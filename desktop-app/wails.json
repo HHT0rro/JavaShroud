@@ -1,0 +1,12 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "JavaShroud",
+  "outputfilename": "javashroud",
+  "frontend:dir": "./frontend",
+  "frontend:install": "yarn install --immutable",
+  "frontend:build": "yarn build",
+  "author": {
+    "name": "JavaShroud",
+    "email": "devnull@example.com"
+  }
+}

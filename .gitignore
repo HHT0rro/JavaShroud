@@ -1,0 +1,82 @@
+# Gradle
+.gradle/
+.gradle-user/
+**/build/
+.kotlin/
+
+# Frontend
+**/node_modules/
+**/dist/
+**/dist-ssr/
+**/.yarn/*
+!**/.yarn/releases/
+!**/.yarn/plugins/
+!**/.yarn/sdks/
+!**/.yarn/versions/
+
+# Wails / desktop build outputs
+**/release/
+*.exe
+*.syso
+
+# Native build outputs
+*.obj
+*.dll
+*.so
+*.dylib
+.javashroud-native/
+core-engine/.javashroud-native/
+core-engine/bin/
+
+# Logs and temporary files
+*.log
+*-log.txt
+logs/
+hs_err_pid*.log
+replay_pid*.log
+.tmp/
+*.tmp
+*.local
+*.patch
+$null
+IK
+w_*.py
+_*.py
+
+# Local build traces
+final-desktop-release-log.txt
+release-run-output.txt
+build-release.summary.txt
+*-output.txt
+*_cmdtest.txt
+*_test.txt
+tmp-smoke-public-release/
+
+# Local agent and index state
+.codegraph/
+.cursor/
+plan/
+verification/
+
+# Local design reference scratchpads
+spotify/
+
+# IDE and OS local state
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Independent projects and local scratch
+javashroud-product-video/
+META-INF/
+.scratch/
+null/
+PowerShell 7.6.2/
+test-fixtures/
+tools/

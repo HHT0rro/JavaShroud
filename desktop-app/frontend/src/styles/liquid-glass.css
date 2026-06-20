@@ -1,0 +1,71 @@
+.surface {
+  --surface-level-bg: var(--panel);
+  --surface-level-fg: var(--text);
+  --surface-level-muted: var(--text-muted);
+  --surface-level-border: var(--line);
+  --surface-level-shadow: var(--shadow-soft);
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  color: var(--surface-level-fg);
+  border: 1px solid var(--surface-level-border);
+  border-radius: var(--radius-lg);
+  background: var(--surface-level-bg);
+  box-shadow: var(--surface-level-shadow);
+}
+
+.surface--background {
+  --surface-level-bg: color-mix(in srgb, var(--surface-background) 94%, transparent);
+  --surface-level-fg: var(--surface-background-fg);
+  --surface-level-muted: var(--surface-background-muted);
+  --surface-level-shadow: var(--shadow);
+}
+
+.surface--surface {
+  --surface-level-bg: color-mix(in srgb, var(--surface-surface) 96%, transparent);
+  --surface-level-fg: var(--surface-surface-fg);
+  --surface-level-muted: var(--surface-surface-muted);
+  --surface-level-shadow: var(--shadow-soft);
+}
+
+.surface--raised {
+  --surface-level-bg: var(--surface-raised);
+  --surface-level-fg: var(--surface-raised-fg);
+  --surface-level-muted: var(--surface-raised-muted);
+  --surface-level-shadow: none;
+  border-radius: var(--radius-sm);
+}
+
+.surface--control {
+  --surface-level-bg: var(--surface-control);
+  --surface-level-fg: var(--surface-control-fg);
+  --surface-level-muted: var(--surface-control-muted);
+  --surface-level-shadow: none;
+  border-radius: var(--radius-sm);
+}
+
+.surface > * {
+  position: relative;
+  z-index: 1;
+}
+
+.surface h1,
+.surface h2,
+.surface h3,
+.surface h4 {
+  color: var(--surface-level-fg);
+}
+
+.surface svg {
+  color: currentColor;
+}
+
+@supports not (background: color-mix(in srgb, #000 50%, transparent)) {
+  .surface--background {
+    --surface-level-bg: var(--surface-background);
+  }
+
+  .surface--surface {
+    --surface-level-bg: var(--surface-surface);
+  }
+}
