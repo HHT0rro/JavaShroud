@@ -31,6 +31,7 @@ fun createReferenceProxies(classBytes: ByteArray): ByteArray {
             if (insn is MethodInsnNode && insn.opcode == Opcodes.INVOKESTATIC) {
                 if (insn.name == "<clinit>" || insn.name == "<init>") continue
                 if (insn.owner == classNode.name) continue
+                if (isPlatformInvocationOwner(insn.owner)) continue
                 val target = CallTarget(insn.owner, insn.name, insn.desc, insn.itf)
                 targets.add(target)
                 callSites.add(Pair(method, insn))
@@ -63,6 +64,13 @@ fun createReferenceProxies(classBytes: ByteArray): ByteArray {
     classNode.accept(writer)
     return writer.toByteArray()
 }
+
+private fun isPlatformInvocationOwner(owner: String): Boolean =
+    owner.startsWith("java/") ||
+        owner.startsWith("javax/") ||
+        owner.startsWith("jdk/") ||
+        owner.startsWith("sun/") ||
+        owner.startsWith("com/sun/")
 
 private fun createStaticForwarderProxy(
     classNode: ClassNode,
