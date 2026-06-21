@@ -66,6 +66,29 @@ class ClassEncryptionLoaderRuntimeRegressionTest {
         }
     }
 
+    @Test
+    fun class_encryption_loader_skips_entrypoint_closure_and_stateful_instance_classes() {
+        val inputJar = buildDiverseFixtureJar(Files.createTempFile("javashroud-cel-boundary-input", ".jar"))
+        val outputJar = inputJar.resolveSibling("javashroud-cel-boundary-output.jar")
+        val configPath = inputJar.resolveSibling("javashroud-cel-boundary-config.toml")
+        try {
+            writeRunConfig(configPath, inputJar, outputJar, listOf("class-encryption-loader"))
+            captureStdout {
+                dispatchRequest(
+                    buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())),
+                    EngineKernel(),
+                )
+            }
+            val encryptedIndex = readJarEntry(outputJar, "__jse/index.tab")?.toString(Charsets.UTF_8).orEmpty()
+            assertTrue("e2e/Root" !in encryptedIndex, "Manifest Main-Class must stay in the app loader namespace")
+            assertTrue("e2e/Root$" !in encryptedIndex, "Manifest Main-Class nested types must stay with the entrypoint")
+            assertTrue("e2e/Impl" !in encryptedIndex, "Stateful instance classes cannot be safely proxied by class-encryption-loader")
+        } finally {
+            Files.deleteIfExists(outputJar)
+            Files.deleteIfExists(configPath)
+            Files.deleteIfExists(inputJar)
+        }
+    }
     private fun injectedHelperInternalNames(jarPath: Path): Set<String> {
         val names = mutableSetOf<String>()
         JarInputStream(Files.newInputStream(jarPath)).use { jar ->
