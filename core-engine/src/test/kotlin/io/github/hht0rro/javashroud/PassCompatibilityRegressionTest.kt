@@ -73,6 +73,12 @@ class PassCompatibilityRegressionTest {
     fun environment_bound_keys_auto_includes_jni_microkernel_loader() {
         assertAutoIncludedJniLoaderDependency("environment-bound-keys")
     }
+
+    @Test
+    fun class_encryption_loader_auto_includes_jni_microkernel_loader() {
+        assertAutoIncludedJniLoaderDependency("class-encryption-loader")
+    }
+
     @Test
     fun string_encryption_auto_includes_jni_microkernel_loader() {
         assertAutoIncludedJniLoaderDependency("string-encryption")
