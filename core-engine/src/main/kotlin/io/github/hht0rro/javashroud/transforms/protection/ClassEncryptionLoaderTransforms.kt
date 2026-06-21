@@ -11,8 +11,11 @@ import io.github.hht0rro.javashroud.transforms.unchangedTransformResult
 import io.github.hht0rro.javashroud.transforms.updatedArtifactTransformResult
 import org.objectweb.asm.*
 import org.objectweb.asm.tree.ClassNode
+import org.objectweb.asm.tree.FieldInsnNode
 import org.objectweb.asm.tree.LdcInsnNode
 import org.objectweb.asm.tree.MethodInsnNode
+import org.objectweb.asm.tree.MultiANewArrayInsnNode
+import org.objectweb.asm.tree.TypeInsnNode
 import java.security.SecureRandom
 import java.util.Base64
 import java.util.jar.Manifest
@@ -39,10 +42,11 @@ fun applyClassEncryptionLoader(
     val matchedClassNames = eligibleClassNamesForAction(artifact.classArtifacts, ruleMatches, "class-encryption-loader")
     if (matchedClassNames.isEmpty()) return unchangedTransformResult(artifact)
     val dynamicLoaderPackages = collectDynamicLoaderPackages(artifact)
-    val manifestEntryPoints = manifestEntryPointClasses(artifact)
+    val manifestEntryPointClosure = manifestEntryPointClassClosure(artifact)
     val encryptedClassNames = expandClassEncryptionRuntimePackageClosure(artifact, matchedClassNames)
         .filterNot { className -> className.substringBeforeLast('/', missingDelimiterValue = "") in dynamicLoaderPackages }
-        .filterNot { className -> className in manifestEntryPoints }
+        .filterNot { className -> className in manifestEntryPointClosure }
+        .filter { className -> artifact.classArtifactIndex[className]?.let(::isSafeClassEncryptionCandidate) == true }
         .toSet()
 
     val strategy = (params["encryptionStrategy"] as? String) ?: "aes-128"
@@ -131,6 +135,102 @@ fun applyClassEncryptionLoader(
     )
 }
 
+private fun isSafeClassEncryptionCandidate(classArtifact: ClassArtifact): Boolean {
+    val node = ClassNode()
+    return runCatching {
+        ClassReader(classArtifact.bytes).accept(node, ClassReader.SKIP_FRAMES)
+        val hasInstanceField = node.fields.orEmpty().any { field -> field.access and Opcodes.ACC_STATIC == 0 }
+        val hasInstanceMethod = node.methods.orEmpty().any { method ->
+            method.access and (Opcodes.ACC_STATIC or Opcodes.ACC_ABSTRACT or Opcodes.ACC_NATIVE) == 0 &&
+                method.name != "<init>"
+        }
+        !hasInstanceField && !hasInstanceMethod
+    }.getOrDefault(false)
+}
+private fun manifestEntryPointClassClosure(artifact: BytecodeArtifact): Set<String> {
+    val index = artifact.classArtifactIndex
+    val selected = manifestEntryPointClasses(artifact).filterTo(LinkedHashSet<String>()) { className -> className in index }
+    val queue = ArrayDeque<String>()
+    queue.addAll(selected)
+    while (queue.isNotEmpty()) {
+        val className = queue.removeFirst()
+        val classArtifact = index[className] ?: continue
+        for (referenced in referencedApplicationClasses(classArtifact, index.keys)) {
+            if (selected.add(referenced)) queue.addLast(referenced)
+        }
+    }
+    return selected
+}
+
+private fun referencedApplicationClasses(classArtifact: ClassArtifact, applicationClasses: Set<String>): Set<String> {
+    val node = ClassNode()
+    return runCatching {
+        ClassReader(classArtifact.bytes).accept(node, ClassReader.SKIP_FRAMES)
+        buildSet<String> {
+            addReferencedType(node.superName, applicationClasses)
+            node.interfaces.orEmpty().forEach { addReferencedType(it as String, applicationClasses) }
+            node.outerClass?.let { addReferencedType(it, applicationClasses) }
+            node.nestHostClass?.let { addReferencedType(it, applicationClasses) }
+            node.nestMembers.orEmpty().forEach { addReferencedType(it as String, applicationClasses) }
+            node.innerClasses.orEmpty().forEach { inner ->
+                addReferencedType(inner.name, applicationClasses)
+                inner.outerName?.let { addReferencedType(it, applicationClasses) }
+            }
+            node.fields.orEmpty().forEach { field ->
+                addDescriptorTypes(field.desc, applicationClasses)
+                field.signature?.let { addSignatureTypeNames(it, applicationClasses) }
+            }
+            node.methods.orEmpty().forEach { method ->
+                addDescriptorTypes(method.desc, applicationClasses)
+                method.signature?.let { addSignatureTypeNames(it, applicationClasses) }
+                method.exceptions.orEmpty().forEach { addReferencedType(it as String, applicationClasses) }
+                method.tryCatchBlocks.orEmpty().forEach { block -> block.type?.let { addReferencedType(it, applicationClasses) } }
+                method.instructions?.iterator()?.forEach { insn ->
+                    when (insn) {
+                        is FieldInsnNode -> {
+                            addReferencedType(insn.owner, applicationClasses)
+                            addDescriptorTypes(insn.desc, applicationClasses)
+                        }
+                        is MethodInsnNode -> {
+                            addReferencedType(insn.owner, applicationClasses)
+                            addDescriptorTypes(insn.desc, applicationClasses)
+                        }
+                        is TypeInsnNode -> addReferencedType(insn.desc, applicationClasses)
+                        is LdcInsnNode -> (insn.cst as? Type)?.let { addType(it, applicationClasses) }
+                        is MultiANewArrayInsnNode -> addDescriptorTypes(insn.desc, applicationClasses)
+                    }
+                }
+            }
+        }
+    }.getOrDefault(emptySet())
+}
+
+private fun MutableSet<String>.addDescriptorTypes(descriptor: String, applicationClasses: Set<String>) {
+    runCatching { Type.getType(descriptor) }.getOrNull()?.let { addType(it, applicationClasses) }
+}
+
+private fun MutableSet<String>.addType(type: Type, applicationClasses: Set<String>) {
+    when (type.sort) {
+        Type.ARRAY -> addType(type.elementType, applicationClasses)
+        Type.OBJECT -> addReferencedType(type.internalName, applicationClasses)
+        Type.METHOD -> {
+            type.argumentTypes.forEach { addType(it, applicationClasses) }
+            addType(type.returnType, applicationClasses)
+        }
+    }
+}
+
+private fun MutableSet<String>.addSignatureTypeNames(signature: String, applicationClasses: Set<String>) {
+    for (candidate in applicationClasses) {
+        if (signature.contains("L$candidate;")) add(candidate)
+    }
+}
+
+private fun MutableSet<String>.addReferencedType(internalName: String, applicationClasses: Set<String>) {
+    var name = internalName.removePrefix("[").removePrefix("L").removeSuffix(";")
+    while (name.startsWith("[")) name = name.removePrefix("[").removePrefix("L").removeSuffix(";")
+    if (name in applicationClasses) add(name)
+}
 private fun manifestEntryPointClasses(artifact: BytecodeArtifact): Set<String> {
     val manifestEntry = artifact.jarEntries.firstOrNull { it.name.equals("META-INF/MANIFEST.MF", ignoreCase = true) }
         ?: return emptySet()
@@ -142,7 +242,6 @@ private fun manifestEntryPointClasses(artifact: BytecodeArtifact): Set<String> {
             ?: emptySet()
     }.getOrDefault(emptySet())
 }
-
 private fun collectDynamicLoaderPackages(artifact: BytecodeArtifact): Set<String> {
     val packages = HashSet<String>()
     for (classArtifact in artifact.classArtifacts) {
