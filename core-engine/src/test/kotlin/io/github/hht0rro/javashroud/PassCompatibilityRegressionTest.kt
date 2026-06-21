@@ -19,6 +19,14 @@ class PassCompatibilityRegressionTest {
     }
 
     @Test
+    fun method_body_delayed_decryption_and_method_virtualization_remain_hard_conflicted() {
+        assertIncompatibleCombination(
+            listOf("method-body-delayed-decryption", "method-virtualization"),
+            allowOptInPasses = true,
+        )
+    }
+
+    @Test
     fun formerly_hard_conflicted_bytecode_surface_pairs_are_allowed_for_planner_ordering() {
         val pairs = listOf(
             listOf("control-flow-obfuscation", "field-string-encryption"),
