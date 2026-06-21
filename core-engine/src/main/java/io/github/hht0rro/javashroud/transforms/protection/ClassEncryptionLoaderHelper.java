@@ -314,7 +314,7 @@ public final class ClassEncryptionLoaderHelper {
                 java.util.Arrays.fill(key, (byte) 0);
             }
         } catch (Exception e) {
-            return null;
+            throw new IllegalStateException("Failed to decrypt encrypted class: " + binaryName, e);
         }
     }
 
@@ -327,7 +327,9 @@ public final class ClassEncryptionLoaderHelper {
         while ((n = is.read(buf)) != -1) {
             bos.write(buf, 0, n);
         }
-        return bos.toByteArray();
+        byte[] bytes = bos.toByteArray();
+        byte[] decoded = decodeRuntimeResource(bytes);
+        return decoded != null ? decoded : bytes;
     }
 
     private static byte[] decryptBytes(byte[] data, String strategy, byte[] key, byte[] iv) throws Exception {
@@ -458,7 +460,7 @@ public final class ClassEncryptionLoaderHelper {
                     // Prefer locally decrypting an encrypted application class so it
                     // and its siblings stay in this loader's namespace; only fall
                     // back to the parent (JDK + non-encrypted classes) otherwise.
-                    if (decryptClassBytes(name) != null) {
+                    if (manifest().containsKey(name)) {
                         c = findClass(name);
                     } else {
                         c = super.loadClass(name, false);

@@ -31,6 +31,7 @@ internal fun loaderProtectionCapabilityBindings(): List<CapabilityBinding> = lis
         requiresRuntimeFlags = emptyList(),
 
         compatibilityNotes = "会改变类加载路径并把类主体封装到加密资源；请重点验证反射、资源路径和自定义 ClassLoader 场景。",
+        requiredPassIds = listOf("jni-microkernel-loader"),
         defaultEnabled = false,
 
         params = listOf(
@@ -157,4 +158,3 @@ internal fun loaderProtectionCapabilityBindings(): List<CapabilityBinding> = lis
 
 
 fun buildLoaderProtectionCapabilityDefinitions() = capabilityDefinitions(loaderProtectionCapabilityBindings())
-

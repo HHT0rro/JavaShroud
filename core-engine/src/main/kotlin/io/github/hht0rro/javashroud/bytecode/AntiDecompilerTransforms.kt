@@ -32,6 +32,7 @@ fun insertAntiDecompilerStructures(classBytes: ByteArray): ByteArray {
         if (method.name == "<clinit>" || method.name == "<init>") continue
         if ((method.access and Opcodes.ACC_ABSTRACT) != 0) continue
         if ((method.access and Opcodes.ACC_NATIVE) != 0) continue
+        if ((method.access and Opcodes.ACC_SYNTHETIC) != 0) continue
         val insns = method.instructions ?: continue
         if (insns.size() < 2) continue
 

@@ -15,6 +15,7 @@ import org.objectweb.asm.tree.LdcInsnNode
 import org.objectweb.asm.tree.MethodInsnNode
 import java.security.SecureRandom
 import java.util.Base64
+import java.util.jar.Manifest
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -38,8 +39,10 @@ fun applyClassEncryptionLoader(
     val matchedClassNames = eligibleClassNamesForAction(artifact.classArtifacts, ruleMatches, "class-encryption-loader")
     if (matchedClassNames.isEmpty()) return unchangedTransformResult(artifact)
     val dynamicLoaderPackages = collectDynamicLoaderPackages(artifact)
+    val manifestEntryPoints = manifestEntryPointClasses(artifact)
     val encryptedClassNames = expandClassEncryptionRuntimePackageClosure(artifact, matchedClassNames)
         .filterNot { className -> className.substringBeforeLast('/', missingDelimiterValue = "") in dynamicLoaderPackages }
+        .filterNot { className -> className in manifestEntryPoints }
         .toSet()
 
     val strategy = (params["encryptionStrategy"] as? String) ?: "aes-128"
@@ -126,6 +129,18 @@ fun applyClassEncryptionLoader(
         transformedClassCount = classCount,
         transformedMemberCount = classCount,
     )
+}
+
+private fun manifestEntryPointClasses(artifact: BytecodeArtifact): Set<String> {
+    val manifestEntry = artifact.jarEntries.firstOrNull { it.name.equals("META-INF/MANIFEST.MF", ignoreCase = true) }
+        ?: return emptySet()
+    return runCatching {
+        Manifest(manifestEntry.bytes.inputStream()).mainAttributes
+            .getValue("Main-Class")
+            ?.replace('.', '/')
+            ?.let(::setOf)
+            ?: emptySet()
+    }.getOrDefault(emptySet())
 }
 
 private fun collectDynamicLoaderPackages(artifact: BytecodeArtifact): Set<String> {
