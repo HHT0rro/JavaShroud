@@ -69,7 +69,61 @@ class MethodBodyDelayedDecryptionSafetyTest {
         assertEquals(0, result.transformedMemberCount, "Instance methods must not be moved into delayed-decryption wrappers")
         assertEquals(emptyList(), result.artifact.jarEntries.filter { it.name.startsWith("__jmd/") }.map { it.name })
     }
-    private fun buildResourceDefineClassLoader(internalName: String, targetName: String): ByteArray {
+
+    @Test
+    fun delayed_decryption_skips_runtime_protection_helper_calls() {
+        val internalName = "sample/DelayedRuntimeHelperHost"
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = internalName,
+                    bytes = buildRuntimeProtectionHelperCaller(internalName),
+                    methodSummaries = listOf(
+                        MemberSummary(MemberKind.METHOD, "<init>", "()V", Opcodes.ACC_PUBLIC),
+                        MemberSummary(MemberKind.METHOD, "probe", "()V", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
+                    ),
+                ),
+            ),
+        )
+
+        val result = applyMethodBodyDelayedDecryption(
+            artifact = artifact,
+            ruleMatches = listOf(ruleMatchFor(internalName)),
+            params = mapOf("seed" to 23),
+        )
+
+        assertEquals(0, result.transformedMemberCount, "Runtime protection helper calls must stay in loadable class bytecode so sealing can remap them")
+        assertEquals(emptyList(), result.artifact.jarEntries.filter { it.name.startsWith("__jmd/") }.map { it.name })
+    }
+
+    private fun buildRuntimeProtectionHelperCaller(internalName: String): ByteArray {
+        val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", null)
+        val init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
+        init.visitCode()
+        init.visitVarInsn(Opcodes.ALOAD, 0)
+        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+        init.visitInsn(Opcodes.RETURN)
+        init.visitMaxs(1, 1)
+        init.visitEnd()
+        val probe = cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "probe", "()V", null, null)
+        probe.visitCode()
+        probe.visitLdcInsn("standard")
+        probe.visitLdcInsn("log")
+        probe.visitMethodInsn(
+            Opcodes.INVOKESTATIC,
+            "io/github/hht0rro/javashroud/transforms/protection/AntiInstrumentationHelper",
+            "checkInstrumentation",
+            "(Ljava/lang/String;Ljava/lang/String;)V",
+            false,
+        )
+        probe.visitInsn(Opcodes.RETURN)
+        probe.visitMaxs(2, 0)
+        probe.visitEnd()
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+    private fun buildResourceDefineClassLoader(internalName: String, targetName: String): ByteArray {
         val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
         cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, internalName, null, "java/lang/ClassLoader", null)
         val method = cw.visitMethod(Opcodes.ACC_PUBLIC, "findClass", "(Ljava/lang/String;)Ljava/lang/Class;", null, null)

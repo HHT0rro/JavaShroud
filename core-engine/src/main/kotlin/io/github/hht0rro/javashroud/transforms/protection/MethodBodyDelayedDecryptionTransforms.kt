@@ -266,10 +266,14 @@ private fun shouldProtectDelayedMethod(classNode: ClassNode, method: MethodNode)
 
     for (instruction in method.instructions) {
         if (instruction is org.objectweb.asm.tree.InvokeDynamicInsnNode) return false
+        if (instruction is MethodInsnNode && isRuntimeProtectionHelperCall(instruction)) return false
         if (instruction is MethodInsnNode && isDelayedDecryptionSensitiveCall(classNode, method, instruction)) return false
     }
     return true
 }
+
+private fun isRuntimeProtectionHelperCall(call: MethodInsnNode): Boolean =
+    call.owner.startsWith("io/github/hht0rro/javashroud/transforms/protection/")
 
 private fun hasClassWideDelayedDecryptionSensitivity(classNode: ClassNode): Boolean {
     for (method in classNode.methods) {
