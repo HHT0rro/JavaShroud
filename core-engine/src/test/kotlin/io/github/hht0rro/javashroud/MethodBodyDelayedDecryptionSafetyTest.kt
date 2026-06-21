@@ -44,6 +44,31 @@ class MethodBodyDelayedDecryptionSafetyTest {
         assertEquals(setOf("<init>", "run", "secret"), node.methods.map { it.name }.toSet())
     }
 
+    @Test
+    fun delayed_decryption_skips_instance_methods() {
+        val internalName = "sample/DelayedInstanceHost"
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = internalName,
+                    bytes = buildSimpleTarget(internalName),
+                    methodSummaries = listOf(
+                        MemberSummary(MemberKind.METHOD, "<init>", "()V", Opcodes.ACC_PUBLIC),
+                        MemberSummary(MemberKind.METHOD, "ping", "(Ljava/lang/String;)Ljava/lang/String;", Opcodes.ACC_PUBLIC),
+                    ),
+                ),
+            ),
+        )
+
+        val result = applyMethodBodyDelayedDecryption(
+            artifact = artifact,
+            ruleMatches = listOf(ruleMatchFor(internalName)),
+            params = mapOf("seed" to 17),
+        )
+
+        assertEquals(0, result.transformedMemberCount, "Instance methods must not be moved into delayed-decryption wrappers")
+        assertEquals(emptyList(), result.artifact.jarEntries.filter { it.name.startsWith("__jmd/") }.map { it.name })
+    }
     private fun buildResourceDefineClassLoader(internalName: String, targetName: String): ByteArray {
         val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
         cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, internalName, null, "java/lang/ClassLoader", null)
