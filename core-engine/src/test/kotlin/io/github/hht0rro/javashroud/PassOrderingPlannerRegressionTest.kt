@@ -40,6 +40,20 @@ class PassOrderingPlannerRegressionTest {
     }
 
     @Test
+    fun planner_orders_class_and_package_renaming_before_string_encryption() {
+        val result = planPassOrdering(
+            passIds = listOf("string-encryption", "rename-packages", "rename-classes"),
+            orderingConstraints = buildOrderingConstraints(),
+            hardConflicts = hardConflictPairs,
+            softConflicts = softConflictPairs,
+        )
+
+        assertTrue(result.accepted, "Planner should accept rename plus string encryption pipeline: ${result.diagnostics}")
+        assertBefore(result.orderedPasses, "rename-packages", "string-encryption")
+        assertBefore(result.orderedPasses, "rename-classes", "string-encryption")
+    }
+
+    @Test
     fun planner_rejects_remaining_hard_conflict() {
         val result = planPassOrdering(
             passIds = listOf("class-encryption-loader", "method-virtualization"),

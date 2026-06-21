@@ -57,6 +57,8 @@ fun buildOrderingConstraints(): List<OrderingConstraint> = listOf(
     OrderingConstraint(before = "rename-fields", after = "method-virtualization", reason = "Field renaming must complete before virtualization embeds field references in VBC4 resources."),
     OrderingConstraint(before = "rename-methods", after = "string-encryption", reason = "Method renaming must see plaintext reflection string constants before string encryption hides them."),
     OrderingConstraint(before = "rename-methods", after = "field-string-encryption", reason = "Method renaming must see plaintext reflection string constants before field string encryption rewrites storage."),
+    OrderingConstraint(before = "rename-classes", after = "string-encryption", reason = "Class renaming must see plaintext class-name and class-resource string constants before string encryption hides them."),
+    OrderingConstraint(before = "rename-packages", after = "string-encryption", reason = "Package renaming must see plaintext package resource string constants before string encryption hides them."),
     OrderingConstraint(before = "rename-fields", after = "string-encryption", reason = "Field renaming must see plaintext reflection string constants before string encryption hides them."),
     OrderingConstraint(before = "rename-fields", after = "field-string-encryption", reason = "Field renaming must see plaintext reflection string constants before field string encryption rewrites storage."),
     OrderingConstraint(before = "string-encryption", after = "field-string-encryption", reason = "LDC string encryption must complete before field string encryption to avoid encrypting decrypt stub strings."),
