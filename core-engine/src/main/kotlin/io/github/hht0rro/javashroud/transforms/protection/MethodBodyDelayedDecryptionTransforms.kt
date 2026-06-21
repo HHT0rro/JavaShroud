@@ -258,6 +258,7 @@ private fun shouldProtectDelayedMethod(classNode: ClassNode, name: String, descr
 private fun shouldProtectDelayedMethod(classNode: ClassNode, method: MethodNode): Boolean {
     if (method.name == "<init>" || method.name == "<clinit>") return false
     if (method.access and (Opcodes.ACC_ABSTRACT or Opcodes.ACC_NATIVE) != 0) return false
+    if (method.access and Opcodes.ACC_STATIC == 0) return false
     if (method.access and (Opcodes.ACC_PRIVATE or Opcodes.ACC_SYNTHETIC or Opcodes.ACC_BRIDGE) != 0) return false
     if (method.instructions == null || method.instructions.size() == 0) return false
     if (isClassLoaderType(classNode)) return false
