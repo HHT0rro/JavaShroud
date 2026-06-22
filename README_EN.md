@@ -10,8 +10,6 @@
 
 <p align="center">
   <img alt="License" src="https://img.shields.io/badge/license-GPL--3.0-blue" />
-  <img alt="Engine" src="https://img.shields.io/badge/engine-Dev--0.7.0-2f6fed" />
-  <img alt="VBC" src="https://img.shields.io/badge/VBC-4.52-5b6ee1" />
   <img alt="JDK" src="https://img.shields.io/badge/JDK-21%2B-orange" />
   <img alt="Desktop" src="https://img.shields.io/badge/desktop-Wails%20%2B%20Vue-42b883" />
 </p>
@@ -50,37 +48,25 @@ Implemented mechanisms include:
 The flow below is split into build time and runtime. The relevant validation gates include method eligibility, resource envelope authentication, VBC4 program structure, native ABI integrity, runtime instrumentation/debug signals, and final cleanup of sensitive state.
 
 ```mermaid
+%%{init: {"themeVariables": {"fontSize": "19px", "fontFamily": "Arial, sans-serif"}, "flowchart": {"nodeSpacing": 30, "rankSpacing": 34, "curve": "basis"}} }%%
 flowchart LR
-  subgraph BUILD_EN["Build time: method to VMBC resource"]
-    E4["Eligibility check: constructors / clinit / abstract / native / invokedynamic / size limit"]
-    E5["MethodBodyCapture records ASM events"]
-    E6["Lowering: opcode aliases, super-operators, block planning, exception masking"]
-    E7["Binding material: entryToken, resourcePath, clean entry integrity, jarLayoutDigest"]
-    E8["VBC4 packaging: nonce, keyId, wrappedSeed, CP / block encryption, HMAC, padding"]
-    E9["JSRP envelope: magic/version/kind/layers/variant, AES/CTR, HMAC"]
-    E10["Resource camouflage: opaque path, slice manifest, decoy resources"]
-    E11["Replace with native dispatcher stub"]
-    EF["Build-time fail-closed: strict selected method is incompatible"]
-  end
+  classDef main fill:#172033,stroke:#5b6ee1,color:#f8fafc,stroke-width:1px,font-size:19px;
+  classDef runtime fill:#142820,stroke:#42b883,color:#f8fafc,stroke-width:1px,font-size:19px;
+  classDef gate fill:#3b1f1f,stroke:#ef4444,color:#fff,stroke-width:1px,font-size:19px;
 
-  subgraph RUN_EN["Runtime: dispatcher to native VM"]
-    N1["JniMicrokernelHelper.executeVmResource"]
-    N2["Native microkernel: load state, sealed ABI marker, boot token, self-check"]
-    N3["JSRP decode: magic/version/length/HMAC validation, decrypt/decompress"]
-    N4["js_vm_parse_program: VBC4 version, flags, keyId, wrappedSeed, block token, HMAC"]
-    N5["Guard gate: anti-debug, anti-instrumentation, anti-JVMTI, trampoline, trace signal"]
-    N6["js_vm_execute_resource: register IR, lazy CP decrypt, resident masking, dispatch drift"]
-    N7["Return result and wipe buffers, CP plain values, locals, stack, program state"]
-    NF["Runtime fail-closed: native / ABI / resource / program / policy validation failure"]
-  end
+  A["Business method<br/>select / check"] --> B["Build transform<br/>ASM capture / VMBC lowering"]
+  B --> C["Resource package<br/>VBC4 / JSRP / HMAC"]
+  C --> D["Native entry<br/>stub / JNI microkernel"]
+  D --> E["NBVM execution<br/>parse / guard / dispatch"]
+  E --> F["Consistent output<br/>return / wipe"]
 
-  E4 -->|"compatible"| E5 --> E6 --> E7 --> E8 --> E9 --> E10 --> E11 --> N1
-  E4 -->|"strict but incompatible"| EF
-  N1 --> N2 --> N3 --> N4 --> N5 --> N6 --> N7
-  N2 -->|"fail"| NF
-  N3 -->|"fail"| NF
-  N4 -->|"fail"| NF
-  N5 -->|"refuse"| NF
+  A -.-> G["Strict hit but incompatible<br/>build-time fail-closed"]
+  D -.-> H["ABI / resource / guard failure<br/>runtime fail-closed"]
+  E -.-> H
+
+  class A,B,C main;
+  class D,E,F runtime;
+  class G,H gate;
 ```
 
 These capabilities have clear boundaries: `method-virtualization` only protects selected and compatible methods. Methods that are not virtualized remain ordinary bytecode-obfuscation targets. A self-contained artifact still contains the material required for execution, so a sufficiently privileged and targeted reverse-engineering effort can continue layer by layer. JavaShroud focuses on engineering cost increase, not absolute resistance to analysis.

@@ -10,8 +10,6 @@
 
 <p align="center">
   <img alt="License" src="https://img.shields.io/badge/license-GPL--3.0-blue" />
-  <img alt="Engine" src="https://img.shields.io/badge/engine-Dev--0.7.0-2f6fed" />
-  <img alt="VBC" src="https://img.shields.io/badge/VBC-4.52-5b6ee1" />
   <img alt="JDK" src="https://img.shields.io/badge/JDK-21%2B-orange" />
   <img alt="Desktop" src="https://img.shields.io/badge/desktop-Wails%20%2B%20Vue-42b883" />
 </p>
@@ -47,37 +45,25 @@ JavaShroud 的 VMBC / NBVM 指向同一条代码链路：`method-virtualization`
 下面的流程图按代码路径拆分为构建期和运行期。重点校验点包括方法可虚拟化性、资源 envelope、VBC4 程序结构、native ABI、运行期插桩/调试信号以及执行后的敏感状态清理。
 
 ```mermaid
+%%{init: {"themeVariables": {"fontSize": "19px", "fontFamily": "Arial, sans-serif"}, "flowchart": {"nodeSpacing": 30, "rankSpacing": 34, "curve": "basis"}} }%%
 flowchart LR
-  subgraph BUILD["构建期：方法到 VMBC 资源"]
-    B4["方法兼容性校验：构造器 / clinit / abstract / native / invokedynamic / 指令上限"]
-    B5["MethodBodyCapture 捕获 ASM 事件"]
-    B6["lowering：opcode alias、super-operator、block planning、exception masking"]
-    B7["绑定材料：entryToken、resourcePath、clean entry integrity、jarLayoutDigest"]
-    B8["VBC4 封装：nonce、keyId、wrappedSeed、CP / block encryption、HMAC、padding"]
-    B9["JSRP envelope：magic/version/kind/layers/variant、AES/CTR、HMAC"]
-    B10["资源伪装：opaque path、slice manifest、decoy resources"]
-    B11["替换为 native dispatcher stub"]
-    BF["构建期 fail-closed：严格命中但不兼容"]
-  end
+  classDef main fill:#172033,stroke:#5b6ee1,color:#f8fafc,stroke-width:1px,font-size:19px;
+  classDef runtime fill:#142820,stroke:#42b883,color:#f8fafc,stroke-width:1px,font-size:19px;
+  classDef gate fill:#3b1f1f,stroke:#ef4444,color:#fff,stroke-width:1px,font-size:19px;
 
-  subgraph RUN["运行期：dispatcher 到 native VM"]
-    R1["JniMicrokernelHelper.executeVmResource"]
-    R2["native 微内核：load state、sealed ABI marker、boot token、self-check"]
-    R3["JSRP 解封：magic/version/length/HMAC 校验，decrypt/decompress"]
-    R4["js_vm_parse_program：VBC4 version、flags、keyId、wrappedSeed、block token、HMAC"]
-    R5["防护门：anti-debug、anti-instrumentation、anti-JVMTI、trampoline、trace signal"]
-    R6["js_vm_execute_resource：register IR、lazy CP decrypt、resident masking、dispatch drift"]
-    R7["返回结果并 wipe buffers、CP plain、locals、stack、program state"]
-    RF["运行期 fail-closed：native / ABI / resource / program / policy 校验失败"]
-  end
+  A["业务方法<br/>选择 / 校验"] --> B["构建期转换<br/>ASM 捕获 / VMBC lowering"]
+  B --> C["资源封装<br/>VBC4 / JSRP / HMAC"]
+  C --> D["Native 入口<br/>stub / JNI 微内核"]
+  D --> E["NBVM 执行<br/>解析 / 防护 / dispatch"]
+  E --> F["一致输出<br/>返回结果 / wipe"]
 
-  B4 -->|"兼容"| B5 --> B6 --> B7 --> B8 --> B9 --> B10 --> B11 --> R1
-  B4 -->|"严格命中但不兼容"| BF
-  R1 --> R2 --> R3 --> R4 --> R5 --> R6 --> R7
-  R2 -->|"失败"| RF
-  R3 -->|"失败"| RF
-  R4 -->|"失败"| RF
-  R5 -->|"拒绝"| RF
+  A -.-> G["严格命中但不兼容<br/>构建期 fail-closed"]
+  D -.-> H["ABI / 资源 / 防护失败<br/>运行期 fail-closed"]
+  E -.-> H
+
+  class A,B,C main;
+  class D,E,F runtime;
+  class G,H gate;
 ```
 
 这些能力的边界同样需要诚实说明：`method-virtualization` 只保护被选中且兼容的方法；未虚拟化的方法仍是普通字节码混淆问题。自包含产物中仍然存在完成执行所需的全部材料，具备足够时间和权限的定向逆向仍可逐层推进。JavaShroud 强调的是工程化成本提升，而不是绝对不可分析。
