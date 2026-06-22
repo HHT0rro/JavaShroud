@@ -10,10 +10,6 @@ val hardConflictPairs: Set<Pair<String, String>> = setOf(
     // encrypted payloads, so VM/JNI virtualization combinations must be rejected
     // until encrypted payload remapping is implemented.
     "class-encryption-loader" to "method-virtualization",
-    // Delayed method body resources are embedded into runtime decryption stubs.
-    // Method virtualization moves those stubs and resource path constants into
-    // VBC4 resources, where sealing cannot safely rewrite delayed resource names.
-    "method-body-delayed-decryption" to "method-virtualization",
 )
 val softConflictPairs: Set<Pair<String, String>> = emptySet()
 
