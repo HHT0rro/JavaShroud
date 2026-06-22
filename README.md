@@ -40,9 +40,7 @@ JavaShroud 的 VMBC / NBVM 指向同一条代码链路：`method-virtualization`
 | Native 运行时 | JNI 微内核、native VM parser / executor、register IR、lazy CP decrypt、resident masking、wipe | 缩短明文窗口，并把分析面扩展到 JVM 与 Native 边界 |
 | 运行期防护 | anti-instrumentation、anti-dump、anti-JVMTI / agent 检测、trampoline 检测、完整性 gate | 对普通 hook、插桩、转储和替换加载形成额外阻力 |
 
-### VMBC / NBVM 详细流程
-
-下面的流程图按代码路径拆分为构建期和运行期。重点校验点包括方法可虚拟化性、资源 envelope、VBC4 程序结构、native ABI、运行期插桩/调试信号以及执行后的敏感状态清理。
+### VMBC / NBVM 流程
 
 ```mermaid
 %%{init: {"themeVariables": {"fontSize": "19px", "fontFamily": "Arial, sans-serif"}, "flowchart": {"nodeSpacing": 30, "rankSpacing": 34, "curve": "basis"}} }%%

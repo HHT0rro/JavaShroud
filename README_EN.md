@@ -43,9 +43,7 @@ Implemented mechanisms include:
 | Native runtime | JNI microkernel, native VM parser / executor, register IR, lazy CP decrypt, resident masking, wipe | Shortens plaintext windows and moves the analysis surface across JVM and Native boundaries |
 | Runtime defense | Anti-instrumentation, anti-dump, anti-JVMTI / agent checks, trampoline checks, integrity gates | Adds friction against common hooks, instrumentation, dumps, and replacement loading |
 
-### VMBC / NBVM Detailed Flow
-
-The flow below is split into build time and runtime. The relevant validation gates include method eligibility, resource envelope authentication, VBC4 program structure, native ABI integrity, runtime instrumentation/debug signals, and final cleanup of sensitive state.
+### VMBC / NBVM Flow
 
 ```mermaid
 %%{init: {"themeVariables": {"fontSize": "19px", "fontFamily": "Arial, sans-serif"}, "flowchart": {"nodeSpacing": 30, "rankSpacing": 34, "curve": "basis"}} }%%
