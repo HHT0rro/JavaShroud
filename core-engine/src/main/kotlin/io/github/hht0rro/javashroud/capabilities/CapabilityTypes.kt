@@ -3,7 +3,7 @@ package io.github.hht0rro.javashroud.capabilities
 import io.github.hht0rro.javashroud.model.schema.ParamSchema
 
 private const val schemaVersion: String = "2"
-private const val engineVersion: String = "Dev-0.7.5"
+private const val engineVersion: String = "Dev-0.7.6"
 private const val vbcVersion: String = "4.52 "
 
 internal data class CapabilityBinding(
