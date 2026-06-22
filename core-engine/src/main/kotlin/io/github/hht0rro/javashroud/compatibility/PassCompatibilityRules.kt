@@ -49,6 +49,7 @@ fun buildOrderingConstraints(): List<OrderingConstraint> = listOf(
     OrderingConstraint(before = "rename-classes", after = "class-encryption-loader", reason = "Class renaming must complete before class encryption loader packages encrypted classes."),
     OrderingConstraint(before = "rename-packages", after = "class-encryption-loader", reason = "Package renaming must complete before class encryption loader records package names."),
     OrderingConstraint(before = "rename-methods", after = "method-body-delayed-decryption", reason = "Method renaming must complete before delayed decryption packages method bodies."),
+    OrderingConstraint(before = "rename-fields", after = "method-body-delayed-decryption", reason = "Field renaming must complete before delayed decryption packages field references."),
     OrderingConstraint(before = "rename-classes", after = "method-body-delayed-decryption", reason = "Class renaming must complete before delayed decryption embeds class references."),
     OrderingConstraint(before = "rename-packages", after = "method-body-delayed-decryption", reason = "Package renaming must complete before delayed decryption embeds package names."),
     OrderingConstraint(before = "rename-classes", after = "method-virtualization", reason = "Class renaming must complete before virtualization embeds class references."),

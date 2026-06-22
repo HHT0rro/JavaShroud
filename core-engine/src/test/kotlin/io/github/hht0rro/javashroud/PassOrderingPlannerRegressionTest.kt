@@ -84,6 +84,7 @@ class PassOrderingPlannerRegressionTest {
         assertBefore(result.orderedPasses, "field-string-encryption", "class-encryption-loader")
         assertBefore(result.orderedPasses, "class-encryption-loader", "jni-microkernel-loader")
         assertBefore(result.orderedPasses, "jni-microkernel-loader", "environment-bound-keys")
+        assertBefore(result.orderedPasses, "rename-fields", "method-body-delayed-decryption")
     }
 
     @Test
