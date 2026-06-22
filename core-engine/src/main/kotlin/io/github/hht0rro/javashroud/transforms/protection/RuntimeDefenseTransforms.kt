@@ -57,7 +57,7 @@ fun applyCallsiteRotationProtection(
                 val superMv = super.visitMethod(access, name, descriptor, signature, exceptions)
                 return object : MethodVisitor(Opcodes.ASM9, superMv) {
                     override fun visitMethodInsn(opcode: Int, owner: String, name: String, descriptor: String, isInterface: Boolean) {
-                        if (opcode == Opcodes.INVOKEVIRTUAL && !owner.startsWith("[") && random.nextInt(100) < 30) {
+                        if (opcode == Opcodes.INVOKEVIRTUAL && !owner.startsWith("[") && !isReflectionSurfaceVirtualCall(owner, name) && random.nextInt(100) < 30) {
                             // Replace with invokedynamic via MutableCallSite rotation
                             val bsm = Handle(
                                 Opcodes.H_INVOKESTATIC,
@@ -101,6 +101,24 @@ fun applyCallsiteRotationProtection(
         transformedMemberCount = callCount,
     )
 }
+
+private val reflectionSurfaceVirtualMethodNames = setOf(
+    "getDeclaredMethods",
+    "getMethods",
+    "getDeclaredMethod",
+    "getMethod",
+    "getDeclaredFields",
+    "getFields",
+    "getDeclaredField",
+    "getField",
+    "getDeclaredConstructors",
+    "getConstructors",
+    "getDeclaredConstructor",
+    "getConstructor",
+)
+
+private fun isReflectionSurfaceVirtualCall(owner: String, name: String): Boolean =
+    owner == "java/lang/Class" && name in reflectionSurfaceVirtualMethodNames
 
 /**
  * Environment Bound Keys transform.
