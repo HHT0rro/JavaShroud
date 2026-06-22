@@ -54,6 +54,39 @@ class PassOrderingPlannerRegressionTest {
     }
 
     @Test
+    fun planner_keeps_full_native_encryption_subgraph_acyclic() {
+        val result = planPassOrdering(
+            passIds = listOf(
+                "string-encryption",
+                "class-encryption-loader",
+                "environment-bound-keys",
+                "field-string-encryption",
+                "jni-microkernel-loader",
+                "method-body-delayed-decryption",
+                "rename-classes",
+                "rename-fields",
+                "rename-methods",
+                "rename-packages",
+            ),
+            orderingConstraints = buildOrderingConstraints(),
+            hardConflicts = hardConflictPairs,
+            softConflicts = softConflictPairs,
+        )
+
+        assertTrue(result.accepted, "Planner should not report cycles for full native encryption subgraph: ${result.diagnostics}")
+        assertTrue(
+            result.diagnostics.none { it.causeId == "circular-dependency" },
+            "Planner should avoid falling back to original order: ${result.diagnostics}",
+        )
+        assertBefore(result.orderedPasses, "rename-classes", "string-encryption")
+        assertBefore(result.orderedPasses, "rename-packages", "string-encryption")
+        assertBefore(result.orderedPasses, "string-encryption", "field-string-encryption")
+        assertBefore(result.orderedPasses, "field-string-encryption", "class-encryption-loader")
+        assertBefore(result.orderedPasses, "class-encryption-loader", "jni-microkernel-loader")
+        assertBefore(result.orderedPasses, "jni-microkernel-loader", "environment-bound-keys")
+    }
+
+    @Test
     fun planner_rejects_remaining_hard_conflict() {
         val result = planPassOrdering(
             passIds = listOf("class-encryption-loader", "method-virtualization"),
