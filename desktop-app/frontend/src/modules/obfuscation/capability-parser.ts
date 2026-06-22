@@ -58,7 +58,7 @@ interface OrderingConstraintShape {
 }
 
 const compatibilitySeverities = ['hard', 'soft'] as const
-const passRisks = ['low', 'medium', 'high', 'ultra-high'] as const
+const passRisks = ['low', 'medium', 'high'] as const
 const paramTypes = ['boolean', 'string', 'enum', 'number'] as const
 const supportedSchemaVersion = '2'
 

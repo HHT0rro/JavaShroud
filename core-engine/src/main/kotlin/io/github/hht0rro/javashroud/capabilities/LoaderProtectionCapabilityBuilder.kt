@@ -26,7 +26,7 @@ internal fun loaderProtectionCapabilityBindings(): List<CapabilityBinding> = lis
 
         stability = "experimental",
 
-        risk = "ultra-high",
+        risk = "high",
 
         requiresRuntimeFlags = emptyList(),
 
@@ -96,7 +96,7 @@ internal fun loaderProtectionCapabilityBindings(): List<CapabilityBinding> = lis
 
         stability = "experimental",
 
-        risk = "ultra-high",
+        risk = "high",
 
         requiresRuntimeFlags = emptyList(),
 

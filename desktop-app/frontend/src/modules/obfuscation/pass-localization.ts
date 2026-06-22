@@ -40,7 +40,6 @@ const riskLabels: Readonly<Record<PassItem['risk'], LocalizedText>> = {
   low: text('低风险', 'Low risk'),
   medium: text('中风险', 'Medium risk'),
   high: text('高风险', 'High risk'),
-  'ultra-high': text('极高风险', 'Ultra-high risk'),
 }
 
 export const uiText: Readonly<Record<string, LocalizedText>> = {

@@ -71,7 +71,7 @@ export interface EngineSchemaPayload {
 
 export type PassParamValue = boolean | string | number | null
 
-export type PassRisk = 'low' | 'medium' | 'high' | 'ultra-high'
+export type PassRisk = 'low' | 'medium' | 'high'
 
 export interface PassItem {
   readonly id: string
