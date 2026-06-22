@@ -44,16 +44,26 @@ class Case:
 
 
 def run(cmd: list[str], cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        cmd,
-        cwd=str(cwd),
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=timeout,
-    )
+    try:
+        return subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        stdout = error.stdout.decode("utf-8", errors="replace") if isinstance(error.stdout, bytes) else error.stdout
+        stderr = error.stderr.decode("utf-8", errors="replace") if isinstance(error.stderr, bytes) else error.stderr
+        return subprocess.CompletedProcess(
+            cmd,
+            124,
+            stdout or "",
+            (stderr or "") + f"\n<TIMEOUT after {timeout}s>",
+        )
 
 
 def jar_main_class(jar_path: Path) -> str | None:
@@ -234,8 +244,14 @@ def fingerprint(path: Path) -> str:
 
 def normalize_text(value: str) -> str:
     text = value.replace("\r\n", "\n")
+    text = re.sub(r"\[\d{2}:\d{2}:\d{2}\.\d{3}\]", "[<clock>]", text)
+    text = re.sub(r"\[\+\d+ms\]", "[+<time>]", text)
     text = re.sub(r"Total time: \d+ms", "Total time: <time>", text)
     text = re.sub(r"Calc: \d+ms", "Calc: <time>", text)
+    text = re.sub(r"耗时=\d+ms", "耗时=<time>", text)
+    text = re.sub(r"用时=\d+ms", "用时=<time>", text)
+    text = re.sub(r"启动耗时=\d+ms", "启动耗时=<time>", text)
+    text = re.sub(r"\b\d+ms\b", "<time>", text)
     text = re.sub(r"\b\d+\.\d+ms\b", "<time>", text)
     text = re.sub(r"Jar size: \d+KB", "Jar size: <size>", text)
     text = re.sub(r"^Test 1\.6: Pool (PASS|FAIL)$", "Test 1.6: Pool <flaky>", text, flags=re.MULTILINE)
