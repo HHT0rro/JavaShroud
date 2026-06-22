@@ -43,11 +43,12 @@ fun applyClassEncryptionLoader(
     if (matchedClassNames.isEmpty()) return unchangedTransformResult(artifact)
     val dynamicLoaderPackages = collectDynamicLoaderPackages(artifact)
     val manifestEntryPointClosure = manifestEntryPointClassClosure(artifact)
-    val encryptedClassNames = expandClassEncryptionRuntimePackageClosure(artifact, matchedClassNames)
+    val encryptionCandidates = expandClassEncryptionRuntimePackageClosure(artifact, matchedClassNames)
         .filterNot { className -> className.substringBeforeLast('/', missingDelimiterValue = "") in dynamicLoaderPackages }
         .filterNot { className -> className in manifestEntryPointClosure }
         .filter { className -> artifact.classArtifactIndex[className]?.let(::isSafeClassEncryptionCandidate) == true }
         .toSet()
+    val encryptedClassNames = pruneUnsafePackagePrivateLoaderSplits(artifact, encryptionCandidates)
 
     val strategy = (params["encryptionStrategy"] as? String) ?: "aes-128"
     val supportedStrategies = setOf("aes-128", "aes-256")
@@ -146,6 +147,65 @@ private fun isSafeClassEncryptionCandidate(classArtifact: ClassArtifact): Boolea
         }
         !hasInstanceField && !hasInstanceMethod
     }.getOrDefault(false)
+}
+
+private fun pruneUnsafePackagePrivateLoaderSplits(
+    artifact: BytecodeArtifact,
+    candidates: Set<String>,
+): Set<String> {
+    val selected = candidates.toMutableSet()
+    var changed: Boolean
+    do {
+        changed = false
+        for (className in selected.toList()) {
+            val classArtifact = artifact.classArtifactIndex[className] ?: continue
+            val unresolvedDependencies = packagePrivateRuntimeDependencies(classArtifact, artifact.classArtifactIndex)
+                .filterNot { dependency -> dependency in selected }
+            if (unresolvedDependencies.isNotEmpty()) {
+                selected.remove(className)
+                changed = true
+            }
+        }
+    } while (changed)
+    return selected
+}
+
+private fun packagePrivateRuntimeDependencies(
+    classArtifact: ClassArtifact,
+    index: Map<String, ClassArtifact>,
+): Set<String> {
+    val node = ClassNode()
+    return runCatching {
+        ClassReader(classArtifact.bytes).accept(node, ClassReader.SKIP_FRAMES)
+        val packageName = node.name.substringBeforeLast('/', missingDelimiterValue = "")
+        buildSet<String> {
+            fun addIfPackagePrivateBoundary(owner: String, name: String? = null, desc: String? = null) {
+                if (owner == node.name) return
+                if (owner.substringBeforeLast('/', missingDelimiterValue = "") != packageName) return
+                val ownerArtifact = index[owner] ?: return
+                if (isPackagePrivateRuntimeType(ownerArtifact)) {
+                    add(owner)
+                    return
+                }
+                if (name == null || desc == null) return
+                val member = ownerArtifact.summary.methodSummaries.firstOrNull { it.name == name && it.descriptor == desc }
+                    ?: ownerArtifact.summary.fieldSummaries.firstOrNull { it.name == name && it.descriptor == desc }
+                if (member != null && member.accessFlags and (Opcodes.ACC_PUBLIC or Opcodes.ACC_PRIVATE or Opcodes.ACC_PROTECTED) == 0) {
+                    add(owner)
+                }
+            }
+
+            for (method in node.methods) {
+                method.instructions?.iterator()?.forEach { insn ->
+                    when (insn) {
+                        is MethodInsnNode -> addIfPackagePrivateBoundary(insn.owner, insn.name, insn.desc)
+                        is FieldInsnNode -> addIfPackagePrivateBoundary(insn.owner, insn.name, insn.desc)
+                        is TypeInsnNode -> addIfPackagePrivateBoundary(insn.desc)
+                    }
+                }
+            }
+        }
+    }.getOrDefault(emptySet())
 }
 private fun manifestEntryPointClassClosure(artifact: BytecodeArtifact): Set<String> {
     val index = artifact.classArtifactIndex

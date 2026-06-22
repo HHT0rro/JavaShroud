@@ -14,10 +14,19 @@ import org.objectweb.asm.Opcodes
 import org.objectweb.asm.tree.ClassNode
 import org.objectweb.asm.tree.InvokeDynamicInsnNode
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 
 class InvokeDynamicBootstrapRemapTest {
+
+    @Test
+    fun invoke_dynamic_indirection_skips_class_loader_boundaries() {
+        val original = buildClassLoaderBoundaryCaller()
+        val transformed = indirectMethodCalls(original)
+
+        assertContentEquals(original, transformed, "ClassLoader/defineClass/resource-loading boundaries must not be wrapped in indy callsites")
+    }
 
     @Test
     fun invoke_dynamic_indirection_bootstrap_handle_tracks_method_and_class_renames() {
@@ -137,6 +146,42 @@ class InvokeDynamicBootstrapRemapTest {
         }
         run.visitInsn(Opcodes.RETURN)
         run.visitMaxs(1, 0)
+        run.visitEnd()
+
+        classWriter.visitEnd()
+        return classWriter.toByteArray()
+    }
+
+    private fun buildClassLoaderBoundaryCaller(): ByteArray {
+        val classWriter = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        classWriter.visit(
+            Opcodes.V21,
+            Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER,
+            "com/example/BoundaryLoader",
+            null,
+            "java/lang/ClassLoader",
+            null,
+        )
+
+        val init = classWriter.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
+        init.visitCode()
+        init.visitVarInsn(Opcodes.ALOAD, 0)
+        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/ClassLoader", "<init>", "()V", false)
+        init.visitInsn(Opcodes.RETURN)
+        init.visitMaxs(1, 1)
+        init.visitEnd()
+
+        val run = classWriter.visitMethod(Opcodes.ACC_PUBLIC, "load", "(Ljava/lang/String;[B)Ljava/lang/Class;", null, null)
+        run.visitCode()
+        run.visitVarInsn(Opcodes.ALOAD, 0)
+        run.visitVarInsn(Opcodes.ALOAD, 1)
+        run.visitVarInsn(Opcodes.ALOAD, 2)
+        run.visitInsn(Opcodes.ICONST_0)
+        run.visitVarInsn(Opcodes.ALOAD, 2)
+        run.visitInsn(Opcodes.ARRAYLENGTH)
+        run.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "com/example/BoundaryLoader", "defineClass", "(Ljava/lang/String;[BII)Ljava/lang/Class;", false)
+        run.visitInsn(Opcodes.ARETURN)
+        run.visitMaxs(5, 3)
         run.visitEnd()
 
         classWriter.visitEnd()

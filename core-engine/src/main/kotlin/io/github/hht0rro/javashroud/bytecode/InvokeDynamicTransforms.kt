@@ -31,6 +31,9 @@ fun indirectMethodCalls(classBytes: ByteArray): ByteArray {
     if ((classNode.access and Opcodes.ACC_INTERFACE) != 0) {
         return classBytes
     }
+    if (isClassLoadingBoundarySensitive(classNode)) {
+        return classBytes
+    }
 
     data class CallTarget(val owner: String, val name: String, val desc: String, val isInterface: Boolean)
     val targets = mutableSetOf<CallTarget>()
@@ -117,4 +120,24 @@ fun indirectMethodCalls(classBytes: ByteArray): ByteArray {
     val writer = computeFramesWriter(reader)
     classNode.accept(writer)
     return writer.toByteArray()
+}
+
+private fun isClassLoadingBoundarySensitive(classNode: ClassNode): Boolean {
+    if (classNode.superName == "java/lang/ClassLoader" || classNode.superName?.endsWith("ClassLoader") == true) return true
+    for (method in classNode.methods) {
+        val instructions = method.instructions ?: continue
+        for (instruction in instructions) {
+            if (instruction is MethodInsnNode && isClassLoadingBoundaryCall(instruction)) return true
+        }
+    }
+    return false
+}
+
+private fun isClassLoadingBoundaryCall(call: MethodInsnNode): Boolean {
+    if (call.name == "defineClass") return true
+    if (call.owner == "java/lang/ClassLoader" && call.name in setOf("loadClass", "findClass", "getResource", "getResourceAsStream")) return true
+    if (call.owner == "java/lang/Class" && call.name in setOf("forName", "getClassLoader", "getResource", "getResourceAsStream", "newInstance")) return true
+    if (call.owner == "java/lang/reflect/Method" && call.name == "invoke") return true
+    if (call.owner == "java/lang/reflect/Constructor" && call.name == "newInstance") return true
+    return false
 }
