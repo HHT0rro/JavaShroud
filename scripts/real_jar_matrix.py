@@ -258,7 +258,8 @@ def normalize_text(value: str) -> str:
     text = re.sub(r"^\+-[-+]+\+$", "+<table-border>+", text, flags=re.MULTILINE)
     text = re.sub(r"[ \t]+\|", " |", text)
     text = re.sub(r"\|[ \t]+", "| ", text)
-    return text.strip()
+    lines = [line.rstrip() for line in text.strip().splitlines() if line.strip()]
+    return "\n".join(sorted(lines))
 
 
 def normalize(proc: subprocess.CompletedProcess[str]) -> tuple[int, str, str]:
