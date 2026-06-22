@@ -154,7 +154,7 @@ def compatible(pass_ids: list[str], hard_conflicts: set[frozenset[str]]) -> bool
     return all(not pair.issubset(selected) for pair in hard_conflicts)
 
 
-def build_cases(data: dict[str, Any], mode: str, include_native: bool, limit: int | None) -> list[Case]:
+def build_cases(data: dict[str, Any], mode: str, include_native: bool, limit: int | None, offset: int = 0) -> list[Case]:
     modules = {module["id"]: module for module in data["modules"]}
     hard_conflicts = conflicts(data)
     pass_ids = [pid for pid in sorted(modules) if include_native or pid not in DEFAULT_SKIP]
@@ -198,7 +198,8 @@ def build_cases(data: dict[str, Any], mode: str, include_native: bool, limit: in
         if key not in seen:
             seen.add(key)
             deduped.append(case)
-    return deduped[:limit] if limit else deduped
+    sliced = deduped[offset:]
+    return sliced[:limit] if limit else sliced
 
 
 def fingerprint(path: Path) -> str:
@@ -241,6 +242,7 @@ def main() -> int:
     parser.add_argument("--mode", choices=["single", "pair", "triple", "full", "random", "all"], default="single")
     parser.add_argument("--include-native", action="store_true")
     parser.add_argument("--limit", type=int, default=12)
+    parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--work-dir", type=Path, default=Path("build/real-jar-matrix"))
     parser.add_argument("--run-timeout", type=int, default=20)
     parser.add_argument("--run-attempts", type=int, default=5)
@@ -250,7 +252,7 @@ def main() -> int:
     cwd = Path.cwd()
     engine = args.engine if args.engine.is_absolute() else cwd / args.engine
     data = load_schema(engine, cwd)
-    cases = build_cases(data, args.mode, args.include_native, args.limit)
+    cases = build_cases(data, args.mode, args.include_native, args.limit, args.offset)
     args.work_dir.mkdir(parents=True, exist_ok=True)
 
     failures = 0
