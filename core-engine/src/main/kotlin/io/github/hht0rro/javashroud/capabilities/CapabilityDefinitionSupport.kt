@@ -35,7 +35,7 @@ fun capabilityDefinition(
     requiredPassIds = requiredPassIds,
     requiresAnyPassIds = requiresAnyPassIds,
     defaultEnabled = defaultEnabled,
-    requiresOptIn = requiresOptIn || risk == "high" || risk == "ultra-high",
+    requiresOptIn = requiresOptIn || risk == "high",
 )
 
 internal fun capabilityDefinitions(bindings: List<CapabilityBinding>): List<ModuleDefinition> =

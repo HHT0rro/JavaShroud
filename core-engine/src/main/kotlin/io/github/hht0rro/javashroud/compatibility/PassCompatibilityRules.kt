@@ -10,6 +10,10 @@ val hardConflictPairs: Set<Pair<String, String>> = setOf(
     // encrypted payloads, so VM/JNI virtualization combinations must be rejected
     // until encrypted payload remapping is implemented.
     "class-encryption-loader" to "method-virtualization",
+    // Delayed method body resources are embedded into runtime decryption stubs.
+    // Method virtualization moves those stubs and resource path constants into
+    // VBC4 resources, where sealing cannot safely rewrite delayed resource names.
+    "method-body-delayed-decryption" to "method-virtualization",
 )
 val softConflictPairs: Set<Pair<String, String>> = emptySet()
 
@@ -45,6 +49,7 @@ fun buildOrderingConstraints(): List<OrderingConstraint> = listOf(
     OrderingConstraint(before = "rename-classes", after = "class-encryption-loader", reason = "Class renaming must complete before class encryption loader packages encrypted classes."),
     OrderingConstraint(before = "rename-packages", after = "class-encryption-loader", reason = "Package renaming must complete before class encryption loader records package names."),
     OrderingConstraint(before = "rename-methods", after = "method-body-delayed-decryption", reason = "Method renaming must complete before delayed decryption packages method bodies."),
+    OrderingConstraint(before = "rename-fields", after = "method-body-delayed-decryption", reason = "Field renaming must complete before delayed decryption packages field references."),
     OrderingConstraint(before = "rename-classes", after = "method-body-delayed-decryption", reason = "Class renaming must complete before delayed decryption embeds class references."),
     OrderingConstraint(before = "rename-packages", after = "method-body-delayed-decryption", reason = "Package renaming must complete before delayed decryption embeds package names."),
     OrderingConstraint(before = "rename-classes", after = "method-virtualization", reason = "Class renaming must complete before virtualization embeds class references."),

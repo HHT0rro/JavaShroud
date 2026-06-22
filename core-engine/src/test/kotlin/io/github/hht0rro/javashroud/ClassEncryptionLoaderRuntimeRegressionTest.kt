@@ -5,6 +5,14 @@ import io.github.hht0rro.javashroud.adapters.protocol.EngineCommand
 import io.github.hht0rro.javashroud.adapters.protocol.buildCommandRequest
 import io.github.hht0rro.javashroud.adapters.protocol.dispatchRequest
 import io.github.hht0rro.javashroud.kernel.EngineKernel
+import io.github.hht0rro.javashroud.model.analysis.MemberKind
+import io.github.hht0rro.javashroud.model.analysis.MemberSummary
+import io.github.hht0rro.javashroud.model.analysis.RuleMatch
+import io.github.hht0rro.javashroud.model.analysis.TargetSelector
+import io.github.hht0rro.javashroud.model.config.RuleSpec
+import io.github.hht0rro.javashroud.transforms.protection.applyClassEncryptionLoader
+import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import java.nio.file.Files
@@ -14,6 +22,8 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 import org.objectweb.asm.ClassReader
+import org.objectweb.asm.ClassWriter
+import org.objectweb.asm.Opcodes
 import org.objectweb.asm.tree.ClassNode
 import org.objectweb.asm.tree.FieldInsnNode
 import org.objectweb.asm.tree.MethodInsnNode
@@ -89,6 +99,41 @@ class ClassEncryptionLoaderRuntimeRegressionTest {
             Files.deleteIfExists(inputJar)
         }
     }
+
+    @Test
+    fun class_encryption_loader_preserves_package_private_loader_namespace() {
+        val entryName = "pkg/Entry"
+        val packagePrivateName = "pkg/HiddenState"
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = entryName,
+                    bytes = buildPackagePrivateCaller(entryName, packagePrivateName),
+                    methodSummaries = listOf(MemberSummary(MemberKind.METHOD, "value", "()I", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC)),
+                    accessFlags = Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER,
+                ),
+                testClassArtifact(
+                    internalName = packagePrivateName,
+                    bytes = buildPackagePrivateState(packagePrivateName),
+                    fieldSummaries = listOf(MemberSummary(MemberKind.FIELD, "result", "I", 0)),
+                    methodSummaries = listOf(MemberSummary(MemberKind.METHOD, "<init>", "(II)V", 0)),
+                    accessFlags = Opcodes.ACC_SUPER,
+                ),
+            ),
+        )
+
+        val result = withVbc4BuildContext(defaultVbc4BuildContext()) {
+            applyClassEncryptionLoader(
+                artifact = artifact,
+                ruleMatches = listOf(ruleMatchForClassEncryption(entryName), ruleMatchForClassEncryption(packagePrivateName)),
+                params = mapOf("encryptionStrategy" to "aes-128", "keyMode" to "per-class", "seed" to 7),
+            )
+        }
+
+        val encryptedIndex = result.artifact.jarEntries.singleOrNull { it.name == "__jse/index.tab" }?.bytes?.toString(Charsets.UTF_8).orEmpty()
+        assertTrue(entryName !in encryptedIndex, "A class that would access package-private app-loader state must not be split into the class-encryption loader")
+        assertTrue(packagePrivateName !in encryptedIndex, "Unsafe package-private dependency should remain in the app loader namespace")
+    }
     private fun injectedHelperInternalNames(jarPath: Path): Set<String> {
         val names = mutableSetOf<String>()
         JarInputStream(Files.newInputStream(jarPath)).use { jar ->
@@ -161,6 +206,58 @@ class ClassEncryptionLoaderRuntimeRegressionTest {
 
     private fun writeRunConfig(configPath: Path, inputJar: Path, outputJar: Path, passIds: List<String>) {
         writeTestRunConfigToml(configPath, inputJar, outputJar, passIds)
+    }
+
+    private fun ruleMatchForClassEncryption(internalName: String) = RuleMatch(
+        rule = RuleSpec(target = internalName, action = "class-encryption-loader"),
+        selector = TargetSelector(classPattern = internalName, memberPattern = null, memberDescriptorPattern = null),
+        matchedClassNames = listOf(internalName),
+        matchedMembers = emptyList(),
+    )
+
+    private fun buildPackagePrivateCaller(internalName: String, dependencyName: String): ByteArray {
+        val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", null)
+        val init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
+        init.visitCode()
+        init.visitVarInsn(Opcodes.ALOAD, 0)
+        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+        init.visitInsn(Opcodes.RETURN)
+        init.visitMaxs(1, 1)
+        init.visitEnd()
+        val value = cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "value", "()I", null, null)
+        value.visitCode()
+        value.visitTypeInsn(Opcodes.NEW, dependencyName)
+        value.visitInsn(Opcodes.DUP)
+        value.visitInsn(Opcodes.ICONST_1)
+        value.visitInsn(Opcodes.ICONST_2)
+        value.visitMethodInsn(Opcodes.INVOKESPECIAL, dependencyName, "<init>", "(II)V", false)
+        value.visitFieldInsn(Opcodes.GETFIELD, dependencyName, "result", "I")
+        value.visitInsn(Opcodes.IRETURN)
+        value.visitMaxs(4, 0)
+        value.visitEnd()
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    private fun buildPackagePrivateState(internalName: String): ByteArray {
+        val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        cw.visit(Opcodes.V17, Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", null)
+        cw.visitField(0, "result", "I", null, null).visitEnd()
+        val init = cw.visitMethod(0, "<init>", "(II)V", null, null)
+        init.visitCode()
+        init.visitVarInsn(Opcodes.ALOAD, 0)
+        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+        init.visitVarInsn(Opcodes.ALOAD, 0)
+        init.visitVarInsn(Opcodes.ILOAD, 1)
+        init.visitVarInsn(Opcodes.ILOAD, 2)
+        init.visitInsn(Opcodes.IADD)
+        init.visitFieldInsn(Opcodes.PUTFIELD, internalName, "result", "I")
+        init.visitInsn(Opcodes.RETURN)
+        init.visitMaxs(3, 3)
+        init.visitEnd()
+        cw.visitEnd()
+        return cw.toByteArray()
     }
 
     private fun captureStdout(block: () -> Unit): String {

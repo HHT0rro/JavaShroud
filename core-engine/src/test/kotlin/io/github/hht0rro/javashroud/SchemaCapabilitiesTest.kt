@@ -173,7 +173,7 @@ class SchemaCapabilitiesTest {
             assertTrue(module != null, "Default pipeline references unknown module '$passId'")
             assertFalse(module!!.requiresOptIn, "Default pipeline must not include opt-in pass '$passId'")
             assertFalse(
-                module.risk == "high" || module.risk == "ultra-high",
+                module.risk == "high",
                 "Default pipeline must not include high-risk pass '$passId' (${module.risk})",
             )
             assertTrue(
@@ -197,7 +197,28 @@ class SchemaCapabilitiesTest {
     }
 
     @Test
-    fun real_jar_semantics_or_helper_fingerprint_risky_modules_require_opt_in() {
+    fun native_loader_and_vm_modules_use_top_risk_and_require_opt_in() {
+        val moduleIndex = buildEngineSchemaPayload().modules.associateBy { it.id }
+        val topRiskModules = listOf(
+            "anti-dump-protection",
+            "anti-instrumentation",
+            "class-encryption-loader",
+            "environment-bound-keys",
+            "jni-microkernel-loader",
+            "method-body-delayed-decryption",
+            "method-virtualization",
+        )
+
+        for (passId in topRiskModules) {
+            val module = moduleIndex[passId]
+            assertTrue(module != null, "Schema should expose module '$passId'")
+            assertEquals("high", module!!.risk, "'$passId' should use the highest published risk level")
+            assertTrue(module.requiresOptIn, "'$passId' must require explicit opt-in")
+        }
+    }
+
+    @Test
+    fun real_jar_semantics_or_helper_fingerprint_medium_risk_modules_require_opt_in() {
         val moduleIndex = buildEngineSchemaPayload().modules.associateBy { it.id }
         val riskyOnReflectionOrLayoutSensitiveJars = listOf(
             "anti-decompiler-structure",
@@ -211,7 +232,9 @@ class SchemaCapabilitiesTest {
             "reference-proxy",
             "static-init-perturbation",
             "string-encryption",
+            "callsite-rotation-protection",
             "anti-symbolic-execution",
+            "exception-semantic-virtualization",
             "rename-classes",
             "rename-packages",
             "rename-methods",
@@ -221,7 +244,7 @@ class SchemaCapabilitiesTest {
         for (passId in riskyOnReflectionOrLayoutSensitiveJars) {
             val module = moduleIndex[passId]
             assertTrue(module != null, "Schema should expose module '$passId'")
-            assertEquals("high", module!!.risk, "Real TEST.jar probes show '$passId' is not a low-risk safe pass")
+            assertEquals("medium", module!!.risk, "Real TEST.jar probes show '$passId' is not a low-risk safe pass")
             assertTrue(module.requiresOptIn, "Real TEST.jar probes show '$passId' must require explicit opt-in")
             assertTrue(
                 module.compatibilityNotes.isNotBlank(),
@@ -251,21 +274,28 @@ class SchemaCapabilitiesTest {
     }
 
     @Test
-    fun class_encryption_rejects_vm_payload_combinations_until_encrypted_remap_exists() {
+    fun sealed_runtime_payload_combinations_remain_hard_conflicts_until_remapping_exists() {
         val hardConflicts = buildEngineSchemaPayload().compatibility
             .filter { it.severity == "hard" }
             .map { it.passIds.toSet() }
             .toSet()
 
         assertEquals(
-            setOf(setOf("class-encryption-loader", "method-virtualization")),
+            setOf(
+                setOf("class-encryption-loader", "method-virtualization"),
+                setOf("method-body-delayed-decryption", "method-virtualization"),
+            ),
             hardConflicts,
-            "Only the encrypted payload remapping boundary should remain a hard conflict.",
+            "Only sealed runtime payload remapping boundaries should remain hard conflicts.",
         )
 
         assertTrue(
             setOf("class-encryption-loader", "method-virtualization") in hardConflicts,
             "class encryption must not package VM-dispatch bytecode that later sealing cannot remap",
+        )
+        assertTrue(
+            setOf("method-body-delayed-decryption", "method-virtualization") in hardConflicts,
+            "delayed method body resources must not be moved into VM payloads before sealing can remap them",
         )
     }
 
@@ -422,7 +452,7 @@ class SchemaCapabilitiesTest {
     fun loader_protection_modules_have_correct_risk() {
         val modules = buildLoaderProtectionCapabilityDefinitions()
         for (module in modules) {
-            assertTrue(module.risk in listOf("low", "medium", "high", "ultra-high"), "Module ${module.id} should have a valid risk level")
+            assertTrue(module.risk in listOf("low", "medium", "high"), "Module ${module.id} should have a valid risk level")
         }
     }
 }

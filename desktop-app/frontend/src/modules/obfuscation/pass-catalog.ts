@@ -216,17 +216,29 @@ const inferRisk = (passId: string, category: string): PassItem['risk'] => {
     return 'low'
   }
 
-  if (category === 'runtime-defense' || category === 'virtualization' || category === 'native-kernel') {
+  const highRiskPassIds = new Set([
+    'anti-dump-protection',
+    'anti-instrumentation',
+    'class-encryption-loader',
+    'environment-bound-keys',
+    'jni-microkernel-loader',
+    'method-body-delayed-decryption',
+    'method-virtualization',
+  ])
+
+  if (highRiskPassIds.has(passId) || category === 'native-kernel' || category === 'virtualization') {
     return 'high'
   }
 
-  if (passId === 'rename-classes' || passId === 'rename-packages') {
-    return 'high'
-  }
+  const mediumRiskCategories = new Set([
+    'control-flow',
+    'decompiler-traps',
+    'helper-loader',
+    'member-hiding',
+    'runtime-defense',
+    'string-protection',
+    'symbol-renaming',
+  ])
 
-  if (category === 'control-flow' || category === 'string-protection' || category === 'helper-loader') {
-    return 'high'
-  }
-
-  return 'medium'
+  return mediumRiskCategories.has(category) ? 'medium' : 'low'
 }

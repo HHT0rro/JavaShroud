@@ -67,7 +67,7 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
 
         stability = "experimental",
 
-        risk = "ultra-high",
+        risk = "high",
 
         requiresRuntimeFlags = emptyList(),
 
@@ -141,7 +141,7 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
 
         stability = "experimental",
 
-        risk = "ultra-high",
+        risk = "high",
 
         requiresRuntimeFlags = emptyList(),
 
@@ -187,7 +187,7 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
 
         stability = "experimental",
 
-        risk = "ultra-high",
+        risk = "high",
 
         requiresRuntimeFlags = emptyList(),
 

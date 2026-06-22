@@ -42,6 +42,48 @@ class CallsiteRotationProtectionSafetyTest {
         assertEquals(1, instructions.filterIsInstance<MethodInsnNode>().count { it.owner.startsWith("[") && it.name == "clone" })
     }
 
+    @Test
+    fun callsite_rotation_keeps_class_reflection_surface_calls_visible_for_later_rename_rewrites() {
+        val internalName = "sample/ReflectionSurfaceHost"
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = internalName,
+                    bytes = buildReflectionSurfaceHost(internalName),
+                    methodSummaries = listOf(MemberSummary(MemberKind.METHOD, "lookup", "()Ljava/lang/reflect/Field;", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC)),
+                ),
+            ),
+        )
+
+        val result = applyCallsiteRotationProtection(
+            artifact = artifact,
+            ruleMatches = listOf(ruleMatchFor(internalName)),
+            params = mapOf("seed" to 1),
+        )
+
+        val node = ClassNode()
+        ClassReader(result.artifact.classArtifactIndex[internalName]!!.bytes).accept(node, ClassReader.SKIP_FRAMES)
+        val instructions = node.methods.single { it.name == "lookup" }.instructions.toArray()
+        assertEquals(0, instructions.filterIsInstance<InvokeDynamicInsnNode>().count(), "Reflection surface Class calls must remain MethodInsnNode so rename passes can rewrite adjacent name constants")
+        assertEquals(1, instructions.filterIsInstance<MethodInsnNode>().count { it.owner == "java/lang/Class" && it.name == "getDeclaredField" })
+    }
+
+    private fun buildReflectionSurfaceHost(internalName: String): ByteArray {
+        val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", null)
+        cw.visitField(Opcodes.ACC_PRIVATE, "secret", "I", null, null).visitEnd()
+        val method = cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "lookup", "()Ljava/lang/reflect/Field;", null, arrayOf("java/lang/NoSuchFieldException"))
+        method.visitCode()
+        method.visitLdcInsn(org.objectweb.asm.Type.getObjectType(internalName))
+        method.visitLdcInsn("secret")
+        method.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Class", "getDeclaredField", "(Ljava/lang/String;)Ljava/lang/reflect/Field;", false)
+        method.visitInsn(Opcodes.ARETURN)
+        method.visitMaxs(2, 0)
+        method.visitEnd()
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
     private fun buildArrayVirtualCallHost(internalName: String): ByteArray {
         val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
         cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", null)
