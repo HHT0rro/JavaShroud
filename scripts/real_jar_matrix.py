@@ -154,10 +154,28 @@ def compatible(pass_ids: list[str], hard_conflicts: set[frozenset[str]]) -> bool
     return all(not pair.issubset(selected) for pair in hard_conflicts)
 
 
-def build_cases(data: dict[str, Any], mode: str, include_native: bool, limit: int | None, offset: int = 0) -> list[Case]:
+def combo_case(name: str, pass_ids: list[str], modules: dict[str, Any], profile_name: str) -> Case:
+    params = {
+        pass_id: profile_params
+        for pass_id in pass_ids
+        if (profile_params := profiles(modules[pass_id]).get(profile_name, {}))
+    }
+    suffix = "" if profile_name == "default" else f"-params-{profile_name}"
+    return Case(name + suffix, pass_ids, params)
+
+
+def build_cases(
+    data: dict[str, Any],
+    mode: str,
+    include_native: bool,
+    limit: int | None,
+    offset: int = 0,
+    combo_param_profiles: list[str] | None = None,
+) -> list[Case]:
     modules = {module["id"]: module for module in data["modules"]}
     hard_conflicts = conflicts(data)
     pass_ids = [pid for pid in sorted(modules) if include_native or pid not in DEFAULT_SKIP]
+    combo_profiles = combo_param_profiles or ["default"]
     cases: list[Case] = []
 
     if data.get("defaultPipeline"):
@@ -172,24 +190,28 @@ def build_cases(data: dict[str, Any], mode: str, include_native: bool, limit: in
         for combo in itertools.combinations(pass_ids, 2):
             combo_ids = list(combo)
             if compatible(combo_ids, hard_conflicts):
-                cases.append(Case("pair-" + "__".join(combo_ids), combo_ids, {}))
+                for profile_name in combo_profiles:
+                    cases.append(combo_case("pair-" + "__".join(combo_ids), combo_ids, modules, profile_name))
 
     if mode in {"triple", "all"}:
         for combo in itertools.combinations(pass_ids, 3):
             combo_ids = list(combo)
             if compatible(combo_ids, hard_conflicts):
-                cases.append(Case("triple-" + "__".join(combo_ids), combo_ids, {}))
+                for profile_name in combo_profiles:
+                    cases.append(combo_case("triple-" + "__".join(combo_ids), combo_ids, modules, profile_name))
 
     if mode in {"random", "all"}:
         rng = random.Random(20260623)
         for index in range(20):
             combo_ids = rng.sample(pass_ids, rng.randint(2, min(6, len(pass_ids))))
             if compatible(combo_ids, hard_conflicts):
-                cases.append(Case(f"random-{index:02d}", combo_ids, {}))
+                for profile_name in combo_profiles:
+                    cases.append(combo_case(f"random-{index:02d}", combo_ids, modules, profile_name))
 
     if mode in {"full", "all"}:
         full = [pid for pid in pass_ids if compatible([pid], hard_conflicts)]
-        cases.append(Case("full-non-hard-conflict", full, {}))
+        for profile_name in combo_profiles:
+            cases.append(combo_case("full-non-hard-conflict", full, modules, profile_name))
 
     deduped: list[Case] = []
     seen: set[tuple[str, tuple[str, ...], str]] = set()
@@ -241,6 +263,13 @@ def main() -> int:
     parser.add_argument("--fixtures", type=Path, nargs="*", default=DEFAULT_FIXTURES)
     parser.add_argument("--mode", choices=["single", "pair", "triple", "full", "random", "all"], default="single")
     parser.add_argument("--include-native", action="store_true")
+    parser.add_argument(
+        "--combo-param-profiles",
+        nargs="+",
+        choices=["default", "min", "max"],
+        default=["default"],
+        help="Parameter profiles to apply to pair/triple/random/full cases.",
+    )
     parser.add_argument("--limit", type=int, default=12)
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--work-dir", type=Path, default=Path("build/real-jar-matrix"))
@@ -252,7 +281,7 @@ def main() -> int:
     cwd = Path.cwd()
     engine = args.engine if args.engine.is_absolute() else cwd / args.engine
     data = load_schema(engine, cwd)
-    cases = build_cases(data, args.mode, args.include_native, args.limit, args.offset)
+    cases = build_cases(data, args.mode, args.include_native, args.limit, args.offset, args.combo_param_profiles)
     args.work_dir.mkdir(parents=True, exist_ok=True)
 
     failures = 0
@@ -300,4 +329,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
