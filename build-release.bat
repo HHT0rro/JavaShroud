@@ -266,7 +266,9 @@ exit /b 0
 :sha256_file
 set "SHA_FILE=%~1"
 set "SHA_VAR=%~2"
-for /f "usebackq delims=" %%H in (`powershell -NoProfile -Command "(Get-FileHash -Algorithm SHA256 -LiteralPath '%SHA_FILE%').Hash"`) do set "%SHA_VAR%=%%H"
+set "POWERSHELL_EXE=powershell"
+where pwsh >nul 2>nul && set "POWERSHELL_EXE=pwsh"
+for /f "delims=" %%H in ('%POWERSHELL_EXE% -NoProfile -Command "(Get-FileHash -Algorithm SHA256 -LiteralPath $env:SHA_FILE).Hash"') do set "%SHA_VAR%=%%H"
 if not defined %SHA_VAR% exit /b 1
 exit /b 0
 
