@@ -44,16 +44,26 @@ class Case:
 
 
 def run(cmd: list[str], cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        cmd,
-        cwd=str(cwd),
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=timeout,
-    )
+    try:
+        return subprocess.run(
+            cmd,
+            cwd=str(cwd),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        stdout = error.stdout.decode("utf-8", errors="replace") if isinstance(error.stdout, bytes) else error.stdout
+        stderr = error.stderr.decode("utf-8", errors="replace") if isinstance(error.stderr, bytes) else error.stderr
+        return subprocess.CompletedProcess(
+            cmd,
+            124,
+            stdout or "",
+            (stderr or "") + f"\n<TIMEOUT after {timeout}s>",
+        )
 
 
 def jar_main_class(jar_path: Path) -> str | None:
@@ -154,10 +164,28 @@ def compatible(pass_ids: list[str], hard_conflicts: set[frozenset[str]]) -> bool
     return all(not pair.issubset(selected) for pair in hard_conflicts)
 
 
-def build_cases(data: dict[str, Any], mode: str, include_native: bool, limit: int | None, offset: int = 0) -> list[Case]:
+def combo_case(name: str, pass_ids: list[str], modules: dict[str, Any], profile_name: str) -> Case:
+    params = {
+        pass_id: profile_params
+        for pass_id in pass_ids
+        if (profile_params := profiles(modules[pass_id]).get(profile_name, {}))
+    }
+    suffix = "" if profile_name == "default" else f"-params-{profile_name}"
+    return Case(name + suffix, pass_ids, params)
+
+
+def build_cases(
+    data: dict[str, Any],
+    mode: str,
+    include_native: bool,
+    limit: int | None,
+    offset: int = 0,
+    combo_param_profiles: list[str] | None = None,
+) -> list[Case]:
     modules = {module["id"]: module for module in data["modules"]}
     hard_conflicts = conflicts(data)
     pass_ids = [pid for pid in sorted(modules) if include_native or pid not in DEFAULT_SKIP]
+    combo_profiles = combo_param_profiles or ["default"]
     cases: list[Case] = []
 
     if data.get("defaultPipeline"):
@@ -172,24 +200,28 @@ def build_cases(data: dict[str, Any], mode: str, include_native: bool, limit: in
         for combo in itertools.combinations(pass_ids, 2):
             combo_ids = list(combo)
             if compatible(combo_ids, hard_conflicts):
-                cases.append(Case("pair-" + "__".join(combo_ids), combo_ids, {}))
+                for profile_name in combo_profiles:
+                    cases.append(combo_case("pair-" + "__".join(combo_ids), combo_ids, modules, profile_name))
 
     if mode in {"triple", "all"}:
         for combo in itertools.combinations(pass_ids, 3):
             combo_ids = list(combo)
             if compatible(combo_ids, hard_conflicts):
-                cases.append(Case("triple-" + "__".join(combo_ids), combo_ids, {}))
+                for profile_name in combo_profiles:
+                    cases.append(combo_case("triple-" + "__".join(combo_ids), combo_ids, modules, profile_name))
 
     if mode in {"random", "all"}:
         rng = random.Random(20260623)
         for index in range(20):
             combo_ids = rng.sample(pass_ids, rng.randint(2, min(6, len(pass_ids))))
             if compatible(combo_ids, hard_conflicts):
-                cases.append(Case(f"random-{index:02d}", combo_ids, {}))
+                for profile_name in combo_profiles:
+                    cases.append(combo_case(f"random-{index:02d}", combo_ids, modules, profile_name))
 
     if mode in {"full", "all"}:
         full = [pid for pid in pass_ids if compatible([pid], hard_conflicts)]
-        cases.append(Case("full-non-hard-conflict", full, {}))
+        for profile_name in combo_profiles:
+            cases.append(combo_case("full-non-hard-conflict", full, modules, profile_name))
 
     deduped: list[Case] = []
     seen: set[tuple[str, tuple[str, ...], str]] = set()
@@ -212,15 +244,23 @@ def fingerprint(path: Path) -> str:
 
 def normalize_text(value: str) -> str:
     text = value.replace("\r\n", "\n")
+    text = re.sub(r"\[\d{2}:\d{2}:\d{2}\.\d{3}\]", "[<clock>]", text)
+    text = re.sub(r"\[\+\d+ms\]", "[+<time>]", text)
     text = re.sub(r"Total time: \d+ms", "Total time: <time>", text)
     text = re.sub(r"Calc: \d+ms", "Calc: <time>", text)
+    text = re.sub(r"耗时=\d+ms", "耗时=<time>", text)
+    text = re.sub(r"用时=\d+ms", "用时=<time>", text)
+    text = re.sub(r"启动耗时=\d+ms", "启动耗时=<time>", text)
     text = re.sub(r"\b\d+\.\d+ms\b", "<time>", text)
+    text = re.sub(r"\b\d+ms\b", "<time>", text)
+    text = re.sub(r"\b\d+\.<time>(?=\s|\|)", "<time>", text)
     text = re.sub(r"Jar size: \d+KB", "Jar size: <size>", text)
     text = re.sub(r"^Test 1\.6: Pool (PASS|FAIL)$", "Test 1.6: Pool <flaky>", text, flags=re.MULTILINE)
     text = re.sub(r"^\+-[-+]+\+$", "+<table-border>+", text, flags=re.MULTILINE)
     text = re.sub(r"[ \t]+\|", " |", text)
     text = re.sub(r"\|[ \t]+", "| ", text)
-    return text.strip()
+    lines = [line.rstrip() for line in text.strip().splitlines() if line.strip()]
+    return "\n".join(sorted(lines))
 
 
 def normalize(proc: subprocess.CompletedProcess[str]) -> tuple[int, str, str]:
@@ -241,6 +281,13 @@ def main() -> int:
     parser.add_argument("--fixtures", type=Path, nargs="*", default=DEFAULT_FIXTURES)
     parser.add_argument("--mode", choices=["single", "pair", "triple", "full", "random", "all"], default="single")
     parser.add_argument("--include-native", action="store_true")
+    parser.add_argument(
+        "--combo-param-profiles",
+        nargs="+",
+        choices=["default", "min", "max"],
+        default=["default"],
+        help="Parameter profiles to apply to pair/triple/random/full cases.",
+    )
     parser.add_argument("--limit", type=int, default=12)
     parser.add_argument("--offset", type=int, default=0)
     parser.add_argument("--work-dir", type=Path, default=Path("build/real-jar-matrix"))
@@ -252,7 +299,7 @@ def main() -> int:
     cwd = Path.cwd()
     engine = args.engine if args.engine.is_absolute() else cwd / args.engine
     data = load_schema(engine, cwd)
-    cases = build_cases(data, args.mode, args.include_native, args.limit, args.offset)
+    cases = build_cases(data, args.mode, args.include_native, args.limit, args.offset, args.combo_param_profiles)
     args.work_dir.mkdir(parents=True, exist_ok=True)
 
     failures = 0
@@ -300,4 +347,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-
