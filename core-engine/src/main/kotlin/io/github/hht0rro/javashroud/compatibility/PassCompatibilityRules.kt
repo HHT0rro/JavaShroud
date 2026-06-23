@@ -90,6 +90,7 @@ fun buildOrderingConstraints(): List<OrderingConstraint> = listOf(
     OrderingConstraint(before = "anti-instrumentation", after = "method-virtualization", reason = "Anti-instrumentation direct native checks must be visible before method virtualization."),
     OrderingConstraint(before = "anti-dump-protection", after = "method-virtualization", reason = "Anti-dump direct native checks must be visible before method virtualization."),
     OrderingConstraint(before = "invoke-dynamic-indirection", after = "callsite-rotation-protection", reason = "Indy callsites should be established before callsite rotation wraps dispatch."),
+    OrderingConstraint(before = "method-virtualization", after = "callsite-rotation-protection", reason = "Method virtualization must capture selected methods before callsite rotation inserts JavaShroud helper invokedynamic callsites that VBC4 intentionally rejects."),
     OrderingConstraint(before = "jni-microkernel-loader", after = "method-virtualization", reason = "JNI kernel must load before method virtualization switches to the native VM interpreter."),
     OrderingConstraint(before = "jni-microkernel-loader", after = "anti-instrumentation", reason = "JNI kernel must load before native runtime defenses."),
     OrderingConstraint(before = "jni-microkernel-loader", after = "anti-dump-protection", reason = "JNI kernel must load before anti-dump initialization."),
