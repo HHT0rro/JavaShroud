@@ -10,6 +10,19 @@ import kotlin.test.assertTrue
 
 class PassOrderingPlannerRegressionTest {
     @Test
+    fun planner_orders_method_virtualization_before_callsite_rotation() {
+        val result = planPassOrdering(
+            passIds = listOf("callsite-rotation-protection", "method-virtualization", "jni-microkernel-loader"),
+            orderingConstraints = buildOrderingConstraints(),
+            hardConflicts = hardConflictPairs,
+            softConflicts = softConflictPairs,
+        )
+
+        assertTrue(result.accepted, "Planner should accept virtualization plus callsite rotation pipeline: ${result.diagnostics}")
+        assertBefore(result.orderedPasses, "jni-microkernel-loader", "method-virtualization")
+        assertBefore(result.orderedPasses, "method-virtualization", "callsite-rotation-protection")
+    }
+    @Test
     fun planner_orders_rename_before_virtualization() {
         val result = planPassOrdering(
             passIds = listOf("method-virtualization", "rename-packages", "rename-classes", "rename-methods", "rename-fields"),
