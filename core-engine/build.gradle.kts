@@ -166,6 +166,7 @@ graalvmNative {
             buildArgs.addAll(
                 listOf(
                     "--no-fallback",
+                    "--enable-url-protocols=https",
                     "--gc=serial",
                     "-O2",
                     "-march=compatibility",
