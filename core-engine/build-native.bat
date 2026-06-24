@@ -33,7 +33,7 @@ call :require_file "%ENGINE_RESOURCE_CONFIG%" "Engine resource config was not ge
 echo [2/3] Building native engine executable...
 if not exist "%ENGINE_NATIVE_DIR%" mkdir "%ENGINE_NATIVE_DIR%" || exit /b 1
 set "NATIVE_IMAGE_CMD=%GRAALVM_HOME%\bin\native-image.cmd"
-set "NATIVE_IMAGE_TUNING_ARGS= --no-fallback -H:+ReportExceptionStackTraces"
+set "NATIVE_IMAGE_TUNING_ARGS= --no-fallback --enable-url-protocols=https -H:+ReportExceptionStackTraces"
 cmd /v:on /c "call "%VCVARSALL%" x64 >nul && "%NATIVE_IMAGE_CMD%" -cp "%ENGINE_JAR%" -H:Name=obfuscator-engine -H:Path="%ENGINE_NATIVE_DIR%" %NATIVE_IMAGE_TUNING_ARGS% -H:IncludeResources="%HELPER_CLASS_RESOURCES_1%" -H:IncludeResources="%HELPER_CLASS_RESOURCES_2%" -H:IncludeResources="%HELPER_CLASS_RESOURCES_3%" -H:IncludeResources="%META_INF_RESOURCES%" -H:ResourceConfigurationFiles="%ENGINE_RESOURCE_CONFIG%" %ENGINE_MAIN_CLASS%" || exit /b 1
 call :require_file "%ENGINE_EXE%" "Native engine build did not produce obfuscator-engine.exe" || exit /b 1
 

@@ -405,11 +405,7 @@ object EmbeddedHelperDeployment {
         }
 
         val targetPlatformParam = (loaderPass.params["targetPlatform"] as? com.fasterxml.jackson.databind.node.TextNode)?.textValue() ?: "auto"
-        val targetPlatforms = if (targetPlatformParam == "auto") {
-            NativeRecompilationTransforms.ZIG_TARGETS.keys
-        } else {
-            listOf(targetPlatformParam)
-        }
+        val targetPlatforms = resolveNativeCompileTargetPlatforms(targetPlatformParam)
         if (targetPlatforms.isEmpty() || targetPlatforms.any { it !in NativeRecompilationTransforms.ZIG_TARGETS }) {
             throw IllegalArgumentException("target platform is unsupported: $targetPlatformParam")
         }
@@ -434,6 +430,23 @@ object EmbeddedHelperDeployment {
             emitNativeRecompilationFailure(emit, error.message ?: error::class.java.simpleName)
             throw error
         }
+    }
+
+    internal fun resolveNativeCompileTargetPlatforms(
+        targetPlatformParam: String,
+        osName: String = System.getProperty("os.name"),
+        osArch: String = System.getProperty("os.arch"),
+    ): List<String> {
+        if (targetPlatformParam != "auto") return listOf(targetPlatformParam)
+        val detected = NativeToolchainProvisioner.detectPlatform(osName, osArch)
+            ?: throw IllegalArgumentException("target platform is unsupported: auto ($osName/$osArch)")
+        val normalized = detected
+            .replace("-x86_64", "-x64")
+            .replace("-aarch64", "-arm64")
+        if (normalized !in NativeRecompilationTransforms.ZIG_TARGETS) {
+            throw IllegalArgumentException("target platform is unsupported: auto ($detected)")
+        }
+        return listOf(normalized)
     }
 
     private fun emitNativeRecompilationMessage(
