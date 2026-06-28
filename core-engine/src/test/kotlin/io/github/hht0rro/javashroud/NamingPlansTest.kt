@@ -44,6 +44,16 @@ class NamingPlansTest {
     }
 
     @Test
+    fun buildClassRenameMap_skips_names_already_used_in_same_package() {
+        val artifacts = listOf(
+            testClassArtifact("com/example/Alpha"),
+            testClassArtifact("com/example/C0000"),
+        )
+        val map = buildClassRenameMap(artifacts, setOf("com/example/Alpha"))
+        assertEquals("com/example/C0001", map["com/example/Alpha"])
+    }
+
+    @Test
     fun buildClassRenameMap_returns_empty_for_no_matches() {
         val artifacts = listOf(testClassArtifact("com/example/Foo"))
         val map = buildClassRenameMap(artifacts, emptySet())

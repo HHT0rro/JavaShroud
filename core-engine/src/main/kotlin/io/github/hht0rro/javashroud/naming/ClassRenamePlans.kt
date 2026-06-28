@@ -12,17 +12,20 @@ fun buildClassRenameMap(
         .sortedBy { it.summary.internalName }
 
     val generator = NameGenerator(config)
+    val existingClassNames = classArtifacts.map { it.summary.internalName }.toSet()
+    val allocatedClassNames = mutableSetOf<String>()
 
-    return selectedClassArtifacts
-        .map { classArtifact ->
-            val original = classArtifact.summary.internalName
+    return selectedClassArtifacts.mapNotNull { classArtifact ->
+        val original = classArtifact.summary.internalName
+        val packageName = original.substringBeforeLast('/', "")
+        var fullNewName: String
+        do {
             val newName = generator.generateSimpleName("C")
-            val packageName = original.substringBeforeLast('/', "")
-            val fullNewName = if (packageName.isBlank()) newName else "$packageName/$newName"
-            original to fullNewName
-        }
-        .filter { it.first != it.second }
-        .toMap()
+            fullNewName = if (packageName.isBlank()) newName else "$packageName/$newName"
+        } while (fullNewName in existingClassNames || fullNewName in allocatedClassNames)
+        allocatedClassNames += fullNewName
+        if (original == fullNewName) null else original to fullNewName
+    }.toMap()
 }
 
 fun buildPackageRenameMap(
