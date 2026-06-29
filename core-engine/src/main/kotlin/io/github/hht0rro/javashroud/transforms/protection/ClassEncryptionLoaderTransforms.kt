@@ -16,11 +16,12 @@ import org.objectweb.asm.tree.LdcInsnNode
 import org.objectweb.asm.tree.MethodInsnNode
 import org.objectweb.asm.tree.MultiANewArrayInsnNode
 import org.objectweb.asm.tree.TypeInsnNode
+import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
 import java.util.jar.Manifest
 import javax.crypto.Cipher
-import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
@@ -65,7 +66,7 @@ fun applyClassEncryptionLoader(
     val buildContext = requireVbc4BuildContext()
     val globalKeyId = if (keyMode == "global") generateKeyId(random) else null
     val globalSalt = if (keyMode == "global") generateSalt(random) else null
-    val globalIv = if (keyMode == "global") generateIv(random) else null
+    val globalNonce = if (keyMode == "global") generateNonce(random) else null
 
     val nameGen = NameGenerator(random)
     val newResources = mutableListOf<JarEntryData>()
@@ -85,16 +86,17 @@ fun applyClassEncryptionLoader(
         val className = classArtifact.summary.internalName
         val classKeyId = globalKeyId ?: generateKeyId(random)
         val classSalt = globalSalt ?: generateSalt(random)
-        val classIv = globalIv ?: generateIv(random)
+        val classNonce = globalNonce ?: generateNonce(random)
         val classKey = deriveClassEncryptionKey(buildContext, strategy, classKeyId, classSalt)
+        val resourcePath = "__jse/${className}.enc"
+        val aad = classEncryptionAad(className, resourcePath, strategy, keyMode)
 
         // Encrypt the original class bytes
-        val encryptedBytes = encryptBytes(classArtifact.bytes, strategy, classKey, classIv)
+        val encryptedBytes = encryptBytes(classArtifact.bytes, strategy, classKey, classNonce, aad)
         java.util.Arrays.fill(classKey, 0)
-        val resourcePath = "__jse/${className}.enc"
         newResources.add(JarEntryData(name = resourcePath, bytes = encryptedBytes))
 
-        val keyMetadata = buildKeyMetadata(strategy, classKeyId, classSalt, classIv)
+        val keyMetadata = buildKeyMetadata(strategy, classKeyId, classSalt, classNonce, aad)
         // internalName \t resourcePath \t keyMetadata
         manifestLines.add("$className\t$resourcePath\t$keyMetadata")
 
@@ -662,34 +664,33 @@ internal fun deriveClassEncryptionKey(
     salt: ByteArray,
 ): ByteArray = context.deriveSubKey(VBC4_DERIVE_LABEL_CLASS_ENCRYPTION, classKeyLength(strategy), keyId, salt)
 
-private fun generateIv(random: SecureRandom): ByteArray {
-    val iv = ByteArray(16)
-    random.nextBytes(iv)
-    return iv
-}
+private fun generateNonce(random: SecureRandom): ByteArray = ByteArray(12).also { random.nextBytes(it) }
 
-private fun encryptBytes(data: ByteArray, strategy: String, key: ByteArray, iv: ByteArray?): ByteArray {
+private fun encryptBytes(data: ByteArray, strategy: String, key: ByteArray, nonce: ByteArray, aad: ByteArray): ByteArray {
     require(strategy == "aes-128" || strategy == "aes-256") { "class-encryption-loader requires AES encryption" }
-    val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+    require(nonce.size == 12) { "class-encryption-loader AES-GCM nonce must be 12 bytes" }
+    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
     val keySpec = SecretKeySpec(key, "AES")
-    val actualIv = iv ?: generateIv(SecureRandom())
-    val ivSpec = IvParameterSpec(actualIv)
-    cipher.init(Cipher.ENCRYPT_MODE, keySpec, ivSpec)
-    // Don't prepend IV - it's stored separately in keyMetadata
+    cipher.init(Cipher.ENCRYPT_MODE, keySpec, GCMParameterSpec(128, nonce))
+    cipher.updateAAD(aad)
     return cipher.doFinal(data)
 }
 
-private fun buildKeyMetadata(strategy: String, keyId: ByteArray, salt: ByteArray, iv: ByteArray?): String {
-    // Derived-key metadata format: "strategy:keyId:salt:iv" (all but strategy
-    // Base64). No raw symmetric key is written; the runtime re-derives the AES
-    // key from the per-build root using keyId+salt.
+private fun buildKeyMetadata(strategy: String, keyId: ByteArray, salt: ByteArray, nonce: ByteArray, aad: ByteArray): String {
+    // v2 metadata format: v2:strategy:keyId:salt:nonce:aadHash. No raw
+    // symmetric key is written; the runtime re-derives the AES-GCM key from the
+    // resident root and refuses metadata/resource tampering through the AEAD tag.
     val sb = StringBuilder()
-    sb.append(strategy).append(":")
+    sb.append("v2:").append(strategy).append(":")
     sb.append(Base64.getEncoder().encodeToString(keyId)).append(":")
     sb.append(Base64.getEncoder().encodeToString(salt))
-    sb.append(":").append(Base64.getEncoder().encodeToString(iv ?: ByteArray(0)))
+    sb.append(":").append(Base64.getEncoder().encodeToString(nonce))
+    sb.append(":").append(Base64.getEncoder().encodeToString(MessageDigest.getInstance("SHA-256").digest(aad)))
     return sb.toString()
 }
+
+private fun classEncryptionAad(className: String, resourcePath: String, strategy: String, keyMode: String): ByteArray =
+    "javashroud:class-encryption:v2:$className:$resourcePath:$strategy:$keyMode:sealed-runtime".toByteArray(Charsets.UTF_8)
 
 // --- Argument loading helpers ---
 

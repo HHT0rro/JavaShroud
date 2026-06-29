@@ -25,7 +25,7 @@ import org.objectweb.asm.commons.ClassRemapper
 import org.objectweb.asm.commons.Remapper
 import java.util.Base64
 import javax.crypto.Cipher
-import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import java.security.MessageDigest
 import java.util.Arrays
@@ -57,8 +57,10 @@ private val AUTO_SEALED_HELPER_PASSES = setOf(
 
 private val SEALED_RUNTIME_HELPERS = listOf(
     "$PROTECTION_HELPER_PACKAGE/ClassEncryptionLoaderHelper",
+    "$PROTECTION_HELPER_PACKAGE/ClassEncryptionLoaderHelper${"$"}ParsedMetadata",
     "$PROTECTION_HELPER_PACKAGE/ClassEncryptionLoaderHelper${"$"}SharedDecryptingClassLoader",
     "$PROTECTION_HELPER_PACKAGE/MethodBodyDecryptionHelper",
+    "$PROTECTION_HELPER_PACKAGE/MethodBodyDecryptionHelper${"$"}ParsedMetadata",
     "$PROTECTION_HELPER_PACKAGE/StringEncryptionHelper",
     "$PROTECTION_HELPER_PACKAGE/BootstrapEncryptionHelper",
     "$PROTECTION_HELPER_PACKAGE/EnvironmentBindingHelper",
@@ -217,6 +219,8 @@ private data class SealedHelperMemberRenamePlan(
     fun methodName(owner: String?, name: String?, descriptor: String?): String? =
         if (owner == null || name == null || descriptor == null) {
             name
+        } else if (name == "<init>" || name == "<clinit>") {
+            name
         } else {
             methodRenames[SealedMemberRef(owner, name, descriptor)] ?: name
         }
@@ -275,6 +279,7 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
 
     fun addMethod(owner: String, name: String, descriptor: String) {
         val sealedOwner = helperClassRenameMap[owner] ?: return
+        if (name == "<init>" || name == "<clinit>") return
         val sealedMethodName = sealedMemberName(seed, owner, name, descriptor, "m")
         for (candidate in listOf(owner, sealedOwner)) {
             methodRenames[SealedMemberRef(candidate, name, descriptor)] = sealedMethodName
@@ -292,6 +297,10 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     val exceptionHelper = "$PROTECTION_HELPER_PACKAGE/ExceptionVirtualizationHelper"
     addMethod(exceptionHelper, "shouldVirtualize", "()Z")
     addField(exceptionHelper, "enabled", "Z")
+    val flowControlException = "$PROTECTION_HELPER_PACKAGE/FlowControlException"
+    addMethod(flowControlException, "<init>", "()V")
+    addMethod(flowControlException, "<init>", "(I)V")
+    addField(flowControlException, "state", "I")
 
     val stringStringVoid = "(Ljava/lang/String;Ljava/lang/String;)V"
     val stringVoid = "(Ljava/lang/String;)V"
@@ -308,6 +317,7 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     val antiInstrumentation = "$PROTECTION_HELPER_PACKAGE/AntiInstrumentationHelper"
     addMethod(antiInstrumentation, "checkInstrumentation", stringStringVoid)
     addMethod(antiInstrumentation, "checkInstrumentationEx", stringStringVoid)
+    addMethod(antiInstrumentation, "checkInstrumentationExSafe", stringStringVoid)
     addMethod(antiInstrumentation, "nativeCheckInstrumentation", stringStringVoid)
 
     val antiJvmTi = "$PROTECTION_HELPER_PACKAGE/AntiJvmTiHelper"
@@ -320,7 +330,15 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
 
     val antiDumpRuntime = "$PROTECTION_HELPER_PACKAGE/AntiDumpRuntimeHelper"
     addMethod(antiDumpRuntime, "initializeProtection", stringVoid)
+    addMethod(antiDumpRuntime, "initializeProtection", "(Ljava/lang/String;Ljava/lang/Class;)V")
     addMethod(antiDumpRuntime, "nativeInitializeProtection", stringVoid)
+    addMethod(antiDumpRuntime, "nativeInitializeProtection", "(Ljava/lang/String;Ljava/lang/Class;)V")
+    addMethod(antiDumpRuntime, "scrambleString", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;")
+    addMethod(antiDumpRuntime, "unscrambleString", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;")
+    addMethod(antiDumpRuntime, "scrambleBytes", "([BLjava/lang/String;Ljava/lang/String;)[B")
+    addMethod(antiDumpRuntime, "unscrambleBytes", "([BLjava/lang/String;Ljava/lang/String;)[B")
+    addMethod(antiDumpRuntime, "scrambleChars", "([CLjava/lang/String;Ljava/lang/String;)[C")
+    addMethod(antiDumpRuntime, "unscrambleChars", "([CLjava/lang/String;Ljava/lang/String;)[C")
 
     val jniHelper = "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper"
     addMethod(jniHelper, "loadKernel", "(Ljava/lang/String;Ljava/lang/String;)V")
@@ -354,6 +372,7 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
 
     val methodBody = "$PROTECTION_HELPER_PACKAGE/MethodBodyDecryptionHelper"
     addMethod(methodBody, "invokeEncrypted", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Class;Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;")
+    addMethod(methodBody, "invokeEncrypted", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Class;Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;")
     addMethod(methodBody, "decryptBytes", "([B[BLjava/lang/String;)[B")
 
     val environment = "$PROTECTION_HELPER_PACKAGE/EnvironmentBindingHelper"
@@ -969,35 +988,40 @@ private fun rewriteClassStringConstants(
 
 /**
  * Parse the class encryption manifest to extract encryption keys for each encrypted class.
- * Returns a map of resourcePath -> Triple(strategy, key, iv).
+ * Returns a map of resourcePath -> AEAD rewrite key material.
  */
-private fun parseClassEncryptionManifest(jarEntries: List<JarEntryData>): Map<String, Triple<String, ByteArray, ByteArray?>> {
+private data class ClassEncryptionRewriteKey(
+    val strategy: String,
+    val key: ByteArray,
+    val nonce: ByteArray,
+    val aad: ByteArray,
+)
+
+private fun parseClassEncryptionManifest(jarEntries: List<JarEntryData>): Map<String, ClassEncryptionRewriteKey> {
     val manifest = jarEntries.find { isClassEncryptionManifestResource(it.name) } ?: return emptyMap()
     val buildContext = requireVbc4BuildContext()
-    val result = linkedMapOf<String, Triple<String, ByteArray, ByteArray?>>()
+    val result = linkedMapOf<String, ClassEncryptionRewriteKey>()
     for (line in String(manifest.bytes, Charsets.UTF_8).lines()) {
         if (line.isEmpty()) continue
         val cols = line.split('\t')
         if (cols.size < 3) continue
+        val className = cols[0]
         val resourcePath = cols[1]
         val keyMetadata = cols[2]
         val parts = keyMetadata.split(':')
-        val strategy = parts[0]
-        if (parts.size >= 4) {
-            // Derived-key format: strategy:keyId:salt:iv. Recompute the AES key
-            // from the per-build root rather than reading raw key bytes.
-            val keyId = Base64.getDecoder().decode(parts[1])
-            val salt = Base64.getDecoder().decode(parts[2])
-            val ivBytes = Base64.getDecoder().decode(parts[3])
-            val iv = if (ivBytes.isEmpty()) null else ivBytes
-            val key = deriveClassEncryptionKey(buildContext, strategy, keyId, salt)
-            result[resourcePath] = Triple(strategy, key, iv)
-        } else {
-            // Legacy direct-key format: strategy:key[:iv] (migration only).
-            val key = Base64.getDecoder().decode(parts[1])
-            val iv = if (parts.size > 2) Base64.getDecoder().decode(parts[2]) else null
-            result[resourcePath] = Triple(strategy, key, iv)
-        }
+        if (parts.size != 6 || parts[0] != "v2") continue
+        val strategy = parts[1]
+        val keyId = Base64.getDecoder().decode(parts[2])
+        val salt = Base64.getDecoder().decode(parts[3])
+        val nonce = Base64.getDecoder().decode(parts[4])
+        val expectedHash = Base64.getDecoder().decode(parts[5])
+        val aad = listOf("per-class", "global")
+            .map { keyMode -> classEncryptionRewriteAad(className, resourcePath, strategy, keyMode) }
+            .firstOrNull { candidate -> Arrays.equals(MessageDigest.getInstance("SHA-256").digest(candidate), expectedHash) }
+            ?: continue
+        if (nonce.size != 12) continue
+        val key = deriveClassEncryptionKey(buildContext, strategy, keyId, salt)
+        result[resourcePath] = ClassEncryptionRewriteKey(strategy, key, nonce, aad)
     }
     return result
 }
@@ -1009,7 +1033,7 @@ private fun parseClassEncryptionManifest(jarEntries: List<JarEntryData>): Map<St
 private fun rewriteEncryptedClassBytes(
     encryptedBytes: ByteArray,
     resourceName: String,
-    classEncryptionKeys: Map<String, Triple<String, ByteArray, ByteArray?>>,
+    classEncryptionKeys: Map<String, ClassEncryptionRewriteKey>,
     stringRewriteMap: Map<String, String>,
     seed: Long,
     helperClassRenameMap: Map<String, String>,
@@ -1017,10 +1041,9 @@ private fun rewriteEncryptedClassBytes(
 ): ByteArray {
     if (classEncryptionKeys.isEmpty() || stringRewriteMap.isEmpty()) return encryptedBytes
     val keyInfo = classEncryptionKeys[resourceName] ?: return encryptedBytes
-    val (strategy, key, iv) = keyInfo
     // Decrypt the class bytecode
     val decryptedBytes = try {
-        decryptClassBytesForRewrite(encryptedBytes, strategy, key, iv)
+        decryptClassBytesForRewrite(encryptedBytes, keyInfo)
     } catch (_: Exception) {
         return encryptedBytes
     } ?: return encryptedBytes
@@ -1032,29 +1055,32 @@ private fun rewriteEncryptedClassBytes(
     }
     // Re-encrypt the rewritten bytecode
     return try {
-        encryptClassBytesForSealing(rewrittenBytes, strategy, key, iv)
+        encryptClassBytesForSealing(rewrittenBytes, keyInfo)
     } catch (_: Exception) {
         encryptedBytes
     }
 }
 
-private fun decryptClassBytesForRewrite(data: ByteArray, strategy: String, key: ByteArray, iv: ByteArray?): ByteArray? {
-    require(strategy == "aes-128" || strategy == "aes-256") { "Unsupported encryption strategy: $strategy" }
-    val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-    val keySpec = SecretKeySpec(key, "AES")
-    val ivSpec = IvParameterSpec(iv)
-    cipher.init(Cipher.DECRYPT_MODE, keySpec, ivSpec)
+private fun decryptClassBytesForRewrite(data: ByteArray, keyInfo: ClassEncryptionRewriteKey): ByteArray? {
+    require(keyInfo.strategy == "aes-128" || keyInfo.strategy == "aes-256") { "Unsupported encryption strategy: ${keyInfo.strategy}" }
+    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+    val keySpec = SecretKeySpec(keyInfo.key, "AES")
+    cipher.init(Cipher.DECRYPT_MODE, keySpec, GCMParameterSpec(128, keyInfo.nonce))
+    cipher.updateAAD(keyInfo.aad)
     return cipher.doFinal(data)
 }
 
-private fun encryptClassBytesForSealing(data: ByteArray, strategy: String, key: ByteArray, iv: ByteArray?): ByteArray {
-    require(strategy == "aes-128" || strategy == "aes-256") { "Unsupported encryption strategy: $strategy" }
-    val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-    val keySpec = SecretKeySpec(key, "AES")
-    val ivSpec = IvParameterSpec(iv)
-    cipher.init(Cipher.ENCRYPT_MODE, keySpec, ivSpec)
+private fun encryptClassBytesForSealing(data: ByteArray, keyInfo: ClassEncryptionRewriteKey): ByteArray {
+    require(keyInfo.strategy == "aes-128" || keyInfo.strategy == "aes-256") { "Unsupported encryption strategy: ${keyInfo.strategy}" }
+    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+    val keySpec = SecretKeySpec(keyInfo.key, "AES")
+    cipher.init(Cipher.ENCRYPT_MODE, keySpec, GCMParameterSpec(128, keyInfo.nonce))
+    cipher.updateAAD(keyInfo.aad)
     return cipher.doFinal(data)
 }
+
+private fun classEncryptionRewriteAad(className: String, resourcePath: String, strategy: String, keyMode: String): ByteArray =
+    "javashroud:class-encryption:v2:$className:$resourcePath:$strategy:$keyMode:sealed-runtime".toByteArray(Charsets.UTF_8)
 
 /**
  * Rewrite string constants and helper references in decrypted class bytecode.
@@ -1118,6 +1144,3 @@ private fun sealedReplacementForString(value: String, seed: Long, stringRewriteM
     stringRewriteMap[value]?.let { return it }
     return null
 }
-
-
-

@@ -7,8 +7,9 @@ import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.Base64;
 import java.util.concurrent.ConcurrentHashMap;
+import java.security.MessageDigest;
 import javax.crypto.Cipher;
-import javax.crypto.spec.IvParameterSpec;
+import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
 public final class MethodBodyDecryptionHelper {
@@ -17,13 +18,29 @@ public final class MethodBodyDecryptionHelper {
     private static final ConcurrentHashMap<String, Object> INSTANCE_CACHE = new ConcurrentHashMap<>();
 
     private MethodBodyDecryptionHelper() { }
-    public static Object invokeEncrypted(String resourcePath, String keyBase64, String strategy, int isStatic, Class<?> ownerClass, Object thisRef, Object[] args) throws Exception {
-        byte[] encrypted = readResource(resourcePath);
-        byte[] key = Base64.getDecoder().decode(keyBase64);
-        byte[] classBytes = decryptBytes(encrypted, key, strategy);
-        Class<?> wrapperClass = defineClass(ownerClass, classBytes);
-        Method method = findEntryMethod(wrapperClass);
-        Object[] actualArgs = actualArgs(method, isStatic, wrapperClass, thisRef, args);
+    public static Object invokeEncrypted(String resourcePath, String metadata, String strategy, int isStatic, Class<?> ownerClass, Object thisRef, Object[] args) throws Exception {
+        return invokeEncrypted(resourcePath, metadata, strategy, "lazy-decrypt", isStatic, ownerClass, thisRef, args);
+    }
+
+    public static Object invokeEncrypted(String resourcePath, String metadata, String strategy, String mode, int isStatic, Class<?> ownerClass, Object thisRef, Object[] args) throws Exception {
+        String effectiveMode = mode == null ? "lazy-decrypt" : mode;
+        Method method;
+        try {
+            method = "hidden-class-redirect".equals(effectiveMode)
+                ? defineAndFindMethod(resourcePath, metadata, strategy, effectiveMode, ownerClass)
+                : METHOD_CACHE.computeIfAbsent(resourcePath + "|" + metadata + "|" + strategy + "|" + ownerClass.getName(), key -> {
+                try {
+                    return defineAndFindMethod(resourcePath, metadata, strategy, effectiveMode, ownerClass);
+                } catch (Exception e) {
+                    throw new IllegalStateException(e);
+                }
+            });
+        } catch (IllegalStateException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof Exception) throw (Exception) cause;
+            throw e;
+        }
+        Object[] actualArgs = actualArgs(method, isStatic, method.getDeclaringClass(), thisRef, args);
         try {
             return method.invoke(null, actualArgs);
         } catch (InvocationTargetException e) {
@@ -31,10 +48,22 @@ public final class MethodBodyDecryptionHelper {
         }
     }
 
+    private static Method defineAndFindMethod(String resourcePath, String metadataText, String requestedStrategy, String mode, Class<?> ownerClass) throws Exception {
+        byte[] encrypted = readResource(resourcePath);
+        ParsedMetadata metadata = parseMetadata(ownerClass, resourcePath, metadataText, requestedStrategy, mode);
+        byte[] key = JniMicrokernelHelper.deriveClassEncryptionKey(metadata.keyId, metadata.salt, metadata.keyLength);
+        try {
+            byte[] classBytes = decryptBytes(encrypted, key, metadata);
+            Class<?> wrapperClass = defineClass(ownerClass, classBytes);
+            return findEntryMethod(wrapperClass);
+        } finally {
+            java.util.Arrays.fill(key, (byte) 0);
+        }
+    }
+
     public static byte[] decryptBytes(byte[] encrypted, byte[] key, String strategy) throws Exception {
         if (encrypted == null || key == null || key.length == 0) return encrypted;
-        if ("aes-128".equals(strategy) || "aes-256".equals(strategy)) return aesDecrypt(encrypted, key);
-        throw new IllegalStateException("Unsupported encrypted method resource format");
+        throw new SecurityException("method-body-delayed-decryption requires v2 AES-GCM metadata");
     }
 
     private static byte[] readResource(String resourcePath) throws Exception {
@@ -54,13 +83,9 @@ public final class MethodBodyDecryptionHelper {
     }
 
     private static Method findEntryMethod(Class<?> wrapperClass) {
-        String cacheKey = wrapperClass.getName();
-        Method cached = METHOD_CACHE.get(cacheKey);
-        if (cached != null) return cached;
         for (Method method : wrapperClass.getDeclaredMethods()) {
             if ((method.getModifiers() & java.lang.reflect.Modifier.STATIC) != 0) {
                 method.setAccessible(true);
-                METHOD_CACHE.put(cacheKey, method);
                 return method;
             }
         }
@@ -108,18 +133,60 @@ public final class MethodBodyDecryptionHelper {
         }
     }
 
-    private static byte[] aesDecrypt(byte[] encrypted, byte[] key) throws Exception {
-        if (encrypted.length < 16) {
-            throw new IllegalStateException("Encrypted method resource is missing AES IV");
+    private static ParsedMetadata parseMetadata(Class<?> ownerClass, String resourcePath, String metadata, String requestedStrategy, String mode) throws Exception {
+        String[] parts = metadata == null ? null : metadata.split(":", -1);
+        if (parts == null || parts.length != 6 || !"v2".equals(parts[0])) {
+            throw new SecurityException("Unsupported encrypted method metadata format");
         }
-        byte[] iv = new byte[16];
-        byte[] payload = new byte[encrypted.length - 16];
-        System.arraycopy(encrypted, 0, iv, 0, 16);
-        System.arraycopy(encrypted, 16, payload, 0, payload.length);
-        Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-        cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(iv));
-        return cipher.doFinal(payload);
+        String strategy = parts[1];
+        if (!("aes-128".equals(strategy) || "aes-256".equals(strategy)) || !strategy.equals(requestedStrategy)) {
+            throw new SecurityException("Encrypted method strategy mismatch");
+        }
+        byte[] keyId = Base64.getDecoder().decode(parts[2]);
+        byte[] salt = Base64.getDecoder().decode(parts[3]);
+        byte[] nonce = Base64.getDecoder().decode(parts[4]);
+        if (nonce.length != 12) throw new SecurityException("Invalid AES-GCM nonce length for encrypted method resource");
+        byte[] aad = aad(strategy, mode);
+        byte[] expectedHash = Base64.getDecoder().decode(parts[5]);
+        if (!constantTimeEquals(MessageDigest.getInstance("SHA-256").digest(aad), expectedHash)) {
+            throw new SecurityException("Encrypted method metadata AAD mismatch");
+        }
+        return new ParsedMetadata(strategy, keyId, salt, nonce, aad, "aes-256".equals(strategy) ? 32 : 16);
+    }
+
+    private static byte[] decryptBytes(byte[] encrypted, byte[] key, ParsedMetadata metadata) throws Exception {
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, metadata.nonce));
+        cipher.updateAAD(metadata.aad);
+        return cipher.doFinal(encrypted);
+    }
+
+    private static byte[] aad(String strategy, String mode) {
+        return ("javashroud:method-body:v2:" + strategy + ":" + mode + ":sealed-runtime")
+            .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    private static boolean constantTimeEquals(byte[] left, byte[] right) {
+        if (left == null || right == null || left.length != right.length) return false;
+        int diff = 0;
+        for (int i = 0; i < left.length; i++) diff |= (left[i] ^ right[i]) & 0xFF;
+        return diff == 0;
+    }
+
+    private static final class ParsedMetadata {
+        final String strategy;
+        final byte[] keyId;
+        final byte[] salt;
+        final byte[] nonce;
+        final byte[] aad;
+        final int keyLength;
+        ParsedMetadata(String strategy, byte[] keyId, byte[] salt, byte[] nonce, byte[] aad, int keyLength) {
+            this.strategy = strategy;
+            this.keyId = keyId;
+            this.salt = salt;
+            this.nonce = nonce;
+            this.aad = aad;
+            this.keyLength = keyLength;
+        }
     }
 }
-
-
