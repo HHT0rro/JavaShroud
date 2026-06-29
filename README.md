@@ -194,8 +194,8 @@ JavaShroud 的设计与实现参考、学习并对比了许多开源混淆、虚
 
 - [Open-MyJ2c](https://github.com/MyJ2c/Open-MyJ2c)
 - [native-obfuscator](https://github.com/radioegor146/native-obfuscator)
-- [native-obfuscator-plus](https://github.com/Araykal/native-obfuscator-plus)
 - [skidfuscator-java-obfuscator](https://github.com/skidfuscatordev/skidfuscator-java-obfuscator)
+- [Tigress_protection](https://github.com/JonathanSalwan/Tigress_protection)
 - code-encryptor-master
 - jar-obfuscator-main
 - obfuscator-master

@@ -197,7 +197,6 @@ JavaShroud's design and implementation were informed by many open-source obfusca
 
 - [Open-MyJ2c](https://github.com/MyJ2c/Open-MyJ2c)
 - [native-obfuscator](https://github.com/radioegor146/native-obfuscator)
-- [native-obfuscator-plus](https://github.com/Araykal/native-obfuscator-plus)
 - [skidfuscator-java-obfuscator](https://github.com/skidfuscatordev/skidfuscator-java-obfuscator)
 - [Tigress_protection](https://github.com/JonathanSalwan/Tigress_protection)
 - code-encryptor-master
