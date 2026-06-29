@@ -2,6 +2,7 @@ package io.github.hht0rro.javashroud
 
 import io.github.hht0rro.javashroud.transforms.protection.NativeRecompilationTransforms
 import io.github.hht0rro.javashroud.transforms.protection.NativeToolchainProvisioner
+import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
@@ -132,13 +133,14 @@ class NativeRecompilationTransformsTest {
         )
 
         val secrets = NativeRecompilationTransforms.generateDiversifiedSecrets(42L, java.util.Random(42L), context)
-        val shareA = parseCByteArray(secrets, "JS_VBC4_BUILD_KEY_SHARE_A")
-        val shareB = parseCByteArray(secrets, "JS_VBC4_BUILD_KEY_SHARE_B")
-        val reconstructed = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (shareA[index].toInt() xor shareB[index].toInt()).toByte() }
+        val reconstructed = reconstructNativeBuildKey(secrets)
 
         assertTrue(secrets.contains("JS_VBC4_BUILD_KEY_GENERATED"), "Native VBC4 build key marker must be generated")
-        assertTrue(context.masterKey.contentEquals(reconstructed), "Generated native VBC4 key shares must reconstruct the Kotlin build master key")
-        assertTrue(secrets.contains("static const unsigned char JS_VBC4_LAYOUT_DIGEST[32] = { ${cBytesForTest(context.jarLayoutDigest)} };"), "Native VBC4 layout digest must match the Kotlin build context")
+        assertTrue(context.masterKey.contentEquals(reconstructed), "Generated native VBC4 slot table must reconstruct the Kotlin build master key")
+        assertFalse(secrets.contains("JS_VBC4_BUILD_KEY_SHARE_A"), "Generated native VBC4 material must not expose a stable share A symbol")
+        assertFalse(secrets.contains("JS_VBC4_BUILD_KEY_SHARE_B"), "Generated native VBC4 material must not expose a stable share B symbol")
+        assertFalse(secrets.contains("static const unsigned char JS_VBC4_LAYOUT_DIGEST[32]"), "Generated native VBC4 material must not expose a stable layout digest symbol")
+        assertTrue(secrets.contains("JS_VBC4_LAYOUT_DIGEST_AT"), "Native VBC4 layout digest must be exposed only through an accessor")
         assertTrue(secrets.contains("#define JS_VBC4_DISPATCH_MIX_A"), "Native VBC4 dispatch mix must be generated per build")
     }
     @Test
@@ -150,14 +152,15 @@ class NativeRecompilationTransformsTest {
         )
 
         val secrets = NativeRecompilationTransforms.generateDiversifiedSecrets(99L, java.util.Random(99L), context)
-        val shareA = parseCByteArray(secrets, "JS_VBC4_BUILD_KEY_SHARE_A")
-        val shareB = parseCByteArray(secrets, "JS_VBC4_BUILD_KEY_SHARE_B")
-        val reconstructed = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (shareA[index].toInt() xor shareB[index].toInt()).toByte() }
+        val slots = parseNativeSecretSlots(secrets)
+        val reconstructed = reconstructNativeBuildKey(secrets)
 
         assertTrue(context.masterKey.contentEquals(reconstructed), "Split shares must reconstruct the scoped build master only when combined")
-        assertFalse(shareA.contentEquals(context.masterKey), "Share A must not be the flat VBC4 master key")
-        assertFalse(shareB.contentEquals(context.masterKey), "Share B must not be the flat VBC4 master key")
+        slots.forEachIndexed { index, slot ->
+            assertFalse(slot.contentEquals(context.masterKey), "Native slot $index must not be the flat VBC4 master key")
+        }
         assertFalse(secrets.contains("JS_VBC4_MASTER_KEY"), "Generated native secrets must not expose a flat VBC4 master key symbol")
+        assertFalse(secrets.contains("JS_VBC4_BUILD_KEY_SHARE_A") || secrets.contains("JS_VBC4_BUILD_KEY_SHARE_B"), "Generated native secrets must not expose a fixed A/B share recipe")
         assertFalse(secrets.contains("g_vbc4_inner_pad") || secrets.contains("g_vbc4_outer_pad"), "Generated native secrets must not expose long-lived VBC4 HMAC pads")
         assertFalse(secrets.contains(cBytesForTest(context.masterKey)), "Generated native secrets must not contain the contiguous flat VBC4 master key bytes")
     }
@@ -202,13 +205,22 @@ class NativeRecompilationTransformsTest {
         assertTrue(targets.containsKey("macos-arm64"), "Should have macos-arm64 target")
     }
     @Test
-    fun target_platform_auto_still_expands_to_every_zig_target() {
-        val source = java.nio.file.Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/EmbeddedHelperDeployment.kt"))
-        val autoBranch = source.substringAfter("val targetPlatforms = if (targetPlatformParam == \"auto\") {").substringBefore("} else {")
-
-        assertTrue(autoBranch.contains("NativeRecompilationTransforms.ZIG_TARGETS.keys"), "targetPlatform=auto must keep compiling every supported Zig target")
+    fun target_platform_auto_resolves_to_detected_supported_zig_target() {
+        assertTrue(
+            EmbeddedHelperDeployment.resolveNativeCompileTargetPlatforms("auto", "Linux", "x86_64") == listOf("linux-x64"),
+            "targetPlatform=auto must resolve to the detected supported Zig target",
+        )
     }
 
+    @Test
+    fun native_recompilation_uses_csprng_for_production_diversification() {
+        val source = java.nio.file.Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeRecompilationTransforms.kt"))
+
+        assertTrue(source.contains("nativeBuildSecureRandom(seed, vbc4BuildContext)"), "Production native diversification must start from CSPRNG material")
+        assertTrue(source.contains("SecureRandom()"), "Production native diversification must use SecureRandom")
+        assertFalse(source.contains("Random(seed xor vbc4BuildContext.nativeSeed)"), "Production native diversification must not be reproducible from seed xor nativeSeed")
+        assertTrue(source.contains("protectedSectionKey"), "Native cache key and secrets must retain per-build protected-section material")
+    }
     @Test
     fun native_artifact_cache_key_covers_security_sensitive_inputs() {
         val source = java.nio.file.Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeRecompilationTransforms.kt"))
@@ -226,6 +238,16 @@ class NativeRecompilationTransformsTest {
         assertTrue(keyBody.contains("vbc4BuildContext.masterKey"), "Cache key must include VBC4 build key material")
         assertTrue(keyBody.contains("vbc4BuildContext.runtimeResourceKey"), "Cache key must include runtime resource key material")
         assertTrue(keyBody.contains("protectedSectionKey"), "Cache key must include protected-section sealing material")
+        assertTrue(keyBody.contains("nativeProtectionLevel"), "Cache key must include native protection level")
+    }
+
+    @Test
+    fun native_protection_level_changes_generated_guard_surface() {
+        val standard = NativeRecompilationTransforms.generateAntiReverseGuards(java.util.Random(42L), "standard")
+        val aggressive = NativeRecompilationTransforms.generateAntiReverseGuards(java.util.Random(42L), "aggressive")
+
+        assertFalse(standard.contains("/proc/self/maps"), "standard native protection should not enable extra anti-unpack map scanning")
+        assertTrue(aggressive.contains("/proc/self/maps") && aggressive.contains("frida") && aggressive.contains("dump"), "aggressive native protection must add stricter instrumentation and dump probes")
     }
 
     @Test
@@ -247,6 +269,35 @@ class NativeRecompilationTransformsTest {
         return values.split(",")
             .map { token -> token.trim().removePrefix("0x").removeSuffix("u").toInt(16).toByte() }
             .toByteArray()
+    }
+
+    private fun parseNativeSecretSlots(source: String): List<ByteArray> {
+        val table = Regex("""(?s)static const unsigned char js_vbc4_native_secret_slots\[\d+]\[32] = \{\s*(.*?)\s*};""")
+            .find(source)?.groupValues?.get(1)
+            ?: error("Missing native secret slot table")
+        return Regex("""\{([^}]*)}""").findAll(table)
+            .map { match ->
+                match.groupValues[1].split(",")
+                    .map { token -> token.trim().removePrefix("0x").removeSuffix("u").toInt(16).toByte() }
+                    .toByteArray()
+            }
+            .toList()
+    }
+
+    private fun reconstructNativeBuildKey(source: String): ByteArray {
+        val slots = parseNativeSecretSlots(source)
+        val slotOrder = Regex("""#define JS_VBC4_BUILD_KEY_SLOT_(\d+) (\d+)""").findAll(source)
+            .toList()
+            .sortedBy { it.groupValues[1].toInt() }
+            .map { it.groupValues[2].toInt() }
+            .toList()
+        require(slotOrder.isNotEmpty()) { "Missing native build key slot order" }
+        val out = ByteArray(VBC4_MASTER_KEY_SIZE)
+        for (slotIndex in slotOrder) {
+            val slot = slots[slotIndex]
+            for (index in out.indices) out[index] = (out[index].toInt() xor slot[index].toInt()).toByte()
+        }
+        return out
     }
 
     private fun cBytesForTest(bytes: ByteArray): String = bytes.joinToString(", ") { byte ->

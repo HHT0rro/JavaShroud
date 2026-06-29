@@ -18,6 +18,7 @@ import java.util.function.IntUnaryOperator;
 import java.util.Arrays;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.security.MessageDigest;
 import javax.crypto.Cipher;
 import javax.crypto.Mac;
 import javax.crypto.spec.IvParameterSpec;
@@ -41,7 +42,8 @@ public final class JniMicrokernelHelper {
     private static volatile long nativeBootToken = 0L;
     private static volatile boolean nativeSelfCheckFailed = false;
     private static final String SEALED_NATIVE_INDEX_RESOURCE = "META-INF/.r/0.dat";
-    private static final int RUNTIME_RESOURCE_VERSION = 5;
+    private static final int RUNTIME_RESOURCE_VERSION = 6;
+    private static final int LEGACY_RUNTIME_RESOURCE_VERSION = 5;
     private static final int BOOTSTRAP_NATIVE_INDEX_VERSION = 1;
     private static final ConcurrentMap<String, Object[]> SAM_LAMBDA_CACHE = new ConcurrentHashMap<>();
 
@@ -359,6 +361,14 @@ public final class JniMicrokernelHelper {
     /** Whether diversified virtualization was requested for this load. */
     public static boolean isDiversifiedVmEnabled() {
         return diversifiedVmEnabled;
+    }
+
+    /**
+     * True once the native kernel finished loading and did not fail ABI or boot-token self-checks.
+     * This distinguishes a genuine integrity failure from early call sites that race helper initialization.
+     */
+    public static boolean isKernelIntegrityReady() {
+        return loadState == 1 && !nativeSelfCheckFailed;
     }
 
     /** Status string for the diversified-VM load-time self-exercise. */
@@ -754,7 +764,9 @@ public final class JniMicrokernelHelper {
     private static byte[] decodeRuntimeResource(byte[] raw) {
         if (!hasRuntimeResourceHeader(raw)) return null;
         int version = raw[4] & 0xFF;
-        return version == RUNTIME_RESOURCE_VERSION ? decodeRuntimeResourceCurrent(raw) : null;
+        if (version == RUNTIME_RESOURCE_VERSION) return decodeRuntimeResourceCurrent(raw);
+        if (version == LEGACY_RUNTIME_RESOURCE_VERSION) return decodeRuntimeResourceLegacy(raw);
+        return null;
     }
 
     private static boolean hasRuntimeResourceHeader(byte[] raw) {
@@ -763,6 +775,40 @@ public final class JniMicrokernelHelper {
     }
 
     private static byte[] decodeRuntimeResourceCurrent(byte[] raw) {
+        if (raw.length < 154 || (raw[raw.length - 1] & 0xFF) != 32) return null;
+        byte[] nonce = Arrays.copyOfRange(raw, 5, 21);
+        int metadataLength = readSealedResourceLe16(raw, 21);
+        int macLength = readSealedResourceLe16(raw, 23);
+        if (metadataLength != 96 || macLength != 32) return null;
+        int metadataOffset = 25;
+        int bodyOffset = metadataOffset + metadataLength;
+        if (bodyOffset + 33 > raw.length) return null;
+        int tagOffset = raw.length - 33;
+        byte[] expected = hmacSha256(concat("jsrp-auth-v2".getBytes(StandardCharsets.US_ASCII), nonce, Arrays.copyOfRange(raw, 0, tagOffset)));
+        if (!constantTimeEquals(expected, raw, tagOffset)) return null;
+        byte[] metadata = runtimeResourceAesCtrWithDomains(
+            Arrays.copyOfRange(raw, metadataOffset, bodyOffset),
+            nonce,
+            intBytes(0),
+            intBytes(0),
+            intBytes(0)
+        );
+        RuntimeResourceMetadata parsed = parseRuntimeResourceMetadata(metadata);
+        if (parsed == null) return null;
+        if (parsed.kindId < 1 || parsed.kindId > 4) return null;
+        if (parsed.layerCount < 1 || parsed.layerCount > 7 || parsed.variantId > 127) return null;
+        if (parsed.plainLength < 0 || parsed.storedLength < 0 || parsed.bodyLength < 0) return null;
+        if (bodyOffset + parsed.bodyLength != tagOffset) return null;
+        byte[] body = Arrays.copyOfRange(raw, bodyOffset, tagOffset);
+        byte[] stored = runtimeResourceAesCtr(body, nonce, parsed.kindId, parsed.variantId, parsed.layerCount);
+        if (stored.length != parsed.storedLength) return null;
+        if (!Arrays.equals(sha256(stored), parsed.storedHash)) return null;
+        byte[] plain = parsed.compressed ? null : stored;
+        if (plain == null || plain.length != parsed.plainLength) return null;
+        return Arrays.equals(sha256(plain), parsed.plainHash) ? plain : null;
+    }
+
+    private static byte[] decodeRuntimeResourceLegacy(byte[] raw) {
         if (raw.length < 73 || (raw[raw.length - 1] & 0xFF) != 32) return null;
         int kindId = raw[5] & 0xFF;
         int layerCount = raw[6] & 0xFF;
@@ -787,20 +833,24 @@ public final class JniMicrokernelHelper {
     }
 
     private static byte[] runtimeResourceAesCtr(byte[] bytes, byte[] nonce, int kindId, int variantId, int layerCount) {
+        return runtimeResourceAesCtrWithDomains(bytes, nonce, intBytes(kindId), intBytes(variantId), intBytes(layerCount));
+    }
+
+    private static byte[] runtimeResourceAesCtrWithDomains(byte[] bytes, byte[] nonce, byte[] kindBytes, byte[] variantBytes, byte[] layerBytes) {
         try {
             byte[] key = Arrays.copyOfRange(hmacSha256(concat(
                 "jsrp-aes-key".getBytes(StandardCharsets.US_ASCII),
                 nonce,
-                intBytes(kindId),
-                intBytes(variantId),
-                intBytes(layerCount)
+                kindBytes,
+                variantBytes,
+                layerBytes
             )), 0, 16);
             byte[] iv = Arrays.copyOfRange(hmacSha256(concat(
                 "jsrp-aes-iv".getBytes(StandardCharsets.US_ASCII),
                 nonce,
-                intBytes(kindId),
-                intBytes(variantId),
-                intBytes(layerCount)
+                kindBytes,
+                variantBytes,
+                layerBytes
             )), 0, 16);
             Cipher cipher = Cipher.getInstance("AES/CTR/NoPadding");
             cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(iv));
@@ -808,6 +858,28 @@ public final class JniMicrokernelHelper {
         } catch (Exception ignored) {
             return new byte[0];
         }
+    }
+
+    private static RuntimeResourceMetadata parseRuntimeResourceMetadata(byte[] bytes) {
+        if (bytes == null || bytes.length != 96) return null;
+        if (bytes[0] != 0x4D || bytes[1] != 0x32 || bytes[2] != 1) return null;
+        int flags = bytes[6] & 0xFF;
+        if ((flags & 0xFE) != 0) return null;
+        int expected = readSealedResourceBe32(sha256(Arrays.copyOfRange(bytes, 0, 92)), 0);
+        if (readSealedResourceLe32(bytes, 92) != expected) return null;
+        RuntimeResourceMetadata parsed = new RuntimeResourceMetadata();
+        parsed.kindId = bytes[3] & 0xFF;
+        parsed.layerCount = bytes[4] & 0xFF;
+        parsed.variantId = bytes[5] & 0xFF;
+        parsed.compressed = (flags & 1) != 0;
+        parsed.plainLength = readSealedResourceLe32(bytes, 8);
+        parsed.storedLength = readSealedResourceLe32(bytes, 12);
+        parsed.bodyLength = readSealedResourceLe32(bytes, 16);
+        parsed.keyId = readSealedResourceLe32(bytes, 20);
+        parsed.seed = readSealedResourceLe32(bytes, 24);
+        parsed.plainHash = Arrays.copyOfRange(bytes, 28, 60);
+        parsed.storedHash = Arrays.copyOfRange(bytes, 60, 92);
+        return parsed;
     }
 
     private static byte[] hmacSha256(byte[] data) {
@@ -868,11 +940,31 @@ public final class JniMicrokernelHelper {
         return diff == 0;
     }
 
+    private static byte[] sha256(byte[] data) {
+        try {
+            return MessageDigest.getInstance("SHA-256").digest(data);
+        } catch (Exception ignored) {
+            return new byte[32];
+        }
+    }
+
+    private static int readSealedResourceLe16(byte[] data, int offset) {
+        return (data[offset] & 0xFF) |
+            ((data[offset + 1] & 0xFF) << 8);
+    }
+
     private static int readSealedResourceLe32(byte[] data, int offset) {
         return (data[offset] & 0xFF) |
             ((data[offset + 1] & 0xFF) << 8) |
             ((data[offset + 2] & 0xFF) << 16) |
             ((data[offset + 3] & 0xFF) << 24);
+    }
+
+    private static int readSealedResourceBe32(byte[] data, int offset) {
+        return ((data[offset] & 0xFF) << 24) |
+            ((data[offset + 1] & 0xFF) << 16) |
+            ((data[offset + 2] & 0xFF) << 8) |
+            (data[offset + 3] & 0xFF);
     }
 
     private static byte[] readAll(InputStream in) throws Exception {
@@ -907,7 +999,18 @@ public final class JniMicrokernelHelper {
         }
     }
 
+    private static final class RuntimeResourceMetadata {
+        int kindId;
+        int layerCount;
+        int variantId;
+        boolean compressed;
+        int plainLength;
+        int storedLength;
+        int bodyLength;
+        int keyId;
+        int seed;
+        byte[] plainHash;
+        byte[] storedHash;
+    }
 
 }
-
-

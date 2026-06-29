@@ -4,6 +4,15 @@ import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
+import org.objectweb.asm.ClassWriter
+import org.objectweb.asm.tree.ClassNode
+import org.objectweb.asm.tree.MethodInsnNode
+import io.github.hht0rro.javashroud.model.analysis.MemberKind
+import io.github.hht0rro.javashroud.model.analysis.MemberSummary
+import io.github.hht0rro.javashroud.model.analysis.RuleMatch
+import io.github.hht0rro.javashroud.model.analysis.TargetSelector
+import io.github.hht0rro.javashroud.model.config.RuleSpec
+import io.github.hht0rro.javashroud.transforms.protection.applyAntiDumpProtection
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -104,6 +113,101 @@ class NativeHelperHardeningTest {
         assertTrue(checks >= 5, "JNI loader and native runtime defenses must avoid injecting clinit work into timing-sensitive concurrent/lambda classes")
         assertTrue(source.contains("java/lang/Thread") && source.contains("java/util/concurrent/"),
             "Timing-sensitive detection must cover sleep and java.util.concurrent surfaces")
+    }
+
+    @Test
+    fun anti_instrumentation_responses_have_distinct_native_semantics() {
+        val nativeSource = nativeRuntimeSources()
+        val responseBody = nativeFunctionBody(nativeSource, "js_runtime_guard_response(JNIEnv *env, const char *resp, const char *reason)")
+
+        assertTrue(responseBody.contains("fprintf(stderr"), "log response must emit a native diagnostic")
+        assertTrue(responseBody.contains("js_runtime_guard_degraded = 1"), "degrade response must set degraded native state")
+        assertTrue(responseBody.contains("js_runtime_guard_strict_path = 1"), "switch-path response must select strict native path")
+        assertTrue(responseBody.contains("throw_sec(env"), "refuse response must throw SecurityException")
+        assertTrue(nativeSource.contains("jdwp") && nativeSource.contains("Instrumentation") && nativeSource.contains("mockito"), "standard/aggressive detection should cover debug and instrumentation traces")
+    }
+
+    @Test
+    fun anti_dump_runtime_initialization_is_class_aware() {
+        val transformSource = Files.readString(sourcePath("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeKernelTransforms.kt"))
+        val helperSource = Files.readString(sourcePath("src/main/java/io/github/hht0rro/javashroud/transforms/protection/AntiDumpRuntimeHelper.java"))
+        val nativeSource = nativeRuntimeSources()
+
+        assertTrue(transformSource.contains("Type.getObjectType(ownerInternalName)"), "anti-dump transform must pass the protected owner class")
+        assertTrue(helperSource.contains("nativeInitializeProtection(String protectionLevel, Class<?> ownerClass)"), "helper must expose class-aware native initialization")
+        assertTrue(nativeSource.contains("(Ljava/lang/String;Ljava/lang/Class;)V") && nativeSource.contains("jsn_r4"), "JNI registration must bind the class-aware anti-dump overload")
+    }
+
+    @Test
+    fun anti_dump_helpers_fail_closed_without_java_decode_fallbacks() {
+        val runtimeHelper = Files.readString(sourcePath("src/main/java/io/github/hht0rro/javashroud/transforms/protection/AntiDumpRuntimeHelper.java"))
+        val stringHelper = Files.readString(sourcePath("src/main/java/io/github/hht0rro/javashroud/transforms/protection/AntiDumpHelper.java"))
+
+        assertTrue(runtimeHelper.contains("requires the sealed native kernel"), "jni-key-hold/full must reject when native is unavailable")
+        assertTrue(runtimeHelper.contains("\"field-scramble\".equals(level)) return"), "field-scramble may retain Java-only field perturbation")
+        assertFalse("Base64.getDecoder()" in stringHelper, "AntiDumpHelper must not keep Java Base64 decode fallback")
+        assertFalse("new String(encodedBytes" in stringHelper, "AntiDumpHelper must not rebuild protected strings in Java when native is unavailable")
+        assertTrue(stringHelper.contains("requires the sealed native kernel"), "AntiDumpHelper must fail closed on native absence")
+    }
+
+    @Test
+    fun anti_dump_field_scramble_rewrites_string_field_accesses() {
+        val internalName = "sample/AntiDumpFieldHost"
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = internalName,
+                    bytes = buildAntiDumpFieldHost(internalName),
+                    methodSummaries = listOf(MemberSummary(MemberKind.METHOD, "roundTrip", "(Ljava/lang/String;)Ljava/lang/String;", Opcodes.ACC_PUBLIC)),
+                ),
+            ),
+        )
+
+        val result = applyAntiDumpProtection(
+            artifact = artifact,
+            ruleMatches = listOf(RuleMatch(
+                rule = RuleSpec(target = internalName, action = "anti-dump-protection"),
+                selector = TargetSelector(classPattern = internalName, memberPattern = null, memberDescriptorPattern = null),
+                matchedClassNames = listOf(internalName),
+                matchedMembers = emptyList(),
+            )),
+            params = mapOf("protectionLevel" to "field-scramble"),
+        )
+
+        val node = ClassNode()
+        ClassReader(result.artifact.classArtifactIndex[internalName]!!.bytes).accept(node, ClassReader.SKIP_FRAMES)
+        val helperCalls = node.methods.flatMap { method -> method.instructions.toArray().filterIsInstance<MethodInsnNode>() }
+            .filter { it.owner.endsWith("AntiDumpRuntimeHelper") }
+            .map { it.name }
+            .toSet()
+
+        assertTrue("scrambleString" in helperCalls, "PUTFIELD must scramble protected String field material")
+        assertTrue("unscrambleString" in helperCalls, "GETFIELD must unscramble protected String field material")
+    }
+
+    private fun buildAntiDumpFieldHost(internalName: String): ByteArray {
+        val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", null)
+        cw.visitField(Opcodes.ACC_PRIVATE, "secret", "Ljava/lang/String;", null, null).visitEnd()
+        val init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
+        init.visitCode()
+        init.visitVarInsn(Opcodes.ALOAD, 0)
+        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+        init.visitInsn(Opcodes.RETURN)
+        init.visitMaxs(1, 1)
+        init.visitEnd()
+        val method = cw.visitMethod(Opcodes.ACC_PUBLIC, "roundTrip", "(Ljava/lang/String;)Ljava/lang/String;", null, null)
+        method.visitCode()
+        method.visitVarInsn(Opcodes.ALOAD, 0)
+        method.visitVarInsn(Opcodes.ALOAD, 1)
+        method.visitFieldInsn(Opcodes.PUTFIELD, internalName, "secret", "Ljava/lang/String;")
+        method.visitVarInsn(Opcodes.ALOAD, 0)
+        method.visitFieldInsn(Opcodes.GETFIELD, internalName, "secret", "Ljava/lang/String;")
+        method.visitInsn(Opcodes.ARETURN)
+        method.visitMaxs(2, 2)
+        method.visitEnd()
+        cw.visitEnd()
+        return cw.toByteArray()
     }
     @Test
     fun jni_vm_resource_execution_is_fail_closed_without_java_forwarder_fallback() {
@@ -275,6 +379,33 @@ class NativeHelperHardeningTest {
     }
 
     @Test
+    fun native_dispatch_rotation_uses_dynamic_runtime_gate() {
+        val nativeSource = nativeRuntimeSources()
+        val gateBody = nativeFunctionBody(nativeSource, "js_vm_dispatch_rotation_due")
+        val executeBody = nativeFunctionBody(nativeSource, "js_vm_execute(JNIEnv *env, js_vm_program *p")
+
+        assertTrue(nativeSource.contains("js_vm_dispatch_rotation_due"), "VM dispatch should use a dynamic rotation gate")
+        assertTrue(gateBody.contains("JS_VBC4_DISPATCH_STEP_MASK") && gateBody.contains("interval = 3u +") && gateBody.contains("phase"),
+            "Dynamic gate should preserve the build mask as one input but add state-derived intervals")
+        assertTrue(executeBody.contains("js_vm_dispatch_rotation_due(p, vm_dispatch_drift_state, dispatch_step, fault_pc, sp)"),
+            "Execute loop must not schedule resident rotation solely from a fixed step mask")
+    }
+
+    @Test
+    fun shared_dispatch_pool_mixes_runtime_entry_preload_and_resource_state() {
+        val nativeSource = nativeRuntimeSources()
+        val seedBody = nativeFunctionBody(nativeSource, "js_vm_shared_dispatch_seed_for")
+        val preloadBody = nativeFunctionBody(nativeSource, "js_vm_shared_dispatch_mix_preload")
+
+        assertTrue(nativeSource.contains("js_vm_runtime_thread_state") && nativeSource.contains("js_vm_probe_monotonic_ticks") && nativeSource.contains("js_vm_shared_dispatch_runtime_counter"),
+            "Shared dispatch pool should mix runtime thread/counter/timing state")
+        assertTrue(seedBody.contains("js_vm_program_path_digest(p)") && seedBody.contains("entry_token") && seedBody.contains("insn_count"),
+            "Per-entry dispatch seed must include entry token, resource metadata digest, and program shape")
+        assertTrue(preloadBody.contains("js_vm_path_mix32(resource_path)") && preloadBody.contains("js_vm_path_mix32(manifest_path)") && preloadBody.contains("shard_count"),
+            "Preload order/resource/manifest state must perturb the shared dispatch pool")
+    }
+
+    @Test
     fun native_protected_section_covers_vbc4_hot_path_leafs() {
         val nativeSource = nativeRuntimeSources()
 
@@ -328,13 +459,19 @@ class NativeHelperHardeningTest {
         )
         assertTrue(
             nativeSource.contains("js_runtime_resource_decode_owned") &&
+                nativeSource.contains("js_runtime_resource_decode_current_owned") &&
+                nativeSource.contains("jsrp-auth-v2") &&
+                nativeSource.contains("raw[4] == 6") &&
                 nativeSource.contains("js_runtime_hmac_sha256") &&
                 !nativeSource.contains("js_vm_decode_resource_layer") &&
                 !nativeSource.contains("js_vm_resource_hmac"),
             "Native VM must own current AES-CTR/HMAC/zstd runtime-resource unsealing after the helper installs the build-local key.",
         )
         assertTrue(
-            helperSource.contains("version == RUNTIME_RESOURCE_VERSION ? decodeRuntimeResourceCurrent(raw) : null") &&
+            helperSource.contains("version == RUNTIME_RESOURCE_VERSION") &&
+                helperSource.contains("LEGACY_RUNTIME_RESOURCE_VERSION") &&
+                helperSource.contains("decodeRuntimeResourceCurrent(raw)") &&
+                helperSource.contains("decodeRuntimeResourceLegacy(raw)") &&
                 helperSource.contains("throw new IllegalArgumentException(\"unsupported runtime resource envelope\")") &&
                 !helperSource.contains("decoded != null ? decoded : raw") &&
                 helperSource.contains("constantTimeEquals(expected, raw, tagOffset)") &&

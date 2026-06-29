@@ -46,49 +46,47 @@ fun applyCallsiteRotationProtection(
     val updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
         if (!matchedClassNames.contains(classArtifact.summary.internalName)) return@map classArtifact
 
-        val cr = ClassReader(classArtifact.bytes)
-        val cw = ClassWriter(cr, ClassWriter.COMPUTE_FRAMES)
-        var classModified = false
+        val classNode = ClassNode()
+        try {
+            ClassReader(classArtifact.bytes).accept(classNode, 0)
+        } catch (_: Exception) { return@map classArtifact }
 
-        val cv = object : ClassVisitor(Opcodes.ASM9, cw) {
-            override fun visitMethod(
-                access: Int, name: String, descriptor: String, signature: String?, exceptions: Array<String>?,
-            ): MethodVisitor {
-                val superMv = super.visitMethod(access, name, descriptor, signature, exceptions)
-                return object : MethodVisitor(Opcodes.ASM9, superMv) {
-                    override fun visitMethodInsn(opcode: Int, owner: String, name: String, descriptor: String, isInterface: Boolean) {
-                        if (opcode == Opcodes.INVOKEVIRTUAL && !owner.startsWith("[") && !isReflectionSurfaceVirtualCall(owner, name) && random.nextInt(100) < 30) {
-                            // Replace with invokedynamic via MutableCallSite rotation
-                            val bsm = Handle(
-                                Opcodes.H_INVOKESTATIC,
-                                "io/github/hht0rro/javashroud/transforms/protection/CallsiteRotationHelper",
-                                "createRotatingCallSite",
-                                "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/invoke/CallSite;",
-                                false,
-                            )
-                            // Prepend owner type to descriptor for INVOKEDYNAMIC (receiver becomes first arg)
-                            val indyDescriptor = "(L$owner;" + descriptor.substring(1)
-                            superMv.visitInvokeDynamicInsn(
-                                name,
-                                indyDescriptor,
-                                bsm,
-                                owner,
-                                rotationStrategy,
-                            )
-                            classModified = true
-                            callCount++
-                        } else {
-                            super.visitMethodInsn(opcode, owner, name, descriptor, isInterface)
-                        }
-                    }
-                }
+        var classModified = false
+        for (method in classNode.methods) {
+            val instructions = method.instructions ?: continue
+            for (insn in instructions.toArray()) {
+                val call = insn as? MethodInsnNode ?: continue
+                if (call.opcode != Opcodes.INVOKEVIRTUAL) continue
+                if (call.owner.startsWith("[")) continue
+                if (isReflectionSurfaceVirtualCall(call.owner, call.name)) continue
+                if (random.nextInt(100) >= 30) continue
+                val bsm = Handle(
+                    Opcodes.H_INVOKESTATIC,
+                    "io/github/hht0rro/javashroud/transforms/protection/CallsiteRotationHelper",
+                    "createRotatingCallSite",
+                    "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/invoke/CallSite;",
+                    false,
+                )
+                val indyDescriptor = "(L${call.owner};" + call.desc.substring(1)
+                instructions.set(
+                    call,
+                    InvokeDynamicInsnNode(
+                        call.name,
+                        indyDescriptor,
+                        bsm,
+                        call.owner,
+                        rotationStrategy,
+                    ),
+                )
+                classModified = true
+                callCount++
             }
         }
-
-        try {
-            cr.accept(cv, 0)
-        } catch (_: Exception) { return@map classArtifact }
         if (!classModified) return@map classArtifact
+        val cw = ClassWriter(ClassWriter.COMPUTE_FRAMES)
+        try {
+            classNode.accept(cw)
+        } catch (_: Exception) { return@map classArtifact }
         classCount++
         reanalyzedClassArtifact(classArtifact, cw.toByteArray())
     }
@@ -458,6 +456,5 @@ fun applyAntiSymbolicExecution(
         transformedMemberCount = trapCount,
     )
 }
-
 
 

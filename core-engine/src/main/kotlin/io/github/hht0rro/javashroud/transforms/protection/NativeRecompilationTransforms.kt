@@ -5,6 +5,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
+import java.security.SecureRandom
 import java.util.Random
 import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
@@ -60,7 +61,8 @@ object NativeRecompilationTransforms {
         seed: Long,
         classLoader: ClassLoader,
         targetPlatforms: Collection<String> = ZIG_TARGETS.keys,
-    ): List<RecompiledNative> = recompileWithDiagnostics(seed, classLoader, targetPlatforms).results
+        nativeProtectionLevel: String = "standard",
+    ): List<RecompiledNative> = recompileWithDiagnostics(seed, classLoader, targetPlatforms, nativeProtectionLevel).results
 
     data class RecompilationDiagnostics(
         val results: List<RecompiledNative>,
@@ -71,8 +73,12 @@ object NativeRecompilationTransforms {
         seed: Long,
         classLoader: ClassLoader,
         targetPlatforms: Collection<String> = ZIG_TARGETS.keys,
+        nativeProtectionLevel: String = "standard",
         onMessage: (NativeToolchainProvisioner.ResolutionMessage) -> Unit = {},
     ): RecompilationDiagnostics {
+        require(nativeProtectionLevel in setOf("standard", "aggressive")) {
+            "jni-microkernel-loader nativeProtectionLevel '$nativeProtectionLevel' is not supported"
+        }
         val messages = mutableListOf<NativeToolchainProvisioner.ResolutionMessage>()
         fun report(message: NativeToolchainProvisioner.ResolutionMessage) {
             messages += message
@@ -82,7 +88,7 @@ object NativeRecompilationTransforms {
         val toolchain = resolution.toolchain ?: return RecompilationDiagnostics(emptyList(), messages)
         val workDir = Files.createTempDirectory("javashroud-native-recompile-")
         return try {
-            val results = doRecompile(seed, classLoader, toolchain, workDir, targetPlatforms, ::report)
+            val results = doRecompile(seed, classLoader, toolchain, workDir, targetPlatforms, nativeProtectionLevel, ::report)
             RecompilationDiagnostics(results, messages)
         } finally {
             workDir.toFile().deleteRecursively()
@@ -95,10 +101,11 @@ object NativeRecompilationTransforms {
         toolchain: NativeToolchainProvisioner.ZigToolchain,
         workDir: Path,
         targetPlatforms: Collection<String>,
+        nativeProtectionLevel: String,
         report: (NativeToolchainProvisioner.ResolutionMessage) -> Unit,
     ): List<RecompiledNative> {
         val vbc4BuildContext = requireVbc4BuildContext()
-        val rng = Random(seed xor vbc4BuildContext.nativeSeed)
+        val rng = nativeBuildSecureRandom(seed, vbc4BuildContext)
         val results = mutableListOf<RecompiledNative>()
         val srcDir = workDir.resolve("src")
         Files.createDirectories(srcDir)
@@ -126,7 +133,7 @@ object NativeRecompilationTransforms {
             Files.writeString(srcDir.resolve(name), diversified, StandardCharsets.UTF_8)
         }
 
-        val guardCode = generateAntiReverseGuards(rng)
+        val guardCode = generateAntiReverseGuards(rng, nativeProtectionLevel)
         Files.writeString(srcDir.resolve("js_native_guards.h"), guardCode, StandardCharsets.UTF_8)
 
 
@@ -154,6 +161,7 @@ object NativeRecompilationTransforms {
                 seed = seed,
                 vbc4BuildContext = vbc4BuildContext,
                 protectedSectionKey = protectedSectionKey,
+                nativeProtectionLevel = nativeProtectionLevel,
             )
             NativeCompileTask(
                 platform = platform,
@@ -161,6 +169,7 @@ object NativeRecompilationTransforms {
                 outputName = outputName,
                 outputPath = outputPath,
                 cachePath = nativeArtifactCacheDirectory().resolve("$cacheKey-$outputName"),
+                nativeProtectionLevel = nativeProtectionLevel,
             )
         }
         val compiledResults = compileTasks.parallelStream().map { task ->
@@ -209,6 +218,7 @@ object NativeRecompilationTransforms {
         val outputName: String,
         val outputPath: Path,
         val cachePath: Path,
+        val nativeProtectionLevel: String,
     )
 
     private data class ZigCompileResult(val success: Boolean, val output: String)
@@ -228,7 +238,7 @@ object NativeRecompilationTransforms {
         readNativeArtifactCache(task.cachePath)?.let { cachedBytes ->
             return NativeArtifactBuildResult(true, "cache-hit", cachedBytes, true)
         }
-        val compileResult = compileWithZig(zigPath, srcDir, task.zigTarget, task.outputPath)
+        val compileResult = compileWithZig(zigPath, srcDir, task.zigTarget, task.outputPath, task.nativeProtectionLevel)
         if (!compileResult.success || !Files.exists(task.outputPath) || Files.size(task.outputPath) <= 0) {
             return NativeArtifactBuildResult(compileResult.success, compileResult.output, null, false)
         }
@@ -269,6 +279,26 @@ object NativeRecompilationTransforms {
     private fun nativeArtifactCacheDirectory(): Path =
         Path.of(System.getProperty("user.home"), ".javashroud", "native", "vbc4")
 
+    private fun nativeBuildSecureRandom(seed: Long, context: Vbc4BuildContext): SecureRandom {
+        val random = SecureRandom()
+        val entropy = ByteArray(64).also(random::nextBytes)
+        val digest = MessageDigest.getInstance("SHA-256")
+        digest.updateUtf8("javashroud-native-recompile-csprng-v1")
+        digest.updateLong(seed)
+        digest.updateLong(context.nativeSeed)
+        digest.update(context.jarLayoutDigest)
+        digest.update(context.runtimeResourceKey)
+        digest.update(entropy)
+        val personalization = digest.digest()
+        return try {
+            random.setSeed(personalization)
+            random
+        } finally {
+            java.util.Arrays.fill(entropy, 0)
+            java.util.Arrays.fill(personalization, 0)
+        }
+    }
+
     internal fun nativeArtifactCacheKey(
         taskPlatform: String,
         zigTarget: String,
@@ -278,6 +308,7 @@ object NativeRecompilationTransforms {
         seed: Long,
         vbc4BuildContext: Vbc4BuildContext,
         protectedSectionKey: ByteArray,
+        nativeProtectionLevel: String = "standard",
     ): String {
         val digest = MessageDigest.getInstance("SHA-256")
         digest.update("javashroud-native-vbc4-cache-v1".toByteArray(StandardCharsets.US_ASCII))
@@ -285,6 +316,7 @@ object NativeRecompilationTransforms {
         digest.updateUtf8(zigTarget)
         digest.updateUtf8(outputName)
         digest.updateUtf8(nativeCompileOptLevel())
+        digest.updateUtf8(nativeProtectionLevel)
         nativeCompileExtraFlags().forEach { flag -> digest.updateUtf8(flag) }
         digest.update(sourceDigest)
         digest.updateUtf8(toolchainIdentity)
@@ -346,7 +378,7 @@ object NativeRecompilationTransforms {
         }
     }
 
-    private fun compileWithZig(zigPath: Path, srcDir: Path, zigTarget: String, outputPath: Path): ZigCompileResult {
+    private fun compileWithZig(zigPath: Path, srcDir: Path, zigTarget: String, outputPath: Path, nativeProtectionLevel: String): ZigCompileResult {
         val optLevel = nativeCompileOptLevel()
         val extraFlags = nativeCompileExtraFlags()
         val cmd = mutableListOf(
@@ -361,6 +393,7 @@ object NativeRecompilationTransforms {
             "-DZSTDLIB_VISIBLE=",
             "-DZSTDERRORLIB_VISIBLE=",
             "-DXXH_PUBLIC_API=",
+            "-DJS_NATIVE_PROTECTION_${nativeProtectionLevel.uppercase()}=1",
             "-o", outputPath.toString(),
             srcDir.resolve("js_kernel.c").toString(),
             srcDir.resolve("js_helpers.c").toString(),
@@ -499,23 +532,59 @@ object NativeRecompilationTransforms {
     }
 
     private fun appendVbc4BuildSecrets(sb: StringBuilder, context: Vbc4BuildContext, rng: Random) {
-        val shareA = ByteArray(VBC4_MASTER_KEY_SIZE)
-        rng.nextBytes(shareA)
         val masterKey = context.masterKey
-        val shareB = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (shareA[index].toInt() xor masterKey[index].toInt()).toByte() }
+        val shareCount = 3 + rng.nextInt(4)
+        val shares = Array(shareCount) { ByteArray(VBC4_MASTER_KEY_SIZE) }
+        for (index in 0 until shareCount - 1) rng.nextBytes(shares[index])
+        for (byteIndex in masterKey.indices) {
+            var acc = masterKey[byteIndex].toInt()
+            for (shareIndex in 0 until shareCount - 1) acc = acc xor shares[shareIndex][byteIndex].toInt()
+            shares[shareCount - 1][byteIndex] = acc.toByte()
+        }
+        val slotOrder = (0 until shareCount).toMutableList().also { java.util.Collections.shuffle(it, rng) }
+        val slotForShare = IntArray(shareCount)
+        slotOrder.forEachIndexed { slot, shareIndex -> slotForShare[shareIndex] = slot }
+        val token = (rng.nextInt() or 1).toUInt().toString(16).uppercase()
+        val layoutMask = ByteArray(VBC4_LAYOUT_DIGEST_SIZE).also(rng::nextBytes)
+        val maskedLayout = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index ->
+            (context.jarLayoutDigest[index].toInt() xor layoutMask[index].toInt()).toByte()
+        }
         try {
             sb.appendLine()
             sb.appendLine("#define JS_VBC4_BUILD_KEY_GENERATED 1")
-            sb.appendLine("static const unsigned char JS_VBC4_BUILD_KEY_SHARE_A[32] = { ${cBytes(shareA)} };")
-            sb.appendLine("static const unsigned char JS_VBC4_BUILD_KEY_SHARE_B[32] = { ${cBytes(shareB)} };")
-            sb.appendLine("static const unsigned char JS_VBC4_LAYOUT_DIGEST[32] = { ${cBytes(context.jarLayoutDigest)} };")
+            sb.appendLine("#define JS_VBC4_NATIVE_SECRET_SLOT_COUNT $shareCount")
+            sb.appendLine("#define JS_VBC4_NATIVE_SECRET_TOKEN 0x${token}u")
+            sb.appendLine("static const unsigned char js_vbc4_native_secret_slots[$shareCount][32] = {")
+            for (slot in 0 until shareCount) {
+                sb.appendLine("    { ${cBytes(shares[slotOrder[slot]])} },")
+            }
+            sb.appendLine("};")
+            sb.appendLine("static const unsigned char js_vbc4_layout_digest_masked[32] = { ${cBytes(maskedLayout)} };")
+            sb.appendLine("static const unsigned char js_vbc4_layout_digest_mask[32] = { ${cBytes(layoutMask)} };")
+            sb.appendLine("#define JS_VBC4_SECRET_SLOT_BYTE(slot, index) (js_vbc4_native_secret_slots[(slot)][(index)])")
+            sb.appendLine("#define JS_VBC4_BUILD_KEY_SLOT_COUNT JS_VBC4_NATIVE_SECRET_SLOT_COUNT")
+            sb.appendLine("#define JS_VBC4_BUILD_KEY_SLOT_0 ${slotForShare[0]}")
+            for (shareIndex in 1 until shareCount) {
+                sb.appendLine("#define JS_VBC4_BUILD_KEY_SLOT_$shareIndex ${slotForShare[shareIndex]}")
+            }
+            sb.appendLine("#define JS_VBC4_COPY_SCOPED_MASTER_KEY(out) do { \\")
+            sb.appendLine("    for (int _js_vbc4_i = 0; _js_vbc4_i < 32; _js_vbc4_i++) { \\")
+            sb.appendLine("        unsigned char _js_vbc4_v = 0; \\")
+            for (shareIndex in 0 until shareCount) {
+                sb.appendLine("        _js_vbc4_v = (unsigned char)(_js_vbc4_v ^ JS_VBC4_SECRET_SLOT_BYTE(JS_VBC4_BUILD_KEY_SLOT_$shareIndex, _js_vbc4_i)); \\")
+            }
+            sb.appendLine("        (out)[_js_vbc4_i] = _js_vbc4_v; \\")
+            sb.appendLine("    } \\")
+            sb.appendLine("} while (0)")
+            sb.appendLine("#define JS_VBC4_LAYOUT_DIGEST_AT(index) ((unsigned char)(js_vbc4_layout_digest_masked[(index)] ^ js_vbc4_layout_digest_mask[(index)]))")
             sb.appendLine("#define JS_VBC4_DISPATCH_MIX_A 0x${(rng.nextInt() or 1).toUInt().toString(16).uppercase()}u")
             sb.appendLine("#define JS_VBC4_DISPATCH_MIX_B 0x${(rng.nextInt() or 1).toUInt().toString(16).uppercase()}u")
             sb.appendLine("#define JS_VBC4_DISPATCH_MIX_C 0x${(rng.nextInt() or 1).toUInt().toString(16).uppercase()}u")
             sb.appendLine("#define JS_VBC4_DISPATCH_STEP_MASK ${listOf(7, 15, 31)[rng.nextInt(3)]}")
         } finally {
-            java.util.Arrays.fill(shareA, 0)
-            java.util.Arrays.fill(shareB, 0)
+            for (share in shares) java.util.Arrays.fill(share, 0)
+            java.util.Arrays.fill(maskedLayout, 0)
+            java.util.Arrays.fill(layoutMask, 0)
         }
     }
 
@@ -710,7 +779,7 @@ object NativeRecompilationTransforms {
         return sb.toString()
     }
 
-    internal fun generateAntiReverseGuards(rng: Random): String {
+    internal fun generateAntiReverseGuards(rng: Random, nativeProtectionLevel: String = "standard"): String {
         val timingThreshold = 500000 + rng.nextInt(2000000)
         val integrityHashSeed = rng.nextLong().toUInt()
         val obfConstant = rng.nextInt(0xFFFFFF)
@@ -799,6 +868,14 @@ object NativeRecompilationTransforms {
         sb.appendLine("    if (_js_guard_timing_anomaly()) return 1;")
         sb.appendLine("    if (_js_guard_hw_breakpoints()) return 1;")
         sb.appendLine("    if (_js_guard_vm_detected()) return 2;")
+        if (nativeProtectionLevel == "aggressive") {
+            sb.appendLine("    /* aggressive: fold sandbox, unpack, and dump-hardening probes into guard response */")
+            sb.appendLine("    if (_js_guard_integrity_check((const void *)&_js_guard_all, 64, ${integrityHashSeed}u ^ ${obfConstant}u)) return 3;")
+            sb.appendLine("#if defined(__linux__) || defined(__ANDROID__)")
+            sb.appendLine("    FILE *maps = fopen(\"/proc/self/maps\", \"r\");")
+            sb.appendLine("    if (maps) { char line[256]; while (fgets(line, sizeof(line), maps)) { if (strstr(line, \"frida\") || strstr(line, \"xposed\") || strstr(line, \"dump\")) { fclose(maps); return 4; } } fclose(maps); }")
+            sb.appendLine("#endif")
+        }
         sb.appendLine("    return 0;")
         sb.appendLine("}")
         sb.appendLine()
@@ -830,6 +907,3 @@ object NativeRecompilationTransforms {
         }
     }
 }
-
-
-
