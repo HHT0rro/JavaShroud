@@ -31,7 +31,7 @@ internal fun vmProtectionCapabilityBindings(): List<CapabilityBinding> = listOf(
                 type = "number",
                 defaultValue = JsonNodeFactory.instance.nullNode(),
                 options = null,
-                description = "确定性种子，控制 VBC4 dispatcher stub 的结构性随机化；真实 VM key material 仍由每方法 CSPRNG 派生。",
+                description = "非秘密个性化输入；输出仍由每产物 CSPRNG 材料随机化，不保证复现 VM key、布局、资源路径或 native profile。",
             ),
             ParamSchema(
                 key = "methodSelection",
@@ -83,7 +83,7 @@ internal fun vmProtectionCapabilityBindings(): List<CapabilityBinding> = listOf(
             fixedVbc4Invariant("vbc4InterpreterDiversity", "VBC4 固定行为：native-only 路径始终启用构建期解释器多样化，不能关闭。"),
             fixedVbc4Invariant("vbc4HashedJniSymbols", "VBC4 固定行为：JNI VM 调用目标使用 per-build/per-method token 定位，热路径不传递明文符号。"),
             fixedVbc4Invariant("vbc4ExecutableRegisterIr", "VBC4 固定行为：native dispatcher 以 register IR 为主执行，stack opcode 只作为兼容输入。"),
-            fixedVbc4Invariant("vbc4SuperOperators", "VBC4 固定行为：serializer 按方法 seed 折叠 super-operator 并纳入认证状态。"),
+            fixedVbc4Invariant("vbc4SuperOperators", "VBC4 固定行为：serializer 按方法随机结构 seed 折叠 super-operator 并纳入认证状态。"),
             fixedVbc4Invariant("vbc4IntegrityKeyBinding", "VBC4 固定行为：session integrity digest 参与 seed unwrap、block key 和 CP key 派生。"),
             fixedVbc4Invariant("vbc4EphemeralRootMaterial", "VBC4 固定行为：native 根材料只按需短生命周期派生，用后擦除。"),
         ),

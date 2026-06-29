@@ -112,7 +112,7 @@ const commonParamDescriptions: Readonly<Record<string, LocalizedText>> = {
   response: text('响应策略：检测到风险环境后选择记录、降级、切换路径或拒绝运行。', 'Response strategy: chooses whether a risky environment is logged, degraded, switched to another path, or refused.'),
   rotationStrategy: text('轮换策略：决定调用点或目标绑定按 epoch、计数器、线程局部或随机方式切换。', 'Rotation strategy: controls whether call sites or target bindings rotate by epoch, counter, thread-local state, or randomness.'),
   scope: text('作用范围：选择哪些字符串、类或载荷进入该 pass 的处理范围。', 'Scope: selects which strings, classes, or payloads are processed by this pass.'),
-  seed: text('确定性种子：填写后可复现同一套命名、密钥或布局；留空则每次随机。', 'Deterministic seed: set it to reproduce naming, keys, or layout. Leave empty for random output each run.'),
+  seed: text('种子：作为非秘密个性化输入；具体 pass 是否可复现以能力说明为准，VMBC/NBVM 输出始终包含每产物随机材料。', 'Seed: non-secret personalization input. Reproducibility depends on the pass; VMBC/NBVM output always includes per-artifact random material.'),
   strategy: text('字符串加密策略：选择 AES、RSA、混合或逐字符串随机策略。', 'String encryption strategy: chooses AES, RSA, hybrid, or per-string random strategy.'),
   targetPlatform: text('目标平台：选择原生微内核产物面向的系统和架构。', 'Target platform: selects the operating system and architecture for the native microkernel artifact.'),
   trapDensity: text('陷阱密度：控制符号执行陷阱的注入频率；越密越难约束求解，也越重。', 'Trap density: controls symbolic-execution trap frequency. Denser traps are harder to solve and heavier to run.'),
@@ -241,7 +241,7 @@ const passCopies: Readonly<Record<string, LocalizedPassCopy>> = {
   },
   'anti-dump-protection': {
     name: text('内存转储防护', 'Anti-dump protection'),
-    description: text('通过 JNI/native 层降低 heap dump、class dump 或 hprof 中关键材料的可见性。', 'Uses JNI/native support to reduce visibility of key material in heap dumps, class dumps, or hprof captures.'),
+    description: text('通过 JNI/native 层降低 dump 中关键材料的可见性；jni-key-hold/full 依赖 native 可用并失败拒绝。', 'Uses JNI/native support to reduce key-material visibility in dumps; jni-key-hold/full require native availability and fail closed.'),
   },
   'anti-instrumentation': {
     name: text('反插桩检测', 'Anti-instrumentation'),
@@ -253,11 +253,11 @@ const passCopies: Readonly<Record<string, LocalizedPassCopy>> = {
   },
   'callsite-rotation-protection': {
     name: text('调用点轮换防护', 'Callsite rotation protection'),
-    description: text('用 MutableCallSite、epoch、线程或随机信号动态切换真实调用目标。', 'Uses MutableCallSite, epoch, thread, or random signals to rotate the real call target at runtime.'),
+    description: text('用 MutableCallSite、epoch、线程或随机信号动态切换调用目标，提高静态恢复成本。', 'Uses MutableCallSite, epoch, thread, or random signals to rotate call targets and raise static recovery cost.'),
   },
   'class-encryption-loader': {
     name: text('类加密加载器', 'Class encryption loader'),
-    description: text('把选定 .class 加密存入资源，并注入自定义 ClassLoader 在运行时解密 defineClass。', 'Encrypts selected .class files into resources and injects a custom ClassLoader to decrypt and defineClass at runtime.'),
+    description: text('把选定 .class 以 AES-GCM 认证加密存入资源，由 native 派生密钥；认证失败拒绝加载。', 'Stores selected .class files as AES-GCM authenticated resources with native-derived keys; authentication failure refuses loading.'),
   },
   'condy-constant-indirection': {
     name: text('动态常量间接化', 'ConstantDynamic indirection'),
@@ -265,7 +265,7 @@ const passCopies: Readonly<Record<string, LocalizedPassCopy>> = {
   },
   'control-flow-flattening': {
     name: text('控制流平坦化', 'Control-flow flattening'),
-    description: text('把方法逻辑改写为分发器驱动结构，削弱原始分支和代码块关系。', 'Rewrites method logic into dispatcher-driven structure, weakening original branch and block relationships.'),
+    description: text('把方法逻辑改写为分发器驱动结构，作为中等强度扰动提高 CFG 恢复成本。', 'Rewrites method logic into dispatcher-driven structure as medium-strength perturbation that raises CFG recovery cost.'),
   },
   'control-flow-obfuscation': {
     name: text('控制流混淆', 'Control-flow obfuscation'),
@@ -273,11 +273,11 @@ const passCopies: Readonly<Record<string, LocalizedPassCopy>> = {
   },
   'environment-bound-keys': {
     name: text('环境绑定密钥', 'Environment-bound keys'),
-    description: text('把硬件、JVM 参数、证书或组合信号纳入 KDF，让产物绑定目标运行环境。', 'Feeds hardware, JVM, certificate, or combined signals into KDF so output binds to the target environment.'),
+    description: text('把规范化环境信号纳入 native KDF；材料缺失或绑定不匹配时拒绝解密。', 'Feeds normalized environment signals into the native KDF; missing material or binding mismatch refuses decryption.'),
   },
   'exception-semantic-virtualization': {
     name: text('异常语义虚拟化', 'Exception semantic virtualization'),
-    description: text('把正常控制流转换为由自定义异常类型驱动的语义路径。', 'Converts normal control flow into semantic paths driven by custom exception types.'),
+    description: text('把部分正常控制流转换为自定义异常路径，是实验性语义扰动而非完整 VM 保护。', 'Converts selected normal control flow into custom exception paths as experimental semantic perturbation, not full VM protection.'),
   },
   'field-string-encryption': {
     name: text('字段字符串加密', 'Field string encryption'),
@@ -301,7 +301,7 @@ const passCopies: Readonly<Record<string, LocalizedPassCopy>> = {
   },
   'method-body-delayed-decryption': {
     name: text('方法体延迟解密', 'Method body delayed decryption'),
-    description: text('把方法体材料延后到运行时恢复，降低静态提取完整执行逻辑的概率。', 'Restores method-body material later at runtime, reducing the chance of extracting full execution logic statically.'),
+    description: text('把方法体放入 AES-GCM 认证资源，trampoline 仅携带 metadata，native 派生密钥并在认证失败时拒绝。', 'Stores method bodies in AES-GCM authenticated resources; trampolines carry metadata only, native-derived keys, and fail closed on authentication failure.'),
   },
   'method-virtualization': {
     name: text('方法虚拟化', 'Method virtualization'),
@@ -316,7 +316,7 @@ const passCopies: Readonly<Record<string, LocalizedPassCopy>> = {
       vbc4InterpreterDiversity: text('VBC4 固定默认：native-only 路径始终启用解释器多样化；关闭会被引擎拒绝。', 'VBC4 fixed default: interpreter diversity is always enabled for the native-only path; disabling it is rejected by the engine.'),
       vbc4HashedJniSymbols: text('VBC4 固定默认：JNI VM 目标使用构建和方法级 token 定位，避免在热路径传递明文符号。', 'VBC4 fixed default: JNI VM targets use build- and method-scoped tokens to avoid passing plaintext symbols on hot paths.'),
       vbc4ExecutableRegisterIr: text('VBC4 固定默认：native dispatcher 以 register IR 执行，stack opcode 仅作为兼容输入。', 'VBC4 fixed default: the native dispatcher executes register IR, with stack opcodes retained only as compatible input.'),
-      vbc4SuperOperators: text('VBC4 固定默认：serializer 按方法 seed 折叠 super-operator，并纳入认证状态。', 'VBC4 fixed default: the serializer folds super-operators by method seed and binds them into authenticated state.'),
+      vbc4SuperOperators: text('VBC4 固定默认：serializer 按方法随机结构 seed 折叠 super-operator，并纳入认证状态。', 'VBC4 fixed default: the serializer folds super-operators by per-method randomized structure seed and binds them into authenticated state.'),
       vbc4IntegrityKeyBinding: text('VBC4 固定默认：session integrity digest 参与 seed unwrap、block key 和 CP key 派生。', 'VBC4 fixed default: the session integrity digest participates in seed unwrap, block-key, and CP-key derivation.'),
       vbc4EphemeralMasterKey: text('VBC4 固定默认：native 主密钥只按需短生命周期派生，用后擦除。', 'VBC4 fixed default: the native master key is derived only for a short on-demand lifetime and wiped after use.'),
     },
