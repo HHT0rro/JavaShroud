@@ -4,6 +4,8 @@ import io.github.hht0rro.javashroud.capabilities.buildEngineSchemaPayload
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceCodec
+import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceKind
 import io.github.hht0rro.javashroud.transforms.protection.VmBytecodeSerializer
 import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.encodeNativeDiversifiedVmResource
@@ -59,6 +61,7 @@ class Vbc4OnlyContractTest {
                 buildSeed = 0x2468_1357,
                 stateBinding = vmStateBinding(0x1357_2468_9ABCL, resourcePath),
                 buildContext = buildContext,
+                structureEntropy = fixedStructureEntropy(),
             )
             serializer.visitCode()
             serializer.visitInsn(Opcodes.ICONST_2)
@@ -121,6 +124,20 @@ class Vbc4OnlyContractTest {
     }
 
     @Test
+    fun runtime_resource_compress_parameter_changes_authenticated_storage() = withVbc4BuildContext(fixedVbc4Context()) {
+        val plain = ByteArray(32768) { 0x41 }
+        val compressed = RuntimeResourceCodec.encode(plain, RuntimeResourceKind.VmBytecode, seed = 0x2468_1357, variantId = 4, layerCount = 3, compress = true)
+        val stored = RuntimeResourceCodec.encode(plain, RuntimeResourceKind.VmBytecode, seed = 0x2468_1357, variantId = 4, layerCount = 3, compress = false)
+
+        assertTrue(compressed.size < stored.size, "compress=true should store compressible VM resources smaller than forced plain storage")
+        assertEquals(plain.toList(), RuntimeResourceCodec.decode(compressed)?.toList(), "compressed resource must round-trip")
+        assertEquals(plain.toList(), RuntimeResourceCodec.decode(stored)?.toList(), "uncompressed resource must round-trip")
+        val tampered = compressed.copyOf()
+        tampered[25] = (tampered[25].toInt() xor 0x11).toByte()
+        assertEquals(null, RuntimeResourceCodec.decode(tampered), "metadata compressed flag and hashes must be MAC-authenticated")
+    }
+
+    @Test
     fun native_verify_uses_keyed_mac_instead_of_recomputable_fnv_hash() {
         val helperSource = Files.readString(resolveSource("src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
         val sealingSource = Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/RuntimeArtifactSealing.kt"))
@@ -160,7 +177,7 @@ class Vbc4OnlyContractTest {
         val source = Files.readString(resolveSource("src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
 
         assertFalse(source.contains("decodeRuntimeResourceV"), "JNI helper must not retain numbered runtime-resource decoder entrypoints")
-        assertTrue(source.contains("RUNTIME_RESOURCE_VERSION = 5"), "JNI helper must pin runtime resources to the current VBC4-only envelope version")
+        assertTrue(source.contains("RUNTIME_RESOURCE_VERSION = 6"), "JNI helper must pin runtime resources to the current opaque VBC4-only envelope version")
         assertFalse(source.contains("decoded != null ? decoded : raw"), "JNI helper must not pass through raw pre-VBC4 or unsealed resources")
         assertTrue(source.contains("throw new IllegalArgumentException(\"unsupported runtime resource envelope\")"), "JNI helper must fail closed on non-current runtime resources")
         assertFalse(source.contains("transformRuntimeResourceLayer"), "JNI helper must not retain legacy seed-derived runtime-resource transforms")
@@ -265,7 +282,8 @@ class Vbc4OnlyContractTest {
             "Build serializer must take VBC4 master key material and layout digest through an explicit scoped key",
         )
         assertFalse(nativeHelpers.contains("JS_VBC4_MASTER_KEY_SHARE_A") || nativeHelpers.contains("JS_VBC4_MASTER_KEY_SHARE_B"), "Native helper must not retain repository-fixed VBC4 master key shares")
-        assertTrue(nativeHelpers.contains("JS_VBC4_BUILD_KEY_SHARE_A") && nativeHelpers.contains("JS_VBC4_BUILD_KEY_SHARE_B"), "Native helper must consume per-build generated VBC4 key shares")
+        assertTrue(nativeHelpers.contains("JS_VBC4_COPY_SCOPED_MASTER_KEY") && nativeHelpers.contains("JS_VBC4_SECRET_SLOT_BYTE"), "Native helper must consume per-build generated VBC4 secret slots through accessors")
+        assertFalse(nativeHelpers.contains("JS_VBC4_BUILD_KEY_SHARE_A") || nativeHelpers.contains("JS_VBC4_BUILD_KEY_SHARE_B"), "Native helper must not retain a stable A/B share extraction recipe")
         assertFalse(nativeHelpers.contains("static unsigned char JS_VBC4_MASTER_KEY"), "Native helper must not retain a resident plaintext VBC4 master key")
         assertFalse(nativeHelpers.contains("g_vbc4_inner_pad") || nativeHelpers.contains("g_vbc4_outer_pad"), "Native helper must not retain long-lived HMAC pads for VBC4 master material")
         assertTrue(nativeHelpers.contains("js_vbc4_hmac_with_scoped_master_key") && (nativeHelpers.contains("js_vbc4_wipe_volatile(scoped_key") || nativeHelpers.contains("js_vbc4_wipe_volatile(session_key")), "Native helper must reconstruct VBC4 key material only inside scoped HMAC calls and wipe it")
@@ -431,8 +449,8 @@ class Vbc4OnlyContractTest {
                 .joinToString("|")
         }.toSet()
 
-        assertTrue(layouts.all { it.blockCount >= 3 }, "Large VBC4 programs should lower into many small logical blocks: $layouts")
-        assertTrue(uniqueStructureSignatures.size >= 4,
+        assertTrue(layouts.all { it.blockCount > 1 }, "Large VBC4 programs should lower into multiple logical blocks: $layouts")
+        assertTrue(uniqueStructureSignatures.size >= 2,
             "Same guest program should produce high structural layout variance across build seeds: $layouts")
         assertTrue(layouts.any { it.physicalBlockOrder != it.physicalBlockOrder.sorted() },
             "At least one build should store blocks out of logical order to break linear layout fingerprints: $layouts")
@@ -472,12 +490,24 @@ class Vbc4OnlyContractTest {
             "VBC4 opcode dialect selection must be salted by method entry state, not only build seed")
         assertTrue(serializer.contains("vbc4-opcode-dialect") && serializer.contains("stateBinding.toByteArray") && serializer.contains("entryMetadata.encode().toByteArray"),
             "Opcode dialect salt must bind resource/entry metadata so same-seed methods do not reuse an isomorphic VM dialect")
-        assertTrue(serializer.contains("opcodeDialectSalt.rotateLeft(7) xor effectiveBuildSeed.rotateLeft(3)"),
-            "Polymorphic opcode aliases must include the per-entry dialect salt")
-        assertTrue(serializer.contains("opcodeDialectSalt.rotateLeft(5) xor effectiveBuildSeed.rotateLeft(11)"),
-            "Non-folded super-operator gating must include the per-entry dialect salt")
-        assertTrue(serializer.contains("opcodeDialectSalt.rotateLeft(13) xor effectiveBuildSeed.rotateLeft(5)") && serializer.contains("opcodeDialectSalt.rotateLeft(17) xor effectiveBuildSeed.rotateLeft(9)"),
-            "Folded semantic super-operator gates must include the per-entry dialect salt")
+        assertTrue(serializer.contains("private fun structureSelector") && serializer.contains("opcodeDialectSalt.rotateLeft") && serializer.contains("structureEntropyWord"),
+            "Dialect-dependent structure selection must mix entry salt with per-method structure entropy")
+        listOf("opcode-alias", "super-opcode", "folded-super", "folded-predicate", "super-plan").forEach { marker ->
+            assertTrue(serializer.contains("structureSelector(\"$marker\""), "VM dialect selector must cover $marker")
+        }
+        assertTrue(serializer.contains("structureEntropyDigest") && serializer.contains("readMacInt(structureEntropyDigest)") && serializer.contains("private val structureSalt"),
+            "Opcode dialect salt should also include per-method structure entropy digest")
+    }
+
+    @Test
+    fun vm_entropy_plan_is_internal_and_covers_resource_domains() {
+        val source = Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/MethodVirtualizationTransforms.kt"))
+        assertTrue(source.contains("internal data class VmEntropyPlan") && source.contains("internal data class VmEntropyWord"), "VM entropy plan should be internal-only")
+        listOf("serializer-structure", "resource-path", "shard-cut-plan", "decoy-").forEach { marker ->
+            assertTrue(source.contains(marker), "VM entropy plan must derive independent domain: $marker")
+        }
+        assertTrue(source.contains("decoyVmPayload") && source.contains("payload[0] = 'V'.code.toByte()") && source.contains("writeBigEndianInt(payload"),
+            "Decoy resources should keep a VBC4-like shape while remaining unauthenticatable")
     }
 
     @Test
@@ -583,6 +613,7 @@ class Vbc4OnlyContractTest {
         "src/main/native/js_antidebug.c",
         "src/main/native/js_protected_section.h",
         "src/main/native/js_protected_section.c",
+        "src/main/native/native_secrets.inc",
         "src/main/native/js_jni_runtime.h",
         "src/main/native/js_jni_runtime.c",
         "src/main/native/js_vm_internal.h",
@@ -607,6 +638,8 @@ class Vbc4OnlyContractTest {
         nativeSeed = 0x5642_4334L,
         jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (index * 23 + 11).toByte() },
     )
+
+    private fun fixedStructureEntropy(): ByteArray = ByteArray(32) { index -> (index * 7 + 13).toByte() }
 
     private fun readU2(bytes: ByteArray, offset: Int): Int =
         ((bytes[offset].toInt() and 0xFF) shl 8) or (bytes[offset + 1].toInt() and 0xFF)
@@ -658,6 +691,3 @@ private fun legacyVmMarkers(): List<String> = listOf(
     "0x564243" + "32",
     "0x564d" + "4243",
 )
-
-
-

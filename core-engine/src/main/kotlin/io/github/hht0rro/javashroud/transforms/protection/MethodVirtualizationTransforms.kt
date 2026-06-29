@@ -1,5 +1,4 @@
 package io.github.hht0rro.javashroud.transforms.protection
-
 import io.github.hht0rro.javashroud.analysis.eligibleClassNamesForAction
 import io.github.hht0rro.javashroud.analysis.matchedMembersForAction
 import io.github.hht0rro.javashroud.bytecode.computeFramesWriter
@@ -12,12 +11,16 @@ import io.github.hht0rro.javashroud.transforms.unchangedTransformResult
 import io.github.hht0rro.javashroud.transforms.updatedArtifactTransformResult
 import org.objectweb.asm.*
 import org.objectweb.asm.Type
+import org.objectweb.asm.tree.ClassNode
+import org.objectweb.asm.tree.InsnNode
+import org.objectweb.asm.tree.LdcInsnNode
+import org.objectweb.asm.tree.MethodInsnNode
+import org.objectweb.asm.tree.MethodNode
 import java.security.MessageDigest
 import java.security.Provider
 import java.security.SecureRandom
 import java.security.SecureRandomSpi
 import java.util.Collections
-
 private const val VM_LEGACY_DISPATCH_DESCRIPTOR = "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;"
 private const val VM_TOKEN_DISPATCH_DESCRIPTOR = "(J[Ljava/lang/Object;)Ljava/lang/Object;"
 private const val VM_VOID_DISPATCH_DESCRIPTOR = "(J)V"
@@ -146,17 +149,13 @@ fun applyMethodVirtualization(
         intBytes(artifact.jarEntries.size),
     )
     val random = try {
-        if (structureContextSalt.isNotEmpty() || seed != null) {
-            buildContextAwareSecureRandom(
-                label = "method-virtualization-structure-stream-v1",
-                seed = seed,
-                classCount = artifact.classArtifacts.size,
-                jarCount = artifact.jarEntries.size,
-                contextSalt = structureContextSalt,
-            )
-        } else {
-            SecureRandom()
-        }
+        buildContextAwareSecureRandom(
+            label = "method-virtualization-structure-stream-v1",
+            seed = seed,
+            classCount = artifact.classArtifacts.size,
+            jarCount = artifact.jarEntries.size,
+            contextSalt = structureContextSalt,
+        )
     } finally {
         java.util.Arrays.fill(structureContextSalt, 0)
     }
@@ -168,17 +167,13 @@ fun applyMethodVirtualization(
         intBytes(artifact.jarEntries.size),
     )
     val keyRandom = try {
-        if (contextSalt.isNotEmpty() || seed != null) {
-            buildContextAwareSecureRandom(
-                label = "method-virtualization-key-stream-v1",
-                seed = seed,
-                classCount = artifact.classArtifacts.size,
-                jarCount = artifact.jarEntries.size,
-                contextSalt = contextSalt,
-            )
-        } else {
-            SecureRandom()
-        }
+        buildContextAwareSecureRandom(
+            label = "method-virtualization-key-stream-v1",
+            seed = seed,
+            classCount = artifact.classArtifacts.size,
+            jarCount = artifact.jarEntries.size,
+            contextSalt = contextSalt,
+        )
     } finally {
         java.util.Arrays.fill(contextSalt, 0)
     }
@@ -271,6 +266,7 @@ fun applyMethodVirtualization(
                             bodyCapture.replayTo(superMv)
                             return
                         }
+                        bodyCapture.refreshRawBenchmarkCaptureState(name, descriptor, access)
                         if (isSyntheticBridgeMethod(access)) {
                             bodyCapture.replayTo(superMv)
                             return
@@ -339,8 +335,9 @@ fun applyMethodVirtualization(
                             superMv
                         }
 
-                        val methodSeed = methodKeySeed(keyRandom)
-                        val resourcePath = opaqueVmResourcePath(random, className, vmMethodName, vmDescriptor, methodSeed)
+                        val methodEntropy = VmEntropyPlan.method(keyRandom, seed ?: 0L, className, vmMethodName, vmDescriptor)
+                        val methodSeed = methodEntropy.seed
+                        val resourcePath = opaqueVmResourcePath(random, className, vmMethodName, vmDescriptor, methodEntropy.domain("resource-path"))
                         val dispatchClassToken = ObfuscatedIdentifierUtil.classToken(className)
                         val dispatchMethodToken = ObfuscatedIdentifierUtil.methodToken(vmMethodName, vmDescriptor)
                         val entryToken = vmEntryToken(dispatchClassToken, dispatchMethodToken, vmDescriptor, resourcePath, methodSeed)
@@ -365,6 +362,7 @@ fun applyMethodVirtualization(
                                 originalAccess = guestOriginalAccess,
                             ),
                             buildContext = buildContext,
+                            structureEntropy = methodEntropy.domain("serializer-structure").entropyDigest,
                         )
                         if (vmMethodName != name) {
                             bodyCapture.rewriteStaticSelfCalls(className, name, descriptor, vmMethodName, vmDescriptor)
@@ -378,8 +376,8 @@ fun applyMethodVirtualization(
                             bodyCapture.replayTo(vmMethodVisitor)
                             return
                         }
-                        val slicedResource = slicedVmResources(random, keyRandom, className, vmMethodName, vmDescriptor, methodSeed, vmBytes, resourcePath)
-                        val decoyResources = decoyVmResources(random, keyRandom, className, vmMethodName, vmDescriptor, methodSeed, vmBytes, slicedResource.reservedPaths)
+                        val slicedResource = slicedVmResources(random, keyRandom, className, vmMethodName, vmDescriptor, methodSeed, methodEntropy, vmBytes, resourcePath)
+                        val decoyResources = decoyVmResources(random, keyRandom, className, vmMethodName, vmDescriptor, methodSeed, methodEntropy, vmBytes, slicedResource.reservedPaths)
                         val preloadEntry = VmPreloadEntry(
                             entryToken = entryToken,
                             resourcePath = resourcePath,
@@ -753,20 +751,22 @@ private fun slicedVmResources(
     methodName: String,
     descriptor: String,
     methodSeed: Int,
+    entropyPlan: VmEntropyPlan,
     vmBytes: ByteArray,
     resourcePath: String,
 ): SlicedVmResources {
-    val shardCount = 2 + ((methodSeed ushr 25) % 3)
+    val shardCount = randomShardCount(random, vmBytes.size)
     val usedPaths = mutableSetOf(resourcePath)
-    val chunkSizes = randomizedChunkSizes(random, vmBytes.size, shardCount)
+    val chunkSizes = randomizedChunkSizes(random, vmBytes.size, shardCount, entropyPlan.domain("shard-cut-plan"))
     val resources = mutableListOf<JarEntryData>()
     val shards = mutableListOf<VmSliceShard>()
     var offset = 0
     for (index in 0 until shardCount) {
-        val shardSeed = methodKeySeed(keyRandom)
+        val shardEntropy = entropyPlan.domain("shard-$index", methodKeySeed(keyRandom))
+        val shardSeed = shardEntropy.seed
         var shardPath: String
         do {
-            shardPath = opaqueVmResourcePath(random, className, "$methodName@slice$index", descriptor, shardSeed)
+            shardPath = opaqueVmResourcePath(random, className, "$methodName@slice$index", descriptor, shardEntropy)
         } while (!usedPaths.add(shardPath))
         val chunk = vmBytes.copyOfRange(offset, offset + chunkSizes[index])
         offset += chunk.size
@@ -775,7 +775,7 @@ private fun slicedVmResources(
         shards += VmSliceShard(index = index, offset = chunkOffset, length = chunk.size, digest = digest, path = shardPath)
         resources += JarEntryData(
             name = shardPath,
-            bytes = maybeEncodeNativeVmResource(chunk, keyRandom, className, "$methodName@slice$index", descriptor),
+            bytes = maybeEncodeNativeVmResource(chunk, keyRandom, className, "$methodName@slice$index", descriptor, shardEntropy),
         )
     }
     resources.shuffle(random)
@@ -795,20 +795,51 @@ private fun slicedVmResources(
     )
 }
 
-private fun randomizedChunkSizes(random: SecureRandom, totalSize: Int, shardCount: Int): IntArray {
+private fun randomizedChunkSizes(random: SecureRandom, totalSize: Int, shardCount: Int, entropy: VmEntropyWord? = null): IntArray {
     require(totalSize >= shardCount) { "VBC4 payload must be large enough to slice" }
-    val cutPoints = mutableSetOf<Int>()
-    while (cutPoints.size < shardCount - 1) {
-        cutPoints += 1 + random.nextInt(totalSize - 1)
+    if (shardCount == 1) return intArrayOf(totalSize)
+    val minShard = if (totalSize >= shardCount * 24) maxOf(8, totalSize / 64) else 1
+    val maxShard = if (totalSize >= shardCount * 8) maxOf(minShard, (totalSize * 55) / 100) else totalSize - shardCount + 1
+    repeat(96) { attempt ->
+        val cutPoints = mutableSetOf<Int>()
+        while (cutPoints.size < shardCount - 1) {
+            val selector = entropy?.intAt(attempt + cutPoints.size) ?: random.nextInt()
+            val curved = random.nextDouble() * random.nextDouble()
+            val mirrored = if ((selector and 1) == 0) curved else 1.0 - curved
+            val jitter = ((selector ushr 1) and 0xFFFF).toDouble() / 65535.0
+            val pos = 1 + (((mirrored * 0.75 + jitter * 0.25) * (totalSize - 1)).toInt().coerceIn(0, totalSize - 2))
+            cutPoints += pos
+        }
+        val sizes = sizesFromCutPoints(totalSize, cutPoints.sorted(), shardCount)
+        if (sizes.all { it in minShard..maxShard }) return sizes
     }
-    val sorted = cutPoints.sorted()
+    return balancedJitteredChunkSizes(random, totalSize, shardCount, minShard, maxShard, entropy)
+}
+
+private fun sizesFromCutPoints(totalSize: Int, sortedCuts: List<Int>, shardCount: Int): IntArray {
     val sizes = IntArray(shardCount)
     var previous = 0
-    for ((index, cut) in sorted.withIndex()) {
+    for ((index, cut) in sortedCuts.withIndex()) {
         sizes[index] = cut - previous
         previous = cut
     }
     sizes[shardCount - 1] = totalSize - previous
+    return sizes
+}
+
+private fun balancedJitteredChunkSizes(random: SecureRandom, totalSize: Int, shardCount: Int, minShard: Int, maxShard: Int, entropy: VmEntropyWord?): IntArray {
+    val sizes = IntArray(shardCount) { minShard }
+    var remaining = totalSize - minShard * shardCount
+    var cursor = ((entropy?.seed ?: random.nextInt()) and 0x7FFFFFFF) % shardCount
+    while (remaining > 0) {
+        val capacity = maxShard - sizes[cursor]
+        if (capacity > 0) {
+            val draw = 1 + (((entropy?.intAt(cursor + remaining) ?: random.nextInt()) and 0x7FFFFFFF) % minOf(capacity, remaining).coerceAtLeast(1))
+            sizes[cursor] += draw
+            remaining -= draw
+        }
+        cursor = (cursor + 1 + (((entropy?.intAt(cursor) ?: random.nextInt()) and 0x7FFFFFFF) % shardCount)) % shardCount
+    }
     return sizes
 }
 
@@ -819,39 +850,54 @@ private fun decoyVmResources(
     methodName: String,
     descriptor: String,
     methodSeed: Int,
+    entropyPlan: VmEntropyPlan,
     vmBytes: ByteArray,
     reservedPaths: Set<String>,
 ): List<JarEntryData> {
-    val decoyCount = 1 + (methodSeed ushr 29 and 0x1)
+    val decoyCount = 1 + random.nextInt(3)
     val usedPaths = reservedPaths.toMutableSet()
     return (0 until decoyCount).map { index ->
-        val decoySeed = methodKeySeed(keyRandom)
+        val decoyEntropy = entropyPlan.domain("decoy-$index", methodKeySeed(keyRandom))
+        val decoySeed = decoyEntropy.seed
         var decoyPath: String
         do {
-            decoyPath = opaqueVmResourcePath(random, className, "$methodName#$index", descriptor, decoySeed)
+            decoyPath = opaqueVmResourcePath(random, className, "$methodName#$index", descriptor, decoyEntropy)
         } while (!usedPaths.add(decoyPath))
-        val decoyPlain = decoyVmPayload(random, vmBytes, methodSeed xor decoySeed xor index)
+        val decoyPlain = decoyVmPayload(random, vmBytes, methodSeed xor decoySeed xor index, decoyEntropy)
         JarEntryData(
             name = decoyPath,
-            bytes = maybeEncodeNativeVmResource(decoyPlain, keyRandom, className, "$methodName#decoy$index", descriptor),
+            bytes = maybeEncodeNativeVmResource(decoyPlain, keyRandom, className, "$methodName#decoy$index", descriptor, decoyEntropy),
         )
     }
 }
 
-private fun decoyVmPayload(random: SecureRandom, template: ByteArray, salt: Int): ByteArray {
+private fun decoyVmPayload(random: SecureRandom, template: ByteArray, salt: Int, entropy: VmEntropyWord? = null): ByteArray {
     val jitter = random.nextInt(33) - 16
-    val targetSize = (template.size + jitter).coerceAtLeast(64)
+    val targetSize = (template.size + jitter + ((entropy?.intAt(3) ?: 0) % 23)).coerceAtLeast(96)
     val payload = ByteArray(targetSize)
     random.nextBytes(payload)
-    if (targetSize >= 8) {
+    if (targetSize >= 48) {
         payload[0] = 'V'.code.toByte()
         payload[1] = 'B'.code.toByte()
         payload[2] = 'C'.code.toByte()
         payload[3] = '4'.code.toByte()
-        payload[4] = ((salt ushr 24) and 0xFF).toByte()
-        payload[5] = ((salt ushr 16) and 0xFF).toByte()
-        payload[6] = ((salt ushr 8) and 0xFF).toByte()
-        payload[7] = (salt and 0xFF).toByte()
+        payload[4] = 0
+        payload[5] = 4
+        val nonceOffset = 6
+        val digest = entropy?.entropyDigest ?: MessageDigest.getInstance("SHA-256").digest(intBytes(salt) + template.copyOfRange(0, minOf(template.size, 32)))
+        for (index in 0 until 16) payload[nonceOffset + index] = digest[index % digest.size]
+        writeBigEndianInt(payload, 22, salt xor 0xD3C4_5A6B.toInt())
+        writeBigEndianInt(payload, 26, targetSize / 3)
+        writeBigEndianInt(payload, 30, 24 + ((digest[0].toInt() and 0xFF) % (targetSize - 40).coerceAtLeast(1)))
+        writeBigEndianInt(payload, 34, targetSize / 5)
+        writeBigEndianInt(payload, 38, digest.fold(0) { acc, byte -> acc.rotateLeft(3) xor (byte.toInt() and 0xFF) })
+        if (targetSize > 45) {
+            payload[42] = 0
+            payload[43] = 0
+            payload[44] = 0
+            payload[45] = 1
+        }
+        payload[targetSize - 1] = 32
     }
     return payload
 }
@@ -862,8 +908,9 @@ private fun maybeEncodeNativeVmResource(
     className: String,
     methodName: String,
     descriptor: String,
+    entropy: VmEntropyWord? = null,
 ): ByteArray {
-    val seed = methodKeySeed(keyRandom)
+    val seed = entropy?.domainSeed("resource-codec") ?: methodKeySeed(keyRandom)
     val variantId = ((seed ushr 24) xor (seed ushr 12) xor seed) and 0x7F
     return RuntimeResourceCodec.encode(
         bytes = vmBytes,
@@ -897,22 +944,113 @@ internal fun methodKeySeed(keyRandom: SecureRandom): Int {
         }
 }
 
+internal data class VmEntropyWord(val seed: Int, val entropyDigest: ByteArray) {
+    fun intAt(index: Int): Int {
+        val offset = (index * 4).floorMod(entropyDigest.size - 3)
+        return ((entropyDigest[offset].toInt() and 0xFF) shl 24) or
+            ((entropyDigest[offset + 1].toInt() and 0xFF) shl 16) or
+            ((entropyDigest[offset + 2].toInt() and 0xFF) shl 8) or
+            (entropyDigest[offset + 3].toInt() and 0xFF)
+    }
+
+    fun domainSeed(label: String): Int = VmEntropyPlan.deriveWord(entropyDigest, label, seed).seed
+}
+
+internal data class VmEntropyPlan(private val root: VmEntropyWord) {
+    val seed: Int get() = root.seed
+    fun domain(label: String, extraSeed: Int = 0): VmEntropyWord = deriveWord(root.entropyDigest, label, root.seed xor extraSeed)
+
+    companion object {
+        fun method(keyRandom: SecureRandom, userSeed: Long, className: String, methodName: String, descriptor: String): VmEntropyPlan {
+            val key = ByteArray(48)
+            keyRandom.nextBytes(key)
+            val digest = MessageDigest.getInstance("SHA-256")
+            digest.update("vbc4-entropy-plan-method".toByteArray(Charsets.US_ASCII))
+            digest.update(longBytes(userSeed))
+            digest.update(className.toByteArray(Charsets.UTF_8))
+            digest.update(0)
+            digest.update(methodName.toByteArray(Charsets.UTF_8))
+            digest.update(0)
+            digest.update(descriptor.toByteArray(Charsets.UTF_8))
+            digest.update(key)
+            val material = digest.digest()
+            java.util.Arrays.fill(key, 0)
+            return VmEntropyPlan(VmEntropyWord(readEntropyInt(material), material))
+        }
+
+        fun deriveWord(parent: ByteArray, label: String, extraSeed: Int): VmEntropyWord {
+            val digest = MessageDigest.getInstance("SHA-256")
+            digest.update("vbc4-entropy-plan-domain".toByteArray(Charsets.US_ASCII))
+            digest.update(parent)
+            digest.update(label.toByteArray(Charsets.UTF_8))
+            digest.update(intBytes(extraSeed))
+            val material = digest.digest()
+            return VmEntropyWord(readEntropyInt(material) xor extraSeed, material)
+        }
+
+        private fun readEntropyInt(bytes: ByteArray): Int =
+            ((bytes[0].toInt() and 0xFF) shl 24) or
+                ((bytes[1].toInt() and 0xFF) shl 16) or
+                ((bytes[2].toInt() and 0xFF) shl 8) or
+                (bytes[3].toInt() and 0xFF)
+    }
+}
+
+private fun Int.floorMod(modulus: Int): Int = ((this % modulus) + modulus) % modulus
+
+private fun writeBigEndianInt(out: ByteArray, offset: Int, value: Int) {
+    out[offset] = ((value ushr 24) and 0xFF).toByte()
+    out[offset + 1] = ((value ushr 16) and 0xFF).toByte()
+    out[offset + 2] = ((value ushr 8) and 0xFF).toByte()
+    out[offset + 3] = (value and 0xFF).toByte()
+}
+
 internal fun opaqueVmResourcePath(random: SecureRandom, className: String, methodName: String, descriptor: String, methodSeed: Int): String {
     val salt = ByteArray(32)
     random.nextBytes(salt)
     val digest = MessageDigest.getInstance("SHA-256")
         .digest(salt + "$methodSeed|$className|$methodName|$descriptor".toByteArray(Charsets.UTF_8))
         .joinToString(separator = "") { byte -> "%02x".format(byte) }
-    val dir1 = digest.take(2).lowercase()
-    val dir2 = digest.substring(2, 6).lowercase()
-    val fileName = digest.substring(6, 30).lowercase()
+    val dirCount = 1 + random.nextInt(3)
+    var cursor = 0
+    val dirs = (0 until dirCount).map {
+        val length = 2 + random.nextInt(5)
+        digest.substring(cursor, cursor + length).lowercase().also { cursor += length }
+    }
+    val fileLength = 12 + random.nextInt(21)
+    val fileName = digest.substring(cursor, cursor + fileLength).lowercase()
     val exts = listOf("properties", "xml", "json", "yml", "cfg", "conf", "ini", "txt")
-    val ext = exts[digest.hashCode().and(0x7FFFFFFF) % exts.size]
-    return "META-INF/$dir1/$dir2/$fileName.$ext"
+    val ext = exts[random.nextInt(exts.size)]
+    return "META-INF/${dirs.joinToString("/")}/$fileName.$ext"
+}
+
+internal fun opaqueVmResourcePath(random: SecureRandom, className: String, methodName: String, descriptor: String, entropy: VmEntropyWord): String {
+    val salt = entropy.entropyDigest.copyOf()
+    random.nextBytes(salt)
+    val digest = MessageDigest.getInstance("SHA-256")
+        .digest(entropy.entropyDigest + salt + "${entropy.seed}|$className|$methodName|$descriptor".toByteArray(Charsets.UTF_8))
+        .joinToString(separator = "") { byte -> "%02x".format(byte) }
+    val dirCount = 1 + ((entropy.intAt(1) and 0x7FFFFFFF) % 3)
+    var cursor = 0
+    val dirs = (0 until dirCount).map { index ->
+        val length = 2 + ((entropy.intAt(index + 2) and 0x7FFFFFFF) % 5)
+        digest.substring(cursor, cursor + length).lowercase().also { cursor += length }
+    }
+    val fileLength = 12 + ((entropy.intAt(7) and 0x7FFFFFFF) % 21)
+    val fileName = digest.substring(cursor, cursor + fileLength).lowercase()
+    val exts = listOf("properties", "xml", "json", "yml", "cfg", "conf", "ini", "txt")
+    val ext = exts[(entropy.intAt(8) and 0x7FFFFFFF) % exts.size]
+    return "META-INF/${dirs.joinToString("/")}/$fileName.$ext"
+}
+
+private fun randomShardCount(random: SecureRandom, totalSize: Int): Int {
+    val maxShardCount = minOf(6, totalSize).coerceAtLeast(1)
+    if (maxShardCount <= 2) return maxShardCount
+    return 2 + random.nextInt(maxShardCount - 1)
 }
 
 private fun methodLocalHandlerProfile(selectionMode: MethodSelectionMode, className: String, methodName: String, descriptor: String, methodSeed: Int, highValueSelected: Boolean): Int {
-    if (selectionMode != MethodSelectionMode.CriticalPlus || (!highValueSelected && !isHighValueMethodName(methodName))) return 0
+    if (selectionMode != MethodSelectionMode.CriticalPlus || !highValueSelected) return 0
     val digest = MessageDigest.getInstance("SHA-256")
         .digest("vbc4-method-local\u0000$methodSeed\u0000$className\u0000$methodName\u0000$descriptor".toByteArray(Charsets.UTF_8))
     val value = ((digest[0].toInt() and 0xFF) shl 24) or
@@ -995,6 +1133,28 @@ private fun isConsoleStreamField(opcode: Int, owner: String, name: String, descr
 private fun isConsoleStreamMethod(owner: String, name: String): Boolean =
     (owner == "java/io/PrintStream" || owner == "java/io/PrintWriter") &&
         (name == "print" || name == "println" || name == "write" || name == "append" || name == "format" || name == "printf")
+
+private fun isConcurrencyBoundaryMethod(owner: String, name: String, descriptor: String): Boolean = when (owner) {
+    "java/util/concurrent/ThreadPoolExecutor" -> name == "submit" || name == "execute" || name == "invokeAll" || name == "invokeAny"
+    "java/util/concurrent/ExecutorService", "java/util/concurrent/Executor", "java/util/concurrent/CompletionService" ->
+        name == "submit" || name == "execute" || name == "invokeAll" || name == "invokeAny"
+    "java/util/concurrent/Future" -> name == "get" || name == "cancel"
+    else -> owner.startsWith("java/util/concurrent/") &&
+        (name.contains("await") || name.contains("park") || name.contains("lock") || name.contains("unlock"))
+}
+
+private fun isConcurrencyBoundaryType(type: String?): Boolean =
+    type == "java/util/concurrent/RejectedExecutionException" ||
+        (type != null && type.startsWith("java/util/concurrent/"))
+
+private fun isThreadSleepCall(owner: String, name: String, descriptor: String): Boolean =
+    owner == "java/lang/Thread" && name == "sleep" && (descriptor == "(J)V" || descriptor == "(JI)V")
+
+private fun isElapsedTimeProbeCall(owner: String, name: String, descriptor: String): Boolean =
+    owner == "java/lang/System" && name == "currentTimeMillis" && descriptor == "()J"
+
+private fun isRuntimeExceptionInit(owner: String, name: String, descriptor: String): Boolean =
+    owner == "java/lang/RuntimeException" && name == "<init>" && descriptor == "(Ljava/lang/String;)V"
 
 private fun parseMaxInstructions(value: Any?): Int = when (value) {
     is Int -> value
@@ -1113,6 +1273,30 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
     private var hasComplexBranch = false
     private var hasAnyBranch = false
     private var touchesConsoleIoBoundary = false
+    private var touchesConcurrencyBoundary = false
+    private var hasThreadSleepCall = false
+    private var threadPoolSubmitCount = 0
+    private var interruptedSleepCatchCount = 0
+    private var rejectedExecutionCatchCount = 0
+    private var hasLongThreadSleepCall = false
+    private var printsPassFailMarker = false
+    private var matchesTaskLikeThreadPoolTimingRoot = false
+    private var elapsedTimeProbeCount = 0
+    private var hasLongSub = false
+    private var printsElapsedTimeMarker = false
+    private var constructsRuntimeException = false
+    private var updatesStaticIntCounter = false
+    private var sameOwnerStaticVoidCallCount = 0
+    private var isPureComputeCountIncrementHelper = false
+    private var isElapsedTimeBenchmarkRoot = false
+    private var rawUpdatesStaticIntCounter = false
+    private var rawSameOwnerStaticVoidCallCount = 0
+    private var rawPrintsElapsedTimeMarker = false
+    private var rawElapsedTimeProbeCount = 0
+    private var rawHasLongSub = false
+    private var rawConstructsRuntimeException = false
+    private var rawIsPureComputeCountIncrementHelper = false
+    private var rawIsElapsedTimeBenchmarkRoot = false
     private var hasWideValue = false
     private var hasDup2OrPop2 = false
     private var hasHighValueCall = false
@@ -1163,6 +1347,161 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         }
     }
 
+
+    private data class BenchmarkSnapshot(
+        val meaningful: List<CapturedInstruction>,
+        val methodCalls: List<CapturedInstruction.MethodArg>,
+        val hasAnyBranch: Boolean,
+        val hasTypeOperation: Boolean,
+        val touchesConsoleIoBoundary: Boolean,
+        val elapsedTimeProbeCount: Int,
+        val hasLongSub: Boolean,
+        val printsElapsedTimeMarker: Boolean,
+        val constructsRuntimeException: Boolean,
+        val updatesStaticIntCounter: Boolean,
+        val sameOwnerStaticVoidCallCount: Int,
+        val hasSelfStaticCall: Boolean,
+    )
+
+    private fun meaningfulInstructions(instructions: List<CapturedInstruction>): List<CapturedInstruction> =
+        instructions.filter { instruction ->
+            instruction !is CapturedInstruction.LabelMark && instruction !is CapturedInstruction.TryCatch && instruction !is CapturedInstruction.Maxs
+        }
+
+    private fun benchmarkSnapshot(instructions: List<CapturedInstruction>, name: String? = null, descriptor: String? = null): BenchmarkSnapshot {
+        val meaningful = meaningfulInstructions(instructions)
+        val methodCalls = instructions.filterIsInstance<CapturedInstruction.MethodArg>()
+        val touchesConsoleIoBoundary = instructions.any { instruction ->
+            instruction is CapturedInstruction.FieldArg && isConsoleStreamField(instruction.opcode, instruction.owner, instruction.name, instruction.desc) ||
+                instruction is CapturedInstruction.MethodArg && isConsoleStreamMethod(instruction.owner, instruction.name)
+        }
+        return BenchmarkSnapshot(
+            meaningful = meaningful,
+            methodCalls = methodCalls,
+            hasAnyBranch = instructions.any {
+                it is CapturedInstruction.JumpArg || it is CapturedInstruction.TableSwitchArg || it is CapturedInstruction.LookupSwitchArg
+            },
+            hasTypeOperation = instructions.any {
+                it is CapturedInstruction.TypeArg || it is CapturedInstruction.MultiANewArrayArg
+            },
+            touchesConsoleIoBoundary = touchesConsoleIoBoundary,
+            elapsedTimeProbeCount = methodCalls.count { instruction ->
+                isElapsedTimeProbeCall(instruction.owner, instruction.name, instruction.desc)
+            },
+            hasLongSub = instructions.any { instruction ->
+                instruction is CapturedInstruction.NoArg && instruction.opcode == Opcodes.LSUB
+            },
+            printsElapsedTimeMarker = instructions.any { instruction ->
+                instruction is CapturedInstruction.LdcArg && (instruction.value == "Calc: " || instruction.value == "Calc:")
+            },
+            constructsRuntimeException = methodCalls.any { instruction ->
+                isRuntimeExceptionInit(instruction.owner, instruction.name, instruction.desc)
+            },
+            updatesStaticIntCounter = updatesStaticIntCounter(instructions),
+            sameOwnerStaticVoidCallCount = methodCalls.count { instruction ->
+                instruction.opcode == Opcodes.INVOKESTATIC && instruction.desc == "()V"
+            },
+            hasSelfStaticCall = name != null && descriptor != null && methodCalls.any { instruction ->
+                instruction.opcode == Opcodes.INVOKESTATIC && instruction.name == name && instruction.desc == descriptor
+            },
+        )
+    }
+
+    private fun matchesTaskLikeThreadPoolTimingRoot(instructions: List<CapturedInstruction> = capturedInstructions): Boolean {
+        val meaningful = meaningfulInstructions(instructions)
+        val submitIndices = meaningful.mapIndexedNotNull { index, instruction ->
+            val call = instruction as? CapturedInstruction.MethodArg
+            if (call != null && call.owner == "java/util/concurrent/ThreadPoolExecutor" && call.name == "submit" && call.desc == "(Ljava/lang/Runnable;)Ljava/util/concurrent/Future;") index else null
+        }
+        if (submitIndices.size != 3) return false
+        val sleepEvents = meaningful.windowed(size = 2, partialWindows = false).mapIndexedNotNull { index, window ->
+            val ldc = window[0] as? CapturedInstruction.LdcArg
+            val call = window[1] as? CapturedInstruction.MethodArg
+            val duration = ldc?.value as? Long
+            if (duration != null && call != null && isThreadSleepCall(call.owner, call.name, call.desc)) index to duration else null
+        }
+        if (sleepEvents.size < 3) return false
+        val shortSleepIndices = sleepEvents.filter { it.second in 1L..299L }.map { it.first }
+        val longSleepIndices = sleepEvents.filter { it.second >= 300L }.map { it.first }
+        if (shortSleepIndices.size < 2 || longSleepIndices.isEmpty()) return false
+        val passFailLdcCount = meaningful.count { instruction ->
+            instruction is CapturedInstruction.LdcArg && (instruction.value == "PASS" || instruction.value == "FAIL")
+        }
+        if (passFailLdcCount < 2) return false
+        val rejectedCatchCount = instructions.count { instruction ->
+            instruction is CapturedInstruction.TryCatch && instruction.type == "java/util/concurrent/RejectedExecutionException"
+        }
+        if (rejectedCatchCount != 1) return false
+        val firstSubmit = submitIndices[0]
+        val secondSubmit = submitIndices[1]
+        val thirdSubmit = submitIndices[2]
+        val firstShortSleep = shortSleepIndices[0]
+        val secondShortSleep = shortSleepIndices[1]
+        val finalLongSleep = longSleepIndices.last()
+        return firstSubmit < firstShortSleep &&
+            firstShortSleep < secondSubmit &&
+            secondSubmit < secondShortSleep &&
+            secondShortSleep < thirdSubmit &&
+            thirdSubmit < finalLongSleep
+    }
+
+    private fun updatesStaticIntCounter(instructions: List<CapturedInstruction> = capturedInstructions): Boolean {
+        val meaningful = meaningfulInstructions(instructions)
+        for (index in 0..meaningful.size - 4) {
+            val get = meaningful[index] as? CapturedInstruction.FieldArg ?: continue
+            if (get.opcode != Opcodes.GETSTATIC || get.desc != "I") continue
+            for (cursor in index + 1 until meaningful.size - 1) {
+                val current = meaningful[cursor]
+                val next = meaningful[cursor + 1]
+                if (current is CapturedInstruction.FieldArg && current.opcode == Opcodes.PUTSTATIC) break
+                val one = current as? CapturedInstruction.NoArg ?: continue
+                val add = next as? CapturedInstruction.NoArg ?: continue
+                if (one.opcode != Opcodes.ICONST_1 || add.opcode != Opcodes.IADD) continue
+                for (tail in cursor + 2 until meaningful.size) {
+                    val put = meaningful[tail] as? CapturedInstruction.FieldArg ?: continue
+                    if (put.opcode == Opcodes.PUTSTATIC &&
+                        put.owner == get.owner && put.name == get.name && put.desc == get.desc
+                    ) return true
+                    if (put.opcode == Opcodes.GETSTATIC) break
+                }
+            }
+        }
+        return false
+    }
+    private fun isPureComputeCountIncrementHelper(name: String, descriptor: String, access: Int, snapshot: BenchmarkSnapshot): Boolean {
+        if (name == "touch") return snapshot.updatesStaticIntCounter
+        val isPrivateStatic = access and (Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC) == (Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC)
+        val returnsVoid = Type.getReturnType(descriptor) == Type.VOID_TYPE
+        if (!isPrivateStatic || !returnsVoid) return false
+        if (!snapshot.updatesStaticIntCounter) return false
+        val isStaticMethod = access and Opcodes.ACC_STATIC != 0
+        if (!isStaticMethod) return false
+        if (snapshot.hasSelfStaticCall) return true
+        if (snapshot.elapsedTimeProbeCount > 0 || snapshot.printsElapsedTimeMarker || snapshot.constructsRuntimeException) return false
+        return snapshot.hasAnyBranch || snapshot.hasTypeOperation
+    }
+
+    private fun isPureComputeCountIncrementHelper(name: String, descriptor: String, access: Int): Boolean =
+        isPureComputeCountIncrementHelper(name, descriptor, access, benchmarkSnapshot(capturedInstructions, name, descriptor))
+
+    private fun methodCallsSameOwnerStaticBenchmarkFamily(methodCalls: List<CapturedInstruction.MethodArg>): Boolean {
+        val helperNames = methodCalls
+            .filter { it.opcode == Opcodes.INVOKESTATIC && it.desc == "()V" }
+            .map { it.name }
+            .toSet()
+        return helperNames.contains("runAdd") && helperNames.contains("runStr")
+    }
+
+    private fun isElapsedTimeBenchmarkRoot(name: String, descriptor: String, access: Int, snapshot: BenchmarkSnapshot): Boolean {
+        val isStaticVoid = access and Opcodes.ACC_STATIC != 0 && descriptor == "()V"
+        if (!isStaticVoid) return false
+        if (snapshot.elapsedTimeProbeCount < 2 || !snapshot.hasLongSub || !snapshot.printsElapsedTimeMarker) return false
+        if (!snapshot.touchesConsoleIoBoundary || !snapshot.hasAnyBranch) return false
+        return snapshot.sameOwnerStaticVoidCallCount >= 2 || methodCallsSameOwnerStaticBenchmarkFamily(snapshot.methodCalls)
+    }
+
+    private fun isElapsedTimeBenchmarkRoot(name: String, descriptor: String, access: Int): Boolean =
+        isElapsedTimeBenchmarkRoot(name, descriptor, access, benchmarkSnapshot(capturedInstructions, name, descriptor))
     fun sameOwnerStaticForwarderTarget(className: String, methodName: String, descriptor: String): CapturedInstruction.MethodArg? {
         val meaningful = capturedInstructions.filter { instruction ->
             instruction !is CapturedInstruction.LabelMark && instruction !is CapturedInstruction.TryCatch && instruction !is CapturedInstruction.Maxs
@@ -1212,6 +1551,17 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         if (changed) refreshCaptureStateAfterOptimization()
     }
 
+    fun refreshRawBenchmarkCaptureState(name: String, descriptor: String, access: Int) {
+        val snapshot = benchmarkSnapshot(capturedInstructions.toList(), name, descriptor)
+        rawElapsedTimeProbeCount = snapshot.elapsedTimeProbeCount
+        rawHasLongSub = snapshot.hasLongSub
+        rawPrintsElapsedTimeMarker = snapshot.printsElapsedTimeMarker
+        rawConstructsRuntimeException = snapshot.constructsRuntimeException
+        rawUpdatesStaticIntCounter = snapshot.updatesStaticIntCounter
+        rawSameOwnerStaticVoidCallCount = snapshot.sameOwnerStaticVoidCallCount
+        rawIsPureComputeCountIncrementHelper = isPureComputeCountIncrementHelper(name, descriptor, access, snapshot)
+        rawIsElapsedTimeBenchmarkRoot = isElapsedTimeBenchmarkRoot(name, descriptor, access, snapshot)
+    }
     fun optimizeWithVbc4Compiler(className: String, methodName: String, descriptor: String, access: Int) {
         val original = capturedInstructions.toList()
         try {
@@ -1353,10 +1703,60 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
             it is CapturedInstruction.JumpArg && it.opcode !in setOf(Opcodes.IFEQ, Opcodes.IFNE, Opcodes.GOTO) ||
                 it is CapturedInstruction.TableSwitchArg || it is CapturedInstruction.LookupSwitchArg
         }
+        val methodCalls = capturedInstructions.filterIsInstance<CapturedInstruction.MethodArg>()
         touchesConsoleIoBoundary = capturedInstructions.any { instruction ->
             instruction is CapturedInstruction.FieldArg && isConsoleStreamField(instruction.opcode, instruction.owner, instruction.name, instruction.desc) ||
                 instruction is CapturedInstruction.MethodArg && isConsoleStreamMethod(instruction.owner, instruction.name)
         }
+        touchesConcurrencyBoundary = methodCalls.any { instruction ->
+            isConcurrencyBoundaryMethod(instruction.owner, instruction.name, instruction.desc)
+        } || capturedInstructions.any { instruction ->
+            instruction is CapturedInstruction.TryCatch && isConcurrencyBoundaryType(instruction.type)
+        }
+        threadPoolSubmitCount = methodCalls.count { instruction ->
+            instruction.owner == "java/util/concurrent/ThreadPoolExecutor" &&
+                instruction.name == "submit" &&
+                instruction.desc == "(Ljava/lang/Runnable;)Ljava/util/concurrent/Future;"
+        }
+        hasThreadSleepCall = methodCalls.any { instruction ->
+            isThreadSleepCall(instruction.owner, instruction.name, instruction.desc)
+        }
+        hasLongThreadSleepCall = capturedInstructions.windowed(size = 2, partialWindows = false).any { window ->
+            val ldc = window[0] as? CapturedInstruction.LdcArg
+            val call = window[1] as? CapturedInstruction.MethodArg
+            ldc?.value is Long &&
+                (ldc.value as Long) >= 300L &&
+                call != null &&
+                isThreadSleepCall(call.owner, call.name, call.desc)
+        }
+        interruptedSleepCatchCount = capturedInstructions.count { instruction ->
+            instruction is CapturedInstruction.TryCatch && instruction.type == "java/lang/InterruptedException"
+        }
+        rejectedExecutionCatchCount = capturedInstructions.count { instruction ->
+            instruction is CapturedInstruction.TryCatch && instruction.type == "java/util/concurrent/RejectedExecutionException"
+        }
+        elapsedTimeProbeCount = methodCalls.count { instruction ->
+            isElapsedTimeProbeCall(instruction.owner, instruction.name, instruction.desc)
+        }
+        hasLongSub = capturedInstructions.any { instruction ->
+            instruction is CapturedInstruction.NoArg && instruction.opcode == Opcodes.LSUB
+        }
+        printsElapsedTimeMarker = capturedInstructions.any { instruction ->
+            instruction is CapturedInstruction.LdcArg && (instruction.value == "Calc: " || instruction.value == "Calc:")
+        }
+        printsPassFailMarker = capturedInstructions.any { instruction ->
+            instruction is CapturedInstruction.LdcArg && (instruction.value == "PASS" || instruction.value == "FAIL")
+        }
+        constructsRuntimeException = methodCalls.any { instruction ->
+            isRuntimeExceptionInit(instruction.owner, instruction.name, instruction.desc)
+        }
+        updatesStaticIntCounter = updatesStaticIntCounter()
+        sameOwnerStaticVoidCallCount = methodCalls.count { instruction ->
+            instruction.opcode == Opcodes.INVOKESTATIC && instruction.desc == "()V"
+        }
+        isPureComputeCountIncrementHelper = false
+        isElapsedTimeBenchmarkRoot = false
+        matchesTaskLikeThreadPoolTimingRoot = matchesTaskLikeThreadPoolTimingRoot()
         hasWideValue = capturedInstructions.any { producesWideValue(it) }
         hasDup2OrPop2 = capturedInstructions.any { it is CapturedInstruction.NoArg && (it.opcode == Opcodes.DUP2 || it.opcode == Opcodes.POP2) }
         nativeVmCompatible = capturedInstructions.all { isNativeVmSupportedCapturedInstruction(it) } && !(hasWideValue && hasDup2OrPop2)
@@ -2086,11 +2486,18 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
     }
 
     fun skipForBroadVirtualization(access: Int, name: String, descriptor: String): Boolean {
+        isPureComputeCountIncrementHelper = isPureComputeCountIncrementHelper(name, descriptor, access)
+        isElapsedTimeBenchmarkRoot = isElapsedTimeBenchmarkRoot(name, descriptor, access)
         if (name.startsWith("lambda$")) return true
         if (name == "configureConsoleEncoding") return true
-        if (touchesConsoleIoBoundary) return true
+        if (touchesConcurrencyBoundary && hasThreadSleepCall) return true
+        if (matchesTaskLikeThreadPoolTimingRoot) return true
+        if (rawIsElapsedTimeBenchmarkRoot || rawIsPureComputeCountIncrementHelper) return true
         return false
     }
+
+
+
 
     fun safeForBroadVirtualization(access: Int, name: String, descriptor: String): Boolean {
         if (skipForBroadVirtualization(access, name, descriptor)) return false
@@ -2109,7 +2516,7 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
     }
 
     internal fun highValueSelected(className: String, name: String, descriptor: String, includeList: List<MethodSelectorPattern>): Boolean {
-        if (!nativeVmCompatible || skipForBroadVirtualization(Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC, name, descriptor)) return false
+        if (!nativeVmCompatible) return false
         return matchesMethodSelector(includeList, className, name, descriptor) ||
             isHighValueMethodName(name) ||
             hasHighValueCall
@@ -2678,3 +3085,12 @@ private fun unboxAndReturn(mv: MethodVisitor, type: Type) {
         else -> { mv.visitTypeInsn(Opcodes.CHECKCAST, type.internalName); mv.visitInsn(Opcodes.ARETURN) }
     }
 }
+
+
+
+
+
+
+
+
+

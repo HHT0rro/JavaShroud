@@ -54,13 +54,32 @@ class MethodVirtualizationThresholdTest {
 
     private fun decodedVbc4ResourceFlags(entries: List<JarEntryData>, context: Vbc4BuildContext): List<Int> =
         withVbc4BuildContext(context) {
-            entries
+            val decodedByName = entries
                 .filter { it.isVmResourceName() }
-                .mapNotNull { RuntimeResourceCodec.decode(it.bytes) }
-                .filter(::isRawVbc4Resource)
-                .map { readU2At(it, VBC4_FLAGS_OFFSET_FOR_TEST) }
+                .mapNotNull { entry -> RuntimeResourceCodec.decode(entry.bytes)?.let { entry.name to it } }
+                .toMap()
+            val rawResources = decodedByName.values.filter(::isRawVbc4Resource)
+            val slicedResources = decodedByName.values.mapNotNull { bytes -> reassembleSlicedVbc4(bytes, decodedByName) }
+            (rawResources + slicedResources).map { readU2At(it, VBC4_FLAGS_OFFSET_FOR_TEST) }
         }
 
+    private fun reassembleSlicedVbc4(manifestBytes: ByteArray, decodedByName: Map<String, ByteArray>): ByteArray? {
+        val lines = runCatching { manifestBytes.decodeToString().trim().lines() }.getOrNull() ?: return null
+        val header = lines.firstOrNull()?.split('|') ?: return null
+        if (header.size < 4 || header[0] != "VBC4S" || header[1] != "1") return null
+        val totalSize = header[2].toIntOrNull() ?: return null
+        val out = ByteArray(totalSize)
+        for (line in lines.drop(1)) {
+            val parts = line.split('|')
+            if (parts.size < 5) return null
+            val offset = parts[1].toIntOrNull() ?: return null
+            val length = parts[2].toIntOrNull() ?: return null
+            val shard = decodedByName[parts[4]] ?: return null
+            if (shard.size != length || offset < 0 || offset + length > out.size) return null
+            shard.copyInto(out, offset)
+        }
+        return out.takeIf(::isRawVbc4Resource)
+    }
 
     private fun isRawVbc4Resource(bytes: ByteArray): Boolean =
         bytes.size > VBC4_FLAGS_OFFSET_FOR_TEST + 1 &&
@@ -485,7 +504,7 @@ class MethodVirtualizationThresholdTest {
     fun method_virtualization_uses_independent_csprng_for_method_keys() {
         val source = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/MethodVirtualizationTransforms.kt"))
         val nativeKernelSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeKernelTransforms.kt"))
-        assertTrue(source.contains("method-virtualization-key-stream-v1"), "Method key material must use the per-build VBC4 context-derived key stream, not the user-seeded structural RNG")
+        assertTrue(source.contains("method-virtualization-key-stream-v1"), "Method key material must use a CSPRNG stream personalized by VBC4 context, not the user-seeded structural RNG")
         assertTrue(source.contains("methodKeySeed(keyRandom)"), "Per-method VM seeds must come from keyRandom")
         assertTrue(!source.lines().any { it.contains("= methodKeySeed(random)") }, "Per-method VM seeds must not be reproducible from the user-visible seed")
         assertTrue(!source.contains("xor className.hashCode()") && !source.contains("xor methodName.hashCode()"), "Method seeds must not be derived from known class or method names")
@@ -498,21 +517,35 @@ class MethodVirtualizationThresholdTest {
     @Test
     fun same_user_seed_does_not_reproduce_vm_resource_ciphertexts() {
         val artifact = artifactFor(simpleClassBytes(), "example/VmThreshold")
-        val first = applyMethodVirtualization(
-            artifact = artifact,
-            ruleMatches = ruleMatchesFor("example/VmThreshold"),
-            params = mapOf("maxInstructions" to 100, "seed" to 42, "__nativeOnlyInterpreter" to true),
-        )
-        val second = applyMethodVirtualization(
-            artifact = artifact,
-            ruleMatches = ruleMatchesFor("example/VmThreshold"),
-            params = mapOf("maxInstructions" to 100, "seed" to 42, "__nativeOnlyInterpreter" to true),
-        )
+        val context = defaultVbc4BuildContext()
+        val params = mapOf("maxInstructions" to 100, "seed" to 42, "__nativeOnlyInterpreter" to true)
+        val first = withVbc4BuildContext(context) {
+            applyMethodVirtualization(
+                artifact = artifact,
+                ruleMatches = ruleMatchesFor("example/VmThreshold"),
+                params = params,
+            )
+        }
+        val second = withVbc4BuildContext(context) {
+            applyMethodVirtualization(
+                artifact = artifact,
+                ruleMatches = ruleMatchesFor("example/VmThreshold"),
+                params = params,
+            )
+        }
 
-        val firstResources = first.artifact.jarEntries.filter { it.isVmResourceName() }.map { it.bytes.toList() }
-        val secondResources = second.artifact.jarEntries.filter { it.isVmResourceName() }.map { it.bytes.toList() }
+        val firstEntries = first.artifact.jarEntries.filter { it.isVmResourceName() }
+        val secondEntries = second.artifact.jarEntries.filter { it.isVmResourceName() }
+        val firstResources = firstEntries.map { it.bytes.toList() }
+        val secondResources = secondEntries.map { it.bytes.toList() }
+        val firstNames = firstEntries.map { it.name }
+        val secondNames = secondEntries.map { it.name }
         assertTrue(firstResources.isNotEmpty() && secondResources.isNotEmpty(), "Native VM virtualization must emit resources")
-        assertTrue(firstResources != secondResources, "Same user seed must not reproduce per-method VM resource ciphertexts")
+        assertEquals(first.transformedMemberCount, second.transformedMemberCount, "Randomization must not change the selected method count")
+        assertTrue(
+            firstNames != secondNames || firstResources != secondResources,
+            "Same artifact, rules, params, seed, and VBC4 context must not reproduce VM resource paths or ciphertexts",
+        )
     }
 
     @Test
@@ -621,7 +654,7 @@ class MethodVirtualizationThresholdTest {
             val preloadEntry = requireNotNull(preloadEntries[manifestPath]) { "Manifest must be listed in VM preload index" }
             meshMaterials += manifestMeshMaterial(preloadEntry, lines)
             val assembled = ByteArray(totalSize)
-            assertTrue(shardCount in 2..4, "VMBC must be distributed across 2-4 shard resources")
+            assertTrue(shardCount in 2..6, "VMBC must be distributed across a CSPRNG-selected non-empty shard set")
             val shardLines = lines.drop(1)
             val rowIndices = shardLines.map { it.split('|')[0].toInt() }
             assertEquals(shardCount, shardLines.size, "Manifest must enumerate every shard")
@@ -857,6 +890,57 @@ class MethodVirtualizationThresholdTest {
             "Reflection count checks mixed with console output must be virtualized under strict all-compatible mode instead of leaking plaintext branch logic.",
         )
     }
+
+    @Test
+    fun all_compatible_skips_elapsed_time_benchmark_loops_under_broad_rules() {
+        val artifact = artifactFor(
+            classBytes = elapsedTimeBenchmarkClassBytes(),
+            internalName = "example/BenchCalc",
+            methodSummaries = listOf(
+                MemberSummary(MemberKind.METHOD, "runAll", "()V", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
+            ),
+        )
+
+        val result = applyMethodVirtualization(
+            artifact = artifact,
+            ruleMatches = ruleMatchesFor("example/BenchCalc"),
+            params = mapOf("maxInstructions" to 100, "seed" to 42, "methodSelection" to "all-compatible", "strictVirtualization" to true, "maxBroadVirtualizedMethods" to 0),
+        )
+
+        val classBytes = result.artifact.classArtifactIndex.getValue("example/BenchCalc").bytes
+        val selectedMethods = listOf(
+            "runAll" to "()V",
+            "call" to "(I)V",
+            "touch" to "()V",
+        ).filter { (methodName, methodDescriptor) -> methodCallsVmDispatcher(classBytes, methodName, methodDescriptor) }
+        assertTrue(!methodCallsVmDispatcher(classBytes, "runAll", "()V"), "Elapsed-time benchmark loop should remain direct bytecode under broad all-compatible selection")
+        assertTrue(!methodCallsVmDispatcher(classBytes, "call", "(I)V"), "Recursive elapsed-time benchmark helper inside the measured loop should remain direct bytecode as well. selected=$selectedMethods transformed=${result.transformedMemberCount}")
+        assertTrue(!methodCallsVmDispatcher(classBytes, "touch", "()V"), "Elapsed-time benchmark helper invoked inside the measured loop should remain direct bytecode as well. selected=$selectedMethods transformed=${result.transformedMemberCount}")
+        assertTrue(result.transformedMemberCount <= 2, "Broad all-compatible selection must keep the measured loop and recursive counter helper out of the VM path even if unrelated helpers remain eligible. selected=$selectedMethods transformed=${result.transformedMemberCount}")
+    }
+
+    @Test
+    fun all_compatible_skips_real_task_like_thread_pool_timing_root() {
+        val artifact = artifactFor(
+            classBytes = realTaskLikeThreadPoolClassBytes(),
+            internalName = "example/TaskLike",
+            methodSummaries = listOf(
+                MemberSummary(MemberKind.METHOD, "run", "()V", Opcodes.ACC_PUBLIC),
+            ),
+        )
+
+        val result = applyMethodVirtualization(
+            artifact = artifact,
+            ruleMatches = ruleMatchesFor("example/TaskLike"),
+            params = mapOf("maxInstructions" to 400, "seed" to 42, "methodSelection" to "all-compatible", "strictVirtualization" to true, "maxBroadVirtualizedMethods" to 0),
+        )
+
+        val classBytes = result.artifact.classArtifactIndex.getValue("example/TaskLike").bytes
+        assertEquals(0, result.transformedMemberCount, "Task-like thread-pool timing root should be excluded from broad all-compatible virtualization")
+        assertTrue(!methodCallsVmDispatcher(classBytes, "run", "()V"), "Task-like thread-pool timing root should remain direct bytecode under broad all-compatible selection")
+    }
+
+
     @Test
     fun fixed_handler_morphing_emits_dispatcher_morph_block() {
         val artifact = artifactFor(simpleClassBytes(), "example/VmThreshold")
@@ -890,6 +974,317 @@ class MethodVirtualizationThresholdTest {
         value.visitInsn(Opcodes.IRETURN)
         value.visitMaxs(2, 0)
         value.visitEnd()
+        writer.visitEnd()
+        return writer.toByteArray()
+    }
+
+    private fun elapsedTimeBenchmarkClassBytes(): ByteArray {
+        val writer = ClassWriter(0)
+        writer.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "example/BenchCalc", null, "java/lang/Object", null)
+
+        writer.visitField(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "count", "I", null, null).visitEnd()
+
+        val init = writer.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
+        init.visitCode()
+        init.visitVarInsn(Opcodes.ALOAD, 0)
+        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+        init.visitInsn(Opcodes.RETURN)
+        init.visitMaxs(1, 1)
+        init.visitEnd()
+
+        val call = writer.visitMethod(Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC, "call", "(I)V", null, null)
+        call.visitCode()
+        val recurse = Label()
+        val done = Label()
+        call.visitVarInsn(Opcodes.ILOAD, 0)
+        call.visitJumpInsn(Opcodes.IFNE, recurse)
+        call.visitFieldInsn(Opcodes.GETSTATIC, "example/BenchCalc", "count", "I")
+        call.visitInsn(Opcodes.ICONST_1)
+        call.visitInsn(Opcodes.IADD)
+        call.visitFieldInsn(Opcodes.PUTSTATIC, "example/BenchCalc", "count", "I")
+        call.visitJumpInsn(Opcodes.GOTO, done)
+        call.visitLabel(recurse)
+        call.visitVarInsn(Opcodes.ILOAD, 0)
+        call.visitInsn(Opcodes.ICONST_1)
+        call.visitInsn(Opcodes.ISUB)
+        call.visitMethodInsn(Opcodes.INVOKESTATIC, "example/BenchCalc", "call", "(I)V", false)
+        call.visitLabel(done)
+        call.visitInsn(Opcodes.RETURN)
+        call.visitMaxs(2, 1)
+        call.visitEnd()
+
+        val runAdd = writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "runAdd", "()V", null, null)
+        runAdd.visitCode()
+        runAdd.visitInsn(Opcodes.DCONST_0)
+        runAdd.visitVarInsn(Opcodes.DSTORE, 0)
+        val addLoop = Label()
+        val addDone = Label()
+        runAdd.visitLabel(addLoop)
+        runAdd.visitVarInsn(Opcodes.DLOAD, 0)
+        runAdd.visitLdcInsn(100.1)
+        runAdd.visitInsn(Opcodes.DCMPG)
+        runAdd.visitJumpInsn(Opcodes.IFGE, addDone)
+        runAdd.visitVarInsn(Opcodes.DLOAD, 0)
+        runAdd.visitLdcInsn(0.99)
+        runAdd.visitInsn(Opcodes.DADD)
+        runAdd.visitVarInsn(Opcodes.DSTORE, 0)
+        runAdd.visitJumpInsn(Opcodes.GOTO, addLoop)
+        runAdd.visitLabel(addDone)
+        runAdd.visitFieldInsn(Opcodes.GETSTATIC, "example/BenchCalc", "count", "I")
+        runAdd.visitInsn(Opcodes.ICONST_1)
+        runAdd.visitInsn(Opcodes.IADD)
+        runAdd.visitFieldInsn(Opcodes.PUTSTATIC, "example/BenchCalc", "count", "I")
+        runAdd.visitInsn(Opcodes.RETURN)
+        runAdd.visitMaxs(4, 2)
+        runAdd.visitEnd()
+
+        val runStr = writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "runStr", "()V", null, null)
+        runStr.visitCode()
+        runStr.visitLdcInsn("")
+        runStr.visitVarInsn(Opcodes.ASTORE, 0)
+        val strLoop = Label()
+        val strDone = Label()
+        runStr.visitLabel(strLoop)
+        runStr.visitVarInsn(Opcodes.ALOAD, 0)
+        runStr.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "length", "()I", false)
+        runStr.visitIntInsn(Opcodes.BIPUSH, 101)
+        runStr.visitJumpInsn(Opcodes.IF_ICMPGE, strDone)
+        runStr.visitTypeInsn(Opcodes.NEW, "java/lang/StringBuilder")
+        runStr.visitInsn(Opcodes.DUP)
+        runStr.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/StringBuilder", "<init>", "()V", false)
+        runStr.visitVarInsn(Opcodes.ALOAD, 0)
+        runStr.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false)
+        runStr.visitLdcInsn("ax")
+        runStr.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false)
+        runStr.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/StringBuilder", "toString", "()Ljava/lang/String;", false)
+        runStr.visitVarInsn(Opcodes.ASTORE, 0)
+        runStr.visitJumpInsn(Opcodes.GOTO, strLoop)
+        runStr.visitLabel(strDone)
+        runStr.visitFieldInsn(Opcodes.GETSTATIC, "example/BenchCalc", "count", "I")
+        runStr.visitInsn(Opcodes.ICONST_1)
+        runStr.visitInsn(Opcodes.IADD)
+        runStr.visitFieldInsn(Opcodes.PUTSTATIC, "example/BenchCalc", "count", "I")
+        runStr.visitInsn(Opcodes.RETURN)
+        runStr.visitMaxs(3, 1)
+        runStr.visitEnd()
+
+        val touch = writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "touch", "()V", null, null)
+        touch.visitCode()
+        touch.visitFieldInsn(Opcodes.GETSTATIC, "example/BenchCalc", "count", "I")
+        touch.visitInsn(Opcodes.ICONST_1)
+        touch.visitInsn(Opcodes.IADD)
+        touch.visitFieldInsn(Opcodes.PUTSTATIC, "example/BenchCalc", "count", "I")
+        touch.visitInsn(Opcodes.RETURN)
+        touch.visitMaxs(2, 0)
+        touch.visitEnd()
+
+        val runAll = writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "runAll", "()V", null, null)
+        runAll.visitCode()
+        runAll.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "currentTimeMillis", "()J", false)
+        runAll.visitVarInsn(Opcodes.LSTORE, 0)
+        runAll.visitInsn(Opcodes.ICONST_0)
+        runAll.visitVarInsn(Opcodes.ISTORE, 2)
+        val loopStart = Label()
+        val loopExit = Label()
+        runAll.visitLabel(loopStart)
+        runAll.visitVarInsn(Opcodes.ILOAD, 2)
+        runAll.visitIntInsn(Opcodes.SIPUSH, 1000)
+        runAll.visitJumpInsn(Opcodes.IF_ICMPGE, loopExit)
+        runAll.visitIntInsn(Opcodes.BIPUSH, 100)
+        runAll.visitMethodInsn(Opcodes.INVOKESTATIC, "example/BenchCalc", "call", "(I)V", false)
+        runAll.visitMethodInsn(Opcodes.INVOKESTATIC, "example/BenchCalc", "runAdd", "()V", false)
+        runAll.visitMethodInsn(Opcodes.INVOKESTATIC, "example/BenchCalc", "runStr", "()V", false)
+        runAll.visitMethodInsn(Opcodes.INVOKESTATIC, "example/BenchCalc", "touch", "()V", false)
+        runAll.visitIincInsn(2, 1)
+        runAll.visitJumpInsn(Opcodes.GOTO, loopStart)
+        runAll.visitLabel(loopExit)
+        runAll.visitFieldInsn(Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;")
+        runAll.visitTypeInsn(Opcodes.NEW, "java/lang/StringBuilder")
+        runAll.visitInsn(Opcodes.DUP)
+        runAll.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/StringBuilder", "<init>", "()V", false)
+        runAll.visitLdcInsn("Calc: ")
+        runAll.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false)
+        runAll.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "currentTimeMillis", "()J", false)
+        runAll.visitVarInsn(Opcodes.LLOAD, 0)
+        runAll.visitInsn(Opcodes.LSUB)
+        runAll.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/StringBuilder", "append", "(J)Ljava/lang/StringBuilder;", false)
+        runAll.visitLdcInsn("ms")
+        runAll.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false)
+        runAll.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/StringBuilder", "toString", "()Ljava/lang/String;", false)
+        runAll.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false)
+        val ok = Label()
+        runAll.visitFieldInsn(Opcodes.GETSTATIC, "example/BenchCalc", "count", "I")
+        runAll.visitIntInsn(Opcodes.SIPUSH, 4000)
+        runAll.visitJumpInsn(Opcodes.IF_ICMPEQ, ok)
+        runAll.visitTypeInsn(Opcodes.NEW, "java/lang/RuntimeException")
+        runAll.visitInsn(Opcodes.DUP)
+        runAll.visitLdcInsn("[ERROR]: Errors occurred in calc!")
+        runAll.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/RuntimeException", "<init>", "(Ljava/lang/String;)V", false)
+        runAll.visitInsn(Opcodes.ATHROW)
+        runAll.visitLabel(ok)
+        runAll.visitInsn(Opcodes.RETURN)
+        runAll.visitMaxs(5, 3)
+        runAll.visitEnd()
+
+        val clinit = writer.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null)
+        clinit.visitCode()
+        clinit.visitInsn(Opcodes.ICONST_0)
+        clinit.visitFieldInsn(Opcodes.PUTSTATIC, "example/BenchCalc", "count", "I")
+        clinit.visitInsn(Opcodes.RETURN)
+        clinit.visitMaxs(1, 0)
+        clinit.visitEnd()
+
+        writer.visitEnd()
+        return writer.toByteArray()
+    }
+
+    private fun realTaskLikeThreadPoolClassBytes(): ByteArray {
+        val writer = ClassWriter(0)
+        writer.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "example/TaskLike", null, "java/lang/Object", null)
+        val init = writer.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
+        init.visitCode()
+        init.visitVarInsn(Opcodes.ALOAD, 0)
+        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+        init.visitInsn(Opcodes.RETURN)
+        init.visitMaxs(1, 1)
+        init.visitEnd()
+
+        writer.visitField(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "score", "I", null, null).visitEnd()
+        writer.visitField(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "tpe", "Ljava/util/concurrent/ThreadPoolExecutor;", null, null).visitEnd()
+
+        val lambda = writer.visitMethod(Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC, "lambda${'$'}run${'$'}0", "(I)V", null, null)
+        lambda.visitCode()
+        lambda.visitFieldInsn(Opcodes.GETSTATIC, "example/TaskLike", "score", "I")
+        lambda.visitVarInsn(Opcodes.ILOAD, 0)
+        lambda.visitInsn(Opcodes.IADD)
+        lambda.visitFieldInsn(Opcodes.PUTSTATIC, "example/TaskLike", "score", "I")
+        lambda.visitInsn(Opcodes.RETURN)
+        lambda.visitMaxs(2, 1)
+        lambda.visitEnd()
+
+        val run = writer.visitMethod(Opcodes.ACC_PUBLIC, "run", "()V", null, arrayOf("java/lang/Exception"))
+        run.visitCode()
+        val sleep1Start = Label()
+        val sleep1End = Label()
+        val sleep1Handler = Label()
+        val sleep2Start = Label()
+        val sleep2End = Label()
+        val sleep2Handler = Label()
+        val rejectStart = Label()
+        val rejectEnd = Label()
+        val rejectHandler = Label()
+        val fail = Label()
+        val done = Label()
+        run.visitTryCatchBlock(sleep1Start, sleep1End, sleep1Handler, "java/lang/InterruptedException")
+        run.visitTryCatchBlock(sleep2Start, sleep2End, sleep2Handler, "java/lang/InterruptedException")
+        run.visitTryCatchBlock(rejectStart, rejectEnd, rejectHandler, "java/util/concurrent/RejectedExecutionException")
+
+        run.visitLabel(rejectStart)
+        run.visitFieldInsn(Opcodes.GETSTATIC, "example/TaskLike", "tpe", "Ljava/util/concurrent/ThreadPoolExecutor;")
+        run.visitInsn(Opcodes.ICONST_3)
+        run.visitInvokeDynamicInsn(
+            "run",
+            "(I)Ljava/lang/Runnable;",
+            org.objectweb.asm.Handle(
+                Opcodes.H_INVOKESTATIC,
+                "java/lang/invoke/LambdaMetafactory",
+                "metafactory",
+                "(Ljava/lang/invoke/MethodHandles${'$'}Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;",
+                false,
+            ),
+            Type.getMethodType("()V"),
+            org.objectweb.asm.Handle(Opcodes.H_INVOKESTATIC, "example/TaskLike", "lambda${'$'}run${'$'}0", "(I)V", false),
+            Type.getMethodType("()V"),
+        )
+        run.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/concurrent/ThreadPoolExecutor", "submit", "(Ljava/lang/Runnable;)Ljava/util/concurrent/Future;", false)
+        run.visitInsn(Opcodes.POP)
+
+        run.visitLabel(sleep1Start)
+        run.visitLdcInsn(50L)
+        run.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Thread", "sleep", "(J)V", false)
+        run.visitLabel(sleep1End)
+        val afterSleep1 = Label()
+        run.visitJumpInsn(Opcodes.GOTO, afterSleep1)
+        run.visitLabel(sleep1Handler)
+        run.visitVarInsn(Opcodes.ASTORE, 1)
+        run.visitLabel(afterSleep1)
+
+        run.visitFieldInsn(Opcodes.GETSTATIC, "example/TaskLike", "tpe", "Ljava/util/concurrent/ThreadPoolExecutor;")
+        run.visitInsn(Opcodes.ICONST_2)
+        run.visitInvokeDynamicInsn(
+            "run",
+            "(I)Ljava/lang/Runnable;",
+            org.objectweb.asm.Handle(
+                Opcodes.H_INVOKESTATIC,
+                "java/lang/invoke/LambdaMetafactory",
+                "metafactory",
+                "(Ljava/lang/invoke/MethodHandles${'$'}Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;",
+                false,
+            ),
+            Type.getMethodType("()V"),
+            org.objectweb.asm.Handle(Opcodes.H_INVOKESTATIC, "example/TaskLike", "lambda${'$'}run${'$'}0", "(I)V", false),
+            Type.getMethodType("()V"),
+        )
+        run.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/concurrent/ThreadPoolExecutor", "submit", "(Ljava/lang/Runnable;)Ljava/util/concurrent/Future;", false)
+        run.visitInsn(Opcodes.POP)
+
+        run.visitLabel(sleep2Start)
+        run.visitLdcInsn(50L)
+        run.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Thread", "sleep", "(J)V", false)
+        run.visitLabel(sleep2End)
+        val afterSleep2 = Label()
+        run.visitJumpInsn(Opcodes.GOTO, afterSleep2)
+        run.visitLabel(sleep2Handler)
+        run.visitVarInsn(Opcodes.ASTORE, 1)
+        run.visitLabel(afterSleep2)
+
+        run.visitFieldInsn(Opcodes.GETSTATIC, "example/TaskLike", "tpe", "Ljava/util/concurrent/ThreadPoolExecutor;")
+        run.visitIntInsn(Opcodes.BIPUSH, 100)
+        run.visitInvokeDynamicInsn(
+            "run",
+            "(I)Ljava/lang/Runnable;",
+            org.objectweb.asm.Handle(
+                Opcodes.H_INVOKESTATIC,
+                "java/lang/invoke/LambdaMetafactory",
+                "metafactory",
+                "(Ljava/lang/invoke/MethodHandles${'$'}Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;",
+                false,
+            ),
+            Type.getMethodType("()V"),
+            org.objectweb.asm.Handle(Opcodes.H_INVOKESTATIC, "example/TaskLike", "lambda${'$'}run${'$'}0", "(I)V", false),
+            Type.getMethodType("()V"),
+        )
+        run.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/concurrent/ThreadPoolExecutor", "submit", "(Ljava/lang/Runnable;)Ljava/util/concurrent/Future;", false)
+        run.visitInsn(Opcodes.POP)
+        run.visitLabel(rejectEnd)
+        val afterReject = Label()
+        run.visitJumpInsn(Opcodes.GOTO, afterReject)
+        run.visitLabel(rejectHandler)
+        run.visitVarInsn(Opcodes.ASTORE, 1)
+        run.visitFieldInsn(Opcodes.GETSTATIC, "example/TaskLike", "score", "I")
+        run.visitIntInsn(Opcodes.BIPUSH, 10)
+        run.visitInsn(Opcodes.IADD)
+        run.visitFieldInsn(Opcodes.PUTSTATIC, "example/TaskLike", "score", "I")
+        run.visitLabel(afterReject)
+
+        run.visitLdcInsn(300L)
+        run.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Thread", "sleep", "(J)V", false)
+        run.visitFieldInsn(Opcodes.GETSTATIC, "example/TaskLike", "score", "I")
+        run.visitIntInsn(Opcodes.BIPUSH, 30)
+        run.visitJumpInsn(Opcodes.IF_ICMPNE, fail)
+        run.visitFieldInsn(Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;")
+        run.visitLdcInsn("PASS")
+        run.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false)
+        run.visitJumpInsn(Opcodes.GOTO, done)
+        run.visitLabel(fail)
+        run.visitFieldInsn(Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;")
+        run.visitLdcInsn("FAIL")
+        run.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false)
+        run.visitLabel(done)
+        run.visitInsn(Opcodes.RETURN)
+        run.visitMaxs(6, 2)
+        run.visitEnd()
+
         writer.visitEnd()
         return writer.toByteArray()
     }
@@ -1626,3 +2021,6 @@ class MethodVirtualizationThresholdTest {
         ),
     )
 }
+
+
+

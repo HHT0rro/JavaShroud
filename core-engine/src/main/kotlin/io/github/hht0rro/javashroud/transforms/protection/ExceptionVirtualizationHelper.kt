@@ -15,7 +15,9 @@ object ExceptionVirtualizationHelper {
  * Custom exception used for control flow virtualization.
  * This exception is used as a message passing mechanism.
  */
-class FlowControlException : RuntimeException("Flow control") {
+class FlowControlException(val state: Int) : RuntimeException("Flow control") {
+    constructor() : this(0)
+
     companion object {
         private const val serialVersionUID = 1L
     }

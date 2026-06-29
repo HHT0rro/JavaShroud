@@ -78,7 +78,7 @@ class VmInterpreterExecutionTest {
     }
 
     @Test
-    fun vbc4_multi_block_layout_is_seed_diversified_but_deterministic_per_seed() {
+    fun vbc4_multi_block_layout_uses_entropy_even_for_same_seed() {
         fun emit(seed: Int): Int {
             val serializer = VmBytecodeSerializer(buildSeed = seed, buildContext = fixedVbc4Context())
             serializer.visitCode()
@@ -92,12 +92,8 @@ class VmInterpreterExecutionTest {
             serializer.visitEnd()
             return readU2(serializer.serialize(), 44)
         }
-        // Deterministic for a fixed seed.
-        assertEquals(emit(0x13572468), emit(0x13572468), "Block layout must be deterministic for a fixed seed")
-        // Diversified across seeds: at least one differs from the first across a sample.
-        val baseline = emit(0x00000001)
-        val sample = (2..40).map { emit(it) }
-        assertTrue(sample.any { it != baseline }, "Block count must vary across build seeds")
+        val repeated = (1..16).map { emit(0x13572468) }
+        assertTrue(repeated.toSet().size > 1, "Block layout must vary even for a repeated fixed seed")
     }
 
     @Test
@@ -122,14 +118,17 @@ class VmInterpreterExecutionTest {
         assertTrue(ids.size > 1, "Fixture must produce enough blocks to make storage order randomization observable")
         assertEquals(ids.sorted(), ids.indices.toList(), "Physical block index must contain each logical block id exactly once")
         assertTrue(ids != ids.indices.toList(), "Multi-block storage order must be shuffled independently of logical execution order")
-        assertEquals(ids, blockIds(0x2468_1357), "Storage order must remain deterministic for a fixed seed")
-        assertTrue((2..40).map { blockIds(it) }.any { it != ids }, "Physical block order must vary across seeds")
+        assertTrue((1..40).map { blockIds(0x2468_1357) }.any { it != ids }, "Physical block order must vary across repeated same-seed builds")
     }
 
     @Test
     fun vbc4_multi_block_index_carries_masked_dispatch_chain() {
         val seed = 0x2468_1357
-        val serializer = VmBytecodeSerializer(buildSeed = seed, buildContext = fixedVbc4Context())
+        val serializer = VmBytecodeSerializer(
+            buildSeed = seed,
+            buildContext = fixedVbc4Context(),
+            structureEntropy = fixedStructureEntropy(),
+        )
         serializer.visitCode()
         repeat(96) { i ->
             serializer.visitLdcInsn(i)
@@ -848,6 +847,8 @@ class VmInterpreterExecutionTest {
         nativeSeed = 0x2468_1357L,
         jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (index * 31 + 9).toByte() },
     )
+
+    private fun fixedStructureEntropy(): ByteArray = ByteArray(32) { index -> (index * 23 + 11).toByte() }
 
     private fun readU2(bytes: ByteArray, offset: Int): Int =
         ((bytes[offset].toInt() and 0xFF) shl 8) or (bytes[offset + 1].toInt() and 0xFF)

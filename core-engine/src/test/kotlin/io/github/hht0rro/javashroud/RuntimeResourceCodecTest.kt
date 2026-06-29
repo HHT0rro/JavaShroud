@@ -39,12 +39,36 @@ class RuntimeResourceCodecTest {
         )
 
         assertTrue(!encoded.startsWithAscii("VBC4"), "encoded resource must not expose raw VBC4 magic before sealing")
-        assertEquals(5, encoded[4].toInt() and 0xFF, "runtime resource envelope must use the current VBC4-only authenticated version")
-        assertEquals(0, encoded[7].toInt() and 0x80, "native-exe build path must not require Java zstd-jni to encode runtime resources")
+        assertEquals(6, encoded[4].toInt() and 0xFF, "runtime resource envelope must use the opaque VBC4-only authenticated version")
+        assertEquals(96, readLe16ForTest(encoded, 21), "public v2 header must expose only encrypted metadata length")
+        assertEquals(32, readLe16ForTest(encoded, 23), "public v2 header must expose only MAC length")
         assertContentEquals(plain, RuntimeResourceCodec.decode(encoded), "encoded payload must round-trip")
 
         encoded[encoded.lastIndex] = (encoded.last().toInt() xor 0x55).toByte()
         assertEquals(null, RuntimeResourceCodec.decode(encoded), "tampered payload must fail MAC/hash validation")
+    }
+
+    @Test
+    fun runtime_resource_codec_same_inputs_emit_different_authenticated_envelopes() = withVbc4BuildContext(fixedRuntimeCodecContext()) {
+        val plain = "same-runtime-resource-plaintext".toByteArray(Charsets.UTF_8)
+        val first = RuntimeResourceCodec.encode(
+            bytes = plain,
+            kind = RuntimeResourceKind.VmBytecode,
+            seed = 0x12345678,
+            variantId = 7,
+            layerCount = 3,
+        )
+        val second = RuntimeResourceCodec.encode(
+            bytes = plain,
+            kind = RuntimeResourceKind.VmBytecode,
+            seed = 0x12345678,
+            variantId = 7,
+            layerCount = 3,
+        )
+
+        assertTrue(!first.contentEquals(second), "same runtime resource inputs must receive fresh envelope nonce/material")
+        assertContentEquals(plain, RuntimeResourceCodec.decode(first), "first randomized envelope must round-trip")
+        assertContentEquals(plain, RuntimeResourceCodec.decode(second), "second randomized envelope must round-trip")
     }
 
     @Test
@@ -85,7 +109,7 @@ class RuntimeResourceCodecTest {
             layerCount = 4,
         )
 
-        for (offset in listOf(5, 8, 24, 40, encoded.size - 33)) {
+        for (offset in listOf(5, 21, 25, 121, encoded.size - 33)) {
             val tampered = encoded.copyOf()
             tampered[offset] = (tampered[offset].toInt() xor 0x21).toByte()
             assertEquals(null, RuntimeResourceCodec.decode(tampered), "tampering offset $offset must fail closed")
@@ -139,8 +163,8 @@ class RuntimeResourceCodecTest {
             compress = false,
         )
 
-        assertEquals(0, requested[7].toInt() and 0x80, "requested compression must not force Java zstd-jni on the native engine path")
-        assertEquals(0, forced[7].toInt() and 0x80, "disabled compression must remain uncompressed without Java zstd-jni")
+        assertEquals(96, readLe16ForTest(requested, 21), "requested compression must not add a public compression flag")
+        assertEquals(96, readLe16ForTest(forced, 21), "disabled compression must not add a public compression flag")
         assertContentEquals(highEntropy, RuntimeResourceCodec.decode(requested), "runtime payload must round-trip")
         assertContentEquals(highEntropy, RuntimeResourceCodec.decode(forced), "forced uncompressed payload must round-trip")
     }
@@ -159,7 +183,7 @@ class RuntimeResourceCodecTest {
             val third = withVbc4BuildContext(fixedRuntimeCodecContext()) { NativeKernelPacker.pack(inputDir, thirdOutputDir, seed = 99) }
 
             assertEquals(1, first.resources.size, "one native resource should be packed")
-            assertEquals(first.indexBytes.toList(), second.indexBytes.toList(), "same seed should produce stable index bytes")
+            assertEquals(first.indexBytes.toList(), second.indexBytes.toList(), "bootstrap native packer index remains deterministic for Java-readable loading metadata")
             assertEquals(first.resources.single().bytes.toList(), second.resources.single().bytes.toList(), "same seed should produce stable resource bytes")
             assertNotEquals(first.indexBytes.toList(), third.indexBytes.toList(), "different seed should diversify bootstrap index bytes")
             assertNotEquals(first.resources.single().path, third.resources.single().path, "different seed should diversify neutral resource paths")
@@ -192,4 +216,7 @@ class RuntimeResourceCodecTest {
         if (size < prefix.size) return false
         return prefix.indices.all { index -> this[index] == prefix[index] }
     }
+
+    private fun readLe16ForTest(bytes: ByteArray, offset: Int): Int =
+        (bytes[offset].toInt() and 0xFF) or ((bytes[offset + 1].toInt() and 0xFF) shl 8)
 }
