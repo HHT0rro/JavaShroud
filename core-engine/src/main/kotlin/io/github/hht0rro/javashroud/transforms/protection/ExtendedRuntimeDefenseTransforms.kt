@@ -17,6 +17,7 @@ import org.objectweb.asm.tree.FieldInsnNode
 import org.objectweb.asm.tree.InsnNode
 import org.objectweb.asm.tree.InvokeDynamicInsnNode
 import org.objectweb.asm.tree.JumpInsnNode
+import org.objectweb.asm.tree.LdcInsnNode
 import org.objectweb.asm.tree.LabelNode
 import org.objectweb.asm.tree.LookupSwitchInsnNode
 import org.objectweb.asm.tree.MethodInsnNode
@@ -48,13 +49,15 @@ fun applyExceptionSemanticVirtualization(
     val random = seed?.let { SecureRandom(it.toString().toByteArray()) } ?: SecureRandom()
 
     val flowControlExceptionOwner = sealedRuntimeHelperInternalName("io/github/hht0rro/javashroud/transforms/protection/FlowControlException")
-    val flowStateFieldName = "state"
+    val flowStateAccessorName = sealedRuntimeHelperMethodName("io/github/hht0rro/javashroud/transforms/protection/FlowControlException", "getState", "()I")
+    val reflectionObservedClasses = reflectionObservedClassNames(artifact)
 
     var classCount = 0
     var methodCount = 0
 
     val updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
         if (!matchedClassNames.contains(classArtifact.summary.internalName)) return@map classArtifact
+        if (classArtifact.summary.internalName in reflectionObservedClasses) return@map classArtifact
 
         val classNode = ClassNode()
         try {
@@ -71,7 +74,7 @@ fun applyExceptionSemanticVirtualization(
             val handlerName = "\$jsv\$" + method.name.replace('<', '_').replace('>', '_') + "\$" + Integer.toHexString(random.nextInt())
             val handler = cloneAsExceptionVirtualizationHandler(method, handlerName)
             classNode.methods.add(handler)
-            rewriteAsExceptionStateDispatcher(classNode.name, method, handlerName, flowControlExceptionOwner, flowStateFieldName)
+            rewriteAsExceptionStateDispatcher(classNode.name, method, handlerName, flowControlExceptionOwner, flowStateAccessorName)
             classModified = true
             methodCount++
         }
@@ -103,13 +106,51 @@ private fun shouldExceptionVirtualize(classNode: ClassNode, method: MethodNode, 
             is JumpInsnNode, is TableSwitchInsnNode, is LookupSwitchInsnNode, is InvokeDynamicInsnNode -> return false
             is LabelNode -> continue
             is InsnNode -> if (insn.opcode == Opcodes.MONITORENTER || insn.opcode == Opcodes.MONITOREXIT) return false
-            is MethodInsnNode -> if (insn.owner.startsWith("io/github/hht0rro/javashroud/transforms/protection/")) return false
+            is MethodInsnNode -> {
+                if (insn.owner.startsWith("io/github/hht0rro/javashroud/transforms/protection/")) return false
+                if (isStackTraceIntrospectionCall(insn)) return false
+            }
             is FieldInsnNode -> if (insn.owner == classNode.name && insn.name.startsWith("\$jsv\$")) return false
         }
         if (insn.opcode == Opcodes.JSR || insn.opcode == Opcodes.RET) return false
     }
     return true
 }
+
+private fun reflectionObservedClassNames(artifact: BytecodeArtifact): Set<String> {
+    val observed = linkedSetOf<String>()
+    for (classArtifact in artifact.classArtifacts) {
+        val classNode = ClassNode()
+        try {
+            ClassReader(classArtifact.bytes).accept(classNode, ClassReader.SKIP_FRAMES)
+        } catch (_: Exception) {
+            continue
+        }
+        for (method in classNode.methods) {
+            var previousClassLiteral: String? = null
+            for (insn in method.instructions?.toArray().orEmpty()) {
+                if (insn is LdcInsnNode && insn.cst is Type) {
+                    val type = insn.cst as Type
+                    previousClassLiteral = type.takeIf { it.sort == Type.OBJECT }?.internalName
+                    continue
+                }
+                if (insn is MethodInsnNode && insn.owner == "java/lang/Class" && isMemberEnumerationCall(insn.name, insn.desc)) {
+                    previousClassLiteral?.let(observed::add)
+                }
+                if (insn.opcode >= 0) previousClassLiteral = null
+            }
+        }
+    }
+    return observed
+}
+
+private fun isMemberEnumerationCall(name: String, descriptor: String): Boolean =
+    descriptor.startsWith("()[Ljava/lang/reflect/") &&
+        name in setOf("getMethods", "getDeclaredMethods", "getFields", "getDeclaredFields")
+
+private fun isStackTraceIntrospectionCall(insn: MethodInsnNode): Boolean =
+    (insn.owner == "java/lang/Throwable" && insn.name == "getStackTrace") ||
+        insn.owner == "java/lang/StackTraceElement"
 
 private fun cloneAsExceptionVirtualizationHandler(method: MethodNode, handlerName: String): MethodNode {
     val handlerAccess = (method.access or Opcodes.ACC_PRIVATE or Opcodes.ACC_SYNTHETIC) and Opcodes.ACC_PUBLIC.inv() and Opcodes.ACC_PROTECTED.inv()
@@ -123,7 +164,7 @@ private fun rewriteAsExceptionStateDispatcher(
     method: MethodNode,
     handlerName: String,
     flowControlExceptionOwner: String,
-    flowStateFieldName: String,
+    flowStateAccessorName: String,
 ) {
     val isStatic = method.access and Opcodes.ACC_STATIC != 0
     val argumentTypes = Type.getArgumentTypes(method.desc)
@@ -159,7 +200,7 @@ private fun rewriteAsExceptionStateDispatcher(
     mv.visitLabel(handler)
     mv.visitVarInsn(Opcodes.ASTORE, exSlot)
     mv.visitVarInsn(Opcodes.ALOAD, exSlot)
-    mv.visitFieldInsn(Opcodes.GETFIELD, flowControlExceptionOwner, flowStateFieldName, "I")
+    mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, flowControlExceptionOwner, flowStateAccessorName, "()I", false)
     mv.visitVarInsn(Opcodes.ISTORE, stateSlot)
     mv.visitJumpInsn(Opcodes.GOTO, loop)
     mv.visitTryCatchBlock(tryStart, tryEnd, handler, flowControlExceptionOwner)

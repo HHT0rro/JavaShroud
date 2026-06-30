@@ -68,6 +68,34 @@ class CallsiteRotationProtectionSafetyTest {
         assertEquals(1, instructions.filterIsInstance<MethodInsnNode>().count { it.owner == "java/lang/Class" && it.name == "getDeclaredField" })
     }
 
+    @Test
+    fun callsite_rotation_keeps_class_loading_and_resource_boundary_calls_visible() {
+        val internalName = "sample/LoaderBoundaryHost"
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = internalName,
+                    bytes = buildLoaderBoundaryHost(internalName),
+                    methodSummaries = listOf(MemberSummary(MemberKind.METHOD, "load", "(Ljava/lang/ClassLoader;)Ljava/lang/Class;", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC)),
+                ),
+            ),
+        )
+
+        val result = applyCallsiteRotationProtection(
+            artifact = artifact,
+            ruleMatches = listOf(ruleMatchFor(internalName)),
+            params = mapOf("seed" to 1),
+        )
+
+        val node = ClassNode()
+        ClassReader(result.artifact.classArtifactIndex[internalName]!!.bytes).accept(node, ClassReader.SKIP_FRAMES)
+        val instructions = node.methods.single { it.name == "load" }.instructions.toArray()
+        assertEquals(0, instructions.filterIsInstance<InvokeDynamicInsnNode>().count(), "Class loading/resource boundary calls must stay as MethodInsnNode for later loader-sensitive passes")
+        assertEquals(1, instructions.filterIsInstance<MethodInsnNode>().count { it.owner == "java/lang/Class" && it.name == "getResourceAsStream" })
+        assertEquals(1, instructions.filterIsInstance<MethodInsnNode>().count { it.owner == "java/lang/Class" && it.name == "getClassLoader" })
+        assertEquals(1, instructions.filterIsInstance<MethodInsnNode>().count { it.owner == "java/lang/ClassLoader" && it.name == "findClass" })
+    }
+
     private fun buildReflectionSurfaceHost(internalName: String): ByteArray {
         val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
         cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", null)
@@ -94,6 +122,34 @@ class CallsiteRotationProtectionSafetyTest {
         method.visitTypeInsn(Opcodes.CHECKCAST, "[Ljava/lang/String;")
         method.visitInsn(Opcodes.ARETURN)
         method.visitMaxs(1, 1)
+        method.visitEnd()
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    private fun buildLoaderBoundaryHost(internalName: String): ByteArray {
+        val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", null)
+        val method = cw.visitMethod(
+            Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC,
+            "load",
+            "(Ljava/lang/ClassLoader;)Ljava/lang/Class;",
+            null,
+            arrayOf("java/lang/ClassNotFoundException"),
+        )
+        method.visitCode()
+        method.visitLdcInsn(org.objectweb.asm.Type.getObjectType(internalName))
+        method.visitLdcInsn("fixture.bin")
+        method.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Class", "getResourceAsStream", "(Ljava/lang/String;)Ljava/io/InputStream;", false)
+        method.visitInsn(Opcodes.POP)
+        method.visitLdcInsn(org.objectweb.asm.Type.getObjectType(internalName))
+        method.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Class", "getClassLoader", "()Ljava/lang/ClassLoader;", false)
+        method.visitInsn(Opcodes.POP)
+        method.visitVarInsn(Opcodes.ALOAD, 0)
+        method.visitLdcInsn("sample.Target")
+        method.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/ClassLoader", "findClass", "(Ljava/lang/String;)Ljava/lang/Class;", false)
+        method.visitInsn(Opcodes.ARETURN)
+        method.visitMaxs(2, 1)
         method.visitEnd()
         cw.visitEnd()
         return cw.toByteArray()

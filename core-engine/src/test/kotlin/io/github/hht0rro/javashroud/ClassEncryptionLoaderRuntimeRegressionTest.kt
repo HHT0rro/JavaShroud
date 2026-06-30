@@ -78,6 +78,41 @@ class ClassEncryptionLoaderRuntimeRegressionTest {
     }
 
     @Test
+    fun jni_runtime_resource_metadata_helper_is_deployed_and_sealed_with_class_encryption_loader() {
+        val deploymentSource = Files.readString(sourcePath("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/EmbeddedHelperDeployment.kt"))
+        val sealingSource = Files.readString(sourcePath("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/RuntimeArtifactSealing.kt"))
+        val helperOuter = "JniMicrokernelHelper"
+        val helperNested = "RuntimeResourceMetadata"
+
+        assertTrue(
+            deploymentSource.contains(helperOuter) && deploymentSource.contains(helperNested),
+            "RuntimeResourceMetadata must be injected with JniMicrokernelHelper so sealed runtime resources can decode",
+        )
+        assertTrue(
+            sealingSource.contains(helperOuter) && sealingSource.contains(helperNested),
+            "RuntimeResourceMetadata must be relocated with JniMicrokernelHelper during runtime sealing",
+        )
+    }
+
+    @Test
+    fun runtime_sealing_rebinds_class_encryption_metadata_to_sealed_resource_names() {
+        val sealingSource = Files.readString(sourcePath("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/RuntimeArtifactSealing.kt"))
+
+        assertTrue(
+            sealingSource.contains("rewriteClassEncryptionMetadataForResource"),
+            "Class-encryption manifest sealing must rewrite metadata when resource paths are sealed",
+        )
+        assertTrue(
+            sealingSource.contains("classEncryptionRewriteAad(className, sealedResourcePath, strategy, keyMode)"),
+            "Sealed class-encryption metadata must hash the sealed resource path, not the legacy __jse path",
+        )
+        assertTrue(
+            sealingSource.contains("classEncryptionRewriteAad(keyInfo.className, sealedResourceName, keyInfo.strategy, keyInfo.keyMode)"),
+            "Encrypted class bytes must be re-encrypted with AAD bound to the sealed resource path",
+        )
+    }
+
+    @Test
     fun class_encryption_loader_skips_entrypoint_closure_and_stateful_instance_classes() {
         val inputJar = buildDiverseFixtureJar(Files.createTempFile("javashroud-cel-boundary-input", ".jar"))
         val outputJar = inputJar.resolveSibling("javashroud-cel-boundary-output.jar")

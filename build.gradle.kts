@@ -16,8 +16,12 @@ val dex2jarVersion = "2.4.28"
 val cafed00dVersion = "2.1.4"
 val jlinkerVersion = "1.0.7"
 val aircompressorVersion = "0.27"
+val javaShroudVersion = "0.9.0-dev"
+val javaShroudVbcVersion = "4.53"
 
 allprojects {
+    version = javaShroudVersion
+
     repositories {
         mavenCentral()
         maven("https://jitpack.io")
@@ -37,6 +41,8 @@ allprojects {
         set("cafed00dVersion", cafed00dVersion)
         set("jlinkerVersion", jlinkerVersion)
         set("aircompressorVersion", aircompressorVersion)
+        set("javaShroudVersion", javaShroudVersion)
+        set("javaShroudVbcVersion", javaShroudVbcVersion)
     }
 }
 

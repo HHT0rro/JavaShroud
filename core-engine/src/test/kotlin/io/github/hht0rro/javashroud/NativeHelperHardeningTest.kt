@@ -13,6 +13,7 @@ import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.analysis.TargetSelector
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.protection.applyAntiDumpProtection
+import io.github.hht0rro.javashroud.transforms.protection.applyAntiInstrumentation
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -128,6 +129,62 @@ class NativeHelperHardeningTest {
     }
 
     @Test
+    fun anti_instrumentation_distributed_probes_skip_runtime_hot_paths_without_disabling_clinit_guard() {
+        val internalName = "sample/RuntimeGuardHotPaths"
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = internalName,
+                    bytes = buildRuntimeGuardHotPathHost(internalName),
+                    methodSummaries = listOf(
+                        MemberSummary(MemberKind.METHOD, "hotStringLoop", "()V", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
+                        MemberSummary(MemberKind.METHOD, "recursive", "()V", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
+                        MemberSummary(MemberKind.METHOD, "elapsed", "()J", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
+                        MemberSummary(MemberKind.METHOD, "cold", "()V", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
+                    ),
+                ),
+            ),
+        )
+
+        val result = applyAntiInstrumentation(
+            artifact = artifact,
+            ruleMatches = listOf(RuleMatch(
+                rule = RuleSpec(target = internalName, action = "anti-instrumentation"),
+                selector = TargetSelector(classPattern = internalName, memberPattern = null, memberDescriptorPattern = null),
+                matchedClassNames = listOf(internalName),
+                matchedMembers = emptyList(),
+            )),
+            params = mapOf("detectionLevel" to "aggressive", "response" to "switch-path", "seed" to 10),
+        )
+
+        val callsByMethod = linkedMapOf<String, MutableList<String>>()
+        ClassReader(result.artifact.classArtifactIndex.getValue(internalName).bytes).accept(object : ClassVisitor(Opcodes.ASM9) {
+            override fun visitMethod(
+                access: Int,
+                name: String,
+                descriptor: String,
+                signature: String?,
+                exceptions: Array<String>?,
+            ): MethodVisitor {
+                val calls = callsByMethod.getOrPut(name + descriptor) { mutableListOf() }
+                return object : MethodVisitor(Opcodes.ASM9) {
+                    override fun visitMethodInsn(opcode: Int, owner: String, methodName: String, methodDescriptor: String, isInterface: Boolean) {
+                        if (owner == "io/github/hht0rro/javashroud/transforms/protection/AntiInstrumentationHelper") calls += methodName
+                    }
+                }
+            }
+        }, ClassReader.SKIP_FRAMES)
+
+        assertTrue("checkInstrumentation" in callsByMethod.getValue("<clinit>()V"), "Class-load anti-instrumentation guard must remain enabled")
+        assertTrue("checkInstrumentationExSafe" in callsByMethod.getValue("cold()V"), "Distributed integrity probe should still be injected into eligible cold methods")
+        for (method in listOf("hotStringLoop()V", "recursive()V", "elapsed()J")) {
+            assertFalse("checkInstrumentationExSafe" in callsByMethod.getValue(method), "Distributed probe must not be injected into hot or JVM timing boundary method $method")
+        }
+        val transformSource = Files.readString(sourcePath("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeKernelTransforms.kt"))
+        assertTrue(transformSource.contains("isJniLoaderTimingSensitiveCall(instruction)"), "Distributed probe hot-path filter must also cover Thread/concurrent boundaries")
+    }
+
+    @Test
     fun anti_dump_runtime_initialization_is_class_aware() {
         val transformSource = Files.readString(sourcePath("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeKernelTransforms.kt"))
         val helperSource = Files.readString(sourcePath("src/main/java/io/github/hht0rro/javashroud/transforms/protection/AntiDumpRuntimeHelper.java"))
@@ -206,6 +263,63 @@ class NativeHelperHardeningTest {
         method.visitInsn(Opcodes.ARETURN)
         method.visitMaxs(2, 2)
         method.visitEnd()
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    private fun buildRuntimeGuardHotPathHost(internalName: String): ByteArray {
+        val cw = ClassWriter(ClassWriter.COMPUTE_FRAMES or ClassWriter.COMPUTE_MAXS)
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", null)
+        cw.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null).apply {
+            visitCode()
+            visitInsn(Opcodes.RETURN)
+            visitMaxs(0, 0)
+            visitEnd()
+        }
+        cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "hotStringLoop", "()V", null, null).apply {
+            val loop = org.objectweb.asm.Label()
+            val end = org.objectweb.asm.Label()
+            visitCode()
+            visitInsn(Opcodes.ICONST_0)
+            visitVarInsn(Opcodes.ISTORE, 0)
+            visitLabel(loop)
+            visitTypeInsn(Opcodes.NEW, "java/lang/StringBuilder")
+            visitInsn(Opcodes.DUP)
+            visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/StringBuilder", "<init>", "()V", false)
+            visitLdcInsn("x")
+            visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false)
+            visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/StringBuilder", "toString", "()Ljava/lang/String;", false)
+            visitInsn(Opcodes.POP)
+            visitIincInsn(0, 1)
+            visitVarInsn(Opcodes.ILOAD, 0)
+            visitIntInsn(Opcodes.BIPUSH, 3)
+            visitJumpInsn(Opcodes.IF_ICMPGE, end)
+            visitJumpInsn(Opcodes.GOTO, loop)
+            visitLabel(end)
+            visitInsn(Opcodes.RETURN)
+            visitMaxs(0, 0)
+            visitEnd()
+        }
+        cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "recursive", "()V", null, null).apply {
+            visitCode()
+            visitMethodInsn(Opcodes.INVOKESTATIC, internalName, "recursive", "()V", false)
+            visitInsn(Opcodes.RETURN)
+            visitMaxs(0, 0)
+            visitEnd()
+        }
+        cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "elapsed", "()J", null, null).apply {
+            visitCode()
+            visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "currentTimeMillis", "()J", false)
+            visitInsn(Opcodes.LRETURN)
+            visitMaxs(0, 0)
+            visitEnd()
+        }
+        cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "cold", "()V", null, null).apply {
+            visitCode()
+            visitInsn(Opcodes.RETURN)
+            visitMaxs(0, 0)
+            visitEnd()
+        }
         cw.visitEnd()
         return cw.toByteArray()
     }

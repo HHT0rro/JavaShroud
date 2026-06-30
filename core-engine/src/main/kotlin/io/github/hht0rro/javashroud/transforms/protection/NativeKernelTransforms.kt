@@ -57,6 +57,7 @@ fun applyAntiInstrumentation(
             .asSequence()
             .filter { it.name != "<clinit>" && it.name != "<init>" }
             .filter { it.access and (Opcodes.ACC_ABSTRACT or Opcodes.ACC_NATIVE) == 0 }
+            .filterNot { isRuntimeGuardProbeHotPath(classNode.name, it) }
             .map { it.name + it.desc }
             .toMutableList()
 
@@ -173,6 +174,33 @@ private fun isJniLoaderTimingSensitiveCall(call: MethodInsnNode): Boolean {
     if (call.owner == "java/lang/Thread" && call.name == "sleep") return true
     if (call.owner.startsWith("java/util/concurrent/")) return true
     return false
+}
+
+private fun isRuntimeGuardProbeHotPath(owner: String, method: org.objectweb.asm.tree.MethodNode): Boolean {
+    val instructions = method.instructions?.toArray().orEmpty()
+    var hasBackwardJump = false
+    var hasSelfCall = false
+    var hasElapsedTimeProbe = false
+    var hasThreadOrConcurrentBoundary = false
+    var hasStringBuilderLoop = false
+    val labelIndex = instructions.mapIndexedNotNull { index, instruction ->
+        (instruction as? org.objectweb.asm.tree.LabelNode)?.let { it to index }
+    }.toMap()
+    for ((index, instruction) in instructions.withIndex()) {
+        when (instruction) {
+            is org.objectweb.asm.tree.JumpInsnNode -> {
+                val targetIndex = labelIndex[instruction.label]
+                if (targetIndex != null && targetIndex <= index) hasBackwardJump = true
+            }
+            is MethodInsnNode -> {
+                if (instruction.owner == owner && instruction.name == method.name && instruction.desc == method.desc) hasSelfCall = true
+                if (instruction.owner == "java/lang/System" && instruction.name == "currentTimeMillis" && instruction.desc == "()J") hasElapsedTimeProbe = true
+                if (isJniLoaderTimingSensitiveCall(instruction)) hasThreadOrConcurrentBoundary = true
+                if (instruction.owner == "java/lang/StringBuilder" || instruction.owner == "java/lang/String") hasStringBuilderLoop = true
+            }
+        }
+    }
+    return hasThreadOrConcurrentBoundary || hasElapsedTimeProbe || hasSelfCall || (hasBackwardJump && hasStringBuilderLoop)
 }
 
 /**

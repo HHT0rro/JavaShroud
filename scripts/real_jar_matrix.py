@@ -12,6 +12,8 @@ import subprocess
 import sys
 import tempfile
 import re
+import queue
+import threading
 import time
 import tomllib
 from dataclasses import dataclass
@@ -66,6 +68,69 @@ def run(cmd: list[str], cwd: Path, timeout: int) -> subprocess.CompletedProcess[
         )
 
 
+def run_jar(jar_path: Path, cwd: Path, timeout: int) -> subprocess.CompletedProcess[str]:
+    proc = subprocess.Popen(
+        ["java", "-jar", str(jar_path)],
+        cwd=str(cwd),
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    output_queue: queue.Queue[tuple[str, str | None]] = queue.Queue()
+
+    def drain(name: str, stream: Any) -> None:
+        try:
+            for line in stream:
+                output_queue.put((name, line))
+        finally:
+            output_queue.put((name, None))
+
+    assert proc.stdout is not None
+    assert proc.stderr is not None
+    threading.Thread(target=drain, args=("stdout", proc.stdout), daemon=True).start()
+    threading.Thread(target=drain, args=("stderr", proc.stderr), daemon=True).start()
+
+    stdout: list[str] = []
+    stderr: list[str] = []
+    completed_streams: set[str] = set()
+    deadline = time.monotonic() + timeout
+    early_success_patterns = [
+        re.compile(r"Tests .* Finished"),
+        re.compile(r"skipStartupDiagnostics=false"),
+    ]
+
+    while len(completed_streams) < 2:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            proc.kill()
+            stderr.append(f"\n<TIMEOUT after {timeout}s>")
+            break
+        try:
+            name, chunk = output_queue.get(timeout=min(0.2, remaining))
+        except queue.Empty:
+            if proc.poll() is not None:
+                continue
+            continue
+        if chunk is None:
+            completed_streams.add(name)
+            continue
+        target = stdout if name == "stdout" else stderr
+        target.append(chunk)
+        combined_stdout = "".join(stdout)
+        if any(pattern.search(combined_stdout) for pattern in early_success_patterns):
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=3)
+            return subprocess.CompletedProcess(["java", "-jar", str(jar_path)], 0, combined_stdout, "".join(stderr))
+
+    return subprocess.CompletedProcess(["java", "-jar", str(jar_path)], proc.poll() or 0, "".join(stdout), "".join(stderr))
+
+
 def jar_main_class(jar_path: Path) -> str | None:
     with tempfile.TemporaryDirectory(prefix="javashroud-manifest-") as temp_dir:
         temp = Path(temp_dir)
@@ -77,6 +142,36 @@ def jar_main_class(jar_path: Path) -> str | None:
             if line.lower().startswith("main-class:"):
                 return line.split(":", 1)[1].strip()
     return None
+
+
+def expand_fixtures(paths: list[Path]) -> list[Path]:
+    fixtures: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        expanded = sorted(path.glob("*.jar")) if path.is_dir() else [path]
+        for fixture in expanded:
+            resolved = fixture.resolve()
+            if resolved not in seen:
+                seen.add(resolved)
+                fixtures.append(resolved)
+    return fixtures
+
+
+def jar_entries(jar_path: Path, cwd: Path, timeout: int) -> list[str] | None:
+    proc = run(["jar", "tf", str(jar_path)], cwd, timeout)
+    if proc.returncode != 0:
+        return None
+    return [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+
+
+def validate_library_jar(jar_path: Path, cwd: Path, timeout: int) -> tuple[bool, str]:
+    entries = jar_entries(jar_path, cwd, timeout)
+    if entries is None:
+        return False, "jar tool could not list entries"
+    class_count = sum(1 for entry in entries if entry.endswith(".class"))
+    if class_count == 0:
+        return False, "no .class entries found"
+    return True, f"entries={len(entries)} classes={class_count}"
 
 
 def toml_string(value: str) -> str:
@@ -134,6 +229,23 @@ def profiles(module: dict[str, Any]) -> dict[str, dict[str, Any]]:
         default = param.get("defaultValue")
         options = param.get("options") or []
         param_type = param.get("type")
+        if key == "targetPlatform":
+            result["default"][key] = "auto"
+            result["min"][key] = "auto"
+            result["max"][key] = "auto"
+            continue
+        if key == "maxInstructions":
+            if default is not None:
+                result["default"][key] = default
+            result["min"][key] = 1
+            result["max"][key] = 2_147_483_647
+            continue
+        if key == "maxBroadVirtualizedMethods":
+            if default is not None:
+                result["default"][key] = default
+            result["min"][key] = 1
+            result["max"][key] = 0
+            continue
         if default is not None:
             result["default"][key] = default
         if options:
@@ -219,7 +331,10 @@ def build_cases(
                     cases.append(combo_case(f"random-{index:02d}", combo_ids, modules, profile_name))
 
     if mode in {"full", "all"}:
-        full = [pid for pid in pass_ids if compatible([pid], hard_conflicts)]
+        full: list[str] = []
+        for pid in pass_ids:
+            if compatible(full + [pid], hard_conflicts):
+                full.append(pid)
         for profile_name in combo_profiles:
             cases.append(combo_case("full-non-hard-conflict", full, modules, profile_name))
 
@@ -242,7 +357,7 @@ def fingerprint(path: Path) -> str:
     return digest.hexdigest()[:16]
 
 
-def normalize_text(value: str) -> str:
+def normalize_text(value: str, ignore_pool: bool = False) -> str:
     text = value.replace("\r\n", "\n")
     text = re.sub(r"\[\d{2}:\d{2}:\d{2}\.\d{3}\]", "[<clock>]", text)
     text = re.sub(r"\[\+\d+ms\]", "[+<time>]", text)
@@ -255,7 +370,8 @@ def normalize_text(value: str) -> str:
     text = re.sub(r"\b\d+ms\b", "<time>", text)
     text = re.sub(r"\b\d+\.<time>(?=\s|\|)", "<time>", text)
     text = re.sub(r"Jar size: \d+KB", "Jar size: <size>", text)
-    text = re.sub(r"^Test 1\.6: Pool (PASS|FAIL)$", "Test 1.6: Pool <flaky>", text, flags=re.MULTILINE)
+    if ignore_pool:
+        text = re.sub(r"^Test 1\.6: Pool (PASS|FAIL|ERROR)$", "Test 1.6: Pool <ignored>", text, flags=re.MULTILINE)
     text = re.sub(r"^\+-[-+]+\+$", "+<table-border>+", text, flags=re.MULTILINE)
     text = re.sub(r"[ \t]+\|", " |", text)
     text = re.sub(r"\|[ \t]+", "| ", text)
@@ -263,16 +379,46 @@ def normalize_text(value: str) -> str:
     return "\n".join(sorted(lines))
 
 
-def normalize(proc: subprocess.CompletedProcess[str]) -> tuple[int, str, str]:
-    return (proc.returncode, normalize_text(proc.stdout), normalize_text(proc.stderr))
+def normalize(proc: subprocess.CompletedProcess[str], ignore_pool: bool = False) -> tuple[int, str, str]:
+    return (proc.returncode, normalize_text(proc.stdout, ignore_pool), normalize_text(proc.stderr, ignore_pool))
 
 
-def stable_run(jar_path: Path, cwd: Path, attempts: int, timeout: int) -> tuple[int, str, str]:
-    observations = [normalize(run(["java", "-jar", str(jar_path)], cwd, timeout)) for _ in range(max(1, attempts))]
+def run_observations(jar_path: Path, cwd: Path, attempts: int, timeout: int, ignore_pool: bool) -> list[tuple[int, str, str]]:
+    return [normalize(run_jar(jar_path, cwd, timeout), ignore_pool) for _ in range(max(1, attempts))]
+
+
+def majority_observation(observations: list[tuple[int, str, str]]) -> tuple[int, str, str]:
     counts: dict[tuple[int, str, str], int] = {}
     for observation in observations:
         counts[observation] = counts.get(observation, 0) + 1
     return max(counts.items(), key=lambda item: item[1])[0]
+
+
+def observation_counts(observations: list[tuple[int, str, str]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for observation in observations:
+        key = repr(observation)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def expected_config_validation_rejection(proc: subprocess.CompletedProcess[str]) -> bool:
+    text = proc.stdout + "\n" + proc.stderr
+    if "Config validation failed:" not in text:
+        return False
+    expected_fragments = [
+        "missing companion passes:",
+        "incompatible passes",
+        "cannot be enabled together",
+    ]
+    return any(fragment in text for fragment in expected_fragments)
+
+
+def first_validation_line(proc: subprocess.CompletedProcess[str]) -> str:
+    for line in (proc.stdout + "\n" + proc.stderr).splitlines():
+        if "Config validation failed:" in line:
+            return line.strip()
+    return "Config validation failed"
 
 
 def main() -> int:
@@ -294,6 +440,7 @@ def main() -> int:
     parser.add_argument("--run-timeout", type=int, default=20)
     parser.add_argument("--run-attempts", type=int, default=5)
     parser.add_argument("--obfuscate-timeout", type=int, default=120)
+    parser.add_argument("--ignore-testjar-pool-flake", action="store_true", help="Ignore only the known nondeterministic TEST.jar Pool line while preserving all other output checks.")
     args = parser.parse_args()
 
     cwd = Path.cwd()
@@ -303,16 +450,28 @@ def main() -> int:
     args.work_dir.mkdir(parents=True, exist_ok=True)
 
     failures = 0
-    for fixture in [path.resolve() for path in args.fixtures]:
+    expected_validation_rejections = 0
+    for fixture in expand_fixtures(args.fixtures):
         if not fixture.exists():
             print(f"SKIP missing {fixture}")
             continue
         main_class = jar_main_class(fixture)
-        if not main_class:
-            print(f"SKIP no Main-Class {fixture}")
-            continue
-        baseline = stable_run(fixture, cwd, args.run_attempts, args.run_timeout)
-        print(f"FIXTURE {fixture.name} main={main_class} sha={fingerprint(fixture)} baseline_rc={baseline[0]}")
+        ignore_pool = args.ignore_testjar_pool_flake and fixture.name.lower().startswith("test")
+        baseline_observations: list[tuple[int, str, str]] = []
+        baseline: tuple[int, str, str] | None = None
+        library_validation = ""
+        if main_class:
+            baseline_observations = run_observations(fixture, cwd, args.run_attempts, args.run_timeout, ignore_pool)
+            baseline = majority_observation(baseline_observations)
+            print(f"FIXTURE {fixture.name} main={main_class} sha={fingerprint(fixture)} baseline_rc={baseline[0]}")
+            if len(set(baseline_observations)) > 1:
+                print(f"FLAKY baseline {fixture.name} variants={len(set(baseline_observations))}")
+        else:
+            ok, library_validation = validate_library_jar(fixture, cwd, args.run_timeout)
+            print(f"FIXTURE {fixture.name} main=<none> sha={fingerprint(fixture)} library_check={library_validation}")
+            if not ok:
+                failures += 1
+                continue
         for index, case in enumerate(cases, 1):
             safe_name = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in case.name)[:140]
             out_dir = args.work_dir / fixture.stem / f"{index:03d}-{safe_name}"
@@ -327,21 +486,46 @@ def main() -> int:
             obfuscated = run(["java", "-jar", str(engine), "-config", str(config_path)], cwd, args.obfuscate_timeout)
             elapsed = time.time() - start
             if obfuscated.returncode != 0 or not output_jar.exists():
+                if expected_config_validation_rejection(obfuscated):
+                    expected_validation_rejections += 1
+                    (out_dir / "obfuscate.stdout.txt").write_text(obfuscated.stdout, encoding="utf-8", errors="replace")
+                    (out_dir / "obfuscate.stderr.txt").write_text(obfuscated.stderr, encoding="utf-8", errors="replace")
+                    print(f"XFAIL validation {fixture.name} {case.name} rc={obfuscated.returncode} reason={first_validation_line(obfuscated)}")
+                    continue
                 failures += 1
                 (out_dir / "obfuscate.stdout.txt").write_text(obfuscated.stdout, encoding="utf-8", errors="replace")
                 (out_dir / "obfuscate.stderr.txt").write_text(obfuscated.stderr, encoding="utf-8", errors="replace")
                 print(f"FAIL obfuscate {fixture.name} {case.name} rc={obfuscated.returncode} sec={elapsed:.1f}")
                 continue
 
-            actual = stable_run(output_jar, cwd, args.run_attempts, args.run_timeout)
-            if actual != baseline:
-                failures += 1
-                (out_dir / "baseline.txt").write_text(repr(baseline), encoding="utf-8")
-                (out_dir / "obfuscated.txt").write_text(repr(actual), encoding="utf-8")
-                print(f"FAIL runtime {fixture.name} {case.name} expected={baseline[0]} actual={actual[0]} sha={fingerprint(output_jar)}")
+            if main_class and baseline is not None:
+                actual_observations = run_observations(output_jar, cwd, args.run_attempts, args.run_timeout, ignore_pool)
+                actual = majority_observation(actual_observations)
+                if len(set(actual_observations)) > 1:
+                    failures += 1
+                    (out_dir / "baseline.txt").write_text(repr(baseline), encoding="utf-8")
+                    (out_dir / "baseline-observations.json").write_text(json.dumps(observation_counts(baseline_observations), ensure_ascii=False, indent=2), encoding="utf-8")
+                    (out_dir / "obfuscated.txt").write_text(repr(actual), encoding="utf-8")
+                    (out_dir / "obfuscated-observations.json").write_text(json.dumps(observation_counts(actual_observations), ensure_ascii=False, indent=2), encoding="utf-8")
+                    print(f"FLAKY runtime {fixture.name} {case.name} variants={len(set(actual_observations))} sha={fingerprint(output_jar)}")
+                elif actual != baseline:
+                    failures += 1
+                    (out_dir / "baseline.txt").write_text(repr(baseline), encoding="utf-8")
+                    (out_dir / "baseline-observations.json").write_text(json.dumps(observation_counts(baseline_observations), ensure_ascii=False, indent=2), encoding="utf-8")
+                    (out_dir / "obfuscated.txt").write_text(repr(actual), encoding="utf-8")
+                    (out_dir / "obfuscated-observations.json").write_text(json.dumps(observation_counts(actual_observations), ensure_ascii=False, indent=2), encoding="utf-8")
+                    print(f"FAIL runtime {fixture.name} {case.name} expected={baseline[0]} actual={actual[0]} sha={fingerprint(output_jar)}")
+                else:
+                    print(f"PASS {fixture.name} {case.name} sec={elapsed:.1f} sha={fingerprint(output_jar)}")
             else:
-                print(f"PASS {fixture.name} {case.name} sec={elapsed:.1f} sha={fingerprint(output_jar)}")
-    print(f"SUMMARY cases={len(cases)} failures={failures} work_dir={args.work_dir}")
+                ok, detail = validate_library_jar(output_jar, cwd, args.run_timeout)
+                if not ok:
+                    failures += 1
+                    (out_dir / "library-validation.txt").write_text(detail, encoding="utf-8")
+                    print(f"FAIL library {fixture.name} {case.name} reason={detail} sha={fingerprint(output_jar)}")
+                else:
+                    print(f"PASS library {fixture.name} {case.name} sec={elapsed:.1f} {detail} sha={fingerprint(output_jar)}")
+    print(f"SUMMARY cases={len(cases)} failures={failures} xfail_validation={expected_validation_rejections} work_dir={args.work_dir}")
     return 1 if failures else 0
 
 

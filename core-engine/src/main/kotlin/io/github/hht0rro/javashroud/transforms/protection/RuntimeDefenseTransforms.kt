@@ -59,6 +59,7 @@ fun applyCallsiteRotationProtection(
                 if (call.opcode != Opcodes.INVOKEVIRTUAL) continue
                 if (call.owner.startsWith("[")) continue
                 if (isReflectionSurfaceVirtualCall(call.owner, call.name)) continue
+                if (isClassLoadingBoundaryVirtualCall(call.owner, call.name)) continue
                 if (random.nextInt(100) >= 30) continue
                 val bsm = Handle(
                     Opcodes.H_INVOKESTATIC,
@@ -117,6 +118,26 @@ private val reflectionSurfaceVirtualMethodNames = setOf(
 
 private fun isReflectionSurfaceVirtualCall(owner: String, name: String): Boolean =
     owner == "java/lang/Class" && name in reflectionSurfaceVirtualMethodNames
+
+private fun isClassLoadingBoundaryVirtualCall(owner: String, name: String): Boolean {
+    if (owner == "java/lang/Class" && name in classResourceAndLoaderMethodNames) return true
+    if (owner == "java/lang/ClassLoader" && name in classLoaderBoundaryMethodNames) return true
+    return owner.endsWith("ClassLoader") && name in classLoaderBoundaryMethodNames
+}
+
+private val classResourceAndLoaderMethodNames = setOf(
+    "getClassLoader",
+    "getResource",
+    "getResourceAsStream",
+)
+
+private val classLoaderBoundaryMethodNames = setOf(
+    "defineClass",
+    "findClass",
+    "loadClass",
+    "getResource",
+    "getResourceAsStream",
+)
 
 /**
  * Environment Bound Keys transform.

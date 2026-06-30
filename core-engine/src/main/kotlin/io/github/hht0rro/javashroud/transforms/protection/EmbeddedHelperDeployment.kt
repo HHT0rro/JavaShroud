@@ -27,6 +27,7 @@ object EmbeddedHelperDeployment {
     private const val HELPER_RESOURCE_ROOT = "META-INF/javashroud-helpers"
     private val runtimeResourceDecodeHelpers = listOf(
         "$PKG/JniMicrokernelHelper",
+        "$PKG/JniMicrokernelHelper${"$"}RuntimeResourceMetadata",
         "$PKG/JniMicrokernelHelper${"$"}SealedNativeLibrary",
         "$PKG/JniMicrokernelHelper${"$"}TypeParseResult",
     )
@@ -74,6 +75,7 @@ object EmbeddedHelperDeployment {
             "$PKG/AntiDumpHelper" to { loadClasspathHelperByName("AntiDumpHelper") },
             "$PKG/AntiByteBuddyHelper" to { loadClasspathHelperByName("AntiByteBuddyHelper") },
             "$PKG/JniMicrokernelHelper" to { loadClasspathHelperByName("JniMicrokernelHelper") },
+            "$PKG/JniMicrokernelHelper${"$"}RuntimeResourceMetadata" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}RuntimeResourceMetadata") },
             "$PKG/JniMicrokernelHelper${"$"}SealedNativeLibrary" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}SealedNativeLibrary") },
             "$PKG/JniMicrokernelHelper${"$"}TypeParseResult" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}TypeParseResult") },
         )
@@ -530,10 +532,11 @@ object EmbeddedHelperDeployment {
 
     private fun generateFlowControlException(): ByteArray {
         val owner = "$PKG/FlowControlException"
+        val stateFieldName = sealedRuntimeHelperFieldName(owner, "state", "I")
         val cw = ClassWriter(ClassWriter.COMPUTE_FRAMES or ClassWriter.COMPUTE_MAXS)
         cw.visit(Opcodes.V11, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, owner, null, "java/lang/RuntimeException", null)
         cw.visitField(Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC or Opcodes.ACC_FINAL, "serialVersionUID", "J", null, 1L).visitEnd()
-        cw.visitField(Opcodes.ACC_PUBLIC or Opcodes.ACC_FINAL, "state", "I", null, null).visitEnd()
+        cw.visitField(Opcodes.ACC_PUBLIC or Opcodes.ACC_FINAL, stateFieldName, "I", null, null).visitEnd()
 
         val init0 = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
         init0.visitCode()
@@ -551,7 +554,7 @@ object EmbeddedHelperDeployment {
         init1.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/RuntimeException", "<init>", "(Ljava/lang/String;)V", false)
         init1.visitVarInsn(Opcodes.ALOAD, 0)
         init1.visitVarInsn(Opcodes.ILOAD, 1)
-        init1.visitFieldInsn(Opcodes.PUTFIELD, owner, "state", "I")
+        init1.visitFieldInsn(Opcodes.PUTFIELD, owner, stateFieldName, "I")
         init1.visitInsn(Opcodes.RETURN)
         init1.visitMaxs(2, 2)
         init1.visitEnd()
@@ -559,7 +562,7 @@ object EmbeddedHelperDeployment {
         val getter = cw.visitMethod(Opcodes.ACC_PUBLIC, "getState", "()I", null, null)
         getter.visitCode()
         getter.visitVarInsn(Opcodes.ALOAD, 0)
-        getter.visitFieldInsn(Opcodes.GETFIELD, owner, "state", "I")
+        getter.visitFieldInsn(Opcodes.GETFIELD, owner, stateFieldName, "I")
         getter.visitInsn(Opcodes.IRETURN)
         getter.visitMaxs(1, 1)
         getter.visitEnd()
