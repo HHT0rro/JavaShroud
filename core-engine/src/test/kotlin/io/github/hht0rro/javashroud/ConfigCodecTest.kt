@@ -87,6 +87,97 @@ class ConfigCodecTest {
         }
     }
 
+    @Test
+    fun parseConfig_parses_workbench_meta_toml() {
+        val tempDir = Files.createTempDirectory("javashroud-workbench-config-codec")
+        val inputJar = tempDir.resolve("input.jar")
+        val outputJar = tempDir.resolve("output.jar")
+        val configPath = tempDir.resolve("workbench.toml")
+        Files.writeString(inputJar, "fixture")
+        Files.writeString(configPath, """
+            [meta]
+            format = "javashroud-workbench"
+            version = 1
+            inputJarPath = "${formatTomlPath(inputJar)}"
+            outputJarPath = "${formatTomlPath(outputJar)}"
+            [[passes]]
+            id = "method-virtualization"
+            enabled = true
+
+            [passes.params]
+            methodSelection = "all-compatible"
+            strictVirtualization = true
+            maxInstructions = 99999999
+        """.trimIndent())
+
+        try {
+            val config = parseConfig(configPath)
+
+            assertEquals(formatTomlPath(inputJar), config.inputJarPath.replace('\\', '/'))
+            assertEquals(formatTomlPath(outputJar), config.outputJarPath.replace('\\', '/'))
+            assertTrue(config.allowOptInPasses)
+            assertEquals("method-virtualization", config.passes.single().id)
+            assertEquals("all-compatible", config.passes.single().params["methodSelection"]?.textValue())
+            assertTrue(config.passes.single().params["strictVirtualization"]?.booleanValue() == true)
+            assertEquals(99999999, config.passes.single().params["maxInstructions"]?.intValue())
+        } finally {
+            tempDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun parseConfig_parses_frontend_workbench_toml() {
+        val tempDir = Files.createTempDirectory("javashroud-frontend-workbench-config-codec")
+        val inputJar = tempDir.resolve("input.jar")
+        val outputJar = tempDir.resolve("output.jar")
+        val configPath = tempDir.resolve("workbench.toml")
+        Files.writeString(inputJar, "fixture")
+        Files.writeString(configPath, """
+            [meta]
+            format = "javashroud-workbench"
+            version = 1
+
+            [input]
+            inputJarPath = "${formatTomlPath(inputJar)}"
+            outputJarPath = "${formatTomlPath(outputJar)}"
+
+            [[passes]]
+            id = "method-virtualization"
+            enabled = true
+
+            [passes.params]
+            methodSelection = "all-compatible"
+            strictVirtualization = true
+            maxInstructions = 0
+            maxBroadVirtualizedMethods = 0
+
+            [[rules]]
+            target = "com/example/*"
+            action = "obfuscate"
+
+            [[rules]]
+            target = "com/example/internal/*"
+            action = "exclude"
+        """.trimIndent())
+
+        try {
+            val config = parseConfig(configPath)
+
+            assertEquals(formatTomlPath(inputJar), config.inputJarPath.replace('\\', '/'))
+            assertEquals(formatTomlPath(outputJar), config.outputJarPath.replace('\\', '/'))
+            assertTrue(config.allowOptInPasses)
+            assertEquals("method-virtualization", config.passes.single().id)
+            assertEquals("all-compatible", config.passes.single().params["methodSelection"]?.textValue())
+            assertEquals(2, config.ruleSet.rules.size)
+            assertEquals("com/example/*", config.ruleSet.rules[0].target)
+            assertEquals("obfuscate", config.ruleSet.rules[0].action)
+            assertEquals("com/example/internal/*", config.ruleSet.rules[1].target)
+            assertEquals("exclude", config.ruleSet.rules[1].action)
+        } finally {
+            tempDir.toFile().deleteRecursively()
+        }
+    }
+
     private fun formatTomlPath(path: Path): String = path.toAbsolutePath().normalize().toString().replace('\\', '/')
 
     @Test

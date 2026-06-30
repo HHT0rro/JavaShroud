@@ -9,10 +9,24 @@ fun requiredRootText(node: JsonNode, fieldName: String, configPath: Path): Strin
 }
 
 fun optionalRootBoolean(node: JsonNode, fieldName: String, configPath: Path): Boolean {
-    val valueNode = node.get(fieldName) ?: return false
+    return optionalNestedBoolean(node, fieldName, configPath, "root")
+}
+
+fun optionalNestedBoolean(node: JsonNode, fieldName: String, configPath: Path, parentPath: String): Boolean {
+    return optionalNestedBooleanOrDefault(node, fieldName, configPath, parentPath, default = false)
+}
+
+fun optionalNestedBooleanOrDefault(
+    node: JsonNode,
+    fieldName: String,
+    configPath: Path,
+    parentPath: String,
+    default: Boolean,
+): Boolean {
+    val valueNode = node.get(fieldName) ?: return default
     if (!valueNode.isBoolean) {
         throw IllegalArgumentException(
-            "Config validation failed: root.$fieldName must be a boolean, path=${configPath.absolutePathString()}"
+            "Config validation failed: $parentPath.$fieldName must be a boolean, path=${configPath.absolutePathString()}"
         )
     }
     return valueNode.booleanValue()

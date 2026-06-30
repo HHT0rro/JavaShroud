@@ -12,6 +12,7 @@ import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.model.config.RuleSpec
+import io.github.hht0rro.javashroud.bytecode.indirectMethodCalls
 import io.github.hht0rro.javashroud.transforms.protection.ObfuscatedIdentifierUtil
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceCodec
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
@@ -32,6 +33,7 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class MethodVirtualizationThresholdTest {
@@ -441,6 +443,27 @@ class MethodVirtualizationThresholdTest {
 
         assertTrue(result.transformedMemberCount > 0, "Huge Long threshold should not overflow into a tiny limit")
         assertTrue(result.artifact.jarEntries.any { it.isVmResourceName() }, "Huge threshold should still emit VM resources")
+    }
+
+    @Test
+    fun method_virtualization_treats_zero_instruction_threshold_as_unbounded() {
+        val artifact = artifactFor(selectionClassBytes(), "example/VmSelection")
+
+        assertFailsWith<IllegalArgumentException> {
+            applyMethodVirtualization(
+                artifact = artifact,
+                ruleMatches = ruleMatchesFor("example/VmSelection"),
+                params = mapOf("maxInstructions" to 1, "seed" to 42, "methodSelection" to "all-compatible", "strictVirtualization" to true, "maxBroadVirtualizedMethods" to 0),
+            )
+        }
+        val unbounded = applyMethodVirtualization(
+            artifact = artifact,
+            ruleMatches = ruleMatchesFor("example/VmSelection"),
+            params = mapOf("maxInstructions" to 0, "seed" to 42, "methodSelection" to "all-compatible", "strictVirtualization" to true, "maxBroadVirtualizedMethods" to 0),
+        )
+
+        assertEquals(3, unbounded.transformedMemberCount, "Workbench maxInstructions=0 must mean unbounded, not a one-instruction cap")
+        assertTrue(unbounded.artifact.jarEntries.any { it.isVmResourceName() }, "Unbounded zero threshold should emit VM resources")
     }
 
     @Test
@@ -892,7 +915,7 @@ class MethodVirtualizationThresholdTest {
     }
 
     @Test
-    fun all_compatible_skips_elapsed_time_benchmark_loops_under_broad_rules() {
+    fun all_compatible_virtualizes_elapsed_time_benchmark_loops_under_strict_broad_rules() {
         val artifact = artifactFor(
             classBytes = elapsedTimeBenchmarkClassBytes(),
             internalName = "example/BenchCalc",
@@ -908,19 +931,14 @@ class MethodVirtualizationThresholdTest {
         )
 
         val classBytes = result.artifact.classArtifactIndex.getValue("example/BenchCalc").bytes
-        val selectedMethods = listOf(
-            "runAll" to "()V",
-            "call" to "(I)V",
-            "touch" to "()V",
-        ).filter { (methodName, methodDescriptor) -> methodCallsVmDispatcher(classBytes, methodName, methodDescriptor) }
-        assertTrue(!methodCallsVmDispatcher(classBytes, "runAll", "()V"), "Elapsed-time benchmark loop should remain direct bytecode under broad all-compatible selection")
-        assertTrue(!methodCallsVmDispatcher(classBytes, "call", "(I)V"), "Recursive elapsed-time benchmark helper inside the measured loop should remain direct bytecode as well. selected=$selectedMethods transformed=${result.transformedMemberCount}")
-        assertTrue(!methodCallsVmDispatcher(classBytes, "touch", "()V"), "Elapsed-time benchmark helper invoked inside the measured loop should remain direct bytecode as well. selected=$selectedMethods transformed=${result.transformedMemberCount}")
-        assertTrue(result.transformedMemberCount <= 2, "Broad all-compatible selection must keep the measured loop and recursive counter helper out of the VM path even if unrelated helpers remain eligible. selected=$selectedMethods transformed=${result.transformedMemberCount}")
+        assertTrue(methodCallsVmDispatcher(classBytes, "runAll", "()V"), "Strict all-compatible must virtualize native-compatible elapsed-time benchmark roots instead of leaking direct bytecode")
+        assertTrue(methodCallsVmDispatcher(classBytes, "call", "(I)V"), "Strict all-compatible must virtualize recursive benchmark helpers when VBC4 supports the bytecode shape")
+        assertTrue(methodCallsVmDispatcher(classBytes, "touch", "()V"), "Strict all-compatible must virtualize benchmark helpers invoked inside measured loops")
+        assertTrue(result.transformedMemberCount >= 3, "Strict all-compatible should cover the benchmark root and helpers. transformed=${result.transformedMemberCount}")
     }
 
     @Test
-    fun all_compatible_skips_real_task_like_thread_pool_timing_root() {
+    fun all_compatible_virtualizes_real_task_like_thread_pool_timing_root() {
         val artifact = artifactFor(
             classBytes = realTaskLikeThreadPoolClassBytes(),
             internalName = "example/TaskLike",
@@ -936,8 +954,50 @@ class MethodVirtualizationThresholdTest {
         )
 
         val classBytes = result.artifact.classArtifactIndex.getValue("example/TaskLike").bytes
-        assertEquals(0, result.transformedMemberCount, "Task-like thread-pool timing root should be excluded from broad all-compatible virtualization")
-        assertTrue(!methodCallsVmDispatcher(classBytes, "run", "()V"), "Task-like thread-pool timing root should remain direct bytecode under broad all-compatible selection")
+        assertTrue(result.transformedMemberCount >= 1, "Strict all-compatible should virtualize native-compatible task-like thread-pool timing roots")
+        assertTrue(methodCallsVmDispatcher(classBytes, "run", "()V"), "Task-like thread-pool timing roots must not remain direct bytecode under strict all-compatible selection")
+    }
+
+    @Test
+    fun all_compatible_virtualizes_task_like_thread_pool_timing_root_after_indy_indirection() {
+        val artifact = artifactFor(
+            classBytes = indirectMethodCalls(realTaskLikeThreadPoolClassBytes()),
+            internalName = "example/TaskLike",
+            methodSummaries = listOf(
+                MemberSummary(MemberKind.METHOD, "run", "()V", Opcodes.ACC_PUBLIC),
+            ),
+        )
+
+        val result = applyMethodVirtualization(
+            artifact = artifact,
+            ruleMatches = ruleMatchesFor("example/TaskLike"),
+            params = mapOf("maxInstructions" to 400, "seed" to 42, "methodSelection" to "all-compatible", "strictVirtualization" to true, "maxBroadVirtualizedMethods" to 0),
+        )
+
+        val classBytes = result.artifact.classArtifactIndex.getValue("example/TaskLike").bytes
+        assertTrue(result.transformedMemberCount >= 1, "Strict all-compatible should virtualize task-like timing roots even after invoke-dynamic-indirection wraps static timing calls")
+        assertTrue(methodCallsVmDispatcher(classBytes, "run", "()V"), "Indy-wrapped Thread.sleep calls must not keep the timing root out of strict all-compatible virtualization")
+    }
+
+    @Test
+    fun all_compatible_virtualizes_class_loader_resource_boundary_methods() {
+        val artifact = artifactFor(
+            classBytes = classLoaderBoundaryClassBytes(),
+            internalName = "example/BoundaryLoader",
+            methodSummaries = listOf(
+                MemberSummary(MemberKind.METHOD, "findClass", "(Ljava/lang/String;)Ljava/lang/Class;", Opcodes.ACC_PUBLIC),
+            ),
+        )
+
+        val result = applyMethodVirtualization(
+            artifact = artifact,
+            ruleMatches = ruleMatchesFor("example/BoundaryLoader"),
+            params = mapOf("maxInstructions" to 400, "seed" to 42, "methodSelection" to "all-compatible", "strictVirtualization" to true, "maxBroadVirtualizedMethods" to 0),
+        )
+
+        val classBytes = result.artifact.classArtifactIndex.getValue("example/BoundaryLoader").bytes
+        assertTrue(methodCallsVmDispatcher(classBytes, "findClass", "(Ljava/lang/String;)Ljava/lang/Class;"), "Strict all-compatible must virtualize native-compatible ClassLoader findClass boundaries")
+        assertTrue(result.transformedMemberCount >= 1, "Strict all-compatible should cover the class-loader boundary method")
     }
 
 
@@ -1133,6 +1193,48 @@ class MethodVirtualizationThresholdTest {
         clinit.visitInsn(Opcodes.RETURN)
         clinit.visitMaxs(1, 0)
         clinit.visitEnd()
+
+        writer.visitEnd()
+        return writer.toByteArray()
+    }
+
+    private fun classLoaderBoundaryClassBytes(): ByteArray {
+        val writer = ClassWriter(0)
+        writer.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "example/BoundaryLoader", null, "java/lang/ClassLoader", null)
+
+        val init = writer.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
+        init.visitCode()
+        init.visitVarInsn(Opcodes.ALOAD, 0)
+        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/ClassLoader", "<init>", "()V", false)
+        init.visitInsn(Opcodes.RETURN)
+        init.visitMaxs(1, 1)
+        init.visitEnd()
+
+        val method = writer.visitMethod(Opcodes.ACC_PUBLIC, "findClass", "(Ljava/lang/String;)Ljava/lang/Class;", null, null)
+        method.visitCode()
+        method.visitLdcInsn(Type.getObjectType("example/BoundaryLoader"))
+        method.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Class", "getClassLoader", "()Ljava/lang/ClassLoader;", false)
+        method.visitLdcInsn("example/BoundaryLoader.class")
+        method.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/ClassLoader", "getResourceAsStream", "(Ljava/lang/String;)Ljava/io/InputStream;", false)
+        method.visitMethodInsn(Opcodes.INVOKESTATIC, "example/BoundaryLoader", "readAllBytes", "(Ljava/io/InputStream;)[B", false)
+        method.visitVarInsn(Opcodes.ASTORE, 2)
+        method.visitVarInsn(Opcodes.ALOAD, 0)
+        method.visitVarInsn(Opcodes.ALOAD, 1)
+        method.visitVarInsn(Opcodes.ALOAD, 2)
+        method.visitInsn(Opcodes.ICONST_0)
+        method.visitVarInsn(Opcodes.ALOAD, 2)
+        method.visitInsn(Opcodes.ARRAYLENGTH)
+        method.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "example/BoundaryLoader", "defineClass", "(Ljava/lang/String;[BII)Ljava/lang/Class;", false)
+        method.visitInsn(Opcodes.ARETURN)
+        method.visitMaxs(6, 3)
+        method.visitEnd()
+
+        val readAllBytes = writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "readAllBytes", "(Ljava/io/InputStream;)[B", null, null)
+        readAllBytes.visitCode()
+        readAllBytes.visitInsn(Opcodes.ACONST_NULL)
+        readAllBytes.visitInsn(Opcodes.ARETURN)
+        readAllBytes.visitMaxs(1, 1)
+        readAllBytes.visitEnd()
 
         writer.visitEnd()
         return writer.toByteArray()

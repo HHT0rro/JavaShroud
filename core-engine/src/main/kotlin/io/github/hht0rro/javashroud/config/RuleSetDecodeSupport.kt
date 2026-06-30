@@ -27,3 +27,20 @@ internal fun decodeRuleSet(ruleSetNode: JsonNode, configPath: Path): RuleSet {
 
     return RuleSet(rules = rules)
 }
+
+internal fun decodeTopLevelRules(rulesNode: JsonNode, configPath: Path): RuleSet {
+    if (!rulesNode.isArray) {
+        throw IllegalArgumentException("Config validation failed: rules must be an array, path=${configPath.absolutePathString()}")
+    }
+
+    val rules = mutableListOf<RuleSpec>()
+    var index = 0
+    for (ruleNode in rulesNode) {
+        val target = requiredNestedText(ruleNode, "target", configPath, "rules[$index]")
+        val action = requiredNestedText(ruleNode, "action", configPath, "rules[$index]")
+        rules.add(RuleSpec(target = target, action = action))
+        index += 1
+    }
+
+    return RuleSet(rules = rules)
+}

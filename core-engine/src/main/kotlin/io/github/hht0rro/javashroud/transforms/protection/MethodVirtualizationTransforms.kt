@@ -67,6 +67,33 @@ private fun isStackTraceSensitiveForVirtualization(classBytes: ByteArray): Boole
         true
     }
 }
+
+private fun isClassLoaderOrResourceBoundaryMethod(owner: String, name: String, descriptor: String): Boolean {
+    if (owner == "java/lang/ClassLoader" && name in setOf("defineClass", "findClass", "loadClass", "getResource", "getResourceAsStream")) return true
+    if (owner == "java/lang/Class" && name in setOf("getClassLoader", "getResource", "getResourceAsStream")) return true
+    return owner.endsWith("ClassLoader") && name in setOf("defineClass", "findClass", "loadClass", "getResource", "getResourceAsStream")
+}
+
+private fun unsafeSyntheticHandlerKeys(classBytes: ByteArray): Set<String> {
+    val classNode = ClassNode()
+    return try {
+        ClassReader(classBytes).accept(classNode, ClassReader.SKIP_FRAMES)
+        classNode.methods
+            .filter { method -> method.name.startsWith("\$jsv\$") && method.instructions != null }
+            .filter { method ->
+                method.name.startsWith("\$jsv\$lambda\$") ||
+                method.instructions.any { instruction ->
+                    instruction is MethodInsnNode &&
+                        (isThreadSleepCall(instruction.owner, instruction.name, instruction.desc) ||
+                            isConcurrencyBoundaryMethod(instruction.owner, instruction.name, instruction.desc) ||
+                            isClassLoaderOrResourceBoundaryMethod(instruction.owner, instruction.name, instruction.desc))
+                }
+            }
+            .mapTo(linkedSetOf()) { method -> method.name + method.desc }
+    } catch (_: Exception) {
+        emptySet()
+    }
+}
 private fun rejectUnsupportedVbc4Params(params: Map<String, Any>) {
     val unsupported = params.keys.filter { it !in VBC4_ALLOWED_PARAMS }
     if (unsupported.isNotEmpty()) {
@@ -197,6 +224,7 @@ fun applyMethodVirtualization(
         val cr = ClassReader(classArtifact.bytes)
         val cw = computeFramesWriter(cr)
         val className = classArtifact.summary.internalName
+        val timingSensitiveSyntheticHandlers = unsafeSyntheticHandlerKeys(classArtifact.bytes)
         val existingMethodKeys = classArtifact.summary.methodSummaries
             .map { it.name + it.descriptor }
             .toMutableSet()
@@ -267,6 +295,10 @@ fun applyMethodVirtualization(
                             return
                         }
                         bodyCapture.refreshRawBenchmarkCaptureState(name, descriptor, access)
+                        bodyCapture.refreshCaptureStateAfterOptimization()
+                        if (bodyCapture.callsTimingSensitiveSyntheticHandler(className, timingSensitiveSyntheticHandlers)) {
+                            bodyCapture.markTimingSensitiveSyntheticHandlerUnsupported()
+                        }
                         if (isSyntheticBridgeMethod(access)) {
                             bodyCapture.replayTo(superMv)
                             return
@@ -1156,12 +1188,15 @@ private fun isElapsedTimeProbeCall(owner: String, name: String, descriptor: Stri
 private fun isRuntimeExceptionInit(owner: String, name: String, descriptor: String): Boolean =
     owner == "java/lang/RuntimeException" && name == "<init>" && descriptor == "(Ljava/lang/String;)V"
 
-private fun parseMaxInstructions(value: Any?): Int = when (value) {
+private fun parseMaxInstructions(value: Any?): Int {
+    val parsed = when (value) {
     is Int -> value
     is Long -> value.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
     is Number -> value.toLong().coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
     else -> 99999
-}.coerceAtLeast(1)
+    }
+    return if (parsed == 0) Int.MAX_VALUE else parsed.coerceAtLeast(1)
+}
 
 private fun isNativeVmSupportedInvokeDynamic(
     name: String,
@@ -1370,7 +1405,7 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
 
     private fun benchmarkSnapshot(instructions: List<CapturedInstruction>, name: String? = null, descriptor: String? = null): BenchmarkSnapshot {
         val meaningful = meaningfulInstructions(instructions)
-        val methodCalls = instructions.filterIsInstance<CapturedInstruction.MethodArg>()
+        val methodCalls = effectiveMethodCalls(instructions)
         val touchesConsoleIoBoundary = instructions.any { instruction ->
             instruction is CapturedInstruction.FieldArg && isConsoleStreamField(instruction.opcode, instruction.owner, instruction.name, instruction.desc) ||
                 instruction is CapturedInstruction.MethodArg && isConsoleStreamMethod(instruction.owner, instruction.name)
@@ -1410,13 +1445,13 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
     private fun matchesTaskLikeThreadPoolTimingRoot(instructions: List<CapturedInstruction> = capturedInstructions): Boolean {
         val meaningful = meaningfulInstructions(instructions)
         val submitIndices = meaningful.mapIndexedNotNull { index, instruction ->
-            val call = instruction as? CapturedInstruction.MethodArg
+            val call = effectiveMethodCall(instruction)
             if (call != null && call.owner == "java/util/concurrent/ThreadPoolExecutor" && call.name == "submit" && call.desc == "(Ljava/lang/Runnable;)Ljava/util/concurrent/Future;") index else null
         }
         if (submitIndices.size != 3) return false
         val sleepEvents = meaningful.windowed(size = 2, partialWindows = false).mapIndexedNotNull { index, window ->
             val ldc = window[0] as? CapturedInstruction.LdcArg
-            val call = window[1] as? CapturedInstruction.MethodArg
+            val call = effectiveMethodCall(window[1])
             val duration = ldc?.value as? Long
             if (duration != null && call != null && isThreadSleepCall(call.owner, call.name, call.desc)) index to duration else null
         }
@@ -1685,7 +1720,7 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
     private fun isSideEffectFreeConstant(instruction: CapturedInstruction): Boolean =
         intConstantValue(instruction) != null || instruction is CapturedInstruction.LdcArg && instruction.value !is Type && instruction.value !is Handle
 
-    private fun refreshCaptureStateAfterOptimization() {
+    fun refreshCaptureStateAfterOptimization() {
         instructionCount = capturedInstructions.count { it !is CapturedInstruction.LabelMark && it !is CapturedInstruction.TryCatch && it !is CapturedInstruction.Maxs }
         hasInvokeDynamic = capturedInstructions.any { it is CapturedInstruction.IndyArg }
         hasUnsupportedInvokeDynamic = capturedInstructions.filterIsInstance<CapturedInstruction.IndyArg>()
@@ -1693,7 +1728,8 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         hasDirectNativeDefenseCall = capturedInstructions.filterIsInstance<CapturedInstruction.MethodArg>()
             .any { isDirectNativeDefenseCall(it.owner, it.name) }
         hasMethodCall = capturedInstructions.any { it is CapturedInstruction.MethodArg || it is CapturedInstruction.IndyArg }
-        hasHighValueCall = capturedInstructions.filterIsInstance<CapturedInstruction.MethodArg>()
+        val methodCalls = effectiveMethodCalls(capturedInstructions)
+        hasHighValueCall = methodCalls
             .any { isHighValueCall(it.owner, it.name) }
         hasFieldAccess = capturedInstructions.any { it is CapturedInstruction.FieldArg }
         hasTypeOperation = capturedInstructions.any { it is CapturedInstruction.TypeArg || it is CapturedInstruction.MultiANewArrayArg }
@@ -1703,7 +1739,6 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
             it is CapturedInstruction.JumpArg && it.opcode !in setOf(Opcodes.IFEQ, Opcodes.IFNE, Opcodes.GOTO) ||
                 it is CapturedInstruction.TableSwitchArg || it is CapturedInstruction.LookupSwitchArg
         }
-        val methodCalls = capturedInstructions.filterIsInstance<CapturedInstruction.MethodArg>()
         touchesConsoleIoBoundary = capturedInstructions.any { instruction ->
             instruction is CapturedInstruction.FieldArg && isConsoleStreamField(instruction.opcode, instruction.owner, instruction.name, instruction.desc) ||
                 instruction is CapturedInstruction.MethodArg && isConsoleStreamMethod(instruction.owner, instruction.name)
@@ -1723,7 +1758,7 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         }
         hasLongThreadSleepCall = capturedInstructions.windowed(size = 2, partialWindows = false).any { window ->
             val ldc = window[0] as? CapturedInstruction.LdcArg
-            val call = window[1] as? CapturedInstruction.MethodArg
+            val call = effectiveMethodCall(window[1])
             ldc?.value is Long &&
                 (ldc.value as Long) >= 300L &&
                 call != null &&
@@ -1760,6 +1795,31 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         hasWideValue = capturedInstructions.any { producesWideValue(it) }
         hasDup2OrPop2 = capturedInstructions.any { it is CapturedInstruction.NoArg && (it.opcode == Opcodes.DUP2 || it.opcode == Opcodes.POP2) }
         nativeVmCompatible = capturedInstructions.all { isNativeVmSupportedCapturedInstruction(it) } && !(hasWideValue && hasDup2OrPop2)
+    }
+
+    private fun effectiveMethodCalls(instructions: List<CapturedInstruction>): List<CapturedInstruction.MethodArg> =
+        instructions.mapNotNull(::effectiveMethodCall)
+
+    private fun effectiveMethodCall(instruction: CapturedInstruction): CapturedInstruction.MethodArg? = when (instruction) {
+        is CapturedInstruction.MethodArg -> instruction
+        is CapturedInstruction.IndyArg -> staticTargetMethodCall(instruction)
+        else -> null
+    }
+
+    private fun staticTargetMethodCall(instruction: CapturedInstruction.IndyArg): CapturedInstruction.MethodArg? {
+        val normalized = try {
+            normalizeNativeVmInvokeDynamic(instruction.name, instruction.desc, instruction.bsm, instruction.bsmArgs)
+        } catch (_: RuntimeException) {
+            return null
+        }
+        val target = methodHandleBackedStaticTarget(normalized) ?: return null
+        return CapturedInstruction.MethodArg(
+            opcode = Opcodes.INVOKESTATIC,
+            owner = target.owner,
+            name = target.name,
+            desc = target.desc,
+            isInterface = target.isInterface,
+        )
     }
 
     private fun producesWideValue(instruction: CapturedInstruction): Boolean =
@@ -2485,6 +2545,21 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         unsupportedReasons += reason
     }
 
+    fun markTimingSensitiveSyntheticHandlerUnsupported() {
+        markNativeVmUnsupported("calls timing-sensitive synthetic exception-virtualization handler")
+    }
+
+    fun callsTimingSensitiveSyntheticHandler(className: String, handlerKeys: Set<String>): Boolean {
+        if (handlerKeys.isEmpty()) return false
+        return capturedInstructions.any { instruction ->
+            instruction is CapturedInstruction.MethodArg &&
+                instruction.owner == className &&
+                instruction.opcode == Opcodes.INVOKESPECIAL &&
+                instruction.name.startsWith("\$jsv\$") &&
+                instruction.name + instruction.desc in handlerKeys
+        }
+    }
+
     fun skipForBroadVirtualization(access: Int, name: String, descriptor: String): Boolean {
         isPureComputeCountIncrementHelper = isPureComputeCountIncrementHelper(name, descriptor, access)
         isElapsedTimeBenchmarkRoot = isElapsedTimeBenchmarkRoot(name, descriptor, access)
@@ -2495,9 +2570,6 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         if (rawIsElapsedTimeBenchmarkRoot || rawIsPureComputeCountIncrementHelper) return true
         return false
     }
-
-
-
 
     fun safeForBroadVirtualization(access: Int, name: String, descriptor: String): Boolean {
         if (skipForBroadVirtualization(access, name, descriptor)) return false
