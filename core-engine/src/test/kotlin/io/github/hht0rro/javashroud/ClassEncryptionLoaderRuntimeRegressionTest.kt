@@ -77,6 +77,40 @@ class ClassEncryptionLoaderRuntimeRegressionTest {
     }
 
     @Test
+    fun environment_bound_keys_is_skipped_for_prior_sealed_vm_abi_inputs() {
+        val plainInputJar = buildDiverseFixtureJar(Files.createTempFile("javashroud-env-prior-plain", ".jar"))
+        val inputJar = plainInputJar.resolveSibling("javashroud-env-prior-input.jar")
+        val outputJar = inputJar.resolveSibling("javashroud-env-prior-output.jar")
+        val configPath = inputJar.resolveSibling("javashroud-env-prior-config.toml")
+        try {
+            copyJarWithLegacyVmIndex(plainInputJar, inputJar)
+            writeRunConfig(configPath, inputJar, outputJar, listOf("environment-bound-keys"))
+
+            captureStdout {
+                dispatchRequest(
+                    buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())),
+                    EngineKernel(),
+                )
+            }
+
+            assertTrue(Files.exists(outputJar), "Engine should write an output jar")
+            assertTrue(readJarEntry(outputJar, VBC4_VM_PRELOAD_INDEX_RESOURCE) != null, "Prior VM index must remain present")
+            assertTrue(readJarEntry(outputJar, VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE) == null, "Fixture must remain a prior sealed VM ABI input")
+            val rootBytes = readJarEntry(outputJar, "e2e/Root.class")
+            assertTrue(rootBytes != null, "Skipped environment-bound-keys must leave app classes in place")
+            assertTrue(
+                !rootBytes!!.containsAscii("EnvironmentBindingHelper"),
+                "Skipped environment-bound-keys must not leave dangling EnvironmentBindingHelper references",
+            )
+        } finally {
+            Files.deleteIfExists(outputJar)
+            Files.deleteIfExists(configPath)
+            Files.deleteIfExists(inputJar)
+            Files.deleteIfExists(plainInputJar)
+        }
+    }
+
+    @Test
     fun injected_loader_helper_only_references_deployed_helpers() {
         val inputJar = buildDiverseFixtureJar(Files.createTempFile("javashroud-cel-input", ".jar"))
         val outputJar = inputJar.resolveSibling("javashroud-cel-output.jar")
@@ -281,6 +315,23 @@ class ClassEncryptionLoaderRuntimeRegressionTest {
                 output.closeEntry()
             }
         }
+    }
+
+    private fun ByteArray.containsAscii(value: String): Boolean {
+        val needle = value.toByteArray(Charsets.US_ASCII)
+        if (needle.isEmpty() || needle.size > size) return false
+        val lastStart = size - needle.size
+        for (start in 0..lastStart) {
+            var matched = true
+            for (offset in needle.indices) {
+                if (this[start + offset] != needle[offset]) {
+                    matched = false
+                    break
+                }
+            }
+            if (matched) return true
+        }
+        return false
     }
 
     private fun readClassWithMethodDescriptor(jarPath: Path, methodDescriptor: String): ByteArray? {

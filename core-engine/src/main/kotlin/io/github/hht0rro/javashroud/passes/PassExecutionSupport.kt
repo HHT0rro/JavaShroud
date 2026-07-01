@@ -89,6 +89,7 @@ private val priorVmAbiPreservingSkippedPasses = setOf(
     "condy-constant-indirection",
     "control-flow-flattening",
     "control-flow-obfuscation",
+    "environment-bound-keys",
     "exception-semantic-virtualization",
     "field-string-encryption",
     "integer-constant-obfuscation",
