@@ -50,7 +50,7 @@ class StringEncryptionSmokeTest {
                     }
 
                     override fun visitMethodInsn(opcode: Int, owner: String, name: String, descriptor: String, isInterface: Boolean) {
-                        if (opcode == Opcodes.INVOKESTATIC && owner == "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper" && name == "nativeDecodeString") {
+                        if (opcode == Opcodes.INVOKESTATIC && owner == "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper" && name == "cachedDecodeString") {
                             foundHelperInvoke = true
                         }
                     }
@@ -58,7 +58,7 @@ class StringEncryptionSmokeTest {
             }
         }, 0)
         assertFalse(foundSyntheticStringArray, "String encryption must not add reflection-visible fields to business classes")
-        assertTrue(foundHelperInvoke, "Should invoke StringEncryptionHelper.nativeDecodeString directly")
+        assertTrue(foundHelperInvoke, "Should invoke StringEncryptionHelper.cachedDecodeString directly")
         assertFalse(foundOriginalLiteral, "Original literals should be removed from LDC sites")
     }
 

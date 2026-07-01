@@ -13,6 +13,8 @@ import io.github.hht0rro.javashroud.passes.RegisteredPass
 import io.github.hht0rro.javashroud.passes.buildRegisteredPasses
 import io.github.hht0rro.javashroud.passes.requireExecutablePass
 import io.github.hht0rro.javashroud.transforms.protection.buildVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE
+import io.github.hht0rro.javashroud.transforms.protection.VBC4_VM_PRELOAD_INDEX_RESOURCE
 import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import java.nio.file.Path
 
@@ -124,21 +126,26 @@ internal fun executeWithOrderedPasses(
             emit = emit,
         )
         val executedPassIds = reorderedPasses.filter { it.spec.enabled }.map { it.spec.id }
-        val artifactWithHelpers = io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment.injectRequiredHelpers(
-            artifact = passExecution.context.artifact,
-            executedPassIds = executedPassIds,
-        )
-        val artifactWithNative = io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment.bundleNativeLibrariesIfAvailable(
-            artifact = artifactWithHelpers,
-            executedPassIds = executedPassIds,
-            config = config,
-            emit = emit,
-        )
-        val artifactWithProcessedHelpers = applyEnabledBasicPassesToHelpers(
-            config = config,
-            artifactContext = passExecution.context.copy(artifact = artifactWithNative),
-            registeredPasses = reorderedPasses,
-        )
+        val preservesExistingVmRuntime = preservesExistingVmRuntime(passExecution.context.artifact)
+        val artifactWithProcessedHelpers = if (preservesExistingVmRuntime) {
+            passExecution.context.artifact
+        } else {
+            val artifactWithHelpers = io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment.injectRequiredHelpers(
+                artifact = passExecution.context.artifact,
+                executedPassIds = executedPassIds,
+            )
+            val artifactWithNative = io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment.bundleNativeLibrariesIfAvailable(
+                artifact = artifactWithHelpers,
+                executedPassIds = executedPassIds,
+                config = config,
+                emit = emit,
+            )
+            applyEnabledBasicPassesToHelpers(
+                config = config,
+                artifactContext = passExecution.context.copy(artifact = artifactWithNative),
+                registeredPasses = reorderedPasses,
+            )
+        }
         val artifactForWrite = io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.sealIfRequested(
             artifact = artifactWithProcessedHelpers,
             config = config,
@@ -158,6 +165,10 @@ internal fun executeWithOrderedPasses(
         EngineRunResult(events = emptyList())
     }
 }
+
+private fun preservesExistingVmRuntime(artifact: BytecodeArtifact): Boolean =
+    artifact.jarEntries.any { it.name == VBC4_VM_PRELOAD_INDEX_RESOURCE } &&
+        artifact.jarEntries.none { it.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE }
 
 internal fun resolveOutputJarPath(config: ObfuscationConfig): Path = Path.of(config.outputJarPath).toAbsolutePath().normalize()
 

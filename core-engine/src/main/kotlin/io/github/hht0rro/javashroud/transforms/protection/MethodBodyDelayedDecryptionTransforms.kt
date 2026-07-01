@@ -63,6 +63,9 @@ fun applyMethodBodyDelayedDecryption(
         val cr = ClassReader(classArtifact.bytes)
         val cn = ClassNode()
         cr.accept(cn, ClassReader.EXPAND_FRAMES)
+        if (isPriorJavaShroudGeneratedRuntimeClass(cn)) continue
+        if (hasPriorSealedRuntimeDependency(cn)) continue
+        if (usesJavaShroudVmDispatch(cn)) continue
         classNodeCache[classArtifact.summary.internalName] = cn
     }
 

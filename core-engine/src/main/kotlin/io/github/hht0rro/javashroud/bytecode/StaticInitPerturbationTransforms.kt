@@ -72,7 +72,7 @@ fun perturbStaticInitializer(classBytes: ByteArray): ByteArray {
     }
 
     // Inject noise: add dummy static field and populate it
-    val dummyFieldName = "a_x"
+    val dummyFieldName = uniqueFieldName(classNode, "a_x")
     classNode.fields.add(FieldNode(
         Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC or Opcodes.ACC_SYNTHETIC,
         dummyFieldName,
@@ -97,6 +97,16 @@ fun perturbStaticInitializer(classBytes: ByteArray): ByteArray {
     val writer = computeFramesWriter(reader)
     classNode.accept(writer)
     return writer.toByteArray()
+}
+
+private fun uniqueFieldName(classNode: ClassNode, baseName: String): String {
+    val existingNames = classNode.fields.map { it.name }.toMutableSet()
+    if (baseName !in existingNames) return baseName
+    for (index in 1..10_000) {
+        val candidate = "${baseName}_$index"
+        if (candidate !in existingNames) return candidate
+    }
+    error("Unable to allocate static-init perturbation field for ${classNode.name}")
 }
 
 private fun findOrCreateClinit(classNode: ClassNode): MethodNode {

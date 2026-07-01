@@ -17,10 +17,6 @@
   <strong>简体中文</strong> · <a href="README_EN.md">English</a>
 </p>
 
-## 发布状态
-
-当前开发发布版本：`0.9.0-dev`。能力 schema 暴露的 engine version 为 `0.9.0-dev`，VBC capability version 为 `4.53`；底层 VMBC 线协议仍为 VBC4，以保持当前 native parser / serializer 合约稳定。
-
 ## 项目定位
 
 JavaShroud 是一个以 Java 字节码变换、方法虚拟化、Native 微内核和桌面化工作流为核心的混淆与加固项目。它既包含传统 Java 混淆器常见的重命名、字符串保护、控制流扰动和元数据清理，也提供面向高价值方法的 VMBC / NBVM (native bytecode VM) 执行链。
@@ -191,6 +187,12 @@ wails build
 ```
 
 完整发布脚本会构建 engine JAR、GraalVM native engine、前端 bundle 和 Wails 桌面程序。发布验收应以 `build\release\javashroud-windows-amd64\javashroud.exe` 等目标产物存在且可运行为准，而不是只看单个 Gradle、Yarn 或 Go 命令成功。
+
+### 0.9.1-dev 验收说明
+
+`0.9.1-dev` 将引擎版本提升到 `0.9.1-dev`，VBC 能力版本提升到 `4.54`。本版本重点修复 fullconfig 对已 sealed VBC4 产物再次处理时的 ABI 保持问题：对已有 `META-INF/.r/vm.idx` 且没有当前运行 `vm-current.idx` 的旧 sealed VM 产物，运行时资源、helper ABI、native loader 和会改变旧 VM 调用面的 pass 会保持原 ABI；新输入或当前运行生成的产物仍使用当前 VBC4 max-strength/native-only 路径，不降低新产物保护强度。
+
+本次发布前使用 `E:\xbeng\Documents\javashroud-config-full.toml` 对 `E:\XiangMu\TestJar` 下全部 JAR 做了 fullconfig 验收。`demo.jar`、`demo-shrouded.jar`、`jvm-obf-tester.jar`、`TEST.jar`、`TEST-shrouded.jar`、`TEST-shrouded-full-run.jar` 均完成混淆并按各自基线运行；`SimpleFiveInARow-obf-test.jar` 完成 12 项自检后保持 UI 进程运行；`ugly-1.0.0.jar` 与输入基线一致，因缺少 main manifest 退出。
 
 ## 目录结构
 

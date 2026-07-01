@@ -103,13 +103,21 @@ internal fun buildVbc4BuildContext(config: ObfuscationConfig, artifact: Bytecode
     SecureRandom().nextBytes(randomSeedBytes)
     val nativeSeed = readLong(seedBytes, 0) xor readLong(seedBytes, 8) xor readLong(randomSeedBytes, 0)
     val masterKey = generateMasterKey(layoutDigest, nativeSeed)
+    val inheritedRuntimeResourceKey = if (config.enablesPass("method-virtualization")) {
+        priorRuntimeResourceKey(artifact)
+    } else {
+        null
+    }
     return Vbc4BuildContext(
         masterKey = masterKey,
         nativeSeed = nativeSeed,
         jarLayoutDigest = layoutDigest,
-        runtimeResourceKey = generateRuntimeResourceKey(masterKey, layoutDigest, nativeSeed),
+        runtimeResourceKey = inheritedRuntimeResourceKey ?: generateRuntimeResourceKey(masterKey, layoutDigest, nativeSeed),
     )
 }
+
+private fun ObfuscationConfig.enablesPass(passId: String): Boolean =
+    passes.any { it.enabled && it.id == passId }
 
 private fun generateStandaloneVbc4BuildContext(): Vbc4BuildContext {
     val random = SecureRandom()

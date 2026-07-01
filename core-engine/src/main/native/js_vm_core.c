@@ -1106,6 +1106,30 @@ static char* sys_prop(JNIEnv *env, const char *key) {
     (*env)->ReleaseStringUTFChars(env, jv, v);
     return cp;
 }
+
+static char* js_first_loader_owner_from_property(JNIEnv *env) {
+    char *owners = sys_prop(env, "j.l");
+    if (!owners || !owners[0]) return owners;
+    char *line = owners;
+    while (*line) {
+        while (*line == '\n' || *line == '\r' || *line == ' ' || *line == '\t') line++;
+        if (!*line) break;
+        char *end = line;
+        while (*end && *end != '\n' && *end != '\r') end++;
+        char saved = *end;
+        *end = 0;
+        if (*line) {
+            char *selected = js_strdup(line);
+            free(owners);
+            return selected;
+        }
+        *end = saved;
+        line = saved ? end + 1 : end;
+    }
+    free(owners);
+    return NULL;
+}
+
 typedef struct js_vm_guest_frame {
     const char *owner;
     const char *name;
@@ -3958,7 +3982,7 @@ static int js_vm_cp_value(JNIEnv *env, js_vm_program *p, jobjectArray args, int 
         case JS_VM_LDC_HANDLE:
             ok = cp.type == JS_VM_CP_STRING && cp.s;
             if (ok) {
-                char *helper_owner = sys_prop(env, "j.l");
+                char *helper_owner = js_first_loader_owner_from_property(env);
                 if (!helper_owner || !helper_owner[0]) { free(helper_owner); helper_owner = js_helper_owner("Jni", "Micro", "kernel", "Helper"); }
                 jclass helper_cls = helper_owner ? js_vm_find_class_name(env, helper_owner) : NULL;
                 jmethodID resolve_mid = helper_cls ? (*env)->GetStaticMethodID(env, helper_cls, "resolveVmMethodHandle", "(Ljava/lang/String;)Ljava/lang/invoke/MethodHandle;") : NULL;
@@ -4250,7 +4274,7 @@ static int js_vm_invoke_dynamic(JNIEnv *env, js_vm_program *p, int cp_idx, js_vm
                 if ((*env)->ExceptionCheck(env)) { ok = 0; }
             }
             if (ok) {
-                char *helper_owner = sys_prop(env, "j.l");
+                char *helper_owner = js_first_loader_owner_from_property(env);
                 if (!helper_owner || !helper_owner[0]) { free(helper_owner); helper_owner = js_helper_owner("Jni", "Micro", "kernel", "Helper"); }
                 jclass helper_cls = helper_owner ? js_vm_find_class_name(env, helper_owner) : NULL;
                 jmethodID create_mid = helper_cls ? (*env)->GetStaticMethodID(env, helper_cls, "createSamLambda", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I[Ljava/lang/Object;)Ljava/lang/Object;") : NULL;
@@ -5678,10 +5702,17 @@ jsn_k8(JNIEnv *env, jclass cls, jlong entryToken, jstring resourcePath)
 JS_LOCAL void JNICALL
 jsn_k9(JNIEnv *env, jclass cls)
 {
-    jstring index_path = (*env)->NewStringUTF(env, "META-INF/.r/vm.idx");
+    jstring index_path = (*env)->NewStringUTF(env, "META-INF/.r/vm-current.idx");
     if (!index_path) { js_vm_clear_exception(env); return; }
     jbyteArray raw_index = js_vm_load_resource_bytes(env, cls, index_path);
     (*env)->DeleteLocalRef(env, index_path);
+    if (!raw_index) {
+        js_vm_clear_exception(env);
+        index_path = (*env)->NewStringUTF(env, "META-INF/.r/vm.idx");
+        if (!index_path) { js_vm_clear_exception(env); return; }
+        raw_index = js_vm_load_resource_bytes(env, cls, index_path);
+        (*env)->DeleteLocalRef(env, index_path);
+    }
     if (!raw_index) {
         js_vm_clear_exception(env);
         return;
@@ -5888,7 +5919,7 @@ JS_HIDDEN char* js_lookup_bound_class(JNIEnv *env, const char *original) {
     int is_loader_owner = loader_owner && !strcmp(original, loader_owner);
     free(loader_owner);
     if (is_loader_owner) {
-        char *loader = sys_prop(env, "j.l");
+        char *loader = js_first_loader_owner_from_property(env);
         if (loader && loader[0]) return loader;
         free(loader);
     }

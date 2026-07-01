@@ -52,6 +52,9 @@ fun applyAntiInstrumentation(
         try {
             ClassReader(classArtifact.bytes).accept(classNode, ClassReader.SKIP_FRAMES)
         } catch (_: Exception) { return@map classArtifact }
+        if (isPriorJavaShroudGeneratedRuntimeClass(classNode)) return@map classArtifact
+        if (hasPriorSealedRuntimeDependency(classNode)) return@map classArtifact
+        if (usesJavaShroudVmDispatch(classNode)) return@map classArtifact
 
         val candidateMethods = classNode.methods
             .asSequence()
@@ -176,6 +179,138 @@ private fun isJniLoaderTimingSensitiveCall(call: MethodInsnNode): Boolean {
     return false
 }
 
+private fun isJavaShroudRuntimeStateClass(classNode: ClassNode): Boolean {
+    if (classNode.name.startsWith("io/github/hht0rro/javashroud/transforms/protection/")) return true
+    var hasRuntimeResourceState = false
+    var hasNativeKernelBindingState = false
+    for (method in classNode.methods) {
+        val instructions = method.instructions?.toArray().orEmpty()
+        for (instruction in instructions) {
+            when (instruction) {
+                is org.objectweb.asm.tree.LdcInsnNode -> {
+                    val value = instruction.cst as? String ?: continue
+                    if (value == "META-INF/.r/vm.idx" || value == "META-INF/.r/vm-current.idx" || value.startsWith("META-INF/2b/") || value == "JSRP" || value == "JSBI") {
+                        hasRuntimeResourceState = true
+                    }
+                    if (value == "j.b" || value == "j.m" || value == "j.l") {
+                        hasNativeKernelBindingState = true
+                    }
+                }
+                is MethodInsnNode -> {
+                    if (instruction.name in setOf(
+                        "nativeExecuteVmResource",
+                        "nativeExecuteVmResourceByToken",
+                        "executeVmResource",
+                        "decodeRuntimeResource",
+                        "decodeBootstrapNativeIndex",
+                        "sealedNativeIndexText",
+                        "publishSealedNativeBindings",
+                    )) {
+                        hasRuntimeResourceState = true
+                    }
+                    if (instruction.owner.endsWith("/JniMicrokernelHelper") || instruction.owner.endsWith("/AntiDumpRuntimeHelper")) {
+                        hasNativeKernelBindingState = true
+                    }
+                }
+            }
+        }
+    }
+    return hasRuntimeResourceState && hasNativeKernelBindingState
+}
+
+internal fun isPriorJavaShroudGeneratedRuntimeClass(classNode: ClassNode): Boolean {
+    if (classNode.name.startsWith("io/github/hht0rro/javashroud/transforms/protection/")) return true
+    if (hasPriorSealedRuntimeNameShape(classNode.name)) return true
+
+    var hasKernelComponentString = false
+    var hasKernelPlatformString = false
+    var hasKernelVmModeString = false
+    var invokesKernelLoaderShape = false
+
+    for (method in classNode.methods) {
+        val instructions = method.instructions?.toArray().orEmpty()
+        for (instruction in instructions) {
+            when (instruction) {
+                is org.objectweb.asm.tree.LdcInsnNode -> {
+                    val value = instruction.cst as? String ?: continue
+                    if (value in setOf("loader", "decrypt", "vm", "guards", "all")) hasKernelComponentString = true
+                    if (value in setOf("auto", "windows-x64", "linux-x64", "macos-x64", "macos-arm64")) hasKernelPlatformString = true
+                    if (value in setOf("vm-diverse", "vm-off")) hasKernelVmModeString = true
+                }
+                is MethodInsnNode -> {
+                    if (instruction.opcode == Opcodes.INVOKESTATIC && instruction.desc == "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V") {
+                        invokesKernelLoaderShape = true
+                    }
+                }
+            }
+        }
+    }
+
+    return invokesKernelLoaderShape && hasKernelComponentString && hasKernelPlatformString && hasKernelVmModeString
+}
+
+private fun hasPriorSealedRuntimeNameShape(internalName: String): Boolean {
+    if (!internalName.startsWith("r/")) return false
+    val parts = internalName.split('/')
+    if (parts.size != 3 || parts[1].length != 2) return false
+    val simpleName = parts[2]
+    if (!simpleName.startsWith('C')) return false
+    val outerName = simpleName.substringBefore('$')
+    if (outerName.length < 10) return false
+    return '$' !in simpleName || simpleName.substringAfter('$').startsWith('I')
+}
+
+internal fun usesJavaShroudVmDispatch(classNode: ClassNode): Boolean = classNode.methods.any { method ->
+    method.instructions?.toArray().orEmpty().any { instruction ->
+        instruction is MethodInsnNode && isJavaShroudVmDispatchCall(instruction)
+    }
+}
+
+internal fun hasPriorSealedRuntimeDependency(classNode: ClassNode): Boolean = classNode.methods.any { method ->
+    method.instructions?.toArray().orEmpty().any { instruction ->
+        instruction is MethodInsnNode && isPriorSealedRuntimeDependencyCall(instruction)
+    }
+}
+
+private fun isPriorSealedRuntimeDependencyCall(call: MethodInsnNode): Boolean {
+    if (!call.owner.startsWith("r/")) return false
+    if (!hasPriorSealedRuntimeNameShape(call.owner)) return false
+    if (call.name.startsWith("m_")) return true
+    return call.name in setOf(
+        "isNativeLoaded",
+        "loadKernel",
+        "executeVmResource",
+        "executeVmResourceVoid",
+        "executeVmResourceIntVoid",
+        "nativeExecuteVmResource",
+        "nativeExecuteVmResourceByToken",
+        "nativeExecuteVmResourceVoid",
+        "nativeExecuteVmResourceIntVoid",
+    )
+}
+
+private fun isJavaShroudVmDispatchCall(call: MethodInsnNode): Boolean {
+    if (call.opcode != Opcodes.INVOKESTATIC) return false
+    if (call.desc !in setOf(
+            "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;",
+            "(J[Ljava/lang/Object;)Ljava/lang/Object;",
+            "(J)V",
+            "(JI)V",
+        )
+    ) return false
+    if (call.name in setOf(
+            "nativeExecuteVmResource",
+            "nativeExecuteVmResourceByToken",
+            "executeVmResource",
+            "nativeExecuteVmResourceVoid",
+            "nativeExecuteVmResourceIntVoid",
+            "executeVmResourceVoid",
+            "executeVmResourceIntVoid",
+        )
+    ) return true
+    return call.owner.startsWith("r/") && call.name.startsWith("m_")
+}
+
 private fun isRuntimeGuardProbeHotPath(owner: String, method: org.objectweb.asm.tree.MethodNode): Boolean {
     val instructions = method.instructions?.toArray().orEmpty()
     var hasBackwardJump = false
@@ -227,6 +362,14 @@ fun applyAntiJvmTiAgent(
     val updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
         if (!matchedClassNames.contains(classArtifact.summary.internalName)) return@map classArtifact
         if (isJniLoaderTimingSensitiveClass(classArtifact.bytes)) return@map classArtifact
+
+        val classNode = ClassNode()
+        try {
+            ClassReader(classArtifact.bytes).accept(classNode, ClassReader.SKIP_FRAMES)
+        } catch (_: Exception) { return@map classArtifact }
+        if (isPriorJavaShroudGeneratedRuntimeClass(classNode)) return@map classArtifact
+        if (hasPriorSealedRuntimeDependency(classNode)) return@map classArtifact
+        if (usesJavaShroudVmDispatch(classNode)) return@map classArtifact
 
         val cr = ClassReader(classArtifact.bytes)
         val cw = ClassWriter(cr, ClassWriter.COMPUTE_FRAMES)
@@ -312,8 +455,11 @@ fun applyAntiDumpProtection(
         try {
             cr.accept(classNode, ClassReader.EXPAND_FRAMES)
         } catch (_: Exception) { return@map classArtifact }
+        if (isPriorJavaShroudGeneratedRuntimeClass(classNode)) return@map classArtifact
+        if (hasPriorSealedRuntimeDependency(classNode)) return@map classArtifact
+        if (usesJavaShroudVmDispatch(classNode)) return@map classArtifact
 
-        val scrambledFields = if (protectionLevel == "field-scramble" || protectionLevel == "full") {
+        val scrambledFields = if ((protectionLevel == "field-scramble" || protectionLevel == "full") && !isJavaShroudRuntimeStateClass(classNode)) {
             eligibleAntiDumpScrambleFields(classNode)
         } else {
             emptyMap()
@@ -401,6 +547,14 @@ fun applyAntiByteBuddyTransform(
         if (isJniLoaderTimingSensitiveClass(classArtifact.bytes)) return@map classArtifact
 
         val cr = ClassReader(classArtifact.bytes)
+        val classNode = ClassNode()
+        try {
+            cr.accept(classNode, ClassReader.SKIP_FRAMES)
+        } catch (_: Exception) { return@map classArtifact }
+        if (isPriorJavaShroudGeneratedRuntimeClass(classNode)) return@map classArtifact
+        if (hasPriorSealedRuntimeDependency(classNode)) return@map classArtifact
+        if (usesJavaShroudVmDispatch(classNode)) return@map classArtifact
+
         val cw = ClassWriter(cr, ClassWriter.COMPUTE_FRAMES)
         var classModified = false
         var hasClinit = false
@@ -515,7 +669,7 @@ private fun eligibleAntiDumpScrambleFields(classNode: ClassNode): Map<String, St
     .filter { field ->
         field.access and (Opcodes.ACC_FINAL or Opcodes.ACC_VOLATILE) == 0 &&
             field.value == null &&
-            field.desc in setOf("Ljava/lang/String;", "[B", "[C")
+            field.desc == "Ljava/lang/String;"
     }
     .associate { field -> field.name + field.desc to field.desc }
 
@@ -610,6 +764,14 @@ fun applyJniMicrokernelLoader(
     val updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
         if (!matchedClassNames.contains(classArtifact.summary.internalName)) return@map classArtifact
         if (isJniLoaderTimingSensitiveClass(classArtifact.bytes)) return@map classArtifact
+
+        val classNode = ClassNode()
+        try {
+            ClassReader(classArtifact.bytes).accept(classNode, ClassReader.SKIP_FRAMES)
+        } catch (_: Exception) { return@map classArtifact }
+        if (isPriorJavaShroudGeneratedRuntimeClass(classNode)) return@map classArtifact
+        if (hasPriorSealedRuntimeDependency(classNode)) return@map classArtifact
+        if (usesJavaShroudVmDispatch(classNode)) return@map classArtifact
 
         val cr = ClassReader(classArtifact.bytes)
         val cw = ClassWriter(cr, ClassWriter.COMPUTE_FRAMES)

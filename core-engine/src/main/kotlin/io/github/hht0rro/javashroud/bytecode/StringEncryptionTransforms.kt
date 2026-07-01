@@ -34,11 +34,11 @@ data class StringEncryptionConfig(
 )
 
 private const val STRING_HELPER_OWNER = "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper"
-private const val STRING_HELPER_DECODE_DESC = "([BII)[B"
+private const val STRING_HELPER_DECODE_DESC = "([BII)Ljava/lang/String;"
 private const val SHROUD_ENCRYPT_DESC = "Lio/github/hht0rro/javashroud/bytecode/ShroudEncrypt;"
 
 /**
- * Replaces string LDC constants with per-class cached native decode callsites.
+ * Replaces string LDC constants with native-backed cached decode callsites.
  */
 fun encryptClassStrings(
     classBytes: ByteArray,
@@ -189,14 +189,10 @@ private fun buildDecodeCallsite(
     flags: Int,
     payload: ByteArray,
 ): InsnList = InsnList().apply {
-    add(TypeInsnNode(Opcodes.NEW, "java/lang/String"))
-    add(InsnNode(Opcodes.DUP))
     addByteArray(payload)
     addInt(seed)
     addInt(flags)
-    add(MethodInsnNode(Opcodes.INVOKESTATIC, STRING_HELPER_OWNER, "nativeDecodeString", STRING_HELPER_DECODE_DESC, false))
-    add(FieldInsnNode(Opcodes.GETSTATIC, "java/nio/charset/StandardCharsets", "UTF_8", "Ljava/nio/charset/Charset;"))
-    add(MethodInsnNode(Opcodes.INVOKESPECIAL, "java/lang/String", "<init>", "([BLjava/nio/charset/Charset;)V", false))
+    add(MethodInsnNode(Opcodes.INVOKESTATIC, STRING_HELPER_OWNER, "cachedDecodeString", STRING_HELPER_DECODE_DESC, false))
 }
 
 private fun InsnList.addByteArray(bytes: ByteArray) {
