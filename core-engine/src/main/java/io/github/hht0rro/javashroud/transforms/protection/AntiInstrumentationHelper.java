@@ -26,6 +26,23 @@ public final class AntiInstrumentationHelper {
      */
     public static void checkInstrumentationEx(String detectionLevel, String response) {
         checkInstrumentation(detectionLevel, response);
-        // Distributed kernel integrity gate - blocks if native was replaced
+        JniMicrokernelHelper.requireHealthyKernel();
+    }
+
+    /**
+     * Distributed probe wrapper that preserves probe coverage without turning
+     * helper initialization races into application-visible integrity failures.
+     * Once the JNI kernel reports itself healthy, the strict integrity gate is
+     * enforced exactly as before.
+     */
+    public static void checkInstrumentationExSafe(String detectionLevel, String response) {
+        checkInstrumentation(detectionLevel, response);
+        if (!JniMicrokernelHelper.isNativeLoaded()) {
+            return;
+        }
+        if (!JniMicrokernelHelper.isKernelIntegrityReady()) {
+            return;
+        }
+        JniMicrokernelHelper.requireHealthyKernel();
     }
 }

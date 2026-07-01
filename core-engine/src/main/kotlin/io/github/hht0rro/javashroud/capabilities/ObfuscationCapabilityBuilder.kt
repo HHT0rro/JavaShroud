@@ -100,13 +100,13 @@ internal fun obfuscationCapabilityBindings(): List<CapabilityBinding> = listOf(
     CapabilityBinding(
         id = "control-flow-flattening",
         name = "Control Flow Flattening",
-        description = "Flatten method control flow using configurable density, handler complexity, and insertion patterns.",
+        description = "Medium-strength control-flow perturbation that flattens selected method control flow using configurable density, handler complexity, and insertion patterns. It raises CFG recovery cost but is not a complete VM-level protection.",
         tagIds = listOf("obfuscation"),
         stability = "experimental",
         risk = "medium",
         requiresOptIn = true,
         defaultEnabled = false,
-        compatibilityNotes = "会重写异常区域和分发结构；请重点验证异常敏感路径和性能表现。",
+        compatibilityNotes = "会重写异常区域和分发结构；请重点验证异常敏感路径和性能表现。当前为中等强度扰动，不能替代 native/VM 级保护。",
         params = listOf(
             ParamSchema(
                 key = "density",

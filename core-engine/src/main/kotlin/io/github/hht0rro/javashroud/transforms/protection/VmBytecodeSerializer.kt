@@ -1,6 +1,7 @@
 package io.github.hht0rro.javashroud.transforms.protection
 
 import org.objectweb.asm.*
+import java.security.SecureRandom
 import javax.crypto.Cipher
 import javax.crypto.Mac
 import javax.crypto.spec.IvParameterSpec
@@ -43,13 +44,16 @@ internal class VmBytecodeSerializer(
     private val stateBinding: String = "",
     private val entryMetadata: Vbc4EntryMetadata = Vbc4EntryMetadata(),
     buildContext: Vbc4BuildContext,
+    structureEntropy: ByteArray = randomVbc4StructureEntropy(),
 ) : MethodVisitor(Opcodes.ASM9) {
 
     private val serializationBuildContext: Vbc4BuildContext = buildContext
-    private val effectiveBuildSeed: Int = deriveVbc4StructureSeed(buildContext, buildSeed, entryMetadata)
+    private val structureEntropyDigest: ByteArray = structureEntropy.copyOf()
+    private val effectiveBuildSeed: Int = deriveVbc4StructureSeed(buildContext, buildSeed, entryMetadata, structureEntropy)
     private val vbc4MasterKey: ByteArray = serializationBuildContext.copyMasterKey()
     private val vbc4LayoutDigest: ByteArray = serializationBuildContext.jarLayoutDigest.copyOf()
-    private val opcodeDialectSalt: Int = vbc4OpcodeDialectSalt(effectiveBuildSeed, stateBinding, entryMetadata)
+    private val opcodeDialectSalt: Int = vbc4OpcodeDialectSalt(effectiveBuildSeed, stateBinding, entryMetadata) xor readMacInt(structureEntropyDigest)
+    private val structureSalt: Int = readMacInt(structureEntropyDigest)
 
     private val instructions = mutableListOf<VmInstruction>()
     private val constantPool = mutableListOf<Any>()
@@ -214,21 +218,34 @@ internal class VmBytecodeSerializer(
                 maskSlots = 1,
             ),
         )
-        val canFoldInstructionPairs = exceptionEntries.isEmpty() && instructions.none { it.opcode in VM_BRANCH_OPCODES }
+        val canFoldInstructionPairs = exceptionEntries.isEmpty()
         var index = 0
         while (index < instructions.size) {
             if (canFoldInstructionPairs) {
-                val foldedPredicate = foldedPredicateBranchGroup(index)
-                if (foldedPredicate != null) {
-                    groups.add(foldedPredicate)
-                    index += 2
-                    continue
-                }
-                val folded = foldedSuperGroup(index)
-                if (folded != null) {
-                    groups.add(folded)
-                    index += 2
-                    continue
+                when (superOperatorPlan(index)) {
+                    SuperOperatorPlan.None -> Unit
+                    SuperOperatorPlan.SemanticFold -> {
+                        val foldedPredicate = foldedPredicateBranchGroup(index)
+                        if (foldedPredicate != null) {
+                            groups.add(foldedPredicate)
+                            index += 2
+                            continue
+                        }
+                        val folded = foldedSuperGroup(index)
+                        if (folded != null) {
+                            groups.add(folded)
+                            index += 2
+                            continue
+                        }
+                    }
+                    SuperOperatorPlan.BinaryFold, SuperOperatorPlan.NestedMicroStream -> {
+                        val folded = foldedSuperGroup(index)
+                        if (folded != null) {
+                            groups.add(folded)
+                            index += 2
+                            continue
+                        }
+                    }
                 }
             }
             groups.add(registerGroup(instructions[index], index))
@@ -272,12 +289,19 @@ internal class VmBytecodeSerializer(
         val maskSlots: Int,
     )
 
+    private enum class SuperOperatorPlan { None, BinaryFold, SemanticFold, NestedMicroStream }
+
+    private fun superOperatorPlan(instructionIndex: Int): SuperOperatorPlan {
+        val selector = structureSelector("super-plan", instructionIndex, opcodeDialectSalt, instructionIndex.rotateLeft(5))
+        return SuperOperatorPlan.values()[(selector and 0x7FFFFFFF) % SuperOperatorPlan.values().size]
+    }
+
     private fun storageOrderedBlocks(blocks: List<VmLogicalBlock>): List<VmLogicalBlock> {
         if (blocks.size <= 1) return blocks
-        val mixed = (effectiveBuildSeed.rotateLeft(11) xor (effectiveBuildSeed ushr 5) xor (blocks.size * 0x7FEB352D.toInt())) and 0x7FFFFFFF
+        val mixed = structureSelector("block-storage-order", blocks.size, blocks.size * 0x7FEB352D.toInt())
         val storageBlocks = blocks.toMutableList()
         for (i in storageBlocks.lastIndex downTo 1) {
-            val selector = (mixed.rotateLeft(i and 31) xor (i * 0x846CA68B.toInt())) and 0x7FFFFFFF
+            val selector = structureSelector("block-storage-swap", i, mixed.rotateLeft(i and 31), i * 0x846CA68B.toInt())
             val j = selector % (i + 1)
             val tmp = storageBlocks[i]
             storageBlocks[i] = storageBlocks[j]
@@ -339,9 +363,9 @@ internal class VmBytecodeSerializer(
         if (total <= 3) return listOf(groups)
         val ceiling = minOf(VBC4_MAX_LOGICAL_BLOCKS, total / 2).coerceAtLeast(1)
         if (ceiling <= 1) return listOf(groups)
-        // Seed-derive the target block count so the same input yields different block
-        // layouts across builds while staying deterministic for a fixed seed.
-        val seedHash = (effectiveBuildSeed.rotateLeft(7) xor (effectiveBuildSeed ushr 3) xor (total * 0x7FEB352D.toInt())) and 0x7FFFFFFF
+        // Entropy-derived target block count so identical inputs and user seeds still
+        // produce different block layouts across production builds.
+        val seedHash = structureSelector("block-partition", total, total * 0x7FEB352D.toInt())
         val splitStrategy = selectBlockSplitStrategy(seedHash, total)
         val coalesceStrategy = selectBlockCoalesceStrategy(seedHash, total)
         // Range [2, ceiling]: methods large enough to split always produce >1 block,
@@ -514,7 +538,7 @@ internal class VmBytecodeSerializer(
         val second = instructions[instructionIndex + 1]
         if (first.operands.isNotEmpty() || second.operands.size != 1) return null
         if (first.opcode !in VBC4_COMPARE_BUILDER_OPCODES || second.opcode !in VBC4_PREDICATE_BRANCH_OPCODES) return null
-        val selector = opcodeDialectSalt.rotateLeft(17) xor effectiveBuildSeed.rotateLeft(9) xor instructionIndex.rotateLeft(7) xor first.opcode.rotateLeft(3) xor second.opcode
+        val selector = structureSelector("folded-predicate", instructionIndex, first.opcode.rotateLeft(3), second.opcode)
         if (selector % 4 == 0) return null
         val branchTarget = registerOperands(second).firstOrNull() ?: return null
         return LogicalGroup(
@@ -535,7 +559,7 @@ internal class VmBytecodeSerializer(
         val second = instructions[instructionIndex + 1]
         if (first.operands.size != 1 || second.operands.isNotEmpty()) return null
         if (first.opcode !in VBC4_CONST_OPCODES || second.opcode !in VBC4_FOLDED_FUSION_OPCODES) return null
-        val selector = opcodeDialectSalt.rotateLeft(13) xor effectiveBuildSeed.rotateLeft(5) xor instructionIndex.rotateLeft(5) xor first.opcode.rotateLeft(1) xor second.opcode
+        val selector = structureSelector("folded-super", instructionIndex, first.opcode.rotateLeft(1), second.opcode)
         if (selector % 4 == 0) return null
         val constOperand = registerOperands(first).firstOrNull() ?: return null
         return LogicalGroup(
@@ -623,7 +647,7 @@ internal class VmBytecodeSerializer(
 
     private fun polymorphicOpcode(opcode: Int, instructionIndex: Int): Int {
         val aliases = VM_OPCODE_ALIASES[opcode] ?: return opcode
-        val selector = (opcodeDialectSalt.rotateLeft(7) xor effectiveBuildSeed.rotateLeft(3) xor instructionIndex.rotateLeft(3) xor opcode) and 0x7FFFFFFF
+        val selector = structureSelector("opcode-alias", instructionIndex, opcode)
         return aliases[selector % aliases.size]
     }
 
@@ -638,7 +662,7 @@ internal class VmBytecodeSerializer(
             VmOpcodes.VM_INVOKESTATIC, VmOpcodes.VM_INVOKEVIRTUAL, VmOpcodes.VM_INVOKESPECIAL, VmOpcodes.VM_INVOKEINTERFACE -> VBC4_SUPER_INVOKE
             else -> return null
         }
-        val selector = (opcodeDialectSalt.rotateLeft(5) xor effectiveBuildSeed.rotateLeft(11) xor instructionIndex.rotateLeft(11) xor instruction.opcode.rotateLeft(3)) and 0x7FFFFFFF
+        val selector = structureSelector("super-opcode", instructionIndex, instruction.opcode.rotateLeft(3))
         return if (selector % 4 == 0) null else superOpcode
     }
 
@@ -714,6 +738,28 @@ internal class VmBytecodeSerializer(
             writeU4(out, vbc4NestedRowChecksum(effectiveBuildSeed, profile, block.blockId, rowIndex, dialect, fields))
         }
         return out.toByteArray()
+    }
+
+    private fun structureSelector(label: String, index: Int, vararg values: Int): Int {
+        var x = effectiveBuildSeed xor opcodeDialectSalt.rotateLeft((index and 15) + 1) xor structureSalt.rotateRight(index and 31)
+        x = x xor structureEntropyWord(index).rotateLeft(7) xor label.hashCode().rotateLeft(3) xor (index * 0x9E3779B9.toInt())
+        values.forEachIndexed { valueIndex, value ->
+            x = x xor value.rotateLeft((valueIndex * 5 + index) and 31) xor structureEntropyWord(index + valueIndex + 1)
+            x = x xor (x ushr 16)
+            x *= 0x7FEB352D
+        }
+        x = x xor (x ushr 15)
+        x *= 0x846CA68B.toInt()
+        return (x xor (x ushr 16)) and 0x7FFFFFFF
+    }
+
+    private fun structureEntropyWord(index: Int): Int {
+        val normalized = ((index % structureEntropyDigest.size) + structureEntropyDigest.size) % structureEntropyDigest.size
+        val offset = (normalized / 4 * 4).coerceAtMost(structureEntropyDigest.size - 4)
+        return ((structureEntropyDigest[offset].toInt() and 0xFF) shl 24) or
+            ((structureEntropyDigest[offset + 1].toInt() and 0xFF) shl 16) or
+            ((structureEntropyDigest[offset + 2].toInt() and 0xFF) shl 8) or
+            (structureEntropyDigest[offset + 3].toInt() and 0xFF)
     }
 
     private fun nestedVmEnabled(): Boolean = entryMetadata.methodLocalProfile != 0
@@ -1731,12 +1777,18 @@ private fun vbc4NestedMix(seed: Int, profile: Int, blockId: Int, rowIndex: Int, 
 
 private const val VBC4_DERIVE_LABEL_VM_STRUCTURE = "javashroud-vbc4-vm-structure-v1"
 
-private fun deriveVbc4StructureSeed(context: Vbc4BuildContext, buildSeed: Int, entryMetadata: Vbc4EntryMetadata): Int {
+private fun deriveVbc4StructureSeed(
+    context: Vbc4BuildContext,
+    buildSeed: Int,
+    entryMetadata: Vbc4EntryMetadata,
+    structureEntropy: ByteArray,
+): Int {
     val derived = context.deriveSubKey(
         VBC4_DERIVE_LABEL_VM_STRUCTURE,
         16,
         intBytes(buildSeed),
         entryMetadata.encode().toByteArray(Charsets.UTF_8),
+        structureEntropy.copyOf(),
     )
     return try {
         readMacInt(derived) xor buildSeed
@@ -1744,6 +1796,9 @@ private fun deriveVbc4StructureSeed(context: Vbc4BuildContext, buildSeed: Int, e
         java.util.Arrays.fill(derived, 0)
     }
 }
+
+private fun randomVbc4StructureEntropy(): ByteArray =
+    ByteArray(32).also { SecureRandom().nextBytes(it) }
 
 private fun vbc4EntryToken(seed: Int, blockId: Int): Int =
     withVbc4HmacMaterial(

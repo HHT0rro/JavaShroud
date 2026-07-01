@@ -2,8 +2,6 @@ package io.github.hht0rro.javashroud.transforms.protection;
 
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
 
 public final class AntiDumpHelper {
     static { JniMicrokernelHelper.loadKernel("loader", "auto", "vm-diverse"); }
@@ -15,10 +13,11 @@ public final class AntiDumpHelper {
         if (JniMicrokernelHelper.isNativeLoaded()) {
             try {
                 return nativeBuildString(encodedBytes);
-            } catch (UnsatisfiedLinkError | SecurityException ignored) {
+            } catch (UnsatisfiedLinkError | SecurityException e) {
+                throw new SecurityException("anti-dump native string build failed", e);
             }
         }
-        return encodedBytes == null ? null : new String(encodedBytes, StandardCharsets.UTF_8);
+        throw new SecurityException("anti-dump string protection requires the sealed native kernel");
     }
     public static String buildStringFromB64(MethodHandles.Lookup lookup, String name, MethodType type, String encodedB64) {
         return decodeString(encodedB64);
@@ -30,10 +29,10 @@ public final class AntiDumpHelper {
         if (JniMicrokernelHelper.isNativeLoaded()) {
             try {
                 return nativeDecodeString(encoded);
-            } catch (UnsatisfiedLinkError | SecurityException ignored) {
+            } catch (UnsatisfiedLinkError | SecurityException e) {
+                throw new SecurityException("anti-dump native string decode failed", e);
             }
         }
-        if (encoded == null) return null;
-        return new String(Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8);
+        throw new SecurityException("anti-dump string decode requires the sealed native kernel");
     }
 }

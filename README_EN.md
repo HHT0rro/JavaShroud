@@ -18,6 +18,10 @@
   <a href="README.md">简体中文</a> · <strong>English</strong>
 </p>
 
+## Release Status
+
+Current development release: `0.9.0-dev`. The capability schema reports engine version `0.9.0-dev` and VBC capability version `4.53`; the underlying VMBC wire protocol remains VBC4 to keep the current native parser / serializer contract stable.
+
 ## Positioning
 
 JavaShroud is a Java obfuscation and hardening project built around bytecode transformation, method virtualization, a native microkernel, and a desktop workflow. It includes conventional Java obfuscation capabilities such as renaming, string protection, control-flow transformation, and metadata cleanup, while also providing a VMBC / NBVM (native bytecode VM) execution path for high-value methods.
@@ -66,6 +70,33 @@ flowchart LR
   class D,E,F runtime;
   class G,H gate;
 ```
+
+### VMBC Encryption -> Decryption -> Execution Path
+
+`method-virtualization` does not directly migrate Java methods into native functions. At build time, it converts method bodies into VBC4 / VMBC resources; at runtime, a sealed JNI microkernel authenticates, decrypts, parses, and executes those resources. The current implementation follows this path:
+
+1. **Build-time method selection and capture**: `MethodVirtualizationTransforms` selects virtualizable methods according to rules, `methodSelection`, `strictVirtualization`, instruction-count limits, and compatibility checks. Matching method bodies are captured through ASM. In strict virtualization scenarios, explicit method matches that are unsupported by VBC4 fail closed instead of silently retaining plaintext implementations.
+2. **Lowering into VMBC / register IR**: `VmBytecodeSerializer` lowers JVM bytecode into a VBC4 logical program and emits method metadata, constant-pool data, exception tables, and register-executable instruction blocks. Serialization introduces structural diversity through opcode dialects, super-operator folding, block split / coalesce, block dispatch tokens, and nested VM micro-streams.
+3. **Inner VBC4 encryption**: The VBC4 payload uses per-build and per-method derived material. The constant-pool index, constant-pool entries, instruction blocks, exception table, and padding derive AES/CTR keys and IVs by section and block. The payload carries an HMAC-SHA256 trailer, while `wrappedSeed`, `nonce`, `layoutDigest`, the entry token, resource path, and session integrity material participate in validation and key derivation.
+4. **Outer JSRP resource envelope**: The generated VBC4 bytes are wrapped by `RuntimeResourceCodec` as a `JSRP` runtime resource. The envelope contains encrypted metadata, an AES/CTR body, HMAC, nonce, kind / variant / layer domains, and plain / stored hashes. Compressible resources use zstd sections. VM resources may also be sliced and accompanied by manifests, decoys, and opaque paths to reduce stable resource fingerprints.
+5. **Dispatcher stub replacement**: The original Java method body is replaced with a lightweight dispatcher stub. The stub carries or indirectly references `entryToken`, the resource path, and argument arrays, then calls `JniMicrokernelHelper.executeVmResource` or a token-only specialized entrypoint. The hot path no longer exposes the original business instruction sequence.
+6. **Runtime sealed native kernel loading**: `JniMicrokernelHelper` loads the bundled native microkernel, installs the runtime resource key, preloads the VM resource index, and performs ABI, boot-token, and self-check validation. VBC4 mode has no Java fallback. Missing native support, ABI mismatch, resource authentication failure, or token mismatch refuses execution.
+7. **Runtime decryption and authentication**: The native side first decodes the `JSRP` envelope, then enters the VBC4 parser through `js_vm_execute_resource` or `js_vm_execute_resource_by_token`. `js_vm_core.c` validates the magic, version, required flags, HMAC, key id, wrapped seed, layout state, and integrity state, then decrypts the CP index, CP entries, instruction blocks, and exception section as needed. Constant-pool entries use lazy decryption to reduce plaintext residency.
+8. **Native VM execution and cleanup**: The parsed register IR is executed by the native dispatcher. Execution includes block dispatch validation, resident masking, opcode masking, anti-trace / trampoline checks, and exception-semantics handling. Completion and failure paths clear programs, constant-pool data, symbol caches, decoded operands, and derived key material through `js_vbc4_wipe_volatile`.
+
+The data flow is summarized below:
+
+```text
+Original Java method body
+  -> ASM capture and compatibility validation
+  -> VBC4 / VMBC register IR
+  -> Section-encrypted VBC4 payload + HMAC
+  -> JSRP runtime resource / slice / manifest / decoy
+  -> Java dispatcher stub(entryToken, args)
+  -> sealed JNI native VM unpack, decrypt, execute, wipe
+```
+
+The security boundary of this path is the instantiated execution protocol, not the secrecy of a single algorithm. Even when the format and implementation are public, each artifact has distinct build-root material, runtime resource keys, layout digests, resource paths, entry tokens, opcode dialects, block layouts, and native profiles. This design does not claim irreversible protection: a targeted reverse-engineering effort with the target environment, sufficient privileges, and sufficient time can still observe runtime state. JavaShroud's objective is to reduce the feasibility of turning one analysis effort into a reusable cross-sample VMBC unpacking and reconstruction template.
 
 These capabilities have clear boundaries: `method-virtualization` only protects selected and compatible methods. Methods that are not virtualized remain ordinary bytecode-obfuscation targets. A self-contained artifact still contains the material required for execution, so a sufficiently privileged and targeted reverse-engineering effort can continue layer by layer. JavaShroud focuses on engineering cost increase, not absolute resistance to analysis.
 
@@ -197,7 +228,6 @@ JavaShroud's design and implementation were informed by many open-source obfusca
 
 - [Open-MyJ2c](https://github.com/MyJ2c/Open-MyJ2c)
 - [native-obfuscator](https://github.com/radioegor146/native-obfuscator)
-- [native-obfuscator-plus](https://github.com/Araykal/native-obfuscator-plus)
 - [skidfuscator-java-obfuscator](https://github.com/skidfuscatordev/skidfuscator-java-obfuscator)
 - [Tigress_protection](https://github.com/JonathanSalwan/Tigress_protection)
 - code-encryptor-master

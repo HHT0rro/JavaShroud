@@ -42,13 +42,30 @@ class VmStructureDivergenceTest {
     }
 
     @Test
-    fun same_guest_program_is_reproducible_for_same_seed_and_context() {
+    fun same_guest_program_is_not_reproducible_for_same_seed_and_context() {
         val first = serializedLayout(0x3300_0003)
         val second = serializedLayout(0x3300_0003)
 
-        assertEquals(first.payload.toList(), second.payload.toList(), "same seed and context must reproduce exact VMBC bytes")
-        assertEquals(first.blockIds, second.blockIds, "same seed must reproduce physical block order")
-        assertEquals(first.dispatchTokens, second.dispatchTokens, "same seed must reproduce dispatch metadata")
+        assertFalse(first.payload.contentEquals(second.payload), "same seed/context must not reproduce exact VMBC bytes")
+        assertTrue(
+            first.blockIds != second.blockIds || first.dispatchTokens != second.dispatchTokens,
+            "same seed/context must not reproduce block order and dispatch metadata",
+        )
+    }
+
+    @Test
+    fun repeated_same_seed_same_context_builds_have_high_uniqueness() {
+        val snapshots = (0 until 16).map { serializedLayout(0x3300_0003, contextSeed = 0x3300_0003) }
+        assertTrue(snapshots.map { sha256Hex(it.payload) }.toSet().size >= 14, "VMBC payloads should be mostly unique across same-seed builds")
+        assertTrue(snapshots.map { it.blockIds.joinToString(",") }.toSet().size >= 2, "block storage order should vary across same-seed builds")
+        assertTrue(snapshots.map { it.dispatchTokens.joinToString(",") }.toSet().size >= 14, "dispatch tokens should be mostly unique across same-seed builds")
+    }
+
+    @Test
+    fun branch_switch_and_try_methods_keep_partitioned_layout() {
+        val snapshots = (0 until 12).map { controlFlowLayout(0x4100_0000 + it) }
+        assertTrue(snapshots.all { it.blockCount > 1 }, "control-flow methods must not collapse to a stable single VBC4 block")
+        assertTrue(snapshots.any { it.blockIds != it.blockIds.sorted() }, "control-flow methods should still allow shuffled storage order")
     }
 
     @Test
@@ -67,7 +84,7 @@ class VmStructureDivergenceTest {
     fun block_dispatch_tokens_carry_state_bound_payload_not_plain_linear_next() {
         val snapshot = serializedLayout(0x7700_0007)
         assertTrue(snapshot.blockCount > 1, "fixture must exercise multi-block dispatch")
-        val effectiveSeed = effectiveStructureSeed(snapshot.context, snapshot.seed)
+        val effectiveSeed = snapshot.effectiveSeed
 
         for (entry in snapshot.entries) {
             val legacyPayload = entry.token xor dispatchMask(effectiveSeed, entry.blockId, snapshot.blockCount)
@@ -91,12 +108,20 @@ class VmStructureDivergenceTest {
     }
 
     @Test
-    fun full_chain_structure_diverges_across_context_and_reproduces_for_same_context() {
+    fun full_chain_structure_diverges_across_repeated_same_context_builds() {
         val first = fullChainSnapshot(seed = 0x5100_0001, contextSeed = 0x6100_0001)
         val second = fullChainSnapshot(seed = 0x5100_0001, contextSeed = 0x6100_0001)
         val different = fullChainSnapshot(seed = 0x5100_0001, contextSeed = 0x6200_0002)
 
-        assertEquals(first, second, "full-chain structure must reproduce for same seed/context")
+        assertTrue(
+            first.blockIds != second.blockIds ||
+                first.dispatchTokens != second.dispatchTokens ||
+                first.nestedDigest != second.nestedDigest ||
+                first.resourceNames != second.resourceNames ||
+                first.resourceDigests != second.resourceDigests ||
+                first.manifestHeaders != second.manifestHeaders,
+            "full-chain structure must not reproduce for same seed/context",
+        )
         assertTrue(first.blockIds != different.blockIds || first.dispatchTokens != different.dispatchTokens, "flattened block layout or dispatch tokens must diverge across VBC4 contexts")
         assertTrue(first.nestedFlags != 0, "full-chain fixture must enable nested VM layer")
         assertTrue(first.nestedDigest != different.nestedDigest, "nested VM envelope must diverge across VBC4 contexts")
@@ -130,15 +155,25 @@ class VmStructureDivergenceTest {
         assertTrue(first != differentSeed, "resident rotation dump must diverge across resident build seeds")
         assertTrue(first != differentDispatch, "resident rotation dump must diverge across shared dispatch drift state")
     }
-    private fun serializedLayout(seed: Int, contextSeed: Int = seed, nestedProfile: Int = 0): LayoutSnapshot {
+    private fun serializedLayout(seed: Int, contextSeed: Int = seed, nestedProfile: Int = 0, structureEntropy: ByteArray? = null): LayoutSnapshot {
         val context = fixedContext(contextSeed)
         return withVbc4BuildContext(context) {
-            val serializer = VmBytecodeSerializer(
-                buildSeed = seed,
-                stateBinding = "structure-divergence-fixture",
-                entryMetadata = Vbc4EntryMetadata(methodLocalProfile = nestedProfile),
-                buildContext = context,
-            )
+            val serializer = if (structureEntropy == null) {
+                VmBytecodeSerializer(
+                    buildSeed = seed,
+                    stateBinding = "structure-divergence-fixture",
+                    entryMetadata = Vbc4EntryMetadata(methodLocalProfile = nestedProfile),
+                    buildContext = context,
+                )
+            } else {
+                VmBytecodeSerializer(
+                    buildSeed = seed,
+                    stateBinding = "structure-divergence-fixture",
+                    entryMetadata = Vbc4EntryMetadata(methodLocalProfile = nestedProfile),
+                    buildContext = context,
+                    structureEntropy = structureEntropy,
+                )
+            }
             serializer.visitCode()
             repeat(128) { index ->
                 serializer.visitLdcInsn(index xor (index shl 2))
@@ -161,12 +196,59 @@ class VmStructureDivergenceTest {
                 payload = bytes,
                 seed = seed,
                 context = context,
+                effectiveSeed = effectiveBuildSeed(serializer),
                 flags = flags,
                 blockCount = blockCount,
                 entries = entries,
                 blockIds = entries.map { it.blockId },
                 dispatchTokens = entries.map { it.token },
             )
+        }
+    }
+
+    private fun controlFlowLayout(seed: Int): LayoutSnapshot {
+        val context = fixedContext(seed)
+        return withVbc4BuildContext(context) {
+            val serializer = VmBytecodeSerializer(
+                buildSeed = seed,
+                stateBinding = "control-flow-structure-fixture",
+                entryMetadata = Vbc4EntryMetadata(methodLocalProfile = 0),
+                buildContext = context,
+            )
+            val start = org.objectweb.asm.Label()
+            val handler = org.objectweb.asm.Label()
+            val done = org.objectweb.asm.Label()
+            val dflt = org.objectweb.asm.Label()
+            val case0 = org.objectweb.asm.Label()
+            val case1 = org.objectweb.asm.Label()
+            serializer.visitCode()
+            serializer.visitTryCatchBlock(start, done, handler, "java/lang/RuntimeException")
+            serializer.visitLabel(start)
+            serializer.visitVarInsn(Opcodes.ILOAD, 0)
+            serializer.visitInsn(Opcodes.ICONST_1)
+            serializer.visitInsn(Opcodes.IAND)
+            serializer.visitLookupSwitchInsn(dflt, intArrayOf(0, 1), arrayOf(case0, case1))
+            serializer.visitLabel(case0)
+            serializer.visitIntInsn(Opcodes.BIPUSH, 7)
+            serializer.visitJumpInsn(Opcodes.GOTO, done)
+            serializer.visitLabel(case1)
+            serializer.visitIntInsn(Opcodes.BIPUSH, 11)
+            serializer.visitJumpInsn(Opcodes.GOTO, done)
+            serializer.visitLabel(dflt)
+            serializer.visitIntInsn(Opcodes.BIPUSH, 13)
+            serializer.visitLabel(done)
+            serializer.visitInsn(Opcodes.IRETURN)
+            serializer.visitLabel(handler)
+            serializer.visitInsn(Opcodes.POP)
+            serializer.visitInsn(Opcodes.ICONST_M1)
+            serializer.visitInsn(Opcodes.IRETURN)
+            serializer.visitMaxs(4, 1)
+            serializer.visitEnd()
+            val bytes = serializer.serialize()
+            val flags = readU2(bytes, 42)
+            val blockCount = readU2(bytes, 44)
+            val entries = readBlockIndex(bytes, blockCount)
+            LayoutSnapshot(bytes, seed, context, effectiveBuildSeed(serializer), flags, blockCount, entries, entries.map { it.blockId }, entries.map { it.token })
         }
     }
 
@@ -309,6 +391,7 @@ class VmStructureDivergenceTest {
         val payload: ByteArray,
         val seed: Int,
         val context: Vbc4BuildContext,
+        val effectiveSeed: Int,
         val flags: Int,
         val blockCount: Int,
         val entries: List<BlockIndexEntry>,
@@ -400,20 +483,6 @@ class VmStructureDivergenceTest {
         }
     }
 
-    private fun effectiveStructureSeed(context: Vbc4BuildContext, buildSeed: Int): Int {
-        val derived = context.deriveSubKey(
-            "javashroud-vbc4-vm-structure-v1",
-            16,
-            intBytes(buildSeed),
-            "vbc4-meta|0|||V|0|||||0".toByteArray(Charsets.UTF_8),
-        )
-        return try {
-            readMacInt(derived) xor buildSeed
-        } finally {
-            java.util.Arrays.fill(derived, 0)
-        }
-    }
-
     private fun decodeDispatchNext(seed: Int, blockId: Int, blockCount: Int, token: Int): Int {
         val payload = token xor dispatchMask(seed, blockId, blockCount)
         val nextId = payload and 0xFFFF
@@ -423,7 +492,7 @@ class VmStructureDivergenceTest {
     }
 
     private fun dispatchChain(snapshot: LayoutSnapshot): List<Int> {
-        val effectiveSeed = effectiveStructureSeed(snapshot.context, snapshot.seed)
+        val effectiveSeed = snapshot.effectiveSeed
         val entriesByBlock = snapshot.entries.associateBy { it.blockId }
         val chain = mutableListOf<Int>()
         var blockId = 0
@@ -456,11 +525,8 @@ class VmStructureDivergenceTest {
         (value and 0xFF).toByte(),
     )
 
-    private fun readMacInt(bytes: ByteArray): Int =
-        ((bytes[0].toInt() and 0xFF) shl 24) or
-            ((bytes[1].toInt() and 0xFF) shl 16) or
-            ((bytes[2].toInt() and 0xFF) shl 8) or
-            (bytes[3].toInt() and 0xFF)
+    private fun effectiveBuildSeed(serializer: VmBytecodeSerializer): Int =
+        serializer.javaClass.getDeclaredField("effectiveBuildSeed").apply { isAccessible = true }.getInt(serializer)
 
     private fun readU2(bytes: ByteArray, offset: Int): Int =
         ((bytes[offset].toInt() and 0xFF) shl 8) or (bytes[offset + 1].toInt() and 0xFF)
@@ -470,4 +536,5 @@ class VmStructureDivergenceTest {
             ((bytes[offset + 1].toInt() and 0xFF) shl 16) or
             ((bytes[offset + 2].toInt() and 0xFF) shl 8) or
             (bytes[offset + 3].toInt() and 0xFF)
+
 }

@@ -20,6 +20,8 @@ val dex2jarVersion = rootProject.extra["dex2jarVersion"] as String
 val cafed00dVersion = rootProject.extra["cafed00dVersion"] as String
 val jlinkerVersion = rootProject.extra["jlinkerVersion"] as String
 val aircompressorVersion = rootProject.extra["aircompressorVersion"] as String
+val javaShroudVersion = rootProject.extra["javaShroudVersion"] as String
+val javaShroudVbcVersion = rootProject.extra["javaShroudVbcVersion"] as String
 
 kotlin {
     jvmToolchain(21)
@@ -100,15 +102,22 @@ tasks.jar {
     archiveBaseName.set("obfuscator-engine")
     manifest {
         attributes["Main-Class"] = application.mainClass.get()
+        attributes["Implementation-Title"] = "JavaShroud Core Engine"
+        attributes["Implementation-Version"] = javaShroudVersion
+        attributes["JavaShroud-VBC-Version"] = javaShroudVbcVersion
     }
     from(configurations.runtimeClasspath.get().map { if (it.isDirectory) it else zipTree(it) })
     from(layout.buildDirectory.dir("classes/kotlin/main"))
     from(layout.buildDirectory.dir("classes/kotlin/main")) {
         include("io/github/hht0rro/javashroud/transforms/protection/**/*.class")
+        exclude("io/github/hht0rro/javashroud/transforms/protection/FlowControlException.class")
+        exclude("io/github/hht0rro/javashroud/transforms/protection/FlowControlException${'$'}Companion.class")
         into("META-INF/javashroud-helpers")
     }
     from(layout.buildDirectory.dir("classes/kotlin/main")) {
         include("io/github/hht0rro/javashroud/transforms/protection/**/*.class")
+        exclude("io/github/hht0rro/javashroud/transforms/protection/FlowControlException.class")
+        exclude("io/github/hht0rro/javashroud/transforms/protection/FlowControlException${'$'}Companion.class")
         rename("(.*)\\.class", "$1.bin")
         into("META-INF/javashroud-helpers")
     }

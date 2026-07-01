@@ -20,6 +20,7 @@ import java.nio.file.Path
 import java.util.jar.JarInputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassWriter
@@ -74,6 +75,41 @@ class ClassEncryptionLoaderRuntimeRegressionTest {
             Files.deleteIfExists(configPath)
             Files.deleteIfExists(inputJar)
         }
+    }
+
+    @Test
+    fun jni_runtime_resource_metadata_helper_is_deployed_and_sealed_with_class_encryption_loader() {
+        val deploymentSource = Files.readString(sourcePath("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/EmbeddedHelperDeployment.kt"))
+        val sealingSource = Files.readString(sourcePath("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/RuntimeArtifactSealing.kt"))
+        val helperOuter = "JniMicrokernelHelper"
+        val helperNested = "RuntimeResourceMetadata"
+
+        assertTrue(
+            deploymentSource.contains(helperOuter) && deploymentSource.contains(helperNested),
+            "RuntimeResourceMetadata must be injected with JniMicrokernelHelper so sealed runtime resources can decode",
+        )
+        assertTrue(
+            sealingSource.contains(helperOuter) && sealingSource.contains(helperNested),
+            "RuntimeResourceMetadata must be relocated with JniMicrokernelHelper during runtime sealing",
+        )
+    }
+
+    @Test
+    fun runtime_sealing_rebinds_class_encryption_metadata_to_sealed_resource_names() {
+        val sealingSource = Files.readString(sourcePath("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/RuntimeArtifactSealing.kt"))
+
+        assertTrue(
+            sealingSource.contains("rewriteClassEncryptionMetadataForResource"),
+            "Class-encryption manifest sealing must rewrite metadata when resource paths are sealed",
+        )
+        assertTrue(
+            sealingSource.contains("classEncryptionRewriteAad(className, sealedResourcePath, strategy, keyMode)"),
+            "Sealed class-encryption metadata must hash the sealed resource path, not the legacy __jse path",
+        )
+        assertTrue(
+            sealingSource.contains("classEncryptionRewriteAad(keyInfo.className, sealedResourceName, keyInfo.strategy, keyInfo.keyMode)"),
+            "Encrypted class bytes must be re-encrypted with AAD bound to the sealed resource path",
+        )
     }
 
     @Test
@@ -133,6 +169,38 @@ class ClassEncryptionLoaderRuntimeRegressionTest {
         val encryptedIndex = result.artifact.jarEntries.singleOrNull { it.name == "__jse/index.tab" }?.bytes?.toString(Charsets.UTF_8).orEmpty()
         assertTrue(entryName !in encryptedIndex, "A class that would access package-private app-loader state must not be split into the class-encryption loader")
         assertTrue(packagePrivateName !in encryptedIndex, "Unsafe package-private dependency should remain in the app loader namespace")
+    }
+
+    @Test
+    fun class_encryption_loader_emits_v2_aead_metadata_and_no_cbc_helper_path() {
+        val internalName = "sample/EncryptedStaticHost"
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = internalName,
+                    bytes = buildStaticOnlyTarget(internalName),
+                    methodSummaries = listOf(MemberSummary(MemberKind.METHOD, "value", "()I", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC)),
+                    accessFlags = Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER,
+                ),
+            ),
+        )
+
+        val result = withVbc4BuildContext(defaultVbc4BuildContext()) {
+            applyClassEncryptionLoader(
+                artifact = artifact,
+                ruleMatches = listOf(ruleMatchForClassEncryption(internalName)),
+                params = mapOf("encryptionStrategy" to "aes-256", "keyMode" to "per-class", "seed" to 31),
+            )
+        }
+
+        val encryptedIndex = result.artifact.jarEntries.single { it.name == "__jse/index.tab" }.bytes.toString(Charsets.UTF_8)
+        val metadata = encryptedIndex.trim().split('\t')[2]
+        assertTrue(metadata.startsWith("v2:aes-256:"), "Class encryption metadata must be versioned AES-GCM metadata")
+        assertEquals(6, metadata.split(':').size, "Class encryption v2 metadata must include strategy, key id, salt, nonce, and AAD hash")
+
+        val helperSource = Files.readString(sourcePath("src/main/java/io/github/hht0rro/javashroud/transforms/protection/ClassEncryptionLoaderHelper.java"))
+        assertFalse("AES/CBC/PKCS5Padding" in helperSource, "Class encryption helper must not keep CBC decrypt fallback")
+        assertFalse("Legacy direct-key" in helperSource, "Class encryption helper must not accept legacy direct-key metadata")
     }
     private fun injectedHelperInternalNames(jarPath: Path): Set<String> {
         val names = mutableSetOf<String>()
@@ -260,6 +328,19 @@ class ClassEncryptionLoaderRuntimeRegressionTest {
         return cw.toByteArray()
     }
 
+    private fun buildStaticOnlyTarget(internalName: String): ByteArray {
+        val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", null)
+        val value = cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "value", "()I", null, null)
+        value.visitCode()
+        value.visitIntInsn(Opcodes.BIPUSH, 9)
+        value.visitInsn(Opcodes.IRETURN)
+        value.visitMaxs(1, 0)
+        value.visitEnd()
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
     private fun captureStdout(block: () -> Unit): String {
         val originalOut = System.out
         val buffer = ByteArrayOutputStream()
@@ -270,5 +351,13 @@ class ClassEncryptionLoaderRuntimeRegressionTest {
         } finally {
             System.setOut(originalOut)
         }
+    }
+
+    private fun sourcePath(relative: String): Path {
+        val direct = Path.of(relative)
+        if (Files.exists(direct)) return direct
+        val nested = Path.of("core-engine").resolve(relative)
+        if (Files.exists(nested)) return nested
+        return direct
     }
 }

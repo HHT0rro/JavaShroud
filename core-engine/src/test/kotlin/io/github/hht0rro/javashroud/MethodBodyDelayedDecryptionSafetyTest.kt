@@ -6,12 +6,18 @@ import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.analysis.TargetSelector
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.protection.applyMethodBodyDelayedDecryption
+import java.nio.file.Files
+import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.tree.ClassNode
+import org.objectweb.asm.tree.LdcInsnNode
+import org.objectweb.asm.tree.MethodInsnNode
 
 class MethodBodyDelayedDecryptionSafetyTest {
     @Test
@@ -94,6 +100,65 @@ class MethodBodyDelayedDecryptionSafetyTest {
 
         assertEquals(0, result.transformedMemberCount, "Runtime protection helper calls must stay in loadable class bytecode so sealing can remap them")
         assertEquals(emptyList(), result.artifact.jarEntries.filter { it.name.startsWith("__jmd/") }.map { it.name })
+    }
+
+    @Test
+    fun delayed_decryption_passes_mode_to_runtime_helper() {
+        val internalName = "sample/DelayedStaticHost"
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = internalName,
+                    bytes = buildStaticTarget(internalName),
+                    methodSummaries = listOf(
+                        MemberSummary(MemberKind.METHOD, "value", "()I", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
+                    ),
+                ),
+            ),
+        )
+
+        val result = applyMethodBodyDelayedDecryption(
+            artifact = artifact,
+            ruleMatches = listOf(ruleMatchFor(internalName)),
+            params = mapOf("seed" to 29, "mode" to "hidden-class-redirect"),
+        )
+
+        val node = ClassNode()
+        ClassReader(result.artifact.classArtifactIndex[internalName]!!.bytes).accept(node, ClassReader.SKIP_FRAMES)
+        val helperCall = node.methods.single { it.name == "value" }.instructions.toArray()
+            .filterIsInstance<MethodInsnNode>()
+            .single { it.owner.endsWith("MethodBodyDecryptionHelper") && it.name == "invokeEncrypted" }
+        assertEquals(
+            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Class;Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;",
+            helperCall.desc,
+            "Delayed decryption trampoline must pass metadata and mode so lazy and hidden-class strategies differ at runtime",
+        )
+        val ldcValues = node.methods.single { it.name == "value" }.instructions.toArray()
+            .filterIsInstance<LdcInsnNode>()
+            .mapNotNull { it.cst as? String }
+        assertTrue(ldcValues.any { it.startsWith("v2:aes-128:") }, "Delayed decryption trampoline must pass v2 metadata")
+        assertFalse(ldcValues.any { it == "keyBase64" }, "Delayed decryption trampoline must not pass a raw keyBase64 marker")
+    }
+
+    @Test
+    fun delayed_decryption_helper_rejects_cbc_and_legacy_keybase64_paths() {
+        val helperSource = Files.readString(sourcePath("src/main/java/io/github/hht0rro/javashroud/transforms/protection/MethodBodyDecryptionHelper.java"))
+        assertFalse("AES/CBC/PKCS5Padding" in helperSource, "Method body helper must not keep CBC decrypt fallback")
+        assertFalse("Base64.getDecoder().decode(keyBase64)" in helperSource, "Method body helper must not decode raw keyBase64")
+        assertTrue("AES/GCM/NoPadding" in helperSource, "Method body helper must use AES-GCM")
+    }
+
+    private fun buildStaticTarget(internalName: String): ByteArray {
+        val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", null)
+        val method = cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "value", "()I", null, null)
+        method.visitCode()
+        method.visitIntInsn(Opcodes.BIPUSH, 7)
+        method.visitInsn(Opcodes.IRETURN)
+        method.visitMaxs(1, 0)
+        method.visitEnd()
+        cw.visitEnd()
+        return cw.toByteArray()
     }
 
     private fun buildRuntimeProtectionHelperCaller(internalName: String): ByteArray {
@@ -198,4 +263,12 @@ class MethodBodyDelayedDecryptionSafetyTest {
         matchedClassNames = listOf(internalName),
         matchedMembers = emptyList(),
     )
+
+    private fun sourcePath(relative: String): Path {
+        val direct = Path.of(relative)
+        if (Files.exists(direct)) return direct
+        val nested = Path.of("core-engine").resolve(relative)
+        if (Files.exists(nested)) return nested
+        return direct
+    }
 }

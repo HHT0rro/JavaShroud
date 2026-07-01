@@ -17,6 +17,10 @@
   <strong>简体中文</strong> · <a href="README_EN.md">English</a>
 </p>
 
+## 发布状态
+
+当前开发发布版本：`0.9.0-dev`。能力 schema 暴露的 engine version 为 `0.9.0-dev`，VBC capability version 为 `4.53`；底层 VMBC 线协议仍为 VBC4，以保持当前 native parser / serializer 合约稳定。
+
 ## 项目定位
 
 JavaShroud 是一个以 Java 字节码变换、方法虚拟化、Native 微内核和桌面化工作流为核心的混淆与加固项目。它既包含传统 Java 混淆器常见的重命名、字符串保护、控制流扰动和元数据清理，也提供面向高价值方法的 VMBC / NBVM (native bytecode VM) 执行链。
@@ -64,7 +68,34 @@ flowchart LR
   class G,H gate;
 ```
 
-这些能力的边界同样需要诚实说明：`method-virtualization` 只保护被选中且兼容的方法；未虚拟化的方法仍是普通字节码混淆问题。自包含产物中仍然存在完成执行所需的全部材料，具备足够时间和权限的定向逆向仍可逐层推进。JavaShroud 强调的是工程化成本提升，而不是绝对不可分析。
+### VMBC 加密 -> 解密 -> 执行链路
+
+`method-virtualization` 并非将 Java 方法直接迁移为 native 函数，而是在构建期将方法体转换为 VBC4 / VMBC 资源，并在运行期由 sealed JNI 微内核完成认证、解密、解析和执行。当前实现的主要链路如下：
+
+1. **构建期选择与捕获方法**：`MethodVirtualizationTransforms` 根据规则、`methodSelection`、`strictVirtualization`、指令数量上限和兼容性检查选择可虚拟化方法。命中的方法体会被 ASM 捕获；在严格虚拟化场景下，显式命中但 VBC4 不支持的方法会 fail-closed，而不是静默保留原始明文实现。
+2. **Lowering 为 VMBC / register IR**：`VmBytecodeSerializer` 将 JVM bytecode lowering 为 VBC4 逻辑程序，并写入方法 metadata、常量池、异常表和 register-executable 指令块。序列化过程中会引入 opcode dialect、super-operator folding、block split / coalesce、block dispatch token、nested VM micro-stream 等结构差异化信息。
+3. **VBC4 内层加密**：VBC4 payload 使用 per-build / per-method 派生材料。常量池索引、常量池 entry、指令 block、异常表和 padding 按 section / block 维度分别派生 AES/CTR key 与 IV；payload 末尾带 HMAC-SHA256，`wrappedSeed`、`nonce`、`layoutDigest`、entry token、resource path 与 session integrity material 共同参与校验和密钥派生。
+4. **JSRP 外层资源封装**：生成的 VBC4 bytes 会被 `RuntimeResourceCodec` 封装为 `JSRP` runtime resource。外层资源包含加密 metadata、AES/CTR body、HMAC、nonce、kind / variant / layer 域和 plain / stored hash；可压缩资源使用 zstd section。VM 资源还可以进一步切片，并生成 manifest、decoy 和 opaque path，以降低稳定资源指纹。
+5. **替换原方法体为 dispatcher stub**：原 Java 方法体被替换为轻量 stub。stub 携带或间接引用 `entryToken`、resource path 和参数数组，调用 `JniMicrokernelHelper.executeVmResource` / token-only 专用入口；热路径不再暴露原始业务指令序列。
+6. **运行期加载 sealed native kernel**：`JniMicrokernelHelper` 只负责加载随 JAR 封装的 native 微内核、安装 runtime resource key、预加载 VM resource index，并做 ABI / boot-token / self-check。VBC4 模式没有 Java fallback；native 不可用、ABI 不匹配、资源认证失败或 token 不匹配都会拒绝执行。
+7. **运行期解密与认证**：native 侧先解 `JSRP` envelope，再由 `js_vm_execute_resource` / `js_vm_execute_resource_by_token` 进入 VBC4 parser。`js_vm_core.c` 会检查 magic、版本、required flags、HMAC、key id、wrapped seed、layout / integrity 状态，然后按需解密 CP index、CP entry、instruction block 和 exception section；常量池 entry 采用 lazy decrypt，减少明文常驻时间。
+8. **Native VM 执行与清理**：解析后的 register IR 交给 native dispatcher 执行。执行期间会穿插 block dispatch 校验、resident masking、opcode mask、anti-trace / trampoline 检测和异常语义处理；执行结束或失败路径会通过 `js_vbc4_wipe_volatile` 清理 program、CP、symbol cache、decoded operands 和派生密钥材料。
+
+数据流概览如下：
+
+```text
+原 Java 方法体
+  -> ASM 捕获与兼容性校验
+  -> VBC4 / VMBC register IR
+  -> 分区加密的 VBC4 payload + HMAC
+  -> JSRP runtime resource / slice / manifest / decoy
+  -> Java dispatcher stub(entryToken, args)
+  -> sealed JNI native VM 解包、解密、执行、wipe
+```
+
+该链路的安全边界是实例化后的执行协议，而非单点算法保密。即使格式和实现公开，不同产物仍具有不同的构建根材料、runtime resource key、layout digest、resource path、entry token、opcode dialect、block 布局和 native profile。该设计不承诺不可逆保护；具备目标环境、足够权限和分析时间的定向逆向仍可动态跟踪运行态。JavaShroud 的目标是降低单次分析结果复用为跨样本通用 VMBC 解包与还原模板的可行性。
+
+这些能力的边界同样需要诚实说明：`method-virtualization` 只保护被选中且兼容的方法；未虚拟化的方法仍是普通字节码混淆问题。自包含产物中仍然存在完成执行所需的全部材料，具备足够时间和权限的定向逆向仍可逐层推进。
 
 ## 与 JNIC / Native 混淆的区别
 
@@ -194,8 +225,8 @@ JavaShroud 的设计与实现参考、学习并对比了许多开源混淆、虚
 
 - [Open-MyJ2c](https://github.com/MyJ2c/Open-MyJ2c)
 - [native-obfuscator](https://github.com/radioegor146/native-obfuscator)
-- [native-obfuscator-plus](https://github.com/Araykal/native-obfuscator-plus)
 - [skidfuscator-java-obfuscator](https://github.com/skidfuscatordev/skidfuscator-java-obfuscator)
+- [Tigress_protection](https://github.com/JonathanSalwan/Tigress_protection)
 - code-encryptor-master
 - jar-obfuscator-main
 - obfuscator-master

@@ -13,12 +13,25 @@ import kotlin.test.assertTrue
 
 class NestedVmStructureTest {
     @Test
-    fun nested_micro_stream_is_reproducible_for_same_seed_context_and_profile() {
+    fun nested_micro_stream_is_not_reproducible_for_same_seed_context_and_profile_by_default() {
         val first = nestedBlock(seed = 0x1357_2468, contextSeed = 0x1122_3344, profile = 0x5566_7788)
         val second = nestedBlock(seed = 0x1357_2468, contextSeed = 0x1122_3344, profile = 0x5566_7788)
 
-        assertEquals(first.bytes.toList(), second.bytes.toList(), "Nested VM micro stream must be deterministic for same seed/context/profile")
-        assertEquals(first.dialect, second.dialect, "Nested VM dialect must be deterministic for same seed/context/profile")
+        assertFalse(first.bytes.contentEquals(second.bytes), "Nested VM micro stream must not be reusable across same-seed production builds")
+        assertTrue(
+            first.microOpcodes != second.microOpcodes || first.dialect != second.dialect,
+            "Nested VM opcode table or dialect must vary across same-seed production builds",
+        )
+    }
+
+    @Test
+    fun nested_micro_stream_is_reproducible_when_structure_entropy_is_fixed() {
+        val entropy = fixedStructureEntropy()
+        val first = nestedBlock(seed = 0x1357_2468, contextSeed = 0x1122_3344, profile = 0x5566_7788, structureEntropy = entropy)
+        val second = nestedBlock(seed = 0x1357_2468, contextSeed = 0x1122_3344, profile = 0x5566_7788, structureEntropy = entropy)
+
+        assertEquals(first.bytes.toList(), second.bytes.toList(), "Fixed test entropy must keep nested VM stream reproducible")
+        assertEquals(first.dialect, second.dialect, "Fixed test entropy must keep nested VM dialect reproducible")
     }
 
     @Test
@@ -56,12 +69,9 @@ class NestedVmStructureTest {
         )
     }
 
-    private fun nestedBlock(seed: Int, contextSeed: Int, profile: Int): NestedSnapshot {
+    private fun nestedBlock(seed: Int, contextSeed: Int, profile: Int, structureEntropy: ByteArray? = null): NestedSnapshot {
         val context = fixedContext(contextSeed)
-        val serializer = VmBytecodeSerializer(
-            buildSeed = seed,
-            stateBinding = "nested-vm-structure-test",
-            entryMetadata = Vbc4EntryMetadata(
+        val entryMetadata = Vbc4EntryMetadata(
                 entryToken = 0x1122_3344_5566_7788L,
                 ownerToken = "owner-token",
                 methodToken = "method-token",
@@ -72,9 +82,23 @@ class NestedVmStructureTest {
                 originalDescriptor = "()I",
                 resourcePath = "META-INF/.r/nested.bin",
                 originalAccess = Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC,
-            ),
-            buildContext = context,
-        )
+            )
+        val serializer = if (structureEntropy == null) {
+            VmBytecodeSerializer(
+                buildSeed = seed,
+                stateBinding = "nested-vm-structure-test",
+                entryMetadata = entryMetadata,
+                buildContext = context,
+            )
+        } else {
+            VmBytecodeSerializer(
+                buildSeed = seed,
+                stateBinding = "nested-vm-structure-test",
+                entryMetadata = entryMetadata,
+                buildContext = context,
+                structureEntropy = structureEntropy,
+            )
+        }
         val block = VmBytecodeSerializer.VmLogicalBlock(
             blockId = 3,
             entryToken = 0x55AA_33CC,
@@ -119,6 +143,8 @@ class NestedVmStructureTest {
         nativeSeed = seed.toLong() xor 0x1357_2468L,
         jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (seed.rotateLeft(index and 31) xor index * 29).toByte() },
     )
+
+    private fun fixedStructureEntropy(): ByteArray = ByteArray(32) { index -> (index * 19 + 7).toByte() }
 
     private data class NestedSnapshot(
         val bytes: ByteArray,

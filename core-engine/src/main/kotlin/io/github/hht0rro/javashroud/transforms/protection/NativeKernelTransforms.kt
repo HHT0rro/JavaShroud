@@ -9,7 +9,9 @@ import io.github.hht0rro.javashroud.transforms.unchangedTransformResult
 import io.github.hht0rro.javashroud.transforms.updatedArtifactTransformResult
 import org.objectweb.asm.*
 import org.objectweb.asm.tree.ClassNode
+import org.objectweb.asm.tree.FieldInsnNode
 import org.objectweb.asm.tree.InvokeDynamicInsnNode
+import org.objectweb.asm.tree.InsnList
 import org.objectweb.asm.tree.MethodInsnNode
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import java.security.SecureRandom
@@ -46,22 +48,29 @@ fun applyAntiInstrumentation(
         if (!matchedClassNames.contains(classArtifact.summary.internalName)) return@map classArtifact
         if (isJniLoaderTimingSensitiveClass(classArtifact.bytes)) return@map classArtifact
 
+        val classNode = ClassNode()
+        try {
+            ClassReader(classArtifact.bytes).accept(classNode, ClassReader.SKIP_FRAMES)
+        } catch (_: Exception) { return@map classArtifact }
+
+        val candidateMethods = classNode.methods
+            .asSequence()
+            .filter { it.name != "<clinit>" && it.name != "<init>" }
+            .filter { it.access and (Opcodes.ACC_ABSTRACT or Opcodes.ACC_NATIVE) == 0 }
+            .filterNot { isRuntimeGuardProbeHotPath(classNode.name, it) }
+            .map { it.name + it.desc }
+            .toMutableList()
+
         val cr = ClassReader(classArtifact.bytes)
         val cw = ClassWriter(cr, ClassWriter.COMPUTE_FRAMES)
         var classModified = false
         var hasClinit = false
 
-        var candidateMethods = mutableListOf<String>()
         val cv = object : ClassVisitor(Opcodes.ASM9, cw) {
             override fun visitMethod(
                 access: Int, name: String, descriptor: String, signature: String?, exceptions: Array<String>?,
             ): MethodVisitor {
                 val superMv = super.visitMethod(access, name, descriptor, signature, exceptions)
-                // Collect candidate methods for distributed probes (non-init, non-clinit, non-abstract, non-native)
-                if (name != "<clinit>" && name != "<init>" &&
-                    access and (Opcodes.ACC_ABSTRACT or Opcodes.ACC_NATIVE) == 0) {
-                    candidateMethods.add(name + descriptor)
-                }
                 if (name != "<clinit>") return superMv
                 hasClinit = true
 
@@ -165,6 +174,33 @@ private fun isJniLoaderTimingSensitiveCall(call: MethodInsnNode): Boolean {
     if (call.owner == "java/lang/Thread" && call.name == "sleep") return true
     if (call.owner.startsWith("java/util/concurrent/")) return true
     return false
+}
+
+private fun isRuntimeGuardProbeHotPath(owner: String, method: org.objectweb.asm.tree.MethodNode): Boolean {
+    val instructions = method.instructions?.toArray().orEmpty()
+    var hasBackwardJump = false
+    var hasSelfCall = false
+    var hasElapsedTimeProbe = false
+    var hasThreadOrConcurrentBoundary = false
+    var hasStringBuilderLoop = false
+    val labelIndex = instructions.mapIndexedNotNull { index, instruction ->
+        (instruction as? org.objectweb.asm.tree.LabelNode)?.let { it to index }
+    }.toMap()
+    for ((index, instruction) in instructions.withIndex()) {
+        when (instruction) {
+            is org.objectweb.asm.tree.JumpInsnNode -> {
+                val targetIndex = labelIndex[instruction.label]
+                if (targetIndex != null && targetIndex <= index) hasBackwardJump = true
+            }
+            is MethodInsnNode -> {
+                if (instruction.owner == owner && instruction.name == method.name && instruction.desc == method.desc) hasSelfCall = true
+                if (instruction.owner == "java/lang/System" && instruction.name == "currentTimeMillis" && instruction.desc == "()J") hasElapsedTimeProbe = true
+                if (isJniLoaderTimingSensitiveCall(instruction)) hasThreadOrConcurrentBoundary = true
+                if (instruction.owner == "java/lang/StringBuilder" || instruction.owner == "java/lang/String") hasStringBuilderLoop = true
+            }
+        }
+    }
+    return hasThreadOrConcurrentBoundary || hasElapsedTimeProbe || hasSelfCall || (hasBackwardJump && hasStringBuilderLoop)
 }
 
 /**
@@ -272,7 +308,19 @@ fun applyAntiDumpProtection(
         if (isJniLoaderTimingSensitiveClass(classArtifact.bytes)) return@map classArtifact
 
         val cr = ClassReader(classArtifact.bytes)
-        val cw = ClassWriter(cr, ClassWriter.COMPUTE_FRAMES)
+        val classNode = ClassNode()
+        try {
+            cr.accept(classNode, ClassReader.EXPAND_FRAMES)
+        } catch (_: Exception) { return@map classArtifact }
+
+        val scrambledFields = if (protectionLevel == "field-scramble" || protectionLevel == "full") {
+            eligibleAntiDumpScrambleFields(classNode)
+        } else {
+            emptyMap()
+        }
+        val fieldRewriteCount = rewriteAntiDumpFieldAccesses(classNode, scrambledFields)
+
+        val cw = ClassWriter(ClassWriter.COMPUTE_FRAMES)
         var classModified = false
         var hasClinit = false
 
@@ -287,7 +335,7 @@ fun applyAntiDumpProtection(
                 return object : MethodVisitor(Opcodes.ASM9, superMv) {
                     override fun visitInsn(opcode: Int) {
                         if (opcode == Opcodes.RETURN) {
-                            emitAntiDumpProtectionInit(this, protectionLevel)
+                            emitAntiDumpProtectionInit(this, protectionLevel, classArtifact.summary.internalName)
                             classModified = true
                         }
                         super.visitInsn(opcode)
@@ -299,7 +347,7 @@ fun applyAntiDumpProtection(
                 if (!hasClinit) {
                     val mv = super.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null)
                     mv.visitCode()
-                    emitAntiDumpProtectionInit(mv, protectionLevel)
+                    emitAntiDumpProtectionInit(mv, protectionLevel, classArtifact.summary.internalName)
                     mv.visitInsn(Opcodes.RETURN)
                     mv.visitMaxs(1, 0)
                     mv.visitEnd()
@@ -310,9 +358,9 @@ fun applyAntiDumpProtection(
         }
 
         try {
-            cr.accept(cv, ClassReader.SKIP_FRAMES)
+            classNode.accept(cv)
         } catch (_: Exception) { return@map classArtifact }
-        if (!classModified) return@map classArtifact
+        if (!classModified && fieldRewriteCount == 0) return@map classArtifact
         classCount++
         reanalyzedClassArtifact(classArtifact, cw.toByteArray())
     }
@@ -433,7 +481,7 @@ private fun emitDistributedIntegrityProbe(mv: MethodVisitor, detectionLevel: Str
     mv.visitMethodInsn(
         Opcodes.INVOKESTATIC,
         "io/github/hht0rro/javashroud/transforms/protection/AntiInstrumentationHelper",
-        "checkInstrumentationEx",
+        "checkInstrumentationExSafe",
         "(Ljava/lang/String;Ljava/lang/String;)V",
         false,
     )
@@ -451,15 +499,71 @@ private fun emitAntiJvmTiCheck(mv: MethodVisitor, detectionMode: String, respons
     )
 }
 
-private fun emitAntiDumpProtectionInit(mv: MethodVisitor, protectionLevel: String) {
+private fun emitAntiDumpProtectionInit(mv: MethodVisitor, protectionLevel: String, ownerInternalName: String) {
     mv.visitLdcInsn(protectionLevel)
+    mv.visitLdcInsn(Type.getObjectType(ownerInternalName))
     mv.visitMethodInsn(
         Opcodes.INVOKESTATIC,
         "io/github/hht0rro/javashroud/transforms/protection/AntiDumpRuntimeHelper",
         "initializeProtection",
-        "(Ljava/lang/String;)V",
+        "(Ljava/lang/String;Ljava/lang/Class;)V",
         false,
     )
+}
+
+private fun eligibleAntiDumpScrambleFields(classNode: ClassNode): Map<String, String> = classNode.fields
+    .filter { field ->
+        field.access and (Opcodes.ACC_FINAL or Opcodes.ACC_VOLATILE) == 0 &&
+            field.value == null &&
+            field.desc in setOf("Ljava/lang/String;", "[B", "[C")
+    }
+    .associate { field -> field.name + field.desc to field.desc }
+
+private fun rewriteAntiDumpFieldAccesses(classNode: ClassNode, fields: Map<String, String>): Int {
+    if (fields.isEmpty()) return 0
+    var rewrites = 0
+    for (method in classNode.methods) {
+        val instructions = method.instructions ?: continue
+        for (insn in instructions.toArray()) {
+            val fieldInsn = insn as? FieldInsnNode ?: continue
+            if (fieldInsn.owner != classNode.name) continue
+            val descriptor = fields[fieldInsn.name + fieldInsn.desc] ?: continue
+            val helper = antiDumpFieldHelper(descriptor, fieldInsn.opcode) ?: continue
+            val wrap = InsnList()
+            wrap.add(org.objectweb.asm.tree.LdcInsnNode(classNode.name))
+            wrap.add(org.objectweb.asm.tree.LdcInsnNode(fieldInsn.name))
+            wrap.add(MethodInsnNode(Opcodes.INVOKESTATIC, ANTI_DUMP_RUNTIME_HELPER, helper, antiDumpFieldHelperDescriptor(descriptor), false))
+            when (fieldInsn.opcode) {
+                Opcodes.GETFIELD, Opcodes.GETSTATIC -> instructions.insert(fieldInsn, wrap)
+                Opcodes.PUTFIELD, Opcodes.PUTSTATIC -> instructions.insertBefore(fieldInsn, wrap)
+            }
+            rewrites++
+        }
+    }
+    return rewrites
+}
+
+private const val ANTI_DUMP_RUNTIME_HELPER = "io/github/hht0rro/javashroud/transforms/protection/AntiDumpRuntimeHelper"
+
+private fun antiDumpFieldHelper(descriptor: String, opcode: Int): String? {
+    val prefix = when (opcode) {
+        Opcodes.GETFIELD, Opcodes.GETSTATIC -> "unscramble"
+        Opcodes.PUTFIELD, Opcodes.PUTSTATIC -> "scramble"
+        else -> return null
+    }
+    return when (descriptor) {
+        "Ljava/lang/String;" -> prefix + "String"
+        "[B" -> prefix + "Bytes"
+        "[C" -> prefix + "Chars"
+        else -> null
+    }
+}
+
+private fun antiDumpFieldHelperDescriptor(descriptor: String): String = when (descriptor) {
+    "Ljava/lang/String;" -> "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"
+    "[B" -> "([BLjava/lang/String;Ljava/lang/String;)[B"
+    "[C" -> "([CLjava/lang/String;Ljava/lang/String;)[C"
+    else -> error("unsupported anti-dump field descriptor: $descriptor")
 }
 
 private fun emitAntiByteBuddyCheck(mv: MethodVisitor, response: String) {

@@ -1,6 +1,7 @@
 package io.github.hht0rro.javashroud.transforms.protection
 
 import java.security.MessageDigest
+import java.security.SecureRandom
 import java.util.Arrays
 import javax.crypto.Cipher
 import javax.crypto.Mac
@@ -16,8 +17,11 @@ enum class RuntimeResourceKind(val id: Int) {
 
 object RuntimeResourceCodec {
     private val magic = byteArrayOf(0x4A, 0x53, 0x52, 0x50) // JSRP
-    private const val version = 5
-    private const val headerSize = 40
+    private const val version = 6
+    private const val legacyVersion = 5
+    private const val headerSize = 25
+    private const val legacyHeaderSize = 40
+    private const val metadataSize = 96
     private const val macLength = 32
 
     fun encode(
@@ -30,10 +34,9 @@ object RuntimeResourceCodec {
     ): ByteArray {
         val normalizedLayers = layerCount.coerceIn(1, 7)
         val normalizedVariant = variantId and 0x7F
-        val storedBytes = Vbc4ZstdCodec.compress(bytes)
-        val compressed = storedBytes.size < bytes.size
-        @Suppress("UNUSED_VARIABLE")
-        val requestedCompression = compress
+        val compressedCandidate = if (compress) Vbc4ZstdCodec.compress(bytes) else bytes
+        val compressed = compress && compressedCandidate.size < bytes.size
+        val storedBytes = if (compressed) compressedCandidate else bytes
         val key = runtimeResourceKey()
         return try {
             val kindBytes = intBytes(kind.id)
@@ -41,30 +44,33 @@ object RuntimeResourceCodec {
             val layerBytes = intBytes(normalizedLayers)
             val plainHash = sha256(bytes)
             val storedHash = sha256(storedBytes)
-            val nonce = deriveNonce(
+            val nonce = randomNonce()
+            val metadataPlain = encodeMetadata(
+                kindId = kind.id,
+                layerCount = normalizedLayers,
+                variantId = normalizedVariant,
+                compressed = compressed,
+                plainLength = bytes.size,
+                storedLength = storedBytes.size,
+                bodyLength = storedBytes.size,
+                keyId = readBe32(hmacSha256WithKey(key, "jsrp-key-id-v2".toByteArray(Charsets.US_ASCII), nonce), 0),
                 seed = seed,
-                kindBytes = kindBytes,
-                variantBytes = variantBytes,
-                layerBytes = layerBytes,
                 plainHash = plainHash,
                 storedHash = storedHash,
-                key = key,
             )
+            val metadataCipher = aesCtrCrypt(metadataPlain, nonce, key, intBytes(0), intBytes(0), intBytes(0))
             val body = aesCtrCrypt(storedBytes, nonce, key, kindBytes, variantBytes, layerBytes)
-            val out = ByteArray(headerSize + body.size + macLength + 1)
+            val out = ByteArray(headerSize + metadataCipher.size + body.size + macLength + 1)
             System.arraycopy(magic, 0, out, 0, magic.size)
             out[4] = version.toByte()
-            out[5] = kind.id.toByte()
-            out[6] = normalizedLayers.toByte()
-            out[7] = (normalizedVariant or if (compressed) 0x80 else 0).toByte()
-            System.arraycopy(nonce, 0, out, 8, nonce.size)
-            writeLe32(out, 24, bytes.size)
-            writeLe32(out, 28, storedBytes.size)
-            writeLe32(out, 32, body.size)
-            writeLe32(out, 36, readBe32(hmacSha256WithKey(key, "jsrp-key-id".toByteArray(Charsets.US_ASCII), nonce), 0))
-            System.arraycopy(body, 0, out, headerSize, body.size)
-            val tag = hmacSha256WithKey(key, out, 0, headerSize + body.size, "jsrp-auth".toByteArray(Charsets.US_ASCII), nonce)
-            System.arraycopy(tag, 0, out, headerSize + body.size, tag.size)
+            System.arraycopy(nonce, 0, out, 5, nonce.size)
+            writeLe16(out, 21, metadataCipher.size)
+            writeLe16(out, 23, macLength)
+            System.arraycopy(metadataCipher, 0, out, headerSize, metadataCipher.size)
+            System.arraycopy(body, 0, out, headerSize + metadataCipher.size, body.size)
+            val tagOffset = headerSize + metadataCipher.size + body.size
+            val tag = hmacSha256WithKey(key, out, 0, tagOffset, "jsrp-auth-v2".toByteArray(Charsets.US_ASCII), nonce)
+            System.arraycopy(tag, 0, out, tagOffset, tag.size)
             out[out.lastIndex] = macLength.toByte()
             out
         } finally {
@@ -74,15 +80,66 @@ object RuntimeResourceCodec {
 
     fun decode(bytes: ByteArray): ByteArray? {
         if (!hasCurrentHeader(bytes)) return null
-        return decodeCurrent(bytes)
+        return when (bytes[4].toInt() and 0xFF) {
+            version -> decodeCurrent(bytes)
+            legacyVersion -> decodeLegacy(bytes)
+            else -> null
+        }
     }
 
     fun hasCurrentHeader(bytes: ByteArray): Boolean =
-        bytes.size >= headerSize && magic.indices.all { index -> bytes[index] == magic[index] } &&
-            (bytes[4].toInt() and 0xFF) == version
+        bytes.size >= 5 && magic.indices.all { index -> bytes[index] == magic[index] } &&
+            ((bytes[4].toInt() and 0xFF) == version || (bytes[4].toInt() and 0xFF) == legacyVersion)
 
     private fun decodeCurrent(bytes: ByteArray): ByteArray? {
-        if (bytes.size < headerSize + macLength + 1) return null
+        if (bytes.size < headerSize + metadataSize + macLength + 1) return null
+        if ((bytes.last().toInt() and 0xFF) != macLength) return null
+        val nonce = bytes.copyOfRange(5, 21)
+        val metadataLength = readLe16(bytes, 21)
+        val declaredMacLength = readLe16(bytes, 23)
+        if (metadataLength != metadataSize || declaredMacLength != macLength) return null
+        val metadataOffset = headerSize
+        val bodyOffset = metadataOffset + metadataLength
+        if (bodyOffset + macLength + 1 > bytes.size) return null
+        val expectedTag = hmacSha256(bytes, 0, bytes.size - macLength - 1, "jsrp-auth-v2".toByteArray(Charsets.US_ASCII), nonce)
+        if (!constantTimeEquals(expectedTag, bytes, bytes.size - macLength - 1)) return null
+        val key = runtimeResourceKey()
+        val metadataPlain = try {
+            aesCtrCrypt(
+                bytes.copyOfRange(metadataOffset, bodyOffset),
+                nonce,
+                key,
+                intBytes(0),
+                intBytes(0),
+                intBytes(0),
+            )
+        } finally {
+            Arrays.fill(key, 0)
+        }
+        val metadata = parseMetadata(metadataPlain) ?: return null
+        val kindId = metadata.kindId
+        val layerCount = metadata.layerCount
+        val variantId = metadata.variantId
+        val compressed = metadata.compressed
+        if (kindId !in RuntimeResourceKind.entries.map { it.id }) return null
+        if (layerCount !in 1..7) return null
+        if (variantId !in 0..127) return null
+        val plainLength = metadata.plainLength
+        val storedLength = metadata.storedLength
+        val bodyLength = metadata.bodyLength
+        if (plainLength < 0 || storedLength < 0 || bodyLength < 0) return null
+        val tagOffset = bodyOffset + bodyLength
+        if (tagOffset + macLength + 1 != bytes.size) return null
+        val body = bytes.copyOfRange(bodyOffset, tagOffset)
+        val storedBytes = aesCtrCrypt(body, nonce, kindId, variantId, layerCount)
+        if (storedBytes.size != storedLength) return null
+        if (!sha256(storedBytes).contentEquals(metadata.storedHash)) return null
+        val plain = if (compressed) Vbc4ZstdCodec.decompress(storedBytes, plainLength) ?: return null else storedBytes
+        return if (plain.size == plainLength && sha256(plain).contentEquals(metadata.plainHash)) plain else null
+    }
+
+    private fun decodeLegacy(bytes: ByteArray): ByteArray? {
+        if (bytes.size < legacyHeaderSize + macLength + 1) return null
         if ((bytes.last().toInt() and 0xFF) != macLength) return null
         val kindId = bytes[5].toInt() and 0xFF
         val layerCount = bytes[6].toInt() and 0xFF
@@ -95,7 +152,7 @@ object RuntimeResourceCodec {
         val storedLength = readLe32(bytes, 28)
         val bodyLength = readLe32(bytes, 32)
         if (plainLength < 0 || storedLength < 0 || bodyLength < 0) return null
-        val bodyOffset = headerSize
+        val bodyOffset = legacyHeaderSize
         val tagOffset = bodyOffset + bodyLength
         if (tagOffset + macLength + 1 != bytes.size) return null
         val expectedTag = hmacSha256(bytes, 0, tagOffset, "jsrp-auth".toByteArray(Charsets.US_ASCII), nonce)
@@ -106,25 +163,6 @@ object RuntimeResourceCodec {
         val plain = if (compressed) Vbc4ZstdCodec.decompress(storedBytes, plainLength) ?: return null else storedBytes
         return if (plain.size == plainLength) plain else null
     }
-
-    private fun deriveNonce(
-        seed: Int,
-        kindBytes: ByteArray,
-        variantBytes: ByteArray,
-        layerBytes: ByteArray,
-        plainHash: ByteArray,
-        storedHash: ByteArray,
-        key: ByteArray,
-    ): ByteArray = hmacSha256WithKey(
-        key,
-        "jsrp-nonce".toByteArray(Charsets.US_ASCII),
-        intBytes(seed),
-        kindBytes,
-        variantBytes,
-        layerBytes,
-        plainHash,
-        storedHash,
-    ).copyOfRange(0, 16)
 
     private fun aesCtrCrypt(bytes: ByteArray, nonce: ByteArray, kindId: Int, variantId: Int, layerCount: Int): ByteArray =
         runtimeResourceKey().let { key ->
@@ -205,6 +243,76 @@ object RuntimeResourceCodec {
     private fun runtimeResourceKey(): ByteArray =
         requireVbc4BuildContext().copyRuntimeResourceKey()
 
+    private fun randomNonce(): ByteArray = ByteArray(16).also { SecureRandom().nextBytes(it) }
+
+    private data class Metadata(
+        val kindId: Int,
+        val layerCount: Int,
+        val variantId: Int,
+        val compressed: Boolean,
+        val plainLength: Int,
+        val storedLength: Int,
+        val bodyLength: Int,
+        val keyId: Int,
+        val seed: Int,
+        val plainHash: ByteArray,
+        val storedHash: ByteArray,
+    )
+
+    private fun encodeMetadata(
+        kindId: Int,
+        layerCount: Int,
+        variantId: Int,
+        compressed: Boolean,
+        plainLength: Int,
+        storedLength: Int,
+        bodyLength: Int,
+        keyId: Int,
+        seed: Int,
+        plainHash: ByteArray,
+        storedHash: ByteArray,
+    ): ByteArray {
+        val out = ByteArray(metadataSize)
+        out[0] = 0x4D
+        out[1] = 0x32
+        out[2] = 1
+        out[3] = kindId.toByte()
+        out[4] = layerCount.toByte()
+        out[5] = variantId.toByte()
+        out[6] = if (compressed) 1 else 0
+        out[7] = 0
+        writeLe32(out, 8, plainLength)
+        writeLe32(out, 12, storedLength)
+        writeLe32(out, 16, bodyLength)
+        writeLe32(out, 20, keyId)
+        writeLe32(out, 24, seed)
+        System.arraycopy(plainHash, 0, out, 28, 32)
+        System.arraycopy(storedHash, 0, out, 60, 32)
+        writeLe32(out, 92, readBe32(sha256(out.copyOfRange(0, 92)), 0))
+        return out
+    }
+
+    private fun parseMetadata(bytes: ByteArray): Metadata? {
+        if (bytes.size != metadataSize) return null
+        if (bytes[0] != 0x4D.toByte() || bytes[1] != 0x32.toByte() || bytes[2] != 1.toByte()) return null
+        if (readLe32(bytes, 92) != readBe32(sha256(bytes.copyOfRange(0, 92)), 0)) return null
+        val flags = bytes[6].toInt() and 0xFF
+        if ((flags and 0xFE) != 0) return null
+        return Metadata(
+            kindId = bytes[3].toInt() and 0xFF,
+            layerCount = bytes[4].toInt() and 0xFF,
+            variantId = bytes[5].toInt() and 0xFF,
+            compressed = (flags and 1) != 0,
+            plainLength = readLe32(bytes, 8),
+            storedLength = readLe32(bytes, 12),
+            bodyLength = readLe32(bytes, 16),
+            keyId = readLe32(bytes, 20),
+            seed = readLe32(bytes, 24),
+            plainHash = bytes.copyOfRange(28, 60),
+            storedHash = bytes.copyOfRange(60, 92),
+        )
+    }
+
     private fun sha256(bytes: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(bytes)
 
     private fun intBytes(value: Int): ByteArray = byteArrayOf(
@@ -228,6 +336,14 @@ object RuntimeResourceCodec {
         out[offset + 3] = ((value ushr 24) and 0xFF).toByte()
     }
 
+    private fun writeLe16(out: ByteArray, offset: Int, value: Int) {
+        out[offset] = (value and 0xFF).toByte()
+        out[offset + 1] = ((value ushr 8) and 0xFF).toByte()
+    }
+
+    private fun readLe16(bytes: ByteArray, offset: Int): Int =
+        (bytes[offset].toInt() and 0xFF) or ((bytes[offset + 1].toInt() and 0xFF) shl 8)
+
     private fun readLe32(bytes: ByteArray, offset: Int): Int =
         (bytes[offset].toInt() and 0xFF) or
             ((bytes[offset + 1].toInt() and 0xFF) shl 8) or
@@ -240,4 +356,3 @@ object RuntimeResourceCodec {
             ((bytes[offset + 2].toInt() and 0xFF) shl 8) or
             (bytes[offset + 3].toInt() and 0xFF)
 }
-

@@ -98,7 +98,7 @@ class CrossMethodOutliningExecutionTest {
             meshDigests += header[4]
             assertEquals(manifests.size, header[6].toInt(), "Manifest mesh must bind every virtualized method entry")
             assertEquals(shardCount, preloadIndex[manifestPath], "Preload shard count must match manifest header")
-            assertTrue(shardCount in 2..4, "Outlined VMBC must be split across bounded shard count")
+            assertTrue(shardCount in 2..6, "Outlined VMBC must be split across a bounded CSPRNG-selected shard count")
 
             val assembled = ByteArray(totalSize)
             val shardLines = lines.drop(1)
@@ -131,13 +131,16 @@ class CrossMethodOutliningExecutionTest {
     }
 
     @Test
-    fun cross_method_outlining_is_reproducible_for_same_seed_and_vbc4_context() {
+    fun cross_method_outlining_is_not_reproducible_for_same_seed_and_vbc4_context() {
         val first = encodedCrossMethodResources(context = fixedContext(0x4A53_0001), seed = 73)
         val second = encodedCrossMethodResources(context = fixedContext(0x4A53_0001), seed = 73)
         val differentContext = encodedCrossMethodResources(context = fixedContext(0x4A53_0002), seed = 73)
 
-        assertEquals(first.map { it.name }, second.map { it.name }, "same seed/context must reproduce outlined resource paths")
-        assertEquals(first.map { it.bytes.toList() }, second.map { it.bytes.toList() }, "same seed/context must reproduce encoded outlined resources")
+        assertTrue(
+            first.map { it.name } != second.map { it.name } ||
+                first.map { it.bytes.toList() } != second.map { it.bytes.toList() },
+            "same seed/context must not reproduce outlined resource paths or encoded resources",
+        )
         assertTrue(
             first.map { it.name } != differentContext.map { it.name } ||
                 first.map { it.bytes.toList() } != differentContext.map { it.bytes.toList() },

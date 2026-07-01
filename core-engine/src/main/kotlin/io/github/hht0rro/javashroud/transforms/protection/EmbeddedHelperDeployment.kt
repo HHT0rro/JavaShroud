@@ -27,6 +27,7 @@ object EmbeddedHelperDeployment {
     private const val HELPER_RESOURCE_ROOT = "META-INF/javashroud-helpers"
     private val runtimeResourceDecodeHelpers = listOf(
         "$PKG/JniMicrokernelHelper",
+        "$PKG/JniMicrokernelHelper${"$"}RuntimeResourceMetadata",
         "$PKG/JniMicrokernelHelper${"$"}SealedNativeLibrary",
         "$PKG/JniMicrokernelHelper${"$"}TypeParseResult",
     )
@@ -34,10 +35,14 @@ object EmbeddedHelperDeployment {
     private val passToHelpers: Map<String, List<String>> = mapOf(
         "class-encryption-loader" to listOf(
             "$PKG/ClassEncryptionLoaderHelper",
+            "$PKG/ClassEncryptionLoaderHelper${"$"}ParsedMetadata",
             "$PKG/ClassEncryptionLoaderHelper${"$"}SharedDecryptingClassLoader",
         ) + runtimeResourceDecodeHelpers,
         "string-encryption" to listOf("$PKG/StringEncryptionHelper"),
-        "method-body-delayed-decryption" to listOf("$PKG/MethodBodyDecryptionHelper"),
+        "method-body-delayed-decryption" to listOf(
+            "$PKG/MethodBodyDecryptionHelper",
+            "$PKG/MethodBodyDecryptionHelper${"$"}ParsedMetadata",
+        ) + runtimeResourceDecodeHelpers,
         "callsite-rotation-protection" to listOf("$PKG/CallsiteRotationHelper"),
         "environment-bound-keys" to listOf("$PKG/EnvironmentBindingHelper"),
         "anti-symbolic-execution" to listOf("$PKG/AntiSymbolicExecutionHelper"),
@@ -53,8 +58,10 @@ object EmbeddedHelperDeployment {
     private val helperGenerators: Map<String, () -> ByteArray> by lazy {
         mapOf(
             "$PKG/ClassEncryptionLoaderHelper" to { loadClasspathHelperByName("ClassEncryptionLoaderHelper") },
+            "$PKG/ClassEncryptionLoaderHelper${"$"}ParsedMetadata" to { loadClasspathHelperByName("ClassEncryptionLoaderHelper${"$"}ParsedMetadata") },
             "$PKG/ClassEncryptionLoaderHelper${"$"}SharedDecryptingClassLoader" to { loadClasspathHelperByName("ClassEncryptionLoaderHelper${"$"}SharedDecryptingClassLoader") },
             "$PKG/MethodBodyDecryptionHelper" to { loadClasspathHelperByName("MethodBodyDecryptionHelper") },
+            "$PKG/MethodBodyDecryptionHelper${"$"}ParsedMetadata" to { loadClasspathHelperByName("MethodBodyDecryptionHelper${"$"}ParsedMetadata") },
             "$PKG/StringEncryptionHelper" to { loadClasspathHelperByName("StringEncryptionHelper") },
             "$PKG/BootstrapEncryptionHelper" to { loadClasspathHelperByName("BootstrapEncryptionHelper") },
             "$PKG/CallsiteRotationHelper" to ::generateCallsiteRotationHelper,
@@ -68,6 +75,7 @@ object EmbeddedHelperDeployment {
             "$PKG/AntiDumpHelper" to { loadClasspathHelperByName("AntiDumpHelper") },
             "$PKG/AntiByteBuddyHelper" to { loadClasspathHelperByName("AntiByteBuddyHelper") },
             "$PKG/JniMicrokernelHelper" to { loadClasspathHelperByName("JniMicrokernelHelper") },
+            "$PKG/JniMicrokernelHelper${"$"}RuntimeResourceMetadata" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}RuntimeResourceMetadata") },
             "$PKG/JniMicrokernelHelper${"$"}SealedNativeLibrary" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}SealedNativeLibrary") },
             "$PKG/JniMicrokernelHelper${"$"}TypeParseResult" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}TypeParseResult") },
         )
@@ -405,6 +413,10 @@ object EmbeddedHelperDeployment {
         }
 
         val targetPlatformParam = (loaderPass.params["targetPlatform"] as? com.fasterxml.jackson.databind.node.TextNode)?.textValue() ?: "auto"
+        val nativeProtectionLevel = (loaderPass.params["nativeProtectionLevel"] as? com.fasterxml.jackson.databind.node.TextNode)?.textValue() ?: "standard"
+        require(nativeProtectionLevel in setOf("standard", "aggressive")) {
+            "jni-microkernel-loader nativeProtectionLevel '$nativeProtectionLevel' is not supported"
+        }
         val targetPlatforms = resolveNativeCompileTargetPlatforms(targetPlatformParam)
         if (targetPlatforms.isEmpty() || targetPlatforms.any { it !in NativeRecompilationTransforms.ZIG_TARGETS }) {
             throw IllegalArgumentException("target platform is unsupported: $targetPlatformParam")
@@ -420,6 +432,7 @@ object EmbeddedHelperDeployment {
                 seed = seed,
                 classLoader = classLoader,
                 targetPlatforms = targetPlatforms,
+                nativeProtectionLevel = nativeProtectionLevel,
                 onMessage = { message -> emitNativeRecompilationMessage(emit, message) },
             )
             if (diagnostics.results.isEmpty()) {
@@ -519,13 +532,41 @@ object EmbeddedHelperDeployment {
 
     private fun generateFlowControlException(): ByteArray {
         val owner = "$PKG/FlowControlException"
+        val stateFieldName = sealedRuntimeHelperFieldName(owner, "state", "I")
         val cw = ClassWriter(ClassWriter.COMPUTE_FRAMES or ClassWriter.COMPUTE_MAXS)
         cw.visit(Opcodes.V11, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, owner, null, "java/lang/RuntimeException", null)
         cw.visitField(Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC or Opcodes.ACC_FINAL, "serialVersionUID", "J", null, 1L).visitEnd()
-        val mv = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
-        mv.visitCode(); mv.visitVarInsn(Opcodes.ALOAD, 0); mv.visitLdcInsn("Flow control")
-        mv.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/RuntimeException", "<init>", "(Ljava/lang/String;)V", false)
-        mv.visitInsn(Opcodes.RETURN); mv.visitMaxs(2, 1); mv.visitEnd()
+        cw.visitField(Opcodes.ACC_PUBLIC or Opcodes.ACC_FINAL, stateFieldName, "I", null, null).visitEnd()
+
+        val init0 = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
+        init0.visitCode()
+        init0.visitVarInsn(Opcodes.ALOAD, 0)
+        init0.visitInsn(Opcodes.ICONST_0)
+        init0.visitMethodInsn(Opcodes.INVOKESPECIAL, owner, "<init>", "(I)V", false)
+        init0.visitInsn(Opcodes.RETURN)
+        init0.visitMaxs(2, 1)
+        init0.visitEnd()
+
+        val init1 = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "(I)V", null, null)
+        init1.visitCode()
+        init1.visitVarInsn(Opcodes.ALOAD, 0)
+        init1.visitLdcInsn("Flow control")
+        init1.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/RuntimeException", "<init>", "(Ljava/lang/String;)V", false)
+        init1.visitVarInsn(Opcodes.ALOAD, 0)
+        init1.visitVarInsn(Opcodes.ILOAD, 1)
+        init1.visitFieldInsn(Opcodes.PUTFIELD, owner, stateFieldName, "I")
+        init1.visitInsn(Opcodes.RETURN)
+        init1.visitMaxs(2, 2)
+        init1.visitEnd()
+
+        val getter = cw.visitMethod(Opcodes.ACC_PUBLIC, "getState", "()I", null, null)
+        getter.visitCode()
+        getter.visitVarInsn(Opcodes.ALOAD, 0)
+        getter.visitFieldInsn(Opcodes.GETFIELD, owner, stateFieldName, "I")
+        getter.visitInsn(Opcodes.IRETURN)
+        getter.visitMaxs(1, 1)
+        getter.visitEnd()
+
         cw.visitEnd(); return cw.toByteArray()
     }
 

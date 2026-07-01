@@ -6,6 +6,7 @@ import java.lang.reflect.Method;
  import java.security.ProtectionDomain; 
 import java.util.Base64;
 import java.util.concurrent.ConcurrentHashMap;
+import java.security.MessageDigest;
 
 /**
  * Runtime helper for class encryption loader.
@@ -289,27 +290,11 @@ public final class ClassEncryptionLoaderHelper {
         try {
             String resourcePath = entry[0];
             String keyMetadata = entry[1];
-            String[] parts = keyMetadata.split(":");
-            String strategy = parts[0];
-            byte[] key;
-            byte[] iv;
-            if (parts.length >= 4) {
-                // Derived-key format: strategy:keyId:salt:iv. No raw key stored;
-                // recompute the AES key from the per-build resident root key.
-                byte[] keyId = Base64.getDecoder().decode(parts[1]);
-                byte[] salt = Base64.getDecoder().decode(parts[2]);
-                byte[] ivBytes = Base64.getDecoder().decode(parts[3]);
-                iv = ivBytes.length == 0 ? null : ivBytes;
-                int keyLength = "aes-256".equals(strategy) ? 32 : 16;
-                key = JniMicrokernelHelper.deriveClassEncryptionKey(keyId, salt, keyLength);
-            } else {
-                // Legacy direct-key format: strategy:key[:iv] (migration only).
-                key = Base64.getDecoder().decode(parts[1]);
-                iv = parts.length > 2 ? Base64.getDecoder().decode(parts[2]) : null;
-            }
+            ParsedMetadata metadata = parseMetadata(binaryName, resourcePath, keyMetadata);
+            byte[] key = JniMicrokernelHelper.deriveClassEncryptionKey(metadata.keyId, metadata.salt, metadata.keyLength);
             byte[] encryptedBytes = readResource(resourcePath);
             try {
-                return decryptBytes(encryptedBytes, strategy, key, iv);
+                return decryptBytes(encryptedBytes, metadata.strategy, key, metadata.nonce, metadata.aad);
             } finally {
                 java.util.Arrays.fill(key, (byte) 0);
             }
@@ -332,25 +317,74 @@ public final class ClassEncryptionLoaderHelper {
         return decoded != null ? decoded : bytes;
     }
 
-    private static byte[] decryptBytes(byte[] data, String strategy, byte[] key, byte[] iv) throws Exception {
+    private static ParsedMetadata parseMetadata(String binaryName, String resourcePath, String keyMetadata) throws Exception {
+        String[] parts = keyMetadata.split(":", -1);
+        if (parts.length != 6 || !"v2".equals(parts[0])) {
+            throw new SecurityException("Unsupported encrypted class metadata format: " + binaryName);
+        }
+        String strategy = parts[1];
         if (!("aes-128".equals(strategy) || "aes-256".equals(strategy))) {
             throw new IllegalStateException("Unsupported encrypted class resource format");
         }
-        byte[] nativeResult = decryptBytesNative(data, strategy, key, iv);
-        if (nativeResult != null) return nativeResult;
-        javax.crypto.Cipher cipher = javax.crypto.Cipher.getInstance("AES/CBC/PKCS5Padding");
+        byte[] keyId = Base64.getDecoder().decode(parts[2]);
+        byte[] salt = Base64.getDecoder().decode(parts[3]);
+        byte[] nonce = Base64.getDecoder().decode(parts[4]);
+        byte[] expectedHash = Base64.getDecoder().decode(parts[5]);
+        if (nonce.length != 12) throw new SecurityException("Invalid AES-GCM nonce length for encrypted class: " + binaryName);
+        byte[] aad = matchingAad(binaryName.replace('.', '/'), resourcePath, strategy, expectedHash);
+        if (aad == null) {
+            throw new SecurityException("Encrypted class metadata AAD mismatch: " + binaryName);
+        }
+        return new ParsedMetadata(strategy, keyId, salt, nonce, aad, "aes-256".equals(strategy) ? 32 : 16);
+    }
+
+    private static byte[] decryptBytes(byte[] data, String strategy, byte[] key, byte[] nonce, byte[] aad) throws Exception {
+        if (!("aes-128".equals(strategy) || "aes-256".equals(strategy))) {
+            throw new IllegalStateException("Unsupported encrypted class resource format");
+        }
+        if (nonce == null || nonce.length != 12) throw new SecurityException("Invalid AES-GCM nonce length");
+        javax.crypto.Cipher cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
         javax.crypto.spec.SecretKeySpec keySpec = new javax.crypto.spec.SecretKeySpec(key, "AES");
-        cipher.init(javax.crypto.Cipher.DECRYPT_MODE, keySpec, new javax.crypto.spec.IvParameterSpec(iv));
+        cipher.init(javax.crypto.Cipher.DECRYPT_MODE, keySpec, new javax.crypto.spec.GCMParameterSpec(128, nonce));
+        cipher.updateAAD(aad);
         return cipher.doFinal(data);
     }
 
-    private static byte[] decryptBytesNative(byte[] data, String strategy, byte[] key, byte[] iv) {
-        try {
-            if (!"aes-128".equals(strategy) || iv == null) return null;
-            Object result = JniMicrokernelHelper.nativeDecryptAes(data, key, iv);
-            return result instanceof byte[] ? (byte[]) result : null;
-        } catch (Throwable ignored) {
-            return null;
+    private static byte[] aad(String className, String resourcePath, String strategy, String keyMode) {
+        return ("javashroud:class-encryption:v2:" + className + ":" + resourcePath + ":" + strategy + ":" + keyMode + ":sealed-runtime")
+            .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    private static byte[] matchingAad(String className, String resourcePath, String strategy, byte[] expectedHash) throws Exception {
+        String[] keyModes = new String[] { "per-class", "global" };
+        for (String keyMode : keyModes) {
+            byte[] candidate = aad(className, resourcePath, strategy, keyMode);
+            if (constantTimeEquals(MessageDigest.getInstance("SHA-256").digest(candidate), expectedHash)) return candidate;
+        }
+        return null;
+    }
+
+    private static boolean constantTimeEquals(byte[] left, byte[] right) {
+        if (left == null || right == null || left.length != right.length) return false;
+        int diff = 0;
+        for (int i = 0; i < left.length; i++) diff |= (left[i] ^ right[i]) & 0xFF;
+        return diff == 0;
+    }
+
+    private static final class ParsedMetadata {
+        final String strategy;
+        final byte[] keyId;
+        final byte[] salt;
+        final byte[] nonce;
+        final byte[] aad;
+        final int keyLength;
+        ParsedMetadata(String strategy, byte[] keyId, byte[] salt, byte[] nonce, byte[] aad, int keyLength) {
+            this.strategy = strategy;
+            this.keyId = keyId;
+            this.salt = salt;
+            this.nonce = nonce;
+            this.aad = aad;
+            this.keyLength = keyLength;
         }
     }
 

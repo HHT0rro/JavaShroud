@@ -10,7 +10,7 @@ import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import java.security.SecureRandom
 import java.util.Base64
 import javax.crypto.Cipher
-import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -24,8 +24,8 @@ import org.objectweb.asm.Opcodes
 /**
  * Phase 0 / REQ-001 gate: the class-encryption artifact must NOT carry any
  * directly reusable symmetric key. The manifest stores only non-secret
- * metadata (strategy:keyId:salt:iv); the real AES key is HKDF-derived from the
- * per-build root key and recomputed at runtime, never persisted.
+ * v2 metadata (strategy/keyId/salt/nonce/AAD hash); the real AES-GCM key is
+ * HKDF-derived from the per-build root key and recomputed at runtime, never persisted.
  */
 class KerckhoffsLeakageTest {
 
@@ -63,15 +63,18 @@ class KerckhoffsLeakageTest {
         val cols = lines[0].split('\t')
         val keyMetadata = cols[2]
         val parts = keyMetadata.split(':')
-        assertEquals(4, parts.size, "Metadata must be strategy:keyId:salt:iv (4 parts, no raw key)")
-        assertEquals("aes-256", parts[0])
+        assertEquals(6, parts.size, "Metadata must be v2:strategy:keyId:salt:nonce:aadHash (6 parts, no raw key)")
+        assertEquals("v2", parts[0])
+        assertEquals("aes-256", parts[1])
 
-        val keyId = Base64.getDecoder().decode(parts[1])
-        val salt = Base64.getDecoder().decode(parts[2])
-        val iv = Base64.getDecoder().decode(parts[3])
+        val keyId = Base64.getDecoder().decode(parts[2])
+        val salt = Base64.getDecoder().decode(parts[3])
+        val nonce = Base64.getDecoder().decode(parts[4])
+        val aadHash = Base64.getDecoder().decode(parts[5])
         assertEquals(8, keyId.size, "keyId is an 8-byte non-secret id")
         assertEquals(16, salt.size, "salt is 16 bytes")
-        assertEquals(16, iv.size, "iv is 16 bytes")
+        assertEquals(12, nonce.size, "AES-GCM nonce is 12 bytes")
+        assertEquals(32, aadHash.size, "AAD hash is SHA-256")
 
         // Re-derive the real AES key the same way the runtime would.
         val derivedKey = deriveClassEncryptionKey(context, "aes-256", keyId, salt)
@@ -88,8 +91,10 @@ class KerckhoffsLeakageTest {
 
         // Round-trip: the metadata + per-build root recompute the key and decrypt
         // the resource back to valid class bytecode (0xCAFEBABE).
-        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(derivedKey, "AES"), IvParameterSpec(iv))
+        val aad = "javashroud:class-encryption:v2:$internalName:__jse/$internalName.enc:aes-256:per-class:sealed-runtime".toByteArray(Charsets.UTF_8)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(derivedKey, "AES"), GCMParameterSpec(128, nonce))
+        cipher.updateAAD(aad)
         val decrypted = cipher.doFinal(resourceEntry.bytes)
         assertEquals(0xCAFEBABE.toInt(), readInt(decrypted, 0), "Decrypted resource must be valid class bytecode")
     }

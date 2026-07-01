@@ -20,6 +20,7 @@ JS_HIDDEN void JNICALL jsn_r0(JNIEnv *env, jclass cls, jstring jdl, jstring jres
 JS_HIDDEN void JNICALL jsn_r1(JNIEnv *env, jclass cls, jstring jdm, jstring jresp);
 JS_HIDDEN void JNICALL jsn_r2(JNIEnv *env, jclass cls, jstring jresp);
 JS_HIDDEN void JNICALL jsn_r3(JNIEnv *env, jclass cls, jstring jpl);
+JS_HIDDEN void JNICALL jsn_r4(JNIEnv *env, jclass cls, jstring jpl, jclass ownerClass);
 JS_HIDDEN jstring JNICALL jsn_r11(JNIEnv *env, jclass cls, jbyteArray encodedBytes);
 JS_HIDDEN jstring JNICALL jsn_r12(JNIEnv *env, jclass cls, jstring encodedB64);
 JS_HIDDEN jstring JNICALL jsn_r13(JNIEnv *env, jclass cls, jstring encoded);
@@ -285,8 +286,11 @@ static int js_register_all_natives(JNIEnv *env) {
     JNINativeMethod anti_bytebuddy_methods[] = {{js_native_name("Check", "Byte", "Buddy"), "(Ljava/lang/String;)V", (void*)jsn_r2}};
     if (!js_register_native_group(env, js_helper_owner("An", "tiByte", "Buddy", "Helper"), anti_bytebuddy_methods, 1, 0)) return 0;
 
-    JNINativeMethod anti_dump_runtime_methods[] = {{js_native_name("Init", "ialize", "Protection"), "(Ljava/lang/String;)V", (void*)jsn_r3}};
-    if (!js_register_native_group(env, js_helper_owner("An", "tiDump", "Runtime", "Helper"), anti_dump_runtime_methods, 1, 0)) return 0;
+    JNINativeMethod anti_dump_runtime_methods[] = {
+        {js_native_name("Init", "ialize", "Protection"), "(Ljava/lang/String;)V", (void*)jsn_r3},
+        {js_native_name("Init", "ialize", "Protection"), "(Ljava/lang/String;Ljava/lang/Class;)V", (void*)jsn_r4},
+    };
+    if (!js_register_native_group(env, js_helper_owner("An", "tiDump", "Runtime", "Helper"), anti_dump_runtime_methods, 2, 0)) return 0;
 
     JNINativeMethod anti_dump_methods[] = {
         {js_native_name("Build", "String", ""), "([B)Ljava/lang/String;", (void*)jsn_r11},

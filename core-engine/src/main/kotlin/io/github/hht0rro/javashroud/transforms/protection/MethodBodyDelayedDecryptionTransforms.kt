@@ -17,7 +17,7 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
 import javax.crypto.Cipher
-import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
@@ -50,6 +50,7 @@ fun applyMethodBodyDelayedDecryption(
     require(strategy in supportedStrategies) { "method-body-delayed-decryption encryptionStrategy '$strategy' is not supported; supported values: ${supportedStrategies.joinToString("", "")}" }
     val seed = (params["seed"] as? Int)?.toLong() ?: (params["seed"] as? Long)
     val random = seed?.let { SecureRandom(it.toString().toByteArray()) } ?: SecureRandom()
+    val buildContext = currentVbc4BuildContextOrNull() ?: defaultVbc4BuildContext()
 
     val newResources = mutableListOf<JarEntryData>()
     var classCount = 0
@@ -68,19 +69,16 @@ fun applyMethodBodyDelayedDecryption(
     val dynamicallyDefinedClassNames = collectDynamicallyDefinedClassNames(classNodeCache.values)
 
     // Phase 2: Encrypt method bodies and collect resource paths
-    // Key per class, deterministic resource path per method
-    val classKeys = mutableMapOf<String, ByteArray>()
-    val classIvs = mutableMapOf<String, ByteArray?>()
+    // Metadata per method; raw keys are derived from build/runtime root material
+    // and are never embedded into the trampoline bytecode.
+    val methodMetadata = mutableMapOf<String, MutableMap<String, String>>()
     val methodResourceMap = mutableMapOf<String, MutableMap<String, String>>() // className -> (methodKey -> resourcePath)
 
     for ((className, cn) in classNodeCache) {
         if (className in dynamicallyDefinedClassNames) continue
-        val key = generateMethodKey(strategy, random)
-        val iv = generateMethodIv(random)
-        classKeys[className] = key
-        classIvs[className] = iv
 
         val methodMap = mutableMapOf<String, String>()
+        val metadataMap = mutableMapOf<String, String>()
         for (method in cn.methods) {
             if (!shouldProtectDelayedMethod(cn, method)) continue
 
@@ -89,13 +87,24 @@ fun applyMethodBodyDelayedDecryption(
 
             // Use deterministic resource path based on class + method + descriptor
             val resourcePath = deterministicResourcePath(className, method.name, method.desc)
-            val encryptedBytes = encryptBytes(methodBytes, strategy, key, iv)
+            val keyId = generateMethodKeyId(random)
+            val salt = generateMethodSalt(random)
+            val nonce = generateMethodNonce(random)
+            val aad = methodBodyAad(strategy, mode)
+            val key = deriveMethodBodyKey(buildContext, strategy, keyId, salt)
+            val encryptedBytes = try {
+                encryptBytes(methodBytes, strategy, key, nonce, aad)
+            } finally {
+                java.util.Arrays.fill(key, 0)
+            }
             newResources.add(JarEntryData(name = resourcePath, bytes = encryptedBytes))
 
             val methodKey = method.name + method.desc
             methodMap[methodKey] = resourcePath
+            metadataMap[methodKey] = buildMethodMetadata(strategy, keyId, salt, nonce, aad)
         }
         methodResourceMap[className] = methodMap
+        methodMetadata[className] = metadataMap
     }
 
     // Phase 3: Replace method bodies with decryption trampolines
@@ -104,8 +113,7 @@ fun applyMethodBodyDelayedDecryption(
 
         val className = classArtifact.summary.internalName
         val methodMap = methodResourceMap[className] ?: return@classMap classArtifact
-        val key = classKeys[className] ?: return@classMap classArtifact
-        val keyBase64 = Base64.getEncoder().encodeToString(key)
+        val metadataMap = methodMetadata[className] ?: return@classMap classArtifact
         var classModified = false
 
         val cr = ClassReader(classArtifact.bytes)
@@ -122,7 +130,9 @@ fun applyMethodBodyDelayedDecryption(
                 // Only transform matched methods
                 val methodKey = name + descriptor
                 val resourcePath = methodMap[methodKey]
+                val metadata = metadataMap[methodKey]
                 if (resourcePath == null) return superMv
+                if (metadata == null) return superMv
                 if (!shouldProtectDelayedMethod(classNodeCache[className] ?: return superMv, name, descriptor)) return superMv
 
                 val isStatic = access and Opcodes.ACC_STATIC != 0
@@ -134,13 +144,14 @@ fun applyMethodBodyDelayedDecryption(
                         super.visitCode()
 
                         // Call MethodBodyDecryptionHelper.invokeEncrypted(
-                        //     resourcePath, keyBase64, strategy, isStatic, declaringClass, thisRef, methodArgs[])
+                        //     resourcePath, metadata, strategy, mode, isStatic, declaringClass, thisRef, methodArgs[])
                         // where methodArgs is an Object[] of boxed arguments
 
                         // Push resource path, key, strategy, isStatic, declaringClassName
                         super.visitLdcInsn(resourcePath)
-                        super.visitLdcInsn(keyBase64)
+                        super.visitLdcInsn(metadata)
                         super.visitLdcInsn(strategy)
+                        super.visitLdcInsn(mode)
                         super.visitLdcInsn(if (isStatic) 1 else 0)
                         super.visitLdcInsn(Type.getObjectType(className))
 
@@ -169,7 +180,7 @@ fun applyMethodBodyDelayedDecryption(
                             Opcodes.INVOKESTATIC,
                             MBDD_HELPER_INTERNAL,
                             "invokeEncrypted",
-                            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Class;Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;",
+                            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Class;Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;",
                             false,
                         )
 
@@ -375,22 +386,40 @@ private fun serializeMethod(classNode: ClassNode, method: MethodNode): ByteArray
 
 // --- Encryption ---
 
-private fun generateMethodKey(strategy: String, random: SecureRandom): ByteArray = when (strategy) {
-    "aes-256" -> ByteArray(32).also { random.nextBytes(it) }
-    else -> ByteArray(16).also { random.nextBytes(it) }
-}
+private fun methodKeyLength(strategy: String): Int = if (strategy == "aes-256") 32 else 16
 
-private fun generateMethodIv(random: SecureRandom): ByteArray = ByteArray(16).also { random.nextBytes(it) }
+private fun generateMethodKeyId(random: SecureRandom): ByteArray = ByteArray(8).also { random.nextBytes(it) }
 
-private fun encryptBytes(data: ByteArray, strategy: String, key: ByteArray, iv: ByteArray?): ByteArray {
+private fun generateMethodSalt(random: SecureRandom): ByteArray = ByteArray(16).also { random.nextBytes(it) }
+
+private fun generateMethodNonce(random: SecureRandom): ByteArray = ByteArray(12).also { random.nextBytes(it) }
+
+private fun deriveMethodBodyKey(context: Vbc4BuildContext, strategy: String, keyId: ByteArray, salt: ByteArray): ByteArray =
+    context.deriveSubKey(VBC4_DERIVE_LABEL_CLASS_ENCRYPTION, methodKeyLength(strategy), keyId, salt)
+
+private fun encryptBytes(data: ByteArray, strategy: String, key: ByteArray, nonce: ByteArray, aad: ByteArray): ByteArray {
     require(strategy == "aes-128" || strategy == "aes-256") { "method-body-delayed-decryption requires AES encryption" }
-    val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+    require(nonce.size == 12) { "method-body-delayed-decryption AES-GCM nonce must be 12 bytes" }
+    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
     val keySpec = SecretKeySpec(key, "AES")
-    val actualIv = iv ?: ByteArray(16).also { SecureRandom().nextBytes(it) }
-    val ivSpec = IvParameterSpec(actualIv)
-    cipher.init(Cipher.ENCRYPT_MODE, keySpec, ivSpec)
-    return actualIv + cipher.doFinal(data)
+    cipher.init(Cipher.ENCRYPT_MODE, keySpec, GCMParameterSpec(128, nonce))
+    cipher.updateAAD(aad)
+    return cipher.doFinal(data)
 }
+
+private fun buildMethodMetadata(strategy: String, keyId: ByteArray, salt: ByteArray, nonce: ByteArray, aad: ByteArray): String =
+    listOf(
+        "v2",
+        strategy,
+        Base64.getEncoder().encodeToString(keyId),
+        Base64.getEncoder().encodeToString(salt),
+        Base64.getEncoder().encodeToString(nonce),
+        Base64.getEncoder().encodeToString(MessageDigest.getInstance("SHA-256").digest(aad)),
+    ).joinToString(":")
+
+private fun methodBodyAad(strategy: String, mode: String): ByteArray =
+    "javashroud:method-body:v2:$strategy:$mode:sealed-runtime".toByteArray(Charsets.UTF_8)
+
 
 // --- Argument loading helpers ---
 

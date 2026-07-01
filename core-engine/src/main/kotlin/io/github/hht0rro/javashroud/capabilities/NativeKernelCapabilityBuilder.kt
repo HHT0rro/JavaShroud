@@ -133,9 +133,9 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
 
         name = "反内存转储",
 
-        description = "通过 JNI/native 辅助对抗 heap dump、class dump、hprof 等内存转储手段，降低 dump 时的可见性，" +
+        description = "通过 JNI/native 辅助降低 heap dump、class dump、hprof 等内存转储时的关键材料可见性。" +
 
-            "使用 JNI 侧短生命周期材料避免在 heap 中暴露。",
+            " field-scramble 是低强度 Java 字段扰动；jni-key-hold/full 依赖 native 可用性并在 native 缺失时 fail-closed。",
 
         tagIds = listOf("native-kernel", "runtime-defense"),
 
@@ -147,7 +147,7 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
 
         platformConstraints = listOf("HotSpot JVM"),
 
-        compatibilityNotes = "仅用于授权保护场景，可能与诊断、分析、heap 调试工具冲突。",
+        compatibilityNotes = "仅用于授权保护场景，可能与诊断、分析、heap 调试工具冲突。jni-key-hold/full 要求 jni-microkernel-loader 成功加载。",
 
         requiredPassIds = listOf("jni-microkernel-loader"),
 
@@ -165,7 +165,7 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
 
                 options = listOf("field-scramble", "jni-key-hold", "full"),
 
-                description = "保护级别：field-scramble 混淆敏感字段，jni-key-hold 将密钥持有在 JNI 层，full 完整保护。",
+                description = "保护级别：field-scramble 为低强度字段扰动；jni-key-hold 将密钥持有在 JNI 层；full 启用 native 严格路径，native 不可用则拒绝。",
 
             ),
 
