@@ -190,9 +190,9 @@ wails build
 
 ### 0.9.1-dev 验收说明
 
-`0.9.1-dev` 将引擎版本提升到 `0.9.1-dev`，VBC 能力版本提升到 `4.54`。本版本重点修复 fullconfig 对已 sealed VBC4 产物再次处理时的 ABI 保持问题：对已有 `META-INF/.r/vm.idx` 且没有当前运行 `vm-current.idx` 的旧 sealed VM 产物，运行时资源、helper ABI、native loader 和会改变旧 VM 调用面的 pass 会保持原 ABI；新输入或当前运行生成的产物仍使用当前 VBC4 max-strength/native-only 路径，不降低新产物保护强度。
+`0.9.1-dev` 将引擎版本提升到 `0.9.1-dev`，VBC 能力版本提升到 `4.54`。本版本重点修复 fullconfig 对已 sealed VBC4 产物再次处理时的 ABI 保持问题：对已有 `META-INF/.r/vm.idx` 且没有当前运行 `vm-current.idx` 的旧 sealed VM 产物，运行时资源、helper ABI、native loader、class-encryption-loader 和会改变旧 VM 调用面的 pass 会保持原 ABI；新输入或当前运行生成的产物仍使用当前 VBC4 max-strength/native-only 路径，不降低新产物保护强度。
 
-本次发布前使用 `E:\xbeng\Documents\javashroud-config-full.toml` 对 `E:\XiangMu\TestJar` 下全部 JAR 做了 fullconfig 验收。`demo.jar`、`demo-shrouded.jar`、`jvm-obf-tester.jar`、`TEST.jar`、`TEST-shrouded.jar`、`TEST-shrouded-full-run.jar` 均完成混淆并按各自基线运行；`SimpleFiveInARow-obf-test.jar` 完成 12 项自检后保持 UI 进程运行；`ugly-1.0.0.jar` 与输入基线一致，因缺少 main manifest 退出。
+本次发布前使用 `E:\xbeng\Documents\javashroud-config-full.toml` 对 `E:\XiangMu\TestJar` 下全部 JAR 做了 fullconfig 验收，并使用真实 JAR 矩阵覆盖 class-encryption-loader 的 default/min/max 参数组合。`demo.jar`、`demo-shrouded.jar`、`jvm-obf-tester.jar`、`TEST.jar`、`TEST-shrouded.jar`、`TEST-shrouded-full-run.jar` 均完成混淆并按各自基线运行；`SimpleFiveInARow-obf-test.jar` 完成 12 项自检后保持 UI 进程运行；`ugly-1.0.0.jar` 与输入基线一致，因缺少 main manifest 退出。
 
 ## 目录结构
 

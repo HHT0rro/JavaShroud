@@ -12,12 +12,16 @@ import io.github.hht0rro.javashroud.model.analysis.TargetSelector
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.protection.applyClassEncryptionLoader
 import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE
+import io.github.hht0rro.javashroud.transforms.protection.VBC4_VM_PRELOAD_INDEX_RESOURCE
 import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import java.nio.file.Files
 import java.nio.file.Path
+import java.util.jar.JarEntry
 import java.util.jar.JarInputStream
+import java.util.jar.JarOutputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -41,6 +45,36 @@ import org.objectweb.asm.tree.TypeInsnNode
 class ClassEncryptionLoaderRuntimeRegressionTest {
     private val objectMapper = ObjectMapper()
     private val helperPkg = "io/github/hht0rro/javashroud/transforms/protection"
+
+    @Test
+    fun class_encryption_loader_is_skipped_for_prior_sealed_vm_abi_inputs() {
+        val plainInputJar = buildDiverseFixtureJar(Files.createTempFile("javashroud-cel-prior-plain", ".jar"))
+        val inputJar = plainInputJar.resolveSibling("javashroud-cel-prior-input.jar")
+        val outputJar = inputJar.resolveSibling("javashroud-cel-prior-output.jar")
+        val configPath = inputJar.resolveSibling("javashroud-cel-prior-config.toml")
+        try {
+            copyJarWithLegacyVmIndex(plainInputJar, inputJar)
+            writeRunConfig(configPath, inputJar, outputJar, listOf("class-encryption-loader"))
+
+            captureStdout {
+                dispatchRequest(
+                    buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())),
+                    EngineKernel(),
+                )
+            }
+
+            assertTrue(Files.exists(outputJar), "Engine should write an output jar")
+            assertTrue(readJarEntry(outputJar, VBC4_VM_PRELOAD_INDEX_RESOURCE) != null, "Prior VM index must remain present")
+            assertTrue(readJarEntry(outputJar, VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE) == null, "Fixture must remain a prior sealed VM ABI input")
+            assertTrue(readJarEntry(outputJar, "__jse/index.tab") == null, "Skipped class-encryption-loader must not package encrypted class resources")
+            assertTrue(readJarEntry(outputJar, "e2e/Root.class") != null, "Skipped class-encryption-loader must leave app classes in the original loader namespace")
+        } finally {
+            Files.deleteIfExists(outputJar)
+            Files.deleteIfExists(configPath)
+            Files.deleteIfExists(inputJar)
+            Files.deleteIfExists(plainInputJar)
+        }
+    }
 
     @Test
     fun injected_loader_helper_only_references_deployed_helpers() {
@@ -228,6 +262,25 @@ class ClassEncryptionLoaderRuntimeRegressionTest {
             }
         }
         return null
+    }
+
+    private fun copyJarWithLegacyVmIndex(sourceJar: Path, targetJar: Path) {
+        JarInputStream(Files.newInputStream(sourceJar)).use { input ->
+            JarOutputStream(Files.newOutputStream(targetJar)).use { output ->
+                while (true) {
+                    val entry = input.nextJarEntry ?: break
+                    if (!entry.isDirectory) {
+                        output.putNextEntry(JarEntry(entry.name))
+                        output.write(input.readBytes())
+                        output.closeEntry()
+                    }
+                    input.closeEntry()
+                }
+                output.putNextEntry(JarEntry(VBC4_VM_PRELOAD_INDEX_RESOURCE))
+                output.write("legacy-runtime\n".toByteArray(Charsets.UTF_8))
+                output.closeEntry()
+            }
+        }
     }
 
     private fun readClassWithMethodDescriptor(jarPath: Path, methodDescriptor: String): ByteArray? {

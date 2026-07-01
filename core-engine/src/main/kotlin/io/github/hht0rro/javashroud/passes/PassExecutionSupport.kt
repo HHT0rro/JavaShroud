@@ -85,6 +85,7 @@ private val priorVmAbiPreservingSkippedPasses = setOf(
     "anti-instrumentation",
     "anti-symbolic-execution",
     "callsite-rotation-protection",
+    "class-encryption-loader",
     "condy-constant-indirection",
     "control-flow-flattening",
     "control-flow-obfuscation",
