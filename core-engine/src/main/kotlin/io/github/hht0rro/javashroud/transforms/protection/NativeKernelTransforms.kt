@@ -221,32 +221,7 @@ private fun isJavaShroudRuntimeStateClass(classNode: ClassNode): Boolean {
 internal fun isPriorJavaShroudGeneratedRuntimeClass(classNode: ClassNode): Boolean {
     if (classNode.name.startsWith("io/github/hht0rro/javashroud/transforms/protection/")) return true
     if (hasPriorSealedRuntimeNameShape(classNode.name)) return true
-
-    var hasKernelComponentString = false
-    var hasKernelPlatformString = false
-    var hasKernelVmModeString = false
-    var invokesKernelLoaderShape = false
-
-    for (method in classNode.methods) {
-        val instructions = method.instructions?.toArray().orEmpty()
-        for (instruction in instructions) {
-            when (instruction) {
-                is org.objectweb.asm.tree.LdcInsnNode -> {
-                    val value = instruction.cst as? String ?: continue
-                    if (value in setOf("loader", "decrypt", "vm", "guards", "all")) hasKernelComponentString = true
-                    if (value in setOf("auto", "windows-x64", "linux-x64", "macos-x64", "macos-arm64")) hasKernelPlatformString = true
-                    if (value in setOf("vm-diverse", "vm-off")) hasKernelVmModeString = true
-                }
-                is MethodInsnNode -> {
-                    if (instruction.opcode == Opcodes.INVOKESTATIC && instruction.desc == "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V") {
-                        invokesKernelLoaderShape = true
-                    }
-                }
-            }
-        }
-    }
-
-    return invokesKernelLoaderShape && hasKernelComponentString && hasKernelPlatformString && hasKernelVmModeString
+    return false
 }
 
 private fun hasPriorSealedRuntimeNameShape(internalName: String): Boolean {

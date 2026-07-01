@@ -79,6 +79,7 @@ object RuntimeResourceCodec {
     }
 
     fun decode(bytes: ByteArray): ByteArray? {
+        if (!hasCurrentHeader(bytes)) return null
         val key = runtimeResourceKey()
         return try {
             decodeWithKey(bytes, key)

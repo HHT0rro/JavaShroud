@@ -12,6 +12,7 @@ import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceCodec
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceKind
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.applyMethodVirtualization
 import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
@@ -214,7 +215,7 @@ class AttackRegressionTest {
             )
         },
         params = mapOf("maxInstructions" to Int.MAX_VALUE, "seed" to 91),
-    ).artifact.jarEntries.filter { entry -> entry.name.isVmResourceName() || entry.name == "META-INF/.r/vm.idx" }
+    ).artifact.jarEntries.filter { entry -> entry.name.isVmResourceName() || entry.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE }
 
     private fun slicedManifestIsComplete(manifestBytes: ByteArray, resources: Map<String, ByteArray>): Boolean {
         val lines = manifestBytes.decodeToString().trim().lines()

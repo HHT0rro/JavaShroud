@@ -15,6 +15,7 @@ import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployme
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceCodec
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.applyMethodVirtualization
 import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
@@ -74,7 +75,7 @@ class CrossMethodOutliningExecutionTest {
         val context = defaultVbc4BuildContext()
         val decodedResources = decodedCrossMethodResources(context = context, seed = 73)
 
-        val preloadIndex = decodedResources["META-INF/.r/vm.idx"]
+        val preloadIndex = decodedResources[VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE]
             ?.decodeToString()
             ?.trim()
             ?.lines()
@@ -164,6 +165,7 @@ class CrossMethodOutliningExecutionTest {
             passParams = mapOf(
                 "method-virtualization" to mapOf(
                     "strictVirtualization" to objectMapper.valueToTree(true),
+                    "methodSelection" to objectMapper.valueToTree("all-compatible"),
                     "maxInstructions" to objectMapper.valueToTree(512),
                 ),
                 "jni-microkernel-loader" to mapOf(
@@ -259,7 +261,7 @@ class CrossMethodOutliningExecutionTest {
             )
             assertEquals(3, result.transformedMemberCount, "Fixture must virtualize all selected cross-method entries")
             result.artifact.jarEntries
-                .filter { entry -> entry.name.isVmResourceName() || entry.name == "META-INF/.r/vm.idx" }
+                .filter { entry -> entry.name.isVmResourceName() || entry.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE }
                 .sortedBy { it.name }
         }
 

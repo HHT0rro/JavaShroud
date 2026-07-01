@@ -9,6 +9,7 @@ import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceCodec
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4EntryMetadata
 import io.github.hht0rro.javashroud.transforms.protection.VmBytecodeSerializer
@@ -281,7 +282,7 @@ class VmStructureDivergenceTest {
         )
         assertEquals(3, result.transformedMemberCount, "full-chain fixture must virtualize every selected method")
         result.artifact.jarEntries
-            .filter { entry -> entry.name.isVmResourceName() || entry.name == "META-INF/.r/vm.idx" }
+            .filter { entry -> entry.name.isVmResourceName() || entry.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE }
             .sortedBy { it.name }
     }
 
