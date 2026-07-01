@@ -191,7 +191,13 @@ wails build
 
 The full release script builds the engine JAR, the GraalVM native engine, the frontend bundle, and the Wails desktop application. Release acceptance should be based on the expected artifacts, such as `build\release\javashroud-windows-amd64\javashroud.exe`, existing and running successfully, not only on individual Gradle, Yarn, or Go commands returning success.
 
-GitHub Releases are created by `.github/workflows/release.yml` when a `v*` tag is pushed. The release order is to push `dev` and `main` first, then push or recreate a `v`-prefixed tag such as `v0.9.1-dev`; the bare `0.9.1-dev` tag does not trigger the release workflow and will not appear as a `github-actions` release.
+GitHub Releases are created by `.github/workflows/release.yml` when a `v*` tag is pushed. The release order is to push `dev` and `main` first, then push or recreate a `v`-prefixed tag such as `v0.9.2-dev`; the bare `0.9.2-dev` tag does not trigger the release workflow and will not appear as a `github-actions` release.
+
+### 0.9.2-dev Acceptance Notes
+
+`0.9.2-dev` bumps the engine version to `0.9.2-dev` and the VBC capability version to `4.55`. This release fixes the interaction between `condy-constant-indirection` and `method-virtualization` under strict `all-compatible` max-parameter coverage: engine-generated `ConstantDynamic` LDC values now enter the native VM through a guarded opcode, preserving string and int condy bootstrap semantics while unknown bootstrap shapes still fail closed.
+
+This is not a downgrade fix that skips methods or disables strict mode. `methodSelection = "all-compatible"` still covers compatible methods containing guarded condy LDC instructions, and the previously failing real-JAR matrix case `demo.jar` / `pair-condy-constant-indirection__method-virtualization-params-max` now obfuscates and runs according to its baseline.
 
 ### 0.9.1-dev Acceptance Notes
 

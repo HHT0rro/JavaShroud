@@ -188,7 +188,13 @@ wails build
 
 完整发布脚本会构建 engine JAR、GraalVM native engine、前端 bundle 和 Wails 桌面程序。发布验收应以 `build\release\javashroud-windows-amd64\javashroud.exe` 等目标产物存在且可运行为准，而不是只看单个 Gradle、Yarn 或 Go 命令成功。
 
-GitHub Release 由 `.github/workflows/release.yml` 在推送 `v*` tag 时创建。发布顺序必须先推送 `dev` 和 `main` 分支，再推送或重推 `v0.9.1-dev` 这样的 `v` 前缀 tag；裸 tag `0.9.1-dev` 不会触发 release workflow，因此不会显示为由 `github-actions` 发布。
+GitHub Release 由 `.github/workflows/release.yml` 在推送 `v*` tag 时创建。发布顺序必须先推送 `dev` 和 `main` 分支，再推送或重推 `v0.9.2-dev` 这样的 `v` 前缀 tag；裸 tag `0.9.2-dev` 不会触发 release workflow，因此不会显示为由 `github-actions` 发布。
+
+### 0.9.2-dev 验收说明
+
+`0.9.2-dev` 将引擎版本提升到 `0.9.2-dev`，VBC 能力版本提升到 `4.55`。本版本修复 `condy-constant-indirection` 与 `method-virtualization` 在 strict `all-compatible`、max 参数组合下的交互问题：由引擎生成的 `ConstantDynamic` LDC 现在会以受控 opcode 进入 native VM，字符串和 int condy bootstrap 保持运行语义，未知 bootstrap 形态仍 fail closed。
+
+这不是通过跳过方法或关闭 strict 模式实现的降级修复。`methodSelection = "all-compatible"` 仍会覆盖包含受控 condy LDC 的兼容方法，真实 JAR 矩阵中此前失败的 `demo.jar` / `pair-condy-constant-indirection__method-virtualization-params-max` 已完成混淆并按基线运行。
 
 ### 0.9.1-dev 验收说明
 

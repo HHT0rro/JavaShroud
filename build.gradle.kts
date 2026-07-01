@@ -16,8 +16,8 @@ val dex2jarVersion = "2.4.28"
 val cafed00dVersion = "2.1.4"
 val jlinkerVersion = "1.0.7"
 val aircompressorVersion = "0.27"
-val javaShroudVersion = "0.9.1-dev"
-val javaShroudVbcVersion = "4.54"
+val javaShroudVersion = "0.9.2-dev"
+val javaShroudVbcVersion = "4.55"
 
 allprojects {
     version = javaShroudVersion
