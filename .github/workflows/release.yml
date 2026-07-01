@@ -2,6 +2,8 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
   workflow_dispatch:
@@ -22,12 +24,42 @@ jobs:
   build-release:
     name: Build Windows release
     runs-on: windows-latest
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.event.head_commit.message, 'Release v')
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref }}
+
+      - name: Resolve release tag
+        id: release_tag
+        shell: pwsh
+        run: |
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            $tag = '${{ inputs.tag_name }}'
+          } elseif ('${{ github.ref }}'.StartsWith('refs/tags/')) {
+            $tag = '${{ github.ref_name }}'
+          } else {
+            $rootBuild = Get-Content -LiteralPath 'build.gradle.kts' -Raw
+            if ($rootBuild -notmatch 'val\s+javaShroudVersion\s*=\s*"([^"]+)"') {
+              throw 'Unable to resolve javaShroudVersion from build.gradle.kts.'
+            }
+            $tag = "v$($Matches[1])"
+          }
+
+          if ($tag -notmatch '^v\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$') {
+            throw "Invalid release tag: $tag"
+          }
+
+          git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
+          $tagSha = (git rev-list -n 1 $tag).Trim()
+          $headSha = (git rev-parse HEAD).Trim()
+          if ($tagSha -ne $headSha) {
+            throw "Release tag $tag points to $tagSha, but checked out commit is $headSha. Push main/dev first, then recreate the tag on the release commit."
+          }
+
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Setup GraalVM Native Image
         uses: graalvm/setup-graalvm@v1
@@ -90,8 +122,8 @@ jobs:
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
-          name: JavaShroud ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+          tag_name: ${{ steps.release_tag.outputs.tag }}
+          name: JavaShroud ${{ steps.release_tag.outputs.tag }}
           body_path: RELEASE_NOTES.md
           draft: false
           prerelease: false
