@@ -17,8 +17,11 @@ import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Type
 import org.objectweb.asm.tree.AbstractInsnNode
 import org.objectweb.asm.tree.ClassNode
+import org.objectweb.asm.tree.IntInsnNode
 import org.objectweb.asm.tree.InsnNode
+import org.objectweb.asm.tree.LdcInsnNode
 import org.objectweb.asm.tree.MethodInsnNode
+import org.objectweb.asm.tree.MethodNode
 import org.objectweb.asm.tree.VarInsnNode
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.commons.ClassRemapper
@@ -92,10 +95,12 @@ object RuntimeArtifactSealing {
     }
 
     fun sealIfRequested(artifact: BytecodeArtifact, config: ObfuscationConfig): BytecodeArtifact =
-        if (isRequested(config)) seal(artifact, seedFromConfig(config)) else artifact
+        if (isRequested(config)) seal(artifact, seedFromConfig(config), rewritesVmRuntime = config.enablesPass("method-virtualization")) else artifact
 
-    internal fun seal(artifact: BytecodeArtifact, seed: Long): BytecodeArtifact {
+    internal fun seal(artifact: BytecodeArtifact, seed: Long, rewritesVmRuntime: Boolean = true): BytecodeArtifact {
         val reservedEntryNames = artifact.jarEntries.map { it.name }.toMutableSet()
+        val rewritesCurrentVmRuntime = rewritesVmRuntime && artifact.jarEntries.any { it.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE }
+        val preservesExistingVmRuntime = !rewritesCurrentVmRuntime && artifact.jarEntries.any { it.name == VBC4_VM_PRELOAD_INDEX_RESOURCE }
         val sealedNativeIndexResource = uniqueSealedResourceName(
             seed = seed,
             kind = "i",
@@ -104,15 +109,24 @@ object RuntimeArtifactSealing {
             preferredName = sealedNativeIndexResourceName(seed),
             reservedEntryNames = reservedEntryNames,
         )
-        val helperClassRenameMap = sealedRuntimeHelperRenameMap(artifact, seed)
-        val helperMemberRenamePlan = sealedJavaOnlyHelperMemberRenamePlan(seed, helperClassRenameMap)
+        val helperClassRenameMap = if (preservesExistingVmRuntime) emptyMap() else sealedRuntimeHelperRenameMap(artifact, seed)
+        val helperMemberRenamePlan = if (preservesExistingVmRuntime) {
+            SealedHelperMemberRenamePlan(methodRenames = emptyMap(), fieldRenames = emptyMap())
+        } else {
+            sealedJavaOnlyHelperMemberRenamePlan(seed, helperClassRenameMap)
+        }
         val resourceRenameMap = linkedMapOf<String, String>()
         val vmResourceRenameMap = linkedMapOf<String, String>()
-        val legacyVmResourceNames = legacyVirtualMachineResourceNames(artifact.jarEntries)
-        val stringRewriteMap = linkedMapOf(LEGACY_SEALED_NATIVE_INDEX_RESOURCE to sealedNativeIndexResource)
-        stringRewriteMap.putAll(sealedHelperStringRewriteMap(seed, helperClassRenameMap))
-        stringRewriteMap[LEGACY_CLASS_ENCRYPTION_RESOURCE_ROOT] = sealedSemanticText(seed, "class-encryption-root")
-        stringRewriteMap[".enc"] = sealedSemanticText(seed, "encrypted-resource-suffix")
+        val priorRuntimeResourceKey = if (rewritesCurrentVmRuntime) priorRuntimeResourceKey(artifact) else null
+        val legacyVmResourceNames = if (rewritesCurrentVmRuntime) legacyVirtualMachineResourceNames(artifact.jarEntries, priorRuntimeResourceKey) else emptySet()
+        val helperStringRewriteMap = linkedMapOf(LEGACY_SEALED_NATIVE_INDEX_RESOURCE to sealedNativeIndexResource)
+        if (!preservesExistingVmRuntime) {
+            helperStringRewriteMap.putAll(sealedHelperStringRewriteMap(seed, helperClassRenameMap))
+        }
+        val resourceStringRewriteMap = linkedMapOf(
+            LEGACY_CLASS_ENCRYPTION_RESOURCE_ROOT to sealedSemanticText(seed, "class-encryption-root"),
+            ".enc" to sealedSemanticText(seed, "encrypted-resource-suffix"),
+        )
         val sealedNativeSpecs = mutableListOf<SealedNativeSpec>()
         val methodRenameBindings = parseMethodRenameBindings(artifact.jarEntries)
 
@@ -128,18 +142,30 @@ object RuntimeArtifactSealing {
                     // Rewrite encrypted class bytecode to update helper references
                     val rewrittenBytes = rewriteEncryptedClassBytes(
                         entry.bytes, entry.name, sealedName, classEncryptionKeys,
-                        stringRewriteMap + resourceRenameMap, seed, helperClassRenameMap, helperMemberRenamePlan,
+                        helperStringRewriteMap + resourceStringRewriteMap + resourceRenameMap,
+                        seed,
+                        helperClassRenameMap,
+                        helperMemberRenamePlan,
                     )
                     entry.copy(name = sealedName, bytes = rewrittenBytes)
                 }
-                entry.name == VBC4_VM_PRELOAD_INDEX_RESOURCE -> {
-                    null
-                }
+                entry.name == VBC4_VM_PRELOAD_INDEX_RESOURCE -> if (rewritesCurrentVmRuntime) null else entry
+                entry.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE -> entry
                 entry.name in legacyVmResourceNames -> {
                     val sealedName = uniqueSealedResourceName(seed, "v", entry.name, index, sealedResourceName(seed, "v", entry.name, index), reservedEntryNames)
                     reservedEntryNames += sealedName
                     vmResourceRenameMap[entry.name] = sealedName
-                    entry.copy(name = sealedName)
+                    val rewrittenBytes = decodeRuntimeResourceWithPriorKey(entry.bytes, priorRuntimeResourceKey)?.let { decoded ->
+                        RuntimeResourceCodec.encode(
+                            bytes = decoded,
+                            kind = RuntimeResourceKind.VmBytecode,
+                            seed = sealedDigest(seed, "vm", entry.name, index).take(8).toLong(16).toInt(),
+                            variantId = index.coerceAtLeast(1),
+                            layerCount = 4,
+                            compress = true,
+                        )
+                    } ?: entry.bytes
+                    entry.copy(name = sealedName, bytes = rewrittenBytes)
                 }
                 isNativeKernelResource(entry.name) -> {
                     val nativeSpec = nativeSpecFor(entry.name)
@@ -154,7 +180,8 @@ object RuntimeArtifactSealing {
                     resourceRenameMap[entry.name] = sealedName
                     entry.copy(name = sealedName, bytes = encodeSealedClassEncryptionManifest(entry.bytes, resourceRenameMap))
                 }
-                entry.name == LEGACY_SEALED_NATIVE_INDEX_RESOURCE || entry.name == METHOD_RENAME_BINDINGS_RESOURCE -> null
+                entry.name == LEGACY_SEALED_NATIVE_INDEX_RESOURCE -> entry.takeIf { preservesExistingVmRuntime }
+                entry.name == METHOD_RENAME_BINDINGS_RESOURCE -> null
                 else -> renamedClassEntry(entry, helperClassRenameMap)
             }
         }
@@ -165,7 +192,8 @@ object RuntimeArtifactSealing {
             rewriteClassArtifact(
                 classArtifact = classArtifact,
                 seed = seed,
-                stringRewriteMap = stringRewriteMap + resourceRenameMap,
+                helperStringRewriteMap = helperStringRewriteMap,
+                resourceStringRewriteMap = resourceStringRewriteMap + resourceRenameMap,
                 helperClassRenameMap = helperClassRenameMap,
                 helperMemberRenamePlan = helperMemberRenamePlan,
             ) ?: classArtifact
@@ -181,8 +209,8 @@ object RuntimeArtifactSealing {
             synchronizedEntry
         }.let { entries ->
             val runtimeEntries = entries.toMutableList()
-            if (vmResourceRenameMap.isNotEmpty()) {
-                val rewrittenVmIndex = rewriteVirtualMachinePreloadIndex(artifact.jarEntries, vmResourceRenameMap)
+            if (rewritesCurrentVmRuntime && vmResourceRenameMap.isNotEmpty()) {
+                val rewrittenVmIndex = rewriteVirtualMachinePreloadIndex(artifact.jarEntries, vmResourceRenameMap, priorRuntimeResourceKey)
                 if (rewrittenVmIndex != null) runtimeEntries += JarEntryData(
                     name = VBC4_VM_PRELOAD_INDEX_RESOURCE,
                     bytes = rewrittenVmIndex,
@@ -250,6 +278,9 @@ private data class SealedHelperMemberRenamePlan(
 private const val RUNTIME_SEALING_SEED = 0x4A53524CL
 
 private fun seedFromConfig(config: ObfuscationConfig): Long = RUNTIME_SEALING_SEED
+
+private fun ObfuscationConfig.enablesPass(passId: String): Boolean =
+    passes.any { it.enabled && it.id == passId }
 
 private fun renamedClassEntry(entry: JarEntryData, classRenameMap: Map<String, String>): JarEntryData {
     val internalName = entry.name.takeIf { it.endsWith(".class") }?.removeSuffix(".class") ?: return entry
@@ -734,9 +765,9 @@ private fun isVirtualMachineRuntimeResource(bytes: ByteArray): Boolean {
     return bytes.decodeToString().startsWith("VBC4S|1|")
 }
 
-private fun legacyVirtualMachineResourceNames(jarEntries: List<JarEntryData>): Set<String> {
+private fun legacyVirtualMachineResourceNames(jarEntries: List<JarEntryData>, priorRuntimeResourceKey: ByteArray?): Set<String> {
     val indexEntry = jarEntries.find { it.name == VBC4_VM_PRELOAD_INDEX_RESOURCE } ?: return emptySet()
-    val decodedIndex = RuntimeResourceCodec.decode(indexEntry.bytes) ?: return emptySet()
+    val decodedIndex = decodeRuntimeResourceWithPriorKey(indexEntry.bytes, priorRuntimeResourceKey) ?: return emptySet()
     return decodedIndex.decodeToString()
         .lineSequence()
         .mapNotNull { line ->
@@ -744,6 +775,94 @@ private fun legacyVirtualMachineResourceNames(jarEntries: List<JarEntryData>): S
             if (parts.size >= 2 && parts[0] != "A") parts[1] else null
         }
         .toSet()
+}
+
+internal fun decodeRuntimeResourceWithPriorKey(bytes: ByteArray, priorRuntimeResourceKey: ByteArray?): ByteArray? {
+    RuntimeResourceCodec.decode(bytes)?.let { return it }
+    if (priorRuntimeResourceKey == null) return null
+    return RuntimeResourceCodec.decodeWithKey(bytes, priorRuntimeResourceKey.copyOf())
+}
+
+internal fun priorRuntimeResourceKey(artifact: BytecodeArtifact): ByteArray? {
+    val jniHelperName = sealedRuntimeHelperInternalName("$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper")
+    val candidateBytes = buildList {
+        artifact.classArtifacts.firstOrNull { it.summary.internalName == jniHelperName }?.let { add(it.bytes) }
+        artifact.jarEntries.firstOrNull { it.name == "$jniHelperName.class" }?.let { add(it.bytes) }
+        artifact.classArtifacts.forEach { classArtifact ->
+            if (classArtifact.summary.internalName.startsWith("r/")) add(classArtifact.bytes)
+        }
+        artifact.jarEntries.forEach { entry ->
+            if (entry.name.startsWith("r/") && entry.name.endsWith(".class")) add(entry.bytes)
+        }
+    }
+    for (bytes in candidateBytes.distinctBy { it.contentHashCode() }) {
+        val classNode = ClassNode()
+        try {
+            ClassReader(bytes).accept(classNode, ClassReader.SKIP_FRAMES)
+            extractRuntimeResourceKeyFromHelper(classNode)?.let { return it }
+        } catch (_: Exception) {
+        }
+    }
+    return null
+}
+
+private fun extractRuntimeResourceKeyFromHelper(classNode: ClassNode): ByteArray? {
+    val shareMethods = classNode.methods
+        .filter { it.desc == "()[B" }
+        .associateBy { it.name }
+    val runtimeKeyMethod = shareMethods.values.firstOrNull { method ->
+        method.instructions?.toArray().orEmpty().any { insn ->
+            insn is MethodInsnNode && insn.owner == classNode.name && insn.name.startsWith("jsRrkShare") && insn.desc == "()[B"
+        }
+    } ?: return null
+    val shareNames = runtimeKeyMethod.instructions.toArray()
+        .filterIsInstance<MethodInsnNode>()
+        .filter { it.owner == classNode.name && it.desc == "()[B" && it.name.startsWith("jsRrkShare") }
+        .map { it.name }
+    if (shareNames.isEmpty()) return null
+    val shares = shareNames.map { name -> extractByteArrayReturn(shareMethods[name] ?: return null) ?: return null }
+    val keySize = shares.first().size
+    if (keySize != 32 || shares.any { it.size != keySize }) return null
+    return ByteArray(keySize) { index ->
+        shares.fold(0) { acc, share -> acc xor (share[index].toInt() and 0xFF) }.toByte()
+    }
+}
+
+private fun extractByteArrayReturn(method: MethodNode): ByteArray? {
+    val instructions = method.instructions?.toArray().orEmpty()
+    val newArrayIndex = instructions.indexOfFirst { it is IntInsnNode && it.opcode == Opcodes.NEWARRAY && it.operand == Opcodes.T_BYTE }
+    if (newArrayIndex <= 0) return null
+    val size = pushIntValue(instructions[newArrayIndex - 1]) ?: return null
+    if (size <= 0 || size > 4096) return null
+    val bytes = ByteArray(size)
+    var index = newArrayIndex + 1
+    while (index < instructions.size) {
+        if (instructions[index].opcode == Opcodes.ARETURN) return bytes
+        if (index + 3 < instructions.size && instructions[index].opcode == Opcodes.DUP) {
+            val byteIndex = pushIntValue(instructions[index + 1])
+            val byteValue = pushIntValue(instructions[index + 2])
+            if (byteIndex != null && byteValue != null && byteIndex in bytes.indices && instructions[index + 3].opcode == Opcodes.BASTORE) {
+                bytes[byteIndex] = byteValue.toByte()
+                index += 4
+                continue
+            }
+        }
+        index++
+    }
+    return null
+}
+
+private fun pushIntValue(insn: AbstractInsnNode): Int? = when (insn.opcode) {
+    Opcodes.ICONST_M1 -> -1
+    Opcodes.ICONST_0 -> 0
+    Opcodes.ICONST_1 -> 1
+    Opcodes.ICONST_2 -> 2
+    Opcodes.ICONST_3 -> 3
+    Opcodes.ICONST_4 -> 4
+    Opcodes.ICONST_5 -> 5
+    Opcodes.BIPUSH, Opcodes.SIPUSH -> (insn as? IntInsnNode)?.operand
+    Opcodes.LDC -> (insn as? LdcInsnNode)?.cst as? Int
+    else -> null
 }
 
 
@@ -777,9 +896,9 @@ private fun rewriteVirtualMachineManifestEntry(entry: JarEntryData, resourceRena
     ))
 }
 
-private fun rewriteVirtualMachinePreloadIndex(jarEntries: List<JarEntryData>, resourceRenameMap: Map<String, String>): ByteArray? {
+private fun rewriteVirtualMachinePreloadIndex(jarEntries: List<JarEntryData>, resourceRenameMap: Map<String, String>, priorRuntimeResourceKey: ByteArray?): ByteArray? {
     val indexEntry = jarEntries.find { it.name == VBC4_VM_PRELOAD_INDEX_RESOURCE } ?: return null
-    val decodedIndex = RuntimeResourceCodec.decode(indexEntry.bytes) ?: return null
+    val decodedIndex = decodeRuntimeResourceWithPriorKey(indexEntry.bytes, priorRuntimeResourceKey) ?: return null
     val rewrittenLines = decodedIndex.decodeToString()
         .lineSequence()
         .filter { it.isNotBlank() }
@@ -876,10 +995,12 @@ private fun rewriteClassEncryptionMetadataForResource(
 private fun rewriteClassArtifact(
     classArtifact: ClassArtifact,
     seed: Long,
-    stringRewriteMap: Map<String, String>,
+    helperStringRewriteMap: Map<String, String>,
+    resourceStringRewriteMap: Map<String, String>,
     helperClassRenameMap: Map<String, String>,
     helperMemberRenamePlan: SealedHelperMemberRenamePlan,
 ): ClassArtifact? {
+    if (isPriorSealedRuntimeArtifact(classArtifact)) return null
     var currentArtifact = classArtifact
     var modified = false
     rewriteSealedNativeVmDispatchCallsites(currentArtifact, helperClassRenameMap)?.let { rewrittenArtifact ->
@@ -895,15 +1016,73 @@ private fun rewriteClassArtifact(
         modified = true
     }
     val effectiveStringRewriteMap = if (currentArtifact.summary.internalName in helperClassRenameMap.values) {
-        stringRewriteMap + sealedHelperMethodStringRewriteMap(helperMemberRenamePlan)
+        helperStringRewriteMap + resourceStringRewriteMap + sealedHelperMethodStringRewriteMap(helperMemberRenamePlan)
     } else {
-        stringRewriteMap
+        resourceStringRewriteMap
     }
     rewriteClassStringConstants(currentArtifact, seed, effectiveStringRewriteMap)?.let { rewrittenArtifact ->
         currentArtifact = rewrittenArtifact
         modified = true
     }
     return if (modified) currentArtifact else null
+}
+
+private fun isPriorSealedRuntimeArtifact(classArtifact: ClassArtifact): Boolean {
+    if (!classArtifact.summary.internalName.startsWith("r/")) return false
+    if (hasPriorSealedRuntimeNameShape(classArtifact.summary.internalName)) return true
+    val classNode = ClassNode()
+    return try {
+        ClassReader(classArtifact.bytes).accept(classNode, ClassReader.SKIP_FRAMES)
+        isPriorSealedRuntimeClassNode(classNode)
+    } catch (_: Exception) {
+        false
+    }
+}
+
+private fun hasPriorSealedRuntimeNameShape(internalName: String): Boolean {
+    val parts = internalName.split('/')
+    if (parts.size != 3 || parts[1].length != 2) return false
+    val simpleName = parts[2]
+    if (!simpleName.startsWith('C')) return false
+    val outerName = simpleName.substringBefore('$')
+    if (outerName.length < 10) return false
+    return '$' !in simpleName || simpleName.substringAfter('$').startsWith('I')
+}
+
+private fun isPriorSealedRuntimeClassNode(classNode: ClassNode): Boolean {
+    var hasKernelComponentString = false
+    var hasKernelPlatformString = false
+    var hasKernelVmModeString = false
+    var invokesKernelLoaderShape = false
+    var invokesVmDispatchShape = false
+    for (method in classNode.methods) {
+        for (instruction in method.instructions?.toArray().orEmpty()) {
+            when (instruction) {
+                is org.objectweb.asm.tree.LdcInsnNode -> {
+                    val value = instruction.cst as? String ?: continue
+                    if (value in setOf("loader", "decrypt", "vm", "guards", "all")) hasKernelComponentString = true
+                    if (value in setOf("auto", "windows-x64", "linux-x64", "macos-x64", "macos-arm64")) hasKernelPlatformString = true
+                    if (value in setOf("vm-diverse", "vm-off")) hasKernelVmModeString = true
+                }
+                is MethodInsnNode -> {
+                    if (instruction.opcode == Opcodes.INVOKESTATIC && instruction.desc == "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V") {
+                        invokesKernelLoaderShape = true
+                    }
+                    if (instruction.opcode == Opcodes.INVOKESTATIC && instruction.owner.startsWith("r/") && instruction.name.startsWith("m_") &&
+                        instruction.desc in setOf(
+                            "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;",
+                            "(J[Ljava/lang/Object;)Ljava/lang/Object;",
+                            "(J)V",
+                            "(JI)V",
+                        )
+                    ) {
+                        invokesVmDispatchShape = true
+                    }
+                }
+            }
+        }
+    }
+    return invokesVmDispatchShape || (invokesKernelLoaderShape && hasKernelComponentString && hasKernelPlatformString && hasKernelVmModeString)
 }
 
 private fun remapHelperReferences(

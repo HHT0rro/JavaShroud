@@ -18,10 +18,6 @@
   <a href="README.md">简体中文</a> · <strong>English</strong>
 </p>
 
-## Release Status
-
-Current development release: `0.9.0-dev`. The capability schema reports engine version `0.9.0-dev` and VBC capability version `4.53`; the underlying VMBC wire protocol remains VBC4 to keep the current native parser / serializer contract stable.
-
 ## Positioning
 
 JavaShroud is a Java obfuscation and hardening project built around bytecode transformation, method virtualization, a native microkernel, and a desktop workflow. It includes conventional Java obfuscation capabilities such as renaming, string protection, control-flow transformation, and metadata cleanup, while also providing a VMBC / NBVM (native bytecode VM) execution path for high-value methods.
@@ -194,6 +190,12 @@ wails build
 ```
 
 The full release script builds the engine JAR, the GraalVM native engine, the frontend bundle, and the Wails desktop application. Release acceptance should be based on the expected artifacts, such as `build\release\javashroud-windows-amd64\javashroud.exe`, existing and running successfully, not only on individual Gradle, Yarn, or Go commands returning success.
+
+### 0.9.1-dev Acceptance Notes
+
+`0.9.1-dev` bumps the engine version to `0.9.1-dev` and the VBC capability version to `4.54`. This release focuses on preserving ABI compatibility when fullconfig processes artifacts that were already sealed by VBC4. For older sealed VM artifacts that contain `META-INF/.r/vm.idx` but no current-run `vm-current.idx`, runtime resources, helper ABI, native loader wiring, and passes that would rewrite the old VM call surface preserve the existing ABI. Fresh inputs and artifacts produced by the current run continue to use the current VBC4 max-strength/native-only path; this is not a weakening of protection for new artifacts.
+
+Before release, `E:\xbeng\Documents\javashroud-config-full.toml` was applied to every JAR under `E:\XiangMu\TestJar`. `demo.jar`, `demo-shrouded.jar`, `jvm-obf-tester.jar`, `TEST.jar`, `TEST-shrouded.jar`, and `TEST-shrouded-full-run.jar` all completed obfuscation and ran according to their baselines. `SimpleFiveInARow-obf-test.jar` completed its 12 self-checks and then kept the UI process alive. `ugly-1.0.0.jar` matched its input baseline by exiting because it has no main manifest.
 
 ## Repository Layout
 

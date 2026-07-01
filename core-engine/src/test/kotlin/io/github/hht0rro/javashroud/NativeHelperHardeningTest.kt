@@ -9,11 +9,20 @@ import org.objectweb.asm.tree.ClassNode
 import org.objectweb.asm.tree.MethodInsnNode
 import io.github.hht0rro.javashroud.model.analysis.MemberKind
 import io.github.hht0rro.javashroud.model.analysis.MemberSummary
+import io.github.hht0rro.javashroud.model.analysis.MatchedMember
 import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.analysis.TargetSelector
 import io.github.hht0rro.javashroud.model.config.RuleSpec
+import io.github.hht0rro.javashroud.transforms.rename.renameClasses
+import io.github.hht0rro.javashroud.transforms.rename.renameFields
+import io.github.hht0rro.javashroud.transforms.rename.renameMethods
 import io.github.hht0rro.javashroud.transforms.protection.applyAntiDumpProtection
 import io.github.hht0rro.javashroud.transforms.protection.applyAntiInstrumentation
+import io.github.hht0rro.javashroud.transforms.protection.applyJniMicrokernelLoader
+import io.github.hht0rro.javashroud.transforms.protection.applyMethodBodyDelayedDecryption
+import io.github.hht0rro.javashroud.transforms.protection.applyMethodVirtualization
+import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -40,9 +49,10 @@ class NativeHelperHardeningTest {
         )
         assertTrue(helperSource.contains("public static native byte[] nativeDecodeString(byte[] payload, int seed, int flags);"))
         assertTrue(!helperSource.contains("public static String decode("), "StringEncryptionHelper must not expose a Java string-decoder trampoline.")
+        assertTrue(helperSource.contains("public static String cachedDecodeString(byte[] payload, int seed, int flags)"), "StringEncryptionHelper should expose only the native-backed cached string materialization API.")
+        assertTrue(helperSource.contains("nativeDecodeString(payload, seed, flags)"), "Cached materialization must still delegate decryption to the native microkernel.")
+        assertTrue(helperSource.contains("ConcurrentHashMap"), "Repeated string materialization must be cached outside target classes to avoid hot-path native decrypt loops.")
         assertTrue(helperSource.contains("JniMicrokernelHelper.loadKernel"), "String helper must load through the JNI microkernel.")
-        assertFalse(helperSource.contains("new String("), "StringEncryptionHelper must not construct Java strings around native decode bytes.")
-        assertFalse(helperSource.contains("StandardCharsets"), "StringEncryptionHelper must not own charset conversion for native-decoded strings.")
         assertFalse(helperSource.contains("Base64"), "String helper must not retain legacy Base64 payload handling.")
     }
     @Test
@@ -242,6 +252,337 @@ class NativeHelperHardeningTest {
         assertTrue("unscrambleString" in helperCalls, "GETFIELD must unscramble protected String field material")
     }
 
+    @Test
+    fun anti_dump_field_scramble_skips_mutable_array_fields() {
+        val internalName = "sample/MutableArrayFieldHost"
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = internalName,
+                    bytes = buildMutableArrayFieldHost(internalName),
+                    methodSummaries = listOf(MemberSummary(MemberKind.METHOD, "roundTrip", "([B)[B", Opcodes.ACC_PUBLIC)),
+                ),
+            ),
+        )
+
+        val result = applyAntiDumpProtection(
+            artifact = artifact,
+            ruleMatches = listOf(RuleMatch(
+                rule = RuleSpec(target = internalName, action = "anti-dump-protection"),
+                selector = TargetSelector(classPattern = internalName, memberPattern = null, memberDescriptorPattern = null),
+                matchedClassNames = listOf(internalName),
+                matchedMembers = emptyList(),
+            )),
+            params = mapOf("protectionLevel" to "field-scramble"),
+        )
+
+        val node = ClassNode()
+        ClassReader(result.artifact.classArtifactIndex[internalName]!!.bytes).accept(node, ClassReader.SKIP_FRAMES)
+        val helperCalls = node.methods.flatMap { method -> method.instructions.toArray().filterIsInstance<MethodInsnNode>() }
+            .filter { it.owner.endsWith("AntiDumpRuntimeHelper") }
+            .map { it.name }
+            .toSet()
+
+        assertFalse("scrambleBytes" in helperCalls, "Mutable byte-array fields must not be clone-scrambled because array element writes and identity-sensitive caches would become non-equivalent")
+        assertFalse("unscrambleBytes" in helperCalls, "Mutable byte-array fields must not be clone-unscrambled because reads must return the stored array instance")
+        assertTrue("initializeProtection" in helperCalls, "The class should still receive anti-dump initialization")
+    }
+
+    @Test
+    fun anti_dump_field_scramble_skips_classes_that_already_dispatch_through_javashroud_vm() {
+        val internalName = "sample/ExistingVmDispatchHost"
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = internalName,
+                    bytes = buildExistingVmDispatchHost(internalName),
+                    methodSummaries = listOf(MemberSummary(MemberKind.METHOD, "roundTrip", "(Ljava/lang/String;)Ljava/lang/String;", Opcodes.ACC_PUBLIC)),
+                ),
+            ),
+        )
+
+        val result = applyAntiDumpProtection(
+            artifact = artifact,
+            ruleMatches = listOf(RuleMatch(
+                rule = RuleSpec(target = internalName, action = "anti-dump-protection"),
+                selector = TargetSelector(classPattern = internalName, memberPattern = null, memberDescriptorPattern = null),
+                matchedClassNames = listOf(internalName),
+                matchedMembers = emptyList(),
+            )),
+            params = mapOf("protectionLevel" to "field-scramble"),
+        )
+
+        val node = ClassNode()
+        ClassReader(result.artifact.classArtifactIndex[internalName]!!.bytes).accept(node, ClassReader.SKIP_FRAMES)
+        val helperCalls = node.methods.flatMap { method -> method.instructions.toArray().filterIsInstance<MethodInsnNode>() }
+            .filter { it.owner.endsWith("AntiDumpRuntimeHelper") }
+            .map { it.name }
+            .toSet()
+
+        assertEquals(buildExistingVmDispatchHost(internalName).toList(), result.artifact.classArtifactIndex.getValue(internalName).bytes.toList())
+        assertFalse("scrambleString" in helperCalls, "Classes already partly executed by JavaShroud VM must not receive asymmetric Java-only field scrambling")
+        assertFalse("unscrambleString" in helperCalls, "Classes already partly executed by JavaShroud VM must not receive asymmetric Java-only field unscrambling")
+        assertFalse("initializeProtection" in helperCalls, "Classes already dispatching through a prior JavaShroud VM must not load a second sealed native runtime")
+    }
+
+    @Test
+    fun anti_dump_does_not_reinject_prior_javashroud_generated_runtime_classes() {
+        val internalName = "r/74/C9f148d72d3254a8cabd3f4f8"
+        val originalBytes = buildPriorJavaShroudGeneratedRuntimeHost(internalName)
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = internalName,
+                    bytes = originalBytes,
+                    methodSummaries = listOf(MemberSummary(MemberKind.METHOD, "m_56f234c58f2269ad", "(Ljava/lang/String;Ljava/lang/String;)V", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC)),
+                ),
+            ),
+        )
+
+        val result = applyAntiDumpProtection(
+            artifact = artifact,
+            ruleMatches = listOf(RuleMatch(
+                rule = RuleSpec(target = internalName, action = "anti-dump-protection"),
+                selector = TargetSelector(classPattern = internalName, memberPattern = null, memberDescriptorPattern = null),
+                matchedClassNames = listOf(internalName),
+                matchedMembers = emptyList(),
+            )),
+            params = mapOf("protectionLevel" to "field-scramble"),
+        )
+
+        assertEquals(originalBytes.toList(), result.artifact.classArtifactIndex.getValue(internalName).bytes.toList())
+        val helperCalls = helperCallNames(result.artifact.classArtifactIndex.getValue(internalName).bytes, "AntiDumpRuntimeHelper")
+        assertFalse("initializeProtection" in helperCalls, "Prior JavaShroud sealed runtime classes must not receive a second anti-dump class-load guard")
+    }
+
+    @Test
+    fun anti_dump_does_not_reinject_prior_javashroud_generated_runtime_support_classes() {
+        val internalName = "r/64/C006b55bb01dc9902c16e6f2c"
+        val originalBytes = buildPriorJavaShroudGeneratedRuntimeSupportHost(internalName)
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = internalName,
+                    bytes = originalBytes,
+                    methodSummaries = emptyList(),
+                ),
+            ),
+        )
+
+        val result = applyAntiDumpProtection(
+            artifact = artifact,
+            ruleMatches = listOf(RuleMatch(
+                rule = RuleSpec(target = internalName, action = "anti-dump-protection"),
+                selector = TargetSelector(classPattern = internalName, memberPattern = null, memberDescriptorPattern = null),
+                matchedClassNames = listOf(internalName),
+                matchedMembers = emptyList(),
+            )),
+            params = mapOf("protectionLevel" to "field-scramble"),
+        )
+
+        assertEquals(originalBytes.toList(), result.artifact.classArtifactIndex.getValue(internalName).bytes.toList())
+        val helperCalls = helperCallNames(result.artifact.classArtifactIndex.getValue(internalName).bytes, "AntiDumpRuntimeHelper")
+        assertFalse("initializeProtection" in helperCalls, "Prior JavaShroud runtime support classes must not receive a second anti-dump class-load guard")
+    }
+
+    @Test
+    fun anti_instrumentation_does_not_reinject_prior_javashroud_generated_runtime_classes() {
+        val internalName = "r/74/C9f148d72d3254a8cabd3f4f8"
+        val originalBytes = buildPriorJavaShroudGeneratedRuntimeHost(internalName)
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = internalName,
+                    bytes = originalBytes,
+                    methodSummaries = listOf(MemberSummary(MemberKind.METHOD, "m_56f234c58f2269ad", "(Ljava/lang/String;Ljava/lang/String;)V", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC)),
+                ),
+            ),
+        )
+
+        val result = applyAntiInstrumentation(
+            artifact = artifact,
+            ruleMatches = listOf(RuleMatch(
+                rule = RuleSpec(target = internalName, action = "anti-instrumentation"),
+                selector = TargetSelector(classPattern = internalName, memberPattern = null, memberDescriptorPattern = null),
+                matchedClassNames = listOf(internalName),
+                matchedMembers = emptyList(),
+            )),
+            params = emptyMap(),
+        )
+
+        assertEquals(originalBytes.toList(), result.artifact.classArtifactIndex.getValue(internalName).bytes.toList())
+        val helperCalls = helperCallNames(result.artifact.classArtifactIndex.getValue(internalName).bytes, "AntiInstrumentationHelper")
+        assertFalse("checkInstrumentation" in helperCalls, "Prior JavaShroud sealed runtime classes must not receive a second anti-instrumentation class-load guard")
+        assertFalse("checkInstrumentationExSafe" in helperCalls, "Prior JavaShroud sealed runtime classes must not receive distributed integrity probes")
+    }
+
+    @Test
+    fun jni_loader_does_not_reinject_prior_javashroud_generated_runtime_classes() {
+        val internalName = "r/0e/C7b908c2243e8a1135d80f05b\$Ib812e96115a80c60"
+        val originalBytes = buildPriorJavaShroudGeneratedRuntimeSupportHost(internalName)
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = internalName,
+                    bytes = originalBytes,
+                    methodSummaries = emptyList(),
+                ),
+            ),
+        )
+
+        val result = applyJniMicrokernelLoader(
+            artifact = artifact,
+            ruleMatches = listOf(RuleMatch(
+                rule = RuleSpec(target = internalName, action = "jni-microkernel-loader"),
+                selector = TargetSelector(classPattern = internalName, memberPattern = null, memberDescriptorPattern = null),
+                matchedClassNames = listOf(internalName),
+                matchedMembers = emptyList(),
+            )),
+            params = mapOf("kernelComponents" to "loader", "targetPlatform" to "auto", "diversifiedVirtualization" to true),
+        )
+
+        assertEquals(originalBytes.toList(), result.artifact.classArtifactIndex.getValue(internalName).bytes.toList())
+        val helperCalls = helperCallOwners(result.artifact.classArtifactIndex.getValue(internalName).bytes)
+        assertFalse(
+            "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper" in helperCalls,
+            "Prior JavaShroud runtime support classes must not receive a second loader call to the unsealed helper owner",
+        )
+    }
+
+    @Test
+    fun anti_dump_does_not_change_application_classes_bound_to_prior_sealed_runtime() {
+        val internalName = "sample/PriorVmBoundHost"
+        val originalBytes = buildPriorSealedRuntimeBoundApplicationHost(internalName)
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = internalName,
+                    bytes = originalBytes,
+                    methodSummaries = listOf(MemberSummary(MemberKind.METHOD, "main", "([Ljava/lang/String;)V", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC)),
+                ),
+            ),
+        )
+
+        val result = applyAntiDumpProtection(
+            artifact = artifact,
+            ruleMatches = listOf(RuleMatch(
+                rule = RuleSpec(target = internalName, action = "anti-dump-protection"),
+                selector = TargetSelector(classPattern = internalName, memberPattern = null, memberDescriptorPattern = null),
+                matchedClassNames = listOf(internalName),
+                matchedMembers = emptyList(),
+            )),
+            params = mapOf("protectionLevel" to "full"),
+        )
+
+        assertEquals(
+            originalBytes.toList(),
+            result.artifact.classArtifactIndex.getValue(internalName).bytes.toList(),
+            "Classes already wired to a prior sealed runtime must keep their constant pool stable because existing VM resources resolve by old indexes",
+        )
+    }
+
+    @Test
+    fun method_body_delayed_decryption_does_not_wrap_application_classes_bound_to_prior_sealed_runtime() {
+        val internalName = "sample/PriorVmBoundMethodHost"
+        val originalBytes = buildPriorSealedRuntimeBoundApplicationHost(internalName)
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = internalName,
+                    bytes = originalBytes,
+                    methodSummaries = listOf(MemberSummary(MemberKind.METHOD, "main", "([Ljava/lang/String;)V", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC)),
+                ),
+            ),
+        )
+
+        val result = applyMethodBodyDelayedDecryption(
+            artifact = artifact,
+            ruleMatches = listOf(RuleMatch(
+                rule = RuleSpec(target = internalName, action = "method-body-delayed-decryption"),
+                selector = TargetSelector(classPattern = internalName, memberPattern = null, memberDescriptorPattern = null),
+                matchedClassNames = listOf(internalName),
+                matchedMembers = emptyList(),
+            )),
+            params = mapOf("mode" to "lazy-decrypt", "encryptionStrategy" to "aes-128"),
+        )
+
+        assertEquals(
+            originalBytes.toList(),
+            result.artifact.classArtifactIndex.getValue(internalName).bytes.toList(),
+            "Method-body wrapping must not alter classes whose existing sealed runtime resources still resolve against their old bytecode layout",
+        )
+    }
+
+    @Test
+    fun method_virtualization_does_not_wrap_application_classes_bound_to_prior_sealed_runtime() {
+        val internalName = "sample/PriorVmBoundVirtualizationHost"
+        val originalBytes = buildPriorSealedRuntimeBoundApplicationHost(internalName)
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = internalName,
+                    bytes = originalBytes,
+                    methodSummaries = listOf(MemberSummary(MemberKind.METHOD, "main", "([Ljava/lang/String;)V", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC)),
+                ),
+            ),
+        )
+
+        val result = withVbc4BuildContext(defaultVbc4BuildContext()) {
+            applyMethodVirtualization(
+                artifact = artifact,
+                ruleMatches = listOf(RuleMatch(
+                    rule = RuleSpec(target = internalName, action = "method-virtualization"),
+                    selector = TargetSelector(classPattern = internalName, memberPattern = null, memberDescriptorPattern = null),
+                    matchedClassNames = listOf(internalName),
+                    matchedMembers = emptyList(),
+                )),
+                params = mapOf("methodSelection" to "all-compatible", "maxInstructions" to Int.MAX_VALUE),
+            )
+        }
+
+        assertEquals(
+            originalBytes.toList(),
+            result.artifact.classArtifactIndex.getValue(internalName).bytes.toList(),
+            "Method virtualization must not wrap classes already bound to an older sealed runtime because old VM resources still resolve across that bytecode boundary",
+        )
+    }
+
+    @Test
+    fun rename_passes_do_not_change_application_classes_bound_to_prior_sealed_runtime() {
+        val internalName = "sample/PriorVmBoundRenameHost"
+        val originalBytes = buildPriorSealedRuntimeBoundApplicationHost(internalName)
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = internalName,
+                    bytes = originalBytes,
+                    fieldSummaries = listOf(MemberSummary(MemberKind.FIELD, "state", "I", Opcodes.ACC_PRIVATE)),
+                    methodSummaries = listOf(MemberSummary(MemberKind.METHOD, "main", "([Ljava/lang/String;)V", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC)),
+                ),
+            ),
+        )
+
+        val classRename = renameClasses(
+            artifact = artifact,
+            ruleMatches = listOf(classRuleMatch(internalName, "rename-classes")),
+            params = mapOf("dictionaryStyle" to "sequential"),
+        )
+        val methodRename = renameMethods(
+            artifact = artifact,
+            ruleMatches = listOf(memberRuleMatch(internalName, "main", "([Ljava/lang/String;)V", MemberKind.METHOD, "rename-methods")),
+            params = mapOf("dictionaryStyle" to "sequential"),
+        )
+        val fieldRename = renameFields(
+            artifact = artifact,
+            ruleMatches = listOf(memberRuleMatch(internalName, "state", "I", MemberKind.FIELD, "rename-fields")),
+            params = mapOf("dictionaryStyle" to "sequential"),
+        )
+
+        assertEquals(originalBytes.toList(), classRename.artifact.classArtifactIndex.getValue(internalName).bytes.toList(), "Class rename must preserve prior VM-bound classes because old VM resources resolve their owner names")
+        assertEquals(originalBytes.toList(), methodRename.artifact.classArtifactIndex.getValue(internalName).bytes.toList(), "Method rename must preserve prior VM-bound classes because old VM resources resolve member names")
+        assertEquals(originalBytes.toList(), fieldRename.artifact.classArtifactIndex.getValue(internalName).bytes.toList(), "Field rename must preserve prior VM-bound classes because old VM resources resolve field names")
+    }
+
     private fun buildAntiDumpFieldHost(internalName: String): ByteArray {
         val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
         cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", null)
@@ -265,6 +606,165 @@ class NativeHelperHardeningTest {
         method.visitEnd()
         cw.visitEnd()
         return cw.toByteArray()
+    }
+
+    private fun buildMutableArrayFieldHost(internalName: String): ByteArray {
+        val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", null)
+        cw.visitField(Opcodes.ACC_PRIVATE, "state", "[B", null, null).visitEnd()
+        val init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
+        init.visitCode()
+        init.visitVarInsn(Opcodes.ALOAD, 0)
+        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+        init.visitInsn(Opcodes.RETURN)
+        init.visitMaxs(1, 1)
+        init.visitEnd()
+        val method = cw.visitMethod(Opcodes.ACC_PUBLIC, "roundTrip", "([B)[B", null, null)
+        method.visitCode()
+        method.visitVarInsn(Opcodes.ALOAD, 0)
+        method.visitVarInsn(Opcodes.ALOAD, 1)
+        method.visitFieldInsn(Opcodes.PUTFIELD, internalName, "state", "[B")
+        method.visitVarInsn(Opcodes.ALOAD, 0)
+        method.visitFieldInsn(Opcodes.GETFIELD, internalName, "state", "[B")
+        method.visitInsn(Opcodes.ARETURN)
+        method.visitMaxs(2, 2)
+        method.visitEnd()
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    private fun buildExistingVmDispatchHost(internalName: String): ByteArray {
+        val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", null)
+        cw.visitField(Opcodes.ACC_PRIVATE, "secret", "Ljava/lang/String;", null, null).visitEnd()
+        val init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
+        init.visitCode()
+        init.visitVarInsn(Opcodes.ALOAD, 0)
+        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+        init.visitInsn(Opcodes.RETURN)
+        init.visitMaxs(1, 1)
+        init.visitEnd()
+        val method = cw.visitMethod(Opcodes.ACC_PUBLIC, "roundTrip", "(Ljava/lang/String;)Ljava/lang/String;", null, null)
+        method.visitCode()
+        method.visitVarInsn(Opcodes.ALOAD, 0)
+        method.visitVarInsn(Opcodes.ALOAD, 1)
+        method.visitFieldInsn(Opcodes.PUTFIELD, internalName, "secret", "Ljava/lang/String;")
+        method.visitLdcInsn(1L)
+        method.visitInsn(Opcodes.ACONST_NULL)
+        method.visitInsn(Opcodes.ACONST_NULL)
+        method.visitMethodInsn(
+            Opcodes.INVOKESTATIC,
+            "r/0e/C7b908c2243e8a1135d80f05b",
+            "executeVmResource",
+            "(J[Ljava/lang/Object;)Ljava/lang/Object;",
+            false,
+        )
+        method.visitInsn(Opcodes.POP)
+        method.visitVarInsn(Opcodes.ALOAD, 0)
+        method.visitFieldInsn(Opcodes.GETFIELD, internalName, "secret", "Ljava/lang/String;")
+        method.visitInsn(Opcodes.ARETURN)
+        method.visitMaxs(4, 2)
+        method.visitEnd()
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    private fun buildPriorJavaShroudGeneratedRuntimeHost(internalName: String): ByteArray {
+        val loaderOwner = "r/0e/C7b908c2243e8a1135d80f05b"
+        val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_FINAL or Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", null)
+        cw.visitField(Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC, "state", "Ljava/lang/String;", null, null).visitEnd()
+
+        cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC or Opcodes.ACC_NATIVE, "m_87d26895fcb8d435", "(Ljava/lang/String;Ljava/lang/String;)V", null, null).visitEnd()
+
+        val wrapper = cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "m_56f234c58f2269ad", "(Ljava/lang/String;Ljava/lang/String;)V", null, null)
+        wrapper.visitCode()
+        wrapper.visitMethodInsn(Opcodes.INVOKESTATIC, loaderOwner, "isNativeLoaded", "()Z", false)
+        val end = org.objectweb.asm.Label()
+        wrapper.visitJumpInsn(Opcodes.IFEQ, end)
+        wrapper.visitVarInsn(Opcodes.ALOAD, 0)
+        wrapper.visitVarInsn(Opcodes.ALOAD, 1)
+        wrapper.visitMethodInsn(Opcodes.INVOKESTATIC, internalName, "m_87d26895fcb8d435", "(Ljava/lang/String;Ljava/lang/String;)V", false)
+        wrapper.visitLabel(end)
+        wrapper.visitInsn(Opcodes.RETURN)
+        wrapper.visitMaxs(2, 2)
+        wrapper.visitEnd()
+
+        val clinit = cw.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null)
+        clinit.visitCode()
+        clinit.visitLdcInsn("loader")
+        clinit.visitLdcInsn("auto")
+        clinit.visitLdcInsn("vm-diverse")
+        clinit.visitMethodInsn(Opcodes.INVOKESTATIC, loaderOwner, "m_4487bf5f5bb3efe5", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", false)
+        clinit.visitInsn(Opcodes.RETURN)
+        clinit.visitMaxs(3, 0)
+        clinit.visitEnd()
+
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    @Suppress("SameParameterValue")
+    private fun buildPriorJavaShroudGeneratedRuntimeSupportHost(internalName: String): ByteArray {
+        val loaderOwner = "r/0e/C7b908c2243e8a1135d80f05b"
+        val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_FINAL or Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", null)
+        val init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
+        init.visitCode()
+        init.visitVarInsn(Opcodes.ALOAD, 0)
+        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+        init.visitInsn(Opcodes.RETURN)
+        init.visitMaxs(1, 1)
+        init.visitEnd()
+        val clinit = cw.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null)
+        clinit.visitCode()
+        clinit.visitLdcInsn("loader")
+        clinit.visitLdcInsn("auto")
+        clinit.visitLdcInsn("vm-diverse")
+        clinit.visitMethodInsn(Opcodes.INVOKESTATIC, loaderOwner, "m_4487bf5f5bb3efe5", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", false)
+        clinit.visitInsn(Opcodes.RETURN)
+        clinit.visitMaxs(3, 0)
+        clinit.visitEnd()
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    private fun buildPriorSealedRuntimeBoundApplicationHost(internalName: String): ByteArray {
+        val priorHelperOwner = "r/0c/C0e0e34e1db2d2d3839562642"
+        val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", null)
+        val clinit = cw.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null)
+        clinit.visitCode()
+        clinit.visitLdcInsn("full")
+        clinit.visitLdcInsn("sample/PriorVmBoundHost")
+        clinit.visitMethodInsn(Opcodes.INVOKESTATIC, priorHelperOwner, "m_56f234c58f2269ad", "(Ljava/lang/String;Ljava/lang/String;)V", false)
+        clinit.visitInsn(Opcodes.RETURN)
+        clinit.visitMaxs(2, 0)
+        clinit.visitEnd()
+        val main = cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "main", "([Ljava/lang/String;)V", null, null)
+        main.visitCode()
+        main.visitInsn(Opcodes.RETURN)
+        main.visitMaxs(0, 1)
+        main.visitEnd()
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    private fun helperCallNames(bytes: ByteArray, ownerSuffix: String): Set<String> {
+        val node = ClassNode()
+        ClassReader(bytes).accept(node, ClassReader.SKIP_FRAMES)
+        return node.methods.flatMap { method -> method.instructions.toArray().filterIsInstance<MethodInsnNode>() }
+            .filter { it.owner.endsWith(ownerSuffix) }
+            .map { it.name }
+            .toSet()
+    }
+
+    private fun helperCallOwners(bytes: ByteArray): Set<String> {
+        val node = ClassNode()
+        ClassReader(bytes).accept(node, ClassReader.SKIP_FRAMES)
+        return node.methods.flatMap { method -> method.instructions.toArray().filterIsInstance<MethodInsnNode>() }
+            .map { it.owner }
+            .toSet()
     }
 
     private fun buildRuntimeGuardHotPathHost(internalName: String): ByteArray {
@@ -372,6 +872,7 @@ class NativeHelperHardeningTest {
             nativeSource.contains("js_vm_ephemeral_cache_get") &&
                 nativeSource.contains("js_vm_ephemeral_cache_put") &&
                 nativeSource.contains("jsn_k9(JNIEnv *env, jclass cls)") &&
+                nativeSource.contains("META-INF/.r/vm-current.idx") &&
                 nativeSource.contains("META-INF/.r/vm.idx") &&
                 helperSource.contains("nativePreloadRuntimeResources();"),
             "Native VM resources must preload into a resident native program cache after kernel load.",
@@ -1165,6 +1666,20 @@ class NativeHelperHardeningTest {
         if (Files.exists(nested)) return nested
         return direct
     }
+
+    private fun classRuleMatch(internalName: String, action: String): RuleMatch = RuleMatch(
+        rule = RuleSpec(target = internalName, action = action),
+        selector = TargetSelector(classPattern = internalName, memberPattern = null, memberDescriptorPattern = null),
+        matchedClassNames = listOf(internalName),
+        matchedMembers = emptyList(),
+    )
+
+    private fun memberRuleMatch(internalName: String, memberName: String, descriptor: String, kind: MemberKind, action: String): RuleMatch = RuleMatch(
+        rule = RuleSpec(target = "$internalName#$memberName", action = action),
+        selector = TargetSelector(classPattern = internalName, memberPattern = memberName, memberDescriptorPattern = descriptor),
+        matchedClassNames = listOf(internalName),
+        matchedMembers = listOf(MatchedMember(internalName, kind, memberName, descriptor)),
+    )
 
     private fun nativeRuntimeSources(): String = listOf(
         "src/main/native/js_helpers.c",

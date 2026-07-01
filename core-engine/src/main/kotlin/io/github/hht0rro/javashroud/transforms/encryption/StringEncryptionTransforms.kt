@@ -6,11 +6,18 @@ import io.github.hht0rro.javashroud.bytecode.encryptClassStrings
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.transforms.TransformResult
+import io.github.hht0rro.javashroud.transforms.protection.VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE
+import io.github.hht0rro.javashroud.transforms.protection.VBC4_VM_PRELOAD_INDEX_RESOURCE
 import io.github.hht0rro.javashroud.transforms.reanalyzedClassArtifact
 import io.github.hht0rro.javashroud.transforms.unchangedTransformResult
 import io.github.hht0rro.javashroud.transforms.updatedArtifactTransformResult
 
 fun encryptStrings(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, params: Map<String, Any>): TransformResult {
+    if (artifact.jarEntries.any { it.name == VBC4_VM_PRELOAD_INDEX_RESOURCE } &&
+        artifact.jarEntries.none { it.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE }
+    ) {
+        return unchangedTransformResult(artifact)
+    }
     val matchedClassNames = eligibleClassNamesForAction(artifact.classArtifacts, ruleMatches, "string-encryption")
     if (matchedClassNames.isEmpty()) {
         return unchangedTransformResult(artifact)

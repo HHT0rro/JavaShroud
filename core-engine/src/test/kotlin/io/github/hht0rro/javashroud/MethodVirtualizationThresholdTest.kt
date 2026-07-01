@@ -15,12 +15,16 @@ import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.bytecode.indirectMethodCalls
 import io.github.hht0rro.javashroud.transforms.protection.ObfuscatedIdentifierUtil
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceCodec
+import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceKind
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE
+import io.github.hht0rro.javashroud.transforms.protection.VBC4_VM_PRELOAD_INDEX_RESOURCE
 import io.github.hht0rro.javashroud.transforms.protection.currentVbc4BuildContextOrNull
 import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.applyBootstrapTableEncryption
 import io.github.hht0rro.javashroud.transforms.protection.applyMethodVirtualization as applyMethodVirtualizationTransform
+import io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.Label
@@ -587,12 +591,122 @@ class MethodVirtualizationThresholdTest {
             )
         }
 
-        val indexEntry = result.artifact.jarEntries.single { it.name == "META-INF/.r/vm.idx" }
+        val indexEntry = result.artifact.jarEntries.single { it.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE }
         val index = withVbc4BuildContext(context) {
             RuntimeResourceCodec.decode(indexEntry.bytes)!!.decodeToString().trim().lines()
         }
         assertTrue(index.isNotEmpty(), "Preload index must contain entries")
         assertTrue(index.all { it.split('|').size >= 4 }, "Preload index must include manifest and shard coordinates")
+    }
+
+    @Test
+    fun vm_preload_index_replaces_existing_index_entry_during_reobfuscation() {
+        val baseArtifact = artifactFor(twoMethodClassBytes(), "example/VmThreshold", methodSummaries = listOf(
+            MemberSummary(MemberKind.METHOD, "hot", "()I", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
+            MemberSummary(MemberKind.METHOD, "cold", "()I", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
+        ))
+        val context = defaultVbc4BuildContext()
+        val legacyIndexLine = "123456789abcdef0|META-INF/.r/legacy.vm|META-INF/.r/legacy.manifest|2"
+        val artifact = withVbc4BuildContext(context) {
+            baseArtifact.copy(
+                jarEntries = baseArtifact.jarEntries + JarEntryData(
+                    VBC4_VM_PRELOAD_INDEX_RESOURCE,
+                    RuntimeResourceCodec.encode(
+                        bytes = "$legacyIndexLine\n".toByteArray(Charsets.UTF_8),
+                        kind = RuntimeResourceKind.NativeIndex,
+                        seed = 7,
+                        variantId = 1,
+                        layerCount = 4,
+                        compress = false,
+                    ),
+                ),
+            )
+        }
+
+        val result = withVbc4BuildContext(context) {
+            applyMethodVirtualization(
+                artifact = artifact,
+                ruleMatches = ruleMatchesFor("example/VmThreshold"),
+                params = mapOf("maxInstructions" to Int.MAX_VALUE, "seed" to 42, "methodSelection" to "all-compatible"),
+            )
+        }
+
+        assertEquals(1, result.artifact.jarEntries.count { it.name == VBC4_VM_PRELOAD_INDEX_RESOURCE })
+        assertEquals(1, result.artifact.jarEntries.count { it.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE })
+        val decodedIndex = withVbc4BuildContext(context) {
+            RuntimeResourceCodec.decode(result.artifact.jarEntries.single { it.name == VBC4_VM_PRELOAD_INDEX_RESOURCE }.bytes)!!.decodeToString()
+        }
+        assertTrue(decodedIndex.lines().contains(legacyIndexLine), "Re-obfuscation must keep the prior VM preload token/resource mapping")
+        val currentIndex = withVbc4BuildContext(context) {
+            RuntimeResourceCodec.decode(result.artifact.jarEntries.single { it.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE }.bytes)!!.decodeToString()
+        }
+        assertTrue(currentIndex.lines().none { it == legacyIndexLine }, "Current-run VM index must stay separate from the prior runtime index")
+    }
+
+    @Test
+    fun runtime_sealing_keeps_single_vm_preload_index_after_virtualization() {
+        val artifact = artifactFor(twoMethodClassBytes(), "example/VmThreshold", methodSummaries = listOf(
+            MemberSummary(MemberKind.METHOD, "hot", "()I", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
+            MemberSummary(MemberKind.METHOD, "cold", "()I", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
+        ))
+
+        val sealed = withVbc4BuildContext(defaultVbc4BuildContext()) {
+            val virtualized = applyMethodVirtualization(
+                artifact = artifact,
+                ruleMatches = ruleMatchesFor("example/VmThreshold"),
+                params = mapOf("maxInstructions" to Int.MAX_VALUE, "seed" to 42, "methodSelection" to "all-compatible"),
+            ).artifact
+            RuntimeArtifactSealing.seal(virtualized, 0x4A53524CL, rewritesVmRuntime = true)
+        }
+
+        assertEquals(0, sealed.jarEntries.count { it.name == VBC4_VM_PRELOAD_INDEX_RESOURCE })
+        assertEquals(1, sealed.jarEntries.count { it.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE })
+    }
+
+    @Test
+    fun runtime_sealing_preserves_prior_vm_preload_index_after_revirtualization() {
+        val baseArtifact = artifactFor(twoMethodClassBytes(), "example/VmThreshold", methodSummaries = listOf(
+            MemberSummary(MemberKind.METHOD, "hot", "()I", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
+            MemberSummary(MemberKind.METHOD, "cold", "()I", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
+        ))
+        val context = defaultVbc4BuildContext()
+        val legacyLine = "123456789abcdef0|META-INF/.r/legacy.vm|META-INF/.r/legacy.manifest|2"
+        val artifact = withVbc4BuildContext(context) {
+            baseArtifact.copy(
+                jarEntries = baseArtifact.jarEntries + listOf(
+                    JarEntryData(
+                        VBC4_VM_PRELOAD_INDEX_RESOURCE,
+                        RuntimeResourceCodec.encode(
+                            bytes = "$legacyLine\n".toByteArray(Charsets.UTF_8),
+                            kind = RuntimeResourceKind.NativeIndex,
+                            seed = 7,
+                            variantId = 1,
+                            layerCount = 4,
+                            compress = false,
+                        ),
+                    ),
+                    JarEntryData("META-INF/.r/legacy.vm", RuntimeResourceCodec.encode("VBC4\u0000payload".toByteArray(), RuntimeResourceKind.VmBytecode, seed = 9, variantId = 1, layerCount = 4, compress = false)),
+                    JarEntryData("META-INF/.r/legacy.manifest", RuntimeResourceCodec.encode("VBC4S|1|x\n".toByteArray(), RuntimeResourceKind.VmBytecode, seed = 10, variantId = 1, layerCount = 4, compress = false)),
+                ),
+            )
+        }
+
+        val sealed = withVbc4BuildContext(context) {
+            val virtualized = applyMethodVirtualization(
+                artifact = artifact,
+                ruleMatches = ruleMatchesFor("example/VmThreshold"),
+                params = mapOf("maxInstructions" to Int.MAX_VALUE, "seed" to 42, "methodSelection" to "all-compatible"),
+            ).artifact
+            RuntimeArtifactSealing.seal(virtualized, 0x4A53524CL, rewritesVmRuntime = true)
+        }
+
+        assertEquals(1, sealed.jarEntries.count { it.name == VBC4_VM_PRELOAD_INDEX_RESOURCE })
+        assertEquals(1, sealed.jarEntries.count { it.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE })
+        val decodedIndex = withVbc4BuildContext(context) {
+            RuntimeResourceCodec.decode(sealed.jarEntries.single { it.name == VBC4_VM_PRELOAD_INDEX_RESOURCE }.bytes)!!.decodeToString()
+        }
+        assertTrue(decodedIndex.contains("|META-INF/.r/legacy.vm|META-INF/.r/legacy.manifest\n"), "Sealed index must retain prior VM binding paths")
+        assertTrue(decodedIndex.lines().any { it.startsWith("A|META-INF/.r/legacy.vm|") }, "Sealed index must expose alias metadata for renamed prior VM resources")
     }
 
     @Test
@@ -617,7 +731,7 @@ class MethodVirtualizationThresholdTest {
                 .toMap()
         }
         val emittedManifestOrder = decodedResources.filterValues { it.startsWith("VBC4S|1|") }.keys.toList()
-        val indexEntry = result.artifact.jarEntries.single { it.name == "META-INF/.r/vm.idx" }
+        val indexEntry = result.artifact.jarEntries.single { it.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE }
         val preloadManifestOrder = withVbc4BuildContext(context) {
             RuntimeResourceCodec.decode(indexEntry.bytes)!!.decodeToString().trim().lines().map { it.split('|')[2] }
         }
@@ -642,12 +756,12 @@ class MethodVirtualizationThresholdTest {
             )
             assertTrue(result.transformedMemberCount > 0, "Fixture must virtualize methods before slicing assertions")
             result.artifact.jarEntries
-                .filter { it.isVmResourceName() || it.name == "META-INF/.r/vm.idx" }
+                .filter { it.isVmResourceName() || it.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE }
                 .mapNotNull { entry -> RuntimeResourceCodec.decode(entry.bytes)?.let { entry.name to it } }
                 .toMap()
         }
         val manifests = decodedResources.filterValues { bytes -> bytes.decodeToString().startsWith("VBC4S|1|") }
-        val preloadEntries = decodedResources["META-INF/.r/vm.idx"]!!
+        val preloadEntries = decodedResources[VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE]!!
             .decodeToString()
             .trim()
             .lines()

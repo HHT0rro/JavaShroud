@@ -13,6 +13,8 @@ import io.github.hht0rro.javashroud.model.config.RuleSet
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.model.passes.PassContext
 import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
+import io.github.hht0rro.javashroud.transforms.protection.VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE
+import io.github.hht0rro.javashroud.transforms.protection.VBC4_VM_PRELOAD_INDEX_RESOURCE
 
 internal data class PassApplyResult(
     val context: PassContext,
@@ -35,6 +37,14 @@ internal fun applyRegisteredPassWithMetrics(spec: PassSpec, executable: Executab
     }
 
     val artifact = context.artifact
+    if (preservesExistingVmRuntime(artifact) && spec.id in priorVmAbiPreservingSkippedPasses) {
+        return PassApplyResult(
+            context = context.copy(events = context.events + createPassEvent(message = "Skipped pass for prior sealed VM ABI preservation: id=${spec.id}")),
+            transformedClassCount = 0,
+            transformedMemberCount = 0,
+            plannedRenameCount = 0,
+        )
+    }
     val currentSummary = artifact.currentAnalysisSummary(context)
     val ruleMatches = currentSummary.ruleMatches
     val passParams: Map<String, Any> = spec.params.mapValues { (_, v) ->
@@ -68,6 +78,32 @@ internal fun applyRegisteredPassWithMetrics(spec: PassSpec, executable: Executab
         plannedRenameCount = currentSummary.renamePlan.entries.size,
     )
 }
+
+private val priorVmAbiPreservingSkippedPasses = setOf(
+    "anti-decompiler-structure",
+    "anti-dump-protection",
+    "anti-instrumentation",
+    "anti-symbolic-execution",
+    "callsite-rotation-protection",
+    "condy-constant-indirection",
+    "control-flow-flattening",
+    "control-flow-obfuscation",
+    "exception-semantic-virtualization",
+    "field-string-encryption",
+    "integer-constant-obfuscation",
+    "invoke-dynamic-indirection",
+    "jni-microkernel-loader",
+    "method-body-delayed-decryption",
+    "method-virtualization",
+    "reference-proxy",
+    "static-init-perturbation",
+    "string-encryption",
+    "strip-compile-debug-info",
+)
+
+private fun preservesExistingVmRuntime(artifact: io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact): Boolean =
+    artifact.jarEntries.any { it.name == VBC4_VM_PRELOAD_INDEX_RESOURCE } &&
+        artifact.jarEntries.none { it.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE }
 
 private fun remapConfigRulesAfterClassRename(
     config: ObfuscationConfig,

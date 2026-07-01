@@ -20,11 +20,13 @@ import io.github.hht0rro.javashroud.transforms.updatedArtifactTransformResult
 
 fun renameMethods(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, params: Map<String, Any>): TransformResult {
     val config = buildRenameConfig(params)
+    val runtimeBoundClassNames = priorRuntimeBoundClassNames(artifact)
     val externallyBoundSignatures = externallyBoundMethodSignatures(artifact)
     val inArtifactOverrideSignatures = inArtifactOverrideMethodSignatures(artifact)
     val protectedSignatures = externallyBoundSignatures + inArtifactOverrideSignatures
     val matchedMembers = eligibleMembersForAction(artifact.classArtifacts, ruleMatches, "rename-methods")
         .filter { it.kind == MemberKind.METHOD }
+        .filter { it.owner !in runtimeBoundClassNames }
         .filter { canRenameMethod(it.name) }
         .filter { artifact.classArtifactIndex[it.owner]?.summary?.accessFlags?.and(org.objectweb.asm.Opcodes.ACC_ENUM) == 0 }
         .filter { methodSignature(it.name, it.descriptor) !in protectedSignatures }
@@ -69,8 +71,10 @@ fun renameMethods(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, para
 
 fun renameFields(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, params: Map<String, Any>): TransformResult {
     val config = buildRenameConfig(params)
+    val runtimeBoundClassNames = priorRuntimeBoundClassNames(artifact)
     val matchedMembers = eligibleMembersForAction(artifact.classArtifacts, ruleMatches, "rename-fields")
         .filter { it.kind == MemberKind.FIELD }
+        .filter { it.owner !in runtimeBoundClassNames }
     val fieldRenameMap = buildFieldRenameMap(matchedMembers, config)
     if (fieldRenameMap.isEmpty()) {
         return unchangedTransformResult(artifact)
@@ -165,5 +169,4 @@ private fun nativeMethodKeys(artifact: BytecodeArtifact): Set<MemberKey> = artif
             .map { method -> MemberKey(classArtifact.summary.internalName, method.name, method.descriptor) }
     }
     .toSet()
-
 

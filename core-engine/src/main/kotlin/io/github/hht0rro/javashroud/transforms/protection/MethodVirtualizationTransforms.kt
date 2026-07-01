@@ -222,6 +222,14 @@ fun applyMethodVirtualization(
 
         if (isStackTraceSensitiveForVirtualization(classArtifact.bytes)) return@map classArtifact
         val cr = ClassReader(classArtifact.bytes)
+        val classNode = ClassNode()
+        try {
+            cr.accept(classNode, ClassReader.SKIP_FRAMES)
+        } catch (_: Exception) { return@map classArtifact }
+        if (isPriorJavaShroudGeneratedRuntimeClass(classNode)) return@map classArtifact
+        if (hasPriorSealedRuntimeDependency(classNode)) return@map classArtifact
+        if (usesJavaShroudVmDispatch(classNode)) return@map classArtifact
+
         val cw = computeFramesWriter(cr)
         val className = classArtifact.summary.internalName
         val timingSensitiveSyntheticHandlers = unsafeSyntheticHandlerKeys(classArtifact.bytes)
@@ -466,8 +474,11 @@ fun applyMethodVirtualization(
             entry.manifestPlan.toJarEntry(keyRandom, mesh, index, vmPreloadEntries.size, meshPeers)
         }
         val scheduledResources = interproceduralVmResourceSchedule(methodResources + manifestResources, random)
-        val vmIndex = encodeNativeVmPreloadIndex(interproceduralVmPreloadSchedule(vmPreloadEntries, scheduledResources, random))
-        artifact.copy(jarEntries = artifact.jarEntries + scheduledResources + vmIndex)
+        val vmIndex = encodeNativeVmPreloadIndex(
+            interproceduralVmPreloadSchedule(vmPreloadEntries, scheduledResources, random),
+            indexResourceName = VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE,
+        )
+        artifact.copy(jarEntries = artifact.jarEntries.filterNot { it.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE } + scheduledResources + vmIndex)
     } else artifact
 
     return updatedArtifactTransformResult(
@@ -480,6 +491,7 @@ fun applyMethodVirtualization(
 
 internal const val VBC4_CLEAN_ENTRY_INTEGRITY_HEX = "10429f6c"
 internal const val VBC4_VM_PRELOAD_INDEX_RESOURCE = "META-INF/.r/vm.idx"
+internal const val VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE = "META-INF/.r/vm-current.idx"
 
 private data class VmPreloadEntry(
     val entryToken: Long,
@@ -523,16 +535,19 @@ private fun VmPreloadEntry.toMeshPeer(ordinal: Int): VmSliceMeshPeer = VmSliceMe
     material = manifestPlan.meshMaterial(entryToken, resourcePath, manifestPath, shardCount),
 )
 
-private fun encodeNativeVmPreloadIndex(entries: List<VmPreloadEntry>): JarEntryData {
-    val plain = entries.joinToString(separator = "\n", postfix = "\n") { entry ->
+private fun encodeNativeVmPreloadIndex(entries: List<VmPreloadEntry>, indexResourceName: String = VBC4_VM_PRELOAD_INDEX_RESOURCE): JarEntryData {
+    val newEntries = entries.map { entry ->
         "${entry.entryToken.toULong().toString(16)}|${entry.resourcePath}|${entry.manifestPath}|${entry.shardCount}"
-    }.toByteArray(Charsets.UTF_8)
+    }
+    val plain = newEntries
+        .joinToString(separator = "\n", postfix = "\n")
+        .toByteArray(Charsets.UTF_8)
     val seed = MessageDigest.getInstance("SHA-256")
         .digest(plain)
         .take(4)
         .fold(0) { acc, byte -> (acc shl 8) or (byte.toInt() and 0xFF) }
     return JarEntryData(
-        name = VBC4_VM_PRELOAD_INDEX_RESOURCE,
+        name = indexResourceName,
         bytes = RuntimeResourceCodec.encode(
             bytes = plain,
             kind = RuntimeResourceKind.NativeIndex,

@@ -68,6 +68,7 @@ public final class JniMicrokernelHelper {
             loadKernel("vm", "auto", "vm-diverse");
         }
         if (isNativeLoaded()) {
+            publishSealedNativeBindings();
             return nativeExecuteVmResource(entryToken, resourcePath, args);
         }
         throw new SecurityException("method-virtualization requires a bundled sealed JNI VM kernel; native kernel not loaded (" + loadMessage + ")");
@@ -77,6 +78,7 @@ public final class JniMicrokernelHelper {
             loadKernel("vm", "auto", "vm-diverse");
         }
         if (isNativeLoaded()) {
+            publishSealedNativeBindings();
             return nativeExecuteVmResourceByToken(entryToken, args);
         }
         throw new SecurityException("method-virtualization requires a bundled sealed JNI VM kernel; native kernel not loaded (" + loadMessage + ")");
@@ -89,6 +91,7 @@ public final class JniMicrokernelHelper {
             loadKernel("vm", "auto", "vm-diverse");
         }
         if (isNativeLoaded()) {
+            publishSealedNativeBindings();
             nativeExecuteVmResourceVoid(entryToken);
             return;
         }
@@ -99,6 +102,7 @@ public final class JniMicrokernelHelper {
             loadKernel("vm", "auto", "vm-diverse");
         }
         if (isNativeLoaded()) {
+            publishSealedNativeBindings();
             nativeExecuteVmResourceIntVoid(entryToken, arg0);
             return;
         }
@@ -505,6 +509,7 @@ public final class JniMicrokernelHelper {
     }
 
     private static boolean tryLoadNative(String platformSuffix, String components) {
+        String previousLoaderOwner = System.getProperty(sealedLoaderPropertyName());
         try {
             publishSealedNativeBindings();
             System.loadLibrary(kernelBaseName() + platformSuffix);
@@ -532,6 +537,8 @@ public final class JniMicrokernelHelper {
             }
         } catch (UnsatisfiedLinkError e) {
             return false;
+        } finally {
+            restoreLoaderProperty(previousLoaderOwner);
         }
     }
 
@@ -561,6 +568,7 @@ public final class JniMicrokernelHelper {
 
     private static boolean tryLoadBundledNativeFromDirectory(String platformSuffix, String resourcePath, String suffix, byte[] nativeBytes, File extractDirectory) {
         File tempLib = null;
+        String previousLoaderOwner = System.getProperty(sealedLoaderPropertyName());
         try {
             if (!ensureNativeExtractDirectory(extractDirectory)) return false;
             tempLib = File.createTempFile(nativeTempPrefix(resourcePath), suffix, extractDirectory);
@@ -599,6 +607,8 @@ public final class JniMicrokernelHelper {
             loadMessage = "native:bundled-init-error:" + e.getClass().getName() + ":" + String.valueOf(e.getMessage());
             if (tempLib != null) tempLib.delete();
             return false;
+        } finally {
+            restoreLoaderProperty(previousLoaderOwner);
         }
     }
 
@@ -679,11 +689,46 @@ public final class JniMicrokernelHelper {
                     methodBindings.append(parts[1]).append('=').append(parts[2]);
                 }
             }
-            if (bindings.length() > 0) System.setProperty(sealedBindingPropertyName(), bindings.toString());
-            if (methodBindings.length() > 0) System.setProperty(sealedMethodBindingPropertyName(), methodBindings.toString());
+            if (bindings.length() > 0) System.setProperty(sealedBindingPropertyName(), mergeBindingProperties(System.getProperty(sealedBindingPropertyName()), bindings.toString()));
+            if (methodBindings.length() > 0) System.setProperty(sealedMethodBindingPropertyName(), mergeBindingProperties(System.getProperty(sealedMethodBindingPropertyName()), methodBindings.toString()));
         } catch (Throwable ignored) {
         }
     }
+
+    private static void restoreLoaderProperty(String previous) {
+        try {
+            if (previous == null) {
+                System.clearProperty(sealedLoaderPropertyName());
+            } else {
+                System.setProperty(sealedLoaderPropertyName(), previous);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static String mergeBindingProperties(String existing, String additions) {
+        if (existing == null || existing.length() == 0) return additions;
+        if (additions == null || additions.length() == 0) return existing;
+        java.util.LinkedHashMap<String, String> merged = new java.util.LinkedHashMap<>();
+        appendBindingProperties(merged, existing);
+        appendBindingProperties(merged, additions);
+        StringBuilder out = new StringBuilder();
+        for (java.util.Map.Entry<String, String> entry : merged.entrySet()) {
+            if (out.length() > 0) out.append('\n');
+            out.append(entry.getKey()).append('=').append(entry.getValue());
+        }
+        return out.toString();
+    }
+
+    private static void appendBindingProperties(java.util.LinkedHashMap<String, String> target, String text) {
+        String[] lines = text.split("\n");
+        for (String line : lines) {
+            int separator = line.indexOf('=');
+            if (separator <= 0) continue;
+            target.put(line.substring(0, separator), line.substring(separator + 1));
+        }
+    }
+
     private static String sealedLoaderPropertyName() {
         return new String(new char[]{'j', '.', 'l'});
     }

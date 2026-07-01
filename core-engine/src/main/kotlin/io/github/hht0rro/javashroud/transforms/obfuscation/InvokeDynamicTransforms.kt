@@ -6,12 +6,24 @@ import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.transforms.TransformResult
 import io.github.hht0rro.javashroud.transforms.excludeReflectionSurfaceSensitiveClasses
+import io.github.hht0rro.javashroud.transforms.protection.hasPriorSealedRuntimeDependency
+import io.github.hht0rro.javashroud.transforms.protection.isPriorJavaShroudGeneratedRuntimeClass
 import io.github.hht0rro.javashroud.transforms.reanalyzedClassArtifact
 import io.github.hht0rro.javashroud.transforms.unchangedTransformResult
 import io.github.hht0rro.javashroud.transforms.updatedArtifactTransformResult
+import org.objectweb.asm.ClassReader
+import org.objectweb.asm.tree.ClassNode
 
 fun invokeDynamicIndirect(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, params: Map<String, Any>): TransformResult {
-    val matchedClassNames = excludeReflectionSurfaceSensitiveClasses(artifact, eligibleClassNamesForAction(artifact.classArtifacts, ruleMatches, "invoke-dynamic-indirection"))
+    val runtimeBoundClassNames = artifact.classArtifacts
+        .filter { classArtifact ->
+            val classNode = ClassNode()
+            ClassReader(classArtifact.bytes).accept(classNode, ClassReader.SKIP_FRAMES)
+            isPriorJavaShroudGeneratedRuntimeClass(classNode) || hasPriorSealedRuntimeDependency(classNode)
+        }
+        .map { it.summary.internalName }
+        .toSet()
+    val matchedClassNames = excludeReflectionSurfaceSensitiveClasses(artifact, eligibleClassNamesForAction(artifact.classArtifacts, ruleMatches, "invoke-dynamic-indirection")) - runtimeBoundClassNames
     if (matchedClassNames.isEmpty()) {
         return unchangedTransformResult(artifact)
     }
@@ -43,4 +55,3 @@ fun invokeDynamicIndirect(artifact: BytecodeArtifact, ruleMatches: List<RuleMatc
         transformedMemberCount = 0,
     )
 }
-
