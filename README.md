@@ -188,6 +188,8 @@ wails build
 
 完整发布脚本会构建 engine JAR、GraalVM native engine、前端 bundle 和 Wails 桌面程序。发布验收应以 `build\release\javashroud-windows-amd64\javashroud.exe` 等目标产物存在且可运行为准，而不是只看单个 Gradle、Yarn 或 Go 命令成功。
 
+GitHub Release 由 `.github/workflows/release.yml` 在推送 `v*` tag 时创建。发布顺序必须先推送 `dev` 和 `main` 分支，再推送或重推 `v0.9.1-dev` 这样的 `v` 前缀 tag；裸 tag `0.9.1-dev` 不会触发 release workflow，因此不会显示为由 `github-actions` 发布。
+
 ### 0.9.1-dev 验收说明
 
 `0.9.1-dev` 将引擎版本提升到 `0.9.1-dev`，VBC 能力版本提升到 `4.54`。本版本重点修复 fullconfig 对已 sealed VBC4 产物再次处理时的 ABI 保持问题：对已有 `META-INF/.r/vm.idx` 且没有当前运行 `vm-current.idx` 的旧 sealed VM 产物，运行时资源、helper ABI、native loader、class-encryption-loader 和会改变旧 VM 调用面的 pass 会保持原 ABI；新输入或当前运行生成的产物仍使用当前 VBC4 max-strength/native-only 路径，不降低新产物保护强度。

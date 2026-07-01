@@ -191,6 +191,8 @@ wails build
 
 The full release script builds the engine JAR, the GraalVM native engine, the frontend bundle, and the Wails desktop application. Release acceptance should be based on the expected artifacts, such as `build\release\javashroud-windows-amd64\javashroud.exe`, existing and running successfully, not only on individual Gradle, Yarn, or Go commands returning success.
 
+GitHub Releases are created by `.github/workflows/release.yml` when a `v*` tag is pushed. The release order is to push `dev` and `main` first, then push or recreate a `v`-prefixed tag such as `v0.9.1-dev`; the bare `0.9.1-dev` tag does not trigger the release workflow and will not appear as a `github-actions` release.
+
 ### 0.9.1-dev Acceptance Notes
 
 `0.9.1-dev` bumps the engine version to `0.9.1-dev` and the VBC capability version to `4.54`. This release focuses on preserving ABI compatibility when fullconfig processes artifacts that were already sealed by VBC4. For older sealed VM artifacts that contain `META-INF/.r/vm.idx` but no current-run `vm-current.idx`, runtime resources, helper ABI, native loader wiring, and passes that would rewrite the old VM call surface preserve the existing ABI. Fresh inputs and artifacts produced by the current run continue to use the current VBC4 max-strength/native-only path; this is not a weakening of protection for new artifacts.
