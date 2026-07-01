@@ -234,6 +234,38 @@ class Vbc4OnlyContractTest {
     }
 
     @Test
+    fun anti_dump_full_initialization_does_not_poison_vbc4_constant_pool_decode() {
+        val nativeCore = Files.readString(resolveSource("src/main/native/js_vm_core.c"))
+        val antiDumpInit = nativeCore.substringAfter("JS_LOCAL void JNICALL\njsn_r4")
+            .substringBefore("JS_LOCAL jstring JNICALL\njsn_r11")
+
+        assertTrue(
+            nativeCore.contains("js_runtime_anti_dump_mix"),
+            "Anti-dump full may keep native runtime state, but it must be separate from VBC4 trace poison state",
+        )
+        assertFalse(
+            antiDumpInit.contains("js_vm_trace_poison_seed"),
+            "Normal anti-dump full initialization must not poison VBC4 CP decoding; only detected tracing/instrumentation may corrupt VM decode state",
+        )
+    }
+
+    @Test
+    fun preload_uses_owned_binding_path_when_parsing_state_bound_vbc4_resources() {
+        val nativeCore = Files.readString(resolveSource("src/main/native/js_vm_core.c"))
+        val preloadBody = nativeCore.substringAfter("JS_LOCAL void JNICALL\njsn_k9")
+            .substringBefore("JS_HIDDEN char* js_lookup_bound_class")
+
+        assertTrue(
+            preloadBody.contains("char *cache_resource_path = preload_binding_path ? js_strdup(preload_binding_path) : NULL"),
+            "Preload must keep an owned binding path copy before wiping index-backed resource path strings",
+        )
+        assertTrue(
+            preloadBody.contains("js_vm_prepare_resource_program_bound(env, cls, (jlong)token, resource_jstr, cache_path)"),
+            "Preload parsing must use the owned cache_path for VBC4 state binding, not a wiped/freed preload_binding_path pointer",
+        )
+    }
+
+    @Test
     fun c_vm_parser_accepts_only_vbc4_and_declares_register_dispatch_safety_hooks() {
         val source = nativeRuntimeSources()
 

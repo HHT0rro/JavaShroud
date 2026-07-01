@@ -35,6 +35,8 @@ JS_HIDDEN jobject js_vm_get_active_host_loader(void) { return js_vm_active_host_
 
 JS_HIDDEN void js_vm_set_active_host_loader(jobject loader) { js_vm_active_host_loader = loader; }
 
+JS_HIDDEN volatile int js_vm_last_parse_stage = 0;
+
 JS_HIDDEN int js_vm_active_program_push(js_vm_program *program) {
     if (!program) return 0;
     if (js_vm_active_program_depth >= (int)(sizeof(js_vm_active_program_stack) / sizeof(js_vm_active_program_stack[0]))) return 0;
@@ -1087,8 +1089,16 @@ static uint32_t js_vm_entry_integrity_state_early(void) {
     return 0x10429F6Cu;
 }
 
+static uint32_t js_vm_clean_entry_integrity_state(void) {
+    return 0x10429F6Cu;
+}
+
 static void js_vm_write_entry_integrity_bytes_early(unsigned char out[4]) {
     js_vm_write_be32_early(out, js_vm_entry_integrity_state_early());
+}
+
+static void js_vm_write_clean_entry_integrity_bytes(unsigned char out[4]) {
+    js_vm_write_be32_early(out, js_vm_clean_entry_integrity_state());
 }
 
 static char* sys_prop(JNIEnv *env, const char *key) {
@@ -1175,6 +1185,7 @@ static void js_hmac_sha256_with_key(const unsigned char *key, int key_len, const
 static void js_write_be32_tmp(unsigned char out[4], uint32_t value);
 static uint32_t js_vm_entry_integrity_state(void);
 static void js_vm_write_entry_integrity_bytes(unsigned char out[4]);
+static void js_vm_write_clean_entry_integrity_bytes(unsigned char out[4]);
 static void js_vbc4_copy_scoped_master_key(unsigned char out[32]);
 static void js_vbc4_session_integrity_material(unsigned char out[32]);
 static void js_vbc4_hmac_with_scoped_master_key(const unsigned char **parts, const int *part_lens, int part_count, unsigned char out[32]);
@@ -1950,7 +1961,7 @@ static void js_vbc4_session_integrity_material(unsigned char out[32]) {
     unsigned char entry_integrity[4];
     js_sha256_ctx ctx;
     js_vbc4_copy_scoped_master_key(base_key);
-    js_vm_write_entry_integrity_bytes(entry_integrity);
+    js_vm_write_clean_entry_integrity_bytes(entry_integrity);
     js_sha256_init(&ctx);
     js_sha256_update(&ctx, label, (int)(sizeof(label) - 1));
     js_sha256_update(&ctx, base_key, (int)sizeof(base_key));
@@ -2554,6 +2565,7 @@ static int b64dec(const char *in, int inlen, unsigned char *out) {
 static volatile int js_runtime_guard_degraded = 0;
 static volatile int js_runtime_guard_strict_path = 0;
 static volatile int js_runtime_guard_log_once = 0;
+static volatile uint32_t js_runtime_anti_dump_mix = 0;
 
 JS_LOCAL void JNICALL jsn_r4(JNIEnv *env, jclass cls, jstring jpl, jclass ownerClass);
 
@@ -2669,7 +2681,7 @@ jsn_r4(JNIEnv *env, jclass cls, jstring jpl, jclass ownerClass) {
     if (!pl) { rls(env, jpl, pl); return; }
     if (!strcmp(pl, "full")) {
         js_runtime_guard_strict_path = 1;
-        js_vm_trace_poison_seed ^= 0xA11D0BEEu;
+        js_runtime_anti_dump_mix ^= 0xA11D0BEEu;
     } else if (!strcmp(pl, "jni-key-hold")) {
         js_runtime_guard_degraded |= 0;
     } else if (!strcmp(pl, "field-scramble")) {
@@ -2681,7 +2693,7 @@ jsn_r4(JNIEnv *env, jclass cls, jstring jpl, jclass ownerClass) {
             const char *owner_name = j2c(env, name);
             if (owner_name) {
                 uint32_t owner_mix = fnv1a((const unsigned char*)owner_name, (int)strlen(owner_name));
-                if (!strcmp(pl, "full")) js_vm_trace_poison_seed ^= owner_mix;
+                if (!strcmp(pl, "full")) js_runtime_anti_dump_mix ^= owner_mix;
                 rls(env, name, owner_name);
             }
             (*env)->DeleteLocalRef(env, name);
@@ -3138,6 +3150,7 @@ JS_HIDDEN int js_vm_parse_program(const unsigned char *data, int len, js_vm_prog
     p->nested_vm_profile = 0;
 
 #define JS_VM_PARSE_FAIL do { \
+    js_vm_last_parse_stage = parse_stage; \
     if (cp) { js_vbc4_wipe_volatile(cp, (size_t)cp_enc_sz); free(cp); } \
     if (insn) { js_vbc4_wipe_volatile(insn, (size_t)insn_enc_sz); free(insn); } \
     if (exc) { js_vbc4_wipe_volatile(exc, (size_t)exc_enc_sz); free(exc); } \
@@ -3183,7 +3196,9 @@ JS_HIDDEN int js_vm_parse_program(const unsigned char *data, int len, js_vm_prog
     if (((unsigned int)vbc4_flags & JS_VBC4_REQUIRED_FLAGS) != JS_VBC4_REQUIRED_FLAGS) JS_VM_PARSE_FAIL; /* require full VBC4 max-strength feature set */
     p->vbc4_flags = (uint32_t)vbc4_flags;
     parse_stage = 2;
+    parse_stage = 21;
     if (!js_vbc4_unwrap_seed(vbc4_nonce, vbc4_wrapped_seed, state_binding, state_binding_len, &build_seed)) JS_VM_PARSE_FAIL;
+    parse_stage = 22;
     if (js_vbc4_key_id(build_seed, vbc4_nonce) != vbc4_key_id) JS_VM_PARSE_FAIL;
     memcpy(p->nonce, vbc4_nonce, sizeof(p->nonce));
     js_vm_init_resident_key_mask(p, vbc4_nonce);
@@ -3594,6 +3609,7 @@ if (raw_pos != (int)cp_enc_sz) JS_VM_PARSE_FAIL;
     free(block_ids);
     free(block_next_ids);
     free(block_parse_order);
+    js_vm_last_parse_stage = 0;
 #undef JS_VM_PARSE_FAIL
     return 1;
 }
@@ -3868,7 +3884,7 @@ JS_HIDDEN int js_vm_build_state_binding(jlong entry_token, const char *resource_
     for (int i = 0; i < 32; i++) snprintf(layout_digest_hex + (i * 2), sizeof(layout_digest_hex) - (size_t)(i * 2), "%02x", layout_digest[i]);
     js_vbc4_wipe_volatile(layout_digest, sizeof(layout_digest));
     layout_digest_hex[64] = 0;
-    js_vm_write_entry_integrity_bytes(entry_integrity);
+    js_vm_write_clean_entry_integrity_bytes(entry_integrity);
     int written = snprintf((char*)out, (size_t)out_cap, "%llx", (unsigned long long)entry_token);
     if (written < 0 || written >= out_cap) written = out_cap - 1;
     binding_len = written;
@@ -3935,6 +3951,10 @@ JS_HIDDEN int js_vm_execute_hot_path_self_check(void) {
         js_check_trampoline((const void*)js_vm_invoke_method) &&
         js_check_trampoline((const void*)js_vm_box_return) &&
         js_check_trampoline((const void*)js_vbc4_decrypt_block);
+}
+
+JS_HIDDEN int js_vm_resource_integrity_clean(void) {
+    return js_vm_entry_integrity_state() == js_vm_clean_entry_integrity_state();
 }
 
 static jobject js_vm_receiver_class_from_args(JNIEnv *env, jobjectArray args) {
@@ -5828,7 +5848,7 @@ jsn_k9(JNIEnv *env, jclass cls)
             if (!js_vm_call_gate_mark_loading((jlong)token, cache_path)) {
                 /* The index registration should already have opened this gate; if not, fail closed below. */
             }
-            js_vm_program *program = js_vm_prepare_resource_program_bound(env, cls, (jlong)token, resource_jstr, preload_binding_path);
+            js_vm_program *program = js_vm_prepare_resource_program_bound(env, cls, (jlong)token, resource_jstr, cache_path);
             if (program) {
                 js_vm_program validation;
                 memset(&validation, 0, sizeof(validation));

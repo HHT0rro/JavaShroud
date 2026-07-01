@@ -1268,7 +1268,7 @@ class NativeHelperHardeningTest {
         )
     }
     @Test
-    fun native_vm_entry_integrity_state_participates_in_resource_key_derivation() {
+    fun native_vm_entry_integrity_state_gates_resource_parsing_without_destabilizing_key_derivation() {
         val nativeSource = nativeRuntimeSources()
         assertTrue(
             nativeSource.contains("static uint32_t js_vm_entry_integrity_state(void)") &&
@@ -1276,19 +1276,25 @@ class NativeHelperHardeningTest {
                 nativeSource.contains("js_detect_instrumentation()"),
             "Native VM resource entry must compute anti-hook/anti-instrumentation state.",
         )
-        val integrityWriterStart = nativeSource.lastIndexOf("static void js_vm_write_entry_integrity_bytes(unsigned char out[4])")
-        assertTrue(integrityWriterStart >= 0, "Native helper must define the VBC4 entry integrity writer.")
-        val integrityWriterBody = nativeSource.substring(integrityWriterStart, nativeSource.indexOf("}\n", integrityWriterStart).let { if (it >= 0) it + 1 else nativeSource.length })
+        val cleanWriterStart = nativeSource.indexOf("static void js_vm_write_clean_entry_integrity_bytes(unsigned char out[4]) {")
+        assertTrue(cleanWriterStart >= 0, "Native helper must define the stable VBC4 entry integrity writer.")
+        val cleanWriterBody = nativeSource.substring(cleanWriterStart, nativeSource.indexOf("}\n", cleanWriterStart).let { if (it >= 0) it + 1 else nativeSource.length })
         assertTrue(
-            integrityWriterBody.contains("js_vm_entry_integrity_state()"),
-            "Entry integrity writer must fold dynamic anti-hook/anti-instrumentation state into VBC4 binding bytes.",
+            cleanWriterBody.contains("js_vm_clean_entry_integrity_state()") && !cleanWriterBody.contains("js_vm_entry_integrity_state();"),
+            "VBC4 key material must use the build-time clean entry integrity value, not an unstable runtime probe result.",
         )
         assertTrue(
-            nativeSource.contains("js_vm_write_entry_integrity_bytes(entry_integrity)") &&
+            nativeSource.contains("js_vm_resource_integrity_clean()") &&
+                nativeSource.contains("js_vm_set_prepare_stage(\"integrity\")") &&
+                nativeSource.contains("js_vm_fail_closed(env, NULL)"),
+            "Dynamic anti-hook/anti-instrumentation state must still gate VM resource parsing fail-closed before parse.",
+        )
+        assertTrue(
+            nativeSource.contains("js_vm_write_clean_entry_integrity_bytes(entry_integrity)") &&
                 nativeSource.contains("entry_integrity[0]") &&
                 nativeSource.contains("js_vm_build_state_binding(entry_token, binding_resource_path, binding_buf") &&
                 nativeSource.contains("js_vm_parse_program(decoded, decoded_len, parsed_program, binding_buf, binding_len)"),
-            "Entry integrity state must be folded into the parser state binding used for VBC4 seed unwrapping.",
+            "Clean entry integrity state must be folded into the parser state binding used for VBC4 seed unwrapping.",
         )
         assertTrue(
             nativeSource.contains("js_vbc4_wipe_volatile(entry_integrity, sizeof(entry_integrity))"),
@@ -1555,8 +1561,9 @@ class NativeHelperHardeningTest {
     fun vm_state_binding_includes_anti_hook_integrity_in_key_derivation() {
         val source = nativeRuntimeSources()
 
-        assertTrue(source.contains("js_vm_entry_integrity_state"), "VM must compute entry integrity state for binding")
-        assertTrue(source.contains("js_vm_write_entry_integrity_bytes"), "VM must write integrity bytes into state binding")
+        assertTrue(source.contains("js_vm_entry_integrity_state"), "VM must compute dynamic entry integrity state")
+        assertTrue(source.contains("js_vm_write_clean_entry_integrity_bytes"), "VM must write clean integrity bytes into state binding")
+        assertTrue(source.contains("js_vm_resource_integrity_clean"), "VM must gate resource parsing on dynamic integrity checks")
         assertTrue(source.contains("binding_buf") && source.contains("entry_integrity"), "State binding must include entry integrity bytes")
         assertTrue(source.contains("js_vbc4_unwrap_seed"), "Build seed must be unwrapped through nonce and state binding")
         assertTrue(source.contains("js_check_trampoline") && source.contains("js_detect_instrumentation"), "Entry integrity must check for hooks and instrumentation")

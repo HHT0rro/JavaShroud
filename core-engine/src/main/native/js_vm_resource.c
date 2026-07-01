@@ -620,13 +620,26 @@ JS_HIDDEN js_vm_program* js_vm_prepare_resource_program_bound(JNIEnv *env, jclas
     unsigned char binding_buf[1200];
     const char *binding_resource_path = binding_path_override && binding_path_override[0] ? binding_path_override : (resource_path ? resource_path : "");
     int binding_len = js_vm_build_state_binding(entry_token, binding_resource_path, binding_buf, (int)sizeof(binding_buf));
+    if (!js_vm_resource_integrity_clean()) {
+        js_vm_set_prepare_stage("integrity");
+        js_vbc4_wipe_volatile(binding_buf, sizeof(binding_buf));
+        js_vbc4_wipe_volatile(decoded, (size_t)decoded_len);
+        free(decoded);
+        js_vm_free_program(env, parsed_program);
+        free(parsed_program);
+        rls(env, resourcePath, resource_path);
+        js_vm_fail_closed(env, NULL);
+        return NULL;
+    }
     int parsed = binding_len > 0 ? js_vm_parse_program(decoded, decoded_len, parsed_program, binding_buf, binding_len) : 0;
     js_vbc4_wipe_volatile(binding_buf, sizeof(binding_buf));
     js_vbc4_wipe_volatile(decoded, (size_t)decoded_len);
     free(decoded);
     decoded = NULL;
     if (!parsed) {
-        js_vm_set_prepare_stage("parse");
+        char parse_stage[32];
+        snprintf(parse_stage, sizeof(parse_stage), "parse-%d", js_vm_last_parse_stage);
+        js_vm_set_prepare_stage(parse_stage);
         js_vm_free_program(env, parsed_program);
         free(parsed_program);
         rls(env, resourcePath, resource_path);
