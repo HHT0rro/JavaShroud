@@ -12,6 +12,7 @@ import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.model.config.RuleSpec
+import io.github.hht0rro.javashroud.bytecode.applyCondyConstantIndirection
 import io.github.hht0rro.javashroud.bytecode.indirectMethodCalls
 import io.github.hht0rro.javashroud.transforms.protection.ObfuscatedIdentifierUtil
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceCodec
@@ -375,6 +376,29 @@ class MethodVirtualizationThresholdTest {
         } finally {
             outputDir.toFile().deleteRecursively()
         }
+    }
+
+    @Test
+    fun strict_all_compatible_virtualizes_engine_generated_condy_constants() {
+        val classBytes = applyCondyConstantIndirection(condyConstantsClassBytes())
+        val artifact = artifactFor(classBytes, "example/VmCondyConstants")
+
+        val result = applyMethodVirtualization(
+            artifact = artifact,
+            ruleMatches = ruleMatchesFor("example/VmCondyConstants"),
+            params = mapOf("maxInstructions" to 100, "seed" to 42, "methodSelection" to "all-compatible", "strictVirtualization" to true, "maxBroadVirtualizedMethods" to 0),
+        )
+        val transformed = result.artifact.classArtifactIndex.getValue("example/VmCondyConstants").bytes
+
+        assertTrue(result.transformedMemberCount >= 1, "strict all-compatible must keep condy-indirected constants in the virtualized set")
+        assertTrue(methodCallsVmDispatcher(transformed, "value", "()I"), "Condy-bearing method should be replaced by the native VM dispatcher")
+        assertTrue(result.artifact.jarEntries.any { it.isVmResourceName() }, "Condy-bearing virtualization should emit a VBC4 resource")
+        val projectDir = Path.of(System.getProperty("user.dir"))
+        val sourceRoot = if (Files.exists(projectDir.resolve("src/main/native/js_vm_core.c"))) projectDir else projectDir.resolve("core-engine")
+        val serializerSource = Files.readString(sourceRoot.resolve("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/VmBytecodeSerializer.kt"))
+        val nativeSource = Files.readString(sourceRoot.resolve("src/main/native/js_vm_core.c"))
+        assertTrue(serializerSource.contains("VM_LDC_CONDY"), "Serializer must keep a dedicated guarded ConstantDynamic LDC opcode")
+        assertTrue(nativeSource.contains("JS_VM_LDC_CONDY") && nativeSource.contains("js_vm_cp_condy_value"), "Native VM must execute guarded ConstantDynamic LDC values")
     }
 
     @Test
@@ -1144,6 +1168,29 @@ class MethodVirtualizationThresholdTest {
         value.visitCode()
         value.visitInsn(Opcodes.ICONST_1)
         value.visitInsn(Opcodes.ICONST_2)
+        value.visitInsn(Opcodes.IADD)
+        value.visitInsn(Opcodes.IRETURN)
+        value.visitMaxs(2, 0)
+        value.visitEnd()
+        writer.visitEnd()
+        return writer.toByteArray()
+    }
+
+    private fun condyConstantsClassBytes(): ByteArray {
+        val writer = ClassWriter(0)
+        writer.visit(Opcodes.V11, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "example/VmCondyConstants", null, "java/lang/Object", null)
+        val init = writer.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
+        init.visitCode()
+        init.visitVarInsn(Opcodes.ALOAD, 0)
+        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+        init.visitInsn(Opcodes.RETURN)
+        init.visitMaxs(1, 1)
+        init.visitEnd()
+        val value = writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "value", "()I", null, null)
+        value.visitCode()
+        value.visitLdcInsn("abc")
+        value.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "length", "()I", false)
+        value.visitLdcInsn(4)
         value.visitInsn(Opcodes.IADD)
         value.visitInsn(Opcodes.IRETURN)
         value.visitMaxs(2, 0)

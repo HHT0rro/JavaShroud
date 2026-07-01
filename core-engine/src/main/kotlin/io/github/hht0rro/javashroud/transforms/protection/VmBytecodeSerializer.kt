@@ -1110,7 +1110,34 @@ internal class VmBytecodeSerializer(
             is String -> { val cp = addConstant(value); emit(VmOpcodes.VM_LDC_STRING, cp) }
             is Type -> { val cp = addConstant(value.descriptor); emit(VmOpcodes.VM_LDC_TYPE, cp) }
             is Handle -> { val cp = addConstant("handle|${value.tag}|${value.owner}|${value.name}|${value.desc}"); emit(VmOpcodes.VM_LDC_HANDLE, cp) }
+            is ConstantDynamic -> { val cp = addConstant(encodeCondyLdc(value)); emit(VmOpcodes.VM_LDC_CONDY, cp) }
             else -> unsupportedOpcode("ldc", -1)
+        }
+    }
+
+    private fun encodeCondyLdc(value: ConstantDynamic): String {
+        require(value.name == "c" && value.bootstrapMethodArgumentCount == 1) { "unsupported ConstantDynamic shape" }
+        val bsm = value.bootstrapMethod
+        return when (value.descriptor) {
+            "Ljava/lang/String;" -> {
+                require(bsm.tag == Opcodes.H_INVOKESTATIC && bsm.name == "\$_c_str" &&
+                    bsm.desc == "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Object;") {
+                    "unsupported ConstantDynamic string bootstrap"
+                }
+                val constant = value.getBootstrapMethodArgument(0) as? String
+                    ?: throw UnsupportedOperationException("unsupported ConstantDynamic string argument")
+                listOf("condy", "str", bsm.owner, bsm.name, bsm.desc, constant.encodeToByteArray().joinToString("") { "%02x".format(it.toInt() and 0xFF) }).joinToString("|")
+            }
+            "I" -> {
+                require(bsm.tag == Opcodes.H_INVOKESTATIC && bsm.name == "\$_c_int" &&
+                    bsm.desc == "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;I)Ljava/lang/Object;") {
+                    "unsupported ConstantDynamic int bootstrap"
+                }
+                val constant = value.getBootstrapMethodArgument(0) as? Int
+                    ?: throw UnsupportedOperationException("unsupported ConstantDynamic int argument")
+                listOf("condy", "int", bsm.owner, bsm.name, bsm.desc, constant.toString()).joinToString("|")
+            }
+            else -> throw UnsupportedOperationException("unsupported ConstantDynamic descriptor ${value.descriptor}")
         }
     }
 
@@ -1193,6 +1220,7 @@ object VmOpcodes {
     const val VM_LDC_STRING = 0x0C
     const val VM_LDC_TYPE = 0x0D
     const val VM_LDC_HANDLE = 0x0E
+    const val VM_LDC_CONDY = 0xFC
 
     // Loads
     const val VM_ILOAD = 0x10

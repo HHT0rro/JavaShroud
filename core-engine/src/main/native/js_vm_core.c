@@ -1205,6 +1205,7 @@ static void js_vbc4_hmac_with_scoped_master_key(const unsigned char **parts, con
 #define JS_VM_LDC_STRING 0x0C
 #define JS_VM_LDC_TYPE 0x0D
 #define JS_VM_LDC_HANDLE 0x0E
+#define JS_VM_LDC_CONDY 0xFC
 #define JS_VM_ILOAD 0x10
 #define JS_VM_LLOAD 0x11
 #define JS_VM_FLOAD 0x12
@@ -3968,6 +3969,74 @@ static jobject js_vm_receiver_class_from_args(JNIEnv *env, jobjectArray args) {
     return cls;
 }
 
+static int js_vm_hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static char* js_vm_hex_to_utf8_owned(const char *hex) {
+    size_t hex_len = hex ? strlen(hex) : 0;
+    if (hex_len == 0 || (hex_len & 1u) != 0 || hex_len > 0xFFFFu * 2u) return NULL;
+    char *out = (char*)malloc(hex_len / 2u + 1u);
+    if (!out) return NULL;
+    for (size_t i = 0; i < hex_len; i += 2u) {
+        int hi = js_vm_hex_nibble(hex[i]);
+        int lo = js_vm_hex_nibble(hex[i + 1u]);
+        if (hi < 0 || lo < 0) { js_vbc4_wipe_volatile(out, hex_len / 2u); free(out); return NULL; }
+        out[i / 2u] = (char)((hi << 4) | lo);
+    }
+    out[hex_len / 2u] = 0;
+    return out;
+}
+
+static int js_vm_cp_condy_value(JNIEnv *env, const char *encoded, js_vm_value *out) {
+    char *owned = NULL;
+    char *parts[6] = {0};
+    char *cursor = NULL;
+    int ok = 0;
+    if (!env || !encoded || !out || strncmp(encoded, "condy|", 6) != 0) return 0;
+    owned = js_strdup(encoded);
+    if (!owned) return 0;
+    cursor = owned;
+    for (int i = 0; i < 6; i++) {
+        parts[i] = cursor;
+        char *bar = strchr(cursor, '|');
+        if (i < 5) {
+            if (!bar) goto done;
+            *bar = 0;
+            cursor = bar + 1;
+        } else if (bar) {
+            goto done;
+        }
+    }
+    if (strcmp(parts[0], "condy") != 0 || !parts[2][0]) goto done;
+    if (strcmp(parts[1], "str") == 0) {
+        if (strcmp(parts[3], "$_c_str") != 0 ||
+            strcmp(parts[4], "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Object;") != 0) goto done;
+        char *utf8 = js_vm_hex_to_utf8_owned(parts[5]);
+        if (!utf8) goto done;
+        jobject s = (*env)->NewStringUTF(env, utf8);
+        js_vbc4_wipe_volatile(utf8, strlen(utf8));
+        free(utf8);
+        if ((*env)->ExceptionCheck(env) || !s) goto done;
+        *out = js_vm_object_value(s);
+        ok = 1;
+    } else if (strcmp(parts[1], "int") == 0) {
+        if (strcmp(parts[3], "$_c_int") != 0 ||
+            strcmp(parts[4], "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/Class;I)Ljava/lang/Object;") != 0) goto done;
+        char *end = NULL;
+        long value = strtol(parts[5], &end, 10);
+        if (!end || *end != 0 || value < INT32_MIN || value > INT32_MAX) goto done;
+        *out = js_vm_int_value((jint)value);
+        ok = 1;
+    }
+done:
+    if (owned) { js_vbc4_wipe_volatile(owned, strlen(owned)); free(owned); }
+    return ok;
+}
+
 static int js_vm_cp_value(JNIEnv *env, js_vm_program *p, jobjectArray args, int cp_idx, int opcode, js_vm_value *out) {
     if (cp_idx < 0 || cp_idx >= p->cp_count) return 0;
     js_vm_cp cp;
@@ -4022,6 +4091,9 @@ static int js_vm_cp_value(JNIEnv *env, js_vm_program *p, jobjectArray args, int 
                 *out = js_vm_object_value(cls);
                 ok = !(*env)->ExceptionCheck(env) && !js_vm_value_is_null(*out);
             }
+            break;
+        case JS_VM_LDC_CONDY:
+            ok = cp.type == JS_VM_CP_STRING && cp.s && js_vm_cp_condy_value(env, cp.s, out);
             break;
         default:
             ok = 0;
@@ -5168,6 +5240,7 @@ JS_HIDDEN int js_vm_execute(JNIEnv *env, js_vm_program *p, jobjectArray args, ch
             JS_VM_CASE(JS_VM_LDC_STRING)
             JS_VM_CASE(JS_VM_LDC_TYPE)
             JS_VM_CASE(JS_VM_LDC_HANDLE)
+            JS_VM_CASE(JS_VM_LDC_CONDY)
                 ok = insn->op_count >= 1 && js_vm_cp_value(env, p, args, ops[0], insn->opcode, &a) && js_vm_push(stack, stack_cap, &sp, a);
                 JS_VM_BREAK;
             JS_VM_CASE(JS_VM_ILOAD) JS_VM_CASE(JS_VM_LLOAD) JS_VM_CASE(JS_VM_FLOAD) JS_VM_CASE(JS_VM_DLOAD) JS_VM_CASE(JS_VM_ALOAD)

@@ -2785,7 +2785,25 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         else -> false
     }
 
-    private fun isNativeVmSupportedLdc(value: Any): Boolean = value is Int || value is Long || value is Float || value is Double || value is String || value is Type || value is Handle
+    private fun isNativeVmSupportedLdc(value: Any): Boolean =
+        value is Int || value is Long || value is Float || value is Double || value is String || value is Type || value is Handle || isNativeVmSupportedCondyLdc(value)
+
+    private fun isNativeVmSupportedCondyLdc(value: Any): Boolean {
+        val condy = value as? ConstantDynamic ?: return false
+        if (condy.name != "c" || condy.bootstrapMethodArgumentCount != 1) return false
+        val bsm = condy.bootstrapMethod
+        return when (condy.descriptor) {
+            "Ljava/lang/String;" -> bsm.tag == Opcodes.H_INVOKESTATIC &&
+                bsm.name == "\$_c_str" &&
+                bsm.desc == "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Object;" &&
+                condy.getBootstrapMethodArgument(0) is String
+            "I" -> bsm.tag == Opcodes.H_INVOKESTATIC &&
+                bsm.name == "\$_c_int" &&
+                bsm.desc == "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;I)Ljava/lang/Object;" &&
+                condy.getBootstrapMethodArgument(0) is Int
+            else -> false
+        }
+    }
 
     private fun isDirectNativeDefenseCall(owner: String, name: String): Boolean = when (owner) {
         "io/github/hht0rro/javashroud/transforms/protection/AntiInstrumentationHelper" -> name == "nativeCheckInstrumentation"
