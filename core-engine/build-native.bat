@@ -4,7 +4,8 @@ setlocal EnableExtensions EnableDelayedExpansion
 set "SCRIPT_DIR=%~dp0"
 for %%I in ("%SCRIPT_DIR%..") do set "CORE_DIR=%%~fI"
 set "ENGINE_BUILD_DIR=%CORE_DIR%\build\core-engine"
-set "ENGINE_JAR=%ENGINE_BUILD_DIR%\libs\obfuscator-engine.jar"
+set "ENGINE_LIBS_DIR=%ENGINE_BUILD_DIR%\libs"
+set "ENGINE_JAR=%ENGINE_LIBS_DIR%\obfuscator-engine.jar"
 set "ENGINE_RESOURCE_CONFIG=%ENGINE_BUILD_DIR%\native\generated\generateResourcesConfigFile\resource-config.json"
 set "ENGINE_NATIVE_DIR=%ENGINE_BUILD_DIR%\native\manual-native-image"
 set "ENGINE_EXE=%ENGINE_NATIVE_DIR%\obfuscator-engine.exe"
@@ -27,7 +28,7 @@ echo [1/3] Building engine jar and native resources...
 pushd "%CORE_DIR%" || exit /b 1
 call gradlew.bat --build-cache --no-configuration-cache --rerun-tasks :core-engine:jar :core-engine:generateResourcesConfigFile || (popd & exit /b 1)
 popd
-call :require_file "%ENGINE_JAR%" "Engine jar build did not produce obfuscator-engine.jar" || exit /b 1
+call :resolve_engine_jar || exit /b 1
 call :require_file "%ENGINE_RESOURCE_CONFIG%" "Engine resource config was not generated" || exit /b 1
 
 echo [2/3] Building native engine executable...
@@ -44,6 +45,20 @@ exit /b 0
 if exist %~1 exit /b 0
 echo %~2: %~1
 exit /b 1
+
+:resolve_engine_jar
+if exist "%ENGINE_JAR%" exit /b 0
+set "ENGINE_VERSIONED_JAR="
+for /f "delims=" %%J in ('dir /b /a-d /o-d "%ENGINE_LIBS_DIR%\obfuscator-engine-*.jar" 2^>nul') do (
+  if not defined ENGINE_VERSIONED_JAR set "ENGINE_VERSIONED_JAR=%ENGINE_LIBS_DIR%\%%J"
+)
+if not defined ENGINE_VERSIONED_JAR (
+  echo Engine jar build did not produce obfuscator-engine.jar or obfuscator-engine-*.jar under %ENGINE_LIBS_DIR%
+  exit /b 1
+)
+copy /y "%ENGINE_VERSIONED_JAR%" "%ENGINE_JAR%" >nul || exit /b 1
+echo Engine jar alias ready: %ENGINE_JAR% from %ENGINE_VERSIONED_JAR%
+exit /b 0
 
 :require_native_image
 where native-image >nul 2>nul

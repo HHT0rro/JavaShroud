@@ -28,7 +28,8 @@ set "WAILS_ICON_RESOURCE=%DESKTOP_DIR%\rsrc_windows_amd64.syso"
 set "RELEASE_ROOT=%BUILD_ROOT%\release"
 set "RELEASE_DIR=%RELEASE_ROOT%\javashroud-windows-amd64"
 set "ENGINE_BUILD_DIR=%BUILD_ROOT%\core-engine"
-set "ENGINE_JAR=%ENGINE_BUILD_DIR%\libs\obfuscator-engine.jar"
+set "ENGINE_LIBS_DIR=%ENGINE_BUILD_DIR%\libs"
+set "ENGINE_JAR=%ENGINE_LIBS_DIR%\obfuscator-engine.jar"
 set "ENGINE_RESOURCE_CONFIG=%ENGINE_BUILD_DIR%\native\generated\generateResourcesConfigFile\resource-config.json"
 set "ENGINE_NATIVE_DIR=%ENGINE_BUILD_DIR%\native\manual-native-image"
 set "ENGINE_EXE=%ENGINE_NATIVE_DIR%\obfuscator-engine.exe"
@@ -151,10 +152,7 @@ echo [2/10] Building engine jar and native resources...
 pushd "%CORE_DIR%" || exit /b 1
 call gradlew.bat --no-build-cache --no-configuration-cache --rerun-tasks :core-engine:jar :core-engine:generateResourcesConfigFile || (popd & exit /b 1)
 popd
-if not exist "%ENGINE_JAR%" (
-  echo Engine jar build did not produce obfuscator-engine.jar: %ENGINE_JAR%
-  exit /b 1
-)
+call :resolve_engine_jar || exit /b 1
 if not exist "%ENGINE_RESOURCE_CONFIG%" (
   echo Engine resource config was not generated: %ENGINE_RESOURCE_CONFIG%
   exit /b 1
@@ -271,6 +269,20 @@ set "POWERSHELL_EXE=powershell"
 where pwsh >nul 2>nul && set "POWERSHELL_EXE=pwsh"
 for /f "delims=" %%H in ('%POWERSHELL_EXE% -NoProfile -Command "(Get-FileHash -Algorithm SHA256 -LiteralPath $env:SHA_FILE).Hash"') do set "%SHA_VAR%=%%H"
 if not defined %SHA_VAR% exit /b 1
+exit /b 0
+
+:resolve_engine_jar
+if exist "%ENGINE_JAR%" exit /b 0
+set "ENGINE_VERSIONED_JAR="
+for /f "delims=" %%J in ('dir /b /a-d /o-d "%ENGINE_LIBS_DIR%\obfuscator-engine-*.jar" 2^>nul') do (
+  if not defined ENGINE_VERSIONED_JAR set "ENGINE_VERSIONED_JAR=%ENGINE_LIBS_DIR%\%%J"
+)
+if not defined ENGINE_VERSIONED_JAR (
+  echo Engine jar build did not produce obfuscator-engine.jar or obfuscator-engine-*.jar under %ENGINE_LIBS_DIR%
+  exit /b 1
+)
+copy /y "%ENGINE_VERSIONED_JAR%" "%ENGINE_JAR%" >nul || exit /b 1
+echo Engine jar alias ready: %ENGINE_JAR% from %ENGINE_VERSIONED_JAR%
 exit /b 0
 
 :verify_same_file_hash
