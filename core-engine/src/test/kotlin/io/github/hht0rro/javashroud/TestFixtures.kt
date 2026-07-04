@@ -21,6 +21,7 @@ internal fun testConfig(
     passes: List<PassSpec> = emptyList(),
     allowOptInPasses: Boolean = false,
     allowRedundantPasses: Boolean = false,
+    allowAnnotationPasses: Boolean = false,
     ruleSet: RuleSet = RuleSet(rules = emptyList()),
 ): ObfuscationConfig = ObfuscationConfig(
     inputJarPath = inputJarPath,
@@ -28,6 +29,7 @@ internal fun testConfig(
     passes = passes,
     allowOptInPasses = allowOptInPasses,
     allowRedundantPasses = allowRedundantPasses,
+    allowAnnotationPasses = allowAnnotationPasses,
     ruleSet = ruleSet,
 )
 

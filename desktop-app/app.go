@@ -9,12 +9,13 @@ import (
 const engineEventName = "engine:event"
 
 type ObfuscationRequest struct {
-	InputJarPath         string     `json:"inputJarPath"`
-	OutputJarPath        string     `json:"outputJarPath"`
-	Passes               []PassSpec `json:"passes"`
-	Rules                []RuleItem `json:"rules"`
-	AllowOptInPasses     bool       `json:"allowOptInPasses"`
-	AllowRedundantPasses bool       `json:"allowRedundantPasses"`
+	InputJarPath          string     `json:"inputJarPath"`
+	OutputJarPath         string     `json:"outputJarPath"`
+	Passes                []PassSpec `json:"passes"`
+	Rules                 []RuleItem `json:"rules"`
+	AllowOptInPasses      bool       `json:"allowOptInPasses"`
+	AllowRedundantPasses  bool       `json:"allowRedundantPasses"`
+	AllowAnnotationPasses bool       `json:"allowAnnotationPasses"`
 }
 
 type PassSpec struct {
@@ -30,12 +31,13 @@ type RuleItem struct {
 }
 
 type EngineConfig struct {
-	InputJarPath         string     `json:"inputJarPath"`
-	OutputJarPath        string     `json:"outputJarPath"`
-	Passes               []PassSpec `json:"passes"`
-	RuleSet              RuleSet    `json:"ruleSet"`
-	AllowOptInPasses     bool       `json:"allowOptInPasses"`
-	AllowRedundantPasses bool       `json:"allowRedundantPasses"`
+	InputJarPath          string     `json:"inputJarPath"`
+	OutputJarPath         string     `json:"outputJarPath"`
+	Passes                []PassSpec `json:"passes"`
+	RuleSet               RuleSet    `json:"ruleSet"`
+	AllowOptInPasses      bool       `json:"allowOptInPasses"`
+	AllowRedundantPasses  bool       `json:"allowRedundantPasses"`
+	AllowAnnotationPasses bool       `json:"allowAnnotationPasses"`
 }
 
 type RuleSet struct {

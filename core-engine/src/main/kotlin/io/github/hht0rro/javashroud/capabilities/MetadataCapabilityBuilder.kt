@@ -10,7 +10,7 @@ internal fun metadataCapabilityBindings(): List<CapabilityBinding> = listOf(
         tagIds = listOf("metadata"),
         stability = "stable",
         risk = "low",
-        compatibilityNotes = "移除调试属性，不改变业务字节码语义；仍建议确认调试、堆栈和诊断链路预期。",
+        compatibilityNotes = "移除调试属性，不改变业务字节码语义，也不应抬升输入 classfile major version；仍建议确认调试、堆栈和诊断链路预期。",
     ),
 )
 

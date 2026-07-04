@@ -210,7 +210,7 @@ class ConfigCodecTest {
 
     @Test
     fun decodeConfig_rejects_non_boolean_root_flags() {
-        val flagNames = listOf("allowIncomplete", "allowOptInPasses", "allowRedundantPasses")
+        val flagNames = listOf("allowIncomplete", "allowOptInPasses", "allowRedundantPasses", "allowAnnotationPasses")
         for (flagName in flagNames) {
             val json = mapper.readTree("""
                 {

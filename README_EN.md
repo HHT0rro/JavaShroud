@@ -138,6 +138,39 @@ The default pipeline stays conservative. High-risk capabilities are disabled by 
 | Frontend | Vue 3, Vite, TypeScript, Naive UI, lucide-vue-next, xterm, Tailwind CSS |
 | Tests | Kotlin test / JUnit Platform, Go test, frontend parser check scripts |
 
+## Compatibility Notes
+
+The JavaShroud engine itself requires JDK 21+ to build and run. In this section, legacy compatibility refers to the obfuscated artifact's classfile and target runtime. The default rule is: passes that do not require Java 11+ features must not raise Java 8 classfiles (major 52), and must not write out-of-range features such as `ConstantDynamic`.
+
+| Pass | Minimum target artifact | Compatibility conclusion and limits |
+| --- | --- | --- |
+| `strip-compile-debug-info` | Java 8 / classfile 52 | Removes debug attributes only; does not raise classfile version. |
+| `rename-classes` | Java 8 / classfile 52 | Does not raise classfile version; keep reflected names, resource paths, and public API classes. |
+| `rename-packages` | Java 8 / classfile 52 | Does not raise classfile version; verify resource lookup and custom ClassLoader code. |
+| `rename-methods` | Java 8 / classfile 52 | Does not raise classfile version; keep reflection, serialization hooks, framework entrypoints, and inheritance-sensitive methods. |
+| `rename-fields` | Java 8 / classfile 52 | Does not raise classfile version; keep reflective fields, serializers, DI, and data binding fields. |
+| `field-string-encryption` | Java 8 / classfile 52 | Does not raise classfile version; rewrites static initialization paths. |
+| `integer-constant-obfuscation` | Java 8 / classfile 52 | Does not raise classfile version; uses Java 8-compatible arithmetic bytecode. |
+| `static-init-perturbation` | Java 8 / classfile 52 | Does not raise classfile version; changes `<clinit>` structure, so validate initialization-order-sensitive code. |
+| `anti-decompiler-structure` | Java 8 / classfile 52 | Does not raise classfile version; adds exception/dead-code structures, so validate older verifiers. |
+| `invoke-dynamic-indirection` | Java 8 / classfile 52 | May introduce `invokedynamic` in Java 8 artifacts without raising classfile version; Java 7 or older is not a target. |
+| `control-flow-obfuscation` | Java 8 / classfile 52 | Does not raise classfile version; validate performance and exception-sensitive paths. |
+| `reference-proxy` | Java 8 / classfile 52 | Does not raise classfile version; inserts proxy call sites, so validate stack/reflective scenarios. |
+| `control-flow-flattening` | Java 8 / classfile 52 | Does not raise classfile version; rewrites dispatch and exception regions. |
+| `condy-constant-indirection` | Java 11 / classfile 55 | Writes `ConstantDynamic` only for Java 11+ classfiles; Java 8 input must skip or fall back without condy or version raising. |
+| `member-hide` | Java 8 / classfile 52 | Does not raise classfile version; changes synthetic/access flag visibility. |
+| `anti-symbolic-execution` | Java 11+ target runtime | Injects a Java 11/classfile 55 runtime helper; not treated as a Java 8 artifact-compatible pass. |
+| `exception-semantic-virtualization` | Java 11+ target runtime | Injects a Java 11/classfile 55 runtime helper; changes exception behavior and stack shapes, so validate exception-sensitive paths. |
+| `string-encryption` | Java 11+ target runtime | Requires `jni-microkernel-loader` and native-backed decoding; not treated as a Java 8 runtime-compatible pass. |
+| `class-encryption-loader` | Java 11+ target runtime | Requires `jni-microkernel-loader`, platform native libraries, and custom loading paths; native/metadata failures are fail-closed. |
+| `method-body-delayed-decryption` | Java 11+; `hidden-class-redirect` requires JDK 15+ | Requires native/helper support and changes method-body restoration paths. |
+| `method-virtualization` | Java 11+ target runtime | VBC4/native-only; requires `jni-microkernel-loader` and platform native libraries. Old resources/profiles fail closed. |
+| `callsite-rotation-protection` | Java 11+ target runtime | Uses runtime callsite/linking perturbation; validate proxies, debugging, and performance. |
+| `environment-bound-keys` | Java 11+ target runtime | Requires `jni-microkernel-loader` and stable environment material; environment changes can break startup/decryption. |
+| `anti-instrumentation` | Java 11+ target runtime | Requires platform native libraries; can conflict with agents, APM, debuggers, and test tools. |
+| `anti-dump-protection` | Java 8 (`field-scramble`) / Java 11+ (native modes) | `field-scramble` should not raise version; `jni-key-hold/full` require the native loader. |
+| `jni-microkernel-loader` | Java 11+ target runtime | Enabled only as a dependency of helper/native passes; requires a supported platform and native build chain. |
+
 ## Common Commands
 
 ### Core Engine
