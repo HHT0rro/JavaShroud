@@ -542,14 +542,15 @@ private fun encodeNativeVmPreloadIndex(entries: List<VmPreloadEntry>, indexResou
     val plain = newEntries
         .joinToString(separator = "\n", postfix = "\n")
         .toByteArray(Charsets.UTF_8)
+    val maskedPlain = encodeMaskedNativePreloadIndex(plain, "current:$indexResourceName:${entries.size}")
     val seed = MessageDigest.getInstance("SHA-256")
-        .digest(plain)
+        .digest(maskedPlain)
         .take(4)
         .fold(0) { acc, byte -> (acc shl 8) or (byte.toInt() and 0xFF) }
     return JarEntryData(
         name = indexResourceName,
         bytes = RuntimeResourceCodec.encode(
-            bytes = plain,
+            bytes = maskedPlain,
             kind = RuntimeResourceKind.NativeIndex,
             seed = seed,
             variantId = entries.size.coerceAtLeast(1),
@@ -557,6 +558,73 @@ private fun encodeNativeVmPreloadIndex(entries: List<VmPreloadEntry>, indexResou
             compress = true,
         ),
     )
+}
+
+internal fun encodeMaskedNativePreloadIndex(plain: ByteArray, domain: String): ByteArray {
+    val context = requireVbc4BuildContext()
+    val saltDigest = MessageDigest.getInstance("SHA-256").apply {
+        update("jsmi2-salt".toByteArray(Charsets.US_ASCII))
+        update(domain.toByteArray(Charsets.UTF_8))
+        update(context.jarLayoutDigest)
+        update(plain)
+    }.digest()
+    val salt = saltDigest.copyOfRange(0, 16)
+    val masked = ByteArray(plain.size)
+    var offset = 0
+    var counter = 0
+    while (offset < plain.size) {
+        val mask = nativePreloadMaskBlock(salt, counter++)
+        val take = minOf(mask.size, plain.size - offset)
+        for (index in 0 until take) masked[offset + index] = (plain[offset + index].toInt() xor mask[index].toInt()).toByte()
+        offset += take
+    }
+    val tag = nativePreloadTag(salt, plain).copyOfRange(0, 16)
+    return "JSMI2|${salt.toHexLower()}|${masked.toHexLower()}|${tag.toHexLower()}\n".toByteArray(Charsets.US_ASCII)
+}
+
+internal fun decodeMaskedNativePreloadIndexText(text: String): String {
+    val trimmed = text.trim()
+    if (!trimmed.startsWith("JSMI2|")) return text
+    val parts = trimmed.split('|')
+    if (parts.size != 4) return text
+    val salt = parts[1].hexToBytesOrNull() ?: return text
+    val masked = parts[2].hexToBytesOrNull() ?: return text
+    val expectedTag = parts[3].hexToBytesOrNull() ?: return text
+    if (salt.size != 16 || expectedTag.size != 16) return text
+    val plain = ByteArray(masked.size)
+    var offset = 0
+    var counter = 0
+    while (offset < masked.size) {
+        val mask = nativePreloadMaskBlock(salt, counter++)
+        val take = minOf(mask.size, masked.size - offset)
+        for (index in 0 until take) plain[offset + index] = (masked[offset + index].toInt() xor mask[index].toInt()).toByte()
+        offset += take
+    }
+    val actualTag = nativePreloadTag(salt, plain).copyOfRange(0, 16)
+    return if (actualTag.contentEquals(expectedTag)) plain.decodeToString() else text
+}
+
+private fun nativePreloadMaskBlock(salt: ByteArray, counter: Int): ByteArray = MessageDigest.getInstance("SHA-256").apply {
+    update("jsmi2-mask".toByteArray(Charsets.US_ASCII))
+    update(salt)
+    update(intBytes(counter))
+}.digest()
+
+private fun nativePreloadTag(salt: ByteArray, plain: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").apply {
+    update("jsmi2-tag".toByteArray(Charsets.US_ASCII))
+    update(salt)
+    update(plain)
+}.digest()
+
+private fun String.hexToBytesOrNull(): ByteArray? {
+    if (length % 2 != 0) return null
+    val out = ByteArray(length / 2)
+    for (index in out.indices) {
+        val hi = this[index * 2].digitToIntOrNull(16) ?: return null
+        val lo = this[index * 2 + 1].digitToIntOrNull(16) ?: return null
+        out[index] = ((hi shl 4) or lo).toByte()
+    }
+    return out
 }
 
 private fun buildContextAwareSecureRandom(
@@ -2785,7 +2853,25 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         else -> false
     }
 
-    private fun isNativeVmSupportedLdc(value: Any): Boolean = value is Int || value is Long || value is Float || value is Double || value is String || value is Type || value is Handle
+    private fun isNativeVmSupportedLdc(value: Any): Boolean =
+        value is Int || value is Long || value is Float || value is Double || value is String || value is Type || value is Handle || isNativeVmSupportedCondyLdc(value)
+
+    private fun isNativeVmSupportedCondyLdc(value: Any): Boolean {
+        val condy = value as? ConstantDynamic ?: return false
+        if (condy.name != "c" || condy.bootstrapMethodArgumentCount != 1) return false
+        val bsm = condy.bootstrapMethod
+        return when (condy.descriptor) {
+            "Ljava/lang/String;" -> bsm.tag == Opcodes.H_INVOKESTATIC &&
+                bsm.name == "\$_c_str" &&
+                bsm.desc == "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Object;" &&
+                condy.getBootstrapMethodArgument(0) is String
+            "I" -> bsm.tag == Opcodes.H_INVOKESTATIC &&
+                bsm.name == "\$_c_int" &&
+                bsm.desc == "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;I)Ljava/lang/Object;" &&
+                condy.getBootstrapMethodArgument(0) is Int
+            else -> false
+        }
+    }
 
     private fun isDirectNativeDefenseCall(owner: String, name: String): Boolean = when (owner) {
         "io/github/hht0rro/javashroud/transforms/protection/AntiInstrumentationHelper" -> name == "nativeCheckInstrumentation"

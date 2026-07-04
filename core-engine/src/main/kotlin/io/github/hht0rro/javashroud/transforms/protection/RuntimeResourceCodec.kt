@@ -140,7 +140,8 @@ object RuntimeResourceCodec {
         if (storedBytes.size != storedLength) return null
         if (!sha256(storedBytes).contentEquals(metadata.storedHash)) return null
         val plain = if (compressed) Vbc4ZstdCodec.decompress(storedBytes, plainLength) ?: return null else storedBytes
-        return if (plain.size == plainLength && sha256(plain).contentEquals(metadata.plainHash)) plain else null
+        if (plain.size != plainLength || !sha256(plain).contentEquals(metadata.plainHash)) return null
+        return if (kindId == RuntimeResourceKind.NativeIndex.id) decodeMaskedNativePreloadIndexText(plain.decodeToString()).toByteArray(Charsets.UTF_8) else plain
     }
 
     private fun decodeLegacy(bytes: ByteArray, runtimeKey: ByteArray): ByteArray? {

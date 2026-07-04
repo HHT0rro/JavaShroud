@@ -745,7 +745,7 @@ public final class JniMicrokernelHelper {
         try (InputStream in = resourceStream(SEALED_NATIVE_INDEX_RESOURCE)) {
             if (in == null) return null;
             byte[] decoded = decodeBootstrapNativeIndex(readAll(in));
-            return decoded == null ? null : new String(decoded, StandardCharsets.UTF_8);
+            return decoded == null ? null : decodeMaskedNativeIndexText(new String(decoded, StandardCharsets.UTF_8));
         } catch (Exception ignored) {
             return null;
         }
@@ -771,6 +771,44 @@ public final class JniMicrokernelHelper {
     private static byte[] decodeSealedNativeResource(byte[] raw) {
         if (raw == null || raw.length == 0 || hasRuntimeResourceHeader(raw)) return null;
         return raw;
+    }
+
+    private static String decodeMaskedNativeIndexText(String text) {
+        if (text == null || !text.trim().startsWith("JSMI2|")) return text;
+        try {
+            String[] parts = text.trim().split("\\|", -1);
+            if (parts.length != 4) return text;
+            byte[] salt = hexToBytes(parts[1]);
+            byte[] masked = hexToBytes(parts[2]);
+            byte[] expectedTag = hexToBytes(parts[3]);
+            if (salt.length != 16 || expectedTag.length != 16) return text;
+            byte[] plain = new byte[masked.length];
+            int offset = 0;
+            int counter = 0;
+            while (offset < masked.length) {
+                byte[] mask = sha256(concat("jsmi2-mask".getBytes(StandardCharsets.US_ASCII), salt, intBytes(counter++)));
+                int take = Math.min(mask.length, masked.length - offset);
+                for (int index = 0; index < take; index++) plain[offset + index] = (byte) (masked[offset + index] ^ mask[index]);
+                offset += take;
+            }
+            byte[] actualTag = Arrays.copyOf(sha256(concat("jsmi2-tag".getBytes(StandardCharsets.US_ASCII), salt, plain)), 16);
+            if (!Arrays.equals(actualTag, expectedTag)) return text;
+            return new String(plain, StandardCharsets.UTF_8);
+        } catch (Exception ignored) {
+            return text;
+        }
+    }
+
+    private static byte[] hexToBytes(String hex) {
+        if ((hex.length() & 1) != 0) throw new IllegalArgumentException("odd hex");
+        byte[] out = new byte[hex.length() / 2];
+        for (int index = 0; index < out.length; index++) {
+            int hi = Character.digit(hex.charAt(index * 2), 16);
+            int lo = Character.digit(hex.charAt(index * 2 + 1), 16);
+            if (hi < 0 || lo < 0) throw new IllegalArgumentException("bad hex");
+            out[index] = (byte) ((hi << 4) | lo);
+        }
+        return out;
     }
 
     public static byte[] decodeRuntimeResourceForNative(byte[] raw) {

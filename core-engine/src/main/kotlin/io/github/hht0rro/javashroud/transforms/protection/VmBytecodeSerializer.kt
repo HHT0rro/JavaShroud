@@ -117,21 +117,25 @@ internal class VmBytecodeSerializer(
         resolveLabelReferences()
 
         val metadataCpIndex = addConstant(entryMetadata.encode())
-        val logicalProgram = lowerToLogicalProgram(metadataCpIndex)
-        val constantPoolPlain = serializeConstantPool()
+        val logicalProgramBeforeCpLayout = lowerToLogicalProgram(metadataCpIndex)
+        val cpIndexMap = polymorphicConstantPoolIndexMap()
+        val logicalProgram = remapLogicalProgramCpIndexes(logicalProgramBeforeCpLayout, cpIndexMap, metadataCpIndex)
+        val constantPoolPlain = serializeConstantPool(cpIndexMap)
 
         val nestedVmFlag = if (nestedVmEnabled()) VBC4_FLAG_NESTED_VM else 0
+        val registerRowEnvelopeFlag = if (shouldUseRegisterRowEnvelope()) VBC4_FLAG_REGISTER_ROW_ENVELOPE else 0
         val flags = VBC4_FLAG_ENCRYPTED_CP or VBC4_FLAG_BLOCK_ENCRYPTED or VBC4_FLAG_MAC or VBC4_FLAG_STATE_BOUND or
             VBC4_FLAG_AUTHENTICATED or VBC4_FLAG_PER_ENTRY_CP or VBC4_FLAG_PADDED or VBC4_FLAG_PER_BLOCK_ENCRYPT or
             VBC4_FLAG_REGISTER_EXECUTABLE or VBC4_FLAG_SUPER_OPERATORS or VBC4_FLAG_ZSTD_SECTIONS or
-            VBC4_FLAG_BLOCK_DISPATCH or nestedVmFlag
+            VBC4_FLAG_POLYMORPHIC_CP or
+            VBC4_FLAG_BLOCK_DISPATCH or nestedVmFlag or registerRowEnvelopeFlag
         val exceptionShape = intBytes(exceptionEntries.size)
         val nonce = vbc4Nonce(effectiveBuildSeed, flags, constantPoolPlain, exceptionShape, logicalProgram.blocks.size)
         val cryptoSeed = effectiveBuildSeed
         val wrappedSeed = vbc4WrappedSeed(cryptoSeed, nonce, stateBinding)
-        val exceptionPlain = serializeExceptions(cryptoSeed)
+        val exceptionPlain = serializeExceptions(cryptoSeed, cpIndexMap)
         // Per-entry CP encryption: each constant pool entry encrypted independently
-        val cpEntryPlainBuffers = serializeConstantPoolEntries()
+        val cpEntryPlainBuffers = serializeConstantPoolEntries(cpIndexMap)
         val cpEntryStoredSections = cpEntryPlainBuffers.map(::compressCpEntrySection)
         val cpEntryEncryptedBuffers = cpEntryStoredSections.mapIndexed { idx, section ->
             vbc4Crypt(section.bytes, cryptoSeed, nonce, VBC4_SECTION_CONSTANT_POOL_ENTRY, idx)
@@ -168,8 +172,8 @@ internal class VmBytecodeSerializer(
             writeU4(out, blk.entryToken)
             writeU4(out, vbc4BlockDispatchToken(cryptoSeed, blk.blockId, nextLogicalBlockId(blk.blockId, logicalProgram.blocks.size), logicalProgram.blocks.size))
         }
-        for (blk in storageBlocks) {
-            val blockPlain = serializeSingleBlock(blk, logicalProgram.registerCount, nestedVmFlag != 0)
+        storageBlocks.forEachIndexed { blockId, blk ->
+            val blockPlain = serializeSingleBlock(blk, logicalProgram.registerCount, nestedVmFlag != 0, blockId)
             val blockStored = zstdCompressSection(blockPlain)
             val blockEncrypted = vbc4Crypt(blockStored, cryptoSeed, nonce, VBC4_SECTION_INSTRUCTIONS, blk.blockId)
             writeU4(out, blockPlain.size)
@@ -597,19 +601,88 @@ internal class VmBytecodeSerializer(
             else -> operand.hashCode()
         }
     }
-    private fun serializeConstantPool(): ByteArray {
+
+    /**
+     * Generate polymorphic constant pool index mapping.
+     * Returns logical-to-physical index array where logicalToPhysical[logicalIdx] = physicalIdx.
+     */
+    private fun polymorphicConstantPoolIndexMap(): IntArray = IntArray(constantPool.size) { it }
+
+    /**
+     * Remap CP indexes in logical program to use physical ordering.
+     */
+    private fun remapLogicalProgramCpIndexes(
+        program: VmLogicalProgram,
+        cpIndexMap: IntArray,
+        metadataCpIndex: Int,
+    ): VmLogicalProgram {
+        if (cpIndexMap.isEmpty()) return program
+        var maskIndex = 0
+        val remappedBlocks = program.blocks.map { block ->
+            val remappedInsns = block.instructions.map { insn ->
+                val decodedOpcode = if ((insn.flags and VBC4_REG_FLAG_CONTINUATION) == 0) {
+                    insn.opcode xor vbc4OpcodeMask(effectiveBuildSeed, maskIndex++)
+                } else {
+                    insn.opcode
+                }
+                val newOperand = when {
+                    decodedOpcode == VBC4_REG_META && insn.operand == metadataCpIndex && insn.operand in cpIndexMap.indices -> cpIndexMap[insn.operand]
+                    vbc4OpcodeUsesZeroBasedCpOperand(decodedOpcode) && insn.operand in cpIndexMap.indices -> cpIndexMap[insn.operand]
+                    else -> insn.operand
+                }
+                insn.copy(operand = newOperand)
+            }
+            block.copy(instructions = remappedInsns)
+        }
+        return program.copy(blocks = remappedBlocks)
+    }
+
+    private fun vbc4OpcodeUsesZeroBasedCpOperand(opcode: Int): Boolean = when (canonicalVmOpcode(opcode)) {
+        VmOpcodes.VM_LDC_INT, VmOpcodes.VM_LDC_LONG, VmOpcodes.VM_LDC_FLOAT, VmOpcodes.VM_LDC_DOUBLE,
+        VmOpcodes.VM_LDC_STRING, VmOpcodes.VM_LDC_TYPE, VmOpcodes.VM_LDC_HANDLE, VmOpcodes.VM_LDC_CONDY,
+        VmOpcodes.VM_GETSTATIC, VmOpcodes.VM_PUTSTATIC, VmOpcodes.VM_GETFIELD, VmOpcodes.VM_PUTFIELD,
+        VmOpcodes.VM_INVOKEVIRTUAL, VmOpcodes.VM_INVOKESPECIAL, VmOpcodes.VM_INVOKESTATIC,
+        VmOpcodes.VM_INVOKEINTERFACE, VmOpcodes.VM_INVOKEDYNAMIC, VmOpcodes.VM_NEW, VmOpcodes.VM_ANEWARRAY,
+        VmOpcodes.VM_CHECKCAST, VmOpcodes.VM_INSTANCEOF, VmOpcodes.VM_MULTIANEWARRAY -> true
+        else -> false
+    }
+
+    private fun canonicalVmOpcode(opcode: Int): Int {
+        VM_OPCODE_ALIASES.forEach { (canonical, aliases) ->
+            if (opcode in aliases) return canonical
+        }
+        return opcode
+    }
+
+    private fun serializeConstantPool(cpIndexMap: IntArray): ByteArray {
         val out = java.io.ByteArrayOutputStream(estimateConstantPoolSize(includeCount = true))
         writeU2(out, constantPool.size)
-        for (entry in constantPool) {
+        val physicalPool = if (cpIndexMap.isEmpty()) constantPool else {
+            val reordered = MutableList<Any?>(constantPool.size) { null }
+            cpIndexMap.forEachIndexed { logicalIndex, physicalIndex ->
+                reordered[physicalIndex] = constantPool[logicalIndex]
+            }
+            reordered.map { requireNotNull(it) }
+        }
+        for (entry in physicalPool) {
             writeConstantPoolEntry(out, entry)
         }
         return out.toByteArray()
     }
 
-    private fun serializeConstantPoolEntries(): List<ByteArray> = constantPool.map { entry ->
-        val out = java.io.ByteArrayOutputStream(estimateConstantPoolEntrySize(entry))
-        writeConstantPoolEntry(out, entry)
-        out.toByteArray()
+    private fun serializeConstantPoolEntries(cpIndexMap: IntArray): List<ByteArray> {
+        val physicalPool = if (cpIndexMap.isEmpty()) constantPool else {
+            val reordered = MutableList<Any?>(constantPool.size) { null }
+            cpIndexMap.forEachIndexed { logicalIndex, physicalIndex ->
+                reordered[physicalIndex] = constantPool[logicalIndex]
+            }
+            reordered.map { requireNotNull(it) }
+        }
+        return physicalPool.map { entry ->
+            val out = java.io.ByteArrayOutputStream(estimateConstantPoolEntrySize(entry))
+            writeConstantPoolEntry(out, entry)
+            out.toByteArray()
+        }
     }
 
     private fun writeConstantPoolEntry(out: java.io.ByteArrayOutputStream, entry: Any) {
@@ -683,8 +756,106 @@ internal class VmBytecodeSerializer(
         return out.toByteArray()
     }
 
-    private fun serializeSingleBlock(block: VmLogicalBlock, registerCount: Int, nestedVm: Boolean): ByteArray {
+    /**
+     * Check if Register Row Envelope should be used.
+     * Uses structure selector for pseudo-random divergence.
+     */
+    private fun shouldUseRegisterRowEnvelope(): Boolean {
+        if (nestedVmEnabled()) return false
+        if (constantPool.size < 5) return false
+        // Use structureSelector for pseudo-random decision
+        return structureSelector("register-row-envelope", 0, effectiveBuildSeed, 100) < 50
+    }
+    /**
+     * Generate dialect value for register row envelope.
+     */
+    private fun vbc4RegisterRowDialect(blockId: Int, rowCount: Int): Int {
+        return vbc4RegisterRowMix(effectiveBuildSeed, blockId, rowCount, 0x23, 0x4D)
+    }
+
+    /**
+     * Generate field order permutation for a register row.
+     */
+    private fun vbc4RegisterRowFieldOrder(blockId: Int, rowIndex: Int): IntArray {
+        val order = intArrayOf(0, 1, 2, 3, 4, 5)
+        for (i in 5 downTo 0) {
+            val j = (vbc4RegisterRowMix(effectiveBuildSeed, blockId, rowIndex, i, 0x71) % (i + 1)).toInt()
+            val tmp = order[i]
+            order[i] = order[j]
+            order[j] = tmp
+        }
+        return order
+    }
+
+    /**
+     * Generate mask for register row field.
+     */
+    private fun vbc4RegisterRowMask(blockId: Int, rowIndex: Int, slot: Int, fieldIndex: Int): Int {
+        return vbc4RegisterRowMix(effectiveBuildSeed, blockId, rowIndex, slot, fieldIndex)
+    }
+
+    /**
+     * Multi-round mixing function for register row envelope.
+     */
+    private fun vbc4RegisterRowMix(seed: Int, blockId: Int, rowIndex: Int, slot: Int, fieldIndex: Int): Int {
+        var state = seed xor (blockId * 0x045D9F3B.toInt()) xor (rowIndex * 0x7FEB352D.toInt()) xor
+            (slot * 0x846CA68B.toInt()) xor (fieldIndex * 0x2C1B3C6D.toInt())
+        state = state xor (state ushr 16)
+        state = (state.toLong() * 0x7FEB352D).toInt()
+        state = state xor (state ushr 13)
+        state = (state.toLong() * 0x846CA68B).toInt()
+        return state xor (state ushr 16)
+    }
+
+    /**
+     * Serialize a block using register row envelope format.
+     */
+    private fun serializeEnvelopeBlock(block: VmLogicalBlock, registerCount: Int, blockId: Int): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        writeU2(out, registerCount)
+        writeU2(out, block.instructions.size)
+        val dialect = vbc4RegisterRowDialect(blockId, block.instructions.size)
+        writeU4(out, dialect)
+        block.instructions.forEachIndexed { rowIndex, instruction ->
+            writeEnvelopeRegisterRow(out, blockId, rowIndex, instruction)
+        }
+        writeU2(out, 0)
+        return out.toByteArray()
+    }
+
+    /**
+     * Write a single register row in envelope format.
+     */
+    private fun writeEnvelopeRegisterRow(
+        out: java.io.ByteArrayOutputStream,
+        blockId: Int,
+        rowIndex: Int,
+        instruction: VmRegisterInstruction
+    ) {
+        val fields = intArrayOf(
+            instruction.opcode and 0xFFFF,
+            instruction.flags and 0xFFFF,
+            instruction.dst and 0xFFFF,
+            instruction.srcA and 0xFFFF,
+            instruction.srcB and 0xFFFF,
+            instruction.operand,
+        )
+        val order = vbc4RegisterRowFieldOrder(blockId, rowIndex)
+        order.forEachIndexed { slot, fieldIndex ->
+            val mask = vbc4RegisterRowMask(blockId, rowIndex, slot, fieldIndex)
+            val value = fields[fieldIndex] xor mask
+            if (fieldIndex == 5) {
+                writeU4(out, value)
+            } else {
+                writeU2(out, value and 0xFFFF)
+            }
+        }
+    }
+
+    private fun serializeSingleBlock(block: VmLogicalBlock, registerCount: Int, nestedVm: Boolean, blockId: Int = 0): ByteArray {
         if (nestedVm) return serializeNestedBlock(block, registerCount)
+        val useRowEnvelope = !nestedVm && shouldUseRegisterRowEnvelope()
+        if (useRowEnvelope) return serializeEnvelopeBlock(block, registerCount, blockId)
         val out = java.io.ByteArrayOutputStream()
         writeU2(out, registerCount)
         writeU2(out, block.instructions.size)
@@ -770,7 +941,7 @@ internal class VmBytecodeSerializer(
         // an executable fallback; the native parser rejects any non-zero stack stream.
         writeU2(out, 0)
     }
-    private fun serializeExceptions(cryptoSeed: Int): ByteArray {
+    private fun serializeExceptions(cryptoSeed: Int, cpIndexMap: IntArray): ByteArray {
         val out = java.io.ByteArrayOutputStream()
         // Add 1-3 decoy exception entries after real ones to confuse analysis tools.
         // Decoys use plausible but unreachable offsets within the instruction stream.
@@ -783,7 +954,13 @@ internal class VmBytecodeSerializer(
             writeU2(out, requireLabelOffset(entry.start, "start") xor vbc4ExceptionMask(cryptoSeed, index, 0, token))
             writeU2(out, requireLabelOffset(entry.end, "end") xor vbc4ExceptionMask(cryptoSeed, index, 1, token))
             writeU2(out, requireLabelOffset(entry.handler, "handler") xor vbc4ExceptionMask(cryptoSeed, index, 2, token))
-            writeU2(out, entry.typeCpIndex xor vbc4ExceptionMask(cryptoSeed, index, 3, token))
+            // Apply polymorphic CP index remapping if enabled
+            val typeCpIndex = if (cpIndexMap.isNotEmpty() && entry.typeCpIndex > 0 && (entry.typeCpIndex - 1) < cpIndexMap.size) {
+                cpIndexMap[entry.typeCpIndex - 1] + 1
+            } else {
+                entry.typeCpIndex
+            }
+            writeU2(out, typeCpIndex xor vbc4ExceptionMask(cryptoSeed, index, 3, token))
         }
         // Emit decoy entries with crypto-derived plausible offsets.
         // Decoy ranges are placed BEYOND the real instruction count so they
@@ -1110,7 +1287,34 @@ internal class VmBytecodeSerializer(
             is String -> { val cp = addConstant(value); emit(VmOpcodes.VM_LDC_STRING, cp) }
             is Type -> { val cp = addConstant(value.descriptor); emit(VmOpcodes.VM_LDC_TYPE, cp) }
             is Handle -> { val cp = addConstant("handle|${value.tag}|${value.owner}|${value.name}|${value.desc}"); emit(VmOpcodes.VM_LDC_HANDLE, cp) }
+            is ConstantDynamic -> { val cp = addConstant(encodeCondyLdc(value)); emit(VmOpcodes.VM_LDC_CONDY, cp) }
             else -> unsupportedOpcode("ldc", -1)
+        }
+    }
+
+    private fun encodeCondyLdc(value: ConstantDynamic): String {
+        require(value.name == "c" && value.bootstrapMethodArgumentCount == 1) { "unsupported ConstantDynamic shape" }
+        val bsm = value.bootstrapMethod
+        return when (value.descriptor) {
+            "Ljava/lang/String;" -> {
+                require(bsm.tag == Opcodes.H_INVOKESTATIC && bsm.name == "\$_c_str" &&
+                    bsm.desc == "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Object;") {
+                    "unsupported ConstantDynamic string bootstrap"
+                }
+                val constant = value.getBootstrapMethodArgument(0) as? String
+                    ?: throw UnsupportedOperationException("unsupported ConstantDynamic string argument")
+                listOf("condy", "str", bsm.owner, bsm.name, bsm.desc, constant.encodeToByteArray().joinToString("") { "%02x".format(it.toInt() and 0xFF) }).joinToString("|")
+            }
+            "I" -> {
+                require(bsm.tag == Opcodes.H_INVOKESTATIC && bsm.name == "\$_c_int" &&
+                    bsm.desc == "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;I)Ljava/lang/Object;") {
+                    "unsupported ConstantDynamic int bootstrap"
+                }
+                val constant = value.getBootstrapMethodArgument(0) as? Int
+                    ?: throw UnsupportedOperationException("unsupported ConstantDynamic int argument")
+                listOf("condy", "int", bsm.owner, bsm.name, bsm.desc, constant.toString()).joinToString("|")
+            }
+            else -> throw UnsupportedOperationException("unsupported ConstantDynamic descriptor ${value.descriptor}")
         }
     }
 
@@ -1193,6 +1397,7 @@ object VmOpcodes {
     const val VM_LDC_STRING = 0x0C
     const val VM_LDC_TYPE = 0x0D
     const val VM_LDC_HANDLE = 0x0E
+    const val VM_LDC_CONDY = 0xFC
 
     // Loads
     const val VM_ILOAD = 0x10
@@ -1586,6 +1791,8 @@ private const val VBC4_FLAG_SUPER_OPERATORS = 0x0200
 private const val VBC4_FLAG_ZSTD_SECTIONS = 0x0400
 private const val VBC4_FLAG_BLOCK_DISPATCH = 0x0800
 private const val VBC4_FLAG_NESTED_VM = 0x1000
+private const val VBC4_FLAG_POLYMORPHIC_CP = 0x2000
+private const val VBC4_FLAG_REGISTER_ROW_ENVELOPE = 0x4000
 private const val VBC4_NESTED_MAGIC = 0x4E56
 private const val VBC4_NESTED_VERSION = 1
 private const val VBC4_NESTED_FIELD_COUNT = 6

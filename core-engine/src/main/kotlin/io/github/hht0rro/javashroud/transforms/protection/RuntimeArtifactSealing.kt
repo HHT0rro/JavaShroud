@@ -920,8 +920,14 @@ private fun rewriteVirtualMachinePreloadIndex(jarEntries: List<JarEntryData>, re
         .digest(rewrittenIndex.toByteArray(Charsets.UTF_8))
         .take(4)
         .fold(0) { acc, byte -> (acc shl 8) or (byte.toInt() and 0xFF) }
+    val plainBytes = rewrittenIndex.toByteArray(Charsets.UTF_8)
+    val encodedBytes = if (decodedIndex.decodeToString().trim().startsWith("JSMI2|")) {
+        encodeMaskedNativePreloadIndex(plainBytes, "sealed:${resourceRenameMap.size}:$resourceSeed")
+    } else {
+        plainBytes
+    }
     return RuntimeResourceCodec.encode(
-        bytes = rewrittenIndex.toByteArray(Charsets.UTF_8),
+        bytes = encodedBytes,
         kind = RuntimeResourceKind.NativeIndex,
         seed = resourceSeed,
         variantId = resourceRenameMap.size.coerceAtLeast(1),
