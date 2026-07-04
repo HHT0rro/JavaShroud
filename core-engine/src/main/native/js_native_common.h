@@ -11,6 +11,16 @@
 #define JS_HIDDEN __attribute__((visibility("hidden")))
 #endif
 
+#include "js_protected_section.h"
+
+#ifndef JS_PROTECTED
+#if JS_PROTECTED_SECTION_ENABLED
+#define JS_PROTECTED __attribute__((noinline, section(JS_PROTECTED_SECTION_NAME)))
+#else
+#define JS_PROTECTED __attribute__((noinline))
+#endif
+#endif
+
 JS_HIDDEN char* js_strdup(const char *s);
 JS_HIDDEN char* js_substr_dup(const char *start, size_t len);
 JS_HIDDEN unsigned int fnv1a(const unsigned char *data, int len);

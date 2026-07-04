@@ -30,6 +30,7 @@ JS_HIDDEN int js_hex32_to_bytes(const char *hex, unsigned char out[32]);
 JS_HIDDEN int js_parse_u32_token(const char *text, uint32_t *out);
 JS_HIDDEN char* js_next_manifest_field(char **cursor);
 JS_HIDDEN void js_vm_register_preload_index_entries(const unsigned char *index_bytes, int index_len);
+JS_HIDDEN unsigned char* js_vm_decode_masked_preload_index_owned(const unsigned char *index_bytes, int index_len, int *out_len);
 JS_HIDDEN void js_vm_resource_alias_register(const char *original_path, const char *sealed_path);
 JS_HIDDEN const char* js_vm_resource_alias_resolve(const char *path);
 JS_HIDDEN void js_vm_call_gate_register(jlong entry_token, const char *resource_path);

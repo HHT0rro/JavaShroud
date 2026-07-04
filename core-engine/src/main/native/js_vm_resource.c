@@ -202,6 +202,105 @@ static int js_hex_nibble(char c) {
     return -1;
 }
 
+static int js_hex_bytes_to_buffer(const char *hex, size_t hex_len, unsigned char *out) {
+    if (!hex || !out || (hex_len & 1u) != 0u) return 0;
+    for (size_t i = 0; i < hex_len / 2u; i++) {
+        int hi = js_hex_nibble(hex[i * 2u]);
+        int lo = js_hex_nibble(hex[i * 2u + 1u]);
+        if (hi < 0 || lo < 0) return 0;
+        out[i] = (unsigned char)((hi << 4) | lo);
+    }
+    return 1;
+}
+
+static void js_u32_be_bytes(uint32_t value, unsigned char out[4]) {
+    out[0] = (unsigned char)((value >> 24) & 0xFFu);
+    out[1] = (unsigned char)((value >> 16) & 0xFFu);
+    out[2] = (unsigned char)((value >> 8) & 0xFFu);
+    out[3] = (unsigned char)(value & 0xFFu);
+}
+
+JS_PROTECTED static void js_vm_mask_block(const unsigned char salt[16], uint32_t counter, unsigned char out[32]) {
+    static const unsigned char label[] = "jsmi2-mask";
+    unsigned char ctr[4];
+    js_u32_be_bytes(counter, ctr);
+    js_sha256_ctx ctx;
+    js_sha256_init(&ctx);
+    js_sha256_update(&ctx, label, (int)(sizeof(label) - 1));
+    js_sha256_update(&ctx, salt, 16);
+    js_sha256_update(&ctx, ctr, 4);
+    js_sha256_final(&ctx, out);
+    js_vbc4_wipe_volatile(&ctx, sizeof(ctx));
+    js_vbc4_wipe_volatile(ctr, sizeof(ctr));
+}
+
+JS_PROTECTED static void js_vm_masked_index_tag(const unsigned char salt[16], const unsigned char *plain, int plain_len, unsigned char out[32]) {
+    static const unsigned char label[] = "jsmi2-tag";
+    js_sha256_ctx ctx;
+    js_sha256_init(&ctx);
+    js_sha256_update(&ctx, label, (int)(sizeof(label) - 1));
+    js_sha256_update(&ctx, salt, 16);
+    js_sha256_update(&ctx, plain, plain_len);
+    js_sha256_final(&ctx, out);
+    js_vbc4_wipe_volatile(&ctx, sizeof(ctx));
+}
+
+JS_PROTECTED unsigned char* js_vm_decode_masked_preload_index_owned(const unsigned char *index_bytes, int index_len, int *out_len) {
+    if (!index_bytes || index_len <= 6 || !out_len || memcmp(index_bytes, "JSMI2|", 6) != 0) return NULL;
+    int end = index_len;
+    while (end > 0 && (index_bytes[end - 1] == '\n' || index_bytes[end - 1] == '\r' || index_bytes[end - 1] == ' ' || index_bytes[end - 1] == '\t')) end--;
+    int sep1 = 5, sep2 = -1, sep3 = -1;
+    for (int i = 6; i < end; i++) {
+        if (index_bytes[i] != '|') continue;
+        if (sep2 < 0) sep2 = i;
+        else { sep3 = i; break; }
+    }
+    if (sep2 <= sep1 + 1 || sep3 <= sep2 + 1 || sep3 + 1 >= end) return NULL;
+    size_t salt_hex_len = (size_t)(sep2 - sep1 - 1);
+    size_t masked_hex_len = (size_t)(sep3 - sep2 - 1);
+    size_t tag_hex_len = (size_t)(end - sep3 - 1);
+    if (salt_hex_len != 32u || tag_hex_len != 32u || (masked_hex_len & 1u) != 0u) return NULL;
+    unsigned char salt[16];
+    unsigned char expected_tag[16];
+    if (!js_hex_bytes_to_buffer((const char*)index_bytes + sep1 + 1, salt_hex_len, salt) ||
+        !js_hex_bytes_to_buffer((const char*)index_bytes + sep3 + 1, tag_hex_len, expected_tag)) return NULL;
+    int plain_len = (int)(masked_hex_len / 2u);
+    unsigned char *masked = plain_len > 0 ? (unsigned char*)malloc((size_t)plain_len) : (unsigned char*)calloc(1, 1);
+    unsigned char *plain = plain_len > 0 ? (unsigned char*)malloc((size_t)plain_len) : (unsigned char*)calloc(1, 1);
+    if (!masked || !plain || !js_hex_bytes_to_buffer((const char*)index_bytes + sep2 + 1, masked_hex_len, masked)) {
+        if (masked) free(masked);
+        if (plain) free(plain);
+        return NULL;
+    }
+    int offset = 0;
+    uint32_t counter = 0;
+    while (offset < plain_len) {
+        unsigned char mask[32];
+        js_vm_mask_block(salt, counter++, mask);
+        int take = plain_len - offset;
+        if (take > 32) take = 32;
+        for (int i = 0; i < take; i++) plain[offset + i] = (unsigned char)(masked[offset + i] ^ mask[i]);
+        js_vbc4_wipe_volatile(mask, sizeof(mask));
+        offset += take;
+    }
+    unsigned char actual_tag[32];
+    js_vm_masked_index_tag(salt, plain, plain_len, actual_tag);
+    int diff = 0;
+    for (int i = 0; i < 16; i++) diff |= (int)(actual_tag[i] ^ expected_tag[i]);
+    js_vbc4_wipe_volatile(masked, (size_t)plain_len);
+    free(masked);
+    js_vbc4_wipe_volatile(salt, sizeof(salt));
+    js_vbc4_wipe_volatile(expected_tag, sizeof(expected_tag));
+    js_vbc4_wipe_volatile(actual_tag, sizeof(actual_tag));
+    if (diff != 0) {
+        js_vbc4_wipe_volatile(plain, (size_t)plain_len);
+        free(plain);
+        return NULL;
+    }
+    *out_len = plain_len;
+    return plain;
+}
+
 JS_HIDDEN int js_hex32_to_bytes(const char *hex, unsigned char out[32]) {
     if (!hex || !out) return 0;
     for (int i = 0; i < 32; i++) {
@@ -404,6 +503,76 @@ JS_HIDDEN unsigned char* js_vm_decode_resource_path_owned(JNIEnv *env, jclass he
     return decoded;
 }
 
+static int js_hex16_is_valid(const char *text) {
+    if (!text || strlen(text) != 16u) return 0;
+    for (int i = 0; i < 16; i++) if (js_hex_nibble(text[i]) < 0) return 0;
+    return 1;
+}
+
+static void js_sha256_hex16(unsigned char digest[32], char out[17]) {
+    static const char hex[] = "0123456789abcdef";
+    for (int i = 0; i < 8; i++) {
+        out[i * 2] = hex[(digest[i] >> 4) & 0x0F];
+        out[i * 2 + 1] = hex[digest[i] & 0x0F];
+    }
+    out[16] = 0;
+}
+
+static void js_sha256_update_cstr(js_sha256_ctx *ctx, const char *text) {
+    js_sha256_update(ctx, (const unsigned char*)text, (int)strlen(text));
+}
+
+static void js_sha256_update_zero(js_sha256_ctx *ctx) {
+    static const unsigned char zero = 0;
+    js_sha256_update(ctx, &zero, 1);
+}
+
+JS_PROTECTED static int js_manifest_mesh_link_matches(const char *mesh, uint32_t ordinal, uint32_t index, uint32_t offset, uint32_t length, const char *digest, const char *path, const char *expected) {
+    if (!mesh || !digest || !path || !expected || !js_hex16_is_valid(expected)) return 0;
+    char ordinal_text[16], index_text[16], offset_text[16], length_text[16];
+    snprintf(ordinal_text, sizeof(ordinal_text), "%u", ordinal);
+    snprintf(index_text, sizeof(index_text), "%u", index);
+    snprintf(offset_text, sizeof(offset_text), "%u", offset);
+    snprintf(length_text, sizeof(length_text), "%u", length);
+    unsigned char digest_bytes[32];
+    char actual[17];
+    js_sha256_ctx ctx;
+    js_sha256_init(&ctx);
+    js_sha256_update_cstr(&ctx, mesh); js_sha256_update_zero(&ctx);
+    js_sha256_update_cstr(&ctx, ordinal_text); js_sha256_update_zero(&ctx);
+    js_sha256_update_cstr(&ctx, index_text); js_sha256_update_zero(&ctx);
+    js_sha256_update_cstr(&ctx, offset_text); js_sha256_update_zero(&ctx);
+    js_sha256_update_cstr(&ctx, length_text); js_sha256_update_zero(&ctx);
+    js_sha256_update_cstr(&ctx, digest); js_sha256_update_zero(&ctx);
+    js_sha256_update_cstr(&ctx, path);
+    js_sha256_final(&ctx, digest_bytes);
+    js_sha256_hex16(digest_bytes, actual);
+    js_vbc4_wipe_volatile(digest_bytes, sizeof(digest_bytes));
+    js_vbc4_wipe_volatile(&ctx, sizeof(ctx));
+    return strcmp(actual, expected) == 0;
+}
+
+JS_PROTECTED static int js_manifest_order_token(const char *mesh, uint32_t ordinal, uint32_t index, const char *path, const char *digest, char out[17]) {
+    if (!mesh || !path || !digest || !out) return 0;
+    char ordinal_text[16], index_text[16];
+    snprintf(ordinal_text, sizeof(ordinal_text), "%u", ordinal);
+    snprintf(index_text, sizeof(index_text), "%u", index);
+    unsigned char digest_bytes[32];
+    js_sha256_ctx ctx;
+    js_sha256_init(&ctx);
+    js_sha256_update_cstr(&ctx, "vbc4-shard-order"); js_sha256_update_zero(&ctx);
+    js_sha256_update_cstr(&ctx, mesh); js_sha256_update_zero(&ctx);
+    js_sha256_update_cstr(&ctx, ordinal_text); js_sha256_update_zero(&ctx);
+    js_sha256_update_cstr(&ctx, index_text); js_sha256_update_zero(&ctx);
+    js_sha256_update_cstr(&ctx, path); js_sha256_update_zero(&ctx);
+    js_sha256_update_cstr(&ctx, digest);
+    js_sha256_final(&ctx, digest_bytes);
+    js_sha256_hex16(digest_bytes, out);
+    js_vbc4_wipe_volatile(digest_bytes, sizeof(digest_bytes));
+    js_vbc4_wipe_volatile(&ctx, sizeof(ctx));
+    return 1;
+}
+
 JS_HIDDEN unsigned char* js_vm_reassemble_sliced_resource(JNIEnv *env, jclass helper_cls, unsigned char *decoded, int decoded_len, int *out_len) {
     if (!decoded || decoded_len < 10 || !out_len || memcmp(decoded, "VBC4S|1|", 8) != 0) return decoded;
     char *manifest = (char*)calloc((size_t)decoded_len + 1u, 1u);
@@ -422,18 +591,34 @@ JS_HIDDEN unsigned char* js_vm_reassemble_sliced_resource(JNIEnv *env, jclass he
     char *version = js_next_manifest_field(&cursor);
     char *total_text = js_next_manifest_field(&cursor);
     char *count_text = js_next_manifest_field(&cursor);
+    char *mesh_text = js_next_manifest_field(&cursor);
+    char *ordinal_text = js_next_manifest_field(&cursor);
+    char *entry_count_text = js_next_manifest_field(&cursor);
     uint32_t total_len = 0;
     uint32_t shard_count = 0;
+    uint32_t manifest_ordinal = 0;
+    uint32_t manifest_entry_count = 0;
     if (!magic || strcmp(magic, "VBC4S") != 0 || !version || strcmp(version, "1") != 0 ||
         !js_parse_u32_token(total_text, &total_len) || !js_parse_u32_token(count_text, &shard_count) ||
-        total_len == 0 || shard_count < 2 || shard_count > 16 || total_len > 64u * 1024u * 1024u) {
+        !mesh_text || strlen(mesh_text) != 64u || !js_parse_u32_token(ordinal_text, &manifest_ordinal) ||
+        !js_parse_u32_token(entry_count_text, &manifest_entry_count) || manifest_entry_count == 0 ||
+        manifest_ordinal >= manifest_entry_count || total_len == 0 || shard_count < 2 || shard_count > 16 ||
+        total_len > 64u * 1024u * 1024u) {
         js_vbc4_wipe_volatile(manifest, (size_t)decoded_len); free(manifest); return NULL;
     }
+    unsigned char mesh_digest_bytes[32];
+    if (!js_hex32_to_bytes(mesh_text, mesh_digest_bytes)) {
+        js_vbc4_wipe_volatile(mesh_digest_bytes, sizeof(mesh_digest_bytes));
+        js_vbc4_wipe_volatile(manifest, (size_t)decoded_len); free(manifest); return NULL;
+    }
+    js_vbc4_wipe_volatile(mesh_digest_bytes, sizeof(mesh_digest_bytes));
     unsigned char *assembled = (unsigned char*)calloc((size_t)total_len, 1u);
     unsigned char *seen = (unsigned char*)calloc((size_t)shard_count, 1u);
-    if (!assembled || !seen) {
+    char (*order_tokens)[17] = (char (*)[17])calloc((size_t)shard_count, sizeof(*order_tokens));
+    if (!assembled || !seen || !order_tokens) {
         if (assembled) free(assembled);
         if (seen) free(seen);
+        if (order_tokens) free(order_tokens);
         js_vbc4_wipe_volatile(manifest, (size_t)decoded_len); free(manifest); return NULL;
     }
     int ok = 1;
@@ -448,15 +633,28 @@ JS_HIDDEN unsigned char* js_vm_reassemble_sliced_resource(JNIEnv *env, jclass he
         char *length_text = js_next_manifest_field(&field_cursor);
         char *sha_text = js_next_manifest_field(&field_cursor);
         char *path_text = js_next_manifest_field(&field_cursor);
-        uint32_t index = 0, offset = 0, length = 0;
+        char *mesh_link_text = js_next_manifest_field(&field_cursor);
+        char *peer_ordinal_text = js_next_manifest_field(&field_cursor);
+        char *peer_link_text = js_next_manifest_field(&field_cursor);
+        uint32_t index = 0, offset = 0, length = 0, peer_ordinal = 0;
         unsigned char expected_sha[32];
         memset(expected_sha, 0, sizeof(expected_sha));
         if (!js_parse_u32_token(index_text, &index) || !js_parse_u32_token(offset_text, &offset) ||
-            !js_parse_u32_token(length_text, &length) || index >= shard_count || seen[index] ||
-            length == 0 || offset > total_len || length > total_len - offset || !sha_text || strlen(sha_text) != 64 ||
-            !js_hex32_to_bytes(sha_text, expected_sha) || !path_text || !path_text[0]) {
+            !js_parse_u32_token(length_text, &length) || !js_parse_u32_token(peer_ordinal_text, &peer_ordinal) ||
+            index >= shard_count || seen[index] || peer_ordinal >= manifest_entry_count ||
+            (manifest_entry_count > 1 && peer_ordinal == manifest_ordinal) || length == 0 || offset > total_len ||
+            length > total_len - offset || !sha_text || strlen(sha_text) != 64 ||
+            !js_hex32_to_bytes(sha_text, expected_sha) || !path_text || !path_text[0] ||
+            !js_hex16_is_valid(mesh_link_text) || !js_hex16_is_valid(peer_link_text)) {
             ok = 0;
         } else {
+            char expected_order_token[17];
+            if (!js_manifest_mesh_link_matches(mesh_text, manifest_ordinal, index, offset, length, sha_text, path_text, mesh_link_text) ||
+                !js_manifest_order_token(mesh_text, manifest_ordinal, index, path_text, sha_text, expected_order_token) ||
+                (loaded_count > 0 && strcmp(order_tokens[loaded_count - 1], expected_order_token) > 0)) {
+                ok = 0;
+            }
+            if (ok) memcpy(order_tokens[loaded_count], expected_order_token, sizeof(expected_order_token));
             int shard_len = 0;
             unsigned char *shard = js_vm_decode_resource_path_owned(env, helper_cls, path_text, &shard_len);
             if (!shard || shard_len != (int)length) {
@@ -484,6 +682,8 @@ JS_HIDDEN unsigned char* js_vm_reassemble_sliced_resource(JNIEnv *env, jclass he
     }
     for (uint32_t i = 0; ok && i < shard_count; i++) if (!seen[i]) ok = 0;
     if (loaded_count != shard_count) ok = 0;
+    js_vbc4_wipe_volatile(order_tokens, (size_t)shard_count * sizeof(*order_tokens));
+    free(order_tokens);
     js_vbc4_wipe_volatile(seen, (size_t)shard_count);
     free(seen);
     js_vbc4_wipe_volatile(manifest, (size_t)decoded_len);

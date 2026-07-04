@@ -811,9 +811,23 @@ JS_HIDDEN jint js_vm_next_opcode_epoch(const js_vm_program *p, int index, jint o
     return (jint)x;
 }
 
+/* Inject trace poison into epoch/mask rotation: when debugger detected,
+ * epoch/mask derivation becomes unstable across runs, making dump->replay fail. */
+static uint32_t js_vm_poison_epoch_seed(uint32_t seed, uint32_t trace_state) {
+    if (trace_state == 0 || js_vm_trace_poison_seed == 0) return seed;
+    uint32_t poison = trace_state ^ js_vm_trace_poison_seed;
+    poison ^= poison >> 13;
+    poison *= 0x5BD1E995u;
+    return seed ^ poison;
+}
 JS_HIDDEN void js_vm_rewrap_resident_opcode(js_vm_program *p, int index, jint opcode, int step, int pc_after_fetch, int stack_depth) {
     if (!p || index < 0 || index >= p->insn_count) return;
     jint next_epoch = js_vm_next_opcode_epoch(p, index, p->insns[index].opcode_epoch, step, pc_after_fetch, stack_depth);
+    /* Poison epoch when trace detected: makes rewrapped opcodes diverge from clean dump */
+    if (js_vm_trace_poison_seed != 0) {
+        uint32_t poison_mix = js_vm_trace_poison_seed ^ (uint32_t)step ^ (uint32_t)index;
+        next_epoch ^= (jint)(poison_mix & 0xFFu);
+    }
     p->insns[index].opcode_epoch = next_epoch;
     p->insns[index].opcode = opcode ^ js_vm_resident_opcode_mask(p, index);
 }
@@ -822,6 +836,10 @@ JS_HIDDEN void js_vm_rotate_resident_block(js_vm_program *p, int anchor, int ste
     if (!p || p->insn_count <= 1) return;
     uint32_t seed = (uint32_t)js_vm_load_resident_build_seed(p) ^ (uint32_t)js_vm_load_resident_mac_key(p) ^ dispatch_drift_state;
     seed ^= (uint32_t)(step * 0x9E3779B1u) ^ (uint32_t)(pc_after_fetch * 0x85EBCA77u) ^ (uint32_t)(stack_depth * 0xC2B2AE3Du);
+    /* Poison rotation seed when debugger detected: cache epoch becomes unstable */
+    if (js_vm_trace_poison_seed != 0) {
+        seed = js_vm_poison_epoch_seed(seed, js_vm_trace_poison_seed);
+    }
     seed ^= seed >> 16;
     seed *= 0x7FEB352Du;
     seed ^= seed >> 15;
@@ -998,12 +1016,6 @@ JS_HIDDEN void js_vm_free_program(JNIEnv *env, js_vm_program *p) {
  *    the image carries no base relocations into the protected range; the patcher
  *    independently verifies this and fails open if violated.
  */
-#if JS_PROTECTED_SECTION_ENABLED
-#define JS_PROTECTED __attribute__((noinline, section(JS_PROTECTED_SECTION_NAME)))
-#else
-#define JS_PROTECTED __attribute__((noinline))
-#endif
-
 #if defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 #define JS_THREAD_LOCAL _Thread_local
 #elif defined(_MSC_VER)
@@ -1205,6 +1217,7 @@ static void js_vbc4_hmac_with_scoped_master_key(const unsigned char **parts, con
 #define JS_VM_LDC_STRING 0x0C
 #define JS_VM_LDC_TYPE 0x0D
 #define JS_VM_LDC_HANDLE 0x0E
+#define JS_VM_LDC_CONDY 0xFC
 #define JS_VM_ILOAD 0x10
 #define JS_VM_LLOAD 0x11
 #define JS_VM_FLOAD 0x12
@@ -1456,6 +1469,8 @@ static void js_vbc4_hmac_with_scoped_master_key(const unsigned char **parts, con
 #define JS_VBC4_FLAG_BLOCK_DISPATCH 0x0800u
 #define JS_VBC4_REQUIRED_FLAGS 0x0FFFu
 #define JS_VBC4_FLAG_NESTED_VM 0x1000u
+#define JS_VBC4_FLAG_POLYMORPHIC_CP 0x2000u
+#define JS_VBC4_FLAG_REGISTER_ROW_ENVELOPE 0x4000u
 #define JS_VBC4_NESTED_MAGIC 0x4E56u
 #define JS_VBC4_NESTED_VERSION 1u
 #define JS_VBC4_NESTED_FIELD_COUNT 6u
@@ -1776,6 +1791,46 @@ static uint32_t js_vbc4_nested_mix(uint32_t seed, uint32_t profile, uint32_t blo
 static uint32_t js_vbc4_nested_dialect(uint32_t seed, uint32_t profile, uint32_t block_id, uint32_t row_count) {
     uint32_t dialect_seed = js_vbc4_rotl32(seed, 9) ^ js_vbc4_rotl32(profile, 3);
     return js_vbc4_nested_mix(seed, profile, block_id, row_count, 0x23u, dialect_seed);
+}
+
+static uint32_t js_vbc4_register_row_mix(uint32_t seed, uint32_t block_id, uint32_t row_index, uint32_t slot, uint32_t field_index) {
+    uint32_t x = seed ^ (block_id * 0x045D9F3Bu) ^ (row_index * 0x7FEB352Du) ^
+        (slot * 0x846CA68Bu) ^ (field_index * 0x2C1B3C6Du);
+    x ^= x >> 16;
+    x *= 0x7FEB352Du;
+    x ^= x >> 13;
+    x *= 0x846CA68Bu;
+    return x ^ (x >> 16);
+}
+
+static void js_vbc4_register_row_order(uint32_t seed, uint32_t block_id, uint32_t row_index, int order[6]) {
+    for (int i = 0; i < 6; i++) order[i] = i;
+    for (int i = 5; i >= 0; i--) {
+        int j = (int)(js_vbc4_register_row_mix(seed, block_id, row_index, (uint32_t)i, 0x71u) % (uint32_t)(i + 1));
+        int tmp = order[i];
+        order[i] = order[j];
+        order[j] = tmp;
+    }
+}
+
+static int js_vbc4_read_register_row(const unsigned char *data, int len, int *pos, uint32_t seed, uint32_t block_id, uint32_t row_index, unsigned int fields[6]) {
+    int order[6];
+    memset(fields, 0, sizeof(unsigned int) * 6u);
+    js_vbc4_register_row_order(seed, block_id, row_index, order);
+    for (int slot = 0; slot < 6; slot++) {
+        int field = order[slot];
+        unsigned int value16 = 0;
+        uint32_t value32 = 0;
+        uint32_t mask = js_vbc4_register_row_mix(seed, block_id, row_index, (uint32_t)slot, (uint32_t)field);
+        if (field == 5) {
+            if (!js_vm_read_u4(data, len, pos, &value32)) return 0;
+            fields[field] = value32 ^ mask;
+        } else {
+            if (!js_vm_read_u2(data, len, pos, &value16)) return 0;
+            fields[field] = (value16 ^ mask) & 0xFFFFu;
+        }
+    }
+    return 1;
 }
 
 static uint32_t js_vbc4_nested_row_checksum(uint32_t seed, uint32_t profile, uint32_t block_id, uint32_t row_index, uint32_t dialect, const uint32_t fields[6]) {
@@ -3193,7 +3248,8 @@ JS_HIDDEN int js_vm_parse_program(const unsigned char *data, int len, js_vm_prog
     pos += 16;
     if (!js_vm_read_u2(data, len, &pos, &u)) JS_VM_PARSE_FAIL; /* flags */
     vbc4_flags = (int)u;
-    if (((unsigned int)vbc4_flags & JS_VBC4_REQUIRED_FLAGS) != JS_VBC4_REQUIRED_FLAGS) JS_VM_PARSE_FAIL; /* require full VBC4 max-strength feature set */
+    if (((unsigned int)vbc4_flags & (JS_VBC4_REQUIRED_FLAGS | JS_VBC4_FLAG_POLYMORPHIC_CP)) !=
+        (JS_VBC4_REQUIRED_FLAGS | JS_VBC4_FLAG_POLYMORPHIC_CP)) JS_VM_PARSE_FAIL; /* require full VBC4 max-strength feature set */
     p->vbc4_flags = (uint32_t)vbc4_flags;
     parse_stage = 2;
     parse_stage = 21;
@@ -3360,18 +3416,34 @@ if (raw_pos != (int)cp_enc_sz) JS_VM_PARSE_FAIL;
             if (!block) JS_VM_PARSE_FAIL;
             int block_pos = 0;
             unsigned int register_count = 0, register_insn_count = 0, stack_insn_count = 0;
+            uint32_t row_dialect = 0;
             if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &register_count)) JS_VM_PARSE_FAIL;
             if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &register_insn_count)) JS_VM_PARSE_FAIL;
+            if ((vbc4_flags & JS_VBC4_FLAG_REGISTER_ROW_ENVELOPE) != 0 && (vbc4_flags & JS_VBC4_FLAG_NESTED_VM) == 0) {
+                if (!js_vm_read_u4(block, (int)block_plain_sz, &block_pos, &row_dialect)) JS_VM_PARSE_FAIL;
+                if (row_dialect != js_vbc4_register_row_mix((uint32_t)build_seed, (uint32_t)bi, register_insn_count, 0x23u, 0x4Du)) JS_VM_PARSE_FAIL;
+            }
             p->reg_program.register_count = (int)register_count;
             int base_insn = p->insn_count;
             for (unsigned int ri = 0; ri < register_insn_count; ri++) {
                 unsigned int raw_opcode = 0, flags = 0, op_count = 0, srcA = 0, srcB = 0;
-                if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &raw_opcode)) JS_VM_PARSE_FAIL;
-                if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &flags)) JS_VM_PARSE_FAIL;
-                if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &op_count)) JS_VM_PARSE_FAIL;
-                if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &srcA)) JS_VM_PARSE_FAIL;
-                if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &srcB)) JS_VM_PARSE_FAIL;
-                if (!js_vm_read_u4(block, (int)block_plain_sz, &block_pos, &u4)) JS_VM_PARSE_FAIL;
+                if ((vbc4_flags & JS_VBC4_FLAG_NESTED_VM) != 0 || (vbc4_flags & JS_VBC4_FLAG_REGISTER_ROW_ENVELOPE) == 0) {
+                    if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &raw_opcode)) JS_VM_PARSE_FAIL;
+                    if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &flags)) JS_VM_PARSE_FAIL;
+                    if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &op_count)) JS_VM_PARSE_FAIL;
+                    if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &srcA)) JS_VM_PARSE_FAIL;
+                    if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &srcB)) JS_VM_PARSE_FAIL;
+                    if (!js_vm_read_u4(block, (int)block_plain_sz, &block_pos, &u4)) JS_VM_PARSE_FAIL;
+                } else {
+                    unsigned int row_fields[6];
+                    if (!js_vbc4_read_register_row(block, (int)block_plain_sz, &block_pos, (uint32_t)build_seed, (uint32_t)bi, ri, row_fields)) JS_VM_PARSE_FAIL;
+                    raw_opcode = row_fields[0];
+                    flags = row_fields[1];
+                    op_count = row_fields[2];
+                    srcA = row_fields[3];
+                    srcB = row_fields[4];
+                    u4 = row_fields[5];
+                }
                 if ((flags & 0x8000u) != 0) continue;
                 if ((flags & 0x0001u) == 0) continue;
                 int opcode_mask_index = logical_insn_index++;
@@ -3400,12 +3472,23 @@ if (raw_pos != (int)cp_enc_sz) JS_VM_PARSE_FAIL;
                     for (unsigned int extra = 1; extra < op_count; extra++) {
                         unsigned int cont_opcode = 0, cont_flags = 0, cont_dst = 0, cont_srcA = 0, cont_srcB = 0, cont_operand = 0;
                         if (++ri >= register_insn_count) JS_VM_PARSE_FAIL;
-                        if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &cont_opcode)) JS_VM_PARSE_FAIL;
-                        if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &cont_flags)) JS_VM_PARSE_FAIL;
-                        if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &cont_dst)) JS_VM_PARSE_FAIL;
-                        if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &cont_srcA)) JS_VM_PARSE_FAIL;
-                        if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &cont_srcB)) JS_VM_PARSE_FAIL;
-                        if (!js_vm_read_u4(block, (int)block_plain_sz, &block_pos, &cont_operand)) JS_VM_PARSE_FAIL;
+                        if ((vbc4_flags & JS_VBC4_FLAG_NESTED_VM) != 0 || (vbc4_flags & JS_VBC4_FLAG_REGISTER_ROW_ENVELOPE) == 0) {
+                            if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &cont_opcode)) JS_VM_PARSE_FAIL;
+                            if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &cont_flags)) JS_VM_PARSE_FAIL;
+                            if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &cont_dst)) JS_VM_PARSE_FAIL;
+                            if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &cont_srcA)) JS_VM_PARSE_FAIL;
+                            if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &cont_srcB)) JS_VM_PARSE_FAIL;
+                            if (!js_vm_read_u4(block, (int)block_plain_sz, &block_pos, &cont_operand)) JS_VM_PARSE_FAIL;
+                        } else {
+                            unsigned int cont_fields[6];
+                            if (!js_vbc4_read_register_row(block, (int)block_plain_sz, &block_pos, (uint32_t)build_seed, (uint32_t)bi, ri, cont_fields)) JS_VM_PARSE_FAIL;
+                            cont_opcode = cont_fields[0];
+                            cont_flags = cont_fields[1];
+                            cont_dst = cont_fields[2];
+                            cont_srcA = cont_fields[3];
+                            cont_srcB = cont_fields[4];
+                            cont_operand = cont_fields[5];
+                        }
                         if ((cont_flags & 0x8000u) == 0 || cont_opcode != JS_VM_REG_OPERAND_CONT) JS_VM_PARSE_FAIL;
                         if (!js_vm_reg_program_append(p, (jint)cont_opcode, (jint)cont_flags, (jint)cont_dst, (jint)cont_srcA, (jint)cont_srcB, (jint)cont_operand, (jint)cont_opcode, (jint)cont_opcode)) JS_VM_PARSE_FAIL;
                         p->insns[p->insn_count].ops[extra] = js_vm_store_resident_operand(p, p->insn_count, (int)extra, (jint)cont_operand);
@@ -3466,18 +3549,34 @@ if (raw_pos != (int)cp_enc_sz) JS_VM_PARSE_FAIL;
 
         int insn_pos = 0;
         unsigned int register_count = 0, register_insn_count = 0;
+        uint32_t row_dialect = 0;
         if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &register_count)) JS_VM_PARSE_FAIL;
         if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &register_insn_count)) JS_VM_PARSE_FAIL;
+        if ((vbc4_flags & JS_VBC4_FLAG_REGISTER_ROW_ENVELOPE) != 0 && (vbc4_flags & JS_VBC4_FLAG_NESTED_VM) == 0) {
+            if (!js_vm_read_u4(insn, (int)insn_plain_sz, &insn_pos, &row_dialect)) JS_VM_PARSE_FAIL;
+            if (row_dialect != js_vbc4_register_row_mix((uint32_t)build_seed, (uint32_t)block_ids[0], register_insn_count, 0x23u, 0x4Du)) JS_VM_PARSE_FAIL;
+        }
         p->reg_program.register_count = (int)register_count;
         int logical_insn_index = 0;
         for (unsigned int ri = 0; ri < register_insn_count; ri++) {
             unsigned int raw_opcode = 0, flags = 0, op_count = 0, srcA = 0, srcB = 0;
-            if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &raw_opcode)) JS_VM_PARSE_FAIL;
-            if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &flags)) JS_VM_PARSE_FAIL;
-            if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &op_count)) JS_VM_PARSE_FAIL;
-            if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &srcA)) JS_VM_PARSE_FAIL;
-            if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &srcB)) JS_VM_PARSE_FAIL;
-            if (!js_vm_read_u4(insn, (int)insn_plain_sz, &insn_pos, &u4)) JS_VM_PARSE_FAIL;
+            if ((vbc4_flags & JS_VBC4_FLAG_NESTED_VM) != 0 || (vbc4_flags & JS_VBC4_FLAG_REGISTER_ROW_ENVELOPE) == 0) {
+                if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &raw_opcode)) JS_VM_PARSE_FAIL;
+                if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &flags)) JS_VM_PARSE_FAIL;
+                if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &op_count)) JS_VM_PARSE_FAIL;
+                if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &srcA)) JS_VM_PARSE_FAIL;
+                if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &srcB)) JS_VM_PARSE_FAIL;
+                if (!js_vm_read_u4(insn, (int)insn_plain_sz, &insn_pos, &u4)) JS_VM_PARSE_FAIL;
+            } else {
+                unsigned int row_fields[6];
+                if (!js_vbc4_read_register_row(insn, (int)insn_plain_sz, &insn_pos, (uint32_t)build_seed, (uint32_t)block_ids[0], ri, row_fields)) JS_VM_PARSE_FAIL;
+                raw_opcode = row_fields[0];
+                flags = row_fields[1];
+                op_count = row_fields[2];
+                srcA = row_fields[3];
+                srcB = row_fields[4];
+                u4 = row_fields[5];
+            }
             if ((flags & 0x8000u) != 0) continue;
             if ((flags & 0x0001u) == 0) continue;
             int opcode_mask_index = logical_insn_index++;
@@ -3506,12 +3605,23 @@ if (raw_pos != (int)cp_enc_sz) JS_VM_PARSE_FAIL;
                 for (unsigned int extra = 1; extra < op_count; extra++) {
                     unsigned int cont_opcode = 0, cont_flags = 0, cont_dst = 0, cont_srcA = 0, cont_srcB = 0, cont_operand = 0;
                     if (++ri >= register_insn_count) JS_VM_PARSE_FAIL;
-                    if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &cont_opcode)) JS_VM_PARSE_FAIL;
-                    if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &cont_flags)) JS_VM_PARSE_FAIL;
-                    if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &cont_dst)) JS_VM_PARSE_FAIL;
-                    if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &cont_srcA)) JS_VM_PARSE_FAIL;
-                    if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &cont_srcB)) JS_VM_PARSE_FAIL;
-                    if (!js_vm_read_u4(insn, (int)insn_plain_sz, &insn_pos, &cont_operand)) JS_VM_PARSE_FAIL;
+                    if ((vbc4_flags & JS_VBC4_FLAG_NESTED_VM) != 0 || (vbc4_flags & JS_VBC4_FLAG_REGISTER_ROW_ENVELOPE) == 0) {
+                        if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &cont_opcode)) JS_VM_PARSE_FAIL;
+                        if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &cont_flags)) JS_VM_PARSE_FAIL;
+                        if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &cont_dst)) JS_VM_PARSE_FAIL;
+                        if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &cont_srcA)) JS_VM_PARSE_FAIL;
+                        if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &cont_srcB)) JS_VM_PARSE_FAIL;
+                        if (!js_vm_read_u4(insn, (int)insn_plain_sz, &insn_pos, &cont_operand)) JS_VM_PARSE_FAIL;
+                    } else {
+                        unsigned int cont_fields[6];
+                        if (!js_vbc4_read_register_row(insn, (int)insn_plain_sz, &insn_pos, (uint32_t)build_seed, (uint32_t)block_ids[0], ri, cont_fields)) JS_VM_PARSE_FAIL;
+                        cont_opcode = cont_fields[0];
+                        cont_flags = cont_fields[1];
+                        cont_dst = cont_fields[2];
+                        cont_srcA = cont_fields[3];
+                        cont_srcB = cont_fields[4];
+                        cont_operand = cont_fields[5];
+                    }
                     if ((cont_flags & 0x8000u) == 0 || cont_opcode != JS_VM_REG_OPERAND_CONT) JS_VM_PARSE_FAIL;
                     if (!js_vm_reg_program_append(p, (jint)cont_opcode, (jint)cont_flags, (jint)cont_dst, (jint)cont_srcA, (jint)cont_srcB, (jint)cont_operand, (jint)cont_opcode, (jint)cont_opcode)) JS_VM_PARSE_FAIL;
                     p->insns[p->insn_count].ops[extra] = js_vm_store_resident_operand(p, p->insn_count, (int)extra, (jint)cont_operand);
@@ -3968,6 +4078,74 @@ static jobject js_vm_receiver_class_from_args(JNIEnv *env, jobjectArray args) {
     return cls;
 }
 
+static int js_vm_hex_nibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static char* js_vm_hex_to_utf8_owned(const char *hex) {
+    size_t hex_len = hex ? strlen(hex) : 0;
+    if (hex_len == 0 || (hex_len & 1u) != 0 || hex_len > 0xFFFFu * 2u) return NULL;
+    char *out = (char*)malloc(hex_len / 2u + 1u);
+    if (!out) return NULL;
+    for (size_t i = 0; i < hex_len; i += 2u) {
+        int hi = js_vm_hex_nibble(hex[i]);
+        int lo = js_vm_hex_nibble(hex[i + 1u]);
+        if (hi < 0 || lo < 0) { js_vbc4_wipe_volatile(out, hex_len / 2u); free(out); return NULL; }
+        out[i / 2u] = (char)((hi << 4) | lo);
+    }
+    out[hex_len / 2u] = 0;
+    return out;
+}
+
+static int js_vm_cp_condy_value(JNIEnv *env, const char *encoded, js_vm_value *out) {
+    char *owned = NULL;
+    char *parts[6] = {0};
+    char *cursor = NULL;
+    int ok = 0;
+    if (!env || !encoded || !out || strncmp(encoded, "condy|", 6) != 0) return 0;
+    owned = js_strdup(encoded);
+    if (!owned) return 0;
+    cursor = owned;
+    for (int i = 0; i < 6; i++) {
+        parts[i] = cursor;
+        char *bar = strchr(cursor, '|');
+        if (i < 5) {
+            if (!bar) goto done;
+            *bar = 0;
+            cursor = bar + 1;
+        } else if (bar) {
+            goto done;
+        }
+    }
+    if (strcmp(parts[0], "condy") != 0 || !parts[2][0]) goto done;
+    if (strcmp(parts[1], "str") == 0) {
+        if (strcmp(parts[3], "$_c_str") != 0 ||
+            strcmp(parts[4], "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Object;") != 0) goto done;
+        char *utf8 = js_vm_hex_to_utf8_owned(parts[5]);
+        if (!utf8) goto done;
+        jobject s = (*env)->NewStringUTF(env, utf8);
+        js_vbc4_wipe_volatile(utf8, strlen(utf8));
+        free(utf8);
+        if ((*env)->ExceptionCheck(env) || !s) goto done;
+        *out = js_vm_object_value(s);
+        ok = 1;
+    } else if (strcmp(parts[1], "int") == 0) {
+        if (strcmp(parts[3], "$_c_int") != 0 ||
+            strcmp(parts[4], "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/Class;I)Ljava/lang/Object;") != 0) goto done;
+        char *end = NULL;
+        long value = strtol(parts[5], &end, 10);
+        if (!end || *end != 0 || value < INT32_MIN || value > INT32_MAX) goto done;
+        *out = js_vm_int_value((jint)value);
+        ok = 1;
+    }
+done:
+    if (owned) { js_vbc4_wipe_volatile(owned, strlen(owned)); free(owned); }
+    return ok;
+}
+
 static int js_vm_cp_value(JNIEnv *env, js_vm_program *p, jobjectArray args, int cp_idx, int opcode, js_vm_value *out) {
     if (cp_idx < 0 || cp_idx >= p->cp_count) return 0;
     js_vm_cp cp;
@@ -4022,6 +4200,9 @@ static int js_vm_cp_value(JNIEnv *env, js_vm_program *p, jobjectArray args, int 
                 *out = js_vm_object_value(cls);
                 ok = !(*env)->ExceptionCheck(env) && !js_vm_value_is_null(*out);
             }
+            break;
+        case JS_VM_LDC_CONDY:
+            ok = cp.type == JS_VM_CP_STRING && cp.s && js_vm_cp_condy_value(env, cp.s, out);
             break;
         default:
             ok = 0;
@@ -4467,6 +4648,33 @@ static uint32_t js_vm_method_local_salt(const js_vm_program *program, uint32_t s
     salt ^= salt >> 16;
     salt *= 0x7FEB352Du;
     return salt ^ (salt >> 15);
+}
+
+JS_PROTECTED static uint32_t js_vm_dispatch_profile_for(const js_vm_program *program) {
+    if (!program) return 0u;
+    uint32_t x = (uint32_t)program->entry_token ^ (uint32_t)((uint64_t)program->entry_token >> 32);
+    x ^= program->method_local_profile + 0x9E3779B9u;
+    x ^= program->vbc4_flags * 0x45D9F3Bu;
+    for (int i = 0; i < 16; i++) x = (x << 5) ^ (x >> 27) ^ (uint32_t)program->nonce[i];
+    x ^= x >> 16; x *= 0x7FEB352Du; x ^= x >> 15; x *= 0x846CA68Bu; x ^= x >> 16;
+    return x % 6u;
+}
+
+JS_PROTECTED static int js_vm_profile_next_pc(uint32_t profile, int current_pc, int sequential_pc, int target_pc, int has_target, uint32_t drift, int step, int sp) {
+    if (has_target) {
+        uint32_t guard = ((uint32_t)target_pc ^ drift ^ (uint32_t)(step * 0x45D9F3Bu) ^ (uint32_t)(sp * 0x119DE1F3u));
+        if (profile == 4u && ((guard ^ (guard >> 7)) & 1u)) return target_pc;
+        if (profile == 5u) return (int)((uint32_t)target_pc ^ ((guard & 0u) << 1));
+        return target_pc;
+    }
+    if (profile == 1u) return current_pc + 1;
+    if (profile == 2u) return sequential_pc + (int)((drift >> (step & 7)) & 0u);
+    if (profile == 3u) {
+        int next = current_pc;
+        next += 1;
+        return next;
+    }
+    return sequential_pc;
 }
 
 static uint32_t js_vm_dispatch_progress_salt(const js_vm_program *program, int pc, uint32_t drift_state) {
@@ -5068,6 +5276,7 @@ JS_HIDDEN int js_vm_execute(JNIEnv *env, js_vm_program *p, jobjectArray args, ch
     int dispatch_step = 0;
     uint32_t vm_trace_state = 0;  /* accumulates anti-trace detection state */
     uint32_t vm_dispatch_drift_state = js_vm_dispatch_drift_step(p, js_vm_shared_dispatch_seed_for(p), 0, pc, sp);  /* self-modifying dispatch salt state, seeded from shared cross-method pool (item #6) */
+    uint32_t js_vm_dispatch_profile = js_vm_dispatch_profile_for(p);
     int execution_step_limit = (p->insn_count > 0 ? p->insn_count : 1) * 250000;
     if (execution_step_limit < 1000000) execution_step_limit = 1000000;
     uint32_t saved_trace_poison_seed = js_vm_trace_poison_seed;
@@ -5075,6 +5284,9 @@ JS_HIDDEN int js_vm_execute(JNIEnv *env, js_vm_program *p, jobjectArray args, ch
     while (ok && !returned && pc >= 0 && pc < p->insn_count) {
         if (dispatch_step >= execution_step_limit) {
             js_vm_last_failure_pc = pc;
+            /* Clear sensitive window before fail-closed exit */
+            if (locals_heap && locals) js_vbc4_wipe_volatile(locals, sizeof(js_vm_value) * (size_t)local_cap);
+            if (stack_heap && stack) js_vbc4_wipe_volatile(stack, sizeof(js_vm_value) * (size_t)stack_cap);
             js_vm_last_failure_opcode = JS_VM_UNSUPPORTED;
             js_vm_last_failure_sp = sp;
             js_vm_last_failure_step = dispatch_step;
@@ -5086,13 +5298,40 @@ JS_HIDDEN int js_vm_execute(JNIEnv *env, js_vm_program *p, jobjectArray args, ch
             ok = 0;
             break;
         }
+        /* Native integrity checkpoint: verify hot path integrity before each dispatch group.
+         * Frequency: every 128 steps (amortized). Fail-closed on corruption. */
+        if ((dispatch_step & 127) == 0 && js_vm_hot_integrity_baseline_clean) {
+            if (!js_vm_hot_integrity_clean()) {
+                /* Hot path patched mid-execution: poison cache and fail-closed */
+                if (p->insns && p->insn_count > 0) {
+                    for (int poison_idx = 0; poison_idx < p->insn_count && poison_idx < 8; poison_idx++) {
+                        p->insns[poison_idx].opcode ^= 0xDEADu;
+                        p->insns[poison_idx].opcode_epoch ^= 0xBEEFu;
+                    }
+                }
+                js_vm_last_failure_pc = pc;
+                js_vm_last_failure_opcode = JS_VM_UNSUPPORTED;
+                js_vm_last_failure_sp = sp;
+                ok = 0;
+                break;
+            }
+        }
         js_vm_dispatch_fetch:
         /* Anti-trace trap: detect debugger/trace attachment */
         if (js_vm_anti_trace_check(dispatch_step, &vm_trace_state)) {
             /* Poison the dispatch: corrupt the next opcode to land on a wrong handler.
              * This makes single-step traces produce garbage instruction sequences. */
             p->insns[pc >= 0 && pc < p->insn_count ? pc : 0].opcode ^= (jint)(vm_trace_state & 0xFFu);
+            /* Poison resident epoch rotation and cache state */
+            p->resident_rotation_epoch ^= (uint32_t)(vm_trace_state * 0x45D9F3Bu);
+            /* Poison a few upcoming opcodes to corrupt trace prediction */
+            for (int poison_ahead = 1; poison_ahead <= 3 && pc + poison_ahead < p->insn_count; poison_ahead++) {
+                uint32_t poison_mix = vm_trace_state ^ (uint32_t)(dispatch_step + poison_ahead);
+                p->insns[pc + poison_ahead].opcode ^= (jint)((poison_mix >> (poison_ahead * 3)) & 0x7Fu);
+            }
         }
+        /* Bogus handler row injection: 1/16 chance to execute semantically-noop bogus path */
+        int execute_bogus = ((vm_dispatch_drift_state ^ (uint32_t)dispatch_step) & 0xFu) == 0x7u;
         int fault_pc = pc;
         jobject pending_throw = NULL;
         js_vm_insn active_insn = p->insns[pc];
@@ -5100,7 +5339,7 @@ JS_HIDDEN int js_vm_execute(JNIEnv *env, js_vm_program *p, jobjectArray args, ch
         jint active_mask = js_vm_resident_opcode_mask(p, pc);
         jint active_epoch = p->insns[pc].opcode_epoch;
         active_insn.opcode = js_vm_canonical_opcode(active_raw_opcode ^ active_mask);
-        pc++;
+        pc = js_vm_profile_next_pc(js_vm_dispatch_profile, fault_pc, pc + 1, 0, 0, vm_dispatch_drift_state, dispatch_step, sp);
         if (js_vm_dispatch_rotation_due(p, vm_dispatch_drift_state, dispatch_step, fault_pc, sp)) {
             vm_dispatch_drift_state = js_vm_dispatch_drift_step(p, vm_dispatch_drift_state, dispatch_step, fault_pc, sp);
             js_vm_rotate_resident_block(p, fault_pc, dispatch_step, vm_dispatch_drift_state, pc, sp);
@@ -5125,6 +5364,13 @@ JS_HIDDEN int js_vm_execute(JNIEnv *env, js_vm_program *p, jobjectArray args, ch
             }
         } else {
             active_insn.ops = NULL;
+        }
+        /* Bogus handler: noop computation that pollutes trace/symbolic analysis */
+        if (execute_bogus) {
+            volatile jint bogus_acc = (jint)(vm_dispatch_drift_state ^ (uint32_t)pc ^ (uint32_t)sp);
+            bogus_acc = (bogus_acc << 3) ^ (bogus_acc >> 5);
+            bogus_acc = bogus_acc * 0x01000193 + dispatch_step;
+            (void)bogus_acc; /* prevent optimization */
         }
         jint *ops = insn->ops;
         js_vm_value a = js_vm_null_value();
@@ -5168,6 +5414,7 @@ JS_HIDDEN int js_vm_execute(JNIEnv *env, js_vm_program *p, jobjectArray args, ch
             JS_VM_CASE(JS_VM_LDC_STRING)
             JS_VM_CASE(JS_VM_LDC_TYPE)
             JS_VM_CASE(JS_VM_LDC_HANDLE)
+            JS_VM_CASE(JS_VM_LDC_CONDY)
                 ok = insn->op_count >= 1 && js_vm_cp_value(env, p, args, ops[0], insn->opcode, &a) && js_vm_push(stack, stack_cap, &sp, a);
                 JS_VM_BREAK;
             JS_VM_CASE(JS_VM_ILOAD) JS_VM_CASE(JS_VM_LLOAD) JS_VM_CASE(JS_VM_FLOAD) JS_VM_CASE(JS_VM_DLOAD) JS_VM_CASE(JS_VM_ALOAD)
@@ -5186,7 +5433,7 @@ JS_HIDDEN int js_vm_execute(JNIEnv *env, js_vm_program *p, jobjectArray args, ch
                 JS_VM_BREAK;
             JS_VM_CASE(JS_VM_RET)
                 ok = insn->op_count >= 1 && ops[0] >= 0 && ops[0] < local_cap && js_vm_to_int(locals[js_vm_local_perm(ops[0], local_cap, local_perm_mul, local_perm_add)], &ia);
-                if (ok) pc = ia;
+                if (ok) pc = js_vm_profile_next_pc(js_vm_dispatch_profile, fault_pc, pc, ia, 1, vm_dispatch_drift_state, dispatch_step, sp);
                 JS_VM_BREAK;
             JS_VM_CASE(JS_VM_IINC)
                 ok = insn->op_count >= 2 && ops[0] >= 0 && ops[0] < local_cap && js_vm_to_int(locals[js_vm_local_perm(ops[0], local_cap, local_perm_mul, local_perm_add)], &ia);
@@ -5337,29 +5584,29 @@ JS_HIDDEN int js_vm_execute(JNIEnv *env, js_vm_program *p, jobjectArray args, ch
                 JS_VM_BREAK;
             JS_VM_CASE(JS_VM_IFEQ) JS_VM_CASE(JS_VM_IFNE) JS_VM_CASE(JS_VM_IFLT) JS_VM_CASE(JS_VM_IFGE) JS_VM_CASE(JS_VM_IFGT) JS_VM_CASE(JS_VM_IFLE)
                 ok = insn->op_count >= 1 && js_vm_pop(stack, &sp, &a) && js_vm_to_int(a, &ia);
-                if (ok && ((insn->opcode == JS_VM_IFEQ && ia == 0) || (insn->opcode == JS_VM_IFNE && ia != 0) || (insn->opcode == JS_VM_IFLT && ia < 0) || (insn->opcode == JS_VM_IFGE && ia >= 0) || (insn->opcode == JS_VM_IFGT && ia > 0) || (insn->opcode == JS_VM_IFLE && ia <= 0))) pc = ops[0];
+                if (ok && ((insn->opcode == JS_VM_IFEQ && ia == 0) || (insn->opcode == JS_VM_IFNE && ia != 0) || (insn->opcode == JS_VM_IFLT && ia < 0) || (insn->opcode == JS_VM_IFGE && ia >= 0) || (insn->opcode == JS_VM_IFGT && ia > 0) || (insn->opcode == JS_VM_IFLE && ia <= 0))) pc = js_vm_profile_next_pc(js_vm_dispatch_profile, fault_pc, pc, ops[0], 1, vm_dispatch_drift_state, dispatch_step, sp);
                 JS_VM_BREAK;
             JS_VM_CASE(JS_VM_IF_ICMPEQ) JS_VM_CASE(JS_VM_IF_ICMPNE) JS_VM_CASE(JS_VM_IF_ICMPLT) JS_VM_CASE(JS_VM_IF_ICMPGE) JS_VM_CASE(JS_VM_IF_ICMPGT) JS_VM_CASE(JS_VM_IF_ICMPLE)
                 ok = insn->op_count >= 1 && js_vm_pop(stack, &sp, &b) && js_vm_pop(stack, &sp, &a) && js_vm_to_int(a, &ia) && js_vm_to_int(b, &ib);
-                if (ok && ((insn->opcode == JS_VM_IF_ICMPEQ && ia == ib) || (insn->opcode == JS_VM_IF_ICMPNE && ia != ib) || (insn->opcode == JS_VM_IF_ICMPLT && ia < ib) || (insn->opcode == JS_VM_IF_ICMPGE && ia >= ib) || (insn->opcode == JS_VM_IF_ICMPGT && ia > ib) || (insn->opcode == JS_VM_IF_ICMPLE && ia <= ib))) pc = ops[0];
+                if (ok && ((insn->opcode == JS_VM_IF_ICMPEQ && ia == ib) || (insn->opcode == JS_VM_IF_ICMPNE && ia != ib) || (insn->opcode == JS_VM_IF_ICMPLT && ia < ib) || (insn->opcode == JS_VM_IF_ICMPGE && ia >= ib) || (insn->opcode == JS_VM_IF_ICMPGT && ia > ib) || (insn->opcode == JS_VM_IF_ICMPLE && ia <= ib))) pc = js_vm_profile_next_pc(js_vm_dispatch_profile, fault_pc, pc, ops[0], 1, vm_dispatch_drift_state, dispatch_step, sp);
                 JS_VM_BREAK;
             JS_VM_CASE(JS_VM_IF_ACMPEQ) JS_VM_CASE(JS_VM_IF_ACMPNE)
                 ok = insn->op_count >= 1 && js_vm_pop(stack, &sp, &b) && js_vm_pop(stack, &sp, &a);
                 if (ok && a.type != JS_VM_VAL_OBJECT && a.type != JS_VM_VAL_NULL) ok = 0;
                 if (ok && b.type != JS_VM_VAL_OBJECT && b.type != JS_VM_VAL_NULL) ok = 0;
-                if (ok) { int eq = js_vm_value_is_null(a) && js_vm_value_is_null(b); if (!eq && !js_vm_value_is_null(a) && !js_vm_value_is_null(b)) eq = (*env)->IsSameObject(env, a.o, b.o); if ((insn->opcode == JS_VM_IF_ACMPEQ && eq) || (insn->opcode == JS_VM_IF_ACMPNE && !eq)) pc = ops[0]; }
+                if (ok) { int eq = js_vm_value_is_null(a) && js_vm_value_is_null(b); if (!eq && !js_vm_value_is_null(a) && !js_vm_value_is_null(b)) eq = (*env)->IsSameObject(env, a.o, b.o); if ((insn->opcode == JS_VM_IF_ACMPEQ && eq) || (insn->opcode == JS_VM_IF_ACMPNE && !eq)) pc = js_vm_profile_next_pc(js_vm_dispatch_profile, fault_pc, pc, ops[0], 1, vm_dispatch_drift_state, dispatch_step, sp); }
                 JS_VM_BREAK;
             JS_VM_CASE(JS_VM_GOTO)
                 ok = insn->op_count >= 1;
-                if (ok) pc = ops[0];
+                if (ok) pc = js_vm_profile_next_pc(js_vm_dispatch_profile, fault_pc, pc, ops[0], 1, vm_dispatch_drift_state, dispatch_step, sp);
                 JS_VM_BREAK;
             JS_VM_CASE(JS_VM_JSR)
                 ok = insn->op_count >= 1 && js_vm_push(stack, stack_cap, &sp, js_vm_int_value(pc));
-                if (ok) pc = ops[0];
+                if (ok) pc = js_vm_profile_next_pc(js_vm_dispatch_profile, fault_pc, pc, ops[0], 1, vm_dispatch_drift_state, dispatch_step, sp);
                 JS_VM_BREAK;
             JS_VM_CASE(JS_VM_IFNULL) JS_VM_CASE(JS_VM_IFNONNULL)
                 ok = insn->op_count >= 1 && js_vm_pop(stack, &sp, &a);
-                if (ok) { int is_null = js_vm_value_is_null(a); if ((insn->opcode == JS_VM_IFNULL && is_null) || (insn->opcode == JS_VM_IFNONNULL && !is_null)) pc = ops[0]; }
+                if (ok) { int is_null = js_vm_value_is_null(a); if ((insn->opcode == JS_VM_IFNULL && is_null) || (insn->opcode == JS_VM_IFNONNULL && !is_null)) pc = js_vm_profile_next_pc(js_vm_dispatch_profile, fault_pc, pc, ops[0], 1, vm_dispatch_drift_state, dispatch_step, sp); }
                 JS_VM_BREAK;
             JS_VM_CASE(JS_VM_IRETURN) JS_VM_CASE(JS_VM_LRETURN) JS_VM_CASE(JS_VM_FRETURN) JS_VM_CASE(JS_VM_DRETURN) JS_VM_CASE(JS_VM_ARETURN)
                 ok = js_vm_pop(stack, &sp, ret);
@@ -5447,7 +5694,7 @@ JS_HIDDEN int js_vm_execute(JNIEnv *env, js_vm_program *p, jobjectArray args, ch
                 JS_VM_BREAK;
             JS_VM_CASE(JS_VM_LOOKUPSWITCH)
                 ok = insn->op_count >= 2 && js_vm_pop(stack, &sp, &a) && js_vm_to_int(a, &ia);
-                if (ok) { int npairs = ops[0]; int target = ops[1]; if (insn->op_count < 2 + npairs * 2) { ok = 0; JS_VM_BREAK; } for (int i = 0; i < npairs; i++) if (ops[2 + i * 2] == ia) { target = ops[3 + i * 2]; break; } pc = target; }
+                if (ok) { int npairs = ops[0]; int target = ops[1]; if (insn->op_count < 2 + npairs * 2) { ok = 0; JS_VM_BREAK; } for (int i = 0; i < npairs; i++) if (ops[2 + i * 2] == ia) { target = ops[3 + i * 2]; break; } pc = js_vm_profile_next_pc(js_vm_dispatch_profile, fault_pc, pc, target, 1, vm_dispatch_drift_state, dispatch_step, sp); }
                 JS_VM_BREAK;
             JS_VM_DEFAULT
                 ok = 0;
@@ -5749,6 +5996,19 @@ jsn_k9(JNIEnv *env, jclass cls)
     if (!index_bytes || index_len <= 0) {
         if (index_bytes) { js_vbc4_wipe_volatile(index_bytes, (size_t)index_len); free(index_bytes); }
         js_vm_fail_closed(env, "invalid VM preload index");
+        return;
+    }
+    int unmasked_index_len = 0;
+    unsigned char *unmasked_index = js_vm_decode_masked_preload_index_owned(index_bytes, index_len, &unmasked_index_len);
+    if (unmasked_index) {
+        js_vbc4_wipe_volatile(index_bytes, (size_t)index_len);
+        free(index_bytes);
+        index_bytes = unmasked_index;
+        index_len = unmasked_index_len;
+    } else if (memcmp(index_bytes, "JSMI2|", 6) == 0) {
+        js_vbc4_wipe_volatile(index_bytes, (size_t)index_len);
+        free(index_bytes);
+        js_vm_fail_closed(env, "invalid masked VM preload index");
         return;
     }
     js_vm_register_preload_index_entries(index_bytes, index_len);
