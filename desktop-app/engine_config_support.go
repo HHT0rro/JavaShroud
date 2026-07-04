@@ -30,12 +30,13 @@ func prepareConfigFile(request ObfuscationRequest) (string, string, func(), erro
 	}
 
 	config := EngineConfig{
-		InputJarPath:         inputJarPath,
-		OutputJarPath:        outputJarPath,
-		Passes:               clonePasses(request.Passes),
-		RuleSet:              RuleSet{Rules: cloneRules(request.Rules)},
-		AllowOptInPasses:     request.AllowOptInPasses,
-		AllowRedundantPasses: request.AllowRedundantPasses,
+		InputJarPath:          inputJarPath,
+		OutputJarPath:         outputJarPath,
+		Passes:                clonePasses(request.Passes),
+		RuleSet:               RuleSet{Rules: cloneRules(request.Rules)},
+		AllowOptInPasses:      request.AllowOptInPasses,
+		AllowRedundantPasses:  request.AllowRedundantPasses,
+		AllowAnnotationPasses: request.AllowAnnotationPasses,
 	}
 
 	payload, err := formatEngineConfigToml(config)
@@ -97,6 +98,9 @@ func formatEngineConfigToml(config EngineConfig) (string, error) {
 	builder.WriteString("\n")
 	builder.WriteString("allowRedundantPasses = ")
 	builder.WriteString(strconv.FormatBool(config.AllowRedundantPasses))
+	builder.WriteString("\n")
+	builder.WriteString("allowAnnotationPasses = ")
+	builder.WriteString(strconv.FormatBool(config.AllowAnnotationPasses))
 	builder.WriteString("\n\n")
 
 	for _, passSpec := range config.Passes {

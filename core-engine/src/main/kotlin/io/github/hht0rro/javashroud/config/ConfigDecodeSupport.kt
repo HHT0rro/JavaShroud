@@ -28,6 +28,7 @@ fun decodeConfig(rootNode: JsonNode, configPath: Path): ObfuscationConfig {
         default = isWorkbenchConfig(scalarRoot),
     )
     val allowRedundantPasses = optionalNestedBoolean(scalarRoot, "allowRedundantPasses", configPath, scalarRootPath)
+    val allowAnnotationPasses = optionalNestedBoolean(scalarRoot, "allowAnnotationPasses", configPath, scalarRootPath)
 
     return ObfuscationConfig(
         inputJarPath = inputJarPath,
@@ -37,6 +38,7 @@ fun decodeConfig(rootNode: JsonNode, configPath: Path): ObfuscationConfig {
         allowIncomplete = allowIncomplete,
         allowOptInPasses = allowOptInPasses,
         allowRedundantPasses = allowRedundantPasses,
+        allowAnnotationPasses = allowAnnotationPasses,
     )
 }
 
