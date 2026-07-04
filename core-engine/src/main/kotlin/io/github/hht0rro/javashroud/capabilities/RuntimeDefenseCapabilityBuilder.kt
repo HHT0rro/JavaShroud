@@ -13,7 +13,7 @@ internal fun runtimeDefenseCapabilityBindings(): List<CapabilityBinding> = listO
         risk = "medium",
         requiresOptIn = true,
         defaultEnabled = false,
-        compatibilityNotes = "Changes callsite linking and runtime dispatch paths; verify performance, debugging, and framework proxy scenarios. Treat as cost-raising dispatch indirection, not a hard anti-hook boundary.",
+        compatibilityNotes = "Changes callsite linking and runtime dispatch paths; generated helper/callsite surfaces target Java 11+ runtime behavior. Verify performance, debugging, framework proxy, and older runtime scenarios. Treat as cost-raising dispatch indirection, not a hard anti-hook boundary.",
         params = listOf(
             ParamSchema(
                 key = "rotationStrategy",
@@ -39,7 +39,7 @@ internal fun runtimeDefenseCapabilityBindings(): List<CapabilityBinding> = listO
         stability = "experimental",
         risk = "high",
         defaultEnabled = false,
-        compatibilityNotes = "Requires jni-microkernel-loader and stable runtime binding material; environment changes directly affect decryption and startup behavior. Combined mode requires all configured material to be present.",
+        compatibilityNotes = "Requires jni-microkernel-loader, Java 11+ runtime, and stable runtime binding material; environment changes directly affect decryption and startup behavior. Combined mode requires all configured material to be present.",
         requiredPassIds = listOf("jni-microkernel-loader"),
         params = listOf(
             ParamSchema(
@@ -67,7 +67,7 @@ internal fun runtimeDefenseCapabilityBindings(): List<CapabilityBinding> = listO
         risk = "medium",
         requiresOptIn = true,
         defaultEnabled = false,
-        compatibilityNotes = RUNTIME_HELPER_COMPATIBILITY_NOTE,
+        compatibilityNotes = "会注入 Java 11/classfile 55 runtime helper；目标运行时需 Java 11+。会插入运行时数据相关分支，请验证性能、监控工具和符号执行/测试环境兼容性。",
         params = listOf(
             ParamSchema(
                 key = "trapDensity",
@@ -94,7 +94,7 @@ internal fun runtimeDefenseCapabilityBindings(): List<CapabilityBinding> = listO
         risk = "medium",
         requiresOptIn = true,
         defaultEnabled = false,
-        compatibilityNotes = "May impact performance, stack traces, and debugging; verify exception-sensitive code paths carefully.",
+        compatibilityNotes = "会注入 Java 11/classfile 55 runtime helper；目标运行时需 Java 11+。会改变异常语义、堆栈形态和性能特征，需验证异常敏感路径。",
         params = listOf(
             ParamSchema(key = "virtualizationLevel", type = "enum", defaultValue = JsonNodeFactory.instance.textNode("selective"), options = listOf("selective", "aggressive"), description = "Virtualization level."),
             ParamSchema(key = "seed", type = "number", defaultValue = JsonNodeFactory.instance.nullNode(), options = null, description = "Deterministic seed."),

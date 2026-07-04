@@ -47,7 +47,7 @@ internal fun obfuscationCapabilityBindings(): List<CapabilityBinding> = listOf(
         risk = "medium",
         requiresOptIn = true,
         defaultEnabled = false,
-        compatibilityNotes = LAYOUT_SENSITIVE_COMPATIBILITY_NOTE,
+        compatibilityNotes = "Java 8 classfile 兼容：输出可包含 invokedynamic，但不应抬升 classfile major version。会改变调用点链接形态，请验证反射、agent、AOT 和安全管理策略。",
     ),
     CapabilityBinding(
         id = "control-flow-obfuscation",
@@ -106,7 +106,7 @@ internal fun obfuscationCapabilityBindings(): List<CapabilityBinding> = listOf(
         risk = "medium",
         requiresOptIn = true,
         defaultEnabled = false,
-        compatibilityNotes = "会重写异常区域和分发结构；请重点验证异常敏感路径和性能表现。当前为中等强度扰动，不能替代 native/VM 级保护。",
+        compatibilityNotes = "会重写异常区域和分发结构；Java 8 classfile 输入不应被抬升 major version。请重点验证异常敏感路径和性能表现。当前为中等强度扰动，不能替代 native/VM 级保护。",
         params = listOf(
             ParamSchema(
                 key = "density",
@@ -144,7 +144,7 @@ internal fun obfuscationCapabilityBindings(): List<CapabilityBinding> = listOf(
         risk = "medium",
         requiresOptIn = true,
         defaultEnabled = false,
-        compatibilityNotes = LAYOUT_SENSITIVE_COMPATIBILITY_NOTE,
+        compatibilityNotes = "Java 11+/classfile 55+ 特性：只应对 Java 11 及以上 classfile 写入 CONSTANT_Dynamic；Java 8/classfile 52 输入必须跳过或回退，不能写入 CONSTANT_Dynamic，也不应抬升 major version。",
     ),
 )
 
