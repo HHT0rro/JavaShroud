@@ -1457,6 +1457,8 @@ static void js_vbc4_hmac_with_scoped_master_key(const unsigned char **parts, con
 #define JS_VBC4_FLAG_BLOCK_DISPATCH 0x0800u
 #define JS_VBC4_REQUIRED_FLAGS 0x0FFFu
 #define JS_VBC4_FLAG_NESTED_VM 0x1000u
+#define JS_VBC4_FLAG_POLYMORPHIC_CP 0x2000u
+#define JS_VBC4_FLAG_REGISTER_ROW_ENVELOPE 0x4000u
 #define JS_VBC4_NESTED_MAGIC 0x4E56u
 #define JS_VBC4_NESTED_VERSION 1u
 #define JS_VBC4_NESTED_FIELD_COUNT 6u
@@ -1777,6 +1779,46 @@ static uint32_t js_vbc4_nested_mix(uint32_t seed, uint32_t profile, uint32_t blo
 static uint32_t js_vbc4_nested_dialect(uint32_t seed, uint32_t profile, uint32_t block_id, uint32_t row_count) {
     uint32_t dialect_seed = js_vbc4_rotl32(seed, 9) ^ js_vbc4_rotl32(profile, 3);
     return js_vbc4_nested_mix(seed, profile, block_id, row_count, 0x23u, dialect_seed);
+}
+
+static uint32_t js_vbc4_register_row_mix(uint32_t seed, uint32_t block_id, uint32_t row_index, uint32_t slot, uint32_t field_index) {
+    uint32_t x = seed ^ (block_id * 0x045D9F3Bu) ^ (row_index * 0x7FEB352Du) ^
+        (slot * 0x846CA68Bu) ^ (field_index * 0x2C1B3C6Du);
+    x ^= x >> 16;
+    x *= 0x7FEB352Du;
+    x ^= x >> 13;
+    x *= 0x846CA68Bu;
+    return x ^ (x >> 16);
+}
+
+static void js_vbc4_register_row_order(uint32_t seed, uint32_t block_id, uint32_t row_index, int order[6]) {
+    for (int i = 0; i < 6; i++) order[i] = i;
+    for (int i = 5; i >= 0; i--) {
+        int j = (int)(js_vbc4_register_row_mix(seed, block_id, row_index, (uint32_t)i, 0x71u) % (uint32_t)(i + 1));
+        int tmp = order[i];
+        order[i] = order[j];
+        order[j] = tmp;
+    }
+}
+
+static int js_vbc4_read_register_row(const unsigned char *data, int len, int *pos, uint32_t seed, uint32_t block_id, uint32_t row_index, unsigned int fields[6]) {
+    int order[6];
+    memset(fields, 0, sizeof(unsigned int) * 6u);
+    js_vbc4_register_row_order(seed, block_id, row_index, order);
+    for (int slot = 0; slot < 6; slot++) {
+        int field = order[slot];
+        unsigned int value16 = 0;
+        uint32_t value32 = 0;
+        uint32_t mask = js_vbc4_register_row_mix(seed, block_id, row_index, (uint32_t)slot, (uint32_t)field);
+        if (field == 5) {
+            if (!js_vm_read_u4(data, len, pos, &value32)) return 0;
+            fields[field] = value32 ^ mask;
+        } else {
+            if (!js_vm_read_u2(data, len, pos, &value16)) return 0;
+            fields[field] = (value16 ^ mask) & 0xFFFFu;
+        }
+    }
+    return 1;
 }
 
 static uint32_t js_vbc4_nested_row_checksum(uint32_t seed, uint32_t profile, uint32_t block_id, uint32_t row_index, uint32_t dialect, const uint32_t fields[6]) {
@@ -3194,7 +3236,8 @@ JS_HIDDEN int js_vm_parse_program(const unsigned char *data, int len, js_vm_prog
     pos += 16;
     if (!js_vm_read_u2(data, len, &pos, &u)) JS_VM_PARSE_FAIL; /* flags */
     vbc4_flags = (int)u;
-    if (((unsigned int)vbc4_flags & JS_VBC4_REQUIRED_FLAGS) != JS_VBC4_REQUIRED_FLAGS) JS_VM_PARSE_FAIL; /* require full VBC4 max-strength feature set */
+    if (((unsigned int)vbc4_flags & (JS_VBC4_REQUIRED_FLAGS | JS_VBC4_FLAG_POLYMORPHIC_CP)) !=
+        (JS_VBC4_REQUIRED_FLAGS | JS_VBC4_FLAG_POLYMORPHIC_CP)) JS_VM_PARSE_FAIL; /* require full VBC4 max-strength feature set */
     p->vbc4_flags = (uint32_t)vbc4_flags;
     parse_stage = 2;
     parse_stage = 21;
@@ -3361,18 +3404,34 @@ if (raw_pos != (int)cp_enc_sz) JS_VM_PARSE_FAIL;
             if (!block) JS_VM_PARSE_FAIL;
             int block_pos = 0;
             unsigned int register_count = 0, register_insn_count = 0, stack_insn_count = 0;
+            uint32_t row_dialect = 0;
             if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &register_count)) JS_VM_PARSE_FAIL;
             if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &register_insn_count)) JS_VM_PARSE_FAIL;
+            if ((vbc4_flags & JS_VBC4_FLAG_REGISTER_ROW_ENVELOPE) != 0 && (vbc4_flags & JS_VBC4_FLAG_NESTED_VM) == 0) {
+                if (!js_vm_read_u4(block, (int)block_plain_sz, &block_pos, &row_dialect)) JS_VM_PARSE_FAIL;
+                if (row_dialect != js_vbc4_register_row_mix((uint32_t)build_seed, (uint32_t)bi, register_insn_count, 0x23u, 0x4Du)) JS_VM_PARSE_FAIL;
+            }
             p->reg_program.register_count = (int)register_count;
             int base_insn = p->insn_count;
             for (unsigned int ri = 0; ri < register_insn_count; ri++) {
                 unsigned int raw_opcode = 0, flags = 0, op_count = 0, srcA = 0, srcB = 0;
-                if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &raw_opcode)) JS_VM_PARSE_FAIL;
-                if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &flags)) JS_VM_PARSE_FAIL;
-                if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &op_count)) JS_VM_PARSE_FAIL;
-                if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &srcA)) JS_VM_PARSE_FAIL;
-                if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &srcB)) JS_VM_PARSE_FAIL;
-                if (!js_vm_read_u4(block, (int)block_plain_sz, &block_pos, &u4)) JS_VM_PARSE_FAIL;
+                if ((vbc4_flags & JS_VBC4_FLAG_NESTED_VM) != 0 || (vbc4_flags & JS_VBC4_FLAG_REGISTER_ROW_ENVELOPE) == 0) {
+                    if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &raw_opcode)) JS_VM_PARSE_FAIL;
+                    if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &flags)) JS_VM_PARSE_FAIL;
+                    if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &op_count)) JS_VM_PARSE_FAIL;
+                    if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &srcA)) JS_VM_PARSE_FAIL;
+                    if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &srcB)) JS_VM_PARSE_FAIL;
+                    if (!js_vm_read_u4(block, (int)block_plain_sz, &block_pos, &u4)) JS_VM_PARSE_FAIL;
+                } else {
+                    unsigned int row_fields[6];
+                    if (!js_vbc4_read_register_row(block, (int)block_plain_sz, &block_pos, (uint32_t)build_seed, (uint32_t)bi, ri, row_fields)) JS_VM_PARSE_FAIL;
+                    raw_opcode = row_fields[0];
+                    flags = row_fields[1];
+                    op_count = row_fields[2];
+                    srcA = row_fields[3];
+                    srcB = row_fields[4];
+                    u4 = row_fields[5];
+                }
                 if ((flags & 0x8000u) != 0) continue;
                 if ((flags & 0x0001u) == 0) continue;
                 int opcode_mask_index = logical_insn_index++;
@@ -3401,12 +3460,23 @@ if (raw_pos != (int)cp_enc_sz) JS_VM_PARSE_FAIL;
                     for (unsigned int extra = 1; extra < op_count; extra++) {
                         unsigned int cont_opcode = 0, cont_flags = 0, cont_dst = 0, cont_srcA = 0, cont_srcB = 0, cont_operand = 0;
                         if (++ri >= register_insn_count) JS_VM_PARSE_FAIL;
-                        if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &cont_opcode)) JS_VM_PARSE_FAIL;
-                        if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &cont_flags)) JS_VM_PARSE_FAIL;
-                        if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &cont_dst)) JS_VM_PARSE_FAIL;
-                        if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &cont_srcA)) JS_VM_PARSE_FAIL;
-                        if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &cont_srcB)) JS_VM_PARSE_FAIL;
-                        if (!js_vm_read_u4(block, (int)block_plain_sz, &block_pos, &cont_operand)) JS_VM_PARSE_FAIL;
+                        if ((vbc4_flags & JS_VBC4_FLAG_NESTED_VM) != 0 || (vbc4_flags & JS_VBC4_FLAG_REGISTER_ROW_ENVELOPE) == 0) {
+                            if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &cont_opcode)) JS_VM_PARSE_FAIL;
+                            if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &cont_flags)) JS_VM_PARSE_FAIL;
+                            if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &cont_dst)) JS_VM_PARSE_FAIL;
+                            if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &cont_srcA)) JS_VM_PARSE_FAIL;
+                            if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &cont_srcB)) JS_VM_PARSE_FAIL;
+                            if (!js_vm_read_u4(block, (int)block_plain_sz, &block_pos, &cont_operand)) JS_VM_PARSE_FAIL;
+                        } else {
+                            unsigned int cont_fields[6];
+                            if (!js_vbc4_read_register_row(block, (int)block_plain_sz, &block_pos, (uint32_t)build_seed, (uint32_t)bi, ri, cont_fields)) JS_VM_PARSE_FAIL;
+                            cont_opcode = cont_fields[0];
+                            cont_flags = cont_fields[1];
+                            cont_dst = cont_fields[2];
+                            cont_srcA = cont_fields[3];
+                            cont_srcB = cont_fields[4];
+                            cont_operand = cont_fields[5];
+                        }
                         if ((cont_flags & 0x8000u) == 0 || cont_opcode != JS_VM_REG_OPERAND_CONT) JS_VM_PARSE_FAIL;
                         if (!js_vm_reg_program_append(p, (jint)cont_opcode, (jint)cont_flags, (jint)cont_dst, (jint)cont_srcA, (jint)cont_srcB, (jint)cont_operand, (jint)cont_opcode, (jint)cont_opcode)) JS_VM_PARSE_FAIL;
                         p->insns[p->insn_count].ops[extra] = js_vm_store_resident_operand(p, p->insn_count, (int)extra, (jint)cont_operand);
@@ -3467,18 +3537,34 @@ if (raw_pos != (int)cp_enc_sz) JS_VM_PARSE_FAIL;
 
         int insn_pos = 0;
         unsigned int register_count = 0, register_insn_count = 0;
+        uint32_t row_dialect = 0;
         if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &register_count)) JS_VM_PARSE_FAIL;
         if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &register_insn_count)) JS_VM_PARSE_FAIL;
+        if ((vbc4_flags & JS_VBC4_FLAG_REGISTER_ROW_ENVELOPE) != 0 && (vbc4_flags & JS_VBC4_FLAG_NESTED_VM) == 0) {
+            if (!js_vm_read_u4(insn, (int)insn_plain_sz, &insn_pos, &row_dialect)) JS_VM_PARSE_FAIL;
+            if (row_dialect != js_vbc4_register_row_mix((uint32_t)build_seed, (uint32_t)block_ids[0], register_insn_count, 0x23u, 0x4Du)) JS_VM_PARSE_FAIL;
+        }
         p->reg_program.register_count = (int)register_count;
         int logical_insn_index = 0;
         for (unsigned int ri = 0; ri < register_insn_count; ri++) {
             unsigned int raw_opcode = 0, flags = 0, op_count = 0, srcA = 0, srcB = 0;
-            if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &raw_opcode)) JS_VM_PARSE_FAIL;
-            if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &flags)) JS_VM_PARSE_FAIL;
-            if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &op_count)) JS_VM_PARSE_FAIL;
-            if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &srcA)) JS_VM_PARSE_FAIL;
-            if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &srcB)) JS_VM_PARSE_FAIL;
-            if (!js_vm_read_u4(insn, (int)insn_plain_sz, &insn_pos, &u4)) JS_VM_PARSE_FAIL;
+            if ((vbc4_flags & JS_VBC4_FLAG_NESTED_VM) != 0 || (vbc4_flags & JS_VBC4_FLAG_REGISTER_ROW_ENVELOPE) == 0) {
+                if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &raw_opcode)) JS_VM_PARSE_FAIL;
+                if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &flags)) JS_VM_PARSE_FAIL;
+                if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &op_count)) JS_VM_PARSE_FAIL;
+                if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &srcA)) JS_VM_PARSE_FAIL;
+                if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &srcB)) JS_VM_PARSE_FAIL;
+                if (!js_vm_read_u4(insn, (int)insn_plain_sz, &insn_pos, &u4)) JS_VM_PARSE_FAIL;
+            } else {
+                unsigned int row_fields[6];
+                if (!js_vbc4_read_register_row(insn, (int)insn_plain_sz, &insn_pos, (uint32_t)build_seed, (uint32_t)block_ids[0], ri, row_fields)) JS_VM_PARSE_FAIL;
+                raw_opcode = row_fields[0];
+                flags = row_fields[1];
+                op_count = row_fields[2];
+                srcA = row_fields[3];
+                srcB = row_fields[4];
+                u4 = row_fields[5];
+            }
             if ((flags & 0x8000u) != 0) continue;
             if ((flags & 0x0001u) == 0) continue;
             int opcode_mask_index = logical_insn_index++;
@@ -3507,12 +3593,23 @@ if (raw_pos != (int)cp_enc_sz) JS_VM_PARSE_FAIL;
                 for (unsigned int extra = 1; extra < op_count; extra++) {
                     unsigned int cont_opcode = 0, cont_flags = 0, cont_dst = 0, cont_srcA = 0, cont_srcB = 0, cont_operand = 0;
                     if (++ri >= register_insn_count) JS_VM_PARSE_FAIL;
-                    if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &cont_opcode)) JS_VM_PARSE_FAIL;
-                    if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &cont_flags)) JS_VM_PARSE_FAIL;
-                    if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &cont_dst)) JS_VM_PARSE_FAIL;
-                    if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &cont_srcA)) JS_VM_PARSE_FAIL;
-                    if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &cont_srcB)) JS_VM_PARSE_FAIL;
-                    if (!js_vm_read_u4(insn, (int)insn_plain_sz, &insn_pos, &cont_operand)) JS_VM_PARSE_FAIL;
+                    if ((vbc4_flags & JS_VBC4_FLAG_NESTED_VM) != 0 || (vbc4_flags & JS_VBC4_FLAG_REGISTER_ROW_ENVELOPE) == 0) {
+                        if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &cont_opcode)) JS_VM_PARSE_FAIL;
+                        if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &cont_flags)) JS_VM_PARSE_FAIL;
+                        if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &cont_dst)) JS_VM_PARSE_FAIL;
+                        if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &cont_srcA)) JS_VM_PARSE_FAIL;
+                        if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &cont_srcB)) JS_VM_PARSE_FAIL;
+                        if (!js_vm_read_u4(insn, (int)insn_plain_sz, &insn_pos, &cont_operand)) JS_VM_PARSE_FAIL;
+                    } else {
+                        unsigned int cont_fields[6];
+                        if (!js_vbc4_read_register_row(insn, (int)insn_plain_sz, &insn_pos, (uint32_t)build_seed, (uint32_t)block_ids[0], ri, cont_fields)) JS_VM_PARSE_FAIL;
+                        cont_opcode = cont_fields[0];
+                        cont_flags = cont_fields[1];
+                        cont_dst = cont_fields[2];
+                        cont_srcA = cont_fields[3];
+                        cont_srcB = cont_fields[4];
+                        cont_operand = cont_fields[5];
+                    }
                     if ((cont_flags & 0x8000u) == 0 || cont_opcode != JS_VM_REG_OPERAND_CONT) JS_VM_PARSE_FAIL;
                     if (!js_vm_reg_program_append(p, (jint)cont_opcode, (jint)cont_flags, (jint)cont_dst, (jint)cont_srcA, (jint)cont_srcB, (jint)cont_operand, (jint)cont_opcode, (jint)cont_opcode)) JS_VM_PARSE_FAIL;
                     p->insns[p->insn_count].ops[extra] = js_vm_store_resident_operand(p, p->insn_count, (int)extra, (jint)cont_operand);
