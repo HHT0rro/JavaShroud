@@ -30,7 +30,7 @@ internal fun loaderProtectionCapabilityBindings(): List<CapabilityBinding> = lis
 
         requiresRuntimeFlags = emptyList(),
 
-        compatibilityNotes = "需要 jni-microkernel-loader；native 不可用、metadata 篡改或资源篡改会 fail-closed。会改变类加载路径，请重点验证反射、资源路径和自定义 ClassLoader 场景。",
+        compatibilityNotes = "需要 jni-microkernel-loader 与平台 native 库；运行目标通常要求 Java 11+。native 不可用、metadata 篡改或资源篡改会 fail-closed。会改变类加载路径，请重点验证反射、资源路径和自定义 ClassLoader 场景。",
         requiredPassIds = listOf("jni-microkernel-loader"),
         defaultEnabled = false,
 
@@ -100,7 +100,7 @@ internal fun loaderProtectionCapabilityBindings(): List<CapabilityBinding> = lis
 
         requiresRuntimeFlags = emptyList(),
 
-        compatibilityNotes = "需要 jni-microkernel-loader；native 不可用、metadata 篡改或资源篡改会 fail-closed。会改变方法体恢复和调用路径；hidden-class-redirect 模式需要 JDK 15+。",
+        compatibilityNotes = "需要 jni-microkernel-loader 与平台 native 库；lazy-decrypt 模式通常要求 Java 11+ helper，hidden-class-redirect 模式需要 JDK 15+。native 不可用、metadata 篡改或资源篡改会 fail-closed。会改变方法体恢复和调用路径。",
         requiredPassIds = listOf("jni-microkernel-loader"),
 
         defaultEnabled = false,

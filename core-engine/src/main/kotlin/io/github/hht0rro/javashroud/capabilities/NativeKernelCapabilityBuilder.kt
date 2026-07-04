@@ -73,7 +73,7 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
 
         platformConstraints = emptyList(),
 
-        compatibilityNotes = "可能与调试、测试、APM、游戏反作弊或监控工具冲突。仅用于授权保护场景。",
+        compatibilityNotes = "需要平台特定 native 库和 Java 11+ 目标运行时。可能与调试、测试、APM、游戏反作弊或监控工具冲突。仅用于授权保护场景。",
 
         requiredPassIds = listOf("jni-microkernel-loader"),
 
@@ -147,7 +147,7 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
 
         platformConstraints = listOf("HotSpot JVM"),
 
-        compatibilityNotes = "仅用于授权保护场景，可能与诊断、分析、heap 调试工具冲突。jni-key-hold/full 要求 jni-microkernel-loader 成功加载。",
+        compatibilityNotes = "仅用于授权保护场景，可能与诊断、分析、heap 调试工具冲突。field-scramble 应保持输入 classfile major；jni-key-hold/full 要求 Java 11+、平台 native 库和 jni-microkernel-loader 成功加载。",
 
         requiredPassIds = listOf("jni-microkernel-loader"),
 

@@ -12,6 +12,7 @@ on:
       - 'settings.gradle.kts'
       - 'gradlew'
       - 'gradlew.bat'
+      - 'annotations/**'
       - 'core-engine/**'
       - 'desktop-app/**'
   pull_request:
@@ -23,6 +24,7 @@ on:
       - 'settings.gradle.kts'
       - 'gradlew'
       - 'gradlew.bat'
+      - 'annotations/**'
       - 'core-engine/**'
       - 'desktop-app/**'
 
@@ -39,8 +41,8 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-      - name: Build core-engine
-        run: ./gradlew :core-engine:build
+      - name: Build Gradle modules
+        run: ./gradlew :annotations:build :core-engine:build
         shell: bash
 
   desktop-app:

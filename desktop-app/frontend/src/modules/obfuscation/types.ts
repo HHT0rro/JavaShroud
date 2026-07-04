@@ -114,6 +114,7 @@ export interface ObfuscationRequest {
   readonly rules: readonly RuleItem[]
   readonly allowOptInPasses: boolean
   readonly allowRedundantPasses: boolean
+  readonly allowAnnotationPasses?: boolean
 }
 
 export interface WorkbenchTomlPassConfig {

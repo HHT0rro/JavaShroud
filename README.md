@@ -135,6 +135,39 @@ JavaShroud 的 VMBC 路线更偏向虚拟执行模型。Native 层不是单纯�
 | 前端 | Vue 3、Vite、TypeScript、Naive UI、lucide-vue-next、xterm、Tailwind CSS |
 | 测试 | Kotlin test / JUnit Platform、Go test、前端 parser check 脚本 |
 
+## 兼容性说明
+
+JavaShroud 引擎本身需要 JDK 21+ 构建和运行；这里的“老旧版本兼容性”指被混淆产物的 classfile/JDK 运行目标。默认原则是：不依赖 Java 11+ 特性的普通 pass 处理 Java 8 classfile（major 52）时，不应抬升 classfile 版本，也不应写入 `ConstantDynamic` 等越界特性。
+
+| Pass | 最低目标产物版本 | 兼容性结论与限制 |
+| --- | --- | --- |
+| `strip-compile-debug-info` | Java 8 / classfile 52 | 只移除调试属性，不抬升 classfile 版本。 |
+| `rename-classes` | Java 8 / classfile 52 | 不抬升 classfile 版本；需 keep 反射、资源路径和外部 API 类名。 |
+| `rename-packages` | Java 8 / classfile 52 | 不抬升 classfile 版本；需验证资源查找和自定义 ClassLoader。 |
+| `rename-methods` | Java 8 / classfile 52 | 不抬升 classfile 版本；需 keep 反射、序列化钩子、框架入口和继承敏感方法。 |
+| `rename-fields` | Java 8 / classfile 52 | 不抬升 classfile 版本；需 keep 反射、序列化、DI 和数据绑定字段。 |
+| `field-string-encryption` | Java 8 / classfile 52 | 不抬升 classfile 版本；会改写静态初始化路径。 |
+| `integer-constant-obfuscation` | Java 8 / classfile 52 | 不抬升 classfile 版本；只使用 Java 8 可表达的算术字节码。 |
+| `static-init-perturbation` | Java 8 / classfile 52 | 不抬升 classfile 版本；会改变 `<clinit>` 结构，需验证初始化顺序敏感代码。 |
+| `anti-decompiler-structure` | Java 8 / classfile 52 | 不抬升 classfile 版本；会增加异常/死代码结构，需验证老旧 verifier。 |
+| `invoke-dynamic-indirection` | Java 8 / classfile 52 | 可在 Java 8 产物中引入 `invokedynamic`，但不抬升 classfile 版本；Java 7 以下不是目标。 |
+| `control-flow-obfuscation` | Java 8 / classfile 52 | 不抬升 classfile 版本；需验证性能和异常敏感路径。 |
+| `reference-proxy` | Java 8 / classfile 52 | 不抬升 classfile 版本；会插入代理调用点，需验证调用栈/反射场景。 |
+| `control-flow-flattening` | Java 8 / classfile 52 | 不抬升 classfile 版本；会重写分发和异常区域。 |
+| `condy-constant-indirection` | Java 11 / classfile 55 | Java 11+ 才写入 `ConstantDynamic`；Java 8 输入必须跳过或回退，不能写入 condy 或抬升版本。 |
+| `member-hide` | Java 8 / classfile 52 | 不抬升 classfile 版本；会改变 synthetic/访问标志可见性。 |
+| `anti-symbolic-execution` | Java 11+ 目标运行时 | 会注入 Java 11/classfile 55 runtime helper；不作为 Java 8 产物兼容 pass。 |
+| `exception-semantic-virtualization` | Java 11+ 目标运行时 | 会注入 Java 11/classfile 55 runtime helper；会改变异常语义和堆栈形态，需验证异常敏感路径。 |
+| `string-encryption` | Java 11+ 目标运行时 | 依赖 `jni-microkernel-loader` 和 native-backed 解密路径；不作为 Java 8 运行目标兼容 pass。 |
+| `class-encryption-loader` | Java 11+ 目标运行时 | 依赖 `jni-microkernel-loader`、平台 native 库和自定义加载路径；native/metadata 失败会 fail-closed。 |
+| `method-body-delayed-decryption` | Java 11+；`hidden-class-redirect` 需要 JDK 15+ | 依赖 native/helper；会改变方法体恢复路径。 |
+| `method-virtualization` | Java 11+ 目标运行时 | VBC4/native-only；要求 `jni-microkernel-loader` 和平台 native 库，旧资源/旧 profile fail-closed。 |
+| `callsite-rotation-protection` | Java 11+ 目标运行时 | 使用运行时 callsite/linking 扰动；需验证代理、调试和性能。 |
+| `environment-bound-keys` | Java 11+ 目标运行时 | 依赖 `jni-microkernel-loader` 与稳定环境材料；环境变化会导致启动/解密失败。 |
+| `anti-instrumentation` | Java 11+ 目标运行时 | 依赖平台 native 库；可能与 agent、APM、调试和测试工具冲突。 |
+| `anti-dump-protection` | Java 8（`field-scramble`）/ Java 11+（native 模式） | `field-scramble` 不应抬升版本；`jni-key-hold/full` 依赖 native loader。 |
+| `jni-microkernel-loader` | Java 11+ 目标运行时 | 只作为其他 helper/native pass 的依赖启用；需要支持的平台和 native 构建链。 |
+
 ## 常用命令
 
 ### 核心引擎
@@ -188,7 +221,13 @@ wails build
 
 完整发布脚本会构建 engine JAR、GraalVM native engine、前端 bundle 和 Wails 桌面程序。发布验收应以 `build\release\javashroud-windows-amd64\javashroud.exe` 等目标产物存在且可运行为准，而不是只看单个 Gradle、Yarn 或 Go 命令成功。
 
-GitHub Release 由 `.github/workflows/release.yml` 在推送 `v*` tag 时创建。发布顺序必须先推送 `dev` 和 `main` 分支，再推送或重推 `v0.9.1-dev` 这样的 `v` 前缀 tag；裸 tag `0.9.1-dev` 不会触发 release workflow，因此不会显示为由 `github-actions` 发布。
+GitHub Release 由 `.github/workflows/release.yml` 在推送 `v*` tag 时创建。发布顺序必须先推送 `dev` 和 `main` 分支，再推送或重推 `v0.9.2-dev` 这样的 `v` 前缀 tag；裸 tag `0.9.2-dev` 不会触发 release workflow，因此不会显示为由 `github-actions` 发布。
+
+### 0.9.2-dev 验收说明
+
+`0.9.2-dev` 将引擎版本提升到 `0.9.2-dev`，VBC 能力版本提升到 `4.55`。本版本修复 `condy-constant-indirection` 与 `method-virtualization` 在 strict `all-compatible`、max 参数组合下的交互问题：由引擎生成的 `ConstantDynamic` LDC 现在会以受控 opcode 进入 native VM，字符串和 int condy bootstrap 保持运行语义，未知 bootstrap 形态仍 fail closed。
+
+这不是通过跳过方法或关闭 strict 模式实现的降级修复。`methodSelection = "all-compatible"` 仍会覆盖包含受控 condy LDC 的兼容方法，真实 JAR 矩阵中此前失败的 `demo.jar` / `pair-condy-constant-indirection__method-virtualization-params-max` 已完成混淆并按基线运行。
 
 ### 0.9.1-dev 验收说明
 

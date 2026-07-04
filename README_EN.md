@@ -138,6 +138,39 @@ The default pipeline stays conservative. High-risk capabilities are disabled by 
 | Frontend | Vue 3, Vite, TypeScript, Naive UI, lucide-vue-next, xterm, Tailwind CSS |
 | Tests | Kotlin test / JUnit Platform, Go test, frontend parser check scripts |
 
+## Compatibility Notes
+
+The JavaShroud engine itself requires JDK 21+ to build and run. In this section, legacy compatibility refers to the obfuscated artifact's classfile and target runtime. The default rule is: passes that do not require Java 11+ features must not raise Java 8 classfiles (major 52), and must not write out-of-range features such as `ConstantDynamic`.
+
+| Pass | Minimum target artifact | Compatibility conclusion and limits |
+| --- | --- | --- |
+| `strip-compile-debug-info` | Java 8 / classfile 52 | Removes debug attributes only; does not raise classfile version. |
+| `rename-classes` | Java 8 / classfile 52 | Does not raise classfile version; keep reflected names, resource paths, and public API classes. |
+| `rename-packages` | Java 8 / classfile 52 | Does not raise classfile version; verify resource lookup and custom ClassLoader code. |
+| `rename-methods` | Java 8 / classfile 52 | Does not raise classfile version; keep reflection, serialization hooks, framework entrypoints, and inheritance-sensitive methods. |
+| `rename-fields` | Java 8 / classfile 52 | Does not raise classfile version; keep reflective fields, serializers, DI, and data binding fields. |
+| `field-string-encryption` | Java 8 / classfile 52 | Does not raise classfile version; rewrites static initialization paths. |
+| `integer-constant-obfuscation` | Java 8 / classfile 52 | Does not raise classfile version; uses Java 8-compatible arithmetic bytecode. |
+| `static-init-perturbation` | Java 8 / classfile 52 | Does not raise classfile version; changes `<clinit>` structure, so validate initialization-order-sensitive code. |
+| `anti-decompiler-structure` | Java 8 / classfile 52 | Does not raise classfile version; adds exception/dead-code structures, so validate older verifiers. |
+| `invoke-dynamic-indirection` | Java 8 / classfile 52 | May introduce `invokedynamic` in Java 8 artifacts without raising classfile version; Java 7 or older is not a target. |
+| `control-flow-obfuscation` | Java 8 / classfile 52 | Does not raise classfile version; validate performance and exception-sensitive paths. |
+| `reference-proxy` | Java 8 / classfile 52 | Does not raise classfile version; inserts proxy call sites, so validate stack/reflective scenarios. |
+| `control-flow-flattening` | Java 8 / classfile 52 | Does not raise classfile version; rewrites dispatch and exception regions. |
+| `condy-constant-indirection` | Java 11 / classfile 55 | Writes `ConstantDynamic` only for Java 11+ classfiles; Java 8 input must skip or fall back without condy or version raising. |
+| `member-hide` | Java 8 / classfile 52 | Does not raise classfile version; changes synthetic/access flag visibility. |
+| `anti-symbolic-execution` | Java 11+ target runtime | Injects a Java 11/classfile 55 runtime helper; not treated as a Java 8 artifact-compatible pass. |
+| `exception-semantic-virtualization` | Java 11+ target runtime | Injects a Java 11/classfile 55 runtime helper; changes exception behavior and stack shapes, so validate exception-sensitive paths. |
+| `string-encryption` | Java 11+ target runtime | Requires `jni-microkernel-loader` and native-backed decoding; not treated as a Java 8 runtime-compatible pass. |
+| `class-encryption-loader` | Java 11+ target runtime | Requires `jni-microkernel-loader`, platform native libraries, and custom loading paths; native/metadata failures are fail-closed. |
+| `method-body-delayed-decryption` | Java 11+; `hidden-class-redirect` requires JDK 15+ | Requires native/helper support and changes method-body restoration paths. |
+| `method-virtualization` | Java 11+ target runtime | VBC4/native-only; requires `jni-microkernel-loader` and platform native libraries. Old resources/profiles fail closed. |
+| `callsite-rotation-protection` | Java 11+ target runtime | Uses runtime callsite/linking perturbation; validate proxies, debugging, and performance. |
+| `environment-bound-keys` | Java 11+ target runtime | Requires `jni-microkernel-loader` and stable environment material; environment changes can break startup/decryption. |
+| `anti-instrumentation` | Java 11+ target runtime | Requires platform native libraries; can conflict with agents, APM, debuggers, and test tools. |
+| `anti-dump-protection` | Java 8 (`field-scramble`) / Java 11+ (native modes) | `field-scramble` should not raise version; `jni-key-hold/full` require the native loader. |
+| `jni-microkernel-loader` | Java 11+ target runtime | Enabled only as a dependency of helper/native passes; requires a supported platform and native build chain. |
+
 ## Common Commands
 
 ### Core Engine
@@ -191,7 +224,13 @@ wails build
 
 The full release script builds the engine JAR, the GraalVM native engine, the frontend bundle, and the Wails desktop application. Release acceptance should be based on the expected artifacts, such as `build\release\javashroud-windows-amd64\javashroud.exe`, existing and running successfully, not only on individual Gradle, Yarn, or Go commands returning success.
 
-GitHub Releases are created by `.github/workflows/release.yml` when a `v*` tag is pushed. The release order is to push `dev` and `main` first, then push or recreate a `v`-prefixed tag such as `v0.9.1-dev`; the bare `0.9.1-dev` tag does not trigger the release workflow and will not appear as a `github-actions` release.
+GitHub Releases are created by `.github/workflows/release.yml` when a `v*` tag is pushed. The release order is to push `dev` and `main` first, then push or recreate a `v`-prefixed tag such as `v0.9.2-dev`; the bare `0.9.2-dev` tag does not trigger the release workflow and will not appear as a `github-actions` release.
+
+### 0.9.2-dev Acceptance Notes
+
+`0.9.2-dev` bumps the engine version to `0.9.2-dev` and the VBC capability version to `4.55`. This release fixes the interaction between `condy-constant-indirection` and `method-virtualization` under strict `all-compatible` max-parameter coverage: engine-generated `ConstantDynamic` LDC values now enter the native VM through a guarded opcode, preserving string and int condy bootstrap semantics while unknown bootstrap shapes still fail closed.
+
+This is not a downgrade fix that skips methods or disables strict mode. `methodSelection = "all-compatible"` still covers compatible methods containing guarded condy LDC instructions, and the previously failing real-JAR matrix case `demo.jar` / `pair-condy-constant-indirection__method-virtualization-params-max` now obfuscates and runs according to its baseline.
 
 ### 0.9.1-dev Acceptance Notes
 

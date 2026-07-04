@@ -25,4 +25,5 @@ data class ObfuscationConfig(
     val allowIncomplete: Boolean = false,
     val allowOptInPasses: Boolean = false,
     val allowRedundantPasses: Boolean = false,
+    val allowAnnotationPasses: Boolean = false,
 )
