@@ -44,6 +44,12 @@ static void js_vm_set_prepare_stage(const char *s) {
     js_vm_last_prepare_stage[n] = 0;
 }
 
+static int js_vm_prepare_stage_has_prefix(const char *prefix) {
+    if (!prefix) return 0;
+    size_t n = strlen(prefix);
+    return n > 0 && strncmp(js_vm_last_prepare_stage, prefix, n) == 0;
+}
+
 JS_HIDDEN unsigned char* js_vbc4_zstd_decompress_owned(const unsigned char *stored, uint32_t stored_len, uint32_t plain_len) {
     if (!stored || stored_len == 0) return NULL;
     if (stored_len == plain_len) {
@@ -621,7 +627,7 @@ JS_PROTECTED static int js_manifest_order_token(const char *mesh, uint32_t ordin
 JS_HIDDEN unsigned char* js_vm_reassemble_sliced_resource(JNIEnv *env, jclass helper_cls, unsigned char *decoded, int decoded_len, int *out_len) {
     if (!decoded || decoded_len < 10 || !out_len || memcmp(decoded, "VBC4S|1|", 8) != 0) return decoded;
     char *manifest = (char*)calloc((size_t)decoded_len + 1u, 1u);
-    if (!manifest) return NULL;
+    if (!manifest) { js_vm_set_prepare_stage("reassemble-manifest-alloc"); return NULL; }
     memcpy(manifest, decoded, (size_t)decoded_len);
     js_vbc4_wipe_volatile(decoded, (size_t)decoded_len);
     free(decoded);
@@ -629,7 +635,7 @@ JS_HIDDEN unsigned char* js_vm_reassemble_sliced_resource(JNIEnv *env, jclass he
 
     char *line = manifest;
     char *next_line = strchr(line, '\n');
-    if (!next_line) { js_vbc4_wipe_volatile(manifest, (size_t)decoded_len); free(manifest); return NULL; }
+    if (!next_line) { js_vm_set_prepare_stage("reassemble-manifest-newline"); js_vbc4_wipe_volatile(manifest, (size_t)decoded_len); free(manifest); return NULL; }
     *next_line++ = 0;
     char *cursor = line;
     char *magic = js_next_manifest_field(&cursor);
@@ -649,10 +655,12 @@ JS_HIDDEN unsigned char* js_vm_reassemble_sliced_resource(JNIEnv *env, jclass he
         !js_parse_u32_token(entry_count_text, &manifest_entry_count) || manifest_entry_count == 0 ||
         manifest_ordinal >= manifest_entry_count || total_len == 0 || shard_count < 2 || shard_count > 16 ||
         total_len > 64u * 1024u * 1024u) {
+        js_vm_set_prepare_stage("reassemble-header");
         js_vbc4_wipe_volatile(manifest, (size_t)decoded_len); free(manifest); return NULL;
     }
     unsigned char mesh_digest_bytes[32];
     if (!js_hex32_to_bytes(mesh_text, mesh_digest_bytes)) {
+        js_vm_set_prepare_stage("reassemble-mesh-digest");
         js_vbc4_wipe_volatile(mesh_digest_bytes, sizeof(mesh_digest_bytes));
         js_vbc4_wipe_volatile(manifest, (size_t)decoded_len); free(manifest); return NULL;
     }
@@ -661,6 +669,7 @@ JS_HIDDEN unsigned char* js_vm_reassemble_sliced_resource(JNIEnv *env, jclass he
     unsigned char *seen = (unsigned char*)calloc((size_t)shard_count, 1u);
     char (*order_tokens)[17] = (char (*)[17])calloc((size_t)shard_count, sizeof(*order_tokens));
     if (!assembled || !seen || !order_tokens) {
+        js_vm_set_prepare_stage("reassemble-alloc");
         if (assembled) free(assembled);
         if (seen) free(seen);
         if (order_tokens) free(order_tokens);
@@ -691,6 +700,7 @@ JS_HIDDEN unsigned char* js_vm_reassemble_sliced_resource(JNIEnv *env, jclass he
             length > total_len - offset || !sha_text || strlen(sha_text) != 64 ||
             !js_hex32_to_bytes(sha_text, expected_sha) || !path_text || !path_text[0] ||
             !js_hex16_is_valid(mesh_link_text) || !js_hex16_is_valid(peer_link_text)) {
+            js_vm_set_prepare_stage("reassemble-row");
             ok = 0;
         } else {
             char expected_order_token[17];
@@ -698,12 +708,14 @@ JS_HIDDEN unsigned char* js_vm_reassemble_sliced_resource(JNIEnv *env, jclass he
                 !js_manifest_peer_link_matches(mesh_text, manifest_ordinal, manifest_entry_count, index, offset, length, sha_text, path_text, peer_ordinal, peer_link_text) ||
                 !js_manifest_order_token(mesh_text, manifest_ordinal, index, path_text, sha_text, expected_order_token) ||
                 (loaded_count > 0 && strcmp(order_tokens[loaded_count - 1], expected_order_token) > 0)) {
+                js_vm_set_prepare_stage("reassemble-mesh-link");
                 ok = 0;
             }
             if (ok) memcpy(order_tokens[loaded_count], expected_order_token, sizeof(expected_order_token));
             int shard_len = 0;
             unsigned char *shard = js_vm_decode_resource_path_owned(env, helper_cls, path_text, &shard_len);
             if (!shard || shard_len != (int)length) {
+                js_vm_set_prepare_stage("reassemble-shard-load");
                 ok = 0;
             } else {
                 unsigned char actual_sha[32];
@@ -712,6 +724,7 @@ JS_HIDDEN unsigned char* js_vm_reassemble_sliced_resource(JNIEnv *env, jclass he
                 js_sha256_update(&sha_ctx, shard, shard_len);
                 js_sha256_final(&sha_ctx, actual_sha);
                 if (memcmp(actual_sha, expected_sha, 32) != 0) {
+                    js_vm_set_prepare_stage("reassemble-shard-digest");
                     ok = 0;
                 } else {
                     memcpy(assembled + offset, shard, (size_t)length);
@@ -726,8 +739,8 @@ JS_HIDDEN unsigned char* js_vm_reassemble_sliced_resource(JNIEnv *env, jclass he
         }
         line = line_end ? line_end + 1 : NULL;
     }
-    for (uint32_t i = 0; ok && i < shard_count; i++) if (!seen[i]) ok = 0;
-    if (loaded_count != shard_count) ok = 0;
+    for (uint32_t i = 0; ok && i < shard_count; i++) if (!seen[i]) { js_vm_set_prepare_stage("reassemble-missing-shard"); ok = 0; }
+    if (loaded_count != shard_count) { js_vm_set_prepare_stage("reassemble-count"); ok = 0; }
     js_vbc4_wipe_volatile(order_tokens, (size_t)shard_count * sizeof(*order_tokens));
     free(order_tokens);
     js_vbc4_wipe_volatile(seen, (size_t)shard_count);
@@ -872,7 +885,7 @@ JS_HIDDEN js_vm_program* js_vm_prepare_resource_program_bound(JNIEnv *env, jclas
     }
     decoded = js_vm_reassemble_sliced_resource(env, resource_cls, decoded, decoded_len, &decoded_len);
     if (!decoded) {
-        js_vm_set_prepare_stage("reassemble");
+        if (!js_vm_prepare_stage_has_prefix("reassemble-")) js_vm_set_prepare_stage("reassemble");
         rls(env, resourcePath, resource_path);
         return NULL;
     }

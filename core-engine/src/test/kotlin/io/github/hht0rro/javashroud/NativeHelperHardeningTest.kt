@@ -1085,8 +1085,8 @@ class NativeHelperHardeningTest {
         assertTrue(
             helperSource.contains("version == RUNTIME_RESOURCE_VERSION") &&
                 helperSource.contains("LEGACY_RUNTIME_RESOURCE_VERSION") &&
-                helperSource.contains("decodeRuntimeResourceCurrent(raw)") &&
-                helperSource.contains("decodeRuntimeResourceLegacy(raw)") &&
+                helperSource.contains("decodeRuntimeResourceCurrent(raw, allowCompressed)") &&
+                helperSource.contains("decodeRuntimeResourceLegacy(raw, allowCompressed)") &&
                 helperSource.contains("throw new IllegalArgumentException(\"unsupported runtime resource envelope\")") &&
                 !helperSource.contains("decoded != null ? decoded : raw") &&
                 helperSource.contains("constantTimeEquals(expected, raw, tagOffset)") &&
@@ -1299,6 +1299,33 @@ class NativeHelperHardeningTest {
         assertTrue(
             nativeSource.contains("js_vbc4_wipe_volatile(entry_integrity, sizeof(entry_integrity))"),
             "Entry integrity bytes must be wiped after being folded into state binding.",
+        )
+    }
+    @Test
+    fun native_vm_reports_granular_sliced_resource_reassemble_failures() {
+        val nativeSource = nativeRuntimeSources()
+        for (stage in listOf(
+            "reassemble-manifest-alloc",
+            "reassemble-manifest-newline",
+            "reassemble-header",
+            "reassemble-mesh-digest",
+            "reassemble-alloc",
+            "reassemble-row",
+            "reassemble-mesh-link",
+            "reassemble-shard-load",
+            "reassemble-shard-digest",
+            "reassemble-missing-shard",
+            "reassemble-count",
+        )) {
+            assertTrue(
+                nativeSource.contains("js_vm_set_prepare_stage(\"$stage\")"),
+                "Sliced VBC4 resource reassembly failures must report granular preload stage: $stage",
+            )
+        }
+        assertTrue(
+            nativeSource.contains("js_vm_prepare_stage_has_prefix(\"reassemble-\")") &&
+                nativeSource.contains("if (!js_vm_prepare_stage_has_prefix(\"reassemble-\")) js_vm_set_prepare_stage(\"reassemble\")"),
+            "The caller must preserve granular reassemble-* diagnostics instead of overwriting them with the generic stage.",
         )
     }
     @Test
