@@ -334,6 +334,8 @@ class NativeRecompilationTransformsTest {
         assertFalse(core.contains("__thread static jobject"), "Linux manual-mapped inner runtime must not require ELF TLS for active host loader state")
         assertTrue(core.contains("js_vm_method_from_object"), "Manual mapped primitive unboxing must resolve methods from the actual boxed receiver class")
         assertFalse(core.contains("CallIntMethod(env, obj, js_jni_cache.integer_int_value"), "Manual mapped primitive unboxing must not reuse cached Integer.intValue method IDs")
+        assertTrue(core.contains("js_vm_valid_method_lookup"), "Manual mapped dynamic method fallback must validate lookup strings before JVM symbol lookup")
+        assertTrue(core.contains("if (js_vm_valid_method_lookup(dyn_lookup, dyn_mr.desc)) mid = (*env)->GetMethodID"), "Dynamic virtual fallback must guard mapped method lookup before GetMethodID")
     }
 
     @Test

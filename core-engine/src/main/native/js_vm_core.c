@@ -696,6 +696,25 @@ JS_HIDDEN int js_vm_clone_cached_execution_program(js_vm_program *source, js_vm_
     return 1;
 }
 
+static int js_vm_valid_method_lookup_name(const char *name) {
+    if (!name || !name[0]) return 0;
+    if (strcmp(name, "<init>") == 0 || strcmp(name, "<clinit>") == 0) return 1;
+    for (const unsigned char *p = (const unsigned char*)name; *p; p++) {
+        if (*p <= 0x20u || *p >= 0x7fu || *p == '.' || *p == '/' || *p == ';' || *p == '[' || *p == '(' || *p == ')') return 0;
+    }
+    return 1;
+}
+
+static int js_vm_valid_method_lookup(const char *name, const char *desc) {
+    char *tags = NULL;
+    int argc = 0;
+    if (!js_vm_valid_method_lookup_name(name) || !desc || !desc[0]) return 0;
+    if (strlen(name) > 512u || strlen(desc) > 4096u) return 0;
+    if (!js_vm_descriptor_arg_tags(desc, &tags, &argc)) return 0;
+    free(tags);
+    return argc >= 0 && js_vm_descriptor_return_tag(desc) != 0;
+}
+
 JS_HIDDEN int js_vm_append_execution_insn(js_vm_program *program, jint opcode, jint op_count, const jint *operands) {
     if (!program || op_count < 0 || (op_count > 0 && !operands)) return 0;
     js_vm_insn *grown = (js_vm_insn*)realloc(program->insns, (size_t)(program->insn_count + 1) * sizeof(js_vm_insn));
@@ -5273,8 +5292,8 @@ static int js_vm_invoke_method(JNIEnv *env, js_vm_program *p, int cp_idx, int op
                                 const char *dyn_lookup = dyn_mr.name ? dyn_mr.name : "";
                                 char *dyn_mapped = js_lookup_bound_method(env, dyn_mr.owner, dyn_mr.name, dyn_mr.desc);
                                 if (dyn_mapped && dyn_mapped[0]) dyn_lookup = dyn_mapped;
-                                mid = (*env)->GetMethodID(env, target_cls, dyn_lookup, dyn_mr.desc);
-                                if (((*env)->ExceptionCheck(env) || !mid) && dyn_mapped && dyn_mapped[0] && strcmp(dyn_lookup, dyn_mr.name) != 0) {
+                                if (js_vm_valid_method_lookup(dyn_lookup, dyn_mr.desc)) mid = (*env)->GetMethodID(env, target_cls, dyn_lookup, dyn_mr.desc);
+                                if (((*env)->ExceptionCheck(env) || !mid) && dyn_mapped && dyn_mapped[0] && strcmp(dyn_lookup, dyn_mr.name) != 0 && js_vm_valid_method_lookup(dyn_mr.name, dyn_mr.desc)) {
                                     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
                                     mid = (*env)->GetMethodID(env, target_cls, dyn_mr.name, dyn_mr.desc);
                                 }
