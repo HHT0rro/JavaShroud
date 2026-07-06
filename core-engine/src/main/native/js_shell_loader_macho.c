@@ -119,6 +119,7 @@ typedef struct js_symtab_command {
 } js_symtab_command;
 
 static const char *g_js_shell_loader_failure = "mach-o loader has not started";
+static volatile const char g_js_shell_macho_fail_closed_marker[] = "JS_MACHO_ANON_EXEC_FAIL_CLOSED_V1";
 
 static void js_shell_loader_fail(const char *reason) {
     g_js_shell_loader_failure = reason;
@@ -379,6 +380,7 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
         return 0;
     }
 
+    if (g_js_shell_macho_fail_closed_marker[0] != 'J') return 0;
     js_shell_loader_fail("mach-o payload validated through segments, sections, rebase/bind/lazy-bind streams and initializer metadata, but anonymous execution mapping stays fail-closed until runtime execution is verified on macOS");
     return 0;
 }

@@ -433,8 +433,9 @@ class NativeRecompilationTransformsTest {
             assertTrue(result.bytes.containsAscii("JNI_OnLoad"), "${result.platform} outer shell must export JNI_OnLoad")
             assertTrue(result.bytes.containsAscii("JS_NATIVE_MAX_STUB_V1"), "${result.platform} outer shell must carry the max stub marker")
             assertTrue(result.bytes.containsAscii("JS_NATIVE_MAX_PAYLOAD_V1"), "${result.platform} outer shell must carry the authenticated max payload marker")
-            assertTrue(result.bytes.containsAscii("mach-o payload validated, but anonymous execution mapping stays fail-closed"), "${result.platform} must retain explicit Mach-O fail-closed reason until true anonymous execution is implemented")
+            assertTrue(result.bytes.containsAscii("JS_MACHO_ANON_EXEC_FAIL_CLOSED_V1"), "${result.platform} must retain explicit Mach-O fail-closed evidence until true anonymous execution is implemented")
             assertFalse(result.bytes.containsAscii("JS_NATIVE_SHELL_LOADER_V1"), "${result.platform} max output must not be the standard overlay artifact")
+            assertMaxStubReverseEvidence(result.bytes, result.platform)
         }
     }
 
