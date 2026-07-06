@@ -305,7 +305,37 @@ class NativeRecompilationTransformsTest {
                 source.contains("elf64 init array is outside the mapped image"),
             "Linux max shell loader must fail closed when dynamic, relocation, string, or init metadata points outside the anonymous image.",
         )
+        assertTrue(
+            source.contains("exec_low_vaddr") &&
+                source.contains("code_low") &&
+                source.contains("elf64 exported JNI or ABI entry is outside executable image pages"),
+            "Linux max shell loader must expose executable image bounds and reject exported entrypoints outside executable pages.",
+        )
         assertFalse(source.contains("elf64 anonymous memory loader is fail-closed until"), "Linux max shell loader must not remain the placeholder fail-closed skeleton")
+    }
+
+    @Test
+    fun linux_manual_mapped_resource_loader_avoids_class_vtable_dispatch() {
+        val resource = java.nio.file.Files.readString(resolveSource("src/main/native/js_vm_resource.c"))
+
+        assertTrue(resource.contains("CallNonvirtualObjectMethod(env, class_obj, js_jni_cache.class_class, js_jni_cache.class_get_class_loader"), "Manual mapped resource loading must avoid virtual Class.getClassLoader dispatch")
+        assertTrue(resource.contains("CallNonvirtualObjectMethod(env, class_obj, js_jni_cache.class_class, js_jni_cache.class_get_name"), "Manual mapped resource loading must avoid virtual Class.getName dispatch")
+        assertTrue(resource.contains("CallNonvirtualObjectMethod(env, class_obj, js_jni_cache.class_class, js_jni_cache.class_get_resource_as_stream"), "Manual mapped resource loading must avoid virtual Class.getResourceAsStream dispatch")
+    }
+
+    @Test
+    fun max_shell_stub_validates_inner_abi_table_before_dispatch() {
+        val stub = java.nio.file.Files.readString(resolveSource("src/main/native/js_shell_stub.c"))
+        val loaderHeader = java.nio.file.Files.readString(resolveSource("src/main/native/js_shell_loader.h"))
+        val runtime = java.nio.file.Files.readString(resolveSource("src/main/native/js_jni_runtime.c"))
+
+        assertTrue(loaderHeader.contains("code_low") && loaderHeader.contains("code_size"), "Loaded shell images must carry executable code bounds for ABI validation")
+        assertTrue(stub.contains("js_shell_validate_inner_abi_table"), "Outer stub must validate the inner ABI table before dispatch")
+        assertTrue(stub.contains("inner ABI table pointer is outside the mapped image"), "Outer stub must fail closed when the ABI table pointer is outside the mapped image")
+        assertTrue(stub.contains("inner ABI function pointer is outside executable image pages"), "Outer stub must fail closed when ABI functions do not point at executable inner code")
+        assertTrue(stub.contains("js_shell_inner_code_contains((const void *)g_inner_image.jni_on_load)"), "Outer stub must validate inner JNI_OnLoad before invoking it")
+        assertTrue(stub.contains("g_shell_helper_class") && stub.contains("js_shell_effective_helper_class(cls)"), "Outer stub must pin the registered helper class for all inner ABI dispatch")
+        assertTrue(runtime.contains("if (!js_jni_runtime_manual_mapped_shell)"), "Manual-mapped inner JNI_OnLoad must not register inner native method pointers with the JVM")
     }
 
     @Test

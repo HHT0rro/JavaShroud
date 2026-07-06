@@ -352,10 +352,13 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
         return JNI_ERR;
     }
     if (!js_jni_cache_init(env)) return JNI_ERR;
-    int ok = js_register_all_natives(env);
-    if (ok && (*env)->ExceptionCheck(env)) {
-        js_vm_clear_exception(env);
-        ok = 0;
+    int ok = 1;
+    if (!js_jni_runtime_manual_mapped_shell) {
+        ok = js_register_all_natives(env);
+        if (ok && (*env)->ExceptionCheck(env)) {
+            js_vm_clear_exception(env);
+            ok = 0;
+        }
     }
     if (ok) js_vm_mark_hot_integrity_baseline_clean();
     if (!ok) js_jni_cache_destroy(env);

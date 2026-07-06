@@ -18,6 +18,7 @@
 static js_shell_loaded_image g_inner_image;
 static const js_native_abi_table *g_inner_abi = 0;
 static JavaVM *g_shell_vm = 0;
+static jclass g_shell_helper_class = 0;
 static volatile int g_shell_loaded = 0;
 static volatile int g_shell_failed = 0;
 static volatile int g_inner_onload_done = 0;
@@ -152,6 +153,66 @@ static jint js_shell_fail_onload(void) {
     }
     g_shell_failed = 1;
     return JNI_ERR;
+}
+
+static void js_shell_debug_native_init_failure(const char *reason) {
+    const char *debug = getenv("JAVASHROUD_DEBUG_NATIVE_LOAD");
+    if (debug && debug[0] && debug[0] != '0' && reason && reason[0]) {
+        fprintf(stderr, "JavaShroud max native shell init failed: %s\n", reason);
+    }
+}
+
+static int js_shell_range_contains(const void *base, size_t size, const void *ptr, size_t ptr_size) {
+    uintptr_t low = (uintptr_t)base;
+    uintptr_t addr = (uintptr_t)ptr;
+    if (!base || !ptr || size == 0u || ptr_size == 0u) return 0;
+    return addr >= low && addr <= low + size && ptr_size <= low + size - addr;
+}
+
+static int js_shell_inner_image_contains(const void *ptr, size_t size) {
+    return js_shell_range_contains(g_inner_image.image_base, g_inner_image.image_size, ptr, size);
+}
+
+static int js_shell_inner_code_contains(const void *ptr) {
+    if (!g_inner_image.code_low || g_inner_image.code_size == 0u) return 1;
+    return js_shell_range_contains(g_inner_image.code_low, g_inner_image.code_size, ptr, 1u);
+}
+
+static jclass js_shell_effective_helper_class(jclass fallback) {
+    return g_shell_helper_class ? g_shell_helper_class : fallback;
+}
+
+static int js_shell_validate_inner_abi_table(const js_native_abi_table *abi) {
+    if (!abi || !js_shell_inner_image_contains(abi, sizeof(*abi))) {
+        js_shell_debug_native_init_failure("inner ABI table pointer is outside the mapped image");
+        return 0;
+    }
+    if (abi->version != JS_NATIVE_ABI_TABLE_VERSION) {
+        js_shell_debug_native_init_failure("inner ABI table version mismatch");
+        return 0;
+    }
+    const void *functions[] = {
+        (const void *)abi->native_init,
+        (const void *)abi->native_verify,
+        (const void *)abi->native_heartbeat,
+        (const void *)abi->native_decrypt_aes,
+        (const void *)abi->native_get_version,
+        (const void *)abi->native_get_boot_token,
+        (const void *)abi->native_install_runtime_resource_key,
+        (const void *)abi->native_preload_runtime_resources,
+        (const void *)abi->native_derive_class_encryption_key,
+        (const void *)abi->execute_vm_resource,
+        (const void *)abi->execute_vm_resource_by_token,
+        (const void *)abi->execute_vm_resource_void,
+        (const void *)abi->execute_vm_resource_int_void,
+    };
+    for (size_t i = 0; i < sizeof(functions) / sizeof(functions[0]); i++) {
+        if (!functions[i] || !js_shell_inner_code_contains(functions[i])) {
+            js_shell_debug_native_init_failure("inner ABI function pointer is outside executable image pages");
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static unsigned long long js_shell_fnv1a64(const char *value, unsigned long long hash) {
@@ -339,12 +400,21 @@ static jclass js_shell_find_helper_class(JNIEnv *env, char **owner_out) {
 static jint JNICALL js_shell_native_init(JNIEnv *env, jclass cls, jstring platform) {
     if (!g_inner_image.jni_on_load || !g_shell_vm || g_shell_failed) return JNI_ERR;
     if (!g_inner_onload_done) {
+        if (!js_shell_inner_code_contains((const void *)g_inner_image.jni_on_load)) {
+            js_shell_debug_native_init_failure("inner JNI_OnLoad is outside executable image pages");
+            g_shell_failed = 1;
+            return JNI_ERR;
+        }
         jint loaded = g_inner_image.jni_on_load(g_shell_vm, JS_SHELL_MANUAL_MAP_RESERVED);
         if ((*env)->ExceptionCheck(env)) return JNI_ERR;
         if (loaded == JNI_ERR || loaded == 0) { g_shell_failed = 1; return JNI_ERR; }
-        if (!g_inner_image.native_abi_table_v1) { g_shell_failed = 1; return JNI_ERR; }
+        if (!g_inner_image.native_abi_table_v1 || !js_shell_inner_code_contains((const void *)g_inner_image.native_abi_table_v1)) {
+            js_shell_debug_native_init_failure("inner ABI table export is outside executable image pages");
+            g_shell_failed = 1;
+            return JNI_ERR;
+        }
         g_inner_abi = g_inner_image.native_abi_table_v1();
-        if (!g_inner_abi || g_inner_abi->version != JS_NATIVE_ABI_TABLE_VERSION || !g_inner_abi->native_init || !g_inner_abi->native_verify || !g_inner_abi->native_heartbeat || !g_inner_abi->native_decrypt_aes || !g_inner_abi->native_get_version || !g_inner_abi->native_get_boot_token || !g_inner_abi->native_install_runtime_resource_key || !g_inner_abi->native_preload_runtime_resources || !g_inner_abi->native_derive_class_encryption_key || !g_inner_abi->execute_vm_resource || !g_inner_abi->execute_vm_resource_by_token || !g_inner_abi->execute_vm_resource_void || !g_inner_abi->execute_vm_resource_int_void) {
+        if (!js_shell_validate_inner_abi_table(g_inner_abi)) {
             g_shell_failed = 1;
             return JNI_ERR;
         }
@@ -356,67 +426,67 @@ static jint JNICALL js_shell_native_init(JNIEnv *env, jclass cls, jstring platfo
         g_shell_loaded = 1;
         return 2;
     }
-    return g_inner_abi && g_inner_abi->native_init ? g_inner_abi->native_init(env, cls, platform) : JNI_ERR;
+    return g_inner_abi && g_inner_abi->native_init ? g_inner_abi->native_init(env, js_shell_effective_helper_class(cls), platform) : JNI_ERR;
 }
 
 static jint JNICALL js_shell_native_verify(JNIEnv *env, jclass cls, jbyteArray data, jbyteArray expected_mac) {
     if (!g_inner_abi || !g_inner_abi->native_verify) return 0;
-    return g_inner_abi->native_verify(env, cls, data, expected_mac);
+    return g_inner_abi->native_verify(env, js_shell_effective_helper_class(cls), data, expected_mac);
 }
 
 static jint JNICALL js_shell_native_heartbeat(JNIEnv *env, jclass cls) {
     if (!g_inner_abi || !g_inner_abi->native_heartbeat) return 0;
-    return g_inner_abi->native_heartbeat(env, cls);
+    return g_inner_abi->native_heartbeat(env, js_shell_effective_helper_class(cls));
 }
 
 static jbyteArray JNICALL js_shell_native_decrypt_aes(JNIEnv *env, jclass cls, jbyteArray encrypted, jbyteArray keyArr, jbyteArray ivArr) {
     if (!g_inner_abi || !g_inner_abi->native_decrypt_aes) return 0;
-    return g_inner_abi->native_decrypt_aes(env, cls, encrypted, keyArr, ivArr);
+    return g_inner_abi->native_decrypt_aes(env, js_shell_effective_helper_class(cls), encrypted, keyArr, ivArr);
 }
 
 static jstring JNICALL js_shell_native_get_version(JNIEnv *env, jclass cls) {
     if (!g_inner_abi || !g_inner_abi->native_get_version) return 0;
-    return g_inner_abi->native_get_version(env, cls);
+    return g_inner_abi->native_get_version(env, js_shell_effective_helper_class(cls));
 }
 
 static jlong JNICALL js_shell_native_get_boot_token(JNIEnv *env, jclass cls) {
     if (!g_inner_abi || !g_inner_abi->native_get_boot_token) return 0;
-    return g_inner_abi->native_get_boot_token(env, cls);
+    return g_inner_abi->native_get_boot_token(env, js_shell_effective_helper_class(cls));
 }
 
 static void JNICALL js_shell_native_install_runtime_resource_key(JNIEnv *env, jclass cls, jbyteArray keyArr) {
     if (!g_inner_abi || !g_inner_abi->native_install_runtime_resource_key) return;
-    g_inner_abi->native_install_runtime_resource_key(env, cls, keyArr);
+    g_inner_abi->native_install_runtime_resource_key(env, js_shell_effective_helper_class(cls), keyArr);
 }
 
 static void JNICALL js_shell_native_preload_runtime_resources(JNIEnv *env, jclass cls) {
     if (!g_inner_abi || !g_inner_abi->native_preload_runtime_resources) return;
-    g_inner_abi->native_preload_runtime_resources(env, cls);
+    g_inner_abi->native_preload_runtime_resources(env, js_shell_effective_helper_class(cls));
 }
 
 static jbyteArray JNICALL js_shell_native_derive_class_encryption_key(JNIEnv *env, jclass cls, jbyteArray keyIdArr, jbyteArray saltArr, jint length) {
     if (!g_inner_abi || !g_inner_abi->native_derive_class_encryption_key) return 0;
-    return g_inner_abi->native_derive_class_encryption_key(env, cls, keyIdArr, saltArr, length);
+    return g_inner_abi->native_derive_class_encryption_key(env, js_shell_effective_helper_class(cls), keyIdArr, saltArr, length);
 }
 
 static jobject JNICALL js_shell_execute_vm_resource(JNIEnv *env, jclass cls, jlong entryToken, jstring resourcePath, jobjectArray args) {
     if (!g_inner_abi || !g_inner_abi->execute_vm_resource) return 0;
-    return g_inner_abi->execute_vm_resource(env, cls, entryToken, resourcePath, args);
+    return g_inner_abi->execute_vm_resource(env, js_shell_effective_helper_class(cls), entryToken, resourcePath, args);
 }
 
 static jobject JNICALL js_shell_execute_vm_resource_by_token(JNIEnv *env, jclass cls, jlong entryToken, jobjectArray args) {
     if (!g_inner_abi || !g_inner_abi->execute_vm_resource_by_token) return 0;
-    return g_inner_abi->execute_vm_resource_by_token(env, cls, entryToken, args);
+    return g_inner_abi->execute_vm_resource_by_token(env, js_shell_effective_helper_class(cls), entryToken, args);
 }
 
 static void JNICALL js_shell_execute_vm_resource_void(JNIEnv *env, jclass cls, jlong entryToken) {
     if (!g_inner_abi || !g_inner_abi->execute_vm_resource_void) return;
-    g_inner_abi->execute_vm_resource_void(env, cls, entryToken);
+    g_inner_abi->execute_vm_resource_void(env, js_shell_effective_helper_class(cls), entryToken);
 }
 
 static void JNICALL js_shell_execute_vm_resource_int_void(JNIEnv *env, jclass cls, jlong entryToken, jint arg0) {
     if (!g_inner_abi || !g_inner_abi->execute_vm_resource_int_void) return;
-    g_inner_abi->execute_vm_resource_int_void(env, cls, entryToken, arg0);
+    g_inner_abi->execute_vm_resource_int_void(env, js_shell_effective_helper_class(cls), entryToken, arg0);
 }
 
 static int js_shell_register_outer_shim(JNIEnv *env) {
@@ -506,6 +576,15 @@ static int js_shell_register_outer_shim(JNIEnv *env) {
     methods[12].fnPtr = (void *)js_shell_execute_vm_resource_int_void;
     int ok = ((*env)->RegisterNatives(env, helper_cls, methods, (jint)(sizeof(methods) / sizeof(methods[0]))) == 0);
     if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); ok = 0; }
+    if (ok && !g_shell_helper_class) {
+        jclass global_helper = (jclass)(*env)->NewGlobalRef(env, helper_cls);
+        if ((*env)->ExceptionCheck(env) || !global_helper) {
+            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+            ok = 0;
+        } else {
+            g_shell_helper_class = global_helper;
+        }
+    }
     free(mapped_init);
     free(mapped_verify);
     free(mapped_heartbeat);
@@ -597,6 +676,11 @@ jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
 }
 
 void JNICALL JNI_OnUnload(JavaVM *vm, void *reserved) {
+    JNIEnv *env = 0;
+    if (vm && (*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) == JNI_OK && env && g_shell_helper_class) {
+        (*env)->DeleteGlobalRef(env, g_shell_helper_class);
+        g_shell_helper_class = 0;
+    }
 #if defined(_WIN32)
     /* Windows manual-mapped PE images are process-lifetime. Calling the inner
      * JNI_OnUnload, TLS detach, or DllMain detach from the outer library unload

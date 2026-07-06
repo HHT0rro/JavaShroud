@@ -14,6 +14,8 @@
 typedef struct js_shell_loaded_image {
     void *image_base;
     size_t image_size;
+    void *code_low;
+    size_t code_size;
     void *platform_data;
     jint (*jni_on_load)(JavaVM *vm, void *reserved);
     void (*jni_on_unload)(JavaVM *vm, void *reserved);

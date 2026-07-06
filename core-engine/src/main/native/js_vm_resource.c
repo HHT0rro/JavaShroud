@@ -359,7 +359,7 @@ static void js_vm_resource_clear_exception(JNIEnv *env) {
 
 JS_HIDDEN jobject js_vm_class_resource_as_stream(JNIEnv *env, jobject class_obj, jstring resource_path) {
     if (!class_obj || !resource_path || !js_jni_cache.initialized) return NULL;
-    jobject loader = (*env)->CallObjectMethod(env, class_obj, js_jni_cache.class_get_class_loader);
+    jobject loader = (*env)->CallNonvirtualObjectMethod(env, class_obj, js_jni_cache.class_class, js_jni_cache.class_get_class_loader);
     if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); return NULL; }
     const char *raw_path = j2c(env, resource_path);
     if (!raw_path) { js_vm_resource_clear_exception(env); return NULL; }
@@ -367,7 +367,7 @@ JS_HIDDEN jobject js_vm_class_resource_as_stream(JNIEnv *env, jobject class_obj,
     if (raw_path[0] == '/') {
         resolved = js_strdup(raw_path + 1);
     } else {
-        jstring class_name_j = (jstring)(*env)->CallObjectMethod(env, class_obj, js_jni_cache.class_get_name);
+        jstring class_name_j = (jstring)(*env)->CallNonvirtualObjectMethod(env, class_obj, js_jni_cache.class_class, js_jni_cache.class_get_name);
         if ((*env)->ExceptionCheck(env) || !class_name_j) {
             if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
         } else {
@@ -396,7 +396,7 @@ JS_HIDDEN jobject js_vm_class_resource_as_stream(JNIEnv *env, jobject class_obj,
     jobject stream = loader ? js_vm_resource_from_loader(env, loader, resolved_j) : NULL;
     (*env)->DeleteLocalRef(env, resolved_j);
     if (stream) return stream;
-    return (*env)->CallObjectMethod(env, class_obj, js_jni_cache.class_get_resource_as_stream, resource_path);
+    return (*env)->CallNonvirtualObjectMethod(env, class_obj, js_jni_cache.class_class, js_jni_cache.class_get_resource_as_stream, resource_path);
 }
 
 JS_HIDDEN jobject js_vm_resource_from_loader(JNIEnv *env, jobject loader, jstring resourcePath) {
@@ -429,7 +429,7 @@ JS_HIDDEN jobject js_vm_helper_class_loader(JNIEnv *env, jclass helper_cls) {
     if (!class_cls) { js_vm_resource_clear_exception(env); return NULL; }
     jmethodID get_class_loader = js_jni_cache.initialized ? js_jni_cache.class_get_class_loader : (*env)->GetMethodID(env, class_cls, "getClassLoader", "()Ljava/lang/ClassLoader;");
     if (!get_class_loader) { js_vm_resource_clear_exception(env); return NULL; }
-    jobject loader = (*env)->CallObjectMethod(env, helper_cls, get_class_loader);
+    jobject loader = (*env)->CallNonvirtualObjectMethod(env, helper_cls, class_cls, get_class_loader);
     if ((*env)->ExceptionCheck(env)) { js_vm_resource_clear_exception(env); return NULL; }
     return loader;
 }
@@ -452,7 +452,7 @@ static jobject js_vm_resource_from_helper_class(JNIEnv *env, jclass helper_cls, 
     if (!class_cls) { js_vm_resource_clear_exception(env); return NULL; }
     jmethodID get_resource = js_jni_cache.initialized ? js_jni_cache.class_get_resource_as_stream : (*env)->GetMethodID(env, class_cls, "getResourceAsStream", "(Ljava/lang/String;)Ljava/io/InputStream;");
     if (!get_resource) { js_vm_resource_clear_exception(env); return NULL; }
-    jobject stream = (*env)->CallObjectMethod(env, helper_cls, get_resource, absolute_path);
+    jobject stream = (*env)->CallNonvirtualObjectMethod(env, helper_cls, class_cls, get_resource, absolute_path);
     if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); return NULL; }
     return stream;
 }

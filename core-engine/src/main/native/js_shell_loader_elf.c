@@ -71,6 +71,10 @@ static int js_shell_dyn_range_contains(const js_shell_elf_dyn *dyn, uintptr_t ad
     return dyn && js_shell_mapped_range_contains(dyn->mapped_low, dyn->mapped_high, addr, size);
 }
 
+static int js_shell_pointer_in_range(uintptr_t low, uintptr_t high, const void *ptr) {
+    return ptr && js_shell_mapped_range_contains(low, high, (uintptr_t)ptr, 1u);
+}
+
 static void *js_shell_host_symbol(const char *name) {
     if (!name || !name[0]) return 0;
     void *symbol = dlsym(RTLD_DEFAULT, name);
@@ -332,6 +336,8 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
     const Elf64_Phdr *ph = (const Elf64_Phdr *)(bytes + eh->e_phoff);
     uintptr_t min_vaddr = UINTPTR_MAX;
     uintptr_t max_vaddr = 0;
+    uintptr_t exec_low_vaddr = UINTPTR_MAX;
+    uintptr_t exec_high_vaddr = 0;
     const Elf64_Phdr *dynamic_ph = 0;
     for (uint16_t i = 0; i < eh->e_phnum; i++) {
         if (ph[i].p_type == PT_LOAD) {
@@ -343,6 +349,10 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
             uintptr_t end = js_shell_align_up((uintptr_t)ph[i].p_vaddr + (uintptr_t)ph[i].p_memsz, 0x1000u);
             if (start < min_vaddr) min_vaddr = start;
             if (end > max_vaddr) max_vaddr = end;
+            if (ph[i].p_flags & PF_X) {
+                if (start < exec_low_vaddr) exec_low_vaddr = start;
+                if (end > exec_high_vaddr) exec_high_vaddr = end;
+            }
         } else if (ph[i].p_type == PT_DYNAMIC) {
             dynamic_ph = ph + i;
         }
@@ -351,18 +361,26 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
         js_shell_loader_fail("elf64 payload has no PT_LOAD or PT_DYNAMIC segments");
         return 0;
     }
+    if (exec_low_vaddr == UINTPTR_MAX || exec_high_vaddr <= exec_low_vaddr) {
+        js_shell_loader_fail("elf64 payload has no executable PT_LOAD segment");
+        return 0;
+    }
 
     long page_size_long = sysconf(_SC_PAGESIZE);
     uintptr_t page_size = page_size_long > 0 ? (uintptr_t)page_size_long : 4096u;
     min_vaddr = js_shell_align_down(min_vaddr, page_size);
     max_vaddr = js_shell_align_up(max_vaddr, page_size);
     size_t image_size = (size_t)(max_vaddr - min_vaddr);
+    uintptr_t exec_low = 0;
+    uintptr_t exec_high = 0;
     void *mapping = mmap(0, image_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (mapping == MAP_FAILED) {
         js_shell_loader_fail("elf64 anonymous mmap failed");
         return 0;
     }
     uintptr_t image = (uintptr_t)mapping - min_vaddr;
+    exec_low = image + exec_low_vaddr;
+    exec_high = image + exec_high_vaddr;
     for (uint16_t i = 0; i < eh->e_phnum; i++) {
         if (ph[i].p_type != PT_LOAD) continue;
         memcpy((void *)(image + (uintptr_t)ph[i].p_vaddr), bytes + ph[i].p_offset, (size_t)ph[i].p_filesz);
@@ -423,8 +441,17 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
         js_shell_loader_fail("elf64 payload does not export native ABI table");
         return 0;
     }
+    if (!js_shell_pointer_in_range(exec_low, exec_high, (const void *)out_image->jni_on_load) ||
+        !js_shell_pointer_in_range(exec_low, exec_high, (const void *)out_image->native_abi_table_v1) ||
+        (out_image->jni_on_unload && !js_shell_pointer_in_range(exec_low, exec_high, (const void *)out_image->jni_on_unload))) {
+        munmap(mapping, image_size);
+        js_shell_loader_fail("elf64 exported JNI or ABI entry is outside executable image pages");
+        return 0;
+    }
     out_image->image_base = mapping;
     out_image->image_size = image_size;
+    out_image->code_low = (void *)exec_low;
+    out_image->code_size = (size_t)(exec_high - exec_low);
     g_js_shell_loader_failure = "elf64 anonymous memory loader completed";
     return 1;
 }
