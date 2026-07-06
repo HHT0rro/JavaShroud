@@ -332,6 +332,8 @@ class NativeRecompilationTransformsTest {
         assertTrue(core.contains("jsn_k9(JNIEnv *env, jclass cls)\n{\n    js_vm_preload_in_progress++;"), "Native preload must enter preload mode before reading the VM index")
         assertFalse(core.contains("__thread static js_vm_program"), "Linux manual-mapped inner runtime must not require ELF TLS for active VM program state")
         assertFalse(core.contains("__thread static jobject"), "Linux manual-mapped inner runtime must not require ELF TLS for active host loader state")
+        assertTrue(core.contains("js_vm_method_from_object"), "Manual mapped primitive unboxing must resolve methods from the actual boxed receiver class")
+        assertFalse(core.contains("CallIntMethod(env, obj, js_jni_cache.integer_int_value"), "Manual mapped primitive unboxing must not reuse cached Integer.intValue method IDs")
     }
 
     @Test

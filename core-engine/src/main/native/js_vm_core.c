@@ -223,17 +223,27 @@ JS_HIDDEN int js_vm_to_double(js_vm_value v, jdouble *out) {
     switch (v.type) { case JS_VM_VAL_NULL: *out = 0.0; return 1; case JS_VM_VAL_INT: *out = (jdouble)v.i; return 1; case JS_VM_VAL_LONG: *out = (jdouble)v.l; return 1; case JS_VM_VAL_FLOAT: *out = (jdouble)v.f; return 1; case JS_VM_VAL_DOUBLE: *out = v.d; return 1; default: return 0; }
 }
 
+static jmethodID js_vm_method_from_object(JNIEnv *env, jobject obj, const char *name, const char *sig) {
+    if (!obj || !name || !sig) return NULL;
+    jclass cls = (*env)->GetObjectClass(env, obj);
+    if ((*env)->ExceptionCheck(env) || !cls) { js_vm_clear_exception(env); return NULL; }
+    jmethodID mid = (*env)->GetMethodID(env, cls, name, sig);
+    (*env)->DeleteLocalRef(env, cls);
+    if ((*env)->ExceptionCheck(env) || !mid) { js_vm_clear_exception(env); return NULL; }
+    return mid;
+}
+
 JS_HIDDEN int js_vm_boxed_arg(JNIEnv *env, jobject obj, js_vm_value *out) {
     if (!obj) { *out = js_vm_null_value(); return 1; }
     if (!js_jni_cache.initialized) return 0;
-    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.integer_class)) { *out = js_vm_int_value((*env)->CallIntMethod(env, obj, js_jni_cache.integer_int_value)); return !(*env)->ExceptionCheck(env); }
-    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.boolean_class)) { *out = js_vm_int_value((*env)->CallBooleanMethod(env, obj, js_jni_cache.boolean_boolean_value) ? 1 : 0); return !(*env)->ExceptionCheck(env); }
-    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.byte_class)) { *out = js_vm_int_value((jint)(*env)->CallByteMethod(env, obj, js_jni_cache.byte_byte_value)); return !(*env)->ExceptionCheck(env); }
-    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.short_class)) { *out = js_vm_int_value((jint)(*env)->CallShortMethod(env, obj, js_jni_cache.short_short_value)); return !(*env)->ExceptionCheck(env); }
-    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.character_class)) { *out = js_vm_int_value((jint)(*env)->CallCharMethod(env, obj, js_jni_cache.character_char_value)); return !(*env)->ExceptionCheck(env); }
-    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.long_class)) { *out = js_vm_long_value((*env)->CallLongMethod(env, obj, js_jni_cache.long_long_value)); return !(*env)->ExceptionCheck(env); }
-    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.float_class)) { *out = js_vm_float_value((*env)->CallFloatMethod(env, obj, js_jni_cache.float_float_value)); return !(*env)->ExceptionCheck(env); }
-    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.double_class)) { *out = js_vm_double_value((*env)->CallDoubleMethod(env, obj, js_jni_cache.double_double_value)); return !(*env)->ExceptionCheck(env); }
+    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.integer_class)) { jmethodID mid = js_vm_method_from_object(env, obj, "intValue", "()I"); if (!mid) return 0; *out = js_vm_int_value((*env)->CallIntMethod(env, obj, mid)); return !(*env)->ExceptionCheck(env); }
+    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.boolean_class)) { jmethodID mid = js_vm_method_from_object(env, obj, "booleanValue", "()Z"); if (!mid) return 0; *out = js_vm_int_value((*env)->CallBooleanMethod(env, obj, mid) ? 1 : 0); return !(*env)->ExceptionCheck(env); }
+    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.byte_class)) { jmethodID mid = js_vm_method_from_object(env, obj, "byteValue", "()B"); if (!mid) return 0; *out = js_vm_int_value((jint)(*env)->CallByteMethod(env, obj, mid)); return !(*env)->ExceptionCheck(env); }
+    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.short_class)) { jmethodID mid = js_vm_method_from_object(env, obj, "shortValue", "()S"); if (!mid) return 0; *out = js_vm_int_value((jint)(*env)->CallShortMethod(env, obj, mid)); return !(*env)->ExceptionCheck(env); }
+    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.character_class)) { jmethodID mid = js_vm_method_from_object(env, obj, "charValue", "()C"); if (!mid) return 0; *out = js_vm_int_value((jint)(*env)->CallCharMethod(env, obj, mid)); return !(*env)->ExceptionCheck(env); }
+    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.long_class)) { jmethodID mid = js_vm_method_from_object(env, obj, "longValue", "()J"); if (!mid) return 0; *out = js_vm_long_value((*env)->CallLongMethod(env, obj, mid)); return !(*env)->ExceptionCheck(env); }
+    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.float_class)) { jmethodID mid = js_vm_method_from_object(env, obj, "floatValue", "()F"); if (!mid) return 0; *out = js_vm_float_value((*env)->CallFloatMethod(env, obj, mid)); return !(*env)->ExceptionCheck(env); }
+    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.double_class)) { jmethodID mid = js_vm_method_from_object(env, obj, "doubleValue", "()D"); if (!mid) return 0; *out = js_vm_double_value((*env)->CallDoubleMethod(env, obj, mid)); return !(*env)->ExceptionCheck(env); }
     *out = js_vm_object_value(obj);
     return 1;
 }
