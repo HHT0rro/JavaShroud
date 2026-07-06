@@ -62,12 +62,29 @@ static uint32_t js_shell_chunk_tag32(const unsigned char *key, size_t key_size, 
     return js_shell_mix32(state ^ (uint32_t)length ^ (chunk_index * 0x9e3779b9u));
 }
 
+static unsigned char js_shell_profile_bound_mask(uint32_t state, unsigned int layout_profile, unsigned int dispatcher_profile, unsigned int chunk_index, size_t offset, uint32_t *bogus_accumulator) {
+    uint32_t selector = (layout_profile * 3u + dispatcher_profile * 5u + chunk_index + (unsigned int)offset) & 3u;
+    uint32_t bogus_row = js_shell_mix32(state ^ selector ^ (layout_profile << 8) ^ (dispatcher_profile << 16));
+    if (selector == 0u) {
+        *bogus_accumulator ^= js_shell_mix32(bogus_row + 0x7f4a7c15u);
+    } else if (selector == 1u) {
+        *bogus_accumulator += js_shell_mix32(bogus_row ^ 0x9e3779b9u);
+    } else if (selector == 2u) {
+        *bogus_accumulator = (*bogus_accumulator << 3) ^ js_shell_mix32(bogus_row + chunk_index);
+    } else {
+        *bogus_accumulator = js_shell_mix32(*bogus_accumulator ^ bogus_row ^ (uint32_t)offset);
+    }
+    return (unsigned char)(state & 0xffu);
+}
+
 static void js_shell_decode_chunk(unsigned char *bytes, size_t length, const unsigned char *key, size_t key_size, const unsigned char nonce[16], unsigned int layout_profile, unsigned int dispatcher_profile, unsigned int chunk_index) {
     uint32_t state = js_shell_seed32(key, key_size, nonce, layout_profile, dispatcher_profile) ^ js_shell_mix32(chunk_index * 0x45d9f3bu);
+    uint32_t bogus_accumulator = js_shell_mix32(state ^ 0x4d415850u);
     for (size_t i = 0; i < length; i++) {
         state = js_shell_mix32(state + (uint32_t)i + chunk_index * 0x119de1f3u + 0x9e3779b9u);
-        bytes[i] = (unsigned char)(bytes[i] ^ (unsigned char)(state & 0xffu));
+        bytes[i] = (unsigned char)(bytes[i] ^ js_shell_profile_bound_mask(state, layout_profile, dispatcher_profile, chunk_index, i, &bogus_accumulator));
     }
+    if ((bogus_accumulator ^ state) == 0x6a09e667u) bytes[0] ^= 0u;
 }
 
 int js_shell_decode_payload_chunks(unsigned char *bytes, size_t size, const unsigned char *key, size_t key_size, const unsigned char nonce[16], unsigned int layout_profile, unsigned int dispatcher_profile, unsigned int chunk_size, const unsigned char *chunk_tags, size_t chunk_tags_size) {

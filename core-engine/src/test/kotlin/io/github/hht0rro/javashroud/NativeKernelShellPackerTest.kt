@@ -134,6 +134,16 @@ class NativeKernelShellPackerTest {
     }
 
     @Test
+    fun native_max_decoder_carries_profile_bound_bogus_decode_surface() {
+        val source = java.nio.file.Files.readString(resolveSource("src/main/native/js_shell_crypto.c"))
+
+        assertTrue(source.contains("js_shell_profile_bound_mask"), "native max decoder must route chunk bytes through a profile-bound decoder lane")
+        assertTrue(source.contains("layout_profile * 3u") && source.contains("dispatcher_profile * 5u"), "decoder lane selection must be bound to layout and dispatcher profiles")
+        assertTrue(source.contains("bogus_accumulator") && source.contains("bogus_row"), "decoder must carry bogus decode rows in the runtime code path")
+        assertTrue(source.contains("bytes[0] ^= 0u"), "bogus accumulator must remain anchored so optimizer-visible decoder surface survives native compilation")
+    }
+
+    @Test
     fun tampering_standard_overlay_fails_mac_validation() {
         val packed = NativeKernelShellPacker.pack(
             bytes = nativeBytes,
@@ -259,6 +269,9 @@ class NativeKernelShellPackerTest {
         bytes[offset + 2] = ((value ushr 16) and 0xFF).toByte()
         bytes[offset + 3] = ((value ushr 24) and 0xFF).toByte()
     }
+
+    private fun resolveSource(relativePath: String): java.nio.file.Path =
+        java.nio.file.Path.of(System.getProperty("user.dir")).resolve(relativePath).normalize()
 
     private fun ByteArray.containsAscii(value: String): Boolean {
         val needle = value.toByteArray(Charsets.US_ASCII)
