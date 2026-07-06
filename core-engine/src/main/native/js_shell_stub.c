@@ -99,8 +99,8 @@ static int js_shell_extract_meta(js_shell_payload_meta *meta) {
     if (offset > JS_SHELL_PAYLOAD_HEADER_SIZE || JS_SHELL_PAYLOAD_HEADER_SIZE - offset < 16u) return 0;
     memcpy(meta->nonce, js_shell_payload_header + offset, 16u);
     offset += 16u;
-    if (JS_SHELL_PAYLOAD_HEADER_SIZE - offset < 64u) return 0;
-    offset += 64u;
+    if (JS_SHELL_PAYLOAD_HEADER_SIZE - offset < 96u) return 0;
+    offset += 96u;
     if (!js_shell_read_u32_le(js_shell_payload_header, JS_SHELL_PAYLOAD_HEADER_SIZE, &offset, &chunk_tags_size)) return 0;
     if (chunk_tags_size != meta->chunk_count * 4u) return 0;
     if (offset > JS_SHELL_PAYLOAD_HEADER_SIZE || (size_t)chunk_tags_size > JS_SHELL_PAYLOAD_HEADER_SIZE - offset) return 0;

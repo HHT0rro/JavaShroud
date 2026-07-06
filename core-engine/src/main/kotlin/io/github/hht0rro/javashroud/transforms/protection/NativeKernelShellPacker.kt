@@ -55,6 +55,7 @@ internal object NativeKernelShellPacker {
         val encodedPayload: ByteArray,
         val payloadMac: ByteArray,
         val sectionDigest: ByteArray,
+        val bogusMetadataDigest: ByteArray,
         val bindingTag: ByteArray,
         val streamKey: ByteArray,
         val nativeMac: ByteArray,
@@ -84,6 +85,7 @@ internal object NativeKernelShellPacker {
         val nonceSize: Int = 0,
         val layoutProfile: Int = 0,
         val dispatcherProfile: Int = 0,
+        val bogusMetadataDigestValid: Boolean = false,
         val macValid: Boolean = false,
         val bindingTagValid: Boolean = false,
     )
@@ -167,6 +169,7 @@ internal object NativeKernelShellPacker {
             val storedPayload = if (compressionCodec == maxCompressionCodecZstd) compressed else bytes
             val encoded = encodeMaxPayloadForStub(storedPayload, streamKey, nonce, layoutProfile, dispatcherProfile, MAX_PAYLOAD_CHUNK_SIZE)
             val sectionDigest = sha256(bytes)
+            val bogusMetadataDigest = maxBogusMetadataDigest(seed, key, nonce, layoutProfile, dispatcherProfile, sectionDigest)
             val bindingTag = maxBindingTag(platform, outputName, bootstrapNativeIndexDigest, sectionDigest)
             val headerBytes = ByteArrayOutputStream().apply {
                 write(MAX_PAYLOAD_MARKER.toByteArray(Charsets.US_ASCII))
@@ -187,6 +190,7 @@ internal object NativeKernelShellPacker {
                 writeIntLe(dispatcherProfile)
                 write(nonce)
                 write(sectionDigest)
+                write(bogusMetadataDigest)
                 write(bindingTag)
                 writeIntLe(encoded.chunkTags.size)
                 write(encoded.chunkTags)
@@ -198,6 +202,7 @@ internal object NativeKernelShellPacker {
                 encodedPayload = encoded.encodedPayload,
                 payloadMac = payloadMac,
                 sectionDigest = sectionDigest,
+                bogusMetadataDigest = bogusMetadataDigest,
                 bindingTag = bindingTag,
                 streamKey = streamKey,
                 nativeMac = nativeMac,
@@ -240,6 +245,8 @@ internal object NativeKernelShellPacker {
                 hmac(key, headerBytes + encodedPayload + bootstrapNativeIndexDigest).contentEquals(payloadMac)
             val bindingTagValid = maxBindingTag(parsed.platform, parsed.outputName, bootstrapNativeIndexDigest, parsed.sectionDigest)
                 .contentEquals(parsed.bindingTag)
+            val bogusMetadataDigestValid = maxBogusMetadataDigest(seed, key, parsed.nonce, parsed.layoutProfile, parsed.dispatcherProfile, parsed.sectionDigest)
+                .contentEquals(parsed.bogusMetadataDigest)
             MaxPayloadInspection(
                 present = true,
                 version = parsed.version,
@@ -255,6 +262,7 @@ internal object NativeKernelShellPacker {
                 nonceSize = parsed.nonceSize,
                 layoutProfile = parsed.layoutProfile,
                 dispatcherProfile = parsed.dispatcherProfile,
+                bogusMetadataDigestValid = bogusMetadataDigestValid,
                 macValid = macValid,
                 bindingTagValid = bindingTagValid,
             )
@@ -283,6 +291,7 @@ internal object NativeKernelShellPacker {
         appendLine("static const unsigned char js_shell_build_hmac[32] = { ${bundle.payloadMac.toCByteArrayLiteral()} };")
         appendLine("static const unsigned char js_shell_stream_key[32] = { ${bundle.streamKey.toCByteArrayLiteral()} };")
         appendLine("static const unsigned char js_shell_section_digest[32] = { ${bundle.sectionDigest.toCByteArrayLiteral()} };")
+        appendLine("static const unsigned char js_shell_bogus_metadata_digest[32] = { ${bundle.bogusMetadataDigest.toCByteArrayLiteral()} };")
         appendLine("static const unsigned char js_shell_binding_tag[32] = { ${bundle.bindingTag.toCByteArrayLiteral()} };")
         appendLine("#define JS_SHELL_PAYLOAD_HEADER_SIZE ${bundle.headerBytes.size}")
         appendLine("#define JS_SHELL_PAYLOAD_SIZE ${bundle.encodedPayload.size}")
@@ -348,6 +357,7 @@ internal object NativeKernelShellPacker {
         val dispatcherProfile: Int,
         val nonce: ByteArray,
         val sectionDigest: ByteArray,
+        val bogusMetadataDigest: ByteArray,
         val bindingTag: ByteArray,
         val chunkTags: ByteArray,
     )
@@ -422,6 +432,7 @@ internal object NativeKernelShellPacker {
         val dispatcherProfile = reader.readIntLe()
         val nonce = reader.readBytes(nonceSize)
         val sectionDigest = reader.readBytes(32)
+        val bogusMetadataDigest = reader.readBytes(32)
         val bindingTag = reader.readBytes(32)
         val chunkTagsSize = reader.readIntLe()
         val chunkTags = reader.readBytes(chunkTagsSize)
@@ -443,6 +454,7 @@ internal object NativeKernelShellPacker {
             dispatcherProfile = dispatcherProfile,
             nonce = nonce,
             sectionDigest = sectionDigest,
+            bogusMetadataDigest = bogusMetadataDigest,
             bindingTag = bindingTag,
             chunkTags = chunkTags,
         )
@@ -650,6 +662,17 @@ internal object NativeKernelShellPacker {
                 outputName.toByteArray(Charsets.UTF_8) + byteArrayOf(0) +
                 bootstrapNativeIndexDigest + sectionDigest,
         )
+
+    private fun maxBogusMetadataDigest(seed: Long, key: ByteArray, nonce: ByteArray, layoutProfile: Int, dispatcherProfile: Int, sectionDigest: ByteArray): ByteArray =
+        MessageDigest.getInstance("SHA-256").apply {
+            update("javashroud-native-max-bogus-section-metadata-v1".toByteArray(Charsets.US_ASCII))
+            updateLong(seed)
+            update(key)
+            update(nonce)
+            updateInt(layoutProfile)
+            updateInt(dispatcherProfile)
+            update(sectionDigest)
+        }.digest()
 
     private fun innerFileType(outputName: String): String = when {
         outputName.endsWith(".dll", ignoreCase = true) -> "pe64-dll"

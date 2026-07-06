@@ -89,6 +89,7 @@ class NativeKernelShellPackerTest {
         assertTrue(inspection.present, "max payload header must parse")
         assertTrue(inspection.macValid, "max payload must authenticate with VBC4/runtime/protected-section key material")
         assertTrue(inspection.bindingTagValid, "max payload binding tag must cover stub and bootstrap index material")
+        assertTrue(inspection.bogusMetadataDigestValid, "max payload must carry authenticated bogus section metadata")
         assertEquals("linux-x64", inspection.platform)
         assertEquals("js_kernel_linux-x64.so", inspection.outputName)
         assertEquals("elf64-so", inspection.innerFileType)
@@ -107,6 +108,7 @@ class NativeKernelShellPackerTest {
         val renderedHeader = NativeKernelShellPacker.renderMaxPayloadHeader(bundle)
         assertTrue(renderedHeader.contains(NativeKernelShellPacker.MAX_STUB_MARKER), "generated C header must bind to the max stub marker")
         assertTrue(renderedHeader.contains("js_shell_stream_key"), "generated C header must expose the stub decode stream key")
+        assertTrue(renderedHeader.contains("js_shell_bogus_metadata_digest"), "generated C header must carry bogus section metadata evidence")
         assertTrue(renderedHeader.contains("js_shell_build_hmac"), "generated C header must retain build-side HMAC separately from the native MAC")
         assertTrue(renderedHeader.contains(cBytesForTest(bundle.nativeMac)), "stub payload MAC must use the native-side MAC algorithm")
         assertTrue(renderedHeader.contains(cBytesForTest(bundle.streamKey)), "stub decode key must match the payload stream key")
@@ -206,6 +208,10 @@ class NativeKernelShellPackerTest {
             val offset = maxPayloadProfileOffsets(header).second
             writeIntLeForTest(header, offset, bundle.dispatcherProfile xor 0x01)
         }
+        val tamperedBogusMetadataHeader = bundle.headerBytes.copyOf().also { header ->
+            val offset = maxPayloadBogusMetadataDigestOffset(header)
+            header[offset] = (header[offset].toInt() xor 0x5A).toByte()
+        }
 
         assertTrue(
             NativeKernelShellPacker.inspectMaxPayloadBundle(bundle.headerBytes, bundle.encodedPayload, bundle.payloadMac, 31L, keyMaterial, bootstrapDigest).macValid,
@@ -219,6 +225,9 @@ class NativeKernelShellPackerTest {
             NativeKernelShellPacker.inspectMaxPayloadBundle(tamperedDispatcherHeader, bundle.encodedPayload, bundle.payloadMac, 31L, keyMaterial, bootstrapDigest).macValid,
             "dispatcher profile must be bound into the max payload MAC",
         )
+        val bogusTamperInspection = NativeKernelShellPacker.inspectMaxPayloadBundle(tamperedBogusMetadataHeader, bundle.encodedPayload, bundle.payloadMac, 31L, keyMaterial, bootstrapDigest)
+        assertFalse(bogusTamperInspection.macValid, "bogus section metadata must be bound into the max payload MAC")
+        assertFalse(bogusTamperInspection.bogusMetadataDigestValid, "bogus section metadata digest mismatch must be independently inspectable")
         assertEquals(
             null,
             NativeKernelShellPacker.decodeMaxPayloadForTest(bundle.copy(layoutProfile = bundle.layoutProfile xor 0x01)),
@@ -255,6 +264,15 @@ class NativeKernelShellPackerTest {
         }
         repeat(7) { offset += 4 }
         return offset to offset + 4
+    }
+
+    private fun maxPayloadBogusMetadataDigestOffset(header: ByteArray): Int {
+        val profiles = maxPayloadProfileOffsets(header)
+        var offset = profiles.second + 4
+        val nonceSize = readIntLeForTest(header, profiles.first - 4)
+        offset += nonceSize
+        offset += 32
+        return offset
     }
 
     private fun readIntLeForTest(bytes: ByteArray, offset: Int): Int =
