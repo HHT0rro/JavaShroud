@@ -19,6 +19,35 @@
 #define JS_LC_REEXPORT_DYLIB 0x1fu
 #define JS_LC_LOAD_UPWARD_DYLIB 0x23u
 #define JS_LC_MAIN 0x80000028u
+#define JS_SECTION_TYPE 0x000000ffu
+#define JS_S_MOD_INIT_FUNC_POINTERS 0x9u
+
+#define JS_REBASE_OPCODE_MASK 0xf0u
+#define JS_REBASE_IMMEDIATE_MASK 0x0fu
+#define JS_REBASE_OPCODE_DONE 0x00u
+#define JS_REBASE_OPCODE_SET_TYPE_IMM 0x10u
+#define JS_REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB 0x20u
+#define JS_REBASE_OPCODE_ADD_ADDR_ULEB 0x30u
+#define JS_REBASE_OPCODE_ADD_ADDR_IMM_SCALED 0x40u
+#define JS_REBASE_OPCODE_DO_REBASE_IMM_TIMES 0x50u
+#define JS_REBASE_OPCODE_DO_REBASE_ULEB_TIMES 0x60u
+#define JS_REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB 0x70u
+#define JS_REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB 0x80u
+
+#define JS_BIND_OPCODE_MASK 0xf0u
+#define JS_BIND_OPCODE_DONE 0x00u
+#define JS_BIND_OPCODE_SET_DYLIB_ORDINAL_IMM 0x10u
+#define JS_BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB 0x20u
+#define JS_BIND_OPCODE_SET_DYLIB_SPECIAL_IMM 0x30u
+#define JS_BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM 0x40u
+#define JS_BIND_OPCODE_SET_TYPE_IMM 0x50u
+#define JS_BIND_OPCODE_SET_ADDEND_SLEB 0x60u
+#define JS_BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB 0x70u
+#define JS_BIND_OPCODE_ADD_ADDR_ULEB 0x80u
+#define JS_BIND_OPCODE_DO_BIND 0x90u
+#define JS_BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB 0xa0u
+#define JS_BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED 0xb0u
+#define JS_BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB 0xc0u
 
 typedef struct js_mach_header_64 {
     uint32_t magic;
@@ -49,6 +78,21 @@ typedef struct js_segment_command_64 {
     uint32_t nsects;
     uint32_t flags;
 } js_segment_command_64;
+
+typedef struct js_section_64 {
+    char sectname[16];
+    char segname[16];
+    uint64_t addr;
+    uint64_t size;
+    uint32_t offset;
+    uint32_t align;
+    uint32_t reloff;
+    uint32_t nreloc;
+    uint32_t flags;
+    uint32_t reserved1;
+    uint32_t reserved2;
+    uint32_t reserved3;
+} js_section_64;
 
 typedef struct js_dyld_info_command {
     uint32_t cmd;
@@ -97,6 +141,91 @@ static const unsigned char *js_shell_read_uleb128(const unsigned char *p, const 
         shift += 7u;
     }
     return 0;
+}
+
+static const unsigned char *js_shell_read_sleb128(const unsigned char *p, const unsigned char *end) {
+    unsigned int shift = 0;
+    while (p < end && shift < 64u) {
+        unsigned char byte = *p++;
+        if ((byte & 0x80u) == 0) return p;
+        shift += 7u;
+    }
+    return 0;
+}
+
+static const unsigned char *js_shell_skip_cstring(const unsigned char *p, const unsigned char *end) {
+    while (p < end) {
+        if (*p++ == 0) return p;
+    }
+    return 0;
+}
+
+static int js_shell_validate_rebase_stream(const unsigned char *base, size_t size, unsigned int segment_count) {
+    const unsigned char *p = base;
+    const unsigned char *end = base + size;
+    unsigned int saw_done = size == 0u;
+    while (p < end) {
+        unsigned char byte = *p++;
+        unsigned char opcode = byte & JS_REBASE_OPCODE_MASK;
+        unsigned char imm = byte & JS_REBASE_IMMEDIATE_MASK;
+        uint64_t ignored = 0;
+        if (opcode == JS_REBASE_OPCODE_DONE) { saw_done = 1; break; }
+        if (opcode == JS_REBASE_OPCODE_SET_TYPE_IMM || opcode == JS_REBASE_OPCODE_ADD_ADDR_IMM_SCALED || opcode == JS_REBASE_OPCODE_DO_REBASE_IMM_TIMES) {
+            (void)imm;
+        } else if (opcode == JS_REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB) {
+            if (imm >= segment_count) return 0;
+            p = js_shell_read_uleb128(p, end, &ignored);
+            if (!p) return 0;
+        } else if (opcode == JS_REBASE_OPCODE_ADD_ADDR_ULEB || opcode == JS_REBASE_OPCODE_DO_REBASE_ULEB_TIMES || opcode == JS_REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB) {
+            p = js_shell_read_uleb128(p, end, &ignored);
+            if (!p) return 0;
+        } else if (opcode == JS_REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB) {
+            p = js_shell_read_uleb128(p, end, &ignored);
+            if (!p) return 0;
+            p = js_shell_read_uleb128(p, end, &ignored);
+            if (!p) return 0;
+        } else {
+            return 0;
+        }
+    }
+    return saw_done && p <= end;
+}
+
+static int js_shell_validate_bind_stream(const unsigned char *base, size_t size, unsigned int segment_count) {
+    const unsigned char *p = base;
+    const unsigned char *end = base + size;
+    unsigned int saw_done = size == 0u;
+    while (p < end) {
+        unsigned char byte = *p++;
+        unsigned char opcode = byte & JS_BIND_OPCODE_MASK;
+        unsigned char imm = byte & 0x0fu;
+        uint64_t ignored = 0;
+        if (opcode == JS_BIND_OPCODE_DONE) { saw_done = 1; break; }
+        if (opcode == JS_BIND_OPCODE_SET_DYLIB_ORDINAL_IMM || opcode == JS_BIND_OPCODE_SET_DYLIB_SPECIAL_IMM || opcode == JS_BIND_OPCODE_SET_TYPE_IMM || opcode == JS_BIND_OPCODE_DO_BIND || opcode == JS_BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED) {
+            (void)imm;
+        } else if (opcode == JS_BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB || opcode == JS_BIND_OPCODE_ADD_ADDR_ULEB || opcode == JS_BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB) {
+            p = js_shell_read_uleb128(p, end, &ignored);
+            if (!p) return 0;
+        } else if (opcode == JS_BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM) {
+            p = js_shell_skip_cstring(p, end);
+            if (!p) return 0;
+        } else if (opcode == JS_BIND_OPCODE_SET_ADDEND_SLEB) {
+            p = js_shell_read_sleb128(p, end);
+            if (!p) return 0;
+        } else if (opcode == JS_BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB) {
+            if (imm >= segment_count) return 0;
+            p = js_shell_read_uleb128(p, end, &ignored);
+            if (!p) return 0;
+        } else if (opcode == JS_BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB) {
+            p = js_shell_read_uleb128(p, end, &ignored);
+            if (!p) return 0;
+            p = js_shell_read_uleb128(p, end, &ignored);
+            if (!p) return 0;
+        } else {
+            return 0;
+        }
+    }
+    return saw_done && p <= end;
 }
 
 static int js_shell_export_trie_has_symbol(const unsigned char *base, size_t size, const char *needle) {
@@ -155,6 +284,7 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
     unsigned int segment_count = 0;
     int saw_text = 0;
     int saw_linkedit = 0;
+    unsigned int initializer_section_count = 0;
     const js_dyld_info_command *dyld = 0;
     const js_symtab_command *symtab = 0;
     for (uint32_t i = 0; i < mh->ncmds; i++) {
@@ -176,6 +306,23 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
             if (!js_shell_validate_range(seg->fileoff, seg->filesize, size)) {
                 js_shell_loader_fail("mach-o segment file range is out of bounds");
                 return 0;
+            }
+            if (seg->nsects && lc->cmdsize < sizeof(js_segment_command_64) + ((uint64_t)seg->nsects * sizeof(js_section_64))) {
+                js_shell_loader_fail("mach-o section table is truncated");
+                return 0;
+            }
+            const js_section_64 *sections = (const js_section_64 *)(cmd_ptr + sizeof(js_segment_command_64));
+            for (uint32_t si = 0; si < seg->nsects; si++) {
+                const js_section_64 *section = sections + si;
+                if (section->size && section->offset && !js_shell_validate_range(section->offset, section->size, size)) {
+                    js_shell_loader_fail("mach-o section file range is out of bounds");
+                    return 0;
+                }
+                if (section->nreloc && !js_shell_validate_range(section->reloff, (uint64_t)section->nreloc * 8u, size)) {
+                    js_shell_loader_fail("mach-o relocation table is out of bounds");
+                    return 0;
+                }
+                if ((section->flags & JS_SECTION_TYPE) == JS_S_MOD_INIT_FUNC_POINTERS) initializer_section_count++;
             }
             if (memcmp(seg->segname, "__TEXT", 6) == 0) saw_text = 1;
             if (memcmp(seg->segname, "__LINKEDIT", 10) == 0) saw_linkedit = 1;
@@ -213,6 +360,16 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
         js_shell_loader_fail("mach-o symbol table range is out of bounds");
         return 0;
     }
+    if (!js_shell_validate_rebase_stream(bytes + dyld->rebase_off, dyld->rebase_size, segment_count) ||
+        !js_shell_validate_bind_stream(bytes + dyld->bind_off, dyld->bind_size, segment_count) ||
+        !js_shell_validate_bind_stream(bytes + dyld->lazy_bind_off, dyld->lazy_bind_size, segment_count)) {
+        js_shell_loader_fail("mach-o rebase/bind/lazy-bind opcode stream is invalid");
+        return 0;
+    }
+    if (initializer_section_count > 16u) {
+        js_shell_loader_fail("mach-o initializer section count is suspicious");
+        return 0;
+    }
     if (!dyld->export_size || !js_shell_export_trie_has_symbol(bytes + dyld->export_off, dyld->export_size, "_JNI_OnLoad")) {
         js_shell_loader_fail("mach-o payload does not export _JNI_OnLoad");
         return 0;
@@ -222,7 +379,7 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
         return 0;
     }
 
-    js_shell_loader_fail("mach-o payload validated, but anonymous execution mapping stays fail-closed until rebase/bind/lazy-bind/initializer execution is implemented and verified on macOS");
+    js_shell_loader_fail("mach-o payload validated through segments, sections, rebase/bind/lazy-bind streams and initializer metadata, but anonymous execution mapping stays fail-closed until runtime execution is verified on macOS");
     return 0;
 }
 

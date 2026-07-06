@@ -434,7 +434,7 @@ class NativeRecompilationTransformsTest {
 
         assertEquals(platforms.toSet(), maxDiagnostics.results.map { it.platform }.toSet(), "Windows/Linux max recompilation must produce reportable outer stubs")
         assertEquals(platforms.toSet(), innerDiagnostics.results.map { it.platform }.toSet(), "Windows/Linux off recompilation must produce inner kernels for plaintext comparison")
-        assertEquals(setOf("macos-x64", "macos-arm64"), macosDiagnostics.results.map { it.platform }.toSet(), "macOS max recompilation must produce fail-closed reportable outer stubs")
+        assertEquals(setOf("macos-x64", "macos-arm64"), macosDiagnostics.results.map { it.platform }.toSet(), "macOS max recompilation must produce fail-closed reportable outer stubs. diagnostics=${macosDiagnostics.messages.joinToString(" | ") { "${it.level}:${it.message}" }}")
 
         val innerByPlatform = innerDiagnostics.results.associateBy { it.platform }
         val report = StringBuilder()
@@ -467,7 +467,7 @@ class NativeRecompilationTransformsTest {
         }
 
         macosDiagnostics.results.sortedBy { it.platform }.forEach { result ->
-            assertTrue(result.bytes.containsAscii("mach-o payload validated, but anonymous execution mapping stays fail-closed"), "${result.platform} must retain its explicit Mach-O fail-closed reason")
+            assertTrue(result.bytes.containsAscii("mach-o payload validated through segments, sections, rebase/bind/lazy-bind streams and initializer metadata"), "${result.platform} must retain its explicit Mach-O fail-closed reason")
             assertMaxStubReverseEvidence(result.bytes, result.platform)
             appendReverseEvidenceReport(
                 report,
@@ -475,7 +475,7 @@ class NativeRecompilationTransformsTest {
                 result.bytes,
                 innerBytes = null,
                 rawHeaderComparable = false,
-                failClosedReason = "Mach-O payload parser is present, but anonymous execution mapping remains fail-closed until real macOS runtime validation is implemented.",
+                failClosedReason = "Mach-O payload parser validates segments, sections, rebase/bind/lazy-bind streams and initializer metadata, but anonymous execution remains fail-closed until real macOS runtime validation is implemented.",
             )
         }
 
