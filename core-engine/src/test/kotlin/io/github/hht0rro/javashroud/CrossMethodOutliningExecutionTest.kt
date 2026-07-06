@@ -26,6 +26,7 @@ import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
 import java.nio.file.Files
 import java.nio.file.Path
+import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import java.util.jar.JarEntry
 import java.util.jar.JarInputStream
@@ -104,13 +105,21 @@ class CrossMethodOutliningExecutionTest {
             val assembled = ByteArray(totalSize)
             val shardLines = lines.drop(1)
             assertEquals(shardCount, shardLines.size, "Manifest must enumerate every shard")
+            var previousOrderToken: String? = null
             for (line in shardLines) {
                 val parts = line.split('|')
+                val index = parts[0].toInt()
                 val offset = parts[1].toInt()
                 val length = parts[2].toInt()
+                val digest = parts[3]
                 val shardPath = parts[4]
                 val peerOrdinal = parts[6].toInt()
                 val shardBytes = assertNotNull(decodedResources[shardPath], "Manifest shard path must resolve to an emitted opaque resource")
+                val orderToken = shardOrderToken(header[4], ownOrdinal, index, shardPath, digest)
+                previousOrderToken?.let { previous ->
+                    assertTrue(previous <= orderToken, "Manifest shard order must match native reassemble order-token validation")
+                }
+                previousOrderToken = orderToken
                 referencedPeerOrdinals += peerOrdinal
                 assertTrue(peerOrdinal in 0 until manifests.size, "Shard peer ordinal must point into shared manifest mesh")
                 assertTrue(peerOrdinal != ownOrdinal, "Cross-method shard peer link must point at another method manifest")
@@ -149,6 +158,13 @@ class CrossMethodOutliningExecutionTest {
         )
     }
 
+    private fun shardOrderToken(mesh: String, ordinal: Int, index: Int, path: String, digest: String): String {
+        val material = "vbc4-shard-order\u0000$mesh\u0000$ordinal\u0000$index\u0000$path\u0000$digest"
+        return MessageDigest.getInstance("SHA-256")
+            .digest(material.toByteArray(Charsets.UTF_8))
+            .take(8)
+            .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xFF) }
+    }
     private fun runEngine(inputJar: Path): Path {
         val outputJar = inputJar.resolveSibling("javashroud-cross-method-output.jar")
         val configPath = inputJar.resolveSibling("javashroud-cross-method-config.toml")

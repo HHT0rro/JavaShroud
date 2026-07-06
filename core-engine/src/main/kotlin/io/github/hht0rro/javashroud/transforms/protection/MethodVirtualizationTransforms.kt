@@ -845,12 +845,8 @@ private data class VmSliceManifestPlan(
         return meshPeers[peerIndex]
     }
 
-    private fun meshOrderedShards(mesh: String, ordinal: Int): List<VmSliceShard> {
-        val ordered = shards.sortedBy { shard -> shard.meshOrderToken(mesh, ordinal) }
-        return if (ordered.size > 1 && ordered.map { it.index } == shards.map { it.index }) {
-            ordered.drop(1) + ordered.first()
-        } else ordered
-    }
+    private fun meshOrderedShards(mesh: String, ordinal: Int): List<VmSliceShard> =
+        shards.sortedBy { shard -> shard.meshOrderToken(mesh, ordinal) }
 }
 
 private data class VmSliceShard(
