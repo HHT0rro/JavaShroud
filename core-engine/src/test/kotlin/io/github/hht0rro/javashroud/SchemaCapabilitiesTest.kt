@@ -366,6 +366,15 @@ class SchemaCapabilitiesTest {
         assertEquals("standard", protectionLevel!!.defaultValue?.asText(), "nativeProtectionLevel should default to standard")
         assertEquals(listOf("standard", "aggressive"), protectionLevel.options)
 
+        val packingLevel = jniModule.params.singleOrNull { it.key == "nativePackingLevel" }
+        assertTrue(packingLevel != null, "nativePackingLevel param should exist")
+        assertEquals("max", packingLevel!!.defaultValue?.asText(), "nativePackingLevel should default to max")
+        assertEquals(listOf("off", "standard", "max"), packingLevel.options)
+        assertFalse(packingLevel.hidden, "nativePackingLevel should be visible")
+        assertTrue(packingLevel.description.contains("standard") && packingLevel.description.contains("overlay"), "nativePackingLevel schema must describe standard as overlay compatibility")
+        assertTrue(packingLevel.description.contains("max") && packingLevel.description.contains("stub shell"), "nativePackingLevel schema must describe max as the stub shell mode")
+        assertTrue(packingLevel.description.contains("完整 js_kernel"), "nativePackingLevel schema must state that max protects the complete js_kernel")
+
         assertTrue(
             jniModule.params.none { it.key == "codeSectionEncryption" },
             "codeSectionEncryption should not be exposed until a real JNI_OnLoad self-decrypt path exists",

@@ -357,8 +357,16 @@ object EmbeddedHelperDeployment {
 
     internal fun nativeLibraryContainsRequiredJniVmAbi(bytes: ByteArray): Boolean =
         bytes.isNotEmpty() &&
-            REQUIRED_SEALED_NATIVE_ABI_MARKERS.all { marker -> bytes.containsAscii(marker) } &&
-            REJECTED_LEGACY_NATIVE_ABI_MARKERS.none { marker -> bytes.containsAscii(marker) }
+            REJECTED_LEGACY_NATIVE_ABI_MARKERS.none { marker -> bytes.containsAscii(marker) } &&
+            (
+                REQUIRED_SEALED_NATIVE_ABI_MARKERS.all { marker -> bytes.containsAscii(marker) } ||
+                    nativeLibraryContainsMaxShellStubAbi(bytes)
+            )
+
+    internal fun nativeLibraryContainsMaxShellStubAbi(bytes: ByteArray): Boolean =
+        bytes.containsAscii("JNI_OnLoad") &&
+            bytes.containsAscii(NativeKernelShellPacker.MAX_STUB_MARKER) &&
+            bytes.containsAscii(NativeKernelShellPacker.MAX_PAYLOAD_MARKER)
 
     internal fun hasLoadableNativeKernel(): Boolean = hasBundledNativeSources()
 
@@ -417,6 +425,8 @@ object EmbeddedHelperDeployment {
         require(nativeProtectionLevel in setOf("standard", "aggressive")) {
             "jni-microkernel-loader nativeProtectionLevel '$nativeProtectionLevel' is not supported"
         }
+        val nativePackingLevel = (loaderPass.params["nativePackingLevel"] as? com.fasterxml.jackson.databind.node.TextNode)?.textValue() ?: "max"
+        NativeKernelShellPacker.Level.parse(nativePackingLevel)
         val targetPlatforms = resolveNativeCompileTargetPlatforms(targetPlatformParam)
         if (targetPlatforms.isEmpty() || targetPlatforms.any { it !in NativeRecompilationTransforms.ZIG_TARGETS }) {
             throw IllegalArgumentException("target platform is unsupported: $targetPlatformParam")
@@ -433,6 +443,7 @@ object EmbeddedHelperDeployment {
                 classLoader = classLoader,
                 targetPlatforms = targetPlatforms,
                 nativeProtectionLevel = nativeProtectionLevel,
+                nativePackingLevel = nativePackingLevel,
                 onMessage = { message -> emitNativeRecompilationMessage(emit, message) },
             )
             if (diagnostics.results.isEmpty()) {

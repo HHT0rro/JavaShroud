@@ -283,6 +283,23 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
 
             ),
 
+
+            ParamSchema(
+
+                key = "nativePackingLevel",
+
+                type = "enum",
+
+                defaultValue = JsonNodeFactory.instance.textNode("max"),
+
+                options = listOf("off", "standard", "max"),
+
+                description = "Zig 编译后 native 加壳级别。off 保持原生动态库；standard 保留可加载前缀并追加认证 overlay；max 生成外层 stub shell，并将完整 js_kernel 作为认证编码 payload 绑定到 stub 和 native bootstrap index。",
+
+                hidden = false,
+
+            ),
+
             ParamSchema(
 
                 key = "seed",

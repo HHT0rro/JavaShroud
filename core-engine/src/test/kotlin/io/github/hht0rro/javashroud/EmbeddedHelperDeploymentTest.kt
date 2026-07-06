@@ -9,6 +9,7 @@ import io.github.hht0rro.javashroud.model.analysis.JarAnalysisSummary
 import io.github.hht0rro.javashroud.model.analysis.RenamePlan
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
+import io.github.hht0rro.javashroud.transforms.protection.NativeKernelShellPacker
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
@@ -49,6 +50,26 @@ class EmbeddedHelperDeploymentTest {
         }
     }
 
+
+    @Test
+    fun overlay_marker_alone_does_not_satisfy_max_stub_abi_probe() {
+        val shellPackedBytes = "loadable-native-prefix-${NativeKernelShellPacker.LOADER_MARKER}".toByteArray(Charsets.US_ASCII)
+
+        assertFalse(
+            EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(shellPackedBytes),
+            "standard overlay marker alone must not be accepted as max stub shell evidence.",
+        )
+    }
+
+    @Test
+    fun max_stub_markers_and_jni_onload_satisfy_jni_vm_abi_probe() {
+        val maxStubBytes = "native-prefix-JNI_OnLoad-${NativeKernelShellPacker.MAX_STUB_MARKER}-${NativeKernelShellPacker.MAX_PAYLOAD_MARKER}".toByteArray(Charsets.US_ASCII)
+
+        assertTrue(
+            EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(maxStubBytes),
+            "max stub artifacts must carry JNI_OnLoad plus stub and payload markers.",
+        )
+    }
 
     @Test
     fun jni_microkernel_helper_runtime_resource_key_is_injected_per_build() {

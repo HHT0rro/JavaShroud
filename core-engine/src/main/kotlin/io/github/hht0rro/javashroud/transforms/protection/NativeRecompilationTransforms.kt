@@ -51,6 +51,14 @@ object NativeRecompilationTransforms {
         "js_jni_runtime.c",
         "js_jni_runtime.h",
         "native_secrets.inc",
+        "js_shell_stub.c",
+        "js_shell_stub.h",
+        "js_shell_crypto.c",
+        "js_shell_crypto.h",
+        "js_shell_loader.h",
+        "js_shell_loader_pe.c",
+        "js_shell_loader_elf.c",
+        "js_shell_loader_macho.c",
     )
 
     private val NATIVE_DIVERSIFICATION_TARGETS = listOf("js_kernel.c", "js_vm_core.c")
@@ -62,7 +70,8 @@ object NativeRecompilationTransforms {
         classLoader: ClassLoader,
         targetPlatforms: Collection<String> = ZIG_TARGETS.keys,
         nativeProtectionLevel: String = "standard",
-    ): List<RecompiledNative> = recompileWithDiagnostics(seed, classLoader, targetPlatforms, nativeProtectionLevel).results
+        nativePackingLevel: String = "max",
+    ): List<RecompiledNative> = recompileWithDiagnostics(seed, classLoader, targetPlatforms, nativeProtectionLevel, nativePackingLevel).results
 
     data class RecompilationDiagnostics(
         val results: List<RecompiledNative>,
@@ -74,11 +83,13 @@ object NativeRecompilationTransforms {
         classLoader: ClassLoader,
         targetPlatforms: Collection<String> = ZIG_TARGETS.keys,
         nativeProtectionLevel: String = "standard",
+        nativePackingLevel: String = "max",
         onMessage: (NativeToolchainProvisioner.ResolutionMessage) -> Unit = {},
     ): RecompilationDiagnostics {
         require(nativeProtectionLevel in setOf("standard", "aggressive")) {
             "jni-microkernel-loader nativeProtectionLevel '$nativeProtectionLevel' is not supported"
         }
+        val parsedNativePackingLevel = NativeKernelShellPacker.Level.parse(nativePackingLevel)
         val messages = mutableListOf<NativeToolchainProvisioner.ResolutionMessage>()
         fun report(message: NativeToolchainProvisioner.ResolutionMessage) {
             messages += message
@@ -88,7 +99,7 @@ object NativeRecompilationTransforms {
         val toolchain = resolution.toolchain ?: return RecompilationDiagnostics(emptyList(), messages)
         val workDir = Files.createTempDirectory("javashroud-native-recompile-")
         return try {
-            val results = doRecompile(seed, classLoader, toolchain, workDir, targetPlatforms, nativeProtectionLevel, ::report)
+            val results = doRecompile(seed, classLoader, toolchain, workDir, targetPlatforms, nativeProtectionLevel, parsedNativePackingLevel, ::report)
             RecompilationDiagnostics(results, messages)
         } finally {
             workDir.toFile().deleteRecursively()
@@ -102,6 +113,7 @@ object NativeRecompilationTransforms {
         workDir: Path,
         targetPlatforms: Collection<String>,
         nativeProtectionLevel: String,
+        nativePackingLevel: NativeKernelShellPacker.Level,
         report: (NativeToolchainProvisioner.ResolutionMessage) -> Unit,
     ): List<RecompiledNative> {
         val vbc4BuildContext = requireVbc4BuildContext()
@@ -162,6 +174,10 @@ object NativeRecompilationTransforms {
                 vbc4BuildContext = vbc4BuildContext,
                 protectedSectionKey = protectedSectionKey,
                 nativeProtectionLevel = nativeProtectionLevel,
+                nativePackingLevel = nativePackingLevel.name.lowercase(),
+                nativeShellPackerVersion = NativeKernelShellPacker.PACKER_VERSION,
+                nativeShellPayloadProfile = "${nativePackingLevel.name.lowercase()}-payload-zstd-chunk-v3",
+                nativeShellLoaderProfile = nativeShellLoaderProfile(platform),
             )
             NativeCompileTask(
                 platform = platform,
@@ -170,6 +186,7 @@ object NativeRecompilationTransforms {
                 outputPath = outputPath,
                 cachePath = nativeArtifactCacheDirectory().resolve("$cacheKey-$outputName"),
                 nativeProtectionLevel = nativeProtectionLevel,
+                nativePackingLevel = nativePackingLevel.name.lowercase(),
             )
         }
         val compiledResults = compileTasks.parallelStream().map { task ->
@@ -191,11 +208,41 @@ object NativeRecompilationTransforms {
                     // Here we encrypt that section in-place for supported native formats and flip
                     // the in-binary seal marker so the constructor decrypts it at load time. This protects
                     // the most analysis-relevant code against offline static analysis while
-                    // keeping the library loadable. The patcher fails open (returns the
-                    // unmodified bytes) if the section is absent, the format cannot be safely
-                    // parsed, or relocations overlap the section. Per-build
-                    // divergence also still comes from source diversification.
-                    NativeProtectedSectionPacker.sealIfPossible(compileResult.bytes, protectedSectionKey, report, failClosed = true)
+                    // keeping the library loadable. The patcher fails closed for responsible formats.
+                    val sectionSealed = NativeProtectedSectionPacker.sealIfPossible(compileResult.bytes, protectedSectionKey, report, failClosed = true)
+                    when (nativePackingLevel) {
+                        NativeKernelShellPacker.Level.OFF -> sectionSealed
+                        NativeKernelShellPacker.Level.STANDARD -> {
+                            val shellPacked = NativeKernelShellPacker.pack(
+                                bytes = sectionSealed,
+                                platform = task.platform,
+                                outputName = task.outputName,
+                                seed = seed,
+                                level = nativePackingLevel,
+                                keyMaterial = protectedSectionKey + vbc4BuildContext.runtimeResourceKey,
+                            )
+                            report(NativeToolchainProvisioner.ResolutionMessage("info", "Applied standard native shell overlay for ${task.platform}", 94))
+                            shellPacked
+                        }
+                        NativeKernelShellPacker.Level.MAX -> {
+                            val bootstrapDigest = nativeBootstrapIndexDigest(task.platform, task.outputName, vbc4BuildContext)
+                            val payloadBundle = NativeKernelShellPacker.buildMaxPayloadBundle(
+                                bytes = sectionSealed,
+                                platform = task.platform,
+                                outputName = task.outputName,
+                                seed = seed,
+                                keyMaterial = protectedSectionKey + vbc4BuildContext.runtimeResourceKey + vbc4BuildContext.jarLayoutDigest,
+                                bootstrapNativeIndexDigest = bootstrapDigest,
+                            )
+                            Files.writeString(srcDir.resolve("js_shell_payload.inc"), NativeKernelShellPacker.renderMaxPayloadHeader(payloadBundle), StandardCharsets.UTF_8)
+                            val outerResult = compileShellStubWithZig(toolchain.zigPath, srcDir, task.zigTarget, task.outputPath, task.nativeProtectionLevel)
+                            if (!outerResult.success || !Files.exists(task.outputPath) || Files.size(task.outputPath) <= 0) {
+                                throw IllegalStateException("failed to compile max native shell stub for ${task.platform}: ${outerResult.output.take(600)}")
+                            }
+                            report(NativeToolchainProvisioner.ResolutionMessage("info", "Applied max native stub shell for ${task.platform}; inner kernel is carried as authenticated payload", 94))
+                            Files.readAllBytes(task.outputPath)
+                        }
+                    }
                 }
                 if (!compileResult.fromCache && EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(rawBytes)) {
                     writeNativeArtifactCache(task.cachePath, rawBytes)
@@ -212,6 +259,22 @@ object NativeRecompilationTransforms {
         return results
     }
 
+
+    private fun nativeBootstrapIndexDigest(platform: String, outputName: String, context: Vbc4BuildContext): ByteArray =
+        MessageDigest.getInstance("SHA-256").apply {
+            updateUtf8("javashroud-native-bootstrap-index-v1")
+            updateUtf8(platform)
+            updateUtf8(outputName)
+            update(context.jarLayoutDigest)
+            update(context.runtimeResourceKey)
+        }.digest()
+
+    private fun nativeShellLoaderProfile(platform: String): String = when {
+        platform.startsWith("windows-") -> "pe64-memory-loader-reloc-import-noentry-v18"
+        platform.startsWith("linux-") -> "elf64-anonymous-loader-rela-v2"
+        platform.startsWith("macos-") -> "macho64-validated-fail-closed-v2"
+        else -> "unknown-loader-fail-closed-v1"
+    }
     private data class NativeCompileTask(
         val platform: String,
         val zigTarget: String,
@@ -219,6 +282,7 @@ object NativeRecompilationTransforms {
         val outputPath: Path,
         val cachePath: Path,
         val nativeProtectionLevel: String,
+        val nativePackingLevel: String,
     )
 
     private data class ZigCompileResult(val success: Boolean, val output: String)
@@ -309,6 +373,10 @@ object NativeRecompilationTransforms {
         vbc4BuildContext: Vbc4BuildContext,
         protectedSectionKey: ByteArray,
         nativeProtectionLevel: String = "standard",
+        nativePackingLevel: String = "max",
+        nativeShellPackerVersion: Int = NativeKernelShellPacker.PACKER_VERSION,
+        nativeShellPayloadProfile: String = "standard-overlay",
+        nativeShellLoaderProfile: String = "direct-native-loader",
     ): String {
         val digest = MessageDigest.getInstance("SHA-256")
         digest.update("javashroud-native-vbc4-cache-v1".toByteArray(StandardCharsets.US_ASCII))
@@ -317,6 +385,10 @@ object NativeRecompilationTransforms {
         digest.updateUtf8(outputName)
         digest.updateUtf8(nativeCompileOptLevel())
         digest.updateUtf8(nativeProtectionLevel)
+        digest.updateUtf8(nativePackingLevel)
+        digest.updateInt(nativeShellPackerVersion)
+        digest.updateUtf8(nativeShellPayloadProfile)
+        digest.updateUtf8(nativeShellLoaderProfile)
         nativeCompileExtraFlags().forEach { flag -> digest.updateUtf8(flag) }
         digest.update(sourceDigest)
         digest.updateUtf8(toolchainIdentity)
@@ -372,6 +444,13 @@ object NativeRecompilationTransforms {
         update(0)
     }
 
+    private fun MessageDigest.updateInt(value: Int) {
+        update(((value ushr 24) and 0xFF).toByte())
+        update(((value ushr 16) and 0xFF).toByte())
+        update(((value ushr 8) and 0xFF).toByte())
+        update((value and 0xFF).toByte())
+    }
+
     private fun MessageDigest.updateLong(value: Long) {
         for (shift in 56 downTo 0 step 8) {
             update(((value ushr shift) and 0xFF).toByte())
@@ -420,8 +499,11 @@ object NativeRecompilationTransforms {
         )
         if (zigTarget.contains("macos")) {
             val exportList = srcDir.resolve("macos-exported-symbols.txt")
-            Files.writeString(exportList, "_JNI_OnLoad\n_JNI_OnUnload\n", StandardCharsets.US_ASCII)
+            Files.writeString(exportList, "_JNI_OnLoad\n_JNI_OnUnload\n_js_native_abi_table_v1\n", StandardCharsets.US_ASCII)
             cmd.add("-Wl,-exported_symbols_list,${exportList}")
+        }
+        if (zigTarget.contains("windows")) {
+            cmd.add("-Wl,--no-entry")
         }
         cmd.addAll(extraFlags)
         return try {
@@ -435,6 +517,59 @@ object NativeRecompilationTransforms {
         }
     }
 
+    private fun compileShellStubWithZig(zigPath: Path, srcDir: Path, zigTarget: String, outputPath: Path, nativeProtectionLevel: String): ZigCompileResult {
+        val optLevel = nativeCompileOptLevel()
+        val extraFlags = nativeCompileExtraFlags()
+        val loaderSource = when {
+            zigTarget.contains("windows") -> "js_shell_loader_pe.c"
+            zigTarget.contains("linux") -> "js_shell_loader_elf.c"
+            zigTarget.contains("macos") -> "js_shell_loader_macho.c"
+            else -> "js_shell_loader_elf.c"
+        }
+        val cmd = mutableListOf(
+            zigPath.toString(), "cc", "-target", zigTarget, optLevel, "-shared",
+            "-fwrapv",
+            "-DZSTD_DISABLE_ASM=1",
+            "-DZSTDLIB_VISIBLE=",
+            "-DZSTDERRORLIB_VISIBLE=",
+            "-DXXH_PUBLIC_API=",
+            "-DJS_NATIVE_PROTECTION_${nativeProtectionLevel.uppercase()}=1",
+            "-o", outputPath.toString(),
+            srcDir.resolve("js_shell_stub.c").toString(),
+            srcDir.resolve("js_shell_crypto.c").toString(),
+            srcDir.resolve(loaderSource).toString(),
+            srcDir.resolve("zstd/common/debug.c").toString(),
+            srcDir.resolve("zstd/common/entropy_common.c").toString(),
+            srcDir.resolve("zstd/common/error_private.c").toString(),
+            srcDir.resolve("zstd/common/fse_decompress.c").toString(),
+            srcDir.resolve("zstd/common/xxhash.c").toString(),
+            srcDir.resolve("zstd/common/zstd_common.c").toString(),
+            srcDir.resolve("zstd/decompress/huf_decompress.c").toString(),
+            srcDir.resolve("zstd/decompress/zstd_ddict.c").toString(),
+            srcDir.resolve("zstd/decompress/zstd_decompress.c").toString(),
+            srcDir.resolve("zstd/decompress/zstd_decompress_block.c").toString(),
+            "-I", srcDir.toString(), "-I", srcDir.resolve("cross-compile").toString(),
+            "-I", srcDir.resolve("zstd").toString(), "-I", srcDir.resolve("zstd/common").toString(), "-I", srcDir.resolve("zstd/decompress").toString(),
+        )
+        if (zigTarget.contains("macos")) {
+            val exportList = srcDir.resolve("macos-shell-exported-symbols.txt")
+            Files.writeString(exportList, "_JNI_OnLoad\n_JNI_OnUnload\n", StandardCharsets.US_ASCII)
+            cmd.add("-Wl,-exported_symbols_list,${exportList}")
+        }
+        if (zigTarget.contains("windows")) {
+            cmd.add("-Wl,--no-entry")
+        }
+        cmd.addAll(extraFlags)
+        return try {
+            val pb = ProcessBuilder(cmd)
+            pb.redirectErrorStream(true)
+            val process = pb.start()
+            val output = process.inputStream.bufferedReader().readText()
+            ZigCompileResult(process.waitFor() == 0, output)
+        } catch (error: Exception) {
+            ZigCompileResult(false, error.message ?: error::class.java.simpleName)
+        }
+    }
     internal fun generateDiversifiedSecrets(
         seed: Long,
         rng: Random,
