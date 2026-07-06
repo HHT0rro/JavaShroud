@@ -1002,8 +1002,8 @@ class NativeHelperHardeningTest {
         assertTrue(nativeSource.contains("js_vm_dispatch_rotation_due"), "VM dispatch should use a dynamic rotation gate")
         assertTrue(gateBody.contains("JS_VBC4_DISPATCH_STEP_MASK") && gateBody.contains("interval = 3u +") && gateBody.contains("phase"),
             "Dynamic gate should preserve the build mask as one input but add state-derived intervals")
-        assertTrue(executeBody.contains("js_vm_dispatch_rotation_due(p, vm_dispatch_drift_state, dispatch_step, fault_pc, sp)"),
-            "Execute loop must not schedule resident rotation solely from a fixed step mask")
+        assertTrue(executeBody.contains("js_vm_profile_transition_due(js_vm_dispatch_profile, p, vm_dispatch_drift_state, dispatch_step, fault_pc, sp)"),
+            "Execute loop must route resident rotation through a dispatcher-profile transition gate instead of a fixed step mask")
     }
 
     @Test
@@ -1202,8 +1202,8 @@ class NativeHelperHardeningTest {
             "Native VM must encode parsed operands for resident program storage and decode only into a temporary instruction copy.",
         )
         assertTrue(
-            nativeSource.contains("decoded_ops[operand_index] = js_vm_load_resident_operand(p, resident_index, operand_index)"),
-            "VM execution must decode operands into per-iteration temporary storage.",
+            nativeSource.contains("decoded_ops[operand_index] = js_vm_profile_fetch_operand(p, js_vm_dispatch_profile, resident_index, operand_index"),
+            "VM execution must decode operands into per-iteration temporary storage through a dispatcher-profile operand fetch path.",
         )
         assertTrue(
             nativeSource.contains("js_vbc4_wipe_volatile(decoded_ops"),

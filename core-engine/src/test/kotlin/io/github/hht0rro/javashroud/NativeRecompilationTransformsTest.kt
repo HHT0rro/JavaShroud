@@ -220,6 +220,9 @@ class NativeRecompilationTransformsTest {
         assertTrue(source.contains("SecureRandom()"), "Production native diversification must use SecureRandom")
         assertFalse(source.contains("Random(seed xor vbc4BuildContext.nativeSeed)"), "Production native diversification must not be reproducible from seed xor nativeSeed")
         assertTrue(source.contains("protectedSectionKey"), "Native cache key and secrets must retain per-build protected-section material")
+        assertTrue(source.contains("NativeKernelShellPacker.pack"), "standard Zig-compiled native artifacts must pass through the shell overlay packer after section sealing")
+        assertTrue(source.contains("buildMaxPayloadBundle"), "max native artifacts must build an authenticated payload bundle after section sealing")
+        assertTrue(source.contains("compileShellStubWithZig"), "max native artifacts must compile an outer stub shell")
     }
     @Test
     fun native_artifact_cache_key_covers_security_sensitive_inputs() {
@@ -239,6 +242,248 @@ class NativeRecompilationTransformsTest {
         assertTrue(keyBody.contains("vbc4BuildContext.runtimeResourceKey"), "Cache key must include runtime resource key material")
         assertTrue(keyBody.contains("protectedSectionKey"), "Cache key must include protected-section sealing material")
         assertTrue(keyBody.contains("nativeProtectionLevel"), "Cache key must include native protection level")
+        assertTrue(keyBody.contains("nativePackingLevel"), "Cache key must include native shell packing level")
+        assertTrue(keyBody.contains("nativeShellPackerVersion"), "Cache key must include native shell packer version")
+        assertTrue(keyBody.contains("nativeShellPayloadProfile"), "Cache key must include max payload profile identity")
+        assertTrue(keyBody.contains("nativeShellLoaderProfile"), "Cache key must include platform loader profile identity")
+    }
+
+    @Test
+    fun linux_max_shell_loader_maps_decoded_inner_elf_in_memory() {
+        val source = java.nio.file.Files.readString(resolveSource("src/main/native/js_shell_loader_elf.c"))
+
+        assertTrue(source.contains("payload->decoded_payload"), "Linux max shell loader must use decoded inner payload bytes, not the encoded blob")
+        assertTrue(source.contains("ET_DYN") && source.contains("EM_X86_64"), "Linux max shell loader must validate a supported ELF64 shared object")
+        assertTrue(source.contains("PT_LOAD") && source.contains("PT_DYNAMIC"), "Linux max shell loader must map load segments and parse the dynamic section")
+        assertTrue(source.contains("MAP_PRIVATE | MAP_ANONYMOUS"), "Linux max shell loader must use anonymous in-memory mapping")
+        assertTrue(source.contains("R_X86_64_RELATIVE") && source.contains("R_X86_64_JUMP_SLOT") && source.contains("R_X86_64_GLOB_DAT"), "Linux max shell loader must process core RELA relocation classes")
+        assertTrue(source.contains("dlsym(RTLD_DEFAULT"), "Linux max shell loader must resolve host imports without writing a temp library")
+        assertTrue(source.contains("init_array") && source.contains("JNI_OnLoad"), "Linux max shell loader must run initializers and resolve the inner JNI_OnLoad export")
+        assertFalse(source.contains("elf64 anonymous memory loader is fail-closed until"), "Linux max shell loader must not remain the placeholder fail-closed skeleton")
+    }
+
+    @Test
+    fun windows_max_shell_loader_maps_decoded_inner_pe_in_memory() {
+        val source = java.nio.file.Files.readString(resolveSource("src/main/native/js_shell_loader_pe.c"))
+
+        assertTrue(source.contains("payload->decoded_payload"), "Windows max shell loader must use decoded inner payload bytes, not the encoded blob")
+        assertTrue(source.contains("IMAGE_FILE_MACHINE_AMD64") && source.contains("IMAGE_NT_OPTIONAL_HDR64_MAGIC"), "Windows max shell loader must validate a PE64 AMD64 DLL")
+        assertTrue(source.contains("VirtualAlloc") && source.contains("IMAGE_FIRST_SECTION"), "Windows max shell loader must allocate an image and map sections")
+        assertTrue(source.contains("IMAGE_REL_BASED_DIR64"), "Windows max shell loader must apply PE64 base relocations")
+        assertTrue(source.contains("LoadLibraryA") && source.contains("GetProcAddress"), "Windows max shell loader must resolve imports in memory")
+        assertTrue(source.contains("skipped tls and dllmain attach for manual image"), "Windows max shell loader must avoid PE TLS/DllMain attach for manual-mapped inner images")
+        assertTrue(source.contains("IMAGE_DIRECTORY_ENTRY_EXPORT") && source.contains("JNI_OnLoad"), "Windows max shell loader must resolve the inner JNI_OnLoad export")
+        assertFalse(source.contains("pe64 memory loader is fail-closed until"), "Windows max shell loader must not remain the placeholder fail-closed skeleton")
+    }
+
+    @Test
+    fun windows_max_shell_loader_keeps_manual_image_process_lifetime() {
+        val source = java.nio.file.Files.readString(resolveSource("src/main/native/js_shell_loader_pe.c"))
+        val runtime = java.nio.file.Files.readString(resolveSource("src/main/native/js_jni_runtime.c"))
+        val stub = java.nio.file.Files.readString(resolveSource("src/main/native/js_shell_stub.c"))
+
+        assertTrue(source.contains("Do not run TLS callbacks or DllMain"), "Windows manual mapper must document why attach callbacks are skipped")
+        assertFalse(source.contains("DLL_PROCESS_ATTACH"), "Windows manual mapper must not run attach callbacks for the manually mapped inner kernel")
+        assertFalse(source.contains("DLL_PROCESS_DETACH"), "Windows manual mapper must not run detach callbacks for the manually mapped inner kernel")
+        assertTrue(source.contains("Keep the PE image process-lifetime"), "Windows manual mapper must avoid freeing native-method code pages")
+        assertTrue(runtime.contains("js_protected_section_unseal_now();"), "Inner JNI_OnLoad must explicitly unseal protected sections before any protected VM code can run")
+        assertTrue(stub.contains("g_inner_image.jni_on_load(vm, 0)"), "Outer stub must not pass a custom sentinel through the JVM-reserved JNI_OnLoad parameter")
+    }
+
+    @Test
+    fun macos_max_shell_loader_validates_macho_but_remains_fail_closed() {
+        val source = java.nio.file.Files.readString(resolveSource("src/main/native/js_shell_loader_macho.c"))
+
+        assertTrue(source.contains("JS_MH_MAGIC_64") && source.contains("JS_MH_DYLIB"), "macOS max shell loader must validate a Mach-O 64 dylib")
+        assertTrue(source.contains("JS_CPU_TYPE_X86_64") && source.contains("JS_CPU_TYPE_ARM64"), "macOS max shell loader must cover x64 and arm64 payload identities")
+        assertTrue(source.contains("JS_LC_SEGMENT_64") && source.contains("__TEXT") && source.contains("__LINKEDIT"), "macOS max shell loader must parse core segment commands")
+        assertTrue(source.contains("JS_LC_DYLD_INFO") && source.contains("rebase_off") && source.contains("lazy_bind_off"), "macOS max shell loader must validate dyld rebase/bind/lazy-bind ranges")
+        assertTrue(source.contains("js_shell_export_trie_has_symbol") && source.contains("_JNI_OnLoad"), "macOS max shell loader must validate the JNI_OnLoad export trie")
+        assertTrue(source.contains("anonymous execution mapping stays fail-closed"), "macOS max shell loader must explicitly fail closed until true in-memory execution is implemented")
+    }
+
+    @Test
+    fun linux_max_native_recompile_emits_outer_stub_shell_artifact() {
+        val context = defaultVbc4BuildContext()
+        val innerDiagnostics = withVbc4BuildContext(context) {
+            NativeRecompilationTransforms.recompileWithDiagnostics(
+                seed = 424242L,
+                classLoader = NativeRecompilationTransforms::class.java.classLoader,
+                targetPlatforms = listOf("linux-x64"),
+                nativeProtectionLevel = "standard",
+                nativePackingLevel = "off",
+            )
+        }
+        val diagnostics = withVbc4BuildContext(context) {
+            NativeRecompilationTransforms.recompileWithDiagnostics(
+                seed = 424242L,
+                classLoader = NativeRecompilationTransforms::class.java.classLoader,
+                targetPlatforms = listOf("linux-x64"),
+                nativeProtectionLevel = "standard",
+                nativePackingLevel = "max",
+            )
+        }
+
+        val result = diagnostics.results.singleOrNull()
+        assertTrue(result != null, "linux-x64 max native recompilation should produce one shell artifact; messages=${diagnostics.messages.joinToString { it.message }}")
+        val bytes = result!!.bytes
+        assertTrue(bytes.containsAscii("JNI_OnLoad"), "outer shell must export JNI_OnLoad")
+        assertTrue(bytes.containsAscii("JS_NATIVE_MAX_STUB_V1"), "outer shell must carry the max stub marker")
+        assertTrue(bytes.containsAscii("JS_NATIVE_MAX_PAYLOAD_V1"), "outer shell must carry the authenticated max payload marker")
+        assertFalse(bytes.containsAscii("JS_NATIVE_SHELL_LOADER_V1"), "max output must not be the standard overlay artifact")
+        assertMaxStubReverseEvidence(bytes, "linux-x64")
+
+        val innerBytes = innerDiagnostics.results.singleOrNull()?.bytes
+        assertTrue(innerBytes != null, "linux-x64 off recompilation should expose the sealed inner kernel for reverse-evidence comparison")
+        assertFalse(
+            bytes.indexOfSlice(innerBytes!!.copyOfRange(0, minOf(96, innerBytes.size))) >= 0,
+            "max outer stub must not contain the inner js_kernel ELF header as a raw embedded dynamic library",
+        )
+        assertFalse(
+            containsAnyHighEntropyPlaintextSlice(haystack = bytes, needleSource = innerBytes),
+            "max outer stub must not contain sampled high-entropy plaintext slices from the complete inner js_kernel",
+        )
+    }
+
+    @Test
+    fun jni_microkernel_helper_reports_failed_native_load_status() {
+        val source = java.nio.file.Files.readString(resolveSource("src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
+        val statusBody = source.substringAfter("public static String getLoadStatus()").substringBefore("public static boolean isNativeLoaded()")
+        val classKeyBody = source.substringAfter("public static byte[] deriveClassEncryptionKey").substringBefore("private static byte[] concat")
+
+        assertTrue(statusBody.contains("loadMessage == null || loadMessage.length() == 0"), "failed native load attempts must report loadMessage instead of collapsing to untried")
+        assertTrue(classKeyBody.contains("no Java fallback ("), "class-encryption fail-closed errors must include native load status for real-JAR diagnostics")
+    }
+
+    @Test
+    fun windows_max_native_recompile_emits_outer_stub_shell_artifact() {
+        val diagnostics = withVbc4BuildContext(defaultVbc4BuildContext()) {
+            NativeRecompilationTransforms.recompileWithDiagnostics(
+                seed = 525252L,
+                classLoader = NativeRecompilationTransforms::class.java.classLoader,
+                targetPlatforms = listOf("windows-x64"),
+                nativeProtectionLevel = "standard",
+                nativePackingLevel = "max",
+            )
+        }
+
+        val result = diagnostics.results.singleOrNull()
+        assertTrue(result != null, "windows-x64 max native recompilation should produce one shell artifact; messages=${diagnostics.messages.joinToString { it.message }}")
+        val bytes = result!!.bytes
+        assertTrue(bytes.containsAscii("JNI_OnLoad"), "outer shell must export JNI_OnLoad")
+        assertTrue(bytes.containsAscii("JS_NATIVE_MAX_STUB_V1"), "outer shell must carry the max stub marker")
+        assertTrue(bytes.containsAscii("JS_NATIVE_MAX_PAYLOAD_V1"), "outer shell must carry the authenticated max payload marker")
+        assertFalse(bytes.containsAscii("JS_NATIVE_SHELL_LOADER_V1"), "max output must not be the standard overlay artifact")
+        assertMaxStubReverseEvidence(bytes, "windows-x64")
+    }
+
+    @Test
+    fun macos_max_native_recompile_emits_fail_closed_outer_stub_shell_artifacts() {
+        val diagnostics = withVbc4BuildContext(defaultVbc4BuildContext()) {
+            NativeRecompilationTransforms.recompileWithDiagnostics(
+                seed = 626262L,
+                classLoader = NativeRecompilationTransforms::class.java.classLoader,
+                targetPlatforms = listOf("macos-x64", "macos-arm64"),
+                nativeProtectionLevel = "standard",
+                nativePackingLevel = "max",
+            )
+        }
+
+        assertEquals(emptyList(), diagnostics.messages.filter { it.level == "error" }.map { it.message }, "macOS max shell cross-compilation should not report errors")
+        assertEquals(setOf("macos-x64", "macos-arm64"), diagnostics.results.map { it.platform }.toSet(), "max shell should emit both macOS outer stub targets")
+        diagnostics.results.forEach { result ->
+            assertTrue(result.bytes.containsAscii("JNI_OnLoad"), "${result.platform} outer shell must export JNI_OnLoad")
+            assertTrue(result.bytes.containsAscii("JS_NATIVE_MAX_STUB_V1"), "${result.platform} outer shell must carry the max stub marker")
+            assertTrue(result.bytes.containsAscii("JS_NATIVE_MAX_PAYLOAD_V1"), "${result.platform} outer shell must carry the authenticated max payload marker")
+            assertTrue(result.bytes.containsAscii("mach-o payload validated, but anonymous execution mapping stays fail-closed"), "${result.platform} must retain explicit Mach-O fail-closed reason until true anonymous execution is implemented")
+            assertFalse(result.bytes.containsAscii("JS_NATIVE_SHELL_LOADER_V1"), "${result.platform} max output must not be the standard overlay artifact")
+        }
+    }
+
+    @Test
+    fun native_max_reverse_evidence_report_is_written_for_outer_stubs() {
+        val context = defaultVbc4BuildContext()
+        val platforms = listOf("windows-x64", "linux-x64")
+        val innerDiagnostics = withVbc4BuildContext(context) {
+            NativeRecompilationTransforms.recompileWithDiagnostics(
+                seed = 737373L,
+                classLoader = NativeRecompilationTransforms::class.java.classLoader,
+                targetPlatforms = platforms,
+                nativeProtectionLevel = "standard",
+                nativePackingLevel = "off",
+            )
+        }
+        val maxDiagnostics = withVbc4BuildContext(context) {
+            NativeRecompilationTransforms.recompileWithDiagnostics(
+                seed = 737373L,
+                classLoader = NativeRecompilationTransforms::class.java.classLoader,
+                targetPlatforms = platforms,
+                nativeProtectionLevel = "standard",
+                nativePackingLevel = "max",
+            )
+        }
+        val macosDiagnostics = withVbc4BuildContext(context) {
+            NativeRecompilationTransforms.recompileWithDiagnostics(
+                seed = 737373L,
+                classLoader = NativeRecompilationTransforms::class.java.classLoader,
+                targetPlatforms = listOf("macos-x64", "macos-arm64"),
+                nativeProtectionLevel = "standard",
+                nativePackingLevel = "max",
+            )
+        }
+
+        assertEquals(platforms.toSet(), maxDiagnostics.results.map { it.platform }.toSet(), "Windows/Linux max recompilation must produce reportable outer stubs")
+        assertEquals(platforms.toSet(), innerDiagnostics.results.map { it.platform }.toSet(), "Windows/Linux off recompilation must produce inner kernels for plaintext comparison")
+        assertEquals(setOf("macos-x64", "macos-arm64"), macosDiagnostics.results.map { it.platform }.toSet(), "macOS max recompilation must produce fail-closed reportable outer stubs")
+
+        val innerByPlatform = innerDiagnostics.results.associateBy { it.platform }
+        val report = StringBuilder()
+        report.appendLine("# JavaShroud Native Max Reverse Evidence")
+        report.appendLine()
+        report.appendLine("Generated by NativeRecompilationTransformsTest.native_max_reverse_evidence_report_is_written_for_outer_stubs")
+        report.appendLine("Scope: artifact-level reverse indicators for max outer stub outputs; runtime JAR evidence is covered by RealJniMicrokernelFixtureRegressionTest.")
+        report.appendLine()
+
+        val allOuterResults = (maxDiagnostics.results + macosDiagnostics.results).sortedBy { it.platform }
+        appendJarNativeEntryEvidence(report, allOuterResults)
+        appendReverseToolAvailability(report)
+
+        maxDiagnostics.results.sortedBy { it.platform }.forEach { result ->
+            val innerBytes = innerByPlatform[result.platform]?.bytes
+            assertTrue(innerBytes != null, "${result.platform} must have an off inner artifact for reverse-evidence comparison")
+            assertMaxStubReverseEvidence(result.bytes, result.platform)
+            val rawHeaderComparable = result.platform != "windows-x64"
+            if (rawHeaderComparable) {
+                assertFalse(
+                    result.bytes.indexOfSlice(innerBytes!!.copyOfRange(0, minOf(96, innerBytes.size))) >= 0,
+                    "${result.platform} max outer stub must not contain the inner raw dynamic-library header",
+                )
+            }
+            assertFalse(
+                containsAnyHighEntropyPlaintextSlice(haystack = result.bytes, needleSource = innerBytes),
+                "${result.platform} max outer stub must not contain sampled high-entropy plaintext slices from the inner js_kernel",
+            )
+            appendReverseEvidenceReport(report, result.platform, result.bytes, innerBytes, rawHeaderComparable, failClosedReason = null)
+        }
+
+        macosDiagnostics.results.sortedBy { it.platform }.forEach { result ->
+            assertTrue(result.bytes.containsAscii("mach-o payload validated, but anonymous execution mapping stays fail-closed"), "${result.platform} must retain its explicit Mach-O fail-closed reason")
+            assertMaxStubReverseEvidence(result.bytes, result.platform)
+            appendReverseEvidenceReport(
+                report,
+                result.platform,
+                result.bytes,
+                innerBytes = null,
+                rawHeaderComparable = false,
+                failClosedReason = "Mach-O payload parser is present, but anonymous execution mapping remains fail-closed until real macOS runtime validation is implemented.",
+            )
+        }
+
+        val reportDir = workspaceRootForReports().resolve("build").resolve("core-engine").resolve("reports").resolve("native-max")
+        java.nio.file.Files.createDirectories(reportDir)
+        val reportPath = reportDir.resolve("native-max-reverse-evidence.md")
+        java.nio.file.Files.writeString(reportPath, report.toString(), Charsets.UTF_8)
+        assertTrue(java.nio.file.Files.size(reportPath) > 0, "native max reverse evidence report must be written: $reportPath")
     }
 
     @Test
@@ -312,6 +557,12 @@ private fun resolveSource(relativePath: String): java.nio.file.Path {
     if (java.nio.file.Files.exists(direct)) return direct
     return java.nio.file.Path.of("core-engine").resolve(relativePath)
 }
+
+private fun workspaceRootForReports(): java.nio.file.Path {
+    val cwd = java.nio.file.Path.of("").toAbsolutePath().normalize()
+    return if (cwd.fileName?.toString() == "core-engine") cwd.parent else cwd
+}
+
 private fun decryptNativeSecret(encrypted: ByteArray, key: ByteArray, iv: ByteArray, index: Int): String {
     val counter = iv.copyOf()
     var carry = index
@@ -325,4 +576,247 @@ private fun decryptNativeSecret(encrypted: ByteArray, key: ByteArray, iv: ByteAr
     val cipher = Cipher.getInstance("AES/CTR/NoPadding")
     cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(counter))
     return cipher.doFinal(encrypted).toString(Charsets.UTF_8)
+}
+
+private fun ByteArray.containsAscii(value: String): Boolean {
+    val needle = value.toByteArray(Charsets.US_ASCII)
+    if (needle.isEmpty() || needle.size > size) return false
+    return indices.any { start ->
+        start <= size - needle.size && needle.indices.all { offset -> this[start + offset] == needle[offset] }
+    }
+}
+
+private fun ByteArray.countAsciiOccurrences(value: String): Int {
+    val needle = value.toByteArray(Charsets.US_ASCII)
+    if (needle.isEmpty() || needle.size > size) return 0
+    var count = 0
+    var start = 0
+    while (start <= size - needle.size) {
+        var match = true
+        for (offset in needle.indices) {
+            if (this[start + offset] != needle[offset]) {
+                match = false
+                break
+            }
+        }
+        if (match) {
+            count++
+            start += needle.size
+        } else {
+            start++
+        }
+    }
+    return count
+}
+
+private fun assertMaxStubReverseEvidence(bytes: ByteArray, platform: String) {
+    val forbiddenPlaintext = listOf(
+        "Java_io_github_hht0rro_javashroud_transforms_protection_JniMicrokernelHelper_nativeExecuteVmResource",
+        "Java_io_github_hht0rro_javashroud_transforms_protection_JniMicrokernelHelper_nativeDecryptString",
+        "Java_io_github_hht0rro_javashroud_transforms_protection_JniMicrokernelHelper_nativeDeriveClassEncryptionKey",
+        "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper",
+        "nativeExecuteVmResource",
+        "nativeDecryptString",
+        "nativeDeriveClassEncryptionKey",
+        "nativeRegisterVmResource",
+        "nativePreloadVmResource",
+        "js_vm_execute",
+        "js_vm_resource_decode",
+        "js_protected_section_unseal_now",
+    )
+    forbiddenPlaintext.forEach { value ->
+        assertFalse(bytes.containsAscii(value), "$platform max outer stub must not expose inner helper/native symbol plaintext: $value")
+    }
+    assertTrue(bytes.countAsciiOccurrences("JNI_OnLoad") in 1..4, "$platform max outer stub should expose only the minimal JNI load surface, not repeated inner exports")
+    assertTrue(bytes.countAsciiOccurrences("JS_NATIVE_MAX_PAYLOAD_V1") == 1, "$platform max outer stub should carry exactly one authenticated payload marker")
+}
+
+private fun appendJarNativeEntryEvidence(
+    report: StringBuilder,
+    outerResults: List<NativeRecompilationTransforms.RecompiledNative>,
+) {
+    val nativeEntries = outerResults.map { result -> "META-INF/js-native/${result.libName}" }
+    assertEquals(nativeEntries.size, nativeEntries.toSet().size, "max outer native resources must have unique JAR entries")
+    assertTrue(nativeEntries.isNotEmpty(), "reverse evidence must include max outer native JAR entries")
+    assertTrue(
+        outerResults.all { result ->
+            result.bytes.containsAscii("JS_NATIVE_MAX_STUB_V1") &&
+                result.bytes.containsAscii("JS_NATIVE_MAX_PAYLOAD_V1") &&
+                !result.bytes.containsAscii("JS_NATIVE_SHELL_LOADER_V1")
+        },
+        "all reportable JAR native resources must be max outer stubs, not standard overlays",
+    )
+
+    report.appendLine("## jar-native-entry-evidence")
+    report.appendLine()
+    report.appendLine("- native_entry_count: ${nativeEntries.size}")
+    report.appendLine("- outer_stub_entry_count: ${outerResults.count { it.bytes.containsAscii("JS_NATIVE_MAX_STUB_V1") && it.bytes.containsAscii("JS_NATIVE_MAX_PAYLOAD_V1") }}")
+    report.appendLine("- standard_overlay_entry_count: ${outerResults.count { it.bytes.containsAscii("JS_NATIVE_SHELL_LOADER_V1") }}")
+    nativeEntries.zip(outerResults).forEach { (entry, result) ->
+        report.appendLine("- entry: $entry platform=${result.platform} sha256=${sha256Hex(result.bytes)} size=${result.bytes.size}")
+    }
+    report.appendLine()
+}
+
+private fun appendReverseToolAvailability(report: StringBuilder) {
+    val tools = listOf("strings", "llvm-strings", "readelf", "llvm-readelf", "nm", "llvm-nm", "dumpbin")
+    report.appendLine("## reverse-tool-availability")
+    report.appendLine()
+    tools.forEach { tool ->
+        report.appendLine("- $tool: ${findExecutableForReport(tool) ?: "unavailable"}")
+    }
+    report.appendLine()
+}
+
+private fun findExecutableForReport(tool: String): String? {
+    val pathExts = (System.getenv("PATHEXT") ?: ".COM;.EXE;.BAT;.CMD")
+        .split(';')
+        .filter { it.isNotBlank() }
+    val candidates = if (tool.contains('.')) {
+        listOf(tool)
+    } else {
+        listOf(tool) + pathExts.map { tool + it.lowercase() } + pathExts.map { tool + it.uppercase() }
+    }
+    return (System.getenv("PATH") ?: "")
+        .split(java.io.File.pathSeparatorChar)
+        .asSequence()
+        .filter { it.isNotBlank() }
+        .flatMap { dir -> candidates.asSequence().map { name -> java.nio.file.Path.of(dir, name) } }
+        .firstOrNull { java.nio.file.Files.isRegularFile(it) && java.nio.file.Files.isExecutable(it) }
+        ?.toAbsolutePath()
+        ?.normalize()
+        ?.toString()
+}
+
+private fun appendReverseEvidenceReport(
+    report: StringBuilder,
+    platform: String,
+    outerBytes: ByteArray,
+    innerBytes: ByteArray?,
+    rawHeaderComparable: Boolean,
+    failClosedReason: String?,
+) {
+    val forbiddenPlaintext = listOf(
+        "Java_io_github_hht0rro_javashroud_transforms_protection_JniMicrokernelHelper_nativeExecuteVmResource",
+        "Java_io_github_hht0rro_javashroud_transforms_protection_JniMicrokernelHelper_nativeDecryptString",
+        "Java_io_github_hht0rro_javashroud_transforms_protection_JniMicrokernelHelper_nativeDeriveClassEncryptionKey",
+        "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper",
+        "nativeExecuteVmResource",
+        "nativeDecryptString",
+        "nativeDeriveClassEncryptionKey",
+        "nativeRegisterVmResource",
+        "nativePreloadVmResource",
+        "js_vm_execute",
+        "js_vm_resource_decode",
+        "js_protected_section_unseal_now",
+    )
+    val sensitiveHits = forbiddenPlaintext.filter { outerBytes.containsAscii(it) }
+    val rawHeaderPresent = innerBytes?.takeIf { rawHeaderComparable }?.let { inner ->
+        outerBytes.indexOfSlice(inner.copyOfRange(0, minOf(96, inner.size))) >= 0
+    }
+    val sampledHighEntropyPlaintextPresent = innerBytes?.let { inner ->
+        containsAnyHighEntropyPlaintextSlice(haystack = outerBytes, needleSource = inner)
+    }
+    val printableTokens = printableAsciiTokens(outerBytes)
+    val suspiciousPrintableTokens = printableTokens.filter { token ->
+        forbiddenPlaintext.any { forbidden -> token.contains(forbidden) } || token.contains("JniMicrokernelHelper")
+    }
+
+    report.appendLine("## $platform")
+    report.appendLine()
+    report.appendLine("- artifact_size: ${outerBytes.size}")
+    report.appendLine("- sha256: ${sha256Hex(outerBytes)}")
+    report.appendLine("- file_magic: ${nativeFileMagic(outerBytes)}")
+    report.appendLine("- marker.JNI_OnLoad: ${outerBytes.countAsciiOccurrences("JNI_OnLoad")}")
+    report.appendLine("- marker.JNI_OnUnload: ${outerBytes.countAsciiOccurrences("JNI_OnUnload")}")
+    report.appendLine("- marker.JS_NATIVE_MAX_STUB_V1: ${outerBytes.countAsciiOccurrences("JS_NATIVE_MAX_STUB_V1")}")
+    report.appendLine("- marker.JS_NATIVE_MAX_PAYLOAD_V1: ${outerBytes.countAsciiOccurrences("JS_NATIVE_MAX_PAYLOAD_V1")}")
+    report.appendLine("- marker.JS_NATIVE_SHELL_LOADER_V1: ${outerBytes.countAsciiOccurrences("JS_NATIVE_SHELL_LOADER_V1")}")
+    report.appendLine("- sensitive_plaintext_hits: ${if (sensitiveHits.isEmpty()) "none" else sensitiveHits.joinToString()}")
+    report.appendLine("- printable_token_count_len6: ${printableTokens.size}")
+    report.appendLine("- suspicious_printable_tokens: ${if (suspiciousPrintableTokens.isEmpty()) "none" else suspiciousPrintableTokens.take(8).joinToString()}")
+    report.appendLine("- printable_token_sample: ${printableTokens.take(12).joinToString { it.take(96) }}")
+    report.appendLine("- inner_raw_header_present: ${rawHeaderPresent ?: "not-applicable"}")
+    report.appendLine("- sampled_high_entropy_inner_plaintext_present: ${sampledHighEntropyPlaintextPresent ?: "not-applicable"}")
+    if (failClosedReason != null) {
+        report.appendLine("- fail_closed_reason: $failClosedReason")
+    }
+    report.appendLine()
+}
+
+private fun sha256Hex(bytes: ByteArray): String =
+    java.security.MessageDigest.getInstance("SHA-256")
+        .digest(bytes)
+        .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xFF) }
+
+private fun nativeFileMagic(bytes: ByteArray): String = when {
+    bytes.size >= 4 && bytes[0] == 0x7F.toByte() && bytes[1] == 'E'.code.toByte() && bytes[2] == 'L'.code.toByte() && bytes[3] == 'F'.code.toByte() -> "ELF"
+    bytes.size >= 2 && bytes[0] == 'M'.code.toByte() && bytes[1] == 'Z'.code.toByte() -> "PE/COFF"
+    bytes.size >= 4 && bytes[0] == 0xCF.toByte() && bytes[1] == 0xFA.toByte() && bytes[2] == 0xED.toByte() && bytes[3] == 0xFE.toByte() -> "Mach-O-64"
+    bytes.size >= 4 && bytes[0] == 0xFE.toByte() && bytes[1] == 0xED.toByte() && bytes[2] == 0xFA.toByte() && bytes[3] == 0xCF.toByte() -> "Mach-O-64-BE"
+    else -> "unknown"
+}
+
+private fun printableAsciiTokens(bytes: ByteArray, minLength: Int = 6): List<String> {
+    val tokens = mutableListOf<String>()
+    val current = StringBuilder()
+    fun flush() {
+        if (current.length >= minLength) tokens.add(current.toString())
+        current.setLength(0)
+    }
+    for (byte in bytes) {
+        val value = byte.toInt() and 0xFF
+        if (value in 0x20..0x7E) {
+            current.append(value.toChar())
+        } else {
+            flush()
+        }
+    }
+    flush()
+    return tokens.distinct().sorted()
+}
+
+private fun containsAnyHighEntropyPlaintextSlice(haystack: ByteArray, needleSource: ByteArray, sliceSize: Int = 512): Boolean {
+    if (haystack.size < sliceSize || needleSource.size < sliceSize) return false
+    var checked = 0
+    var offset = 0
+    val step = sliceSize
+    while (offset + sliceSize <= needleSource.size && checked < 48) {
+        val slice = needleSource.copyOfRange(offset, offset + sliceSize)
+        if (slice.distinctByteCount() >= 64 && !slice.all { it.toInt() == 0 }) {
+            checked++
+            if (haystack.indexOfSlice(slice) >= 0) return true
+        }
+        offset += step
+    }
+    return false
+}
+
+private fun ByteArray.distinctByteCount(): Int {
+    val seen = BooleanArray(256)
+    var count = 0
+    for (byte in this) {
+        val value = byte.toInt() and 0xFF
+        if (!seen[value]) {
+            seen[value] = true
+            count++
+        }
+    }
+    return count
+}
+
+private fun ByteArray.indexOfSlice(needle: ByteArray): Int {
+    if (needle.isEmpty()) return 0
+    if (needle.size > size) return -1
+    for (start in 0..(size - needle.size)) {
+        var match = true
+        for (index in needle.indices) {
+            if (this[start + index] != needle[index]) {
+                match = false
+                break
+            }
+        }
+        if (match) return start
+    }
+    return -1
 }

@@ -236,7 +236,8 @@ class Vbc4OnlyContractTest {
     @Test
     fun anti_dump_full_initialization_does_not_poison_vbc4_constant_pool_decode() {
         val nativeCore = Files.readString(resolveSource("src/main/native/js_vm_core.c"))
-        val antiDumpInit = nativeCore.substringAfter("JS_LOCAL void JNICALL\njsn_r4")
+        val normalizedNativeCore = nativeCore.replace("\r\n", "\n")
+        val antiDumpInit = normalizedNativeCore.substringAfter("JS_LOCAL void JNICALL\njsn_r4")
             .substringBefore("JS_LOCAL jstring JNICALL\njsn_r11")
 
         assertTrue(
@@ -266,6 +267,32 @@ class Vbc4OnlyContractTest {
     }
 
     @Test
+    fun masked_preload_index_binds_manifest_mesh_and_method_profile() {
+        val virtualizationSource = Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/MethodVirtualizationTransforms.kt"))
+        val sealingSource = Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/RuntimeArtifactSealing.kt"))
+        val nativeCore = Files.readString(resolveSource("src/main/native/js_vm_core.c"))
+        val nativeResource = Files.readString(resolveSource("src/main/native/js_vm_resource.c"))
+        val nativeResourceHeader = Files.readString(resolveSource("src/main/native/js_vm_resource.h"))
+
+        assertTrue(virtualizationSource.contains("jsmi2-entry-auth") && virtualizationSource.contains("methodLocalProfile"),
+            "Native preload index V2 must authenticate resource, manifest, mesh and method-local profile material")
+        assertTrue(nativeCore.contains("js_vm_preload_entry_auth_matches") && nativeCore.contains("invalid VM preload profile auth"),
+            "Native preload parser must verify the V2 entry auth tag before loading VM resources")
+        assertTrue(nativeCore.contains("program->method_local_profile != expected_profile") && nativeCore.contains("native VM preload profile mismatch"),
+            "Native preload parser must bind index profile to the parsed VM metadata profile")
+        assertTrue(nativeResourceHeader.contains("expected_profile") && nativeResource.contains("js_vm_call_gate_register_profile"),
+            "Preload call gates must retain the expected method-local profile for on-demand native loading")
+        assertTrue(nativeResource.contains("js_manifest_mesh_link_matches") && nativeResource.contains("js_manifest_peer_link_matches") && nativeResource.contains("js_manifest_order_token"),
+            "Native sliced-resource reassembly must validate meshLink, peerLink and shard order tokens instead of ignoring tail mesh fields")
+        assertTrue(nativeResource.contains("peer_ordinal >= manifest_entry_count") && nativeResource.contains("peer_ordinal == manifest_ordinal"),
+            "Native sliced-resource reassembly must fail closed on invalid peer ordinals")
+        assertTrue(virtualizationSource.contains("shard.peerLink(mesh, ordinal, peer, entryCount)"),
+            "Generated peerLink material must include mesh entry-count binding that native reassembly can independently recompute")
+        assertTrue(sealingSource.contains("sealedNativePreloadEntryAuthTag") && sealingSource.contains("encodeMaskedNativePreloadIndex(plainBytes"),
+            "Runtime sealing must re-mask rewritten native preload indexes and recompute V2 auth tags")
+    }
+
+    @Test
     fun c_vm_parser_accepts_only_vbc4_and_declares_register_dispatch_safety_hooks() {
         val source = nativeRuntimeSources()
 
@@ -277,6 +304,12 @@ class Vbc4OnlyContractTest {
         assertTrue(source.contains("js_vm_case_match"), "C interpreter dispatch must avoid plain opcode-to-handler equality checks")
         assertTrue(source.contains("js_vm_dispatch_drift_step"), "C interpreter dispatch must rotate a per-execution drift state")
         assertTrue(source.contains("js_vm_dispatch_progress_salt"), "C interpreter dispatch salt must include execution-progress drift")
+        assertTrue(source.contains("js_vm_dispatch_profile_for") && source.contains("js_vm_profile_next_pc"), "C interpreter must derive a per-program dispatcher profile and use it for VPC updates")
+        assertTrue(source.contains("js_vm_profile_case_salt") && source.contains("js_vm_profile_case_salt(js_vm_dispatch_profile"), "C interpreter dispatch profile must reshape handler matching salt")
+        assertTrue(source.contains("js_vm_profile_case_matches") && source.contains("switch ((opcode ^ expected") && source.contains("selectors[(salt >> 31) & 1u]"), "C interpreter must use multiple profile-specific handler match forms instead of one stable case matcher")
+        assertTrue(source.contains("js_vm_profile_transition_due") && source.contains("js_vm_profile_transition_due(js_vm_dispatch_profile"), "C interpreter must route block-transition decisions through dispatcher profile-specific logic")
+        assertTrue(source.contains("js_vm_profile_fetch_operand") && source.contains("resident_index = fault_pc"), "C interpreter dispatch profile must reshape operand fetch without relying on sequential pc-1")
+        assertTrue(source.contains("js_vm_dispatch_profile_tag_matches") && source.contains("dispatch profile tag mismatch"), "C interpreter must fail closed when authenticated dispatch profile metadata does not match the parsed program")
         assertTrue(source.contains("dispatch_step & JS_VBC4_DISPATCH_STEP_MASK"), "C interpreter dispatch drift must rotate with a per-build mask during normal execution")
         assertFalse(source.contains("#define JS_VM_DISPATCH(insn_ptr) switch"), "C interpreter must not expose textbook switch dispatch in the VM main loop")
         assertFalse(source.contains("js_vm_dispatch_table[256]"), "C interpreter must not expose a fixed 256-entry computed-goto dispatch table")
@@ -349,12 +382,17 @@ class Vbc4OnlyContractTest {
 
         assertTrue(serializerSource.contains("val methodLocalProfile: Int = 0"), "VBC4 metadata must carry a method-local profile slot")
         assertTrue(serializerSource.contains("methodLocalProfile.toUInt().toString(16)"), "VBC4 metadata must serialize the method-local profile")
+        assertTrue(serializerSource.contains("vbc4DispatchProfileTag") && serializerSource.contains("dispatchProfileTag.toUInt().toString(16)"), "VBC4 metadata must serialize an authenticated dispatch profile tag")
         assertTrue(virtualizationSource.contains("methodLocalHandlerProfile(methodSelection") && virtualizationSource.contains("selectionMode != MethodSelectionMode.CriticalPlus"), "method-local profiles must be gated to critical-plus selection")
         assertTrue(virtualizationSource.contains("license") && virtualizationSource.contains("auth") && virtualizationSource.contains("signature"), "critical-plus method-local profile detection must cover license/auth/signature method names")
         assertTrue(serializerSource.contains("VBC4_FLAG_NESTED_VM") && serializerSource.contains("entryMetadata.methodLocalProfile != 0"), "High-value method-local profiles must mark resources with the nested-VM flag")
+        assertTrue(serializerSource.contains("VBC4_FLAG_MIXED_OPERAND_ENVELOPE") && serializerSource.contains("serializeMixedOperandEnvelopeBlock") && serializerSource.contains("writeMixedOperandRow"), "VBC4 serializer must support a mixed stack/register operand row envelope")
+        assertTrue(serializerSource.contains("val mixedOperandEnvelope = !nestedVm && !registerRowEnvelope") && serializerSource.contains("if (nestedVm) return serializeNestedBlock") && serializerSource.contains("if (registerRowEnvelope) return serializeEnvelopeBlock") && serializerSource.contains("if (mixedOperandEnvelope) return serializeMixedOperandEnvelopeBlock"), "nested, register-row and mixed operand envelopes must be selected as mutually exclusive row modes")
         assertTrue(nativeHelpers.contains("method_local_profile") && nativeHelpers.contains("p->method_local_profile = 0"), "Native VM program state must retain and initialize parsed method-local profile")
         assertTrue(nativeHelpers.contains("JS_VBC4_FLAG_NESTED_VM") && nativeHelpers.contains("nested_vm_profile"), "Native parser must bind nested-VM flag to a non-zero method-local profile")
+        assertTrue(nativeHelpers.contains("JS_VBC4_FLAG_MIXED_OPERAND_ENVELOPE") && nativeHelpers.contains("js_vbc4_read_mixed_operand_row") && nativeHelpers.contains("js_vbc4_row_envelopes_mutually_exclusive"), "Native parser must decode mixed operand rows and reject incompatible row-mode flag combinations")
         assertTrue(nativeSymbols.contains("strtoul(parts[5], NULL, 16)"), "Native VM parser must parse the sixth metadata field as the method-local profile")
+        assertTrue(nativeSymbols.contains("parts[11]") && nativeSymbols.contains("p->resource_path = js_strdup(parts[9])"), "Native VM parser must parse dispatch profile tag and resource path from metadata")
         assertTrue(nativeHelpers.contains("js_vm_method_local_salt") && nativeHelpers.contains("program->method_local_profile"), "Native dispatch salt must mix the method-local profile")
     }
 
@@ -596,6 +634,17 @@ class Vbc4OnlyContractTest {
         // Critical hot functions must be placed in the protected section.
         assertTrue(nativeHelpers.contains("JS_PROTECTED static jint js_vm_canonical_opcode"),
             "Opcode canonicalization must live in the protected section")
+        listOf(
+            "JS_PROTECTED int js_vm_parse_program",
+            "JS_PROTECTED unsigned char* js_runtime_resource_decode_owned",
+            "JS_PROTECTED void js_vm_register_preload_index_entries",
+            "JS_PROTECTED unsigned char* js_vm_decode_masked_preload_index_owned",
+            "JS_PROTECTED jint js_vm_store_resident_opcode",
+            "JS_PROTECTED jint js_vm_load_resident_operand",
+            "JS_PROTECTED int js_vm_load_resident_build_seed",
+        ).forEach { signature ->
+            assertTrue(nativeHelpers.contains(signature), ".jsx protected section must cover native VM parser/resource/preload/resident hot path '$signature'.")
+        }
         // The build-time patcher must exist and be wired into recompilation.
         val packer = Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeProtectedSectionPacker.kt"))
         assertTrue(packer.contains("sealIfPossible") && packer.contains("relocOverlapsPeSection") && packer.contains("elfRelocationOverlapsSection"),
