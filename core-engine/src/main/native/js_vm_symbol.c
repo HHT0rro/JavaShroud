@@ -16,6 +16,25 @@ JS_HIDDEN unsigned long long js_vm_hash64_string(const char *value) {
     return hash;
 }
 
+static int js_vm_valid_symbol_method_name(const char *name) {
+    if (!name || !name[0]) return 0;
+    if (strcmp(name, "<init>") == 0 || strcmp(name, "<clinit>") == 0) return 1;
+    for (const unsigned char *p = (const unsigned char*)name; *p; p++) {
+        if (*p <= 0x20u || *p >= 0x7fu || *p == '.' || *p == '/' || *p == ';' || *p == '[' || *p == '(' || *p == ')') return 0;
+    }
+    return 1;
+}
+
+static int js_vm_valid_symbol_method_lookup(const char *name, const char *desc) {
+    char *tags = NULL;
+    int argc = 0;
+    if (!js_vm_valid_symbol_method_name(name) || !desc || !desc[0]) return 0;
+    if (strlen(name) > 512u || strlen(desc) > 4096u) return 0;
+    if (!js_vm_descriptor_arg_tags(desc, &tags, &argc)) return 0;
+    free(tags);
+    return argc >= 0 && js_vm_descriptor_return_tag(desc) != 0;
+}
+
 JS_HIDDEN js_vm_symbol_cache_entry* js_vm_symbol_cache_lookup(js_vm_program *p, int cp_idx, int kind) {
     if (!p || !p->symbols || p->symbol_count <= 0) return NULL;
     for (int i = 0; i < p->symbol_count; i++) {
@@ -163,8 +182,9 @@ JS_HIDDEN int js_vm_resolve_method_symbol(JNIEnv *env, js_vm_program *p, int cp_
     const char *lookup_name = is_constructor ? "<init>" : mr.name;
     if (!is_constructor) mapped_method = js_lookup_bound_method(env, mr.owner, mr.name, mr.desc);
     if (mapped_method && mapped_method[0]) lookup_name = mapped_method;
-    jmethodID mid = (opcode == JS_VM_INVOKESTATIC) ? (*env)->GetStaticMethodID(env, cls, lookup_name, mr.desc) : (*env)->GetMethodID(env, cls, lookup_name, mr.desc);
-    if (((*env)->ExceptionCheck(env) || !mid) && mapped_method && mapped_method[0] && strcmp(mapped_method, mr.name) != 0) {
+    jmethodID mid = NULL;
+    if (js_vm_valid_symbol_method_lookup(lookup_name, mr.desc)) mid = (opcode == JS_VM_INVOKESTATIC) ? (*env)->GetStaticMethodID(env, cls, lookup_name, mr.desc) : (*env)->GetMethodID(env, cls, lookup_name, mr.desc);
+    if (((*env)->ExceptionCheck(env) || !mid) && mapped_method && mapped_method[0] && strcmp(mapped_method, mr.name) != 0 && js_vm_valid_symbol_method_lookup(mr.name, mr.desc)) {
         if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
         lookup_name = mr.name;
         mid = (opcode == JS_VM_INVOKESTATIC) ? (*env)->GetStaticMethodID(env, cls, lookup_name, mr.desc) : (*env)->GetMethodID(env, cls, lookup_name, mr.desc);

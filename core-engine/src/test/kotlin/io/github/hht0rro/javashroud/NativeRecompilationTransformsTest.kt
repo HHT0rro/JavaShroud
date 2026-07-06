@@ -318,6 +318,7 @@ class NativeRecompilationTransformsTest {
     fun linux_manual_mapped_resource_loader_avoids_class_vtable_dispatch() {
         val resource = java.nio.file.Files.readString(resolveSource("src/main/native/js_vm_resource.c"))
         val core = java.nio.file.Files.readString(resolveSource("src/main/native/js_vm_core.c"))
+        val symbol = java.nio.file.Files.readString(resolveSource("src/main/native/js_vm_symbol.c"))
 
         assertTrue(resource.contains("CallNonvirtualObjectMethod(env, class_obj, js_jni_cache.class_class, js_jni_cache.class_get_class_loader"), "Manual mapped resource loading must avoid virtual Class.getClassLoader dispatch")
         assertTrue(resource.contains("CallNonvirtualObjectMethod(env, class_obj, js_jni_cache.class_class, js_jni_cache.class_get_name"), "Manual mapped resource loading must avoid virtual Class.getName dispatch")
@@ -336,6 +337,8 @@ class NativeRecompilationTransformsTest {
         assertFalse(core.contains("CallIntMethod(env, obj, js_jni_cache.integer_int_value"), "Manual mapped primitive unboxing must not reuse cached Integer.intValue method IDs")
         assertTrue(core.contains("js_vm_valid_method_lookup"), "Manual mapped dynamic method fallback must validate lookup strings before JVM symbol lookup")
         assertTrue(core.contains("if (js_vm_valid_method_lookup(dyn_lookup, dyn_mr.desc)) mid = (*env)->GetMethodID"), "Dynamic virtual fallback must guard mapped method lookup before GetMethodID")
+        assertTrue(symbol.contains("js_vm_valid_symbol_method_lookup"), "Manual mapped symbol resolution must validate method lookup strings before JVM symbol lookup")
+        assertTrue(symbol.contains("if (js_vm_valid_symbol_method_lookup(lookup_name, mr.desc)) mid ="), "Initial symbol resolution must guard GetMethodID/GetStaticMethodID inputs")
     }
 
     @Test
