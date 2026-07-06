@@ -423,6 +423,7 @@ fun applyMethodVirtualization(
                             resourcePath = resourcePath,
                             manifestPath = slicedResource.manifestPath,
                             shardCount = slicedResource.shardCount,
+                            methodLocalProfile = methodLocalProfile,
                             manifestPlan = slicedResource.manifestPlan,
                         )
                         vmPreloadEntries += preloadEntry
@@ -498,6 +499,7 @@ private data class VmPreloadEntry(
     val resourcePath: String,
     val manifestPath: String,
     val shardCount: Int,
+    val methodLocalProfile: Int,
     val manifestPlan: VmSliceManifestPlan,
 )
 
@@ -532,12 +534,15 @@ private fun VmPreloadEntry.toMeshPeer(ordinal: Int): VmSliceMeshPeer = VmSliceMe
     ordinal = ordinal,
     manifestPath = manifestPath,
     shardCount = shardCount,
-    material = manifestPlan.meshMaterial(entryToken, resourcePath, manifestPath, shardCount),
+    material = manifestPlan.meshMaterial(entryToken, resourcePath, manifestPath, shardCount, methodLocalProfile),
 )
 
 private fun encodeNativeVmPreloadIndex(entries: List<VmPreloadEntry>, indexResourceName: String = VBC4_VM_PRELOAD_INDEX_RESOURCE): JarEntryData {
+    val mesh = interproceduralVmSliceMesh(entries)
     val newEntries = entries.map { entry ->
-        "${entry.entryToken.toULong().toString(16)}|${entry.resourcePath}|${entry.manifestPath}|${entry.shardCount}"
+        val profile = entry.methodLocalProfile.toUInt().toString(16)
+        val authTag = nativePreloadEntryAuthTag(entry, mesh, profile)
+        "${entry.entryToken.toULong().toString(16)}|${entry.resourcePath}|${entry.manifestPath}|${entry.shardCount}|$mesh|$profile|$authTag"
     }
     val plain = newEntries
         .joinToString(separator = "\n", postfix = "\n")
@@ -615,6 +620,22 @@ private fun nativePreloadTag(salt: ByteArray, plain: ByteArray): ByteArray = Mes
     update(salt)
     update(plain)
 }.digest()
+
+private fun nativePreloadEntryAuthTag(entry: VmPreloadEntry, mesh: String, profile: String): String = MessageDigest.getInstance("SHA-256").apply {
+    update("jsmi2-entry-auth".toByteArray(Charsets.US_ASCII))
+    update(0)
+    update(entry.entryToken.toULong().toString(16).toByteArray(Charsets.US_ASCII))
+    update(0)
+    update(entry.resourcePath.toByteArray(Charsets.UTF_8))
+    update(0)
+    update(entry.manifestPath.toByteArray(Charsets.UTF_8))
+    update(0)
+    update(entry.shardCount.toString().toByteArray(Charsets.US_ASCII))
+    update(0)
+    update(mesh.toByteArray(Charsets.US_ASCII))
+    update(0)
+    update(profile.toByteArray(Charsets.US_ASCII))
+}.digest().take(8).toByteArray().toHexLower()
 
 private fun String.hexToBytesOrNull(): ByteArray? {
     if (length % 2 != 0) return null
@@ -705,7 +726,7 @@ private fun intBytes(value: Int): ByteArray = byteArrayOf(
 private fun interproceduralVmSliceMesh(entries: List<VmPreloadEntry>): String {
     val orderedEntries = entries.sortedWith(compareBy<VmPreloadEntry> { it.manifestPath }.thenBy { it.resourcePath })
     val material = orderedEntries.joinToString(separator = "\u0000") { entry ->
-        entry.manifestPlan.meshMaterial(entry.entryToken, entry.resourcePath, entry.manifestPath, entry.shardCount)
+        entry.manifestPlan.meshMaterial(entry.entryToken, entry.resourcePath, entry.manifestPath, entry.shardCount, entry.methodLocalProfile)
     }.toByteArray(Charsets.UTF_8)
     return MessageDigest.getInstance("SHA-256").digest(material).toHexLower()
 }
@@ -793,7 +814,7 @@ private data class VmSliceManifestPlan(
                 .append(shard.path).append('|')
                 .append(shard.meshLink(mesh, ordinal)).append('|')
                 .append(peer.ordinal).append('|')
-                .append(shard.peerLink(mesh, ordinal, peer)).append('\n')
+                .append(shard.peerLink(mesh, ordinal, peer, entryCount)).append('\n')
         }
         return JarEntryData(
             name = path,
@@ -801,11 +822,12 @@ private data class VmSliceManifestPlan(
         )
     }
 
-    fun meshMaterial(entryToken: Long, resourcePath: String, manifestPath: String, shardCount: Int): String = buildString {
+    fun meshMaterial(entryToken: Long, resourcePath: String, manifestPath: String, shardCount: Int, methodLocalProfile: Int): String = buildString {
         append(entryToken.toULong().toString(16)).append('|')
         append(resourcePath).append('|')
         append(manifestPath).append('|')
         append(shardCount).append('|')
+        append(methodLocalProfile.toUInt().toString(16)).append('|')
         append(totalSize)
         for (shard in shards.sortedBy { it.index }) append('\u0000').append(shard.meshMaterial())
     }
@@ -844,8 +866,8 @@ private data class VmSliceShard(
         .toByteArray()
         .toHexLower()
 
-    fun peerLink(mesh: String, ordinal: Int, peer: VmSliceMeshPeer): String = MessageDigest.getInstance("SHA-256")
-        .digest("vbc4-peer-link\u0000$mesh\u0000$ordinal\u0000$index\u0000$offset\u0000$length\u0000$digest\u0000$path\u0000${peer.ordinal}\u0000${peer.manifestPath}\u0000${peer.shardCount}\u0000${peer.material}".toByteArray(Charsets.UTF_8))
+    fun peerLink(mesh: String, ordinal: Int, peer: VmSliceMeshPeer, entryCount: Int): String = MessageDigest.getInstance("SHA-256")
+        .digest("vbc4-peer-link\u0000$mesh\u0000$ordinal\u0000$entryCount\u0000$index\u0000$offset\u0000$length\u0000$digest\u0000$path\u0000${peer.ordinal}".toByteArray(Charsets.UTF_8))
         .take(8)
         .toByteArray()
         .toHexLower()
@@ -3258,8 +3280,6 @@ private fun unboxAndReturn(mv: MethodVisitor, type: Type) {
         else -> { mv.visitTypeInsn(Opcodes.CHECKCAST, type.internalName); mv.visitInsn(Opcodes.ARETURN) }
     }
 }
-
-
 
 
 

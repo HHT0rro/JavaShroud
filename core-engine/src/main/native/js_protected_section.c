@@ -13,6 +13,8 @@
 #include <windows.h>
 #elif defined(__linux__) || defined(__ANDROID__)
 #include <dlfcn.h>
+#include <elf.h>
+#include <stdio.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
@@ -56,8 +58,7 @@ static void js_protected_section_xor(unsigned char *buf, unsigned int len) {
 
 #if JS_PROTECTED_SECTION_ENABLED
 #if defined(_WIN32)
-__attribute__((constructor))
-static void js_protected_section_unseal(void) {
+JS_HIDDEN void js_protected_section_unseal_now(void) {
     unsigned char *marker_addr = (unsigned char*)&js_protected_seal_marker;
     if (js_protected_seal_marker.state != 1u) return;
 
@@ -65,7 +66,10 @@ static void js_protected_section_unseal(void) {
     if (!GetModuleHandleExA(
             GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
             (LPCSTR)marker_addr, &module) || !module) {
-        return;
+        MEMORY_BASIC_INFORMATION mbi;
+        memset(&mbi, 0, sizeof(mbi));
+        if (!VirtualQuery(marker_addr, &mbi, sizeof(mbi)) || !mbi.AllocationBase) return;
+        module = (HMODULE)mbi.AllocationBase;
     }
     unsigned char *base = (unsigned char*)module;
     IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER*)base;
@@ -91,17 +95,120 @@ static void js_protected_section_unseal(void) {
         }
     }
 }
-#elif defined(__linux__) || defined(__ANDROID__)
+
 __attribute__((constructor))
 static void js_protected_section_unseal(void) {
+    js_protected_section_unseal_now();
+}
+#elif defined(__linux__) || defined(__ANDROID__)
+typedef struct js_linux_map_range {
+    uintptr_t start;
+    uintptr_t end;
+    int readable;
+} js_linux_map_range;
+
+static int js_linux_find_map_index(const js_linux_map_range *ranges, int count, uintptr_t address) {
+    for (int i = 0; i < count; i++) {
+        if (address >= ranges[i].start && address < ranges[i].end) return i;
+    }
+    return -1;
+}
+
+static int js_linux_is_readable_range(const js_linux_map_range *ranges, int count, uintptr_t start, uintptr_t end) {
+    if (end <= start) return 0;
+    uintptr_t cursor = start;
+    while (cursor < end) {
+        int index = js_linux_find_map_index(ranges, count, cursor);
+        if (index < 0 || !ranges[index].readable || ranges[index].end <= cursor) return 0;
+        cursor = ranges[index].end < end ? ranges[index].end : end;
+    }
+    return 1;
+}
+
+static unsigned char *js_linux_find_manual_elf_base(uintptr_t marker_addr, unsigned int section_rva, unsigned int section_size) {
+    FILE *maps = fopen("/proc/self/maps", "r");
+    if (!maps) return 0;
+
+    js_linux_map_range ranges[512];
+    int count = 0;
+    char line[512];
+    while (count < (int)(sizeof(ranges) / sizeof(ranges[0])) && fgets(line, sizeof(line), maps)) {
+        unsigned long long start = 0;
+        unsigned long long end = 0;
+        char perms[5] = { 0, 0, 0, 0, 0 };
+        if (sscanf(line, "%llx-%llx %4s", &start, &end, perms) == 3 && end > start) {
+            ranges[count].start = (uintptr_t)start;
+            ranges[count].end = (uintptr_t)end;
+            ranges[count].readable = perms[0] == 'r';
+            count++;
+        }
+    }
+    fclose(maps);
+
+    int marker_index = js_linux_find_map_index(ranges, count, marker_addr);
+    if (marker_index < 0 || !ranges[marker_index].readable) return 0;
+
+    uintptr_t low = ranges[marker_index].start;
+    uintptr_t high = ranges[marker_index].end;
+    for (int i = marker_index - 1; i >= 0 && ranges[i].end == low && ranges[i].readable; i--) low = ranges[i].start;
+    for (int i = marker_index + 1; i < count && ranges[i].start == high && ranges[i].readable; i++) high = ranges[i].end;
+
+    long page_size_long = sysconf(_SC_PAGESIZE);
+    uintptr_t page_size = page_size_long > 0 ? (uintptr_t)page_size_long : 4096u;
+    uintptr_t scan = marker_addr & ~(page_size - 1u);
+    uintptr_t lowest_scan = low;
+    const uintptr_t max_back_scan = (uintptr_t)256u * 1024u * 1024u;
+    if (scan > max_back_scan && scan - max_back_scan > lowest_scan) lowest_scan = scan - max_back_scan;
+
+    while (scan >= lowest_scan) {
+        if (js_linux_is_readable_range(ranges, count, scan, scan + sizeof(Elf64_Ehdr))) {
+            const Elf64_Ehdr *eh = (const Elf64_Ehdr *)scan;
+            if (memcmp(eh->e_ident, ELFMAG, SELFMAG) == 0 &&
+                    eh->e_ident[EI_CLASS] == ELFCLASS64 &&
+                    eh->e_ident[EI_DATA] == ELFDATA2LSB &&
+                    eh->e_type == ET_DYN &&
+#if defined(__x86_64__)
+                    eh->e_machine == EM_X86_64 &&
+#elif defined(__aarch64__)
+                    eh->e_machine == EM_AARCH64 &&
+#endif
+                    eh->e_phentsize == sizeof(Elf64_Phdr) && eh->e_phnum > 0) {
+                uintptr_t ph_start = scan + (uintptr_t)eh->e_phoff;
+                uintptr_t ph_end = ph_start + (uintptr_t)eh->e_phnum * sizeof(Elf64_Phdr);
+                uintptr_t section_start = scan + (uintptr_t)section_rva;
+                uintptr_t section_end = section_start + (uintptr_t)section_size;
+                if (ph_end >= ph_start && section_end >= section_start &&
+                        js_linux_is_readable_range(ranges, count, ph_start, ph_end) &&
+                        js_linux_find_map_index(ranges, count, section_start) >= 0 &&
+                        section_end <= high) {
+                    return (unsigned char *)scan;
+                }
+            }
+        }
+        if (scan < page_size) break;
+        scan -= page_size;
+    }
+    return 0;
+}
+
+JS_HIDDEN void js_protected_section_unseal_now(void) {
     if (js_protected_seal_marker.state != 1u) return;
     if (js_protected_seal_marker.section_rva == 0u || js_protected_seal_marker.section_size == 0u) return;
 
     Dl_info info;
     memset(&info, 0, sizeof(info));
-    if (!dladdr((const void*)&js_protected_seal_marker, &info) || !info.dli_fbase) return;
+    unsigned char *image_base = 0;
+    if (dladdr((const void*)&js_protected_seal_marker, &info) && info.dli_fbase) {
+        image_base = (unsigned char*)info.dli_fbase;
+    } else {
+        image_base = js_linux_find_manual_elf_base(
+            (uintptr_t)&js_protected_seal_marker,
+            js_protected_seal_marker.section_rva,
+            js_protected_seal_marker.section_size);
+    }
+    if (!image_base) return;
 
-    unsigned char *sec_base = (unsigned char*)info.dli_fbase + js_protected_seal_marker.section_rva;
+    unsigned char *sec_base = image_base + js_protected_seal_marker.section_rva;
     unsigned int enc_len = js_protected_seal_marker.section_size;
     long page_size_long = sysconf(_SC_PAGESIZE);
     if (page_size_long <= 0) return;
@@ -121,5 +228,12 @@ static void js_protected_section_unseal(void) {
     __builtin___clear_cache((char*)sec_base, (char*)(sec_base + enc_len));
 #endif
 }
+
+__attribute__((constructor))
+static void js_protected_section_unseal(void) {
+    js_protected_section_unseal_now();
+}
 #endif
+#else
+JS_HIDDEN void js_protected_section_unseal_now(void) {}
 #endif

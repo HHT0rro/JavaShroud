@@ -8,6 +8,7 @@
 typedef struct {
     jlong entry_token;
     char resource_path[JS_VM_CALL_GATE_KEY_LEN];
+    uint32_t expected_profile;
     int active;
     int loading;
 } js_vm_call_gate_entry;
@@ -16,7 +17,7 @@ JS_HIDDEN extern volatile int js_vm_preload_in_progress;
 JS_HIDDEN extern char js_vm_last_prepare_stage[96];
 
 JS_HIDDEN void js_vm_free_program(JNIEnv *env, js_vm_program *program);
-JS_HIDDEN unsigned char* js_runtime_resource_decode_owned(const unsigned char *raw, int raw_len, int *out_len);
+JS_PROTECTED unsigned char* js_runtime_resource_decode_owned(const unsigned char *raw, int raw_len, int *out_len);
 JS_HIDDEN unsigned char* js_vbc4_zstd_decompress_owned(const unsigned char *stored, uint32_t stored_len, uint32_t plain_len);
 JS_HIDDEN js_vm_loaded_resource js_vm_load_resource_bytes_with_loader(JNIEnv *env, jclass helper_cls, jstring resourcePath);
 JS_HIDDEN jbyteArray js_vm_load_resource_bytes(JNIEnv *env, jclass helper_cls, jstring resourcePath);
@@ -29,11 +30,12 @@ JS_HIDDEN unsigned char* js_vm_reassemble_sliced_resource(JNIEnv *env, jclass he
 JS_HIDDEN int js_hex32_to_bytes(const char *hex, unsigned char out[32]);
 JS_HIDDEN int js_parse_u32_token(const char *text, uint32_t *out);
 JS_HIDDEN char* js_next_manifest_field(char **cursor);
-JS_HIDDEN void js_vm_register_preload_index_entries(const unsigned char *index_bytes, int index_len);
+JS_PROTECTED void js_vm_register_preload_index_entries(const unsigned char *index_bytes, int index_len);
 JS_HIDDEN unsigned char* js_vm_decode_masked_preload_index_owned(const unsigned char *index_bytes, int index_len, int *out_len);
 JS_HIDDEN void js_vm_resource_alias_register(const char *original_path, const char *sealed_path);
 JS_HIDDEN const char* js_vm_resource_alias_resolve(const char *path);
 JS_HIDDEN void js_vm_call_gate_register(jlong entry_token, const char *resource_path);
+JS_HIDDEN void js_vm_call_gate_register_profile(jlong entry_token, const char *resource_path, uint32_t expected_profile);
 JS_HIDDEN const js_vm_call_gate_entry* js_vm_call_gate_lookup(jlong entry_token);
 JS_HIDDEN int js_vm_call_gate_mark_loading(jlong entry_token, const char *resource_path);
 JS_HIDDEN void js_vm_call_gate_clear_loading(jlong entry_token);

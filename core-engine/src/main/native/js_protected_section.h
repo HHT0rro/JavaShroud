@@ -19,5 +19,6 @@ typedef struct {
 } js_protected_seal;
 
 JS_HIDDEN const unsigned char* js_protected_section_key(int *len);
+JS_HIDDEN void js_protected_section_unseal_now(void);
 
 #endif

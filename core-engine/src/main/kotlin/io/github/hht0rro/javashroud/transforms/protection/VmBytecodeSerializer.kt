@@ -19,6 +19,8 @@ internal data class Vbc4EntryMetadata(
     val resourcePath: String = "",
     val originalAccess: Int = 0,
 ) {
+    private val dispatchProfileTag: Int = vbc4DispatchProfileTag(entryToken, resourcePath, methodLocalProfile, originalAccess)
+
     fun encode(): String = listOf(
         "vbc4-meta",
         entryToken.toULong().toString(16),
@@ -31,8 +33,26 @@ internal data class Vbc4EntryMetadata(
         originalDescriptor,
         resourcePath,
         originalAccess.toUInt().toString(16),
+        dispatchProfileTag.toUInt().toString(16),
     ).joinToString("|")
-}/**
+}
+
+private fun vbc4DispatchProfileTag(entryToken: Long, resourcePath: String, methodLocalProfile: Int, originalAccess: Int): Int {
+    var x = (entryToken xor (entryToken ushr 32)).toInt()
+    x = x xor methodLocalProfile xor (originalAccess * 0x45D9F3B)
+    for (byte in resourcePath.toByteArray(Charsets.UTF_8)) {
+        x = x xor (byte.toInt() and 0xFF)
+        x *= 0x01000193
+        x = x xor (x ushr 13)
+    }
+    x = x xor (x ushr 16)
+    x *= 0x7FEB352D
+    x = x xor (x ushr 15)
+    x *= 0x846CA68B.toInt()
+    return x xor (x ushr 16)
+}
+
+/**
  * VBC4 bytecode serializer.
  *
  * The Kotlin side is compile-time only: it captures JVM bytecode, builds a
@@ -122,13 +142,17 @@ internal class VmBytecodeSerializer(
         val logicalProgram = remapLogicalProgramCpIndexes(logicalProgramBeforeCpLayout, cpIndexMap, metadataCpIndex)
         val constantPoolPlain = serializeConstantPool(cpIndexMap)
 
-        val nestedVmFlag = if (nestedVmEnabled()) VBC4_FLAG_NESTED_VM else 0
-        val registerRowEnvelopeFlag = if (shouldUseRegisterRowEnvelope()) VBC4_FLAG_REGISTER_ROW_ENVELOPE else 0
+        val nestedVm = nestedVmEnabled()
+        val registerRowEnvelope = !nestedVm && shouldUseRegisterRowEnvelope()
+        val mixedOperandEnvelope = !nestedVm && !registerRowEnvelope && shouldUseMixedOperandEnvelope()
+        val nestedVmFlag = if (nestedVm) VBC4_FLAG_NESTED_VM else 0
+        val registerRowEnvelopeFlag = if (registerRowEnvelope) VBC4_FLAG_REGISTER_ROW_ENVELOPE else 0
+        val mixedOperandEnvelopeFlag = if (mixedOperandEnvelope) VBC4_FLAG_MIXED_OPERAND_ENVELOPE else 0
         val flags = VBC4_FLAG_ENCRYPTED_CP or VBC4_FLAG_BLOCK_ENCRYPTED or VBC4_FLAG_MAC or VBC4_FLAG_STATE_BOUND or
             VBC4_FLAG_AUTHENTICATED or VBC4_FLAG_PER_ENTRY_CP or VBC4_FLAG_PADDED or VBC4_FLAG_PER_BLOCK_ENCRYPT or
             VBC4_FLAG_REGISTER_EXECUTABLE or VBC4_FLAG_SUPER_OPERATORS or VBC4_FLAG_ZSTD_SECTIONS or
             VBC4_FLAG_POLYMORPHIC_CP or
-            VBC4_FLAG_BLOCK_DISPATCH or nestedVmFlag or registerRowEnvelopeFlag
+            VBC4_FLAG_BLOCK_DISPATCH or nestedVmFlag or registerRowEnvelopeFlag or mixedOperandEnvelopeFlag
         val exceptionShape = intBytes(exceptionEntries.size)
         val nonce = vbc4Nonce(effectiveBuildSeed, flags, constantPoolPlain, exceptionShape, logicalProgram.blocks.size)
         val cryptoSeed = effectiveBuildSeed
@@ -173,7 +197,7 @@ internal class VmBytecodeSerializer(
             writeU4(out, vbc4BlockDispatchToken(cryptoSeed, blk.blockId, nextLogicalBlockId(blk.blockId, logicalProgram.blocks.size), logicalProgram.blocks.size))
         }
         storageBlocks.forEachIndexed { blockId, blk ->
-            val blockPlain = serializeSingleBlock(blk, logicalProgram.registerCount, nestedVmFlag != 0, blockId)
+            val blockPlain = serializeSingleBlock(blk, logicalProgram.registerCount, nestedVm, registerRowEnvelope, mixedOperandEnvelope, blockId)
             val blockStored = zstdCompressSection(blockPlain)
             val blockEncrypted = vbc4Crypt(blockStored, cryptoSeed, nonce, VBC4_SECTION_INSTRUCTIONS, blk.blockId)
             writeU4(out, blockPlain.size)
@@ -764,7 +788,13 @@ internal class VmBytecodeSerializer(
         if (nestedVmEnabled()) return false
         if (constantPool.size < 5) return false
         // Use structureSelector for pseudo-random decision
-        return structureSelector("register-row-envelope", 0, effectiveBuildSeed, 100) < 50
+        return structureSelector("register-row-envelope", 0, effectiveBuildSeed, 100) < 40
+    }
+
+    private fun shouldUseMixedOperandEnvelope(): Boolean {
+        if (nestedVmEnabled()) return false
+        if (constantPool.size < 3) return false
+        return structureSelector("mixed-operand-envelope", 0, effectiveBuildSeed, 100) < 70
     }
     /**
      * Generate dialect value for register row envelope.
@@ -852,10 +882,59 @@ internal class VmBytecodeSerializer(
         }
     }
 
-    private fun serializeSingleBlock(block: VmLogicalBlock, registerCount: Int, nestedVm: Boolean, blockId: Int = 0): ByteArray {
+    private fun mixedOperandRowShape(blockId: Int, rowIndex: Int, instruction: VmRegisterInstruction): Int =
+        structureSelector("mixed-operand-row", rowIndex, blockId, instruction.opcode, instruction.flags, instruction.operand, 3) % 3
+
+    private fun mixedOperandRowToken(blockId: Int, rowIndex: Int, shape: Int): Int =
+        (vbc4RegisterRowMix(effectiveBuildSeed, blockId, rowIndex, shape, 0x5E) xor (shape * 0x45D9F3B)) and 0xFFFF
+
+    private fun writeMixedOperandRow(
+        out: java.io.ByteArrayOutputStream,
+        blockId: Int,
+        rowIndex: Int,
+        instruction: VmRegisterInstruction,
+    ) {
+        val shape = mixedOperandRowShape(blockId, rowIndex, instruction)
+        writeU2(out, mixedOperandRowToken(blockId, rowIndex, shape))
+        when (shape) {
+            0 -> {
+                writeU2(out, instruction.opcode)
+                writeU2(out, instruction.flags)
+                writeU2(out, instruction.dst)
+                writeU2(out, instruction.srcA)
+                writeU2(out, instruction.srcB)
+                writeU4(out, instruction.operand)
+            }
+            1 -> writeEnvelopeRegisterRow(out, blockId, rowIndex, instruction)
+            else -> {
+                val operandMask = vbc4RegisterRowMask(blockId, rowIndex, 0x42, 5)
+                writeU4(out, instruction.operand xor operandMask)
+                writeU2(out, instruction.srcB xor (vbc4RegisterRowMask(blockId, rowIndex, 0x43, 4) and 0xFFFF))
+                writeU2(out, instruction.srcA xor (vbc4RegisterRowMask(blockId, rowIndex, 0x44, 3) and 0xFFFF))
+                writeU2(out, instruction.dst xor (vbc4RegisterRowMask(blockId, rowIndex, 0x45, 2) and 0xFFFF))
+                writeU2(out, instruction.flags xor (vbc4RegisterRowMask(blockId, rowIndex, 0x46, 1) and 0xFFFF))
+                writeU2(out, instruction.opcode xor (vbc4RegisterRowMask(blockId, rowIndex, 0x47, 0) and 0xFFFF))
+            }
+        }
+    }
+
+    private fun serializeMixedOperandEnvelopeBlock(block: VmLogicalBlock, registerCount: Int, blockId: Int): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        writeU2(out, registerCount)
+        writeU2(out, block.instructions.size)
+        val dialect = vbc4RegisterRowDialect(blockId, block.instructions.size) xor vbc4RegisterRowMix(effectiveBuildSeed, blockId, block.instructions.size, 0x61, 0x4F)
+        writeU4(out, dialect)
+        block.instructions.forEachIndexed { rowIndex, instruction ->
+            writeMixedOperandRow(out, blockId, rowIndex, instruction)
+        }
+        writeU2(out, 0)
+        return out.toByteArray()
+    }
+
+    private fun serializeSingleBlock(block: VmLogicalBlock, registerCount: Int, nestedVm: Boolean, registerRowEnvelope: Boolean, mixedOperandEnvelope: Boolean, blockId: Int = 0): ByteArray {
         if (nestedVm) return serializeNestedBlock(block, registerCount)
-        val useRowEnvelope = !nestedVm && shouldUseRegisterRowEnvelope()
-        if (useRowEnvelope) return serializeEnvelopeBlock(block, registerCount, blockId)
+        if (registerRowEnvelope) return serializeEnvelopeBlock(block, registerCount, blockId)
+        if (mixedOperandEnvelope) return serializeMixedOperandEnvelopeBlock(block, registerCount, blockId)
         val out = java.io.ByteArrayOutputStream()
         writeU2(out, registerCount)
         writeU2(out, block.instructions.size)
@@ -1793,6 +1872,7 @@ private const val VBC4_FLAG_BLOCK_DISPATCH = 0x0800
 private const val VBC4_FLAG_NESTED_VM = 0x1000
 private const val VBC4_FLAG_POLYMORPHIC_CP = 0x2000
 private const val VBC4_FLAG_REGISTER_ROW_ENVELOPE = 0x4000
+private const val VBC4_FLAG_MIXED_OPERAND_ENVELOPE = 0x8000
 private const val VBC4_NESTED_MAGIC = 0x4E56
 private const val VBC4_NESTED_VERSION = 1
 private const val VBC4_NESTED_FIELD_COUNT = 6

@@ -319,10 +319,10 @@ JS_HIDDEN char js_vm_return_descriptor_from_meta(js_vm_program *p, jlong expecte
     unsigned long long token = 0ULL;
     char return_desc = 0;
     char *copy = meta.s;
-    char *parts[11] = {0};
+    char *parts[12] = {0};
     int part_count = 0;
     char *cursor = copy;
-    while (cursor && part_count < 11) {
+    while (cursor && part_count < 12) {
         parts[part_count++] = cursor;
         char *sep = strchr(cursor, '|');
         if (!sep) break;
@@ -349,6 +349,11 @@ JS_HIDDEN char js_vm_return_descriptor_from_meta(js_vm_program *p, jlong expecte
             }
         }
         if (part_count >= 11) p->original_access = (uint32_t)strtoul(parts[10], NULL, 16);
+        if (part_count >= 12) p->dispatch_profile_tag = (uint32_t)strtoul(parts[11], NULL, 16);
+        if (part_count >= 10) {
+            p->resource_path = js_strdup(parts[9]);
+            if (!p->resource_path) return_desc = 0;
+        }
     }
     js_vm_clear_decoded_cp(&meta);
     if ((jlong)token != expected_token) return 0;

@@ -7,8 +7,10 @@
 
 #ifdef _WIN32
 #define JS_HIDDEN
+#define JS_EXPORT __declspec(dllexport)
 #else
 #define JS_HIDDEN __attribute__((visibility("hidden")))
+#define JS_EXPORT __attribute__((visibility("default")))
 #endif
 
 #include "js_protected_section.h"

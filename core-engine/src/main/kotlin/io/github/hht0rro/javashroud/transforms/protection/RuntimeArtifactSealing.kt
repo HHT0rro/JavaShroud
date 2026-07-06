@@ -119,6 +119,13 @@ object RuntimeArtifactSealing {
         val vmResourceRenameMap = linkedMapOf<String, String>()
         val priorRuntimeResourceKey = if (rewritesCurrentVmRuntime) priorRuntimeResourceKey(artifact) else null
         val legacyVmResourceNames = if (rewritesCurrentVmRuntime) legacyVirtualMachineResourceNames(artifact.jarEntries, priorRuntimeResourceKey) else emptySet()
+        artifact.jarEntries.forEachIndexed { index, entry ->
+            if (entry.name in legacyVmResourceNames) {
+                val sealedName = uniqueSealedResourceName(seed, "v", entry.name, index, sealedResourceName(seed, "v", entry.name, index), reservedEntryNames)
+                reservedEntryNames += sealedName
+                vmResourceRenameMap[entry.name] = sealedName
+            }
+        }
         val helperStringRewriteMap = linkedMapOf(LEGACY_SEALED_NATIVE_INDEX_RESOURCE to sealedNativeIndexResource)
         if (!preservesExistingVmRuntime) {
             helperStringRewriteMap.putAll(sealedHelperStringRewriteMap(seed, helperClassRenameMap))
@@ -150,11 +157,9 @@ object RuntimeArtifactSealing {
                     entry.copy(name = sealedName, bytes = rewrittenBytes)
                 }
                 entry.name == VBC4_VM_PRELOAD_INDEX_RESOURCE -> if (rewritesCurrentVmRuntime) null else entry
-                entry.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE -> entry
+                entry.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE -> if (rewritesCurrentVmRuntime) null else entry
                 entry.name in legacyVmResourceNames -> {
-                    val sealedName = uniqueSealedResourceName(seed, "v", entry.name, index, sealedResourceName(seed, "v", entry.name, index), reservedEntryNames)
-                    reservedEntryNames += sealedName
-                    vmResourceRenameMap[entry.name] = sealedName
+                    val sealedName = vmResourceRenameMap.getValue(entry.name)
                     val rewrittenBytes = decodeRuntimeResourceWithPriorKey(entry.bytes, priorRuntimeResourceKey)?.let { decoded ->
                         RuntimeResourceCodec.encode(
                             bytes = decoded,
@@ -766,15 +771,36 @@ private fun isVirtualMachineRuntimeResource(bytes: ByteArray): Boolean {
 }
 
 private fun legacyVirtualMachineResourceNames(jarEntries: List<JarEntryData>, priorRuntimeResourceKey: ByteArray?): Set<String> {
-    val indexEntry = jarEntries.find { it.name == VBC4_VM_PRELOAD_INDEX_RESOURCE } ?: return emptySet()
+    val indexEntry = jarEntries.find { it.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE }
+        ?: jarEntries.find { it.name == VBC4_VM_PRELOAD_INDEX_RESOURCE }
+        ?: return emptySet()
     val decodedIndex = decodeRuntimeResourceWithPriorKey(indexEntry.bytes, priorRuntimeResourceKey) ?: return emptySet()
-    return decodedIndex.decodeToString()
+    val names = linkedSetOf<String>()
+    decodedIndex.decodeToString()
         .lineSequence()
-        .mapNotNull { line ->
+        .forEach { line ->
             val parts = line.split('|')
-            if (parts.size >= 2 && parts[0] != "A") parts[1] else null
+            if (parts.size < 2 || parts[0] == "A") return@forEach
+            val resourcePath = parts[1]
+            names += resourcePath
+            val manifestPath = parts.getOrNull(2)
+            if (!manifestPath.isNullOrBlank()) names += manifestPath
         }
-        .toSet()
+    val entriesByName = jarEntries.associateBy { it.name }
+    for (manifestName in names.toList()) {
+        val manifestEntry = entriesByName[manifestName] ?: continue
+        val decodedManifest = decodeRuntimeResourceWithPriorKey(manifestEntry.bytes, priorRuntimeResourceKey) ?: continue
+        if (!decodedManifest.decodeToString().startsWith("VBC4S|1|")) continue
+        decodedManifest.decodeToString()
+            .lineSequence()
+            .drop(1)
+            .forEach { line ->
+                val parts = line.split('|')
+                val shardPath = parts.getOrNull(4)
+                if (!shardPath.isNullOrBlank()) names += shardPath
+            }
+    }
+    return names
 }
 
 internal fun decodeRuntimeResourceWithPriorKey(bytes: ByteArray, priorRuntimeResourceKey: ByteArray?): ByteArray? {
@@ -866,38 +892,10 @@ private fun pushIntValue(insn: AbstractInsnNode): Int? = when (insn.opcode) {
 }
 
 
-private fun rewriteVirtualMachineManifestEntry(entry: JarEntryData, resourceRenameMap: Map<String, String>): JarEntryData {
-    if (resourceRenameMap.isEmpty()) return entry
-    val decoded = RuntimeResourceCodec.decode(entry.bytes) ?: return entry
-    val text = decoded.decodeToString()
-    if (!text.startsWith("VBC4S|1|")) return entry
-    val lines = text.trimEnd(0x0A.toChar(), 0x0D.toChar()).lines()
-    if (lines.isEmpty()) return entry
-    val rewritten = buildString {
-        append(lines.first()).append("\n")
-        for (line in lines.drop(1)) {
-            if (line.isBlank()) continue
-            val parts = line.split('|').toMutableList()
-            if (parts.size >= 5) parts[4] = resourceRenameMap[parts[4]] ?: parts[4]
-            append(parts.joinToString("|")).append("\n")
-        }
-    }
-    val resourceSeed = MessageDigest.getInstance("SHA-256")
-        .digest(rewritten.toByteArray(Charsets.UTF_8))
-        .take(4)
-        .fold(0) { acc, byte -> (acc shl 8) or (byte.toInt() and 0xFF) }
-    return entry.copy(bytes = RuntimeResourceCodec.encode(
-        bytes = rewritten.toByteArray(Charsets.UTF_8),
-        kind = RuntimeResourceKind.VmBytecode,
-        seed = resourceSeed,
-        variantId = resourceRenameMap.size.coerceAtLeast(1),
-        layerCount = 3,
-        compress = true,
-    ))
-}
-
 private fun rewriteVirtualMachinePreloadIndex(jarEntries: List<JarEntryData>, resourceRenameMap: Map<String, String>, priorRuntimeResourceKey: ByteArray?): ByteArray? {
-    val indexEntry = jarEntries.find { it.name == VBC4_VM_PRELOAD_INDEX_RESOURCE } ?: return null
+    val indexEntry = jarEntries.find { it.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE }
+        ?: jarEntries.find { it.name == VBC4_VM_PRELOAD_INDEX_RESOURCE }
+        ?: return null
     val decodedIndex = decodeRuntimeResourceWithPriorKey(indexEntry.bytes, priorRuntimeResourceKey) ?: return null
     val rewrittenLines = decodedIndex.decodeToString()
         .lineSequence()
@@ -908,9 +906,17 @@ private fun rewriteVirtualMachinePreloadIndex(jarEntries: List<JarEntryData>, re
             val resourcePath = parts[1]
             val manifestPath = parts.getOrNull(2) ?: resourcePath
             val shardCount = parts.getOrNull(3) ?: "0"
+            val mesh = parts.getOrNull(4)
+            val profile = parts.getOrNull(5)
+            val authTag = parts.getOrNull(6)
             val sealedResourcePath = resourceRenameMap[resourcePath] ?: resourcePath
             val sealedManifestPath = resourceRenameMap[manifestPath] ?: manifestPath
-            listOf(parts[0], sealedResourcePath, sealedManifestPath, shardCount, resourcePath, manifestPath).joinToString("|")
+            if (mesh != null && profile != null && authTag != null) {
+                val sealedAuthTag = sealedNativePreloadEntryAuthTag(parts[0], sealedResourcePath, sealedManifestPath, shardCount, mesh, profile)
+                listOf(parts[0], sealedResourcePath, sealedManifestPath, shardCount, mesh, profile, sealedAuthTag, resourcePath, manifestPath).joinToString("|")
+            } else {
+                listOf(parts[0], sealedResourcePath, sealedManifestPath, shardCount, resourcePath, manifestPath).joinToString("|")
+            }
         }
         .toList()
     val aliasLines = resourceRenameMap.entries.map { (original, sealed) -> listOf("A", original, sealed).joinToString("|") }
@@ -921,11 +927,7 @@ private fun rewriteVirtualMachinePreloadIndex(jarEntries: List<JarEntryData>, re
         .take(4)
         .fold(0) { acc, byte -> (acc shl 8) or (byte.toInt() and 0xFF) }
     val plainBytes = rewrittenIndex.toByteArray(Charsets.UTF_8)
-    val encodedBytes = if (decodedIndex.decodeToString().trim().startsWith("JSMI2|")) {
-        encodeMaskedNativePreloadIndex(plainBytes, "sealed:${resourceRenameMap.size}:$resourceSeed")
-    } else {
-        plainBytes
-    }
+    val encodedBytes = encodeMaskedNativePreloadIndex(plainBytes, "sealed:${resourceRenameMap.size}:$resourceSeed")
     return RuntimeResourceCodec.encode(
         bytes = encodedBytes,
         kind = RuntimeResourceKind.NativeIndex,
@@ -935,6 +937,29 @@ private fun rewriteVirtualMachinePreloadIndex(jarEntries: List<JarEntryData>, re
         compress = true,
     )
 }
+
+private fun sealedNativePreloadEntryAuthTag(
+    tokenHex: String,
+    resourcePath: String,
+    manifestPath: String,
+    shardCount: String,
+    mesh: String,
+    profile: String,
+): String = MessageDigest.getInstance("SHA-256").apply {
+    update("jsmi2-entry-auth".toByteArray(Charsets.US_ASCII))
+    update(0)
+    update(tokenHex.toByteArray(Charsets.US_ASCII))
+    update(0)
+    update(resourcePath.toByteArray(Charsets.UTF_8))
+    update(0)
+    update(manifestPath.toByteArray(Charsets.UTF_8))
+    update(0)
+    update(shardCount.toByteArray(Charsets.US_ASCII))
+    update(0)
+    update(mesh.toByteArray(Charsets.US_ASCII))
+    update(0)
+    update(profile.toByteArray(Charsets.US_ASCII))
+}.digest().take(8).toByteArray().toHexLower()
 
 private fun encodeSealedClassEncryptionManifest(bytes: ByteArray, resourceRenameMap: Map<String, String>): ByteArray {
     val rewritten = String(bytes, Charsets.UTF_8)
