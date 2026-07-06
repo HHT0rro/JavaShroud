@@ -317,10 +317,19 @@ class NativeRecompilationTransformsTest {
     @Test
     fun linux_manual_mapped_resource_loader_avoids_class_vtable_dispatch() {
         val resource = java.nio.file.Files.readString(resolveSource("src/main/native/js_vm_resource.c"))
+        val core = java.nio.file.Files.readString(resolveSource("src/main/native/js_vm_core.c"))
 
         assertTrue(resource.contains("CallNonvirtualObjectMethod(env, class_obj, js_jni_cache.class_class, js_jni_cache.class_get_class_loader"), "Manual mapped resource loading must avoid virtual Class.getClassLoader dispatch")
         assertTrue(resource.contains("CallNonvirtualObjectMethod(env, class_obj, js_jni_cache.class_class, js_jni_cache.class_get_name"), "Manual mapped resource loading must avoid virtual Class.getName dispatch")
         assertTrue(resource.contains("CallNonvirtualObjectMethod(env, class_obj, js_jni_cache.class_class, js_jni_cache.class_get_resource_as_stream"), "Manual mapped resource loading must avoid virtual Class.getResourceAsStream dispatch")
+        assertTrue(resource.contains("jclass loader_cls = (*env)->GetObjectClass(env, loader)"), "Manual mapped resource loading must resolve ClassLoader methods from the actual receiver class")
+        assertTrue(resource.contains("jclass thread_obj_cls = (*env)->GetObjectClass(env, thread)"), "Manual mapped context loader lookup must resolve Thread methods from the actual receiver class")
+        assertTrue(resource.contains("jclass stream_cls = (*env)->GetObjectClass(env, stream)"), "Manual mapped stream reads must resolve InputStream methods from the actual receiver class")
+        assertFalse(resource.contains("js_jni_cache.initialized ? js_jni_cache.class_loader_get_resource_as_stream"), "Manual mapped resource loading must not reuse cached ClassLoader virtual method IDs")
+        assertFalse(resource.contains("js_jni_cache.initialized ? js_jni_cache.thread_get_context_class_loader"), "Manual mapped resource loading must not reuse cached Thread virtual method IDs")
+        assertFalse(resource.contains("js_jni_cache.initialized ? js_jni_cache.input_stream_read_all_bytes"), "Manual mapped resource loading must not reuse cached InputStream virtual method IDs")
+        assertTrue(resource.contains("if (!js_vm_preload_in_progress)"), "Preload resource loading must not consult the dispatch-frame active host loader")
+        assertTrue(core.contains("jsn_k9(JNIEnv *env, jclass cls)\n{\n    js_vm_preload_in_progress++;"), "Native preload must enter preload mode before reading the VM index")
     }
 
     @Test

@@ -6242,19 +6242,21 @@ jsn_k8(JNIEnv *env, jclass cls, jlong entryToken, jstring resourcePath)
 JS_LOCAL void JNICALL
 jsn_k9(JNIEnv *env, jclass cls)
 {
+    js_vm_preload_in_progress++;
     jstring index_path = (*env)->NewStringUTF(env, "META-INF/.r/vm-current.idx");
-    if (!index_path) { js_vm_clear_exception(env); return; }
+    if (!index_path) { js_vm_clear_exception(env); js_vm_preload_in_progress--; return; }
     jbyteArray raw_index = js_vm_load_resource_bytes(env, cls, index_path);
     (*env)->DeleteLocalRef(env, index_path);
     if (!raw_index) {
         js_vm_clear_exception(env);
         index_path = (*env)->NewStringUTF(env, "META-INF/.r/vm.idx");
-        if (!index_path) { js_vm_clear_exception(env); return; }
+        if (!index_path) { js_vm_clear_exception(env); js_vm_preload_in_progress--; return; }
         raw_index = js_vm_load_resource_bytes(env, cls, index_path);
         (*env)->DeleteLocalRef(env, index_path);
     }
     if (!raw_index) {
         js_vm_clear_exception(env);
+        js_vm_preload_in_progress--;
         return;
     }
     int raw_len = (*env)->GetArrayLength(env, raw_index);
@@ -6269,6 +6271,7 @@ jsn_k9(JNIEnv *env, jclass cls)
     if (!index_bytes || index_len <= 0) {
         if (index_bytes) { js_vbc4_wipe_volatile(index_bytes, (size_t)index_len); free(index_bytes); }
         js_vm_fail_closed(env, "invalid VM preload index");
+        js_vm_preload_in_progress--;
         return;
     }
     int unmasked_index_len = 0;
@@ -6282,10 +6285,10 @@ jsn_k9(JNIEnv *env, jclass cls)
         js_vbc4_wipe_volatile(index_bytes, (size_t)index_len);
         free(index_bytes);
         js_vm_fail_closed(env, "invalid masked VM preload index");
+        js_vm_preload_in_progress--;
         return;
     }
     js_vm_register_preload_index_entries(index_bytes, index_len);
-    js_vm_preload_in_progress++;
     int line_start = 0;
     for (int i = 0; i <= index_len; i++) {
         if (i != index_len && index_bytes[i] != '\n' && index_bytes[i] != '\r') continue;

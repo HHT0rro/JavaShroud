@@ -401,9 +401,10 @@ JS_HIDDEN jobject js_vm_class_resource_as_stream(JNIEnv *env, jobject class_obj,
 
 JS_HIDDEN jobject js_vm_resource_from_loader(JNIEnv *env, jobject loader, jstring resourcePath) {
     if (!loader || !resourcePath) return NULL;
-    jclass loader_cls = js_jni_cache.initialized ? js_jni_cache.class_loader_class : (*env)->FindClass(env, "java/lang/ClassLoader");
+    jclass loader_cls = (*env)->GetObjectClass(env, loader);
     if (!loader_cls) { js_vm_resource_clear_exception(env); return NULL; }
-    jmethodID get_resource = js_jni_cache.initialized ? js_jni_cache.class_loader_get_resource_as_stream : (*env)->GetMethodID(env, loader_cls, "getResourceAsStream", "(Ljava/lang/String;)Ljava/io/InputStream;");
+    jmethodID get_resource = (*env)->GetMethodID(env, loader_cls, "getResourceAsStream", "(Ljava/lang/String;)Ljava/io/InputStream;");
+    (*env)->DeleteLocalRef(env, loader_cls);
     if (!get_resource) { js_vm_resource_clear_exception(env); return NULL; }
     jobject stream = (*env)->CallObjectMethod(env, loader, get_resource, resourcePath);
     if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); return NULL; }
@@ -414,10 +415,14 @@ JS_HIDDEN jobject js_vm_context_class_loader(JNIEnv *env) {
     jclass thread_cls = js_jni_cache.initialized ? js_jni_cache.thread_class : (*env)->FindClass(env, "java/lang/Thread");
     if (!thread_cls) { js_vm_resource_clear_exception(env); return NULL; }
     jmethodID current_thread = js_jni_cache.initialized ? js_jni_cache.thread_current_thread : (*env)->GetStaticMethodID(env, thread_cls, "currentThread", "()Ljava/lang/Thread;");
-    jmethodID get_context_loader = js_jni_cache.initialized ? js_jni_cache.thread_get_context_class_loader : (*env)->GetMethodID(env, thread_cls, "getContextClassLoader", "()Ljava/lang/ClassLoader;");
-    if (!current_thread || !get_context_loader) { js_vm_resource_clear_exception(env); return NULL; }
+    if (!current_thread) { js_vm_resource_clear_exception(env); return NULL; }
     jobject thread = (*env)->CallStaticObjectMethod(env, thread_cls, current_thread);
     if ((*env)->ExceptionCheck(env) || !thread) { js_vm_resource_clear_exception(env); return NULL; }
+    jclass thread_obj_cls = (*env)->GetObjectClass(env, thread);
+    if (!thread_obj_cls) { js_vm_resource_clear_exception(env); return NULL; }
+    jmethodID get_context_loader = (*env)->GetMethodID(env, thread_obj_cls, "getContextClassLoader", "()Ljava/lang/ClassLoader;");
+    (*env)->DeleteLocalRef(env, thread_obj_cls);
+    if (!get_context_loader) { js_vm_resource_clear_exception(env); return NULL; }
     jobject loader = (*env)->CallObjectMethod(env, thread, get_context_loader);
     if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); return NULL; }
     return loader;
@@ -460,10 +465,11 @@ static jobject js_vm_resource_from_helper_class(JNIEnv *env, jclass helper_cls, 
 static jbyteArray js_vm_read_stream_bytes(JNIEnv *env, jobject stream) {
     if (!stream) return NULL;
     jbyteArray bytes = NULL;
-    jclass stream_cls = js_jni_cache.initialized ? js_jni_cache.input_stream_class : (*env)->FindClass(env, "java/io/InputStream");
+    jclass stream_cls = (*env)->GetObjectClass(env, stream);
     if (stream_cls) {
-        jmethodID read_all = js_jni_cache.initialized ? js_jni_cache.input_stream_read_all_bytes : (*env)->GetMethodID(env, stream_cls, "readAllBytes", "()[B");
-        jmethodID close = js_jni_cache.initialized ? js_jni_cache.input_stream_close : (*env)->GetMethodID(env, stream_cls, "close", "()V");
+        jmethodID read_all = (*env)->GetMethodID(env, stream_cls, "readAllBytes", "()[B");
+        jmethodID close = (*env)->GetMethodID(env, stream_cls, "close", "()V");
+        (*env)->DeleteLocalRef(env, stream_cls);
         if (read_all) bytes = (jbyteArray)(*env)->CallObjectMethod(env, stream, read_all);
         if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); bytes = NULL; }
         if (close) (*env)->CallVoidMethod(env, stream, close);
@@ -478,8 +484,12 @@ JS_HIDDEN js_vm_loaded_resource js_vm_load_resource_bytes_with_loader(JNIEnv *en
     js_vm_loaded_resource result;
     memset(&result, 0, sizeof(result));
     if (!resourcePath) return result;
-    jobject loader = js_vm_get_active_host_loader();
-    jobject stream = js_vm_resource_from_loader(env, loader, resourcePath);
+    jobject loader = NULL;
+    jobject stream = NULL;
+    if (!js_vm_preload_in_progress) {
+        loader = js_vm_get_active_host_loader();
+        stream = js_vm_resource_from_loader(env, loader, resourcePath);
+    }
     if (!stream) {
         loader = js_vm_context_class_loader(env);
         stream = js_vm_resource_from_loader(env, loader, resourcePath);
