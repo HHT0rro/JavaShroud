@@ -249,6 +249,44 @@ class NativeRecompilationTransformsTest {
     }
 
     @Test
+    fun native_artifact_cache_key_changes_when_shell_protocol_inputs_change() {
+        val context = defaultVbc4BuildContext()
+        val sourceDigest = ByteArray(32) { index -> (index * 3 + 1).toByte() }
+        val protectedSectionKey = ByteArray(32) { index -> (0xA5 xor index).toByte() }
+        fun key(
+            packingLevel: String = "max",
+            packerVersion: Int = 7,
+            payloadProfile: String = "max-payload-zstd-chunk-v3",
+            loaderProfile: String = "pe64-memory-loader-reloc-import-noentry-v18",
+            toolchainIdentity: String = "zig|test|0.16.0",
+            platform: String = "windows-x64",
+            zigTarget: String = "x86_64-windows-gnu",
+        ): String = NativeRecompilationTransforms.nativeArtifactCacheKey(
+            taskPlatform = platform,
+            zigTarget = zigTarget,
+            outputName = "js_kernel_windows-x64.dll",
+            sourceDigest = sourceDigest,
+            toolchainIdentity = toolchainIdentity,
+            seed = 5150L,
+            vbc4BuildContext = context,
+            protectedSectionKey = protectedSectionKey,
+            nativeProtectionLevel = "standard",
+            nativePackingLevel = packingLevel,
+            nativeShellPackerVersion = packerVersion,
+            nativeShellPayloadProfile = payloadProfile,
+            nativeShellLoaderProfile = loaderProfile,
+        )
+
+        val baseline = key()
+        assertNotEquals(baseline, key(packingLevel = "standard"), "Cache key must change when max shell packing level changes")
+        assertNotEquals(baseline, key(packerVersion = 8), "Cache key must change when shell protocol/packer version changes")
+        assertNotEquals(baseline, key(payloadProfile = "max-payload-zstd-chunk-v4"), "Cache key must change when payload profile changes")
+        assertNotEquals(baseline, key(loaderProfile = "pe64-memory-loader-reloc-import-noentry-v19"), "Cache key must change when loader profile changes")
+        assertNotEquals(baseline, key(toolchainIdentity = "zig|test|0.17.0"), "Cache key must change when toolchain identity changes")
+        assertNotEquals(baseline, key(platform = "linux-x64", zigTarget = "x86_64-linux-gnu"), "Cache key must change when target platform changes")
+    }
+
+    @Test
     fun linux_max_shell_loader_maps_decoded_inner_elf_in_memory() {
         val source = java.nio.file.Files.readString(resolveSource("src/main/native/js_shell_loader_elf.c"))
 
