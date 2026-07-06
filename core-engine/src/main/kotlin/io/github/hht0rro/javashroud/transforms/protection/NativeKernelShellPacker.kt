@@ -10,7 +10,7 @@ import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 internal object NativeKernelShellPacker {
-    const val PACKER_VERSION: Int = 2
+    const val PACKER_VERSION: Int = 3
     const val LOADER_MARKER: String = "JS_NATIVE_SHELL_LOADER_V1"
     const val MAX_STUB_MARKER: String = "JS_NATIVE_MAX_STUB_V1"
     const val MAX_PAYLOAD_MARKER: String = "JS_NATIVE_MAX_PAYLOAD_V1"

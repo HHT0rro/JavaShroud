@@ -256,7 +256,7 @@ class NativeRecompilationTransformsTest {
         fun key(
             packingLevel: String = "max",
             packerVersion: Int = 7,
-            payloadProfile: String = "max-payload-zstd-chunk-v3",
+            payloadProfile: String = "max-payload-zstd-chunk-v4-bogus-metadata",
             loaderProfile: String = "pe64-memory-loader-reloc-import-noentry-v18",
             toolchainIdentity: String = "zig|test|0.16.0",
             platform: String = "windows-x64",
@@ -280,7 +280,7 @@ class NativeRecompilationTransformsTest {
         val baseline = key()
         assertNotEquals(baseline, key(packingLevel = "standard"), "Cache key must change when max shell packing level changes")
         assertNotEquals(baseline, key(packerVersion = 8), "Cache key must change when shell protocol/packer version changes")
-        assertNotEquals(baseline, key(payloadProfile = "max-payload-zstd-chunk-v4"), "Cache key must change when payload profile changes")
+        assertNotEquals(baseline, key(payloadProfile = "max-payload-zstd-chunk-v5"), "Cache key must change when payload profile changes")
         assertNotEquals(baseline, key(loaderProfile = "pe64-memory-loader-reloc-import-noentry-v19"), "Cache key must change when loader profile changes")
         assertNotEquals(baseline, key(toolchainIdentity = "zig|test|0.17.0"), "Cache key must change when toolchain identity changes")
         assertNotEquals(baseline, key(platform = "linux-x64", zigTarget = "x86_64-linux-gnu"), "Cache key must change when target platform changes")

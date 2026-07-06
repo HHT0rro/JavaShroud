@@ -176,7 +176,7 @@ object NativeRecompilationTransforms {
                 nativeProtectionLevel = nativeProtectionLevel,
                 nativePackingLevel = nativePackingLevel.name.lowercase(),
                 nativeShellPackerVersion = NativeKernelShellPacker.PACKER_VERSION,
-                nativeShellPayloadProfile = "${nativePackingLevel.name.lowercase()}-payload-zstd-chunk-v3",
+                nativeShellPayloadProfile = "${nativePackingLevel.name.lowercase()}-payload-zstd-chunk-v4-bogus-metadata",
                 nativeShellLoaderProfile = nativeShellLoaderProfile(platform),
             )
             NativeCompileTask(
