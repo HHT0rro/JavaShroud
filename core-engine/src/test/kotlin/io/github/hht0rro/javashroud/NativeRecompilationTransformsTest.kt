@@ -297,6 +297,14 @@ class NativeRecompilationTransformsTest {
         assertTrue(source.contains("R_X86_64_RELATIVE") && source.contains("R_X86_64_JUMP_SLOT") && source.contains("R_X86_64_GLOB_DAT"), "Linux max shell loader must process core RELA relocation classes")
         assertTrue(source.contains("dlsym(RTLD_DEFAULT"), "Linux max shell loader must resolve host imports without writing a temp library")
         assertTrue(source.contains("init_array") && source.contains("JNI_OnLoad"), "Linux max shell loader must run initializers and resolve the inner JNI_OnLoad export")
+        assertTrue(
+            source.contains("js_shell_mapped_range_contains") &&
+                source.contains("elf64 relocation target is outside the mapped image") &&
+                source.contains("elf64 relocation table is outside the mapped image") &&
+                source.contains("elf64 string table is outside the mapped image") &&
+                source.contains("elf64 init array is outside the mapped image"),
+            "Linux max shell loader must fail closed when dynamic, relocation, string, or init metadata points outside the anonymous image.",
+        )
         assertFalse(source.contains("elf64 anonymous memory loader is fail-closed until"), "Linux max shell loader must not remain the placeholder fail-closed skeleton")
     }
 

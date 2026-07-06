@@ -14,6 +14,8 @@ static const char *g_js_shell_loader_failure = "elf64 loader has not started";
 static char g_js_shell_loader_failure_buffer[192];
 
 typedef struct js_shell_elf_dyn {
+    uintptr_t mapped_low;
+    uintptr_t mapped_high;
     const Elf64_Sym *symtab;
     const char *strtab;
     const Elf64_Rela *rela_dyn;
@@ -59,6 +61,14 @@ static int js_shell_page_prot(uint32_t flags) {
 
 static int js_shell_validate_range(size_t offset, size_t size, size_t total) {
     return offset <= total && size <= total - offset;
+}
+
+static int js_shell_mapped_range_contains(uintptr_t low, uintptr_t high, uintptr_t addr, size_t size) {
+    return high >= low && addr >= low && addr <= high && size <= high - addr;
+}
+
+static int js_shell_dyn_range_contains(const js_shell_elf_dyn *dyn, uintptr_t addr, size_t size) {
+    return dyn && js_shell_mapped_range_contains(dyn->mapped_low, dyn->mapped_high, addr, size);
 }
 
 static void *js_shell_host_symbol(const char *name) {
@@ -110,9 +120,10 @@ static size_t js_shell_symbol_count(uintptr_t image, const js_shell_elf_dyn *dyn
 static void *js_shell_find_export(uintptr_t image, const js_shell_elf_dyn *dyn, const char *name) {
     if (!dyn->symtab || !dyn->strtab || !name) return 0;
     size_t count = js_shell_symbol_count(image, dyn);
-    if (!count) return 0;
+    if (!count || !js_shell_dyn_range_contains(dyn, (uintptr_t)dyn->symtab, count * sizeof(Elf64_Sym))) return 0;
     for (size_t i = 0; i < count; i++) {
         const Elf64_Sym *sym = dyn->symtab + i;
+        if (!js_shell_dyn_range_contains(dyn, (uintptr_t)sym, sizeof(*sym))) continue;
         if (sym->st_name >= dyn->strsz) continue;
         if (sym->st_shndx == SHN_UNDEF || sym->st_value == 0) continue;
         if (strcmp(dyn->strtab + sym->st_name, name) == 0) return (void *)(image + sym->st_value);
@@ -122,8 +133,18 @@ static void *js_shell_find_export(uintptr_t image, const js_shell_elf_dyn *dyn, 
 
 static int js_shell_apply_rela(uintptr_t image, const js_shell_elf_dyn *dyn, const Elf64_Rela *rela, size_t count) {
     if (!rela || !count) return 1;
+    if (!js_shell_dyn_range_contains(dyn, (uintptr_t)rela, count * sizeof(Elf64_Rela))) {
+        js_shell_loader_fail("elf64 relocation table is outside the mapped image");
+        return 0;
+    }
+    size_t symbol_count = js_shell_symbol_count(image, dyn);
     for (size_t i = 0; i < count; i++) {
-        uintptr_t *where = (uintptr_t *)(image + rela[i].r_offset);
+        uintptr_t where_addr = image + rela[i].r_offset;
+        if (!js_shell_dyn_range_contains(dyn, where_addr, sizeof(uintptr_t))) {
+            js_shell_loader_fail("elf64 relocation target is outside the mapped image");
+            return 0;
+        }
+        uintptr_t *where = (uintptr_t *)where_addr;
         uint32_t type = ELF64_R_TYPE(rela[i].r_info);
         uint32_t sym_index = ELF64_R_SYM(rela[i].r_info);
         uintptr_t value = 0;
@@ -132,7 +153,15 @@ static int js_shell_apply_rela(uintptr_t image, const js_shell_elf_dyn *dyn, con
                 js_shell_loader_fail("elf64 relocation references missing symbol tables");
                 return 0;
             }
+            if (!symbol_count || sym_index >= symbol_count) {
+                js_shell_loader_fail("elf64 relocation symbol index is out of range");
+                return 0;
+            }
             const Elf64_Sym *sym = dyn->symtab + sym_index;
+            if (!js_shell_dyn_range_contains(dyn, (uintptr_t)sym, sizeof(*sym))) {
+                js_shell_loader_fail("elf64 relocation symbol entry is out of range");
+                return 0;
+            }
             if (sym->st_name >= dyn->strsz) {
                 js_shell_loader_fail("elf64 relocation symbol name is out of range");
                 return 0;
@@ -177,8 +206,14 @@ static int js_shell_apply_rela(uintptr_t image, const js_shell_elf_dyn *dyn, con
     return 1;
 }
 
-static int js_shell_parse_dynamic(uintptr_t image, const Elf64_Dyn *dynamic, size_t dynamic_size, js_shell_elf_dyn *out) {
+static int js_shell_parse_dynamic(uintptr_t image, uintptr_t mapped_low, uintptr_t mapped_high, const Elf64_Dyn *dynamic, size_t dynamic_size, js_shell_elf_dyn *out) {
     memset(out, 0, sizeof(*out));
+    out->mapped_low = mapped_low;
+    out->mapped_high = mapped_high;
+    if (!js_shell_mapped_range_contains(mapped_low, mapped_high, (uintptr_t)dynamic, dynamic_size)) {
+        js_shell_loader_fail("elf64 dynamic section is outside the mapped image");
+        return 0;
+    }
     size_t dyn_count = dynamic_size / sizeof(Elf64_Dyn);
     size_t rela_dyn_size = 0;
     size_t rela_plt_size = 0;
@@ -248,7 +283,28 @@ static int js_shell_parse_dynamic(uintptr_t image, const Elf64_Dyn *dynamic, siz
     out->rela_plt_count = rela_plt_size / sizeof(Elf64_Rela);
     out->init_array_count = init_array_size / sizeof(uintptr_t);
     out->fini_array_count = fini_array_size / sizeof(uintptr_t);
-    return out->symtab && out->strtab && out->strsz;
+    if (!out->symtab || !out->strtab || !out->strsz) return 0;
+    if (!js_shell_mapped_range_contains(mapped_low, mapped_high, (uintptr_t)out->strtab, (size_t)out->strsz)) {
+        js_shell_loader_fail("elf64 string table is outside the mapped image");
+        return 0;
+    }
+    if (out->rela_dyn_count && !js_shell_mapped_range_contains(mapped_low, mapped_high, (uintptr_t)out->rela_dyn, out->rela_dyn_count * sizeof(Elf64_Rela))) {
+        js_shell_loader_fail("elf64 RELA dynamic table is outside the mapped image");
+        return 0;
+    }
+    if (out->rela_plt_count && !js_shell_mapped_range_contains(mapped_low, mapped_high, (uintptr_t)out->rela_plt, out->rela_plt_count * sizeof(Elf64_Rela))) {
+        js_shell_loader_fail("elf64 RELA PLT table is outside the mapped image");
+        return 0;
+    }
+    if (out->init_array_count && !js_shell_mapped_range_contains(mapped_low, mapped_high, image + out->init_array, out->init_array_count * sizeof(uintptr_t))) {
+        js_shell_loader_fail("elf64 init array is outside the mapped image");
+        return 0;
+    }
+    if (out->fini_array_count && !js_shell_mapped_range_contains(mapped_low, mapped_high, image + out->fini_array, out->fini_array_count * sizeof(uintptr_t))) {
+        js_shell_loader_fail("elf64 fini array is outside the mapped image");
+        return 0;
+    }
+    return 1;
 }
 
 int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loaded_image *out_image) {
@@ -314,9 +370,10 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
 
     const Elf64_Dyn *dynamic = (const Elf64_Dyn *)(image + (uintptr_t)dynamic_ph->p_vaddr);
     js_shell_elf_dyn dyn;
-    if (!js_shell_parse_dynamic(image, dynamic, (size_t)dynamic_ph->p_memsz, &dyn)) {
+    uintptr_t mapped_low = (uintptr_t)mapping;
+    uintptr_t mapped_high = mapped_low + image_size;
+    if (!js_shell_parse_dynamic(image, mapped_low, mapped_high, dynamic, (size_t)dynamic_ph->p_memsz, &dyn)) {
         munmap(mapping, image_size);
-        js_shell_loader_fail("elf64 dynamic section is incomplete");
         return 0;
     }
     if (!js_shell_apply_rela(image, &dyn, dyn.rela_dyn, dyn.rela_dyn_count) || !js_shell_apply_rela(image, &dyn, dyn.rela_plt, dyn.rela_plt_count)) {
@@ -336,7 +393,13 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
     }
 
     if (dyn.init_func) {
-        void (*init_func)(void) = (void (*)(void))(image + dyn.init_func);
+        uintptr_t init_addr = image + dyn.init_func;
+        if (!js_shell_dyn_range_contains(&dyn, init_addr, 1u)) {
+            munmap(mapping, image_size);
+            js_shell_loader_fail("elf64 init function is outside the mapped image");
+            return 0;
+        }
+        void (*init_func)(void) = (void (*)(void))init_addr;
         init_func();
     }
 
