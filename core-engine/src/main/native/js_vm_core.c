@@ -16,8 +16,8 @@ static int js_vm_active_program_depth = 0;
 __declspec(thread) static js_vm_program *js_vm_active_program_stack[64];
 __declspec(thread) static int js_vm_active_program_depth = 0;
 #elif defined(__GNUC__) || defined(__clang__)
-__thread static js_vm_program *js_vm_active_program_stack[64];
-__thread static int js_vm_active_program_depth = 0;
+static js_vm_program *js_vm_active_program_stack[64];
+static int js_vm_active_program_depth = 0;
 #else
 static js_vm_program *js_vm_active_program_stack[64];
 static int js_vm_active_program_depth = 0;
@@ -31,7 +31,7 @@ static jobject js_vm_active_host_loader = NULL;
 #elif defined(_MSC_VER)
 __declspec(thread) static jobject js_vm_active_host_loader = NULL;
 #elif defined(__GNUC__) || defined(__clang__)
-__thread static jobject js_vm_active_host_loader = NULL;
+static jobject js_vm_active_host_loader = NULL;
 #else
 static jobject js_vm_active_host_loader = NULL;
 #endif

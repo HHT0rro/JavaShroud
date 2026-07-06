@@ -330,6 +330,8 @@ class NativeRecompilationTransformsTest {
         assertFalse(resource.contains("js_jni_cache.initialized ? js_jni_cache.input_stream_read_all_bytes"), "Manual mapped resource loading must not reuse cached InputStream virtual method IDs")
         assertTrue(resource.contains("if (!js_vm_preload_in_progress)"), "Preload resource loading must not consult the dispatch-frame active host loader")
         assertTrue(core.contains("jsn_k9(JNIEnv *env, jclass cls)\n{\n    js_vm_preload_in_progress++;"), "Native preload must enter preload mode before reading the VM index")
+        assertFalse(core.contains("__thread static js_vm_program"), "Linux manual-mapped inner runtime must not require ELF TLS for active VM program state")
+        assertFalse(core.contains("__thread static jobject"), "Linux manual-mapped inner runtime must not require ELF TLS for active host loader state")
     }
 
     @Test
