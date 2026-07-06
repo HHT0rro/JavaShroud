@@ -506,7 +506,7 @@ class NativeRecompilationTransformsTest {
         }
 
         macosDiagnostics.results.sortedBy { it.platform }.forEach { result ->
-            assertTrue(result.bytes.containsAscii("mach-o payload validated through segments, sections, rebase/bind/lazy-bind streams and initializer metadata"), "${result.platform} must retain its explicit Mach-O fail-closed reason")
+            assertTrue(result.bytes.containsAscii("JS_MACHO_ANON_EXEC_FAIL_CLOSED_V1"), "${result.platform} must retain its explicit Mach-O fail-closed evidence marker")
             assertMaxStubReverseEvidence(result.bytes, result.platform)
             appendReverseEvidenceReport(
                 report,
@@ -771,6 +771,7 @@ private fun appendReverseEvidenceReport(
     report.appendLine("- marker.JS_NATIVE_MAX_STUB_V1: ${outerBytes.countAsciiOccurrences("JS_NATIVE_MAX_STUB_V1")}")
     report.appendLine("- marker.JS_NATIVE_MAX_PAYLOAD_V1: ${outerBytes.countAsciiOccurrences("JS_NATIVE_MAX_PAYLOAD_V1")}")
     report.appendLine("- marker.JS_NATIVE_SHELL_LOADER_V1: ${outerBytes.countAsciiOccurrences("JS_NATIVE_SHELL_LOADER_V1")}")
+    report.appendLine("- marker.JS_MACHO_ANON_EXEC_FAIL_CLOSED_V1: ${outerBytes.countAsciiOccurrences("JS_MACHO_ANON_EXEC_FAIL_CLOSED_V1")}")
     report.appendLine("- sensitive_plaintext_hits: ${if (sensitiveHits.isEmpty()) "none" else sensitiveHits.joinToString()}")
     report.appendLine("- printable_token_count_len6: ${printableTokens.size}")
     report.appendLine("- suspicious_printable_tokens: ${if (suspiciousPrintableTokens.isEmpty()) "none" else suspiciousPrintableTokens.take(8).joinToString()}")
