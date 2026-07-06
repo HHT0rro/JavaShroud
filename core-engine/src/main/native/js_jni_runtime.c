@@ -1,9 +1,15 @@
 #include "js_jni_runtime.h"
 #include "js_antidebug.h"
+#include "js_protected_section.h"
+#include "js_vm_core.h"
 #include "js_vm_resource.h"
 
 #include <stdlib.h>
 #include <string.h>
+
+#define JS_SHELL_MANUAL_MAP_RESERVED ((void *)(uintptr_t)0x4A5353484D4D4150ULL)
+
+static volatile int js_jni_runtime_manual_mapped_shell = 0;
 
 JS_HIDDEN js_jni_cache_state js_jni_cache;
 
@@ -31,6 +37,27 @@ JS_HIDDEN jbyteArray JNICALL jsn_r21(JNIEnv *env, jclass cls, jbyteArray payload
 JS_HIDDEN jobject JNICALL jsn_r22(JNIEnv *env, jclass cls, jlong entryToken, jobjectArray args);
 JS_HIDDEN void JNICALL jsn_r23(JNIEnv *env, jclass cls, jlong entryToken);
 JS_HIDDEN void JNICALL jsn_r24(JNIEnv *env, jclass cls, jlong entryToken, jint arg0);
+
+static const js_native_abi_table js_native_abi_table_instance = {
+    JS_NATIVE_ABI_TABLE_VERSION,
+    jsn_k0,
+    jsn_k1,
+    jsn_k3,
+    jsn_k4,
+    jsn_k5,
+    jsn_k6,
+    jsn_k7,
+    jsn_k9,
+    jsn_k10,
+    jsn_r20,
+    jsn_r22,
+    jsn_r23,
+    jsn_r24,
+};
+
+JS_EXPORT const js_native_abi_table *js_native_abi_table_v1(void) {
+    return &js_native_abi_table_instance;
+}
 
 static jclass js_jni_cache_global_class(JNIEnv *env, const char *name) {
     jclass local = (*env)->FindClass(env, name);
@@ -203,13 +230,17 @@ fail:
 }
 
 static int js_register_natives(JNIEnv *env, const char *class_name, const JNINativeMethod *methods, int count, int required) {
-    jclass cls = js_vm_find_registration_class(env, class_name);
+    jclass cls = required ? js_vm_find_registration_class(env, class_name) : (*env)->FindClass(env, class_name);
     if (!cls) {
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        js_vm_clear_exception(env);
         return required ? 0 : 1;
     }
     if ((*env)->RegisterNatives(env, cls, methods, count) != 0) {
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        js_vm_clear_exception(env);
+        return required ? 0 : 1;
+    }
+    if ((*env)->ExceptionCheck(env)) {
+        js_vm_clear_exception(env);
         return required ? 0 : 1;
     }
     return 1;
@@ -311,6 +342,8 @@ static int js_register_all_natives(JNIEnv *env) {
 }
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
+    if (reserved == JS_SHELL_MANUAL_MAP_RESERVED) js_jni_runtime_manual_mapped_shell = 1;
+    js_protected_section_unseal_now();
     js_native_anti_dump_harden();
     js_vm_cache_lock_init();
     (void)reserved;
@@ -320,6 +353,10 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     }
     if (!js_jni_cache_init(env)) return JNI_ERR;
     int ok = js_register_all_natives(env);
+    if (ok && (*env)->ExceptionCheck(env)) {
+        js_vm_clear_exception(env);
+        ok = 0;
+    }
     if (ok) js_vm_mark_hot_integrity_baseline_clean();
     if (!ok) js_jni_cache_destroy(env);
     return ok ? JNI_VERSION_1_6 : JNI_ERR;
@@ -327,6 +364,7 @@ JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
 
 JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *reserved) {
     (void)reserved;
+    if (js_jni_runtime_manual_mapped_shell) return;
     JNIEnv *env = NULL;
     if ((*vm)->GetEnv(vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK) env = NULL;
     js_runtime_on_unload_cleanup(env);
