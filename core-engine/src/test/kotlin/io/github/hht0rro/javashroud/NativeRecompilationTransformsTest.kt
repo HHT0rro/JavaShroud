@@ -614,6 +614,7 @@ class NativeRecompilationTransformsTest {
         assertTrue(java.nio.file.Files.size(reportPath) > 0, "native max reverse evidence report must be written: $reportPath")
         val reportText = java.nio.file.Files.readString(reportPath)
         assertTrue(reportText.contains("## reverse-tool-output-evidence"), "native max reverse evidence report must include external reverse-tool output evidence")
+        assertNativeMaxReverseEvidenceReportCoversReleaseGate(reportText)
     }
 
     @Test
@@ -680,6 +681,50 @@ class NativeRecompilationTransformsTest {
     }
 
 
+}
+
+private fun assertNativeMaxReverseEvidenceReportCoversReleaseGate(reportText: String) {
+    assertTrue(reportText.contains("- native_entry_count: 4"), "reverse evidence must cover all four platform native entries")
+    assertTrue(reportText.contains("- outer_stub_entry_count: 4"), "reverse evidence must prove all four packaged natives are max outer stubs")
+    assertTrue(reportText.contains("- standard_overlay_entry_count: 0"), "reverse evidence must not accept standard overlay artifacts as max shell evidence")
+    listOf("linux-x64", "windows-x64", "macos-x64", "macos-arm64").forEach { platform ->
+        assertTrue(reportText.contains("platform=$platform"), "reverse evidence must list packaged native entry for $platform")
+        val section = reportSection(reportText, "## $platform")
+        assertTrue(section.contains("marker.JS_NATIVE_MAX_STUB_V1: 1"), "$platform reverse evidence must prove exactly one max stub marker")
+        assertTrue(section.contains("marker.JS_NATIVE_MAX_PAYLOAD_V1: 1"), "$platform reverse evidence must prove exactly one max payload marker")
+        assertTrue(section.contains("marker.JS_NATIVE_SHELL_LOADER_V1: 0"), "$platform reverse evidence must exclude standard overlay marker")
+        assertTrue(section.contains("sensitive_plaintext_hits: none"), "$platform reverse evidence must record no sensitive plaintext hits")
+        assertTrue(section.contains("suspicious_printable_tokens: none"), "$platform reverse evidence must record no suspicious printable tokens")
+    }
+    listOf("linux-x64", "windows-x64").forEach { platform ->
+        val section = reportSection(reportText, "## $platform")
+        assertTrue(section.contains("sampled_high_entropy_inner_plaintext_present: false"), "$platform max stub must not expose sampled high-entropy inner plaintext")
+    }
+    listOf("macos-x64", "macos-arm64").forEach { platform ->
+        val section = reportSection(reportText, "## $platform")
+        assertTrue(section.contains("marker.JS_MACHO_ANON_EXEC_FAIL_CLOSED_V1: 1"), "$platform must record explicit Mach-O fail-closed marker")
+        assertTrue(section.contains("fail_closed_reason:"), "$platform must document the Mach-O anonymous execution boundary")
+    }
+
+    val toolSection = reportSection(reportText, "## reverse-tool-output-evidence")
+    listOf("linux-x64", "windows-x64", "macos-x64", "macos-arm64").forEach { platform ->
+        val platformToolSection = reportSection(toolSection, "### $platform")
+        assertTrue(platformToolSection.contains("strings.exit_code: 0"), "$platform external strings evidence must be captured")
+        assertTrue(platformToolSection.contains("strings.forbidden_hits: none"), "$platform external strings evidence must not expose forbidden tokens")
+    }
+    val linuxToolSection = reportSection(toolSection, "### linux-x64")
+    listOf("readelf", "nm").forEach { tool ->
+        assertTrue(linuxToolSection.contains("$tool.exit_code: 0"), "Linux external $tool evidence must be captured")
+        assertTrue(linuxToolSection.contains("$tool.contains_JNI_OnLoad: true"), "Linux external $tool evidence must preserve minimal JNI load surface")
+        assertTrue(linuxToolSection.contains("$tool.forbidden_hits: none"), "Linux external $tool evidence must not expose forbidden tokens")
+    }
+}
+
+private fun reportSection(reportText: String, heading: String): String {
+    val start = reportText.indexOf(heading)
+    assertTrue(start >= 0, "Missing report section: $heading")
+    val next = reportText.indexOf("\n## ", start + heading.length)
+    return if (next >= 0) reportText.substring(start, next) else reportText.substring(start)
 }
 
 private fun resolveSource(relativePath: String): java.nio.file.Path {
