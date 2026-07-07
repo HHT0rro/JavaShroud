@@ -21,6 +21,9 @@
 #define JS_LC_MAIN 0x80000028u
 #define JS_SECTION_TYPE 0x000000ffu
 #define JS_S_MOD_INIT_FUNC_POINTERS 0x9u
+#define JS_VM_PROT_EXECUTE 0x4u
+#define JS_MACHO_MAX_SEGMENTS 64u
+#define JS_MACHO_PAGE_GRANULE 0x4000ull
 
 #define JS_REBASE_OPCODE_MASK 0xf0u
 #define JS_REBASE_IMMEDIATE_MASK 0x0fu
@@ -118,6 +121,26 @@ typedef struct js_symtab_command {
     uint32_t strsize;
 } js_symtab_command;
 
+typedef struct js_macho_segment_plan {
+    uint64_t vmaddr;
+    uint64_t vmsize;
+    uint64_t fileoff;
+    uint64_t filesize;
+    uint32_t initprot;
+    int executable;
+} js_macho_segment_plan;
+
+typedef struct js_macho_image_plan {
+    js_macho_segment_plan segments[JS_MACHO_MAX_SEGMENTS];
+    unsigned int segment_count;
+    uint64_t vm_low;
+    uint64_t vm_high;
+    uint64_t mapping_size;
+    uint64_t text_low;
+    uint64_t text_high;
+    uint64_t slide;
+} js_macho_image_plan;
+
 static const char *g_js_shell_loader_failure = "mach-o loader has not started";
 static volatile const char g_js_shell_macho_fail_closed_marker[] = "JS_MACHO_ANON_EXEC_FAIL_CLOSED_V1";
 
@@ -127,6 +150,84 @@ static void js_shell_loader_fail(const char *reason) {
 
 static int js_shell_validate_range(uint64_t offset, uint64_t size, uint64_t total) {
     return offset <= total && size <= total - offset;
+}
+
+static uint64_t js_shell_macho_align_down(uint64_t value, uint64_t alignment) {
+    return value & ~(alignment - 1u);
+}
+
+static int js_shell_macho_align_up(uint64_t value, uint64_t alignment, uint64_t *out) {
+    uint64_t mask = alignment - 1u;
+    if (value > UINT64_MAX - mask) return 0;
+    *out = (value + mask) & ~mask;
+    return 1;
+}
+
+static int js_shell_macho_add_overflows(uint64_t left, uint64_t right, uint64_t *out) {
+    if (left > UINT64_MAX - right) return 1;
+    *out = left + right;
+    return 0;
+}
+
+static void js_shell_macho_init_image_plan(js_macho_image_plan *plan) {
+    memset(plan, 0, sizeof(*plan));
+    plan->vm_low = UINT64_MAX;
+}
+
+static int js_shell_macho_plan_segment(js_macho_image_plan *plan, const js_segment_command_64 *seg, size_t payload_size) {
+    uint64_t vm_end = 0;
+    uint64_t aligned_high = 0;
+    if (plan->segment_count >= JS_MACHO_MAX_SEGMENTS) {
+        js_shell_loader_fail("mach-o segment count exceeds loader planning table");
+        return 0;
+    }
+    if (!seg->vmsize || seg->filesize > seg->vmsize) {
+        js_shell_loader_fail("mach-o segment vm/file size is invalid for anonymous mapping");
+        return 0;
+    }
+    if (js_shell_macho_add_overflows(seg->vmaddr, seg->vmsize, &vm_end)) {
+        js_shell_loader_fail("mach-o segment vm range overflows");
+        return 0;
+    }
+    if (!js_shell_validate_range(seg->fileoff, seg->filesize, payload_size)) {
+        js_shell_loader_fail("mach-o segment file range is out of bounds");
+        return 0;
+    }
+
+    js_macho_segment_plan *entry = &plan->segments[plan->segment_count++];
+    entry->vmaddr = seg->vmaddr;
+    entry->vmsize = seg->vmsize;
+    entry->fileoff = seg->fileoff;
+    entry->filesize = seg->filesize;
+    entry->initprot = seg->initprot;
+    entry->executable = (seg->initprot & JS_VM_PROT_EXECUTE) != 0;
+
+    uint64_t aligned_low = js_shell_macho_align_down(seg->vmaddr, JS_MACHO_PAGE_GRANULE);
+    if (!js_shell_macho_align_up(vm_end, JS_MACHO_PAGE_GRANULE, &aligned_high)) {
+        js_shell_loader_fail("mach-o aligned segment range overflows");
+        return 0;
+    }
+    if (aligned_low < plan->vm_low) plan->vm_low = aligned_low;
+    if (aligned_high > plan->vm_high) plan->vm_high = aligned_high;
+    if (entry->executable) {
+        if (!plan->text_high || aligned_low < plan->text_low) plan->text_low = aligned_low;
+        if (aligned_high > plan->text_high) plan->text_high = aligned_high;
+    }
+    return 1;
+}
+
+static int js_shell_macho_finalize_image_plan(js_macho_image_plan *plan) {
+    if (!plan->segment_count || plan->vm_low == UINT64_MAX || plan->vm_high <= plan->vm_low) {
+        js_shell_loader_fail("mach-o anonymous image layout has no mapped segments");
+        return 0;
+    }
+    plan->mapping_size = plan->vm_high - plan->vm_low;
+    plan->slide = 0u - plan->vm_low;
+    if (!plan->text_high || plan->text_high <= plan->text_low) {
+        js_shell_loader_fail("mach-o anonymous image layout has no executable segment");
+        return 0;
+    }
+    return 1;
 }
 
 static const unsigned char *js_shell_read_uleb128(const unsigned char *p, const unsigned char *end, uint64_t *out) {
@@ -288,6 +389,8 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
     unsigned int initializer_section_count = 0;
     const js_dyld_info_command *dyld = 0;
     const js_symtab_command *symtab = 0;
+    js_macho_image_plan image_plan;
+    js_shell_macho_init_image_plan(&image_plan);
     for (uint32_t i = 0; i < mh->ncmds; i++) {
         if (cmd_ptr + sizeof(js_load_command) > cmd_end) {
             js_shell_loader_fail("mach-o load command is truncated");
@@ -304,8 +407,7 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
                 return 0;
             }
             const js_segment_command_64 *seg = (const js_segment_command_64 *)cmd_ptr;
-            if (!js_shell_validate_range(seg->fileoff, seg->filesize, size)) {
-                js_shell_loader_fail("mach-o segment file range is out of bounds");
+            if (!js_shell_macho_plan_segment(&image_plan, seg, size)) {
                 return 0;
             }
             if (seg->nsects && lc->cmdsize < sizeof(js_segment_command_64) + ((uint64_t)seg->nsects * sizeof(js_section_64))) {
@@ -350,6 +452,9 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
         js_shell_loader_fail("mach-o payload lacks required segments or dyld info");
         return 0;
     }
+    if (!js_shell_macho_finalize_image_plan(&image_plan)) {
+        return 0;
+    }
     if (!js_shell_validate_range(dyld->rebase_off, dyld->rebase_size, size) ||
         !js_shell_validate_range(dyld->bind_off, dyld->bind_size, size) ||
         !js_shell_validate_range(dyld->lazy_bind_off, dyld->lazy_bind_size, size) ||
@@ -381,7 +486,7 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
     }
 
     if (g_js_shell_macho_fail_closed_marker[0] != 'J') return 0;
-    js_shell_loader_fail("mach-o payload validated through segments, sections, rebase/bind/lazy-bind streams and initializer metadata, but anonymous execution mapping stays fail-closed until runtime execution is verified on macOS");
+    js_shell_loader_fail("mach-o payload validated through segments, sections, anonymous image layout, rebase/bind/lazy-bind streams and initializer metadata, but anonymous execution mapping stays fail-closed until runtime execution is verified on macOS");
     return 0;
 }
 
