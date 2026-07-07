@@ -388,6 +388,23 @@ static const unsigned char *js_shell_read_sleb128(const unsigned char *p, const 
     return 0;
 }
 
+static const unsigned char *js_shell_read_sleb128_value(const unsigned char *p, const unsigned char *end, int64_t *out) {
+    uint64_t value = 0;
+    unsigned int shift = 0;
+    unsigned char byte = 0;
+    while (p < end && shift < 64u) {
+        byte = *p++;
+        value |= ((uint64_t)(byte & 0x7fu)) << shift;
+        shift += 7u;
+        if ((byte & 0x80u) == 0) {
+            if (shift < 64u && (byte & 0x40u)) value |= (~0ull) << shift;
+            *out = (int64_t)value;
+            return p;
+        }
+    }
+    return 0;
+}
+
 static const unsigned char *js_shell_skip_cstring(const unsigned char *p, const unsigned char *end) {
     while (p < end) {
         if (*p++ == 0) return p;
@@ -456,6 +473,96 @@ static int js_shell_validate_bind_stream(const unsigned char *base, size_t size,
             if (!p) return 0;
             p = js_shell_read_uleb128(p, end, &ignored);
             if (!p) return 0;
+        } else {
+            return 0;
+        }
+    }
+    return saw_done && p <= end;
+}
+
+static int js_shell_macho_resolve_bind_symbol(const char *symbol, int dylib_ordinal, int64_t addend, uint64_t *resolved_out) {
+    (void)symbol;
+    (void)dylib_ordinal;
+    (void)addend;
+    (void)resolved_out;
+    js_shell_loader_fail("mach-o bind symbol resolver is not available for anonymous mapping");
+    return 0;
+}
+
+static int js_shell_macho_apply_bind_at(void *mapping, const js_macho_image_plan *plan, uint64_t vmaddr, const char *symbol, int dylib_ordinal, int64_t addend) {
+    uint64_t resolved = 0;
+    if (!symbol || !symbol[0]) {
+        js_shell_loader_fail("mach-o bind opcode reached a slot without a symbol");
+        return 0;
+    }
+    if (!js_shell_macho_range_inside_mapping(plan, vmaddr, sizeof(uint64_t))) {
+        js_shell_loader_fail("mach-o bind target is outside anonymous mapping");
+        return 0;
+    }
+    if (!js_shell_macho_resolve_bind_symbol(symbol, dylib_ordinal, addend, &resolved)) return 0;
+    uint64_t *slot = (uint64_t *)((unsigned char *)mapping + (vmaddr - plan->vm_low));
+    *slot = resolved;
+    return 1;
+}
+
+static int js_shell_macho_apply_bind_stream(void *mapping, const js_macho_image_plan *plan, const unsigned char *base, size_t size) {
+    const unsigned char *p = base;
+    const unsigned char *end = base + size;
+    uint64_t vmaddr = 0;
+    uint64_t ignored = 0;
+    int64_t addend = 0;
+    int dylib_ordinal = 0;
+    const char *symbol = 0;
+    unsigned int saw_done = size == 0u;
+    while (p < end) {
+        unsigned char byte = *p++;
+        unsigned char opcode = byte & JS_BIND_OPCODE_MASK;
+        unsigned char imm = byte & 0x0fu;
+        if (opcode == JS_BIND_OPCODE_DONE) { saw_done = 1; break; }
+        if (opcode == JS_BIND_OPCODE_SET_DYLIB_ORDINAL_IMM) {
+            dylib_ordinal = imm;
+        } else if (opcode == JS_BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB) {
+            p = js_shell_read_uleb128(p, end, &ignored);
+            if (!p || ignored > INT32_MAX) return 0;
+            dylib_ordinal = (int)ignored;
+        } else if (opcode == JS_BIND_OPCODE_SET_DYLIB_SPECIAL_IMM) {
+            dylib_ordinal = imm == 0 ? 0 : (int)(imm | 0xfffffff0u);
+        } else if (opcode == JS_BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM) {
+            symbol = (const char *)p;
+            p = js_shell_skip_cstring(p, end);
+            if (!p) return 0;
+        } else if (opcode == JS_BIND_OPCODE_SET_TYPE_IMM) {
+            (void)imm;
+        } else if (opcode == JS_BIND_OPCODE_SET_ADDEND_SLEB) {
+            p = js_shell_read_sleb128_value(p, end, &addend);
+            if (!p) return 0;
+        } else if (opcode == JS_BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB) {
+            p = js_shell_read_uleb128(p, end, &ignored);
+            if (!p || !js_shell_macho_segment_offset_to_vmaddr(plan, imm, ignored, &vmaddr)) return 0;
+        } else if (opcode == JS_BIND_OPCODE_ADD_ADDR_ULEB) {
+            p = js_shell_read_uleb128(p, end, &ignored);
+            if (!p || js_shell_macho_add_overflows(vmaddr, ignored, &vmaddr) || !js_shell_macho_range_inside_mapping(plan, vmaddr, sizeof(uint64_t))) return 0;
+        } else if (opcode == JS_BIND_OPCODE_DO_BIND) {
+            if (!js_shell_macho_apply_bind_at(mapping, plan, vmaddr, symbol, dylib_ordinal, addend) || js_shell_macho_add_overflows(vmaddr, sizeof(uint64_t), &vmaddr)) return 0;
+        } else if (opcode == JS_BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB) {
+            uint64_t advance = 0;
+            p = js_shell_read_uleb128(p, end, &ignored);
+            if (!p || js_shell_macho_add_overflows(sizeof(uint64_t), ignored, &advance) || !js_shell_macho_apply_bind_at(mapping, plan, vmaddr, symbol, dylib_ordinal, addend) || js_shell_macho_add_overflows(vmaddr, advance, &vmaddr)) return 0;
+        } else if (opcode == JS_BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED) {
+            uint64_t advance = sizeof(uint64_t) + ((uint64_t)imm * sizeof(uint64_t));
+            if (!js_shell_macho_apply_bind_at(mapping, plan, vmaddr, symbol, dylib_ordinal, addend) || js_shell_macho_add_overflows(vmaddr, advance, &vmaddr)) return 0;
+        } else if (opcode == JS_BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB) {
+            uint64_t count = 0;
+            uint64_t skip = 0;
+            uint64_t advance = 0;
+            p = js_shell_read_uleb128(p, end, &count);
+            if (!p) return 0;
+            p = js_shell_read_uleb128(p, end, &skip);
+            if (!p || js_shell_macho_add_overflows(sizeof(uint64_t), skip, &advance)) return 0;
+            for (uint64_t i = 0; i < count; i++) {
+                if (!js_shell_macho_apply_bind_at(mapping, plan, vmaddr, symbol, dylib_ordinal, addend)) return 0;
+                if (js_shell_macho_add_overflows(vmaddr, advance, &vmaddr)) return 0;
+            }
         } else {
             return 0;
         }
@@ -628,6 +735,14 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
         js_shell_loader_fail("mach-o rebase application failed inside anonymous mapping");
         return 0;
     }
+    if (!js_shell_macho_apply_bind_stream(planned_mapping, &image_plan, bytes + dyld->bind_off, dyld->bind_size) ||
+        !js_shell_macho_apply_bind_stream(planned_mapping, &image_plan, bytes + dyld->lazy_bind_off, dyld->lazy_bind_size)) {
+        munmap(planned_mapping, (size_t)image_plan.mapping_size);
+        if (!g_js_shell_loader_failure || strcmp(g_js_shell_loader_failure, "mach-o loader has not started") == 0) {
+            js_shell_loader_fail("mach-o bind application failed inside anonymous mapping");
+        }
+        return 0;
+    }
     if (!js_shell_macho_protect_segments(planned_mapping, &image_plan)) {
         munmap(planned_mapping, (size_t)image_plan.mapping_size);
         return 0;
@@ -635,7 +750,7 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
     munmap(planned_mapping, (size_t)image_plan.mapping_size);
 
     if (g_js_shell_macho_fail_closed_marker[0] != 'J') return 0;
-    js_shell_loader_fail("mach-o payload validated through segments, sections, anonymous image layout, segment materialization, rebase application, bind/lazy-bind streams and initializer metadata, but anonymous execution mapping stays fail-closed until runtime execution is verified on macOS");
+    js_shell_loader_fail("mach-o payload validated through segments, sections, anonymous image layout, segment materialization, rebase and bind/lazy-bind application, and initializer metadata, but anonymous execution mapping stays fail-closed until runtime execution is verified on macOS");
     return 0;
 }
 
