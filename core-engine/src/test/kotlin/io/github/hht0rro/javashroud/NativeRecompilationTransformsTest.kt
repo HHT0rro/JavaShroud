@@ -459,6 +459,9 @@ class NativeRecompilationTransformsTest {
         assertTrue(source.contains("js_shell_macho_resolve_export_rva") && source.contains("js_shell_macho_resolve_export_pointer"), "macOS max shell loader must resolve export trie addresses into anonymous image pointers")
         assertTrue(source.contains("mach-o export entrypoint is outside executable image pages") && source.contains("mach-o export symbol address is outside anonymous mapping"), "macOS max shell loader must fail closed when resolved exports escape code or image bounds")
         assertTrue(source.contains("resolved_jni_on_load") && source.contains("resolved_native_abi_table"), "macOS max shell loader must resolve JNI_OnLoad and native ABI table exports before execution can be enabled")
+        assertTrue(source.contains("js_macho_initializer_section_plan") && source.contains("js_shell_macho_plan_initializer_section"), "macOS max shell loader must record initializer pointer sections from Mach-O section metadata")
+        assertTrue(source.contains("js_shell_macho_validate_initializers") && source.contains("mach-o initializer pointer is outside executable image pages"), "macOS max shell loader must validate materialized initializer pointers before execution can be enabled")
+        assertTrue(source.contains("initializer_section_count") && source.contains("JS_MACHO_MAX_INITIALIZER_SECTIONS"), "macOS max shell loader must cap initializer section metadata while parsing")
         assertTrue(source.contains("anonymous execution mapping stays fail-closed"), "macOS max shell loader must explicitly fail closed until true in-memory execution is implemented")
     }
 

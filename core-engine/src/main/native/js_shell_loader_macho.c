@@ -27,6 +27,7 @@
 #define JS_VM_PROT_WRITE 0x2u
 #define JS_VM_PROT_EXECUTE 0x4u
 #define JS_MACHO_MAX_SEGMENTS 64u
+#define JS_MACHO_MAX_INITIALIZER_SECTIONS 16u
 #define JS_MACHO_PAGE_GRANULE 0x4000ull
 
 #define JS_REBASE_OPCODE_MASK 0xf0u
@@ -134,9 +135,16 @@ typedef struct js_macho_segment_plan {
     int executable;
 } js_macho_segment_plan;
 
+typedef struct js_macho_initializer_section_plan {
+    uint64_t vmaddr;
+    uint64_t size;
+} js_macho_initializer_section_plan;
+
 typedef struct js_macho_image_plan {
     js_macho_segment_plan segments[JS_MACHO_MAX_SEGMENTS];
+    js_macho_initializer_section_plan initializer_sections[JS_MACHO_MAX_INITIALIZER_SECTIONS];
     unsigned int segment_count;
+    unsigned int initializer_section_count;
     uint64_t vm_low;
     uint64_t vm_high;
     uint64_t mapping_size;
@@ -153,6 +161,7 @@ static void js_shell_loader_fail(const char *reason) {
 }
 
 static const unsigned char *js_shell_read_uleb128(const unsigned char *p, const unsigned char *end, uint64_t *out);
+static int js_shell_macho_range_inside_mapping(const js_macho_image_plan *plan, uint64_t vmaddr, uint64_t size);
 
 static int js_shell_validate_range(uint64_t offset, uint64_t size, uint64_t total) {
     return offset <= total && size <= total - offset;
@@ -222,6 +231,21 @@ static int js_shell_macho_plan_segment(js_macho_image_plan *plan, const js_segme
     return 1;
 }
 
+static int js_shell_macho_plan_initializer_section(js_macho_image_plan *plan, const js_section_64 *section) {
+    if (plan->initializer_section_count >= JS_MACHO_MAX_INITIALIZER_SECTIONS) {
+        js_shell_loader_fail("mach-o initializer section count is suspicious");
+        return 0;
+    }
+    if ((section->size % sizeof(uint64_t)) != 0 || !js_shell_macho_range_inside_mapping(plan, section->addr, section->size)) {
+        js_shell_loader_fail("mach-o initializer pointer section is outside anonymous mapping");
+        return 0;
+    }
+    js_macho_initializer_section_plan *entry = &plan->initializer_sections[plan->initializer_section_count++];
+    entry->vmaddr = section->addr;
+    entry->size = section->size;
+    return 1;
+}
+
 static int js_shell_macho_finalize_image_plan(js_macho_image_plan *plan) {
     if (!plan->segment_count || plan->vm_low == UINT64_MAX || plan->vm_high <= plan->vm_low) {
         js_shell_loader_fail("mach-o anonymous image layout has no mapped segments");
@@ -269,6 +293,33 @@ static int js_shell_macho_materialize_segments(const unsigned char *bytes, const
         }
     }
     *mapping_out = mapping;
+    return 1;
+}
+
+static int js_shell_macho_validate_initializers(void *mapping, const js_macho_image_plan *plan) {
+    uint64_t executable_low = 0;
+    uint64_t executable_high = 0;
+    if (js_shell_macho_add_overflows(plan->text_low, plan->slide, &executable_low) ||
+        js_shell_macho_add_overflows(plan->text_high, plan->slide, &executable_high)) {
+        js_shell_loader_fail("mach-o initializer executable bounds overflow");
+        return 0;
+    }
+    for (unsigned int si = 0; si < plan->initializer_section_count; si++) {
+        const js_macho_initializer_section_plan *section = &plan->initializer_sections[si];
+        if (!js_shell_macho_range_inside_mapping(plan, section->vmaddr, section->size) || (section->size % sizeof(uint64_t)) != 0) {
+            js_shell_loader_fail("mach-o initializer pointer section is outside anonymous mapping");
+            return 0;
+        }
+        const uint64_t *entries = (const uint64_t *)((const unsigned char *)mapping + (section->vmaddr - plan->vm_low));
+        size_t count = (size_t)(section->size / sizeof(uint64_t));
+        for (size_t i = 0; i < count; i++) {
+            uint64_t initializer = entries[i];
+            if (initializer < executable_low || initializer >= executable_high) {
+                js_shell_loader_fail("mach-o initializer pointer is outside executable image pages");
+                return 0;
+            }
+        }
+    }
     return 1;
 }
 
@@ -674,7 +725,6 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
     unsigned int segment_count = 0;
     int saw_text = 0;
     int saw_linkedit = 0;
-    unsigned int initializer_section_count = 0;
     const js_dyld_info_command *dyld = 0;
     const js_symtab_command *symtab = 0;
     js_macho_image_plan image_plan;
@@ -713,7 +763,7 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
                     js_shell_loader_fail("mach-o relocation table is out of bounds");
                     return 0;
                 }
-                if ((section->flags & JS_SECTION_TYPE) == JS_S_MOD_INIT_FUNC_POINTERS) initializer_section_count++;
+                if ((section->flags & JS_SECTION_TYPE) == JS_S_MOD_INIT_FUNC_POINTERS && !js_shell_macho_plan_initializer_section(&image_plan, section)) return 0;
             }
             if (memcmp(seg->segname, "__TEXT", 6) == 0) saw_text = 1;
             if (memcmp(seg->segname, "__LINKEDIT", 10) == 0) saw_linkedit = 1;
@@ -760,10 +810,6 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
         js_shell_loader_fail("mach-o rebase/bind/lazy-bind opcode stream is invalid");
         return 0;
     }
-    if (initializer_section_count > 16u) {
-        js_shell_loader_fail("mach-o initializer section count is suspicious");
-        return 0;
-    }
     if (!dyld->export_size || !js_shell_export_trie_has_symbol(bytes + dyld->export_off, dyld->export_size, "_JNI_OnLoad")) {
         js_shell_loader_fail("mach-o payload does not export _JNI_OnLoad");
         return 0;
@@ -789,6 +835,10 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
         if (!g_js_shell_loader_failure || strcmp(g_js_shell_loader_failure, "mach-o loader has not started") == 0) {
             js_shell_loader_fail("mach-o bind application failed inside anonymous mapping");
         }
+        return 0;
+    }
+    if (!js_shell_macho_validate_initializers(planned_mapping, &image_plan)) {
+        munmap(planned_mapping, (size_t)image_plan.mapping_size);
         return 0;
     }
     if (!js_shell_macho_protect_segments(planned_mapping, &image_plan)) {
