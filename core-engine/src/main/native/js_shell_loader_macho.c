@@ -3,6 +3,7 @@
 #if defined(__APPLE__) && defined(__MACH__)
 
 #include <sys/mman.h>
+#include <dlfcn.h>
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
@@ -532,12 +533,39 @@ static int js_shell_validate_bind_stream(const unsigned char *base, size_t size,
 }
 
 static int js_shell_macho_resolve_bind_symbol(const char *symbol, int dylib_ordinal, int64_t addend, uint64_t *resolved_out) {
-    (void)symbol;
     (void)dylib_ordinal;
-    (void)addend;
-    (void)resolved_out;
-    js_shell_loader_fail("mach-o bind symbol resolver is not available for anonymous mapping");
-    return 0;
+    if (!symbol || !symbol[0] || !resolved_out) {
+        js_shell_loader_fail("mach-o bind symbol resolver received an empty symbol");
+        return 0;
+    }
+    const char *lookup = symbol[0] == '_' ? symbol + 1u : symbol;
+    if (!lookup[0]) {
+        js_shell_loader_fail("mach-o bind symbol resolver received a stripped empty symbol");
+        return 0;
+    }
+    void *address = dlsym(RTLD_DEFAULT, lookup);
+    if (!address) {
+        js_shell_loader_fail("mach-o bind symbol resolver could not resolve host symbol");
+        return 0;
+    }
+    uint64_t resolved = (uint64_t)(uintptr_t)address;
+    if (addend >= 0) {
+        uint64_t positive = (uint64_t)addend;
+        if (resolved > UINT64_MAX - positive) {
+            js_shell_loader_fail("mach-o bind symbol addend overflows resolved address");
+            return 0;
+        }
+        resolved += positive;
+    } else {
+        uint64_t negative = (uint64_t)(-(addend + 1)) + 1u;
+        if (resolved < negative) {
+            js_shell_loader_fail("mach-o bind symbol negative addend underflows resolved address");
+            return 0;
+        }
+        resolved -= negative;
+    }
+    *resolved_out = resolved;
+    return 1;
 }
 
 static int js_shell_macho_apply_bind_at(void *mapping, const js_macho_image_plan *plan, uint64_t vmaddr, const char *symbol, int dylib_ordinal, int64_t addend) {
