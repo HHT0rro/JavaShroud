@@ -152,6 +152,8 @@ static void js_shell_loader_fail(const char *reason) {
     g_js_shell_loader_failure = reason;
 }
 
+static const unsigned char *js_shell_read_uleb128(const unsigned char *p, const unsigned char *end, uint64_t *out);
+
 static int js_shell_validate_range(uint64_t offset, uint64_t size, uint64_t total) {
     return offset <= total && size <= total - offset;
 }
@@ -266,24 +268,99 @@ static int js_shell_macho_materialize_segments(const unsigned char *bytes, const
             memcpy((unsigned char *)mapping + target_offset, bytes + seg->fileoff, (size_t)seg->filesize);
         }
     }
+    *mapping_out = mapping;
+    return 1;
+}
+
+static int js_shell_macho_protect_segments(void *mapping, const js_macho_image_plan *plan) {
     for (unsigned int i = 0; i < plan->segment_count; i++) {
         const js_macho_segment_plan *seg = &plan->segments[i];
         uint64_t segment_low = js_shell_macho_align_down(seg->vmaddr, JS_MACHO_PAGE_GRANULE);
         uint64_t segment_end = 0;
         uint64_t segment_high = 0;
         if (js_shell_macho_add_overflows(seg->vmaddr, seg->vmsize, &segment_end) || !js_shell_macho_align_up(segment_end, JS_MACHO_PAGE_GRANULE, &segment_high)) {
-            munmap(mapping, (size_t)plan->mapping_size);
             js_shell_loader_fail("mach-o segment protection range overflows");
             return 0;
         }
         if (mprotect((unsigned char *)mapping + (segment_low - plan->vm_low), (size_t)(segment_high - segment_low), js_shell_macho_mmap_prot(seg->initprot)) != 0) {
-            munmap(mapping, (size_t)plan->mapping_size);
             js_shell_loader_fail("mach-o segment protection failed");
             return 0;
         }
     }
-    *mapping_out = mapping;
     return 1;
+}
+
+static int js_shell_macho_segment_offset_to_vmaddr(const js_macho_image_plan *plan, unsigned int segment_index, uint64_t segment_offset, uint64_t *vmaddr_out) {
+    if (segment_index >= plan->segment_count) return 0;
+    const js_macho_segment_plan *seg = &plan->segments[segment_index];
+    if (segment_offset > seg->vmsize || js_shell_macho_add_overflows(seg->vmaddr, segment_offset, vmaddr_out)) return 0;
+    return js_shell_macho_range_inside_mapping(plan, *vmaddr_out, sizeof(uint64_t));
+}
+
+static int js_shell_macho_apply_rebase_at(void *mapping, const js_macho_image_plan *plan, uint64_t vmaddr) {
+    if (!js_shell_macho_range_inside_mapping(plan, vmaddr, sizeof(uint64_t))) {
+        js_shell_loader_fail("mach-o rebase target is outside anonymous mapping");
+        return 0;
+    }
+    uint64_t *slot = (uint64_t *)((unsigned char *)mapping + (vmaddr - plan->vm_low));
+    *slot += plan->slide;
+    return 1;
+}
+
+static int js_shell_macho_apply_rebase_stream(void *mapping, const js_macho_image_plan *plan, const unsigned char *base, size_t size) {
+    const unsigned char *p = base;
+    const unsigned char *end = base + size;
+    uint64_t vmaddr = 0;
+    uint64_t ignored = 0;
+    unsigned int saw_done = size == 0u;
+    while (p < end) {
+        unsigned char byte = *p++;
+        unsigned char opcode = byte & JS_REBASE_OPCODE_MASK;
+        unsigned char imm = byte & JS_REBASE_IMMEDIATE_MASK;
+        if (opcode == JS_REBASE_OPCODE_DONE) { saw_done = 1; break; }
+        if (opcode == JS_REBASE_OPCODE_SET_TYPE_IMM) {
+            (void)imm;
+        } else if (opcode == JS_REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB) {
+            p = js_shell_read_uleb128(p, end, &ignored);
+            if (!p || !js_shell_macho_segment_offset_to_vmaddr(plan, imm, ignored, &vmaddr)) return 0;
+        } else if (opcode == JS_REBASE_OPCODE_ADD_ADDR_ULEB) {
+            p = js_shell_read_uleb128(p, end, &ignored);
+            if (!p || js_shell_macho_add_overflows(vmaddr, ignored, &vmaddr) || !js_shell_macho_range_inside_mapping(plan, vmaddr, sizeof(uint64_t))) return 0;
+        } else if (opcode == JS_REBASE_OPCODE_ADD_ADDR_IMM_SCALED) {
+            uint64_t addend = (uint64_t)imm * sizeof(uint64_t);
+            if (js_shell_macho_add_overflows(vmaddr, addend, &vmaddr) || !js_shell_macho_range_inside_mapping(plan, vmaddr, sizeof(uint64_t))) return 0;
+        } else if (opcode == JS_REBASE_OPCODE_DO_REBASE_IMM_TIMES) {
+            for (unsigned int i = 0; i < imm; i++) {
+                if (!js_shell_macho_apply_rebase_at(mapping, plan, vmaddr) || js_shell_macho_add_overflows(vmaddr, sizeof(uint64_t), &vmaddr)) return 0;
+            }
+        } else if (opcode == JS_REBASE_OPCODE_DO_REBASE_ULEB_TIMES) {
+            p = js_shell_read_uleb128(p, end, &ignored);
+            if (!p) return 0;
+            for (uint64_t i = 0; i < ignored; i++) {
+                if (!js_shell_macho_apply_rebase_at(mapping, plan, vmaddr) || js_shell_macho_add_overflows(vmaddr, sizeof(uint64_t), &vmaddr)) return 0;
+            }
+        } else if (opcode == JS_REBASE_OPCODE_DO_REBASE_ADD_ADDR_ULEB) {
+            p = js_shell_read_uleb128(p, end, &ignored);
+            uint64_t advance = 0;
+            if (!p || js_shell_macho_add_overflows(sizeof(uint64_t), ignored, &advance) || !js_shell_macho_apply_rebase_at(mapping, plan, vmaddr) || js_shell_macho_add_overflows(vmaddr, advance, &vmaddr)) return 0;
+        } else if (opcode == JS_REBASE_OPCODE_DO_REBASE_ULEB_TIMES_SKIPPING_ULEB) {
+            uint64_t count = 0;
+            uint64_t skip = 0;
+            uint64_t advance = 0;
+            p = js_shell_read_uleb128(p, end, &count);
+            if (!p) return 0;
+            p = js_shell_read_uleb128(p, end, &skip);
+            if (!p) return 0;
+            if (js_shell_macho_add_overflows(sizeof(uint64_t), skip, &advance)) return 0;
+            for (uint64_t i = 0; i < count; i++) {
+                if (!js_shell_macho_apply_rebase_at(mapping, plan, vmaddr)) return 0;
+                if (js_shell_macho_add_overflows(vmaddr, advance, &vmaddr)) return 0;
+            }
+        } else {
+            return 0;
+        }
+    }
+    return saw_done && p <= end;
 }
 
 static const unsigned char *js_shell_read_uleb128(const unsigned char *p, const unsigned char *end, uint64_t *out) {
@@ -545,10 +622,20 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
     if (!js_shell_macho_materialize_segments(bytes, &image_plan, &planned_mapping)) {
         return 0;
     }
+    image_plan.slide = (uint64_t)(uintptr_t)planned_mapping - image_plan.vm_low;
+    if (!js_shell_macho_apply_rebase_stream(planned_mapping, &image_plan, bytes + dyld->rebase_off, dyld->rebase_size)) {
+        munmap(planned_mapping, (size_t)image_plan.mapping_size);
+        js_shell_loader_fail("mach-o rebase application failed inside anonymous mapping");
+        return 0;
+    }
+    if (!js_shell_macho_protect_segments(planned_mapping, &image_plan)) {
+        munmap(planned_mapping, (size_t)image_plan.mapping_size);
+        return 0;
+    }
     munmap(planned_mapping, (size_t)image_plan.mapping_size);
 
     if (g_js_shell_macho_fail_closed_marker[0] != 'J') return 0;
-    js_shell_loader_fail("mach-o payload validated through segments, sections, anonymous image layout, segment materialization, rebase/bind/lazy-bind streams and initializer metadata, but anonymous execution mapping stays fail-closed until runtime execution is verified on macOS");
+    js_shell_loader_fail("mach-o payload validated through segments, sections, anonymous image layout, segment materialization, rebase application, bind/lazy-bind streams and initializer metadata, but anonymous execution mapping stays fail-closed until runtime execution is verified on macOS");
     return 0;
 }
 
