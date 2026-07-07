@@ -249,6 +249,25 @@ class NativeRecompilationTransformsTest {
     }
 
     @Test
+    fun native_max_source_digest_covers_stub_crypto_and_platform_loaders() {
+        val source = java.nio.file.Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeRecompilationTransforms.kt"))
+        val nativeSources = source.substringAfter("private val NATIVE_SOURCE_FILES = listOf(").substringBefore(")")
+
+        listOf(
+            "js_shell_stub.c",
+            "js_shell_stub.h",
+            "js_shell_crypto.c",
+            "js_shell_crypto.h",
+            "js_shell_loader.h",
+            "js_shell_loader_pe.c",
+            "js_shell_loader_elf.c",
+            "js_shell_loader_macho.c",
+        ).forEach { fileName ->
+            assertTrue(nativeSources.contains(fileName), "Native source digest must cover max shell source: $fileName")
+        }
+    }
+
+    @Test
     fun native_artifact_cache_key_changes_when_shell_protocol_inputs_change() {
         val context = defaultVbc4BuildContext()
         val sourceDigest = ByteArray(32) { index -> (index * 3 + 1).toByte() }
