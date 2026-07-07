@@ -105,6 +105,16 @@ class RealJniMicrokernelFixtureRegressionTest {
                 Files.deleteIfExists(tamperedJar)
             }
 
+            val tamperedBogusJar = outputJar.resolveSibling("${outputJar.fileName.toString().removeSuffix(".jar")}-tampered-bogus-metadata.jar")
+            try {
+                tamperMaxNativeShellBogusMetadata(outputJar, tamperedBogusJar, scenario)
+                val tampered = runLocalJavaProcessWithTimeout(ProcessBuilder("java", "-jar", tamperedBogusJar.toAbsolutePath().toString()))
+                assertTamperedRunFailsClosed(tampered, baseline, scenario, "max native shell bogus metadata")
+                tamperResults.add(TamperEvidence("max native shell bogus metadata", tampered))
+            } finally {
+                Files.deleteIfExists(tamperedBogusJar)
+            }
+
             val tamperedIndexJar = outputJar.resolveSibling("${outputJar.fileName.toString().removeSuffix(".jar")}-tampered-native-index.jar")
             try {
                 tamperBootstrapNativeIndex(outputJar, tamperedIndexJar, scenario)
@@ -148,7 +158,7 @@ class RealJniMicrokernelFixtureRegressionTest {
             val reportPath = writeRuntimeEvidenceReport(scenario, inputJar, outputJar, baseline, result, tamperResults)
             val reportText = Files.readString(reportPath)
             assertTrue(reportText.contains("runtime_status: passed"), "Native Max runtime evidence report must record the successful real JAR run")
-            assertTrue(reportText.contains("tamper_fail_closed_count: 5"), "Native Max runtime evidence report must record all fail-closed tamper probes")
+            assertTrue(reportText.contains("tamper_fail_closed_count: 6"), "Native Max runtime evidence report must record all fail-closed tamper probes")
             assertNativeMaxRuntimeEvidenceReportCoversReleaseGate(reportText)
         } finally {
             Files.deleteIfExists(outputJar)
@@ -251,8 +261,8 @@ class RealJniMicrokernelFixtureRegressionTest {
             "obfuscated_stdout: REAL_RESULT=1;LIFECYCLE=ok",
             "stdout_preserved: true",
             "lifecycle_ok: true",
-            "tamper_probe_count: 5",
-            "tamper_fail_closed_count: 5",
+            "tamper_probe_count: 6",
+            "tamper_fail_closed_count: 6",
             "max_shell_entry_count: 1",
             "stub_marker=1",
             "payload_marker=1",
@@ -262,6 +272,7 @@ class RealJniMicrokernelFixtureRegressionTest {
         }
         listOf(
             "max native shell payload/header",
+            "max native shell bogus metadata",
             "sealed bootstrap native index",
             "max native shell resource path",
             "VM preload profile tag",
@@ -450,6 +461,60 @@ class RealJniMicrokernelFixtureRegressionTest {
             }
         }
         assertTrue(tampered, "Expected to tamper a max native shell payload/header in $scenario JAR")
+    }
+
+    private fun tamperMaxNativeShellBogusMetadata(sourceJar: Path, targetJar: Path, scenario: String) {
+        var tampered = false
+        rewriteJar(sourceJar, targetJar) { entry, bytes ->
+            if (!entry.isDirectory && !tampered && bytes.containsAscii(NativeKernelShellPacker.MAX_PAYLOAD_MARKER)) {
+                val changed = bytes.copyOf()
+                val tamperOffset = maxPayloadBogusMetadataDigestOffset(changed)
+                changed[tamperOffset] = (changed[tamperOffset].toInt() xor 0x33).toByte()
+                tampered = true
+                changed
+            } else {
+                bytes
+            }
+        }
+        assertTrue(tampered, "Expected to tamper max native shell bogus metadata in $scenario JAR")
+    }
+
+    private fun maxPayloadBogusMetadataDigestOffset(bytes: ByteArray): Int {
+        var offset = maxPayloadHeaderOffset(bytes)
+        offset += NativeKernelShellPacker.MAX_PAYLOAD_MARKER.length + 1
+        repeat(2) { offset += 4 }
+        repeat(3) {
+            assertTrue(offset + 4 <= bytes.size, "Max payload string length must stay inside native shell bytes")
+            val length = readIntLe(bytes, offset)
+            assertTrue(length >= 0 && offset + 4 + length <= bytes.size, "Max payload string field must stay inside native shell bytes")
+            offset += 4 + length
+        }
+        repeat(7) { offset += 4 }
+        assertTrue(offset + 4 <= bytes.size, "Max payload nonce size must stay inside native shell bytes")
+        val nonceSize = readIntLe(bytes, offset)
+        assertTrue(nonceSize >= 0 && offset + 4 + nonceSize <= bytes.size, "Max payload nonce field must stay inside native shell bytes")
+        offset += 4 + nonceSize
+        offset += 32
+        assertTrue(offset in bytes.indices, "Max payload bogus metadata digest offset must stay inside the native shell bytes")
+        return offset
+    }
+
+    private fun maxPayloadHeaderOffset(bytes: ByteArray): Int {
+        val marker = NativeKernelShellPacker.MAX_PAYLOAD_MARKER.toByteArray(Charsets.US_ASCII)
+        var searchFrom = 0
+        while (searchFrom <= bytes.size - marker.size) {
+            val found = bytes.indexOfAscii(NativeKernelShellPacker.MAX_PAYLOAD_MARKER, searchFrom)
+            if (found < 0) break
+            val fields = found + marker.size + 1
+            if (fields + 8 <= bytes.size &&
+                readIntLe(bytes, fields) == NativeKernelShellPacker.PACKER_VERSION &&
+                readIntLe(bytes, fields + 4) == NativeKernelShellPacker.Level.MAX.id
+            ) {
+                return found
+            }
+            searchFrom = found + 1
+        }
+        error("Expected max payload header marker with protocol version and max level")
     }
 
     private fun tamperBootstrapNativeIndex(sourceJar: Path, targetJar: Path, scenario: String) {
@@ -707,10 +772,10 @@ class RealJniMicrokernelFixtureRegressionTest {
         return needle.size <= size && needle.indices.all { index -> this[index] == needle[index] }
     }
 
-    private fun ByteArray.indexOfAscii(value: String): Int {
+    private fun ByteArray.indexOfAscii(value: String, startIndex: Int = 0): Int {
         val needle = value.toByteArray(Charsets.US_ASCII)
-        if (needle.isEmpty() || needle.size > size) return -1
-        for (start in 0..(size - needle.size)) {
+        if (needle.isEmpty() || needle.size > size || startIndex > size - needle.size) return -1
+        for (start in startIndex.coerceAtLeast(0)..(size - needle.size)) {
             var match = true
             for (offset in needle.indices) {
                 if (this[start + offset] != needle[offset]) {
@@ -721,6 +786,14 @@ class RealJniMicrokernelFixtureRegressionTest {
             if (match) return start
         }
         return -1
+    }
+
+    private fun readIntLe(bytes: ByteArray, offset: Int): Int {
+        assertTrue(offset >= 0 && offset + 4 <= bytes.size, "Expected a little-endian int inside byte array bounds")
+        return (bytes[offset].toInt() and 0xFF) or
+            ((bytes[offset + 1].toInt() and 0xFF) shl 8) or
+            ((bytes[offset + 2].toInt() and 0xFF) shl 16) or
+            ((bytes[offset + 3].toInt() and 0xFF) shl 24)
     }
 
     private fun ByteArray.countAsciiOccurrences(value: String): Int {
