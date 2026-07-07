@@ -146,6 +146,17 @@ class NativeKernelShellPackerTest {
     }
 
     @Test
+    fun native_max_stub_revalidates_header_bound_bogus_metadata() {
+        val source = java.nio.file.Files.readString(resolveSource("src/main/native/js_shell_stub.c"))
+
+        assertTrue(source.contains("meta->section_digest") && source.contains("js_shell_section_digest"), "native stub must retain parsed section digest metadata from the max payload header")
+        assertTrue(source.contains("meta->bogus_metadata_digest") && source.contains("js_shell_bogus_metadata_digest"), "native stub must retain parsed bogus metadata digest from the max payload header")
+        assertTrue(source.contains("meta->binding_tag") && source.contains("js_shell_binding_tag"), "native stub must retain parsed binding tag metadata from the max payload header")
+        assertTrue(source.contains("js_shell_consttime_equal(meta->bogus_metadata_digest, js_shell_bogus_metadata_digest"), "native stub must fail closed when header bogus metadata diverges from generated stub metadata")
+        assertTrue(source.contains("js_shell_consttime_equal(meta->binding_tag, js_shell_binding_tag"), "native stub must fail closed when header binding tag diverges from generated stub metadata")
+    }
+
+    @Test
     fun tampering_standard_overlay_fails_mac_validation() {
         val packed = NativeKernelShellPacker.pack(
             bytes = nativeBytes,

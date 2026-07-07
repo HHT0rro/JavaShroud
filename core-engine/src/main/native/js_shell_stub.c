@@ -38,6 +38,9 @@ typedef struct js_shell_payload_meta {
     unsigned int chunk_count;
     unsigned int layout_profile;
     unsigned int dispatcher_profile;
+    const unsigned char *section_digest;
+    const unsigned char *bogus_metadata_digest;
+    const unsigned char *binding_tag;
     const unsigned char *chunk_tags;
     size_t chunk_tags_size;
     unsigned char nonce[16];
@@ -101,7 +104,12 @@ static int js_shell_extract_meta(js_shell_payload_meta *meta) {
     memcpy(meta->nonce, js_shell_payload_header + offset, 16u);
     offset += 16u;
     if (JS_SHELL_PAYLOAD_HEADER_SIZE - offset < 96u) return 0;
-    offset += 96u;
+    meta->section_digest = js_shell_payload_header + offset;
+    offset += 32u;
+    meta->bogus_metadata_digest = js_shell_payload_header + offset;
+    offset += 32u;
+    meta->binding_tag = js_shell_payload_header + offset;
+    offset += 32u;
     if (!js_shell_read_u32_le(js_shell_payload_header, JS_SHELL_PAYLOAD_HEADER_SIZE, &offset, &chunk_tags_size)) return 0;
     if (chunk_tags_size != meta->chunk_count * 4u) return 0;
     if (offset > JS_SHELL_PAYLOAD_HEADER_SIZE || (size_t)chunk_tags_size > JS_SHELL_PAYLOAD_HEADER_SIZE - offset) return 0;
@@ -118,6 +126,10 @@ static int js_shell_verify_payload(js_shell_payload_meta *meta) {
     if (JS_SHELL_PAYLOAD_SIZE == 0) return 0;
     if (sizeof(js_shell_payload_mac) != 32u || sizeof(js_shell_stream_key) != 32u) return 0;
     if (!js_shell_extract_meta(meta)) return 0;
+    if (sizeof(js_shell_section_digest) != 32u || sizeof(js_shell_bogus_metadata_digest) != 32u || sizeof(js_shell_binding_tag) != 32u) return 0;
+    if (!js_shell_consttime_equal(meta->section_digest, js_shell_section_digest, sizeof(js_shell_section_digest))) return 0;
+    if (!js_shell_consttime_equal(meta->bogus_metadata_digest, js_shell_bogus_metadata_digest, sizeof(js_shell_bogus_metadata_digest))) return 0;
+    if (!js_shell_consttime_equal(meta->binding_tag, js_shell_binding_tag, sizeof(js_shell_binding_tag))) return 0;
     for (size_t i = 0; i < sizeof(js_shell_binding_tag); i++) tag_acc |= (unsigned int)js_shell_binding_tag[i];
     if (tag_acc == 0u) return 0;
     memset(mac, 0, sizeof(mac));
