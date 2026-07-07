@@ -35,6 +35,35 @@ static int js_vm_valid_symbol_method_lookup(const char *name, const char *desc) 
     return argc >= 0 && js_vm_descriptor_return_tag(desc) != 0;
 }
 
+static char* js_vm_bounded_lookup_copy(const char *value, size_t max_len) {
+    if (!value || max_len == 0) return NULL;
+    size_t len = 0;
+    while (len <= max_len && value[len]) len++;
+    if (len == 0 || len > max_len) return NULL;
+    char *copy = (char*)malloc(len + 1u);
+    if (!copy) return NULL;
+    memcpy(copy, value, len);
+    copy[len] = 0;
+    return copy;
+}
+
+static jmethodID js_vm_lookup_method_id(JNIEnv *env, jclass cls, const char *name, const char *desc, int is_static) {
+    if (!env || !cls || !js_vm_valid_symbol_method_lookup(name, desc)) return NULL;
+    char *safe_name = js_vm_bounded_lookup_copy(name, 512u);
+    char *safe_desc = js_vm_bounded_lookup_copy(desc, 4096u);
+    if (!safe_name || !safe_desc) {
+        free(safe_name);
+        free(safe_desc);
+        return NULL;
+    }
+    jmethodID mid = is_static ? (*env)->GetStaticMethodID(env, cls, safe_name, safe_desc) : (*env)->GetMethodID(env, cls, safe_name, safe_desc);
+    js_vbc4_wipe_volatile(safe_name, strlen(safe_name));
+    js_vbc4_wipe_volatile(safe_desc, strlen(safe_desc));
+    free(safe_name);
+    free(safe_desc);
+    return mid;
+}
+
 JS_HIDDEN js_vm_symbol_cache_entry* js_vm_symbol_cache_lookup(js_vm_program *p, int cp_idx, int kind) {
     if (!p || !p->symbols || p->symbol_count <= 0) return NULL;
     for (int i = 0; i < p->symbol_count; i++) {
@@ -182,12 +211,11 @@ JS_HIDDEN int js_vm_resolve_method_symbol(JNIEnv *env, js_vm_program *p, int cp_
     const char *lookup_name = is_constructor ? "<init>" : mr.name;
     if (!is_constructor) mapped_method = js_lookup_bound_method(env, mr.owner, mr.name, mr.desc);
     if (mapped_method && mapped_method[0]) lookup_name = mapped_method;
-    jmethodID mid = NULL;
-    if (js_vm_valid_symbol_method_lookup(lookup_name, mr.desc)) mid = (opcode == JS_VM_INVOKESTATIC) ? (*env)->GetStaticMethodID(env, cls, lookup_name, mr.desc) : (*env)->GetMethodID(env, cls, lookup_name, mr.desc);
+    jmethodID mid = js_vm_lookup_method_id(env, cls, lookup_name, mr.desc, opcode == JS_VM_INVOKESTATIC);
     if (((*env)->ExceptionCheck(env) || !mid) && mapped_method && mapped_method[0] && strcmp(mapped_method, mr.name) != 0 && js_vm_valid_symbol_method_lookup(mr.name, mr.desc)) {
         if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
         lookup_name = mr.name;
-        mid = (opcode == JS_VM_INVOKESTATIC) ? (*env)->GetStaticMethodID(env, cls, lookup_name, mr.desc) : (*env)->GetMethodID(env, cls, lookup_name, mr.desc);
+        mid = js_vm_lookup_method_id(env, cls, lookup_name, mr.desc, opcode == JS_VM_INVOKESTATIC);
     }
     if ((*env)->ExceptionCheck(env) || !mid) {
         if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);

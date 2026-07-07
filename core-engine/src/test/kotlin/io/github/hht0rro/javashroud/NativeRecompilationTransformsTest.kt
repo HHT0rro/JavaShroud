@@ -338,7 +338,8 @@ class NativeRecompilationTransformsTest {
         assertTrue(core.contains("js_vm_valid_method_lookup"), "Manual mapped dynamic method fallback must validate lookup strings before JVM symbol lookup")
         assertTrue(core.contains("if (js_vm_valid_method_lookup(dyn_lookup, dyn_mr.desc)) mid = (*env)->GetMethodID"), "Dynamic virtual fallback must guard mapped method lookup before GetMethodID")
         assertTrue(symbol.contains("js_vm_valid_symbol_method_lookup"), "Manual mapped symbol resolution must validate method lookup strings before JVM symbol lookup")
-        assertTrue(symbol.contains("if (js_vm_valid_symbol_method_lookup(lookup_name, mr.desc)) mid ="), "Initial symbol resolution must guard GetMethodID/GetStaticMethodID inputs")
+        assertTrue(symbol.contains("js_vm_lookup_method_id"), "Initial symbol resolution must copy bounded lookup strings before GetMethodID/GetStaticMethodID")
+        assertFalse(symbol.contains("GetMethodID(env, cls, lookup_name, mr.desc"), "Initial symbol resolution must not pass VM metadata pointers directly to GetMethodID")
     }
 
     @Test
