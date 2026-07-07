@@ -191,6 +191,46 @@ class NativeKernelShellPackerTest {
     }
 
     @Test
+    fun max_payload_binding_tag_changes_with_platform_output_and_bootstrap_index() {
+        val linux = NativeKernelShellPacker.buildMaxPayloadBundle(
+            bytes = nativeBytes,
+            platform = "linux-x64",
+            outputName = "js_kernel_linux-x64.so",
+            seed = 37L,
+            keyMaterial = keyMaterial,
+            bootstrapNativeIndexDigest = bootstrapDigest,
+        )
+        val windows = NativeKernelShellPacker.buildMaxPayloadBundle(
+            bytes = nativeBytes,
+            platform = "windows-x64",
+            outputName = "js_kernel_windows-x64.dll",
+            seed = 37L,
+            keyMaterial = keyMaterial,
+            bootstrapNativeIndexDigest = bootstrapDigest,
+        )
+        val renamed = NativeKernelShellPacker.buildMaxPayloadBundle(
+            bytes = nativeBytes,
+            platform = "linux-x64",
+            outputName = "js_kernel_linux-x64-renamed.so",
+            seed = 37L,
+            keyMaterial = keyMaterial,
+            bootstrapNativeIndexDigest = bootstrapDigest,
+        )
+        val wrongBootstrapDigest = bootstrapDigest.copyOf().also { it[it.lastIndex] = (it.last().toInt() xor 0x33).toByte() }
+
+        assertFalse(linux.bindingTag.contentEquals(windows.bindingTag), "binding tag must be platform-bound")
+        assertFalse(linux.bindingTag.contentEquals(renamed.bindingTag), "binding tag must be output-name-bound")
+        assertTrue(
+            NativeKernelShellPacker.inspectMaxPayloadBundle(linux.headerBytes, linux.encodedPayload, linux.payloadMac, 37L, keyMaterial, bootstrapDigest).bindingTagValid,
+            "control max payload binding tag should validate",
+        )
+        assertFalse(
+            NativeKernelShellPacker.inspectMaxPayloadBundle(linux.headerBytes, linux.encodedPayload, linux.payloadMac, 37L, keyMaterial, wrongBootstrapDigest).bindingTagValid,
+            "binding tag must reject a bootstrap native index digest mismatch",
+        )
+    }
+
+    @Test
     fun tampering_max_payload_profiles_fails_header_mac_and_chunk_decode() {
         val bundle = NativeKernelShellPacker.buildMaxPayloadBundle(
             bytes = nativeBytes,
