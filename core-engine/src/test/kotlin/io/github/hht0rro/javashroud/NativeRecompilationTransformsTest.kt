@@ -323,8 +323,11 @@ class NativeRecompilationTransformsTest {
                 source.contains("elf64 relocation target is outside the mapped image") &&
                 source.contains("elf64 relocation table is outside the mapped image") &&
                 source.contains("elf64 string table is outside the mapped image") &&
+                source.contains("elf64 SYSV hash header is outside the mapped image") &&
+                source.contains("elf64 GNU hash bloom or bucket table is outside the mapped image") &&
+                source.contains("elf64 GNU hash chain is outside the mapped image") &&
                 source.contains("elf64 init array is outside the mapped image"),
-            "Linux max shell loader must fail closed when dynamic, relocation, string, or init metadata is unterminated or points outside the anonymous image.",
+            "Linux max shell loader must fail closed when dynamic, relocation, hash, string, or init metadata is unterminated or points outside the anonymous image.",
         )
         assertTrue(
             source.contains("exec_low_vaddr") &&

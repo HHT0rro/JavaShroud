@@ -86,44 +86,74 @@ static void *js_shell_host_symbol(const char *name) {
     return symbol;
 }
 
-static size_t js_shell_sysv_symbol_count(uintptr_t image, const js_shell_elf_dyn *dyn) {
-    if (!dyn->hash) return 0;
+static int js_shell_sysv_symbol_count(uintptr_t image, const js_shell_elf_dyn *dyn, size_t *out_count) {
+    if (out_count) *out_count = 0;
+    if (!dyn->hash) return 1;
     const uint32_t *hash = (const uint32_t *)(image + dyn->hash);
-    return (size_t)hash[1];
+    if (!js_shell_dyn_range_contains(dyn, (uintptr_t)hash, 2u * sizeof(uint32_t))) {
+        js_shell_loader_fail("elf64 SYSV hash header is outside the mapped image");
+        return 0;
+    }
+    if (out_count) *out_count = (size_t)hash[1];
+    return 1;
 }
 
-static uint32_t js_shell_gnu_hash_symbol_count(uintptr_t image, const js_shell_elf_dyn *dyn) {
-    if (!dyn->gnu_hash || !dyn->symtab) return 0;
+static int js_shell_gnu_hash_symbol_count(uintptr_t image, const js_shell_elf_dyn *dyn, size_t *out_count) {
+    if (out_count) *out_count = 0;
+    if (!dyn->gnu_hash || !dyn->symtab) return 1;
     const uint32_t *base = (const uint32_t *)(image + dyn->gnu_hash);
+    if (!js_shell_dyn_range_contains(dyn, (uintptr_t)base, 4u * sizeof(uint32_t))) {
+        js_shell_loader_fail("elf64 GNU hash header is outside the mapped image");
+        return 0;
+    }
     uint32_t nbuckets = base[0];
     uint32_t symoffset = base[1];
     uint32_t bloom_size = base[2];
     const uint32_t *buckets = (const uint32_t *)((const uintptr_t *)(base + 4) + bloom_size);
     const uint32_t *chains = buckets + nbuckets;
-    uint32_t max_sym = symoffset;
+    if (!js_shell_dyn_range_contains(dyn, (uintptr_t)(base + 4), (size_t)bloom_size * sizeof(uintptr_t)) ||
+        !js_shell_dyn_range_contains(dyn, (uintptr_t)buckets, (size_t)nbuckets * sizeof(uint32_t))) {
+        js_shell_loader_fail("elf64 GNU hash bloom or bucket table is outside the mapped image");
+        return 0;
+    }
+    size_t max_sym = (size_t)symoffset;
     for (uint32_t i = 0; i < nbuckets; i++) {
         uint32_t bucket = buckets[i];
         if (bucket < symoffset) continue;
-        uint32_t sym = bucket;
+        size_t sym = (size_t)bucket;
         const uint32_t *chain = chains + (sym - symoffset);
+        if (!js_shell_dyn_range_contains(dyn, (uintptr_t)chain, sizeof(*chain))) {
+            js_shell_loader_fail("elf64 GNU hash chain is outside the mapped image");
+            return 0;
+        }
         while (((*chain) & 1u) == 0u) {
             sym++;
             chain++;
+            if (!js_shell_dyn_range_contains(dyn, (uintptr_t)chain, sizeof(*chain))) {
+                js_shell_loader_fail("elf64 GNU hash chain is outside the mapped image");
+                return 0;
+            }
         }
         if (sym + 1u > max_sym) max_sym = sym + 1u;
     }
-    return max_sym;
+    if (out_count) *out_count = max_sym;
+    return 1;
 }
 
-static size_t js_shell_symbol_count(uintptr_t image, const js_shell_elf_dyn *dyn) {
-    size_t count = js_shell_sysv_symbol_count(image, dyn);
-    if (count) return count;
-    return (size_t)js_shell_gnu_hash_symbol_count(image, dyn);
+static int js_shell_symbol_count(uintptr_t image, const js_shell_elf_dyn *dyn, size_t *out_count) {
+    size_t count = 0;
+    if (!js_shell_sysv_symbol_count(image, dyn, &count)) return 0;
+    if (count) {
+        if (out_count) *out_count = count;
+        return 1;
+    }
+    return js_shell_gnu_hash_symbol_count(image, dyn, out_count);
 }
 
 static void *js_shell_find_export(uintptr_t image, const js_shell_elf_dyn *dyn, const char *name) {
     if (!dyn->symtab || !dyn->strtab || !name) return 0;
-    size_t count = js_shell_symbol_count(image, dyn);
+    size_t count = 0;
+    if (!js_shell_symbol_count(image, dyn, &count)) return 0;
     if (!count || !js_shell_dyn_range_contains(dyn, (uintptr_t)dyn->symtab, count * sizeof(Elf64_Sym))) return 0;
     for (size_t i = 0; i < count; i++) {
         const Elf64_Sym *sym = dyn->symtab + i;
@@ -141,7 +171,8 @@ static int js_shell_apply_rela(uintptr_t image, const js_shell_elf_dyn *dyn, con
         js_shell_loader_fail("elf64 relocation table is outside the mapped image");
         return 0;
     }
-    size_t symbol_count = js_shell_symbol_count(image, dyn);
+    size_t symbol_count = 0;
+    if (!js_shell_symbol_count(image, dyn, &symbol_count)) return 0;
     for (size_t i = 0; i < count; i++) {
         uintptr_t where_addr = image + rela[i].r_offset;
         if (!js_shell_dyn_range_contains(dyn, where_addr, sizeof(uintptr_t))) {
