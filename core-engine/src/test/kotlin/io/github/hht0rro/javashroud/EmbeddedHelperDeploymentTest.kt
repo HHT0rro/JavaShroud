@@ -98,6 +98,26 @@ class EmbeddedHelperDeploymentTest {
     }
 
     @Test
+    fun bundle_native_libraries_replaces_existing_kernel_resources_with_recompiled_outputs() {
+        val deploymentSource = Files.readString(resolveWorkspacePath("core-engine/src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/EmbeddedHelperDeployment.kt"))
+        val retainedFilter = "val retainedJarEntries = artifact.jarEntries.filterNot { entry -> isNativeKernelResource(entry.name) }"
+        val appendRecompiled = "val updatedJarEntries = retainedJarEntries + newEntries"
+
+        assertTrue(
+            deploymentSource.contains(retainedFilter),
+            "Native bundling must remove pre-existing js_kernel resources before adding max outer stubs.",
+        )
+        assertTrue(
+            deploymentSource.contains(appendRecompiled),
+            "Native bundling must package only retained non-kernel resources plus freshly recompiled native outputs.",
+        )
+        assertTrue(
+            deploymentSource.indexOf(retainedFilter) < deploymentSource.indexOf(appendRecompiled),
+            "Existing native kernel resources must be filtered before the final JAR entry list is assembled.",
+        )
+    }
+
+    @Test
     fun jni_microkernel_helper_runtime_resource_key_is_injected_per_build() {
         val context = Vbc4BuildContext(
             masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (index * 5 + 1).toByte() },
