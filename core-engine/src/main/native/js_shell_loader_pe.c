@@ -354,6 +354,14 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
         js_shell_loader_fail("pe64 payload is not a DLL image");
         return 0;
     }
+    if (nt_src->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_TLS) {
+        js_shell_loader_fail("pe64 optional header does not declare required data directories");
+        return 0;
+    }
+    if (nt_src->OptionalHeader.SizeOfHeaders > nt_src->OptionalHeader.SizeOfImage) {
+        js_shell_loader_fail("pe64 header range is outside the mapped image");
+        return 0;
+    }
     if (!js_shell_validate_range((size_t)dos->e_lfanew + sizeof(IMAGE_NT_HEADERS64), (size_t)nt_src->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER), size)) {
         js_shell_loader_fail("pe64 section table is out of range");
         return 0;

@@ -276,7 +276,7 @@ class NativeRecompilationTransformsTest {
             packingLevel: String = "max",
             packerVersion: Int = 7,
             payloadProfile: String = "max-payload-zstd-chunk-v4-bogus-metadata",
-            loaderProfile: String = "pe64-memory-loader-reloc-import-export-tlsrange-execbounds-v21",
+            loaderProfile: String = "pe64-memory-loader-headerdir-reloc-import-export-tlsrange-execbounds-v22",
             toolchainIdentity: String = "zig|test|0.16.0",
             platform: String = "windows-x64",
             zigTarget: String = "x86_64-windows-gnu",
@@ -300,7 +300,7 @@ class NativeRecompilationTransformsTest {
         assertNotEquals(baseline, key(packingLevel = "standard"), "Cache key must change when max shell packing level changes")
         assertNotEquals(baseline, key(packerVersion = 8), "Cache key must change when shell protocol/packer version changes")
         assertNotEquals(baseline, key(payloadProfile = "max-payload-zstd-chunk-v5"), "Cache key must change when payload profile changes")
-        assertNotEquals(baseline, key(loaderProfile = "pe64-memory-loader-reloc-import-export-tlsrange-execbounds-v22"), "Cache key must change when loader profile changes")
+        assertNotEquals(baseline, key(loaderProfile = "pe64-memory-loader-headerdir-reloc-import-export-tlsrange-execbounds-v23"), "Cache key must change when loader profile changes")
         assertNotEquals(baseline, key(toolchainIdentity = "zig|test|0.17.0"), "Cache key must change when toolchain identity changes")
         assertNotEquals(baseline, key(platform = "linux-x64", zigTarget = "x86_64-linux-gnu"), "Cache key must change when target platform changes")
     }
@@ -415,6 +415,12 @@ class NativeRecompilationTransformsTest {
 
         assertTrue(source.contains("payload->decoded_payload"), "Windows max shell loader must use decoded inner payload bytes, not the encoded blob")
         assertTrue(source.contains("IMAGE_FILE_MACHINE_AMD64") && source.contains("IMAGE_NT_OPTIONAL_HDR64_MAGIC"), "Windows max shell loader must validate a PE64 AMD64 DLL")
+        assertTrue(
+            source.contains("NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_TLS") &&
+                source.contains("pe64 optional header does not declare required data directories") &&
+                source.contains("pe64 header range is outside the mapped image"),
+            "Windows max shell loader must validate optional header directory count and mapped header bounds before reading fixed data directories.",
+        )
         assertTrue(source.contains("VirtualAlloc") && source.contains("IMAGE_FIRST_SECTION"), "Windows max shell loader must allocate an image and map sections")
         assertTrue(source.contains("IMAGE_REL_BASED_DIR64"), "Windows max shell loader must apply PE64 base relocations")
         assertTrue(source.contains("LoadLibraryA") && source.contains("GetProcAddress"), "Windows max shell loader must resolve imports in memory")
