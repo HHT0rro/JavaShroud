@@ -718,6 +718,17 @@ private fun assertNativeMaxReverseEvidenceReportCoversReleaseGate(reportText: St
         assertTrue(linuxToolSection.contains("$tool.contains_JNI_OnLoad: true"), "Linux external $tool evidence must preserve minimal JNI load surface")
         assertTrue(linuxToolSection.contains("$tool.forbidden_hits: none"), "Linux external $tool evidence must not expose forbidden tokens")
     }
+    val windowsToolSection = reportSection(toolSection, "### windows-x64")
+    assertTrue(
+        windowsToolSection.contains("pe-objdump.exit_code: 0") || windowsToolSection.contains("pe-objdump: unavailable"),
+        "Windows PE external structured evidence must be captured or explicitly recorded as unavailable",
+    )
+    if (windowsToolSection.contains("pe-objdump.exit_code: 0")) {
+        assertTrue(windowsToolSection.contains("pe-objdump.contains_pe32_plus: true"), "Windows PE objdump evidence must identify PE32+")
+        assertTrue(windowsToolSection.contains("pe-objdump.contains_dll: true"), "Windows PE objdump evidence must identify DLL characteristics")
+        assertTrue(windowsToolSection.contains("pe-objdump.contains_export_directory: true"), "Windows PE objdump evidence must identify export directory")
+        assertTrue(windowsToolSection.contains("pe-objdump.forbidden_hits: none"), "Windows PE objdump evidence must not expose forbidden tokens")
+    }
 }
 
 private fun reportSection(reportText: String, heading: String): String {
@@ -868,6 +879,9 @@ private fun appendReverseToolOutputEvidence(
             appendStructuredToolEvidence(report, "readelf", listOf("-h", "-Ws"), artifactPath, result.platform)
             appendStructuredToolEvidence(report, "nm", listOf("-D"), artifactPath, result.platform)
         }
+        if (result.platform == "windows-x64") {
+            appendWindowsPeToolEvidence(report, artifactPath, result.platform)
+        }
         report.appendLine()
     }
 }
@@ -908,6 +922,26 @@ private fun appendStructuredToolEvidence(
     report.appendLine("- $tool.sample: ${singleLineToolOutput(output).take(360)}")
 }
 
+private fun appendWindowsPeToolEvidence(report: StringBuilder, artifactPath: java.nio.file.Path, platform: String) {
+    val result = runPeObjdump(artifactPath)
+    if (result == null) {
+        report.appendLine("- pe-objdump: unavailable")
+        return
+    }
+    val output = result.output.take(12_000)
+    val forbiddenHits = reverseEvidenceForbiddenTokens().filter { token -> output.contains(token) }
+    assertTrue(forbiddenHits.isEmpty(), "$platform external PE objdump output must not expose forbidden inner helper/native tokens: $forbiddenHits")
+    report.appendLine("- pe-objdump.exit_code: ${result.exitCode}")
+    report.appendLine("- pe-objdump.contains_pe32_plus: ${output.contains("PE32+")}")
+    report.appendLine("- pe-objdump.contains_dll: ${output.contains("DLL")}")
+    report.appendLine("- pe-objdump.contains_export_directory: ${output.contains("Export Directory")}")
+    report.appendLine("- pe-objdump.contains_import_directory: ${output.contains("Import Directory")}")
+    report.appendLine("- pe-objdump.contains_base_relocation_directory: ${output.contains("Base Relocation Directory")}")
+    report.appendLine("- pe-objdump.contains_tls_directory: ${output.contains("Thread Storage Directory")}")
+    report.appendLine("- pe-objdump.forbidden_hits: ${if (forbiddenHits.isEmpty()) "none" else forbiddenHits.joinToString()}")
+    report.appendLine("- pe-objdump.sample: ${singleLineToolOutput(output).take(360)}")
+}
+
 private fun reverseEvidenceForbiddenTokens(): List<String> = listOf(
     "Java_io_github_hht0rro_javashroud_transforms_protection_JniMicrokernelHelper_nativeExecuteVmResource",
     "Java_io_github_hht0rro_javashroud_transforms_protection_JniMicrokernelHelper_nativeDecryptString",
@@ -933,6 +967,20 @@ private fun runReverseTool(tool: String, args: List<String>, artifactPath: java.
     if (!wslToolAvailable(tool)) return null
     val wslArgs = args.map { arg -> if (arg == artifactPath.toString()) wslPath else arg }
     return runProcessForReverseEvidence(listOf("wsl.exe", "-d", "kali-linux", "--", tool) + wslArgs)
+}
+
+private fun runPeObjdump(artifactPath: java.nio.file.Path): ReverseToolResult? {
+    val wslPath = windowsPathToWslPath(artifactPath)
+    if (wslPath != null && wslToolAvailable("x86_64-w64-mingw32-objdump")) {
+        return runProcessForReverseEvidence(listOf("wsl.exe", "-d", "kali-linux", "--", "x86_64-w64-mingw32-objdump", "-p", wslPath))
+    }
+    findExecutableForReport("llvm-objdump")?.let { executable ->
+        return runProcessForReverseEvidence(listOf(executable, "-p", artifactPath.toString()))
+    }
+    findExecutableForReport("objdump")?.let { executable ->
+        return runProcessForReverseEvidence(listOf(executable, "-p", artifactPath.toString()))
+    }
+    return null
 }
 
 private fun runProcessForReverseEvidence(command: List<String>): ReverseToolResult? = try {
