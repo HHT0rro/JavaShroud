@@ -698,6 +698,55 @@ static int js_shell_macho_resolve_export_pointer(void *mapping, const js_macho_i
     return 1;
 }
 
+static int js_shell_macho_pointer_inside(const void *base, size_t size, const void *ptr, size_t needed) {
+    uintptr_t low = (uintptr_t)base;
+    uintptr_t high = low + size;
+    uintptr_t p = (uintptr_t)ptr;
+    if (!base || !ptr || size == 0u || needed == 0u || high < low) return 0;
+    return p >= low && p <= high && needed <= (size_t)(high - p);
+}
+
+static int js_shell_macho_prepare_loaded_image_plan(
+    void *mapping,
+    const js_macho_image_plan *plan,
+    void *resolved_jni_on_load,
+    void *resolved_native_abi_table,
+    js_shell_loaded_image *planned_image
+) {
+    if (!mapping || !plan || !planned_image || plan->mapping_size == 0u || plan->text_high <= plan->text_low) {
+        js_shell_loader_fail("mach-o loaded image plan is incomplete");
+        return 0;
+    }
+    uint64_t text_offset = plan->text_low - plan->vm_low;
+    uint64_t text_size = plan->text_high - plan->text_low;
+    if (text_offset > plan->mapping_size || text_size > plan->mapping_size - text_offset) {
+        js_shell_loader_fail("mach-o loaded image code bounds escape anonymous mapping");
+        return 0;
+    }
+
+    memset(planned_image, 0, sizeof(*planned_image));
+    planned_image->image_base = mapping;
+    planned_image->image_size = (size_t)plan->mapping_size;
+    planned_image->code_low = (unsigned char *)mapping + text_offset;
+    planned_image->code_size = (size_t)text_size;
+    planned_image->jni_on_load = (jint (*)(JavaVM *, void *))resolved_jni_on_load;
+    planned_image->native_abi_table_v1 = (const js_native_abi_table *(*)(void))resolved_native_abi_table;
+
+    if (!js_shell_macho_pointer_inside(planned_image->image_base, planned_image->image_size, planned_image->code_low, planned_image->code_size)) {
+        js_shell_loader_fail("mach-o loaded image executable range is outside anonymous mapping");
+        return 0;
+    }
+    if (!js_shell_macho_pointer_inside(planned_image->code_low, planned_image->code_size, (const void *)planned_image->jni_on_load, 1u)) {
+        js_shell_loader_fail("mach-o loaded image JNI_OnLoad is outside executable code bounds");
+        return 0;
+    }
+    if (!js_shell_macho_pointer_inside(planned_image->image_base, planned_image->image_size, (const void *)planned_image->native_abi_table_v1, 1u)) {
+        js_shell_loader_fail("mach-o loaded image native ABI table is outside anonymous mapping");
+        return 0;
+    }
+    return 1;
+}
+
 int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loaded_image *out_image) {
     if (!payload || !out_image || !payload->decoded_payload || payload->decoded_payload_size < sizeof(js_mach_header_64)) {
         js_shell_loader_fail("mach-o payload is empty or missing decoded bytes");
@@ -852,12 +901,16 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
         munmap(planned_mapping, (size_t)image_plan.mapping_size);
         return 0;
     }
-    (void)resolved_jni_on_load;
-    (void)resolved_native_abi_table;
+    js_shell_loaded_image planned_image;
+    if (!js_shell_macho_prepare_loaded_image_plan(planned_mapping, &image_plan, resolved_jni_on_load, resolved_native_abi_table, &planned_image)) {
+        munmap(planned_mapping, (size_t)image_plan.mapping_size);
+        return 0;
+    }
+    (void)planned_image;
     munmap(planned_mapping, (size_t)image_plan.mapping_size);
 
     if (g_js_shell_macho_fail_closed_marker[0] != 'J') return 0;
-    js_shell_loader_fail("mach-o payload validated through segments, sections, anonymous image layout, segment materialization, rebase and bind/lazy-bind application, export address resolution, and initializer metadata, but anonymous execution mapping stays fail-closed until runtime execution is verified on macOS");
+    js_shell_loader_fail("mach-o payload validated through segments, sections, anonymous image layout, segment materialization, rebase and bind/lazy-bind application, export address resolution, initializer metadata, and loaded image plan assembly, but anonymous execution mapping stays fail-closed until runtime execution is verified on macOS");
     return 0;
 }
 
