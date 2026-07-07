@@ -75,6 +75,16 @@ static int js_shell_pointer_in_range(uintptr_t low, uintptr_t high, const void *
     return ptr && js_shell_mapped_range_contains(low, high, (uintptr_t)ptr, 1u);
 }
 
+static int js_shell_dyn_string_contains(const js_shell_elf_dyn *dyn, uint32_t offset) {
+    if (!dyn || !dyn->strtab || offset >= dyn->strsz) return 0;
+    const char *cursor = dyn->strtab + offset;
+    size_t remaining = (size_t)dyn->strsz - (size_t)offset;
+    for (size_t i = 0; i < remaining; i++) {
+        if (cursor[i] == '\0') return 1;
+    }
+    return 0;
+}
+
 static void *js_shell_host_symbol(const char *name) {
     if (!name || !name[0]) return 0;
     void *symbol = dlsym(RTLD_DEFAULT, name);
@@ -158,7 +168,7 @@ static void *js_shell_find_export(uintptr_t image, const js_shell_elf_dyn *dyn, 
     for (size_t i = 0; i < count; i++) {
         const Elf64_Sym *sym = dyn->symtab + i;
         if (!js_shell_dyn_range_contains(dyn, (uintptr_t)sym, sizeof(*sym))) continue;
-        if (sym->st_name >= dyn->strsz) continue;
+        if (!js_shell_dyn_string_contains(dyn, sym->st_name)) continue;
         if (sym->st_shndx == SHN_UNDEF || sym->st_value == 0) continue;
         if (strcmp(dyn->strtab + sym->st_name, name) == 0) return (void *)(image + sym->st_value);
     }
@@ -197,8 +207,8 @@ static int js_shell_apply_rela(uintptr_t image, const js_shell_elf_dyn *dyn, con
                 js_shell_loader_fail("elf64 relocation symbol entry is out of range");
                 return 0;
             }
-            if (sym->st_name >= dyn->strsz) {
-                js_shell_loader_fail("elf64 relocation symbol name is out of range");
+            if (!js_shell_dyn_string_contains(dyn, sym->st_name)) {
+                js_shell_loader_fail("elf64 relocation symbol name is outside the string table");
                 return 0;
             }
             if (sym->st_shndx != SHN_UNDEF && sym->st_value != 0) {

@@ -326,6 +326,8 @@ class NativeRecompilationTransformsTest {
                 source.contains("elf64 SYSV hash header is outside the mapped image") &&
                 source.contains("elf64 GNU hash bloom or bucket table is outside the mapped image") &&
                 source.contains("elf64 GNU hash chain is outside the mapped image") &&
+                source.contains("js_shell_dyn_string_contains") &&
+                source.contains("elf64 relocation symbol name is outside the string table") &&
                 source.contains("elf64 init array is outside the mapped image"),
             "Linux max shell loader must fail closed when dynamic, relocation, hash, string, or init metadata is unterminated or points outside the anonymous image.",
         )
