@@ -270,11 +270,14 @@ object NativeRecompilationTransforms {
         }.digest()
 
     private fun nativeShellLoaderProfile(platform: String): String = when {
-        platform.startsWith("windows-") -> "pe64-memory-loader-reloc-import-noentry-v18"
-        platform.startsWith("linux-") -> "elf64-anonymous-loader-rela-v2"
+        platform.startsWith("windows-") -> "pe64-memory-loader-reloc-import-tls-execbounds-v19"
+        platform.startsWith("linux-") -> "elf64-anonymous-loader-rela-init-execbounds-v3"
         platform.startsWith("macos-") -> "macho64-validated-fail-closed-v2"
         else -> "unknown-loader-fail-closed-v1"
     }
+
+    internal fun nativeShellLoaderProfileForTest(platform: String): String = nativeShellLoaderProfile(platform)
+
     private data class NativeCompileTask(
         val platform: String,
         val zigTarget: String,
