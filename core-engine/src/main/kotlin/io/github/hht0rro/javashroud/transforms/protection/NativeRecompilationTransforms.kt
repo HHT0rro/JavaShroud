@@ -271,7 +271,7 @@ object NativeRecompilationTransforms {
 
     private fun nativeShellLoaderProfile(platform: String): String = when {
         platform.startsWith("windows-") -> "pe64-memory-loader-headerdir-reloc-import-export-tlsrange-execbounds-v22"
-        platform.startsWith("linux-") -> "elf64-anonymous-loader-rela-init-execbounds-v3"
+        platform.startsWith("linux-") -> "elf64-anonymous-loader-dynnull-rela-init-execbounds-v4"
         platform.startsWith("macos-") -> "macho64-validated-fail-closed-v2"
         else -> "unknown-loader-fail-closed-v1"
     }

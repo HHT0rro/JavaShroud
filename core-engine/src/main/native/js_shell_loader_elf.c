@@ -223,9 +223,11 @@ static int js_shell_parse_dynamic(uintptr_t image, uintptr_t mapped_low, uintptr
     size_t rela_plt_size = 0;
     size_t init_array_size = 0;
     size_t fini_array_size = 0;
+    int saw_dt_null = 0;
     for (size_t i = 0; i < dyn_count; i++) {
         switch (dynamic[i].d_tag) {
             case DT_NULL:
+                saw_dt_null = 1;
                 i = dyn_count;
                 break;
             case DT_SYMTAB:
@@ -282,6 +284,10 @@ static int js_shell_parse_dynamic(uintptr_t image, uintptr_t mapped_low, uintptr
             default:
                 break;
         }
+    }
+    if (!saw_dt_null) {
+        js_shell_loader_fail("elf64 dynamic section is missing DT_NULL terminator");
+        return 0;
     }
     out->rela_dyn_count = rela_dyn_size / sizeof(Elf64_Rela);
     out->rela_plt_count = rela_plt_size / sizeof(Elf64_Rela);

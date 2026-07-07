@@ -318,11 +318,13 @@ class NativeRecompilationTransformsTest {
         assertTrue(source.contains("init_array") && source.contains("JNI_OnLoad"), "Linux max shell loader must run initializers and resolve the inner JNI_OnLoad export")
         assertTrue(
             source.contains("js_shell_mapped_range_contains") &&
+                source.contains("saw_dt_null") &&
+                source.contains("elf64 dynamic section is missing DT_NULL terminator") &&
                 source.contains("elf64 relocation target is outside the mapped image") &&
                 source.contains("elf64 relocation table is outside the mapped image") &&
                 source.contains("elf64 string table is outside the mapped image") &&
                 source.contains("elf64 init array is outside the mapped image"),
-            "Linux max shell loader must fail closed when dynamic, relocation, string, or init metadata points outside the anonymous image.",
+            "Linux max shell loader must fail closed when dynamic, relocation, string, or init metadata is unterminated or points outside the anonymous image.",
         )
         assertTrue(
             source.contains("exec_low_vaddr") &&
