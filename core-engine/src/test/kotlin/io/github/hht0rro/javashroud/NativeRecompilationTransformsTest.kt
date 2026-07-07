@@ -332,6 +332,11 @@ class NativeRecompilationTransformsTest {
         assertTrue(resource.contains("if (!js_vm_preload_in_progress)"), "Preload resource loading must not consult the dispatch-frame active host loader")
         val preloadBody = core.substringAfter("jsn_k9(JNIEnv *env, jclass cls)").substringBefore("JS_HIDDEN jbyteArray JNICALL jsn_k10")
         assertTrue(preloadBody.contains("js_vm_preload_in_progress++;"), "Native preload must enter preload mode before reading the VM index")
+        val normalizedCore = core.replace("\r\n", "\n")
+        assertTrue(
+            normalizedCore.contains("#elif defined(__GNUC__) || defined(__clang__)\n#define JS_THREAD_LOCAL"),
+            "Linux manual-mapped inner runtime must keep small VM runtime caches process-static instead of using ELF TLS",
+        )
         assertFalse(core.contains("__thread static js_vm_program"), "Linux manual-mapped inner runtime must not require ELF TLS for active VM program state")
         assertFalse(core.contains("__thread static jobject"), "Linux manual-mapped inner runtime must not require ELF TLS for active host loader state")
         assertFalse(core.contains("js_vm_method_from_object(env, obj, \"intValue\""), "Manual mapped primitive unboxing must not perform runtime GetMethodID for final boxed JDK classes")

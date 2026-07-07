@@ -1215,10 +1215,13 @@ JS_HIDDEN void js_vm_free_program(JNIEnv *env, js_vm_program *p) {
  *    the image carries no base relocations into the protected range; the patcher
  *    independently verifies this and fails open if violated.
  */
-/* The max shell manual-maps the Windows inner PE outside the OS loader's TLS
- * bookkeeping. Keep these small caches process-static on Windows so the inner
- * image does not depend on loader-managed static TLS during JVM shutdown. */
+/* The max shell manual-maps inner native images outside the platform loader's
+ * normal TLS bookkeeping. Keep these small VM runtime caches process-static on
+ * Windows and GNU/Clang targets so the manually mapped inner image does not
+ * dereference loader-managed static TLS slots from hot JNI callbacks. */
 #if defined(_WIN32)
+#define JS_THREAD_LOCAL
+#elif defined(__GNUC__) || defined(__clang__)
 #define JS_THREAD_LOCAL
 #elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 #define JS_THREAD_LOCAL _Thread_local
