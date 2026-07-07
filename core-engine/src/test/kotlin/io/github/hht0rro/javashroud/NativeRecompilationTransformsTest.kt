@@ -456,7 +456,8 @@ class NativeRecompilationTransformsTest {
         assertTrue(source.contains("symbol[0] == '_' ? symbol + 1u : symbol") && source.contains("mach-o bind symbol resolver could not resolve host symbol"), "macOS bind resolver must normalize Mach-O symbol names and keep unresolved host symbols fail-closed")
         assertTrue(source.contains("mach-o bind symbol addend overflows resolved address") && source.contains("mach-o bind symbol negative addend underflows resolved address"), "macOS bind resolver must fail closed when bind addends escape address bounds")
         assertTrue(source.contains("mach-o bind target is outside anonymous mapping") && source.contains("mach-o bind application failed inside anonymous mapping"), "macOS max shell loader must fail closed when bind slots target memory outside the planned image")
-        assertTrue(source.contains("JS_LC_DYLD_INFO") && source.contains("rebase_off") && source.contains("lazy_bind_off"), "macOS max shell loader must validate dyld rebase/bind/lazy-bind ranges")
+        assertTrue(source.contains("JS_LC_DYLD_INFO") && source.contains("rebase_off") && source.contains("weak_bind_off") && source.contains("lazy_bind_off"), "macOS max shell loader must validate dyld rebase/bind/weak-bind/lazy-bind ranges")
+        assertTrue(source.contains("dyld->weak_bind_off") && source.contains("dyld->weak_bind_size") && source.contains("weak-bind/lazy-bind opcode stream"), "macOS max shell loader must parse and apply weak-bind opcodes before execution can be enabled")
         assertTrue(source.contains("js_shell_export_trie_has_symbol") && source.contains("_JNI_OnLoad"), "macOS max shell loader must validate the JNI_OnLoad export trie")
         assertTrue(source.contains("js_shell_macho_resolve_export_rva") && source.contains("js_shell_macho_resolve_export_pointer"), "macOS max shell loader must resolve export trie addresses into anonymous image pointers")
         assertTrue(source.contains("mach-o export entrypoint is outside executable image pages") && source.contains("mach-o export symbol address is outside anonymous mapping"), "macOS max shell loader must fail closed when resolved exports escape code or image bounds")
@@ -750,7 +751,7 @@ private fun assertNativeMaxReverseEvidenceReportCoversReleaseGate(reportText: St
         assertTrue(section.contains("macho.has_text_segment: true"), "$platform must record __TEXT segment validation evidence")
         assertTrue(section.contains("macho.has_linkedit_segment: true"), "$platform must record __LINKEDIT segment validation evidence")
         assertTrue(section.contains("macho.has_dyld_info: true"), "$platform must record dyld info validation evidence")
-        assertTrue(section.contains("macho.dyld_ranges_valid: true"), "$platform must record dyld rebase/bind/lazy-bind/export ranges as in-bounds")
+        assertTrue(section.contains("macho.dyld_ranges_valid: true"), "$platform must record dyld rebase/bind/weak-bind/lazy-bind/export ranges as in-bounds")
         assertTrue(section.contains("macho.export_trie_contains_jni_onload: true"), "$platform must record export trie JNI_OnLoad evidence")
         assertTrue(section.contains("macho.loader_requires_native_abi_table: true"), "$platform must record loader-side native ABI table validation evidence")
         assertTrue(section.contains("fail_closed_reason:"), "$platform must document the Mach-O anonymous execution boundary")
@@ -1239,12 +1240,15 @@ private fun parseMachO64Metadata(bytes: ByteArray): MachO64Metadata? {
             val rebaseSize = readUInt32Le(bytes, offset + 12).toLong()
             val bindOff = readUInt32Le(bytes, offset + 16).toLong()
             val bindSize = readUInt32Le(bytes, offset + 20).toLong()
+            val weakBindOff = readUInt32Le(bytes, offset + 24).toLong()
+            val weakBindSize = readUInt32Le(bytes, offset + 28).toLong()
             val lazyBindOff = readUInt32Le(bytes, offset + 32).toLong()
             val lazyBindSize = readUInt32Le(bytes, offset + 36).toLong()
             val exportOff = readUInt32Le(bytes, offset + 40).toLong()
             exportTrieSize = readUInt32Le(bytes, offset + 44).toLong()
             dyldRangesValid = rangeWithin(bytes.size, rebaseOff, rebaseSize) &&
                 rangeWithin(bytes.size, bindOff, bindSize) &&
+                rangeWithin(bytes.size, weakBindOff, weakBindSize) &&
                 rangeWithin(bytes.size, lazyBindOff, lazyBindSize) &&
                 rangeWithin(bytes.size, exportOff, exportTrieSize)
             if (dyldRangesValid && exportTrieSize > 0) {

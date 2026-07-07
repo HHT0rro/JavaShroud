@@ -872,6 +872,7 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
     }
     if (!js_shell_validate_range(dyld->rebase_off, dyld->rebase_size, size) ||
         !js_shell_validate_range(dyld->bind_off, dyld->bind_size, size) ||
+        !js_shell_validate_range(dyld->weak_bind_off, dyld->weak_bind_size, size) ||
         !js_shell_validate_range(dyld->lazy_bind_off, dyld->lazy_bind_size, size) ||
         !js_shell_validate_range(dyld->export_off, dyld->export_size, size)) {
         js_shell_loader_fail("mach-o dyld info range is out of bounds");
@@ -883,8 +884,9 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
     }
     if (!js_shell_validate_rebase_stream(bytes + dyld->rebase_off, dyld->rebase_size, segment_count) ||
         !js_shell_validate_bind_stream(bytes + dyld->bind_off, dyld->bind_size, segment_count) ||
+        !js_shell_validate_bind_stream(bytes + dyld->weak_bind_off, dyld->weak_bind_size, segment_count) ||
         !js_shell_validate_bind_stream(bytes + dyld->lazy_bind_off, dyld->lazy_bind_size, segment_count)) {
-        js_shell_loader_fail("mach-o rebase/bind/lazy-bind opcode stream is invalid");
+        js_shell_loader_fail("mach-o rebase/bind/weak-bind/lazy-bind opcode stream is invalid");
         return 0;
     }
     if (!dyld->export_size || !js_shell_export_trie_has_symbol(bytes + dyld->export_off, dyld->export_size, "_JNI_OnLoad")) {
@@ -907,6 +909,7 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
         return 0;
     }
     if (!js_shell_macho_apply_bind_stream(planned_mapping, &image_plan, bytes + dyld->bind_off, dyld->bind_size) ||
+        !js_shell_macho_apply_bind_stream(planned_mapping, &image_plan, bytes + dyld->weak_bind_off, dyld->weak_bind_size) ||
         !js_shell_macho_apply_bind_stream(planned_mapping, &image_plan, bytes + dyld->lazy_bind_off, dyld->lazy_bind_size)) {
         munmap(planned_mapping, (size_t)image_plan.mapping_size);
         if (!g_js_shell_loader_failure || strcmp(g_js_shell_loader_failure, "mach-o loader has not started") == 0) {
