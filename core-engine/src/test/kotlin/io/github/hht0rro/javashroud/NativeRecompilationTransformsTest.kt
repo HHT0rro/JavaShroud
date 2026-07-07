@@ -709,6 +709,7 @@ private fun assertNativeMaxReverseEvidenceReportCoversReleaseGate(reportText: St
         assertTrue(section.contains("macho.has_dyld_info: true"), "$platform must record dyld info validation evidence")
         assertTrue(section.contains("macho.dyld_ranges_valid: true"), "$platform must record dyld rebase/bind/lazy-bind/export ranges as in-bounds")
         assertTrue(section.contains("macho.export_trie_contains_jni_onload: true"), "$platform must record export trie JNI_OnLoad evidence")
+        assertTrue(section.contains("macho.loader_requires_native_abi_table: true"), "$platform must record loader-side native ABI table validation evidence")
         assertTrue(section.contains("fail_closed_reason:"), "$platform must document the Mach-O anonymous execution boundary")
     }
 
@@ -1118,6 +1119,7 @@ private fun appendReverseEvidenceReport(
         report.appendLine("- macho.dyld_ranges_valid: ${macho.dyldRangesValid}")
         report.appendLine("- macho.export_trie_size: ${macho.exportTrieSize}")
         report.appendLine("- macho.export_trie_contains_jni_onload: ${macho.exportTrieContainsJniOnLoad}")
+        report.appendLine("- macho.loader_requires_native_abi_table: ${outerBytes.containsAscii("_js_native_abi_table_v1")}")
     }
     if (failClosedReason != null) {
         report.appendLine("- fail_closed_reason: $failClosedReason")
