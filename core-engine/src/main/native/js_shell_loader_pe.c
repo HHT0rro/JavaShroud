@@ -33,6 +33,13 @@ static int js_shell_pointer_in_range(uintptr_t low, uintptr_t high, const void *
     return low && high > low && value >= low && value < high;
 }
 
+static int js_shell_image_range_contains(const void *image, const IMAGE_NT_HEADERS64 *nt, const void *ptr, size_t size) {
+    uintptr_t low = (uintptr_t)image;
+    uintptr_t high = low + (uintptr_t)nt->OptionalHeader.SizeOfImage;
+    uintptr_t value = (uintptr_t)ptr;
+    return image && ptr && high >= low && value >= low && value <= high && size <= high - value;
+}
+
 static DWORD js_shell_section_protect(DWORD characteristics) {
     int executable = (characteristics & IMAGE_SCN_MEM_EXECUTE) != 0;
     int readable = (characteristics & IMAGE_SCN_MEM_READ) != 0;
@@ -113,12 +120,7 @@ static int js_shell_resolve_imports(void *image, const IMAGE_NT_HEADERS64 *nt) {
     return 1;
 }
 
-static void js_shell_run_tls_callbacks(void *image, const IMAGE_NT_HEADERS64 *nt, DWORD reason) {
-    IMAGE_DATA_DIRECTORY dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
-    if (!dir.VirtualAddress || !dir.Size) return;
-    IMAGE_TLS_DIRECTORY64 *tls = (IMAGE_TLS_DIRECTORY64 *)js_shell_rva(image, dir.VirtualAddress);
-    if (!tls->AddressOfCallBacks) return;
-    js_shell_tls_callback *callbacks = (js_shell_tls_callback *)(uintptr_t)tls->AddressOfCallBacks;
+static void js_shell_run_tls_callbacks(void *image, js_shell_tls_callback *callbacks, DWORD reason) {
     for (; callbacks && *callbacks; callbacks++) {
         (*callbacks)(image, reason, 0);
     }
@@ -154,18 +156,31 @@ static int js_shell_plan_executable_bounds(void *image, const IMAGE_NT_HEADERS64
     return 1;
 }
 
-static int js_shell_validate_tls_callbacks(void *image, const IMAGE_NT_HEADERS64 *nt, uintptr_t exec_low, uintptr_t exec_high) {
+static int js_shell_validate_tls_callbacks(void *image, const IMAGE_NT_HEADERS64 *nt, uintptr_t exec_low, uintptr_t exec_high, js_shell_tls_callback **out_callbacks) {
+    if (out_callbacks) *out_callbacks = 0;
     IMAGE_DATA_DIRECTORY dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
     if (!dir.VirtualAddress || !dir.Size) return 1;
     IMAGE_TLS_DIRECTORY64 *tls = (IMAGE_TLS_DIRECTORY64 *)js_shell_rva(image, dir.VirtualAddress);
+    if (!js_shell_image_range_contains(image, nt, tls, sizeof(*tls))) {
+        js_shell_loader_fail("pe64 TLS directory is outside the mapped image");
+        return 0;
+    }
     if (!tls->AddressOfCallBacks) return 1;
     js_shell_tls_callback *callbacks = (js_shell_tls_callback *)(uintptr_t)tls->AddressOfCallBacks;
-    for (; callbacks && *callbacks; callbacks++) {
-        if (!js_shell_pointer_in_range(exec_low, exec_high, (const void *)*callbacks)) {
+    for (;;) {
+        if (!js_shell_image_range_contains(image, nt, callbacks, sizeof(*callbacks))) {
+            js_shell_loader_fail("pe64 TLS callback table is outside the mapped image");
+            return 0;
+        }
+        js_shell_tls_callback callback = *callbacks;
+        if (!callback) break;
+        if (!js_shell_pointer_in_range(exec_low, exec_high, (const void *)callback)) {
             js_shell_loader_fail("pe64 TLS callback is outside executable image pages");
             return 0;
         }
+        callbacks++;
     }
+    if (out_callbacks) *out_callbacks = (js_shell_tls_callback *)(uintptr_t)tls->AddressOfCallBacks;
     return 1;
 }
 
@@ -292,11 +307,12 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
         return 0;
     }
     js_shell_loader_trace("registered exception table");
-    if (!js_shell_validate_tls_callbacks(image, nt, exec_low, exec_high)) {
+    js_shell_tls_callback *tls_callbacks = 0;
+    if (!js_shell_validate_tls_callbacks(image, nt, exec_low, exec_high, &tls_callbacks)) {
         VirtualFree(image, 0, MEM_RELEASE);
         return 0;
     }
-    js_shell_run_tls_callbacks(image, nt, DLL_PROCESS_ATTACH);
+    js_shell_run_tls_callbacks(image, tls_callbacks, DLL_PROCESS_ATTACH);
     js_shell_loader_trace("ran tls callbacks for manual image");
     if (nt->OptionalHeader.AddressOfEntryPoint) {
         js_shell_dll_main entry = (js_shell_dll_main)js_shell_rva(image, nt->OptionalHeader.AddressOfEntryPoint);
