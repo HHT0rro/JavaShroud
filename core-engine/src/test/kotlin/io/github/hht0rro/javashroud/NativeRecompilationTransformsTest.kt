@@ -276,7 +276,7 @@ class NativeRecompilationTransformsTest {
             packingLevel: String = "max",
             packerVersion: Int = 7,
             payloadProfile: String = "max-payload-zstd-chunk-v4-bogus-metadata",
-            loaderProfile: String = "pe64-memory-loader-reloc-import-tlsrange-execbounds-v20",
+            loaderProfile: String = "pe64-memory-loader-reloc-import-export-tlsrange-execbounds-v21",
             toolchainIdentity: String = "zig|test|0.16.0",
             platform: String = "windows-x64",
             zigTarget: String = "x86_64-windows-gnu",
@@ -300,7 +300,7 @@ class NativeRecompilationTransformsTest {
         assertNotEquals(baseline, key(packingLevel = "standard"), "Cache key must change when max shell packing level changes")
         assertNotEquals(baseline, key(packerVersion = 8), "Cache key must change when shell protocol/packer version changes")
         assertNotEquals(baseline, key(payloadProfile = "max-payload-zstd-chunk-v5"), "Cache key must change when payload profile changes")
-        assertNotEquals(baseline, key(loaderProfile = "pe64-memory-loader-reloc-import-tlsrange-execbounds-v21"), "Cache key must change when loader profile changes")
+        assertNotEquals(baseline, key(loaderProfile = "pe64-memory-loader-reloc-import-export-tlsrange-execbounds-v22"), "Cache key must change when loader profile changes")
         assertNotEquals(baseline, key(toolchainIdentity = "zig|test|0.17.0"), "Cache key must change when toolchain identity changes")
         assertNotEquals(baseline, key(platform = "linux-x64", zigTarget = "x86_64-linux-gnu"), "Cache key must change when target platform changes")
     }
@@ -418,11 +418,29 @@ class NativeRecompilationTransformsTest {
         assertTrue(source.contains("VirtualAlloc") && source.contains("IMAGE_FIRST_SECTION"), "Windows max shell loader must allocate an image and map sections")
         assertTrue(source.contains("IMAGE_REL_BASED_DIR64"), "Windows max shell loader must apply PE64 base relocations")
         assertTrue(source.contains("LoadLibraryA") && source.contains("GetProcAddress"), "Windows max shell loader must resolve imports in memory")
+        assertTrue(
+            source.contains("pe64 import directory is outside the mapped image") &&
+                source.contains("pe64 import thunk slot is outside the mapped image") &&
+                source.contains("pe64 import symbol name is outside the mapped image"),
+            "Windows max shell loader must fail closed when import descriptors, thunks, or import names escape the mapped image.",
+        )
+        assertTrue(
+            source.contains("pe64 relocation directory is outside the mapped image") &&
+                source.contains("pe64 relocation block is outside the mapped image") &&
+                source.contains("pe64 relocation target slot is outside the mapped image"),
+            "Windows max shell loader must fail closed when relocation metadata or relocation targets escape the mapped image.",
+        )
         assertTrue(source.contains("js_shell_validate_tls_callbacks") && source.contains("js_shell_run_tls_callbacks(image, tls_callbacks, DLL_PROCESS_ATTACH)"), "Windows max shell loader must validate and run PE TLS callbacks during manual attach")
         assertTrue(source.contains("pe64 TLS directory is outside the mapped image") && source.contains("pe64 TLS callback table is outside the mapped image"), "Windows max shell loader must fail closed when TLS metadata escapes the mapped image")
         assertTrue(source.contains("js_shell_plan_executable_bounds") && source.contains("out_image->code_low") && source.contains("out_image->code_size"), "Windows max shell loader must expose executable image bounds for ABI validation")
         assertTrue(source.contains("pe64 DllMain entrypoint is outside executable image pages") && source.contains("DLL_PROCESS_ATTACH"), "Windows max shell loader must validate and run DllMain process attach")
         assertTrue(source.contains("IMAGE_DIRECTORY_ENTRY_EXPORT") && source.contains("JNI_OnLoad"), "Windows max shell loader must resolve the inner JNI_OnLoad export")
+        assertTrue(
+            source.contains("pe64 export directory is outside the mapped image") &&
+                source.contains("pe64 export name or function table is outside the mapped image") &&
+                source.contains("pe64 export symbol address is outside the mapped image"),
+            "Windows max shell loader must fail closed when export directories, name tables, or function RVAs escape the mapped image.",
+        )
         assertFalse(source.contains("pe64 memory loader is fail-closed until"), "Windows max shell loader must not remain the placeholder fail-closed skeleton")
     }
 

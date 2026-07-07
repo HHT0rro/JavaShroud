@@ -58,6 +58,23 @@ static void *js_shell_rva(void *image, DWORD rva) {
     return (void *)((uintptr_t)image + (uintptr_t)rva);
 }
 
+static int js_shell_rva_range_contains(const IMAGE_NT_HEADERS64 *nt, DWORD rva, size_t size) {
+    return rva <= nt->OptionalHeader.SizeOfImage && size <= (size_t)nt->OptionalHeader.SizeOfImage - (size_t)rva;
+}
+
+static int js_shell_image_cstring_contains(const void *image, const IMAGE_NT_HEADERS64 *nt, const char *text) {
+    if (!image || !nt || !text) return 0;
+    uintptr_t low = (uintptr_t)image;
+    uintptr_t high = low + (uintptr_t)nt->OptionalHeader.SizeOfImage;
+    uintptr_t cursor = (uintptr_t)text;
+    if (high < low || cursor < low || cursor >= high) return 0;
+    while (cursor < high) {
+        if (*(const char *)cursor == '\0') return 1;
+        cursor++;
+    }
+    return 0;
+}
+
 static int js_shell_apply_relocations(void *image, const IMAGE_NT_HEADERS64 *nt, uintptr_t delta) {
     if (!delta) return 1;
     IMAGE_DATA_DIRECTORY dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
@@ -65,10 +82,25 @@ static int js_shell_apply_relocations(void *image, const IMAGE_NT_HEADERS64 *nt,
         js_shell_loader_fail("pe64 relocation delta exists but relocation table is missing");
         return 0;
     }
+    if (!js_shell_rva_range_contains(nt, dir.VirtualAddress, dir.Size)) {
+        js_shell_loader_fail("pe64 relocation directory is outside the mapped image");
+        return 0;
+    }
     DWORD offset = 0;
     while (offset < dir.Size) {
+        if (dir.Size - offset < sizeof(IMAGE_BASE_RELOCATION)) {
+            js_shell_loader_fail("pe64 relocation block header is truncated");
+            return 0;
+        }
         IMAGE_BASE_RELOCATION *block = (IMAGE_BASE_RELOCATION *)js_shell_rva(image, dir.VirtualAddress + offset);
-        if (!block->SizeOfBlock || block->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION)) break;
+        if (!block->SizeOfBlock || block->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION) || block->SizeOfBlock > dir.Size - offset) {
+            js_shell_loader_fail("pe64 relocation block is outside the relocation directory");
+            return 0;
+        }
+        if (!js_shell_image_range_contains(image, nt, block, block->SizeOfBlock)) {
+            js_shell_loader_fail("pe64 relocation block is outside the mapped image");
+            return 0;
+        }
         DWORD entry_count = (block->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
         WORD *entries = (WORD *)(block + 1);
         for (DWORD i = 0; i < entry_count; i++) {
@@ -79,7 +111,16 @@ static int js_shell_apply_relocations(void *image, const IMAGE_NT_HEADERS64 *nt,
                 js_shell_loader_fail("pe64 relocation type is not supported by the max shell loader");
                 return 0;
             }
-            uintptr_t *slot = (uintptr_t *)js_shell_rva(image, block->VirtualAddress + reloc_offset);
+            if (block->VirtualAddress > UINT32_MAX - reloc_offset) {
+                js_shell_loader_fail("pe64 relocation target slot is outside the mapped image");
+                return 0;
+            }
+            DWORD target_rva = block->VirtualAddress + reloc_offset;
+            uintptr_t *slot = (uintptr_t *)js_shell_rva(image, target_rva);
+            if (!js_shell_rva_range_contains(nt, target_rva, sizeof(*slot))) {
+                js_shell_loader_fail("pe64 relocation target slot is outside the mapped image");
+                return 0;
+            }
             *slot += delta;
         }
         offset += block->SizeOfBlock;
@@ -87,20 +128,50 @@ static int js_shell_apply_relocations(void *image, const IMAGE_NT_HEADERS64 *nt,
     return 1;
 }
 
-static FARPROC js_shell_import_symbol(void *image, HMODULE module, IMAGE_THUNK_DATA64 *name_thunk) {
+static FARPROC js_shell_import_symbol(void *image, const IMAGE_NT_HEADERS64 *nt, HMODULE module, IMAGE_THUNK_DATA64 *name_thunk) {
     if (name_thunk->u1.Ordinal & IMAGE_ORDINAL_FLAG64) {
         return GetProcAddress(module, (LPCSTR)(uintptr_t)IMAGE_ORDINAL64(name_thunk->u1.Ordinal));
     }
+    if (!js_shell_rva_range_contains(nt, (DWORD)name_thunk->u1.AddressOfData, sizeof(IMAGE_IMPORT_BY_NAME))) {
+        js_shell_loader_fail("pe64 import-by-name header is outside the mapped image");
+        return 0;
+    }
     IMAGE_IMPORT_BY_NAME *by_name = (IMAGE_IMPORT_BY_NAME *)js_shell_rva(image, (DWORD)name_thunk->u1.AddressOfData);
+    if (!js_shell_image_cstring_contains(image, nt, (const char *)by_name->Name)) {
+        js_shell_loader_fail("pe64 import symbol name is outside the mapped image");
+        return 0;
+    }
     return GetProcAddress(module, (LPCSTR)by_name->Name);
 }
 
 static int js_shell_resolve_imports(void *image, const IMAGE_NT_HEADERS64 *nt) {
     IMAGE_DATA_DIRECTORY dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
     if (!dir.VirtualAddress || !dir.Size) return 1;
+    if (!js_shell_rva_range_contains(nt, dir.VirtualAddress, dir.Size)) {
+        js_shell_loader_fail("pe64 import directory is outside the mapped image");
+        return 0;
+    }
     IMAGE_IMPORT_DESCRIPTOR *desc = (IMAGE_IMPORT_DESCRIPTOR *)js_shell_rva(image, dir.VirtualAddress);
-    for (; desc->Name; desc++) {
+    DWORD descriptor_count = dir.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR);
+    for (DWORD desc_index = 0; desc_index < descriptor_count; desc_index++, desc++) {
+        if (!js_shell_image_range_contains(image, nt, desc, sizeof(*desc))) {
+            js_shell_loader_fail("pe64 import descriptor is outside the mapped image");
+            return 0;
+        }
+        if (!desc->OriginalFirstThunk && !desc->FirstThunk && !desc->Name) return 1;
+        if (!desc->Name) {
+            js_shell_loader_fail("pe64 import descriptor is missing a DLL name");
+            return 0;
+        }
+        if (!js_shell_rva_range_contains(nt, desc->Name, 1)) {
+            js_shell_loader_fail("pe64 import DLL name is outside the mapped image");
+            return 0;
+        }
         const char *dll_name = (const char *)js_shell_rva(image, desc->Name);
+        if (!js_shell_image_cstring_contains(image, nt, dll_name)) {
+            js_shell_loader_fail("pe64 import DLL name is outside the mapped image");
+            return 0;
+        }
         HMODULE module = LoadLibraryA(dll_name);
         if (!module) {
             js_shell_loader_fail("pe64 import DLL could not be loaded");
@@ -108,8 +179,17 @@ static int js_shell_resolve_imports(void *image, const IMAGE_NT_HEADERS64 *nt) {
         }
         IMAGE_THUNK_DATA64 *name_thunk = (IMAGE_THUNK_DATA64 *)js_shell_rva(image, desc->OriginalFirstThunk ? desc->OriginalFirstThunk : desc->FirstThunk);
         IMAGE_THUNK_DATA64 *iat = (IMAGE_THUNK_DATA64 *)js_shell_rva(image, desc->FirstThunk);
-        for (; name_thunk->u1.AddressOfData; name_thunk++, iat++) {
-            FARPROC symbol = js_shell_import_symbol(image, module, name_thunk);
+        DWORD name_thunk_rva = desc->OriginalFirstThunk ? desc->OriginalFirstThunk : desc->FirstThunk;
+        DWORD iat_rva = desc->FirstThunk;
+        for (DWORD thunk_index = 0;; thunk_index++, name_thunk++, iat++) {
+            size_t thunk_offset = (size_t)thunk_index * sizeof(IMAGE_THUNK_DATA64);
+            if (thunk_offset > UINT32_MAX || name_thunk_rva > UINT32_MAX - (DWORD)thunk_offset || iat_rva > UINT32_MAX - (DWORD)thunk_offset ||
+                !js_shell_rva_range_contains(nt, name_thunk_rva + (DWORD)thunk_offset, sizeof(*name_thunk)) || !js_shell_rva_range_contains(nt, iat_rva + (DWORD)thunk_offset, sizeof(*iat))) {
+                js_shell_loader_fail("pe64 import thunk slot is outside the mapped image");
+                return 0;
+            }
+            if (!name_thunk->u1.AddressOfData) break;
+            FARPROC symbol = js_shell_import_symbol(image, nt, module, name_thunk);
             if (!symbol) {
                 js_shell_loader_fail("pe64 import symbol could not be resolved");
                 return 0;
@@ -117,7 +197,8 @@ static int js_shell_resolve_imports(void *image, const IMAGE_NT_HEADERS64 *nt) {
             iat->u1.Function = (ULONGLONG)(uintptr_t)symbol;
         }
     }
-    return 1;
+    js_shell_loader_fail("pe64 import descriptor table is missing a terminator");
+    return 0;
 }
 
 static void js_shell_run_tls_callbacks(void *image, js_shell_tls_callback *callbacks, DWORD reason) {
@@ -210,15 +291,41 @@ static PRUNTIME_FUNCTION js_shell_register_exception_table(void *image, const IM
 static void *js_shell_find_export(void *image, const IMAGE_NT_HEADERS64 *nt, const char *name) {
     IMAGE_DATA_DIRECTORY dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
     if (!dir.VirtualAddress || !dir.Size) return 0;
+    if (!js_shell_rva_range_contains(nt, dir.VirtualAddress, dir.Size)) {
+        js_shell_loader_fail("pe64 export directory is outside the mapped image");
+        return 0;
+    }
     IMAGE_EXPORT_DIRECTORY *exports = (IMAGE_EXPORT_DIRECTORY *)js_shell_rva(image, dir.VirtualAddress);
+    if (!js_shell_image_range_contains(image, nt, exports, sizeof(*exports))) {
+        js_shell_loader_fail("pe64 export directory header is outside the mapped image");
+        return 0;
+    }
+    if (!js_shell_rva_range_contains(nt, exports->AddressOfNames, (size_t)exports->NumberOfNames * sizeof(DWORD)) ||
+        !js_shell_rva_range_contains(nt, exports->AddressOfNameOrdinals, (size_t)exports->NumberOfNames * sizeof(WORD)) ||
+        !js_shell_rva_range_contains(nt, exports->AddressOfFunctions, (size_t)exports->NumberOfFunctions * sizeof(DWORD))) {
+        js_shell_loader_fail("pe64 export name or function table is outside the mapped image");
+        return 0;
+    }
     DWORD *names = (DWORD *)js_shell_rva(image, exports->AddressOfNames);
     WORD *ordinals = (WORD *)js_shell_rva(image, exports->AddressOfNameOrdinals);
     DWORD *functions = (DWORD *)js_shell_rva(image, exports->AddressOfFunctions);
     for (DWORD i = 0; i < exports->NumberOfNames; i++) {
+        if (!js_shell_rva_range_contains(nt, names[i], 1)) {
+            js_shell_loader_fail("pe64 export name is outside the mapped image");
+            return 0;
+        }
         const char *export_name = (const char *)js_shell_rva(image, names[i]);
+        if (!js_shell_image_cstring_contains(image, nt, export_name)) {
+            js_shell_loader_fail("pe64 export name is outside the mapped image");
+            return 0;
+        }
         if (strcmp(export_name, name) != 0) continue;
         WORD ordinal = ordinals[i];
         if (ordinal >= exports->NumberOfFunctions) return 0;
+        if (!js_shell_rva_range_contains(nt, functions[ordinal], 1)) {
+            js_shell_loader_fail("pe64 export symbol address is outside the mapped image");
+            return 0;
+        }
         return js_shell_rva(image, functions[ordinal]);
     }
     return 0;
