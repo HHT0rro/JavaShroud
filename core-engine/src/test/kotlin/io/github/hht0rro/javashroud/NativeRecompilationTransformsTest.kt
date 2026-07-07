@@ -703,6 +703,12 @@ private fun assertNativeMaxReverseEvidenceReportCoversReleaseGate(reportText: St
     listOf("macos-x64", "macos-arm64").forEach { platform ->
         val section = reportSection(reportText, "## $platform")
         assertTrue(section.contains("marker.JS_MACHO_ANON_EXEC_FAIL_CLOSED_V1: 1"), "$platform must record explicit Mach-O fail-closed marker")
+        assertTrue(section.contains("macho.segment_count:"), "$platform must record Mach-O segment metadata")
+        assertTrue(section.contains("macho.has_text_segment: true"), "$platform must record __TEXT segment validation evidence")
+        assertTrue(section.contains("macho.has_linkedit_segment: true"), "$platform must record __LINKEDIT segment validation evidence")
+        assertTrue(section.contains("macho.has_dyld_info: true"), "$platform must record dyld info validation evidence")
+        assertTrue(section.contains("macho.dyld_ranges_valid: true"), "$platform must record dyld rebase/bind/lazy-bind/export ranges as in-bounds")
+        assertTrue(section.contains("macho.export_trie_contains_jni_onload: true"), "$platform must record export trie JNI_OnLoad evidence")
         assertTrue(section.contains("fail_closed_reason:"), "$platform must document the Mach-O anonymous execution boundary")
     }
 
@@ -1099,10 +1105,201 @@ private fun appendReverseEvidenceReport(
     report.appendLine("- printable_token_sample: ${printableTokens.take(12).joinToString { it.take(96) }}")
     report.appendLine("- inner_raw_header_present: ${rawHeaderPresent ?: "not-applicable"}")
     report.appendLine("- sampled_high_entropy_inner_plaintext_present: ${sampledHighEntropyPlaintextPresent ?: "not-applicable"}")
+    parseMachO64Metadata(outerBytes)?.let { macho ->
+        report.appendLine("- macho.cpu_type: ${macho.cpuType}")
+        report.appendLine("- macho.file_type: ${macho.fileType}")
+        report.appendLine("- macho.load_command_count: ${macho.loadCommandCount}")
+        report.appendLine("- macho.segment_count: ${macho.segmentCount}")
+        report.appendLine("- macho.section_count: ${macho.sectionCount}")
+        report.appendLine("- macho.initializer_section_count: ${macho.initializerSectionCount}")
+        report.appendLine("- macho.has_text_segment: ${macho.hasTextSegment}")
+        report.appendLine("- macho.has_linkedit_segment: ${macho.hasLinkeditSegment}")
+        report.appendLine("- macho.has_dyld_info: ${macho.hasDyldInfo}")
+        report.appendLine("- macho.dyld_ranges_valid: ${macho.dyldRangesValid}")
+        report.appendLine("- macho.export_trie_size: ${macho.exportTrieSize}")
+        report.appendLine("- macho.export_trie_contains_jni_onload: ${macho.exportTrieContainsJniOnLoad}")
+    }
     if (failClosedReason != null) {
         report.appendLine("- fail_closed_reason: $failClosedReason")
     }
     report.appendLine()
+}
+
+private data class MachO64Metadata(
+    val cpuType: Int,
+    val fileType: Int,
+    val loadCommandCount: Int,
+    val segmentCount: Int,
+    val sectionCount: Int,
+    val initializerSectionCount: Int,
+    val hasTextSegment: Boolean,
+    val hasLinkeditSegment: Boolean,
+    val hasDyldInfo: Boolean,
+    val dyldRangesValid: Boolean,
+    val exportTrieSize: Long,
+    val exportTrieContainsJniOnLoad: Boolean,
+)
+
+private fun parseMachO64Metadata(bytes: ByteArray): MachO64Metadata? {
+    if (bytes.size < 32 || readUInt32Le(bytes, 0) != 0xFEEDFACFu) return null
+    val cpuType = readInt32Le(bytes, 4)
+    val fileType = readInt32Le(bytes, 12)
+    val ncmds = readUInt32Le(bytes, 16).toInt()
+    val sizeofcmds = readUInt32Le(bytes, 20).toLong()
+    if (!rangeWithin(bytes.size, 32L, sizeofcmds)) return null
+
+    var offset = 32
+    val commandEnd = 32L + sizeofcmds
+    var segmentCount = 0
+    var sectionCount = 0
+    var initializerSectionCount = 0
+    var hasText = false
+    var hasLinkedit = false
+    var hasDyldInfo = false
+    var dyldRangesValid = false
+    var exportTrieSize = 0L
+    var exportTrieContainsJniOnLoad = false
+
+    repeat(ncmds) {
+        if (offset + 8 > bytes.size || offset.toLong() + 8L > commandEnd) return null
+        val cmd = readUInt32Le(bytes, offset)
+        val cmdSize = readUInt32Le(bytes, offset + 4).toInt()
+        if (cmdSize < 8 || offset.toLong() + cmdSize.toLong() > commandEnd || offset + cmdSize > bytes.size) return null
+        if (cmd == 0x19u && cmdSize >= 72) {
+            val segName = readFixedAscii(bytes, offset + 8, 16)
+            val fileOff = readUInt64Le(bytes, offset + 40)
+            val fileSize = readUInt64Le(bytes, offset + 48)
+            val nsects = readUInt32Le(bytes, offset + 64).toInt()
+            if (!rangeWithin(bytes.size, fileOff, fileSize)) return null
+            if (nsects > 0 && 72L + nsects.toLong() * 80L > cmdSize.toLong()) return null
+            if (segName == "__TEXT") hasText = true
+            if (segName == "__LINKEDIT") hasLinkedit = true
+            segmentCount++
+            sectionCount += nsects
+            var sectionOffset = offset + 72
+            repeat(nsects) {
+                val sectionFileOffset = readUInt32Le(bytes, sectionOffset + 48).toLong()
+                val sectionSize = readUInt64Le(bytes, sectionOffset + 40)
+                val sectionRelocOffset = readUInt32Le(bytes, sectionOffset + 56).toLong()
+                val sectionRelocCount = readUInt32Le(bytes, sectionOffset + 60).toLong()
+                val sectionFlags = readUInt32Le(bytes, sectionOffset + 64)
+                if (sectionFileOffset != 0L && sectionSize != 0L && !rangeWithin(bytes.size, sectionFileOffset, sectionSize)) return null
+                if (sectionRelocCount != 0L && !rangeWithin(bytes.size, sectionRelocOffset, sectionRelocCount * 8L)) return null
+                if ((sectionFlags and 0xFFu) == 0x9u) initializerSectionCount++
+                sectionOffset += 80
+            }
+        } else if ((cmd == 0x22u || cmd == 0x80000022u) && cmdSize >= 48) {
+            hasDyldInfo = true
+            val rebaseOff = readUInt32Le(bytes, offset + 8).toLong()
+            val rebaseSize = readUInt32Le(bytes, offset + 12).toLong()
+            val bindOff = readUInt32Le(bytes, offset + 16).toLong()
+            val bindSize = readUInt32Le(bytes, offset + 20).toLong()
+            val lazyBindOff = readUInt32Le(bytes, offset + 32).toLong()
+            val lazyBindSize = readUInt32Le(bytes, offset + 36).toLong()
+            val exportOff = readUInt32Le(bytes, offset + 40).toLong()
+            exportTrieSize = readUInt32Le(bytes, offset + 44).toLong()
+            dyldRangesValid = rangeWithin(bytes.size, rebaseOff, rebaseSize) &&
+                rangeWithin(bytes.size, bindOff, bindSize) &&
+                rangeWithin(bytes.size, lazyBindOff, lazyBindSize) &&
+                rangeWithin(bytes.size, exportOff, exportTrieSize)
+            if (dyldRangesValid && exportTrieSize > 0) {
+                val exportBytes = bytes.copyOfRange(exportOff.toInt(), (exportOff + exportTrieSize).toInt())
+                exportTrieContainsJniOnLoad = machoExportTrieHasSymbol(exportBytes, "_JNI_OnLoad") ||
+                    machoExportTrieHasSymbol(exportBytes, "JNI_OnLoad")
+            }
+        }
+        offset += cmdSize
+    }
+    return MachO64Metadata(
+        cpuType = cpuType,
+        fileType = fileType,
+        loadCommandCount = ncmds,
+        segmentCount = segmentCount,
+        sectionCount = sectionCount,
+        initializerSectionCount = initializerSectionCount,
+        hasTextSegment = hasText,
+        hasLinkeditSegment = hasLinkedit,
+        hasDyldInfo = hasDyldInfo,
+        dyldRangesValid = dyldRangesValid,
+        exportTrieSize = exportTrieSize,
+        exportTrieContainsJniOnLoad = exportTrieContainsJniOnLoad,
+    )
+}
+
+private fun rangeWithin(totalSize: Int, offset: Long, size: Long): Boolean =
+    offset >= 0 && size >= 0 && offset <= totalSize.toLong() && size <= totalSize.toLong() - offset
+
+private fun machoExportTrieHasSymbol(bytes: ByteArray, symbol: String): Boolean {
+    val stack = ArrayDeque<Pair<Int, String>>()
+    val visited = mutableSetOf<Int>()
+    stack.add(0 to "")
+    while (stack.isNotEmpty()) {
+        val (nodeOffset, prefix) = stack.removeLast()
+        if (nodeOffset !in bytes.indices || !visited.add(nodeOffset)) continue
+        val terminalSizeResult = readUleb128(bytes, nodeOffset) ?: return false
+        val terminalSize = terminalSizeResult.first
+        var cursor = terminalSizeResult.second
+        if (!rangeWithin(bytes.size, cursor.toLong(), terminalSize)) return false
+        if (terminalSize > 0 && prefix == symbol) return true
+        cursor += terminalSize.toInt()
+        if (cursor !in bytes.indices) return false
+        val childCount = bytes[cursor].toInt() and 0xFF
+        cursor++
+        repeat(childCount) {
+            val edgeEnd = bytes.indexOfByte(0, cursor)
+            if (edgeEnd < 0) return false
+            val edge = bytes.copyOfRange(cursor, edgeEnd).toString(Charsets.US_ASCII)
+            cursor = edgeEnd + 1
+            val childOffsetResult = readUleb128(bytes, cursor) ?: return false
+            cursor = childOffsetResult.second
+            val childOffset = childOffsetResult.first
+            if (childOffset < 0 || childOffset > Int.MAX_VALUE || childOffset >= bytes.size) return false
+            stack.add(childOffset.toInt() to prefix + edge)
+        }
+    }
+    return false
+}
+
+private fun ByteArray.indexOfByte(value: Int, startIndex: Int): Int {
+    for (index in startIndex until size) {
+        if ((this[index].toInt() and 0xFF) == value) return index
+    }
+    return -1
+}
+
+private fun readUleb128(bytes: ByteArray, offset: Int): Pair<Long, Int>? {
+    var value = 0L
+    var shift = 0
+    var cursor = offset
+    while (cursor in bytes.indices && shift < 63) {
+        val current = bytes[cursor].toInt() and 0xFF
+        value = value or ((current and 0x7F).toLong() shl shift)
+        cursor++
+        if ((current and 0x80) == 0) return value to cursor
+        shift += 7
+    }
+    return null
+}
+
+private fun readFixedAscii(bytes: ByteArray, offset: Int, length: Int): String {
+    val end = (offset until offset + length).firstOrNull { bytes[it] == 0.toByte() } ?: (offset + length)
+    return bytes.copyOfRange(offset, end).toString(Charsets.US_ASCII)
+}
+
+private fun readInt32Le(bytes: ByteArray, offset: Int): Int = readUInt32Le(bytes, offset).toInt()
+
+private fun readUInt32Le(bytes: ByteArray, offset: Int): UInt =
+    ((bytes[offset].toUInt() and 0xFFu) or
+        ((bytes[offset + 1].toUInt() and 0xFFu) shl 8) or
+        ((bytes[offset + 2].toUInt() and 0xFFu) shl 16) or
+        ((bytes[offset + 3].toUInt() and 0xFFu) shl 24))
+
+private fun readUInt64Le(bytes: ByteArray, offset: Int): Long {
+    var value = 0L
+    for (index in 0 until 8) {
+        value = value or ((bytes[offset + index].toLong() and 0xFFL) shl (index * 8))
+    }
+    return value
 }
 
 private fun sha256Hex(bytes: ByteArray): String =
