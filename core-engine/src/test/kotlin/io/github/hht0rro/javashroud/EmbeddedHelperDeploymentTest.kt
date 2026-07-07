@@ -72,6 +72,32 @@ class EmbeddedHelperDeploymentTest {
     }
 
     @Test
+    fun jni_microkernel_helper_loads_outer_stub_without_java_max_payload_decoder() {
+        val helperSource = Files.readString(resolveWorkspacePath("core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
+
+        assertTrue(helperSource.contains("System.load(tempLib.getAbsolutePath())"), "Bundled native loading must still delegate to the extracted outer stub library.")
+        assertTrue(helperSource.contains("System.loadLibrary(kernelBaseName() + platformSuffix)"), "System library loading must still target the generated native kernel name.")
+        assertTrue(helperSource.contains("decodeSealedNativeResource"), "Java may only decode the sealed outer native resource before System.load.")
+
+        for (forbiddenToken in listOf(
+            NativeKernelShellPacker.MAX_STUB_MARKER,
+            NativeKernelShellPacker.MAX_PAYLOAD_MARKER,
+            "js_shell_payload",
+            "js_shell_stream_key",
+            "js_shell_payload_mac",
+            "js_shell_payload.inc",
+            "NativeKernelShellPacker",
+            "buildMaxPayloadBundle",
+            "renderMaxPayloadHeader",
+        )) {
+            assertFalse(
+                helperSource.contains(forbiddenToken),
+                "JniMicrokernelHelper must not parse, decrypt, or fallback-load max shell payload material in Java: $forbiddenToken",
+            )
+        }
+    }
+
+    @Test
     fun jni_microkernel_helper_runtime_resource_key_is_injected_per_build() {
         val context = Vbc4BuildContext(
             masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (index * 5 + 1).toByte() },
@@ -157,6 +183,17 @@ class EmbeddedHelperDeploymentTest {
         method.isAccessible = true
         return method.invoke(null) as ByteArray
     }
+
+    private fun resolveWorkspacePath(relativePath: String): Path {
+        var current = Path.of("").toAbsolutePath()
+        while (true) {
+            val candidate = current.resolve(relativePath)
+            if (Files.exists(candidate)) return candidate
+            current = current.parent ?: break
+        }
+        error("Unable to locate workspace file: $relativePath")
+    }
+
     private fun emptyArtifact(): BytecodeArtifact = BytecodeArtifact(
         jarEntries = emptyList(),
         classArtifacts = emptyList(),
