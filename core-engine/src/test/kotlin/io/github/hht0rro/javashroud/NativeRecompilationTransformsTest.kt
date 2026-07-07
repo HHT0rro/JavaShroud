@@ -416,7 +416,9 @@ class NativeRecompilationTransformsTest {
         assertTrue(source.contains("VirtualAlloc") && source.contains("IMAGE_FIRST_SECTION"), "Windows max shell loader must allocate an image and map sections")
         assertTrue(source.contains("IMAGE_REL_BASED_DIR64"), "Windows max shell loader must apply PE64 base relocations")
         assertTrue(source.contains("LoadLibraryA") && source.contains("GetProcAddress"), "Windows max shell loader must resolve imports in memory")
-        assertTrue(source.contains("skipped tls and dllmain attach for manual image"), "Windows max shell loader must avoid PE TLS/DllMain attach for manual-mapped inner images")
+        assertTrue(source.contains("js_shell_validate_tls_callbacks") && source.contains("js_shell_run_tls_callbacks(image, nt, DLL_PROCESS_ATTACH)"), "Windows max shell loader must validate and run PE TLS callbacks during manual attach")
+        assertTrue(source.contains("js_shell_plan_executable_bounds") && source.contains("out_image->code_low") && source.contains("out_image->code_size"), "Windows max shell loader must expose executable image bounds for ABI validation")
+        assertTrue(source.contains("pe64 DllMain entrypoint is outside executable image pages") && source.contains("DLL_PROCESS_ATTACH"), "Windows max shell loader must validate and run DllMain process attach")
         assertTrue(source.contains("IMAGE_DIRECTORY_ENTRY_EXPORT") && source.contains("JNI_OnLoad"), "Windows max shell loader must resolve the inner JNI_OnLoad export")
         assertFalse(source.contains("pe64 memory loader is fail-closed until"), "Windows max shell loader must not remain the placeholder fail-closed skeleton")
     }
@@ -427,12 +429,12 @@ class NativeRecompilationTransformsTest {
         val runtime = java.nio.file.Files.readString(resolveSource("src/main/native/js_jni_runtime.c"))
         val stub = java.nio.file.Files.readString(resolveSource("src/main/native/js_shell_stub.c"))
 
-        assertTrue(source.contains("Do not run TLS callbacks or DllMain"), "Windows manual mapper must document why attach callbacks are skipped")
-        assertFalse(source.contains("DLL_PROCESS_ATTACH"), "Windows manual mapper must not run attach callbacks for the manually mapped inner kernel")
+        assertTrue(source.contains("ran tls callbacks for manual image") && source.contains("ran dllmain attach for manual image"), "Windows manual mapper must run attach callbacks after validation")
         assertFalse(source.contains("DLL_PROCESS_DETACH"), "Windows manual mapper must not run detach callbacks for the manually mapped inner kernel")
         assertTrue(source.contains("Keep the PE image process-lifetime"), "Windows manual mapper must avoid freeing native-method code pages")
         assertTrue(runtime.contains("js_protected_section_unseal_now();"), "Inner JNI_OnLoad must explicitly unseal protected sections before any protected VM code can run")
-        assertTrue(stub.contains("g_inner_image.jni_on_load(vm, 0)"), "Outer stub must not pass a custom sentinel through the JVM-reserved JNI_OnLoad parameter")
+        assertTrue(stub.contains("g_inner_image.jni_on_load(g_shell_vm, 0)"), "Outer stub must pass a null reserved value into inner JNI_OnLoad")
+        assertFalse(stub.contains("JS_SHELL_MANUAL_MAP_RESERVED"), "Outer stub must not pass a custom sentinel through the JVM-reserved JNI_OnLoad parameter")
     }
 
     @Test

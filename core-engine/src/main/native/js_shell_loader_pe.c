@@ -28,6 +28,11 @@ static int js_shell_validate_range(size_t offset, size_t size, size_t total) {
     return offset <= total && size <= total - offset;
 }
 
+static int js_shell_pointer_in_range(uintptr_t low, uintptr_t high, const void *ptr) {
+    uintptr_t value = (uintptr_t)ptr;
+    return low && high > low && value >= low && value < high;
+}
+
 static DWORD js_shell_section_protect(DWORD characteristics) {
     int executable = (characteristics & IMAGE_SCN_MEM_EXECUTE) != 0;
     int readable = (characteristics & IMAGE_SCN_MEM_READ) != 0;
@@ -117,6 +122,51 @@ static void js_shell_run_tls_callbacks(void *image, const IMAGE_NT_HEADERS64 *nt
     for (; callbacks && *callbacks; callbacks++) {
         (*callbacks)(image, reason, 0);
     }
+}
+
+static int js_shell_plan_executable_bounds(void *image, const IMAGE_NT_HEADERS64 *nt, uintptr_t *out_low, uintptr_t *out_high) {
+    uintptr_t low = 0;
+    uintptr_t high = 0;
+    IMAGE_SECTION_HEADER *section = IMAGE_FIRST_SECTION(nt);
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++) {
+        if (!(section[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+        DWORD virtual_size = section[i].Misc.VirtualSize ? section[i].Misc.VirtualSize : section[i].SizeOfRawData;
+        if (!virtual_size) continue;
+        if (section[i].VirtualAddress > nt->OptionalHeader.SizeOfImage || virtual_size > nt->OptionalHeader.SizeOfImage - section[i].VirtualAddress) {
+            js_shell_loader_fail("pe64 executable section range is out of image bounds");
+            return 0;
+        }
+        uintptr_t start = (uintptr_t)image + (uintptr_t)section[i].VirtualAddress;
+        uintptr_t end = start + (uintptr_t)virtual_size;
+        if (end < start) {
+            js_shell_loader_fail("pe64 executable section range overflows");
+            return 0;
+        }
+        if (!low || start < low) low = start;
+        if (end > high) high = end;
+    }
+    if (!low || high <= low) {
+        js_shell_loader_fail("pe64 payload has no executable section");
+        return 0;
+    }
+    if (out_low) *out_low = low;
+    if (out_high) *out_high = high;
+    return 1;
+}
+
+static int js_shell_validate_tls_callbacks(void *image, const IMAGE_NT_HEADERS64 *nt, uintptr_t exec_low, uintptr_t exec_high) {
+    IMAGE_DATA_DIRECTORY dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
+    if (!dir.VirtualAddress || !dir.Size) return 1;
+    IMAGE_TLS_DIRECTORY64 *tls = (IMAGE_TLS_DIRECTORY64 *)js_shell_rva(image, dir.VirtualAddress);
+    if (!tls->AddressOfCallBacks) return 1;
+    js_shell_tls_callback *callbacks = (js_shell_tls_callback *)(uintptr_t)tls->AddressOfCallBacks;
+    for (; callbacks && *callbacks; callbacks++) {
+        if (!js_shell_pointer_in_range(exec_low, exec_high, (const void *)*callbacks)) {
+            js_shell_loader_fail("pe64 TLS callback is outside executable image pages");
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static PRUNTIME_FUNCTION js_shell_register_exception_table(void *image, const IMAGE_NT_HEADERS64 *nt, DWORD *out_count) {
@@ -229,6 +279,12 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
     }
     FlushInstructionCache(GetCurrentProcess(), image, nt->OptionalHeader.SizeOfImage);
     js_shell_loader_trace("protected sections");
+    uintptr_t exec_low = 0;
+    uintptr_t exec_high = 0;
+    if (!js_shell_plan_executable_bounds(image, nt, &exec_low, &exec_high)) {
+        VirtualFree(image, 0, MEM_RELEASE);
+        return 0;
+    }
     DWORD function_count = 0;
     PRUNTIME_FUNCTION function_table = js_shell_register_exception_table(image, nt, &function_count);
     if (function_table == (PRUNTIME_FUNCTION)(uintptr_t)1u) {
@@ -236,8 +292,19 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
         return 0;
     }
     js_shell_loader_trace("registered exception table");
+    if (!js_shell_validate_tls_callbacks(image, nt, exec_low, exec_high)) {
+        VirtualFree(image, 0, MEM_RELEASE);
+        return 0;
+    }
+    js_shell_run_tls_callbacks(image, nt, DLL_PROCESS_ATTACH);
+    js_shell_loader_trace("ran tls callbacks for manual image");
     if (nt->OptionalHeader.AddressOfEntryPoint) {
         js_shell_dll_main entry = (js_shell_dll_main)js_shell_rva(image, nt->OptionalHeader.AddressOfEntryPoint);
+        if (!js_shell_pointer_in_range(exec_low, exec_high, (const void *)entry)) {
+            VirtualFree(image, 0, MEM_RELEASE);
+            js_shell_loader_fail("pe64 DllMain entrypoint is outside executable image pages");
+            return 0;
+        }
         if (!entry((HINSTANCE)image, DLL_PROCESS_ATTACH, 0)) {
             VirtualFree(image, 0, MEM_RELEASE);
             js_shell_loader_fail("pe64 DllMain process attach failed");
@@ -264,8 +331,16 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
         js_shell_loader_fail("pe64 payload does not export native ABI table");
         return 0;
     }
+    if (!js_shell_pointer_in_range(exec_low, exec_high, (const void *)out_image->jni_on_load) ||
+        !js_shell_pointer_in_range(exec_low, exec_high, (const void *)out_image->native_abi_table_v1)) {
+        VirtualFree(image, 0, MEM_RELEASE);
+        js_shell_loader_fail("pe64 exported JNI or ABI entry is outside executable image pages");
+        return 0;
+    }
     out_image->image_base = image;
     out_image->image_size = nt->OptionalHeader.SizeOfImage;
+    out_image->code_low = (void *)exec_low;
+    out_image->code_size = (size_t)(exec_high - exec_low);
     out_image->platform_data = 0;
     js_shell_loader_trace("resolved JNI_OnLoad");
     g_js_shell_loader_failure = "pe64 memory loader completed";

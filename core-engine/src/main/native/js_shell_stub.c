@@ -24,8 +24,6 @@ static volatile int g_shell_failed = 0;
 static volatile int g_inner_onload_done = 0;
 static volatile const char g_js_shell_stub_marker[] = JS_NATIVE_MAX_STUB_MARKER;
 
-#define JS_SHELL_MANUAL_MAP_RESERVED ((void *)(uintptr_t)0x4A5353484D4D4150ULL)
-
 #define JS_SHELL_COMPRESSION_NONE 0u
 #define JS_SHELL_COMPRESSION_ZSTD 1u
 
@@ -477,7 +475,7 @@ static jint JNICALL js_shell_native_init(JNIEnv *env, jclass cls, jstring platfo
             return JNI_ERR;
         }
         js_shell_debug_env_probe("before-inner-onload", env, call_env, JNI_OK);
-        jint loaded = g_inner_image.jni_on_load(g_shell_vm, JS_SHELL_MANUAL_MAP_RESERVED);
+        jint loaded = g_inner_image.jni_on_load(g_shell_vm, 0);
         js_shell_debug_env_probe("after-inner-onload", env, call_env, JNI_OK);
         if ((*call_env)->ExceptionCheck(call_env)) return JNI_ERR;
         if (loaded == JNI_ERR || loaded == 0) { g_shell_failed = 1; return JNI_ERR; }
