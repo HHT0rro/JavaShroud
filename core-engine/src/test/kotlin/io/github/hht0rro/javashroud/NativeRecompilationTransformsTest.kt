@@ -456,6 +456,9 @@ class NativeRecompilationTransformsTest {
         assertTrue(source.contains("mach-o bind target is outside anonymous mapping") && source.contains("mach-o bind application failed inside anonymous mapping"), "macOS max shell loader must fail closed when bind slots target memory outside the planned image")
         assertTrue(source.contains("JS_LC_DYLD_INFO") && source.contains("rebase_off") && source.contains("lazy_bind_off"), "macOS max shell loader must validate dyld rebase/bind/lazy-bind ranges")
         assertTrue(source.contains("js_shell_export_trie_has_symbol") && source.contains("_JNI_OnLoad"), "macOS max shell loader must validate the JNI_OnLoad export trie")
+        assertTrue(source.contains("js_shell_macho_resolve_export_rva") && source.contains("js_shell_macho_resolve_export_pointer"), "macOS max shell loader must resolve export trie addresses into anonymous image pointers")
+        assertTrue(source.contains("mach-o export entrypoint is outside executable image pages") && source.contains("mach-o export symbol address is outside anonymous mapping"), "macOS max shell loader must fail closed when resolved exports escape code or image bounds")
+        assertTrue(source.contains("resolved_jni_on_load") && source.contains("resolved_native_abi_table"), "macOS max shell loader must resolve JNI_OnLoad and native ABI table exports before execution can be enabled")
         assertTrue(source.contains("anonymous execution mapping stays fail-closed"), "macOS max shell loader must explicitly fail closed until true in-memory execution is implemented")
     }
 

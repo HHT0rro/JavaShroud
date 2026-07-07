@@ -570,17 +570,34 @@ static int js_shell_macho_apply_bind_stream(void *mapping, const js_macho_image_
     return saw_done && p <= end;
 }
 
-static int js_shell_export_trie_has_symbol(const unsigned char *base, size_t size, const char *needle) {
+static int js_shell_macho_resolve_export_rva(const unsigned char *base, size_t size, const char *needle, uint64_t *rva_out) {
     const unsigned char *end = base + size;
-    const unsigned char *stack[96];
+    typedef struct js_export_trie_node_state { const unsigned char *node; char prefix[128]; } js_export_trie_node_state;
+    js_export_trie_node_state stack[96];
     size_t stack_count = 0;
-    stack[stack_count++] = base;
+    stack[stack_count].node = base;
+    stack[stack_count].prefix[0] = 0;
+    stack_count++;
     while (stack_count) {
-        const unsigned char *node = stack[--stack_count];
+        js_export_trie_node_state state = stack[--stack_count];
+        const unsigned char *node = state.node;
         if (node < base || node >= end) return 0;
         uint64_t terminal_size = 0;
         const unsigned char *p = js_shell_read_uleb128(node, end, &terminal_size);
         if (!p || terminal_size > (uint64_t)(end - p)) return 0;
+        if (terminal_size) {
+            const unsigned char *terminal_end = p + terminal_size;
+            uint64_t flags = 0;
+            uint64_t address = 0;
+            const unsigned char *tp = js_shell_read_uleb128(p, terminal_end, &flags);
+            if (!tp) return 0;
+            tp = js_shell_read_uleb128(tp, terminal_end, &address);
+            if (!tp) return 0;
+            if (strcmp(state.prefix, needle) == 0) {
+                *rva_out = address;
+                return 1;
+            }
+        }
         p += terminal_size;
         if (p >= end) return 0;
         unsigned int child_count = *p++;
@@ -588,15 +605,46 @@ static int js_shell_export_trie_has_symbol(const unsigned char *base, size_t siz
             const char *edge = (const char *)p;
             size_t edge_len = strnlen(edge, (size_t)(end - p));
             if (p + edge_len >= end) return 0;
-            if (strcmp(edge, needle) == 0) return 1;
             p += edge_len + 1u;
             uint64_t child_offset = 0;
             p = js_shell_read_uleb128(p, end, &child_offset);
             if (!p || child_offset >= size) return 0;
-            if (stack_count < sizeof(stack) / sizeof(stack[0])) stack[stack_count++] = base + child_offset;
+            if (stack_count < sizeof(stack) / sizeof(stack[0])) {
+                size_t prefix_len = strnlen(state.prefix, sizeof(state.prefix));
+                if (prefix_len + edge_len >= sizeof(stack[stack_count].prefix)) return 0;
+                memcpy(stack[stack_count].prefix, state.prefix, prefix_len);
+                memcpy(stack[stack_count].prefix + prefix_len, edge, edge_len);
+                stack[stack_count].prefix[prefix_len + edge_len] = 0;
+                stack[stack_count].node = base + child_offset;
+                stack_count++;
+            }
         }
     }
     return 0;
+}
+
+static int js_shell_export_trie_has_symbol(const unsigned char *base, size_t size, const char *needle) {
+    uint64_t ignored = 0;
+    return js_shell_macho_resolve_export_rva(base, size, needle, &ignored);
+}
+
+static int js_shell_macho_resolve_export_pointer(void *mapping, const js_macho_image_plan *plan, const unsigned char *export_base, size_t export_size, const char *symbol, int require_executable, void **ptr_out) {
+    uint64_t rva = 0;
+    uint64_t vmaddr = 0;
+    if (!js_shell_macho_resolve_export_rva(export_base, export_size, symbol, &rva)) {
+        js_shell_loader_fail("mach-o export symbol address is missing");
+        return 0;
+    }
+    if (js_shell_macho_add_overflows(plan->vm_low, rva, &vmaddr) || !js_shell_macho_range_inside_mapping(plan, vmaddr, 1u)) {
+        js_shell_loader_fail("mach-o export symbol address is outside anonymous mapping");
+        return 0;
+    }
+    if (require_executable && (vmaddr < plan->text_low || vmaddr >= plan->text_high)) {
+        js_shell_loader_fail("mach-o export entrypoint is outside executable image pages");
+        return 0;
+    }
+    *ptr_out = (unsigned char *)mapping + (vmaddr - plan->vm_low);
+    return 1;
 }
 
 int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loaded_image *out_image) {
@@ -747,10 +795,19 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
         munmap(planned_mapping, (size_t)image_plan.mapping_size);
         return 0;
     }
+    void *resolved_jni_on_load = 0;
+    void *resolved_native_abi_table = 0;
+    if (!js_shell_macho_resolve_export_pointer(planned_mapping, &image_plan, bytes + dyld->export_off, dyld->export_size, "_JNI_OnLoad", 1, &resolved_jni_on_load) ||
+        !js_shell_macho_resolve_export_pointer(planned_mapping, &image_plan, bytes + dyld->export_off, dyld->export_size, "_js_native_abi_table_v1", 0, &resolved_native_abi_table)) {
+        munmap(planned_mapping, (size_t)image_plan.mapping_size);
+        return 0;
+    }
+    (void)resolved_jni_on_load;
+    (void)resolved_native_abi_table;
     munmap(planned_mapping, (size_t)image_plan.mapping_size);
 
     if (g_js_shell_macho_fail_closed_marker[0] != 'J') return 0;
-    js_shell_loader_fail("mach-o payload validated through segments, sections, anonymous image layout, segment materialization, rebase and bind/lazy-bind application, and initializer metadata, but anonymous execution mapping stays fail-closed until runtime execution is verified on macOS");
+    js_shell_loader_fail("mach-o payload validated through segments, sections, anonymous image layout, segment materialization, rebase and bind/lazy-bind application, export address resolution, and initializer metadata, but anonymous execution mapping stays fail-closed until runtime execution is verified on macOS");
     return 0;
 }
 
