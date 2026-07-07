@@ -2,8 +2,10 @@
 
 #if defined(__APPLE__) && defined(__MACH__)
 
+#include <sys/mman.h>
 #include <stdint.h>
 #include <string.h>
+#include <unistd.h>
 
 #define JS_MH_MAGIC_64 0xfeedfacfu
 #define JS_CPU_TYPE_X86_64 0x01000007u
@@ -21,6 +23,8 @@
 #define JS_LC_MAIN 0x80000028u
 #define JS_SECTION_TYPE 0x000000ffu
 #define JS_S_MOD_INIT_FUNC_POINTERS 0x9u
+#define JS_VM_PROT_READ 0x1u
+#define JS_VM_PROT_WRITE 0x2u
 #define JS_VM_PROT_EXECUTE 0x4u
 #define JS_MACHO_MAX_SEGMENTS 64u
 #define JS_MACHO_PAGE_GRANULE 0x4000ull
@@ -227,6 +231,58 @@ static int js_shell_macho_finalize_image_plan(js_macho_image_plan *plan) {
         js_shell_loader_fail("mach-o anonymous image layout has no executable segment");
         return 0;
     }
+    return 1;
+}
+
+static int js_shell_macho_mmap_prot(uint32_t initprot) {
+    int prot = 0;
+    if (initprot & JS_VM_PROT_READ) prot |= PROT_READ;
+    if (initprot & JS_VM_PROT_WRITE) prot |= PROT_WRITE;
+    if (initprot & JS_VM_PROT_EXECUTE) prot |= PROT_EXEC;
+    return prot ? prot : PROT_NONE;
+}
+
+static int js_shell_macho_range_inside_mapping(const js_macho_image_plan *plan, uint64_t vmaddr, uint64_t size) {
+    uint64_t end = 0;
+    if (js_shell_macho_add_overflows(vmaddr, size, &end)) return 0;
+    return vmaddr >= plan->vm_low && end <= plan->vm_high;
+}
+
+static int js_shell_macho_materialize_segments(const unsigned char *bytes, const js_macho_image_plan *plan, void **mapping_out) {
+    void *mapping = mmap(0, (size_t)plan->mapping_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (mapping == MAP_FAILED) {
+        js_shell_loader_fail("mach-o anonymous image mmap failed");
+        return 0;
+    }
+    for (unsigned int i = 0; i < plan->segment_count; i++) {
+        const js_macho_segment_plan *seg = &plan->segments[i];
+        if (!js_shell_macho_range_inside_mapping(plan, seg->vmaddr, seg->vmsize)) {
+            munmap(mapping, (size_t)plan->mapping_size);
+            js_shell_loader_fail("mach-o planned segment is outside anonymous mapping");
+            return 0;
+        }
+        if (seg->filesize) {
+            uint64_t target_offset = seg->vmaddr - plan->vm_low;
+            memcpy((unsigned char *)mapping + target_offset, bytes + seg->fileoff, (size_t)seg->filesize);
+        }
+    }
+    for (unsigned int i = 0; i < plan->segment_count; i++) {
+        const js_macho_segment_plan *seg = &plan->segments[i];
+        uint64_t segment_low = js_shell_macho_align_down(seg->vmaddr, JS_MACHO_PAGE_GRANULE);
+        uint64_t segment_end = 0;
+        uint64_t segment_high = 0;
+        if (js_shell_macho_add_overflows(seg->vmaddr, seg->vmsize, &segment_end) || !js_shell_macho_align_up(segment_end, JS_MACHO_PAGE_GRANULE, &segment_high)) {
+            munmap(mapping, (size_t)plan->mapping_size);
+            js_shell_loader_fail("mach-o segment protection range overflows");
+            return 0;
+        }
+        if (mprotect((unsigned char *)mapping + (segment_low - plan->vm_low), (size_t)(segment_high - segment_low), js_shell_macho_mmap_prot(seg->initprot)) != 0) {
+            munmap(mapping, (size_t)plan->mapping_size);
+            js_shell_loader_fail("mach-o segment protection failed");
+            return 0;
+        }
+    }
+    *mapping_out = mapping;
     return 1;
 }
 
@@ -485,8 +541,14 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
         return 0;
     }
 
+    void *planned_mapping = 0;
+    if (!js_shell_macho_materialize_segments(bytes, &image_plan, &planned_mapping)) {
+        return 0;
+    }
+    munmap(planned_mapping, (size_t)image_plan.mapping_size);
+
     if (g_js_shell_macho_fail_closed_marker[0] != 'J') return 0;
-    js_shell_loader_fail("mach-o payload validated through segments, sections, anonymous image layout, rebase/bind/lazy-bind streams and initializer metadata, but anonymous execution mapping stays fail-closed until runtime execution is verified on macOS");
+    js_shell_loader_fail("mach-o payload validated through segments, sections, anonymous image layout, segment materialization, rebase/bind/lazy-bind streams and initializer metadata, but anonymous execution mapping stays fail-closed until runtime execution is verified on macOS");
     return 0;
 }
 
