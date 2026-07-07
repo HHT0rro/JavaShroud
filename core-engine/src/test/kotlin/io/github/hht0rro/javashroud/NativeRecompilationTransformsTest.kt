@@ -327,8 +327,10 @@ class NativeRecompilationTransformsTest {
         assertTrue(
             source.contains("exec_low_vaddr") &&
                 source.contains("code_low") &&
+                source.contains("elf64 init function is outside executable image pages") &&
+                source.contains("elf64 init array function is outside executable image pages") &&
                 source.contains("elf64 exported JNI or ABI entry is outside executable image pages"),
-            "Linux max shell loader must expose executable image bounds and reject exported entrypoints outside executable pages.",
+            "Linux max shell loader must expose executable image bounds and reject initializer/export entrypoints outside executable pages.",
         )
         assertFalse(source.contains("elf64 anonymous memory loader is fail-closed until"), "Linux max shell loader must not remain the placeholder fail-closed skeleton")
     }

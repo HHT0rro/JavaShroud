@@ -412,9 +412,9 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
 
     if (dyn.init_func) {
         uintptr_t init_addr = image + dyn.init_func;
-        if (!js_shell_dyn_range_contains(&dyn, init_addr, 1u)) {
+        if (!js_shell_pointer_in_range(exec_low, exec_high, (const void *)init_addr)) {
             munmap(mapping, image_size);
-            js_shell_loader_fail("elf64 init function is outside the mapped image");
+            js_shell_loader_fail("elf64 init function is outside executable image pages");
             return 0;
         }
         void (*init_func)(void) = (void (*)(void))init_addr;
@@ -424,7 +424,13 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
     if (dyn.init_array && dyn.init_array_count) {
         void (**init_array)(void) = (void (**)(void))(image + dyn.init_array);
         for (size_t i = 0; i < dyn.init_array_count; i++) {
-            if (init_array[i]) init_array[i]();
+            if (!init_array[i]) continue;
+            if (!js_shell_pointer_in_range(exec_low, exec_high, (const void *)init_array[i])) {
+                munmap(mapping, image_size);
+                js_shell_loader_fail("elf64 init array function is outside executable image pages");
+                return 0;
+            }
+            init_array[i]();
         }
     }
 
