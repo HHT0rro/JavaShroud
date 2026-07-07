@@ -434,7 +434,7 @@ JS_HIDDEN jobject js_vm_helper_class_loader(JNIEnv *env, jclass helper_cls) {
     if (!class_cls) { js_vm_resource_clear_exception(env); return NULL; }
     jmethodID get_class_loader = js_jni_cache.initialized ? js_jni_cache.class_get_class_loader : (*env)->GetMethodID(env, class_cls, "getClassLoader", "()Ljava/lang/ClassLoader;");
     if (!get_class_loader) { js_vm_resource_clear_exception(env); return NULL; }
-    jobject loader = (*env)->CallNonvirtualObjectMethod(env, helper_cls, class_cls, get_class_loader);
+    jobject loader = (*env)->CallObjectMethod(env, helper_cls, get_class_loader);
     if ((*env)->ExceptionCheck(env)) { js_vm_resource_clear_exception(env); return NULL; }
     return loader;
 }
@@ -457,7 +457,7 @@ static jobject js_vm_resource_from_helper_class(JNIEnv *env, jclass helper_cls, 
     if (!class_cls) { js_vm_resource_clear_exception(env); return NULL; }
     jmethodID get_resource = js_jni_cache.initialized ? js_jni_cache.class_get_resource_as_stream : (*env)->GetMethodID(env, class_cls, "getResourceAsStream", "(Ljava/lang/String;)Ljava/io/InputStream;");
     if (!get_resource) { js_vm_resource_clear_exception(env); return NULL; }
-    jobject stream = (*env)->CallNonvirtualObjectMethod(env, helper_cls, class_cls, get_resource, absolute_path);
+    jobject stream = (*env)->CallObjectMethod(env, helper_cls, get_resource, absolute_path);
     if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); return NULL; }
     return stream;
 }
@@ -1059,6 +1059,68 @@ JS_HIDDEN jobject js_vm_execute_resource_by_token(JNIEnv *env, jclass resource_c
     }
     js_vm_program *program = js_vm_ephemeral_cache_get(entry_token, gate->resource_path);
     return js_vm_execute_cached_program(env, resource_cls, program, args);
+}
+
+static js_vm_program *js_vm_preloaded_program_for_primitive_token(JNIEnv *env, jlong entry_token) {
+    if (entry_token == 0) { js_vm_fail_closed(env, NULL); return NULL; }
+    if (!js_vm_execute_hot_path_self_check()) { js_vm_fail_closed(env, NULL); return NULL; }
+    const js_vm_call_gate_entry *gate = js_vm_call_gate_lookup(entry_token);
+    if (!gate || !gate->active || !gate->resource_path[0]) {
+        js_vm_fail_closed(env, "native VM token was not preloaded");
+        return NULL;
+    }
+    js_vm_program *program = js_vm_ephemeral_cache_get(entry_token, gate->resource_path);
+    if (!program) {
+        js_vm_fail_closed(env, "native VM resource was not preloaded");
+        return NULL;
+    }
+    return program;
+}
+
+JS_HIDDEN void js_vm_execute_resource_int_void_by_token(JNIEnv *env, jclass resource_cls, jlong entry_token, jint arg0) {
+    js_vm_program *program = js_vm_preloaded_program_for_primitive_token(env, entry_token);
+    if (!program) return;
+#ifdef _WIN32
+    js_vm_cache_lock_enter();
+#endif
+    (void)resource_cls;
+    int ok = js_vm_execute_prepared_program_int_void(env, program, arg0);
+#ifdef _WIN32
+    js_vm_cache_lock_leave();
+#endif
+    if (!ok && !(*env)->ExceptionCheck(env)) js_vm_fail_closed(env, NULL);
+}
+
+JS_HIDDEN jint js_vm_execute_resource_int_by_token(JNIEnv *env, jclass resource_cls, jlong entry_token) {
+    js_vm_program *program = js_vm_preloaded_program_for_primitive_token(env, entry_token);
+    if (!program) return 0;
+#ifdef _WIN32
+    js_vm_cache_lock_enter();
+#endif
+    (void)resource_cls;
+    jint value = 0;
+    int ok = js_vm_execute_prepared_program_int(env, program, &value);
+#ifdef _WIN32
+    js_vm_cache_lock_leave();
+#endif
+    if (!ok && !(*env)->ExceptionCheck(env)) js_vm_fail_closed(env, NULL);
+    return ok ? value : 0;
+}
+
+JS_HIDDEN jint js_vm_execute_resource_int_int_by_token(JNIEnv *env, jclass resource_cls, jlong entry_token, jint arg0) {
+    js_vm_program *program = js_vm_preloaded_program_for_primitive_token(env, entry_token);
+    if (!program) return 0;
+#ifdef _WIN32
+    js_vm_cache_lock_enter();
+#endif
+    (void)resource_cls;
+    jint value = 0;
+    int ok = js_vm_execute_prepared_program_int_int(env, program, arg0, &value);
+#ifdef _WIN32
+    js_vm_cache_lock_leave();
+#endif
+    if (!ok && !(*env)->ExceptionCheck(env)) js_vm_fail_closed(env, NULL);
+    return ok ? value : 0;
 }
 
 JS_HIDDEN js_vm_program* js_vm_find_preloaded_program_by_method(unsigned long long class_hash, unsigned long long meth_hash, unsigned long long sig_hash) {

@@ -24,6 +24,8 @@ import java.util.Collections
 private const val VM_LEGACY_DISPATCH_DESCRIPTOR = "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;"
 private const val VM_TOKEN_DISPATCH_DESCRIPTOR = "(J[Ljava/lang/Object;)Ljava/lang/Object;"
 private const val VM_VOID_DISPATCH_DESCRIPTOR = "(J)V"
+private const val VM_INT_DISPATCH_DESCRIPTOR = "(J)I"
+private const val VM_INT_INT_DISPATCH_DESCRIPTOR = "(JI)I"
 private const val VM_INT_VOID_DISPATCH_DESCRIPTOR = "(JI)V"
 private const val JNI_MICROKERNEL_DISPATCH_OWNER = "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper"
 private const val JNI_MICROKERNEL_VM_DISPATCH_METHOD = "executeVmResource"
@@ -3037,8 +3039,11 @@ private const val BROAD_VIRTUALIZATION_MAX_INSTRUCTIONS = 16
 
 private fun specializedVmDispatchMethod(descriptor: String, access: Int): String? {
     if (access and Opcodes.ACC_STATIC == 0) return null
-    if (Type.getReturnType(descriptor) != Type.VOID_TYPE) return null
     val args = Type.getArgumentTypes(descriptor)
+    val returnType = Type.getReturnType(descriptor)
+    if (args.isEmpty() && returnType == Type.INT_TYPE) return "executeVmResourceInt"
+    if (args.size == 1 && args[0] == Type.INT_TYPE && returnType == Type.INT_TYPE) return "executeVmResourceIntInt"
+    if (returnType != Type.VOID_TYPE) return null
     return when {
         args.isEmpty() -> "executeVmResourceVoid"
         args.size == 1 && args[0] == Type.INT_TYPE -> "executeVmResourceIntVoid"
@@ -3049,6 +3054,8 @@ private fun specializedVmDispatchMethod(descriptor: String, access: Int): String
 private fun specializedVmDispatchDescriptor(descriptor: String, access: Int): String? {
     return when (specializedVmDispatchMethod(descriptor, access)) {
         "executeVmResourceVoid" -> VM_VOID_DISPATCH_DESCRIPTOR
+        "executeVmResourceInt" -> VM_INT_DISPATCH_DESCRIPTOR
+        "executeVmResourceIntInt" -> VM_INT_INT_DISPATCH_DESCRIPTOR
         "executeVmResourceIntVoid" -> VM_INT_VOID_DISPATCH_DESCRIPTOR
         else -> null
     }
@@ -3078,7 +3085,8 @@ internal fun generateVmDispatcher(
     val localBase = parameterSlotCount + 1 // after params + this + 1 gap slot
     val usesTokenOnlyDispatch = dispatchDescriptor == VM_TOKEN_DISPATCH_DESCRIPTOR
     val usesVoidSpecializedDispatch = dispatchDescriptor == VM_VOID_DISPATCH_DESCRIPTOR || dispatchDescriptor == VM_INT_VOID_DISPATCH_DESCRIPTOR
-    if (!usesTokenOnlyDispatch && !usesVoidSpecializedDispatch) {
+    val usesPrimitiveIntDispatch = dispatchDescriptor == VM_INT_DISPATCH_DESCRIPTOR || dispatchDescriptor == VM_INT_INT_DISPATCH_DESCRIPTOR
+    if (!usesTokenOnlyDispatch && !usesVoidSpecializedDispatch && !usesPrimitiveIntDispatch) {
         // Legacy dispatch paths keep the obfuscated resource path argument for compatibility.
         emitObfuscatedString(mv, resourcePath, random)
         mv.visitVarInsn(Opcodes.ASTORE, localBase)
@@ -3092,11 +3100,11 @@ internal fun generateVmDispatcher(
         }
     }
     if (handlerOrder.size > opcodeMapping.size) {
-        emitDispatcherMorphBlock(mv, opcodeMapping, handlerOrder, dispatchLayout, localBase + if (usesTokenOnlyDispatch || usesVoidSpecializedDispatch) 0 else 1, random)
+        emitDispatcherMorphBlock(mv, opcodeMapping, handlerOrder, dispatchLayout, localBase + if (usesTokenOnlyDispatch || usesVoidSpecializedDispatch || usesPrimitiveIntDispatch) 0 else 1, random)
     }
-    emitDeadCodeShadowDispatch(mv, localBase + if (usesTokenOnlyDispatch || usesVoidSpecializedDispatch) 8 else 9, random)
+    emitDeadCodeShadowDispatch(mv, localBase + if (usesTokenOnlyDispatch || usesVoidSpecializedDispatch || usesPrimitiveIntDispatch) 8 else 9, random, usesPrimitiveIntDispatch)
     mv.visitLdcInsn(entryToken)
-    if (!usesTokenOnlyDispatch && !usesVoidSpecializedDispatch) {
+    if (!usesTokenOnlyDispatch && !usesVoidSpecializedDispatch && !usesPrimitiveIntDispatch) {
         mv.visitVarInsn(Opcodes.ALOAD, localBase)
     }
 
@@ -3104,7 +3112,9 @@ internal fun generateVmDispatcher(
         if (dispatchDescriptor == VM_INT_VOID_DISPATCH_DESCRIPTOR) {
             mv.visitVarInsn(Opcodes.ILOAD, if (isStatic) 0 else 1)
         }
-    } else {
+    } else if (dispatchDescriptor == VM_INT_INT_DISPATCH_DESCRIPTOR) {
+        mv.visitVarInsn(Opcodes.ILOAD, if (isStatic) 0 else 1)
+    } else if (!usesPrimitiveIntDispatch) {
         mv.visitIntInsn(Opcodes.BIPUSH, totalArgs)
         mv.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object")
 
@@ -3139,6 +3149,8 @@ internal fun generateVmDispatcher(
     val returnType = Type.getReturnType(descriptor)
     if (usesVoidSpecializedDispatch) {
         mv.visitInsn(Opcodes.RETURN)
+    } else if (usesPrimitiveIntDispatch) {
+        mv.visitInsn(Opcodes.IRETURN)
     } else {
         unboxAndReturn(mv, returnType)
     }
@@ -3151,6 +3163,7 @@ private fun emitDeadCodeShadowDispatch(
     mv: MethodVisitor,
     scratchSlot: Int,
     random: SecureRandom,
+    primitiveIntShape: Boolean = false,
 ) {
     // Opaque predicate: dead-code shadow dispatch to confuse pattern scanners.
     val shadowChance = random.nextInt(100)
@@ -3166,17 +3179,16 @@ private fun emitDeadCodeShadowDispatch(
     mv.visitJumpInsn(Opcodes.IFEQ, shadowEnd)
     mv.visitLabel(shadowStart)
     mv.visitLdcInsn(0L)
-    emitObfuscatedString(mv, fakeResourcePath(fakeId, random), random)
-    mv.visitInsn(Opcodes.ICONST_0)
-    mv.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object")
-    mv.visitMethodInsn(
-        Opcodes.INVOKESTATIC,
-        fakeOwner,
-        fakeMethod,
-        VM_LEGACY_DISPATCH_DESCRIPTOR,
-        false,
-    )
-    mv.visitInsn(Opcodes.POP)
+    if (primitiveIntShape) {
+        mv.visitMethodInsn(Opcodes.INVOKESTATIC, fakeOwner, fakeMethod, VM_INT_DISPATCH_DESCRIPTOR, false)
+        mv.visitInsn(Opcodes.POP)
+    } else {
+        emitObfuscatedString(mv, fakeResourcePath(fakeId, random), random)
+        mv.visitInsn(Opcodes.ICONST_0)
+        mv.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object")
+        mv.visitMethodInsn(Opcodes.INVOKESTATIC, fakeOwner, fakeMethod, VM_LEGACY_DISPATCH_DESCRIPTOR, false)
+        mv.visitInsn(Opcodes.POP)
+    }
     mv.visitLabel(shadowEnd)
 }
 private fun fakeResourcePath(fakeId: (Int) -> String, random: SecureRandom): String {

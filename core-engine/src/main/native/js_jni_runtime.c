@@ -37,6 +37,8 @@ JS_HIDDEN jbyteArray JNICALL jsn_r21(JNIEnv *env, jclass cls, jbyteArray payload
 JS_HIDDEN jobject JNICALL jsn_r22(JNIEnv *env, jclass cls, jlong entryToken, jobjectArray args);
 JS_HIDDEN void JNICALL jsn_r23(JNIEnv *env, jclass cls, jlong entryToken);
 JS_HIDDEN void JNICALL jsn_r24(JNIEnv *env, jclass cls, jlong entryToken, jint arg0);
+JS_HIDDEN jint JNICALL jsn_r25(JNIEnv *env, jclass cls, jlong entryToken);
+JS_HIDDEN jint JNICALL jsn_r26(JNIEnv *env, jclass cls, jlong entryToken, jint arg0);
 
 static const js_native_abi_table js_native_abi_table_instance = {
     JS_NATIVE_ABI_TABLE_VERSION,
@@ -52,6 +54,8 @@ static const js_native_abi_table js_native_abi_table_instance = {
     jsn_r20,
     jsn_r22,
     jsn_r23,
+    jsn_r25,
+    jsn_r26,
     jsn_r24,
 };
 
@@ -118,6 +122,7 @@ JS_HIDDEN int js_jni_cache_init(JNIEnv *env) {
 #define JS_JNI_CLASS(field, name) do { js_jni_cache.field = js_jni_cache_global_class(env, name); if (!js_jni_cache.field) goto fail; } while (0)
 #define JS_JNI_METHOD(field, cls, name, sig) do { js_jni_cache.field = (*env)->GetMethodID(env, js_jni_cache.cls, name, sig); if (!js_jni_cache_require_member(env, js_jni_cache.field)) goto fail; } while (0)
 #define JS_JNI_STATIC_METHOD(field, cls, name, sig) do { js_jni_cache.field = (*env)->GetStaticMethodID(env, js_jni_cache.cls, name, sig); if (!js_jni_cache_require_member(env, js_jni_cache.field)) goto fail; } while (0)
+#define JS_JNI_FIELD(field, cls, name, sig) do { js_jni_cache.field = (*env)->GetFieldID(env, js_jni_cache.cls, name, sig); if (!js_jni_cache_require_member(env, js_jni_cache.field)) goto fail; } while (0)
 #define JS_JNI_STATIC_FIELD(field, cls, name, sig) do { js_jni_cache.field = (*env)->GetStaticFieldID(env, js_jni_cache.cls, name, sig); if (!js_jni_cache_require_member(env, js_jni_cache.field)) goto fail; } while (0)
 
     JS_JNI_CLASS(object_class, "java/lang/Object");
@@ -213,17 +218,27 @@ JS_HIDDEN int js_jni_cache_init(JNIEnv *env) {
     JS_JNI_STATIC_FIELD(float_type_field, float_class, "TYPE", "Ljava/lang/Class;");
     JS_JNI_STATIC_FIELD(double_type_field, double_class, "TYPE", "Ljava/lang/Class;");
     JS_JNI_STATIC_FIELD(void_type_field, void_class, "TYPE", "Ljava/lang/Class;");
+    JS_JNI_FIELD(integer_value_field, integer_class, "value", "I");
+    JS_JNI_FIELD(boolean_value_field, boolean_class, "value", "Z");
+    JS_JNI_FIELD(byte_value_field, byte_class, "value", "B");
+    JS_JNI_FIELD(short_value_field, short_class, "value", "S");
+    JS_JNI_FIELD(character_value_field, character_class, "value", "C");
+    JS_JNI_FIELD(long_value_field, long_class, "value", "J");
+    JS_JNI_FIELD(float_value_field, float_class, "value", "F");
+    JS_JNI_FIELD(double_value_field, double_class, "value", "D");
 
     js_jni_cache.initialized = 1;
 #undef JS_JNI_CLASS
 #undef JS_JNI_METHOD
 #undef JS_JNI_STATIC_METHOD
+#undef JS_JNI_FIELD
 #undef JS_JNI_STATIC_FIELD
     return 1;
 fail:
 #undef JS_JNI_CLASS
 #undef JS_JNI_METHOD
 #undef JS_JNI_STATIC_METHOD
+#undef JS_JNI_FIELD
 #undef JS_JNI_STATIC_FIELD
     js_jni_cache_destroy(env);
     return 0;
@@ -304,6 +319,8 @@ static int js_register_all_natives(JNIEnv *env) {
         {js_native_name("Ex", "ecuteVm", "Resource"), "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;", (void*)jsn_r20},
         {js_native_name("Ex", "ecuteVmResource", "ByToken"), "(J[Ljava/lang/Object;)Ljava/lang/Object;", (void*)jsn_r22},
         {js_native_name("Ex", "ecuteVmResource", "Void"), "(J)V", (void*)jsn_r23},
+        {js_native_name("Ex", "ecuteVmResource", "Int"), "(J)I", (void*)jsn_r25},
+        {js_native_name("Ex", "ecuteVmResourceInt", "Int"), "(JI)I", (void*)jsn_r26},
         {js_native_name("Ex", "ecuteVmResourceInt", "Void"), "(JI)V", (void*)jsn_r24},
     };
     if (!js_register_native_group(env, js_helper_owner("Jni", "Micro", "kernel", "Helper"), jni_microkernel_methods, (int)(sizeof(jni_microkernel_methods) / sizeof(jni_microkernel_methods[0])), 1)) return 0;

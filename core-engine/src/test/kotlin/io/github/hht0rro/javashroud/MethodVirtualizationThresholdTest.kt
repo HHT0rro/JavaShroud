@@ -1012,6 +1012,24 @@ class MethodVirtualizationThresholdTest {
             methodCallsVmDispatcherMethodWithDescriptor(classBytes, "acceptInt", "(I)V", "executeVmResourceIntVoid", "(JI)V"),
             "Static int-to-void VM stub must use the int-specialized token-only void ABI.",
         )
+        assertTrue(
+            methodCallsVmDispatcherMethodWithDescriptor(classBytes, "value", "()I", "executeVmResourceInt", "(J)I"),
+            "Static int-return VM stub must use the primitive int token-only ABI.",
+        )
+        assertEquals(
+            0,
+            countObjectArrayAllocationsBeforeVmDispatcher(classBytes, "value", "()I"),
+            "Static int-return VM stub must not allocate or leave an Object[] argument on the primitive int ABI stack before the real helper call.",
+        )
+        assertTrue(
+            methodCallsVmDispatcherMethodWithDescriptor(classBytes, "hot", "(I)I", "executeVmResourceIntInt", "(JI)I"),
+            "Static int-to-int VM stub must use the primitive int argument and return ABI.",
+        )
+        assertEquals(
+            0,
+            countObjectArrayAllocationsBeforeVmDispatcher(classBytes, "hot", "(I)I"),
+            "Static int-to-int VM stub must not allocate Object[] arguments before the primitive helper call.",
+        )
     }
 
     @Test
@@ -1575,6 +1593,20 @@ class MethodVirtualizationThresholdTest {
         acceptInt.visitInsn(Opcodes.RETURN)
         acceptInt.visitMaxs(1, 1)
         acceptInt.visitEnd()
+        val value = writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "value", "()I", null, null)
+        value.visitCode()
+        value.visitIntInsn(Opcodes.BIPUSH, 7)
+        value.visitInsn(Opcodes.IRETURN)
+        value.visitMaxs(1, 0)
+        value.visitEnd()
+        val hot = writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "hot", "(I)I", null, null)
+        hot.visitCode()
+        hot.visitVarInsn(Opcodes.ILOAD, 0)
+        hot.visitInsn(Opcodes.ICONST_1)
+        hot.visitInsn(Opcodes.IADD)
+        hot.visitInsn(Opcodes.IRETURN)
+        hot.visitMaxs(2, 1)
+        hot.visitEnd()
         writer.visitEnd()
         return writer.toByteArray()
     }
@@ -2179,6 +2211,28 @@ class MethodVirtualizationThresholdTest {
             }
         }, 0)
         return calls
+    }
+
+    private fun countObjectArrayAllocationsBeforeVmDispatcher(classBytes: ByteArray, methodName: String, descriptor: String): Int {
+        var count = 0
+        ClassReader(classBytes).accept(object : org.objectweb.asm.ClassVisitor(Opcodes.ASM9) {
+            override fun visitMethod(access: Int, name: String, desc: String, signature: String?, exceptions: Array<String>?): MethodVisitor? {
+                if (name != methodName || desc != descriptor) return null
+                var beforeRealDispatcher = true
+                return object : MethodVisitor(Opcodes.ASM9) {
+                    override fun visitTypeInsn(opcode: Int, type: String) {
+                        if (beforeRealDispatcher && opcode == Opcodes.ANEWARRAY && type == "java/lang/Object") count++
+                    }
+
+                    override fun visitMethodInsn(opcode: Int, owner: String, name: String, methodDescriptor: String, isInterface: Boolean) {
+                        if (owner.endsWith("JniMicrokernelHelper") && name.startsWith("executeVmResource")) {
+                            beforeRealDispatcher = false
+                        }
+                    }
+                }
+            }
+        }, 0)
+        return count
     }
 
     private fun artifactFor(

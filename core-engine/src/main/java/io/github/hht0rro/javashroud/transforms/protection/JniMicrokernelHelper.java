@@ -41,6 +41,7 @@ public final class JniMicrokernelHelper {
     private static volatile String vmSelfCheck = "";
     private static volatile long nativeBootToken = 0L;
     private static volatile boolean nativeSelfCheckFailed = false;
+    private static volatile boolean sealedNativeBindingsPublished = false;
     private static final String SEALED_NATIVE_INDEX_RESOURCE = "META-INF/.r/0.dat";
     private static final String VM_PRELOAD_INDEX_RESOURCE = "META-INF/.r/vm.idx";
     private static final String VM_CURRENT_PRELOAD_INDEX_RESOURCE = "META-INF/.r/vm-current.idx";
@@ -71,7 +72,7 @@ public final class JniMicrokernelHelper {
             loadKernel("vm", "auto", "vm-diverse");
         }
         if (isNativeLoaded()) {
-            publishSealedNativeBindings();
+            ensureSealedNativeBindingsPublished();
             return nativeExecuteVmResource(entryToken, resourcePath, args);
         }
         throw new SecurityException("method-virtualization requires a bundled sealed JNI VM kernel; native kernel not loaded (" + loadMessage + ")");
@@ -81,22 +82,44 @@ public final class JniMicrokernelHelper {
             loadKernel("vm", "auto", "vm-diverse");
         }
         if (isNativeLoaded()) {
-            publishSealedNativeBindings();
+            ensureSealedNativeBindingsPublished();
             return nativeExecuteVmResourceByToken(entryToken, args);
         }
         throw new SecurityException("method-virtualization requires a bundled sealed JNI VM kernel; native kernel not loaded (" + loadMessage + ")");
     }
 
     public static native void nativeExecuteVmResourceVoid(long entryToken);
+    public static native int nativeExecuteVmResourceInt(long entryToken);
+    public static native int nativeExecuteVmResourceIntInt(long entryToken, int arg0);
     public static native void nativeExecuteVmResourceIntVoid(long entryToken, int arg0);
     public static void executeVmResourceVoid(long entryToken) {
         if (loadState == 0) {
             loadKernel("vm", "auto", "vm-diverse");
         }
         if (isNativeLoaded()) {
-            publishSealedNativeBindings();
+            ensureSealedNativeBindingsPublished();
             nativeExecuteVmResourceVoid(entryToken);
             return;
+        }
+        throw new SecurityException("method-virtualization requires a bundled sealed JNI VM kernel; native kernel not loaded (" + loadMessage + ")");
+    }
+    public static int executeVmResourceInt(long entryToken) {
+        if (loadState == 0) {
+            loadKernel("vm", "auto", "vm-diverse");
+        }
+        if (isNativeLoaded()) {
+            ensureSealedNativeBindingsPublished();
+            return nativeExecuteVmResourceInt(entryToken);
+        }
+        throw new SecurityException("method-virtualization requires a bundled sealed JNI VM kernel; native kernel not loaded (" + loadMessage + ")");
+    }
+    public static int executeVmResourceIntInt(long entryToken, int arg0) {
+        if (loadState == 0) {
+            loadKernel("vm", "auto", "vm-diverse");
+        }
+        if (isNativeLoaded()) {
+            ensureSealedNativeBindingsPublished();
+            return nativeExecuteVmResourceIntInt(entryToken, arg0);
         }
         throw new SecurityException("method-virtualization requires a bundled sealed JNI VM kernel; native kernel not loaded (" + loadMessage + ")");
     }
@@ -105,7 +128,7 @@ public final class JniMicrokernelHelper {
             loadKernel("vm", "auto", "vm-diverse");
         }
         if (isNativeLoaded()) {
-            publishSealedNativeBindings();
+            ensureSealedNativeBindingsPublished();
             nativeExecuteVmResourceIntVoid(entryToken, arg0);
             return;
         }
@@ -586,11 +609,13 @@ public final class JniMicrokernelHelper {
 
     private static boolean tryLoadNative(String platformSuffix, String components) {
         String previousLoaderOwner = System.getProperty(sealedLoaderPropertyName());
+        boolean ok = false;
         try {
             publishSealedNativeBindings();
             System.loadLibrary(kernelBaseName() + platformSuffix);
             loadMessage = "native:" + platformSuffix + ":" + initializeNativeKernel(platformSuffix);
             installRuntimeResourceKeyIntoNative();
+            sealedNativeBindingsPublished = true;
             // Mark the kernel loaded BEFORE preloading VM resources. Native preload
             // (and the method-handle pre-resolution it performs) can trigger <clinit>
             // of other bundled classes whose injected loadKernel call would otherwise
@@ -600,7 +625,6 @@ public final class JniMicrokernelHelper {
             // the re-entry guard in loadKernel short-circuits and nested
             // executeVmResource calls see a ready kernel. Reset on failure.
             loadState = 1;
-            boolean ok = false;
             try {
                 preloadRuntimeResourcesIntoNative();
                 if (verifyNativeAbiAfterLoad()) {
@@ -609,12 +633,15 @@ public final class JniMicrokernelHelper {
                 }
                 return ok;
             } finally {
-                if (!ok) loadState = 0;
+                if (!ok) {
+                    loadState = 0;
+                    sealedNativeBindingsPublished = false;
+                }
             }
         } catch (UnsatisfiedLinkError e) {
             return false;
         } finally {
-            restoreLoaderProperty(previousLoaderOwner);
+            if (!ok) restoreLoaderProperty(previousLoaderOwner);
         }
     }
 
@@ -645,6 +672,7 @@ public final class JniMicrokernelHelper {
     private static boolean tryLoadBundledNativeFromDirectory(String platformSuffix, String resourcePath, String suffix, byte[] nativeBytes, File extractDirectory) {
         File tempLib = null;
         String previousLoaderOwner = System.getProperty(sealedLoaderPropertyName());
+        boolean ok = false;
         try {
             if (!ensureNativeExtractDirectory(extractDirectory)) return false;
             tempLib = File.createTempFile(nativeTempPrefix(resourcePath), suffix, extractDirectory);
@@ -659,12 +687,12 @@ public final class JniMicrokernelHelper {
             System.load(tempLib.getAbsolutePath());
             loadMessage = "native:bundled:" + platformSuffix + ":" + initializeNativeKernel(platformSuffix);
             installRuntimeResourceKeyIntoNative();
+            sealedNativeBindingsPublished = true;
             // See the note in tryLoadNative: set loadState before preload so the
             // re-entry guard in loadKernel stops <clinit>-triggered recursion during
             // native preload/handle resolution, and nested executeVmResource calls
             // see a ready kernel. Reset on failure.
             loadState = 1;
-            boolean ok = false;
             try {
                 preloadRuntimeResourcesIntoNative();
                 if (verifyNativeAbiAfterLoad()) {
@@ -673,7 +701,10 @@ public final class JniMicrokernelHelper {
                 }
                 return ok;
             } finally {
-                if (!ok) loadState = 0;
+                if (!ok) {
+                    loadState = 0;
+                    sealedNativeBindingsPublished = false;
+                }
             }
         } catch (UnsatisfiedLinkError e) {
             loadMessage = debugNativeLoadMessage("native:bundled-load-error", e);
@@ -684,7 +715,7 @@ public final class JniMicrokernelHelper {
             if (tempLib != null) tempLib.delete();
             return false;
         } finally {
-            restoreLoaderProperty(previousLoaderOwner);
+            if (!ok) restoreLoaderProperty(previousLoaderOwner);
         }
     }
 
@@ -774,6 +805,12 @@ public final class JniMicrokernelHelper {
             if (methodBindings.length() > 0) System.setProperty(sealedMethodBindingPropertyName(), mergeBindingProperties(System.getProperty(sealedMethodBindingPropertyName()), methodBindings.toString()));
         } catch (Throwable ignored) {
         }
+    }
+
+    private static void ensureSealedNativeBindingsPublished() {
+        if (sealedNativeBindingsPublished) return;
+        publishSealedNativeBindings();
+        sealedNativeBindingsPublished = true;
     }
 
     private static void restoreLoaderProperty(String previous) {

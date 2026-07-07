@@ -83,6 +83,14 @@ typedef struct {
     jfieldID float_type_field;
     jfieldID double_type_field;
     jfieldID void_type_field;
+    jfieldID integer_value_field;
+    jfieldID boolean_value_field;
+    jfieldID byte_value_field;
+    jfieldID short_value_field;
+    jfieldID character_value_field;
+    jfieldID long_value_field;
+    jfieldID float_value_field;
+    jfieldID double_value_field;
 } js_jni_cache_state;
 
 JS_HIDDEN extern js_jni_cache_state js_jni_cache;
@@ -110,6 +118,8 @@ typedef struct js_native_abi_table {
     jobject (JNICALL *execute_vm_resource)(JNIEnv *env, jclass cls, jlong entryToken, jstring resourcePath, jobjectArray args);
     jobject (JNICALL *execute_vm_resource_by_token)(JNIEnv *env, jclass cls, jlong entryToken, jobjectArray args);
     void (JNICALL *execute_vm_resource_void)(JNIEnv *env, jclass cls, jlong entryToken);
+    jint (JNICALL *execute_vm_resource_int)(JNIEnv *env, jclass cls, jlong entryToken);
+    jint (JNICALL *execute_vm_resource_int_int)(JNIEnv *env, jclass cls, jlong entryToken, jint arg0);
     void (JNICALL *execute_vm_resource_int_void)(JNIEnv *env, jclass cls, jlong entryToken, jint arg0);
 } js_native_abi_table;
 

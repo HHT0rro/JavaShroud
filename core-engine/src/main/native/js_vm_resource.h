@@ -46,6 +46,9 @@ JS_HIDDEN js_vm_program* js_vm_preload_indexed_program_on_demand(JNIEnv *env, jc
 JS_HIDDEN jobject js_vm_execute_cached_program(JNIEnv *env, jclass resource_cls, js_vm_program *program, jobjectArray args);
 JS_HIDDEN jobject js_vm_execute_resource(JNIEnv *env, jclass resource_cls, jlong entry_token, jstring resourcePath, jobjectArray args);
 JS_HIDDEN jobject js_vm_execute_resource_by_token(JNIEnv *env, jclass resource_cls, jlong entry_token, jobjectArray args);
+JS_HIDDEN jint js_vm_execute_resource_int_by_token(JNIEnv *env, jclass resource_cls, jlong entry_token);
+JS_HIDDEN jint js_vm_execute_resource_int_int_by_token(JNIEnv *env, jclass resource_cls, jlong entry_token, jint arg0);
+JS_HIDDEN void js_vm_execute_resource_int_void_by_token(JNIEnv *env, jclass resource_cls, jlong entry_token, jint arg0);
 JS_HIDDEN js_vm_program* js_vm_find_preloaded_program_by_method(unsigned long long class_hash, unsigned long long meth_hash, unsigned long long sig_hash);
 JS_HIDDEN js_vm_program* js_vm_ephemeral_cache_get(jlong entry_token, const char *resource_path);
 JS_HIDDEN js_vm_program* js_vm_ephemeral_cache_find_by_method(unsigned long long class_hash, unsigned long long meth_hash, unsigned long long sig_hash);

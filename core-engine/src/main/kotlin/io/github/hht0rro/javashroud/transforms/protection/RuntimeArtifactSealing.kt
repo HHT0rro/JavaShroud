@@ -424,6 +424,8 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     addMethod(jniHelper, "executeVmResource", "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;")
     addMethod(jniHelper, "executeVmResource", "(J[Ljava/lang/Object;)Ljava/lang/Object;")
     addMethod(jniHelper, "executeVmResourceVoid", "(J)V")
+    addMethod(jniHelper, "executeVmResourceInt", "(J)I")
+    addMethod(jniHelper, "executeVmResourceIntInt", "(JI)I")
     addMethod(jniHelper, "executeVmResourceIntVoid", "(JI)V")
     addMethod(jniHelper, "nativeInit", "(Ljava/lang/String;)I")
     addMethod(jniHelper, "nativeVerify", "([B[B)I")
@@ -436,6 +438,8 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     addMethod(jniHelper, "nativeExecuteVmResource", "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;")
     addMethod(jniHelper, "nativeExecuteVmResourceByToken", "(J[Ljava/lang/Object;)Ljava/lang/Object;")
     addMethod(jniHelper, "nativeExecuteVmResourceVoid", "(J)V")
+    addMethod(jniHelper, "nativeExecuteVmResourceInt", "(J)I")
+    addMethod(jniHelper, "nativeExecuteVmResourceIntInt", "(JI)I")
     addMethod(jniHelper, "nativeExecuteVmResourceIntVoid", "(JI)V")
 
     val bootstrap = "$PROTECTION_HELPER_PACKAGE/BootstrapEncryptionHelper"

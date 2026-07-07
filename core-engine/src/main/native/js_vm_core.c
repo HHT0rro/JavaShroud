@@ -40,6 +40,11 @@ JS_HIDDEN jobject js_vm_get_active_host_loader(void) { return js_vm_active_host_
 
 JS_HIDDEN void js_vm_set_active_host_loader(jobject loader) { js_vm_active_host_loader = loader; }
 
+static void js_vm_debug_method_lookup_probe(const char *label, JNIEnv *env, jclass cls, jobject obj, const char *name, const char *desc, int is_static);
+static void js_vm_debug_alloc_probe(const char *label, JNIEnv *env, jclass cls, const char *tag);
+static int js_vm_execute_with_preset_locals(JNIEnv *env, js_vm_program *p, jobjectArray args, const js_vm_value *preset_locals, int preset_count, char ret_desc, js_vm_value *ret);
+JS_HIDDEN int js_vm_execute_prepared_program_int_int(JNIEnv *env, js_vm_program *program, jint arg0, jint *out);
+
 JS_HIDDEN volatile int js_vm_last_parse_stage = 0;
 
 JS_HIDDEN int js_vm_active_program_push(js_vm_program *program) {
@@ -51,6 +56,11 @@ JS_HIDDEN int js_vm_active_program_push(js_vm_program *program) {
 
 JS_HIDDEN void js_vm_active_program_pop(void) {
     if (js_vm_active_program_depth > 0) js_vm_active_program_stack[--js_vm_active_program_depth] = NULL;
+}
+
+static js_vm_program* js_vm_active_program_current(void) {
+    if (js_vm_active_program_depth <= 0) return NULL;
+    return js_vm_active_program_stack[js_vm_active_program_depth - 1];
 }
 
 JS_HIDDEN js_vm_program* js_vm_active_program_find_by_method(unsigned long long class_hash, unsigned long long meth_hash, unsigned long long sig_hash) {
@@ -66,7 +76,7 @@ JS_HIDDEN js_vm_program* js_vm_active_program_find_by_method(unsigned long long 
     return NULL;
 }
 
-JS_HIDDEN int js_vm_execute_register(JNIEnv *env, js_vm_program *p, jobjectArray args, char ret_desc, js_vm_value *ret) {
+static int js_vm_execute_register_with_preset_locals(JNIEnv *env, js_vm_program *p, jobjectArray args, const js_vm_value *preset_locals, int preset_count, char ret_desc, js_vm_value *ret) {
     if (!p) return 0;
     js_vm_program execution;
     memset(&execution, 0, sizeof(execution));
@@ -80,7 +90,7 @@ JS_HIDDEN int js_vm_execute_register(JNIEnv *env, js_vm_program *p, jobjectArray
         return 0;
     }
     int pushed_active_program = js_vm_active_program_push(&execution);
-    int ok = js_vm_execute(env, &execution, args, ret_desc, ret);
+    int ok = js_vm_execute_with_preset_locals(env, &execution, args, preset_locals, preset_count, ret_desc, ret);
     if (pushed_active_program) js_vm_active_program_pop();
     /* Execution program owns its per-run symbol cache exclusively. */
     if (execution.symbols) {
@@ -92,6 +102,10 @@ JS_HIDDEN int js_vm_execute_register(JNIEnv *env, js_vm_program *p, jobjectArray
     }
     js_vm_clear_execution_program(&execution);
     return ok;
+}
+
+JS_HIDDEN int js_vm_execute_register(JNIEnv *env, js_vm_program *p, jobjectArray args, char ret_desc, js_vm_value *ret) {
+    return js_vm_execute_register_with_preset_locals(env, p, args, NULL, 0, ret_desc, ret);
 }
 
 JS_HIDDEN void js_vm_clear_exception(JNIEnv *env) {
@@ -227,6 +241,7 @@ static jmethodID js_vm_method_from_object(JNIEnv *env, jobject obj, const char *
     if (!obj || !name || !sig) return NULL;
     jclass cls = (*env)->GetObjectClass(env, obj);
     if ((*env)->ExceptionCheck(env) || !cls) { js_vm_clear_exception(env); return NULL; }
+    js_vm_debug_method_lookup_probe("method-from-object", env, cls, obj, name, sig, 0);
     jmethodID mid = (*env)->GetMethodID(env, cls, name, sig);
     (*env)->DeleteLocalRef(env, cls);
     if ((*env)->ExceptionCheck(env) || !mid) { js_vm_clear_exception(env); return NULL; }
@@ -236,14 +251,14 @@ static jmethodID js_vm_method_from_object(JNIEnv *env, jobject obj, const char *
 JS_HIDDEN int js_vm_boxed_arg(JNIEnv *env, jobject obj, js_vm_value *out) {
     if (!obj) { *out = js_vm_null_value(); return 1; }
     if (!js_jni_cache.initialized) return 0;
-    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.integer_class)) { jmethodID mid = js_vm_method_from_object(env, obj, "intValue", "()I"); if (!mid) return 0; *out = js_vm_int_value((*env)->CallIntMethod(env, obj, mid)); return !(*env)->ExceptionCheck(env); }
-    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.boolean_class)) { jmethodID mid = js_vm_method_from_object(env, obj, "booleanValue", "()Z"); if (!mid) return 0; *out = js_vm_int_value((*env)->CallBooleanMethod(env, obj, mid) ? 1 : 0); return !(*env)->ExceptionCheck(env); }
-    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.byte_class)) { jmethodID mid = js_vm_method_from_object(env, obj, "byteValue", "()B"); if (!mid) return 0; *out = js_vm_int_value((jint)(*env)->CallByteMethod(env, obj, mid)); return !(*env)->ExceptionCheck(env); }
-    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.short_class)) { jmethodID mid = js_vm_method_from_object(env, obj, "shortValue", "()S"); if (!mid) return 0; *out = js_vm_int_value((jint)(*env)->CallShortMethod(env, obj, mid)); return !(*env)->ExceptionCheck(env); }
-    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.character_class)) { jmethodID mid = js_vm_method_from_object(env, obj, "charValue", "()C"); if (!mid) return 0; *out = js_vm_int_value((jint)(*env)->CallCharMethod(env, obj, mid)); return !(*env)->ExceptionCheck(env); }
-    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.long_class)) { jmethodID mid = js_vm_method_from_object(env, obj, "longValue", "()J"); if (!mid) return 0; *out = js_vm_long_value((*env)->CallLongMethod(env, obj, mid)); return !(*env)->ExceptionCheck(env); }
-    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.float_class)) { jmethodID mid = js_vm_method_from_object(env, obj, "floatValue", "()F"); if (!mid) return 0; *out = js_vm_float_value((*env)->CallFloatMethod(env, obj, mid)); return !(*env)->ExceptionCheck(env); }
-    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.double_class)) { jmethodID mid = js_vm_method_from_object(env, obj, "doubleValue", "()D"); if (!mid) return 0; *out = js_vm_double_value((*env)->CallDoubleMethod(env, obj, mid)); return !(*env)->ExceptionCheck(env); }
+    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.integer_class)) { *out = js_vm_int_value((*env)->GetIntField(env, obj, js_jni_cache.integer_value_field)); return !(*env)->ExceptionCheck(env); }
+    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.boolean_class)) { *out = js_vm_int_value((*env)->GetBooleanField(env, obj, js_jni_cache.boolean_value_field) ? 1 : 0); return !(*env)->ExceptionCheck(env); }
+    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.byte_class)) { *out = js_vm_int_value((jint)(*env)->GetByteField(env, obj, js_jni_cache.byte_value_field)); return !(*env)->ExceptionCheck(env); }
+    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.short_class)) { *out = js_vm_int_value((jint)(*env)->GetShortField(env, obj, js_jni_cache.short_value_field)); return !(*env)->ExceptionCheck(env); }
+    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.character_class)) { *out = js_vm_int_value((jint)(*env)->GetCharField(env, obj, js_jni_cache.character_value_field)); return !(*env)->ExceptionCheck(env); }
+    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.long_class)) { *out = js_vm_long_value((*env)->GetLongField(env, obj, js_jni_cache.long_value_field)); return !(*env)->ExceptionCheck(env); }
+    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.float_class)) { *out = js_vm_float_value((*env)->GetFloatField(env, obj, js_jni_cache.float_value_field)); return !(*env)->ExceptionCheck(env); }
+    if ((*env)->IsInstanceOf(env, obj, js_jni_cache.double_class)) { *out = js_vm_double_value((*env)->GetDoubleField(env, obj, js_jni_cache.double_value_field)); return !(*env)->ExceptionCheck(env); }
     *out = js_vm_object_value(obj);
     return 1;
 }
@@ -329,17 +344,37 @@ JS_HIDDEN int js_vm_to_jvalue(JNIEnv *env, js_vm_value v, char tag, jvalue *out)
     }
 }
 
+static jobject js_vm_alloc_boxed_value(JNIEnv *env, jclass cls, jfieldID field, char tag, jvalue value) {
+    if (!env || !cls || !field) return NULL;
+    char tag_text[2] = { tag, 0 };
+    js_vm_debug_alloc_probe("boxed-value", env, cls, tag_text);
+    jobject boxed = (*env)->AllocObject(env, cls);
+    if ((*env)->ExceptionCheck(env) || !boxed) return NULL;
+    switch (tag) {
+        case 'Z': (*env)->SetBooleanField(env, boxed, field, value.z); break;
+        case 'B': (*env)->SetByteField(env, boxed, field, value.b); break;
+        case 'S': (*env)->SetShortField(env, boxed, field, value.s); break;
+        case 'C': (*env)->SetCharField(env, boxed, field, value.c); break;
+        case 'I': (*env)->SetIntField(env, boxed, field, value.i); break;
+        case 'J': (*env)->SetLongField(env, boxed, field, value.j); break;
+        case 'F': (*env)->SetFloatField(env, boxed, field, value.f); break;
+        case 'D': (*env)->SetDoubleField(env, boxed, field, value.d); break;
+        default: return NULL;
+    }
+    return (*env)->ExceptionCheck(env) ? NULL : boxed;
+}
+
 JS_HIDDEN jobject js_vm_box_jvalue_arg(JNIEnv *env, char tag, jvalue value) {
     if (!js_jni_cache.initialized) return NULL;
     switch (tag) {
-        case 'Z': return (*env)->CallStaticObjectMethodA(env, js_jni_cache.boolean_class, js_jni_cache.boolean_value_of, &value);
-        case 'B': return (*env)->CallStaticObjectMethodA(env, js_jni_cache.byte_class, js_jni_cache.byte_value_of, &value);
-        case 'S': return (*env)->CallStaticObjectMethodA(env, js_jni_cache.short_class, js_jni_cache.short_value_of, &value);
-        case 'C': return (*env)->CallStaticObjectMethodA(env, js_jni_cache.character_class, js_jni_cache.character_value_of, &value);
-        case 'I': return (*env)->CallStaticObjectMethodA(env, js_jni_cache.integer_class, js_jni_cache.integer_value_of, &value);
-        case 'J': return (*env)->CallStaticObjectMethodA(env, js_jni_cache.long_class, js_jni_cache.long_value_of, &value);
-        case 'F': return (*env)->CallStaticObjectMethodA(env, js_jni_cache.float_class, js_jni_cache.float_value_of, &value);
-        case 'D': return (*env)->CallStaticObjectMethodA(env, js_jni_cache.double_class, js_jni_cache.double_value_of, &value);
+        case 'Z': return js_vm_alloc_boxed_value(env, js_jni_cache.boolean_class, js_jni_cache.boolean_value_field, tag, value);
+        case 'B': return js_vm_alloc_boxed_value(env, js_jni_cache.byte_class, js_jni_cache.byte_value_field, tag, value);
+        case 'S': return js_vm_alloc_boxed_value(env, js_jni_cache.short_class, js_jni_cache.short_value_field, tag, value);
+        case 'C': return js_vm_alloc_boxed_value(env, js_jni_cache.character_class, js_jni_cache.character_value_field, tag, value);
+        case 'I': return js_vm_alloc_boxed_value(env, js_jni_cache.integer_class, js_jni_cache.integer_value_field, tag, value);
+        case 'J': return js_vm_alloc_boxed_value(env, js_jni_cache.long_class, js_jni_cache.long_value_field, tag, value);
+        case 'F': return js_vm_alloc_boxed_value(env, js_jni_cache.float_class, js_jni_cache.float_value_field, tag, value);
+        case 'D': return js_vm_alloc_boxed_value(env, js_jni_cache.double_class, js_jni_cache.double_value_field, tag, value);
         case 'L':
         case '[':
             return value.l ? (*env)->NewLocalRef(env, value.l) : NULL;
@@ -713,6 +748,82 @@ static int js_vm_valid_method_lookup(const char *name, const char *desc) {
     if (!js_vm_descriptor_arg_tags(desc, &tags, &argc)) return 0;
     free(tags);
     return argc >= 0 && js_vm_descriptor_return_tag(desc) != 0;
+}
+
+static int js_vm_debug_native_enabled(void) {
+    const char *debug = getenv("JAVASHROUD_DEBUG_NATIVE_LOAD");
+    return debug && debug[0] && debug[0] != '0';
+}
+
+static void js_vm_debug_method_lookup_probe(const char *label, JNIEnv *env, jclass cls, jobject obj, const char *name, const char *desc, int is_static) {
+    if (!js_vm_debug_native_enabled()) return;
+    const char *log_path = getenv("JAVASHROUD_DEBUG_NATIVE_LOG");
+    FILE *out = stderr;
+    if (log_path && log_path[0]) {
+        FILE *file = fopen(log_path, "ab");
+        if (file) out = file;
+    }
+    fprintf(out,
+        "JavaShroud native VM method lookup: %s env=%p cls=%p obj=%p static=%d name=%.120s desc=%.180s\n",
+        label ? label : "<null>",
+        (void *)env,
+        (void *)cls,
+        (void *)obj,
+        is_static,
+        name ? name : "<null>",
+        desc ? desc : "<null>");
+    if (out != stderr) fclose(out);
+}
+
+static void js_vm_debug_alloc_probe(const char *label, JNIEnv *env, jclass cls, const char *tag) {
+    if (!js_vm_debug_native_enabled()) return;
+    js_vm_program *program = js_vm_active_program_current();
+    const char *log_path = getenv("JAVASHROUD_DEBUG_NATIVE_LOG");
+    FILE *out = stderr;
+    if (log_path && log_path[0]) {
+        FILE *file = fopen(log_path, "ab");
+        if (file) out = file;
+    }
+    fprintf(out,
+        "JavaShroud native VM alloc: %s env=%p cls=%p tag=%.80s owner=%.160s name=%.120s desc=%.160s\n",
+        label ? label : "<null>",
+        (void *)env,
+        (void *)cls,
+        tag ? tag : "<null>",
+        program && program->original_owner ? program->original_owner : "<null>",
+        program && program->original_name ? program->original_name : "<null>",
+        program && program->original_desc ? program->original_desc : "<null>");
+    if (out != stderr) fclose(out);
+}
+
+static char* js_vm_bounded_method_lookup_copy(const char *value, size_t max_len) {
+    if (!value || max_len == 0u) return NULL;
+    size_t len = 0;
+    while (len <= max_len && value[len]) len++;
+    if (len == 0u || len > max_len) return NULL;
+    char *copy = (char*)malloc(len + 1u);
+    if (!copy) return NULL;
+    memcpy(copy, value, len);
+    copy[len] = 0;
+    return copy;
+}
+
+static jmethodID js_vm_lookup_valid_method_id(JNIEnv *env, jclass cls, const char *name, const char *desc, int is_static) {
+    if (!env || !cls || !js_vm_valid_method_lookup(name, desc)) return NULL;
+    char *safe_name = js_vm_bounded_method_lookup_copy(name, 512u);
+    char *safe_desc = js_vm_bounded_method_lookup_copy(desc, 4096u);
+    if (!safe_name || !safe_desc) {
+        free(safe_name);
+        free(safe_desc);
+        return NULL;
+    }
+    js_vm_debug_method_lookup_probe("valid-method-id", env, cls, NULL, safe_name, safe_desc, is_static);
+    jmethodID mid = is_static ? (*env)->GetStaticMethodID(env, cls, safe_name, safe_desc) : (*env)->GetMethodID(env, cls, safe_name, safe_desc);
+    js_vbc4_wipe_volatile(safe_name, strlen(safe_name));
+    js_vbc4_wipe_volatile(safe_desc, strlen(safe_desc));
+    free(safe_name);
+    free(safe_desc);
+    return mid;
 }
 
 JS_HIDDEN int js_vm_append_execution_insn(js_vm_program *program, jint opcode, jint op_count, const jint *operands) {
@@ -4122,6 +4233,25 @@ static int js_vm_try_invoke_preloaded_nested(JNIEnv *env, js_vm_symbol_cache_ent
         if ((*env)->ExceptionCheck(env)) { (*env)->PopLocalFrame(env, NULL); return -1; }
         if (!same_class) { (*env)->PopLocalFrame(env, NULL); return 0; }
     }
+    if (!target && symbol->argc == 0 && (char)symbol->ret_tag == 'I') {
+        jint int_result = 0;
+        js_vm_nested_dispatch_depth++;
+        int nested_ok = js_vm_execute_prepared_program_int(env, nested_program, &int_result);
+        js_vm_nested_dispatch_depth--;
+        if ((*env)->ExceptionCheck(env) || !nested_ok) { (*env)->PopLocalFrame(env, NULL); return -1; }
+        (*env)->PopLocalFrame(env, NULL);
+        return js_vm_push(stack, stack_cap, sp, js_vm_int_value(int_result)) ? 1 : -1;
+    }
+    if (!target && symbol->argc == 1 && symbol->arg_tags && symbol->arg_tags[0] == 'I' && (char)symbol->ret_tag == 'I') {
+        jint int_arg = args[0].i;
+        jint int_result = 0;
+        js_vm_nested_dispatch_depth++;
+        int nested_ok = js_vm_execute_prepared_program_int_int(env, nested_program, int_arg, &int_result);
+        js_vm_nested_dispatch_depth--;
+        if ((*env)->ExceptionCheck(env) || !nested_ok) { (*env)->PopLocalFrame(env, NULL); return -1; }
+        (*env)->PopLocalFrame(env, NULL);
+        return js_vm_push(stack, stack_cap, sp, js_vm_int_value(int_result)) ? 1 : -1;
+    }
     jobjectArray nested_args = js_vm_build_nested_args(env, target, args, symbol->arg_tags, symbol->argc);
     if ((*env)->ExceptionCheck(env) || !nested_args) { (*env)->PopLocalFrame(env, NULL); return -1; }
     js_vm_nested_dispatch_depth++;
@@ -4206,6 +4336,22 @@ JS_HIDDEN js_vm_object_result js_vm_execute_prepared_program(JNIEnv *env, js_vm_
         return result;
     }
     if ((*env)->ExceptionCheck(env)) { js_vm_clear_value(&ret); js_vm_guest_frame_restore(guest_frame_saved_count, guest_frame_pushed); return result; }
+    if (js_vm_debug_native_enabled()) {
+        const char *log_path = getenv("JAVASHROUD_DEBUG_NATIVE_LOG");
+        FILE *out = stderr;
+        if (log_path && log_path[0]) {
+            FILE *file = fopen(log_path, "ab");
+            if (file) out = file;
+        }
+        fprintf(out,
+            "JavaShroud native VM return box: owner=%.160s name=%.120s desc=%.160s ret=%c valueType=%d\n",
+            program && program->original_owner ? program->original_owner : "<null>",
+            program && program->original_name ? program->original_name : "<null>",
+            program && program->original_desc ? program->original_desc : "<null>",
+            ret_desc,
+            ret.type);
+        if (out != stderr) fclose(out);
+    }
     jobject boxed = js_vm_box_return(env, ret_desc, ret);
     js_vm_clear_value(&ret);
     if ((*env)->ExceptionCheck(env)) { js_vm_guest_frame_restore(guest_frame_saved_count, guest_frame_pushed); return result; }
@@ -4213,6 +4359,45 @@ JS_HIDDEN js_vm_object_result js_vm_execute_prepared_program(JNIEnv *env, js_vm_
     result.value = boxed;
     js_vm_guest_frame_restore(guest_frame_saved_count, guest_frame_pushed);
     return result;
+}
+
+JS_HIDDEN int js_vm_execute_prepared_program_int_void(JNIEnv *env, js_vm_program *program, jint arg0) {
+    if (!program) return 0;
+    js_vm_value preset_locals[1];
+    js_vm_value ret = js_vm_null_value();
+    int guest_frame_saved_count = js_vm_guest_frame_count;
+    int guest_frame_pushed = js_vm_guest_frame_push(program);
+    preset_locals[0] = js_vm_int_value(arg0);
+    int ok = js_vm_execute_register_with_preset_locals(env, program, NULL, preset_locals, 1, 'V', &ret);
+    js_vm_clear_value(&ret);
+    js_vm_guest_frame_restore(guest_frame_saved_count, guest_frame_pushed);
+    return ok && !(*env)->ExceptionCheck(env);
+}
+
+JS_HIDDEN int js_vm_execute_prepared_program_int(JNIEnv *env, js_vm_program *program, jint *out) {
+    if (!program || !out) return 0;
+    js_vm_value ret = js_vm_null_value();
+    int guest_frame_saved_count = js_vm_guest_frame_count;
+    int guest_frame_pushed = js_vm_guest_frame_push(program);
+    int ok = js_vm_execute_register_with_preset_locals(env, program, NULL, NULL, 0, 'I', &ret);
+    if (ok && !(*env)->ExceptionCheck(env)) ok = js_vm_to_int(ret, out);
+    js_vm_clear_value(&ret);
+    js_vm_guest_frame_restore(guest_frame_saved_count, guest_frame_pushed);
+    return ok && !(*env)->ExceptionCheck(env);
+}
+
+JS_HIDDEN int js_vm_execute_prepared_program_int_int(JNIEnv *env, js_vm_program *program, jint arg0, jint *out) {
+    if (!program || !out) return 0;
+    js_vm_value preset_locals[1];
+    js_vm_value ret = js_vm_null_value();
+    int guest_frame_saved_count = js_vm_guest_frame_count;
+    int guest_frame_pushed = js_vm_guest_frame_push(program);
+    preset_locals[0] = js_vm_int_value(arg0);
+    int ok = js_vm_execute_register_with_preset_locals(env, program, NULL, preset_locals, 1, 'I', &ret);
+    if (ok && !(*env)->ExceptionCheck(env)) ok = js_vm_to_int(ret, out);
+    js_vm_clear_value(&ret);
+    js_vm_guest_frame_restore(guest_frame_saved_count, guest_frame_pushed);
+    return ok && !(*env)->ExceptionCheck(env);
 }
 
 JS_HIDDEN int js_vm_execute_hot_path_self_check(void) {
@@ -4564,7 +4749,7 @@ static int js_vm_invoke_dynamic_static_target(JNIEnv *env, const char *indy, js_
     if (!js_vm_pop_jni_args_cached(env, stack, sp, tags, argc, &args)) goto done;
     cls = js_vm_find_class_name(env, parts[3]);
     if ((*env)->ExceptionCheck(env) || !cls) goto done;
-    mid = (*env)->GetStaticMethodID(env, cls, parts[4], parts[5]);
+    mid = js_vm_lookup_valid_method_id(env, cls, parts[4], parts[5], 1);
     if ((*env)->ExceptionCheck(env) || !mid) goto done;
     ret_tag = js_vm_descriptor_return_tag(parts[5]);
     switch (ret_tag) {
@@ -5193,7 +5378,7 @@ static int js_vm_invoke_method(JNIEnv *env, js_vm_program *p, int cp_idx, int op
             if (target_value.type == JS_VM_VAL_UNINIT) {
                 jclass alloc_cls = target_value.uninit_type ? js_vm_find_class_name(env, target_value.uninit_type) : cls;
                 if ((*env)->ExceptionCheck(env) || !alloc_cls) ok = 0;
-                else target = (*env)->AllocObject(env, alloc_cls);
+                else { js_vm_debug_alloc_probe("constructor-target", env, alloc_cls, target_value.uninit_type); target = (*env)->AllocObject(env, alloc_cls); }
                 if ((*env)->ExceptionCheck(env) || !target) ok = 0;
                 else {
                     (*env)->CallNonvirtualVoidMethodA(env, target, cls, mid, args);
@@ -5292,10 +5477,10 @@ static int js_vm_invoke_method(JNIEnv *env, js_vm_program *p, int cp_idx, int op
                                 const char *dyn_lookup = dyn_mr.name ? dyn_mr.name : "";
                                 char *dyn_mapped = js_lookup_bound_method(env, dyn_mr.owner, dyn_mr.name, dyn_mr.desc);
                                 if (dyn_mapped && dyn_mapped[0]) dyn_lookup = dyn_mapped;
-                                if (js_vm_valid_method_lookup(dyn_lookup, dyn_mr.desc)) mid = (*env)->GetMethodID(env, target_cls, dyn_lookup, dyn_mr.desc);
+                                mid = js_vm_lookup_valid_method_id(env, target_cls, dyn_lookup, dyn_mr.desc, 0);
                                 if (((*env)->ExceptionCheck(env) || !mid) && dyn_mapped && dyn_mapped[0] && strcmp(dyn_lookup, dyn_mr.name) != 0 && js_vm_valid_method_lookup(dyn_mr.name, dyn_mr.desc)) {
                                     if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
-                                    mid = (*env)->GetMethodID(env, target_cls, dyn_mr.name, dyn_mr.desc);
+                                    mid = js_vm_lookup_valid_method_id(env, target_cls, dyn_mr.name, dyn_mr.desc, 0);
                                 }
                                 if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
                                 free(dyn_mapped);
@@ -5474,7 +5659,7 @@ JS_HIDDEN int js_vm_build_execution_program_from_registers(js_vm_program *source
     return execution->insn_count > 0 && execution->insns != NULL;
 }
 
-JS_HIDDEN int js_vm_execute(JNIEnv *env, js_vm_program *p, jobjectArray args, char ret_desc, js_vm_value *ret) {
+static int js_vm_execute_with_preset_locals(JNIEnv *env, js_vm_program *p, jobjectArray args, const js_vm_value *preset_locals, int preset_count, char ret_desc, js_vm_value *ret) {
     if (!js_vm_dispatch_profile_tag_matches(p)) {
         if (ret) *ret = js_vm_null_value();
         js_vm_last_failure_detail[0] = 0;
@@ -5526,7 +5711,12 @@ JS_HIDDEN int js_vm_execute(JNIEnv *env, js_vm_program *p, jobjectArray args, ch
         if (!coprime) { m = 1u; local_perm_add = 0u; }
         local_perm_mul = m;
     }
-    if (args) {
+    if (preset_locals && preset_count > 0) {
+        int count = preset_count < local_cap ? preset_count : local_cap;
+        for (int i = 0; i < count; i++) {
+            locals[js_vm_local_perm(i, local_cap, local_perm_mul, local_perm_add)] = preset_locals[i];
+        }
+    } else if (args) {
         jsize argc = (*env)->GetArrayLength(env, args);
         /* The dispatch stub boxes one Object[] element per logical argument (plus a
          * leading `this` for instance methods), but the VBC4 body addresses locals by
@@ -6055,6 +6245,10 @@ JS_HIDDEN int js_vm_execute(JNIEnv *env, js_vm_program *p, jobjectArray args, ch
     return ok;
 }
 
+JS_HIDDEN int js_vm_execute(JNIEnv *env, js_vm_program *p, jobjectArray args, char ret_desc, js_vm_value *ret) {
+    return js_vm_execute_with_preset_locals(env, p, args, NULL, 0, ret_desc, ret);
+}
+
 JS_LOCAL jobject JNICALL
 jsn_r20(
     JNIEnv *env, jclass cls, jlong entryToken, jstring resourcePath, jobjectArray args)
@@ -6083,23 +6277,32 @@ jsn_r24(JNIEnv *env, jclass cls, jlong entryToken, jint arg0)
         js_vm_fail_closed(env, "native VM local frame allocation failed");
         return;
     }
-    jobject boxed = (*env)->CallStaticObjectMethod(env, js_jni_cache.integer_class, js_jni_cache.integer_value_of, arg0);
-    if ((*env)->ExceptionCheck(env) || !boxed) {
-        (*env)->PopLocalFrame(env, NULL);
-        return;
+    js_vm_execute_resource_int_void_by_token(env, cls, entryToken, arg0);
+    (*env)->PopLocalFrame(env, NULL);
+}
+
+JS_LOCAL jint JNICALL
+jsn_r25(JNIEnv *env, jclass cls, jlong entryToken)
+{
+    if ((*env)->PushLocalFrame(env, 256) != 0) {
+        js_vm_fail_closed(env, "native VM local frame allocation failed");
+        return 0;
     }
-    jobjectArray args = (*env)->NewObjectArray(env, 1, js_jni_cache.object_class, NULL);
-    if ((*env)->ExceptionCheck(env) || !args) {
-        (*env)->PopLocalFrame(env, NULL);
-        return;
+    jint result = js_vm_execute_resource_int_by_token(env, cls, entryToken);
+    (*env)->PopLocalFrame(env, NULL);
+    return result;
+}
+
+JS_LOCAL jint JNICALL
+jsn_r26(JNIEnv *env, jclass cls, jlong entryToken, jint arg0)
+{
+    if ((*env)->PushLocalFrame(env, 256) != 0) {
+        js_vm_fail_closed(env, "native VM local frame allocation failed");
+        return 0;
     }
-    (*env)->SetObjectArrayElement(env, args, 0, boxed);
-    if ((*env)->ExceptionCheck(env)) {
-        (*env)->PopLocalFrame(env, NULL);
-        return;
-    }
-    jobject result = js_vm_execute_resource_by_token(env, cls, entryToken, args);
-    (*env)->PopLocalFrame(env, result);
+    jint result = js_vm_execute_resource_int_int_by_token(env, cls, entryToken, arg0);
+    (*env)->PopLocalFrame(env, NULL);
+    return result;
 }
 
 

@@ -162,6 +162,46 @@ static void js_shell_debug_native_init_failure(const char *reason) {
     }
 }
 
+static int js_shell_debug_enabled(void) {
+    const char *debug = getenv("JAVASHROUD_DEBUG_NATIVE_LOAD");
+    return debug && debug[0] && debug[0] != '0';
+}
+
+static void js_shell_debug_env_probe(const char *label, JNIEnv *incoming, JNIEnv *current, jint status) {
+    if (!js_shell_debug_enabled()) return;
+    const char *log_path = getenv("JAVASHROUD_DEBUG_NATIVE_LOG");
+    FILE *out = stderr;
+    if (log_path && log_path[0]) {
+        FILE *file = fopen(log_path, "ab");
+        if (file) out = file;
+    }
+    fprintf(out,
+        "JavaShroud max native shell env probe: %s incoming=%p current=%p getEnv=%d vm=%p innerLoaded=%d innerOnLoad=%d failed=%d\n",
+        label ? label : "<null>",
+        (void *)incoming,
+        (void *)current,
+        (int)status,
+        (void *)g_shell_vm,
+        (int)g_shell_loaded,
+        (int)g_inner_onload_done,
+        (int)g_shell_failed);
+    if (out != stderr) fclose(out);
+}
+
+static JNIEnv *js_shell_current_env_for(const char *label, JNIEnv *incoming) {
+    if (incoming) {
+        js_shell_debug_env_probe(label, incoming, incoming, JNI_OK);
+        return incoming;
+    }
+    JNIEnv *current = 0;
+    jint status = g_shell_vm ? (*g_shell_vm)->GetEnv(g_shell_vm, (void **)&current, JNI_VERSION_1_6) : JNI_ERR;
+    js_shell_debug_env_probe(label, incoming, current, status);
+    if (status == JNI_OK && current) {
+        return current;
+    }
+    return incoming;
+}
+
 static int js_shell_range_contains(const void *base, size_t size, const void *ptr, size_t ptr_size) {
     uintptr_t low = (uintptr_t)base;
     uintptr_t addr = (uintptr_t)ptr;
@@ -180,6 +220,10 @@ static int js_shell_inner_code_contains(const void *ptr) {
 
 static jclass js_shell_effective_helper_class(jclass fallback) {
     return g_shell_helper_class ? g_shell_helper_class : fallback;
+}
+
+static JNIEnv *js_shell_current_env(JNIEnv *incoming) {
+    return js_shell_current_env_for("current-env", incoming);
 }
 
 static int js_shell_validate_inner_abi_table(const js_native_abi_table *abi) {
@@ -204,6 +248,8 @@ static int js_shell_validate_inner_abi_table(const js_native_abi_table *abi) {
         (const void *)abi->execute_vm_resource,
         (const void *)abi->execute_vm_resource_by_token,
         (const void *)abi->execute_vm_resource_void,
+        (const void *)abi->execute_vm_resource_int,
+        (const void *)abi->execute_vm_resource_int_int,
         (const void *)abi->execute_vm_resource_int_void,
     };
     for (size_t i = 0; i < sizeof(functions) / sizeof(functions[0]); i++) {
@@ -306,6 +352,17 @@ static void js_shell_native_execute_void_name(char out[28]) {
     memcpy(out + 23u, "Void", 5u);
 }
 
+static void js_shell_native_execute_int_name(char out[27]) {
+    js_shell_native_execute_name(out);
+    memcpy(out + 23u, "Int", 4u);
+}
+
+static void js_shell_native_execute_int_int_name(char out[30]) {
+    js_shell_native_execute_name(out);
+    memcpy(out + 23u, "Int", 3u);
+    memcpy(out + 26u, "Int", 4u);
+}
+
 static void js_shell_native_execute_int_void_name(char out[31]) {
     js_shell_native_execute_name(out);
     memcpy(out + 23u, "Int", 3u);
@@ -398,6 +455,8 @@ static jclass js_shell_find_helper_class(JNIEnv *env, char **owner_out) {
 }
 
 static jint JNICALL js_shell_native_init(JNIEnv *env, jclass cls, jstring platform) {
+    JNIEnv *call_env = js_shell_current_env_for("native-init", env);
+    if (!call_env) return JNI_ERR;
     if (!g_inner_image.jni_on_load || !g_shell_vm || g_shell_failed) return JNI_ERR;
     if (!g_inner_onload_done) {
         if (!js_shell_inner_code_contains((const void *)g_inner_image.jni_on_load)) {
@@ -405,8 +464,10 @@ static jint JNICALL js_shell_native_init(JNIEnv *env, jclass cls, jstring platfo
             g_shell_failed = 1;
             return JNI_ERR;
         }
+        js_shell_debug_env_probe("before-inner-onload", env, call_env, JNI_OK);
         jint loaded = g_inner_image.jni_on_load(g_shell_vm, JS_SHELL_MANUAL_MAP_RESERVED);
-        if ((*env)->ExceptionCheck(env)) return JNI_ERR;
+        js_shell_debug_env_probe("after-inner-onload", env, call_env, JNI_OK);
+        if ((*call_env)->ExceptionCheck(call_env)) return JNI_ERR;
         if (loaded == JNI_ERR || loaded == 0) { g_shell_failed = 1; return JNI_ERR; }
         if (!g_inner_image.native_abi_table_v1 || !js_shell_inner_code_contains((const void *)g_inner_image.native_abi_table_v1)) {
             js_shell_debug_native_init_failure("inner ABI table export is outside executable image pages");
@@ -418,7 +479,7 @@ static jint JNICALL js_shell_native_init(JNIEnv *env, jclass cls, jstring platfo
             g_shell_failed = 1;
             return JNI_ERR;
         }
-        if (!js_shell_register_outer_shim(env)) {
+        if (!js_shell_register_outer_shim(call_env)) {
             g_shell_failed = 1;
             return JNI_ERR;
         }
@@ -426,67 +487,105 @@ static jint JNICALL js_shell_native_init(JNIEnv *env, jclass cls, jstring platfo
         g_shell_loaded = 1;
         return 2;
     }
-    return g_inner_abi && g_inner_abi->native_init ? g_inner_abi->native_init(env, js_shell_effective_helper_class(cls), platform) : JNI_ERR;
+    return g_inner_abi && g_inner_abi->native_init ? g_inner_abi->native_init(call_env, js_shell_effective_helper_class(cls), platform) : JNI_ERR;
 }
 
 static jint JNICALL js_shell_native_verify(JNIEnv *env, jclass cls, jbyteArray data, jbyteArray expected_mac) {
+    JNIEnv *call_env = js_shell_current_env_for("native-verify", env);
+    if (!call_env) return 0;
     if (!g_inner_abi || !g_inner_abi->native_verify) return 0;
-    return g_inner_abi->native_verify(env, js_shell_effective_helper_class(cls), data, expected_mac);
+    return g_inner_abi->native_verify(call_env, js_shell_effective_helper_class(cls), data, expected_mac);
 }
 
 static jint JNICALL js_shell_native_heartbeat(JNIEnv *env, jclass cls) {
+    JNIEnv *call_env = js_shell_current_env_for("native-heartbeat", env);
+    if (!call_env) return 0;
     if (!g_inner_abi || !g_inner_abi->native_heartbeat) return 0;
-    return g_inner_abi->native_heartbeat(env, js_shell_effective_helper_class(cls));
+    return g_inner_abi->native_heartbeat(call_env, js_shell_effective_helper_class(cls));
 }
 
 static jbyteArray JNICALL js_shell_native_decrypt_aes(JNIEnv *env, jclass cls, jbyteArray encrypted, jbyteArray keyArr, jbyteArray ivArr) {
+    JNIEnv *call_env = js_shell_current_env_for("native-decrypt-aes", env);
+    if (!call_env) return 0;
     if (!g_inner_abi || !g_inner_abi->native_decrypt_aes) return 0;
-    return g_inner_abi->native_decrypt_aes(env, js_shell_effective_helper_class(cls), encrypted, keyArr, ivArr);
+    return g_inner_abi->native_decrypt_aes(call_env, js_shell_effective_helper_class(cls), encrypted, keyArr, ivArr);
 }
 
 static jstring JNICALL js_shell_native_get_version(JNIEnv *env, jclass cls) {
+    JNIEnv *call_env = js_shell_current_env_for("native-get-version", env);
+    if (!call_env) return 0;
     if (!g_inner_abi || !g_inner_abi->native_get_version) return 0;
-    return g_inner_abi->native_get_version(env, js_shell_effective_helper_class(cls));
+    return g_inner_abi->native_get_version(call_env, js_shell_effective_helper_class(cls));
 }
 
 static jlong JNICALL js_shell_native_get_boot_token(JNIEnv *env, jclass cls) {
+    JNIEnv *call_env = js_shell_current_env_for("native-get-boot-token", env);
+    if (!call_env) return 0;
     if (!g_inner_abi || !g_inner_abi->native_get_boot_token) return 0;
-    return g_inner_abi->native_get_boot_token(env, js_shell_effective_helper_class(cls));
+    return g_inner_abi->native_get_boot_token(call_env, js_shell_effective_helper_class(cls));
 }
 
 static void JNICALL js_shell_native_install_runtime_resource_key(JNIEnv *env, jclass cls, jbyteArray keyArr) {
+    JNIEnv *call_env = js_shell_current_env_for("native-install-runtime-resource-key", env);
+    if (!call_env) return;
     if (!g_inner_abi || !g_inner_abi->native_install_runtime_resource_key) return;
-    g_inner_abi->native_install_runtime_resource_key(env, js_shell_effective_helper_class(cls), keyArr);
+    g_inner_abi->native_install_runtime_resource_key(call_env, js_shell_effective_helper_class(cls), keyArr);
 }
 
 static void JNICALL js_shell_native_preload_runtime_resources(JNIEnv *env, jclass cls) {
+    JNIEnv *call_env = js_shell_current_env_for("native-preload-runtime-resources", env);
+    if (!call_env) return;
     if (!g_inner_abi || !g_inner_abi->native_preload_runtime_resources) return;
-    g_inner_abi->native_preload_runtime_resources(env, js_shell_effective_helper_class(cls));
+    g_inner_abi->native_preload_runtime_resources(call_env, js_shell_effective_helper_class(cls));
 }
 
 static jbyteArray JNICALL js_shell_native_derive_class_encryption_key(JNIEnv *env, jclass cls, jbyteArray keyIdArr, jbyteArray saltArr, jint length) {
+    JNIEnv *call_env = js_shell_current_env_for("native-derive-class-encryption-key", env);
+    if (!call_env) return 0;
     if (!g_inner_abi || !g_inner_abi->native_derive_class_encryption_key) return 0;
-    return g_inner_abi->native_derive_class_encryption_key(env, js_shell_effective_helper_class(cls), keyIdArr, saltArr, length);
+    return g_inner_abi->native_derive_class_encryption_key(call_env, js_shell_effective_helper_class(cls), keyIdArr, saltArr, length);
 }
 
 static jobject JNICALL js_shell_execute_vm_resource(JNIEnv *env, jclass cls, jlong entryToken, jstring resourcePath, jobjectArray args) {
+    JNIEnv *call_env = js_shell_current_env_for("execute-vm-resource", env);
+    if (!call_env) return 0;
     if (!g_inner_abi || !g_inner_abi->execute_vm_resource) return 0;
-    return g_inner_abi->execute_vm_resource(env, js_shell_effective_helper_class(cls), entryToken, resourcePath, args);
+    return g_inner_abi->execute_vm_resource(call_env, js_shell_effective_helper_class(cls), entryToken, resourcePath, args);
 }
 
 static jobject JNICALL js_shell_execute_vm_resource_by_token(JNIEnv *env, jclass cls, jlong entryToken, jobjectArray args) {
+    JNIEnv *call_env = js_shell_current_env_for("execute-vm-resource-by-token", env);
+    if (!call_env) return 0;
     if (!g_inner_abi || !g_inner_abi->execute_vm_resource_by_token) return 0;
-    return g_inner_abi->execute_vm_resource_by_token(env, js_shell_effective_helper_class(cls), entryToken, args);
+    return g_inner_abi->execute_vm_resource_by_token(call_env, js_shell_effective_helper_class(cls), entryToken, args);
 }
 
 static void JNICALL js_shell_execute_vm_resource_void(JNIEnv *env, jclass cls, jlong entryToken) {
+    JNIEnv *call_env = js_shell_current_env_for("execute-vm-resource-void", env);
+    if (!call_env) return;
     if (!g_inner_abi || !g_inner_abi->execute_vm_resource_void) return;
-    g_inner_abi->execute_vm_resource_void(env, js_shell_effective_helper_class(cls), entryToken);
+    g_inner_abi->execute_vm_resource_void(call_env, js_shell_effective_helper_class(cls), entryToken);
+}
+
+static jint JNICALL js_shell_execute_vm_resource_int(JNIEnv *env, jclass cls, jlong entryToken) {
+    JNIEnv *call_env = js_shell_current_env_for("execute-vm-resource-int", env);
+    if (!call_env) return 0;
+    if (!g_inner_abi || !g_inner_abi->execute_vm_resource_int) return 0;
+    return g_inner_abi->execute_vm_resource_int(call_env, js_shell_effective_helper_class(cls), entryToken);
+}
+
+static jint JNICALL js_shell_execute_vm_resource_int_int(JNIEnv *env, jclass cls, jlong entryToken, jint arg0) {
+    JNIEnv *call_env = js_shell_current_env_for("execute-vm-resource-int-int", env);
+    if (!call_env) return 0;
+    if (!g_inner_abi || !g_inner_abi->execute_vm_resource_int_int) return 0;
+    return g_inner_abi->execute_vm_resource_int_int(call_env, js_shell_effective_helper_class(cls), entryToken, arg0);
 }
 
 static void JNICALL js_shell_execute_vm_resource_int_void(JNIEnv *env, jclass cls, jlong entryToken, jint arg0) {
+    JNIEnv *call_env = js_shell_current_env_for("execute-vm-resource-int-void", env);
+    if (!call_env) return;
     if (!g_inner_abi || !g_inner_abi->execute_vm_resource_int_void) return;
-    g_inner_abi->execute_vm_resource_int_void(env, js_shell_effective_helper_class(cls), entryToken, arg0);
+    g_inner_abi->execute_vm_resource_int_void(call_env, js_shell_effective_helper_class(cls), entryToken, arg0);
 }
 
 static int js_shell_register_outer_shim(JNIEnv *env) {
@@ -505,6 +604,8 @@ static int js_shell_register_outer_shim(JNIEnv *env) {
     char native_exec_name[24];
     char native_exec_token_name[31];
     char native_void_name[28];
+    char native_int_name[27];
+    char native_int_int_name[30];
     char native_int_void_name[31];
     js_shell_native_init_name(native_init_name);
     js_shell_native_verify_name(native_verify_name);
@@ -518,6 +619,8 @@ static int js_shell_register_outer_shim(JNIEnv *env) {
     js_shell_native_execute_name(native_exec_name);
     js_shell_native_execute_by_token_name(native_exec_token_name);
     js_shell_native_execute_void_name(native_void_name);
+    js_shell_native_execute_int_name(native_int_name);
+    js_shell_native_execute_int_int_name(native_int_int_name);
     js_shell_native_execute_int_void_name(native_int_void_name);
     char *original_owner = js_shell_default_helper_owner();
     char *mapped_init = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_init_name, "(Ljava/lang/String;)I") : 0;
@@ -532,8 +635,10 @@ static int js_shell_register_outer_shim(JNIEnv *env) {
     char *mapped_exec = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_exec_name, "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;") : 0;
     char *mapped_exec_token = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_exec_token_name, "(J[Ljava/lang/Object;)Ljava/lang/Object;") : 0;
     char *mapped_void = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_void_name, "(J)V") : 0;
+    char *mapped_int = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_int_name, "(J)I") : 0;
+    char *mapped_int_int = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_int_int_name, "(JI)I") : 0;
     char *mapped_int_void = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_int_void_name, "(JI)V") : 0;
-    JNINativeMethod methods[13];
+    JNINativeMethod methods[15];
     memset(methods, 0, sizeof(methods));
     methods[0].name = (char *)((mapped_init && mapped_init[0]) ? mapped_init : native_init_name);
     methods[0].signature = "(Ljava/lang/String;)I";
@@ -574,6 +679,12 @@ static int js_shell_register_outer_shim(JNIEnv *env) {
     methods[12].name = (char *)((mapped_int_void && mapped_int_void[0]) ? mapped_int_void : native_int_void_name);
     methods[12].signature = "(JI)V";
     methods[12].fnPtr = (void *)js_shell_execute_vm_resource_int_void;
+    methods[13].name = (char *)((mapped_int && mapped_int[0]) ? mapped_int : native_int_name);
+    methods[13].signature = "(J)I";
+    methods[13].fnPtr = (void *)js_shell_execute_vm_resource_int;
+    methods[14].name = (char *)((mapped_int_int && mapped_int_int[0]) ? mapped_int_int : native_int_int_name);
+    methods[14].signature = "(JI)I";
+    methods[14].fnPtr = (void *)js_shell_execute_vm_resource_int_int;
     int ok = ((*env)->RegisterNatives(env, helper_cls, methods, (jint)(sizeof(methods) / sizeof(methods[0]))) == 0);
     if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); ok = 0; }
     if (ok && !g_shell_helper_class) {
@@ -597,6 +708,8 @@ static int js_shell_register_outer_shim(JNIEnv *env) {
     free(mapped_exec);
     free(mapped_exec_token);
     free(mapped_void);
+    free(mapped_int);
+    free(mapped_int_int);
     free(mapped_int_void);
     free(original_owner);
     free(owner);

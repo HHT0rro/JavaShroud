@@ -256,10 +256,14 @@ private fun isPriorSealedRuntimeDependencyCall(call: MethodInsnNode): Boolean {
         "loadKernel",
         "executeVmResource",
         "executeVmResourceVoid",
+        "executeVmResourceInt",
+        "executeVmResourceIntInt",
         "executeVmResourceIntVoid",
         "nativeExecuteVmResource",
         "nativeExecuteVmResourceByToken",
         "nativeExecuteVmResourceVoid",
+        "nativeExecuteVmResourceInt",
+        "nativeExecuteVmResourceIntInt",
         "nativeExecuteVmResourceIntVoid",
     )
 }
@@ -270,6 +274,8 @@ private fun isJavaShroudVmDispatchCall(call: MethodInsnNode): Boolean {
             "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;",
             "(J[Ljava/lang/Object;)Ljava/lang/Object;",
             "(J)V",
+            "(J)I",
+            "(JI)I",
             "(JI)V",
         )
     ) return false
@@ -278,8 +284,12 @@ private fun isJavaShroudVmDispatchCall(call: MethodInsnNode): Boolean {
             "nativeExecuteVmResourceByToken",
             "executeVmResource",
             "nativeExecuteVmResourceVoid",
+            "nativeExecuteVmResourceInt",
+            "nativeExecuteVmResourceIntInt",
             "nativeExecuteVmResourceIntVoid",
             "executeVmResourceVoid",
+            "executeVmResourceInt",
+            "executeVmResourceIntInt",
             "executeVmResourceIntVoid",
         )
     ) return true
