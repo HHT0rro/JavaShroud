@@ -4,6 +4,7 @@ import io.github.hht0rro.javashroud.transforms.encryption.encryptStrings
 import io.github.hht0rro.javashroud.transforms.encryption.encryptFieldStringValues
 import io.github.hht0rro.javashroud.transforms.hiding.hideMembers
 import io.github.hht0rro.javashroud.transforms.metadata.stripCompileDebugInfo
+import io.github.hht0rro.javashroud.transforms.metadata.shuffleMembers
 import io.github.hht0rro.javashroud.transforms.obfuscation.applyControlFlowObfuscation
 import io.github.hht0rro.javashroud.transforms.obfuscation.applyControlFlowFlattening
 import io.github.hht0rro.javashroud.transforms.obfuscation.applyReferenceProxy
@@ -37,6 +38,7 @@ import io.github.hht0rro.javashroud.transforms.protection.applyExceptionSemantic
 
 internal fun metadataModuleBindings(): List<ModuleBinding> = listOf(
     ModuleBinding(id = "strip-compile-debug-info", transform = ModuleTransform(::stripCompileDebugInfo)),
+    ModuleBinding(id = "member-shuffle", transform = ModuleTransform(::shuffleMembers)),
 )
 
 internal fun renamingModuleBindings(): List<ModuleBinding> = listOf(

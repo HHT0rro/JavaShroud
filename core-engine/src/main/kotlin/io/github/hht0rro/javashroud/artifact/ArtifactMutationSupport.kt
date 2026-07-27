@@ -2,6 +2,7 @@ package io.github.hht0rro.javashroud.artifact
 
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
+import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 
 fun updateArtifactClassSet(artifact: BytecodeArtifact, updatedClassArtifacts: List<ClassArtifact>): BytecodeArtifact =
     copiedArtifactWithClasses(
@@ -12,6 +13,20 @@ fun updateArtifactClassSet(artifact: BytecodeArtifact, updatedClassArtifacts: Li
             updatedClassArtifacts = updatedClassArtifacts,
         ),
     )
+
+fun updateArtifactClassAndJarOrder(
+    artifact: BytecodeArtifact,
+    updatedClassArtifacts: List<ClassArtifact>,
+    updatedJarEntries: List<JarEntryData>,
+): BytecodeArtifact = copiedArtifactWithJarEntries(
+    artifact = artifact,
+    jarEntries = updatedJarEntries,
+    classArtifacts = updatedClassArtifacts,
+    analysisSummary = refreshArtifactSummary(
+        analysisSummary = artifact.analysisSummary,
+        updatedClassArtifacts = updatedClassArtifacts,
+    ),
+)
 
 fun updateRenamedArtifactClasses(
     artifact: BytecodeArtifact,
