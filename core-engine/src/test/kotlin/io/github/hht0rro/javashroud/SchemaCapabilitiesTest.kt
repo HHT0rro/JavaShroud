@@ -43,9 +43,10 @@ class SchemaCapabilitiesTest {
     @Test
     fun buildMetadataCapabilityDefinitions_returns_current_metadata_modules() {
         val modules = buildMetadataCapabilityDefinitions()
-        assertEquals(1, modules.size)
+        assertEquals(2, modules.size)
         val ids = modules.map { it.id }
         assertTrue(ids.contains("strip-compile-debug-info"))
+        assertTrue(ids.contains("member-shuffle"))
     }
 
     @Test

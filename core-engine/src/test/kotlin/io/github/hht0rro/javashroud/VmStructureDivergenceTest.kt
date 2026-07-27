@@ -9,8 +9,8 @@ import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceCodec
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.NativeVmBuildProfile
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4EntryMetadata
 import io.github.hht0rro.javashroud.transforms.protection.VmBytecodeSerializer
 import io.github.hht0rro.javashroud.transforms.protection.applyMethodVirtualization
@@ -25,6 +25,18 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class VmStructureDivergenceTest {
+
+    @Test
+    fun build_local_parser_profile_selects_exactly_one_non_nested_row_family() {
+        val plain = serializedLayout(seed = 0x1200, contextSeed = 0x2200, nativeVmProfile = NativeVmBuildProfile(0, 0))
+        val register = serializedLayout(seed = 0x1200, contextSeed = 0x2200, nativeVmProfile = NativeVmBuildProfile(1, 1))
+        val mixed = serializedLayout(seed = 0x1200, contextSeed = 0x2200, nativeVmProfile = NativeVmBuildProfile(2, 2))
+
+        assertEquals(0, plain.flags and (0x4000 or 0x8000))
+        assertEquals(0x4000, register.flags and (0x4000 or 0x8000))
+        assertEquals(0x8000, mixed.flags and (0x4000 or 0x8000))
+        assertEquals(3, setOf(sha256Hex(plain.payload), sha256Hex(register.payload), sha256Hex(mixed.payload)).size)
+    }
     private companion object {
         const val VBC4_FLAG_NESTED_VM_TEST = 0x1000
     }
@@ -156,8 +168,8 @@ class VmStructureDivergenceTest {
         assertTrue(first != differentSeed, "resident rotation dump must diverge across resident build seeds")
         assertTrue(first != differentDispatch, "resident rotation dump must diverge across shared dispatch drift state")
     }
-    private fun serializedLayout(seed: Int, contextSeed: Int = seed, nestedProfile: Int = 0, structureEntropy: ByteArray? = null): LayoutSnapshot {
-        val context = fixedContext(contextSeed)
+    private fun serializedLayout(seed: Int, contextSeed: Int = seed, nestedProfile: Int = 0, structureEntropy: ByteArray? = null, nativeVmProfile: NativeVmBuildProfile? = null): LayoutSnapshot {
+        val context = fixedContext(contextSeed, nativeVmProfile)
         return withVbc4BuildContext(context) {
             val serializer = if (structureEntropy == null) {
                 VmBytecodeSerializer(
@@ -282,7 +294,7 @@ class VmStructureDivergenceTest {
         )
         assertEquals(3, result.transformedMemberCount, "full-chain fixture must virtualize every selected method")
         result.artifact.jarEntries
-            .filter { entry -> entry.name.isVmResourceName() || entry.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE }
+            .filter { entry -> entry.name.isVmResourceName() }
             .sortedBy { it.name }
     }
 
@@ -372,10 +384,14 @@ class VmStructureDivergenceTest {
         .digest(bytes)
         .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xFF) }
 
-    private fun fixedContext(seed: Int): Vbc4BuildContext = Vbc4BuildContext(
+    private fun fixedContext(seed: Int, nativeVmProfile: NativeVmBuildProfile? = null): Vbc4BuildContext = Vbc4BuildContext(
         masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (seed ushr ((index and 3) * 8) xor index * 17).toByte() },
         nativeSeed = seed.toLong() xor 0x5A5A_1357L,
         jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (seed.rotateLeft(index and 31) xor index * 31).toByte() },
+        nativeVmProfile = nativeVmProfile ?: NativeVmBuildProfile.fromBuildMaterial(
+            seed.toLong() xor 0x5A5A_1357L,
+            ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (seed.rotateLeft(index and 31) xor index * 31).toByte() },
+        ),
     )
 
     private data class FullChainSnapshot(

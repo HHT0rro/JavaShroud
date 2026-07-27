@@ -12,6 +12,7 @@ import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployme
 import io.github.hht0rro.javashroud.transforms.protection.NativeKernelShellPacker
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.RuntimeKeyPartitions
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
@@ -118,12 +119,14 @@ class EmbeddedHelperDeploymentTest {
     }
 
     @Test
-    fun jni_microkernel_helper_runtime_resource_key_is_injected_per_build() {
+    fun jni_microkernel_helper_partition_keys_are_injected_per_build() {
+        val partitions = RuntimeKeyPartitions.generate()
         val context = Vbc4BuildContext(
             masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (index * 5 + 1).toByte() },
             nativeSeed = 0x1122_3344L,
             jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (index * 9 + 3).toByte() },
             runtimeResourceKey = ByteArray(32) { index -> (index * 7 + 11).toByte() },
+            runtimeKeyPartitions = partitions,
         )
 
         val updated = withVbc4BuildContext(context) {
@@ -134,7 +137,15 @@ class EmbeddedHelperDeploymentTest {
         }
         val helperBytes = updated.jarEntries.single { it.name == "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.class" }.bytes
 
-        assertEquals(context.runtimeResourceKey.toList(), runtimeResourceKeyBytes(helperBytes).toList(), "JniMicrokernelHelper must receive the build-local runtime resource key, not the repository placeholder")
+        assertEquals(partitions.resourcePartitionCount, invokeIntHelper(helperBytes, "runtimeResourcePartitionCount"), "helper must expose the per-build partition count")
+        assertEquals(partitions.anchorSlotId, invokeIntHelper(helperBytes, "anchorResourcePartition"), "helper must expose the anchor slot id")
+        for (slot in 0 until partitions.totalSlots) {
+            assertEquals(
+                partitions.copyKeyForSlot(slot).toList(),
+                invokePartitionKey(helperBytes, slot).toList(),
+                "helper must reassemble the exact partition key for slot $slot",
+            )
+        }
     }
     @Test
     fun string_encryption_embeds_native_decode_helper() {
@@ -190,18 +201,25 @@ class EmbeddedHelperDeploymentTest {
     }
 
 
-    private fun runtimeResourceKeyBytes(helperBytes: ByteArray): ByteArray {
-        val helperClass = object : ClassLoader(javaClass.classLoader) {
-            fun define(): Class<*> = defineClass(
-                "io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper",
-                helperBytes,
-                0,
-                helperBytes.size,
-            )
-        }.define()
-        val method = helperClass.getDeclaredMethod("runtimeResourceKey")
+    private fun defineHelper(helperBytes: ByteArray): Class<*> = object : ClassLoader(javaClass.classLoader) {
+        fun define(): Class<*> = defineClass(
+            "io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper",
+            helperBytes,
+            0,
+            helperBytes.size,
+        )
+    }.define()
+
+    private fun invokeIntHelper(helperBytes: ByteArray, name: String): Int {
+        val method = defineHelper(helperBytes).getDeclaredMethod(name)
         method.isAccessible = true
-        return method.invoke(null) as ByteArray
+        return method.invoke(null) as Int
+    }
+
+    private fun invokePartitionKey(helperBytes: ByteArray, slot: Int): ByteArray {
+        val method = defineHelper(helperBytes).getDeclaredMethod("partitionResourceKey", Int::class.javaPrimitiveType)
+        method.isAccessible = true
+        return method.invoke(null, slot) as ByteArray
     }
 
     private fun resolveWorkspacePath(relativePath: String): Path {

@@ -9,6 +9,8 @@ import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployme
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.NativeVmBuildProfile
+import io.github.hht0rro.javashroud.transforms.protection.RuntimeKeyPartitions
 import io.github.hht0rro.javashroud.transforms.protection.VmBytecodeSerializer
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
@@ -751,13 +753,102 @@ class VmInterpreterExecutionTest {
         }
     }
 
-    private fun runEngine(inputJar: Path, passIds: List<String>, passParams: Map<String, Map<String, Any>> = emptyMap()): Path {
-        val tag = safeTag(passIds.joinToString("-"), "javashroud-vm-exec-")
+    @Test
+    fun all_build_local_native_vm_profiles_preserve_thread_sleep_behavior() {
+        if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) return
+        val passes = listOf("method-virtualization", "jni-microkernel-loader")
+        val inputJar = buildThreadSleepFixtureJar(Files.createTempFile("javashroud-vm-profile-matrix", ".jar"))
+        val outputs = mutableListOf<Path>()
+        val sharedPartitions = RuntimeKeyPartitions.generate()
+        val results = mutableListOf<Pair<NativeVmBuildProfile, JavaProcessResult>>()
+        var baseline: JavaProcessResult? = null
+        try {
+            baseline = runJavaProcessWithTimeout(ProcessBuilder("java", "-jar", inputJar.toAbsolutePath().normalize().toString()))
+            assertEquals(0, baseline.exitCode, "Baseline native profile matrix fixture must exit cleanly. stdout=${baseline.output}")
+            listOf(NativeVmBuildProfile(0, 0), NativeVmBuildProfile(1, 1), NativeVmBuildProfile(2, 2)).forEach { profile ->
+                val baseContext = fixedVbc4Context()
+                val context = baseContext.copy(
+                    runtimeKeyPartitions = sharedPartitions.deepCopy(),
+                    nativeVmProfile = profile,
+                )
+                baseContext.wipe()
+                try {
+                    val outputJar = runEngine(
+                        inputJar = inputJar,
+                        passIds = passes,
+                        passParams = mapOf(
+                            "method-virtualization" to mapOf(
+                                "methodSelection" to "all-compatible",
+                                "strictVirtualization" to true,
+                                "maxInstructions" to 99999,
+                                "seed" to 0x1357_2468,
+                            ),
+                            "jni-microkernel-loader" to mapOf(
+                                "targetPlatform" to "windows-x64",
+                                "nativePackingLevel" to "off",
+                                "seed" to 0x2468_1357,
+                            ),
+                        ),
+                        contextOverride = context,
+                        outputTag = "profile-${profile.parserRowProfile}-${profile.operandAccessProfile}",
+                    )
+                    outputs.add(outputJar)
+                    assertTrue(methodInvokesNativeVmDispatcher(outputJar, "e2e/ThreadSleepRoot", "compute", "(I)I"), "Profile $profile must virtualize the fixture")
+                    val result = runJavaProcessWithTimeout(ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()))
+                    results += profile to result
+                    assertEquals(0, result.exitCode, "Profile $profile must execute cleanly. stdout=${result.output}")
+                    assertEquals(baseline.output.trim(), result.output.trim(), "Profile $profile must preserve native VBC4 behavior")
+                } finally {
+                    context.wipe()
+                }
+            }
+            writeNativeProfileBehaviorEvidence(baseline, results)
+        } finally {
+            sharedPartitions.wipe()
+            outputs.forEach(Files::deleteIfExists)
+            Files.deleteIfExists(inputJar)
+        }
+    }
+
+    private fun writeNativeProfileBehaviorEvidence(
+        baseline: JavaProcessResult,
+        results: List<Pair<NativeVmBuildProfile, JavaProcessResult>>,
+    ) {
+        val cwd = Path.of("").toAbsolutePath().normalize()
+        val root = if (cwd.fileName?.toString() == "core-engine") cwd.parent else cwd
+        val reportPath = root.resolve("build/core-engine/reports/native-max/native-vm-profile-behavior-evidence.json")
+        Files.createDirectories(reportPath.parent)
+        fun digest(value: String): String = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+        val profiles = results.joinToString(prefix = "[", postfix = "]", separator = ",") { (profile, result) ->
+            """{"parser_row_profile":${profile.parserRowProfile},"operand_access_profile":${profile.operandAccessProfile},"authenticated_id":${profile.authenticatedId},"exit_code":${result.exitCode},"stdout_sha256":"${digest(result.output.trim())}","contract_equal":${result.exitCode == baseline.exitCode && result.output.trim() == baseline.output.trim()}}"""
+        }
+        val report = """{"schema_version":1,"fixture":"thread-sleep-native-vbc4","baseline":{"exit_code":${baseline.exitCode},"stdout_sha256":"${digest(baseline.output.trim())}"},"profiles":$profiles,"status":"passed"}"""
+        Files.writeString(reportPath, report, Charsets.UTF_8)
+        assertTrue(Files.size(reportPath) > 0, "Native profile behavior evidence report must be written: $reportPath")
+    }
+
+    private fun runEngine(
+        inputJar: Path,
+        passIds: List<String>,
+        passParams: Map<String, Map<String, Any>> = emptyMap(),
+        contextOverride: Vbc4BuildContext? = null,
+        outputTag: String? = null,
+    ): Path {
+        val tag = safeTag(outputTag ?: passIds.joinToString("-"), "javashroud-vm-exec-")
         val outputJar = inputJar.resolveSibling("javashroud-vm-out-$tag.jar")
         val configPath = inputJar.resolveSibling("javashroud-vm-cfg-$tag.toml")
         writeRunConfig(configPath, inputJar, outputJar, passIds, passParams)
         try {
-            dispatchRequest(buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())), EngineKernel())
+            if (contextOverride == null) {
+                dispatchRequest(buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())), EngineKernel())
+            } else {
+                io.github.hht0rro.javashroud.kernel.executeKernelRun(
+                    config = io.github.hht0rro.javashroud.config.loadValidatedConfig(configPath),
+                    configPath = configPath,
+                    vbc4BuildContextOverride = contextOverride,
+                )
+            }
         } finally {
             Files.deleteIfExists(configPath)
         }
@@ -819,11 +910,13 @@ class VmInterpreterExecutionTest {
                                 override fun visitMethodInsn(opcode: Int, owner: String, name: String, descriptor: String, isInterface: Boolean) {
                                     if (
                                         opcode == Opcodes.INVOKESTATIC &&
-                                        (descriptor == "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;" ||
-                                            descriptor == "(J[Ljava/lang/Object;)Ljava/lang/Object;" ||
-                                            descriptor == "(J)V" ||
-                                            descriptor == "(JI)V")
-                                    ) found = true
+                                         (descriptor == "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;" ||
+                                             descriptor == "(J[Ljava/lang/Object;)Ljava/lang/Object;" ||
+                                             descriptor == "(J)V" ||
+                                             descriptor == "(J)I" ||
+                                             descriptor == "(JI)I" ||
+                                             descriptor == "(JI)V")
+                                     ) found = true
                                 }
                             }
                         }

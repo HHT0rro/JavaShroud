@@ -13,16 +13,20 @@ import java.lang.invoke.MethodHandleProxies;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.util.LinkedHashSet;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.jar.JarEntry;
+import java.util.jar.JarFile;
 import java.util.function.Function;
 import java.util.function.IntUnaryOperator;
 import java.util.Arrays;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.security.MessageDigest;
-import javax.crypto.Cipher;
-import javax.crypto.Mac;
-import javax.crypto.spec.IvParameterSpec;
-import javax.crypto.spec.SecretKeySpec;
+import java.security.NoSuchAlgorithmException;
+import java.security.SecureRandom;
 
 /**
  * Runtime helper for JNI microkernel loader.
@@ -35,7 +39,11 @@ import javax.crypto.spec.SecretKeySpec;
  */
 public final class JniMicrokernelHelper {
 
-    private static volatile int loadState = 0; // 0=untried, 1=native
+    private static final int LOAD_FAILED = -1;
+    private static final int LOAD_UNTRIED = 0;
+    private static final int LOAD_LOADING = 1;
+    private static final int LOAD_READY = 2;
+    private static volatile int loadState = LOAD_UNTRIED;
     private static volatile String loadMessage = "";
     private static volatile boolean diversifiedVmEnabled = false;
     private static volatile String vmSelfCheck = "";
@@ -43,10 +51,9 @@ public final class JniMicrokernelHelper {
     private static volatile boolean nativeSelfCheckFailed = false;
     private static volatile boolean sealedNativeBindingsPublished = false;
     private static final String SEALED_NATIVE_INDEX_RESOURCE = "META-INF/.r/0.dat";
-    private static final String VM_PRELOAD_INDEX_RESOURCE = "META-INF/.r/vm.idx";
-    private static final String VM_CURRENT_PRELOAD_INDEX_RESOURCE = "META-INF/.r/vm-current.idx";
-    private static final int RUNTIME_RESOURCE_VERSION = 6;
-    private static final int LEGACY_RUNTIME_RESOURCE_VERSION = 5;
+    private static final String VM_CATALOG_RESOURCE = "META-INF/.r/vm.catalog";
+    private static final int RUNTIME_RESOURCE_VERSION = 7;
+    private static final int NATIVE_ANCHOR_KEY_SLOT = 16;
     private static final int BOOTSTRAP_NATIVE_INDEX_VERSION = 1;
     private static final int ZSTD_MAGIC = 0xFD2FB528;
     private static final ConcurrentMap<String, Object[]> SAM_LAMBDA_CACHE = new ConcurrentHashMap<>();
@@ -60,15 +67,15 @@ public final class JniMicrokernelHelper {
     static native int nativeHeartbeat();
     static native String nativeGetVersion();
     static native long nativeGetBootToken();
-    static native void nativeInstallRuntimeResourceKey(byte[] key);
-    static native void nativePreloadRuntimeResources();
+    static native void nativeInstallRuntimeResourceKey(byte[] key, int slot);
+    static native void nativePreloadRuntimeResources(byte[] preloadIndex, byte[] commitments, byte[] startupNonce);
     public static native byte[] nativeDecryptAes(byte[] encrypted, byte[] key, byte[] iv);
     public static native byte[] nativeDeriveClassEncryptionKey(byte[] keyId, byte[] salt, int length);
 
     public static native Object nativeExecuteVmResource(long entryToken, String resourcePath, Object[] args);
     public static native Object nativeExecuteVmResourceByToken(long entryToken, Object[] args);
     public static Object executeVmResource(long entryToken, String resourcePath, Object[] args) {
-        if (loadState == 0) {
+        if (loadState == LOAD_UNTRIED) {
             loadKernel("vm", "auto", "vm-diverse");
         }
         if (isNativeLoaded()) {
@@ -78,7 +85,7 @@ public final class JniMicrokernelHelper {
         throw new SecurityException("method-virtualization requires a bundled sealed JNI VM kernel; native kernel not loaded (" + loadMessage + ")");
     }
     public static Object executeVmResource(long entryToken, Object[] args) {
-        if (loadState == 0) {
+        if (loadState == LOAD_UNTRIED) {
             loadKernel("vm", "auto", "vm-diverse");
         }
         if (isNativeLoaded()) {
@@ -93,7 +100,7 @@ public final class JniMicrokernelHelper {
     public static native int nativeExecuteVmResourceIntInt(long entryToken, int arg0);
     public static native void nativeExecuteVmResourceIntVoid(long entryToken, int arg0);
     public static void executeVmResourceVoid(long entryToken) {
-        if (loadState == 0) {
+        if (loadState == LOAD_UNTRIED) {
             loadKernel("vm", "auto", "vm-diverse");
         }
         if (isNativeLoaded()) {
@@ -104,7 +111,7 @@ public final class JniMicrokernelHelper {
         throw new SecurityException("method-virtualization requires a bundled sealed JNI VM kernel; native kernel not loaded (" + loadMessage + ")");
     }
     public static int executeVmResourceInt(long entryToken) {
-        if (loadState == 0) {
+        if (loadState == LOAD_UNTRIED) {
             loadKernel("vm", "auto", "vm-diverse");
         }
         if (isNativeLoaded()) {
@@ -114,7 +121,7 @@ public final class JniMicrokernelHelper {
         throw new SecurityException("method-virtualization requires a bundled sealed JNI VM kernel; native kernel not loaded (" + loadMessage + ")");
     }
     public static int executeVmResourceIntInt(long entryToken, int arg0) {
-        if (loadState == 0) {
+        if (loadState == LOAD_UNTRIED) {
             loadKernel("vm", "auto", "vm-diverse");
         }
         if (isNativeLoaded()) {
@@ -124,7 +131,7 @@ public final class JniMicrokernelHelper {
         throw new SecurityException("method-virtualization requires a bundled sealed JNI VM kernel; native kernel not loaded (" + loadMessage + ")");
     }
     public static void executeVmResourceIntVoid(long entryToken, int arg0) {
-        if (loadState == 0) {
+        if (loadState == LOAD_UNTRIED) {
             loadKernel("vm", "auto", "vm-diverse");
         }
         if (isNativeLoaded()) {
@@ -250,7 +257,7 @@ public final class JniMicrokernelHelper {
             ClassLoader loader = JniMicrokernelHelper.class.getClassLoader();
             Class<?> ownerClass = Class.forName(owner.replace('/', '.'), false, loader);
             MethodType methodType = descriptorMethodType(descriptor, ownerClass.getClassLoader());
-            MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(ownerClass, MethodHandles.lookup());
+            MethodHandles.Lookup lookup = privateLookup(ownerClass);
             switch (tag) {
                 case 6: return lookup.findStatic(ownerClass, name, methodType);
                 case 5: return lookup.findVirtual(ownerClass, name, methodType);
@@ -260,6 +267,22 @@ public final class JniMicrokernelHelper {
             }
         } catch (Throwable ignored) {
             return null;
+        }
+    }
+
+    private static MethodHandles.Lookup privateLookup(Class<?> ownerClass) throws ReflectiveOperationException {
+        try {
+            Method privateLookupIn = MethodHandles.class.getMethod(
+                "privateLookupIn",
+                Class.class,
+                MethodHandles.Lookup.class
+            );
+            return (MethodHandles.Lookup) privateLookupIn.invoke(null, ownerClass, MethodHandles.lookup());
+        } catch (NoSuchMethodException ignored) {
+            java.lang.reflect.Constructor<MethodHandles.Lookup> constructor =
+                MethodHandles.Lookup.class.getDeclaredConstructor(Class.class);
+            constructor.setAccessible(true);
+            return constructor.newInstance(ownerClass);
         }
     }
 
@@ -352,11 +375,11 @@ public final class JniMicrokernelHelper {
     /* ---- Public status API ---- */
 
     public static String getLoadStatus() {
-        return loadState == 0 && (loadMessage == null || loadMessage.length() == 0) ? "untried" : loadMessage;
+        return loadState == LOAD_UNTRIED && (loadMessage == null || loadMessage.length() == 0) ? "untried" : loadMessage;
     }
 
     public static boolean isNativeLoaded() {
-        return loadState == 1;
+        return loadState == LOAD_READY;
     }
 
     /* ---- Kernel loading ---- */
@@ -365,26 +388,39 @@ public final class JniMicrokernelHelper {
         loadKernel(kernelComponents, targetPlatform, "vm-off");
     }
 
-    public static void loadKernel(String kernelComponents, String targetPlatform, String vmMode) {
+    public static synchronized void loadKernel(String kernelComponents, String targetPlatform, String vmMode) {
         diversifiedVmEnabled = "vm-diverse".equals(vmMode);
-        if (loadState != 0) return;
+        if (loadState != LOAD_UNTRIED) return;
+        loadState = LOAD_LOADING;
         try {
             String platformSuffix = detectPlatform();
             if (platformSuffix == null) {
                 loadMessage = "native-unavailable";
+                loadState = LOAD_FAILED;
                 runDiversifiedVmSelfExercise();
                 return;
             }
             if (!"auto".equals(targetPlatform) && !targetPlatform.equals(platformSuffix)) {
+                loadState = LOAD_FAILED;
                 return;
             }
             // Prefer the bundled library so stale system-path copies cannot shadow the ABI we generated.
-            if (tryLoadBundledNative(platformSuffix, kernelComponents)) { runDiversifiedVmSelfExercise(); return; }
-            if (tryLoadNative(platformSuffix, kernelComponents)) { runDiversifiedVmSelfExercise(); return; }
+            if (tryLoadBundledNative(platformSuffix, kernelComponents)) {
+                loadState = LOAD_READY;
+                runDiversifiedVmSelfExercise();
+                return;
+            }
+            if (tryLoadNative(platformSuffix, kernelComponents)) {
+                loadState = LOAD_READY;
+                runDiversifiedVmSelfExercise();
+                return;
+            }
             if (loadMessage == null || loadMessage.length() == 0) loadMessage = "native-unavailable";
+            loadState = LOAD_FAILED;
             runDiversifiedVmSelfExercise();
         } catch (Exception e) {
             loadMessage = debugNativeLoadMessage("native-exception", e);
+            loadState = LOAD_FAILED;
         }
     }
 
@@ -398,7 +434,7 @@ public final class JniMicrokernelHelper {
      * This distinguishes a genuine integrity failure from early call sites that race helper initialization.
      */
     public static boolean isKernelIntegrityReady() {
-        return loadState == 1 && !nativeSelfCheckFailed;
+        return loadState == LOAD_READY && !nativeSelfCheckFailed;
     }
 
     /** Status string for the diversified-VM load-time self-exercise. */
@@ -413,7 +449,7 @@ public final class JniMicrokernelHelper {
      */
     private static void runDiversifiedVmSelfExercise() {
         if (!diversifiedVmEnabled) return;
-        vmSelfCheck = loadState == 1 ? "native:vm-diverse:ok" : "native:vm-diverse:unavailable";
+        vmSelfCheck = loadState == LOAD_READY ? "native:vm-diverse:ok" : "native:vm-diverse:unavailable";
     }
 
     /**
@@ -498,54 +534,231 @@ public final class JniMicrokernelHelper {
     }
 
     private static void preloadRuntimeResourcesIntoNative() {
+        byte[][] catalog = null;
+        byte[] startupNonce = createVmStartupNonce();
         try {
-            verifyVmPreloadIndexBeforeNative();
-            nativePreloadRuntimeResources();
+            catalog = verifiedVmCatalogPayload();
+            nativePreloadRuntimeResources(catalog[0], catalog[1], startupNonce);
         } catch (SecurityException e) {
             throw e;
         } catch (Throwable e) {
             throw new SecurityException("VM preload failed", e);
+        } finally {
+            if (catalog != null) {
+                Arrays.fill(catalog[0], (byte) 0);
+                Arrays.fill(catalog[1], (byte) 0);
+            }
+            Arrays.fill(startupNonce, (byte) 0);
         }
     }
 
-    private static void verifyVmPreloadIndexBeforeNative() {
-        String index = vmPreloadIndexText();
-        if (index == null || index.length() == 0) return;
+    private static byte[] createVmStartupNonce() {
+        byte[] nonce = new byte[32];
+        vmStartupSecureRandom().nextBytes(nonce);
+        return nonce;
+    }
+
+    private static SecureRandom vmStartupSecureRandom() {
+        if (File.separatorChar == '\\') {
+            try {
+                return SecureRandom.getInstance("Windows-PRNG");
+            } catch (NoSuchAlgorithmException ignored) {
+                // Retain the portable JCA provider path on non-standard Windows runtimes.
+            }
+        }
+        return new SecureRandom();
+    }
+
+    private static void verifyVmPreloadIndexBeforeNative(String index, Set<String> committedPaths) {
+        if (index == null || index.length() == 0) throw new SecurityException("missing VM preload index");
+        Set<String> tokens = new HashSet<>();
         String[] lines = index.split("\n");
         for (String rawLine : lines) {
             String line = rawLine.trim();
             if (line.length() == 0 || line.startsWith("A|")) continue;
             String[] parts = line.split("\\|", -1);
-            if (parts.length >= 7 && isHex(parts[0], 1, 16) && isHex(parts[4], 64, 64) && isHex(parts[5], 1, 8) && isHex(parts[6], 16, 16)) {
-                String actual = vmPreloadEntryAuthTag(parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]);
-                if (!constantTimeAsciiEquals(actual, parts[6])) {
-                    throw new SecurityException("invalid VM preload profile auth");
-                }
+            if (parts.length < 7 || !isHex(parts[0], 1, 16) || !isHex(parts[4], 64, 64) ||
+                !isHex(parts[5], 1, 8) || !isHex(parts[6], 16, 16)) {
+                throw new SecurityException("malformed VM preload entry");
             }
+            if (!tokens.add(parts[0]) || !committedPaths.contains(parts[1]) || !committedPaths.contains(parts[2])) {
+                throw new SecurityException("invalid VM preload catalog reference");
+            }
+            String actual = vmPreloadEntryAuthTag(parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]);
+            if (!constantTimeAsciiEquals(actual, parts[6])) {
+                throw new SecurityException("invalid VM preload profile auth");
+            }
+        }
+        if (tokens.isEmpty()) throw new SecurityException("empty VM preload index");
+    }
+
+    private static byte[][] verifiedVmCatalogPayload() throws Exception {
+        JarFile catalogJar = openCatalogJar();
+        try {
+        byte[] rootRaw = readRequiredResource(VM_CATALOG_RESOURCE, catalogJar);
+        int tagMarker = lastIndexOf(rootRaw, new byte[] {'\n', 'H', '|'});
+        if (tagMarker < 0) throw new SecurityException("malformed VM catalog root");
+        byte[] rootBody = Arrays.copyOfRange(rootRaw, 0, tagMarker + 1);
+        String rootText = new String(rootRaw, StandardCharsets.UTF_8);
+        String rootTagText = rootText.substring(tagMarker + 3).trim();
+        if (!isHex(rootTagText, 64, 64)) throw new SecurityException("malformed VM catalog root tag");
+        byte[] anchorKey = partitionResourceKey(anchorResourcePartition());
+        try {
+            byte[] expectedTag = hmacSha256(anchorKey, concat(
+                "jsc1-root-auth-v1".getBytes(StandardCharsets.US_ASCII),
+                rootBody
+            ));
+            if (!MessageDigest.isEqual(expectedTag, hexToBytes(rootTagText))) {
+                throw new SecurityException("invalid VM catalog root tag");
+            }
+        } finally {
+            Arrays.fill(anchorKey, (byte) 0);
+        }
+
+        String[] rootLines = new String(rootBody, StandardCharsets.UTF_8).split("\n");
+        if (rootLines.length < 2) throw new SecurityException("empty VM catalog root");
+        String[] header = rootLines[0].split("\\|", -1);
+        if (header.length != 6 || !"JSC1".equals(header[0]) || !isHex(header[1], 32, 32) ||
+            !isDecimal(header[2]) || !isDecimal(header[3]) || !isDecimal(header[4]) || !isHex(header[5], 64, 64)) {
+            throw new SecurityException("malformed VM catalog header");
+        }
+        byte[] catalogId = hexToBytes(header[1]);
+        int partitionCount = parsePositiveInt(header[2], "partition count");
+        int expectedMethodCount = parsePositiveInt(header[3], "method count");
+        int expectedResourceCount = parsePositiveInt(header[4], "resource count");
+        if (partitionCount != runtimeResourcePartitionCount()) throw new SecurityException("VM catalog partition mismatch");
+        byte[] expectedCatalogRoot = hexToBytes(header[5]);
+
+        List<String[]> directories = new ArrayList<>();
+        for (int i = 1; i < rootLines.length; i++) {
+            String line = rootLines[i].trim();
+            if (line.length() == 0) continue;
+            String[] parts = line.split("\\|", -1);
+            if (parts.length != 8 || !"D".equals(parts[0])) throw new SecurityException("malformed VM catalog directory");
+            directories.add(parts);
+        }
+        if (directories.size() != partitionCount) throw new SecurityException("incomplete VM catalog directories");
+        sortVmCatalogDirectories(directories);
+
+        StringBuilder preloadIndex = new StringBuilder();
+        StringBuilder commitments = new StringBuilder();
+        Set<String> committedPaths = new HashSet<>();
+        List<byte[]> partitionRoots = new ArrayList<>();
+        int totalMethods = 0;
+        int totalResources = 0;
+        for (int directoryOrdinal = 0; directoryOrdinal < directories.size(); directoryOrdinal++) {
+            String[] descriptor = directories.get(directoryOrdinal);
+            int partitionId = parsePositiveInt(descriptor[1], "partition id");
+            if (partitionId != directoryOrdinal || !isHex(descriptor[4], 64, 64) || !isHex(descriptor[7], 64, 64)) {
+                throw new SecurityException("invalid VM catalog directory ordering");
+            }
+            String directoryPath = descriptor[2];
+            int directoryLength = parsePositiveInt(descriptor[3], "directory length");
+            int directoryMethodCount = parsePositiveInt(descriptor[5], "directory method count");
+            int directoryResourceCount = parsePositiveInt(descriptor[6], "directory resource count");
+            byte[] descriptorRoot = hexToBytes(descriptor[7]);
+            byte[] directoryRaw = readRequiredResource(directoryPath, catalogJar);
+            if (directoryRaw.length != directoryLength || !MessageDigest.isEqual(sha256(directoryRaw), hexToBytes(descriptor[4]))) {
+                throw new SecurityException("invalid VM catalog directory ciphertext");
+            }
+            if (!hasPartitionedRuntimeResourceHeader(directoryRaw, partitionId)) {
+                throw new SecurityException("VM catalog directory partition mismatch");
+            }
+            byte[] directoryPlain = decodeRuntimeResource(directoryRaw, true);
+            if (directoryPlain == null) throw new SecurityException("invalid VM catalog directory envelope");
+            String[] directoryLines = new String(directoryPlain, StandardCharsets.UTF_8).split("\n");
+            if (directoryLines.length == 0) throw new SecurityException("empty VM catalog directory");
+            String[] directoryHeader = directoryLines[0].split("\\|", -1);
+            if (directoryHeader.length != 6 || !"JSD1".equals(directoryHeader[0]) ||
+                !header[1].equals(directoryHeader[1]) || partitionId != parsePositiveInt(directoryHeader[2], "directory partition") ||
+                directoryMethodCount != parsePositiveInt(directoryHeader[3], "directory method count") ||
+                directoryResourceCount != parsePositiveInt(directoryHeader[4], "directory resource count") ||
+                !descriptor[7].equals(directoryHeader[5])) {
+                throw new SecurityException("invalid VM catalog directory header");
+            }
+            List<byte[]> leaves = new ArrayList<>();
+            int actualMethodCount = 0;
+            int actualResourceCount = 0;
+            for (int lineIndex = 1; lineIndex < directoryLines.length; lineIndex++) {
+                String line = directoryLines[lineIndex];
+                if (line.length() == 0) continue;
+                if (line.startsWith("M|")) {
+                    preloadIndex.append(line.substring(2)).append('\n');
+                    actualMethodCount++;
+                    continue;
+                }
+                String[] resource = line.split("\\|", -1);
+                if (resource.length != 5 || !"R".equals(resource[0]) || !isDecimal(resource[3]) || !isHex(resource[4], 64, 64)) {
+                    throw new SecurityException("malformed VM catalog resource");
+                }
+                String logicalPath = resource[1];
+                String storagePath = resource[2];
+                int rawLength = parsePositiveInt(resource[3], "resource length");
+                byte[] rawDigest = hexToBytes(resource[4]);
+                if (!committedPaths.add(storagePath)) throw new SecurityException("duplicate VM catalog resource");
+                byte[] raw = readRequiredResource(storagePath, catalogJar);
+                if (raw.length != rawLength || !MessageDigest.isEqual(sha256(raw), rawDigest) ||
+                    !hasPartitionedRuntimeResourceHeader(raw, partitionId)) {
+                    throw new SecurityException("invalid VM catalog resource ciphertext");
+                }
+                leaves.add(vmCatalogLeaf(catalogId, partitionId, logicalPath, storagePath, rawLength, rawDigest));
+                commitments.append("R|").append(storagePath).append('|').append(rawLength).append('|')
+                    .append(resource[4]).append('|').append(partitionId).append('\n');
+                actualResourceCount++;
+            }
+            if (actualMethodCount != directoryMethodCount || actualResourceCount != directoryResourceCount) {
+                throw new SecurityException("VM catalog directory count mismatch");
+            }
+            byte[] actualRoot = vmCatalogMerkleRoot(leaves, catalogId, partitionId);
+            if (!MessageDigest.isEqual(actualRoot, descriptorRoot)) throw new SecurityException("VM catalog partition root mismatch");
+            partitionRoots.add(actualRoot);
+            totalMethods += actualMethodCount;
+            totalResources += actualResourceCount;
+        }
+        if (totalMethods != expectedMethodCount || totalResources != expectedResourceCount) {
+            throw new SecurityException("VM catalog count mismatch");
+        }
+        if (!MessageDigest.isEqual(vmCatalogRoot(catalogId, partitionRoots), expectedCatalogRoot)) {
+            throw new SecurityException("VM catalog root mismatch");
+        }
+        verifyVmPreloadIndexBeforeNative(preloadIndex.toString(), committedPaths);
+        return new byte[][] {
+            preloadIndex.toString().getBytes(StandardCharsets.UTF_8),
+            commitments.toString().getBytes(StandardCharsets.UTF_8),
+        };
+        } finally {
+            if (catalogJar != null) catalogJar.close();
         }
     }
 
-    private static String vmPreloadIndexText() {
-        String current = vmPreloadIndexText(VM_CURRENT_PRELOAD_INDEX_RESOURCE);
-        return current != null ? current : vmPreloadIndexText(VM_PRELOAD_INDEX_RESOURCE);
+    private static JarFile openCatalogJar() {
+        try {
+            java.security.CodeSource source = JniMicrokernelHelper.class.getProtectionDomain().getCodeSource();
+            if (source == null || source.getLocation() == null || !"file".equalsIgnoreCase(source.getLocation().getProtocol())) return null;
+            File file = new File(source.getLocation().toURI());
+            return file.isFile() ? new JarFile(file, false) : null;
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
-    private static String vmPreloadIndexText(String resourcePath) {
+    private static byte[] readRequiredResource(String resourcePath, JarFile catalogJar) throws Exception {
+        if (catalogJar != null) {
+            JarEntry entry = catalogJar.getJarEntry(resourcePath);
+            if (entry == null || entry.isDirectory()) throw new SecurityException("missing VM catalog resource");
+            try (InputStream in = catalogJar.getInputStream(entry)) {
+                return readAll(in);
+            }
+        }
         try (InputStream in = resourceStream(resourcePath)) {
-            if (in == null) return null;
-            byte[] decoded = decodeRuntimeResource(readAll(in), true);
-            if (decoded == null) throw new SecurityException("invalid VM preload index resource");
-            return decodeMaskedNativeIndexText(new String(decoded, StandardCharsets.UTF_8));
-        } catch (SecurityException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new SecurityException("invalid VM preload index resource", e);
+            if (in == null) throw new SecurityException("missing VM catalog resource");
+            return readAll(in);
         }
     }
 
     private static String vmPreloadEntryAuthTag(String tokenHex, String resourcePath, String manifestPath, String shardCount, String mesh, String profile) {
         byte[] digest = sha256(concat(
-            "jsmi2-entry-auth".getBytes(StandardCharsets.US_ASCII), new byte[] { 0 },
+            "jsc1-method-auth-v1".getBytes(StandardCharsets.US_ASCII), new byte[] { 0 },
             tokenHex.getBytes(StandardCharsets.US_ASCII), new byte[] { 0 },
             resourcePath.getBytes(StandardCharsets.UTF_8), new byte[] { 0 },
             manifestPath.getBytes(StandardCharsets.UTF_8), new byte[] { 0 },
@@ -581,11 +794,20 @@ public final class JniMicrokernelHelper {
     }
 
     private static void installRuntimeResourceKeyIntoNative() {
-        byte[] key = runtimeResourceKey();
+        int count = runtimeResourcePartitionCount();
+        for (int slot = 0; slot < count; slot++) {
+            byte[] key = partitionResourceKey(slot);
+            try {
+                nativeInstallRuntimeResourceKey(key, slot);
+            } finally {
+                Arrays.fill(key, (byte) 0);
+            }
+        }
+        byte[] anchor = partitionResourceKey(anchorResourcePartition());
         try {
-            nativeInstallRuntimeResourceKey(key);
+            nativeInstallRuntimeResourceKey(anchor, NATIVE_ANCHOR_KEY_SLOT);
         } finally {
-            Arrays.fill(key, (byte) 0);
+            Arrays.fill(anchor, (byte) 0);
         }
     }
 
@@ -604,7 +826,11 @@ public final class JniMicrokernelHelper {
 
     private static String debugNativeLoadMessage(String prefix, Throwable e) {
         if (!Boolean.getBoolean("javashroud.debugNativeLoad")) return "native-unavailable";
-        return prefix + ":" + e.getClass().getName() + ":" + String.valueOf(e.getMessage());
+        Throwable root = e;
+        while (root.getCause() != null && root.getCause() != root) root = root.getCause();
+        String detail = prefix + ":" + e.getClass().getName() + ":" + String.valueOf(e.getMessage());
+        if (root != e) detail += ":cause=" + root.getClass().getName() + ":" + String.valueOf(root.getMessage());
+        return detail;
     }
 
     private static boolean tryLoadNative(String platformSuffix, String components) {
@@ -616,15 +842,6 @@ public final class JniMicrokernelHelper {
             loadMessage = "native:" + platformSuffix + ":" + initializeNativeKernel(platformSuffix);
             installRuntimeResourceKeyIntoNative();
             sealedNativeBindingsPublished = true;
-            // Mark the kernel loaded BEFORE preloading VM resources. Native preload
-            // (and the method-handle pre-resolution it performs) can trigger <clinit>
-            // of other bundled classes whose injected loadKernel call would otherwise
-            // re-enter this loader while loadState is still 0, recursively redoing the
-            // entire extract/load/init/preload sequence (an effectively unbounded
-            // cascade under broad method virtualization). With loadState already set,
-            // the re-entry guard in loadKernel short-circuits and nested
-            // executeVmResource calls see a ready kernel. Reset on failure.
-            loadState = 1;
             try {
                 preloadRuntimeResourcesIntoNative();
                 if (verifyNativeAbiAfterLoad()) {
@@ -634,7 +851,6 @@ public final class JniMicrokernelHelper {
                 return ok;
             } finally {
                 if (!ok) {
-                    loadState = 0;
                     sealedNativeBindingsPublished = false;
                 }
             }
@@ -675,7 +891,9 @@ public final class JniMicrokernelHelper {
         boolean ok = false;
         try {
             if (!ensureNativeExtractDirectory(extractDirectory)) return false;
-            tempLib = File.createTempFile(nativeTempPrefix(resourcePath), suffix, extractDirectory);
+            /* File.createTempFile has a one-time multi-second init path on
+             * Java 8 (Windows); build the unique name directly instead. */
+            tempLib = createUniqueTempFile(nativeTempPrefix(resourcePath), suffix, extractDirectory);
             tempLib.deleteOnExit();
             try (FileOutputStream out = new FileOutputStream(tempLib)) {
                 out.write(nativeBytes);
@@ -688,11 +906,6 @@ public final class JniMicrokernelHelper {
             loadMessage = "native:bundled:" + platformSuffix + ":" + initializeNativeKernel(platformSuffix);
             installRuntimeResourceKeyIntoNative();
             sealedNativeBindingsPublished = true;
-            // See the note in tryLoadNative: set loadState before preload so the
-            // re-entry guard in loadKernel stops <clinit>-triggered recursion during
-            // native preload/handle resolution, and nested executeVmResource calls
-            // see a ready kernel. Reset on failure.
-            loadState = 1;
             try {
                 preloadRuntimeResourcesIntoNative();
                 if (verifyNativeAbiAfterLoad()) {
@@ -702,7 +915,6 @@ public final class JniMicrokernelHelper {
                 return ok;
             } finally {
                 if (!ok) {
-                    loadState = 0;
                     sealedNativeBindingsPublished = false;
                 }
             }
@@ -863,7 +1075,7 @@ public final class JniMicrokernelHelper {
         try (InputStream in = resourceStream(SEALED_NATIVE_INDEX_RESOURCE)) {
             if (in == null) return null;
             byte[] decoded = decodeBootstrapNativeIndex(readAll(in));
-            return decoded == null ? null : decodeMaskedNativeIndexText(new String(decoded, StandardCharsets.UTF_8));
+            return decoded == null ? null : new String(decoded, StandardCharsets.UTF_8);
         } catch (Exception ignored) {
             return null;
         }
@@ -891,32 +1103,6 @@ public final class JniMicrokernelHelper {
         return raw;
     }
 
-    private static String decodeMaskedNativeIndexText(String text) {
-        if (text == null || !text.trim().startsWith("JSMI2|")) return text;
-        try {
-            String[] parts = text.trim().split("\\|", -1);
-            if (parts.length != 4) return text;
-            byte[] salt = hexToBytes(parts[1]);
-            byte[] masked = hexToBytes(parts[2]);
-            byte[] expectedTag = hexToBytes(parts[3]);
-            if (salt.length != 16 || expectedTag.length != 16) return text;
-            byte[] plain = new byte[masked.length];
-            int offset = 0;
-            int counter = 0;
-            while (offset < masked.length) {
-                byte[] mask = sha256(concat("jsmi2-mask".getBytes(StandardCharsets.US_ASCII), salt, intBytes(counter++)));
-                int take = Math.min(mask.length, masked.length - offset);
-                for (int index = 0; index < take; index++) plain[offset + index] = (byte) (masked[offset + index] ^ mask[index]);
-                offset += take;
-            }
-            byte[] actualTag = Arrays.copyOf(sha256(concat("jsmi2-tag".getBytes(StandardCharsets.US_ASCII), salt, plain)), 16);
-            if (!Arrays.equals(actualTag, expectedTag)) return text;
-            return new String(plain, StandardCharsets.UTF_8);
-        } catch (Exception ignored) {
-            return text;
-        }
-    }
-
     private static byte[] hexToBytes(String hex) {
         if ((hex.length() & 1) != 0) throw new IllegalArgumentException("odd hex");
         byte[] out = new byte[hex.length() / 2];
@@ -935,13 +1121,17 @@ public final class JniMicrokernelHelper {
         return decoded;
     }
 
-    private static byte[] runtimeResourceKey() {
-        return new byte[] {
-            0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-            0, 0, 0, 0, 0, 0, 0, 0,
-        };
+    private static int runtimeResourcePartitionCount() {
+        return 1;
+    }
+
+    private static int anchorResourcePartition() {
+        return 0;
+    }
+
+    private static byte[] partitionResourceKey(int partitionId) {
+        if (partitionId < 0) return new byte[32];
+        return new byte[32];
     }
 
     public static byte[] decodeRuntimeResourceEnvelope(byte[] raw) {
@@ -970,71 +1160,55 @@ public final class JniMicrokernelHelper {
         if (!hasRuntimeResourceHeader(raw)) return null;
         int version = raw[4] & 0xFF;
         if (version == RUNTIME_RESOURCE_VERSION) return decodeRuntimeResourceCurrent(raw, allowCompressed);
-        if (version == LEGACY_RUNTIME_RESOURCE_VERSION) return decodeRuntimeResourceLegacy(raw, allowCompressed);
         return null;
     }
 
     private static boolean hasRuntimeResourceHeader(byte[] raw) {
-        return raw != null && raw.length >= 4 &&
+        return raw != null && raw.length >= 5 &&
             (raw[0] & 0xFF) == 0x4A && (raw[1] & 0xFF) == 0x53 && (raw[2] & 0xFF) == 0x52 && (raw[3] & 0xFF) == 0x50;
     }
 
     private static byte[] decodeRuntimeResourceCurrent(byte[] raw, boolean allowCompressed) {
-        if (raw.length < 154 || (raw[raw.length - 1] & 0xFF) != 32) return null;
+        if (raw.length < 156 || (raw[raw.length - 1] & 0xFF) != 32) return null;
         byte[] nonce = Arrays.copyOfRange(raw, 5, 21);
         int metadataLength = readSealedResourceLe16(raw, 21);
         int macLength = readSealedResourceLe16(raw, 23);
+        int partitionId = readSealedResourceLe16(raw, 25);
         if (metadataLength != 96 || macLength != 32) return null;
-        int metadataOffset = 25;
+        if (partitionId < 0 || partitionId >= runtimeResourcePartitionCount()) return null;
+        int metadataOffset = 27;
         int bodyOffset = metadataOffset + metadataLength;
         if (bodyOffset + 33 > raw.length) return null;
         int tagOffset = raw.length - 33;
-        byte[] expected = hmacSha256(concat("jsrp-auth-v2".getBytes(StandardCharsets.US_ASCII), nonce, Arrays.copyOfRange(raw, 0, tagOffset)));
-        if (!constantTimeEquals(expected, raw, tagOffset)) return null;
-        byte[] metadata = runtimeResourceAesCtrWithDomains(
-            Arrays.copyOfRange(raw, metadataOffset, bodyOffset),
-            nonce,
-            intBytes(0),
-            intBytes(0),
-            intBytes(0)
-        );
-        RuntimeResourceMetadata parsed = parseRuntimeResourceMetadata(metadata);
-        if (parsed == null) return null;
-        if (parsed.kindId < 1 || parsed.kindId > 4) return null;
-        if (parsed.layerCount < 1 || parsed.layerCount > 7 || parsed.variantId > 127) return null;
-        if (parsed.plainLength < 0 || parsed.storedLength < 0 || parsed.bodyLength < 0) return null;
-        if (bodyOffset + parsed.bodyLength != tagOffset) return null;
-        byte[] body = Arrays.copyOfRange(raw, bodyOffset, tagOffset);
-        byte[] stored = runtimeResourceAesCtr(body, nonce, parsed.kindId, parsed.variantId, parsed.layerCount);
-        if (stored.length != parsed.storedLength) return null;
-        if (!Arrays.equals(sha256(stored), parsed.storedHash)) return null;
-        byte[] plain = parsed.compressed ? (allowCompressed ? decompressEmbeddedZstd(stored, parsed.plainLength) : null) : stored;
-        if (plain == null || plain.length != parsed.plainLength) return null;
-        return Arrays.equals(sha256(plain), parsed.plainHash) ? plain : null;
-    }
-
-    private static byte[] decodeRuntimeResourceLegacy(byte[] raw, boolean allowCompressed) {
-        if (raw.length < 73 || (raw[raw.length - 1] & 0xFF) != 32) return null;
-        int kindId = raw[5] & 0xFF;
-        int layerCount = raw[6] & 0xFF;
-        int flags = raw[7] & 0xFF;
-        boolean compressed = (flags & 0x80) != 0;
-        int variantId = flags & 0x7F;
-        if (layerCount < 1 || layerCount > 7) return null;
-        byte[] nonce = Arrays.copyOfRange(raw, 8, 24);
-        int plainLength = readSealedResourceLe32(raw, 24);
-        int storedLength = readSealedResourceLe32(raw, 28);
-        int bodyLength = readSealedResourceLe32(raw, 32);
-        int tagOffset = 40 + bodyLength;
-        if (plainLength < 0 || storedLength < 0 || bodyLength < 0) return null;
-        if (tagOffset + 33 != raw.length) return null;
-        byte[] expected = hmacSha256(concat("jsrp-auth".getBytes(StandardCharsets.US_ASCII), nonce, Arrays.copyOfRange(raw, 0, tagOffset)));
-        if (!constantTimeEquals(expected, raw, tagOffset)) return null;
-        byte[] body = Arrays.copyOfRange(raw, 40, tagOffset);
-        byte[] stored = runtimeResourceAesCtr(body, nonce, kindId, variantId, layerCount);
-        if (stored.length != storedLength) return null;
-        byte[] plain = compressed ? (allowCompressed ? decompressEmbeddedZstd(stored, plainLength) : null) : stored;
-        return plain != null && plain.length == plainLength ? plain : null;
+        byte[] resourceKey = partitionResourceKey(partitionId);
+        try {
+            byte[] expected = hmacSha256(resourceKey, concat("jsrp-auth-v3".getBytes(StandardCharsets.US_ASCII), nonce, Arrays.copyOfRange(raw, 0, tagOffset)));
+            if (!constantTimeEquals(expected, raw, tagOffset)) return null;
+            byte[] metadata = runtimeResourceAesCtrWithDomains(
+                resourceKey,
+                Arrays.copyOfRange(raw, metadataOffset, bodyOffset),
+                nonce,
+                intBytes(0),
+                intBytes(0),
+                intBytes(0)
+            );
+            RuntimeResourceMetadata parsed = parseRuntimeResourceMetadata(metadata);
+            if (parsed == null) return null;
+            if (parsed.partitionId != partitionId) return null;
+            if (parsed.kindId < 1 || parsed.kindId > 4) return null;
+            if (parsed.layerCount < 1 || parsed.layerCount > 7 || parsed.variantId > 127) return null;
+            if (parsed.plainLength < 0 || parsed.storedLength < 0 || parsed.bodyLength < 0) return null;
+            if (bodyOffset + parsed.bodyLength != tagOffset) return null;
+            byte[] body = Arrays.copyOfRange(raw, bodyOffset, tagOffset);
+            byte[] stored = runtimeResourceAesCtr(resourceKey, body, nonce, parsed.kindId, parsed.variantId, parsed.layerCount);
+            if (stored.length != parsed.storedLength) return null;
+            if (!Arrays.equals(sha256(stored), parsed.storedHash)) return null;
+            byte[] plain = parsed.compressed ? (allowCompressed ? decompressEmbeddedZstd(stored, parsed.plainLength) : null) : stored;
+            if (plain == null || plain.length != parsed.plainLength) return null;
+            return Arrays.equals(sha256(plain), parsed.plainHash) ? plain : null;
+        } finally {
+            Arrays.fill(resourceKey, (byte) 0);
+        }
     }
 
     private static byte[] decompressEmbeddedZstd(byte[] bytes, int expectedLength) {
@@ -1096,29 +1270,27 @@ public final class JniMicrokernelHelper {
         return length == 2 ? value + 256L : value;
     }
 
-    private static byte[] runtimeResourceAesCtr(byte[] bytes, byte[] nonce, int kindId, int variantId, int layerCount) {
-        return runtimeResourceAesCtrWithDomains(bytes, nonce, intBytes(kindId), intBytes(variantId), intBytes(layerCount));
+    private static byte[] runtimeResourceAesCtr(byte[] resourceKey, byte[] bytes, byte[] nonce, int kindId, int variantId, int layerCount) {
+        return runtimeResourceAesCtrWithDomains(resourceKey, bytes, nonce, intBytes(kindId), intBytes(variantId), intBytes(layerCount));
     }
 
-    private static byte[] runtimeResourceAesCtrWithDomains(byte[] bytes, byte[] nonce, byte[] kindBytes, byte[] variantBytes, byte[] layerBytes) {
+    private static byte[] runtimeResourceAesCtrWithDomains(byte[] resourceKey, byte[] bytes, byte[] nonce, byte[] kindBytes, byte[] variantBytes, byte[] layerBytes) {
         try {
-            byte[] key = Arrays.copyOfRange(hmacSha256(concat(
+            byte[] key = Arrays.copyOfRange(hmacSha256(resourceKey, concat(
                 "jsrp-aes-key".getBytes(StandardCharsets.US_ASCII),
                 nonce,
                 kindBytes,
                 variantBytes,
                 layerBytes
             )), 0, 16);
-            byte[] iv = Arrays.copyOfRange(hmacSha256(concat(
+            byte[] iv = Arrays.copyOfRange(hmacSha256(resourceKey, concat(
                 "jsrp-aes-iv".getBytes(StandardCharsets.US_ASCII),
                 nonce,
                 kindBytes,
                 variantBytes,
                 layerBytes
             )), 0, 16);
-            Cipher cipher = Cipher.getInstance("AES/CTR/NoPadding");
-            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(iv));
-            return cipher.doFinal(bytes);
+            return aesCtrCrypt(key, iv, bytes);
         } catch (Exception ignored) {
             return new byte[0];
         }
@@ -1139,6 +1311,7 @@ public final class JniMicrokernelHelper {
         parsed.plainLength = readSealedResourceLe32(bytes, 8);
         parsed.storedLength = readSealedResourceLe32(bytes, 12);
         parsed.bodyLength = readSealedResourceLe32(bytes, 16);
+        parsed.partitionId = bytes[7] & 0xFF;
         parsed.keyId = readSealedResourceLe32(bytes, 20);
         parsed.seed = readSealedResourceLe32(bytes, 24);
         parsed.plainHash = Arrays.copyOfRange(bytes, 28, 60);
@@ -1146,16 +1319,150 @@ public final class JniMicrokernelHelper {
         return parsed;
     }
 
+
+    /* Pure-Java AES-128 block cipher (encrypt direction only) plus CTR mode.
+     * Byte layout follows FIPS-197: state column c holds bytes in[4c..4c+3]. */
+    private static final int[] AES_RCON = { 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1B, 0x36 };
+    private static byte[] aesSboxTable;
+
+    private static int aesXtime(int x) {
+        return ((x << 1) ^ ((x & 0x80) != 0 ? 0x1B : 0)) & 0xFF;
+    }
+
+    private static byte[] aesSbox() {
+        if (aesSboxTable != null) return aesSboxTable;
+        byte[] sbox = new byte[256];
+        int[] log = new int[256];
+        int[] exp = new int[255];
+        int x = 1;
+        for (int i = 0; i < 255; i++) {
+            exp[i] = x;
+            log[x] = i;
+            x = (x << 1) ^ x ^ ((x & 0x80) != 0 ? 0x1B : 0);
+            x &= 0xFF;
+        }
+        sbox[0] = 0x63;
+        for (int i = 1; i < 256; i++) {
+            int inv = exp[(255 - log[i]) % 255];
+            int s = inv;
+            s ^= ((inv << 1) | (inv >>> 7)) & 0xFF;
+            s ^= ((inv << 2) | (inv >>> 6)) & 0xFF;
+            s ^= ((inv << 3) | (inv >>> 5)) & 0xFF;
+            s ^= ((inv << 4) | (inv >>> 4)) & 0xFF;
+            sbox[i] = (byte) (s ^ 0x63);
+        }
+        aesSboxTable = sbox;
+        return sbox;
+    }
+
+    private static int[] aesExpandKey(byte[] key, byte[] sbox) {
+        int[] rk = new int[44];
+        for (int i = 0; i < 4; i++) {
+            rk[i] = ((key[4 * i] & 0xFF) << 24) | ((key[4 * i + 1] & 0xFF) << 16)
+                    | ((key[4 * i + 2] & 0xFF) << 8) | (key[4 * i + 3] & 0xFF);
+        }
+        for (int i = 4; i < 44; i++) {
+            int t = rk[i - 1];
+            if (i % 4 == 0) {
+                int rot = (t << 8) | (t >>> 24);
+                t = ((sbox[(rot >>> 24) & 0xFF] & 0xFF) << 24) | ((sbox[(rot >>> 16) & 0xFF] & 0xFF) << 16)
+                        | ((sbox[(rot >>> 8) & 0xFF] & 0xFF) << 8) | (sbox[rot & 0xFF] & 0xFF);
+                t ^= AES_RCON[i / 4 - 1] << 24;
+            }
+            rk[i] = rk[i - 4] ^ t;
+        }
+        return rk;
+    }
+
+    private static int aesMixColumn(int b0, int b1, int b2, int b3, int row) {
+        switch (row) {
+            case 0: return aesXtime(b0) ^ (aesXtime(b1) ^ b1) ^ b2 ^ b3;
+            case 1: return b0 ^ aesXtime(b1) ^ (aesXtime(b2) ^ b2) ^ b3;
+            case 2: return b0 ^ b1 ^ aesXtime(b2) ^ (aesXtime(b3) ^ b3);
+            default: return (aesXtime(b0) ^ b0) ^ b1 ^ b2 ^ aesXtime(b3);
+        }
+    }
+
+    private static void aesEncryptBlock(int[] rk, byte[] sbox, byte[] in, int inOff, byte[] out, int outOff) {
+        int[] s = new int[4];
+        for (int c = 0; c < 4; c++) {
+            s[c] = ((in[inOff + 4 * c] & 0xFF) << 24) | ((in[inOff + 4 * c + 1] & 0xFF) << 16)
+                    | ((in[inOff + 4 * c + 2] & 0xFF) << 8) | (in[inOff + 4 * c + 3] & 0xFF);
+            s[c] ^= rk[c];
+        }
+        for (int round = 1; round < 10; round++) {
+            int[] t = new int[4];
+            for (int c = 0; c < 4; c++) {
+                int b0 = sbox[(s[c] >>> 24) & 0xFF] & 0xFF;
+                int b1 = sbox[(s[(c + 1) & 3] >>> 16) & 0xFF] & 0xFF;
+                int b2 = sbox[(s[(c + 2) & 3] >>> 8) & 0xFF] & 0xFF;
+                int b3 = sbox[s[(c + 3) & 3] & 0xFF] & 0xFF;
+                t[c] = (aesMixColumn(b0, b1, b2, b3, 0) << 24) | (aesMixColumn(b0, b1, b2, b3, 1) << 16)
+                        | (aesMixColumn(b0, b1, b2, b3, 2) << 8) | aesMixColumn(b0, b1, b2, b3, 3);
+            }
+            for (int c = 0; c < 4; c++) s[c] = t[c] ^ rk[round * 4 + c];
+        }
+        for (int c = 0; c < 4; c++) {
+            int b0 = sbox[(s[c] >>> 24) & 0xFF] & 0xFF;
+            int b1 = sbox[(s[(c + 1) & 3] >>> 16) & 0xFF] & 0xFF;
+            int b2 = sbox[(s[(c + 2) & 3] >>> 8) & 0xFF] & 0xFF;
+            int b3 = sbox[s[(c + 3) & 3] & 0xFF] & 0xFF;
+            int v = ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) ^ rk[40 + c];
+            out[outOff + 4 * c] = (byte) (v >>> 24);
+            out[outOff + 4 * c + 1] = (byte) (v >>> 16);
+            out[outOff + 4 * c + 2] = (byte) (v >>> 8);
+            out[outOff + 4 * c + 3] = (byte) v;
+        }
+    }
+
+    private static byte[] aesCtrCrypt(byte[] key, byte[] iv, byte[] data) {
+        byte[] sbox = aesSbox();
+        int[] rk = aesExpandKey(key, sbox);
+        byte[] counter = iv.clone();
+        byte[] stream = new byte[16];
+        byte[] out = new byte[data.length];
+        int offset = 0;
+        while (offset < data.length) {
+            aesEncryptBlock(rk, sbox, counter, 0, stream, 0);
+            int take = Math.min(16, data.length - offset);
+            for (int i = 0; i < take; i++) out[offset + i] = (byte) (data[offset + i] ^ stream[i]);
+            offset += take;
+            for (int i = 15; i >= 0; i--) {
+                counter[i] = (byte) (counter[i] + 1);
+                if (counter[i] != 0) break;
+            }
+        }
+        Arrays.fill(stream, (byte) 0);
+        return out;
+    }
+
     private static byte[] hmacSha256(byte[] data) {
-        byte[] key = runtimeResourceKey();
+        byte[] key = partitionResourceKey(anchorResourcePartition());
         try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(key, "HmacSHA256"));
-            return mac.doFinal(data);
-        } catch (Exception ignored) {
-            return new byte[32];
+            return hmacSha256(key, data);
         } finally {
             Arrays.fill(key, (byte) 0);
+        }
+    }
+
+    private static byte[] hmacSha256(byte[] key, byte[] data) {
+        try {
+            /* javax.crypto provider jars trigger JarVerifier.getSystemEntropy
+             * (network adapter enumeration) on first use under Java 8, which
+             * stalls startup badly on hosts with many virtual adapters. HMAC
+             * over java.security.MessageDigest stays on the boot-class SUN
+             * provider and avoids that path entirely. */
+            byte[] k = key.length > 64 ? sha256(key) : key;
+            byte[] ipad = new byte[64];
+            byte[] opad = new byte[64];
+            for (int i = 0; i < 64; i++) {
+                byte b = i < k.length ? k[i] : 0;
+                ipad[i] = (byte) (b ^ 0x36);
+                opad[i] = (byte) (b ^ 0x5c);
+            }
+            return sha256(concat(opad, sha256(concat(ipad, data))));
+        } catch (Exception ignored) {
+            return new byte[32];
         }
     }
 
@@ -1174,6 +1481,149 @@ public final class JniMicrokernelHelper {
             throw new SecurityException("class-encryption key derivation requires the sealed native kernel; no Java fallback (" + loadMessage + ")");
         }
         return nativeDeriveClassEncryptionKey(keyId, salt, length);
+    }
+
+    private static boolean isDecimal(String value) {
+        if (value == null || value.length() == 0 || value.length() > 10) return false;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if (c < '0' || c > '9') return false;
+        }
+        return true;
+    }
+
+    private static int parsePositiveInt(String value, String label) {
+        if (!isDecimal(value)) throw new SecurityException("invalid VM catalog " + label);
+        try {
+            int parsed = Integer.parseInt(value);
+            if (parsed < 0) throw new SecurityException("invalid VM catalog " + label);
+            return parsed;
+        } catch (NumberFormatException e) {
+            throw new SecurityException("invalid VM catalog " + label, e);
+        }
+    }
+
+    private static int lastIndexOf(byte[] data, byte[] needle) {
+        if (data == null || needle == null || needle.length == 0 || needle.length > data.length) return -1;
+        for (int offset = data.length - needle.length; offset >= 0; offset--) {
+            boolean match = true;
+            for (int index = 0; index < needle.length; index++) {
+                if (data[offset + index] != needle[index]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) return offset;
+        }
+        return -1;
+    }
+
+    private static boolean hasPartitionedRuntimeResourceHeader(byte[] raw, int partitionId) {
+        return raw != null && raw.length >= 27 && raw[0] == 'J' && raw[1] == 'S' && raw[2] == 'R' && raw[3] == 'P' &&
+            (raw[4] & 0xFF) == RUNTIME_RESOURCE_VERSION && readSealedResourceLe16(raw, 25) == partitionId;
+    }
+
+    private static byte[] vmCatalogLeaf(
+        byte[] catalogId,
+        int partitionId,
+        String logicalPath,
+        String storagePath,
+        int rawLength,
+        byte[] rawDigest
+    ) {
+        return sha256(concat(
+            "JSL1".getBytes(StandardCharsets.US_ASCII),
+            catalogId,
+            intBytes(partitionId),
+            frame(logicalPath),
+            frame(storagePath),
+            longBytes(rawLength),
+            rawDigest
+        ));
+    }
+
+    private static byte[] vmCatalogMerkleRoot(List<byte[]> leaves, byte[] catalogId, int partitionId) {
+        if (leaves.isEmpty()) {
+            return sha256(concat("JSP1".getBytes(StandardCharsets.US_ASCII), catalogId, intBytes(partitionId)));
+        }
+        List<byte[]> level = new ArrayList<>(leaves);
+        sortByteArrays(level);
+        while (level.size() > 1) {
+            List<byte[]> next = new ArrayList<>((level.size() + 1) / 2);
+            for (int index = 0; index < level.size(); index += 2) {
+                byte[] left = level.get(index);
+                byte[] right = index + 1 < level.size() ? level.get(index + 1) : left;
+                next.add(sha256(concat("JSP1".getBytes(StandardCharsets.US_ASCII), left, right)));
+            }
+            level = next;
+        }
+        return level.get(0);
+    }
+
+    private static byte[] vmCatalogRoot(byte[] catalogId, List<byte[]> partitionRoots) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] domain = "JSC1-root".getBytes(StandardCharsets.US_ASCII);
+        out.write(domain, 0, domain.length);
+        out.write(catalogId, 0, catalogId.length);
+        for (int partitionId = 0; partitionId < partitionRoots.size(); partitionId++) {
+            byte[] id = intBytes(partitionId);
+            byte[] root = partitionRoots.get(partitionId);
+            out.write(id, 0, id.length);
+            out.write(root, 0, root.length);
+        }
+        return sha256(out.toByteArray());
+    }
+
+    private static int compareUnsigned(byte[] left, byte[] right) {
+        int length = Math.min(left.length, right.length);
+        for (int index = 0; index < length; index++) {
+            int comparison = Integer.compare(left[index] & 0xFF, right[index] & 0xFF);
+            if (comparison != 0) return comparison;
+        }
+        return Integer.compare(left.length, right.length);
+    }
+
+    private static void sortVmCatalogDirectories(List<String[]> directories) {
+        for (int index = 1; index < directories.size(); index++) {
+            String[] value = directories.get(index);
+            int valuePartition = parsePositiveInt(value[1], "partition id");
+            int cursor = index - 1;
+            while (cursor >= 0 && parsePositiveInt(directories.get(cursor)[1], "partition id") > valuePartition) {
+                directories.set(cursor + 1, directories.get(cursor));
+                cursor--;
+            }
+            directories.set(cursor + 1, value);
+        }
+    }
+
+    private static void sortByteArrays(List<byte[]> values) {
+        for (int index = 1; index < values.size(); index++) {
+            byte[] value = values.get(index);
+            int cursor = index - 1;
+            while (cursor >= 0 && compareUnsigned(values.get(cursor), value) > 0) {
+                values.set(cursor + 1, values.get(cursor));
+                cursor--;
+            }
+            values.set(cursor + 1, value);
+        }
+    }
+
+    private static byte[] frame(String value) {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        return concat(intBytes(bytes.length), bytes);
+    }
+
+    private static byte[] longBytes(long value) {
+        return new byte[] {
+            (byte) (value >>> 56),
+            (byte) (value >>> 48),
+            (byte) (value >>> 40),
+            (byte) (value >>> 32),
+            (byte) (value >>> 24),
+            (byte) (value >>> 16),
+            (byte) (value >>> 8),
+            (byte) value,
+        };
     }
 
     private static byte[] concat(byte[]... parts) {
@@ -1231,6 +1681,15 @@ public final class JniMicrokernelHelper {
             (data[offset + 3] & 0xFF);
     }
 
+    private static File createUniqueTempFile(String prefix, String suffix, File dir) throws java.io.IOException {
+        long seed = System.nanoTime();
+        for (int attempt = 0; attempt < 100; attempt++) {
+            File candidate = new File(dir, prefix + (seed + attempt) + suffix);
+            if (candidate.createNewFile()) return candidate;
+        }
+        throw new java.io.IOException("cannot create unique temp file in " + dir);
+    }
+
     private static byte[] readAll(InputStream in) throws Exception {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         byte[] buf = new byte[1024];
@@ -1264,6 +1723,7 @@ public final class JniMicrokernelHelper {
     }
 
     private static final class RuntimeResourceMetadata {
+        int partitionId;
         int kindId;
         int layerCount;
         int variantId;

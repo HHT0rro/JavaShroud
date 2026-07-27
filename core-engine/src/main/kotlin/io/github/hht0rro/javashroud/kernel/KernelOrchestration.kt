@@ -13,9 +13,11 @@ import io.github.hht0rro.javashroud.passes.RegisteredPass
 import io.github.hht0rro.javashroud.passes.buildRegisteredPasses
 import io.github.hht0rro.javashroud.passes.requireExecutablePass
 import io.github.hht0rro.javashroud.transforms.protection.buildVbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_VM_PRELOAD_INDEX_RESOURCE
+import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.CandidateProductionBuildEvidence
 import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.currentVbc4BuildContextOrNull
+import java.nio.file.Files
 import java.nio.file.Path
 
 data class KernelPreparation(
@@ -37,6 +39,7 @@ internal fun executeKernelRun(
     config: ObfuscationConfig,
     configPath: Path,
     emit: (EngineEvent) -> Unit = {},
+    vbc4BuildContextOverride: Vbc4BuildContext? = null,
 ): EngineRunResult {
     val bootstrapEvents = buildBootstrapEvents(configPath)
     bootstrapEvents.forEach(emit)
@@ -73,6 +76,7 @@ internal fun executeKernelRun(
             planningResult = planningResult.copy(orderedPasses = enabledPassIds),
             enabledPassIds = enabledPassIds,
             emit = emit,
+            vbc4BuildContextOverride = vbc4BuildContextOverride,
         )
     }
     val knownBrokenPassWarnings = buildKnownBrokenPassWarnings(enabledPassIds)
@@ -88,6 +92,7 @@ internal fun executeKernelRun(
         preparation = preparation,
         reorderedPasses = reorderedPasses,
         emit = emit,
+        vbc4BuildContextOverride = vbc4BuildContextOverride,
     )
 }
 
@@ -99,6 +104,7 @@ internal fun executeKernelRunWithFallbackOrder(
     planningResult: io.github.hht0rro.javashroud.transforms.protection.PlanningResult,
     enabledPassIds: List<String>,
     emit: (EngineEvent) -> Unit = {},
+    vbc4BuildContextOverride: Vbc4BuildContext? = null,
 ): EngineRunResult {
     val passMap = registeredPasses.associateBy { it.spec.id }
     val reorderedPasses = planningResult.orderedPasses.mapNotNull { passMap[it] }
@@ -107,6 +113,7 @@ internal fun executeKernelRunWithFallbackOrder(
         preparation = preparation,
         reorderedPasses = reorderedPasses,
         emit = emit,
+        vbc4BuildContextOverride = vbc4BuildContextOverride,
     )
 }
 
@@ -115,8 +122,11 @@ internal fun executeWithOrderedPasses(
     preparation: KernelPreparation,
     reorderedPasses: List<RegisteredPass>,
     emit: (EngineEvent) -> Unit = {},
+    vbc4BuildContextOverride: Vbc4BuildContext? = null,
 ): EngineRunResult {
-    val vbc4BuildContext = buildVbc4BuildContext(config, preparation.artifact)
+    val outputJarPath = resolveOutputJarPath(config)
+    Files.deleteIfExists(CandidateProductionBuildEvidence.evidencePath(outputJarPath))
+    val vbc4BuildContext = vbc4BuildContextOverride ?: buildVbc4BuildContext(config, preparation.artifact)
     return withVbc4BuildContext(vbc4BuildContext) {
         val knownBrokenPassWarnings = buildKnownBrokenPassWarnings(reorderedPasses.filter { it.spec.enabled }.map { it.spec.id })
         knownBrokenPassWarnings.forEach(emit)
@@ -126,33 +136,30 @@ internal fun executeWithOrderedPasses(
             emit = emit,
         )
         val executedPassIds = reorderedPasses.filter { it.spec.enabled }.map { it.spec.id }
-        val preservesExistingVmRuntime = preservesExistingVmRuntime(passExecution.context.artifact)
-        val artifactWithProcessedHelpers = if (preservesExistingVmRuntime) {
-            passExecution.context.artifact
-        } else {
-            val artifactWithHelpers = io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment.injectRequiredHelpers(
-                artifact = passExecution.context.artifact,
-                executedPassIds = executedPassIds,
-            )
-            val artifactWithNative = io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment.bundleNativeLibrariesIfAvailable(
-                artifact = artifactWithHelpers,
-                executedPassIds = executedPassIds,
-                config = config,
-                emit = emit,
-            )
-            applyEnabledBasicPassesToHelpers(
-                config = config,
-                artifactContext = passExecution.context.copy(artifact = artifactWithNative),
-                registeredPasses = reorderedPasses,
-            )
-        }
+        val artifactWithHelpers = io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment.injectRequiredHelpers(
+            artifact = passExecution.context.artifact,
+            executedPassIds = executedPassIds,
+        )
+        val artifactWithNative = io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment.bundleNativeLibrariesIfAvailable(
+            artifact = artifactWithHelpers,
+            executedPassIds = executedPassIds,
+            config = config,
+            emit = emit,
+        )
+        val artifactWithProcessedHelpers = applyEnabledBasicPassesToHelpers(
+            config = config,
+            artifactContext = passExecution.context.copy(artifact = artifactWithNative),
+            registeredPasses = reorderedPasses,
+        )
         val artifactForWrite = io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.sealIfRequested(
             artifact = artifactWithProcessedHelpers,
             config = config,
         )
-
-        val outputJarPath = resolveOutputJarPath(config)
         writeBytecodeArtifact(outputJarPath, artifactForWrite)
+        currentVbc4BuildContextOrNull()?.productionBuildEvidence?.writeAfterFinalJar(
+            artifact = artifactForWrite,
+            outputJarPath = outputJarPath,
+        )
         val outputJarPathString = outputJarPath.toString()
         emit(buildRunSummaryEvent(
             executedPassCount = passExecution.executedPassCount,
@@ -165,10 +172,6 @@ internal fun executeWithOrderedPasses(
         EngineRunResult(events = emptyList())
     }
 }
-
-private fun preservesExistingVmRuntime(artifact: BytecodeArtifact): Boolean =
-    artifact.jarEntries.any { it.name == VBC4_VM_PRELOAD_INDEX_RESOURCE } &&
-        artifact.jarEntries.none { it.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE }
 
 internal fun resolveOutputJarPath(config: ObfuscationConfig): Path = Path.of(config.outputJarPath).toAbsolutePath().normalize()
 

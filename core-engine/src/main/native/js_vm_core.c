@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include "native_secrets.inc"
 
 #define JS_VM_MAXS 0xFE
 #define JS_VM_UNSUPPORTED 0xFF
@@ -77,14 +78,34 @@ JS_HIDDEN js_vm_program* js_vm_active_program_find_by_method(unsigned long long 
 }
 
 static int js_vm_execute_register_with_preset_locals(JNIEnv *env, js_vm_program *p, jobjectArray args, const js_vm_value *preset_locals, int preset_count, char ret_desc, js_vm_value *ret) {
-    if (!p) return 0;
+    if (!p || !js_vm_verify_runtime_session(p)) return 0;
     js_vm_program execution;
     memset(&execution, 0, sizeof(execution));
     if (p->cached_execution_ready && p->insns && p->insn_count > 0) {
-        if (!js_vm_clone_cached_execution_program(p, &execution)) {
+        /* Hot path: flat-copy the validated program instead of deep cloning it
+         * per call. The interpreter mutates only the (opcode, opcode_epoch)
+         * fields of the resident array during execution (per-step rewrap and
+         * window rotation reseal), while operand arrays are read-only (operand
+         * decode lands in a per-fetch buffer). So one flat malloc+memcpy keeps
+         * the private mutable state, and the persistent program keeps owning
+         * the shared operand storage. Symbol resolution results are JVM-global,
+         * so the symbol cache lives on the persistent program as an append-only
+         * shared table instead of being rebuilt and wiped per call. */
+        js_vm_copy_execution_program_header(&execution, p);
+        execution.insns = (js_vm_insn*)malloc((size_t)p->insn_count * sizeof(js_vm_insn));
+        if (!execution.insns) {
             js_vm_clear_execution_program(&execution);
             return 0;
         }
+        memcpy(execution.insns, p->insns, (size_t)p->insn_count * sizeof(js_vm_insn));
+        execution.insn_count = p->insn_count;
+        execution.borrowed_insns = 0;
+        execution.borrowed_insn_operands = 1;
+        execution.cached_execution_ready = 0;
+        execution.symbols = p->symbols;
+        execution.symbol_count = p->symbol_count;
+        execution.symbol_capacity = p->symbol_capacity;
+        execution.symbol_cache_owner = p->symbol_cache_owner ? p->symbol_cache_owner : p;
     } else if (!js_vm_build_execution_program_from_registers(p, &execution)) {
         js_vm_clear_execution_program(&execution);
         return 0;
@@ -92,8 +113,9 @@ static int js_vm_execute_register_with_preset_locals(JNIEnv *env, js_vm_program 
     int pushed_active_program = js_vm_active_program_push(&execution);
     int ok = js_vm_execute_with_preset_locals(env, &execution, args, preset_locals, preset_count, ret_desc, ret);
     if (pushed_active_program) js_vm_active_program_pop();
-    /* Execution program owns its per-run symbol cache exclusively. */
-    if (execution.symbols) {
+    /* Per-run symbol caches are only owned privately when the execution was
+     * built from registers; cached programs share the persistent table. */
+    if (!execution.symbol_cache_owner && execution.symbols) {
         for (int si = 0; si < execution.symbol_count; si++) js_vm_symbol_cache_clear_entry(env, &execution.symbols[si]);
         js_vbc4_wipe_volatile(execution.symbols, (size_t)execution.symbol_count * sizeof(js_vm_symbol_cache_entry));
         free(execution.symbols);
@@ -647,8 +669,12 @@ JS_HIDDEN void js_vm_copy_execution_program_header(js_vm_program *dst, js_vm_pro
     dst->build_seed = src->build_seed;
     dst->key_mask = src->key_mask;
     memcpy(dst->nonce, src->nonce, sizeof(dst->nonce));
+    memcpy(dst->session_leaf, src->session_leaf, sizeof(dst->session_leaf));
+    memcpy(dst->session_tag, src->session_tag, sizeof(dst->session_tag));
+    dst->session_bound = src->session_bound;
     dst->metadata_cp_index = src->metadata_cp_index;
     dst->method_local_profile = src->method_local_profile;
+    dst->native_vm_profile_id = src->native_vm_profile_id;
     dst->dispatch_profile_tag = src->dispatch_profile_tag;
     dst->vbc4_flags = src->vbc4_flags;
     dst->nested_vm_profile = src->nested_vm_profile;
@@ -1064,34 +1090,31 @@ JS_PROTECTED jint js_vm_load_resident_operand(const js_vm_program *p, int insn_i
     return p->insns[insn_index].ops[operand_index] ^ js_vm_resident_operand_mask(p, insn_index, operand_index);
 }
 
-JS_PROTECTED static jint js_vm_profile_fetch_operand(const js_vm_program *p, uint32_t profile, int insn_index, int operand_index, uint32_t drift, int step, int sp) {
+#if defined(JS_NATIVE_CFG_EVIDENCE)
+JS_EXPORT
+#endif
+JS_PROTECTED jint js_vm_profile_fetch_operand(const js_vm_program *p, uint32_t profile, int insn_index, int operand_index, uint32_t drift, int step, int sp) {
     if (!p || insn_index < 0 || insn_index >= p->insn_count) return 0;
     if (operand_index < 0 || operand_index >= p->insns[insn_index].op_count || !p->insns[insn_index].ops) return 0;
     uint32_t guard = drift ^ (uint32_t)(step * 0x9E3779B1u) ^ (uint32_t)(sp * 0x45D9F3Bu) ^ profile;
-    if (profile == 1u) {
-        int physical_operand = operand_index ^ (int)(guard & 0u);
-        return js_vm_load_resident_operand(p, insn_index, physical_operand);
-    }
-    if (profile == 2u) {
+#if JS_NATIVE_OPERAND_PROFILE == 0
+    int physical_operand = operand_index ^ (int)(guard & 0u);
+    return js_vm_load_resident_operand(p, insn_index, physical_operand);
+#elif JS_NATIVE_OPERAND_PROFILE == 1
+    {
         jint stored = p->insns[insn_index].ops[operand_index];
         jint mask = js_vm_resident_operand_mask(p, insn_index, operand_index);
         return (stored ^ (jint)(guard & 0u)) ^ mask;
     }
-    if (profile == 3u) {
+#elif JS_NATIVE_OPERAND_PROFILE == 2
+    {
         volatile jint value = p->insns[insn_index].ops[operand_index];
         value ^= js_vm_resident_operand_mask(p, insn_index, operand_index);
         return value;
     }
-    if (profile == 4u) {
-        int mirrored_index = operand_index + (int)((guard >> 5) & 0u);
-        return p->insns[insn_index].ops[mirrored_index] ^ js_vm_resident_operand_mask(p, insn_index, mirrored_index);
-    }
-    if (profile == 5u) {
-        jint a = p->insns[insn_index].ops[operand_index] ^ js_vm_resident_operand_mask(p, insn_index, operand_index);
-        jint b = js_vm_load_resident_operand(p, insn_index, operand_index);
-        return (guard & 1u) ? a : b;
-    }
-    return js_vm_load_resident_operand(p, insn_index, operand_index);
+#else
+#error "JS_NATIVE_OPERAND_PROFILE must be 0, 1 or 2"
+#endif
 }
 
 JS_PROTECTED jint js_vm_resident_exception_mask(const js_vm_program *p, int exception_index, int field_index) {
@@ -1195,8 +1218,6 @@ JS_HIDDEN void js_vm_free_program(JNIEnv *env, js_vm_program *p) {
 #include <intrin.h>
 #endif
 #endif
-#include "native_secrets.inc"
-
 /* ---- Item #4: native critical-region pre-decrypt protection ----
  *
  * Selected pure, relocation-free hot functions are emitted into a dedicated code
@@ -1408,6 +1429,7 @@ static void js_vm_write_clean_entry_integrity_bytes(unsigned char out[4]);
 static void js_vbc4_copy_scoped_master_key(unsigned char out[32]);
 static void js_vbc4_session_integrity_material(unsigned char out[32]);
 static void js_vbc4_hmac_with_scoped_master_key(const unsigned char **parts, const int *part_lens, int part_count, unsigned char out[32]);
+static void js_vbc4_vm_build_key(unsigned char out[32]);
 
 #define JS_VM_NOP 0x00
 #define JS_VM_ACONST_NULL 0x01
@@ -1705,7 +1727,14 @@ static volatile int js_vm_last_failure_step_limit = -1;
 static char js_vm_last_failure_detail[256];
 JS_HIDDEN volatile int js_vm_last_validation_error = 0;
 #define JS_RRK_SHARE_COUNT 3
-static unsigned char js_runtime_resource_key_shares[JS_RRK_SHARE_COUNT][32];
+#define JS_RRK_RESOURCE_SLOTS 16
+#define JS_RRK_ANCHOR_SLOT 16
+#define JS_RRK_SLOTS 17
+/* Per-partition divergent key domains: each resource partition and the anchor
+ * key lives in its own XOR-share slot, installed independently at runtime.
+ * No globally-applicable resource key is ever assembled in this process. */
+static unsigned char js_runtime_resource_key_shares[JS_RRK_SLOTS][JS_RRK_SHARE_COUNT][32];
+static volatile int js_runtime_resource_key_slot_ready[JS_RRK_SLOTS];
 /* Reassemble the per-build root key from XOR shares. JS_PROTECTED leaf taking
  * the shares by pointer, so the protected .jsx section carries no global
  * reference and stays relocation-free (required by the section packer). The
@@ -1717,7 +1746,9 @@ JS_PROTECTED static void js_rrk_xor_assemble(const unsigned char *shares, int sh
         out[b] = acc;
     }
 }
-static volatile int js_runtime_resource_key_ready = 0;
+#if defined(JS_NATIVE_CFG_EVIDENCE)
+JS_EXPORT
+#endif
 JS_PROTECTED int js_vm_parse_program(const unsigned char *data, int len, js_vm_program *p, const unsigned char *state_binding, int state_binding_len);
 JS_PROTECTED unsigned char* js_runtime_resource_decode_owned(const unsigned char *raw, int raw_len, int *out_len);
 JS_HIDDEN char* js_lookup_bound_method(JNIEnv *env, const char *original_class, const char *method_name, const char *signature);
@@ -2001,6 +2032,7 @@ static uint32_t js_vbc4_nested_dialect(uint32_t seed, uint32_t profile, uint32_t
     return js_vbc4_nested_mix(seed, profile, block_id, row_count, 0x23u, dialect_seed);
 }
 
+#if JS_NATIVE_PARSER_PROFILE != 0
 static uint32_t js_vbc4_register_row_mix(uint32_t seed, uint32_t block_id, uint32_t row_index, uint32_t slot, uint32_t field_index) {
     uint32_t x = seed ^ (block_id * 0x045D9F3Bu) ^ (row_index * 0x7FEB352Du) ^
         (slot * 0x846CA68Bu) ^ (field_index * 0x2C1B3C6Du);
@@ -2041,46 +2073,85 @@ static int js_vbc4_read_register_row(const unsigned char *data, int len, int *po
     return 1;
 }
 
+#if JS_NATIVE_PARSER_PROFILE == 2
 static uint32_t js_vbc4_mixed_row_token(uint32_t seed, uint32_t block_id, uint32_t row_index, uint32_t shape) {
-    return (js_vbc4_register_row_mix(seed, block_id, row_index, shape, 0x5Eu) ^ (shape * 0x045D9F3Bu)) & 0xFFFFu;
+    uint32_t payload = (js_vbc4_register_row_mix(seed, block_id, row_index, shape, 0x5Eu) ^
+        (shape * 0x045D9F3Bu)) & 0x3FFFu;
+    return ((shape & 0x3u) << 14) | payload;
 }
 
 static int js_vbc4_read_mixed_operand_row(const unsigned char *data, int len, int *pos, uint32_t seed, uint32_t block_id, uint32_t row_index, unsigned int fields[6]) {
     unsigned int token = 0;
     memset(fields, 0, sizeof(unsigned int) * 6u);
     if (!js_vm_read_u2(data, len, pos, &token)) return 0;
-    for (uint32_t shape = 0; shape < 3u; shape++) {
-        if (token != js_vbc4_mixed_row_token(seed, block_id, row_index, shape)) continue;
-        if (shape == 0u) {
-            unsigned int raw_opcode = 0, flags = 0, dst = 0, srcA = 0, srcB = 0;
-            uint32_t operand = 0;
-            if (!js_vm_read_u2(data, len, pos, &raw_opcode)) return 0;
-            if (!js_vm_read_u2(data, len, pos, &flags)) return 0;
-            if (!js_vm_read_u2(data, len, pos, &dst)) return 0;
-            if (!js_vm_read_u2(data, len, pos, &srcA)) return 0;
-            if (!js_vm_read_u2(data, len, pos, &srcB)) return 0;
-            if (!js_vm_read_u4(data, len, pos, &operand)) return 0;
-            fields[0] = raw_opcode; fields[1] = flags; fields[2] = dst; fields[3] = srcA; fields[4] = srcB; fields[5] = operand;
-            return 1;
-        }
-        if (shape == 1u) return js_vbc4_read_register_row(data, len, pos, seed, block_id, row_index, fields);
+    uint32_t shape = (token >> 14) & 0x3u;
+    if (shape >= 3u || token != js_vbc4_mixed_row_token(seed, block_id, row_index, shape)) return 0;
+    if (shape == 0u) {
+        unsigned int raw_opcode = 0, flags = 0, dst = 0, srcA = 0, srcB = 0;
         uint32_t operand = 0;
-        unsigned int srcB = 0, srcA = 0, dst = 0, flags = 0, raw_opcode = 0;
-        if (!js_vm_read_u4(data, len, pos, &operand)) return 0;
-        if (!js_vm_read_u2(data, len, pos, &srcB)) return 0;
-        if (!js_vm_read_u2(data, len, pos, &srcA)) return 0;
-        if (!js_vm_read_u2(data, len, pos, &dst)) return 0;
-        if (!js_vm_read_u2(data, len, pos, &flags)) return 0;
         if (!js_vm_read_u2(data, len, pos, &raw_opcode)) return 0;
-        fields[5] = operand ^ js_vbc4_register_row_mix(seed, block_id, row_index, 0x42u, 5u);
-        fields[4] = (srcB ^ js_vbc4_register_row_mix(seed, block_id, row_index, 0x43u, 4u)) & 0xFFFFu;
-        fields[3] = (srcA ^ js_vbc4_register_row_mix(seed, block_id, row_index, 0x44u, 3u)) & 0xFFFFu;
-        fields[2] = (dst ^ js_vbc4_register_row_mix(seed, block_id, row_index, 0x45u, 2u)) & 0xFFFFu;
-        fields[1] = (flags ^ js_vbc4_register_row_mix(seed, block_id, row_index, 0x46u, 1u)) & 0xFFFFu;
-        fields[0] = (raw_opcode ^ js_vbc4_register_row_mix(seed, block_id, row_index, 0x47u, 0u)) & 0xFFFFu;
+        if (!js_vm_read_u2(data, len, pos, &flags)) return 0;
+        if (!js_vm_read_u2(data, len, pos, &dst)) return 0;
+        if (!js_vm_read_u2(data, len, pos, &srcA)) return 0;
+        if (!js_vm_read_u2(data, len, pos, &srcB)) return 0;
+        if (!js_vm_read_u4(data, len, pos, &operand)) return 0;
+        fields[0] = raw_opcode; fields[1] = flags; fields[2] = dst; fields[3] = srcA; fields[4] = srcB; fields[5] = operand;
         return 1;
     }
+    if (shape == 1u) return js_vbc4_read_register_row(data, len, pos, seed, block_id, row_index, fields);
+    uint32_t operand = 0;
+    unsigned int srcB = 0, srcA = 0, dst = 0, flags = 0, raw_opcode = 0;
+    if (!js_vm_read_u4(data, len, pos, &operand)) return 0;
+    if (!js_vm_read_u2(data, len, pos, &srcB)) return 0;
+    if (!js_vm_read_u2(data, len, pos, &srcA)) return 0;
+    if (!js_vm_read_u2(data, len, pos, &dst)) return 0;
+    if (!js_vm_read_u2(data, len, pos, &flags)) return 0;
+    if (!js_vm_read_u2(data, len, pos, &raw_opcode)) return 0;
+    fields[5] = operand ^ js_vbc4_register_row_mix(seed, block_id, row_index, 0x42u, 5u);
+    fields[4] = (srcB ^ js_vbc4_register_row_mix(seed, block_id, row_index, 0x43u, 4u)) & 0xFFFFu;
+    fields[3] = (srcA ^ js_vbc4_register_row_mix(seed, block_id, row_index, 0x44u, 3u)) & 0xFFFFu;
+    fields[2] = (dst ^ js_vbc4_register_row_mix(seed, block_id, row_index, 0x45u, 2u)) & 0xFFFFu;
+    fields[1] = (flags ^ js_vbc4_register_row_mix(seed, block_id, row_index, 0x46u, 1u)) & 0xFFFFu;
+    fields[0] = (raw_opcode ^ js_vbc4_register_row_mix(seed, block_id, row_index, 0x47u, 0u)) & 0xFFFFu;
+    return 1;
+}
+#endif
+#endif
+
+static uint32_t js_vbc4_native_row_dialect(uint32_t seed, uint32_t block_id, uint32_t row_count) {
+#if JS_NATIVE_PARSER_PROFILE == 0
+    (void)seed; (void)block_id; (void)row_count;
+    return 0u;
+#elif JS_NATIVE_PARSER_PROFILE == 1
+    return js_vbc4_register_row_mix(seed, block_id, row_count, 0x23u, 0x4Du);
+#else
+    return js_vbc4_register_row_mix(seed, block_id, row_count, 0x23u, 0x4Du) ^
+        js_vbc4_register_row_mix(seed, block_id, row_count, 0x61u, 0x4Fu);
+#endif
+}
+
+static int js_vbc4_read_native_row(const unsigned char *data, int len, int *pos, uint32_t seed, uint32_t block_id, uint32_t row_index, unsigned int fields[6]) {
+#if JS_NATIVE_PARSER_PROFILE == 0
+    (void)data; (void)len; (void)pos; (void)seed; (void)block_id; (void)row_index; (void)fields;
     return 0;
+#elif JS_NATIVE_PARSER_PROFILE == 1
+    return js_vbc4_read_register_row(data, len, pos, seed, block_id, row_index, fields);
+#else
+    return js_vbc4_read_mixed_operand_row(data, len, pos, seed, block_id, row_index, fields);
+#endif
+}
+
+static int js_vbc4_native_parser_profile_matches(uint32_t flags) {
+    if ((flags & JS_VBC4_FLAG_NESTED_VM) != 0u) return 1;
+#if JS_NATIVE_PARSER_PROFILE == 0
+    return (flags & (JS_VBC4_FLAG_REGISTER_ROW_ENVELOPE | JS_VBC4_FLAG_MIXED_OPERAND_ENVELOPE)) == 0u;
+#elif JS_NATIVE_PARSER_PROFILE == 1
+    return (flags & JS_VBC4_FLAG_REGISTER_ROW_ENVELOPE) != 0u && (flags & JS_VBC4_FLAG_MIXED_OPERAND_ENVELOPE) == 0u;
+#elif JS_NATIVE_PARSER_PROFILE == 2
+    return (flags & JS_VBC4_FLAG_MIXED_OPERAND_ENVELOPE) != 0u && (flags & JS_VBC4_FLAG_REGISTER_ROW_ENVELOPE) == 0u;
+#else
+#error "JS_NATIVE_PARSER_PROFILE must be 0, 1 or 2"
+#endif
 }
 
 static int js_vbc4_row_envelopes_mutually_exclusive(uint32_t flags) {
@@ -2218,23 +2289,6 @@ static void js_vbc4_copy_scoped_master_key(unsigned char out[32]) {
     JS_VBC4_COPY_SCOPED_MASTER_KEY(out);
 }
 
-/* ---- Item #4: load-time decrypt of the protected code section ----
- * Embedded keystream seed (shared with the build-time PE patcher). Generated per
- * build into native_secrets.inc; a weak fallback keeps a non-patched dev build
- * loadable (the seal marker still gates whether decryption runs at all). */
-#ifndef JS_PROTECTED_SECTION_KEY_GENERATED
-static const unsigned char JS_PROTECTED_SECTION_KEY[32] = {
-    0x6A,0x73,0x78,0x2D,0x70,0x72,0x6F,0x74,0x65,0x63,0x74,0x2D,0x6B,0x65,0x79,0x30,
-    0x31,0x32,0x33,0x34,0x35,0x36,0x37,0x38,0x39,0x61,0x62,0x63,0x64,0x65,0x66,0x67,
-};
-#endif
-
-JS_HIDDEN const unsigned char* js_protected_section_key(int *len) {
-    if (len) *len = (int)sizeof(JS_PROTECTED_SECTION_KEY);
-    return JS_PROTECTED_SECTION_KEY;
-}
-
-
 JS_PROTECTED static void js_hmac_sha256_with_key(const unsigned char *key, int key_len, const unsigned char **parts, const int *part_lens, int part_count, unsigned char out[32]) {
     unsigned char inner_hash[32];
     unsigned char key_block[64];
@@ -2296,6 +2350,163 @@ static void js_vbc4_hmac_with_scoped_master_key(const unsigned char **parts, con
     js_hmac_sha256_with_key(scoped_key, 32, parts, part_lens, part_count, out);
     js_vbc4_wipe_volatile(session_material, sizeof(session_material));
     js_vbc4_wipe_volatile(scoped_key, sizeof(scoped_key));
+}
+
+/* Runtime-only VM key hierarchy. Stored VBC4 authentication continues to use
+ * js_vbc4_hmac_with_scoped_master_key above, so a fresh startup nonce never
+ * invalidates deterministic on-disk MACs. */
+static const unsigned char JS_VM_BUILD_KEY_DOMAIN[] = "javashroud-vbc4-vm-build-key-v1";
+static const unsigned char JS_VM_METHOD_KEY_DOMAIN[] = "javashroud-vbc4-vm-method-key-v1";
+static const unsigned char JS_VM_SESSION_KEY_DOMAIN[] = "javashroud-vbc4-vm-session-key-v1";
+static const unsigned char JS_VM_SESSION_TAG_DOMAIN[] = "javashroud-vbc4-vm-session-tag-v1";
+static unsigned char js_vm_startup_nonce[32];
+static volatile int js_vm_startup_nonce_ready = 0;
+
+static void js_vbc4_vm_build_key(unsigned char out[32]) {
+    unsigned char base_key[32];
+    unsigned char layout_digest[32];
+    js_vbc4_copy_scoped_master_key(base_key);
+    for (int i = 0; i < 32; i++) layout_digest[i] = JS_VBC4_LAYOUT_DIGEST_AT(i);
+    const unsigned char *extract_parts[1] = { base_key };
+    const int extract_lens[1] = { 32 };
+    unsigned char prk[32];
+    js_hmac_sha256_with_key(JS_VM_BUILD_KEY_DOMAIN, (int)(sizeof(JS_VM_BUILD_KEY_DOMAIN) - 1), extract_parts, extract_lens, 1, prk);
+    unsigned char counter = 1;
+    const unsigned char *expand_parts[2] = { layout_digest, &counter };
+    const int expand_lens[2] = { 32, 1 };
+    js_hmac_sha256_with_key(prk, 32, expand_parts, expand_lens, 2, out);
+    js_vbc4_wipe_volatile(base_key, sizeof(base_key));
+    js_vbc4_wipe_volatile(layout_digest, sizeof(layout_digest));
+    js_vbc4_wipe_volatile(prk, sizeof(prk));
+}
+
+static void js_vm_write_be64_tmp(unsigned char out[8], uint64_t value) {
+    for (int i = 0; i < 8; i++) out[i] = (unsigned char)(value >> (56 - i * 8));
+}
+
+static int js_vm_runtime_session_leaf(
+    jlong entry_token,
+    const char *resource_path,
+    const unsigned char method_nonce[16],
+    unsigned char out[32]
+) {
+    if (!js_vm_startup_nonce_ready || entry_token == 0 || !resource_path || !resource_path[0] || !method_nonce || !out) return 0;
+    unsigned char build_key[32], method_prk[32], method_key[32], session_prk[32], token_bytes[8];
+    unsigned char counter = 1;
+    js_vbc4_vm_build_key(build_key);
+    js_vm_write_be64_tmp(token_bytes, (uint64_t)entry_token);
+    const unsigned char *method_extract_parts[1] = { build_key };
+    const int method_extract_lens[1] = { 32 };
+    js_hmac_sha256_with_key(JS_VM_METHOD_KEY_DOMAIN, (int)(sizeof(JS_VM_METHOD_KEY_DOMAIN) - 1), method_extract_parts, method_extract_lens, 1, method_prk);
+    const unsigned char *method_expand_parts[4] = { token_bytes, (const unsigned char*)resource_path, method_nonce, &counter };
+    const int method_expand_lens[4] = { 8, (int)strlen(resource_path), 16, 1 };
+    js_hmac_sha256_with_key(method_prk, 32, method_expand_parts, method_expand_lens, 4, method_key);
+    const unsigned char *session_extract_parts[1] = { method_key };
+    const int session_extract_lens[1] = { 32 };
+    js_hmac_sha256_with_key(JS_VM_SESSION_KEY_DOMAIN, (int)(sizeof(JS_VM_SESSION_KEY_DOMAIN) - 1), session_extract_parts, session_extract_lens, 1, session_prk);
+    counter = 1;
+    const unsigned char *session_expand_parts[2] = { js_vm_startup_nonce, &counter };
+    const int session_expand_lens[2] = { 32, 1 };
+    js_hmac_sha256_with_key(session_prk, 32, session_expand_parts, session_expand_lens, 2, out);
+    js_vbc4_wipe_volatile(build_key, sizeof(build_key));
+    js_vbc4_wipe_volatile(method_prk, sizeof(method_prk));
+    js_vbc4_wipe_volatile(method_key, sizeof(method_key));
+    js_vbc4_wipe_volatile(session_prk, sizeof(session_prk));
+    js_vbc4_wipe_volatile(token_bytes, sizeof(token_bytes));
+    return 1;
+}
+
+static void js_vm_runtime_session_tag(const js_vm_program *program, const unsigned char leaf[32], unsigned char out[32]) {
+    unsigned char token_bytes[8], profile_bytes[4], native_profile_bytes[4], dispatch_tag_bytes[4];
+    unsigned char flags_bytes[4], nested_profile_bytes[4], access_bytes[4], return_desc_byte[1];
+    js_vm_write_be64_tmp(token_bytes, (uint64_t)program->entry_token);
+    js_write_be32_tmp(profile_bytes, program->method_local_profile);
+    js_write_be32_tmp(native_profile_bytes, program->native_vm_profile_id);
+    js_write_be32_tmp(dispatch_tag_bytes, program->dispatch_profile_tag);
+    js_write_be32_tmp(flags_bytes, program->vbc4_flags);
+    js_write_be32_tmp(nested_profile_bytes, program->nested_vm_profile);
+    js_write_be32_tmp(access_bytes, program->original_access);
+    return_desc_byte[0] = (unsigned char)program->return_desc;
+    /* All metadata fields that select identity, calling convention, or native
+     * execution profile are immutable after bind and covered by this tag. */
+    const unsigned char *parts[14] = {
+        JS_VM_SESSION_TAG_DOMAIN, token_bytes, (const unsigned char*)program->resource_path,
+        program->nonce, profile_bytes, native_profile_bytes, dispatch_tag_bytes, flags_bytes,
+        nested_profile_bytes, access_bytes, (const unsigned char*)program->original_owner,
+        (const unsigned char*)program->original_name, (const unsigned char*)program->original_desc,
+        return_desc_byte
+    };
+    const int lens[14] = {
+        (int)(sizeof(JS_VM_SESSION_TAG_DOMAIN) - 1), 8, (int)strlen(program->resource_path),
+        16, 4, 4, 4, 4, 4, 4,
+        program->original_owner ? (int)strlen(program->original_owner) : 0,
+        program->original_name ? (int)strlen(program->original_name) : 0,
+        program->original_desc ? (int)strlen(program->original_desc) : 0, 1
+    };
+    js_hmac_sha256_with_key(leaf, 32, parts, lens, 14, out);
+    js_vbc4_wipe_volatile(token_bytes, sizeof(token_bytes));
+    js_vbc4_wipe_volatile(profile_bytes, sizeof(profile_bytes));
+    js_vbc4_wipe_volatile(native_profile_bytes, sizeof(native_profile_bytes));
+    js_vbc4_wipe_volatile(dispatch_tag_bytes, sizeof(dispatch_tag_bytes));
+    js_vbc4_wipe_volatile(flags_bytes, sizeof(flags_bytes));
+    js_vbc4_wipe_volatile(nested_profile_bytes, sizeof(nested_profile_bytes));
+    js_vbc4_wipe_volatile(access_bytes, sizeof(access_bytes));
+    js_vbc4_wipe_volatile(return_desc_byte, sizeof(return_desc_byte));
+}
+
+JS_HIDDEN int js_vm_install_startup_nonce(const unsigned char *nonce, int nonce_len) {
+    if (!nonce || nonce_len != 32 || js_vm_startup_nonce_ready) return 0;
+    unsigned char nonzero = 0;
+    for (int i = 0; i < 32; i++) nonzero |= nonce[i];
+    if (!nonzero) return 0;
+    memcpy(js_vm_startup_nonce, nonce, 32);
+    js_vm_startup_nonce_ready = 1;
+    return 1;
+}
+
+JS_HIDDEN void js_vm_clear_startup_nonce(void) {
+    js_vbc4_wipe_volatile(js_vm_startup_nonce, sizeof(js_vm_startup_nonce));
+    js_vm_startup_nonce_ready = 0;
+}
+
+static void js_vm_abort_preload_state(JNIEnv *env) {
+    js_vm_preload_in_progress = 0;
+    js_vm_ephemeral_cache_clear(env);
+    js_vm_call_gate_reset();
+    js_vbc4_wipe_volatile((void*)js_vm_shared_dispatch_pool, sizeof(js_vm_shared_dispatch_pool));
+    js_vm_shared_dispatch_epoch = 0;
+    js_vm_shared_dispatch_seeded = 0;
+    js_vm_clear_startup_nonce();
+}
+
+JS_HIDDEN int js_vm_bind_runtime_session(js_vm_program *program, jlong entry_token, const char *resource_path) {
+    if (!program || !resource_path || !resource_path[0]) return 0;
+    program->entry_token = entry_token;
+    if (program->resource_path) { js_vbc4_wipe_volatile(program->resource_path, strlen(program->resource_path)); free(program->resource_path); }
+    program->resource_path = js_strdup(resource_path);
+    if (!program->resource_path || !js_vm_runtime_session_leaf(entry_token, resource_path, program->nonce, program->session_leaf)) return 0;
+    js_vm_runtime_session_tag(program, program->session_leaf, program->session_tag);
+    program->session_bound = 1;
+    const char *session_evidence = getenv("JAVASHROUD_SESSION_EVIDENCE");
+    if (session_evidence && session_evidence[0] == '1' && session_evidence[1] == 0) {
+        fprintf(stderr, "JAVASHROUD_VM_SESSION=");
+        for (int i = 0; i < 8; i++) fprintf(stderr, "%02x", program->session_tag[i]);
+        fprintf(stderr, "\n");
+    }
+    return 1;
+}
+
+JS_HIDDEN int js_vm_verify_runtime_session(const js_vm_program *program) {
+    if (!program || !program->session_bound || !program->resource_path) return 0;
+    unsigned char expected_leaf[32], expected_tag[32];
+    if (!js_vm_runtime_session_leaf(program->entry_token, program->resource_path, program->nonce, expected_leaf)) return 0;
+    js_vm_runtime_session_tag(program, expected_leaf, expected_tag);
+    unsigned char diff = 0;
+    for (int i = 0; i < 32; i++) diff |= (unsigned char)(expected_leaf[i] ^ program->session_leaf[i]);
+    for (int i = 0; i < 32; i++) diff |= (unsigned char)(expected_tag[i] ^ program->session_tag[i]);
+    js_vbc4_wipe_volatile(expected_leaf, sizeof(expected_leaf));
+    js_vbc4_wipe_volatile(expected_tag, sizeof(expected_tag));
+    return diff == 0;
 }
 
 
@@ -2536,15 +2747,15 @@ static uint32_t js_read_le16_runtime(const unsigned char *data, int offset) {
     return ((uint32_t)data[offset]) | ((uint32_t)data[offset + 1] << 8);
 }
 
-static void js_runtime_hmac_sha256(const unsigned char **parts, const int *part_lens, int part_count, unsigned char out[32]) {
-    if (!js_runtime_resource_key_ready) { memset(out, 0, 32); return; }
+static void js_runtime_hmac_sha256(int slot, const unsigned char **parts, const int *part_lens, int part_count, unsigned char out[32]) {
+    if (slot < 0 || slot >= JS_RRK_SLOTS || !js_runtime_resource_key_slot_ready[slot]) { memset(out, 0, 32); return; }
     unsigned char root[32];
-    js_rrk_xor_assemble(&js_runtime_resource_key_shares[0][0], JS_RRK_SHARE_COUNT, root);
+    js_rrk_xor_assemble(&js_runtime_resource_key_shares[slot][0][0], JS_RRK_SHARE_COUNT, root);
     js_hmac_sha256_with_key(root, 32, parts, part_lens, part_count, out);
     js_vbc4_wipe_volatile(root, sizeof(root));
 }
 
-static void js_runtime_resource_aes_ctr(unsigned char *buf, int len, const unsigned char nonce[16], int kind_id, int variant_id, int layer_count) {
+static void js_runtime_resource_aes_ctr(int slot, unsigned char *buf, int len, const unsigned char nonce[16], int kind_id, int variant_id, int layer_count) {
     static const unsigned char key_label[] = "jsrp-aes-key";
     static const unsigned char iv_label[] = "jsrp-aes-iv";
     unsigned char kind_bytes[4], variant_bytes[4], layer_bytes[4], digest[32], key[16], counter[16], stream[16];
@@ -2553,11 +2764,11 @@ static void js_runtime_resource_aes_ctr(unsigned char *buf, int len, const unsig
     js_write_be32_tmp(layer_bytes, (uint32_t)layer_count);
     const unsigned char *key_parts[5] = { key_label, nonce, kind_bytes, variant_bytes, layer_bytes };
     int key_lens[5] = { (int)(sizeof(key_label) - 1), 16, 4, 4, 4 };
-    js_runtime_hmac_sha256(key_parts, key_lens, 5, digest);
+    js_runtime_hmac_sha256(slot, key_parts, key_lens, 5, digest);
     memcpy(key, digest, 16);
     const unsigned char *iv_parts[5] = { iv_label, nonce, kind_bytes, variant_bytes, layer_bytes };
     int iv_lens[5] = { (int)(sizeof(iv_label) - 1), 16, 4, 4, 4 };
-    js_runtime_hmac_sha256(iv_parts, iv_lens, 5, digest);
+    js_runtime_hmac_sha256(slot, iv_parts, iv_lens, 5, digest);
     memcpy(counter, digest, 16);
     int offset = 0;
     while (offset < len) {
@@ -2580,35 +2791,38 @@ static int js_runtime_resource_ct_equal(const unsigned char *a, const unsigned c
     return diff == 0;
 }
 
-static void js_runtime_sha256(const unsigned char *data, int len, unsigned char out[32]) {
+JS_HIDDEN void js_runtime_sha256(const unsigned char *data, int len, unsigned char out[32]) {
     js_sha256_ctx ctx;
     js_sha256_init(&ctx);
     js_sha256_update(&ctx, data, len);
     js_sha256_final(&ctx, out);
 }
 
-static void js_runtime_resource_aes_ctr_domains(unsigned char *buf, int len, const unsigned char nonce[16], uint32_t kind_id, uint32_t variant_id, uint32_t layer_count) {
+static void js_runtime_resource_aes_ctr_domains(int slot, unsigned char *buf, int len, const unsigned char nonce[16], uint32_t kind_id, uint32_t variant_id, uint32_t layer_count) {
     int kind_arg = (int)kind_id;
     int variant_arg = (int)variant_id;
     int layer_arg = (int)layer_count;
-    js_runtime_resource_aes_ctr(buf, len, nonce, kind_arg, variant_arg, layer_arg);
+    js_runtime_resource_aes_ctr(slot, buf, len, nonce, kind_arg, variant_arg, layer_arg);
 }
 
 static unsigned char* js_runtime_resource_decode_current_owned(const unsigned char *raw, int raw_len, int *out_len) {
-    static const unsigned char auth_label[] = "jsrp-auth-v2";
-    if (raw_len < 154 || raw[raw_len - 1] != 32) return NULL;
+    static const unsigned char auth_label[] = "jsrp-auth-v3";
+    if (raw_len < 156 || raw[raw_len - 1] != 32) return NULL;
     const unsigned char *nonce = raw + 5;
     uint32_t metadata_len = js_read_le16_runtime(raw, 21);
     uint32_t mac_len = js_read_le16_runtime(raw, 23);
+    uint32_t partition_id = js_read_le16_runtime(raw, 25);
     if (metadata_len != 96 || mac_len != 32) return NULL;
-    int metadata_offset = 25;
+    if (partition_id >= JS_RRK_RESOURCE_SLOTS) return NULL;
+    if (!js_runtime_resource_key_slot_ready[partition_id]) return NULL;
+    int metadata_offset = 27;
     int body_offset = metadata_offset + (int)metadata_len;
     if (body_offset + 33 > raw_len) return NULL;
     int tag_offset = raw_len - 33;
     unsigned char expected[32];
     const unsigned char *parts[3] = { auth_label, nonce, raw };
     int lens[3] = { (int)(sizeof(auth_label) - 1), 16, tag_offset };
-    js_runtime_hmac_sha256(parts, lens, 3, expected);
+    js_runtime_hmac_sha256((int)partition_id, parts, lens, 3, expected);
     if (!js_runtime_resource_ct_equal(raw + tag_offset, expected, 32)) {
         js_vbc4_wipe_volatile(expected, sizeof(expected));
         return NULL;
@@ -2617,8 +2831,12 @@ static unsigned char* js_runtime_resource_decode_current_owned(const unsigned ch
 
     unsigned char metadata[96];
     memcpy(metadata, raw + metadata_offset, sizeof(metadata));
-    js_runtime_resource_aes_ctr_domains(metadata, (int)sizeof(metadata), nonce, 0, 0, 0);
+    js_runtime_resource_aes_ctr_domains((int)partition_id, metadata, (int)sizeof(metadata), nonce, 0, 0, 0);
     if (metadata[0] != 0x4Du || metadata[1] != 0x32u || metadata[2] != 1u) {
+        js_vbc4_wipe_volatile(metadata, sizeof(metadata));
+        return NULL;
+    }
+    if ((uint32_t)(metadata[7] & 0xFFu) != partition_id) {
         js_vbc4_wipe_volatile(metadata, sizeof(metadata));
         return NULL;
     }
@@ -2656,7 +2874,7 @@ static unsigned char* js_runtime_resource_decode_current_owned(const unsigned ch
     unsigned char *stored = (unsigned char*)(body_len == 0 ? calloc(1, 1) : malloc((size_t)body_len));
     if (!stored) return NULL;
     memcpy(stored, raw + body_offset, (size_t)body_len);
-    js_runtime_resource_aes_ctr_domains(stored, (int)body_len, nonce, kind_id, variant_id, layer_count);
+    js_runtime_resource_aes_ctr_domains((int)partition_id, stored, (int)body_len, nonce, kind_id, variant_id, layer_count);
     unsigned char digest[32];
     js_runtime_sha256(stored, (int)stored_len, digest);
     if (!js_runtime_resource_ct_equal(digest, stored_hash, 32)) {
@@ -2682,44 +2900,16 @@ static unsigned char* js_runtime_resource_decode_current_owned(const unsigned ch
 }
 
 static unsigned char* js_runtime_resource_decode_legacy_owned(const unsigned char *raw, int raw_len, int *out_len) {
-    static const unsigned char auth_label[] = "jsrp-auth";
-    if (raw_len < 73 || raw[raw_len - 1] != 32) return NULL;
-    int kind_id = raw[5] & 0xFF;
-    int layer_count = raw[6] & 0xFF;
-    int flags = raw[7] & 0xFF;
-    int compressed = (flags & 0x80) != 0;
-    int variant_id = flags & 0x7F;
-    if (layer_count < 1 || layer_count > 7) return NULL;
-    const unsigned char *nonce = raw + 8;
-    uint32_t plain_len = js_read_le32_runtime(raw, 24);
-    uint32_t stored_len = js_read_le32_runtime(raw, 28);
-    uint32_t body_len = js_read_le32_runtime(raw, 32);
-    if (stored_len == 0 || body_len != stored_len || body_len > (uint32_t)raw_len) return NULL;
-    int tag_offset = 40 + (int)body_len;
-    if (tag_offset < 40 || tag_offset + 33 != raw_len) return NULL;
-    unsigned char expected[32];
-    const unsigned char *parts[3] = { auth_label, nonce, raw };
-    int lens[3] = { (int)(sizeof(auth_label) - 1), 16, tag_offset };
-    js_runtime_hmac_sha256(parts, lens, 3, expected);
-    if (!js_runtime_resource_ct_equal(raw + tag_offset, expected, 32)) { js_vbc4_wipe_volatile(expected, sizeof(expected)); return NULL; }
-    js_vbc4_wipe_volatile(expected, sizeof(expected));
-    unsigned char *stored = (unsigned char*)malloc((size_t)body_len);
-    if (!stored) return NULL;
-    memcpy(stored, raw + 40, (size_t)body_len);
-    js_runtime_resource_aes_ctr(stored, (int)body_len, nonce, kind_id, variant_id, layer_count);
-    unsigned char *plain = compressed ? js_vbc4_zstd_decompress_owned(stored, stored_len, plain_len) : stored;
-    if (compressed) { js_vbc4_wipe_volatile(stored, (size_t)body_len); free(stored); }
-    if (!plain) return NULL;
-    if (out_len) *out_len = (int)plain_len;
-    return plain;
+    (void)raw; (void)raw_len; (void)out_len;
+    /* Legacy pre-partition envelopes are rejected fail-closed. */
+    return NULL;
 }
 
 JS_PROTECTED unsigned char* js_runtime_resource_decode_owned(const unsigned char *raw, int raw_len, int *out_len) {
     if (out_len) *out_len = 0;
-    if (!raw || raw_len < 6 || !js_runtime_resource_key_ready) return NULL;
+    if (!raw || raw_len < 6) return NULL;
     if (raw[0] != 0x4A || raw[1] != 0x53 || raw[2] != 0x52 || raw[3] != 0x50) return NULL;
-    if (raw[4] == 6) return js_runtime_resource_decode_current_owned(raw, raw_len, out_len);
-    if (raw[4] == 5) return js_runtime_resource_decode_legacy_owned(raw, raw_len, out_len);
+    if (raw[4] == 7) return js_runtime_resource_decode_current_owned(raw, raw_len, out_len);
     return NULL;
 }
 
@@ -3431,6 +3621,9 @@ static int js_jni_callgate(JNIEnv *env, jclass cls, jobject obj, jmethodID mid, 
     return 1;
 }
 
+#if defined(JS_NATIVE_CFG_EVIDENCE)
+JS_EXPORT
+#endif
 JS_PROTECTED int js_vm_parse_program(const unsigned char *data, int len, js_vm_program *p, const unsigned char *state_binding, int state_binding_len) {
     int pos = 0;
     int parse_stage = 0;
@@ -3459,6 +3652,7 @@ JS_PROTECTED int js_vm_parse_program(const unsigned char *data, int len, js_vm_p
     p->max_locals = 8;
     p->metadata_cp_index = -1;
     p->method_local_profile = 0;
+    p->native_vm_profile_id = 0;
     p->dispatch_profile_tag = 0;
     p->vbc4_flags = 0;
     p->nested_vm_profile = 0;
@@ -3510,6 +3704,7 @@ JS_PROTECTED int js_vm_parse_program(const unsigned char *data, int len, js_vm_p
     if (((unsigned int)vbc4_flags & (JS_VBC4_REQUIRED_FLAGS | JS_VBC4_FLAG_POLYMORPHIC_CP)) !=
         (JS_VBC4_REQUIRED_FLAGS | JS_VBC4_FLAG_POLYMORPHIC_CP)) JS_VM_PARSE_FAIL; /* require full VBC4 max-strength feature set */
     if (!js_vbc4_row_envelopes_mutually_exclusive((uint32_t)vbc4_flags)) JS_VM_PARSE_FAIL;
+    if (!js_vbc4_native_parser_profile_matches((uint32_t)vbc4_flags)) JS_VM_PARSE_FAIL;
     p->vbc4_flags = (uint32_t)vbc4_flags;
     parse_stage = 2;
     parse_stage = 21;
@@ -3680,8 +3875,7 @@ if (raw_pos != (int)cp_enc_sz) JS_VM_PARSE_FAIL;
             if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &register_count)) JS_VM_PARSE_FAIL;
             if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &register_insn_count)) JS_VM_PARSE_FAIL;
             if ((vbc4_flags & (JS_VBC4_FLAG_REGISTER_ROW_ENVELOPE | JS_VBC4_FLAG_MIXED_OPERAND_ENVELOPE)) != 0 && (vbc4_flags & JS_VBC4_FLAG_NESTED_VM) == 0) {
-                uint32_t expected_dialect = js_vbc4_register_row_mix((uint32_t)build_seed, (uint32_t)bi, register_insn_count, 0x23u, 0x4Du);
-                if ((vbc4_flags & JS_VBC4_FLAG_MIXED_OPERAND_ENVELOPE) != 0) expected_dialect ^= js_vbc4_register_row_mix((uint32_t)build_seed, (uint32_t)bi, register_insn_count, 0x61u, 0x4Fu);
+                uint32_t expected_dialect = js_vbc4_native_row_dialect((uint32_t)build_seed, (uint32_t)bi, register_insn_count);
                 if (!js_vm_read_u4(block, (int)block_plain_sz, &block_pos, &row_dialect)) JS_VM_PARSE_FAIL;
                 if (row_dialect != expected_dialect) JS_VM_PARSE_FAIL;
             }
@@ -3698,9 +3892,7 @@ if (raw_pos != (int)cp_enc_sz) JS_VM_PARSE_FAIL;
                     if (!js_vm_read_u4(block, (int)block_plain_sz, &block_pos, &u4)) JS_VM_PARSE_FAIL;
                 } else {
                     unsigned int row_fields[6];
-                    int row_ok = (vbc4_flags & JS_VBC4_FLAG_MIXED_OPERAND_ENVELOPE) != 0 ?
-                        js_vbc4_read_mixed_operand_row(block, (int)block_plain_sz, &block_pos, (uint32_t)build_seed, (uint32_t)bi, ri, row_fields) :
-                        js_vbc4_read_register_row(block, (int)block_plain_sz, &block_pos, (uint32_t)build_seed, (uint32_t)bi, ri, row_fields);
+                    int row_ok = js_vbc4_read_native_row(block, (int)block_plain_sz, &block_pos, (uint32_t)build_seed, (uint32_t)bi, ri, row_fields);
                     if (!row_ok) JS_VM_PARSE_FAIL;
                     raw_opcode = row_fields[0];
                     flags = row_fields[1];
@@ -3746,9 +3938,7 @@ if (raw_pos != (int)cp_enc_sz) JS_VM_PARSE_FAIL;
                             if (!js_vm_read_u4(block, (int)block_plain_sz, &block_pos, &cont_operand)) JS_VM_PARSE_FAIL;
                         } else {
                             unsigned int cont_fields[6];
-                            int cont_ok = (vbc4_flags & JS_VBC4_FLAG_MIXED_OPERAND_ENVELOPE) != 0 ?
-                                js_vbc4_read_mixed_operand_row(block, (int)block_plain_sz, &block_pos, (uint32_t)build_seed, (uint32_t)bi, ri, cont_fields) :
-                                js_vbc4_read_register_row(block, (int)block_plain_sz, &block_pos, (uint32_t)build_seed, (uint32_t)bi, ri, cont_fields);
+                            int cont_ok = js_vbc4_read_native_row(block, (int)block_plain_sz, &block_pos, (uint32_t)build_seed, (uint32_t)bi, ri, cont_fields);
                             if (!cont_ok) JS_VM_PARSE_FAIL;
                             cont_opcode = cont_fields[0];
                             cont_flags = cont_fields[1];
@@ -3772,6 +3962,7 @@ if (raw_pos != (int)cp_enc_sz) JS_VM_PARSE_FAIL;
             }
             if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &stack_insn_count)) JS_VM_PARSE_FAIL;
             if (stack_insn_count != 0) JS_VM_PARSE_FAIL;
+            if (block_pos != (int)block_plain_sz) JS_VM_PARSE_FAIL;
             if (p->insn_count == base_insn && bi == 0) JS_VM_PARSE_FAIL;
             js_vbc4_wipe_volatile(block, (size_t)block_enc_sz);
             free(block);
@@ -3821,8 +4012,7 @@ if (raw_pos != (int)cp_enc_sz) JS_VM_PARSE_FAIL;
         if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &register_count)) JS_VM_PARSE_FAIL;
         if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &register_insn_count)) JS_VM_PARSE_FAIL;
         if ((vbc4_flags & (JS_VBC4_FLAG_REGISTER_ROW_ENVELOPE | JS_VBC4_FLAG_MIXED_OPERAND_ENVELOPE)) != 0 && (vbc4_flags & JS_VBC4_FLAG_NESTED_VM) == 0) {
-            uint32_t expected_dialect = js_vbc4_register_row_mix((uint32_t)build_seed, (uint32_t)block_ids[0], register_insn_count, 0x23u, 0x4Du);
-            if ((vbc4_flags & JS_VBC4_FLAG_MIXED_OPERAND_ENVELOPE) != 0) expected_dialect ^= js_vbc4_register_row_mix((uint32_t)build_seed, (uint32_t)block_ids[0], register_insn_count, 0x61u, 0x4Fu);
+            uint32_t expected_dialect = js_vbc4_native_row_dialect((uint32_t)build_seed, (uint32_t)block_ids[0], register_insn_count);
             if (!js_vm_read_u4(insn, (int)insn_plain_sz, &insn_pos, &row_dialect)) JS_VM_PARSE_FAIL;
             if (row_dialect != expected_dialect) JS_VM_PARSE_FAIL;
         }
@@ -3839,9 +4029,7 @@ if (raw_pos != (int)cp_enc_sz) JS_VM_PARSE_FAIL;
                 if (!js_vm_read_u4(insn, (int)insn_plain_sz, &insn_pos, &u4)) JS_VM_PARSE_FAIL;
             } else {
                 unsigned int row_fields[6];
-                int row_ok = (vbc4_flags & JS_VBC4_FLAG_MIXED_OPERAND_ENVELOPE) != 0 ?
-                    js_vbc4_read_mixed_operand_row(insn, (int)insn_plain_sz, &insn_pos, (uint32_t)build_seed, (uint32_t)block_ids[0], ri, row_fields) :
-                    js_vbc4_read_register_row(insn, (int)insn_plain_sz, &insn_pos, (uint32_t)build_seed, (uint32_t)block_ids[0], ri, row_fields);
+                int row_ok = js_vbc4_read_native_row(insn, (int)insn_plain_sz, &insn_pos, (uint32_t)build_seed, (uint32_t)block_ids[0], ri, row_fields);
                 if (!row_ok) JS_VM_PARSE_FAIL;
                 raw_opcode = row_fields[0];
                 flags = row_fields[1];
@@ -3887,9 +4075,7 @@ if (raw_pos != (int)cp_enc_sz) JS_VM_PARSE_FAIL;
                         if (!js_vm_read_u4(insn, (int)insn_plain_sz, &insn_pos, &cont_operand)) JS_VM_PARSE_FAIL;
                     } else {
                         unsigned int cont_fields[6];
-                        int cont_ok = (vbc4_flags & JS_VBC4_FLAG_MIXED_OPERAND_ENVELOPE) != 0 ?
-                            js_vbc4_read_mixed_operand_row(insn, (int)insn_plain_sz, &insn_pos, (uint32_t)build_seed, (uint32_t)block_ids[0], ri, cont_fields) :
-                            js_vbc4_read_register_row(insn, (int)insn_plain_sz, &insn_pos, (uint32_t)build_seed, (uint32_t)block_ids[0], ri, cont_fields);
+                        int cont_ok = js_vbc4_read_native_row(insn, (int)insn_plain_sz, &insn_pos, (uint32_t)build_seed, (uint32_t)block_ids[0], ri, cont_fields);
                         if (!cont_ok) JS_VM_PARSE_FAIL;
                         cont_opcode = cont_fields[0];
                         cont_flags = cont_fields[1];
@@ -3913,6 +4099,7 @@ if (raw_pos != (int)cp_enc_sz) JS_VM_PARSE_FAIL;
         }
         if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &u)) JS_VM_PARSE_FAIL;
         if (u != 0) JS_VM_PARSE_FAIL;
+        if (insn_pos != (int)insn_plain_sz) JS_VM_PARSE_FAIL;
         if (p->insn_count <= 0 || !p->insns || p->reg_program.insn_count <= 0 || !p->reg_program.insns) JS_VM_PARSE_FAIL;
         js_vbc4_wipe_volatile(insn, (size_t)insn_enc_sz);
         free(insn);
@@ -5014,7 +5201,7 @@ JS_PROTECTED static uint32_t js_vm_dispatch_profile_tag_for(const js_vm_program 
     if (!program) return 0u;
     uint64_t token = (uint64_t)program->entry_token;
     uint32_t x = (uint32_t)(token ^ (token >> 32));
-    x ^= program->method_local_profile ^ (program->original_access * 0x45D9F3Bu);
+    x ^= program->method_local_profile ^ (program->original_access * 0x45D9F3Bu) ^ (program->native_vm_profile_id * 0x27D4EB2Du);
     const unsigned char *path = (const unsigned char*)(program->resource_path ? program->resource_path : "");
     for (const unsigned char *p = path; p && *p; ++p) {
         x ^= (uint32_t)(*p);
@@ -5030,6 +5217,7 @@ JS_PROTECTED static uint32_t js_vm_dispatch_profile_tag_for(const js_vm_program 
 
 JS_PROTECTED static int js_vm_dispatch_profile_tag_matches(const js_vm_program *program) {
     if (!program || program->dispatch_profile_tag == 0u) return 0;
+    if (program->native_vm_profile_id != JS_NATIVE_VM_PROFILE_ID) return 0;
     return js_vm_dispatch_profile_tag_for(program) == program->dispatch_profile_tag;
 }
 
@@ -5049,7 +5237,8 @@ JS_PROTECTED static int js_vm_preload_entry_auth_matches(
     char actual[17];
     static const char hex[] = "0123456789abcdef";
     js_sha256_init(&ctx);
-    js_sha256_update(&ctx, (const unsigned char*)"jsmi2-entry-auth", 16);
+    static const unsigned char auth_domain[] = "jsc1-method-auth-v1";
+    js_sha256_update(&ctx, auth_domain, (int)(sizeof(auth_domain) - 1));
     unsigned char zero = 0;
     js_sha256_update(&ctx, &zero, 1); js_sha256_update(&ctx, (const unsigned char*)token_hex, (int)strlen(token_hex));
     js_sha256_update(&ctx, &zero, 1); js_sha256_update(&ctx, (const unsigned char*)resource_path, (int)strlen(resource_path));
@@ -5835,7 +6024,12 @@ static int js_vm_execute_with_preset_locals(JNIEnv *env, js_vm_program *p, jobje
         jint active_epoch = p->insns[pc].opcode_epoch;
         active_insn.opcode = js_vm_canonical_opcode(active_raw_opcode ^ active_mask);
         pc = js_vm_profile_next_pc(js_vm_dispatch_profile, fault_pc, pc + 1, 0, 0, vm_dispatch_drift_state, dispatch_step, sp);
-        if (js_vm_profile_transition_due(js_vm_dispatch_profile, p, vm_dispatch_drift_state, dispatch_step, fault_pc, sp)) {
+        /* Rotating the resident epoch rewraps the complete instruction array.
+         * Keep per-opcode rewrap on every dispatch, but run the whole-program
+         * rotation at a build-local coarse cadence (128/256/512 steps). */
+        uint32_t resident_rotation_mask = ((uint32_t)JS_VBC4_DISPATCH_STEP_MASK << 4) | 0x0Fu;
+        if ((((uint32_t)dispatch_step & resident_rotation_mask) == 0u) &&
+            js_vm_profile_transition_due(js_vm_dispatch_profile, p, vm_dispatch_drift_state, dispatch_step, fault_pc, sp)) {
             vm_dispatch_drift_state = js_vm_dispatch_drift_step(p, vm_dispatch_drift_state, dispatch_step, fault_pc, sp);
             js_vm_rotate_resident_block(p, fault_pc, dispatch_step, vm_dispatch_drift_state, pc, sp);
         }
@@ -6312,16 +6506,17 @@ jsn_r26(JNIEnv *env, jclass cls, jlong entryToken, jint arg0)
 static const unsigned char JS_JSE_CLASS_DERIVE_LABEL[] = "javashroud-vbc4-jse-class-v1";
 
 /* HKDF-SHA256 (RFC 5869) class-encryption key derivation. Runs ONLY inside the
- * sealed native kernel: ikm is the resident per-build runtime resource root key,
- * the label is the extract salt, info is keyId||salt. Byte-for-byte identical to
- * the Kotlin build-time derivation so a build-time key recomputes at runtime. */
+ * sealed native kernel: ikm is the resident per-build anchor key, the label is
+ * the extract salt, info is keyId||salt. Byte-for-byte identical to the Kotlin
+ * build-time derivation so a build-time key recomputes at runtime. */
 static int js_hkdf_sha256_class_key(const unsigned char *info, int info_len, unsigned char *out, int out_len) {
     if (out_len < 1 || out_len > 255 * 32) return 0;
     unsigned char prk[32];
     const unsigned char *xparts[1];
     int xlens[1];
     unsigned char root[32];
-    js_rrk_xor_assemble(&js_runtime_resource_key_shares[0][0], JS_RRK_SHARE_COUNT, root);
+    if (!js_runtime_resource_key_slot_ready[JS_RRK_ANCHOR_SLOT]) return 0;
+    js_rrk_xor_assemble(&js_runtime_resource_key_shares[JS_RRK_ANCHOR_SLOT][0][0], JS_RRK_SHARE_COUNT, root);
     xparts[0] = root;
     xlens[0] = 32;
     js_hmac_sha256_with_key(JS_JSE_CLASS_DERIVE_LABEL, (int)(sizeof(JS_JSE_CLASS_DERIVE_LABEL) - 1), xparts, xlens, 1, prk);
@@ -6354,7 +6549,7 @@ JS_LOCAL jbyteArray JNICALL
 jsn_k10(JNIEnv *env, jclass cls, jbyteArray keyIdArr, jbyteArray saltArr, jint length)
 {
     (void)cls;
-    if (!js_runtime_resource_key_ready) return NULL;
+    if (!js_runtime_resource_key_slot_ready[JS_RRK_ANCHOR_SLOT]) return NULL;
     if (length < 1 || length > 64) return NULL;
     if (!keyIdArr || !saltArr) return NULL;
     jsize id_len = (*env)->GetArrayLength(env, keyIdArr);
@@ -6391,26 +6586,27 @@ static void js_rrk_fill_entropy(unsigned char out[32]) {
 }
 
 JS_LOCAL void JNICALL
-jsn_k7(JNIEnv *env, jclass cls, jbyteArray keyArr)
+jsn_k7(JNIEnv *env, jclass cls, jbyteArray keyArr, jint slot)
 {
     (void)cls;
+    if (slot < 0 || slot >= JS_RRK_SLOTS) return;
     if (!keyArr || (*env)->GetArrayLength(env, keyArr) != 32) {
-        js_runtime_resource_key_ready = 0;
+        js_runtime_resource_key_slot_ready[slot] = 0;
         return;
     }
     jbyte *raw = (*env)->GetByteArrayElements(env, keyArr, NULL);
     if (!raw) {
-        js_runtime_resource_key_ready = 0;
+        js_runtime_resource_key_slot_ready[slot] = 0;
         return;
     }
-    for (int s = 0; s < JS_RRK_SHARE_COUNT - 1; s++) js_rrk_fill_entropy(js_runtime_resource_key_shares[s]);
+    for (int s = 0; s < JS_RRK_SHARE_COUNT - 1; s++) js_rrk_fill_entropy(js_runtime_resource_key_shares[slot][s]);
     for (int b = 0; b < 32; b++) {
         unsigned char acc = (unsigned char)raw[b];
-        for (int s = 0; s < JS_RRK_SHARE_COUNT - 1; s++) acc = (unsigned char)(acc ^ js_runtime_resource_key_shares[s][b]);
-        js_runtime_resource_key_shares[JS_RRK_SHARE_COUNT - 1][b] = acc;
+        for (int s = 0; s < JS_RRK_SHARE_COUNT - 1; s++) acc = (unsigned char)(acc ^ js_runtime_resource_key_shares[slot][s][b]);
+        js_runtime_resource_key_shares[slot][JS_RRK_SHARE_COUNT - 1][b] = acc;
     }
     (*env)->ReleaseByteArrayElements(env, keyArr, raw, JNI_ABORT);
-    js_runtime_resource_key_ready = 1;
+    js_runtime_resource_key_slot_ready[slot] = 1;
 }
 
 JS_LOCAL jobject JNICALL
@@ -6475,55 +6671,56 @@ jsn_k8(JNIEnv *env, jclass cls, jlong entryToken, jstring resourcePath)
 }
 
 JS_LOCAL void JNICALL
-jsn_k9(JNIEnv *env, jclass cls)
+jsn_k9(JNIEnv *env, jclass cls, jbyteArray preload_index, jbyteArray commitments, jbyteArray startup_nonce)
 {
-    js_vm_preload_in_progress++;
-    jstring index_path = (*env)->NewStringUTF(env, "META-INF/.r/vm-current.idx");
-    if (!index_path) { js_vm_clear_exception(env); js_vm_preload_in_progress--; return; }
-    jbyteArray raw_index = js_vm_load_resource_bytes(env, cls, index_path);
-    (*env)->DeleteLocalRef(env, index_path);
-    if (!raw_index) {
-        js_vm_clear_exception(env);
-        index_path = (*env)->NewStringUTF(env, "META-INF/.r/vm.idx");
-        if (!index_path) { js_vm_clear_exception(env); js_vm_preload_in_progress--; return; }
-        raw_index = js_vm_load_resource_bytes(env, cls, index_path);
-        (*env)->DeleteLocalRef(env, index_path);
-    }
-    if (!raw_index) {
-        js_vm_clear_exception(env);
-        js_vm_preload_in_progress--;
+    (void)cls;
+    /* A preload attempt replaces the complete runtime catalog/session domain.
+     * Drop any prior programs before accepting a new nonce so a failed retry
+     * cannot leave old programs reachable under partially replaced gates. */
+    js_vm_abort_preload_state(env);
+    if (!preload_index || !commitments || !startup_nonce || (*env)->GetArrayLength(env, startup_nonce) != 32) {
+        js_vm_fail_closed(env, "missing VM catalog payload");
         return;
     }
-    int raw_len = (*env)->GetArrayLength(env, raw_index);
-    jbyte *raw_bytes = raw_len > 0 ? (*env)->GetByteArrayElements(env, raw_index, NULL) : NULL;
-    int index_len = 0;
-    unsigned char *index_bytes = NULL;
-    if (raw_bytes) {
-        index_bytes = js_runtime_resource_decode_owned((const unsigned char*)raw_bytes, raw_len, &index_len);
-        js_vbc4_wipe_volatile(raw_bytes, (size_t)raw_len);
-        (*env)->ReleaseByteArrayElements(env, raw_index, raw_bytes, JNI_ABORT);
-    }
-    if (!index_bytes || index_len <= 0) {
-        if (index_bytes) { js_vbc4_wipe_volatile(index_bytes, (size_t)index_len); free(index_bytes); }
-        js_vm_fail_closed(env, "invalid VM preload index");
-        js_vm_preload_in_progress--;
+    jbyte startup_nonce_bytes[32] = {0};
+    (*env)->GetByteArrayRegion(env, startup_nonce, 0, 32, startup_nonce_bytes);
+    if ((*env)->ExceptionCheck(env)) {
+        js_vbc4_wipe_volatile(startup_nonce_bytes, sizeof(startup_nonce_bytes));
+        js_vm_abort_preload_state(env);
+        /* Preserve the pending JNI exception; ThrowNew cannot replace it. */
         return;
     }
-    int unmasked_index_len = 0;
-    unsigned char *unmasked_index = js_vm_decode_masked_preload_index_owned(index_bytes, index_len, &unmasked_index_len);
-    if (unmasked_index) {
-        js_vbc4_wipe_volatile(index_bytes, (size_t)index_len);
+    if (!js_vm_install_startup_nonce((const unsigned char*)startup_nonce_bytes, 32)) {
+        js_vbc4_wipe_volatile(startup_nonce_bytes, sizeof(startup_nonce_bytes));
+        js_vm_abort_preload_state(env);
+        js_vm_fail_closed(env, "invalid VM startup nonce");
+        return;
+    }
+    js_vbc4_wipe_volatile(startup_nonce_bytes, sizeof(startup_nonce_bytes));
+    int index_len = (*env)->GetArrayLength(env, preload_index);
+    int commitment_len = (*env)->GetArrayLength(env, commitments);
+    jbyte *index_raw = index_len > 0 ? (*env)->GetByteArrayElements(env, preload_index, NULL) : NULL;
+    jbyte *commitment_raw = commitment_len > 0 ? (*env)->GetByteArrayElements(env, commitments, NULL) : NULL;
+    unsigned char *index_bytes = index_len > 0 ? (unsigned char*)malloc((size_t)index_len) : NULL;
+    if (!index_raw || !commitment_raw || !index_bytes) {
+        if (index_raw) (*env)->ReleaseByteArrayElements(env, preload_index, index_raw, JNI_ABORT);
+        if (commitment_raw) (*env)->ReleaseByteArrayElements(env, commitments, commitment_raw, JNI_ABORT);
+        if (index_bytes) free(index_bytes);
+        js_vm_abort_preload_state(env);
+        js_vm_fail_closed(env, "invalid VM catalog payload");
+        return;
+    }
+    memcpy(index_bytes, index_raw, (size_t)index_len);
+    int commitments_ok = js_vm_commitments_install((const unsigned char*)commitment_raw, commitment_len);
+    (*env)->ReleaseByteArrayElements(env, preload_index, index_raw, JNI_ABORT);
+    (*env)->ReleaseByteArrayElements(env, commitments, commitment_raw, JNI_ABORT);
+    if (!commitments_ok || index_len <= 0) {
+        js_vbc4_wipe_volatile(index_bytes, (size_t)(index_len > 0 ? index_len : 0));
         free(index_bytes);
-        index_bytes = unmasked_index;
-        index_len = unmasked_index_len;
-    } else if (memcmp(index_bytes, "JSMI2|", 6) == 0) {
-        js_vbc4_wipe_volatile(index_bytes, (size_t)index_len);
-        free(index_bytes);
-        js_vm_fail_closed(env, "invalid masked VM preload index");
-        js_vm_preload_in_progress--;
+        js_vm_abort_preload_state(env);
+        js_vm_fail_closed(env, "invalid VM catalog commitments");
         return;
     }
-    js_vm_register_preload_index_entries(index_bytes, index_len);
     int line_start = 0;
     for (int i = 0; i <= index_len; i++) {
         if (i != index_len && index_bytes[i] != '\n' && index_bytes[i] != '\r') continue;
@@ -6549,7 +6746,7 @@ jsn_k9(JNIEnv *env, jclass cls)
                 continue;
             }
             if (sep1 <= line_start || sep1 + 1 >= line_end || sep1 - line_start > 16) {
-                js_vm_preload_in_progress--;
+                js_vm_abort_preload_state(env);
                 js_vbc4_wipe_volatile(index_bytes, (size_t)index_len);
                 free(index_bytes);
                 js_vm_fail_closed(env, "malformed VM preload index");
@@ -6560,7 +6757,7 @@ jsn_k9(JNIEnv *env, jclass cls)
                 unsigned char ch = index_bytes[p];
                 int nibble = (ch >= '0' && ch <= '9') ? (ch - '0') : (ch >= 'a' && ch <= 'f') ? (ch - 'a' + 10) : (ch >= 'A' && ch <= 'F') ? (ch - 'A' + 10) : -1;
                 if (nibble < 0) {
-                    js_vm_preload_in_progress--;
+                    js_vm_abort_preload_state(env);
                     js_vbc4_wipe_volatile(index_bytes, (size_t)index_len);
                     free(index_bytes);
                     js_vm_fail_closed(env, "malformed VM preload token");
@@ -6607,7 +6804,7 @@ jsn_k9(JNIEnv *env, jclass cls)
                         if (manifest_path) { js_vbc4_wipe_volatile(manifest_path, strlen(manifest_path)); free(manifest_path); }
                         if (binding_resource_path) { js_vbc4_wipe_volatile(binding_resource_path, strlen(binding_resource_path)); free(binding_resource_path); }
                         if (binding_manifest_path) { js_vbc4_wipe_volatile(binding_manifest_path, strlen(binding_manifest_path)); free(binding_manifest_path); }
-                        js_vm_preload_in_progress--;
+                        js_vm_abort_preload_state(env);
                         js_vbc4_wipe_volatile(index_bytes, (size_t)index_len);
                         free(index_bytes);
                         js_vm_fail_closed(env, "invalid VM preload profile auth");
@@ -6623,8 +6820,6 @@ jsn_k9(JNIEnv *env, jclass cls)
             }
             const char *preload_binding_path = binding_resource_path && binding_resource_path[0] ? binding_resource_path : resource_path;
             const char *preload_binding_manifest = binding_manifest_path && binding_manifest_path[0] ? binding_manifest_path : manifest_path;
-            js_vm_resource_alias_register(preload_binding_path, resource_path);
-            if (manifest_path && preload_binding_manifest) js_vm_resource_alias_register(preload_binding_manifest, manifest_path);
             if (!resource_path || (sep2 > 0 && sep3 > 0 && (!manifest_path || shard_count < 2))) {
                 if (token_text) { js_vbc4_wipe_volatile(token_text, strlen(token_text)); free(token_text); }
                 if (shard_text) { js_vbc4_wipe_volatile(shard_text, strlen(shard_text)); free(shard_text); }
@@ -6635,15 +6830,18 @@ jsn_k9(JNIEnv *env, jclass cls)
                 if (manifest_path) { js_vbc4_wipe_volatile(manifest_path, strlen(manifest_path)); free(manifest_path); }
                 if (binding_resource_path) { js_vbc4_wipe_volatile(binding_resource_path, strlen(binding_resource_path)); free(binding_resource_path); }
                 if (binding_manifest_path) { js_vbc4_wipe_volatile(binding_manifest_path, strlen(binding_manifest_path)); free(binding_manifest_path); }
-                js_vm_preload_in_progress--;
+                js_vm_abort_preload_state(env);
                 js_vbc4_wipe_volatile(index_bytes, (size_t)index_len);
                 free(index_bytes);
                 js_vm_fail_closed(env, NULL);
                 return;
             }
             if (manifest_path) js_vm_shared_dispatch_mix_preload((jlong)token, preload_binding_path, preload_binding_manifest, shard_count);
-            jstring resource_jstr = (*env)->NewStringUTF(env, preload_binding_path);
-            char *cache_resource_path = preload_binding_path ? js_strdup(preload_binding_path) : NULL;
+            /* On-demand unseal: program bytes are fetched, authenticated,
+             * parsed and validated at first execution through
+             * js_vm_preload_indexed_program_on_demand. Boot only authenticates
+             * the index and registers the call gates, so startup cost stays
+             * proportional to the methods actually exercised. */
             if (token_text) { js_vbc4_wipe_volatile(token_text, strlen(token_text)); free(token_text); token_text = NULL; }
             if (shard_text) { js_vbc4_wipe_volatile(shard_text, strlen(shard_text)); free(shard_text); shard_text = NULL; }
             if (mesh_text) { js_vbc4_wipe_volatile(mesh_text, strlen(mesh_text)); free(mesh_text); mesh_text = NULL; }
@@ -6653,107 +6851,22 @@ jsn_k9(JNIEnv *env, jclass cls)
             js_vbc4_wipe_volatile(resource_path, strlen(resource_path));
             free(resource_path);
             resource_path = NULL;
-            if (!resource_jstr) {
-                js_vm_clear_exception(env);
-                js_vm_preload_in_progress--;
-                js_vbc4_wipe_volatile(index_bytes, (size_t)index_len);
-                free(index_bytes);
-                js_vm_fail_closed(env, NULL);
-                return;
-            }
-            const char *cache_path = cache_resource_path ? cache_resource_path : "";
-            if (!js_vm_call_gate_mark_loading((jlong)token, cache_path)) {
-                /* The index registration should already have opened this gate; if not, fail closed below. */
-            }
-            js_vm_program *program = js_vm_prepare_resource_program_bound(env, cls, (jlong)token, resource_jstr, cache_path);
-            if (program && expected_profile != 0u && program->method_local_profile != expected_profile) {
-                js_vm_free_program(env, program);
-                free(program);
-                js_vm_call_gate_clear_loading((jlong)token);
-                if (binding_resource_path) { js_vbc4_wipe_volatile(binding_resource_path, strlen(binding_resource_path)); free(binding_resource_path); }
-                if (binding_manifest_path) { js_vbc4_wipe_volatile(binding_manifest_path, strlen(binding_manifest_path)); free(binding_manifest_path); }
-                if (cache_resource_path) { js_vbc4_wipe_volatile(cache_resource_path, strlen(cache_resource_path)); free(cache_resource_path); }
-                (*env)->DeleteLocalRef(env, resource_jstr);
-                js_vm_preload_in_progress--;
-                js_vbc4_wipe_volatile(index_bytes, (size_t)index_len);
-                free(index_bytes);
-                js_vm_fail_closed(env, "native VM preload profile mismatch");
-                return;
-            }
-            if (program) {
-                js_vm_program validation;
-                memset(&validation, 0, sizeof(validation));
-                if (!js_vm_build_execution_program_from_registers(program, &validation)) {
-                    char reason[384];
-                    snprintf(reason, sizeof(reason), "native VM preload validation failed at %s#%s%s err=%d reg=%d super=%d insn=%d",
-                        program->original_owner ? program->original_owner : "?",
-                        program->original_name ? program->original_name : "?",
-                        program->original_desc ? program->original_desc : "?",
-                        js_vm_last_validation_error, program->reg_program.insn_count, program->reg_program.super_count, program->insn_count);
-                    js_vm_clear_execution_program(&validation);
-                    js_vm_free_program(env, program);
-                    free(program);
-                    js_vm_call_gate_clear_loading((jlong)token);
-                    if (binding_resource_path) { js_vbc4_wipe_volatile(binding_resource_path, strlen(binding_resource_path)); free(binding_resource_path); }
-                    if (binding_manifest_path) { js_vbc4_wipe_volatile(binding_manifest_path, strlen(binding_manifest_path)); free(binding_manifest_path); }
-                    if (cache_resource_path) { js_vbc4_wipe_volatile(cache_resource_path, strlen(cache_resource_path)); free(cache_resource_path); }
-                    (*env)->DeleteLocalRef(env, resource_jstr);
-                    js_vm_preload_in_progress--;
-                    js_vbc4_wipe_volatile(index_bytes, (size_t)index_len);
-                    free(index_bytes);
-                    js_vm_fail_closed(env, reason);
-                    return;
-                } else if (!js_vm_adopt_validated_execution_program(program, &validation)) {
-                    js_vm_clear_execution_program(&validation);
-                    js_vm_free_program(env, program);
-                    free(program);
-                    js_vm_call_gate_clear_loading((jlong)token);
-                    if (binding_resource_path) { js_vbc4_wipe_volatile(binding_resource_path, strlen(binding_resource_path)); free(binding_resource_path); }
-                    if (binding_manifest_path) { js_vbc4_wipe_volatile(binding_manifest_path, strlen(binding_manifest_path)); free(binding_manifest_path); }
-                    if (cache_resource_path) { js_vbc4_wipe_volatile(cache_resource_path, strlen(cache_resource_path)); free(cache_resource_path); }
-                    (*env)->DeleteLocalRef(env, resource_jstr);
-                    js_vm_preload_in_progress--;
-                    js_vbc4_wipe_volatile(index_bytes, (size_t)index_len);
-                    free(index_bytes);
-                    js_vm_fail_closed(env, "native VM preload validation produced no execution program");
-                    return;
-                } else {
-                    js_vm_clear_execution_program(&validation);
-                }
-            }
-            if (!program || !js_vm_ephemeral_cache_put((jlong)token, cache_path, program)) {
-                if (program) { js_vm_free_program(env, program); free(program); }
-                js_vm_call_gate_clear_loading((jlong)token);
-                if (binding_resource_path) { js_vbc4_wipe_volatile(binding_resource_path, strlen(binding_resource_path)); free(binding_resource_path); }
-                if (binding_manifest_path) { js_vbc4_wipe_volatile(binding_manifest_path, strlen(binding_manifest_path)); free(binding_manifest_path); }
-                if (cache_resource_path) { js_vbc4_wipe_volatile(cache_resource_path, strlen(cache_resource_path)); free(cache_resource_path); }
-                (*env)->DeleteLocalRef(env, resource_jstr);
-                js_vm_preload_in_progress--;
-                js_vbc4_wipe_volatile(index_bytes, (size_t)index_len);
-                free(index_bytes);
-                {
-                    char preload_reason[160];
-                    snprintf(preload_reason, sizeof(preload_reason), "native VM preload validation failed (stage=%s)", js_vm_last_prepare_stage[0] ? js_vm_last_prepare_stage : "program");
-                    js_vm_fail_closed(env, preload_reason);
-                }
-                return;
-            }
-            js_vm_call_gate_clear_loading((jlong)token);
-            if (binding_resource_path) { js_vbc4_wipe_volatile(binding_resource_path, strlen(binding_resource_path)); free(binding_resource_path); }
-            if (binding_manifest_path) { js_vbc4_wipe_volatile(binding_manifest_path, strlen(binding_manifest_path)); free(binding_manifest_path); }
-            if (cache_resource_path) { js_vbc4_wipe_volatile(cache_resource_path, strlen(cache_resource_path)); free(cache_resource_path); }
-            (*env)->DeleteLocalRef(env, resource_jstr);
-            if ((*env)->ExceptionCheck(env)) {
-                js_vm_preload_in_progress--;
-                js_vbc4_wipe_volatile(index_bytes, (size_t)index_len);
-                free(index_bytes);
-                return;
-            }
+            if (binding_resource_path) { js_vbc4_wipe_volatile(binding_resource_path, strlen(binding_resource_path)); free(binding_resource_path); binding_resource_path = NULL; }
+            if (binding_manifest_path) { js_vbc4_wipe_volatile(binding_manifest_path, strlen(binding_manifest_path)); free(binding_manifest_path); binding_manifest_path = NULL; }
         }
         while (i + 1 < index_len && (index_bytes[i + 1] == '\n' || index_bytes[i + 1] == '\r')) i++;
         line_start = i + 1;
     }
-    js_vm_preload_in_progress--;
+    if (!js_vm_register_preload_index_entries(index_bytes, index_len)) {
+        js_vm_abort_preload_state(env);
+        js_vbc4_wipe_volatile(index_bytes, (size_t)index_len);
+        free(index_bytes);
+        js_vm_fail_closed(env, "VM catalog registration failed");
+        return;
+    }
+    /* Keep the on-demand channel open after boot: the flag now means "catalog
+     * registered, lazy unseal allowed". It is only cleared on process unload. */
+    js_vm_preload_in_progress = 1;
     js_vbc4_wipe_volatile(index_bytes, (size_t)index_len);
     free(index_bytes);
 }
@@ -6837,7 +6950,8 @@ JS_HIDDEN void js_vm_mark_hot_integrity_baseline_clean(void) {
 JS_HIDDEN void js_runtime_on_unload_cleanup(JNIEnv *env) {
     js_vm_ephemeral_cache_clear(env);
     js_vbc4_wipe_volatile(js_runtime_resource_key_shares, sizeof(js_runtime_resource_key_shares));
-    js_runtime_resource_key_ready = 0;
+    for (int s = 0; s < JS_RRK_SLOTS; s++) js_runtime_resource_key_slot_ready[s] = 0;
+    js_vm_clear_startup_nonce();
     if (env) js_jni_cache_destroy(env);
 }
 

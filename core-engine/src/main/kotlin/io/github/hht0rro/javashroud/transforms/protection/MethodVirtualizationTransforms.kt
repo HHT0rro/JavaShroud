@@ -419,6 +419,21 @@ fun applyMethodVirtualization(
                             return
                         }
                         val slicedResource = slicedVmResources(random, keyRandom, className, vmMethodName, vmDescriptor, methodSeed, methodEntropy, vmBytes, resourcePath)
+                        val methodEvidence = serializer.productionEvidence()
+                        buildContext.productionBuildEvidence.recordMethod(
+                            CandidateProductionBuildEvidence.MethodObservation(
+                                semanticId = CandidateProductionBuildEvidence.semanticId(
+                                    className,
+                                    guestOriginalName,
+                                    guestOriginalDescriptor,
+                                ),
+                                entryToken = entryToken,
+                                sourceResourcePath = slicedResource.manifestPath,
+                                opcodeStreamSha256 = methodEvidence.opcodeStreamSha256,
+                                operandStreamSha256 = methodEvidence.operandStreamSha256,
+                                methodEncodingSha256 = methodEvidence.methodEncodingSha256,
+                            ),
+                        )
                         val decoyResources = decoyVmResources(random, keyRandom, className, vmMethodName, vmDescriptor, methodSeed, methodEntropy, vmBytes, slicedResource.reservedPaths)
                         val preloadEntry = VmPreloadEntry(
                             entryToken = entryToken,
@@ -477,11 +492,11 @@ fun applyMethodVirtualization(
             entry.manifestPlan.toJarEntry(keyRandom, mesh, index, vmPreloadEntries.size, meshPeers)
         }
         val scheduledResources = interproceduralVmResourceSchedule(methodResources + manifestResources, random)
-        val vmIndex = encodeNativeVmPreloadIndex(
+        val catalogPlan = runtimeVmCatalogPlan(
             interproceduralVmPreloadSchedule(vmPreloadEntries, scheduledResources, random),
-            indexResourceName = VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE,
         )
-        artifact.copy(jarEntries = artifact.jarEntries.filterNot { it.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE } + scheduledResources + vmIndex)
+        buildContext.publishRuntimeVmCatalogPlan(catalogPlan)
+        artifact.copy(jarEntries = artifact.jarEntries + scheduledResources)
     } else artifact
 
     return updatedArtifactTransformResult(
@@ -493,8 +508,6 @@ fun applyMethodVirtualization(
 }
 
 internal const val VBC4_CLEAN_ENTRY_INTEGRITY_HEX = "10429f6c"
-internal const val VBC4_VM_PRELOAD_INDEX_RESOURCE = "META-INF/.r/vm.idx"
-internal const val VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE = "META-INF/.r/vm-current.idx"
 
 private data class VmPreloadEntry(
     val entryToken: Long,
@@ -539,115 +552,20 @@ private fun VmPreloadEntry.toMeshPeer(ordinal: Int): VmSliceMeshPeer = VmSliceMe
     material = manifestPlan.meshMaterial(entryToken, resourcePath, manifestPath, shardCount, methodLocalProfile),
 )
 
-private fun encodeNativeVmPreloadIndex(entries: List<VmPreloadEntry>, indexResourceName: String = VBC4_VM_PRELOAD_INDEX_RESOURCE): JarEntryData {
+private fun runtimeVmCatalogPlan(entries: List<VmPreloadEntry>): RuntimeVmCatalogPlan {
     val mesh = interproceduralVmSliceMesh(entries)
-    val newEntries = entries.map { entry ->
-        val profile = entry.methodLocalProfile.toUInt().toString(16)
-        val authTag = nativePreloadEntryAuthTag(entry, mesh, profile)
-        "${entry.entryToken.toULong().toString(16)}|${entry.resourcePath}|${entry.manifestPath}|${entry.shardCount}|$mesh|$profile|$authTag"
-    }
-    val plain = newEntries
-        .joinToString(separator = "\n", postfix = "\n")
-        .toByteArray(Charsets.UTF_8)
-    val maskedPlain = encodeMaskedNativePreloadIndex(plain, "current:$indexResourceName:${entries.size}")
-    val seed = MessageDigest.getInstance("SHA-256")
-        .digest(maskedPlain)
-        .take(4)
-        .fold(0) { acc, byte -> (acc shl 8) or (byte.toInt() and 0xFF) }
-    return JarEntryData(
-        name = indexResourceName,
-        bytes = RuntimeResourceCodec.encode(
-            bytes = maskedPlain,
-            kind = RuntimeResourceKind.NativeIndex,
-            seed = seed,
-            variantId = entries.size.coerceAtLeast(1),
-            layerCount = 4,
-            compress = true,
-        ),
+    return RuntimeVmCatalogPlan(
+        methods = entries.map { entry ->
+            RuntimeVmCatalogMethod(
+                entryToken = entry.entryToken,
+                resourcePath = entry.resourcePath,
+                manifestPath = entry.manifestPath,
+                shardCount = entry.shardCount,
+                mesh = mesh,
+                methodLocalProfile = entry.methodLocalProfile,
+            )
+        },
     )
-}
-
-internal fun encodeMaskedNativePreloadIndex(plain: ByteArray, domain: String): ByteArray {
-    val context = requireVbc4BuildContext()
-    val saltDigest = MessageDigest.getInstance("SHA-256").apply {
-        update("jsmi2-salt".toByteArray(Charsets.US_ASCII))
-        update(domain.toByteArray(Charsets.UTF_8))
-        update(context.jarLayoutDigest)
-        update(plain)
-    }.digest()
-    val salt = saltDigest.copyOfRange(0, 16)
-    val masked = ByteArray(plain.size)
-    var offset = 0
-    var counter = 0
-    while (offset < plain.size) {
-        val mask = nativePreloadMaskBlock(salt, counter++)
-        val take = minOf(mask.size, plain.size - offset)
-        for (index in 0 until take) masked[offset + index] = (plain[offset + index].toInt() xor mask[index].toInt()).toByte()
-        offset += take
-    }
-    val tag = nativePreloadTag(salt, plain).copyOfRange(0, 16)
-    return "JSMI2|${salt.toHexLower()}|${masked.toHexLower()}|${tag.toHexLower()}\n".toByteArray(Charsets.US_ASCII)
-}
-
-internal fun decodeMaskedNativePreloadIndexText(text: String): String {
-    val trimmed = text.trim()
-    if (!trimmed.startsWith("JSMI2|")) return text
-    val parts = trimmed.split('|')
-    if (parts.size != 4) return text
-    val salt = parts[1].hexToBytesOrNull() ?: return text
-    val masked = parts[2].hexToBytesOrNull() ?: return text
-    val expectedTag = parts[3].hexToBytesOrNull() ?: return text
-    if (salt.size != 16 || expectedTag.size != 16) return text
-    val plain = ByteArray(masked.size)
-    var offset = 0
-    var counter = 0
-    while (offset < masked.size) {
-        val mask = nativePreloadMaskBlock(salt, counter++)
-        val take = minOf(mask.size, masked.size - offset)
-        for (index in 0 until take) plain[offset + index] = (masked[offset + index].toInt() xor mask[index].toInt()).toByte()
-        offset += take
-    }
-    val actualTag = nativePreloadTag(salt, plain).copyOfRange(0, 16)
-    return if (actualTag.contentEquals(expectedTag)) plain.decodeToString() else text
-}
-
-private fun nativePreloadMaskBlock(salt: ByteArray, counter: Int): ByteArray = MessageDigest.getInstance("SHA-256").apply {
-    update("jsmi2-mask".toByteArray(Charsets.US_ASCII))
-    update(salt)
-    update(intBytes(counter))
-}.digest()
-
-private fun nativePreloadTag(salt: ByteArray, plain: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").apply {
-    update("jsmi2-tag".toByteArray(Charsets.US_ASCII))
-    update(salt)
-    update(plain)
-}.digest()
-
-private fun nativePreloadEntryAuthTag(entry: VmPreloadEntry, mesh: String, profile: String): String = MessageDigest.getInstance("SHA-256").apply {
-    update("jsmi2-entry-auth".toByteArray(Charsets.US_ASCII))
-    update(0)
-    update(entry.entryToken.toULong().toString(16).toByteArray(Charsets.US_ASCII))
-    update(0)
-    update(entry.resourcePath.toByteArray(Charsets.UTF_8))
-    update(0)
-    update(entry.manifestPath.toByteArray(Charsets.UTF_8))
-    update(0)
-    update(entry.shardCount.toString().toByteArray(Charsets.US_ASCII))
-    update(0)
-    update(mesh.toByteArray(Charsets.US_ASCII))
-    update(0)
-    update(profile.toByteArray(Charsets.US_ASCII))
-}.digest().take(8).toByteArray().toHexLower()
-
-private fun String.hexToBytesOrNull(): ByteArray? {
-    if (length % 2 != 0) return null
-    val out = ByteArray(length / 2)
-    for (index in out.indices) {
-        val hi = this[index * 2].digitToIntOrNull(16) ?: return null
-        val lo = this[index * 2 + 1].digitToIntOrNull(16) ?: return null
-        out[index] = ((hi shl 4) or lo).toByte()
-    }
-    return out
 }
 
 private fun buildContextAwareSecureRandom(
@@ -1054,6 +972,7 @@ private fun maybeEncodeNativeVmResource(
         variantId = variantId.coerceAtLeast(1),
         layerCount = 4 + (variantId % 3),
         compress = true,
+        partitionIdentity = ("vm|" + className + "|" + methodName + "|" + descriptor).toByteArray(Charsets.UTF_8),
     )
 }
 
@@ -1064,6 +983,7 @@ internal fun encodeNativeDiversifiedVmResource(vmBytes: ByteArray, seed: Int): B
     variantId = ((seed ushr 24) xor (seed ushr 12) xor seed) and 0x7F,
     layerCount = 3,
     compress = true,
+    partitionIdentity = ("vmd|" + Integer.toUnsignedString(seed, 16)).toByteArray(Charsets.US_ASCII),
 )
 
 internal fun methodKeySeed(keyRandom: SecureRandom): Int {
@@ -3288,10 +3208,4 @@ private fun unboxAndReturn(mv: MethodVisitor, type: Type) {
         else -> { mv.visitTypeInsn(Opcodes.CHECKCAST, type.internalName); mv.visitInsn(Opcodes.ARETURN) }
     }
 }
-
-
-
-
-
-
 

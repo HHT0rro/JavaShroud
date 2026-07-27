@@ -140,6 +140,8 @@ class NestedVmExecutionTest {
                                         (descriptor == "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;" ||
                                             descriptor == "(J[Ljava/lang/Object;)Ljava/lang/Object;" ||
                                             descriptor == "(J)V" ||
+                                            descriptor == "(J)I" ||
+                                            descriptor == "(JI)I" ||
                                             descriptor == "(JI)V")
                                     ) {
                                         found = true

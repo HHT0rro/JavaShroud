@@ -7,24 +7,14 @@ import io.github.hht0rro.javashroud.adapters.protocol.dispatchRequest
 import io.github.hht0rro.javashroud.kernel.EngineKernel
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.protection.NativeKernelShellPacker
-import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceCodec
-import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceKind
-import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.decodeMaskedNativePreloadIndexText
-import io.github.hht0rro.javashroud.transforms.protection.encodeMaskedNativePreloadIndex
-import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
-import org.objectweb.asm.tree.AbstractInsnNode
 import org.objectweb.asm.tree.ClassNode
-import org.objectweb.asm.tree.IntInsnNode
-import org.objectweb.asm.tree.LdcInsnNode
-import org.objectweb.asm.tree.MethodInsnNode
-import org.objectweb.asm.tree.MethodNode
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
+import java.net.URLClassLoader
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 import java.nio.file.Files
@@ -35,6 +25,7 @@ import java.util.jar.JarFile
 import java.util.jar.JarOutputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -93,6 +84,24 @@ class RealJniMicrokernelFixtureRegressionTest {
                 "Obfuscated $scenario should preserve the repeated-call and multithreaded native lifecycle fixture. Output: ${result.output.take(500)}",
             )
 
+            val firstSession = runLocalJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().toString()).apply {
+                    environment()["JAVASHROUD_SESSION_EVIDENCE"] = "1"
+                },
+            )
+            val secondSession = runLocalJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().toString()).apply {
+                    environment()["JAVASHROUD_SESSION_EVIDENCE"] = "1"
+                },
+            )
+            assertEquals(baseline.exitCode, firstSession.exitCode, "First fresh-JVM session evidence run must preserve behavior")
+            assertEquals(baseline.exitCode, secondSession.exitCode, "Second fresh-JVM session evidence run must preserve behavior")
+            val firstSessionTag = sessionEvidenceTag(firstSession.output)
+            val secondSessionTag = sessionEvidenceTag(secondSession.output)
+            assertTrue(firstSessionTag.matches(Regex("[0-9a-f]{16}")), "First fresh JVM must emit a runtime session commitment")
+            assertTrue(secondSessionTag.matches(Regex("[0-9a-f]{16}")), "Second fresh JVM must emit a runtime session commitment")
+            assertFalse(firstSessionTag == secondSessionTag, "The same transformed JAR must mint divergent per-JVM session commitments")
+
             val tamperResults = mutableListOf<TamperEvidence>()
 
             val tamperedJar = outputJar.resolveSibling("${outputJar.fileName.toString().removeSuffix(".jar")}-tampered-native.jar")
@@ -103,6 +112,16 @@ class RealJniMicrokernelFixtureRegressionTest {
                 tamperResults.add(TamperEvidence("max native shell payload/header", tampered))
             } finally {
                 Files.deleteIfExists(tamperedJar)
+            }
+
+            val tamperedVersionJar = outputJar.resolveSibling("${outputJar.fileName.toString().removeSuffix(".jar")}-tampered-native-version.jar")
+            try {
+                tamperMaxNativeShellProtocolVersion(outputJar, tamperedVersionJar, scenario)
+                val tampered = runLocalJavaProcessWithTimeout(ProcessBuilder("java", "-jar", tamperedVersionJar.toAbsolutePath().toString()))
+                assertTamperedRunFailsClosed(tampered, baseline, scenario, "max native shell protocol version 3 to 2")
+                tamperResults.add(TamperEvidence("max native shell protocol version 3 to 2", tampered))
+            } finally {
+                Files.deleteIfExists(tamperedVersionJar)
             }
 
             val tamperedBogusJar = outputJar.resolveSibling("${outputJar.fileName.toString().removeSuffix(".jar")}-tampered-bogus-metadata.jar")
@@ -135,22 +154,22 @@ class RealJniMicrokernelFixtureRegressionTest {
                 Files.deleteIfExists(tamperedResourcePathJar)
             }
 
-            val tamperedProfileJar = outputJar.resolveSibling("${outputJar.fileName.toString().removeSuffix(".jar")}-tampered-vm-profile.jar")
+            val tamperedProfileJar = outputJar.resolveSibling("${outputJar.fileName.toString().removeSuffix(".jar")}-tampered-vm-catalog-root.jar")
             try {
-                tamperVmPreloadProfile(outputJar, tamperedProfileJar, scenario)
+                tamperVmCatalogRoot(outputJar, tamperedProfileJar, scenario)
                 val tampered = runLocalJavaProcessWithTimeout(ProcessBuilder("java", "-jar", tamperedProfileJar.toAbsolutePath().toString()))
-                assertTamperedRunFailsClosed(tampered, baseline, scenario, "VM preload profile tag")
-                tamperResults.add(TamperEvidence("VM preload profile tag", tampered))
+                assertTamperedRunFailsClosed(tampered, baseline, scenario, "VM catalog root")
+                tamperResults.add(TamperEvidence("VM catalog root", tampered))
             } finally {
                 Files.deleteIfExists(tamperedProfileJar)
             }
 
-            val tamperedPreloadMeshJar = outputJar.resolveSibling("${outputJar.fileName.toString().removeSuffix(".jar")}-tampered-vm-preload-mesh.jar")
+            val tamperedPreloadMeshJar = outputJar.resolveSibling("${outputJar.fileName.toString().removeSuffix(".jar")}-tampered-vm-committed-resource.jar")
             try {
-                tamperVmPreloadMesh(outputJar, tamperedPreloadMeshJar, scenario)
+                tamperVmCommittedResource(outputJar, tamperedPreloadMeshJar, scenario)
                 val tampered = runLocalJavaProcessWithTimeout(ProcessBuilder("java", "-jar", tamperedPreloadMeshJar.toAbsolutePath().toString()))
-                assertTamperedRunFailsClosed(tampered, baseline, scenario, "VM preload mesh binding")
-                tamperResults.add(TamperEvidence("VM preload mesh binding", tampered))
+                assertTamperedRunFailsClosed(tampered, baseline, scenario, "VM committed resource")
+                tamperResults.add(TamperEvidence("VM committed resource", tampered))
             } finally {
                 Files.deleteIfExists(tamperedPreloadMeshJar)
             }
@@ -158,7 +177,7 @@ class RealJniMicrokernelFixtureRegressionTest {
             val reportPath = writeRuntimeEvidenceReport(scenario, inputJar, outputJar, baseline, result, tamperResults)
             val reportText = Files.readString(reportPath)
             assertTrue(reportText.contains("runtime_status: passed"), "Native Max runtime evidence report must record the successful real JAR run")
-            assertTrue(reportText.contains("tamper_fail_closed_count: 6"), "Native Max runtime evidence report must record all fail-closed tamper probes")
+            assertTrue(reportText.contains("tamper_fail_closed_count: 7"), "Native Max runtime evidence report must record all fail-closed tamper probes")
             assertNativeMaxRuntimeEvidenceReportCoversReleaseGate(reportText)
         } finally {
             Files.deleteIfExists(outputJar)
@@ -176,6 +195,7 @@ class RealJniMicrokernelFixtureRegressionTest {
                 .any { tampered.output.contains(it, ignoreCase = true) },
             "Tampered $scenario $tamperKind should surface a native fail-closed loading/verification failure. Output: ${tampered.output.take(800)}",
         )
+        assertFalse(tampered.output.contains("LIFECYCLE=ok"), "Tampered $scenario $tamperKind must fail before business logic")
     }
 
     private fun writeRuntimeEvidenceReport(
@@ -261,8 +281,8 @@ class RealJniMicrokernelFixtureRegressionTest {
             "obfuscated_stdout: REAL_RESULT=1;LIFECYCLE=ok",
             "stdout_preserved: true",
             "lifecycle_ok: true",
-            "tamper_probe_count: 6",
-            "tamper_fail_closed_count: 6",
+            "tamper_probe_count: 7",
+            "tamper_fail_closed_count: 7",
             "max_shell_entry_count: 1",
             "stub_marker=1",
             "payload_marker=1",
@@ -272,11 +292,12 @@ class RealJniMicrokernelFixtureRegressionTest {
         }
         listOf(
             "max native shell payload/header",
+            "max native shell protocol version 3 to 2",
             "max native shell bogus metadata",
             "sealed bootstrap native index",
             "max native shell resource path",
-            "VM preload profile tag",
-            "VM preload mesh binding",
+            "VM catalog root",
+            "VM committed resource",
         ).forEach { tamperKind ->
             val line = reportText.lines().firstOrNull { it.contains("tamper: $tamperKind") }
             assertTrue(line != null, "runtime evidence must include tamper probe: $tamperKind")
@@ -479,6 +500,28 @@ class RealJniMicrokernelFixtureRegressionTest {
         assertTrue(tampered, "Expected to tamper max native shell bogus metadata in $scenario JAR")
     }
 
+    private fun tamperMaxNativeShellProtocolVersion(sourceJar: Path, targetJar: Path, scenario: String) {
+        var tampered = false
+        rewriteJar(sourceJar, targetJar) { entry, bytes ->
+            if (!entry.isDirectory && !tampered && bytes.containsAscii(NativeKernelShellPacker.MAX_PAYLOAD_MARKER)) {
+                val changed = bytes.copyOf()
+                val versionOffset = maxPayloadHeaderOffset(changed) + NativeKernelShellPacker.MAX_PAYLOAD_MARKER.length + 1
+                assertEquals(NativeKernelShellPacker.PACKER_VERSION, readIntLe(changed, versionOffset), "Expected current max shell protocol version in $scenario JAR")
+                assertEquals(NativeKernelShellPacker.Level.MAX.id, readIntLe(changed, versionOffset + 4), "Expected max shell level in $scenario JAR")
+                val downgradedVersion = NativeKernelShellPacker.PACKER_VERSION - 1
+                changed[versionOffset] = (downgradedVersion and 0xFF).toByte()
+                changed[versionOffset + 1] = ((downgradedVersion ushr 8) and 0xFF).toByte()
+                changed[versionOffset + 2] = ((downgradedVersion ushr 16) and 0xFF).toByte()
+                changed[versionOffset + 3] = ((downgradedVersion ushr 24) and 0xFF).toByte()
+                tampered = true
+                changed
+            } else {
+                bytes
+            }
+        }
+        assertTrue(tampered, "Expected to tamper max native shell protocol version in $scenario JAR")
+    }
+
     private fun maxPayloadBogusMetadataDigestOffset(bytes: ByteArray): Int {
         var offset = maxPayloadHeaderOffset(bytes)
         offset += NativeKernelShellPacker.MAX_PAYLOAD_MARKER.length + 1
@@ -574,163 +617,145 @@ class RealJniMicrokernelFixtureRegressionTest {
         assertTrue(tampered, "Expected to rename a max native shell resource path in $scenario JAR")
     }
 
-    private fun tamperVmPreloadProfile(sourceJar: Path, targetJar: Path, scenario: String) {
-        assertTrue(
-            tamperVmPreloadIndexField(sourceJar, targetJar, scenario, fieldIndex = 5),
-            "Expected to tamper a VM preload profile tag in $scenario JAR",
-        )
-    }
-
-    private fun tamperVmPreloadMesh(sourceJar: Path, targetJar: Path, scenario: String) {
-        assertTrue(
-            tamperVmPreloadIndexField(sourceJar, targetJar, scenario, fieldIndex = 4),
-            "Expected to tamper a VM preload mesh binding in $scenario JAR",
-        )
-    }
-
-    private fun tamperVmPreloadIndexField(sourceJar: Path, targetJar: Path, scenario: String, fieldIndex: Int): Boolean {
+    private fun tamperVmCatalogRoot(sourceJar: Path, targetJar: Path, scenario: String) {
         var tampered = false
-        val runtimeResourceKey = extractRuntimeResourceKey(sourceJar, scenario)
-        val context = testVbc4Context(runtimeResourceKey)
-        val preloadIndexEntries = setOf("META-INF/.r/vm-current.idx", "META-INF/.r/vm.idx")
-        withVbc4BuildContext(context) {
-            rewriteJar(sourceJar, targetJar) { entry, bytes ->
-                if (!entry.isDirectory && !tampered && entry.name in preloadIndexEntries) {
-                    val decoded = RuntimeResourceCodec.decode(bytes)?.decodeToString()
-                    val plainIndex = decoded
-                    val changed = plainIndex?.lineSequence()?.joinToString(separator = "\n", postfix = "\n") { line ->
-                        if (tampered || !looksLikeVmPreloadIndexLine(line)) return@joinToString line
-                        val parts = line.split('|').toMutableList()
-                        if (parts.getOrNull(fieldIndex).isNullOrEmpty()) {
-                            line
-                        } else {
-                            parts[fieldIndex] = flipHexDigit(parts[fieldIndex])
-                            tampered = true
-                            parts.joinToString("|")
-                        }
-                    }
-                    if (tampered && changed != null) {
-                        val maskedChanged = encodeMaskedNativePreloadIndex(
-                            changed.toByteArray(Charsets.UTF_8),
-                            "tamper:$scenario:$fieldIndex",
-                        )
-                        return@rewriteJar RuntimeResourceCodec.encode(
-                            bytes = maskedChanged,
-                            kind = RuntimeResourceKind.NativeIndex,
-                            seed = 0x7150_0F11 xor fieldIndex,
-                            variantId = 11 + fieldIndex,
-                            layerCount = 3,
-                            compress = true,
-                        )
-                    }
-                }
+        rewriteJar(sourceJar, targetJar) { entry, bytes ->
+            if (!entry.isDirectory && !tampered && bytes.isVmCatalogRoot()) {
+                val changed = bytes.copyOf()
+                changed[5] = if (changed[5] == '0'.code.toByte()) '1'.code.toByte() else '0'.code.toByte()
+                tampered = true
+                changed
+            } else {
                 bytes
             }
         }
-        return tampered
+        assertTrue(tampered, "Expected to tamper the VM catalog root in $scenario JAR")
     }
 
-    private fun extractRuntimeResourceKey(jarPath: Path, scenario: String): ByteArray {
-        JarInputStream(Files.newInputStream(jarPath)).use { jar ->
-            while (true) {
-                val entry = jar.nextJarEntry ?: break
-                if (!entry.isDirectory && (entry.name.endsWith("JniMicrokernelHelper.class") || (entry.name.startsWith("r/") && entry.name.endsWith(".class")))) {
-                    val bytes = jar.readBytes()
-                    val key = runtimeResourceKeyBytes(bytes)
-                    if (key != null) return key
+    private fun tamperVmCommittedResource(sourceJar: Path, targetJar: Path, scenario: String) {
+        val entries = loadJarEntries(sourceJar)
+        val commitment = verifiedVmCatalogCommitments(sourceJar)
+            .sortedBy { it.storagePath }
+            .firstOrNull { candidate -> entries[candidate.storagePath]?.runtimeEnvelopePartitionId() == candidate.partitionId }
+            ?: error("Expected a catalog-committed partitioned VM resource in $scenario JAR")
+        val committedBytes = entries.getValue(commitment.storagePath)
+        assertEquals(commitment.length, committedBytes.size, "Catalog commitment length must match ${commitment.storagePath}")
+        assertEquals(commitment.sha256, sha256Hex(committedBytes), "Catalog commitment digest must match ${commitment.storagePath}")
+        assertEquals(commitment.partitionId, committedBytes.runtimeEnvelopePartitionId(), "Catalog commitment partition must match ${commitment.storagePath}")
+        var tampered = false
+        rewriteJar(sourceJar, targetJar) { entry, bytes ->
+            if (!entry.isDirectory && entry.name == commitment.storagePath) {
+                val changed = bytes.copyOf()
+                val offset = 123.coerceAtMost(changed.lastIndex - 33)
+                changed[offset] = (changed[offset].toInt() xor 0x01).toByte()
+                tampered = true
+                changed
+            } else {
+                bytes
+            }
+        }
+        assertTrue(tampered, "Expected to tamper a catalog-committed VM resource in $scenario JAR")
+    }
+
+    private fun verifiedVmCatalogCommitments(jarPath: Path): List<VmCatalogCommitment> {
+        val verifier = findVmCatalogVerifier(jarPath)
+        val commitmentBytes = URLClassLoader(arrayOf(jarPath.toUri().toURL()), null).use { loader ->
+            val helperClass = Class.forName(verifier.className, false, loader)
+            val method = helperClass.getDeclaredMethod(verifier.methodName)
+            method.setAccessible(true)
+            val payload = method.invoke(null) as? Array<*>
+                ?: error("VM catalog verifier returned an unexpected payload")
+            payload.getOrNull(1) as? ByteArray
+                ?: error("VM catalog verifier did not return native commitments")
+        }
+        val commitments = commitmentBytes.toString(Charsets.UTF_8)
+            .lineSequence()
+            .filter { it.isNotBlank() }
+            .map { line ->
+                val parts = line.split('|')
+                require(parts.size == 5 && parts[0] == "R") { "Malformed verified VM catalog commitment" }
+                val length = parts[2].toIntOrNull()
+                    ?: error("Malformed verified VM catalog commitment length")
+                val sha256 = parts[3]
+                val partitionId = parts[4].toIntOrNull()
+                    ?: error("Malformed verified VM catalog commitment partition")
+                require(length > 0 && sha256.length == 64 && sha256.all { it.digitToIntOrNull(16) != null } && partitionId >= 0) {
+                    "Malformed verified VM catalog commitment fields"
                 }
-                jar.closeEntry()
+                VmCatalogCommitment(parts[1], length, sha256, partitionId)
             }
-        }
-        error("Expected to extract injected runtime resource key from $scenario JNI helper in ${jarPath.fileName}")
+            .toList()
+        assertTrue(commitments.isNotEmpty(), "Final JAR helper must verify and publish VM catalog commitments")
+        assertEquals(commitments.size, commitments.map { it.storagePath }.toSet().size, "Verified VM catalog paths must be unique")
+        return commitments
     }
 
-    private fun runtimeResourceKeyBytes(helperBytes: ByteArray): ByteArray? = try {
-        val classNode = ClassNode()
-        ClassReader(helperBytes).accept(classNode, ClassReader.SKIP_FRAMES)
-        extractRuntimeResourceKeyFromHelper(classNode)
-    } catch (_: Exception) {
-        null
-    }
+    private fun findVmCatalogVerifier(jarPath: Path): VmCatalogVerifier {
+        JarFile(jarPath.toFile(), false).use { jar ->
+            val entries = jar.entries()
+            while (entries.hasMoreElements()) {
+                val entry = entries.nextElement()
+                if (entry.isDirectory || !entry.name.endsWith(".class")) continue
+                val bytes = jar.getInputStream(entry).use { it.readBytes() }
+                var className: String? = null
+                var verifierMethod: String? = null
+                var hasNativeCatalogInstall = false
+                ClassReader(bytes).accept(object : ClassVisitor(Opcodes.ASM9) {
+                    override fun visit(
+                        version: Int,
+                        access: Int,
+                        name: String,
+                        signature: String?,
+                        superName: String?,
+                        interfaces: Array<String>?,
+                    ) {
+                        className = name.replace('/', '.')
+                    }
 
-    private fun extractRuntimeResourceKeyFromHelper(classNode: ClassNode): ByteArray? {
-        val shareMethods = classNode.methods
-            .filter { it.desc == "()[B" }
-            .associateBy { it.name }
-        val runtimeKeyMethod = shareMethods.values.firstOrNull { method ->
-            method.instructions?.toArray().orEmpty().any { insn ->
-                insn is MethodInsnNode && insn.owner == classNode.name && insn.name.startsWith("jsRrkShare") && insn.desc == "()[B"
-            }
-        } ?: return null
-        val shareNames = runtimeKeyMethod.instructions.toArray()
-            .filterIsInstance<MethodInsnNode>()
-            .filter { it.owner == classNode.name && it.desc == "()[B" && it.name.startsWith("jsRrkShare") }
-            .map { it.name }
-        if (shareNames.isEmpty()) return null
-        val shares = shareNames.map { name -> extractByteArrayReturn(shareMethods[name] ?: return null) ?: return null }
-        val keySize = shares.first().size
-        if (keySize != 32 || shares.any { it.size != keySize }) return null
-        return ByteArray(keySize) { index ->
-            shares.fold(0) { acc, share -> acc xor (share[index].toInt() and 0xFF) }.toByte()
-        }
-    }
-
-    private fun extractByteArrayReturn(method: MethodNode): ByteArray? {
-        val instructions = method.instructions?.toArray().orEmpty()
-        val newArrayIndex = instructions.indexOfFirst { it is IntInsnNode && it.opcode == Opcodes.NEWARRAY && it.operand == Opcodes.T_BYTE }
-        if (newArrayIndex <= 0) return null
-        val size = pushIntValue(instructions[newArrayIndex - 1]) ?: return null
-        if (size <= 0 || size > 4096) return null
-        val bytes = ByteArray(size)
-        var index = newArrayIndex + 1
-        while (index < instructions.size) {
-            if (instructions[index].opcode == Opcodes.ARETURN) return bytes
-            if (index + 3 < instructions.size && instructions[index].opcode == Opcodes.DUP) {
-                val byteIndex = pushIntValue(instructions[index + 1])
-                val byteValue = pushIntValue(instructions[index + 2])
-                if (byteIndex != null && byteValue != null && byteIndex in bytes.indices && instructions[index + 3].opcode == Opcodes.BASTORE) {
-                    bytes[byteIndex] = byteValue.toByte()
-                    index += 4
-                    continue
+                    override fun visitMethod(
+                        access: Int,
+                        name: String,
+                        descriptor: String,
+                        signature: String?,
+                        exceptions: Array<String>?,
+                    ): MethodVisitor? {
+                        if (access and Opcodes.ACC_NATIVE != 0 && access and Opcodes.ACC_STATIC != 0 && descriptor == "([B[B[B)V") {
+                            hasNativeCatalogInstall = true
+                        }
+                        if (access and Opcodes.ACC_NATIVE == 0 && access and Opcodes.ACC_STATIC != 0 && descriptor == "()[[B") {
+                            verifierMethod = name
+                        }
+                        return null
+                    }
+                }, ClassReader.SKIP_CODE or ClassReader.SKIP_DEBUG or ClassReader.SKIP_FRAMES)
+                if (hasNativeCatalogInstall && className != null && verifierMethod != null) {
+                    return VmCatalogVerifier(className!!, verifierMethod!!)
                 }
             }
-            index++
         }
-        return null
+        error("Expected the final JAR helper catalog verifier in ${jarPath.fileName}")
     }
 
-    private fun pushIntValue(insn: AbstractInsnNode): Int? = when (insn.opcode) {
-        Opcodes.ICONST_M1 -> -1
-        Opcodes.ICONST_0 -> 0
-        Opcodes.ICONST_1 -> 1
-        Opcodes.ICONST_2 -> 2
-        Opcodes.ICONST_3 -> 3
-        Opcodes.ICONST_4 -> 4
-        Opcodes.ICONST_5 -> 5
-        Opcodes.BIPUSH, Opcodes.SIPUSH -> (insn as? IntInsnNode)?.operand
-        Opcodes.LDC -> (insn as? LdcInsnNode)?.cst as? Int
-        else -> null
-    }
+    private data class VmCatalogVerifier(val className: String, val methodName: String)
 
-    private fun testVbc4Context(runtimeResourceKey: ByteArray): Vbc4BuildContext = Vbc4BuildContext(
-        masterKey = ByteArray(32) { index -> (0x41 + index).toByte() },
-        nativeSeed = 0x7150_0F11L,
-        jarLayoutDigest = ByteArray(32) { index -> (0x23 + index * 3).toByte() },
-        runtimeResourceKey = runtimeResourceKey,
+    private data class VmCatalogCommitment(
+        val storagePath: String,
+        val length: Int,
+        val sha256: String,
+        val partitionId: Int,
     )
 
-    private fun looksLikeVmPreloadIndexLine(line: String): Boolean {
-        if (line.isBlank() || line.startsWith("A|")) return false
-        val parts = line.split('|')
-        return parts.size >= 7 &&
-            parts[0].isNotBlank() &&
-            parts[1].isNotBlank() &&
-            parts[2].isNotBlank() &&
-            parts[3].toIntOrNull() != null &&
-            parts[4].isNotBlank() &&
-            parts[5].isNotBlank() &&
-            parts[6].isNotBlank()
+    private fun ByteArray.runtimeEnvelopePartitionId(): Int? {
+        if (size < 156 || this[0] != 'J'.code.toByte() || this[1] != 'S'.code.toByte() ||
+            this[2] != 'R'.code.toByte() || this[3] != 'P'.code.toByte() ||
+            (this[4].toInt() and 0xFF) != 7 || (last().toInt() and 0xFF) != 32
+        ) return null
+        return (this[25].toInt() and 0xFF) or ((this[26].toInt() and 0xFF) shl 8)
     }
+
+    private fun ByteArray.isVmCatalogRoot(): Boolean = size >= 5 &&
+        this[0] == 'J'.code.toByte() && this[1] == 'S'.code.toByte() && this[2] == 'C'.code.toByte() &&
+        this[3] == '1'.code.toByte() && this[4] == '|'.code.toByte()
 
     private fun rewriteJar(sourceJar: Path, targetJar: Path, transform: (JarEntry, ByteArray) -> ByteArray) {
         JarFile(sourceJar.toFile()).use { input ->
@@ -750,13 +775,6 @@ class RealJniMicrokernelFixtureRegressionTest {
                 }
             }
         }
-    }
-
-    private fun flipHexDigit(value: String): String {
-        if (value.isEmpty()) return value
-        val chars = value.toCharArray()
-        chars[chars.lastIndex] = if (chars.last() == '0') '1' else '0'
-        return String(chars)
     }
 
     private fun ByteArray.containsAscii(value: String): Boolean {
@@ -904,6 +922,11 @@ class RealJniMicrokernelFixtureRegressionTest {
     }
 
     private data class LocalJavaProcessResult(val exitCode: Int, val output: String, val timedOut: Boolean)
+
+    private fun sessionEvidenceTag(output: String): String = output.lineSequence()
+        .firstOrNull { it.startsWith("JAVASHROUD_VM_SESSION=") }
+        ?.substringAfter('=')
+        .orEmpty()
 
     private fun runLocalJavaProcessWithTimeout(processBuilder: ProcessBuilder, timeoutSeconds: Long = 30): LocalJavaProcessResult {
         val process = processBuilder.redirectErrorStream(true).start()

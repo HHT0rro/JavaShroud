@@ -64,10 +64,26 @@ static jmethodID js_vm_lookup_method_id(JNIEnv *env, jclass cls, const char *nam
     return mid;
 }
 
+static js_vm_program *js_vm_symbol_owner(js_vm_program *p) {
+    return (p && p->symbol_cache_owner) ? p->symbol_cache_owner : p;
+}
+
+static int js_vm_symbol_cache_reserve(js_vm_program *owner) {
+    if (owner->symbols) return 1;
+    int capacity = owner->cp_count * 2 + 16;
+    if (capacity < 32) capacity = 32;
+    owner->symbols = (js_vm_symbol_cache_entry*)calloc((size_t)capacity, sizeof(js_vm_symbol_cache_entry));
+    if (!owner->symbols) return 0;
+    owner->symbol_capacity = capacity;
+    owner->symbol_count = 0;
+    return 1;
+}
+
 JS_HIDDEN js_vm_symbol_cache_entry* js_vm_symbol_cache_lookup(js_vm_program *p, int cp_idx, int kind) {
-    if (!p || !p->symbols || p->symbol_count <= 0) return NULL;
-    for (int i = 0; i < p->symbol_count; i++) {
-        if (p->symbols[i].cp_idx == cp_idx && p->symbols[i].kind == kind) return &p->symbols[i];
+    js_vm_program *owner = js_vm_symbol_owner(p);
+    if (!owner || !owner->symbols || owner->symbol_count <= 0) return NULL;
+    for (int i = 0; i < owner->symbol_count; i++) {
+        if (owner->symbols[i].cp_idx == cp_idx && owner->symbols[i].kind == kind) return &owner->symbols[i];
     }
     return NULL;
 }
@@ -82,12 +98,15 @@ JS_HIDDEN void js_vm_symbol_cache_clear_entry(JNIEnv *env, js_vm_symbol_cache_en
 
 JS_HIDDEN js_vm_symbol_cache_entry* js_vm_class_cache_add(JNIEnv *env, js_vm_program *p, int cp_idx, int kind, jclass cls, const char *type_name) {
     if (!env || !p || !cls || !type_name || !*type_name) return NULL;
+    js_vm_program *owner = js_vm_symbol_owner(p);
+    js_vm_symbol_cache_lock_enter();
     js_vm_symbol_cache_entry *existing = js_vm_symbol_cache_lookup(p, cp_idx, kind);
-    if (existing) return existing;
-    js_vm_symbol_cache_entry *grown = (js_vm_symbol_cache_entry*)realloc(p->symbols, (size_t)(p->symbol_count + 1) * sizeof(js_vm_symbol_cache_entry));
-    if (!grown) return NULL;
-    p->symbols = grown;
-    js_vm_symbol_cache_entry *slot = &p->symbols[p->symbol_count];
+    if (existing) { js_vm_symbol_cache_lock_leave(); return existing; }
+    if (!js_vm_symbol_cache_reserve(owner) || owner->symbol_count >= owner->symbol_capacity) {
+        js_vm_symbol_cache_lock_leave();
+        return NULL;
+    }
+    js_vm_symbol_cache_entry *slot = &owner->symbols[owner->symbol_count];
     memset(slot, 0, sizeof(*slot));
     slot->cp_idx = cp_idx;
     slot->kind = kind;
@@ -95,25 +114,31 @@ JS_HIDDEN js_vm_symbol_cache_entry* js_vm_class_cache_add(JNIEnv *env, js_vm_pro
     if ((*env)->ExceptionCheck(env) || !slot->cls) {
         if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
         memset(slot, 0, sizeof(*slot));
+        js_vm_symbol_cache_lock_leave();
         return NULL;
     }
     slot->type_name = js_strdup(type_name);
     if (!slot->type_name) {
         js_vm_symbol_cache_clear_entry(env, slot);
+        js_vm_symbol_cache_lock_leave();
         return NULL;
     }
-    p->symbol_count++;
+    owner->symbol_count++;
+    js_vm_symbol_cache_lock_leave();
     return slot;
 }
 
 JS_HIDDEN js_vm_symbol_cache_entry* js_vm_symbol_cache_add(JNIEnv *env, js_vm_program *p, int cp_idx, int kind, jclass cls, jmethodID mid, jfieldID fid, unsigned char tag, const js_vm_method_ref *ref, const char *lookup_name, unsigned char ret_tag, unsigned char is_constructor) {
     if (!env || !p || !cls || !ref || !ref->owner || !ref->name || !ref->desc) return NULL;
+    js_vm_program *owner = js_vm_symbol_owner(p);
+    js_vm_symbol_cache_lock_enter();
     js_vm_symbol_cache_entry *existing = js_vm_symbol_cache_lookup(p, cp_idx, kind);
-    if (existing) return existing;
-    js_vm_symbol_cache_entry *grown = (js_vm_symbol_cache_entry*)realloc(p->symbols, (size_t)(p->symbol_count + 1) * sizeof(js_vm_symbol_cache_entry));
-    if (!grown) return NULL;
-    p->symbols = grown;
-    js_vm_symbol_cache_entry *slot = &p->symbols[p->symbol_count];
+    if (existing) { js_vm_symbol_cache_lock_leave(); return existing; }
+    if (!js_vm_symbol_cache_reserve(owner) || owner->symbol_count >= owner->symbol_capacity) {
+        js_vm_symbol_cache_lock_leave();
+        return NULL;
+    }
+    js_vm_symbol_cache_entry *slot = &owner->symbols[owner->symbol_count];
     memset(slot, 0, sizeof(*slot));
     slot->cp_idx = cp_idx;
     slot->kind = kind;
@@ -121,6 +146,7 @@ JS_HIDDEN js_vm_symbol_cache_entry* js_vm_symbol_cache_add(JNIEnv *env, js_vm_pr
     if ((*env)->ExceptionCheck(env) || !slot->cls) {
         if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
         memset(slot, 0, sizeof(*slot));
+        js_vm_symbol_cache_lock_leave();
         return NULL;
     }
     slot->mid = mid;
@@ -156,12 +182,14 @@ JS_HIDDEN js_vm_symbol_cache_entry* js_vm_symbol_cache_add(JNIEnv *env, js_vm_pr
         int parsed_argc = 0;
         if (!js_vm_descriptor_arg_tags(ref->desc, &tags, &parsed_argc)) {
             js_vm_symbol_cache_clear_entry(env, slot);
+            js_vm_symbol_cache_lock_leave();
             return NULL;
         }
         slot->arg_tags = tags;
         slot->argc = parsed_argc;
     }
-    p->symbol_count++;
+    owner->symbol_count++;
+    js_vm_symbol_cache_lock_leave();
     return slot;
 }
 
@@ -367,25 +395,25 @@ JS_HIDDEN char js_vm_return_descriptor_from_meta(js_vm_program *p, jlong expecte
     unsigned long long token = 0ULL;
     char return_desc = 0;
     char *copy = meta.s;
-    char *parts[12] = {0};
+    char *parts[13] = {0};
     int part_count = 0;
     char *cursor = copy;
-    while (cursor && part_count < 12) {
+    while (cursor && part_count < 13) {
         parts[part_count++] = cursor;
         char *sep = strchr(cursor, '|');
         if (!sep) break;
         *sep = 0;
         cursor = sep + 1;
     }
-    if (part_count >= 5 && strcmp(parts[0], "vbc4-meta") == 0) {
+    if (part_count == 13 && strcmp(parts[0], "vbc4-meta") == 0) {
         token = strtoull(parts[1], NULL, 16);
         return_desc = parts[4][0];
-        if (part_count >= 6) p->method_local_profile = (uint32_t)strtoul(parts[5], NULL, 16);
+        p->method_local_profile = (uint32_t)strtoul(parts[5], NULL, 16);
         if ((p->vbc4_flags & 0x1000u) != 0u) {
             if (p->method_local_profile == 0u) return_desc = 0;
             else if (p->nested_vm_profile == 0u || p->nested_vm_profile != p->method_local_profile) return_desc = 0;
         }
-        if (part_count >= 9) {
+        {
             p->original_owner = js_strdup(parts[6]);
             p->original_name = js_strdup(parts[7]);
             p->original_desc = js_strdup(parts[8]);
@@ -396,9 +424,10 @@ JS_HIDDEN char js_vm_return_descriptor_from_meta(js_vm_program *p, jlong expecte
                 p->original_desc_hash = js_vm_hash64_string(p->original_desc);
             }
         }
-        if (part_count >= 11) p->original_access = (uint32_t)strtoul(parts[10], NULL, 16);
-        if (part_count >= 12) p->dispatch_profile_tag = (uint32_t)strtoul(parts[11], NULL, 16);
-        if (part_count >= 10) {
+        p->original_access = (uint32_t)strtoul(parts[10], NULL, 16);
+        p->native_vm_profile_id = (uint32_t)strtoul(parts[11], NULL, 16);
+        p->dispatch_profile_tag = (uint32_t)strtoul(parts[12], NULL, 16);
+        {
             p->resource_path = js_strdup(parts[9]);
             if (!p->resource_path) return_desc = 0;
         }

@@ -6,6 +6,8 @@ import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.analysis.TargetSelector
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.protection.applyExceptionSemanticVirtualization
+import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -29,16 +31,18 @@ class ExceptionSemanticVirtualizationTest {
             ),
         )
 
-        val result = applyExceptionSemanticVirtualization(
-            artifact = artifact,
-            ruleMatches = listOf(RuleMatch(
-                rule = RuleSpec(target = internalName, action = "exception-semantic-virtualization"),
-                selector = TargetSelector(classPattern = internalName, memberPattern = null, memberDescriptorPattern = null),
-                matchedClassNames = listOf(internalName),
-                matchedMembers = emptyList(),
-            )),
-            params = mapOf("virtualizationLevel" to "aggressive", "seed" to 37),
-        )
+        val result = withVbc4BuildContext(defaultVbc4BuildContext()) {
+            applyExceptionSemanticVirtualization(
+                artifact = artifact,
+                ruleMatches = listOf(RuleMatch(
+                    rule = RuleSpec(target = internalName, action = "exception-semantic-virtualization"),
+                    selector = TargetSelector(classPattern = internalName, memberPattern = null, memberDescriptorPattern = null),
+                    matchedClassNames = listOf(internalName),
+                    matchedMembers = emptyList(),
+                )),
+                params = mapOf("virtualizationLevel" to "aggressive", "seed" to 37),
+            )
+        }
 
         assertEquals(1, result.transformedMemberCount)
         val node = ClassNode()

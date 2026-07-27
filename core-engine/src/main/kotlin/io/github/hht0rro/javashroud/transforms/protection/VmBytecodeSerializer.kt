@@ -2,6 +2,7 @@ package io.github.hht0rro.javashroud.transforms.protection
 
 import org.objectweb.asm.*
 import java.security.SecureRandom
+import java.nio.charset.StandardCharsets
 import javax.crypto.Cipher
 import javax.crypto.Mac
 import javax.crypto.spec.IvParameterSpec
@@ -18,8 +19,9 @@ internal data class Vbc4EntryMetadata(
     val originalDescriptor: String = "",
     val resourcePath: String = "",
     val originalAccess: Int = 0,
+    val nativeVmProfileId: Int = 0,
 ) {
-    private val dispatchProfileTag: Int = vbc4DispatchProfileTag(entryToken, resourcePath, methodLocalProfile, originalAccess)
+    private val dispatchProfileTag: Int = vbc4DispatchProfileTag(entryToken, resourcePath, methodLocalProfile, originalAccess, nativeVmProfileId)
 
     fun encode(): String = listOf(
         "vbc4-meta",
@@ -33,13 +35,14 @@ internal data class Vbc4EntryMetadata(
         originalDescriptor,
         resourcePath,
         originalAccess.toUInt().toString(16),
+        nativeVmProfileId.toUInt().toString(16),
         dispatchProfileTag.toUInt().toString(16),
     ).joinToString("|")
 }
 
-private fun vbc4DispatchProfileTag(entryToken: Long, resourcePath: String, methodLocalProfile: Int, originalAccess: Int): Int {
+private fun vbc4DispatchProfileTag(entryToken: Long, resourcePath: String, methodLocalProfile: Int, originalAccess: Int, nativeVmProfileId: Int): Int {
     var x = (entryToken xor (entryToken ushr 32)).toInt()
-    x = x xor methodLocalProfile xor (originalAccess * 0x45D9F3B)
+    x = x xor methodLocalProfile xor (originalAccess * 0x45D9F3B) xor (nativeVmProfileId * 0x27D4EB2D)
     for (byte in resourcePath.toByteArray(Charsets.UTF_8)) {
         x = x xor (byte.toInt() and 0xFF)
         x *= 0x01000193
@@ -52,6 +55,23 @@ private fun vbc4DispatchProfileTag(entryToken: Long, resourcePath: String, metho
     return x xor (x ushr 16)
 }
 
+private fun vbc4RegisterRowMixWord(seed: Int, blockId: Int, rowIndex: Int, slot: Int, fieldIndex: Int): Int {
+    var state = seed xor (blockId * 0x045D9F3B.toInt()) xor (rowIndex * 0x7FEB352D.toInt()) xor
+        (slot * 0x846CA68B.toInt()) xor (fieldIndex * 0x2C1B3C6D.toInt())
+    state = state xor (state ushr 16)
+    state = (state.toLong() * 0x7FEB352D).toInt()
+    state = state xor (state ushr 13)
+    state = (state.toLong() * 0x846CA68B).toInt()
+    return state xor (state ushr 16)
+}
+
+internal fun vbc4MixedOperandRowToken(seed: Int, blockId: Int, rowIndex: Int, shape: Int): Int {
+    require(shape in 0..2) { "mixed operand row shape must be 0, 1, or 2" }
+    val payload = (vbc4RegisterRowMixWord(seed, blockId, rowIndex, shape, 0x5E) xor
+        (shape * 0x045D9F3B)) and 0x3FFF
+    return ((shape and 0x3) shl 14) or payload
+}
+
 /**
  * VBC4 bytecode serializer.
  *
@@ -62,11 +82,14 @@ private fun vbc4DispatchProfileTag(entryToken: Long, resourcePath: String, metho
 internal class VmBytecodeSerializer(
     private val buildSeed: Int = 0,
     private val stateBinding: String = "",
-    private val entryMetadata: Vbc4EntryMetadata = Vbc4EntryMetadata(),
+    entryMetadata: Vbc4EntryMetadata = Vbc4EntryMetadata(),
     buildContext: Vbc4BuildContext,
     structureEntropy: ByteArray = randomVbc4StructureEntropy(),
 ) : MethodVisitor(Opcodes.ASM9) {
 
+    private val entryMetadata: Vbc4EntryMetadata = entryMetadata.copy(
+        nativeVmProfileId = buildContext.nativeVmProfile.authenticatedId,
+    )
     private val serializationBuildContext: Vbc4BuildContext = buildContext
     private val structureEntropyDigest: ByteArray = structureEntropy.copyOf()
     private val effectiveBuildSeed: Int = deriveVbc4StructureSeed(buildContext, buildSeed, entryMetadata, structureEntropy)
@@ -82,6 +105,7 @@ internal class VmBytecodeSerializer(
     private val labelToOffset = mutableMapOf<Label, Int>()
     private val labelRefs = mutableListOf<LabelRef>()
     private var currentOffset = 0
+    private var finalProductionEvidence: ProductionMethodEvidence? = null
 
     data class VmInstruction(
         val offset: Int,
@@ -122,6 +146,16 @@ internal class VmBytecodeSerializer(
         val operand: Int,
     )
 
+    internal data class ProductionMethodEvidence(
+        val opcodeStreamSha256: String,
+        val operandStreamSha256: String,
+        val methodEncodingSha256: String,
+    )
+
+    /** Return commitments captured from the final logical rows and VBC4 bytes. */
+    internal fun productionEvidence(): ProductionMethodEvidence = finalProductionEvidence
+        ?: error("VBC4 production evidence requested before serialization completed")
+
     fun serialize(): ByteArray {
         return Vbc4CryptoScope.use(vbc4MasterKey, vbc4LayoutDigest) {
             try {
@@ -143,8 +177,8 @@ internal class VmBytecodeSerializer(
         val constantPoolPlain = serializeConstantPool(cpIndexMap)
 
         val nestedVm = nestedVmEnabled()
-        val registerRowEnvelope = !nestedVm && shouldUseRegisterRowEnvelope()
-        val mixedOperandEnvelope = !nestedVm && !registerRowEnvelope && shouldUseMixedOperandEnvelope()
+        val registerRowEnvelope = !nestedVm && serializationBuildContext.nativeVmProfile.parserRowProfile == 1
+        val mixedOperandEnvelope = !nestedVm && serializationBuildContext.nativeVmProfile.parserRowProfile == 2
         val nestedVmFlag = if (nestedVm) VBC4_FLAG_NESTED_VM else 0
         val registerRowEnvelopeFlag = if (registerRowEnvelope) VBC4_FLAG_REGISTER_ROW_ENVELOPE else 0
         val mixedOperandEnvelopeFlag = if (mixedOperandEnvelope) VBC4_FLAG_MIXED_OPERAND_ENVELOPE else 0
@@ -196,8 +230,8 @@ internal class VmBytecodeSerializer(
             writeU4(out, blk.entryToken)
             writeU4(out, vbc4BlockDispatchToken(cryptoSeed, blk.blockId, nextLogicalBlockId(blk.blockId, logicalProgram.blocks.size), logicalProgram.blocks.size))
         }
-        storageBlocks.forEachIndexed { blockId, blk ->
-            val blockPlain = serializeSingleBlock(blk, logicalProgram.registerCount, nestedVm, registerRowEnvelope, mixedOperandEnvelope, blockId)
+        storageBlocks.forEach { blk ->
+            val blockPlain = serializeSingleBlock(blk, logicalProgram.registerCount, nestedVm, registerRowEnvelope, mixedOperandEnvelope, blk.blockId)
             val blockStored = zstdCompressSection(blockPlain)
             val blockEncrypted = vbc4Crypt(blockStored, cryptoSeed, nonce, VBC4_SECTION_INSTRUCTIONS, blk.blockId)
             writeU4(out, blockPlain.size)
@@ -219,7 +253,47 @@ internal class VmBytecodeSerializer(
         val payload = out.toByteArray()
         out.write(vbc4Hmac(payload, cryptoSeed, nonce))
         out.write(32)
-        return out.toByteArray()
+        val serializedVbc4 = out.toByteArray()
+        finalProductionEvidence = productionEvidenceFor(logicalProgram, serializedVbc4)
+        return serializedVbc4
+    }
+
+    private fun productionEvidenceFor(
+        logicalProgram: VmLogicalProgram,
+        serializedVbc4: ByteArray,
+    ): ProductionMethodEvidence {
+        val opcodeRows = logicalProgram.blocks.flatMap { block ->
+            block.instructions.mapIndexed { rowIndex, row ->
+                intBytes(block.blockId) + intBytes(rowIndex) + intBytes(row.opcode)
+            }
+        }
+        val operandRows = buildList {
+            add(intBytes(logicalProgram.registerCount))
+            logicalProgram.blocks.forEach { block ->
+                block.instructions.forEachIndexed { rowIndex, row ->
+                    add(
+                        intBytes(block.blockId) +
+                            intBytes(rowIndex) +
+                            intBytes(row.flags) +
+                            intBytes(row.dst) +
+                            intBytes(row.srcA) +
+                            intBytes(row.srcB) +
+                            intBytes(row.operand),
+                    )
+                }
+            }
+        }
+        return ProductionMethodEvidence(
+            opcodeStreamSha256 = CandidateProductionBuildEvidence.framedDigest(
+                "javashroud-production-masked-opcode-rows-v2",
+                opcodeRows,
+            ),
+            operandStreamSha256 = CandidateProductionBuildEvidence.framedDigest(
+                "javashroud-production-operand-register-rows-v2",
+                operandRows,
+            ),
+            methodEncodingSha256 = CandidateProductionBuildEvidence.sha256Hex(serializedVbc4),
+        )
     }
 
     private fun resolveLabelReferences() {
@@ -781,22 +855,6 @@ internal class VmBytecodeSerializer(
     }
 
     /**
-     * Check if Register Row Envelope should be used.
-     * Uses structure selector for pseudo-random divergence.
-     */
-    private fun shouldUseRegisterRowEnvelope(): Boolean {
-        if (nestedVmEnabled()) return false
-        if (constantPool.size < 5) return false
-        // Use structureSelector for pseudo-random decision
-        return structureSelector("register-row-envelope", 0, effectiveBuildSeed, 100) < 40
-    }
-
-    private fun shouldUseMixedOperandEnvelope(): Boolean {
-        if (nestedVmEnabled()) return false
-        if (constantPool.size < 3) return false
-        return structureSelector("mixed-operand-envelope", 0, effectiveBuildSeed, 100) < 70
-    }
-    /**
      * Generate dialect value for register row envelope.
      */
     private fun vbc4RegisterRowDialect(blockId: Int, rowCount: Int): Int {
@@ -809,7 +867,10 @@ internal class VmBytecodeSerializer(
     private fun vbc4RegisterRowFieldOrder(blockId: Int, rowIndex: Int): IntArray {
         val order = intArrayOf(0, 1, 2, 3, 4, 5)
         for (i in 5 downTo 0) {
-            val j = (vbc4RegisterRowMix(effectiveBuildSeed, blockId, rowIndex, i, 0x71) % (i + 1)).toInt()
+            val j = Integer.remainderUnsigned(
+                vbc4RegisterRowMix(effectiveBuildSeed, blockId, rowIndex, i, 0x71),
+                i + 1,
+            )
             val tmp = order[i]
             order[i] = order[j]
             order[j] = tmp
@@ -828,13 +889,7 @@ internal class VmBytecodeSerializer(
      * Multi-round mixing function for register row envelope.
      */
     private fun vbc4RegisterRowMix(seed: Int, blockId: Int, rowIndex: Int, slot: Int, fieldIndex: Int): Int {
-        var state = seed xor (blockId * 0x045D9F3B.toInt()) xor (rowIndex * 0x7FEB352D.toInt()) xor
-            (slot * 0x846CA68B.toInt()) xor (fieldIndex * 0x2C1B3C6D.toInt())
-        state = state xor (state ushr 16)
-        state = (state.toLong() * 0x7FEB352D).toInt()
-        state = state xor (state ushr 13)
-        state = (state.toLong() * 0x846CA68B).toInt()
-        return state xor (state ushr 16)
+        return vbc4RegisterRowMixWord(seed, blockId, rowIndex, slot, fieldIndex)
     }
 
     /**
@@ -886,7 +941,7 @@ internal class VmBytecodeSerializer(
         structureSelector("mixed-operand-row", rowIndex, blockId, instruction.opcode, instruction.flags, instruction.operand, 3) % 3
 
     private fun mixedOperandRowToken(blockId: Int, rowIndex: Int, shape: Int): Int =
-        (vbc4RegisterRowMix(effectiveBuildSeed, blockId, rowIndex, shape, 0x5E) xor (shape * 0x45D9F3B)) and 0xFFFF
+        vbc4MixedOperandRowToken(effectiveBuildSeed, blockId, rowIndex, shape)
 
     private fun writeMixedOperandRow(
         out: java.io.ByteArrayOutputStream,

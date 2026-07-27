@@ -102,7 +102,7 @@ JS_HIDDEN char* js_lookup_bound_method(JNIEnv *env, const char *original_class, 
 JS_HIDDEN void js_vm_mark_hot_integrity_baseline_clean(void);
 JS_HIDDEN void js_runtime_on_unload_cleanup(JNIEnv *env);
 
-#define JS_NATIVE_ABI_TABLE_VERSION 1u
+#define JS_NATIVE_ABI_TABLE_VERSION 4u
 
 typedef struct js_native_abi_table {
     unsigned int version;
@@ -112,8 +112,8 @@ typedef struct js_native_abi_table {
     jbyteArray (JNICALL *native_decrypt_aes)(JNIEnv *env, jclass cls, jbyteArray encrypted, jbyteArray keyArr, jbyteArray ivArr);
     jstring (JNICALL *native_get_version)(JNIEnv *env, jclass cls);
     jlong (JNICALL *native_get_boot_token)(JNIEnv *env, jclass cls);
-    void (JNICALL *native_install_runtime_resource_key)(JNIEnv *env, jclass cls, jbyteArray keyArr);
-    void (JNICALL *native_preload_runtime_resources)(JNIEnv *env, jclass cls);
+    void (JNICALL *native_install_runtime_resource_key)(JNIEnv *env, jclass cls, jbyteArray keyArr, jint slot);
+    void (JNICALL *native_preload_runtime_resources)(JNIEnv *env, jclass cls, jbyteArray preload_index, jbyteArray commitments, jbyteArray startup_nonce);
     jbyteArray (JNICALL *native_derive_class_encryption_key)(JNIEnv *env, jclass cls, jbyteArray keyIdArr, jbyteArray saltArr, jint length);
     jobject (JNICALL *execute_vm_resource)(JNIEnv *env, jclass cls, jlong entryToken, jstring resourcePath, jobjectArray args);
     jobject (JNICALL *execute_vm_resource_by_token)(JNIEnv *env, jclass cls, jlong entryToken, jobjectArray args);

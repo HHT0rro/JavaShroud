@@ -22,9 +22,18 @@ typedef struct {
     int active;
 } js_vm_resource_alias_entry;
 
+typedef struct {
+    char path[JS_VM_CALL_GATE_KEY_LEN];
+    int raw_len;
+    int partition_id;
+    unsigned char digest[32];
+} js_vm_resource_commitment;
+
 static js_vm_call_gate_entry js_vm_call_gate[JS_VM_CALL_GATE_SIZE];
 static js_vm_resource_alias_entry js_vm_resource_aliases[JS_VM_CALL_GATE_SIZE];
 static int js_vm_call_gate_count = 0;
+static js_vm_resource_commitment *js_vm_commitments = NULL;
+static int js_vm_commitment_count = 0;
 static js_vm_ephemeral_cache_entry *js_vm_ephemeral_cache = NULL;
 #ifdef _WIN32
 static CRITICAL_SECTION js_vm_cache_lock;
@@ -85,6 +94,9 @@ static void js_vm_cache_lock_leave(void) {
 #endif
 }
 
+JS_HIDDEN void js_vm_symbol_cache_lock_enter(void) { js_vm_cache_lock_enter(); }
+JS_HIDDEN void js_vm_symbol_cache_lock_leave(void) { js_vm_cache_lock_leave(); }
+
 JS_HIDDEN void js_vm_cache_lock_init(void) {
 #ifdef _WIN32
     if (!js_vm_cache_lock_ready) {
@@ -103,13 +115,12 @@ JS_HIDDEN void js_vm_cache_lock_destroy(void) {
 #endif
 }
 
-JS_HIDDEN void js_vm_resource_alias_register(const char *original_path, const char *sealed_path) {
-    if (!original_path || !sealed_path || !original_path[0] || !sealed_path[0] || strcmp(original_path, sealed_path) == 0) return;
+JS_HIDDEN int js_vm_resource_alias_register(const char *original_path, const char *sealed_path) {
+    if (!original_path || !sealed_path || !original_path[0] || !sealed_path[0]) return 0;
+    if (strcmp(original_path, sealed_path) == 0) return 1;
     for (int i = 0; i < JS_VM_CALL_GATE_SIZE; i++) {
         if (js_vm_resource_aliases[i].active && strcmp(js_vm_resource_aliases[i].original, original_path) == 0) {
-            strncpy(js_vm_resource_aliases[i].sealed, sealed_path, JS_VM_CALL_GATE_KEY_LEN - 1);
-            js_vm_resource_aliases[i].sealed[JS_VM_CALL_GATE_KEY_LEN - 1] = 0;
-            return;
+            return strcmp(js_vm_resource_aliases[i].sealed, sealed_path) == 0;
         }
     }
     for (int i = 0; i < JS_VM_CALL_GATE_SIZE; i++) {
@@ -119,9 +130,10 @@ JS_HIDDEN void js_vm_resource_alias_register(const char *original_path, const ch
             strncpy(js_vm_resource_aliases[i].sealed, sealed_path, JS_VM_CALL_GATE_KEY_LEN - 1);
             js_vm_resource_aliases[i].original[JS_VM_CALL_GATE_KEY_LEN - 1] = 0;
             js_vm_resource_aliases[i].sealed[JS_VM_CALL_GATE_KEY_LEN - 1] = 0;
-            return;
+            return 1;
         }
     }
+    return 0;
 }
 
 JS_HIDDEN const char* js_vm_resource_alias_resolve(const char *path) {
@@ -142,9 +154,9 @@ static uint32_t js_vm_call_gate_hash_token(jlong token) {
     return (uint32_t)(x ^ (x >> 32));
 }
 
-JS_HIDDEN void js_vm_call_gate_register_profile(jlong entry_token, const char *resource_path, uint32_t expected_profile) {
-    if (entry_token == 0 || !resource_path) return;
-    if (js_vm_call_gate_count >= JS_VM_CALL_GATE_SIZE - 1) return;
+JS_HIDDEN int js_vm_call_gate_register_profile(jlong entry_token, const char *resource_path, uint32_t expected_profile) {
+    if (entry_token == 0 || !resource_path || !resource_path[0]) return 0;
+    if (js_vm_call_gate_count >= JS_VM_CALL_GATE_SIZE - 1) return 0;
     uint32_t h = js_vm_call_gate_hash_token(entry_token) % JS_VM_CALL_GATE_SIZE;
     for (int i = 0; i < JS_VM_CALL_GATE_SIZE; i++) {
         int idx = (int)((h + (uint32_t)i) % JS_VM_CALL_GATE_SIZE);
@@ -156,17 +168,17 @@ JS_HIDDEN void js_vm_call_gate_register_profile(jlong entry_token, const char *r
             js_vm_call_gate[idx].active = 1;
             js_vm_call_gate[idx].loading = 0;
             js_vm_call_gate_count++;
-            return;
+            return 1;
         }
         if (js_vm_call_gate[idx].entry_token == entry_token) {
-            if (expected_profile != 0u) js_vm_call_gate[idx].expected_profile = expected_profile;
-            return;
+            return 0;
         }
     }
+    return 0;
 }
 
-JS_HIDDEN void js_vm_call_gate_register(jlong entry_token, const char *resource_path) {
-    js_vm_call_gate_register_profile(entry_token, resource_path, 0u);
+JS_HIDDEN int js_vm_call_gate_register(jlong entry_token, const char *resource_path) {
+    return js_vm_call_gate_register_profile(entry_token, resource_path, 0u);
 }
 
 JS_HIDDEN const js_vm_call_gate_entry* js_vm_call_gate_lookup(jlong entry_token) {
@@ -207,6 +219,7 @@ JS_HIDDEN void js_vm_call_gate_reset(void) {
     js_vbc4_wipe_volatile(js_vm_call_gate, sizeof(js_vm_call_gate));
     js_vbc4_wipe_volatile(js_vm_resource_aliases, sizeof(js_vm_resource_aliases));
     js_vm_call_gate_count = 0;
+    js_vm_commitments_reset();
 }
 
 static int js_hex_nibble(char c) {
@@ -227,92 +240,91 @@ static int js_hex_bytes_to_buffer(const char *hex, size_t hex_len, unsigned char
     return 1;
 }
 
-static void js_u32_be_bytes(uint32_t value, unsigned char out[4]) {
-    out[0] = (unsigned char)((value >> 24) & 0xFFu);
-    out[1] = (unsigned char)((value >> 16) & 0xFFu);
-    out[2] = (unsigned char)((value >> 8) & 0xFFu);
-    out[3] = (unsigned char)(value & 0xFFu);
+JS_HIDDEN void js_vm_commitments_reset(void) {
+    if (js_vm_commitments) {
+        js_vbc4_wipe_volatile(js_vm_commitments, (size_t)js_vm_commitment_count * sizeof(*js_vm_commitments));
+        free(js_vm_commitments);
+    }
+    js_vm_commitments = NULL;
+    js_vm_commitment_count = 0;
 }
 
-JS_PROTECTED static void js_vm_mask_block(const unsigned char salt[16], uint32_t counter, unsigned char out[32]) {
-    static const unsigned char label[] = "jsmi2-mask";
-    unsigned char ctr[4];
-    js_u32_be_bytes(counter, ctr);
-    js_sha256_ctx ctx;
-    js_sha256_init(&ctx);
-    js_sha256_update(&ctx, label, (int)(sizeof(label) - 1));
-    js_sha256_update(&ctx, salt, 16);
-    js_sha256_update(&ctx, ctr, 4);
-    js_sha256_final(&ctx, out);
-    js_vbc4_wipe_volatile(&ctx, sizeof(ctx));
-    js_vbc4_wipe_volatile(ctr, sizeof(ctr));
+JS_HIDDEN int js_vm_commitments_install(const unsigned char *bytes, int len) {
+    if (!bytes || len <= 0) return 0;
+    int expected = 0;
+    for (int i = 0; i < len; i++) if ((i == 0 || bytes[i - 1] == '\n') && i + 2 < len && bytes[i] == 'R' && bytes[i + 1] == '|') expected++;
+    if (expected <= 0 || expected >= JS_VM_CALL_GATE_SIZE) return 0;
+    js_vm_resource_commitment *parsed = (js_vm_resource_commitment*)calloc((size_t)expected, sizeof(*parsed));
+    if (!parsed) return 0;
+    int parsed_count = 0;
+    int line_start = 0;
+    for (int i = 0; i <= len; i++) {
+        if (i != len && bytes[i] != '\n' && bytes[i] != '\r') continue;
+        int line_end = i;
+        if (line_end > line_start) {
+            int sep1 = -1, sep2 = -1, sep3 = -1, sep4 = -1;
+            for (int p = line_start; p < line_end; p++) {
+                if (bytes[p] != '|') continue;
+                if (sep1 < 0) sep1 = p;
+                else if (sep2 < 0) sep2 = p;
+                else if (sep3 < 0) sep3 = p;
+                else { sep4 = p; break; }
+            }
+            if (sep1 != line_start + 1 || bytes[line_start] != 'R' || sep2 <= sep1 + 1 || sep3 <= sep2 + 1 || sep4 <= sep3 + 1 || sep4 + 1 >= line_end) goto fail;
+            int path_len = sep2 - sep1 - 1;
+            int length_len = sep3 - sep2 - 1;
+            int digest_len = sep4 - sep3 - 1;
+            int partition_len = line_end - sep4 - 1;
+            if (path_len <= 0 || path_len >= JS_VM_CALL_GATE_KEY_LEN || length_len <= 0 || length_len >= 16 || digest_len != 64 || partition_len <= 0 || partition_len >= 8) goto fail;
+            char length_text[16], partition_text[8];
+            memcpy(length_text, bytes + sep2 + 1, (size_t)length_len);
+            length_text[length_len] = 0;
+            memcpy(partition_text, bytes + sep4 + 1, (size_t)partition_len);
+            partition_text[partition_len] = 0;
+            char *length_end = NULL, *partition_end = NULL;
+            long raw_len = strtol(length_text, &length_end, 10);
+            long partition_id = strtol(partition_text, &partition_end, 10);
+            if (!length_end || *length_end || !partition_end || *partition_end || raw_len <= 0 || raw_len > 0x7fffffffL || partition_id < 0 || partition_id > 16) goto fail;
+            if (parsed_count >= expected) goto fail;
+            js_vm_resource_commitment *slot = &parsed[parsed_count];
+            memcpy(slot->path, bytes + sep1 + 1, (size_t)path_len);
+            slot->path[path_len] = 0;
+            slot->raw_len = (int)raw_len;
+            slot->partition_id = (int)partition_id;
+            if (!js_hex_bytes_to_buffer((const char*)bytes + sep3 + 1, 64, slot->digest)) goto fail;
+            for (int prior = 0; prior < parsed_count; prior++) if (strcmp(parsed[prior].path, slot->path) == 0) goto fail;
+            parsed_count++;
+        }
+        while (i + 1 < len && (bytes[i + 1] == '\n' || bytes[i + 1] == '\r')) i++;
+        line_start = i + 1;
+    }
+    if (parsed_count != expected) goto fail;
+    js_vm_commitments_reset();
+    js_vm_commitments = parsed;
+    js_vm_commitment_count = parsed_count;
+    return 1;
+fail:
+    js_vbc4_wipe_volatile(parsed, (size_t)expected * sizeof(*parsed));
+    free(parsed);
+    return 0;
 }
 
-JS_PROTECTED static void js_vm_masked_index_tag(const unsigned char salt[16], const unsigned char *plain, int plain_len, unsigned char out[32]) {
-    static const unsigned char label[] = "jsmi2-tag";
-    js_sha256_ctx ctx;
-    js_sha256_init(&ctx);
-    js_sha256_update(&ctx, label, (int)(sizeof(label) - 1));
-    js_sha256_update(&ctx, salt, 16);
-    js_sha256_update(&ctx, plain, plain_len);
-    js_sha256_final(&ctx, out);
-    js_vbc4_wipe_volatile(&ctx, sizeof(ctx));
-}
-
-JS_PROTECTED unsigned char* js_vm_decode_masked_preload_index_owned(const unsigned char *index_bytes, int index_len, int *out_len) {
-    if (!index_bytes || index_len <= 6 || !out_len || memcmp(index_bytes, "JSMI2|", 6) != 0) return NULL;
-    int end = index_len;
-    while (end > 0 && (index_bytes[end - 1] == '\n' || index_bytes[end - 1] == '\r' || index_bytes[end - 1] == ' ' || index_bytes[end - 1] == '\t')) end--;
-    int sep1 = 5, sep2 = -1, sep3 = -1;
-    for (int i = 6; i < end; i++) {
-        if (index_bytes[i] != '|') continue;
-        if (sep2 < 0) sep2 = i;
-        else { sep3 = i; break; }
+JS_HIDDEN int js_vm_commitment_matches(const char *path, const unsigned char *raw, int raw_len) {
+    if (!path || !raw || raw_len <= 0 || !js_vm_commitments || js_vm_commitment_count <= 0) return 0;
+    for (int i = 0; i < js_vm_commitment_count; i++) {
+        js_vm_resource_commitment *entry = &js_vm_commitments[i];
+        if (strcmp(entry->path, path) != 0) continue;
+        if (entry->raw_len != raw_len || raw_len < 27 || raw[0] != 'J' || raw[1] != 'S' || raw[2] != 'R' || raw[3] != 'P' || raw[4] != 7) return 0;
+        int partition_id = (int)raw[25] | ((int)raw[26] << 8);
+        if (partition_id != entry->partition_id) return 0;
+        unsigned char digest[32];
+        js_runtime_sha256(raw, raw_len, digest);
+        unsigned char diff = 0;
+        for (int j = 0; j < 32; j++) diff |= (unsigned char)(digest[j] ^ entry->digest[j]);
+        js_vbc4_wipe_volatile(digest, sizeof(digest));
+        return diff == 0;
     }
-    if (sep2 <= sep1 + 1 || sep3 <= sep2 + 1 || sep3 + 1 >= end) return NULL;
-    size_t salt_hex_len = (size_t)(sep2 - sep1 - 1);
-    size_t masked_hex_len = (size_t)(sep3 - sep2 - 1);
-    size_t tag_hex_len = (size_t)(end - sep3 - 1);
-    if (salt_hex_len != 32u || tag_hex_len != 32u || (masked_hex_len & 1u) != 0u) return NULL;
-    unsigned char salt[16];
-    unsigned char expected_tag[16];
-    if (!js_hex_bytes_to_buffer((const char*)index_bytes + sep1 + 1, salt_hex_len, salt) ||
-        !js_hex_bytes_to_buffer((const char*)index_bytes + sep3 + 1, tag_hex_len, expected_tag)) return NULL;
-    int plain_len = (int)(masked_hex_len / 2u);
-    unsigned char *masked = plain_len > 0 ? (unsigned char*)malloc((size_t)plain_len) : (unsigned char*)calloc(1, 1);
-    unsigned char *plain = plain_len > 0 ? (unsigned char*)malloc((size_t)plain_len) : (unsigned char*)calloc(1, 1);
-    if (!masked || !plain || !js_hex_bytes_to_buffer((const char*)index_bytes + sep2 + 1, masked_hex_len, masked)) {
-        if (masked) free(masked);
-        if (plain) free(plain);
-        return NULL;
-    }
-    int offset = 0;
-    uint32_t counter = 0;
-    while (offset < plain_len) {
-        unsigned char mask[32];
-        js_vm_mask_block(salt, counter++, mask);
-        int take = plain_len - offset;
-        if (take > 32) take = 32;
-        for (int i = 0; i < take; i++) plain[offset + i] = (unsigned char)(masked[offset + i] ^ mask[i]);
-        js_vbc4_wipe_volatile(mask, sizeof(mask));
-        offset += take;
-    }
-    unsigned char actual_tag[32];
-    js_vm_masked_index_tag(salt, plain, plain_len, actual_tag);
-    int diff = 0;
-    for (int i = 0; i < 16; i++) diff |= (int)(actual_tag[i] ^ expected_tag[i]);
-    js_vbc4_wipe_volatile(masked, (size_t)plain_len);
-    free(masked);
-    js_vbc4_wipe_volatile(salt, sizeof(salt));
-    js_vbc4_wipe_volatile(expected_tag, sizeof(expected_tag));
-    js_vbc4_wipe_volatile(actual_tag, sizeof(actual_tag));
-    if (diff != 0) {
-        js_vbc4_wipe_volatile(plain, (size_t)plain_len);
-        free(plain);
-        return NULL;
-    }
-    *out_len = plain_len;
-    return plain;
+    return 0;
 }
 
 JS_HIDDEN int js_hex32_to_bytes(const char *hex, unsigned char out[32]) {
@@ -462,16 +474,76 @@ static jobject js_vm_resource_from_helper_class(JNIEnv *env, jclass helper_cls, 
     return stream;
 }
 
+static jbyteArray js_vm_read_stream_bytes_legacy(JNIEnv *env, jobject stream, jclass stream_cls, jmethodID close_mid) {
+    jmethodID read_mid = (*env)->GetMethodID(env, stream_cls, "read", "([B)I");
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); read_mid = NULL; }
+    if (!read_mid) return NULL;
+    size_t capacity = 8192;
+    size_t used = 0;
+    unsigned char *buffer = (unsigned char*)malloc(capacity);
+    if (!buffer) return NULL;
+    for (;;) {
+        if (used == capacity) {
+            size_t next = capacity * 2;
+            unsigned char *grown = (unsigned char*)realloc(buffer, next);
+            if (!grown) { free(buffer); return NULL; }
+            buffer = grown;
+            capacity = next;
+        }
+        jsize chunk = (jsize)(capacity - used);
+        jbyteArray temp = (*env)->NewByteArray(env, chunk);
+        if (!temp) { free(buffer); js_vm_resource_clear_exception(env); return NULL; }
+        jint got = (*env)->CallIntMethod(env, stream, read_mid, temp);
+        if ((*env)->ExceptionCheck(env)) {
+            (*env)->ExceptionClear(env);
+            (*env)->DeleteLocalRef(env, temp);
+            free(buffer);
+            return NULL;
+        }
+        if (got < 0) {
+            (*env)->DeleteLocalRef(env, temp);
+            break;
+        }
+        if (got > 0) {
+            if (used + (size_t)got > capacity) {
+                size_t next = capacity;
+                while (used + (size_t)got > next) next *= 2;
+                unsigned char *grown = (unsigned char*)realloc(buffer, next);
+                if (!grown) { (*env)->DeleteLocalRef(env, temp); free(buffer); return NULL; }
+                buffer = grown;
+                capacity = next;
+            }
+            (*env)->GetByteArrayRegion(env, temp, 0, got, (jbyte*)(buffer + used));
+            used += (size_t)got;
+        }
+        (*env)->DeleteLocalRef(env, temp);
+        if (got == 0) break;
+    }
+    (void)close_mid;
+    jbyteArray result = (*env)->NewByteArray(env, (jsize)used);
+    if (!result) { free(buffer); js_vm_resource_clear_exception(env); return NULL; }
+    if (used > 0) (*env)->SetByteArrayRegion(env, result, 0, (jsize)used, (const jbyte*)buffer);
+    free(buffer);
+    return result;
+}
+
 static jbyteArray js_vm_read_stream_bytes(JNIEnv *env, jobject stream) {
     if (!stream) return NULL;
     jbyteArray bytes = NULL;
     jclass stream_cls = (*env)->GetObjectClass(env, stream);
     if (stream_cls) {
         jmethodID read_all = (*env)->GetMethodID(env, stream_cls, "readAllBytes", "()[B");
+        if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); read_all = NULL; }
         jmethodID close = (*env)->GetMethodID(env, stream_cls, "close", "()V");
-        (*env)->DeleteLocalRef(env, stream_cls);
-        if (read_all) bytes = (jbyteArray)(*env)->CallObjectMethod(env, stream, read_all);
-        if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); bytes = NULL; }
+        if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); close = NULL; }
+        if (read_all) {
+            (*env)->DeleteLocalRef(env, stream_cls);
+            bytes = (jbyteArray)(*env)->CallObjectMethod(env, stream, read_all);
+            if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); bytes = NULL; }
+        } else {
+            bytes = js_vm_read_stream_bytes_legacy(env, stream, stream_cls, close);
+            (*env)->DeleteLocalRef(env, stream_cls);
+        }
         if (close) (*env)->CallVoidMethod(env, stream, close);
         js_vm_resource_clear_exception(env);
     } else {
@@ -524,7 +596,9 @@ JS_HIDDEN unsigned char* js_vm_decode_resource_path_owned(JNIEnv *env, jclass he
     jbyte *raw_bytes = raw_len > 0 ? (*env)->GetByteArrayElements(env, loaded.bytes, NULL) : NULL;
     unsigned char *decoded = NULL;
     if (raw_bytes) {
-        decoded = js_runtime_resource_decode_owned((const unsigned char*)raw_bytes, raw_len, out_len);
+        if (js_vm_commitment_matches(load_path, (const unsigned char*)raw_bytes, raw_len)) {
+            decoded = js_runtime_resource_decode_owned((const unsigned char*)raw_bytes, raw_len, out_len);
+        }
         js_vbc4_wipe_volatile(raw_bytes, (size_t)raw_len);
         (*env)->ReleaseByteArrayElements(env, loaded.bytes, raw_bytes, JNI_ABORT);
     }
@@ -766,8 +840,9 @@ JS_HIDDEN unsigned char* js_vm_reassemble_sliced_resource(JNIEnv *env, jclass he
     return assembled;
 }
 
-JS_PROTECTED void js_vm_register_preload_index_entries(const unsigned char *index_bytes, int index_len) {
-    if (!index_bytes || index_len <= 0) return;
+JS_PROTECTED int js_vm_register_preload_index_entries(const unsigned char *index_bytes, int index_len) {
+    if (!index_bytes || index_len <= 0) return 0;
+    int ok = 1;
     int line_start = 0;
     for (int i = 0; i <= index_len; i++) {
         if (i != index_len && index_bytes[i] != '\n' && index_bytes[i] != '\r') continue;
@@ -790,7 +865,7 @@ JS_PROTECTED void js_vm_register_preload_index_entries(const unsigned char *inde
             if (sep1 == line_start + 1 && index_bytes[line_start] == 'A' && sep2 > sep1 + 1 && sep2 + 1 < line_end) {
                 char *original_path = js_substr_dup((const char*)index_bytes + sep1 + 1, (size_t)(sep2 - sep1 - 1));
                 char *sealed_path = js_substr_dup((const char*)index_bytes + sep2 + 1, (size_t)(line_end - sep2 - 1));
-                if (original_path && sealed_path) js_vm_resource_alias_register(original_path, sealed_path);
+                if (!original_path || !sealed_path || !js_vm_resource_alias_register(original_path, sealed_path)) ok = 0;
                 if (original_path) { js_vbc4_wipe_volatile(original_path, strlen(original_path)); free(original_path); }
                 if (sealed_path) { js_vbc4_wipe_volatile(sealed_path, strlen(sealed_path)); free(sealed_path); }
                 while (i + 1 < index_len && (index_bytes[i + 1] == '\n' || index_bytes[i + 1] == '\r')) i++;
@@ -828,31 +903,35 @@ JS_PROTECTED void js_vm_register_preload_index_entries(const unsigned char *inde
                             binding_resource_path = js_substr_dup((const char*)index_bytes + sep4 + 1, (size_t)(binding_resource_end - sep4 - 1));
                         }
                         const char *gate_path = binding_resource_path && binding_resource_path[0] ? binding_resource_path : resource_path;
-                        js_vm_call_gate_register_profile((jlong)token, gate_path, expected_profile);
-                        if (binding_resource_path && strcmp(binding_resource_path, resource_path) != 0) js_vm_resource_alias_register(binding_resource_path, resource_path);
+                        if (!js_vm_call_gate_register_profile((jlong)token, gate_path, expected_profile)) ok = 0;
+                        if (binding_resource_path && strcmp(binding_resource_path, resource_path) != 0 && !js_vm_resource_alias_register(binding_resource_path, resource_path)) ok = 0;
                         if (authenticated_entry && sep2 > 0 && sep3 > 0 && sep8 > 0) {
                             char *manifest_path = js_substr_dup((const char*)index_bytes + sep2 + 1, (size_t)(sep3 - sep2 - 1));
                             char *binding_manifest_path = js_substr_dup((const char*)index_bytes + sep8 + 1, (size_t)(line_end - sep8 - 1));
-                            if (manifest_path && binding_manifest_path && strcmp(binding_manifest_path, manifest_path) != 0) js_vm_resource_alias_register(binding_manifest_path, manifest_path);
+                            if (manifest_path && binding_manifest_path && strcmp(binding_manifest_path, manifest_path) != 0 && !js_vm_resource_alias_register(binding_manifest_path, manifest_path)) ok = 0;
                             if (manifest_path) { js_vbc4_wipe_volatile(manifest_path, strlen(manifest_path)); free(manifest_path); }
                             if (binding_manifest_path) { js_vbc4_wipe_volatile(binding_manifest_path, strlen(binding_manifest_path)); free(binding_manifest_path); }
                         } else if (sep2 > 0 && sep3 > 0 && sep5 > 0) {
                             char *manifest_path = js_substr_dup((const char*)index_bytes + sep2 + 1, (size_t)(sep3 - sep2 - 1));
                             char *binding_manifest_path = js_substr_dup((const char*)index_bytes + sep5 + 1, (size_t)(line_end - sep5 - 1));
-                            if (manifest_path && binding_manifest_path && strcmp(binding_manifest_path, manifest_path) != 0) js_vm_resource_alias_register(binding_manifest_path, manifest_path);
+                            if (manifest_path && binding_manifest_path && strcmp(binding_manifest_path, manifest_path) != 0 && !js_vm_resource_alias_register(binding_manifest_path, manifest_path)) ok = 0;
                             if (manifest_path) { js_vbc4_wipe_volatile(manifest_path, strlen(manifest_path)); free(manifest_path); }
                             if (binding_manifest_path) { js_vbc4_wipe_volatile(binding_manifest_path, strlen(binding_manifest_path)); free(binding_manifest_path); }
                         }
                         if (binding_resource_path) { js_vbc4_wipe_volatile(binding_resource_path, strlen(binding_resource_path)); free(binding_resource_path); }
                         js_vbc4_wipe_volatile(resource_path, strlen(resource_path));
                         free(resource_path);
+                    } else {
+                        ok = 0;
                     }
                 }
+                else ok = 0;
             }
         }
         while (i + 1 < index_len && (index_bytes[i + 1] == '\n' || index_bytes[i + 1] == '\r')) i++;
         line_start = i + 1;
     }
+    return ok && js_vm_call_gate_count > 0;
 }
 
 JS_HIDDEN js_vm_program* js_vm_prepare_resource_program_bound(JNIEnv *env, jclass resource_cls, jlong entry_token, jstring resourcePath, const char *binding_path_override) {
@@ -884,7 +963,9 @@ JS_HIDDEN js_vm_program* js_vm_prepare_resource_program_bound(JNIEnv *env, jclas
     int raw_len = (*env)->GetArrayLength(env, loaded.bytes);
     jbyte *raw_bytes = raw_len > 0 ? (*env)->GetByteArrayElements(env, loaded.bytes, NULL) : NULL;
     if (raw_bytes) {
-        decoded = js_runtime_resource_decode_owned((const unsigned char*)raw_bytes, raw_len, &decoded_len);
+        if (js_vm_commitment_matches(load_resource_path, (const unsigned char*)raw_bytes, raw_len)) {
+            decoded = js_runtime_resource_decode_owned((const unsigned char*)raw_bytes, raw_len, &decoded_len);
+        }
         js_vbc4_wipe_volatile(raw_bytes, (size_t)raw_len);
         (*env)->ReleaseByteArrayElements(env, loaded.bytes, raw_bytes, JNI_ABORT);
     }
@@ -935,11 +1016,21 @@ JS_HIDDEN js_vm_program* js_vm_prepare_resource_program_bound(JNIEnv *env, jclas
         js_vm_fail_closed(env, NULL);
         return NULL;
     }
-    parsed_program->entry_token = entry_token;
     js_vm_call_gate_register(entry_token, resource_path);
+    parsed_program->entry_token = entry_token;
     parsed_program->return_desc = js_vm_return_descriptor_from_meta(parsed_program, entry_token);
     if (!parsed_program->return_desc) {
         js_vm_set_prepare_stage("return-desc");
+        rls(env, resourcePath, resource_path);
+        js_vm_free_program(env, parsed_program);
+        free(parsed_program);
+        return NULL;
+    }
+    /* Metadata parsing above installs the authenticated method identity and
+     * profile. Bind the runtime leaf only after those immutable tag fields are
+     * final, otherwise verification would correctly reject the later mutation. */
+    if (!js_vm_bind_runtime_session(parsed_program, entry_token, resource_path)) {
+        js_vm_set_prepare_stage("session-bind");
         rls(env, resourcePath, resource_path);
         js_vm_free_program(env, parsed_program);
         free(parsed_program);
@@ -983,6 +1074,13 @@ JS_HIDDEN js_vm_program* js_vm_preload_indexed_program_on_demand(JNIEnv *env, jc
             free(program);
             js_vm_call_gate_clear_loading(entry_token);
             js_vm_fail_closed(env, reason);
+            return NULL;
+        } else if (!js_vm_adopt_validated_execution_program(program, &validation)) {
+            js_vm_clear_execution_program(&validation);
+            js_vm_free_program(env, program);
+            free(program);
+            js_vm_call_gate_clear_loading(entry_token);
+            js_vm_fail_closed(env, "native VM on-demand validation produced no execution program");
             return NULL;
         } else {
             js_vm_clear_execution_program(&validation);
@@ -1058,10 +1156,20 @@ JS_HIDDEN jobject js_vm_execute_resource_by_token(JNIEnv *env, jclass resource_c
         return js_vm_fail_closed(env, "native VM token was not preloaded");
     }
     js_vm_program *program = js_vm_ephemeral_cache_get(entry_token, gate->resource_path);
+    if (!program && js_vm_preload_in_progress) {
+        jstring path_j = (*env)->NewStringUTF(env, gate->resource_path);
+        if (path_j) {
+            program = js_vm_preload_indexed_program_on_demand(env, resource_cls, entry_token, gate->resource_path, path_j);
+            (*env)->DeleteLocalRef(env, path_j);
+        } else {
+            js_vm_resource_clear_exception(env);
+        }
+        if ((*env)->ExceptionCheck(env)) return NULL;
+    }
     return js_vm_execute_cached_program(env, resource_cls, program, args);
 }
 
-static js_vm_program *js_vm_preloaded_program_for_primitive_token(JNIEnv *env, jlong entry_token) {
+static js_vm_program *js_vm_preloaded_program_for_primitive_token(JNIEnv *env, jclass resource_cls, jlong entry_token) {
     if (entry_token == 0) { js_vm_fail_closed(env, NULL); return NULL; }
     if (!js_vm_execute_hot_path_self_check()) { js_vm_fail_closed(env, NULL); return NULL; }
     const js_vm_call_gate_entry *gate = js_vm_call_gate_lookup(entry_token);
@@ -1070,6 +1178,16 @@ static js_vm_program *js_vm_preloaded_program_for_primitive_token(JNIEnv *env, j
         return NULL;
     }
     js_vm_program *program = js_vm_ephemeral_cache_get(entry_token, gate->resource_path);
+    if (!program && js_vm_preload_in_progress) {
+        jstring path_j = (*env)->NewStringUTF(env, gate->resource_path);
+        if (path_j) {
+            program = js_vm_preload_indexed_program_on_demand(env, resource_cls, entry_token, gate->resource_path, path_j);
+            (*env)->DeleteLocalRef(env, path_j);
+        } else {
+            js_vm_resource_clear_exception(env);
+        }
+        if ((*env)->ExceptionCheck(env)) return NULL;
+    }
     if (!program) {
         js_vm_fail_closed(env, "native VM resource was not preloaded");
         return NULL;
@@ -1078,7 +1196,7 @@ static js_vm_program *js_vm_preloaded_program_for_primitive_token(JNIEnv *env, j
 }
 
 JS_HIDDEN void js_vm_execute_resource_int_void_by_token(JNIEnv *env, jclass resource_cls, jlong entry_token, jint arg0) {
-    js_vm_program *program = js_vm_preloaded_program_for_primitive_token(env, entry_token);
+    js_vm_program *program = js_vm_preloaded_program_for_primitive_token(env, resource_cls, entry_token);
     if (!program) return;
 #ifdef _WIN32
     js_vm_cache_lock_enter();
@@ -1092,7 +1210,7 @@ JS_HIDDEN void js_vm_execute_resource_int_void_by_token(JNIEnv *env, jclass reso
 }
 
 JS_HIDDEN jint js_vm_execute_resource_int_by_token(JNIEnv *env, jclass resource_cls, jlong entry_token) {
-    js_vm_program *program = js_vm_preloaded_program_for_primitive_token(env, entry_token);
+    js_vm_program *program = js_vm_preloaded_program_for_primitive_token(env, resource_cls, entry_token);
     if (!program) return 0;
 #ifdef _WIN32
     js_vm_cache_lock_enter();
@@ -1108,7 +1226,7 @@ JS_HIDDEN jint js_vm_execute_resource_int_by_token(JNIEnv *env, jclass resource_
 }
 
 JS_HIDDEN jint js_vm_execute_resource_int_int_by_token(JNIEnv *env, jclass resource_cls, jlong entry_token, jint arg0) {
-    js_vm_program *program = js_vm_preloaded_program_for_primitive_token(env, entry_token);
+    js_vm_program *program = js_vm_preloaded_program_for_primitive_token(env, resource_cls, entry_token);
     if (!program) return 0;
 #ifdef _WIN32
     js_vm_cache_lock_enter();

@@ -1,7 +1,7 @@
 package io.github.hht0rro.javashroud
 
 import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_RUNTIME_RESOURCE_KEY_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.RuntimeKeyPartitions
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -16,13 +16,14 @@ import org.objectweb.asm.tree.LdcInsnNode
 import org.objectweb.asm.ClassReader
 
 /**
- * Phase 0 / SEC-002 gate: after injection, the per-build runtime resource root
- * key must NOT exist as a single contiguous 32-byte literal array in any method
- * of the helper. It is XOR-split into shares and reassembled only at runtime.
- * This test builds a synthetic holder with the same runtimeResourceKey()[B
- * shape the real helper exposes, injects a known key, then (a) scans every
- * method for a constant byte-array literal equal to the key and (b) confirms
- * the reassembled key still round-trips byte-for-byte.
+ * Phase 0 / SEC-002 gate: after injection, no key slot of the per-build
+ * partition key domains may exist as a single contiguous 32-byte literal array
+ * in any method of the helper. Every slot is XOR-split into shares and
+ * reassembled only at runtime. This test builds a synthetic holder with the
+ * same partitionResourceKey(I)[B shape the real helper exposes, injects a
+ * generated multi-partition key domain, then (a) scans every method for a
+ * constant byte-array literal equal to any slot and (b) confirms each slot reassembles
+ * byte-for-byte.
  */
 class RootKeyLiteralTest {
 
@@ -33,7 +34,13 @@ class RootKeyLiteralTest {
         init.visitCode(); init.visitVarInsn(Opcodes.ALOAD, 0)
         init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
         init.visitInsn(Opcodes.RETURN); init.visitMaxs(1, 1); init.visitEnd()
-        val mv = cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "runtimeResourceKey", "()[B", null, null)
+        val count = cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "runtimeResourcePartitionCount", "()I", null, null)
+        count.visitCode(); count.visitInsn(Opcodes.ICONST_0); count.visitInsn(Opcodes.IRETURN)
+        count.visitMaxs(1, 0); count.visitEnd()
+        val anchor = cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "anchorResourcePartition", "()I", null, null)
+        anchor.visitCode(); anchor.visitInsn(Opcodes.ICONST_0); anchor.visitInsn(Opcodes.IRETURN)
+        anchor.visitMaxs(1, 0); anchor.visitEnd()
+        val mv = cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "partitionResourceKey", "(I)[B", null, null)
         mv.visitCode(); mv.visitInsn(Opcodes.ACONST_NULL); mv.visitInsn(Opcodes.ARETURN)
         mv.visitMaxs(1, 0); mv.visitEnd()
         cw.visitEnd()
@@ -45,8 +52,6 @@ class RootKeyLiteralTest {
         fun define(internalName: String, bytes: ByteArray): Class<*> =
             defineClass(internalName.replace('/', '.'), bytes, 0, bytes.size)
     }
-
-    private fun knownKey(): ByteArray = ByteArray(VBC4_RUNTIME_RESOURCE_KEY_SIZE) { (it * 7 + 11).toByte() }
 
     private fun constIntValue(insn: AbstractInsnNode): Int? = when (insn) {
         is IntInsnNode -> if (insn.opcode == Opcodes.BIPUSH || insn.opcode == Opcodes.SIPUSH) insn.operand else null
@@ -90,8 +95,8 @@ class RootKeyLiteralTest {
         return sequences
     }
 
-    private fun containsKeySequence(values: List<Int>): Boolean {
-        val needle = knownKey().map { it.toInt() and 0xFF }
+    private fun containsKeySequence(values: List<Int>, key: ByteArray): Boolean {
+        val needle = key.map { it.toInt() and 0xFF }
         if (needle.size > values.size) return false
         outer@ for (start in 0..values.size - needle.size) {
             for (i in needle.indices) if (values[start + i] != needle[i]) continue@outer
@@ -101,25 +106,49 @@ class RootKeyLiteralTest {
     }
 
     @Test
-    fun root_key_is_not_a_contiguous_literal_after_injection() {
-        val injected = EmbeddedHelperDeployment.injectRuntimeResourceKey(buildHolder(), knownKey())
-        for (sequence in bastoreConstSequences(injected)) {
-            assertFalse(
-                containsKeySequence(sequence),
-                "No method may store the root key as a contiguous byte-array literal",
-            )
+    fun slot_keys_are_not_contiguous_literals_after_injection() {
+        val partitions = RuntimeKeyPartitions.generate()
+        try {
+            val keys = (0 until partitions.totalSlots).map(partitions::copyKeyForSlot)
+            val injected = EmbeddedHelperDeployment.injectRuntimeResourceKey(buildHolder(), partitions)
+            for (sequence in bastoreConstSequences(injected)) {
+                keys.forEach { key ->
+                    assertFalse(
+                        containsKeySequence(sequence, key),
+                        "No method may store a slot key as a contiguous byte-array literal",
+                    )
+                }
+            }
+        } finally {
+            partitions.wipe()
         }
     }
+
     @Test
-    fun reassembled_key_round_trips_byte_for_byte() {
-        val key = knownKey()
-        val injected = EmbeddedHelperDeployment.injectRuntimeResourceKey(buildHolder(), key)
-        val cls = Loader().define(HOLDER, injected)
-        val method = cls.getDeclaredMethod("runtimeResourceKey")
-        method.isAccessible = true
-        val recomputed = method.invoke(null) as ByteArray
-        assertEquals(key.size, recomputed.size)
-        assertTrue(key.contentEquals(recomputed), "Reassembled key must match the injected root key")
+    fun reassembled_slot_keys_round_trip_byte_for_byte() {
+        val partitions = RuntimeKeyPartitions.generate()
+        try {
+            val expected = (0 until partitions.totalSlots).map(partitions::copyKeyForSlot)
+            val injected = EmbeddedHelperDeployment.injectRuntimeResourceKey(buildHolder(), partitions)
+            val cls = Loader().define(HOLDER, injected)
+            val countMethod = cls.getDeclaredMethod("runtimeResourcePartitionCount")
+            countMethod.isAccessible = true
+            assertEquals(partitions.resourcePartitionCount, countMethod.invoke(null) as Int)
+            val anchorMethod = cls.getDeclaredMethod("anchorResourcePartition")
+            anchorMethod.isAccessible = true
+            assertEquals(partitions.anchorSlotId, anchorMethod.invoke(null) as Int)
+            val method = cls.getDeclaredMethod("partitionResourceKey", Int::class.javaPrimitiveType)
+            method.isAccessible = true
+            for (slot in expected.indices) {
+                val recomputed = method.invoke(null, slot) as ByteArray
+                assertEquals(expected[slot].size, recomputed.size)
+                assertTrue(expected[slot].contentEquals(recomputed), "Reassembled key must match the injected key for slot $slot")
+            }
+            val outOfRange = method.invoke(null, partitions.totalSlots + 5) as ByteArray
+            assertTrue(outOfRange.all { it.toInt() == 0 }, "Unknown slots must fail closed to a zero key")
+        } finally {
+            partitions.wipe()
+        }
     }
 
     companion object { private const val HOLDER = "test/RootKeyHolder" }

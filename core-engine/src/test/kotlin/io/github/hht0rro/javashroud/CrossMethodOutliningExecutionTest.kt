@@ -15,10 +15,10 @@ import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployme
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceCodec
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.applyMethodVirtualization
 import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.requireVbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
@@ -74,17 +74,9 @@ class CrossMethodOutliningExecutionTest {
     @Test
     fun cross_method_outlining_emits_shared_mesh_manifests_and_non_standalone_shards() {
         val context = defaultVbc4BuildContext()
-        val decodedResources = decodedCrossMethodResources(context = context, seed = 73)
+        val (decodedResources, catalogPlan) = decodedCrossMethodResources(context = context, seed = 73)
 
-        val preloadIndex = decodedResources[VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE]
-            ?.decodeToString()
-            ?.trim()
-            ?.lines()
-            .orEmpty()
-            .associate { line ->
-                val parts = line.split('|')
-                parts[2] to parts[3].toInt()
-            }
+        val preloadIndex = catalogPlan.methods.associate { method -> method.manifestPath to method.shardCount }
         val manifests = decodedResources.filterValues { bytes -> bytes.decodeToString().startsWith("VBC4S|1|") }
         assertTrue(manifests.size >= 3, "Cross-method outlining must emit one slice manifest per virtualized method")
         assertEquals(manifests.keys, preloadIndex.keys, "VM preload index must cover every cross-method slice manifest")
@@ -142,9 +134,9 @@ class CrossMethodOutliningExecutionTest {
 
     @Test
     fun cross_method_outlining_is_not_reproducible_for_same_seed_and_vbc4_context() {
-        val first = encodedCrossMethodResources(context = fixedContext(0x4A53_0001), seed = 73)
-        val second = encodedCrossMethodResources(context = fixedContext(0x4A53_0001), seed = 73)
-        val differentContext = encodedCrossMethodResources(context = fixedContext(0x4A53_0002), seed = 73)
+        val first = encodedCrossMethodResources(context = fixedContext(0x4A53_0001), seed = 73).first
+        val second = encodedCrossMethodResources(context = fixedContext(0x4A53_0001), seed = 73).first
+        val differentContext = encodedCrossMethodResources(context = fixedContext(0x4A53_0002), seed = 73).first
 
         assertTrue(
             first.map { it.name } != second.map { it.name } ||
@@ -277,15 +269,15 @@ class CrossMethodOutliningExecutionTest {
             )
             assertEquals(3, result.transformedMemberCount, "Fixture must virtualize all selected cross-method entries")
             result.artifact.jarEntries
-                .filter { entry -> entry.name.isVmResourceName() || entry.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE }
-                .sortedBy { it.name }
+                .filter { entry -> entry.name.isVmResourceName() }
+                .sortedBy { it.name } to requireNotNull(requireVbc4BuildContext().runtimeVmCatalogPlanOrNull())
         }
 
     private fun decodedCrossMethodResources(context: Vbc4BuildContext, seed: Int) =
         withVbc4BuildContext(context) {
-            encodedCrossMethodResources(context, seed)
-                .mapNotNull { entry -> RuntimeResourceCodec.decode(entry.bytes)?.let { entry.name to it } }
-                .toMap()
+            val (entries, plan) = encodedCrossMethodResources(context, seed)
+            entries.mapNotNull { entry -> RuntimeResourceCodec.decode(entry.bytes)?.let { entry.name to it } }
+                .toMap() to plan
         }
 
     private fun crossMethodArtifact() = testAttachedArtifact(
@@ -341,7 +333,9 @@ class CrossMethodOutliningExecutionTest {
                                         (descriptor == "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;" ||
                                             descriptor == "(J[Ljava/lang/Object;)Ljava/lang/Object;" ||
                                             descriptor == "(J)V" ||
-                                            descriptor == "(JI)V")
+                                            descriptor == "(JI)V" ||
+                                            descriptor == "(J)I" ||
+                                            descriptor == "(JI)I")
                                     ) {
                                         found = true
                                     }

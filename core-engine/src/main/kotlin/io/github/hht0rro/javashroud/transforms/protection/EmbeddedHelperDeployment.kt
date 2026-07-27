@@ -157,33 +157,40 @@ object EmbeddedHelperDeployment {
             ?: throw IllegalStateException("missing generator")
         val helperBytes = generator()
         return if (helperInternalName == "$PKG/JniMicrokernelHelper") {
-            injectRuntimeResourceKey(helperBytes, requireVbc4BuildContext().copyRuntimeResourceKey())
+            injectRuntimeResourceKey(helperBytes, requireVbc4BuildContext().runtimeKeyPartitions)
         } else {
             helperBytes
         }
     }
 
-    internal fun injectRuntimeResourceKey(helperBytes: ByteArray, runtimeKey: ByteArray): ByteArray {
-        require(runtimeKey.size == VBC4_RUNTIME_RESOURCE_KEY_SIZE) { "runtime resource key must be 32 bytes" }
+    internal fun injectRuntimeResourceKey(helperBytes: ByteArray, partitions: RuntimeKeyPartitions): ByteArray {
         val random = java.security.SecureRandom()
-        // Per-build share split: the per-build root key is never emitted as a
-        // single contiguous literal. It is XOR-split into N shares (N and the
-        // generated method names randomized per build), each share emitted into
-        // its own generated method, and the key is reassembled only transiently
-        // at runtime, after which the share temporaries are wiped.
-        val shareCount = 3 + random.nextInt(4)
-        val shares = Array(shareCount) { ByteArray(runtimeKey.size) }
-        for (index in 0 until shareCount - 1) random.nextBytes(shares[index])
-        val last = shares[shareCount - 1]
-        for (byteIndex in runtimeKey.indices) {
-            var acc = runtimeKey[byteIndex].toInt()
-            for (index in 0 until shareCount - 1) acc = acc xor shares[index][byteIndex].toInt()
-            last[byteIndex] = acc.toByte()
+        val totalSlots = partitions.totalSlots
+        require(totalSlots >= 2) { "partitioned runtime keys must include resource partitions plus an anchor" }
+        // Per-slot share split: no globally-applicable resource key exists in the
+        // artifact. Every partition and the anchor gets an independent random
+        // XOR-share split with per-build randomized share counts and method
+        // names, and each key is reassembled only transiently on demand.
+        val slotShareMethodNames = ArrayList<List<String>>(totalSlots)
+        val slotShares = ArrayList<Array<ByteArray>>(totalSlots)
+        for (slot in 0 until totalSlots) {
+            val key = partitions.copyKeyForSlot(slot)
+            val shareCount = 2 + random.nextInt(3)
+            val shares = Array(shareCount) { ByteArray(VBC4_RUNTIME_RESOURCE_KEY_SIZE) }
+            for (index in 0 until shareCount - 1) random.nextBytes(shares[index])
+            val last = shares[shareCount - 1]
+            for (byteIndex in key.indices) {
+                var acc = key[byteIndex].toInt()
+                for (index in 0 until shareCount - 1) acc = acc xor shares[index][byteIndex].toInt()
+                last[byteIndex] = acc.toByte()
+            }
+            java.util.Arrays.fill(key, 0)
+            val suffix = ByteArray(4).also { random.nextBytes(it) }.joinToString("") { "%02x".format(it.toInt() and 0xFF) }
+            slotShareMethodNames += (0 until shareCount).map { "jsRrkS${slot}_${it}_$suffix" }
+            slotShares += shares
         }
-        val suffix = ByteArray(5).also { random.nextBytes(it) }.joinToString("") { "%02x".format(it.toInt() and 0xFF) }
-        val shareMethodNames = (0 until shareCount).map { "jsRrkShare${it}_$suffix" }
         val reader = ClassReader(helperBytes)
-        val writer = ClassWriter(reader, ClassWriter.COMPUTE_MAXS)
+        val writer = ClassWriter(reader, ClassWriter.COMPUTE_FRAMES)
         var ownerName = "$PKG/JniMicrokernelHelper"
         reader.accept(object : ClassVisitor(Opcodes.ASM9, writer) {
             override fun visit(
@@ -205,17 +212,33 @@ object EmbeddedHelperDeployment {
                 signature: String?,
                 exceptions: Array<String>?,
             ): MethodVisitor? {
-                if (name != "runtimeResourceKey" || descriptor != "()[B") {
-                    return super.visitMethod(access, name, descriptor, signature, exceptions)
+                when {
+                    name == "runtimeResourcePartitionCount" && descriptor == "()I" -> {
+                        val mv = super.visitMethod(access, name, descriptor, signature, exceptions)
+                        emitConstReturn(mv, partitions.resourcePartitionCount)
+                        return null
+                    }
+                    name == "anchorResourcePartition" && descriptor == "()I" -> {
+                        val mv = super.visitMethod(access, name, descriptor, signature, exceptions)
+                        emitConstReturn(mv, partitions.anchorSlotId)
+                        return null
+                    }
+                    name == "partitionResourceKey" && descriptor == "(I)[B" -> {
+                        val mv = super.visitMethod(access, name, descriptor, signature, exceptions)
+                        emitPartitionKeyDispatch(mv, ownerName, slotShareMethodNames, VBC4_RUNTIME_RESOURCE_KEY_SIZE)
+                        return null
+                    }
+                    else -> return super.visitMethod(access, name, descriptor, signature, exceptions)
                 }
-                val mv = super.visitMethod(access, name, descriptor, signature, exceptions)
-                emitReassembly(mv, ownerName, shareMethodNames, runtimeKey.size)
-                return null
             }
 
             override fun visitEnd() {
-                for (shareIndex in shareMethodNames.indices) {
-                    emitShareMethod(this, shareMethodNames[shareIndex], shares[shareIndex])
+                for (slot in slotShareMethodNames.indices) {
+                    val names = slotShareMethodNames[slot]
+                    val shares = slotShares[slot]
+                    for (shareIndex in names.indices) {
+                        emitShareMethod(this, names[shareIndex], shares[shareIndex])
+                    }
                 }
                 super.visitEnd()
             }
@@ -223,47 +246,68 @@ object EmbeddedHelperDeployment {
         return writer.toByteArray()
     }
 
-    private fun emitReassembly(
+    private fun emitConstReturn(mv: MethodVisitor, value: Int) {
+        mv.visitCode()
+        pushInt(mv, value)
+        mv.visitInsn(Opcodes.IRETURN)
+        mv.visitMaxs(0, 0)
+        mv.visitEnd()
+    }
+
+    private fun emitPartitionKeyDispatch(
         mv: MethodVisitor,
         ownerName: String,
-        shareMethodNames: List<String>,
+        slotShareMethodNames: List<List<String>>,
         keyLength: Int,
     ) {
         mv.visitCode()
-        val shareCount = shareMethodNames.size
-        for (shareIndex in 0 until shareCount) {
-            mv.visitMethodInsn(Opcodes.INVOKESTATIC, ownerName, shareMethodNames[shareIndex], "()[B", false)
-            mv.visitVarInsn(Opcodes.ASTORE, shareIndex)
-        }        // result array in local `shareCount`
-        pushInt(mv, keyLength)
-        mv.visitIntInsn(Opcodes.NEWARRAY, Opcodes.T_BYTE)
-        mv.visitVarInsn(Opcodes.ASTORE, shareCount)
-        for (byteIndex in 0 until keyLength) {
-            mv.visitVarInsn(Opcodes.ALOAD, shareCount)
-            pushInt(mv, byteIndex)
-            // XOR all shares at this position
-            mv.visitVarInsn(Opcodes.ALOAD, 0)
-            pushInt(mv, byteIndex)
-            mv.visitInsn(Opcodes.BALOAD)
-            for (shareIndex in 1 until shareCount) {
-                mv.visitVarInsn(Opcodes.ALOAD, shareIndex)
+        val defaultLabel = org.objectweb.asm.Label()
+        val caseLabels = slotShareMethodNames.map { org.objectweb.asm.Label() }.toTypedArray()
+        mv.visitVarInsn(Opcodes.ILOAD, 0)
+        mv.visitTableSwitchInsn(0, slotShareMethodNames.size - 1, defaultLabel, *caseLabels)
+        val maxShares = slotShareMethodNames.maxOf { it.size }
+        val resultLocal = 1 + maxShares
+        for ((slot, shareMethodNames) in slotShareMethodNames.withIndex()) {
+            mv.visitLabel(caseLabels[slot])
+            val shareCount = shareMethodNames.size
+            for (shareIndex in 0 until shareCount) {
+                mv.visitMethodInsn(Opcodes.INVOKESTATIC, ownerName, shareMethodNames[shareIndex], "()[B", false)
+                mv.visitVarInsn(Opcodes.ASTORE, 1 + shareIndex)
+            }
+            pushInt(mv, keyLength)
+            mv.visitIntInsn(Opcodes.NEWARRAY, Opcodes.T_BYTE)
+            mv.visitVarInsn(Opcodes.ASTORE, resultLocal)
+            for (byteIndex in 0 until keyLength) {
+                mv.visitVarInsn(Opcodes.ALOAD, resultLocal)
+                pushInt(mv, byteIndex)
+                mv.visitVarInsn(Opcodes.ALOAD, 1)
                 pushInt(mv, byteIndex)
                 mv.visitInsn(Opcodes.BALOAD)
-                mv.visitInsn(Opcodes.IXOR)
+                for (shareIndex in 1 until shareCount) {
+                    mv.visitVarInsn(Opcodes.ALOAD, 1 + shareIndex)
+                    pushInt(mv, byteIndex)
+                    mv.visitInsn(Opcodes.BALOAD)
+                    mv.visitInsn(Opcodes.IXOR)
+                }
+                mv.visitInsn(Opcodes.I2B)
+                mv.visitInsn(Opcodes.BASTORE)
             }
-            mv.visitInsn(Opcodes.I2B)
-            mv.visitInsn(Opcodes.BASTORE)
+            for (shareIndex in 0 until shareCount) {
+                mv.visitVarInsn(Opcodes.ALOAD, 1 + shareIndex)
+                mv.visitInsn(Opcodes.ICONST_0)
+                mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/util/Arrays", "fill", "([BB)V", false)
+            }
+            mv.visitVarInsn(Opcodes.ALOAD, resultLocal)
+            mv.visitInsn(Opcodes.ARETURN)
         }
-        for (shareIndex in 0 until shareCount) {
-            mv.visitVarInsn(Opcodes.ALOAD, shareIndex)
-            mv.visitInsn(Opcodes.ICONST_0)
-            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/util/Arrays", "fill", "([BB)V", false)
-        }
-        mv.visitVarInsn(Opcodes.ALOAD, shareCount)
+        mv.visitLabel(defaultLabel)
+        pushInt(mv, keyLength)
+        mv.visitIntInsn(Opcodes.NEWARRAY, Opcodes.T_BYTE)
         mv.visitInsn(Opcodes.ARETURN)
         mv.visitMaxs(0, 0)
         mv.visitEnd()
     }
+
     private fun emitShareMethod(cv: ClassVisitor, methodName: String, share: ByteArray) {
         val mv = cv.visitMethod(Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC, methodName, "()[B", null, null)
             ?: return

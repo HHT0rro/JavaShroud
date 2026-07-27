@@ -3,6 +3,8 @@
 
 #include "js_vm_internal.h"
 
+JS_HIDDEN void js_vm_symbol_cache_lock_enter(void);
+JS_HIDDEN void js_vm_symbol_cache_lock_leave(void);
 JS_HIDDEN unsigned long long js_vm_hash64_string(const char *value);
 JS_HIDDEN js_vm_symbol_cache_entry* js_vm_symbol_cache_lookup(js_vm_program *p, int cp_idx, int kind);
 JS_HIDDEN void js_vm_symbol_cache_clear_entry(JNIEnv *env, js_vm_symbol_cache_entry *entry);

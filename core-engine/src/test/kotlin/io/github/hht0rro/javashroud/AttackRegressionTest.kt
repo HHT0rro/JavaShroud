@@ -8,13 +8,14 @@ import io.github.hht0rro.javashroud.model.analysis.TargetSelector
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper
 import io.github.hht0rro.javashroud.transforms.protection.NativeKernelPacker
+import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceCodec
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceKind
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.applyMethodVirtualization
+import io.github.hht0rro.javashroud.transforms.protection.requireVbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import org.objectweb.asm.Opcodes
 import java.nio.file.Files
@@ -112,7 +113,13 @@ class AttackRegressionTest {
         try {
             Files.writeString(inputDir.resolve("js_kernel_linux-x64.so"), "bootstrap-index-regression")
             val packed = NativeKernelPacker.pack(inputDir, outputDir, 0x5EEDL)
-            val decode = JniMicrokernelHelper::class.java.getDeclaredMethod("decodeBootstrapNativeIndex", ByteArray::class.java)
+            val helperResource = "/${JniMicrokernelHelper::class.java.name.replace('.', '/')}.class"
+            val helperBytes = checkNotNull(JniMicrokernelHelper::class.java.getResourceAsStream(helperResource)).use { it.readBytes() }
+            val injectedHelper = EmbeddedHelperDeployment.injectRuntimeResourceKey(helperBytes, requireVbc4BuildContext().runtimeKeyPartitions)
+            val helperClass = object : ClassLoader(javaClass.classLoader) {
+                fun define(): Class<*> = defineClass(JniMicrokernelHelper::class.java.name, injectedHelper, 0, injectedHelper.size)
+            }.define()
+            val decode = helperClass.getDeclaredMethod("decodeBootstrapNativeIndex", ByteArray::class.java)
             decode.isAccessible = true
 
             val decoded = decode.invoke(null, packed.indexBytes) as ByteArray?
@@ -215,7 +222,7 @@ class AttackRegressionTest {
             )
         },
         params = mapOf("maxInstructions" to Int.MAX_VALUE, "seed" to 91),
-    ).artifact.jarEntries.filter { entry -> entry.name.isVmResourceName() || entry.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE }
+    ).artifact.jarEntries.filter { entry -> entry.name.isVmResourceName() }
 
     private fun slicedManifestIsComplete(manifestBytes: ByteArray, resources: Map<String, ByteArray>): Boolean {
         val lines = manifestBytes.decodeToString().trim().lines()

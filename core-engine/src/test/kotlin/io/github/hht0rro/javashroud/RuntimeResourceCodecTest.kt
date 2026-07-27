@@ -39,9 +39,9 @@ class RuntimeResourceCodecTest {
         )
 
         assertTrue(!encoded.startsWithAscii("VBC4"), "encoded resource must not expose raw VBC4 magic before sealing")
-        assertEquals(6, encoded[4].toInt() and 0xFF, "runtime resource envelope must use the opaque VBC4-only authenticated version")
-        assertEquals(96, readLe16ForTest(encoded, 21), "public v2 header must expose only encrypted metadata length")
-        assertEquals(32, readLe16ForTest(encoded, 23), "public v2 header must expose only MAC length")
+        assertEquals(7, encoded[4].toInt() and 0xFF, "runtime resources must use only the partitioned JSRP v7 envelope")
+        assertEquals(96, readLe16ForTest(encoded, 21), "public v3 header must expose only encrypted metadata length")
+        assertEquals(32, readLe16ForTest(encoded, 23), "public v3 header must expose only MAC length")
         assertContentEquals(plain, RuntimeResourceCodec.decode(encoded), "encoded payload must round-trip")
 
         encoded[encoded.lastIndex] = (encoded.last().toInt() xor 0x55).toByte()
@@ -178,8 +178,9 @@ class RuntimeResourceCodecTest {
         try {
             Files.write(inputDir.resolve("js_kernel_linux-x64.so"), "fake-native-JNI_OnLoad-j.l-j.b-j.m".toByteArray(Charsets.UTF_8))
 
-            val first = withVbc4BuildContext(fixedRuntimeCodecContext()) { NativeKernelPacker.pack(inputDir, outputDir, seed = 42) }
-            val second = withVbc4BuildContext(fixedRuntimeCodecContext()) { NativeKernelPacker.pack(inputDir, secondOutputDir, seed = 42) }
+            val sharedContext = fixedRuntimeCodecContext()
+            val first = withVbc4BuildContext(sharedContext) { NativeKernelPacker.pack(inputDir, outputDir, seed = 42) }
+            val second = withVbc4BuildContext(sharedContext) { NativeKernelPacker.pack(inputDir, secondOutputDir, seed = 42) }
             val third = withVbc4BuildContext(fixedRuntimeCodecContext()) { NativeKernelPacker.pack(inputDir, thirdOutputDir, seed = 99) }
 
             assertEquals(1, first.resources.size, "one native resource should be packed")
