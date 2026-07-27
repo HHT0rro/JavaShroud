@@ -45,7 +45,6 @@ static DWORD js_shell_section_protect(DWORD characteristics) {
     int readable = (characteristics & IMAGE_SCN_MEM_READ) != 0;
     int writable = (characteristics & IMAGE_SCN_MEM_WRITE) != 0;
     if (executable) {
-        if (writable) return PAGE_EXECUTE_READWRITE;
         if (readable) return PAGE_EXECUTE_READ;
         return PAGE_EXECUTE;
     }
@@ -366,6 +365,14 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
         js_shell_loader_fail("pe64 section table is out of range");
         return 0;
     }
+    const IMAGE_SECTION_HEADER *section_src = IMAGE_FIRST_SECTION(nt_src);
+    for (WORD i = 0; i < nt_src->FileHeader.NumberOfSections; i++) {
+        DWORD permissions = section_src[i].Characteristics & (IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_WRITE);
+        if (permissions == (IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_WRITE)) {
+            js_shell_loader_fail("pe64 section requests writable executable memory");
+            return 0;
+        }
+    }
 
     void *image = VirtualAlloc(0, nt_src->OptionalHeader.SizeOfImage, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     if (!image) {
@@ -405,7 +412,11 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
     for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++) {
         DWORD old_protect = 0;
         if (section[i].Misc.VirtualSize == 0) continue;
-        VirtualProtect((unsigned char *)image + section[i].VirtualAddress, section[i].Misc.VirtualSize, js_shell_section_protect(section[i].Characteristics), &old_protect);
+        if (!VirtualProtect((unsigned char *)image + section[i].VirtualAddress, section[i].Misc.VirtualSize, js_shell_section_protect(section[i].Characteristics), &old_protect)) {
+            VirtualFree(image, 0, MEM_RELEASE);
+            js_shell_loader_fail("pe64 section VirtualProtect failed");
+            return 0;
+        }
     }
     FlushInstructionCache(GetCurrentProcess(), image, nt->OptionalHeader.SizeOfImage);
     js_shell_loader_trace("protected sections");

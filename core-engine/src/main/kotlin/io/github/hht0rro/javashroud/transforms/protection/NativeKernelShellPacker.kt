@@ -68,7 +68,11 @@ internal object NativeKernelShellPacker {
         val chunkSize: Int,
         val chunkCount: Int,
         val chunkTags: ByteArray,
-    )
+    ) {
+        internal fun wipeSensitive() {
+            Arrays.fill(streamKey, 0)
+        }
+    }
 
     data class MaxPayloadInspection(
         val present: Boolean,
@@ -158,12 +162,18 @@ internal object NativeKernelShellPacker {
     ): MaxPayloadBundle {
         require(bytes.isNotEmpty()) { "max native shell requires non-empty inner native bytes" }
         val key = deriveShellKey(seed, Level.MAX, platform, outputName, keyMaterial + bootstrapNativeIndexDigest)
+        var streamKeyOnFailure: ByteArray? = null
+        var bundleCompleted = false
+        var profileSeedToWipe: ByteArray? = null
+        var dispatcherSeedToWipe: ByteArray? = null
         return try {
             val nonce = ByteArray(16).also { SecureRandom().nextBytes(it) }
-            val profileSeed = sha256(key + nonce + platform.toByteArray(Charsets.UTF_8))
+            val profileSeed = sha256(key + nonce + platform.toByteArray(Charsets.UTF_8)).also { profileSeedToWipe = it }
             val layoutProfile = ((readLongPrefix(profileSeed) ushr 1) % 7L).toInt()
-            val dispatcherProfile = ((readLongPrefix(sha256(nonce + key)) ushr 1) % 11L).toInt()
+            val dispatcherSeed = sha256(nonce + key).also { dispatcherSeedToWipe = it }
+            val dispatcherProfile = ((readLongPrefix(dispatcherSeed) ushr 1) % 11L).toInt()
             val streamKey = sha256(key + nonce + "javashroud-native-shell-stream-key-v2".toByteArray(Charsets.US_ASCII))
+                .also { streamKeyOnFailure = it }
             val compressed = Vbc4ZstdCodec.compress(bytes)
             val compressionCodec = if (compressed.size < bytes.size) maxCompressionCodecZstd else maxCompressionCodecNone
             val storedPayload = if (compressionCodec == maxCompressionCodecZstd) compressed else bytes
@@ -215,9 +225,12 @@ internal object NativeKernelShellPacker {
                 chunkSize = encoded.chunkSize,
                 chunkCount = encoded.chunkCount,
                 chunkTags = encoded.chunkTags,
-            )
+            ).also { bundleCompleted = true }
         } finally {
             Arrays.fill(key, 0)
+            profileSeedToWipe?.let { Arrays.fill(it, 0) }
+            dispatcherSeedToWipe?.let { Arrays.fill(it, 0) }
+            if (!bundleCompleted) streamKeyOnFailure?.let { Arrays.fill(it, 0) }
         }
     }
 
@@ -271,7 +284,10 @@ internal object NativeKernelShellPacker {
         }
     }
 
-    fun renderMaxPayloadHeader(bundle: MaxPayloadBundle): String = buildString {
+    fun renderMaxPayloadHeader(bundle: MaxPayloadBundle): String {
+        val streamKeyPlan = buildScopedStreamKeyPlan(bundle)
+        return try {
+            buildString {
         appendLine("/* AUTO-GENERATED JavaShroud max native shell payload - DO NOT EDIT */")
         appendLine("#ifndef JS_SHELL_PAYLOAD_INC")
         appendLine("#define JS_SHELL_PAYLOAD_INC")
@@ -289,13 +305,116 @@ internal object NativeKernelShellPacker {
         appendLine("static const unsigned char js_shell_payload_bytes[] = { ${bundle.encodedPayload.toCByteArrayLiteral()} };")
         appendLine("static const unsigned char js_shell_payload_mac[32] = { ${bundle.nativeMac.toCByteArrayLiteral()} };")
         appendLine("static const unsigned char js_shell_build_hmac[32] = { ${bundle.payloadMac.toCByteArrayLiteral()} };")
-        appendLine("static const unsigned char js_shell_stream_key[32] = { ${bundle.streamKey.toCByteArrayLiteral()} };")
+        streamKeyPlan.lanes.forEachIndexed { lane, bytes ->
+            appendLine("static const unsigned char js_shell_key_material_${streamKeyPlan.symbolToken}_$lane[${bytes.size}] = { ${bytes.toCByteArrayLiteral()} };")
+        }
+        appendLine("#define JS_SHELL_STREAM_KEY_LANE_COUNT ${streamKeyPlan.lanes.size}")
+        appendLine("#define JS_SHELL_COPY_SCOPED_STREAM_KEY(out, header_nonce, binding, layout_profile, dispatcher_profile) do { \\")
+        appendLine("    static const unsigned char _js_shell_lane_order[${streamKeyPlan.laneOrder.size}] = { ${streamKeyPlan.laneOrder.joinToString(", ") { "${it}u" }} }; \\")
+        appendLine("    for (unsigned int _js_shell_i = 0; _js_shell_i < 32u; _js_shell_i++) { \\")
+        appendLine("        unsigned char _js_shell_v = (unsigned char)((header_nonce)[(_js_shell_i * ${streamKeyPlan.nonceStride}u + ${streamKeyPlan.nonceOffset}u) & 15u] ^ (binding)[(_js_shell_i * ${streamKeyPlan.bindingStride}u + ${streamKeyPlan.bindingOffset}u) & 31u] ^ 0x${"%02X".format(streamKeyPlan.profileSalt)}u ^ ((layout_profile) * 29u) ^ ((dispatcher_profile) * 47u)); \\")
+        appendLine("        for (unsigned int _js_shell_s = 0; _js_shell_s < ${streamKeyPlan.laneOrder.size}u; _js_shell_s++) { \\")
+        appendLine("            unsigned int _js_shell_lane = _js_shell_lane_order[_js_shell_s]; \\")
+        streamKeyPlan.lanes.indices.forEach { lane ->
+            val prefix = if (lane == 0) "if" else "else if"
+            appendLine("            $prefix (_js_shell_lane == ${lane}u) _js_shell_v = (unsigned char)(_js_shell_v ^ js_shell_key_material_${streamKeyPlan.symbolToken}_$lane[(_js_shell_i * ${streamKeyPlan.indexStrides[lane]}u + ${streamKeyPlan.indexOffsets[lane]}u) % ${streamKeyPlan.laneWidths[lane]}u]); \\")
+        }
+        appendLine("        } \\")
+        appendLine("        (out)[_js_shell_i] = (unsigned char)((_js_shell_v >> ${streamKeyPlan.rotateRight}) | (_js_shell_v << ${8 - streamKeyPlan.rotateRight})); \\")
+        appendLine("    } \\")
+        appendLine("} while (0)")
         appendLine("static const unsigned char js_shell_section_digest[32] = { ${bundle.sectionDigest.toCByteArrayLiteral()} };")
         appendLine("static const unsigned char js_shell_bogus_metadata_digest[32] = { ${bundle.bogusMetadataDigest.toCByteArrayLiteral()} };")
         appendLine("static const unsigned char js_shell_binding_tag[32] = { ${bundle.bindingTag.toCByteArrayLiteral()} };")
         appendLine("#define JS_SHELL_PAYLOAD_HEADER_SIZE ${bundle.headerBytes.size}")
         appendLine("#define JS_SHELL_PAYLOAD_SIZE ${bundle.encodedPayload.size}")
         appendLine("#endif")
+            }
+        } finally {
+            streamKeyPlan.lanes.forEach { Arrays.fill(it, 0) }
+        }
+    }
+
+    private data class ScopedStreamKeyPlan(
+        val lanes: Array<ByteArray>,
+        val laneWidths: IntArray,
+        val laneOrder: IntArray,
+        val indexStrides: IntArray,
+        val indexOffsets: IntArray,
+        val nonceStride: Int,
+        val nonceOffset: Int,
+        val bindingStride: Int,
+        val bindingOffset: Int,
+        val profileSalt: Int,
+        val rotateRight: Int,
+        val symbolToken: String,
+    )
+
+    private fun buildScopedStreamKeyPlan(bundle: MaxPayloadBundle): ScopedStreamKeyPlan {
+        require(bundle.streamKey.size == 32) { "max shell stream key must be 32 bytes" }
+        val random = SecureRandom()
+        val laneCount = 3 + random.nextInt(4)
+        val laneOrder = (0 until laneCount).shuffled(random).toIntArray()
+        val laneWidths = intArrayOf(37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97)
+            .toList().shuffled(random).take(laneCount).toIntArray()
+        val indexStrides = IntArray(laneCount) { lane -> 1 + random.nextInt(laneWidths[lane] - 1) }
+        val indexOffsets = IntArray(laneCount) { lane -> random.nextInt(laneWidths[lane]) }
+        val oddStrides = intArrayOf(1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31)
+        val nonceStride = oddStrides[random.nextInt(oddStrides.size)]
+        val nonceOffset = random.nextInt(16)
+        val bindingStride = oddStrides[random.nextInt(oddStrides.size)]
+        val bindingOffset = random.nextInt(32)
+        val profileSalt = random.nextInt(256)
+        val rotateRight = 1 + random.nextInt(7)
+        val lanes = Array(laneCount) { lane -> ByteArray(laneWidths[lane]).also(random::nextBytes) }
+        var planCompleted = false
+        try {
+        val controlledLane = laneOrder.last()
+        for (keyIndex in bundle.streamKey.indices) {
+            val rotated = ((bundle.streamKey[keyIndex].toInt() and 0xFF) shl rotateRight or
+                ((bundle.streamKey[keyIndex].toInt() and 0xFF) ushr (8 - rotateRight))) and 0xFF
+            val domainByte = (bundle.nonce[(keyIndex * nonceStride + nonceOffset) and 15].toInt() and 0xFF) xor
+                (bundle.bindingTag[(keyIndex * bindingStride + bindingOffset) and 31].toInt() and 0xFF) xor
+                (profileSalt and 0xFF) xor (bundle.layoutProfile * 29) xor (bundle.dispatcherProfile * 47)
+            var residual = rotated xor (domainByte and 0xFF)
+            for (lane in laneOrder.dropLast(1)) {
+                residual = residual xor (lanes[lane][(keyIndex * indexStrides[lane] + indexOffsets[lane]) % laneWidths[lane]].toInt() and 0xFF)
+            }
+            val lastIndex = (keyIndex * indexStrides[controlledLane] + indexOffsets[controlledLane]) % laneWidths[controlledLane]
+            lanes[controlledLane][lastIndex] = residual.toByte()
+        }
+        val reconstructed = ByteArray(bundle.streamKey.size)
+        try {
+            for (keyIndex in reconstructed.indices) {
+                var value = ((bundle.nonce[(keyIndex * nonceStride + nonceOffset) and 15].toInt() and 0xFF) xor
+                    (bundle.bindingTag[(keyIndex * bindingStride + bindingOffset) and 31].toInt() and 0xFF) xor
+                    profileSalt xor (bundle.layoutProfile * 29) xor (bundle.dispatcherProfile * 47)) and 0xFF
+                for (lane in laneOrder) {
+                    value = value xor (lanes[lane][(keyIndex * indexStrides[lane] + indexOffsets[lane]) % laneWidths[lane]].toInt() and 0xFF)
+                }
+                reconstructed[keyIndex] = (((value ushr rotateRight) or (value shl (8 - rotateRight))) and 0xFF).toByte()
+            }
+            require(reconstructed.contentEquals(bundle.streamKey)) { "generated max shell scoped key program diverged from the payload stream key" }
+        } finally {
+            Arrays.fill(reconstructed, 0)
+        }
+        return ScopedStreamKeyPlan(
+            lanes = lanes,
+            laneWidths = laneWidths,
+            laneOrder = laneOrder,
+            indexStrides = indexStrides,
+            indexOffsets = indexOffsets,
+            nonceStride = nonceStride,
+            nonceOffset = nonceOffset,
+            bindingStride = bindingStride,
+            bindingOffset = bindingOffset,
+            profileSalt = profileSalt and 0xFF,
+            rotateRight = rotateRight,
+            symbolToken = ByteArray(6).also(random::nextBytes).joinToString("") { "%02x".format(it.toInt() and 0xFF) },
+        ).also { planCompleted = true }
+        } finally {
+            if (!planCompleted) lanes.forEach { Arrays.fill(it, 0) }
+        }
     }
 
     fun inspect(bytes: ByteArray, seed: Long, keyMaterial: ByteArray): ShellInspection {
@@ -572,7 +691,7 @@ internal object NativeKernelShellPacker {
             for (index in part.indices) {
                 val v = (part[index].toInt() and 0xFF) + index * 17 + partIndex * 131
                 val slot = (index + partIndex) and 7
-                state[slot] = shellMix32(state[slot] xor v xor state[(index + 3) and 7])
+                state[slot] = shellMix32(state[slot] xor v xor state[(slot + 3) and 7])
             }
         }
         val total = key.size + header.size + payload.size + bindingTag.size

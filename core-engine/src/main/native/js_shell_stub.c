@@ -119,10 +119,11 @@ static int js_shell_extract_meta(js_shell_payload_meta *meta) {
 
 static int js_shell_verify_payload(js_shell_payload_meta *meta) {
     unsigned char mac[32];
+    unsigned char stream_key[32];
     unsigned int tag_acc = 0;
     if (!js_shell_header_has_marker()) return 0;
     if (JS_SHELL_PAYLOAD_SIZE == 0) return 0;
-    if (sizeof(js_shell_payload_mac) != 32u || sizeof(js_shell_stream_key) != 32u) return 0;
+    if (sizeof(js_shell_payload_mac) != 32u || JS_SHELL_STREAM_KEY_LANE_COUNT < 3u) return 0;
     if (!js_shell_extract_meta(meta)) return 0;
     if (sizeof(js_shell_section_digest) != 32u || sizeof(js_shell_bogus_metadata_digest) != 32u || sizeof(js_shell_binding_tag) != 32u) return 0;
     if (!js_shell_consttime_equal(meta->section_digest, js_shell_section_digest, sizeof(js_shell_section_digest))) return 0;
@@ -131,7 +132,9 @@ static int js_shell_verify_payload(js_shell_payload_meta *meta) {
     for (size_t i = 0; i < sizeof(js_shell_binding_tag); i++) tag_acc |= (unsigned int)js_shell_binding_tag[i];
     if (tag_acc == 0u) return 0;
     memset(mac, 0, sizeof(mac));
-    js_shell_mac32(js_shell_stream_key, sizeof(js_shell_stream_key), js_shell_payload_header, JS_SHELL_PAYLOAD_HEADER_SIZE, js_shell_payload_bytes, JS_SHELL_PAYLOAD_SIZE, js_shell_binding_tag, sizeof(js_shell_binding_tag), mac);
+    JS_SHELL_COPY_SCOPED_STREAM_KEY(stream_key, meta->nonce, js_shell_binding_tag, meta->layout_profile, meta->dispatcher_profile);
+    js_shell_mac32(stream_key, sizeof(stream_key), js_shell_payload_header, JS_SHELL_PAYLOAD_HEADER_SIZE, js_shell_payload_bytes, JS_SHELL_PAYLOAD_SIZE, js_shell_binding_tag, sizeof(js_shell_binding_tag), mac);
+    js_shell_secure_wipe(stream_key, sizeof(stream_key));
     return js_shell_consttime_equal(mac, js_shell_payload_mac, sizeof(mac));
 }
 
@@ -535,18 +538,18 @@ static jlong JNICALL js_shell_native_get_boot_token(JNIEnv *env, jclass cls) {
     return g_inner_abi->native_get_boot_token(call_env, js_shell_effective_helper_class(cls));
 }
 
-static void JNICALL js_shell_native_install_runtime_resource_key(JNIEnv *env, jclass cls, jbyteArray keyArr) {
+static void JNICALL js_shell_native_install_runtime_resource_key(JNIEnv *env, jclass cls, jbyteArray keyArr, jint slot) {
     JNIEnv *call_env = js_shell_current_env_for("native-install-runtime-resource-key", env);
     if (!call_env) return;
     if (!g_inner_abi || !g_inner_abi->native_install_runtime_resource_key) return;
-    g_inner_abi->native_install_runtime_resource_key(call_env, js_shell_effective_helper_class(cls), keyArr);
+    g_inner_abi->native_install_runtime_resource_key(call_env, js_shell_effective_helper_class(cls), keyArr, slot);
 }
 
-static void JNICALL js_shell_native_preload_runtime_resources(JNIEnv *env, jclass cls) {
+static void JNICALL js_shell_native_preload_runtime_resources(JNIEnv *env, jclass cls, jbyteArray preload_index, jbyteArray commitments, jbyteArray startup_nonce) {
     JNIEnv *call_env = js_shell_current_env_for("native-preload-runtime-resources", env);
     if (!call_env) return;
     if (!g_inner_abi || !g_inner_abi->native_preload_runtime_resources) return;
-    g_inner_abi->native_preload_runtime_resources(call_env, js_shell_effective_helper_class(cls));
+    g_inner_abi->native_preload_runtime_resources(call_env, js_shell_effective_helper_class(cls), preload_index, commitments, startup_nonce);
 }
 
 static jbyteArray JNICALL js_shell_native_derive_class_encryption_key(JNIEnv *env, jclass cls, jbyteArray keyIdArr, jbyteArray saltArr, jint length) {
@@ -638,8 +641,8 @@ static int js_shell_register_outer_shim(JNIEnv *env) {
     char *mapped_heartbeat = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_heartbeat_name, "()I") : 0;
     char *mapped_version = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_version_name, "()Ljava/lang/String;") : 0;
     char *mapped_boot_token = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_boot_token_name, "()J") : 0;
-    char *mapped_runtime_key = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_runtime_key_name, "([B)V") : 0;
-    char *mapped_preload = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_preload_name, "()V") : 0;
+    char *mapped_runtime_key = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_runtime_key_name, "([BI)V") : 0;
+    char *mapped_preload = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_preload_name, "([B[B[B)V") : 0;
     char *mapped_decrypt_aes = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_decrypt_aes_name, "([B[B[B)[B") : 0;
     char *mapped_class_key = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_class_key_name, "([B[BI)[B") : 0;
     char *mapped_exec = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_exec_name, "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;") : 0;
@@ -666,10 +669,10 @@ static int js_shell_register_outer_shim(JNIEnv *env) {
     methods[4].signature = "()J";
     methods[4].fnPtr = (void *)js_shell_native_get_boot_token;
     methods[5].name = (char *)((mapped_runtime_key && mapped_runtime_key[0]) ? mapped_runtime_key : native_runtime_key_name);
-    methods[5].signature = "([B)V";
+    methods[5].signature = "([BI)V";
     methods[5].fnPtr = (void *)js_shell_native_install_runtime_resource_key;
     methods[6].name = (char *)((mapped_preload && mapped_preload[0]) ? mapped_preload : native_preload_name);
-    methods[6].signature = "()V";
+    methods[6].signature = "([B[B[B)V";
     methods[6].fnPtr = (void *)js_shell_native_preload_runtime_resources;
     methods[7].name = (char *)((mapped_decrypt_aes && mapped_decrypt_aes[0]) ? mapped_decrypt_aes : native_decrypt_aes_name);
     methods[7].signature = "([B[B[B)[B";
@@ -730,6 +733,7 @@ jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     js_shell_payload_meta meta;
     unsigned char *stored = 0;
     unsigned char *decoded = 0;
+    unsigned char stream_key[32];
     js_shell_payload_view view;
     memset(&view, 0, sizeof(view));
     memset(&meta, 0, sizeof(meta));
@@ -743,10 +747,13 @@ jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
         return js_shell_fail_onload();
     }
     memcpy(stored, js_shell_payload_bytes, (size_t)JS_SHELL_PAYLOAD_SIZE);
-    if (!js_shell_decode_payload_chunks(stored, (size_t)JS_SHELL_PAYLOAD_SIZE, js_shell_stream_key, sizeof(js_shell_stream_key), meta.nonce, meta.layout_profile, meta.dispatcher_profile, meta.chunk_size, meta.chunk_tags, meta.chunk_tags_size)) {
+    JS_SHELL_COPY_SCOPED_STREAM_KEY(stream_key, meta.nonce, js_shell_binding_tag, meta.layout_profile, meta.dispatcher_profile);
+    if (!js_shell_decode_payload_chunks(stored, (size_t)JS_SHELL_PAYLOAD_SIZE, stream_key, sizeof(stream_key), meta.nonce, meta.layout_profile, meta.dispatcher_profile, meta.chunk_size, meta.chunk_tags, meta.chunk_tags_size)) {
+        js_shell_secure_wipe(stream_key, sizeof(stream_key));
         js_shell_wipe_free(stored, (size_t)JS_SHELL_PAYLOAD_SIZE);
         return js_shell_fail_onload();
     }
+    js_shell_secure_wipe(stream_key, sizeof(stream_key));
     if (meta.compression_codec == JS_SHELL_COMPRESSION_NONE) {
         if (meta.stored_size != meta.original_size || meta.stored_size != JS_SHELL_PAYLOAD_SIZE) {
             js_shell_wipe_free(stored, (size_t)JS_SHELL_PAYLOAD_SIZE);

@@ -4,7 +4,9 @@
 
 #include "js_protected_section.h"
 #include "js_crypto.h"
+#include "native_secrets.inc"
 
+#include <limits.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -14,26 +16,66 @@
 #elif defined(__linux__) || defined(__ANDROID__)
 #include <dlfcn.h>
 #include <elf.h>
+#include <sched.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
 #endif
 
-/* Marker lives in .data so the build-time packer can find and flip it after
- * encrypting the .jsx section. */
+/* Marker lives in .data so the build-time packer can find it and initialize
+ * SEALED + section coordinates after encrypting the .jsx body. */
 __attribute__((used))
 static volatile js_protected_seal js_protected_seal_marker = {
     { 0x4A, 0x53, 0x58, 0x53, 0x45, 0x41, 0x4C, 0x31 }, /* "JSXSEAL1" */
-    0u,
+    JS_PROTECTED_SECTION_OPEN,
     0u,
     0u,
 };
 
-static void js_protected_section_xor(unsigned char *buf, unsigned int len) {
-    int key_len = 0;
-    const unsigned char *key = js_protected_section_key(&key_len);
-    if (!key || key_len <= 0) return;
+typedef struct js_protected_region {
+    unsigned char *code;
+    unsigned int code_len;
+    void *protect_base;
+    size_t protect_len;
+} js_protected_region;
+
+static js_protected_region js_protected_runtime_region;
+static volatile unsigned int js_protected_runtime_refs = 0u;
+static volatile int js_protected_runtime_lock = 0;
+
+static void js_protected_lock(void) {
+#if defined(_MSC_VER) && defined(_WIN32)
+    while (InterlockedCompareExchange((volatile LONG *)&js_protected_runtime_lock, 1, 0) != 0) SwitchToThread();
+#else
+    while (__atomic_exchange_n(&js_protected_runtime_lock, 1, __ATOMIC_ACQUIRE) != 0) {
+#if defined(_WIN32)
+        SwitchToThread();
+#elif defined(__linux__) || defined(__ANDROID__)
+        sched_yield();
+#endif
+    }
+#endif
+}
+
+static void js_protected_unlock(void) {
+#if defined(_MSC_VER) && defined(_WIN32)
+    InterlockedExchange((volatile LONG *)&js_protected_runtime_lock, 0);
+#else
+    __atomic_store_n(&js_protected_runtime_lock, 0, __ATOMIC_RELEASE);
+#endif
+}
+
+static int js_protected_section_xor(unsigned char *buf, unsigned int len) {
+    unsigned char key[32];
+    if (!buf || len == 0u) return 0;
+#ifndef JS_PROTECTED_SECTION_KEY_PARTITIONS_GENERATED
+    js_vbc4_wipe_volatile(key, sizeof(key));
+    return 0;
+#else
+    JS_PROTECTED_COPY_SCOPED_KEY(key);
+#endif
     unsigned int produced = 0;
     unsigned int counter = 0;
     while (produced < len) {
@@ -45,60 +87,97 @@ static void js_protected_section_xor(unsigned char *buf, unsigned int len) {
         ctr[2] = (unsigned char)((counter >> 16) & 0xFF);
         ctr[3] = (unsigned char)((counter >> 24) & 0xFF);
         js_sha256_init(&ctx);
-        js_sha256_update(&ctx, key, key_len);
+        js_sha256_update(&ctx, key, (int)sizeof(key));
         js_sha256_update(&ctx, ctr, 4);
         js_sha256_final(&ctx, block);
+        js_vbc4_wipe_volatile(&ctx, sizeof(ctx));
         unsigned int chunk = (len - produced) < 32u ? (len - produced) : 32u;
         for (unsigned int i = 0; i < chunk; i++) buf[produced + i] ^= block[i];
         js_vbc4_wipe_volatile(block, sizeof(block));
         produced += chunk;
         counter++;
     }
+    js_vbc4_wipe_volatile(key, sizeof(key));
+    return 1;
 }
 
 #if JS_PROTECTED_SECTION_ENABLED
 #if defined(_WIN32)
-JS_HIDDEN void js_protected_section_unseal_now(void) {
-    unsigned char *marker_addr = (unsigned char*)&js_protected_seal_marker;
-    if (js_protected_seal_marker.state != 1u) return;
-
+static int js_protected_locate_region(void) {
+    if (js_protected_runtime_region.code) return 1;
+    unsigned char *marker_addr = (unsigned char *)&js_protected_seal_marker;
     HMODULE module = NULL;
     if (!GetModuleHandleExA(
             GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
             (LPCSTR)marker_addr, &module) || !module) {
         MEMORY_BASIC_INFORMATION mbi;
         memset(&mbi, 0, sizeof(mbi));
-        if (!VirtualQuery(marker_addr, &mbi, sizeof(mbi)) || !mbi.AllocationBase) return;
+        if (!VirtualQuery(marker_addr, &mbi, sizeof(mbi)) || !mbi.AllocationBase) return 0;
         module = (HMODULE)mbi.AllocationBase;
     }
-    unsigned char *base = (unsigned char*)module;
-    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER*)base;
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
-    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
-    if (nt->Signature != IMAGE_NT_SIGNATURE) return;
+    unsigned char *base = (unsigned char *)module;
+    IMAGE_DOS_HEADER *dos = (IMAGE_DOS_HEADER *)base;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return 0;
+    IMAGE_NT_HEADERS *nt = (IMAGE_NT_HEADERS *)(base + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) return 0;
     IMAGE_SECTION_HEADER *sec = IMAGE_FIRST_SECTION(nt);
     for (unsigned int i = 0; i < nt->FileHeader.NumberOfSections; i++) {
-        if (memcmp(sec[i].Name, JS_PROTECTED_SECTION_NAME, 4) == 0) {
-            unsigned char *sec_base = base + sec[i].VirtualAddress;
-            DWORD vsize = sec[i].Misc.VirtualSize;
-            DWORD raw_size = sec[i].SizeOfRawData;
-            unsigned int enc_len = (unsigned int)(vsize < raw_size ? vsize : raw_size);
-            if (enc_len == 0) return;
-            DWORD old_prot = 0;
-            if (!VirtualProtect(sec_base, vsize ? vsize : enc_len, PAGE_EXECUTE_READWRITE, &old_prot)) return;
-            js_protected_section_xor(sec_base, enc_len);
-            js_protected_seal_marker.state = 0u;
-            DWORD tmp = 0;
-            VirtualProtect(sec_base, vsize ? vsize : enc_len, old_prot ? old_prot : PAGE_EXECUTE_READ, &tmp);
-            FlushInstructionCache(GetCurrentProcess(), sec_base, vsize ? vsize : enc_len);
-            return;
-        }
+        if (memcmp(sec[i].Name, JS_PROTECTED_SECTION_NAME, 4) != 0) continue;
+        DWORD vsize = sec[i].Misc.VirtualSize;
+        DWORD raw_size = sec[i].SizeOfRawData;
+        unsigned int enc_len = (unsigned int)(vsize < raw_size ? vsize : raw_size);
+        if (enc_len == 0u || sec[i].VirtualAddress != js_protected_seal_marker.section_rva ||
+                enc_len != js_protected_seal_marker.section_size) return 0;
+        js_protected_runtime_region.code = base + sec[i].VirtualAddress;
+        js_protected_runtime_region.code_len = enc_len;
+        js_protected_runtime_region.protect_base = js_protected_runtime_region.code;
+        js_protected_runtime_region.protect_len = (size_t)(vsize ? vsize : enc_len);
+        return 1;
     }
+    return 0;
 }
 
-__attribute__((constructor))
-static void js_protected_section_unseal(void) {
-    js_protected_section_unseal_now();
+static int js_protected_set_write(void) {
+    DWORD old_protect = 0;
+    return VirtualProtect(
+        js_protected_runtime_region.protect_base,
+        js_protected_runtime_region.protect_len,
+        PAGE_READWRITE,
+        &old_protect) != 0;
+}
+
+static int js_protected_set_execute(void) {
+    DWORD old_protect = 0;
+    return VirtualProtect(
+        js_protected_runtime_region.protect_base,
+        js_protected_runtime_region.protect_len,
+        PAGE_EXECUTE_READ,
+        &old_protect) != 0;
+}
+
+static int js_protected_set_sealed(void) {
+    DWORD old_protect = 0;
+    return VirtualProtect(
+        js_protected_runtime_region.protect_base,
+        js_protected_runtime_region.protect_len,
+        PAGE_READONLY,
+        &old_protect) != 0;
+}
+
+static int js_protected_set_disabled(void) {
+    DWORD old_protect = 0;
+    return VirtualProtect(
+        js_protected_runtime_region.protect_base,
+        js_protected_runtime_region.protect_len,
+        PAGE_NOACCESS,
+        &old_protect) != 0;
+}
+
+static void js_protected_flush(void) {
+    FlushInstructionCache(
+        GetCurrentProcess(),
+        js_protected_runtime_region.code,
+        js_protected_runtime_region.code_len);
 }
 #elif defined(__linux__) || defined(__ANDROID__)
 typedef struct js_linux_map_range {
@@ -128,15 +207,35 @@ static int js_linux_is_readable_range(const js_linux_map_range *ranges, int coun
 static unsigned char *js_linux_find_manual_elf_base(uintptr_t marker_addr, unsigned int section_rva, unsigned int section_size) {
     FILE *maps = fopen("/proc/self/maps", "r");
     if (!maps) return 0;
-
-    js_linux_map_range ranges[512];
-    int count = 0;
+    size_t capacity = 256u;
+    size_t count = 0u;
+    js_linux_map_range *ranges = (js_linux_map_range *)malloc(capacity * sizeof(*ranges));
+    if (!ranges) {
+        fclose(maps);
+        return 0;
+    }
     char line[512];
-    while (count < (int)(sizeof(ranges) / sizeof(ranges[0])) && fgets(line, sizeof(line), maps)) {
+    while (fgets(line, sizeof(line), maps)) {
         unsigned long long start = 0;
         unsigned long long end = 0;
         char perms[5] = { 0, 0, 0, 0, 0 };
         if (sscanf(line, "%llx-%llx %4s", &start, &end, perms) == 3 && end > start) {
+            if (count == capacity) {
+                if (capacity > SIZE_MAX / 2u || capacity * 2u > SIZE_MAX / sizeof(*ranges)) {
+                    free(ranges);
+                    fclose(maps);
+                    return 0;
+                }
+                size_t next_capacity = capacity * 2u;
+                js_linux_map_range *grown = (js_linux_map_range *)realloc(ranges, next_capacity * sizeof(*ranges));
+                if (!grown) {
+                    free(ranges);
+                    fclose(maps);
+                    return 0;
+                }
+                ranges = grown;
+                capacity = next_capacity;
+            }
             ranges[count].start = (uintptr_t)start;
             ranges[count].end = (uintptr_t)end;
             ranges[count].readable = perms[0] == 'r';
@@ -144,24 +243,28 @@ static unsigned char *js_linux_find_manual_elf_base(uintptr_t marker_addr, unsig
         }
     }
     fclose(maps);
-
-    int marker_index = js_linux_find_map_index(ranges, count, marker_addr);
-    if (marker_index < 0 || !ranges[marker_index].readable) return 0;
-
+    if (count > (size_t)INT_MAX) {
+        free(ranges);
+        return 0;
+    }
+    int range_count = (int)count;
+    int marker_index = js_linux_find_map_index(ranges, range_count, marker_addr);
+    if (marker_index < 0 || !ranges[marker_index].readable) {
+        free(ranges);
+        return 0;
+    }
     uintptr_t low = ranges[marker_index].start;
     uintptr_t high = ranges[marker_index].end;
     for (int i = marker_index - 1; i >= 0 && ranges[i].end == low && ranges[i].readable; i--) low = ranges[i].start;
-    for (int i = marker_index + 1; i < count && ranges[i].start == high && ranges[i].readable; i++) high = ranges[i].end;
-
+    for (int i = marker_index + 1; i < range_count && ranges[i].start == high && ranges[i].readable; i++) high = ranges[i].end;
     long page_size_long = sysconf(_SC_PAGESIZE);
     uintptr_t page_size = page_size_long > 0 ? (uintptr_t)page_size_long : 4096u;
     uintptr_t scan = marker_addr & ~(page_size - 1u);
     uintptr_t lowest_scan = low;
     const uintptr_t max_back_scan = (uintptr_t)256u * 1024u * 1024u;
     if (scan > max_back_scan && scan - max_back_scan > lowest_scan) lowest_scan = scan - max_back_scan;
-
     while (scan >= lowest_scan) {
-        if (js_linux_is_readable_range(ranges, count, scan, scan + sizeof(Elf64_Ehdr))) {
+        if (js_linux_is_readable_range(ranges, range_count, scan, scan + sizeof(Elf64_Ehdr))) {
             const Elf64_Ehdr *eh = (const Elf64_Ehdr *)scan;
             if (memcmp(eh->e_ident, ELFMAG, SELFMAG) == 0 &&
                     eh->e_ident[EI_CLASS] == ELFCLASS64 &&
@@ -178,9 +281,10 @@ static unsigned char *js_linux_find_manual_elf_base(uintptr_t marker_addr, unsig
                 uintptr_t section_start = scan + (uintptr_t)section_rva;
                 uintptr_t section_end = section_start + (uintptr_t)section_size;
                 if (ph_end >= ph_start && section_end >= section_start &&
-                        js_linux_is_readable_range(ranges, count, ph_start, ph_end) &&
-                        js_linux_find_map_index(ranges, count, section_start) >= 0 &&
+                        js_linux_is_readable_range(ranges, range_count, ph_start, ph_end) &&
+                        js_linux_find_map_index(ranges, range_count, section_start) >= 0 &&
                         section_end <= high) {
+                    free(ranges);
                     return (unsigned char *)scan;
                 }
             }
@@ -188,52 +292,201 @@ static unsigned char *js_linux_find_manual_elf_base(uintptr_t marker_addr, unsig
         if (scan < page_size) break;
         scan -= page_size;
     }
+    free(ranges);
     return 0;
 }
 
-JS_HIDDEN void js_protected_section_unseal_now(void) {
-    if (js_protected_seal_marker.state != 1u) return;
-    if (js_protected_seal_marker.section_rva == 0u || js_protected_seal_marker.section_size == 0u) return;
-
+static int js_protected_locate_region(void) {
+    if (js_protected_runtime_region.code) return 1;
+    if (js_protected_seal_marker.section_rva == 0u || js_protected_seal_marker.section_size == 0u) return 0;
     Dl_info info;
     memset(&info, 0, sizeof(info));
     unsigned char *image_base = 0;
-    if (dladdr((const void*)&js_protected_seal_marker, &info) && info.dli_fbase) {
-        image_base = (unsigned char*)info.dli_fbase;
+    if (dladdr((const void *)&js_protected_seal_marker, &info) && info.dli_fbase) {
+        image_base = (unsigned char *)info.dli_fbase;
     } else {
         image_base = js_linux_find_manual_elf_base(
             (uintptr_t)&js_protected_seal_marker,
             js_protected_seal_marker.section_rva,
             js_protected_seal_marker.section_size);
     }
-    if (!image_base) return;
-
+    if (!image_base) return 0;
     unsigned char *sec_base = image_base + js_protected_seal_marker.section_rva;
     unsigned int enc_len = js_protected_seal_marker.section_size;
     long page_size_long = sysconf(_SC_PAGESIZE);
-    if (page_size_long <= 0) return;
+    if (page_size_long <= 0) return 0;
     uintptr_t page_size = (uintptr_t)page_size_long;
     uintptr_t sec_start = (uintptr_t)sec_base;
     uintptr_t page_start = sec_start & ~(page_size - 1u);
     uintptr_t sec_end = sec_start + (uintptr_t)enc_len;
+    if (sec_end < sec_start) return 0;
     size_t prot_len = (size_t)((sec_end + page_size - 1u) - page_start);
     prot_len &= (size_t)~(page_size - 1u);
-    if (prot_len == 0) return;
+    if (prot_len == 0u) return 0;
+    js_protected_runtime_region.code = sec_base;
+    js_protected_runtime_region.code_len = enc_len;
+    js_protected_runtime_region.protect_base = (void *)page_start;
+    js_protected_runtime_region.protect_len = prot_len;
+    return 1;
+}
 
-    if (mprotect((void*)page_start, prot_len, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) return;
-    js_protected_section_xor(sec_base, enc_len);
-    js_protected_seal_marker.state = 0u;
-    (void)mprotect((void*)page_start, prot_len, PROT_READ | PROT_EXEC);
+static int js_protected_set_write(void) {
+    return mprotect(
+        js_protected_runtime_region.protect_base,
+        js_protected_runtime_region.protect_len,
+        PROT_READ | PROT_WRITE) == 0;
+}
+
+static int js_protected_set_execute(void) {
+    return mprotect(
+        js_protected_runtime_region.protect_base,
+        js_protected_runtime_region.protect_len,
+        PROT_READ | PROT_EXEC) == 0;
+}
+
+static int js_protected_set_sealed(void) {
+    return mprotect(
+        js_protected_runtime_region.protect_base,
+        js_protected_runtime_region.protect_len,
+        PROT_READ) == 0;
+}
+
+static int js_protected_set_disabled(void) {
+    return mprotect(
+        js_protected_runtime_region.protect_base,
+        js_protected_runtime_region.protect_len,
+        PROT_NONE) == 0;
+}
+
+static void js_protected_flush(void) {
 #if defined(__GNUC__) || defined(__clang__)
-    __builtin___clear_cache((char*)sec_base, (char*)(sec_base + enc_len));
+    __builtin___clear_cache(
+        (char *)js_protected_runtime_region.code,
+        (char *)(js_protected_runtime_region.code + js_protected_runtime_region.code_len));
 #endif
+}
+#endif
+
+static int js_protected_lifecycle_enabled(void) {
+    return js_protected_seal_marker.section_rva != 0u && js_protected_seal_marker.section_size != 0u;
+}
+
+static void js_protected_mark_broken_locked(void) {
+    js_protected_seal_marker.state = JS_PROTECTED_SECTION_BROKEN;
+    if (js_protected_runtime_refs == 0u && js_protected_runtime_region.code) {
+        (void)js_protected_set_disabled();
+    }
+}
+
+static void js_protected_finish_broken_locked(void) {
+    if (!js_protected_runtime_region.code) return;
+    if (js_protected_set_write() &&
+            js_protected_section_xor(js_protected_runtime_region.code, js_protected_runtime_region.code_len)) {
+        js_protected_flush();
+    }
+    (void)js_protected_set_disabled();
+}
+
+static int js_protected_open_locked(void) {
+    if (js_protected_seal_marker.state != JS_PROTECTED_SECTION_SEALED ||
+            !js_protected_locate_region() || !js_protected_set_write()) {
+        js_protected_mark_broken_locked();
+        return 0;
+    }
+    if (!js_protected_section_xor(js_protected_runtime_region.code, js_protected_runtime_region.code_len)) {
+        js_protected_mark_broken_locked();
+        return 0;
+    }
+    js_protected_flush();
+    if (!js_protected_set_execute()) {
+        if (js_protected_section_xor(js_protected_runtime_region.code, js_protected_runtime_region.code_len)) {
+            js_protected_flush();
+        }
+        js_protected_mark_broken_locked();
+        return 0;
+    }
+    js_protected_seal_marker.state = JS_PROTECTED_SECTION_OPEN;
+    return 1;
+}
+
+static int js_protected_seal_locked(void) {
+    if (js_protected_seal_marker.state != JS_PROTECTED_SECTION_OPEN ||
+            !js_protected_runtime_region.code || !js_protected_set_write()) {
+        js_protected_mark_broken_locked();
+        return 0;
+    }
+    if (!js_protected_section_xor(js_protected_runtime_region.code, js_protected_runtime_region.code_len)) {
+        js_protected_mark_broken_locked();
+        return 0;
+    }
+    js_protected_flush();
+    if (!js_protected_set_sealed()) {
+        js_protected_mark_broken_locked();
+        return 0;
+    }
+    js_protected_seal_marker.state = JS_PROTECTED_SECTION_SEALED;
+    return 1;
+}
+
+JS_HIDDEN int js_protected_section_enter(void) {
+    if (!js_protected_lifecycle_enabled()) {
+        return js_protected_seal_marker.state != JS_PROTECTED_SECTION_BROKEN;
+    }
+    js_protected_lock();
+    int ok = 1;
+    if (js_protected_seal_marker.state == JS_PROTECTED_SECTION_BROKEN) {
+        ok = 0;
+    } else if (js_protected_runtime_refs == 0u) {
+        ok = js_protected_open_locked();
+    } else if (js_protected_seal_marker.state != JS_PROTECTED_SECTION_OPEN) {
+        js_protected_mark_broken_locked();
+        ok = 0;
+    }
+    if (ok) js_protected_runtime_refs++;
+    js_protected_unlock();
+    return ok;
+}
+
+JS_HIDDEN int js_protected_section_leave(void) {
+    if (!js_protected_lifecycle_enabled()) {
+        return js_protected_seal_marker.state != JS_PROTECTED_SECTION_BROKEN;
+    }
+    js_protected_lock();
+    int ok = 1;
+    if (js_protected_runtime_refs == 0u) {
+        js_protected_mark_broken_locked();
+        ok = 0;
+    } else if (js_protected_seal_marker.state == JS_PROTECTED_SECTION_OPEN) {
+        js_protected_runtime_refs--;
+        if (js_protected_runtime_refs == 0u) ok = js_protected_seal_locked();
+    } else {
+        js_protected_mark_broken_locked();
+        js_protected_runtime_refs--;
+        if (js_protected_runtime_refs == 0u) js_protected_finish_broken_locked();
+        ok = 0;
+    }
+    js_protected_unlock();
+    return ok;
+}
+
+JS_HIDDEN unsigned int js_protected_section_state(void) {
+    return js_protected_seal_marker.state;
+}
+
+JS_HIDDEN unsigned int js_protected_section_refcount(void) {
+    return js_protected_runtime_refs;
 }
 
 __attribute__((constructor))
-static void js_protected_section_unseal(void) {
-    js_protected_section_unseal_now();
+static void js_protected_section_prepare(void) {
+    if (js_protected_seal_marker.state != JS_PROTECTED_SECTION_SEALED) return;
+    js_protected_lock();
+    if (!js_protected_locate_region() || !js_protected_set_sealed()) js_protected_mark_broken_locked();
+    js_protected_unlock();
 }
-#endif
 #else
-JS_HIDDEN void js_protected_section_unseal_now(void) {}
+JS_HIDDEN int js_protected_section_enter(void) { return 1; }
+JS_HIDDEN int js_protected_section_leave(void) { return 1; }
+JS_HIDDEN unsigned int js_protected_section_state(void) { return JS_PROTECTED_SECTION_OPEN; }
+JS_HIDDEN unsigned int js_protected_section_refcount(void) { return 0u; }
 #endif

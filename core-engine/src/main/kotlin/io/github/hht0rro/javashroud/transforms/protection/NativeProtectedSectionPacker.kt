@@ -6,26 +6,30 @@ import java.security.MessageDigest
  * Item #4: build-time encryptor for the native critical-region protected section.
  *
  * The recompiled JNI kernel emits selected pure, relocation-free hot functions into a
- * dedicated protected code section, plus a load-time constructor that decrypts that
- * section in place before any protected function runs. This packer performs the matching
- * build-time step on produced native libraries:
+ * dedicated, page-isolated protected code section. Runtime wrappers decrypt that section
+ * only while protected calls are active, then re-encrypt and remove execute permission.
+ * This packer performs the matching build-time step on produced native libraries:
  *
  *  1. Parse PE or ELF64 headers and locate the protected ".jsx" section.
  *  2. Verify no relocation entries point into the protected section.
  *  3. XOR-encrypt the section's on-disk body with a SHA-256 keystream derived from the
  *     same 32-byte key embedded in the binary (`JS_PROTECTED_SECTION_KEY`).
- *  4. Write the protected section RVA/size into the in-binary seal marker and flip
- *     its `state` field to 1 so the load-time constructor knows to decrypt.
+ *  4. Write the protected section RVA/size into the in-binary seal marker and arm its
+ *     `state` field so the guarded runtime lifecycle can open it on demand.
  *
- * Every failure path returns the original bytes unmodified ("fail open"): a missing
- * section, an unsupported format, a relocation overlap, or any structural inconsistency
- * leaves the library exactly as compiled, so platform loaders are never destabilized.
+ * Callers choose whether a structural failure stays fail-open (diagnostic tooling) or
+ * fails the protected build. Production PE/ELF recompilation uses fail-closed sealing.
  */
 internal object NativeProtectedSectionPacker {
     private const val SECTION_NAME = ".jsx"
     private val SEAL_MAGIC = byteArrayOf(0x4A, 0x53, 0x58, 0x53, 0x45, 0x41, 0x4C, 0x31) // "JSXSEAL1"
     private const val PE_SIGNATURE = 0x00004550 // "PE\0\0" little-endian as int via LE read
+    private const val PT_LOAD = 1
+    private const val PF_EXECUTE = 0x1
+    private const val PF_WRITE = 0x2
+    private const val PF_READ = 0x4
     private val ELF_MAGIC = byteArrayOf(0x7F, 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte())
+    private const val MIN_RUNTIME_PAGE_SIZE = 0x1000L
 
     /** SEC-005/DEC-002: raised when a PE/ELF native kernel that requires
      * protection cannot have its .jsx section sealed, so the build fails closed
@@ -90,12 +94,22 @@ internal object NativeProtectedSectionPacker {
         val optMagic = readLe16(bytes, optOff)
         val is64 = optMagic == 0x20b
         val secTableOff = optOff + optSize
+        val sectionAlignment = readLe32(bytes, optOff + 32).toLong() and 0xFFFFFFFFL
+        if (!isPowerOfTwo(sectionAlignment) || sectionAlignment < MIN_RUNTIME_PAGE_SIZE) return null
 
         var jsxVaddr = -1; var jsxVsize = 0; var jsxRawPtr = -1; var jsxRawSize = 0
+        val allocSections = mutableListOf<Pair<Long, Long>>()
         for (i in 0 until numSections) {
             val o = secTableOff + i * 40
             if (o + 40 > bytes.size) return null
             val name = String(bytes, o, 8, Charsets.US_ASCII).trimEnd('\u0000')
+            val virtualSize = readLe32(bytes, o + 8).toLong() and 0xFFFFFFFFL
+            val virtualAddress = readLe32(bytes, o + 12).toLong() and 0xFFFFFFFFL
+            val rawSize = readLe32(bytes, o + 16).toLong() and 0xFFFFFFFFL
+            if (name != SECTION_NAME) {
+                val span = maxOf(virtualSize, rawSize)
+                if (span > 0L) allocSections += virtualAddress to span
+            }
             if (name == SECTION_NAME) {
                 jsxVsize = readLe32(bytes, o + 8)
                 jsxVaddr = readLe32(bytes, o + 12)
@@ -106,6 +120,11 @@ internal object NativeProtectedSectionPacker {
         if (jsxVaddr < 0 || jsxRawPtr < 0) return null
         val encLen = minOf(jsxVsize, jsxRawSize)
         if (encLen <= 0 || jsxRawPtr + encLen > bytes.size) return null
+        val jsxStart = jsxVaddr.toLong() and 0xFFFFFFFFL
+        val jsxEnd = checkedEnd(jsxStart, encLen.toLong()) ?: return null
+        val protectedPageEnd = alignUp(checkedEnd(jsxStart, maxOf(jsxVsize, jsxRawSize).toLong()) ?: return null, sectionAlignment) ?: return null
+        if (jsxStart % sectionAlignment != 0L || jsxEnd > protectedPageEnd) return null
+        if (allocSections.any { (start, size) -> rangesOverlap(jsxStart, protectedPageEnd, start, checkedEnd(start, size) ?: return null) }) return null
 
         val dirCount = readLe32(bytes, optOff + (if (is64) 108 else 92))
         if (dirCount > 5) {
@@ -144,6 +163,16 @@ internal object NativeProtectedSectionPacker {
         val entrySize: Int,
     )
 
+    private data class ElfProgramHeader(
+        val type: Int,
+        val flags: Int,
+        val offset: Long,
+        val virtualAddress: Long,
+        val fileSize: Long,
+        val memorySize: Long,
+        val alignment: Long,
+    )
+
     private fun trySealElf64(bytes: ByteArray, key: ByteArray): ByteArray? {
         val sections = readElf64Sections(bytes) ?: return null
         val jsx = sections.firstOrNull { it.name == SECTION_NAME } ?: return null
@@ -154,6 +183,7 @@ internal object NativeProtectedSectionPacker {
         if (jsx.type == shtNoBits || jsx.size <= 0) return null
         if ((jsx.flags and shfAlloc) == 0L || (jsx.flags and shfExecInstr) == 0L) return null
         if (jsx.offset + jsx.size > bytes.size) return null
+        if (!elfProtectedPagesAreIsolated(bytes, sections, jsx, shfAlloc)) return null
         if (elfRelocationOverlapsSection(bytes, sections, jsx)) return null
 
         val out = bytes.copyOf()
@@ -221,6 +251,56 @@ internal object NativeProtectedSectionPacker {
             )
         }
         return sections
+    }
+
+    private fun readElf64ProgramHeaders(bytes: ByteArray): List<ElfProgramHeader>? {
+        val tableOffset = readLe64(bytes, 0x20)
+        val entrySize = readLe16(bytes, 0x36)
+        val count = readLe16(bytes, 0x38)
+        if (tableOffset < 0L || tableOffset > Int.MAX_VALUE || entrySize < 56 || count <= 0) return null
+        val tableEnd = tableOffset + entrySize.toLong() * count.toLong()
+        if (tableEnd < tableOffset || tableEnd > bytes.size) return null
+        return (0 until count).map { index ->
+            val offset = tableOffset.toInt() + index * entrySize
+            ElfProgramHeader(
+                type = readLe32(bytes, offset),
+                flags = readLe32(bytes, offset + 4),
+                offset = readLe64(bytes, offset + 8),
+                virtualAddress = readLe64(bytes, offset + 16),
+                fileSize = readLe64(bytes, offset + 32),
+                memorySize = readLe64(bytes, offset + 40),
+                alignment = readLe64(bytes, offset + 48),
+            )
+        }
+    }
+
+    private fun elfProtectedPagesAreIsolated(
+        bytes: ByteArray,
+        sections: List<ElfSection>,
+        jsx: ElfSection,
+        shfAlloc: Long,
+    ): Boolean {
+        val programHeaders = readElf64ProgramHeaders(bytes) ?: return false
+        val load = programHeaders.filter { header ->
+            header.type == PT_LOAD &&
+                header.virtualAddress <= jsx.address &&
+                checkedEnd(header.virtualAddress, header.memorySize)?.let { end ->
+                    checkedEnd(jsx.address, jsx.size.toLong())?.let { jsxEnd -> jsxEnd <= end }
+                } == true
+        }.singleOrNull() ?: return false
+        if (load.flags and (PF_READ or PF_EXECUTE) != (PF_READ or PF_EXECUTE) || load.flags and PF_WRITE != 0) return false
+        val pageSize = load.alignment
+        if (!isPowerOfTwo(pageSize) || pageSize < MIN_RUNTIME_PAGE_SIZE) return false
+        val jsxStart = jsx.address
+        val jsxEnd = checkedEnd(jsxStart, jsx.size.toLong()) ?: return false
+        if (jsxStart % pageSize != 0L || jsxEnd % pageSize != 0L) return false
+        if (jsx.offset.toLong() % pageSize != jsxStart % pageSize) return false
+        if (load.offset % pageSize != load.virtualAddress % pageSize) return false
+        return sections.none { section ->
+            if (section.index == jsx.index || section.size <= 0 || section.flags and shfAlloc == 0L) return@none false
+            val sectionEnd = checkedEnd(section.address, section.size.toLong()) ?: return false
+            rangesOverlap(jsxStart, jsxEnd, section.address, sectionEnd)
+        }
     }
 
     private fun elfRelocationOverlapsSection(bytes: ByteArray, sections: List<ElfSection>, target: ElfSection): Boolean {
@@ -293,6 +373,21 @@ internal object NativeProtectedSectionPacker {
         }
         return null
     }
+
+    private fun checkedEnd(start: Long, size: Long): Long? {
+        if (start < 0L || size < 0L || size > Long.MAX_VALUE - start) return null
+        return start + size
+    }
+
+    private fun isPowerOfTwo(value: Long): Boolean = value > 0L && value and (value - 1L) == 0L
+
+    private fun alignUp(value: Long, alignment: Long): Long? {
+        if (!isPowerOfTwo(alignment) || value > Long.MAX_VALUE - (alignment - 1L)) return null
+        return (value + alignment - 1L) and -alignment
+    }
+
+    private fun rangesOverlap(firstStart: Long, firstEnd: Long, secondStart: Long, secondEnd: Long): Boolean =
+        firstStart < secondEnd && secondStart < firstEnd
 
     /** Keystream block i = SHA-256(KEY || le32(i)); identical to the C decrypt path. */
     private fun xorKeystream(buf: ByteArray, offset: Int, length: Int, key: ByteArray) {

@@ -107,11 +107,41 @@ class NativeKernelShellPackerTest {
         assertTrue(bundle.headerBytes.containsAscii(NativeKernelShellPacker.MAX_PAYLOAD_MARKER), "payload header must carry max payload marker")
         val renderedHeader = NativeKernelShellPacker.renderMaxPayloadHeader(bundle)
         assertTrue(renderedHeader.contains(NativeKernelShellPacker.MAX_STUB_MARKER), "generated C header must bind to the max stub marker")
-        assertTrue(renderedHeader.contains("js_shell_stream_key"), "generated C header must expose the stub decode stream key")
+        assertFalse(renderedHeader.contains("js_shell_stream_key[32]"), "generated C header must not expose a complete contiguous stream key")
+        assertTrue(renderedHeader.contains("JS_SHELL_STREAM_KEY_LANE_COUNT") && renderedHeader.contains("JS_SHELL_COPY_SCOPED_STREAM_KEY"), "generated C header must emit a build-specific scoped reconstruction program")
         assertTrue(renderedHeader.contains("js_shell_bogus_metadata_digest"), "generated C header must carry bogus section metadata evidence")
         assertTrue(renderedHeader.contains("js_shell_build_hmac"), "generated C header must retain build-side HMAC separately from the native MAC")
         assertTrue(renderedHeader.contains(cBytesForTest(bundle.nativeMac)), "stub payload MAC must use the native-side MAC algorithm")
-        assertTrue(renderedHeader.contains(cBytesForTest(bundle.streamKey)), "stub decode key must match the payload stream key")
+        assertFalse(renderedHeader.contains(cBytesForTest(bundle.streamKey)), "generated C header must not contain the complete payload stream key literal")
+    }
+
+    @Test
+    fun max_native_authenticator_changes_when_header_version_changes() {
+        val bundle = NativeKernelShellPacker.buildMaxPayloadBundle(
+            bytes = nativeBytes,
+            platform = "windows-x64",
+            outputName = "js_kernel_windows-x64.dll",
+            seed = 24L,
+            keyMaterial = keyMaterial,
+            bootstrapNativeIndexDigest = bootstrapDigest,
+        )
+        val tamperedHeader = bundle.headerBytes.copyOf().also { header ->
+            writeIntLeForTest(header, NativeKernelShellPacker.MAX_PAYLOAD_MARKER.length + 1, NativeKernelShellPacker.PACKER_VERSION - 1)
+        }
+        val controlNativeMac = nativeMac32ForTest(bundle.streamKey, bundle.headerBytes, bundle.encodedPayload, bundle.bindingTag)
+
+        assertTrue(
+            bundle.nativeMac.contentEquals(controlNativeMac),
+            "test-side native authenticator must match the production bundle before evaluating tamper sensitivity",
+        )
+        assertFalse(
+            bundle.nativeMac.contentEquals(nativeMac32ForTest(bundle.streamKey, tamperedHeader, bundle.encodedPayload, bundle.bindingTag)),
+            "changing the max header version must invalidate the native authenticator",
+        )
+        assertFalse(
+            NativeKernelShellPacker.inspectMaxPayloadBundle(tamperedHeader, bundle.encodedPayload, bundle.payloadMac, 24L, keyMaterial, bootstrapDigest).macValid,
+            "changing the max header version must invalidate build-side inspection",
+        )
     }
 
     @Test
@@ -143,6 +173,32 @@ class NativeKernelShellPackerTest {
         assertTrue(source.contains("layout_profile * 3u") && source.contains("dispatcher_profile * 5u"), "decoder lane selection must be bound to layout and dispatcher profiles")
         assertTrue(source.contains("bogus_accumulator") && source.contains("bogus_row"), "decoder must carry bogus decode rows in the runtime code path")
         assertTrue(source.contains("bytes[0] ^= 0u"), "bogus accumulator must remain anchored so optimizer-visible decoder surface survives native compilation")
+    }
+
+    @Test
+    fun native_max_stub_reconstructs_stream_key_only_in_scoped_buffers_and_wipes_it() {
+        val source = java.nio.file.Files.readString(resolveSource("src/main/native/js_shell_stub.c"))
+        val crypto = java.nio.file.Files.readString(resolveSource("src/main/native/js_shell_crypto.c"))
+
+        assertFalse(source.contains("js_shell_stream_key[32]"), "native stub source must not depend on a complete static stream key")
+        assertTrue(source.contains("unsigned char stream_key[32]") && source.contains("JS_SHELL_COPY_SCOPED_STREAM_KEY(stream_key"), "native stub must reconstruct the key into a scoped stack buffer")
+        assertTrue(source.contains("js_shell_secure_wipe(stream_key, sizeof(stream_key))"), "every native stream-key scope must be wiped immediately after MAC/decode use")
+        assertFalse(source.contains("js_shell_reconstruct_stream_key") || crypto.contains("js_shell_reconstruct_stream_key"), "outer shell must not retain a stable generic key reconstruction API")
+        assertTrue(crypto.contains("volatile unsigned char"), "scoped wipe primitive must resist dead-store removal")
+    }
+
+    @Test
+    fun independent_max_headers_diverge_in_lane_count_layout_and_reconstruction_program() {
+        fun header(): String = NativeKernelShellPacker.renderMaxPayloadHeader(
+            NativeKernelShellPacker.buildMaxPayloadBundle(nativeBytes, "linux-x64", "js_kernel_linux-x64.so", 37L, keyMaterial, bootstrapDigest),
+        )
+        val first = header()
+        val second = header()
+        val firstProgram = first.substringAfter("#define JS_SHELL_STREAM_KEY_LANE_COUNT").substringBefore("static const unsigned char js_shell_section_digest")
+        val secondProgram = second.substringAfter("#define JS_SHELL_STREAM_KEY_LANE_COUNT").substringBefore("static const unsigned char js_shell_section_digest")
+
+        assertNotEquals(firstProgram, secondProgram, "independent max builds must emit structurally divergent lane layouts and scoped reconstruction programs")
+        assertFalse(first.contains(cBytesForTest(keyMaterial)) || second.contains(cBytesForTest(keyMaterial)), "generated shell source must not expose caller key material as a complete literal")
     }
 
     @Test
@@ -305,6 +361,36 @@ class NativeKernelShellPackerTest {
     private fun ByteArray.toCArrayFragmentForTest(): String = take(4).joinToString(", ") { byte -> "0x%02Xu".format(byte.toInt() and 0xFF) }
 
     private fun cBytesForTest(bytes: ByteArray): String = bytes.joinToString(", ") { byte -> "0x%02Xu".format(byte.toInt() and 0xFF) }
+
+    private fun nativeMac32ForTest(key: ByteArray, header: ByteArray, payload: ByteArray, bindingTag: ByteArray): ByteArray {
+        val state = intArrayOf(
+            0x4A534D32, 0x9E3779B9u.toInt(), 0x243F6A88, 0xB7E15162u.toInt(),
+            0xDEADBEEFu.toInt(), 0x8BADF00Du.toInt(), 0xC001D00Du.toInt(), 0x13579BDF,
+        )
+        for ((partIndex, part) in listOf(key, header, payload, bindingTag).withIndex()) {
+            for (index in part.indices) {
+                val value = (part[index].toInt() and 0xFF) + index * 17 + partIndex * 131
+                val slot = (index + partIndex) and 7
+                state[slot] = mix32ForTest(state[slot] xor value xor state[(slot + 3) and 7])
+            }
+        }
+        val total = key.size + header.size + payload.size + bindingTag.size
+        return ByteArray(32).also { out ->
+            for (round in 0 until 8) {
+                state[round] = mix32ForTest(state[round] xor state[(round + 1) and 7] xor total)
+                writeIntLeForTest(out, round * 4, state[round])
+            }
+        }
+    }
+
+    private fun mix32ForTest(input: Int): Int {
+        var value = input
+        value = value xor (value ushr 16)
+        value *= 0x7FEB352D
+        value = value xor (value ushr 15)
+        value *= 0x846CA68Bu.toInt()
+        return value xor (value ushr 16)
+    }
 
     private fun maxPayloadProfileOffsets(header: ByteArray): Pair<Int, Int> {
         var offset = NativeKernelShellPacker.MAX_PAYLOAD_MARKER.length + 1

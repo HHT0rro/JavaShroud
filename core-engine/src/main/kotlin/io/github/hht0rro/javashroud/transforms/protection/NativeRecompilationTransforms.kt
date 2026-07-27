@@ -14,6 +14,8 @@ import javax.crypto.spec.SecretKeySpec
 
 object NativeRecompilationTransforms {
 
+    private val zigCompileLock = Any()
+
     private const val NATIVE_SRC_RESOURCE_ROOT = "META-INF/native-src"
 
     internal val ZIG_TARGETS = mapOf(
@@ -41,6 +43,7 @@ object NativeRecompilationTransforms {
         "js_antidebug.h",
         "js_protected_section.c",
         "js_protected_section.h",
+        "js_protected_section_linux.ld",
         "js_vm_core.c",
         "js_vm_core.h",
         "js_vm_resource.c",
@@ -78,6 +81,22 @@ object NativeRecompilationTransforms {
         val messages: List<NativeToolchainProvisioner.ResolutionMessage>,
     )
 
+    internal fun compileInnerForCfgEvidence(
+        seed: Long,
+        classLoader: ClassLoader,
+        targetPlatform: String = "windows-x64",
+        nativeProtectionLevel: String = "standard",
+        evidenceRandom: Random? = null,
+    ): RecompiledNative? = recompileWithDiagnosticsInternal(
+        seed = seed,
+        classLoader = classLoader,
+        targetPlatforms = listOf(targetPlatform),
+        nativeProtectionLevel = nativeProtectionLevel,
+        nativePackingLevel = "off",
+        cfgEvidenceExports = true,
+        evidenceRandom = evidenceRandom,
+    ).results.singleOrNull()
+
     fun recompileWithDiagnostics(
         seed: Long,
         classLoader: ClassLoader,
@@ -85,6 +104,24 @@ object NativeRecompilationTransforms {
         nativeProtectionLevel: String = "standard",
         nativePackingLevel: String = "max",
         onMessage: (NativeToolchainProvisioner.ResolutionMessage) -> Unit = {},
+    ): RecompilationDiagnostics = recompileWithDiagnosticsInternal(
+        seed = seed,
+        classLoader = classLoader,
+        targetPlatforms = targetPlatforms,
+        nativeProtectionLevel = nativeProtectionLevel,
+        nativePackingLevel = nativePackingLevel,
+        onMessage = onMessage,
+    )
+
+    private fun recompileWithDiagnosticsInternal(
+        seed: Long,
+        classLoader: ClassLoader,
+        targetPlatforms: Collection<String>,
+        nativeProtectionLevel: String,
+        nativePackingLevel: String,
+        onMessage: (NativeToolchainProvisioner.ResolutionMessage) -> Unit = {},
+        cfgEvidenceExports: Boolean = false,
+        evidenceRandom: Random? = null,
     ): RecompilationDiagnostics {
         require(nativeProtectionLevel in setOf("standard", "aggressive")) {
             "jni-microkernel-loader nativeProtectionLevel '$nativeProtectionLevel' is not supported"
@@ -99,7 +136,7 @@ object NativeRecompilationTransforms {
         val toolchain = resolution.toolchain ?: return RecompilationDiagnostics(emptyList(), messages)
         val workDir = Files.createTempDirectory("javashroud-native-recompile-")
         return try {
-            val results = doRecompile(seed, classLoader, toolchain, workDir, targetPlatforms, nativeProtectionLevel, parsedNativePackingLevel, ::report)
+            val results = doRecompile(seed, classLoader, toolchain, workDir, targetPlatforms, nativeProtectionLevel, parsedNativePackingLevel, cfgEvidenceExports, evidenceRandom, ::report)
             RecompilationDiagnostics(results, messages)
         } finally {
             workDir.toFile().deleteRecursively()
@@ -114,10 +151,14 @@ object NativeRecompilationTransforms {
         targetPlatforms: Collection<String>,
         nativeProtectionLevel: String,
         nativePackingLevel: NativeKernelShellPacker.Level,
+        cfgEvidenceExports: Boolean,
+        evidenceRandom: Random?,
         report: (NativeToolchainProvisioner.ResolutionMessage) -> Unit,
     ): List<RecompiledNative> {
         val vbc4BuildContext = requireVbc4BuildContext()
-        val rng = nativeBuildSecureRandom(seed, vbc4BuildContext)
+        require(!cfgEvidenceExports || evidenceRandom != null) { "CFG evidence compilation requires an explicit deterministic random stream" }
+        require(cfgEvidenceExports || evidenceRandom == null) { "Evidence-only random stream must not enter production native recompilation" }
+        val rng: Random = evidenceRandom ?: nativeBuildSecureRandom(seed, vbc4BuildContext)
         val results = mutableListOf<RecompiledNative>()
         val srcDir = workDir.resolve("src")
         Files.createDirectories(srcDir)
@@ -136,6 +177,7 @@ object NativeRecompilationTransforms {
 
         val secretsSeed = (rng.nextInt().toLong() and 0xFFFFFFFFL)
         val protectedSectionKey = ByteArray(32).also(rng::nextBytes)
+        return try {
         val secretsContent = generateDiversifiedSecrets(secretsSeed, rng, vbc4BuildContext, protectedSectionKey)
         Files.write(srcDir.resolve("native_secrets.inc"), secretsContent.toByteArray(StandardCharsets.UTF_8))
 
@@ -176,7 +218,7 @@ object NativeRecompilationTransforms {
                 nativeProtectionLevel = nativeProtectionLevel,
                 nativePackingLevel = nativePackingLevel.name.lowercase(),
                 nativeShellPackerVersion = NativeKernelShellPacker.PACKER_VERSION,
-                nativeShellPayloadProfile = "${nativePackingLevel.name.lowercase()}-payload-zstd-chunk-v4-bogus-metadata",
+                nativeShellPayloadProfile = "${nativePackingLevel.name.lowercase()}-payload-zstd-chunk-v5-scoped-key-program",
                 nativeShellLoaderProfile = nativeShellLoaderProfile(platform),
             )
             NativeCompileTask(
@@ -189,52 +231,89 @@ object NativeRecompilationTransforms {
                 nativePackingLevel = nativePackingLevel.name.lowercase(),
             )
         }
-        val compiledResults = compileTasks.parallelStream().map { task ->
+        // Zig's Windows cache has produced intermittent `file_open Unexpected`
+        // failures when multiple target compilations share it concurrently. Native
+        // builds are infrequent and correctness matters more than parallel startup.
+        val compiledResults = compileTasks.map { task ->
             try {
                 Files.createDirectories(task.outputPath.parent)
-                task to compileOrLoadNativeArtifact(toolchain.zigPath, srcDir, task)
+                val forceProductionCompile =
+                    task.nativePackingLevel == NativeKernelShellPacker.Level.MAX.name.lowercase() &&
+                        vbc4BuildContext.productionBuildEvidence.isEnabled
+                task to compileOrLoadNativeArtifact(
+                    toolchain.zigPath,
+                    srcDir,
+                    workDir,
+                    task,
+                    cfgEvidenceExports,
+                    forceProductionCompile,
+                )
             } catch (error: Exception) {
                 task to NativeArtifactBuildResult(false, error.message ?: error::class.java.simpleName, null, false)
             }
-        }.toList()
+        }
         for ((task, compileResult) in compiledResults) {
             if (compileResult.success && compileResult.bytes != null && compileResult.bytes.isNotEmpty()) {
+                if (cfgEvidenceExports) {
+                    // CFG evidence must observe the compiler output itself. Returning before
+                    // protected-section sealing also keeps the evidence hook out of every
+                    // production cache and outer-shell path.
+                    results.add(RecompiledNative(task.platform, task.outputName, compileResult.bytes))
+                    report(NativeToolchainProvisioner.ResolutionMessage("info", "Compiled pre-seal inner JNI microkernel for ${task.platform} with Zig ${toolchain.zigPath}", 94))
+                    continue
+                }
+                val preSealInner = compileResult.bytes.copyOf()
                 val rawBytes = if (compileResult.fromCache) {
                     compileResult.bytes
                 } else {
                     // Item #4: native critical-region pre-decrypt protection. The compiled
                     // kernel emits selected pure, relocation-free hot functions into a
-                    // dedicated ".jsx" code section plus a load-time decrypt constructor.
-                    // Here we encrypt that section in-place for supported native formats and flip
-                    // the in-binary seal marker so the constructor decrypts it at load time. This protects
+                    // dedicated, page-isolated ".jsx" code section plus a guarded runtime
+                    // enter/leave lifecycle. Here we encrypt that section in-place for supported
+                    // native formats and arm the in-binary seal marker. This protects
                     // the most analysis-relevant code against offline static analysis while
                     // keeping the library loadable. The patcher fails closed for responsible formats.
                     val sectionSealed = NativeProtectedSectionPacker.sealIfPossible(compileResult.bytes, protectedSectionKey, report, failClosed = true)
                     when (nativePackingLevel) {
                         NativeKernelShellPacker.Level.OFF -> sectionSealed
                         NativeKernelShellPacker.Level.STANDARD -> {
-                            val shellPacked = NativeKernelShellPacker.pack(
-                                bytes = sectionSealed,
-                                platform = task.platform,
-                                outputName = task.outputName,
-                                seed = seed,
-                                level = nativePackingLevel,
-                                keyMaterial = protectedSectionKey + vbc4BuildContext.runtimeResourceKey,
-                            )
+                            val shellKeyMaterial = protectedSectionKey + vbc4BuildContext.runtimeResourceKey
+                            val shellPacked = try {
+                                NativeKernelShellPacker.pack(
+                                    bytes = sectionSealed,
+                                    platform = task.platform,
+                                    outputName = task.outputName,
+                                    seed = seed,
+                                    level = nativePackingLevel,
+                                    keyMaterial = shellKeyMaterial,
+                                )
+                            } finally {
+                                shellKeyMaterial.fill(0)
+                            }
                             report(NativeToolchainProvisioner.ResolutionMessage("info", "Applied standard native shell overlay for ${task.platform}", 94))
                             shellPacked
                         }
                         NativeKernelShellPacker.Level.MAX -> {
                             val bootstrapDigest = nativeBootstrapIndexDigest(task.platform, task.outputName, vbc4BuildContext)
-                            val payloadBundle = NativeKernelShellPacker.buildMaxPayloadBundle(
-                                bytes = sectionSealed,
-                                platform = task.platform,
-                                outputName = task.outputName,
-                                seed = seed,
-                                keyMaterial = protectedSectionKey + vbc4BuildContext.runtimeResourceKey + vbc4BuildContext.jarLayoutDigest,
-                                bootstrapNativeIndexDigest = bootstrapDigest,
-                            )
-                            Files.writeString(srcDir.resolve("js_shell_payload.inc"), NativeKernelShellPacker.renderMaxPayloadHeader(payloadBundle), StandardCharsets.UTF_8)
+                            val shellKeyMaterial = protectedSectionKey + vbc4BuildContext.runtimeResourceKey + vbc4BuildContext.jarLayoutDigest
+                            val payloadBundle = try {
+                                NativeKernelShellPacker.buildMaxPayloadBundle(
+                                    bytes = sectionSealed,
+                                    platform = task.platform,
+                                    outputName = task.outputName,
+                                    seed = seed,
+                                    keyMaterial = shellKeyMaterial,
+                                    bootstrapNativeIndexDigest = bootstrapDigest,
+                                )
+                            } finally {
+                                shellKeyMaterial.fill(0)
+                            }
+                            val payloadHeader = try {
+                                NativeKernelShellPacker.renderMaxPayloadHeader(payloadBundle)
+                            } finally {
+                                payloadBundle.wipeSensitive()
+                            }
+                            Files.writeString(srcDir.resolve("js_shell_payload.inc"), payloadHeader, StandardCharsets.UTF_8)
                             val outerResult = compileShellStubWithZig(toolchain.zigPath, srcDir, task.zigTarget, task.outputPath, task.nativeProtectionLevel)
                             if (!outerResult.success || !Files.exists(task.outputPath) || Files.size(task.outputPath) <= 0) {
                                 throw IllegalStateException("failed to compile max native shell stub for ${task.platform}: ${outerResult.output.take(600)}")
@@ -244,7 +323,16 @@ object NativeRecompilationTransforms {
                         }
                     }
                 }
-                if (!compileResult.fromCache && EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(rawBytes)) {
+                if (task.nativePackingLevel == NativeKernelShellPacker.Level.MAX.name.lowercase()) {
+                    recordProductionNativeEvidence(
+                        context = vbc4BuildContext,
+                        task = task,
+                        preSealInner = preSealInner,
+                        diversifiedSource = Files.readAllBytes(srcDir.resolve("js_vm_core.c")),
+                        nativeSourceDigest = nativeSourceDigest,
+                    )
+                }
+                if (!cfgEvidenceExports && !compileResult.fromCache && EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(rawBytes)) {
                     writeNativeArtifactCache(task.cachePath, rawBytes)
                 }
                 results.add(RecompiledNative(task.platform, task.outputName, rawBytes))
@@ -256,7 +344,10 @@ object NativeRecompilationTransforms {
                 report(NativeToolchainProvisioner.ResolutionMessage("warn", "Failed to compile JNI microkernel for ${task.platform} with Zig ${toolchain.zigPath}$suffix", 94))
             }
         }
-        return results
+        results
+        } finally {
+            protectedSectionKey.fill(0)
+        }
     }
 
 
@@ -288,6 +379,68 @@ object NativeRecompilationTransforms {
         val nativePackingLevel: String,
     )
 
+    private fun recordProductionNativeEvidence(
+        context: Vbc4BuildContext,
+        task: NativeCompileTask,
+        preSealInner: ByteArray,
+        diversifiedSource: ByteArray,
+        nativeSourceDigest: ByteArray,
+    ) {
+        val parserSource = extractProductionFunction(diversifiedSource, "js_vm_parse_program")
+        val dispatcherSource = extractProductionFunction(diversifiedSource, "js_vm_execute_with_preset_locals")
+        val parserProfileMaterial = byteArrayOf(context.nativeVmProfile.parserRowProfile.toByte()) + nativeSourceDigest
+        val dispatcherProfileMaterial = byteArrayOf(context.nativeVmProfile.operandAccessProfile.toByte()) + nativeSourceDigest
+        context.productionBuildEvidence.recordNative(
+            CandidateProductionBuildEvidence.NativeObservation(
+                platform = task.platform,
+                outputName = task.outputName,
+                preSealInnerSha256 = CandidateProductionBuildEvidence.sha256Hex(preSealInner),
+                parserProfileId = context.nativeVmProfile.parserRowProfile,
+                operandProfileId = context.nativeVmProfile.operandAccessProfile,
+                parserDiversifiedFunctionSourceSha256 = CandidateProductionBuildEvidence.sha256Hex(parserSource),
+                parserProfileMappingSha256 = CandidateProductionBuildEvidence.framedDigest(
+                    "javashroud-parser-production-profile-v2",
+                    listOf(parserProfileMaterial, parserSource),
+                ),
+                dispatcherDiversifiedFunctionSourceSha256 = CandidateProductionBuildEvidence.sha256Hex(dispatcherSource),
+                dispatcherProfileMappingSha256 = CandidateProductionBuildEvidence.framedDigest(
+                    "javashroud-dispatcher-production-profile-v2",
+                    listOf(dispatcherProfileMaterial, dispatcherSource),
+                ),
+            ),
+        )
+    }
+
+    /** Extract the exact diversified production function, not an evidence fixture. */
+    private fun extractProductionFunction(source: ByteArray, functionName: String): ByteArray {
+        val text = source.toString(StandardCharsets.UTF_8)
+        var searchOffset = 0
+        var nameOffset = -1
+        var open = -1
+        while (true) {
+            nameOffset = text.indexOf("$functionName(", searchOffset)
+            require(nameOffset >= 0) { "production native function is missing: $functionName" }
+            open = text.indexOf('{', nameOffset)
+            require(open >= 0) { "production native function has no body: $functionName" }
+            val semicolon = text.indexOf(';', nameOffset)
+            if (semicolon < 0 || open < semicolon) break
+            searchOffset = nameOffset + functionName.length
+        }
+        var depth = 0
+        var index = open
+        while (index < text.length) {
+            when (text[index]) {
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return text.substring(nameOffset, index + 1).toByteArray(StandardCharsets.UTF_8)
+                }
+            }
+            index++
+        }
+        error("production native function body is truncated: $functionName")
+    }
+
     private data class ZigCompileResult(val success: Boolean, val output: String)
 
     private data class NativeArtifactBuildResult(
@@ -300,12 +453,15 @@ object NativeRecompilationTransforms {
     private fun compileOrLoadNativeArtifact(
         zigPath: Path,
         srcDir: Path,
+        workDir: Path,
         task: NativeCompileTask,
+        cfgEvidenceExports: Boolean,
+        forceProductionCompile: Boolean,
     ): NativeArtifactBuildResult {
-        readNativeArtifactCache(task.cachePath)?.let { cachedBytes ->
+        if (!cfgEvidenceExports && !forceProductionCompile) readNativeArtifactCache(task.cachePath)?.let { cachedBytes ->
             return NativeArtifactBuildResult(true, "cache-hit", cachedBytes, true)
         }
-        val compileResult = compileWithZig(zigPath, srcDir, task.zigTarget, task.outputPath, task.nativeProtectionLevel)
+        val compileResult = compileWithZig(zigPath, srcDir, task.zigTarget, task.outputPath, task.nativeProtectionLevel, cfgEvidenceExports)
         if (!compileResult.success || !Files.exists(task.outputPath) || Files.size(task.outputPath) <= 0) {
             return NativeArtifactBuildResult(compileResult.success, compileResult.output, null, false)
         }
@@ -460,7 +616,7 @@ object NativeRecompilationTransforms {
         }
     }
 
-    private fun compileWithZig(zigPath: Path, srcDir: Path, zigTarget: String, outputPath: Path, nativeProtectionLevel: String): ZigCompileResult {
+    private fun compileWithZig(zigPath: Path, srcDir: Path, zigTarget: String, outputPath: Path, nativeProtectionLevel: String, cfgEvidenceExports: Boolean = false): ZigCompileResult {
         val optLevel = nativeCompileOptLevel()
         val extraFlags = nativeCompileExtraFlags()
         val cmd = mutableListOf(
@@ -508,13 +664,15 @@ object NativeRecompilationTransforms {
         if (zigTarget.contains("windows")) {
             cmd.add("-Wl,--no-entry")
         }
+        if (zigTarget.contains("linux")) {
+            cmd.add("-Wl,-T,${srcDir.resolve("js_protected_section_linux.ld")}")
+        }
+        if (cfgEvidenceExports) cmd.add("-DJS_NATIVE_CFG_EVIDENCE=1")
         cmd.addAll(extraFlags)
         return try {
             val pb = ProcessBuilder(cmd)
             pb.redirectErrorStream(true)
-            val process = pb.start()
-            val output = process.inputStream.bufferedReader().readText()
-            ZigCompileResult(process.waitFor() == 0, output)
+            runZigCompileWithRetry(pb)
         } catch (error: Exception) {
             ZigCompileResult(false, error.message ?: error::class.java.simpleName)
         }
@@ -566,13 +724,30 @@ object NativeRecompilationTransforms {
         return try {
             val pb = ProcessBuilder(cmd)
             pb.redirectErrorStream(true)
-            val process = pb.start()
-            val output = process.inputStream.bufferedReader().readText()
-            ZigCompileResult(process.waitFor() == 0, output)
+            runZigCompileWithRetry(pb)
         } catch (error: Exception) {
             ZigCompileResult(false, error.message ?: error::class.java.simpleName)
         }
     }
+
+    private fun runZigCompileWithRetry(processBuilder: ProcessBuilder): ZigCompileResult = synchronized(zigCompileLock) {
+        var lastResult = ZigCompileResult(false, "Zig compilation did not start")
+        repeat(3) { attempt ->
+            val process = processBuilder.start()
+            val output = process.inputStream.bufferedReader().readText()
+            lastResult = ZigCompileResult(process.waitFor() == 0, output)
+            if (lastResult.success || !isTransientZigFileOpenFailure(output) || attempt == 2) return@synchronized lastResult
+            Thread.sleep(250L)
+        }
+        lastResult
+    }
+
+    private fun isTransientZigFileOpenFailure(output: String): Boolean =
+        output.contains("file_open Unexpected") ||
+            output.lineSequence().any { line ->
+                line.trimEnd().endsWith("note: Unexpected") ||
+                    Regex(""":\d+:\d+: error: Unexpected$""").containsMatchIn(line.trimEnd())
+            }
     internal fun generateDiversifiedSecrets(
         seed: Long,
         rng: Random,
@@ -594,7 +769,7 @@ object NativeRecompilationTransforms {
         sb.appendLine()
         appendEncryptedStrings(sb, secretKey, secretIv)
         appendVbc4BuildSecrets(sb, vbc4BuildContext, rng)
-        appendProtectedSectionKey(sb, protectedSectionKey)
+        appendProtectedSectionKey(sb, protectedSectionKey, rng)
         sb.appendLine("#endif")
         return sb.toString()
     }
@@ -663,10 +838,70 @@ object NativeRecompilationTransforms {
     }
 
 
-    private fun appendProtectedSectionKey(sb: StringBuilder, key: ByteArray) {
-        sb.appendLine()
-        sb.appendLine("#define JS_PROTECTED_SECTION_KEY_GENERATED 1")
-        sb.appendLine("static const unsigned char JS_PROTECTED_SECTION_KEY[32] = { ${cBytes(key)} };")
+    private fun appendProtectedSectionKey(sb: StringBuilder, key: ByteArray, rng: Random) {
+        require(key.size == 32) { "protected-section key must be 32 bytes" }
+        val shareCount = 3 + rng.nextInt(4)
+        val laneMask = ByteArray(key.size)
+        val laneOrder = (0 until shareCount).toMutableList().also { java.util.Collections.shuffle(it, rng) }
+        val laneWidths = intArrayOf(37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97)
+            .toList().shuffled(rng).take(shareCount).toIntArray()
+        val indexStrides = IntArray(shareCount) { lane -> 1 + rng.nextInt(laneWidths[lane] - 1) }
+        val indexOffsets = IntArray(shareCount) { lane -> rng.nextInt(laneWidths[lane]) }
+        val rotateRight = 1 + rng.nextInt(7)
+        val profileMask = rng.nextInt(256)
+        val storedShares = Array(shareCount) { lane -> ByteArray(laneWidths[lane]).also(rng::nextBytes) }
+        try {
+            rng.nextBytes(laneMask)
+            val controlledLane = laneOrder.last()
+            for (keyIndex in key.indices) {
+                val value = key[keyIndex].toInt() and 0xFF
+                val rotated = ((value shl rotateRight) or (value ushr (8 - rotateRight))) and 0xFF
+                var residual = rotated xor (laneMask[(keyIndex * 7 + 3) and 31].toInt() and 0xFF) xor profileMask
+                for (lane in laneOrder.dropLast(1)) {
+                    val storedIndex = (keyIndex * indexStrides[lane] + indexOffsets[lane]) % laneWidths[lane]
+                    residual = residual xor (storedShares[lane][storedIndex].toInt() and 0xFF)
+                }
+                val storedIndex = (keyIndex * indexStrides[controlledLane] + indexOffsets[controlledLane]) % laneWidths[controlledLane]
+                storedShares[controlledLane][storedIndex] = residual.toByte()
+            }
+            val reconstructed = ByteArray(key.size)
+            try {
+                for (keyIndex in reconstructed.indices) {
+                    var value = (laneMask[(keyIndex * 7 + 3) and 31].toInt() and 0xFF) xor profileMask
+                    for (lane in laneOrder) {
+                        value = value xor (storedShares[lane][(keyIndex * indexStrides[lane] + indexOffsets[lane]) % laneWidths[lane]].toInt() and 0xFF)
+                    }
+                    reconstructed[keyIndex] = ((value ushr rotateRight) or (value shl (8 - rotateRight))).toByte()
+                }
+                require(reconstructed.contentEquals(key)) { "generated protected-section scoped key program diverged from the sealing key" }
+            } finally {
+                java.util.Arrays.fill(reconstructed, 0)
+            }
+            sb.appendLine()
+            sb.appendLine("#define JS_PROTECTED_SECTION_KEY_PARTITIONS_GENERATED 1")
+            storedShares.forEachIndexed { lane, share ->
+                sb.appendLine("static const unsigned char js_protected_key_lane_$lane[${share.size}] = { ${cBytes(share)} };")
+            }
+            sb.appendLine("static const unsigned char js_protected_key_lane_mask[32] = { ${cBytes(laneMask)} };")
+            sb.appendLine("#define JS_PROTECTED_KEY_LANE_COUNT $shareCount")
+            sb.appendLine("#define JS_PROTECTED_COPY_SCOPED_KEY(out) do { \\")
+            sb.appendLine("    static const unsigned char _js_ps_lane_order[$shareCount] = { ${laneOrder.joinToString(", ") { "${it}u" }} }; \\")
+            sb.appendLine("    for (int _js_ps_i = 0; _js_ps_i < 32; _js_ps_i++) { \\")
+            sb.appendLine("        unsigned char _js_ps_v = (unsigned char)(js_protected_key_lane_mask[(_js_ps_i * 7 + 3) & 31] ^ 0x${"%02X".format(profileMask)}u); \\")
+            sb.appendLine("        for (int _js_ps_s = 0; _js_ps_s < $shareCount; _js_ps_s++) { \\")
+            sb.appendLine("            int _js_ps_lane = _js_ps_lane_order[_js_ps_s]; \\")
+            storedShares.indices.forEach { lane ->
+                val prefix = if (lane == 0) "if" else "else if"
+                sb.appendLine("            $prefix (_js_ps_lane == $lane) _js_ps_v = (unsigned char)(_js_ps_v ^ js_protected_key_lane_$lane[(_js_ps_i * ${indexStrides[lane]} + ${indexOffsets[lane]}) % ${laneWidths[lane]}]); \\")
+            }
+            sb.appendLine("        } \\")
+            sb.appendLine("        (out)[_js_ps_i] = (unsigned char)((_js_ps_v >> $rotateRight) | (_js_ps_v << ${8 - rotateRight})); \\")
+            sb.appendLine("    } \\")
+            sb.appendLine("} while (0)")
+        } finally {
+            storedShares.forEach { java.util.Arrays.fill(it, 0) }
+            java.util.Arrays.fill(laneMask, 0)
+        }
     }
 
     private fun appendVbc4BuildSecrets(sb: StringBuilder, context: Vbc4BuildContext, rng: Random) {
@@ -719,6 +954,9 @@ object NativeRecompilationTransforms {
             sb.appendLine("#define JS_VBC4_DISPATCH_MIX_B 0x${(rng.nextInt() or 1).toUInt().toString(16).uppercase()}u")
             sb.appendLine("#define JS_VBC4_DISPATCH_MIX_C 0x${(rng.nextInt() or 1).toUInt().toString(16).uppercase()}u")
             sb.appendLine("#define JS_VBC4_DISPATCH_STEP_MASK ${listOf(7, 15, 31)[rng.nextInt(3)]}")
+            sb.appendLine("#define JS_NATIVE_PARSER_PROFILE ${context.nativeVmProfile.parserRowProfile}")
+            sb.appendLine("#define JS_NATIVE_OPERAND_PROFILE ${context.nativeVmProfile.operandAccessProfile}")
+            sb.appendLine("#define JS_NATIVE_VM_PROFILE_ID 0x${context.nativeVmProfile.authenticatedId.toUInt().toString(16).uppercase()}u")
         } finally {
             for (share in shares) java.util.Arrays.fill(share, 0)
             java.util.Arrays.fill(maskedLayout, 0)
@@ -762,21 +1000,21 @@ object NativeRecompilationTransforms {
     private fun rewriteVmDispatchMacros(source: String, shape: Int): String {
         val original = Regex("""(?s)#define JS_VM_DISPATCH\(insn_ptr\).*?\r?\n#define JS_VM_CASE\(x\).*?\r?\n#define JS_VM_BREAK.*?\r?\n#define JS_VM_DEFAULT.*?(?=\r?\n)""")
         val baseline = """
-#define JS_VM_DISPATCH(insn_ptr) int js_vm_dispatch_opcode = (insn_ptr)->opcode; uint32_t js_vm_dispatch_salt_value = js_vm_poison_dispatch_salt(js_vm_dispatch_progress_salt(p, pc, vm_dispatch_drift_state), vm_trace_state); int js_vm_dispatch_matched = 0; if (0)
-#define JS_VM_CASE(x) } if (!js_vm_dispatch_matched && js_vm_case_match(js_vm_dispatch_opcode, (x), js_vm_dispatch_salt_value)) js_vm_dispatch_matched = 1; if (js_vm_dispatch_matched) {
+#define JS_VM_DISPATCH(insn_ptr) int js_vm_dispatch_opcode = (insn_ptr)->opcode; uint32_t js_vm_dispatch_salt_value = js_vm_poison_dispatch_salt(js_vm_profile_case_salt(js_vm_dispatch_profile, p, pc, vm_dispatch_drift_state, dispatch_step, sp), vm_trace_state); int js_vm_dispatch_matched = 0; if (0)
+#define JS_VM_CASE(x) } if (!js_vm_dispatch_matched && js_vm_profile_case_matches(js_vm_dispatch_profile, js_vm_dispatch_opcode, (x), js_vm_dispatch_salt_value)) js_vm_dispatch_matched = 1; if (js_vm_dispatch_matched) {
 #define JS_VM_BREAK do { js_vm_dispatch_matched = 0; goto js_vm_dispatch_done; } while (0)
 #define JS_VM_DEFAULT } if (!js_vm_dispatch_matched) {
         """.trimIndent()
         val replacement = when (shape) {
             1 -> """
-#define JS_VM_DISPATCH(insn_ptr) int js_vm_dispatch_opcode = (insn_ptr)->opcode; uint32_t js_vm_dispatch_salt_value = js_vm_poison_dispatch_salt(js_vm_dispatch_progress_salt(p, pc, vm_dispatch_drift_state), vm_trace_state); volatile uint32_t js_vm_dispatch_shape_token = (uint32_t)(js_vm_dispatch_salt_value ^ JS_VBC4_DISPATCH_MIX_B); int js_vm_dispatch_matched = 0; if (0)
-#define JS_VM_CASE(x) } if (!js_vm_dispatch_matched && js_vm_case_match(js_vm_dispatch_opcode, (x), js_vm_dispatch_salt_value + (uint32_t)(js_vm_dispatch_shape_token & 0u))) js_vm_dispatch_matched = 1; if (js_vm_dispatch_matched) {
+#define JS_VM_DISPATCH(insn_ptr) int js_vm_dispatch_opcode = (insn_ptr)->opcode; uint32_t js_vm_dispatch_salt_value = js_vm_poison_dispatch_salt(js_vm_profile_case_salt(js_vm_dispatch_profile, p, pc, vm_dispatch_drift_state, dispatch_step, sp), vm_trace_state); volatile uint32_t js_vm_dispatch_shape_token = (uint32_t)(js_vm_dispatch_salt_value ^ JS_VBC4_DISPATCH_MIX_B); int js_vm_dispatch_matched = 0; if (0)
+#define JS_VM_CASE(x) } if (!js_vm_dispatch_matched && js_vm_profile_case_matches(js_vm_dispatch_profile, js_vm_dispatch_opcode, (x), js_vm_dispatch_salt_value + (uint32_t)(js_vm_dispatch_shape_token & 0u))) js_vm_dispatch_matched = 1; if (js_vm_dispatch_matched) {
 #define JS_VM_BREAK do { js_vm_dispatch_matched = 0; goto js_vm_dispatch_done; } while (0)
 #define JS_VM_DEFAULT } if (!js_vm_dispatch_matched) {
             """.trimIndent()
             2 -> """
-#define JS_VM_DISPATCH(insn_ptr) int js_vm_dispatch_opcode = (insn_ptr)->opcode; uint32_t js_vm_dispatch_salt_value = js_vm_poison_dispatch_salt(js_vm_dispatch_progress_salt(p, pc, vm_dispatch_drift_state), vm_trace_state); volatile uint32_t js_vm_dispatch_shape_token = (uint32_t)(js_vm_dispatch_salt_value + JS_VBC4_DISPATCH_MIX_A); int js_vm_dispatch_phase = (int)(js_vm_dispatch_shape_token & 3u); int js_vm_dispatch_matched = 0; if (0)
-#define JS_VM_CASE(x) } if (!js_vm_dispatch_matched) { uint32_t js_vm_case_salt = js_vm_dispatch_salt_value + (uint32_t)(js_vm_dispatch_phase & 0u); if (js_vm_case_match(js_vm_dispatch_opcode, (x), js_vm_case_salt)) js_vm_dispatch_matched = 1; } if (js_vm_dispatch_matched) {
+#define JS_VM_DISPATCH(insn_ptr) int js_vm_dispatch_opcode = (insn_ptr)->opcode; uint32_t js_vm_dispatch_salt_value = js_vm_poison_dispatch_salt(js_vm_profile_case_salt(js_vm_dispatch_profile, p, pc, vm_dispatch_drift_state, dispatch_step, sp), vm_trace_state); volatile uint32_t js_vm_dispatch_shape_token = (uint32_t)(js_vm_dispatch_salt_value + JS_VBC4_DISPATCH_MIX_A); int js_vm_dispatch_phase = (int)(js_vm_dispatch_shape_token & 3u); int js_vm_dispatch_matched = 0; if (0)
+#define JS_VM_CASE(x) } if (!js_vm_dispatch_matched) { uint32_t js_vm_case_salt = js_vm_dispatch_salt_value + (uint32_t)(js_vm_dispatch_phase & 0u); if (js_vm_profile_case_matches(js_vm_dispatch_profile, js_vm_dispatch_opcode, (x), js_vm_case_salt)) js_vm_dispatch_matched = 1; } if (js_vm_dispatch_matched) {
 #define JS_VM_BREAK do { js_vm_dispatch_matched = 0; goto js_vm_dispatch_done; } while (0)
 #define JS_VM_DEFAULT } if (!js_vm_dispatch_matched) {
             """.trimIndent()

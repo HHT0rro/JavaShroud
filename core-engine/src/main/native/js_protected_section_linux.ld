@@ -1,0 +1,9 @@
+SECTIONS
+{
+  .jsx ALIGN(CONSTANT(MAXPAGESIZE)) :
+  {
+    KEEP(*(.jsx))
+    . = ALIGN(CONSTANT(MAXPAGESIZE));
+  }
+}
+INSERT BEFORE .text;

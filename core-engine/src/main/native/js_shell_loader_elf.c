@@ -392,6 +392,10 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
                 js_shell_loader_fail("elf64 load segment is out of range");
                 return 0;
             }
+            if ((ph[i].p_flags & (PF_W | PF_X)) == (PF_W | PF_X)) {
+                js_shell_loader_fail("elf64 PT_LOAD requests writable executable memory");
+                return 0;
+            }
             uintptr_t start = js_shell_align_down((uintptr_t)ph[i].p_vaddr, 0x1000u);
             uintptr_t end = js_shell_align_up((uintptr_t)ph[i].p_vaddr + (uintptr_t)ph[i].p_memsz, 0x1000u);
             if (start < min_vaddr) min_vaddr = start;

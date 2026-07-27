@@ -189,7 +189,7 @@ private fun isJavaShroudRuntimeStateClass(classNode: ClassNode): Boolean {
             when (instruction) {
                 is org.objectweb.asm.tree.LdcInsnNode -> {
                     val value = instruction.cst as? String ?: continue
-                    if (value == "META-INF/.r/vm.idx" || value == "META-INF/.r/vm-current.idx" || value.startsWith("META-INF/2b/") || value == "JSRP" || value == "JSBI") {
+                    if (value.startsWith("META-INF/2b/") || value == "JSRP" || value == "JSBI") {
                         hasRuntimeResourceState = true
                     }
                     if (value == "j.b" || value == "j.m" || value == "j.l") {

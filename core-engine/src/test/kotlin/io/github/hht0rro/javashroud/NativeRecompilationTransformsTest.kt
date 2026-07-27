@@ -6,6 +6,7 @@ import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployme
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.NativeVmBuildProfile
 import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.currentVbc4BuildContextOrNull
 import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
@@ -130,6 +131,7 @@ class NativeRecompilationTransformsTest {
             masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (index * 7 + 3).toByte() },
             nativeSeed = 0x13572468L,
             jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (0xA0 + index).toByte() },
+            nativeVmProfile = NativeVmBuildProfile(parserRowProfile = 2, operandAccessProfile = 1),
         )
 
         val secrets = NativeRecompilationTransforms.generateDiversifiedSecrets(42L, java.util.Random(42L), context)
@@ -142,6 +144,58 @@ class NativeRecompilationTransformsTest {
         assertFalse(secrets.contains("static const unsigned char JS_VBC4_LAYOUT_DIGEST[32]"), "Generated native VBC4 material must not expose a stable layout digest symbol")
         assertTrue(secrets.contains("JS_VBC4_LAYOUT_DIGEST_AT"), "Native VBC4 layout digest must be exposed only through an accessor")
         assertTrue(secrets.contains("#define JS_VBC4_DISPATCH_MIX_A"), "Native VBC4 dispatch mix must be generated per build")
+        assertTrue(secrets.contains("#define JS_NATIVE_PARSER_PROFILE 2"), "Native parser row family must be selected at compile time")
+        assertTrue(secrets.contains("#define JS_NATIVE_OPERAND_PROFILE 1"), "Native operand accessor family must be selected at compile time")
+        assertTrue(secrets.contains("#define JS_NATIVE_VM_PROFILE_ID 0x102u"), "Native profile id must bind both compile-time families")
+    }
+
+    @Test
+    fun generated_protected_section_material_is_partitioned_and_reconstructs_only_scoped_key() {
+        val protectedKey = ByteArray(32) { index -> (index * 11 + 7).toByte() }
+        val secrets = NativeRecompilationTransforms.generateDiversifiedSecrets(
+            0x1234L,
+            java.util.Random(0x1234L),
+            defaultVbc4BuildContext(),
+            protectedKey,
+        )
+        val completeKeyLiteral = protectedKey.joinToString(", ") { byte -> "0x%02Xu".format(byte.toInt() and 0xFF) }
+        assertFalse(secrets.contains("JS_PROTECTED_SECTION_KEY[32]") || secrets.contains(completeKeyLiteral), "Generated native source must not expose the complete key as one literal")
+        assertTrue(secrets.contains("JS_PROTECTED_KEY_LANE_COUNT") && secrets.contains("JS_PROTECTED_COPY_SCOPED_KEY"), "Generated native source must expose only a scoped variable-lane reconstruction program")
+        assertTrue(secrets.contains("_js_ps_lane_order") && secrets.contains("_js_ps_v >>"), "Protected-section reconstruction must bind a build-specific lane permutation and nonlinear byte rotation")
+    }
+
+    @Test
+    fun independent_protected_section_builds_emit_structurally_divergent_reconstruction_programs() {
+        val key = ByteArray(32) { index -> (index * 13 + 5).toByte() }
+        fun secrets(seed: Long) = NativeRecompilationTransforms.generateDiversifiedSecrets(seed, java.util.Random(seed), defaultVbc4BuildContext(), key)
+        val first = secrets(101L)
+        val second = secrets(202L)
+        val firstProgram = first.substringAfter("#define JS_PROTECTED_SECTION_KEY_PARTITIONS_GENERATED").substringBefore("#endif")
+        val secondProgram = second.substringAfter("#define JS_PROTECTED_SECTION_KEY_PARTITIONS_GENERATED").substringBefore("#endif")
+
+        assertNotEquals(firstProgram, secondProgram, "independent builds must vary protected-section lane count, permutation, index layout, masks, and rotation")
+        assertFalse(first.contains("js_protected_section_key(") || second.contains("js_protected_section_key("), "generated source must not restore the legacy fixed key getter")
+    }
+
+    @Test
+    fun windows_inner_native_exports_target_functions_only_for_cfg_evidence_builds() {
+        val context = Vbc4BuildContext(
+            masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { (it * 5 + 1).toByte() },
+            nativeSeed = 0x5566_7788L,
+            jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { (it * 7 + 3).toByte() },
+            nativeVmProfile = NativeVmBuildProfile(2, 1),
+        )
+        val compiled = withVbc4BuildContext(context) {
+            NativeRecompilationTransforms.compileInnerForCfgEvidence(
+                seed = 0x1357_2468L,
+                classLoader = NativeRecompilationTransforms::class.java.classLoader,
+                evidenceRandom = java.util.Random(0x1357_2468L),
+            )
+        }
+        val bytes = compiled?.bytes
+        assertTrue(bytes != null, "CFG evidence inner native must compile")
+        assertTrue(bytes!!.containsAscii("js_vm_parse_program"), "CFG evidence build must expose the parser target symbol")
+        assertTrue(bytes.containsAscii("js_vm_profile_fetch_operand"), "CFG evidence build must expose the operand accessor target symbol")
     }
     @Test
     fun generateDiversifiedSecrets_does_not_emit_flat_vbc4_master_material() {
@@ -265,6 +319,22 @@ class NativeRecompilationTransformsTest {
         ).forEach { fileName ->
             assertTrue(nativeSources.contains(fileName), "Native source digest must cover max shell source: $fileName")
         }
+        assertTrue(
+            nativeSources.contains("js_protected_section_linux.ld"),
+            "Native source digest must cover the Linux .jsx page-isolation linker script",
+        )
+    }
+
+    @Test
+    fun linux_inner_native_link_command_uses_page_isolation_script() {
+        val source = java.nio.file.Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeRecompilationTransforms.kt"))
+        val compileBody = source.substringAfter("private fun compileWithZig(").substringBefore("private fun compileShellStubWithZig(")
+        val linkerScript = java.nio.file.Files.readString(resolveSource("src/main/native/js_protected_section_linux.ld"))
+
+        assertTrue(compileBody.contains("zigTarget.contains(\"linux\")"), "Linux linker-script use must stay target-specific")
+        assertTrue(compileBody.contains("-Wl,-T,") && compileBody.contains("js_protected_section_linux.ld"), "Linux inner link must load the .jsx linker script")
+        assertTrue(linkerScript.contains("INSERT BEFORE .text"), ".jsx must be isolated before ordinary text")
+        assertTrue(linkerScript.contains("ALIGN(CONSTANT(MAXPAGESIZE))"), ".jsx start and end must be padded to linker page granularity")
     }
 
     @Test
@@ -313,6 +383,12 @@ class NativeRecompilationTransformsTest {
         assertTrue(source.contains("ET_DYN") && source.contains("EM_X86_64"), "Linux max shell loader must validate a supported ELF64 shared object")
         assertTrue(source.contains("PT_LOAD") && source.contains("PT_DYNAMIC"), "Linux max shell loader must map load segments and parse the dynamic section")
         assertTrue(source.contains("MAP_PRIVATE | MAP_ANONYMOUS"), "Linux max shell loader must use anonymous in-memory mapping")
+        assertTrue(
+            source.contains("(ph[i].p_flags & (PF_W | PF_X)) == (PF_W | PF_X)") &&
+                source.contains("elf64 PT_LOAD requests writable executable memory") &&
+                source.contains("if (mprotect(") && source.contains("elf64 segment mprotect failed"),
+            "Linux manual mapper must reject writable-executable load segments and check every final mprotect transition.",
+        )
         assertTrue(source.contains("R_X86_64_RELATIVE") && source.contains("R_X86_64_JUMP_SLOT") && source.contains("R_X86_64_GLOB_DAT"), "Linux max shell loader must process core RELA relocation classes")
         assertTrue(source.contains("dlsym(RTLD_DEFAULT"), "Linux max shell loader must resolve host imports without writing a temp library")
         assertTrue(source.contains("init_array") && source.contains("JNI_OnLoad"), "Linux max shell loader must run initializers and resolve the inner JNI_OnLoad export")
@@ -359,7 +435,10 @@ class NativeRecompilationTransformsTest {
         assertFalse(resource.contains("js_jni_cache.initialized ? js_jni_cache.input_stream_read_all_bytes"), "Manual mapped resource loading must not reuse cached InputStream virtual method IDs")
         assertTrue(resource.contains("if (!js_vm_preload_in_progress)"), "Preload resource loading must not consult the dispatch-frame active host loader")
         val preloadBody = core.substringAfter("jsn_k9(JNIEnv *env, jclass cls)").substringBefore("JS_HIDDEN jbyteArray JNICALL jsn_k10")
-        assertTrue(preloadBody.contains("js_vm_preload_in_progress++;"), "Native preload must enter preload mode before reading the VM index")
+        assertTrue(
+            preloadBody.contains("js_vm_preload_in_progress = 0;") && preloadBody.contains("js_vm_preload_in_progress = 1;"),
+            "Native preload must keep lazy resource loading disabled until the authenticated VM catalog is registered",
+        )
         val normalizedCore = core.replace("\r\n", "\n")
         assertTrue(
             normalizedCore.contains("#elif defined(__GNUC__) || defined(__clang__)\n#define JS_THREAD_LOCAL"),
@@ -429,6 +508,14 @@ class NativeRecompilationTransformsTest {
             "Windows max shell loader must validate optional header directory count and mapped header bounds before reading fixed data directories.",
         )
         assertTrue(source.contains("VirtualAlloc") && source.contains("IMAGE_FIRST_SECTION"), "Windows max shell loader must allocate an image and map sections")
+        assertTrue(
+            source.contains("IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_WRITE") &&
+                source.contains("pe64 section requests writable executable memory") &&
+                source.contains("if (!VirtualProtect(") &&
+                source.contains("pe64 section VirtualProtect failed"),
+            "Windows manual mapper must reject writable-executable sections and check every final VirtualProtect transition.",
+        )
+        assertFalse(source.contains("PAGE_EXECUTE_READWRITE"), "Windows manual mapper must never leave an inner image section writable and executable")
         assertTrue(source.contains("IMAGE_REL_BASED_DIR64"), "Windows max shell loader must apply PE64 base relocations")
         assertTrue(source.contains("LoadLibraryA") && source.contains("GetProcAddress"), "Windows max shell loader must resolve imports in memory")
         assertTrue(
@@ -466,7 +553,10 @@ class NativeRecompilationTransformsTest {
         assertTrue(source.contains("ran tls callbacks for manual image") && source.contains("ran dllmain attach for manual image"), "Windows manual mapper must run attach callbacks after validation")
         assertFalse(source.contains("DLL_PROCESS_DETACH"), "Windows manual mapper must not run detach callbacks for the manually mapped inner kernel")
         assertTrue(source.contains("Keep the PE image process-lifetime"), "Windows manual mapper must avoid freeing native-method code pages")
-        assertTrue(runtime.contains("js_protected_section_unseal_now();"), "Inner JNI_OnLoad must explicitly unseal protected sections before any protected VM code can run")
+        assertTrue(
+            runtime.contains("js_protected_section_enter()") && runtime.contains("js_protected_section_leave()"),
+            "Inner JNI_OnLoad must enter and leave the protected-section lifecycle around protected startup code",
+        )
         assertTrue(stub.contains("g_inner_image.jni_on_load(g_shell_vm, 0)"), "Outer stub must pass a null reserved value into inner JNI_OnLoad")
         assertFalse(stub.contains("JS_SHELL_MANUAL_MAP_RESERVED"), "Outer stub must not pass a custom sentinel through the JVM-reserved JNI_OnLoad parameter")
     }
@@ -713,7 +803,7 @@ class NativeRecompilationTransformsTest {
     fun native_artifact_cache_hit_requires_sealed_jni_abi_validation() {
         val source = java.nio.file.Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeRecompilationTransforms.kt"))
         val readCacheBody = source.substringAfter("private fun readNativeArtifactCache(").substringBefore("private fun writeNativeArtifactCache")
-        val writeCacheGate = source.substringAfter("if (!compileResult.fromCache &&").substringBefore("results.add")
+        val writeCacheGate = source.substringAfter("if (!cfgEvidenceExports && !compileResult.fromCache &&").substringBefore("results.add")
 
         assertTrue(readCacheBody.contains("EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(bytes)"), "Cache hits must validate sealed JNI ABI before reuse")
         assertTrue(readCacheBody.contains("Files.deleteIfExists(cachePath)"), "Invalid cache entries must be discarded before recompilation")

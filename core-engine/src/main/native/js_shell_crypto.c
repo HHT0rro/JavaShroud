@@ -1,6 +1,12 @@
 #include "js_shell_crypto.h"
 
 #include <stdint.h>
+
+void js_shell_secure_wipe(void *bytes, size_t size) {
+    volatile unsigned char *cursor = (volatile unsigned char *)bytes;
+    while (cursor && size--) *cursor++ = 0;
+}
+
 #include <string.h>
 
 int js_shell_consttime_equal(const unsigned char *a, const unsigned char *b, size_t len) {
@@ -41,7 +47,8 @@ void js_shell_mac32(const unsigned char *key, size_t key_size, const unsigned ch
         if (!parts[part] && sizes[part] != 0) return;
         for (size_t i = 0; i < sizes[part]; i++) {
             uint32_t v = (uint32_t)parts[part][i] + (uint32_t)(i * 17u) + (uint32_t)(part * 131u);
-            state[(i + (size_t)part) & 7u] = js_shell_mix32(state[(i + (size_t)part) & 7u] ^ v ^ state[(i + 3u) & 7u]);
+            size_t slot = (i + (size_t)part) & 7u;
+            state[slot] = js_shell_mix32(state[slot] ^ v ^ state[(slot + 3u) & 7u]);
         }
     }
     for (int round = 0; round < 8; round++) {
