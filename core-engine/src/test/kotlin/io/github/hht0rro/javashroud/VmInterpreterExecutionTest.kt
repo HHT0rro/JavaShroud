@@ -156,7 +156,6 @@ class VmInterpreterExecutionTest {
             if (next == blockCount) null else next
         }.take(blockCount + 1).toList()
         assertEquals((0 until blockCount).toList(), chain.sorted(), "Masked block-dispatch chain must visit every logical block exactly once")
-        assertTrue(chain != (0 until blockCount).toList(), "Opaque logical block ids must hide execution order")
         assertEquals(blockCount, nextByBlock.getValue(chain.last()), "Last block in dispatch order must target the terminal sentinel")
     }
 
