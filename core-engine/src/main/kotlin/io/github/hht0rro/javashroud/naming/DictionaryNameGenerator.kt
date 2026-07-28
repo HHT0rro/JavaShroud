@@ -1,5 +1,6 @@
 package io.github.hht0rro.javashroud.naming
 
+import java.util.Locale
 import java.util.Random
 
 /**
@@ -27,6 +28,7 @@ internal class NameGenerator(
     private val rng = if (config.seed != null) Random(config.seed!!) else Random()
     private val customDictionary = loadCustomDictionary(config.dictionaryFile)
     private val collisionTracker = mutableSetOf<String>()
+    private val lowercaseTracker = mutableSetOf<String>()
     private var counter = 0
 
     fun generateSimpleName(prefix: String): String {
@@ -146,33 +148,41 @@ internal class NameGenerator(
             "append-index" -> {
                 var candidate = name
                 var suffix = 0
-                while (collisionTracker.contains(candidate)) {
+                while (isCollision(candidate)) {
                     suffix++
                     candidate = "${name}_$suffix"
                 }
-                collisionTracker.add(candidate)
+                track(candidate)
                 candidate
             }
             "rehash" -> {
                 var candidate = name
-                while (collisionTracker.contains(candidate)) {
+                while (isCollision(candidate)) {
                     candidate = generateRehashName()
                 }
-                collisionTracker.add(candidate)
+                track(candidate)
                 candidate
             }
             "fail" -> {
-                if (collisionTracker.contains(name)) {
+                if (isCollision(name)) {
                     throw IllegalStateException("Rename collision detected: '$name' (collisionPolicy=fail)")
                 }
-                collisionTracker.add(name)
+                track(name)
                 name
             }
             else -> {
-                collisionTracker.add(name)
+                track(name)
                 name
             }
         }
+    }
+
+    private fun isCollision(name: String): Boolean =
+        name in collisionTracker || name.lowercase(Locale.ROOT) in lowercaseTracker
+
+    private fun track(name: String) {
+        collisionTracker += name
+        lowercaseTracker += name.lowercase(Locale.ROOT)
     }
 
     private fun generateRehashName(): String {

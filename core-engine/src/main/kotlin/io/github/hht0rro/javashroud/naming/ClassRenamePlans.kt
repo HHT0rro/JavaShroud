@@ -1,6 +1,7 @@
 package io.github.hht0rro.javashroud.naming
 
 import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
+import java.util.Locale
 
 fun buildClassRenameMap(
     classArtifacts: List<ClassArtifact>,
@@ -12,7 +13,8 @@ fun buildClassRenameMap(
         .sortedBy { it.summary.internalName }
 
     val generator = NameGenerator(config)
-    val existingClassNames = classArtifacts.map { it.summary.internalName }.toSet()
+    val existingClassNames = classArtifacts
+        .mapTo(mutableSetOf()) { it.summary.internalName.lowercase(Locale.ROOT) }
     val allocatedClassNames = mutableSetOf<String>()
 
     return selectedClassArtifacts.mapNotNull { classArtifact ->
@@ -22,8 +24,8 @@ fun buildClassRenameMap(
         do {
             val newName = generator.generateSimpleName("C")
             fullNewName = if (packageName.isBlank()) newName else "$packageName/$newName"
-        } while (fullNewName in existingClassNames || fullNewName in allocatedClassNames)
-        allocatedClassNames += fullNewName
+        } while (fullNewName.lowercase(Locale.ROOT) in existingClassNames || fullNewName.lowercase(Locale.ROOT) in allocatedClassNames)
+        allocatedClassNames += fullNewName.lowercase(Locale.ROOT)
         if (original == fullNewName) null else original to fullNewName
     }.toMap()
 }
