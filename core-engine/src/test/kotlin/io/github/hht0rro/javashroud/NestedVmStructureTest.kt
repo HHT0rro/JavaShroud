@@ -92,15 +92,13 @@ class NestedVmStructureTest {
         val context = contextOverride ?: fixedContext(contextSeed, nativeVmProfile)
         val entryMetadata = Vbc4EntryMetadata(
                 entryToken = 0x1122_3344_5566_7788L,
-                ownerToken = "owner-token",
-                methodToken = "method-token",
                 returnDescriptor = "I",
                 methodLocalProfile = profile,
-                originalOwner = "example/NestedVm",
-                originalName = "verifyLicense",
-                originalDescriptor = "()I",
+                methodIdentity = context.deriveVbc4Identity("example/NestedVm", "verifyLicense", "()I"),
+                ownerIdentity = context.deriveVbc4OwnerIdentity("example/NestedVm"),
+                argumentTags = vbc4ArgumentTagVector("()I"),
                 resourcePath = "META-INF/.r/nested.bin",
-                originalAccess = Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC,
+                isStatic = true,
             )
         val serializer = if (structureEntropy == null) {
             VmBytecodeSerializer(

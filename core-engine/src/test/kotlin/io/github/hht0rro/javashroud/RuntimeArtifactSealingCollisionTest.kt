@@ -21,10 +21,39 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.Opcodes
+import org.objectweb.asm.tree.ClassNode
 import java.nio.file.Files
 import java.nio.file.Path
 
 class RuntimeArtifactSealingCollisionTest {
+    @Test
+    fun `final runtime sealing preserves the native SAM bridge name`() {
+        val helperName = "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper"
+        val helperBytes = loadClassBytes("$helperName.class")
+        val helperArtifact = ClassArtifact(
+            entryName = "$helperName.class",
+            summary = analyzeClassBytes(helperBytes),
+            bytes = helperBytes,
+        )
+
+        val sealed = withVbc4BuildContext(defaultVbc4BuildContext()) {
+            RuntimeArtifactSealing.seal(testAttachedArtifact(listOf(helperArtifact)), 0x4A53524CL)
+        }
+        val sealedHelper = sealed.classArtifacts.single { it.summary.internalName.startsWith("r/") }
+        val node = ClassNode()
+        org.objectweb.asm.ClassReader(sealedHelper.bytes).accept(node, org.objectweb.asm.ClassReader.SKIP_FRAMES)
+        val bridgeDescriptor = "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;"
+
+        assertTrue(
+            node.methods.any { it.name == "createSamLambda" && it.desc == bridgeDescriptor },
+            "The native VM resolves createSamLambda by its fixed JNI method name after final sealing.",
+        )
+        assertTrue(
+            node.methods.any { it.name == "takeExpectedShellBindingCommitment" && it.desc == "()[B" },
+            "The outer shell resolves the one-shot boot binding bridge by its fixed name after final sealing.",
+        )
+    }
+
     @Test
     fun `sealed runtime helper names avoid existing jar entries during re-obfuscation`() {
         val helperName = "io/github/hht0rro/javashroud/transforms/protection/AntiDumpRuntimeHelper"
@@ -82,9 +111,14 @@ class RuntimeArtifactSealingCollisionTest {
         assertFalse(originalVmResource in sealedEntries.keys, "A VM-producing run should still reseal VM resources")
         assertFalse("META-INF/.r/0.dat" in sealedEntries.keys, "A VM-producing run should replace the legacy sealed native index with this run's sealed index")
 
-        val catalogRoots = sealedEntries.values.filter { it.bytes.size >= 5 && it.bytes.copyOfRange(0, 5).contentEquals("JSC1|".toByteArray(Charsets.US_ASCII)) }
+        val catalogRoots = sealedEntries.values.filter { entry ->
+            withVbc4BuildContext(context) {
+                RuntimeResourceCodec.decode(entry.bytes)?.let { it.size >= 5 && it.copyOfRange(0, 5).contentEquals("JSC1|".toByteArray(Charsets.US_ASCII)) }
+            } == true
+        }
         assertEquals(1, catalogRoots.size, "A VM-producing run must emit exactly one authenticated catalog root")
-        val directoryPaths = catalogRoots.single().bytes.decodeToString().lineSequence()
+        val catalogRootPlain = withVbc4BuildContext(context) { RuntimeResourceCodec.decode(catalogRoots.single().bytes)!! }
+        val directoryPaths = catalogRootPlain.decodeToString().lineSequence()
             .filter { it.startsWith("D|") }
             .map { line -> line.split('|').getOrElse(2) { error("Malformed VM catalog descriptor") } }
             .toList()
@@ -126,7 +160,8 @@ class RuntimeArtifactSealingCollisionTest {
             "Native loading must restore the previous j.l owner after RegisterNatives finishes.",
         )
         assertTrue(
-            helperSource.contains("System.setProperty(sealedLoaderPropertyName(), JniMicrokernelHelper.class.getName().replace('.', '/'))"),
+            helperSource.contains("publishSealedNativeLoaderOwner()") &&
+                helperSource.contains("System.setProperty(sealedLoaderPropertyName(), JniMicrokernelHelper.class.getName().replace('.', '/'))"),
             "The active helper still has to publish itself before registering or invoking native VM entries.",
         )
         assertTrue(

@@ -350,6 +350,22 @@ JS_HIDDEN int js_parse_u32_token(const char *text, uint32_t *out) {
     return 1;
 }
 
+JS_HIDDEN int js_parse_hex_u32_token(const char *text, uint32_t *out) {
+    if (!text || !text[0] || !out) return 0;
+    uint64_t value = 0;
+    for (const unsigned char *p = (const unsigned char*)text; *p; p++) {
+        unsigned int nibble;
+        if (*p >= '0' && *p <= '9') nibble = (unsigned int)(*p - '0');
+        else if (*p >= 'a' && *p <= 'f') nibble = (unsigned int)(*p - 'a' + 10);
+        else if (*p >= 'A' && *p <= 'F') nibble = (unsigned int)(*p - 'A' + 10);
+        else return 0;
+        value = value * 16u + nibble;
+        if (value > 0xFFFFFFFFULL) return 0;
+    }
+    *out = (uint32_t)value;
+    return 1;
+}
+
 JS_HIDDEN char* js_next_manifest_field(char **cursor) {
     if (!cursor || !*cursor) return NULL;
     char *start = *cursor;
@@ -894,7 +910,7 @@ JS_PROTECTED int js_vm_register_preload_index_entries(const unsigned char *index
                             binding_resource_path = js_substr_dup((const char*)index_bytes + sep7 + 1, (size_t)(binding_resource_end - sep7 - 1));
                             char *profile_text = js_substr_dup((const char*)index_bytes + sep5 + 1, (size_t)(sep6 - sep5 - 1));
                             if (profile_text) {
-                                expected_profile = (uint32_t)strtoul(profile_text, NULL, 16);
+                                if (!js_parse_hex_u32_token(profile_text, &expected_profile)) ok = 0;
                                 js_vbc4_wipe_volatile(profile_text, strlen(profile_text));
                                 free(profile_text);
                             }
@@ -1064,10 +1080,8 @@ JS_HIDDEN js_vm_program* js_vm_preload_indexed_program_on_demand(JNIEnv *env, jc
         memset(&validation, 0, sizeof(validation));
         if (!js_vm_build_execution_program_from_registers(program, &validation)) {
             char reason[384];
-            snprintf(reason, sizeof(reason), "native VM preload validation failed at %s#%s%s err=%d reg=%d super=%d insn=%d",
-                program->original_owner ? program->original_owner : "?",
-                program->original_name ? program->original_name : "?",
-                program->original_desc ? program->original_desc : "?",
+            snprintf(reason, sizeof(reason), "native VM preload validation failed for entry=%016llx err=%d reg=%d super=%d insn=%d",
+                (unsigned long long)program->entry_token,
                 js_vm_last_validation_error, program->reg_program.insn_count, program->reg_program.super_count, program->insn_count);
             js_vm_clear_execution_program(&validation);
             js_vm_free_program(env, program);
@@ -1241,11 +1255,11 @@ JS_HIDDEN jint js_vm_execute_resource_int_int_by_token(JNIEnv *env, jclass resou
     return ok ? value : 0;
 }
 
-JS_HIDDEN js_vm_program* js_vm_find_preloaded_program_by_method(unsigned long long class_hash, unsigned long long meth_hash, unsigned long long sig_hash) {
-    if (class_hash == 0ULL || meth_hash == 0ULL || sig_hash == 0ULL) return NULL;
-    js_vm_program *active = js_vm_active_program_find_by_method(class_hash, meth_hash, sig_hash);
+JS_HIDDEN js_vm_program* js_vm_find_preloaded_program_by_identity(const unsigned char method_identity[32]) {
+    if (!method_identity) return NULL;
+    js_vm_program *active = js_vm_active_program_find_by_identity(method_identity);
     if (active) return active;
-    return js_vm_ephemeral_cache_find_by_method(class_hash, meth_hash, sig_hash);
+    return js_vm_ephemeral_cache_find_by_identity(method_identity);
 }
 
 JS_HIDDEN js_vm_program* js_vm_ephemeral_cache_get(jlong entry_token, const char *resource_path) {
@@ -1262,18 +1276,13 @@ JS_HIDDEN js_vm_program* js_vm_ephemeral_cache_get(jlong entry_token, const char
     return NULL;
 }
 
-JS_HIDDEN js_vm_program* js_vm_ephemeral_cache_find_by_method(unsigned long long class_hash, unsigned long long meth_hash, unsigned long long sig_hash) {
-    if (class_hash == 0ULL || meth_hash == 0ULL || sig_hash == 0ULL) return NULL;
+JS_HIDDEN js_vm_program* js_vm_ephemeral_cache_find_by_identity(const unsigned char method_identity[32]) {
+    if (!method_identity) return NULL;
     js_vm_cache_lock_enter();
     js_vm_program *found = NULL;
     for (js_vm_ephemeral_cache_entry *entry = js_vm_ephemeral_cache; entry; entry = entry->next) {
         js_vm_program *program = entry->program;
-        if (program && program->original_owner_hash == class_hash &&
-            program->original_name_hash == meth_hash &&
-            program->original_desc_hash == sig_hash) {
-            found = program;
-            break;
-        }
+        if (program && memcmp(program->method_identity, method_identity, 32) == 0) { found = program; break; }
     }
     js_vm_cache_lock_leave();
     return found;

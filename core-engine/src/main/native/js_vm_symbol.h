@@ -5,7 +5,8 @@
 
 JS_HIDDEN void js_vm_symbol_cache_lock_enter(void);
 JS_HIDDEN void js_vm_symbol_cache_lock_leave(void);
-JS_HIDDEN unsigned long long js_vm_hash64_string(const char *value);
+JS_HIDDEN int js_vm_method_identity_for_ref(const js_vm_method_ref *ref, unsigned char out[32]);
+JS_HIDDEN int js_vm_owner_identity_for_name(const char *owner, unsigned char out[32]);
 JS_HIDDEN js_vm_symbol_cache_entry* js_vm_symbol_cache_lookup(js_vm_program *p, int cp_idx, int kind);
 JS_HIDDEN void js_vm_symbol_cache_clear_entry(JNIEnv *env, js_vm_symbol_cache_entry *entry);
 JS_HIDDEN js_vm_symbol_cache_entry* js_vm_class_cache_add(JNIEnv *env, js_vm_program *p, int cp_idx, int kind, jclass cls, const char *type_name);

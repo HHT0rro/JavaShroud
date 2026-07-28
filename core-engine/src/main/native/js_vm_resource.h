@@ -29,6 +29,7 @@ JS_HIDDEN unsigned char* js_vm_decode_resource_path_owned(JNIEnv *env, jclass he
 JS_HIDDEN unsigned char* js_vm_reassemble_sliced_resource(JNIEnv *env, jclass helper_cls, unsigned char *decoded, int decoded_len, int *out_len);
 JS_HIDDEN int js_hex32_to_bytes(const char *hex, unsigned char out[32]);
 JS_HIDDEN int js_parse_u32_token(const char *text, uint32_t *out);
+JS_HIDDEN int js_parse_hex_u32_token(const char *text, uint32_t *out);
 JS_HIDDEN char* js_next_manifest_field(char **cursor);
 JS_PROTECTED int js_vm_register_preload_index_entries(const unsigned char *index_bytes, int index_len);
 JS_HIDDEN int js_vm_resource_alias_register(const char *original_path, const char *sealed_path);
@@ -51,9 +52,9 @@ JS_HIDDEN jobject js_vm_execute_resource_by_token(JNIEnv *env, jclass resource_c
 JS_HIDDEN jint js_vm_execute_resource_int_by_token(JNIEnv *env, jclass resource_cls, jlong entry_token);
 JS_HIDDEN jint js_vm_execute_resource_int_int_by_token(JNIEnv *env, jclass resource_cls, jlong entry_token, jint arg0);
 JS_HIDDEN void js_vm_execute_resource_int_void_by_token(JNIEnv *env, jclass resource_cls, jlong entry_token, jint arg0);
-JS_HIDDEN js_vm_program* js_vm_find_preloaded_program_by_method(unsigned long long class_hash, unsigned long long meth_hash, unsigned long long sig_hash);
+JS_HIDDEN js_vm_program* js_vm_find_preloaded_program_by_identity(const unsigned char method_identity[32]);
 JS_HIDDEN js_vm_program* js_vm_ephemeral_cache_get(jlong entry_token, const char *resource_path);
-JS_HIDDEN js_vm_program* js_vm_ephemeral_cache_find_by_method(unsigned long long class_hash, unsigned long long meth_hash, unsigned long long sig_hash);
+JS_HIDDEN js_vm_program* js_vm_ephemeral_cache_find_by_identity(const unsigned char method_identity[32]);
 JS_HIDDEN int js_vm_ephemeral_cache_put(jlong entry_token, const char *resource_path, js_vm_program *program);
 JS_HIDDEN void js_vm_ephemeral_cache_clear(JNIEnv *env);
 JS_HIDDEN void js_vm_cache_lock_init(void);

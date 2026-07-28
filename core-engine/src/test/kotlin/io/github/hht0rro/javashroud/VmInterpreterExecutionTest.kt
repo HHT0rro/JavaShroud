@@ -840,14 +840,16 @@ class VmInterpreterExecutionTest {
         val configPath = inputJar.resolveSibling("javashroud-vm-cfg-$tag.toml")
         writeRunConfig(configPath, inputJar, outputJar, passIds, passParams)
         try {
-            if (contextOverride == null) {
-                dispatchRequest(buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())), EngineKernel())
-            } else {
-                io.github.hht0rro.javashroud.kernel.executeKernelRun(
-                    config = io.github.hht0rro.javashroud.config.loadValidatedConfig(configPath),
-                    configPath = configPath,
-                    vbc4BuildContextOverride = contextOverride,
-                )
+            withTestBootSecret {
+                if (contextOverride == null) {
+                    dispatchRequest(buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())), EngineKernel())
+                } else {
+                    io.github.hht0rro.javashroud.kernel.executeKernelRun(
+                        config = io.github.hht0rro.javashroud.config.loadValidatedConfig(configPath),
+                        configPath = configPath,
+                        vbc4BuildContextOverride = contextOverride,
+                    )
+                }
             }
         } finally {
             Files.deleteIfExists(configPath)

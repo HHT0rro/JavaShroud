@@ -199,7 +199,15 @@ internal object RuntimeVmCatalog {
         } finally {
             Arrays.fill(anchorKey, 0)
         }
-        val rootBytes = rootBody + "H|${rootTag.toHexLower()}\n".toByteArray(Charsets.US_ASCII)
+        val rootPlain = rootBody + "H|${rootTag.toHexLower()}\n".toByteArray(Charsets.US_ASCII)
+        val rootBytes = RuntimeResourceCodec.encodeForAnchor(
+            bytes = rootPlain,
+            kind = RuntimeResourceKind.NativeIndex,
+            seed = digestSeed(rootPlain),
+            variantId = 0,
+            layerCount = 3,
+            compress = true,
+        )
         return RuntimeVmCatalogArtifacts(
             entries = directoryEntries + JarEntryData(rootResourcePath, rootBytes),
             catalogId = catalogId,

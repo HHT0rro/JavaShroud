@@ -393,15 +393,13 @@ fun applyMethodVirtualization(
                             stateBinding = stateBinding,
                             entryMetadata = Vbc4EntryMetadata(
                                 entryToken = entryToken,
-                                ownerToken = dispatchClassToken,
-                                methodToken = dispatchMethodToken,
-                                returnDescriptor = Type.getReturnType(guestOriginalDescriptor).descriptor,
+                                returnDescriptor = vbc4ReturnTag(guestOriginalDescriptor),
                                 methodLocalProfile = methodLocalProfile,
-                                originalOwner = className,
-                                originalName = guestOriginalName,
-                                originalDescriptor = guestOriginalDescriptor,
+                                methodIdentity = buildContext.deriveVbc4Identity(className, vmMethodName, vmDescriptor),
+                                ownerIdentity = buildContext.deriveVbc4OwnerIdentity(className),
+                                argumentTags = vbc4ArgumentTagVector(guestOriginalDescriptor),
                                 resourcePath = resourcePath,
-                                originalAccess = guestOriginalAccess,
+                                isStatic = guestOriginalAccess and Opcodes.ACC_STATIC != 0,
                             ),
                             buildContext = buildContext,
                             structureEntropy = methodEntropy.domain("serializer-structure").entropyDigest,
@@ -3208,4 +3206,3 @@ private fun unboxAndReturn(mv: MethodVisitor, type: Type) {
         else -> { mv.visitTypeInsn(Opcodes.CHECKCAST, type.internalName); mv.visitInsn(Opcodes.ARETURN) }
     }
 }
-

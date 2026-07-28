@@ -10,39 +10,101 @@ import javax.crypto.spec.SecretKeySpec
 
 internal data class Vbc4EntryMetadata(
     val entryToken: Long = 0L,
-    val ownerToken: String = "",
-    val methodToken: String = "",
     val returnDescriptor: String = "V",
     val methodLocalProfile: Int = 0,
-    val originalOwner: String = "",
-    val originalName: String = "",
-    val originalDescriptor: String = "",
+    val methodIdentity: String = "0".repeat(64),
+    val ownerIdentity: String = "0".repeat(64),
+    val argumentTags: String = "",
     val resourcePath: String = "",
-    val originalAccess: Int = 0,
+    val isStatic: Boolean = true,
     val nativeVmProfileId: Int = 0,
 ) {
-    private val dispatchProfileTag: Int = vbc4DispatchProfileTag(entryToken, resourcePath, methodLocalProfile, originalAccess, nativeVmProfileId)
+    init {
+        require(methodIdentity.length == 64 && methodIdentity.all(::isLowerHexDigit)) { "VBC4 method identity must be 256-bit lowercase hex" }
+        require(ownerIdentity.length == 64 && ownerIdentity.all(::isLowerHexDigit)) { "VBC4 owner identity must be 256-bit lowercase hex" }
+        require(argumentTags.length <= 0xFFFF && argumentTags.all { it in VBC4_ARGUMENT_TAGS }) { "VBC4 argument tag vector is invalid" }
+        require(returnDescriptor.length == 1 && returnDescriptor[0] in VBC4_RETURN_TAGS) { "VBC4 return tag is invalid" }
+    }
+
+    private val dispatchProfileTag: Int = vbc4DispatchProfileTag(entryToken, resourcePath, methodLocalProfile, isStatic, nativeVmProfileId)
 
     fun encode(): String = listOf(
-        "vbc4-meta",
+        VBC4_METADATA_VERSION,
         entryToken.toULong().toString(16),
-        ownerToken,
-        methodToken,
         returnDescriptor,
         methodLocalProfile.toUInt().toString(16),
-        originalOwner,
-        originalName,
-        originalDescriptor,
+        methodIdentity,
+        ownerIdentity,
+        argumentTags,
         resourcePath,
-        originalAccess.toUInt().toString(16),
+        if (isStatic) "1" else "0",
         nativeVmProfileId.toUInt().toString(16),
         dispatchProfileTag.toUInt().toString(16),
     ).joinToString("|")
 }
 
-private fun vbc4DispatchProfileTag(entryToken: Long, resourcePath: String, methodLocalProfile: Int, originalAccess: Int, nativeVmProfileId: Int): Int {
+private const val VBC4_METADATA_VERSION = "vbc4-meta-v2"
+private const val VBC4_ARGUMENT_TAGS = "ZBCSIJFDL["
+private const val VBC4_RETURN_TAGS = "VZBCSIJFDL["
+private const val VBC4_CP_SEALED_STRING_TYPE = 0x06
+private const val VBC4_CP_SEALED_STRING_VERSION = 1
+private val VBC4_CP_STRING_KEY_DOMAIN = "javashroud-vbc4-cp-string-key-v1".toByteArray(Charsets.US_ASCII)
+private val VBC4_CP_STRING_IV_DOMAIN = "javashroud-vbc4-cp-string-iv-v1".toByteArray(Charsets.US_ASCII)
+private val VBC4_CP_STRING_TAG_DOMAIN = "javashroud-vbc4-cp-string-tag-v1".toByteArray(Charsets.US_ASCII)
+
+private fun isLowerHexDigit(value: Char): Boolean = value in '0'..'9' || value in 'a'..'f'
+
+internal fun vbc4ArgumentTagVector(descriptor: String): String = buildString {
+    for (argument in Type.getArgumentTypes(descriptor)) {
+        append(if (argument.sort == Type.ARRAY) '[' else if (argument.sort == Type.OBJECT) 'L' else argument.descriptor[0])
+    }
+}
+
+internal fun vbc4ReturnTag(descriptor: String): String {
+    val type = Type.getReturnType(descriptor)
+    return when (type.sort) {
+        Type.ARRAY -> "["
+        Type.OBJECT -> "L"
+        else -> type.descriptor
+    }
+}
+
+internal fun Vbc4BuildContext.deriveVbc4Identity(owner: String, name: String, descriptor: String): String {
+    val material = deriveVmBuildKey()
+    return try {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(material, "HmacSHA256"))
+        mac.update("javashroud-vbc4-method-identity-v2".toByteArray(Charsets.US_ASCII))
+        mac.update(0.toByte())
+        mac.update(vbc4ModifiedUtf8Bytes(owner))
+        mac.update(0.toByte())
+        mac.update(vbc4ModifiedUtf8Bytes(name))
+        mac.update(0.toByte())
+        mac.update(vbc4ModifiedUtf8Bytes(descriptor))
+        mac.doFinal().toHexLower()
+    } finally {
+        java.util.Arrays.fill(material, 0)
+    }
+}
+
+internal fun Vbc4BuildContext.deriveVbc4OwnerIdentity(owner: String): String {
+    val material = deriveVmBuildKey()
+    return try {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(material, "HmacSHA256"))
+        mac.update("javashroud-vbc4-owner-identity-v2".toByteArray(Charsets.US_ASCII))
+        mac.update(0.toByte())
+        mac.update(vbc4ModifiedUtf8Bytes(owner))
+        mac.doFinal().toHexLower()
+    } finally {
+        java.util.Arrays.fill(material, 0)
+    }
+}
+
+private fun vbc4DispatchProfileTag(entryToken: Long, resourcePath: String, methodLocalProfile: Int, isStatic: Boolean, nativeVmProfileId: Int): Int {
     var x = (entryToken xor (entryToken ushr 32)).toInt()
-    x = x xor methodLocalProfile xor (originalAccess * 0x45D9F3B) xor (nativeVmProfileId * 0x27D4EB2D)
+    val callFlags = if (isStatic) 1 else 0
+    x = x xor methodLocalProfile xor (callFlags * 0x45D9F3B) xor (nativeVmProfileId * 0x27D4EB2D)
     for (byte in resourcePath.toByteArray(Charsets.UTF_8)) {
         x = x xor (byte.toInt() and 0xFF)
         x *= 0x01000193
@@ -54,6 +116,7 @@ private fun vbc4DispatchProfileTag(entryToken: Long, resourcePath: String, metho
     x *= 0x846CA68B.toInt()
     return x xor (x ushr 16)
 }
+
 
 private fun vbc4RegisterRowMixWord(seed: Int, blockId: Int, rowIndex: Int, slot: Int, fieldIndex: Int): Int {
     var state = seed xor (blockId * 0x045D9F3B.toInt()) xor (rowIndex * 0x7FEB352D.toInt()) xor
@@ -97,6 +160,7 @@ internal class VmBytecodeSerializer(
     private val vbc4LayoutDigest: ByteArray = serializationBuildContext.jarLayoutDigest.copyOf()
     private val opcodeDialectSalt: Int = vbc4OpcodeDialectSalt(effectiveBuildSeed, stateBinding, entryMetadata) xor readMacInt(structureEntropyDigest)
     private val structureSalt: Int = readMacInt(structureEntropyDigest)
+    private var sensitiveMaterialCleared: Boolean = false
 
     private val instructions = mutableListOf<VmInstruction>()
     private val constantPool = mutableListOf<Any>()
@@ -106,6 +170,8 @@ internal class VmBytecodeSerializer(
     private val labelRefs = mutableListOf<LabelRef>()
     private var currentOffset = 0
     private var finalProductionEvidence: ProductionMethodEvidence? = null
+
+    private data class SealedStringPoolEntry(val encoded: ByteArray)
 
     data class VmInstruction(
         val offset: Int,
@@ -157,21 +223,36 @@ internal class VmBytecodeSerializer(
         ?: error("VBC4 production evidence requested before serialization completed")
 
     fun serialize(): ByteArray {
-        return Vbc4CryptoScope.use(vbc4MasterKey, vbc4LayoutDigest) {
-            try {
+        check(!sensitiveMaterialCleared) { "VBC4 serializer is one-shot" }
+        return try {
+            Vbc4CryptoScope.use(vbc4MasterKey, vbc4LayoutDigest) {
                 serializeWithActiveKey()
-            } finally {
+            }
+        } finally {
+            try {
                 java.util.Arrays.fill(vbc4MasterKey, 0)
                 java.util.Arrays.fill(vbc4LayoutDigest, 0)
+                java.util.Arrays.fill(structureEntropyDigest, 0)
+                constantPool.forEach { entry ->
+                    if (entry is SealedStringPoolEntry) java.util.Arrays.fill(entry.encoded, 0)
+                }
+            } finally {
+                sensitiveMaterialCleared = true
             }
         }
     }
 
     private fun serializeWithActiveKey(): ByteArray {
+        if (currentOffset !in 1..0xFFFF) {
+            throw UnsupportedOperationException(
+                "VBC4 method instruction count is outside the u16 CFG range: $currentOffset",
+            )
+        }
         resolveLabelReferences()
 
         val metadataCpIndex = addConstant(entryMetadata.encode())
         val logicalProgramBeforeCpLayout = lowerToLogicalProgram(metadataCpIndex)
+        val decoyExceptionTypeCpIndexes = prepareDecoyExceptionTypeCpIndexes(effectiveBuildSeed)
         val cpIndexMap = polymorphicConstantPoolIndexMap()
         val logicalProgram = remapLogicalProgramCpIndexes(logicalProgramBeforeCpLayout, cpIndexMap, metadataCpIndex)
         val constantPoolPlain = serializeConstantPool(cpIndexMap)
@@ -191,7 +272,7 @@ internal class VmBytecodeSerializer(
         val nonce = vbc4Nonce(effectiveBuildSeed, flags, constantPoolPlain, exceptionShape, logicalProgram.blocks.size)
         val cryptoSeed = effectiveBuildSeed
         val wrappedSeed = vbc4WrappedSeed(cryptoSeed, nonce, stateBinding)
-        val exceptionPlain = serializeExceptions(cryptoSeed, cpIndexMap)
+        val exceptionPlain = serializeExceptions(cryptoSeed, cpIndexMap, decoyExceptionTypeCpIndexes)
         // Per-entry CP encryption: each constant pool entry encrypted independently
         val cpEntryPlainBuffers = serializeConstantPoolEntries(cpIndexMap)
         val cpEntryStoredSections = cpEntryPlainBuffers.map(::compressCpEntrySection)
@@ -225,10 +306,13 @@ internal class VmBytecodeSerializer(
         writeU4(out, cpSectionBytes.size)
         out.write(cpSectionBytes)
         // Write block index for multi-block programs in seed-diversified physical storage order.
+        val nextBlockById = logicalProgram.blocks.mapIndexed { index, block ->
+            block.blockId to if (index + 1 < logicalProgram.blocks.size) logicalProgram.blocks[index + 1].blockId else logicalProgram.blocks.size
+        }.toMap()
         for (blk in storageBlocks) {
             writeU2(out, blk.blockId)
             writeU4(out, blk.entryToken)
-            writeU4(out, vbc4BlockDispatchToken(cryptoSeed, blk.blockId, nextLogicalBlockId(blk.blockId, logicalProgram.blocks.size), logicalProgram.blocks.size))
+            writeU4(out, vbc4BlockDispatchToken(cryptoSeed, blk.blockId, nextBlockById.getValue(blk.blockId), logicalProgram.blocks.size))
         }
         storageBlocks.forEach { blk ->
             val blockPlain = serializeSingleBlock(blk, logicalProgram.registerCount, nestedVm, registerRowEnvelope, mixedOperandEnvelope, blk.blockId)
@@ -354,8 +438,10 @@ internal class VmBytecodeSerializer(
             index++
         }
         val partitions = partitionLogicalGroups(groups)
+        val opaqueBlockIds = opaqueLogicalBlockIds(partitions.size)
         var globalMaskIndex = 0
-        val blocks = partitions.mapIndexed { blockId, blockGroups ->
+        val blocks = partitions.mapIndexed { logicalIndex, blockGroups ->
+            val blockId = opaqueBlockIds[logicalIndex]
             val rows = mutableListOf<VmRegisterInstruction>()
             for (group in blockGroups) {
                 val maskIndex = globalMaskIndex
@@ -372,7 +458,11 @@ internal class VmBytecodeSerializer(
                 rows.addAll(group.continuations)
                 globalMaskIndex += group.maskSlots
             }
-            VmLogicalBlock(blockId, vbc4EntryToken(effectiveBuildSeed, blockId), rows)
+            VmLogicalBlock(
+                blockId,
+                vbc4EntryToken(effectiveBuildSeed, blockId),
+                rows,
+            )
         }
         return VmLogicalProgram(
             registerCount = instructions.maxOfOrNull { it.operands.size }?.coerceAtLeast(1) ?: 1,
@@ -417,8 +507,19 @@ internal class VmBytecodeSerializer(
     }
 
 
-    private fun nextLogicalBlockId(blockId: Int, blockCount: Int): Int =
-        if (blockId + 1 < blockCount) blockId + 1 else blockCount
+    private fun opaqueLogicalBlockIds(blockCount: Int): IntArray {
+        val ids = IntArray(blockCount) { it }
+        // The native chain starts from block 0; every later logical block receives a
+        // build-secret permutation so numeric block ids no longer reveal CFG order.
+        for (index in ids.lastIndex downTo 2) {
+            val selector = structureSelector("logical-block-id", index, blockCount, effectiveBuildSeed)
+            val swap = 1 + selector % index
+            val value = ids[index]
+            ids[index] = ids[swap]
+            ids[swap] = value
+        }
+        return ids
+    }
 
     private fun vbc4BlockDispatchToken(seed: Int, blockId: Int, nextBlockId: Int, blockCount: Int): Int {
         val mask = seed.rotateLeft((blockId * 5 + 7) and 31) xor
@@ -614,7 +715,7 @@ internal class VmBytecodeSerializer(
                     opcode = VBC4_REG_OPERAND_CONT,
                     flags = VBC4_REG_FLAG_CONTINUATION,
                     dst = extraIndex,
-                    srcA = instruction.offset and 0xFFFF,
+                    srcA = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, instruction.offset),
                     srcB = 0,
                     operand = operands[extraIndex],
                 )
@@ -626,7 +727,7 @@ internal class VmBytecodeSerializer(
             maskedOpcodeBase = baseOpcode,
             primaryFlags = flags,
             primaryDst = operands.size and 0xFFFF,
-            primarySrcA = instruction.offset and 0xFFFF,
+            primarySrcA = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, instruction.offset),
             primarySrcB = if (isSuperOperator) instruction.opcode else 0,
             primaryOperand = operands.firstOrNull() ?: 0,
             continuations = continuations,
@@ -646,7 +747,7 @@ internal class VmBytecodeSerializer(
         return LogicalGroup(
             maskedOpcodeBase = VBC4_SUPER_CMP_BRANCH,
             primaryFlags = VBC4_REG_FLAG_EXECUTABLE or VBC4_REG_FLAG_SUPER or VBC4_REG_FLAG_FOLDED,
-            primaryDst = 0,
+            primaryDst = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, first.offset),
             primarySrcA = domainSuperOperandOpcode(first.opcode, instructionIndex, 0),
             primarySrcB = domainSuperOperandOpcode(second.opcode, instructionIndex, 1),
             primaryOperand = branchTarget,
@@ -667,7 +768,7 @@ internal class VmBytecodeSerializer(
         return LogicalGroup(
             maskedOpcodeBase = VBC4_SUPER_INT_ARITH,
             primaryFlags = VBC4_REG_FLAG_EXECUTABLE or VBC4_REG_FLAG_SUPER or VBC4_REG_FLAG_FOLDED,
-            primaryDst = 0,
+            primaryDst = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, first.offset),
             primarySrcA = domainSuperOperandOpcode(first.opcode, instructionIndex, 0),
             primarySrcB = domainSuperOperandOpcode(second.opcode, instructionIndex, 1),
             primaryOperand = constOperand,
@@ -686,14 +787,16 @@ internal class VmBytecodeSerializer(
     private fun requireSupportedVmOpcode(opcode: Int, offset: Int, role: String) {
         if (opcode == VmOpcodes.VM_UNSUPPORTED) {
             throw UnsupportedOperationException(
-                "VBC4 serializer produced unsupported $role opcode for ${entryMetadata.originalOwner}#${entryMetadata.originalName}${entryMetadata.originalDescriptor} at offset=$offset",
+                "VBC4 serializer produced unsupported $role opcode for identity=${entryMetadata.methodIdentity.take(16)} at offset=$offset",
             )
         }
     }
 
-    private fun registerOperands(instruction: VmInstruction): List<Int> = instruction.operands.map { operand ->
+    private fun registerOperands(instruction: VmInstruction): List<Int> = instruction.operands.mapIndexed { operandIndex, operand ->
         when (operand) {
-            is Int -> operand
+            is Int -> if (vbc4OperandIsInstructionTarget(instruction.opcode, operandIndex)) {
+                vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, operand)
+            } else operand
             is Float -> java.lang.Float.floatToIntBits(operand)
             is String -> addConstant(operand)
             else -> operand.hashCode()
@@ -785,22 +888,15 @@ internal class VmBytecodeSerializer(
 
     private fun writeConstantPoolEntry(out: java.io.ByteArrayOutputStream, entry: Any) {
         when (entry) {
-            is String -> {
-                out.write(0x01)
-                val bytes = entry.toByteArray(Charsets.UTF_8)
-                writeU2(out, bytes.size)
-                out.write(bytes)
+            is SealedStringPoolEntry -> {
+                out.write(VBC4_CP_SEALED_STRING_TYPE)
+                out.write(entry.encoded)
             }
             is Int -> { out.write(0x02); writeU4(out, entry) }
             is Long -> { out.write(0x03); writeU8(out, entry) }
             is Float -> { out.write(0x04); writeU4(out, java.lang.Float.floatToIntBits(entry)) }
             is Double -> { out.write(0x05); writeU8(out, java.lang.Double.doubleToLongBits(entry)) }
-            else -> {
-                out.write(0x01)
-                val bytes = entry.toString().toByteArray(Charsets.UTF_8)
-                writeU2(out, bytes.size)
-                out.write(bytes)
-            }
+            else -> error("Unsupported VBC4 constant-pool entry type: ${entry::class.java.name}")
         }
     }
 
@@ -808,12 +904,12 @@ internal class VmBytecodeSerializer(
         (if (includeCount) 2 else 0) + constantPool.sumOf(::estimateConstantPoolEntrySize)
 
     private fun estimateConstantPoolEntrySize(entry: Any): Int = when (entry) {
-        is String -> 3 + entry.toByteArray(Charsets.UTF_8).size
+        is SealedStringPoolEntry -> 1 + entry.encoded.size
         is Int -> 5
         is Long -> 9
         is Float -> 5
         is Double -> 9
-        else -> 3 + entry.toString().toByteArray(Charsets.UTF_8).size
+        else -> error("Unsupported VBC4 constant-pool entry type: ${entry::class.java.name}")
     }
 
     private fun polymorphicOpcode(opcode: Int, instructionIndex: Int): Int {
@@ -1075,44 +1171,82 @@ internal class VmBytecodeSerializer(
         // an executable fallback; the native parser rejects any non-zero stack stream.
         writeU2(out, 0)
     }
-    private fun serializeExceptions(cryptoSeed: Int, cpIndexMap: IntArray): ByteArray {
+    private data class SerializedExceptionEntry(
+        val start: Int,
+        val end: Int,
+        val handler: Int,
+        val typeCpIndex: Int,
+    )
+
+    private fun prepareDecoyExceptionTypeCpIndexes(cryptoSeed: Int): List<Int> {
+        if (currentOffset < 2) return emptyList()
+        val decoyCount = 1 + ((cryptoSeed ushr 16) and 0x3) % 3
+        return List(decoyCount) { index ->
+            val suffix = structureSelector("decoy-exception-type", index, cryptoSeed).toUInt().toString(16)
+            addConstant("javashroud/decoy/E$suffix") + 1
+        }
+    }
+
+    private fun vbc4OperandIsInstructionTarget(opcode: Int, operandIndex: Int): Boolean = when (canonicalVmOpcode(opcode)) {
+        VmOpcodes.VM_GOTO, VmOpcodes.VM_JSR,
+        VmOpcodes.VM_IFEQ, VmOpcodes.VM_IFNE, VmOpcodes.VM_IFLT, VmOpcodes.VM_IFGE, VmOpcodes.VM_IFGT, VmOpcodes.VM_IFLE,
+        VmOpcodes.VM_IF_ICMPEQ, VmOpcodes.VM_IF_ICMPNE, VmOpcodes.VM_IF_ICMPLT, VmOpcodes.VM_IF_ICMPGE,
+        VmOpcodes.VM_IF_ICMPGT, VmOpcodes.VM_IF_ICMPLE, VmOpcodes.VM_IF_ACMPEQ, VmOpcodes.VM_IF_ACMPNE,
+        VmOpcodes.VM_IFNULL, VmOpcodes.VM_IFNONNULL -> operandIndex == 0
+        VmOpcodes.VM_TABLESWITCH -> operandIndex == 2 || operandIndex >= 3
+        VmOpcodes.VM_LOOKUPSWITCH -> operandIndex == 1 || operandIndex >= 3 && operandIndex % 2 == 1
+        else -> false
+    }
+
+    private fun remapExceptionTypeCpIndex(typeCpIndex: Int, cpIndexMap: IntArray): Int =
+        if (cpIndexMap.isNotEmpty() && typeCpIndex > 0 && typeCpIndex - 1 < cpIndexMap.size) {
+            cpIndexMap[typeCpIndex - 1] + 1
+        } else {
+            typeCpIndex
+        }
+
+    private fun serializeExceptions(
+        cryptoSeed: Int,
+        cpIndexMap: IntArray,
+        decoyExceptionTypeCpIndexes: List<Int>,
+    ): ByteArray {
         val out = java.io.ByteArrayOutputStream()
-        // Add 1-3 decoy exception entries after real ones to confuse analysis tools.
-        // Decoys use plausible but unreachable offsets within the instruction stream.
-        val decoyCount = 1 + ((cryptoSeed ushr 16) and 0x3) % 3  // 1-3 decoys
-        val totalEntries = exceptionEntries.size + decoyCount
-        writeU2(out, totalEntries)
-        for ((index, entry) in exceptionEntries.withIndex()) {
+        val entries = exceptionEntries.map { entry ->
+            SerializedExceptionEntry(
+                start = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, requireLabelOffset(entry.start, "start")),
+                end = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, requireLabelOffset(entry.end, "end")),
+                handler = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, requireLabelOffset(entry.handler, "handler")),
+                typeCpIndex = remapExceptionTypeCpIndex(entry.typeCpIndex, cpIndexMap),
+            )
+        }.toMutableList()
+
+        // Decoys occupy valid instruction ranges and carry deliberately unresolvable,
+        // non-Throwable catch types. Insert them among real entries while preserving the
+        // relative order (and therefore the JVM precedence) of all real handlers.
+        val instructionCount = currentOffset
+        decoyExceptionTypeCpIndexes.forEachIndexed { decoyIndex, logicalTypeCpIndex ->
+            val start = structureSelector("decoy-exception-start", decoyIndex, cryptoSeed) % (instructionCount - 1)
+            val remaining = instructionCount - start - 1
+            val end = start + 1 + structureSelector("decoy-exception-end", decoyIndex, cryptoSeed, start) % remaining
+            val handler = structureSelector("decoy-exception-handler", decoyIndex, cryptoSeed, start, end) % instructionCount
+            val decoy = SerializedExceptionEntry(
+                start = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, start),
+                end = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, end),
+                handler = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, handler),
+                typeCpIndex = remapExceptionTypeCpIndex(logicalTypeCpIndex, cpIndexMap),
+            )
+            val insertionPoint = structureSelector("decoy-exception-order", decoyIndex, cryptoSeed) % (entries.size + 1)
+            entries.add(insertionPoint, decoy)
+        }
+
+        writeU2(out, entries.size)
+        for ((index, entry) in entries.withIndex()) {
             val token = vbc4ExceptionToken(cryptoSeed, index)
             writeU4(out, token)
-            writeU2(out, requireLabelOffset(entry.start, "start") xor vbc4ExceptionMask(cryptoSeed, index, 0, token))
-            writeU2(out, requireLabelOffset(entry.end, "end") xor vbc4ExceptionMask(cryptoSeed, index, 1, token))
-            writeU2(out, requireLabelOffset(entry.handler, "handler") xor vbc4ExceptionMask(cryptoSeed, index, 2, token))
-            // Apply polymorphic CP index remapping if enabled
-            val typeCpIndex = if (cpIndexMap.isNotEmpty() && entry.typeCpIndex > 0 && (entry.typeCpIndex - 1) < cpIndexMap.size) {
-                cpIndexMap[entry.typeCpIndex - 1] + 1
-            } else {
-                entry.typeCpIndex
-            }
-            writeU2(out, typeCpIndex xor vbc4ExceptionMask(cryptoSeed, index, 3, token))
-        }
-        // Emit decoy entries with crypto-derived plausible offsets.
-        // Decoy ranges are placed BEYOND the real instruction count so they
-        // never match any fault_pc during normal execution.
-        val maxOffset = currentOffset.coerceAtLeast(16)
-        for (di in 0 until decoyCount) {
-            val decoyIndex = exceptionEntries.size + di
-            val token = vbc4ExceptionToken(cryptoSeed, decoyIndex)
-            writeU4(out, token)
-            // Place decoy range beyond real instructions: start/end > maxOffset
-            val decoyBase = maxOffset + 1 + ((cryptoSeed xor (di * 0x9E3779B9.toInt())) and 0x7FFF)
-            val decoyStart = decoyBase
-            val decoyEnd = decoyBase + 2 + ((cryptoSeed xor (di * 0x85EBCA6B.toInt())) and 0x1F)
-            val decoyHandler = decoyEnd + 1  // handler also beyond range
-            writeU2(out, decoyStart xor vbc4ExceptionMask(cryptoSeed, decoyIndex, 0, token))
-            writeU2(out, decoyEnd xor vbc4ExceptionMask(cryptoSeed, decoyIndex, 1, token))
-            writeU2(out, decoyHandler xor vbc4ExceptionMask(cryptoSeed, decoyIndex, 2, token))
-            writeU2(out, 0 xor vbc4ExceptionMask(cryptoSeed, decoyIndex, 3, token))  // catch-all type
+            writeU2(out, entry.start xor vbc4ExceptionMask(cryptoSeed, index, 0, token))
+            writeU2(out, entry.end xor vbc4ExceptionMask(cryptoSeed, index, 1, token))
+            writeU2(out, entry.handler xor vbc4ExceptionMask(cryptoSeed, index, 2, token))
+            writeU2(out, entry.typeCpIndex xor vbc4ExceptionMask(cryptoSeed, index, 3, token))
         }
         return out.toByteArray()
     }
@@ -1123,9 +1257,52 @@ internal class VmBytecodeSerializer(
     private fun addConstant(value: Any): Int {
         constantPoolIndex[value]?.let { return it }
         val index = constantPool.size
-        constantPool.add(value)
+        constantPool.add(if (value is String) sealStringPoolEntry(value) else value)
         constantPoolIndex[value] = index
         return index
+    }
+
+    private fun sealStringPoolEntry(value: String): SealedStringPoolEntry {
+        var plain = ByteArray(0)
+        val nonce = ByteArray(16)
+        var buildKey = ByteArray(0)
+        var keyMaterial = ByteArray(0)
+        var ivMaterial = ByteArray(0)
+        var key = ByteArray(0)
+        var iv = ByteArray(0)
+        var ciphertext = ByteArray(0)
+        var tag = ByteArray(0)
+        return try {
+            plain = vbc4ModifiedUtf8Bytes(value)
+            require(plain.size <= 0xFFFF) { "VBC4 string constant exceeds u16 length" }
+            SecureRandom().nextBytes(nonce)
+            buildKey = serializationBuildContext.deriveVmBuildKey()
+            keyMaterial = vbc4CpStringMac(buildKey, VBC4_CP_STRING_KEY_DOMAIN, nonce)
+            ivMaterial = vbc4CpStringMac(buildKey, VBC4_CP_STRING_IV_DOMAIN, nonce)
+            key = keyMaterial.copyOfRange(0, 16)
+            iv = ivMaterial.copyOfRange(0, 16)
+            val cipher = Cipher.getInstance("AES/CTR/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+            ciphertext = cipher.doFinal(plain)
+            tag = vbc4CpStringMac(buildKey, VBC4_CP_STRING_TAG_DOMAIN, nonce, ciphertext)
+            val out = java.io.ByteArrayOutputStream(1 + 16 + 2 + ciphertext.size + tag.size)
+            out.write(VBC4_CP_SEALED_STRING_VERSION)
+            out.write(nonce)
+            writeU2(out, ciphertext.size)
+            out.write(ciphertext)
+            out.write(tag)
+            SealedStringPoolEntry(out.toByteArray())
+        } finally {
+            java.util.Arrays.fill(plain, 0)
+            java.util.Arrays.fill(buildKey, 0)
+            java.util.Arrays.fill(keyMaterial, 0)
+            java.util.Arrays.fill(ivMaterial, 0)
+            java.util.Arrays.fill(key, 0)
+            java.util.Arrays.fill(iv, 0)
+            java.util.Arrays.fill(ciphertext, 0)
+            java.util.Arrays.fill(tag, 0)
+            java.util.Arrays.fill(nonce, 0)
+        }
     }
 
     private fun emit(opcode: Int, vararg operands: Any) {
@@ -1361,22 +1538,13 @@ internal class VmBytecodeSerializer(
                 staticTarget.desc,
             ).joinToString("|")
         }
-        if (normalized.bootstrapMethodHandle.owner == "java/lang/invoke/LambdaMetafactory" &&
-            normalized.bootstrapMethodHandle.name == "metafactory" &&
-            normalized.bootstrapMethodArguments.size >= 3
-        ) {
-            val impl = normalized.bootstrapMethodArguments[1] as? Handle
-            if (impl != null) {
-                return listOf(
-                    "lambda",
-                    normalized.name,
-                    normalized.descriptor,
-                    impl.tag.toString(),
-                    impl.owner,
-                    impl.name,
-                    impl.desc,
-                ).joinToString("|")
-            }
+        val samRecipe = extractSamLambdaMetafactoryRecipe(normalized)
+        if (samRecipe != null) {
+            return encodeSamLambdaMetafactoryConstant(
+                name = normalized.name,
+                descriptor = normalized.descriptor,
+                recipe = samRecipe,
+            )
         }
         val bsmRef = "${normalized.bootstrapMethodHandle.owner}.${normalized.bootstrapMethodHandle.name}:${normalized.bootstrapMethodHandle.desc}"
         val callRef = "${normalized.name}:${normalized.descriptor}"
@@ -1437,7 +1605,7 @@ internal class VmBytecodeSerializer(
                 }
                 val constant = value.getBootstrapMethodArgument(0) as? String
                     ?: throw UnsupportedOperationException("unsupported ConstantDynamic string argument")
-                listOf("condy", "str", bsm.owner, bsm.name, bsm.desc, constant.encodeToByteArray().joinToString("") { "%02x".format(it.toInt() and 0xFF) }).joinToString("|")
+                listOf("condy", "str", bsm.owner, bsm.name, bsm.desc, vbc4ModifiedUtf8Bytes(constant).joinToString("") { "%02x".format(it.toInt() and 0xFF) }).joinToString("|")
             }
             "I" -> {
                 require(bsm.tag == Opcodes.H_INVOKESTATIC && bsm.name == "\$_c_int" &&
@@ -1503,6 +1671,11 @@ internal class VmBytecodeSerializer(
     }
 
     override fun visitMaxs(maxStack: Int, maxLocals: Int) {
+        if (currentOffset >= 0xFFFF) {
+            throw UnsupportedOperationException(
+                "VBC4 method exceeds the u16 CFG instruction limit before VM_MAXS",
+            )
+        }
         emit(VmOpcodes.VM_MAXS, maxStack, maxLocals)
     }
 
@@ -2151,6 +2324,60 @@ private fun vbc4EntryToken(seed: Int, blockId: Int): Int =
 
 private fun vbc4OpcodeMask(seed: Int, index: Int): Int = vbc4MaskWord(seed, 7, index, index) and 0xFF
 
+/**
+ * VBC4 control-flow targets are stored as build-secret affine block ids rather
+ * than raw JVM instruction indexes. The native runtime reconstructs the dense
+ * execution program only after the runtime master material has been installed.
+ */
+internal fun vbc4CfgEncodeIndex(seed: Int, instructionCount: Int, instructionIndex: Int): Int {
+    require(instructionCount in 1..0xFFFF) { "VBC4 CFG instruction count is out of range" }
+    require(instructionIndex in 0..instructionCount) { "VBC4 CFG instruction index is out of range" }
+    val multiplier = vbc4CfgMultiplier(seed, instructionCount)
+    val offset = vbc4CfgOffset(seed, instructionCount)
+    return ((instructionIndex.toLong() * multiplier.toLong() + offset.toLong()) and VBC4_CFG_MASK.toLong()).toInt()
+}
+
+internal fun vbc4CfgDecodeIndex(seed: Int, instructionCount: Int, encodedIndex: Int): Int {
+    require(instructionCount in 1..0xFFFF) { "VBC4 CFG instruction count is out of range" }
+    require(encodedIndex in 0..VBC4_CFG_MASK) { "VBC4 CFG encoded index is out of range" }
+    val multiplier = vbc4CfgMultiplier(seed, instructionCount)
+    val inverse = vbc4ModInverse(multiplier, VBC4_CFG_MODULUS)
+    val normalized = (encodedIndex - vbc4CfgOffset(seed, instructionCount)) and VBC4_CFG_MASK
+    val decoded = (normalized.toLong() * inverse.toLong() and VBC4_CFG_MASK.toLong()).toInt()
+    require(decoded <= instructionCount) { "VBC4 CFG encoded index does not map into the method" }
+    return decoded
+}
+
+private const val VBC4_CFG_MODULUS = 0x10000
+private const val VBC4_CFG_MASK = VBC4_CFG_MODULUS - 1
+
+private fun vbc4CfgMultiplier(seed: Int, instructionCount: Int): Int {
+    // Every odd multiplier is invertible over the complete u16 domain. Keeping
+    // all 65,536 values avoids collisions for instruction indexes 65521..65535.
+    return ((seed xor instructionCount.rotateLeft(7) xor 0x6D2B79F5) and VBC4_CFG_MASK) or 1
+}
+
+private fun vbc4CfgOffset(seed: Int, instructionCount: Int): Int =
+    (seed.rotateLeft(13) xor instructionCount * 0x45D9F3B xor 0x27D4EB2D) and VBC4_CFG_MASK
+
+private fun vbc4ModInverse(value: Int, modulus: Int): Int {
+    var t = 0L
+    var nextT = 1L
+    var r = modulus.toLong()
+    var nextR = Math.floorMod(value, modulus).toLong()
+    while (nextR != 0L) {
+        val quotient = r / nextR
+        val oldT = t
+        t = nextT
+        nextT = oldT - quotient * nextT
+        val oldR = r
+        r = nextR
+        nextR = oldR - quotient * nextR
+    }
+    require(r == 1L) { "VBC4 CFG multiplier is not invertible" }
+    return Math.floorMod(t, modulus.toLong()).toInt()
+}
+
 private fun vbc4ExceptionToken(seed: Int, index: Int): Int =
     withVbc4HmacMaterial(
         "vbc4-exception-token".toByteArray(Charsets.US_ASCII),
@@ -2230,6 +2457,42 @@ private fun vbc4Hmac(data: ByteArray, seed: Int, vararg parts: ByteArray): ByteA
     } finally {
         java.util.Arrays.fill(scopedKey, 0)
     }
+}
+
+private fun vbc4CpStringMac(key: ByteArray, vararg parts: ByteArray): ByteArray {
+    val mac = Mac.getInstance("HmacSHA256")
+    mac.init(SecretKeySpec(key, "HmacSHA256"))
+    parts.forEach(mac::update)
+    return mac.doFinal()
+}
+
+/** JNI NewStringUTF consumes modified UTF-8 rather than standard UTF-8. */
+private fun vbc4ModifiedUtf8Bytes(value: String): ByteArray {
+    var encodedLength = 0
+    for (character in value) {
+        val code = character.code
+        val width = if (code in 1..0x7F) 1 else if (code <= 0x7FF) 2 else 3
+        require(encodedLength <= 0xFFFF - width) { "VBC4 string constant exceeds u16 length" }
+        encodedLength += width
+    }
+    val encoded = ByteArray(encodedLength)
+    var offset = 0
+    for (character in value) {
+        val code = character.code
+        when {
+            code in 1..0x7F -> encoded[offset++] = code.toByte()
+            code <= 0x7FF -> {
+                encoded[offset++] = (0xC0 or (code ushr 6)).toByte()
+                encoded[offset++] = (0x80 or (code and 0x3F)).toByte()
+            }
+            else -> {
+                encoded[offset++] = (0xE0 or (code ushr 12)).toByte()
+                encoded[offset++] = (0x80 or ((code ushr 6) and 0x3F)).toByte()
+                encoded[offset++] = (0x80 or (code and 0x3F)).toByte()
+            }
+        }
+    }
+    return encoded
 }
 
 private fun intBytes(value: Int): ByteArray = byteArrayOf(

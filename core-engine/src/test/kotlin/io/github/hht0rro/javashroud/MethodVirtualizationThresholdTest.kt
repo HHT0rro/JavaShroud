@@ -629,7 +629,8 @@ class MethodVirtualizationThresholdTest {
             MemberSummary(MemberKind.METHOD, "cold", "()I", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
         ))
 
-        val sealed = withVbc4BuildContext(defaultVbc4BuildContext()) {
+        val context = defaultVbc4BuildContext()
+        val sealed = withVbc4BuildContext(context) {
             val virtualized = applyMethodVirtualization(
                 artifact = artifact,
                 ruleMatches = ruleMatchesFor("example/VmThreshold"),
@@ -638,7 +639,15 @@ class MethodVirtualizationThresholdTest {
             RuntimeArtifactSealing.seal(virtualized, 0x4A53524CL, rewritesVmRuntime = true)
         }
 
-        assertEquals(1, sealed.jarEntries.count { entry ->
+        val roots = withVbc4BuildContext(context) {
+            sealed.jarEntries.mapNotNull { entry ->
+                RuntimeResourceCodec.decode(entry.bytes)?.takeIf {
+                    it.size >= 5 && it.copyOfRange(0, 5).contentEquals("JSC1|".toByteArray(Charsets.US_ASCII))
+                }
+            }
+        }
+        assertEquals(1, roots.size)
+        assertEquals(0, sealed.jarEntries.count { entry ->
             entry.bytes.size >= 5 && entry.bytes.copyOfRange(0, 5).contentEquals("JSC1|".toByteArray(Charsets.US_ASCII))
         })
     }

@@ -32,6 +32,7 @@ import java.util.Arrays
 import javax.crypto.Mac
 
 private const val LEGACY_SEALED_NATIVE_INDEX_RESOURCE = "META-INF/.r/0.dat"
+private const val LEGACY_SEALED_NATIVE_BINDINGS_RESOURCE = "META-INF/.r/bindings.dat"
 private const val LEGACY_DELAYED_METHOD_RESOURCE_ROOT = "__jmd/"
 private const val LEGACY_CLASS_ENCRYPTION_RESOURCE_ROOT = "__jse/"
 private const val LEGACY_CLASS_ENCRYPTION_MANIFEST_RESOURCE = "__jse/index.tab"
@@ -77,6 +78,8 @@ private val SEALED_RUNTIME_HELPERS = listOf(
     "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper${"$"}RuntimeResourceMetadata",
     "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper${"$"}SealedNativeLibrary",
     "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper${"$"}TypeParseResult",
+    "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper${"$"}SamLambdaOptions",
+    "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper${"$"}SamInvocationHandler",
 )
 
 /**
@@ -96,6 +99,7 @@ object RuntimeArtifactSealing {
 
     internal fun seal(artifact: BytecodeArtifact, seed: Long, rewritesVmRuntime: Boolean = true): BytecodeArtifact {
         val reservedEntryNames = artifact.jarEntries.map { it.name }.toMutableSet()
+        var sealedNativeBindingsResource: String? = null
         val vmCatalogPlan = if (rewritesVmRuntime) requireVbc4BuildContext().runtimeVmCatalogPlanOrNull() else null
         val rewritesCurrentVmRuntime = vmCatalogPlan != null
         val vmCatalogResource = if (rewritesCurrentVmRuntime) {
@@ -118,6 +122,7 @@ object RuntimeArtifactSealing {
             preferredName = sealedNativeIndexResourceName(seed),
             reservedEntryNames = reservedEntryNames,
         )
+        reservedEntryNames += sealedNativeIndexResource
         val helperClassRenameMap = sealedRuntimeHelperRenameMap(artifact, seed)
         val helperMemberRenamePlan = sealedJavaOnlyHelperMemberRenamePlan(seed, helperClassRenameMap)
         val resourceRenameMap = linkedMapOf<String, String>()
@@ -134,6 +139,19 @@ object RuntimeArtifactSealing {
             LEGACY_SEALED_NATIVE_INDEX_RESOURCE to sealedNativeIndexResource,
             VBC4_VM_CATALOG_RESOURCE to vmCatalogResource,
         )
+        if (helperClassRenameMap.isNotEmpty()) {
+            sealedNativeBindingsResource = uniqueSealedResourceName(
+                seed = seed,
+                kind = "b",
+                originalName = "native-bindings",
+                index = 0,
+                preferredName = sealedNativeBindingsResourceName(seed),
+                reservedEntryNames = reservedEntryNames,
+            )
+            val bindingResource = checkNotNull(sealedNativeBindingsResource)
+            reservedEntryNames += bindingResource
+            helperStringRewriteMap[LEGACY_SEALED_NATIVE_BINDINGS_RESOURCE] = bindingResource
+        }
         helperStringRewriteMap.putAll(sealedHelperStringRewriteMap(seed, helperClassRenameMap))
         val resourceStringRewriteMap = linkedMapOf(
             LEGACY_CLASS_ENCRYPTION_RESOURCE_ROOT to sealedSemanticText(seed, "class-encryption-root"),
@@ -189,7 +207,7 @@ object RuntimeArtifactSealing {
                     resourceRenameMap[entry.name] = sealedName
                     entry.copy(name = sealedName, bytes = encodeSealedClassEncryptionManifest(entry.bytes, resourceRenameMap))
                 }
-                entry.name == LEGACY_SEALED_NATIVE_INDEX_RESOURCE -> null
+                entry.name == LEGACY_SEALED_NATIVE_INDEX_RESOURCE || entry.name == LEGACY_SEALED_NATIVE_BINDINGS_RESOURCE -> null
                 entry.name == METHOD_RENAME_BINDINGS_RESOURCE -> null
                 else -> renamedClassEntry(entry, helperClassRenameMap)
             }
@@ -233,8 +251,14 @@ object RuntimeArtifactSealing {
                     collectApplicationMethodRenameBindings(rewrittenClassArtifacts, helperClassRenameMap)
                 runtimeEntries += JarEntryData(
                     name = sealedNativeIndexResource,
-                    bytes = encodeSealedNativeIndex(sealedNativeSpecs, helperClassRenameMap, helperMemberRenamePlan, applicationMethodBindings),
+                    bytes = encodeSealedNativeIndex(sealedNativeSpecs),
                 )
+                sealedNativeBindingsResource?.let { bindingResource ->
+                    runtimeEntries += JarEntryData(
+                        name = bindingResource,
+                        bytes = encodeSealedNativeBindings(helperClassRenameMap, helperMemberRenamePlan, applicationMethodBindings, seed),
+                    )
+                }
             }
             runtimeEntries
         }
@@ -364,6 +388,10 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     fun addMethod(owner: String, name: String, descriptor: String) {
         val sealedOwner = helperClassRenameMap[owner] ?: return
         if (name == "<init>" || name == "<clinit>") return
+        if (
+            owner == "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper" &&
+            (name.startsWith("native") || name == "createSamLambda" || name == "takeExpectedShellBindingCommitment")
+        ) return
         val sealedMethodName = sealedMemberName(seed, owner, name, descriptor, "m")
         for (candidate in listOf(owner, sealedOwner)) {
             methodRenames[SealedMemberRef(candidate, name, descriptor)] = sealedMethodName
@@ -439,7 +467,9 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     addMethod(jniHelper, "nativeHeartbeat", "()I")
     addMethod(jniHelper, "nativeGetVersion", "()Ljava/lang/String;")
     addMethod(jniHelper, "nativeGetBootToken", "()J")
-    addMethod(jniHelper, "nativeInstallRuntimeResourceKey", "([BI)V")
+    addMethod(jniHelper, "nativeInstallBootMaterial", "([B)Z")
+    addMethod(jniHelper, "nativeIsBootMaterialReady", "()Z")
+    addMethod(jniHelper, "nativeAbortBootMaterial", "()V")
     addMethod(jniHelper, "nativePreloadRuntimeResources", "([B[B[B)V")
     addMethod(jniHelper, "nativeDecryptAes", "([B[B[B)[B")
     addMethod(jniHelper, "nativeExecuteVmResource", "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;")
@@ -448,6 +478,8 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     addMethod(jniHelper, "nativeExecuteVmResourceInt", "(J)I")
     addMethod(jniHelper, "nativeExecuteVmResourceIntInt", "(JI)I")
     addMethod(jniHelper, "nativeExecuteVmResourceIntVoid", "(JI)V")
+    addMethod(jniHelper, "createSamLambda", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;")
+    addMethod(jniHelper, "takeExpectedShellBindingCommitment", "()[B")
 
     val bootstrap = "$PROTECTION_HELPER_PACKAGE/BootstrapEncryptionHelper"
     addMethod(bootstrap, "decryptBytes", "(Ljava/lang/String;Ljava/lang/String;)[B")
@@ -457,7 +489,7 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     addMethod(classEncryption, "initializeClass", "(Ljava/lang/String;Ljava/lang/String;)V")
 
     val stringEncryption = "$PROTECTION_HELPER_PACKAGE/StringEncryptionHelper"
-    addMethod(stringEncryption, "nativeDecodeString", "([BII)[B")
+    addMethod(stringEncryption, "nativeDecodeString", "([BIIJJ)[B")
 
     val methodBody = "$PROTECTION_HELPER_PACKAGE/MethodBodyDecryptionHelper"
     addMethod(methodBody, "invokeEncrypted", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Class;Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;")
@@ -532,6 +564,9 @@ private fun nativeSpecFor(entryName: String): SealedNativeSpec {
 
 private fun sealedNativeIndexResourceName(seed: Long): String =
     sealedResourceName(seed, "i", "native-index", 0)
+
+private fun sealedNativeBindingsResourceName(seed: Long): String =
+    sealedResourceName(seed, "b", "native-bindings", 0)
 
 private fun sealedResourceRoot(seed: Long): String {
     val digest = sealedDigest(seed, "rr", "runtime-artifacts", 0)
@@ -617,21 +652,40 @@ private fun sealedInnocuousExtension(digest: String): String {
 }
 private fun encodeSealedNativeIndex(
     specs: List<SealedNativeSpec>,
+): ByteArray {
+    val plain = specs
+        .joinToString(separator = "\n", postfix = if (specs.isEmpty()) "" else "\n") { spec ->
+            listOf(spec.platform, spec.resourceName, spec.loadSuffix).joinToString("|")
+        }
+        .toByteArray(Charsets.UTF_8)
+    return encodeBootstrapNativeIndex(plain)
+}
+
+private fun encodeSealedNativeBindings(
     helperClassRenameMap: Map<String, String>,
     helperMemberRenamePlan: SealedHelperMemberRenamePlan,
     applicationMethodBindings: Map<SealedMemberRef, String> = emptyMap(),
+    seed: Long,
 ): ByteArray {
     val lines = mutableListOf<String>()
-    lines += specs.map { spec -> listOf(spec.platform, spec.resourceName, spec.loadSuffix).joinToString("|") }
     lines += helperClassRenameMap.map { (originalName, sealedName) -> listOf("B", sealedBindingKey(originalName), sealedName).joinToString("|") }
     lines += helperMemberRenamePlan.methodRenames
         .filter { (ref, _) -> ref.owner in helperClassRenameMap.keys }
         .map { (ref, sealedName) -> listOf("M", sealedBindingKey("${ref.owner}#${ref.name}#${ref.descriptor}"), sealedName).joinToString("|") }
     lines += applicationMethodBindings
         .map { (ref, renamedName) -> listOf("M", sealedBindingKey("${ref.owner}#${ref.name}#${ref.descriptor}"), renamedName).joinToString("|") }
-    val plain = lines.joinToString(separator = "\n", postfix = "\n").toByteArray(Charsets.UTF_8)
-    return encodeBootstrapNativeIndex(plain)
+    return encodeSealedNativeBindingLines(lines, seed)
 }
+
+internal fun encodeSealedNativeBindingLines(lines: List<String>, seed: Long): ByteArray =
+    RuntimeResourceCodec.encodeForAnchor(
+        bytes = lines.joinToString(separator = "\n", postfix = "\n").toByteArray(Charsets.UTF_8),
+        kind = RuntimeResourceKind.NativeIndex,
+        seed = sealedDigest(seed, "bk", "native-bindings", 0).take(8).toLong(16).toInt(),
+        variantId = 1,
+        layerCount = 4,
+        compress = true,
+    )
 
 private fun parseMethodRenameBindings(jarEntries: List<JarEntryData>): Map<SealedMemberRef, String> {
     val entry = jarEntries.firstOrNull { it.name == METHOD_RENAME_BINDINGS_RESOURCE } ?: return emptyMap()

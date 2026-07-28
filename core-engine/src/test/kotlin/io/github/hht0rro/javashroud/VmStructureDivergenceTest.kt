@@ -13,6 +13,8 @@ import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.NativeVmBuildProfile
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4EntryMetadata
 import io.github.hht0rro.javashroud.transforms.protection.VmBytecodeSerializer
+import io.github.hht0rro.javashroud.transforms.protection.vbc4CfgDecodeIndex
+import io.github.hht0rro.javashroud.transforms.protection.vbc4CfgEncodeIndex
 import io.github.hht0rro.javashroud.transforms.protection.applyMethodVirtualization
 import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import org.objectweb.asm.Opcodes
@@ -101,7 +103,9 @@ class VmStructureDivergenceTest {
 
         for (entry in snapshot.entries) {
             val legacyPayload = entry.token xor dispatchMask(effectiveSeed, entry.blockId, snapshot.blockCount)
-            val expectedNext = if (entry.blockId + 1 < snapshot.blockCount) entry.blockId + 1 else snapshot.blockCount
+            val chain = dispatchChain(snapshot)
+            val chainIndex = chain.indexOf(entry.blockId)
+            val expectedNext = if (chainIndex + 1 < chain.size) chain[chainIndex + 1] else snapshot.blockCount
             assertTrue(
                 legacyPayload !in 0..snapshot.blockCount,
                 "multi-block dispatch must not emit legacy raw-next ids",
@@ -117,7 +121,30 @@ class VmStructureDivergenceTest {
             .map { serializedLayout(0x7800_0000 + it) }
             .first { it.blockIds != (0 until it.blockCount).toList() }
 
-        assertEquals((0 until snapshot.blockCount).toList(), dispatchChain(snapshot), "state-bound dispatch chain must recover logical execution order from shuffled storage")
+        val chain = dispatchChain(snapshot)
+        assertEquals(snapshot.blockCount, chain.size, "state-bound dispatch chain must visit every logical block")
+        assertEquals((0 until snapshot.blockCount).toSet(), chain.toSet(), "state-bound dispatch chain must be a full block-id permutation")
+        assertEquals(0, chain.first(), "native dispatch must retain block zero as its authenticated entry")
+        assertTrue(
+            chain.drop(1) != (1 until snapshot.blockCount).toList() || snapshot.blockCount == 2,
+            "logical block ids after entry must be build-secret shuffled when more than one permutation exists",
+        )
+    }
+
+    @Test
+    fun cfg_instruction_ids_are_build_keyed_and_round_trip_all_branch_targets() {
+        val instructionCount = 257
+        val firstSeed = 0x1357_2468
+        val secondSeed = 0x2468_1357
+        val first = (0..instructionCount).map { vbc4CfgEncodeIndex(firstSeed, instructionCount, it) }
+        val second = (0..instructionCount).map { vbc4CfgEncodeIndex(secondSeed, instructionCount, it) }
+
+        assertEquals(first.size, first.toSet().size, "CFG storage ids must be bijective inside one method")
+        assertTrue(first != (0..instructionCount).toList(), "CFG storage ids must not expose raw JVM instruction indexes")
+        assertTrue(first != second, "CFG storage ids must diverge across build seeds")
+        first.forEachIndexed { index, encoded ->
+            assertEquals(index, vbc4CfgDecodeIndex(firstSeed, instructionCount, encoded), "native-equivalent inverse must recover every target")
+        }
     }
 
     @Test

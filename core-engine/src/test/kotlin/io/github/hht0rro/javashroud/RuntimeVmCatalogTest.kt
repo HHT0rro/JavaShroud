@@ -29,7 +29,7 @@ class RuntimeVmCatalogTest {
     @Test
     fun root_hmac_authenticates_the_complete_catalog_body() = withCatalogContext { context ->
         val fixture = catalogFixture(context)
-        val root = parseRoot(fixture.artifacts.getValue(VBC4_VM_CATALOG_RESOURCE))
+        val root = parseSealedRoot(fixture.artifacts.getValue(VBC4_VM_CATALOG_RESOURCE))
         val anchorKey = context.runtimeKeyPartitions!!.copyAnchorKey()
         val expectedTag = try {
             hmacSha256(anchorKey, ROOT_AUTH_DOMAIN, root.body)
@@ -55,7 +55,7 @@ class RuntimeVmCatalogTest {
     @Test
     fun partition_directories_cover_every_runtime_resource_and_match_all_merkle_roots() = withCatalogContext { context ->
         val fixture = catalogFixture(context)
-        val root = parseRoot(fixture.artifacts.getValue(VBC4_VM_CATALOG_RESOURCE))
+        val root = parseSealedRoot(fixture.artifacts.getValue(VBC4_VM_CATALOG_RESOURCE))
         val partitionCount = context.runtimeKeyPartitions!!.resourcePartitionCount
 
         assertEquals(partitionCount, root.partitionCount)
@@ -139,7 +139,7 @@ class RuntimeVmCatalogTest {
     @Test
     fun authenticated_outer_catalog_still_rejects_tampered_method_identity_fields() = withCatalogContext { context ->
         val fixture = catalogFixture(context)
-        val root = parseRoot(fixture.artifacts.getValue(VBC4_VM_CATALOG_RESOURCE))
+        val root = parseSealedRoot(fixture.artifacts.getValue(VBC4_VM_CATALOG_RESOURCE))
         val descriptor = root.directories.single { it.partitionId == 0 }
         val directoryPlain = RuntimeResourceCodec.decode(fixture.artifacts.getValue(descriptor.path))
             ?: error("catalog directory did not decode")
@@ -328,6 +328,12 @@ class RuntimeVmCatalogTest {
             body = body,
             tag = tagLine[1].hexToBytes(),
         )
+    }
+
+    private fun parseSealedRoot(bytes: ByteArray): CatalogRoot {
+        assertFalse(bytes.decodeToString().startsWith("JSC1|"), "catalog root must not expose its JSC1 directory in plaintext")
+        val plain = RuntimeResourceCodec.decode(bytes) ?: error("catalog root envelope did not decode")
+        return parseRoot(plain)
     }
 
     private fun parseDirectory(bytes: ByteArray): CatalogDirectoryContents {
