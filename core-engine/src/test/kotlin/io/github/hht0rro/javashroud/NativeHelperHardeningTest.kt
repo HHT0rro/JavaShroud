@@ -115,6 +115,34 @@ class NativeHelperHardeningTest {
         assertEquals("java/lang/StackTraceElement", decodeNativeSecret(include, "STACK_TRACE_ELEMENT_CLASS", seed))
     }
 
+    @Test
+    fun native_key_integrity_constants_match_decoded_obfuscated_key() {
+        val kernelSource = Files.readString(sourcePath("src/main/native/js_kernel.c"))
+        val helperSource = Files.readString(sourcePath("src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
+        val encoded = requireNotNull(
+            Regex("""(?s)static volatile unsigned char JS_KEY_OBF\[\]\s*=\s*\{([^}]*)\};""").find(kernelSource),
+        ).groupValues[1].parseCBytes()
+        assertEquals(16, encoded.size, "native integrity key must retain its 16-byte encoded form")
+
+        val decoded = encoded.mapIndexed { index, value ->
+            val base = 0xA5 + index * 0x1F
+            val mask = (base + (base ushr 3) + index * 17) and 0xFF
+            ((value.toInt() and 0xFF) - mask) and 0xFF
+        }
+        var decodedHash = 0x811C9DC5L
+        decoded.forEach { value ->
+            decodedHash = ((decodedHash xor value.toLong()) * 0x01000193L) and 0xFFFFFFFFL
+        }
+        val nativeHash = requireNotNull(
+            Regex("""g_key_valid\s*=\s*\(chk\s*==\s*0x([0-9A-Fa-f]+)u\)""").find(kernelSource),
+        ).groupValues[1].toLong(16)
+        val javaHash = requireNotNull(
+            Regex("""token\s*\^=\s*0x([0-9A-Fa-f]+)L;\s*//\s*FNV1a\(decoded native key\)""").find(helperSource),
+        ).groupValues[1].toLong(16)
+        assertEquals(decodedHash, nativeHash, "native key self-check must match the decoded JS_KEY_OBF FNV1a32")
+        assertEquals(decodedHash, javaHash, "Java boot-token derivation must mirror the native decoded-key FNV1a32")
+    }
+
 
     @Test
     fun native_runtime_defenses_skip_timing_sensitive_classes_before_clinit_injection() {

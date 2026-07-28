@@ -917,7 +917,7 @@ public final class JniMicrokernelHelper {
     private static long computeExpectedBootToken(String platformSuffix) {
         if (platformSuffix == null) platformSuffix = "";
         long token = 0xCBF29CE484222325L;
-        token ^= 0xAD3B3ED7L; // FNV1a(decoded native key), mirrored from js_kernel.c
+        token ^= 0xCC4A1511L; // FNV1a(decoded native key), mirrored from js_kernel.c
         token *= 0x100000001B3L;
         token ^= 1L; // g_initialized after nativeInit succeeds
         token *= 0x100000001B3L;
