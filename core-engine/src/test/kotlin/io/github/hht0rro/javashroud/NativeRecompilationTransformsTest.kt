@@ -419,9 +419,12 @@ class NativeRecompilationTransformsTest {
         val preloadBody = core.substringAfter(
             "jsn_k9(JNIEnv *env, jclass cls, jbyteArray preload_index, jbyteArray commitments, jbyteArray startup_nonce)",
         ).substringBefore("JS_HIDDEN jbyteArray JNICALL jsn_k10")
+        val preloadReset = preloadBody.indexOf("js_vm_abort_preload_state(env);")
+        val catalogRegistration = preloadBody.indexOf("js_vm_register_preload_index_entries(index_bytes, index_len)")
+        val lazyLoadEnable = preloadBody.indexOf("js_vm_preload_in_progress = 1;")
         assertTrue(
-            preloadBody.contains("js_vm_preload_in_progress = 0;") && preloadBody.contains("js_vm_preload_in_progress = 1;"),
-            "Native preload must keep lazy resource loading disabled until the authenticated VM catalog is registered",
+            preloadReset >= 0 && catalogRegistration > preloadReset && lazyLoadEnable > catalogRegistration,
+            "Native preload must reset prior state and keep lazy resource loading disabled until the authenticated VM catalog is registered",
         )
         val normalizedCore = core.replace("\r\n", "\n")
         assertTrue(
