@@ -1774,6 +1774,26 @@ class NativeHelperHardeningTest {
     }
 
     @Test
+    fun native_vm_lazy_preload_waits_for_the_concurrent_loader() {
+        val nativeSource = nativeRuntimeSources()
+        val markBody = nativeFunctionBody(nativeSource, "js_vm_call_gate_mark_loading(jlong entry_token, const char *resource_path)")
+        val clearBody = nativeFunctionBody(nativeSource, "js_vm_call_gate_clear_loading(jlong entry_token)")
+        val waitBody = nativeFunctionBody(nativeSource, "js_vm_call_gate_wait_for_program(jlong entry_token, const char *resource_path)")
+        val lazyBody = nativeFunctionBody(nativeSource, "js_vm_preload_indexed_program_on_demand(JNIEnv *env, jclass resource_cls, jlong entry_token, const char *resource_path, jstring resourcePath)")
+        val legacyBody = nativeFunctionBody(nativeSource, "jsn_k8(JNIEnv *env, jclass cls, jlong entryToken, jstring resourcePath)")
+        val publishIndex = lazyBody.indexOf("js_vm_ephemeral_cache_put(entry_token, resource_path, program)")
+        val clearIndex = lazyBody.lastIndexOf("js_vm_call_gate_clear_loading(entry_token);")
+
+        assertTrue(markBody.contains("js_vm_cache_lock_enter();") && markBody.contains("js_vm_cache_lock_leave();"), "Lazy preload ownership must be selected under the native cache lock.")
+        assertTrue(clearBody.contains("js_vm_cache_lock_enter();") && clearBody.contains("js_vm_cache_lock_leave();"), "Lazy preload completion must publish under the native cache lock.")
+        assertTrue(waitBody.contains("for (int attempt = 0; attempt < JS_VM_PRELOAD_WAIT_ATTEMPTS; attempt++)") && waitBody.contains("js_vm_call_gate_wait_pause();"), "A concurrent lazy preload must use a bounded wait.")
+        assertTrue(waitBody.contains("js_vm_ephemeral_cache_get(entry_token, resource_path)"), "A waiting preload must re-read the resident program cache.")
+        assertTrue(lazyBody.contains("return js_vm_call_gate_wait_for_program(entry_token, resource_path);"), "A losing lazy preload caller must wait for and reuse the owning loader's program.")
+        assertTrue(publishIndex >= 0 && clearIndex > publishIndex, "The owner must publish the resident program before clearing its loading state.")
+        assertTrue(legacyBody.contains("cached = js_vm_call_gate_wait_for_program(entryToken, path);") && legacyBody.contains("if (!cached) js_vm_fail_closed(env"), "The legacy preload entry must also wait and fail closed when the owner does not publish a program.")
+    }
+
+    @Test
     fun native_vm_symbol_cache_does_not_retain_plaintext_symbols_on_invoke_path() {
         val nativeSource = nativeRuntimeSources()
         val cacheStart = nativeSource.indexOf("typedef struct {\n    int cp_idx;")

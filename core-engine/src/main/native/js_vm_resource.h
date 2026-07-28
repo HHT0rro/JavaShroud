@@ -39,6 +39,7 @@ JS_HIDDEN int js_vm_call_gate_register_profile(jlong entry_token, const char *re
 JS_HIDDEN const js_vm_call_gate_entry* js_vm_call_gate_lookup(jlong entry_token);
 JS_HIDDEN int js_vm_call_gate_mark_loading(jlong entry_token, const char *resource_path);
 JS_HIDDEN void js_vm_call_gate_clear_loading(jlong entry_token);
+JS_HIDDEN js_vm_program* js_vm_call_gate_wait_for_program(jlong entry_token, const char *resource_path);
 JS_HIDDEN void js_vm_call_gate_reset(void);
 JS_HIDDEN int js_vm_commitments_install(const unsigned char *bytes, int len);
 JS_HIDDEN int js_vm_commitment_matches(const char *path, const unsigned char *raw, int raw_len);

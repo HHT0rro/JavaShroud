@@ -1,3 +1,9 @@
+#ifndef _WIN32
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+#endif
+
 #include "js_vm_resource.h"
 #include "js_crypto.h"
 #include "js_jni_runtime.h"
@@ -12,9 +18,11 @@
 #include <windows.h>
 #else
 #include <pthread.h>
+#include <time.h>
 #endif
 
 #define JS_VM_CALL_GATE_SIZE 8192
+#define JS_VM_PRELOAD_WAIT_ATTEMPTS 10000
 
 typedef struct {
     char original[JS_VM_CALL_GATE_KEY_LEN];
@@ -204,15 +212,51 @@ static js_vm_call_gate_entry* js_vm_call_gate_lookup_mutable(jlong entry_token) 
 }
 
 JS_HIDDEN int js_vm_call_gate_mark_loading(jlong entry_token, const char *resource_path) {
+    int marked = 0;
+    js_vm_cache_lock_enter();
     js_vm_call_gate_entry *entry = js_vm_call_gate_lookup_mutable(entry_token);
-    if (!entry || !resource_path || strcmp(entry->resource_path, resource_path) != 0 || entry->loading) return 0;
-    entry->loading = 1;
-    return 1;
+    if (entry && resource_path && strcmp(entry->resource_path, resource_path) == 0 && !entry->loading) {
+        entry->loading = 1;
+        marked = 1;
+    }
+    js_vm_cache_lock_leave();
+    return marked;
 }
 
 JS_HIDDEN void js_vm_call_gate_clear_loading(jlong entry_token) {
+    js_vm_cache_lock_enter();
     js_vm_call_gate_entry *entry = js_vm_call_gate_lookup_mutable(entry_token);
     if (entry) entry->loading = 0;
+    js_vm_cache_lock_leave();
+}
+
+static void js_vm_call_gate_wait_pause(void) {
+#ifdef _WIN32
+    Sleep(1);
+#else
+    const struct timespec delay = {0, 1000000L};
+    (void)nanosleep(&delay, NULL);
+#endif
+}
+
+JS_HIDDEN js_vm_program* js_vm_call_gate_wait_for_program(jlong entry_token, const char *resource_path) {
+    if (entry_token == 0 || !resource_path || !resource_path[0]) return NULL;
+    for (int attempt = 0; attempt < JS_VM_PRELOAD_WAIT_ATTEMPTS; attempt++) {
+        js_vm_program *cached = js_vm_ephemeral_cache_get(entry_token, resource_path);
+        if (cached) return cached;
+
+        int loading = 0;
+        js_vm_cache_lock_enter();
+        js_vm_call_gate_entry *entry = js_vm_call_gate_lookup_mutable(entry_token);
+        if (entry && entry->active && strcmp(entry->resource_path, resource_path) == 0) {
+            loading = entry->loading;
+        }
+        js_vm_cache_lock_leave();
+
+        if (!loading) return js_vm_ephemeral_cache_get(entry_token, resource_path);
+        js_vm_call_gate_wait_pause();
+    }
+    return js_vm_ephemeral_cache_get(entry_token, resource_path);
 }
 
 JS_HIDDEN void js_vm_call_gate_reset(void) {
@@ -1066,7 +1110,9 @@ JS_HIDDEN js_vm_program* js_vm_preload_indexed_program_on_demand(JNIEnv *env, jc
     if (!gate || !gate->active || strcmp(gate->resource_path, resource_path) != 0) return NULL;
     js_vm_program *cached = js_vm_ephemeral_cache_get(entry_token, resource_path);
     if (cached) return cached;
-    if (!js_vm_call_gate_mark_loading(entry_token, resource_path)) return NULL;
+    if (!js_vm_call_gate_mark_loading(entry_token, resource_path)) {
+        return js_vm_call_gate_wait_for_program(entry_token, resource_path);
+    }
     js_vm_program *program = js_vm_prepare_resource_program_bound(env, resource_cls, entry_token, resourcePath, resource_path);
     if (program && gate->expected_profile != 0u && program->method_local_profile != gate->expected_profile) {
         js_vm_free_program(env, program);

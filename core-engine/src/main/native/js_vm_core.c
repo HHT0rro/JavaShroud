@@ -6928,7 +6928,12 @@ jsn_k8(JNIEnv *env, jclass cls, jlong entryToken, jstring resourcePath)
     if (!path) { js_vm_fail_closed(env, NULL); return; }
     js_vm_program *cached = js_vm_ephemeral_cache_get(entryToken, path);
     if (cached) { rls(env, resourcePath, path); return; }
-    if (!js_vm_call_gate_mark_loading(entryToken, path)) { rls(env, resourcePath, path); return; }
+    if (!js_vm_call_gate_mark_loading(entryToken, path)) {
+        cached = js_vm_call_gate_wait_for_program(entryToken, path);
+        rls(env, resourcePath, path);
+        if (!cached) js_vm_fail_closed(env, "native VM preload did not complete");
+        return;
+    }
     js_vm_program *program = js_vm_prepare_resource_program(env, cls, entryToken, resourcePath);
     if (program) {
         js_vm_program validation;
