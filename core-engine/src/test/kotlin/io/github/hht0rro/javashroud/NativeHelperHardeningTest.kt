@@ -1150,7 +1150,11 @@ class NativeHelperHardeningTest {
         assertTrue(nestedBody.contains("JS_VBC4_NESTED_FIELD_OPCODE_BASE"), "Nested VM decoder must parse second-level field micro-ops.")
         assertTrue(nestedBody.contains("js_vbc4_nested_row_checksum"), "Nested VM decoder must validate row checksums before lowering to register rows.")
         assertTrue(nativeSource.contains("js_vm_decode_nested_register_block(block_plain"), "VBC4 parser must expand nested microcode before register validation.")
-        assertTrue(nativeSource.contains("p->nested_vm_profile != p->method_local_profile"), "Metadata profile mismatch must fail closed instead of silently accepting a malformed nested block.")
+        assertTrue(
+            nativeSource.contains("if (p->nested_vm_profile == 0u) p->nested_vm_profile = nested_profile;") &&
+                nativeSource.contains("else if (p->nested_vm_profile != nested_profile) JS_VM_PARSE_FAIL;"),
+            "Nested VM metadata must bind the first decoded profile and fail closed when later blocks disagree.",
+        )
     }
 
     @Test
@@ -1176,7 +1180,7 @@ class NativeHelperHardeningTest {
                 nativeSource.contains("jsrp-auth-v3") &&
                 nativeSource.contains("raw[4] == 7") &&
                 nativeSource.contains("js_runtime_hmac_sha256") &&
-                nativeSource.contains("js_runtime_resource_key_slot_ready[partition_id]") &&
+                nativeSource.contains("js_runtime_resource_key_slot_ready[key_slot]") &&
                 !nativeSource.contains("js_vm_decode_resource_layer") &&
                 !nativeSource.contains("js_vm_resource_hmac"),
             "Native VM must own current AES-CTR/HMAC/zstd runtime-resource unsealing with per-partition key slots after the helper installs the per-build key domains.",
@@ -1432,20 +1436,25 @@ class NativeHelperHardeningTest {
     @Test
     fun native_vm_state_bound_resources_derive_keys_from_runtime_context() {
         val nativeSource = nativeRuntimeSources()
+        val stateBindingBody = nativeFunctionBody(
+            nativeSource,
+            "js_vm_build_state_binding(jlong entry_token, const char *resource_path, unsigned char *out, int out_cap)",
+        )
         assertTrue(
             nativeSource.contains("JS_VBC4_REQUIRED_FLAGS") && nativeSource.contains("require full VBC4 max-strength feature set") &&
                 nativeSource.contains("js_vbc4_unwrap_seed(vbc4_nonce, vbc4_wrapped_seed, state_binding, state_binding_len, &build_seed)"),
             "VBC4 resources must fail-hard unless runtime binding material participates in seed unwrapping.",
         )
         assertTrue(
-                nativeSource.contains("out[binding_len++] = 0") &&
-                nativeSource.contains("memcpy(out + binding_len, binding_resource_path, resource_len)") &&
-                nativeSource.contains("memcpy(out + binding_len, layout_digest_hex, layout_len)") &&
-                nativeSource.contains("entry_token") &&
-                nativeSource.contains("resource_path ? resource_path") &&
-                nativeSource.contains("entry_integrity") &&
-                nativeSource.contains("JS_VBC4_LAYOUT_DIGEST"),
-            "nativeExecuteVmResource path must bind entry token, resource path, entry integrity, and layout digest into the parser context.",
+            stateBindingBody.contains("out[binding_len++] = 0") &&
+                stateBindingBody.contains("(unsigned long long)entry_token") &&
+                stateBindingBody.contains("resource_path ? resource_path : \"\"") &&
+                stateBindingBody.contains("memcpy(out + binding_len, binding_resource_path, resource_len)") &&
+                stateBindingBody.contains("js_vm_write_clean_entry_integrity_bytes(entry_integrity)") &&
+                stateBindingBody.contains("entry_integrity[0], entry_integrity[1], entry_integrity[2], entry_integrity[3]") &&
+                stateBindingBody.contains("js_vbc4_copy_scoped_layout_digest(layout_digest)") &&
+                stateBindingBody.contains("memcpy(out + binding_len, layout_digest_hex, layout_len)"),
+            "nativeExecuteVmResource path must bind entry token, resource path, entry integrity, and runtime layout material into the parser context.",
         )
         assertFalse(
             nativeSource.contains("js_vm_stack_context_state") ||
