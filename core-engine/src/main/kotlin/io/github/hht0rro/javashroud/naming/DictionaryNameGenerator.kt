@@ -46,12 +46,12 @@ internal class NameGenerator(
 
     fun generatePackageSegment(): String {
         return when (config.dictionaryStyle) {
-            "iiliii" -> generateIiliiiName().lowercase()
-            "ooO0oO" -> generateOoO0oOName().lowercase()
-            "nnmnmnm" -> generateNnmnmnmName().lowercase()
+            "iiliii" -> generateIiliiiName().lowercase(Locale.ROOT)
+            "ooO0oO" -> generateOoO0oOName().lowercase(Locale.ROOT)
+            "nnmnmnm" -> generateNnmnmnmName().lowercase(Locale.ROOT)
             "sequential" -> "p${counter++.toString().padStart(4, '0')}"
-            "unicode-confusable" -> generateUnicodeConfusableName().lowercase()
-            "custom-file" -> generateCustomFileName().lowercase()
+            "unicode-confusable" -> generateUnicodeConfusableName().lowercase(Locale.ROOT)
+            "custom-file" -> generateCustomFileName().lowercase(Locale.ROOT)
             else -> "p${counter++.toString().padStart(4, '0')}"
         }.let { applyCollisionPolicy(it) }
     }

@@ -32,8 +32,7 @@ fun renamePackages(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, par
  val runtimeBoundClassNames = priorRuntimeBoundClassNames(artifact)
  val packageRenameCandidates = matchedClassNames.filterNot { it.startsWith("dev/aide/jvmobf/") || it in runtimeBoundClassNames }.toSet() 
  val packageRenameMap = buildPackageRenameMap(artifact.classArtifacts, packageRenameCandidates, config) 
-    val classRenameMap = applyPackageRenameMap(artifact.classArtifacts, packageRenameMap)
- .filterKeys { packageRenameCandidates.contains(it) } 
+    val classRenameMap = applyPackageRenameMap(artifact.classArtifacts, packageRenameMap, packageRenameCandidates)
     return applyClassRenameMap(artifact, classRenameMap)
 }
 
