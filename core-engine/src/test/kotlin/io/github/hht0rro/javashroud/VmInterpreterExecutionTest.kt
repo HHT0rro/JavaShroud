@@ -1265,27 +1265,39 @@ class VmInterpreterExecutionTest {
         source = """
             package e2e;
 
+            import java.util.concurrent.CountDownLatch;
+            import java.util.concurrent.Future;
             import java.util.concurrent.LinkedBlockingQueue;
             import java.util.concurrent.RejectedExecutionException;
             import java.util.concurrent.ThreadPoolExecutor;
             import java.util.concurrent.TimeUnit;
 
             public final class ThreadPoolRoot {
-                private static int value = 1;
+                private static volatile int value = 1;
                 private static final ThreadPoolExecutor EXECUTOR = new ThreadPoolExecutor(0, 1, 1L, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>(1));
+                private static final CountDownLatch FIRST_STARTED = new CountDownLatch(1);
+                private static final CountDownLatch RELEASE_FIRST = new CountDownLatch(1);
 
                 private static final class Exec {
                     private final int delta;
+                    private final boolean blockFirst;
 
-                    Exec(int delta) {
+                    Exec(int delta, boolean blockFirst) {
                         this.delta = delta;
+                        this.blockFirst = blockFirst;
                     }
 
                     void doAdd() {
-                        try {
-                            Thread.sleep(200L);
-                        } catch (InterruptedException ignored) {
-                            Thread.currentThread().interrupt();
+                        if (blockFirst) {
+                            FIRST_STARTED.countDown();
+                            try {
+                                if (!RELEASE_FIRST.await(5L, TimeUnit.SECONDS)) {
+                                    throw new IllegalStateException("first executor task was not released");
+                                }
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                throw new IllegalStateException("first executor task was interrupted", e);
+                            }
                         }
                         value += delta;
                     }
@@ -1305,18 +1317,23 @@ class VmInterpreterExecutionTest {
 
                 private static String run() throws Exception {
                     try {
-                        EXECUTOR.submit(direct(new Exec(3)));
-                        Thread.sleep(50L);
-                        EXECUTOR.submit(snapshot(new Exec(2)));
-                        Thread.sleep(50L);
+                        Future<?> first = EXECUTOR.submit(direct(new Exec(3, true)));
+                        if (!FIRST_STARTED.await(5L, TimeUnit.SECONDS)) {
+                            throw new IllegalStateException("first executor task did not start");
+                        }
+                        Thread.sleep(1L);
+                        Future<?> second = EXECUTOR.submit(snapshot(new Exec(2, false)));
                         try {
-                            EXECUTOR.submit(direct(new Exec(100)));
+                            EXECUTOR.submit(direct(new Exec(100, false)));
                         } catch (RejectedExecutionException expected) {
                             value += 10;
                         }
-                        Thread.sleep(800L);
+                        RELEASE_FIRST.countDown();
+                        first.get(5L, TimeUnit.SECONDS);
+                        second.get(5L, TimeUnit.SECONDS);
                         return "pool:" + value;
                     } finally {
+                        RELEASE_FIRST.countDown();
                         EXECUTOR.shutdownNow();
                     }
                 }
