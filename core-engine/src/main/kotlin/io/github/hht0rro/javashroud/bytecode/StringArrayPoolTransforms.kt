@@ -121,7 +121,7 @@ private fun containsNativeStringDecodeCallsite(classNode: ClassNode): Boolean =
             insn is MethodInsnNode &&
                 insn.opcode == Opcodes.INVOKESTATIC &&
                 insn.owner.startsWith("r/") &&
-                insn.desc == "([BII)[B"
+                insn.desc == "([BIIJJ)[B"
         }
     }
 
