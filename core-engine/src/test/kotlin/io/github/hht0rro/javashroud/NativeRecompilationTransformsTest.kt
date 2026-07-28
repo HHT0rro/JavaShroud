@@ -38,10 +38,12 @@ class NativeRecompilationTransformsTest {
     @Test
     fun native_recompilation_retries_known_zig_cache_failures() {
         val source = java.nio.file.Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeRecompilationTransforms.kt"))
+        val compileBody = source.substringAfter("private fun runZigCompileWithRetry").substringBefore("private fun isTransientZigFileOpenFailure")
         val retryBody = source.substringAfter("private fun isTransientZigFileOpenFailure").substringBefore("internal fun generateDiversifiedSecrets")
 
         assertTrue(retryBody.contains("file_open Unexpected"), "Transient Zig file-open failures must remain retryable.")
         assertTrue(retryBody.contains("CacheCheckFailed"), "Transient Zig cache-check failures must be retried before failing native compilation.")
+        assertTrue(compileBody.contains("output.isBlank()"), "Undiagnosed Zig failures must receive the same bounded retry treatment.")
     }
     @Test
     fun generateDiversifiedSecrets_produces_different_output_for_different_seeds() {

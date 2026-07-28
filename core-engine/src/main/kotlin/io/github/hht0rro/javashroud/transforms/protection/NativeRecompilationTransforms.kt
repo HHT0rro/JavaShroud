@@ -770,8 +770,13 @@ object NativeRecompilationTransforms {
         repeat(3) { attempt ->
             val process = processBuilder.start()
             val output = process.inputStream.bufferedReader().readText()
-            lastResult = ZigCompileResult(process.waitFor() == 0, output)
-            if (lastResult.success || !isTransientZigFileOpenFailure(output) || attempt == 2) return@synchronized lastResult
+            val exitCode = process.waitFor()
+            lastResult = ZigCompileResult(
+                success = exitCode == 0,
+                output = output.ifBlank { "Zig exited with code $exitCode without diagnostics" },
+            )
+            val transientFailure = output.isBlank() || isTransientZigFileOpenFailure(output)
+            if (lastResult.success || !transientFailure || attempt == 2) return@synchronized lastResult
             Thread.sleep(250L)
         }
         lastResult
