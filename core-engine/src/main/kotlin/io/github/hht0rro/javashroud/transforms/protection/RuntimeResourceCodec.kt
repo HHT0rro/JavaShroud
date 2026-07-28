@@ -68,6 +68,28 @@ object RuntimeResourceCodec {
         )
     }
 
+    internal fun encodeForAnchor(
+        bytes: ByteArray,
+        kind: RuntimeResourceKind,
+        seed: Int,
+        variantId: Int,
+        layerCount: Int,
+        compress: Boolean = true,
+    ): ByteArray {
+        val partitions = requireVbc4BuildContext().runtimeKeyPartitions
+        return encodePartitioned(
+            bytes = bytes,
+            kind = kind,
+            seed = seed,
+            variantId = variantId,
+            layerCount = layerCount,
+            compress = compress,
+            partitions = partitions,
+            partitionIdentity = null,
+            forcedPartitionId = partitions.anchorSlotId,
+        )
+    }
+
     internal fun partitionId(bytes: ByteArray): Int? {
         if (!hasCurrentHeader(bytes) || bytes.size < headerSize) return null
         return readLe16(bytes, 25)
@@ -98,7 +120,7 @@ object RuntimeResourceCodec {
         val identity = partitionIdentity
             ?: concatBytes(arrayOf(intBytes(kind.id), intBytes(seed), plainHash))
         val partitionId = forcedPartitionId ?: partitions.partitionFor(identity)
-        val key = partitions.copyResourceKey(partitionId)
+        val key = partitions.copyKeyForSlot(partitionId)
         return try {
             val kindBytes = intBytes(kind.id)
             val variantBytes = intBytes(normalizedVariant)
@@ -149,11 +171,11 @@ object RuntimeResourceCodec {
         val declaredMacLength = readLe16(bytes, 23)
         val partitionId = readLe16(bytes, 25)
         if (metadataLength != metadataSize || declaredMacLength != macLength) return null
-        if (partitionId >= partitions.resourcePartitionCount) return null
+        if (partitionId > partitions.anchorSlotId) return null
         val metadataOffset = headerSize
         val bodyOffset = metadataOffset + metadataLength
         if (bodyOffset + macLength + 1 > bytes.size) return null
-        val key = partitions.copyResourceKey(partitionId)
+        val key = partitions.copyKeyForSlot(partitionId)
         return try {
             val tagOffset = bytes.size - macLength - 1
             val expectedTag = hmacSha256WithKey(key, bytes, 0, tagOffset, partitionedAuthDomain, nonce)

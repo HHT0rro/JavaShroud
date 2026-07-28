@@ -12,8 +12,8 @@ import javax.crypto.spec.SecretKeySpec
  *
  * Method resources are serialized before the native microkernel is recompiled,
  * so both phases must derive the same build-local root key from the same run
- * context. The key is never kept as a repository source constant; it is only
- * materialized in memory and in the per-output generated native include.
+ * context. Root material is never kept as a repository or generated-native
+ * constant; it is sealed into boot.dat and materialized only in runtime memory.
  */
 internal data class Vbc4BuildContext(
     val masterKey: ByteArray,
@@ -25,6 +25,7 @@ internal data class Vbc4BuildContext(
     val productionBuildEvidence: CandidateProductionBuildEvidence = CandidateProductionBuildEvidence.disabled(nativeVmProfile),
 ) {
     private var runtimeVmCatalogPlan: RuntimeVmCatalogPlan? = null
+    private var bootSecretSnapshot: ByteArray? = null
 
     init {
         require(masterKey.size == VBC4_MASTER_KEY_SIZE) { "VBC4 master key must be 32 bytes" }
@@ -39,6 +40,14 @@ internal data class Vbc4BuildContext(
     }
 
     fun runtimeVmCatalogPlanOrNull(): RuntimeVmCatalogPlan? = runtimeVmCatalogPlan
+
+    @Synchronized
+    fun copyBootSecretForBuild(): ByteArray {
+        val snapshot = bootSecretSnapshot ?: NativeKernelShellPacker.requireBootSecretForBuild().also {
+            bootSecretSnapshot = it
+        }
+        return snapshot.copyOf()
+    }
 
     /**
      * Derive a build-local sub key from the per-build runtime resource root key
@@ -111,19 +120,26 @@ internal data class Vbc4BuildContext(
         }
     }
 
+    @Synchronized
     fun scopedCopy(): Vbc4BuildContext = copy(
         masterKey = masterKey.copyOf(),
         jarLayoutDigest = jarLayoutDigest.copyOf(),
         runtimeResourceKey = runtimeResourceKey.copyOf(),
         runtimeKeyPartitions = runtimeKeyPartitions.deepCopy(),
         productionBuildEvidence = productionBuildEvidence,
-    ).also { copy -> copy.runtimeVmCatalogPlan = runtimeVmCatalogPlan }
+    ).also { copy ->
+        copy.runtimeVmCatalogPlan = runtimeVmCatalogPlan
+        copy.bootSecretSnapshot = bootSecretSnapshot?.copyOf()
+    }
 
+    @Synchronized
     fun wipe() {
         java.util.Arrays.fill(masterKey, 0)
         java.util.Arrays.fill(jarLayoutDigest, 0)
         java.util.Arrays.fill(runtimeResourceKey, 0)
         runtimeKeyPartitions.wipe()
+        bootSecretSnapshot?.let { java.util.Arrays.fill(it, 0) }
+        bootSecretSnapshot = null
         runtimeVmCatalogPlan = null
     }
 }

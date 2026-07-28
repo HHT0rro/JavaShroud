@@ -47,10 +47,11 @@ class NativeHelperHardeningTest {
             nativeSource.contains("Java_io_github_hht0rro_javashroud_transforms_protection_StringEncryptionHelper"),
             "StringEncryptionHelper must not expose a traditional Java_* JNI export symbol.",
         )
-        assertTrue(helperSource.contains("public static native byte[] nativeDecodeString(byte[] payload, int seed, int flags);"))
+        assertTrue(helperSource.contains("public static native byte[] nativeDecodeString(byte[] payload, int seed, int flags, long classIdentityHigh, long classIdentityLow);"))
         assertTrue(!helperSource.contains("public static String decode("), "StringEncryptionHelper must not expose a Java string-decoder trampoline.")
-        assertTrue(helperSource.contains("public static String cachedDecodeString(byte[] payload, int seed, int flags)"), "StringEncryptionHelper should expose only the native-backed cached string materialization API.")
-        assertTrue(helperSource.contains("nativeDecodeString(payload, seed, flags)"), "Cached materialization must still delegate decryption to the native microkernel.")
+        assertTrue(helperSource.contains("public static String cachedDecodeString(byte[] payload, int seed, int flags, long classIdentityHigh, long classIdentityLow)"), "StringEncryptionHelper should expose only the native-backed cached string materialization API.")
+        assertTrue(helperSource.contains("nativeDecodeString(payload, seed, flags, classIdentityHigh, classIdentityLow)"), "Cached materialization must still delegate decryption to the native microkernel.")
+        assertTrue(nativeSource.contains("javashroud-string-class-v1") && nativeSource.contains("class_identity_high"), "String material must be derived through a per-class native KDF domain.")
         assertTrue(helperSource.contains("ConcurrentHashMap"), "Repeated string materialization must be cached outside target classes to avoid hot-path native decrypt loops.")
         assertTrue(helperSource.contains("JniMicrokernelHelper.loadKernel"), "String helper must load through the JNI microkernel.")
         assertFalse(helperSource.contains("Base64"), "String helper must not retain legacy Base64 payload handling.")
@@ -77,7 +78,8 @@ class NativeHelperHardeningTest {
         )
         for (fingerprint in listOf(
             "nativeExecuteVmResource",
-            "nativeInstallRuntimeResourceKey",
+            "nativeInstallBootMaterial",
+            "nativeAbortBootMaterial",
             "nativePreloadRuntimeResources",
             "nativeCheckInstrumentation",
             "nativeCheckJvmTiAgents",
@@ -1007,7 +1009,7 @@ class NativeHelperHardeningTest {
             "js_write_be32_tmp(dispatch_tag_bytes, program->dispatch_profile_tag)",
             "js_write_be32_tmp(flags_bytes, program->vbc4_flags)",
             "js_write_be32_tmp(nested_profile_bytes, program->nested_vm_profile)",
-            "js_write_be32_tmp(access_bytes, program->original_access)",
+            "js_write_be32_tmp(call_flags_bytes, program->is_static ? 1u : 0u)",
             "return_desc_byte[0] = (unsigned char)program->return_desc",
         ).forEach { metadataBinding ->
             assertTrue(tagBody.contains(metadataBinding), "Runtime session tag must bind $metadataBinding")
@@ -1022,10 +1024,10 @@ class NativeHelperHardeningTest {
             "dispatch_tag_bytes",
             "flags_bytes",
             "nested_profile_bytes",
-            "access_bytes",
-            "program->original_owner",
-            "program->original_name",
-            "program->original_desc",
+            "call_flags_bytes",
+            "program->method_identity",
+            "program->owner_identity",
+            "program->argument_tags",
             "return_desc_byte",
         ).forEach { tagInput ->
             assertTrue(tagParts.contains(tagInput), "Runtime session HMAC inputs must include $tagInput")
@@ -1615,13 +1617,8 @@ class NativeHelperHardeningTest {
 
         val loadKernelCalls = callsByMethod.getValue("loadKernel(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V")
         val bundledIndex = loadKernelCalls.indexOfFirst { it.second == "tryLoadBundledNative" }
-        val systemIndex = loadKernelCalls.indexOfFirst { it.second == "tryLoadNative" }
         assertTrue(bundledIndex >= 0, "loadKernel must attempt bundled native loading")
-        assertTrue(systemIndex >= 0, "loadKernel may still fall back to system java.library.path loading")
-        assertTrue(
-            bundledIndex < systemIndex,
-            "Bundled native library must be tried before system library path to avoid stale js_kernel shadowing. Calls=$loadKernelCalls",
-        )
+        assertFalse(loadKernelCalls.any { it.second == "tryLoadNative" }, "bundled verification failure must fail closed without a system library fallback")
 
         val abiCalls = callsByMethod.getValue("verifyNativeAbiAfterLoad()Z")
         assertTrue(
@@ -1675,12 +1672,14 @@ class NativeHelperHardeningTest {
     }
 
     @Test
-    fun vm_exception_table_contains_decoy_entries_beyond_instruction_range() {
+    fun vm_exception_table_decoys_use_valid_ranges_and_unresolvable_catch_types() {
         val source = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/VmBytecodeSerializer.kt"))
 
-        assertTrue(source.contains("decoyCount"), "VM serializer must generate decoy exception entries")
-        assertTrue(source.contains("decoyBase"), "Decoy exceptions must use crypto-derived offsets beyond instruction range")
-        assertTrue(source.contains("Decoy ranges are placed BEYOND"), "Decoy exception ranges must be explicitly beyond real instructions")
+        assertTrue(source.contains("prepareDecoyExceptionTypeCpIndexes"), "VM serializer must prepare decoy catch types before freezing the CP layout")
+        assertTrue(source.contains("javashroud/decoy/E"), "Decoy handlers must use unresolvable, non-Throwable catch types")
+        assertTrue(source.contains("% instructionCount"), "Decoy exception offsets must remain inside the executable instruction range")
+        assertTrue(source.contains("entries.add(insertionPoint, decoy)"), "Decoy handlers must be mixed with real exception entries")
+        assertFalse(source.contains("decoyBase"), "Out-of-range decoy offsets remain mechanically removable")
     }
 
     @Test

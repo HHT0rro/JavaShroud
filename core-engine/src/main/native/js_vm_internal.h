@@ -8,6 +8,7 @@
 #define JS_VM_CP_LONG 3
 #define JS_VM_CP_FLOAT 4
 #define JS_VM_CP_DOUBLE 5
+#define JS_VM_CP_SEALED_STRING 6
 
 #define JS_VM_VAL_NULL 0
 #define JS_VM_VAL_INT 1
@@ -61,12 +62,10 @@ typedef struct {
     unsigned char is_class_loader_define_class;
     unsigned char is_class_loader_load_class;
     unsigned char is_self_call;
-    unsigned long long class_hash;
-    unsigned long long meth_hash;
-    unsigned long long sig_hash;
+    unsigned char method_identity[32];
     char *type_name;
 } js_vm_symbol_cache_entry;
-typedef struct js_vm_program { js_vm_cp *cp; int cp_count; js_vm_insn *insns; int insn_count; int borrowed_insns; int borrowed_insn_operands; int cached_execution_ready; js_vm_reg_program reg_program; js_vm_exception *exceptions; int exception_count; int max_stack; int max_locals; int mac_key; int build_seed; int key_mask; uint32_t resident_rotation_epoch; unsigned char nonce[16]; unsigned char session_leaf[32]; unsigned char session_tag[32]; int session_bound; int metadata_cp_index; uint32_t method_local_profile; uint32_t native_vm_profile_id; uint32_t dispatch_profile_tag; uint32_t vbc4_flags; uint32_t nested_vm_profile; jlong entry_token; char return_desc; char *original_owner; char *original_name; char *original_desc; char *resource_path; unsigned long long original_owner_hash; unsigned long long original_name_hash; unsigned long long original_desc_hash; uint32_t original_access; js_vm_symbol_cache_entry *symbols; int symbol_count; int symbol_capacity; struct js_vm_program *symbol_cache_owner; } js_vm_program;
+typedef struct js_vm_program { js_vm_cp *cp; int cp_count; js_vm_insn *insns; int insn_count; int borrowed_insns; int borrowed_insn_operands; int cached_execution_ready; js_vm_reg_program reg_program; js_vm_exception *exceptions; int exception_count; int borrowed_exceptions; int cfg_exceptions_decoded; int max_stack; int max_locals; int mac_key; int build_seed; int key_mask; uint32_t resident_rotation_epoch; unsigned char nonce[16]; unsigned char session_leaf[32]; unsigned char session_tag[32]; int session_bound; int metadata_cp_index; uint32_t method_local_profile; uint32_t native_vm_profile_id; uint32_t dispatch_profile_tag; uint32_t vbc4_flags; uint32_t nested_vm_profile; jlong entry_token; char return_desc; unsigned char method_identity[32]; unsigned char owner_identity[32]; char *argument_tags; int argument_count; char *resource_path; unsigned char is_static; js_vm_symbol_cache_entry *symbols; int symbol_count; int symbol_capacity; struct js_vm_program *symbol_cache_owner; } js_vm_program;
 typedef struct { jbyteArray bytes; jobject loader; } js_vm_loaded_resource;
 typedef struct js_vm_ephemeral_cache_entry {
     jlong entry_token;

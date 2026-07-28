@@ -9,6 +9,7 @@ import io.github.hht0rro.javashroud.model.analysis.JarAnalysisSummary
 import io.github.hht0rro.javashroud.model.analysis.RenamePlan
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
+import io.github.hht0rro.javashroud.transforms.protection.BootMaterialEnvelope
 import io.github.hht0rro.javashroud.transforms.protection.NativeKernelShellPacker
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
@@ -34,18 +35,23 @@ class EmbeddedHelperDeploymentTest {
 
     @Test
     fun jni_microkernel_loader_embeds_all_helper_inner_classes() {
-        val updated = withVbc4BuildContext(defaultVbc4BuildContext()) {
-            EmbeddedHelperDeployment.injectRequiredHelpers(
-                artifact = emptyArtifact(),
-                executedPassIds = listOf("jni-microkernel-loader"),
-            )
+        val updated = withBootSecret {
+            withVbc4BuildContext(defaultVbc4BuildContext()) {
+                EmbeddedHelperDeployment.injectRequiredHelpers(
+                    artifact = emptyArtifact(),
+                    executedPassIds = listOf("jni-microkernel-loader"),
+                )
+            }
         }
         val entries = updated.jarEntries.map { it.name }.toSet()
 
         for (entryName in listOf(
             "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.class",
+            "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper${"$"}RuntimeResourceMetadata.class",
             "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper${"$"}SealedNativeLibrary.class",
             "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper${"$"}TypeParseResult.class",
+            "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper${"$"}SamLambdaOptions.class",
+            "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper${"$"}SamInvocationHandler.class",
         )) {
             assertTrue(entryName in entries, "JNI microkernel helper dependency must be embedded: $entryName")
         }
@@ -77,7 +83,7 @@ class EmbeddedHelperDeploymentTest {
         val helperSource = Files.readString(resolveWorkspacePath("core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
 
         assertTrue(helperSource.contains("System.load(tempLib.getAbsolutePath())"), "Bundled native loading must still delegate to the extracted outer stub library.")
-        assertTrue(helperSource.contains("System.loadLibrary(kernelBaseName() + platformSuffix)"), "System library loading must still target the generated native kernel name.")
+        assertFalse(helperSource.contains("System.loadLibrary("), "A bundled verification failure must not fall back to a stale system-path library.")
         assertTrue(helperSource.contains("decodeSealedNativeResource"), "Java may only decode the sealed outer native resource before System.load.")
 
         for (forbiddenToken in listOf(
@@ -99,14 +105,28 @@ class EmbeddedHelperDeploymentTest {
     }
 
     @Test
+    fun jni_microkernel_helper_parses_boot_kek_without_trimmed_text_copies() {
+        val helperSource = Files.readString(resolveWorkspacePath("core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
+
+        assertFalse(helperSource.contains("encoded.trim()"), "Runtime boot KEK parsing must match the strict native environment contract.")
+        assertFalse(helperSource.contains("new String(bytes, StandardCharsets.US_ASCII)"), "Boot KEK files must be decoded directly from the wipeable byte buffer.")
+        assertTrue(helperSource.contains("return hexToBytes(bytes);"), "Runtime boot KEK files must use direct byte-array hex decoding.")
+    }
+
+    @Test
     fun bundle_native_libraries_replaces_existing_kernel_resources_with_recompiled_outputs() {
         val deploymentSource = Files.readString(resolveWorkspacePath("core-engine/src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/EmbeddedHelperDeployment.kt"))
-        val retainedFilter = "val retainedJarEntries = artifact.jarEntries.filterNot { entry -> isNativeKernelResource(entry.name) }"
+        val retainedFilter = "val retainedJarEntries = artifact.jarEntries.filterNot { entry ->"
+        val rejectedEntries = "isNativeKernelResource(entry.name) || entry.name == BootMaterialEnvelope.RESOURCE_PATH"
         val appendRecompiled = "val updatedJarEntries = retainedJarEntries + newEntries"
 
         assertTrue(
             deploymentSource.contains(retainedFilter),
             "Native bundling must remove pre-existing js_kernel resources before adding max outer stubs.",
+        )
+        assertTrue(
+            deploymentSource.contains(rejectedEntries),
+            "Native bundling must replace both pre-existing kernels and the provisional boot envelope.",
         )
         assertTrue(
             deploymentSource.contains(appendRecompiled),
@@ -119,7 +139,7 @@ class EmbeddedHelperDeploymentTest {
     }
 
     @Test
-    fun jni_microkernel_helper_partition_keys_are_injected_per_build() {
+    fun jni_microkernel_helper_uses_encrypted_boot_material_instead_of_java_key_literals() {
         val partitions = RuntimeKeyPartitions.generate()
         val context = Vbc4BuildContext(
             masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (index * 5 + 1).toByte() },
@@ -129,22 +149,25 @@ class EmbeddedHelperDeploymentTest {
             runtimeKeyPartitions = partitions,
         )
 
-        val updated = withVbc4BuildContext(context) {
-            EmbeddedHelperDeployment.injectRequiredHelpers(
-                artifact = emptyArtifact(),
-                executedPassIds = listOf("jni-microkernel-loader"),
-            )
+        val updated = withBootSecret {
+            withVbc4BuildContext(context) {
+                EmbeddedHelperDeployment.injectRequiredHelpers(
+                    artifact = emptyArtifact(),
+                    executedPassIds = listOf("jni-microkernel-loader"),
+                )
+            }
         }
         val helperBytes = updated.jarEntries.single { it.name == "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.class" }.bytes
-
-        assertEquals(partitions.resourcePartitionCount, invokeIntHelper(helperBytes, "runtimeResourcePartitionCount"), "helper must expose the per-build partition count")
-        assertEquals(partitions.anchorSlotId, invokeIntHelper(helperBytes, "anchorResourcePartition"), "helper must expose the anchor slot id")
+        val envelope = updated.jarEntries.single { it.name == BootMaterialEnvelope.RESOURCE_PATH }.bytes
+        assertTrue(envelope.take(4).toByteArray().contentEquals(byteArrayOf(0x4A, 0x53, 0x42, 0x4D)), "boot envelope must use JSBM framing")
+        assertFalse(String(helperBytes, Charsets.ISO_8859_1).contains("jsRrkS"), "helper bytecode must not contain generated key-share methods")
         for (slot in 0 until partitions.totalSlots) {
-            assertEquals(
-                partitions.copyKeyForSlot(slot).toList(),
-                invokePartitionKey(helperBytes, slot).toList(),
-                "helper must reassemble the exact partition key for slot $slot",
-            )
+            val key = partitions.copyKeyForSlot(slot)
+            try {
+                assertFalse(containsSlice(envelope, key), "encrypted envelope must not expose slot $slot")
+            } finally {
+                java.util.Arrays.fill(key, 0)
+            }
         }
     }
     @Test
@@ -210,16 +233,19 @@ class EmbeddedHelperDeploymentTest {
         )
     }.define()
 
-    private fun invokeIntHelper(helperBytes: ByteArray, name: String): Int {
-        val method = defineHelper(helperBytes).getDeclaredMethod(name)
-        method.isAccessible = true
-        return method.invoke(null) as Int
-    }
+    private fun containsSlice(haystack: ByteArray, needle: ByteArray): Boolean =
+        needle.isNotEmpty() && haystack.indices.any { start ->
+            start + needle.size <= haystack.size && needle.indices.all { offset -> haystack[start + offset] == needle[offset] }
+        }
 
-    private fun invokePartitionKey(helperBytes: ByteArray, slot: Int): ByteArray {
-        val method = defineHelper(helperBytes).getDeclaredMethod("partitionResourceKey", Int::class.javaPrimitiveType)
-        method.isAccessible = true
-        return method.invoke(null, slot) as ByteArray
+    private inline fun <T> withBootSecret(block: () -> T): T {
+        val previous = NativeKernelShellPacker.buildBootSecretProvider
+        NativeKernelShellPacker.buildBootSecretProvider = { ByteArray(32) { 0x42.toByte() } }
+        return try {
+            block()
+        } finally {
+            NativeKernelShellPacker.buildBootSecretProvider = previous
+        }
     }
 
     private fun resolveWorkspacePath(relativePath: String): Path {

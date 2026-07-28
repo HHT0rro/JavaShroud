@@ -1,32 +1,42 @@
 package io.github.hht0rro.javashroud.transforms.protection;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.DataOutputStream;
+import java.io.IOException;
+import java.io.InvalidObjectException;
+import java.io.ObjectInputStream;
+import java.io.Serializable;
 import java.nio.charset.StandardCharsets;
-import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Proxy;
+import java.lang.invoke.CallSite;
 import java.lang.invoke.MethodHandle;
-import java.lang.invoke.MethodHandleProxies;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
+import java.lang.invoke.LambdaMetafactory;
 import java.util.LinkedHashSet;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
-import java.util.function.Function;
-import java.util.function.IntUnaryOperator;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
+import javax.crypto.Cipher;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
 
 /**
  * Runtime helper for JNI microkernel loader.
@@ -50,13 +60,31 @@ public final class JniMicrokernelHelper {
     private static volatile long nativeBootToken = 0L;
     private static volatile boolean nativeSelfCheckFailed = false;
     private static volatile boolean sealedNativeBindingsPublished = false;
+    private static volatile byte[][] runtimeResourceKeys;
+    private static volatile int runtimeResourcePartitionCount;
+    private static volatile int anchorResourcePartition = -1;
+    private static volatile byte[] expectedShellBindingCommitment;
+    private static volatile Thread expectedShellBindingThread;
+    private static volatile int shellBindingHandoffState;
     private static final String SEALED_NATIVE_INDEX_RESOURCE = "META-INF/.r/0.dat";
+    private static final String SEALED_NATIVE_BINDINGS_RESOURCE = "META-INF/.r/bindings.dat";
+    private static final String BOOT_MATERIAL_RESOURCE = "META-INF/.r/boot.dat";
+    private static final String BOOT_SECRET_ENV = "JAVASHROUD_BOOT_SECRET_V1";
+    private static final String BOOT_SECRET_FILE_ENV = "JAVASHROUD_BOOT_SECRET_FILE_V1";
+    private static final int BOOT_MATERIAL_VERSION = 2;
+    private static final int SHELL_BINDING_COMMITMENT_SIZE = 32;
+    private static final byte[] BOOT_MATERIAL_AAD = "javashroud-boot-material-v2".getBytes(StandardCharsets.US_ASCII);
     private static final String VM_CATALOG_RESOURCE = "META-INF/.r/vm.catalog";
     private static final int RUNTIME_RESOURCE_VERSION = 7;
     private static final int NATIVE_ANCHOR_KEY_SLOT = 16;
     private static final int BOOTSTRAP_NATIVE_INDEX_VERSION = 1;
     private static final int ZSTD_MAGIC = 0xFD2FB528;
-    private static final ConcurrentMap<String, Object[]> SAM_LAMBDA_CACHE = new ConcurrentHashMap<>();
+    private static final int LAMBDA_FLAG_SERIALIZABLE = 1;
+    private static final int LAMBDA_FLAG_MARKERS = 2;
+    private static final int LAMBDA_FLAG_BRIDGES = 4;
+    private static final int LAMBDA_SUPPORTED_FLAGS = LAMBDA_FLAG_SERIALIZABLE | LAMBDA_FLAG_MARKERS | LAMBDA_FLAG_BRIDGES;
+    private static final ConcurrentMap<String, MethodHandle> SAM_LAMBDA_CACHE = new ConcurrentHashMap<>();
+    private static final ConcurrentMap<String, Class<?>> SAM_BRIDGE_INTERFACE_CACHE = new ConcurrentHashMap<>();
 
     private JniMicrokernelHelper() { }
 
@@ -67,7 +95,9 @@ public final class JniMicrokernelHelper {
     static native int nativeHeartbeat();
     static native String nativeGetVersion();
     static native long nativeGetBootToken();
-    static native void nativeInstallRuntimeResourceKey(byte[] key, int slot);
+    static native boolean nativeInstallBootMaterial(byte[] material);
+    static native boolean nativeIsBootMaterialReady();
+    static native void nativeAbortBootMaterial();
     static native void nativePreloadRuntimeResources(byte[] preloadIndex, byte[] commitments, byte[] startupNonce);
     public static native byte[] nativeDecryptAes(byte[] encrypted, byte[] key, byte[] iv);
     public static native byte[] nativeDeriveClassEncryptionKey(byte[] keyId, byte[] salt, int length);
@@ -143,107 +173,457 @@ public final class JniMicrokernelHelper {
     }
 
     public static Runnable createRunnableLambda(String owner, String name, String descriptor, int implTag, Object[] captured) {
-        return (Runnable) createSamLambda("run", "()Ljava/lang/Runnable;", owner, name, descriptor, implTag, captured);
+        return (Runnable) createSamLambda("run", "()Ljava/lang/Runnable;", owner, name, descriptor, implTag, "()V", "()V", "0;;", captured);
     }
 
-    public static Object createSamLambda(String samName, String factoryDescriptor, String owner, String name, String descriptor, int implTag, Object[] captured) {
+    public static Object createSamLambda(
+        String samName,
+        String factoryDescriptor,
+        String owner,
+        String name,
+        String descriptor,
+        int implTag,
+        String samDescriptor,
+        String instantiatedDescriptor,
+        String encodedOptions,
+        Object[] captured
+    ) {
         final Object[] capturedArgs = captured == null ? new Object[0] : Arrays.copyOf(captured, captured.length);
-        final Object[] linkedTarget = resolveSamLambdaTarget(owner, name, descriptor, implTag);
+        final MethodHandle linkedTarget = resolveSamLambdaTarget(owner, name, descriptor, implTag);
         String samOwner = descriptorReturnInternalName(factoryDescriptor);
         try {
-            MethodHandles.Lookup lookup = MethodHandles.lookup();
-            if ("java/lang/Runnable".equals(samOwner) && "run".equals(samName)) {
-                MethodHandle handle = lookup.findStatic(JniMicrokernelHelper.class, "runSamLambda", MethodType.methodType(void.class, Object[].class, Object[].class));
-                return MethodHandleProxies.asInterfaceInstance(Runnable.class, MethodHandles.insertArguments(handle, 0, linkedTarget, capturedArgs));
+            ClassLoader loader = JniMicrokernelHelper.class.getClassLoader();
+            Class<?> samInterface = Class.forName(samOwner.replace('/', '.'), false, loader);
+            MethodType samType = MethodType.fromMethodDescriptorString(samDescriptor, loader);
+            MethodType instantiatedType = MethodType.fromMethodDescriptorString(instantiatedDescriptor, loader);
+            SamLambdaOptions options = parseSamLambdaOptions(encodedOptions, loader, samType);
+            if (!samInterface.isInterface() || samName.length() == 0 || samType.parameterCount() != instantiatedType.parameterCount()) {
+                throw new IllegalArgumentException("invalid virtualized SAM recipe");
             }
-            if ("java/util/function/IntUnaryOperator".equals(samOwner) && "applyAsInt".equals(samName)) {
-                MethodHandle handle = lookup.findStatic(JniMicrokernelHelper.class, "applyAsIntSamLambda", MethodType.methodType(int.class, Object[].class, Object[].class, int.class));
-                return MethodHandleProxies.asInterfaceInstance(IntUnaryOperator.class, MethodHandles.insertArguments(handle, 0, linkedTarget, capturedArgs));
+            if ((options.flags & LAMBDA_FLAG_SERIALIZABLE) == 0) {
+                return createNonSerializableSamLambda(
+                    samName,
+                    factoryDescriptor,
+                    owner,
+                    linkedTarget,
+                    samType,
+                    instantiatedType,
+                    options,
+                    capturedArgs
+                );
             }
-            if ("java/util/function/Function".equals(samOwner) && "apply".equals(samName)) {
-                MethodHandle handle = lookup.findStatic(JniMicrokernelHelper.class, "applySamLambda", MethodType.methodType(Object.class, Object[].class, Object[].class, Object.class));
-                return MethodHandleProxies.asInterfaceInstance(Function.class, MethodHandles.insertArguments(handle, 0, linkedTarget, capturedArgs));
-            }
+            MethodHandle handle = adaptSamLambdaTarget(linkedTarget, capturedArgs, instantiatedType);
+            return createSamProxy(
+                samInterface,
+                samName,
+                handle,
+                options,
+                owner,
+                name,
+                descriptor,
+                implTag,
+                instantiatedDescriptor,
+                capturedArgs
+            );
         } catch (ReflectiveOperationException e) {
             throw new IllegalStateException("cannot create virtualized SAM lambda", e);
         }
-        throw new IllegalArgumentException("unsupported virtualized SAM lambda");
     }
 
-    public static void runSamLambda(Object[] linkedTarget, Object[] captured) {
-        invokeSamLambdaTarget(linkedTarget, captured, new Object[0]);
+    private static Object createNonSerializableSamLambda(
+        String samName,
+        String factoryDescriptor,
+        String owner,
+        MethodHandle linkedTarget,
+        MethodType samType,
+        MethodType instantiatedType,
+        SamLambdaOptions options,
+        Object[] captured
+    ) throws ReflectiveOperationException {
+        ClassLoader loader = JniMicrokernelHelper.class.getClassLoader();
+        Class<?> ownerClass = Class.forName(owner.replace('/', '.'), false, loader);
+        MethodHandles.Lookup caller;
+        try {
+            caller = privateLookup(ownerClass);
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            caller = MethodHandles.lookup();
+        }
+        MethodType factoryType = MethodType.fromMethodDescriptorString(factoryDescriptor, loader);
+        CallSite site;
+        try {
+            if (options.flags == 0) {
+                site = LambdaMetafactory.metafactory(
+                    caller,
+                    samName,
+                    factoryType,
+                    samType,
+                    linkedTarget,
+                    instantiatedType
+                );
+            } else {
+                List<Object> arguments = new ArrayList<>();
+                arguments.add(samType);
+                arguments.add(linkedTarget);
+                arguments.add(instantiatedType);
+                arguments.add(Integer.valueOf(options.flags));
+                if ((options.flags & LAMBDA_FLAG_MARKERS) != 0) {
+                    arguments.add(Integer.valueOf(options.markerInterfaces.length));
+                    arguments.addAll(Arrays.asList(options.markerInterfaces));
+                }
+                if ((options.flags & LAMBDA_FLAG_BRIDGES) != 0) {
+                    arguments.add(Integer.valueOf(options.bridgeDescriptors.length));
+                    for (String bridgeDescriptor : options.bridgeDescriptors) {
+                        arguments.add(MethodType.fromMethodDescriptorString(bridgeDescriptor, loader));
+                    }
+                }
+                site = LambdaMetafactory.altMetafactory(caller, samName, factoryType, arguments.toArray());
+            }
+        } catch (java.lang.invoke.LambdaConversionException error) {
+            throw new ReflectiveOperationException("cannot link virtualized SAM lambda", error);
+        }
+        try {
+            return site.getTarget().invokeWithArguments(captured);
+        } catch (RuntimeException | Error error) {
+            throw error;
+        } catch (Throwable error) {
+            throw new ReflectiveOperationException("cannot instantiate virtualized SAM lambda", error);
+        }
     }
 
-    public static int applyAsIntSamLambda(Object[] linkedTarget, Object[] captured, int operand) {
-        Object result = invokeSamLambdaTarget(linkedTarget, captured, new Object[] { Integer.valueOf(operand) });
-        return ((Number) result).intValue();
-    }
-
-    public static Object applySamLambda(Object[] linkedTarget, Object[] captured, Object value) {
-        return invokeSamLambdaTarget(linkedTarget, captured, new Object[] { value });
-    }
-
-    private static Object[] resolveSamLambdaTarget(String owner, String name, String descriptor, int implTag) {
+    private static MethodHandle resolveSamLambdaTarget(String owner, String name, String descriptor, int implTag) {
         String key = owner + '\u0000' + name + '\u0000' + descriptor + '\u0000' + implTag;
-        Object[] cached = SAM_LAMBDA_CACHE.get(key);
+        MethodHandle cached = SAM_LAMBDA_CACHE.get(key);
         if (cached != null) return cached;
         try {
             ClassLoader loader = JniMicrokernelHelper.class.getClassLoader();
             Class<?> ownerClass = Class.forName(owner.replace('/', '.'), false, loader);
-            Class<?>[] parameterTypes = descriptorParameterTypes(descriptor, ownerClass.getClassLoader());
             String resolvedName = resolveBoundMethodName(owner, name, descriptor);
-            Method method = ownerClass.getDeclaredMethod(resolvedName, parameterTypes);
-            method.setAccessible(true);
-            boolean staticTarget = implTag == 6 || Modifier.isStatic(method.getModifiers());
-            Object[] linked = new Object[] { method, Integer.valueOf(parameterTypes.length), Boolean.valueOf(staticTarget) };
-            Object[] existing = SAM_LAMBDA_CACHE.putIfAbsent(key, linked);
+            MethodType methodType = descriptorMethodType(descriptor, ownerClass.getClassLoader());
+            MethodHandle linked = resolveMethodHandle(ownerClass, resolvedName, methodType, implTag);
+            if (linked == null) throw new IllegalArgumentException("unsupported lambda implementation handle tag: " + implTag);
+            MethodHandle existing = SAM_LAMBDA_CACHE.putIfAbsent(key, linked);
             return existing == null ? linked : existing;
         } catch (ReflectiveOperationException e) {
             throw new IllegalStateException("cannot link virtualized SAM lambda", e);
         }
     }
 
-    private static Object invokeSamLambdaTarget(Object[] linkedTarget, Object[] captured, Object[] callArgs) {
-        Object targetHandle = linkedTarget[0];
-        int parameterCount = ((Integer) linkedTarget[1]).intValue();
-        boolean staticTarget = ((Boolean) linkedTarget[2]).booleanValue();
-        Object receiver = null;
-        int capturedOffset = 0;
-        if (!staticTarget) {
-            if (captured.length == 0) throw new IllegalStateException("missing captured lambda receiver");
-            receiver = captured[0];
-            capturedOffset = 1;
-        }
-        int available = captured.length - capturedOffset + callArgs.length;
-        if (available != parameterCount) {
+    private static Object invokeSamLambdaTarget(MethodHandle linkedTarget, Object[] captured, Object[] callArgs) throws Throwable {
+        int available = captured.length + callArgs.length;
+        if (available != linkedTarget.type().parameterCount()) {
             throw new IllegalStateException("lambda argument count mismatch");
         }
         Object[] args = new Object[available];
-        System.arraycopy(captured, capturedOffset, args, 0, captured.length - capturedOffset);
-        System.arraycopy(callArgs, 0, args, captured.length - capturedOffset, callArgs.length);
+        System.arraycopy(captured, 0, args, 0, captured.length);
+        System.arraycopy(callArgs, 0, args, captured.length, callArgs.length);
+        return linkedTarget.invokeWithArguments(args);
+    }
+
+    private static MethodHandle adaptSamLambdaTarget(MethodHandle linkedTarget, Object[] captured, MethodType instantiatedType)
+        throws ReflectiveOperationException {
+        MethodHandle handle = MethodHandles.lookup().findStatic(
+            JniMicrokernelHelper.class,
+            "invokeSamLambdaTarget",
+            MethodType.methodType(Object.class, MethodHandle.class, Object[].class, Object[].class)
+        );
+        handle = MethodHandles.insertArguments(handle, 0, linkedTarget, captured);
+        return handle.asCollector(Object[].class, instantiatedType.parameterCount()).asType(instantiatedType);
+    }
+
+    private static Object createSamProxy(
+        final Class<?> samInterface,
+        final String samName,
+        final MethodHandle target,
+        final SamLambdaOptions options,
+        final String owner,
+        final String name,
+        final String descriptor,
+        final int implTag,
+        final String instantiatedDescriptor,
+        final Object[] captured
+    ) throws ReflectiveOperationException {
+        LinkedHashSet<Class<?>> interfaces = new LinkedHashSet<>();
+        interfaces.add(samInterface);
+        interfaces.addAll(Arrays.asList(options.markerInterfaces));
+        if ((options.flags & LAMBDA_FLAG_SERIALIZABLE) != 0) interfaces.add(Serializable.class);
+        if (options.bridgeDescriptors.length != 0) {
+            interfaces.add(samBridgeInterface(samName, options.bridgeDescriptors));
+        }
+        return Proxy.newProxyInstance(
+            JniMicrokernelHelper.class.getClassLoader(),
+            interfaces.toArray(new Class<?>[0]),
+            new SamInvocationHandler(
+                samInterface.getName(), samName, owner, name, descriptor, implTag,
+                instantiatedDescriptor, captured, target
+            )
+        );
+    }
+
+    private static SamLambdaOptions parseSamLambdaOptions(String encoded, ClassLoader loader, MethodType samType)
+        throws ClassNotFoundException {
+        String[] sections = encoded == null ? new String[0] : encoded.split(";", -1);
+        if (sections.length != 3) throw new IllegalArgumentException("invalid virtualized SAM options");
+        int flags;
         try {
-            if (targetHandle instanceof MethodHandle) {
-                Object[] methodHandleArgs = staticTarget ? args : prependReceiver(receiver, args);
-                return ((MethodHandle) targetHandle).invokeWithArguments(methodHandleArgs);
+            flags = Integer.parseInt(sections[0], 16);
+        } catch (NumberFormatException error) {
+            throw new IllegalArgumentException("invalid virtualized SAM flags", error);
+        }
+        if (flags < 0 || (flags & ~LAMBDA_SUPPORTED_FLAGS) != 0) {
+            throw new IllegalArgumentException("unsupported virtualized SAM flags");
+        }
+        String[] markerDescriptors = splitSamOptionList(sections[1]);
+        String[] bridgeDescriptors = splitSamOptionList(sections[2]);
+        if ((flags & LAMBDA_FLAG_MARKERS) == 0 && markerDescriptors.length != 0) {
+            throw new IllegalArgumentException("unexpected virtualized SAM markers");
+        }
+        if ((flags & LAMBDA_FLAG_BRIDGES) == 0 && bridgeDescriptors.length != 0) {
+            throw new IllegalArgumentException("unexpected virtualized SAM bridges");
+        }
+        Class<?>[] markerInterfaces = new Class<?>[markerDescriptors.length];
+        for (int index = 0; index < markerDescriptors.length; index++) {
+            String descriptor = decodeSamOptionDescriptor(markerDescriptors[index]);
+            TypeParseResult parsed = parseDescriptorType(descriptor, 0, loader);
+            if (parsed.nextIndex != descriptor.length() || !parsed.type.isInterface()) {
+                throw new IllegalArgumentException("invalid virtualized SAM marker interface");
             }
-            return ((Method) targetHandle).invoke(receiver, args);
-        } catch (InvocationTargetException e) {
-            Throwable cause = e.getCause();
-            if (cause instanceof RuntimeException) throw (RuntimeException) cause;
-            if (cause instanceof Error) throw (Error) cause;
-            throw new RuntimeException(cause);
-        } catch (Throwable e) {
-            if (e instanceof RuntimeException) throw (RuntimeException) e;
-            if (e instanceof Error) throw (Error) e;
-            throw new RuntimeException(e);
+            markerInterfaces[index] = parsed.type;
+        }
+        String[] decodedBridgeDescriptors = new String[bridgeDescriptors.length];
+        for (int index = 0; index < bridgeDescriptors.length; index++) {
+            String descriptor = decodeSamOptionDescriptor(bridgeDescriptors[index]);
+            MethodType bridgeType = MethodType.fromMethodDescriptorString(descriptor, loader);
+            if (bridgeType.parameterCount() != samType.parameterCount()) {
+                throw new IllegalArgumentException("invalid virtualized SAM bridge descriptor");
+            }
+            decodedBridgeDescriptors[index] = descriptor;
+        }
+        return new SamLambdaOptions(flags, markerInterfaces, decodedBridgeDescriptors);
+    }
+
+    private static String[] splitSamOptionList(String encoded) {
+        return encoded == null || encoded.length() == 0 ? new String[0] : encoded.split(",", -1);
+    }
+
+    private static String decodeSamOptionDescriptor(String encoded) {
+        byte[] bytes = Base64.getUrlDecoder().decode(encoded);
+        try {
+            return new String(bytes, StandardCharsets.US_ASCII);
+        } finally {
+            Arrays.fill(bytes, (byte) 0);
         }
     }
 
-    private static Object[] prependReceiver(Object receiver, Object[] args) {
-        Object[] withReceiver = new Object[args.length + 1];
-        withReceiver[0] = receiver;
-        System.arraycopy(args, 0, withReceiver, 1, args.length);
-        return withReceiver;
+    private static Class<?> samBridgeInterface(String samName, String[] bridgeDescriptors)
+        throws ReflectiveOperationException {
+        LinkedHashSet<String> uniqueDescriptors = new LinkedHashSet<>(Arrays.asList(bridgeDescriptors));
+        StringBuilder cacheKeyBuilder = new StringBuilder(samName.length() + uniqueDescriptors.size() * 24);
+        cacheKeyBuilder.append(samName.length()).append(':').append(samName);
+        for (String bridgeDescriptor : uniqueDescriptors) {
+            cacheKeyBuilder.append('|').append(bridgeDescriptor.length()).append(':').append(bridgeDescriptor);
+        }
+        String cacheKey = cacheKeyBuilder.toString();
+        Class<?> cached = SAM_BRIDGE_INTERFACE_CACHE.get(cacheKey);
+        if (cached != null) return cached;
+        synchronized (SAM_BRIDGE_INTERFACE_CACHE) {
+            cached = SAM_BRIDGE_INTERFACE_CACHE.get(cacheKey);
+            if (cached != null) return cached;
+            byte[] nameDigest = sha256(cacheKey.getBytes(StandardCharsets.UTF_8));
+            StringBuilder simpleName = new StringBuilder("$B$");
+            try {
+                for (int index = 0; index < 12; index++) {
+                    int value = nameDigest[index] & 0xFF;
+                    simpleName.append(Character.forDigit(value >>> 4, 16));
+                    simpleName.append(Character.forDigit(value & 0x0F, 16));
+                }
+            } finally {
+                Arrays.fill(nameDigest, (byte) 0);
+            }
+            String helperName = JniMicrokernelHelper.class.getName();
+            int packageEnd = helperName.lastIndexOf('.');
+            String binaryName = packageEnd < 0
+                ? simpleName.toString()
+                : helperName.substring(0, packageEnd + 1) + simpleName;
+            byte[] classBytes = buildSamBridgeInterfaceBytes(
+                binaryName.replace('.', '/'),
+                samName,
+                uniqueDescriptors.toArray(new String[0])
+            );
+            Class<?> generated = defineSamBridgeInterface(binaryName, classBytes);
+            SAM_BRIDGE_INTERFACE_CACHE.put(cacheKey, generated);
+            return generated;
+        }
+    }
+
+    private static byte[] buildSamBridgeInterfaceBytes(
+        String internalName,
+        String samName,
+        String[] bridgeDescriptors
+    ) {
+        try {
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            DataOutputStream output = new DataOutputStream(bytes);
+            output.writeInt(0xCAFEBABE);
+            output.writeShort(0);
+            output.writeShort(52);
+            output.writeShort(bridgeDescriptors.length + 9);
+            writeSamBridgeUtf8(output, internalName);       // #1
+            output.writeByte(7); output.writeShort(1);     // #2 this class
+            writeSamBridgeUtf8(output, "java/lang/Object"); // #3
+            output.writeByte(7); output.writeShort(3);     // #4 Object
+            writeSamBridgeUtf8(output, samName);            // #5 method name
+            writeSamBridgeUtf8(output, "Exceptions");      // #6
+            writeSamBridgeUtf8(output, "java/lang/Throwable"); // #7
+            output.writeByte(7); output.writeShort(7);     // #8 Throwable
+            for (String bridgeDescriptor : bridgeDescriptors) {
+                writeSamBridgeUtf8(output, bridgeDescriptor);
+            }
+
+            output.writeShort(0x1601); // public abstract synthetic interface
+            output.writeShort(2);
+            output.writeShort(4);
+            output.writeShort(0);
+            output.writeShort(0);
+            output.writeShort(bridgeDescriptors.length);
+            for (int index = 0; index < bridgeDescriptors.length; index++) {
+                output.writeShort(0x1441); // public abstract bridge synthetic
+                output.writeShort(5);
+                output.writeShort(9 + index);
+                output.writeShort(1);
+                output.writeShort(6);
+                output.writeInt(4);
+                output.writeShort(1);
+                output.writeShort(8);
+            }
+            output.writeShort(0);
+            output.flush();
+            return bytes.toByteArray();
+        } catch (IOException error) {
+            throw new IllegalStateException("cannot encode virtualized SAM bridge interface", error);
+        }
+    }
+
+    private static void writeSamBridgeUtf8(DataOutputStream output, String value) throws IOException {
+        output.writeByte(1);
+        output.writeUTF(value);
+    }
+
+    private static Class<?> defineSamBridgeInterface(String binaryName, byte[] classBytes)
+        throws ReflectiveOperationException {
+        try {
+            Method defineClass = MethodHandles.Lookup.class.getMethod("defineClass", byte[].class);
+            return (Class<?>) defineClass.invoke(MethodHandles.lookup(), new Object[] { classBytes });
+        } catch (NoSuchMethodException ignored) {
+            Class<?> unsafeClass = Class.forName("sun.misc.Unsafe");
+            java.lang.reflect.Field unsafeField = unsafeClass.getDeclaredField("theUnsafe");
+            unsafeField.setAccessible(true);
+            Object unsafe = unsafeField.get(null);
+            Method defineClass = unsafeClass.getDeclaredMethod(
+                "defineClass",
+                String.class,
+                byte[].class,
+                int.class,
+                int.class,
+                ClassLoader.class,
+                java.security.ProtectionDomain.class
+            );
+            return (Class<?>) defineClass.invoke(
+                unsafe,
+                binaryName,
+                classBytes,
+                Integer.valueOf(0),
+                Integer.valueOf(classBytes.length),
+                JniMicrokernelHelper.class.getClassLoader(),
+                JniMicrokernelHelper.class.getProtectionDomain()
+            );
+        }
+    }
+
+    private static final class SamLambdaOptions {
+        final int flags;
+        final Class<?>[] markerInterfaces;
+        final String[] bridgeDescriptors;
+
+        SamLambdaOptions(int flags, Class<?>[] markerInterfaces, String[] bridgeDescriptors) {
+            this.flags = flags;
+            this.markerInterfaces = Arrays.copyOf(markerInterfaces, markerInterfaces.length);
+            this.bridgeDescriptors = Arrays.copyOf(bridgeDescriptors, bridgeDescriptors.length);
+        }
+    }
+
+    private static final class SamInvocationHandler implements InvocationHandler, Serializable {
+        private static final long serialVersionUID = 1L;
+
+        private final String samInterfaceName;
+        private final String samName;
+        private final String owner;
+        private final String name;
+        private final String descriptor;
+        private final int implTag;
+        private final String instantiatedDescriptor;
+        private final Object[] captured;
+        private transient MethodHandle target;
+
+        SamInvocationHandler(
+            String samInterfaceName,
+            String samName,
+            String owner,
+            String name,
+            String descriptor,
+            int implTag,
+            String instantiatedDescriptor,
+            Object[] captured,
+            MethodHandle target
+        ) {
+            this.samInterfaceName = samInterfaceName;
+            this.samName = samName;
+            this.owner = owner;
+            this.name = name;
+            this.descriptor = descriptor;
+            this.implTag = implTag;
+            this.instantiatedDescriptor = instantiatedDescriptor;
+            this.captured = Arrays.copyOf(captured, captured.length);
+            this.target = target;
+        }
+
+        @Override
+        public Object invoke(Object proxy, java.lang.reflect.Method method, Object[] arguments) throws Throwable {
+            Object[] args = arguments == null ? new Object[0] : arguments;
+            if (method.getDeclaringClass() == Object.class) {
+                if ("equals".equals(method.getName())) return Boolean.valueOf(args.length == 1 && proxy == args[0]);
+                if ("hashCode".equals(method.getName())) return Integer.valueOf(System.identityHashCode(proxy));
+                if ("toString".equals(method.getName())) return samInterfaceName + "@" + Integer.toHexString(System.identityHashCode(proxy));
+            }
+            if (method.isDefault()) {
+                MethodHandle defaultHandle = privateLookup(method.getDeclaringClass())
+                    .unreflectSpecial(method, method.getDeclaringClass())
+                    .bindTo(proxy);
+                return defaultHandle.invokeWithArguments(args);
+            }
+            if (!samName.equals(method.getName())) throw new AbstractMethodError(method.toString());
+            MethodType invocationType = MethodType.methodType(method.getReturnType(), method.getParameterTypes());
+            return target().asType(invocationType).invokeWithArguments(args);
+        }
+
+        private MethodHandle target() throws ReflectiveOperationException {
+            if (target != null) return target;
+            ClassLoader loader = JniMicrokernelHelper.class.getClassLoader();
+            MethodHandle linked = resolveSamLambdaTarget(owner, name, descriptor, implTag);
+            MethodType instantiatedType = MethodType.fromMethodDescriptorString(instantiatedDescriptor, loader);
+            target = adaptSamLambdaTarget(linked, captured, instantiatedType);
+            return target;
+        }
+
+        private void readObject(ObjectInputStream input) throws IOException, ClassNotFoundException {
+            input.defaultReadObject();
+            try {
+                target = target();
+            } catch (ReflectiveOperationException | RuntimeException error) {
+                InvalidObjectException invalid = new InvalidObjectException("cannot relink virtualized SAM lambda");
+                invalid.initCause(error);
+                throw invalid;
+            }
+        }
     }
 
     public static MethodHandle resolveVmMethodHandle(String encoded) {
@@ -257,16 +637,33 @@ public final class JniMicrokernelHelper {
             ClassLoader loader = JniMicrokernelHelper.class.getClassLoader();
             Class<?> ownerClass = Class.forName(owner.replace('/', '.'), false, loader);
             MethodType methodType = descriptorMethodType(descriptor, ownerClass.getClassLoader());
-            MethodHandles.Lookup lookup = privateLookup(ownerClass);
-            switch (tag) {
-                case 6: return lookup.findStatic(ownerClass, name, methodType);
-                case 5: return lookup.findVirtual(ownerClass, name, methodType);
-                case 7: return lookup.findSpecial(ownerClass, name, methodType, ownerClass);
-                case 8: return lookup.findStatic(ownerClass, name, methodType);
-                default: return null;
-            }
+            return resolveMethodHandle(ownerClass, name, methodType, tag);
         } catch (Throwable ignored) {
             return null;
+        }
+    }
+
+    private static MethodHandle resolveMethodHandle(
+        Class<?> ownerClass,
+        String name,
+        MethodType methodType,
+        int tag
+    ) throws ReflectiveOperationException {
+        MethodHandles.Lookup lookup;
+        try {
+            lookup = privateLookup(ownerClass);
+        } catch (ReflectiveOperationException | RuntimeException ignored) {
+            lookup = MethodHandles.publicLookup();
+        }
+        switch (tag) {
+            case 5: return lookup.findVirtual(ownerClass, name, methodType);
+            case 6: return lookup.findStatic(ownerClass, name, methodType);
+            case 7: return lookup.findSpecial(ownerClass, name, methodType, ownerClass);
+            case 8:
+                if (!"<init>".equals(name) || methodType.returnType() != void.class) return null;
+                return lookup.findConstructor(ownerClass, methodType);
+            case 9: return lookup.findVirtual(ownerClass, name, methodType);
+            default: return null;
         }
     }
 
@@ -400,28 +797,42 @@ public final class JniMicrokernelHelper {
                 runDiversifiedVmSelfExercise();
                 return;
             }
-            if (!"auto".equals(targetPlatform) && !targetPlatform.equals(platformSuffix)) {
+            if (!targetPlatformAllowsCurrent(targetPlatform, platformSuffix)) {
+                loadMessage = "native-platform-not-requested:" + platformSuffix;
                 loadState = LOAD_FAILED;
                 return;
             }
+            prepareJavaBootMaterialForLoad(platformSuffix);
             // Prefer the bundled library so stale system-path copies cannot shadow the ABI we generated.
             if (tryLoadBundledNative(platformSuffix, kernelComponents)) {
                 loadState = LOAD_READY;
                 runDiversifiedVmSelfExercise();
                 return;
             }
-            if (tryLoadNative(platformSuffix, kernelComponents)) {
-                loadState = LOAD_READY;
-                runDiversifiedVmSelfExercise();
-                return;
+            if (loadMessage == null || loadMessage.length() == 0) loadMessage = "bundled-native-unavailable";
+            clearJavaBootMaterial();
+            try {
+                nativeAbortBootMaterial();
+            } catch (Throwable ignored) {
             }
-            if (loadMessage == null || loadMessage.length() == 0) loadMessage = "native-unavailable";
             loadState = LOAD_FAILED;
             runDiversifiedVmSelfExercise();
         } catch (Exception e) {
+            clearJavaBootMaterial();
             loadMessage = debugNativeLoadMessage("native-exception", e);
             loadState = LOAD_FAILED;
         }
+    }
+
+    private static boolean targetPlatformAllowsCurrent(String targetPlatform, String platformSuffix) {
+        if (targetPlatform == null || platformSuffix == null) return false;
+        String requested = targetPlatform.trim();
+        if ("auto".equals(requested) || "all".equals(requested)) return true;
+        String[] platforms = requested.split(",", -1);
+        for (String platform : platforms) {
+            if (platformSuffix.equals(platform.trim())) return true;
+        }
+        return false;
     }
 
     /** Whether diversified virtualization was requested for this load. */
@@ -434,7 +845,7 @@ public final class JniMicrokernelHelper {
      * This distinguishes a genuine integrity failure from early call sites that race helper initialization.
      */
     public static boolean isKernelIntegrityReady() {
-        return loadState == LOAD_READY && !nativeSelfCheckFailed;
+        return loadState == LOAD_READY && !nativeSelfCheckFailed && nativeIsBootMaterialReady();
     }
 
     /** Status string for the diversified-VM load-time self-exercise. */
@@ -458,7 +869,8 @@ public final class JniMicrokernelHelper {
      * Used by distributed call sites so patching a single check is insufficient.
      */
     public static void requireHealthyKernel() {
-        if (nativeSelfCheckFailed || (vmSelfCheck != null && vmSelfCheck.contains("mismatch"))) {
+        if (nativeSelfCheckFailed || loadState != LOAD_READY || !nativeIsBootMaterialReady() ||
+            (vmSelfCheck != null && vmSelfCheck.contains("mismatch"))) {
             throw new SecurityException("Kernel integrity mismatch");
         }
     }
@@ -480,9 +892,9 @@ public final class JniMicrokernelHelper {
         }
     }
 
-    private static void verifyBootTokenAfterLoad() {
+    private static void verifyBootTokenAfterLoad(String platformSuffix) {
         try {
-            long expected = computeExpectedBootToken();
+            long expected = computeExpectedBootToken(platformSuffix);
             long actual = nativeGetBootToken();
             nativeBootToken = actual;
             if (actual != expected) {
@@ -498,8 +910,7 @@ public final class JniMicrokernelHelper {
         }
     }
 
-    private static long computeExpectedBootToken() {
-        String platformSuffix = detectPlatform();
+    private static long computeExpectedBootToken(String platformSuffix) {
         if (platformSuffix == null) platformSuffix = "";
         long token = 0xCBF29CE484222325L;
         token ^= 0xAD3B3ED7L; // FNV1a(decoded native key), mirrored from js_kernel.c
@@ -595,7 +1006,9 @@ public final class JniMicrokernelHelper {
     private static byte[][] verifiedVmCatalogPayload() throws Exception {
         JarFile catalogJar = openCatalogJar();
         try {
-        byte[] rootRaw = readRequiredResource(VM_CATALOG_RESOURCE, catalogJar);
+        byte[] rootEnvelope = readRequiredResource(VM_CATALOG_RESOURCE, catalogJar);
+        byte[] rootRaw = decodeRuntimeResource(rootEnvelope, true);
+        if (rootRaw == null) throw new SecurityException("invalid VM catalog root envelope");
         int tagMarker = lastIndexOf(rootRaw, new byte[] {'\n', 'H', '|'});
         if (tagMarker < 0) throw new SecurityException("malformed VM catalog root");
         byte[] rootBody = Arrays.copyOfRange(rootRaw, 0, tagMarker + 1);
@@ -682,7 +1095,7 @@ public final class JniMicrokernelHelper {
             for (int lineIndex = 1; lineIndex < directoryLines.length; lineIndex++) {
                 String line = directoryLines[lineIndex];
                 if (line.length() == 0) continue;
-                if (line.startsWith("M|")) {
+                if (line.length() >= 2 && line.charAt(0) == 'M' && line.charAt(1) == '|') {
                     preloadIndex.append(line.substring(2)).append('\n');
                     actualMethodCount++;
                     continue;
@@ -793,33 +1206,263 @@ public final class JniMicrokernelHelper {
         return new String(out);
     }
 
-    private static void installRuntimeResourceKeyIntoNative() {
-        int count = runtimeResourcePartitionCount();
-        for (int slot = 0; slot < count; slot++) {
-            byte[] key = partitionResourceKey(slot);
+    private static void installBootMaterialIntoNative(String platformSuffix) throws Exception {
+        clearJavaBootMaterial();
+        byte[] envelope;
+        try (InputStream in = resourceStream(BOOT_MATERIAL_RESOURCE)) {
+            if (in == null) throw new SecurityException("missing encrypted boot material envelope");
+            envelope = readAll(in);
+        }
+        byte[] bootSecret = null;
+        byte[] material = null;
+        boolean published = false;
+        try {
+            bootSecret = loadBootSecret();
+            material = decryptBootMaterial(envelope, bootSecret);
+            validateAndPublishJavaBootMaterial(material, platformSuffix);
+            published = true;
+            if (!nativeInstallBootMaterial(material) || !nativeIsBootMaterialReady()) {
+                throw new SecurityException("native boot material installation failed");
+            }
+            clearExpectedShellBindingCommitment();
+            Arrays.fill(material, 4, 68, (byte) 0);
+        } catch (Throwable error) {
+            if (published) {
+                clearJavaBootMaterial();
+                try {
+                    nativeAbortBootMaterial();
+                } catch (Throwable ignored) {
+                }
+            }
+            throw error;
+        } finally {
+            if (bootSecret != null) Arrays.fill(bootSecret, (byte) 0);
+            if (material != null) Arrays.fill(material, (byte) 0);
+            Arrays.fill(envelope, (byte) 0);
+        }
+    }
+
+    private static void prepareJavaBootMaterialForLoad(String platformSuffix) throws Exception {
+        clearJavaBootMaterial();
+        byte[] envelope;
+        try (InputStream in = resourceStream(BOOT_MATERIAL_RESOURCE)) {
+            if (in == null) throw new SecurityException("missing encrypted boot material envelope");
+            envelope = readAll(in);
+        }
+        byte[] bootSecret = null;
+        byte[] material = null;
+        boolean published = false;
+        try {
+            bootSecret = loadBootSecret();
+            material = decryptBootMaterial(envelope, bootSecret);
+            validateAndPublishJavaBootMaterial(material, platformSuffix);
+            published = true;
+        } finally {
+            if (!published) clearJavaBootMaterial();
+            if (bootSecret != null) Arrays.fill(bootSecret, (byte) 0);
+            if (material != null) Arrays.fill(material, (byte) 0);
+            Arrays.fill(envelope, (byte) 0);
+        }
+    }
+
+    private static byte[] loadBootSecret() throws Exception {
+        String encoded = System.getenv(BOOT_SECRET_ENV);
+        if (encoded != null && encoded.length() != 0) {
+            if (encoded.length() != 64) throw new SecurityException("boot KEK must be 64 hexadecimal characters");
+            byte[] decoded;
             try {
-                nativeInstallRuntimeResourceKey(key, slot);
-            } finally {
-                Arrays.fill(key, (byte) 0);
+                decoded = hexToBytes(encoded);
+            } catch (IllegalArgumentException error) {
+                throw new SecurityException("boot KEK must be hexadecimal", error);
+            }
+            if (decoded.length != 32) throw new SecurityException("boot KEK must be 32 bytes");
+            return decoded;
+        }
+        String fileName = System.getenv(BOOT_SECRET_FILE_ENV);
+        if (fileName == null || fileName.length() == 0) {
+            throw new SecurityException("boot KEK is missing");
+        }
+        byte[] bytes;
+        try (InputStream in = new FileInputStream(fileName)) {
+            bytes = readAll(in);
+        }
+        if (bytes.length == 32) return bytes;
+        try {
+            if (bytes.length != 64) throw new SecurityException("boot KEK file must contain 32 raw bytes or 64 hexadecimal characters");
+            return hexToBytes(bytes);
+        } catch (IllegalArgumentException error) {
+            throw new SecurityException("boot KEK file must contain hexadecimal characters", error);
+        } finally {
+            Arrays.fill(bytes, (byte) 0);
+        }
+    }
+
+    private static byte[] decryptBootMaterial(byte[] envelope, byte[] bootSecret) throws Exception {
+        if (envelope == null || envelope.length < 4 + 2 + 12 + 4 + 16 || bootSecret.length != 32) {
+            throw new SecurityException("malformed boot material envelope");
+        }
+        if ((envelope[0] & 0xFF) != 0x4A || (envelope[1] & 0xFF) != 0x53 ||
+            (envelope[2] & 0xFF) != 0x42 || (envelope[3] & 0xFF) != 0x4D ||
+            (envelope[4] & 0xFF) != BOOT_MATERIAL_VERSION) {
+            throw new SecurityException("unsupported boot material envelope");
+        }
+        int nonceLength = envelope[5] & 0xFF;
+        if (nonceLength != 12 || 6 + nonceLength + 4 > envelope.length) throw new SecurityException("malformed boot material nonce");
+        int sealedLengthOffset = 6 + nonceLength;
+        int sealedLength = readSealedResourceLe32(envelope, sealedLengthOffset);
+        int sealedOffset = sealedLengthOffset + 4;
+        if (sealedLength < 16 || sealedOffset + sealedLength != envelope.length) throw new SecurityException("malformed boot material payload");
+        byte[] nonce = Arrays.copyOfRange(envelope, 6, 6 + nonceLength);
+        try {
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(bootSecret, "AES"), new GCMParameterSpec(128, nonce));
+            cipher.updateAAD(BOOT_MATERIAL_AAD);
+            return cipher.doFinal(envelope, sealedOffset, sealedLength);
+        } catch (Exception error) {
+            throw new SecurityException("boot material envelope authentication failed", error);
+        } finally {
+            Arrays.fill(nonce, (byte) 0);
+        }
+    }
+
+    private static void validateAndPublishJavaBootMaterial(byte[] material) {
+        validateAndPublishJavaBootMaterial(material, detectPlatform());
+    }
+
+    private static synchronized void validateAndPublishJavaBootMaterial(byte[] material, String platformSuffix) {
+        if (runtimeResourceKeys != null || expectedShellBindingCommitment != null) {
+            throw new SecurityException("boot material is already installed");
+        }
+        if (material == null || material.length < 4 + 64 + 64 ||
+            (material[0] & 0xFF) != BOOT_MATERIAL_VERSION) {
+            throw new SecurityException("malformed boot material");
+        }
+        int partitionCount = material[1] & 0xFF;
+        int slotCount = material[2] & 0xFF;
+        int bindingCount = material[3] & 0xFF;
+        int expectedLength = 4 + 64 + slotCount * 32 + bindingCount * (1 + SHELL_BINDING_COMMITMENT_SIZE);
+        if (partitionCount < 1 || partitionCount > NATIVE_ANCHOR_KEY_SLOT || slotCount != partitionCount + 1 ||
+            bindingCount > 4 || material.length != expectedLength) {
+            throw new SecurityException("invalid boot material key slots");
+        }
+        byte[][] keys = new byte[slotCount][];
+        byte[] selectedBinding = null;
+        boolean published = false;
+        int offset = 4 + 64;
+        try {
+            for (int slot = 0; slot < slotCount; slot++) {
+                keys[slot] = Arrays.copyOfRange(material, offset, offset + 32);
+                offset += 32;
+            }
+            boolean[] seenPlatforms = new boolean[5];
+            int currentPlatformId = shellBindingPlatformId(platformSuffix);
+            for (int binding = 0; binding < bindingCount; binding++) {
+                int platformId = material[offset++] & 0xFF;
+                if (platformId < 1 || platformId > 4 || seenPlatforms[platformId]) {
+                    throw new SecurityException("invalid native shell binding platform");
+                }
+                seenPlatforms[platformId] = true;
+                byte[] commitment = Arrays.copyOfRange(material, offset, offset + SHELL_BINDING_COMMITMENT_SIZE);
+                offset += SHELL_BINDING_COMMITMENT_SIZE;
+                int nonzero = 0;
+                for (byte value : commitment) nonzero |= value & 0xFF;
+                if (nonzero == 0) {
+                    Arrays.fill(commitment, (byte) 0);
+                    throw new SecurityException("invalid native shell binding commitment");
+                }
+                if (platformId == currentPlatformId) {
+                    selectedBinding = commitment;
+                } else {
+                    Arrays.fill(commitment, (byte) 0);
+                }
+            }
+            if (bindingCount > 0 && selectedBinding == null) {
+                throw new SecurityException("missing native shell binding for current platform");
+            }
+            runtimeResourcePartitionCount = partitionCount;
+            anchorResourcePartition = partitionCount;
+            runtimeResourceKeys = keys;
+            expectedShellBindingCommitment = selectedBinding;
+            expectedShellBindingThread = selectedBinding == null ? null : Thread.currentThread();
+            shellBindingHandoffState = selectedBinding == null ? 0 : 1;
+            published = true;
+        } finally {
+            if (!published) {
+                for (byte[] key : keys) if (key != null) Arrays.fill(key, (byte) 0);
+                if (selectedBinding != null) Arrays.fill(selectedBinding, (byte) 0);
             }
         }
-        byte[] anchor = partitionResourceKey(anchorResourcePartition());
-        try {
-            nativeInstallRuntimeResourceKey(anchor, NATIVE_ANCHOR_KEY_SLOT);
-        } finally {
-            Arrays.fill(anchor, (byte) 0);
+    }
+
+    private static synchronized void clearJavaBootMaterial() {
+        byte[][] keys = runtimeResourceKeys;
+        byte[] shellBinding = expectedShellBindingCommitment;
+        runtimeResourceKeys = null;
+        runtimeResourcePartitionCount = 0;
+        anchorResourcePartition = -1;
+        expectedShellBindingCommitment = null;
+        expectedShellBindingThread = null;
+        shellBindingHandoffState = 0;
+        if (keys != null) for (byte[] key : keys) if (key != null) Arrays.fill(key, (byte) 0);
+        if (shellBinding != null) Arrays.fill(shellBinding, (byte) 0);
+    }
+
+    private static synchronized void clearExpectedShellBindingCommitment() {
+        byte[] shellBinding = expectedShellBindingCommitment;
+        expectedShellBindingCommitment = null;
+        expectedShellBindingThread = null;
+        shellBindingHandoffState = 0;
+        if (shellBinding != null) Arrays.fill(shellBinding, (byte) 0);
+    }
+
+    /* Fixed JNI_OnLoad bridge. Runtime sealing must keep this name and descriptor stable. */
+    private static synchronized byte[] takeExpectedShellBindingCommitment() {
+        if (shellBindingHandoffState != 1 || expectedShellBindingThread != Thread.currentThread()) return null;
+        byte[] shellBinding = expectedShellBindingCommitment;
+        expectedShellBindingCommitment = null;
+        if (shellBinding == null) return null;
+        byte[] result = Arrays.copyOf(shellBinding, shellBinding.length);
+        Arrays.fill(shellBinding, (byte) 0);
+        shellBindingHandoffState = 2;
+        return result;
+    }
+
+    private static synchronized void verifyShellBindingHandoffAfterLoad() {
+        if (shellBindingHandoffState == 0) return;
+        if (shellBindingHandoffState != 2 || expectedShellBindingCommitment != null ||
+            expectedShellBindingThread != Thread.currentThread()) {
+            throw new SecurityException("native shell did not consume the boot binding commitment");
         }
+        expectedShellBindingThread = null;
+        shellBindingHandoffState = 0;
+    }
+
+    private static int shellBindingPlatformId(String platform) {
+        if ("windows-x64".equals(platform)) return 1;
+        if ("linux-x64".equals(platform)) return 2;
+        if ("macos-x64".equals(platform)) return 3;
+        if ("macos-arm64".equals(platform)) return 4;
+        return 0;
     }
 
     /* ---- Platform detection ---- */
 
     private static String detectPlatform() {
-        String osName = System.getProperty("os.name", "").toLowerCase();
-        String osArch = System.getProperty("os.arch", "").toLowerCase();
-        if (osName.contains("win") && (osArch.contains("64") || osArch.contains("amd64"))) return "windows-x64";
-        if (osName.contains("linux") && osArch.contains("64")) return "linux-x64";
-        if (osName.contains("mac") && osArch.contains("aarch64")) return "macos-arm64";
-        if (osName.contains("mac")) return "macos-x64";
+        return detectPlatform(System.getProperty("os.name", ""), System.getProperty("os.arch", ""));
+    }
+
+    private static String detectPlatform(String osName, String osArch) {
+        String normalizedOs = osName == null ? "" : osName.trim().toLowerCase(Locale.ROOT);
+        String normalizedArch = osArch == null ? "" : osArch.trim().toLowerCase(Locale.ROOT);
+        boolean x64 = "amd64".equals(normalizedArch) || "x86_64".equals(normalizedArch) || "x64".equals(normalizedArch);
+        boolean arm64 = "aarch64".equals(normalizedArch) || "arm64".equals(normalizedArch);
+        boolean windows = "windows".equals(normalizedOs) || normalizedOs.startsWith("windows ");
+        boolean linux = "linux".equals(normalizedOs) || normalizedOs.startsWith("linux ");
+        boolean macos = "macos".equals(normalizedOs) || "mac os x".equals(normalizedOs) || normalizedOs.startsWith("mac os ");
+        if (windows) return x64 ? "windows-x64" : null;
+        if (linux) return x64 ? "linux-x64" : null;
+        if (macos && x64) return "macos-x64";
+        if (macos && arm64) return "macos-arm64";
         return null;
     }
 
@@ -831,34 +1474,6 @@ public final class JniMicrokernelHelper {
         String detail = prefix + ":" + e.getClass().getName() + ":" + String.valueOf(e.getMessage());
         if (root != e) detail += ":cause=" + root.getClass().getName() + ":" + String.valueOf(root.getMessage());
         return detail;
-    }
-
-    private static boolean tryLoadNative(String platformSuffix, String components) {
-        String previousLoaderOwner = System.getProperty(sealedLoaderPropertyName());
-        boolean ok = false;
-        try {
-            publishSealedNativeBindings();
-            System.loadLibrary(kernelBaseName() + platformSuffix);
-            loadMessage = "native:" + platformSuffix + ":" + initializeNativeKernel(platformSuffix);
-            installRuntimeResourceKeyIntoNative();
-            sealedNativeBindingsPublished = true;
-            try {
-                preloadRuntimeResourcesIntoNative();
-                if (verifyNativeAbiAfterLoad()) {
-                    verifyBootTokenAfterLoad();
-                    ok = true;
-                }
-                return ok;
-            } finally {
-                if (!ok) {
-                    sealedNativeBindingsPublished = false;
-                }
-            }
-        } catch (UnsatisfiedLinkError e) {
-            return false;
-        } finally {
-            if (!ok) restoreLoaderProperty(previousLoaderOwner);
-        }
     }
 
     private static boolean tryLoadBundledNative(String platformSuffix, String components) {
@@ -901,16 +1516,19 @@ public final class JniMicrokernelHelper {
             tempLib.setReadable(true, true);
             tempLib.setWritable(true, true);
             tempLib.setExecutable(true, true);
-            publishSealedNativeBindings();
+            prepareJavaBootMaterialForLoad(platformSuffix);
+            publishSealedNativeLoaderOwner();
             System.load(tempLib.getAbsolutePath());
+            verifyShellBindingHandoffAfterLoad();
             loadMessage = "native:bundled:" + platformSuffix + ":" + initializeNativeKernel(platformSuffix);
-            installRuntimeResourceKeyIntoNative();
+            installBootMaterialIntoNative(platformSuffix);
+            publishSealedNativeBindings();
             sealedNativeBindingsPublished = true;
             try {
                 preloadRuntimeResourcesIntoNative();
                 if (verifyNativeAbiAfterLoad()) {
-                    verifyBootTokenAfterLoad();
-                    ok = true;
+                    verifyBootTokenAfterLoad(platformSuffix);
+                    ok = !nativeSelfCheckFailed;
                 }
                 return ok;
             } finally {
@@ -927,7 +1545,15 @@ public final class JniMicrokernelHelper {
             if (tempLib != null) tempLib.delete();
             return false;
         } finally {
-            if (!ok) restoreLoaderProperty(previousLoaderOwner);
+            if (!ok) {
+                clearJavaBootMaterial();
+                try {
+                    nativeAbortBootMaterial();
+                } catch (Throwable ignored) {
+                }
+                sealedNativeBindingsPublished = false;
+                restoreLoaderProperty(previousLoaderOwner);
+            }
         }
     }
 
@@ -997,12 +1623,17 @@ public final class JniMicrokernelHelper {
 
     private static void publishSealedNativeBindings() {
         try {
-            System.setProperty(sealedLoaderPropertyName(), JniMicrokernelHelper.class.getName().replace('.', '/'));
-            String index = sealedNativeIndexText();
-            if (index == null || index.length() == 0) return;
+            publishSealedNativeLoaderOwner();
+            String bindingText = sealedNativeBindingText();
+            if (bindingText == null || bindingText.length() == 0) {
+                if (!SEALED_NATIVE_BINDINGS_RESOURCE.equals(legacySealedNativeBindingsResource())) {
+                    throw new SecurityException("sealed native bindings unavailable");
+                }
+                return;
+            }
             StringBuilder bindings = new StringBuilder();
             StringBuilder methodBindings = new StringBuilder();
-            String[] lines = index.split("\n");
+            String[] lines = bindingText.split("\n");
             for (String line : lines) {
                 String[] parts = line.trim().split("\\|", -1);
                 if (parts.length == 3 && "B".equals(parts[0])) {
@@ -1015,8 +1646,15 @@ public final class JniMicrokernelHelper {
             }
             if (bindings.length() > 0) System.setProperty(sealedBindingPropertyName(), mergeBindingProperties(System.getProperty(sealedBindingPropertyName()), bindings.toString()));
             if (methodBindings.length() > 0) System.setProperty(sealedMethodBindingPropertyName(), mergeBindingProperties(System.getProperty(sealedMethodBindingPropertyName()), methodBindings.toString()));
-        } catch (Throwable ignored) {
+        } catch (SecurityException e) {
+            throw e;
+        } catch (Throwable e) {
+            throw new SecurityException("sealed native bindings unavailable", e);
         }
+    }
+
+    private static void publishSealedNativeLoaderOwner() {
+        System.setProperty(sealedLoaderPropertyName(), JniMicrokernelHelper.class.getName().replace('.', '/'));
     }
 
     private static void ensureSealedNativeBindingsPublished() {
@@ -1071,10 +1709,24 @@ public final class JniMicrokernelHelper {
         return new String(new char[]{'j', '.', 'm'});
     }
 
+    private static String legacySealedNativeBindingsResource() {
+        return new String(new char[]{'M','E','T','A','-','I','N','F','/','.','r','/','b','i','n','d','i','n','g','s','.','d','a','t'});
+    }
+
     private static String sealedNativeIndexText() {
         try (InputStream in = resourceStream(SEALED_NATIVE_INDEX_RESOURCE)) {
             if (in == null) return null;
             byte[] decoded = decodeBootstrapNativeIndex(readAll(in));
+            return decoded == null ? null : new String(decoded, StandardCharsets.UTF_8);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private static String sealedNativeBindingText() {
+        try (InputStream in = resourceStream(SEALED_NATIVE_BINDINGS_RESOURCE)) {
+            if (in == null) return null;
+            byte[] decoded = decodeRuntimeResource(readAll(in), true);
             return decoded == null ? null : new String(decoded, StandardCharsets.UTF_8);
         } catch (Exception ignored) {
             return null;
@@ -1109,7 +1761,25 @@ public final class JniMicrokernelHelper {
         for (int index = 0; index < out.length; index++) {
             int hi = Character.digit(hex.charAt(index * 2), 16);
             int lo = Character.digit(hex.charAt(index * 2 + 1), 16);
-            if (hi < 0 || lo < 0) throw new IllegalArgumentException("bad hex");
+            if (hi < 0 || lo < 0) {
+                Arrays.fill(out, (byte) 0);
+                throw new IllegalArgumentException("bad hex");
+            }
+            out[index] = (byte) ((hi << 4) | lo);
+        }
+        return out;
+    }
+
+    private static byte[] hexToBytes(byte[] hex) {
+        if ((hex.length & 1) != 0) throw new IllegalArgumentException("odd hex");
+        byte[] out = new byte[hex.length / 2];
+        for (int index = 0; index < out.length; index++) {
+            int hi = Character.digit((char) (hex[index * 2] & 0xFF), 16);
+            int lo = Character.digit((char) (hex[index * 2 + 1] & 0xFF), 16);
+            if (hi < 0 || lo < 0) {
+                Arrays.fill(out, (byte) 0);
+                throw new IllegalArgumentException("bad hex");
+            }
             out[index] = (byte) ((hi << 4) | lo);
         }
         return out;
@@ -1122,16 +1792,17 @@ public final class JniMicrokernelHelper {
     }
 
     private static int runtimeResourcePartitionCount() {
-        return 1;
+        return runtimeResourcePartitionCount;
     }
 
     private static int anchorResourcePartition() {
-        return 0;
+        return anchorResourcePartition;
     }
 
     private static byte[] partitionResourceKey(int partitionId) {
-        if (partitionId < 0) return new byte[32];
-        return new byte[32];
+        byte[][] keys = runtimeResourceKeys;
+        if (keys == null || partitionId < 0 || partitionId >= keys.length) throw new SecurityException("runtime key slot unavailable");
+        return keys[partitionId].clone();
     }
 
     public static byte[] decodeRuntimeResourceEnvelope(byte[] raw) {
@@ -1175,7 +1846,7 @@ public final class JniMicrokernelHelper {
         int macLength = readSealedResourceLe16(raw, 23);
         int partitionId = readSealedResourceLe16(raw, 25);
         if (metadataLength != 96 || macLength != 32) return null;
-        if (partitionId < 0 || partitionId >= runtimeResourcePartitionCount()) return null;
+        if (partitionId < 0 || partitionId > anchorResourcePartition()) return null;
         int metadataOffset = 27;
         int bodyOffset = metadataOffset + metadataLength;
         if (bodyOffset + 33 > raw.length) return null;
@@ -1696,10 +2367,6 @@ public final class JniMicrokernelHelper {
         int n;
         while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
         return out.toByteArray();
-    }
-
-    private static String kernelBaseName() {
-        return new String(new char[]{'j', 's', '_', 'k', 'e', 'r', 'n', 'e', 'l', '_'});
     }
 
     private static final class SealedNativeLibrary {

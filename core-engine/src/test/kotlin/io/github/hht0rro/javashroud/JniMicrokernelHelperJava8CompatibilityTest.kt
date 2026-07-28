@@ -136,11 +136,23 @@ class JniMicrokernelHelperJava8CompatibilityTest {
 
     private fun java8HarnessSource(): String = """
         import io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper;
+        import java.io.ByteArrayInputStream;
+        import java.io.ByteArrayOutputStream;
+        import java.io.ObjectInputStream;
+        import java.io.ObjectOutputStream;
         import java.lang.invoke.MethodHandle;
+        import java.lang.reflect.Method;
+        import java.nio.charset.StandardCharsets;
+        import java.util.Base64;
+        import java.util.function.Function;
 
         public final class Java8LookupHarness {
             private static final class Target {
                 private static String join(String prefix, int value) {
+                    return prefix + value;
+                }
+
+                private static String decorate(String prefix, String value) {
                     return prefix + value;
                 }
             }
@@ -152,6 +164,39 @@ class JniMicrokernelHelperJava8CompatibilityTest {
                 if (handle == null) throw new AssertionError("private lookup returned null");
                 Object result = handle.invokeWithArguments("value=", Integer.valueOf(8));
                 if (!"value=8".equals(result)) throw new AssertionError(String.valueOf(result));
+
+                String bridgeDescriptor = "(Ljava/lang/CharSequence;)Ljava/lang/CharSequence;";
+                String bridgeOption = Base64.getUrlEncoder().withoutPadding().encodeToString(
+                    bridgeDescriptor.getBytes(StandardCharsets.US_ASCII)
+                );
+                Function function = (Function) JniMicrokernelHelper.createSamLambda(
+                    "apply",
+                    "(Ljava/lang/String;)Ljava/util/function/Function;",
+                    "Java8LookupHarness${'$'}Target",
+                    "decorate",
+                    "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                    6,
+                    "(Ljava/lang/Object;)Ljava/lang/Object;",
+                    "(Ljava/lang/String;)Ljava/lang/String;",
+                    "5;;" + bridgeOption,
+                    new Object[] { "java8-" }
+                );
+                if (!"java8-value".equals(function.apply("value"))) throw new AssertionError("SAM invocation failed");
+                Method bridge = function.getClass().getMethod("apply", CharSequence.class);
+                if (!"java8-bridge".equals(bridge.invoke(function, "bridge"))) throw new AssertionError("bridge invocation failed");
+
+                ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+                ObjectOutputStream output = new ObjectOutputStream(bytes);
+                output.writeObject(function);
+                output.close();
+                ObjectInputStream input = new ObjectInputStream(new ByteArrayInputStream(bytes.toByteArray()));
+                Function restored = (Function) input.readObject();
+                input.close();
+                Method restoredBridge = restored.getClass().getMethod("apply", CharSequence.class);
+                if (!"java8-restored".equals(restored.apply("restored"))) throw new AssertionError("restored SAM invocation failed");
+                if (!"java8-restored-bridge".equals(restoredBridge.invoke(restored, "restored-bridge"))) {
+                    throw new AssertionError("restored bridge invocation failed");
+                }
                 System.out.println("java8-private-lookup-ok");
             }
         }

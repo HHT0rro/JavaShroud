@@ -126,50 +126,55 @@ internal fun executeWithOrderedPasses(
 ): EngineRunResult {
     val outputJarPath = resolveOutputJarPath(config)
     Files.deleteIfExists(CandidateProductionBuildEvidence.evidencePath(outputJarPath))
+    val ownsVbc4BuildContext = vbc4BuildContextOverride == null
     val vbc4BuildContext = vbc4BuildContextOverride ?: buildVbc4BuildContext(config, preparation.artifact)
-    return withVbc4BuildContext(vbc4BuildContext) {
-        val knownBrokenPassWarnings = buildKnownBrokenPassWarnings(reorderedPasses.filter { it.spec.enabled }.map { it.spec.id })
-        knownBrokenPassWarnings.forEach(emit)
-        val passExecution = executeRegisteredPasses(
-            initialContext = preparation.initialContext,
-            registeredPasses = reorderedPasses,
-            emit = emit,
-        )
-        val executedPassIds = reorderedPasses.filter { it.spec.enabled }.map { it.spec.id }
-        val artifactWithHelpers = io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment.injectRequiredHelpers(
-            artifact = passExecution.context.artifact,
-            executedPassIds = executedPassIds,
-        )
-        val artifactWithNative = io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment.bundleNativeLibrariesIfAvailable(
-            artifact = artifactWithHelpers,
-            executedPassIds = executedPassIds,
-            config = config,
-            emit = emit,
-        )
-        val artifactWithProcessedHelpers = applyEnabledBasicPassesToHelpers(
-            config = config,
-            artifactContext = passExecution.context.copy(artifact = artifactWithNative),
-            registeredPasses = reorderedPasses,
-        )
-        val artifactForWrite = io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.sealIfRequested(
-            artifact = artifactWithProcessedHelpers,
-            config = config,
-        )
-        writeBytecodeArtifact(outputJarPath, artifactForWrite)
-        currentVbc4BuildContextOrNull()?.productionBuildEvidence?.writeAfterFinalJar(
-            artifact = artifactForWrite,
-            outputJarPath = outputJarPath,
-        )
-        val outputJarPathString = outputJarPath.toString()
-        emit(buildRunSummaryEvent(
-            executedPassCount = passExecution.executedPassCount,
-            totalTransformedClasses = passExecution.totalTransformedClasses,
-            totalTransformedMembers = passExecution.totalTransformedMembers,
-            totalPlannedRenames = passExecution.totalPlannedRenames,
-            outputJarPath = outputJarPathString,
-        ))
-        emit(buildDoneEvent(outputJarPathString))
-        EngineRunResult(events = emptyList())
+    return try {
+        withVbc4BuildContext(vbc4BuildContext) {
+            val knownBrokenPassWarnings = buildKnownBrokenPassWarnings(reorderedPasses.filter { it.spec.enabled }.map { it.spec.id })
+            knownBrokenPassWarnings.forEach(emit)
+            val passExecution = executeRegisteredPasses(
+                initialContext = preparation.initialContext,
+                registeredPasses = reorderedPasses,
+                emit = emit,
+            )
+            val executedPassIds = reorderedPasses.filter { it.spec.enabled }.map { it.spec.id }
+            val artifactWithHelpers = io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment.injectRequiredHelpers(
+                artifact = passExecution.context.artifact,
+                executedPassIds = executedPassIds,
+            )
+            val artifactWithNative = io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment.bundleNativeLibrariesIfAvailable(
+                artifact = artifactWithHelpers,
+                executedPassIds = executedPassIds,
+                config = config,
+                emit = emit,
+            )
+            val artifactWithProcessedHelpers = applyEnabledBasicPassesToHelpers(
+                config = config,
+                artifactContext = passExecution.context.copy(artifact = artifactWithNative),
+                registeredPasses = reorderedPasses,
+            )
+            val artifactForWrite = io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.sealIfRequested(
+                artifact = artifactWithProcessedHelpers,
+                config = config,
+            )
+            writeBytecodeArtifact(outputJarPath, artifactForWrite)
+            currentVbc4BuildContextOrNull()?.productionBuildEvidence?.writeAfterFinalJar(
+                artifact = artifactForWrite,
+                outputJarPath = outputJarPath,
+            )
+            val outputJarPathString = outputJarPath.toString()
+            emit(buildRunSummaryEvent(
+                executedPassCount = passExecution.executedPassCount,
+                totalTransformedClasses = passExecution.totalTransformedClasses,
+                totalTransformedMembers = passExecution.totalTransformedMembers,
+                totalPlannedRenames = passExecution.totalPlannedRenames,
+                outputJarPath = outputJarPathString,
+            ))
+            emit(buildDoneEvent(outputJarPathString))
+            EngineRunResult(events = emptyList())
+        }
+    } finally {
+        if (ownsVbc4BuildContext) vbc4BuildContext.wipe()
     }
 }
 

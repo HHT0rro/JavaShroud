@@ -737,8 +737,12 @@ fun applyJniMicrokernelLoader(
     val supportedKernelComponents = setOf("loader", "decrypt", "vm", "guards", "all")
     require(kernelComponents in supportedKernelComponents) { "jni-microkernel-loader kernelComponents '$kernelComponents' is not supported; supported values: ${supportedKernelComponents.joinToString("", "")}" }
     val targetPlatform = (params["targetPlatform"] as? String) ?: "auto"
-    val supportedTargetPlatforms = setOf("auto", "windows-x64", "linux-x64", "macos-x64", "macos-arm64")
-    require(targetPlatform in supportedTargetPlatforms) { "jni-microkernel-loader targetPlatform '$targetPlatform' is not supported; supported values: ${supportedTargetPlatforms.joinToString("", "")}" }
+    val targetPlatforms = EmbeddedHelperDeployment.resolveNativeCompileTargetPlatforms(targetPlatform)
+    val runtimeTargetPlatform = when {
+        targetPlatform.trim() == "auto" -> "auto"
+        targetPlatform.trim() == "all" -> "all"
+        else -> targetPlatforms.joinToString(",")
+    }
     val diversifiedVirtualization = (params["diversifiedVirtualization"] as? Boolean) ?: true
     val vmMode = if (diversifiedVirtualization) "vm-diverse" else "vm-off"
 
@@ -811,7 +815,7 @@ fun applyJniMicrokernelLoader(
                 return object : MethodVisitor(Opcodes.ASM9, superMv) {
                     override fun visitCode() {
                         super.visitCode()
-                        emitJniMicrokernelLoad(this, kernelComponents, targetPlatform, vmMode)
+                        emitJniMicrokernelLoad(this, kernelComponents, runtimeTargetPlatform, vmMode)
                         classModified = true
                     }
                 }
@@ -824,7 +828,7 @@ fun applyJniMicrokernelLoader(
                 if (!clinitSeen && !isInterfaceClass) {
                     val mv = super.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null)
                     mv.visitCode()
-                    emitJniMicrokernelLoad(mv, kernelComponents, targetPlatform, vmMode)
+                    emitJniMicrokernelLoad(mv, kernelComponents, runtimeTargetPlatform, vmMode)
                     mv.visitInsn(Opcodes.RETURN)
                     mv.visitMaxs(0, 0)
                     mv.visitEnd()
@@ -927,9 +931,12 @@ fun applyDiversifiedVmToClasses(
                             stateBinding = vmStateBinding(entryToken, resourcePath),
                             entryMetadata = Vbc4EntryMetadata(
                                 entryToken = entryToken,
-                                ownerToken = dispatchClassToken,
-                                methodToken = dispatchMethodToken,
-                                returnDescriptor = org.objectweb.asm.Type.getReturnType(descriptor).descriptor,
+                                returnDescriptor = vbc4ReturnTag(descriptor),
+                                methodIdentity = buildContext.deriveVbc4Identity(className, name, descriptor),
+                                ownerIdentity = buildContext.deriveVbc4OwnerIdentity(className),
+                                argumentTags = vbc4ArgumentTagVector(descriptor),
+                                resourcePath = resourcePath,
+                                isStatic = access and org.objectweb.asm.Opcodes.ACC_STATIC != 0,
                             ),
                             buildContext = buildContext,
                         )

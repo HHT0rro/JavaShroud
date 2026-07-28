@@ -19,7 +19,9 @@ extern jint JNICALL jsn_k3(JNIEnv* env, jclass clazz);
 extern jbyteArray JNICALL jsn_k4(JNIEnv* env, jclass clazz, jbyteArray encrypted, jbyteArray keyArr, jbyteArray ivArr);
 extern jstring JNICALL jsn_k5(JNIEnv* env, jclass clazz);
 extern jlong JNICALL jsn_k6(JNIEnv* env, jclass clazz);
-JS_HIDDEN void JNICALL jsn_k7(JNIEnv *env, jclass cls, jbyteArray keyArr, jint slot);
+JS_HIDDEN jboolean JNICALL jsn_k7(JNIEnv *env, jclass cls, jbyteArray material);
+JS_HIDDEN jboolean JNICALL jsn_k11(JNIEnv *env, jclass cls);
+JS_HIDDEN void JNICALL jsn_k12(JNIEnv *env, jclass cls);
 JS_HIDDEN void JNICALL jsn_k9(JNIEnv *env, jclass cls, jbyteArray preload_index, jbyteArray commitments, jbyteArray startup_nonce);
 JS_HIDDEN jbyteArray JNICALL jsn_k10(JNIEnv *env, jclass cls, jbyteArray keyIdArr, jbyteArray saltArr, jint length);
 JS_HIDDEN void JNICALL jsn_r0(JNIEnv *env, jclass cls, jstring jdl, jstring jresp);
@@ -33,7 +35,7 @@ JS_HIDDEN jstring JNICALL jsn_r13(JNIEnv *env, jclass cls, jstring encoded);
 JS_HIDDEN jstring JNICALL jsn_r16(JNIEnv *env, jclass cls, jstring bindingSource, jstring salt);
 JS_HIDDEN void JNICALL jsn_r17(JNIEnv *env, jclass cls, jstring expectedToken, jstring bindingSource, jstring salt);
 JS_HIDDEN jobject JNICALL jsn_r20(JNIEnv *env, jclass cls, jlong entryToken, jstring resourcePath, jobjectArray args);
-JS_HIDDEN jbyteArray JNICALL jsn_r21(JNIEnv *env, jclass cls, jbyteArray payload, jint seed, jint flags);
+JS_HIDDEN jbyteArray JNICALL jsn_r21(JNIEnv *env, jclass cls, jbyteArray payload, jint seed, jint flags, jlong classIdentityHigh, jlong classIdentityLow);
 JS_HIDDEN jobject JNICALL jsn_r22(JNIEnv *env, jclass cls, jlong entryToken, jobjectArray args);
 JS_HIDDEN void JNICALL jsn_r23(JNIEnv *env, jclass cls, jlong entryToken);
 JS_HIDDEN void JNICALL jsn_r24(JNIEnv *env, jclass cls, jlong entryToken, jint arg0);
@@ -96,9 +98,21 @@ static jlong JNICALL jsw_k6(JNIEnv *env, jclass cls) {
     return js_protected_runtime_leave(env) ? result : 0;
 }
 
-static void JNICALL jsw_k7(JNIEnv *env, jclass cls, jbyteArray keyArr, jint slot) {
+static jboolean JNICALL jsw_k7(JNIEnv *env, jclass cls, jbyteArray material) {
+    if (!js_protected_runtime_enter(env)) return JNI_FALSE;
+    jboolean result = jsn_k7(env, cls, material);
+    return js_protected_runtime_leave(env) ? result : JNI_FALSE;
+}
+
+static jboolean JNICALL jsw_k11(JNIEnv *env, jclass cls) {
+    if (!js_protected_runtime_enter(env)) return JNI_FALSE;
+    jboolean result = jsn_k11(env, cls);
+    return js_protected_runtime_leave(env) ? result : JNI_FALSE;
+}
+
+static void JNICALL jsw_k12(JNIEnv *env, jclass cls) {
     if (!js_protected_runtime_enter(env)) return;
-    jsn_k7(env, cls, keyArr, slot);
+    jsn_k12(env, cls);
     (void)js_protected_runtime_leave(env);
 }
 
@@ -180,9 +194,9 @@ static jobject JNICALL jsw_r20(JNIEnv *env, jclass cls, jlong entryToken, jstrin
     return js_protected_runtime_leave(env) ? result : NULL;
 }
 
-static jbyteArray JNICALL jsw_r21(JNIEnv *env, jclass cls, jbyteArray payload, jint seed, jint flags) {
+static jbyteArray JNICALL jsw_r21(JNIEnv *env, jclass cls, jbyteArray payload, jint seed, jint flags, jlong classIdentityHigh, jlong classIdentityLow) {
     if (!js_protected_runtime_enter(env)) return NULL;
-    jbyteArray result = jsn_r21(env, cls, payload, seed, flags);
+    jbyteArray result = jsn_r21(env, cls, payload, seed, flags, classIdentityHigh, classIdentityLow);
     return js_protected_runtime_leave(env) ? result : NULL;
 }
 
@@ -225,6 +239,8 @@ static const js_native_abi_table js_native_abi_table_instance = {
     jsw_k5,
     jsw_k6,
     jsw_k7,
+    jsw_k11,
+    jsw_k12,
     jsw_k9,
     jsw_k10,
     jsw_r20,
@@ -493,7 +509,9 @@ static int js_register_all_natives(JNIEnv *env) {
         {js_native_name("Heart", "beat", ""), "()I", (void*)jsw_k3},
         {js_native_name("Get", "Ver", "sion"), "()Ljava/lang/String;", (void*)jsw_k5},
         {js_native_name("Get", "Boot", "Token"), "()J", (void*)jsw_k6},
-        {js_native_name("Install", "RuntimeResource", "Key"), "([BI)V", (void*)jsw_k7},
+        {js_native_name("Install", "Boot", "Material"), "([B)Z", (void*)jsw_k7},
+        {js_native_name("Is", "BootMaterial", "Ready"), "()Z", (void*)jsw_k11},
+        {js_native_name("Abort", "Boot", "Material"), "()V", (void*)jsw_k12},
         {js_native_name("Preload", "Runtime", "Resources"), "([B[B[B)V", (void*)jsw_k9},
         {js_native_name("De", "crypt", "Aes"), "([B[B[B)[B", (void*)jsw_k4},
         {js_native_name("Derive", "ClassEncryption", "Key"), "([B[BI)[B", (void*)jsw_k10},
@@ -528,7 +546,7 @@ static int js_register_all_natives(JNIEnv *env) {
     };
     if (!js_register_native_group(env, js_helper_owner("An", "tiDump", "", "Helper"), anti_dump_methods, 3, 0)) return 0;
 
-    JNINativeMethod string_encryption_methods[] = {{js_native_name("Decode", "String", ""), "([BII)[B", (void*)jsw_r21}};
+    JNINativeMethod string_encryption_methods[] = {{js_native_name("Decode", "String", ""), "([BIIJJ)[B", (void*)jsw_r21}};
     if (!js_register_native_group(env, js_helper_owner("String", "Encryption", "", "Helper"), string_encryption_methods, 1, 0)) return 0;
     JNINativeMethod environment_methods[] = {
         {js_native_name("Derive", "Key", ""), "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", (void*)jsw_r16},
