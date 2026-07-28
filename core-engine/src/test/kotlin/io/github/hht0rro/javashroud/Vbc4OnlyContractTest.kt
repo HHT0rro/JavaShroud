@@ -73,11 +73,13 @@ class Vbc4OnlyContractTest {
         }
 
         val first = serializedFor("META-INF/vm/a.bin")
+        val repeat = serializedFor("META-INF/vm/a.bin")
         val second = serializedFor("META-INF/vm/b.bin")
 
         assertEquals("VBC4", first.copyOfRange(0, 4).toString(Charsets.US_ASCII))
         assertEquals("VBC4", second.copyOfRange(0, 4).toString(Charsets.US_ASCII))
-        assertTrue(first.copyOfRange(6, 22).contentEquals(second.copyOfRange(6, 22)), "Same program and seed should keep nonce stable")
+        assertTrue(first.copyOfRange(6, 22).contentEquals(repeat.copyOfRange(6, 22)), "Same program, seed, and state binding should keep nonce stable")
+        assertFalse(first.copyOfRange(6, 22).contentEquals(second.copyOfRange(6, 22)), "Resource-path metadata must diversify the VBC4 nonce")
         assertFalse(first.copyOfRange(26, 42).contentEquals(second.copyOfRange(26, 42)), "Wrapped seed token must change when resource-path binding changes")
         assertFalse(first.copyOfRange(first.size - 33, first.size - 1).contentEquals(second.copyOfRange(second.size - 33, second.size - 1)), "VBC4 MAC must authenticate the binding-derived seed token")
     }
