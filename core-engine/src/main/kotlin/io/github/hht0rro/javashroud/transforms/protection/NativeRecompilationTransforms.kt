@@ -370,7 +370,11 @@ object NativeRecompilationTransforms {
                     }
                 }
             } else {
-                val diagnostic = compileResult.output.lineSequence().filter { it.isNotBlank() }.take(6).joinToString(" | ").take(900)
+                val diagnosticLines = compileResult.output.lineSequence().filter { it.isNotBlank() }.toList()
+                val diagnostic = when {
+                    diagnosticLines.size <= 8 -> diagnosticLines
+                    else -> diagnosticLines.take(3) + "..." + diagnosticLines.takeLast(5)
+                }.joinToString(" | ").take(1_800)
                 val suffix = if (diagnostic.isBlank()) "" else ": $diagnostic"
                 report(NativeToolchainProvisioner.ResolutionMessage("warn", "Failed to compile JNI microkernel for ${task.platform} with Zig ${toolchain.zigPath}$suffix", 94))
             }

@@ -748,8 +748,8 @@ class NativeRecompilationTransformsTest {
             )
         }
 
-        assertEquals(platforms.toSet(), maxDiagnostics.results.map { it.platform }.toSet(), "Windows/Linux max recompilation must produce reportable outer stubs")
-        assertEquals(platforms.toSet(), innerDiagnostics.results.map { it.platform }.toSet(), "Windows/Linux off recompilation must produce inner kernels for plaintext comparison")
+        assertEquals(platforms.toSet(), maxDiagnostics.results.map { it.platform }.toSet(), "Windows/Linux max recompilation must produce reportable outer stubs. diagnostics=${maxDiagnostics.messages.joinToString(" | ") { "${it.level}:${it.message}" }}")
+        assertEquals(platforms.toSet(), innerDiagnostics.results.map { it.platform }.toSet(), "Windows/Linux off recompilation must produce inner kernels for plaintext comparison. diagnostics=${innerDiagnostics.messages.joinToString(" | ") { "${it.level}:${it.message}" }}")
         assertEquals(setOf("macos-x64", "macos-arm64"), macosDiagnostics.results.map { it.platform }.toSet(), "macOS max recompilation must produce fail-closed reportable outer stubs. diagnostics=${macosDiagnostics.messages.joinToString(" | ") { "${it.level}:${it.message}" }}")
 
         val innerByPlatform = innerDiagnostics.results.associateBy { it.platform }
