@@ -1497,7 +1497,6 @@ static volatile int js_vm_shared_dispatch_seeded = 0;
 
 
 JS_HIDDEN void js_vbc4_wipe_volatile(void *ptr, size_t len);
-static void js_hmac_sha256_with_key(const unsigned char *key, int key_len, const unsigned char **parts, const int *part_lens, int part_count, unsigned char out[32]);
 static void js_write_be32_tmp(unsigned char out[4], uint32_t value);
 static uint32_t js_vm_entry_integrity_state(void);
 static void js_vm_write_entry_integrity_bytes(unsigned char out[4]);
