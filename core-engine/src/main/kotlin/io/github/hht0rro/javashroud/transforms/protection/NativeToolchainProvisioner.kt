@@ -137,8 +137,8 @@ object NativeToolchainProvisioner {
             }
         }
         val target = when {
-            os.contains("win") -> "windows"
-            os.contains("linux") -> "linux"
+            os.startsWith("windows") -> "windows"
+            os == "linux" || os.startsWith("linux ") -> "linux"
             os.contains("mac") -> "macos"
             else -> return null
         }
@@ -273,7 +273,7 @@ object NativeToolchainProvisioner {
     }
 
     private val isWindows: Boolean
-        get() = System.getProperty("os.name").lowercase().contains("win")
+        get() = System.getProperty("os.name").lowercase().startsWith("windows")
 
     private val exeSuffix: String
         get() = if (isWindows) ".exe" else ""

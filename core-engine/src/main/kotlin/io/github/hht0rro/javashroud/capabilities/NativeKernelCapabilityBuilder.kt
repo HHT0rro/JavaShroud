@@ -219,13 +219,13 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
 
                 key = "targetPlatform",
 
-                type = "enum",
+                type = "string",
 
                 defaultValue = JsonNodeFactory.instance.textNode("auto"),
 
-                options = listOf("auto", "windows-x64", "linux-x64", "macos-x64", "macos-arm64"),
+                options = null,
 
-                description = "目标平台。",
+                description = "原生微内核目标平台。支持 auto（当前构建平台）、all（全部受支持平台），或以逗号分隔的平台列表，例如 windows-x64,linux-x64。",
 
             ),
 
