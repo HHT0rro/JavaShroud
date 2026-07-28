@@ -773,7 +773,15 @@ object NativeRecompilationTransforms {
 
     private fun runZigCompileWithRetry(processBuilder: ProcessBuilder): ZigCompileResult = synchronized(zigCompileLock) {
         var lastResult = ZigCompileResult(false, "Zig compilation did not start")
+        val environment = processBuilder.environment()
+        val globalCacheBase = environment["ZIG_GLOBAL_CACHE_DIR"]?.let(Path::of)
+        val localCacheBase = environment["ZIG_LOCAL_CACHE_DIR"]?.let(Path::of)
+        val retryScope = Integer.toUnsignedString(processBuilder.command().hashCode(), 16)
         repeat(3) { attempt ->
+            if (attempt > 0) {
+                globalCacheBase?.let { environment["ZIG_GLOBAL_CACHE_DIR"] = it.resolve("retry-$retryScope-$attempt").toString() }
+                localCacheBase?.let { environment["ZIG_LOCAL_CACHE_DIR"] = it.resolve("retry-$retryScope-$attempt").toString() }
+            }
             val process = processBuilder.start()
             val output = process.inputStream.bufferedReader().readText()
             val exitCode = process.waitFor()
