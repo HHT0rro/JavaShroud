@@ -349,6 +349,7 @@ object NativeRecompilationTransforms {
                         recordProductionNativeEvidence(
                             context = vbc4BuildContext,
                             task = task,
+                            finalNative = rawBytes,
                             preSealInner = preSealInner,
                             diversifiedSource = Files.readAllBytes(srcDir.resolve("js_vm_core.c")),
                             nativeSourceDigest = nativeSourceDigest,
@@ -412,6 +413,7 @@ object NativeRecompilationTransforms {
     private fun recordProductionNativeEvidence(
         context: Vbc4BuildContext,
         task: NativeCompileTask,
+        finalNative: ByteArray,
         preSealInner: ByteArray,
         diversifiedSource: ByteArray,
         nativeSourceDigest: ByteArray,
@@ -424,6 +426,7 @@ object NativeRecompilationTransforms {
             CandidateProductionBuildEvidence.NativeObservation(
                 platform = task.platform,
                 outputName = task.outputName,
+                finalNativeSha256 = CandidateProductionBuildEvidence.sha256Hex(finalNative),
                 preSealInnerSha256 = CandidateProductionBuildEvidence.sha256Hex(preSealInner),
                 parserProfileId = context.nativeVmProfile.parserRowProfile,
                 operandProfileId = context.nativeVmProfile.operandAccessProfile,

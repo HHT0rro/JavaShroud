@@ -3,7 +3,9 @@ package io.github.hht0rro.javashroud
 import io.github.hht0rro.javashroud.capabilities.buildEngineSchemaPayload
 import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.analysis.TargetSelector
+import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.model.config.RuleSpec
+import io.github.hht0rro.javashroud.transforms.protection.CandidateProductionBuildEvidence
 import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
 import io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper
 import io.github.hht0rro.javashroud.transforms.protection.NativeRecompilationTransforms
@@ -91,6 +93,37 @@ class W8MultiPlatformContractTest {
         assertFalse(selector.invoke(null, "windows-x64", "linux-x64") as Boolean)
     }
 
+    @Test
+    fun production_evidence_binds_each_multi_platform_native_to_its_final_entry() {
+        val windows = byteArrayOf('M'.code.toByte(), 'Z'.code.toByte(), 1)
+        val linux = byteArrayOf(0x7F.toByte(), 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte(), 2)
+        val observations = listOf(
+            nativeObservation("windows-x64", "js_kernel_windows-x64.dll", windows),
+            nativeObservation("linux-x64", "js_kernel_linux-x64.so", linux),
+        )
+        val entries = listOf(
+            JarEntryData("META-INF/hidden/linux.bin", linux),
+            JarEntryData("META-INF/hidden/windows.bin", windows),
+        )
+
+        val matched = CandidateProductionBuildEvidence.matchFinalNatives(observations, entries)
+
+        assertEquals(listOf("linux-x64", "windows-x64"), matched.map { it.observation.platform })
+        assertEquals(
+            listOf("META-INF/hidden/linux.bin", "META-INF/hidden/windows.bin"),
+            matched.map { it.entry.name },
+        )
+        assertFailsWith<IllegalStateException> {
+            CandidateProductionBuildEvidence.matchFinalNatives(observations, entries.dropLast(1))
+        }
+        assertFailsWith<IllegalStateException> {
+            CandidateProductionBuildEvidence.matchFinalNatives(
+                observations = listOf(nativeObservation("windows-x64", "js_kernel_windows-x64.dll", linux)),
+                entries = listOf(JarEntryData("META-INF/hidden/windows.bin", windows)),
+            )
+        }
+    }
+
     private fun injectedRuntimeTarget(configuredTarget: String): String {
         val internalName = "sample/W8Host"
         val original = hostClass(internalName)
@@ -140,4 +173,18 @@ class W8MultiPlatformContractTest {
 
     private fun recompiledNative(platform: String, libName: String) =
         NativeRecompilationTransforms.RecompiledNative(platform, libName, byteArrayOf(1))
+
+    private fun nativeObservation(platform: String, outputName: String, bytes: ByteArray) =
+        CandidateProductionBuildEvidence.NativeObservation(
+            platform = platform,
+            outputName = outputName,
+            finalNativeSha256 = CandidateProductionBuildEvidence.sha256Hex(bytes),
+            preSealInnerSha256 = "1".repeat(64),
+            parserProfileId = 1,
+            operandProfileId = 2,
+            parserDiversifiedFunctionSourceSha256 = "2".repeat(64),
+            parserProfileMappingSha256 = "3".repeat(64),
+            dispatcherDiversifiedFunctionSourceSha256 = "4".repeat(64),
+            dispatcherProfileMappingSha256 = "5".repeat(64),
+        )
 }

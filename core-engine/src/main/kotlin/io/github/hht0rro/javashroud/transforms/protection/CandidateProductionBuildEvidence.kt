@@ -3,6 +3,7 @@ package io.github.hht0rro.javashroud.transforms.protection
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.SerializationFeature
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
+import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
@@ -37,6 +38,7 @@ internal class CandidateProductionBuildEvidence private constructor(
     internal data class NativeObservation(
         val platform: String,
         val outputName: String,
+        val finalNativeSha256: String,
         val preSealInnerSha256: String,
         val parserProfileId: Int,
         val operandProfileId: Int,
@@ -44,6 +46,11 @@ internal class CandidateProductionBuildEvidence private constructor(
         val parserProfileMappingSha256: String,
         val dispatcherDiversifiedFunctionSourceSha256: String,
         val dispatcherProfileMappingSha256: String,
+    )
+
+    internal data class FinalNativeEvidence(
+        val observation: NativeObservation,
+        val entry: JarEntryData,
     )
 
     private val lock = Any()
@@ -73,6 +80,7 @@ internal class CandidateProductionBuildEvidence private constructor(
     internal fun recordNative(observation: NativeObservation) {
         if (!enabled) return
         require(observation.platform.isNotBlank() && observation.outputName.isNotBlank())
+        requireHexSha256(observation.finalNativeSha256, "finalNativeSha256")
         requireHexSha256(observation.preSealInnerSha256, "preSealInnerSha256")
         listOf(
             observation.parserDiversifiedFunctionSourceSha256,
@@ -102,9 +110,12 @@ internal class CandidateProductionBuildEvidence private constructor(
             nativeSnapshot = natives.values.sortedBy { it.platform }
         }
         check(methodSnapshot.isNotEmpty()) { "max candidate produced no protected-method build evidence" }
-        check(nativeSnapshot.size == 1) { "max candidate requires exactly one production native evidence record" }
-        val native = nativeSnapshot.single()
-        check(native.parserProfileId == parserProfileId) { "native parser profile does not match the VBC4 build context" }
+        check(nativeSnapshot.isNotEmpty()) { "max candidate produced no production native evidence records" }
+        nativeSnapshot.forEach { native ->
+            check(native.parserProfileId == parserProfileId) {
+                "native parser profile does not match the VBC4 build context for ${native.platform}"
+            }
+        }
 
         val finalResources = artifact.jarEntries.associateBy { it.name }
         val finalCatalog = currentVbc4BuildContextOrNull()?.runtimeVmCatalogPlanOrNull()
@@ -134,41 +145,27 @@ internal class CandidateProductionBuildEvidence private constructor(
 
         check(Files.isRegularFile(outputJarPath)) { "final output JAR is absent: $outputJarPath" }
         val finalJarSha256 = sha256File(outputJarPath)
-        val nativeEntry = artifact.jarEntries.singleOrNull { entry -> isFinalNativeEntry(entry.bytes) }
-            ?: error("final candidate requires exactly one native image")
-        val finalNativeSha256 = sha256Hex(nativeEntry.bytes)
-        val finalNativeLayoutCommitment = nativeLayoutCommitment(nativeEntry.bytes)
+        val finalNatives = matchFinalNatives(nativeSnapshot, artifact.jarEntries)
         val label = outputJarPath.fileName.toString().removeSuffix(".jar")
+        val legacySinglePeNative = finalNatives.singleOrNull()?.takeIf { isPeNative(it.entry.bytes) }
         val document = linkedMapOf<String, Any>(
-            "schema_version" to 1,
+            "schema_version" to if (legacySinglePeNative != null) 1 else 2,
             "kind" to KIND,
             "evidence_scope" to SCOPE,
             "generated_by" to PRODUCER,
             "generated_at_utc" to Instant.now().toString(),
             "candidate_label" to label,
             "candidate_jar_sha256" to finalJarSha256,
-            "candidate_native" to linkedMapOf(
-                "entry" to nativeEntry.name,
-                "sha256" to finalNativeSha256,
-                "layout_commitment" to finalNativeLayoutCommitment,
-                "pre_seal_inner_sha256" to native.preSealInnerSha256,
-            ),
-            "parser" to linkedMapOf(
-                "profile_id" to native.parserProfileId,
-                "symbol" to "js_vm_parse_program",
-                "pre_seal_inner_sha256" to native.preSealInnerSha256,
-                "diversified_function_source_sha256" to native.parserDiversifiedFunctionSourceSha256,
-                "profile_mapping_sha256" to native.parserProfileMappingSha256,
-            ),
-            "dispatcher" to linkedMapOf(
-                "profile_id" to native.operandProfileId,
-                "symbol" to "js_vm_execute_with_preset_locals",
-                "pre_seal_inner_sha256" to native.preSealInnerSha256,
-                "diversified_function_source_sha256" to native.dispatcherDiversifiedFunctionSourceSha256,
-                "profile_mapping_sha256" to native.dispatcherProfileMappingSha256,
-            ),
-            "methods" to finalMethods,
         )
+        if (legacySinglePeNative != null) {
+            val native = legacySinglePeNative
+            document["candidate_native"] = legacyNativeDocument(native)
+            document["parser"] = parserDocument(native.observation)
+            document["dispatcher"] = dispatcherDocument(native.observation)
+        } else {
+            document["natives"] = finalNatives.map(::multiPlatformNativeDocument)
+        }
+        document["methods"] = finalMethods
         val evidencePath = evidencePath(outputJarPath)
         Files.createDirectories(requireNotNull(evidencePath.parent) { "build evidence path has no parent: $evidencePath" })
         val temporaryPath = Files.createTempFile(evidencePath.parent, ".${evidencePath.fileName}.", ".tmp")
@@ -181,6 +178,39 @@ internal class CandidateProductionBuildEvidence private constructor(
         }
         return evidencePath
     }
+
+    private fun legacyNativeDocument(native: FinalNativeEvidence): Map<String, Any> = linkedMapOf(
+        "entry" to native.entry.name,
+        "sha256" to native.observation.finalNativeSha256,
+        "layout_commitment" to nativeLayoutCommitment(native.entry.bytes),
+        "pre_seal_inner_sha256" to native.observation.preSealInnerSha256,
+    )
+
+    private fun parserDocument(native: NativeObservation): Map<String, Any> = linkedMapOf(
+        "profile_id" to native.parserProfileId,
+        "symbol" to "js_vm_parse_program",
+        "pre_seal_inner_sha256" to native.preSealInnerSha256,
+        "diversified_function_source_sha256" to native.parserDiversifiedFunctionSourceSha256,
+        "profile_mapping_sha256" to native.parserProfileMappingSha256,
+    )
+
+    private fun dispatcherDocument(native: NativeObservation): Map<String, Any> = linkedMapOf(
+        "profile_id" to native.operandProfileId,
+        "symbol" to "js_vm_execute_with_preset_locals",
+        "pre_seal_inner_sha256" to native.preSealInnerSha256,
+        "diversified_function_source_sha256" to native.dispatcherDiversifiedFunctionSourceSha256,
+        "profile_mapping_sha256" to native.dispatcherProfileMappingSha256,
+    )
+
+    private fun multiPlatformNativeDocument(native: FinalNativeEvidence): Map<String, Any> = linkedMapOf(
+        "platform" to native.observation.platform,
+        "output_name" to native.observation.outputName,
+        "entry" to native.entry.name,
+        "sha256" to native.observation.finalNativeSha256,
+        "pre_seal_inner_sha256" to native.observation.preSealInnerSha256,
+        "parser" to parserDocument(native.observation),
+        "dispatcher" to dispatcherDocument(native.observation),
+    )
 
     internal companion object {
         const val KIND = "candidate-production-build-evidence"
@@ -224,6 +254,25 @@ internal class CandidateProductionBuildEvidence private constructor(
             return digest.digest().joinToString("") { byte -> "%02x".format(Locale.ROOT, byte.toInt() and 0xFF) }
         }
 
+        internal fun matchFinalNatives(
+            observations: List<NativeObservation>,
+            entries: Collection<JarEntryData>,
+        ): List<FinalNativeEvidence> {
+            check(observations.isNotEmpty()) { "max candidate produced no production native evidence records" }
+            val nativeEntries = entries.filter { isFinalNativeEntry(it.bytes) }
+            check(nativeEntries.size == observations.size) {
+                "final candidate native image count ${nativeEntries.size} does not match production evidence count ${observations.size}"
+            }
+            val entriesBySha256 = nativeEntries.groupBy { sha256Hex(it.bytes) }
+            return observations.sortedBy { it.platform }.map { observation ->
+                val matches = entriesBySha256[observation.finalNativeSha256].orEmpty()
+                check(matches.size == 1) {
+                    "final candidate native image for ${observation.platform} does not match its production evidence"
+                }
+                FinalNativeEvidence(observation, matches.single())
+            }
+        }
+
         private fun sha256File(path: Path): String = Files.newInputStream(path).use { input ->
             val digest = MessageDigest.getInstance("SHA-256")
             val buffer = ByteArray(1024 * 1024)
@@ -242,9 +291,12 @@ internal class CandidateProductionBuildEvidence private constructor(
         }
 
         private fun isFinalNativeEntry(bytes: ByteArray): Boolean =
-            (bytes.size >= 2 && bytes[0] == 'M'.code.toByte() && bytes[1] == 'Z'.code.toByte()) ||
+            isPeNative(bytes) ||
                 (bytes.size >= 4 && bytes[0] == 0x7F.toByte() && bytes[1] == 'E'.code.toByte() && bytes[2] == 'L'.code.toByte() && bytes[3] == 'F'.code.toByte()) ||
                 (bytes.size >= 4 && bytes.copyOfRange(0, 4).contentEquals(byteArrayOf(0xCF.toByte(), 0xFA.toByte(), 0xED.toByte(), 0xFE.toByte())))
+
+        private fun isPeNative(bytes: ByteArray): Boolean =
+            bytes.size >= 2 && bytes[0] == 'M'.code.toByte() && bytes[1] == 'Z'.code.toByte()
 
         /** Mirrors the direct audit's canonical PE layout projection. */
         private fun nativeLayoutCommitment(bytes: ByteArray): String {
