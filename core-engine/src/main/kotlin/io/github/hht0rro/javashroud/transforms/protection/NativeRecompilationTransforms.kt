@@ -704,6 +704,7 @@ object NativeRecompilationTransforms {
         cmd.addAll(extraFlags)
         return try {
             val pb = ProcessBuilder(cmd)
+            configureZigCache(pb, outputPath)
             pb.redirectErrorStream(true)
             runZigCompileWithRetry(pb)
         } catch (error: Exception) {
@@ -758,6 +759,7 @@ object NativeRecompilationTransforms {
         cmd.addAll(extraFlags)
         return try {
             val pb = ProcessBuilder(cmd)
+            configureZigCache(pb, outputPath)
             pb.redirectErrorStream(true)
             runZigCompileWithRetry(pb)
         } catch (error: Exception) {
@@ -780,6 +782,12 @@ object NativeRecompilationTransforms {
             Thread.sleep(250L)
         }
         lastResult
+    }
+
+    private fun configureZigCache(processBuilder: ProcessBuilder, outputPath: Path) {
+        val buildRoot = outputPath.parent?.parent ?: return
+        processBuilder.environment()["ZIG_GLOBAL_CACHE_DIR"] = buildRoot.resolve("zig-global-cache").toString()
+        processBuilder.environment()["ZIG_LOCAL_CACHE_DIR"] = buildRoot.resolve("zig-local-cache").toString()
     }
 
     private fun isTransientZigFileOpenFailure(output: String): Boolean =

@@ -45,6 +45,17 @@ class NativeRecompilationTransformsTest {
         assertTrue(retryBody.contains("CacheCheckFailed"), "Transient Zig cache-check failures must be retried before failing native compilation.")
         assertTrue(compileBody.contains("output.isBlank()"), "Undiagnosed Zig failures must receive the same bounded retry treatment.")
     }
+
+    @Test
+    fun native_recompilation_isolates_zig_caches_per_build() {
+        val source = java.nio.file.Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeRecompilationTransforms.kt"))
+        val cacheBody = source.substringAfter("private fun configureZigCache").substringBefore("private fun isTransientZigFileOpenFailure")
+
+        assertTrue(cacheBody.contains("ZIG_GLOBAL_CACHE_DIR"), "Native recompilation must not share Zig's global cache across builds.")
+        assertTrue(cacheBody.contains("ZIG_LOCAL_CACHE_DIR"), "Native recompilation must isolate Zig's local cache for each build.")
+        assertTrue(cacheBody.contains("outputPath.parent?.parent"), "Zig cache isolation must stay scoped to the native recompilation work directory.")
+    }
+
     @Test
     fun generateDiversifiedSecrets_produces_different_output_for_different_seeds() {
         val rng1 = java.util.Random(12345L)
