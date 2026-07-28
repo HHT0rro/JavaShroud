@@ -66,7 +66,12 @@ object NativeRecompilationTransforms {
 
     private val NATIVE_DIVERSIFICATION_TARGETS = listOf("js_kernel.c", "js_vm_core.c")
 
-    data class RecompiledNative(val platform: String, val libName: String, val bytes: ByteArray)
+    data class RecompiledNative(
+        val platform: String,
+        val libName: String,
+        val bytes: ByteArray,
+        val shellBindingCommitment: ByteArray? = null,
+    )
 
     fun recompile(
         seed: Long,
@@ -218,7 +223,7 @@ object NativeRecompilationTransforms {
                 nativeProtectionLevel = nativeProtectionLevel,
                 nativePackingLevel = nativePackingLevel.name.lowercase(),
                 nativeShellPackerVersion = NativeKernelShellPacker.PACKER_VERSION,
-                nativeShellPayloadProfile = "${nativePackingLevel.name.lowercase()}-payload-zstd-chunk-v5-scoped-key-program",
+                nativeShellPayloadProfile = "${nativePackingLevel.name.lowercase()}-payload-v7-boot-dat-binding-encrypted-header-aesctr-hmac-chunks",
                 nativeShellLoaderProfile = nativeShellLoaderProfile(platform),
             )
             NativeCompileTask(
@@ -237,9 +242,10 @@ object NativeRecompilationTransforms {
         val compiledResults = compileTasks.map { task ->
             try {
                 Files.createDirectories(task.outputPath.parent)
-                val forceProductionCompile =
-                    task.nativePackingLevel == NativeKernelShellPacker.Level.MAX.name.lowercase() &&
-                        vbc4BuildContext.productionBuildEvidence.isEnabled
+                // MAX output is encrypted for the current external boot KEK. Reusing a cached
+                // outer library could bind the artifact to an earlier provider secret, so the
+                // seed envelope is always rebuilt even outside production-evidence mode.
+                val forceProductionCompile = task.nativePackingLevel == NativeKernelShellPacker.Level.MAX.name.lowercase()
                 task to compileOrLoadNativeArtifact(
                     toolchain.zigPath,
                     srcDir,
@@ -263,81 +269,105 @@ object NativeRecompilationTransforms {
                     continue
                 }
                 val preSealInner = compileResult.bytes.copyOf()
-                val rawBytes = if (compileResult.fromCache) {
-                    compileResult.bytes
-                } else {
-                    // Item #4: native critical-region pre-decrypt protection. The compiled
-                    // kernel emits selected pure, relocation-free hot functions into a
-                    // dedicated, page-isolated ".jsx" code section plus a guarded runtime
-                    // enter/leave lifecycle. Here we encrypt that section in-place for supported
-                    // native formats and arm the in-binary seal marker. This protects
-                    // the most analysis-relevant code against offline static analysis while
-                    // keeping the library loadable. The patcher fails closed for responsible formats.
-                    val sectionSealed = NativeProtectedSectionPacker.sealIfPossible(compileResult.bytes, protectedSectionKey, report, failClosed = true)
-                    when (nativePackingLevel) {
-                        NativeKernelShellPacker.Level.OFF -> sectionSealed
-                        NativeKernelShellPacker.Level.STANDARD -> {
-                            val shellKeyMaterial = protectedSectionKey + vbc4BuildContext.runtimeResourceKey
-                            val shellPacked = try {
-                                NativeKernelShellPacker.pack(
-                                    bytes = sectionSealed,
-                                    platform = task.platform,
-                                    outputName = task.outputName,
-                                    seed = seed,
-                                    level = nativePackingLevel,
-                                    keyMaterial = shellKeyMaterial,
-                                )
-                            } finally {
-                                shellKeyMaterial.fill(0)
+                var shellBindingCommitment: ByteArray? = null
+                try {
+                    val rawBytes = if (compileResult.fromCache) {
+                        compileResult.bytes
+                    } else {
+                        // Item #4: native critical-region pre-decrypt protection. The compiled
+                        // kernel emits selected pure, relocation-free hot functions into a
+                        // dedicated, page-isolated ".jsx" code section plus a guarded runtime
+                        // enter/leave lifecycle. Here we encrypt that section in-place for supported
+                        // native formats and arm the in-binary seal marker. This protects
+                        // the most analysis-relevant code against offline static analysis while
+                        // keeping the library loadable. The patcher fails closed for responsible formats.
+                        val sectionSealed = NativeProtectedSectionPacker.sealIfPossible(compileResult.bytes, protectedSectionKey, report, failClosed = true)
+                        when (nativePackingLevel) {
+                            NativeKernelShellPacker.Level.OFF -> sectionSealed
+                            NativeKernelShellPacker.Level.STANDARD -> {
+                                val shellKeyMaterial = protectedSectionKey + vbc4BuildContext.runtimeResourceKey
+                                val shellPacked = try {
+                                    NativeKernelShellPacker.pack(
+                                        bytes = sectionSealed,
+                                        platform = task.platform,
+                                        outputName = task.outputName,
+                                        seed = seed,
+                                        level = nativePackingLevel,
+                                        keyMaterial = shellKeyMaterial,
+                                    )
+                                } finally {
+                                    shellKeyMaterial.fill(0)
+                                }
+                                report(NativeToolchainProvisioner.ResolutionMessage("info", "Applied standard native shell overlay for ${task.platform}", 94))
+                                shellPacked
                             }
-                            report(NativeToolchainProvisioner.ResolutionMessage("info", "Applied standard native shell overlay for ${task.platform}", 94))
-                            shellPacked
-                        }
-                        NativeKernelShellPacker.Level.MAX -> {
-                            val bootstrapDigest = nativeBootstrapIndexDigest(task.platform, task.outputName, vbc4BuildContext)
-                            val shellKeyMaterial = protectedSectionKey + vbc4BuildContext.runtimeResourceKey + vbc4BuildContext.jarLayoutDigest
-                            val payloadBundle = try {
-                                NativeKernelShellPacker.buildMaxPayloadBundle(
-                                    bytes = sectionSealed,
-                                    platform = task.platform,
-                                    outputName = task.outputName,
-                                    seed = seed,
-                                    keyMaterial = shellKeyMaterial,
-                                    bootstrapNativeIndexDigest = bootstrapDigest,
-                                )
-                            } finally {
-                                shellKeyMaterial.fill(0)
+                            NativeKernelShellPacker.Level.MAX -> {
+                                val bootSecret = vbc4BuildContext.copyBootSecretForBuild()
+                                var bootstrapDigest: ByteArray? = null
+                                try {
+                                    val currentBootstrapDigest = nativeBootstrapIndexDigest(task.platform, task.outputName, vbc4BuildContext)
+                                    bootstrapDigest = currentBootstrapDigest
+                                    val shellKeyMaterial = protectedSectionKey + vbc4BuildContext.runtimeResourceKey + vbc4BuildContext.jarLayoutDigest
+                                    val payloadBundle = try {
+                                        NativeKernelShellPacker.buildMaxPayloadBundle(
+                                            bytes = sectionSealed,
+                                            platform = task.platform,
+                                            outputName = task.outputName,
+                                            seed = seed,
+                                            keyMaterial = shellKeyMaterial,
+                                            bootstrapNativeIndexDigest = currentBootstrapDigest,
+                                            bootSecret = bootSecret,
+                                        )
+                                    } finally {
+                                        shellKeyMaterial.fill(0)
+                                    }
+                                    try {
+                                        shellBindingCommitment = payloadBundle.artifactBindingCommitment.copyOf()
+                                        val renderedShellHeader = NativeKernelShellPacker.renderMaxPayloadHeader(payloadBundle)
+                                        Files.writeString(srcDir.resolve("js_shell_payload.inc"), renderedShellHeader, StandardCharsets.UTF_8)
+                                        val outerResult = compileShellStubWithZig(toolchain.zigPath, srcDir, task.zigTarget, task.outputPath, task.nativeProtectionLevel)
+                                        if (!outerResult.success || !Files.exists(task.outputPath) || Files.size(task.outputPath) <= 0) {
+                                            throw IllegalStateException("failed to compile max native shell stub for ${task.platform}: ${outerResult.output.take(600)}")
+                                        }
+                                    } catch (error: Exception) {
+                                        shellBindingCommitment?.fill(0)
+                                        shellBindingCommitment = null
+                                        throw error
+                                    } finally {
+                                        payloadBundle.wipeSensitive()
+                                    }
+                                    report(NativeToolchainProvisioner.ResolutionMessage("info", "Applied max native stub shell for ${task.platform}; inner kernel is carried as authenticated payload", 94))
+                                    Files.readAllBytes(task.outputPath)
+                                } finally {
+                                    bootstrapDigest?.fill(0)
+                                    bootSecret.fill(0)
+                                }
                             }
-                            val payloadHeader = try {
-                                NativeKernelShellPacker.renderMaxPayloadHeader(payloadBundle)
-                            } finally {
-                                payloadBundle.wipeSensitive()
-                            }
-                            Files.writeString(srcDir.resolve("js_shell_payload.inc"), payloadHeader, StandardCharsets.UTF_8)
-                            val outerResult = compileShellStubWithZig(toolchain.zigPath, srcDir, task.zigTarget, task.outputPath, task.nativeProtectionLevel)
-                            if (!outerResult.success || !Files.exists(task.outputPath) || Files.size(task.outputPath) <= 0) {
-                                throw IllegalStateException("failed to compile max native shell stub for ${task.platform}: ${outerResult.output.take(600)}")
-                            }
-                            report(NativeToolchainProvisioner.ResolutionMessage("info", "Applied max native stub shell for ${task.platform}; inner kernel is carried as authenticated payload", 94))
-                            Files.readAllBytes(task.outputPath)
                         }
                     }
+                    if (task.nativePackingLevel == NativeKernelShellPacker.Level.MAX.name.lowercase()) {
+                        recordProductionNativeEvidence(
+                            context = vbc4BuildContext,
+                            task = task,
+                            preSealInner = preSealInner,
+                            diversifiedSource = Files.readAllBytes(srcDir.resolve("js_vm_core.c")),
+                            nativeSourceDigest = nativeSourceDigest,
+                        )
+                    }
+                    if (!cfgEvidenceExports && !compileResult.fromCache && EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(rawBytes)) {
+                        writeNativeArtifactCache(task.cachePath, rawBytes)
+                    }
+                    results.add(RecompiledNative(task.platform, task.outputName, rawBytes, shellBindingCommitment))
+                    val verb = if (compileResult.fromCache) "Reused cached" else "Compiled"
+                    report(NativeToolchainProvisioner.ResolutionMessage("info", "$verb JNI microkernel for ${task.platform} with Zig ${toolchain.zigPath}", 94))
+                    shellBindingCommitment = null
+                } finally {
+                    shellBindingCommitment?.fill(0)
+                    preSealInner.fill(0)
+                    if (task.nativePackingLevel == NativeKernelShellPacker.Level.MAX.name.lowercase()) {
+                        compileResult.bytes.fill(0)
+                    }
                 }
-                if (task.nativePackingLevel == NativeKernelShellPacker.Level.MAX.name.lowercase()) {
-                    recordProductionNativeEvidence(
-                        context = vbc4BuildContext,
-                        task = task,
-                        preSealInner = preSealInner,
-                        diversifiedSource = Files.readAllBytes(srcDir.resolve("js_vm_core.c")),
-                        nativeSourceDigest = nativeSourceDigest,
-                    )
-                }
-                if (!cfgEvidenceExports && !compileResult.fromCache && EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(rawBytes)) {
-                    writeNativeArtifactCache(task.cachePath, rawBytes)
-                }
-                results.add(RecompiledNative(task.platform, task.outputName, rawBytes))
-                val verb = if (compileResult.fromCache) "Reused cached" else "Compiled"
-                report(NativeToolchainProvisioner.ResolutionMessage("info", "$verb JNI microkernel for ${task.platform} with Zig ${toolchain.zigPath}", 94))
             } else {
                 val diagnostic = compileResult.output.lineSequence().filter { it.isNotBlank() }.take(6).joinToString(" | ").take(900)
                 val suffix = if (diagnostic.isBlank()) "" else ": $diagnostic"
@@ -719,6 +749,8 @@ object NativeRecompilationTransforms {
         }
         if (zigTarget.contains("windows")) {
             cmd.add("-Wl,--no-entry")
+        } else {
+            cmd.add("-ldl")
         }
         cmd.addAll(extraFlags)
         return try {
@@ -768,7 +800,7 @@ object NativeRecompilationTransforms {
         sb.appendLine("static const unsigned char JS_SECRET_AES_IV[16] = { ${cBytes(secretIv)} };")
         sb.appendLine()
         appendEncryptedStrings(sb, secretKey, secretIv)
-        appendVbc4BuildSecrets(sb, vbc4BuildContext, rng)
+        appendVbc4BuildProfile(sb, vbc4BuildContext, rng)
         appendProtectedSectionKey(sb, protectedSectionKey, rng)
         sb.appendLine("#endif")
         return sb.toString()
@@ -904,64 +936,17 @@ object NativeRecompilationTransforms {
         }
     }
 
-    private fun appendVbc4BuildSecrets(sb: StringBuilder, context: Vbc4BuildContext, rng: Random) {
-        val masterKey = context.masterKey
-        val shareCount = 3 + rng.nextInt(4)
-        val shares = Array(shareCount) { ByteArray(VBC4_MASTER_KEY_SIZE) }
-        for (index in 0 until shareCount - 1) rng.nextBytes(shares[index])
-        for (byteIndex in masterKey.indices) {
-            var acc = masterKey[byteIndex].toInt()
-            for (shareIndex in 0 until shareCount - 1) acc = acc xor shares[shareIndex][byteIndex].toInt()
-            shares[shareCount - 1][byteIndex] = acc.toByte()
-        }
-        val slotOrder = (0 until shareCount).toMutableList().also { java.util.Collections.shuffle(it, rng) }
-        val slotForShare = IntArray(shareCount)
-        slotOrder.forEachIndexed { slot, shareIndex -> slotForShare[shareIndex] = slot }
-        val token = (rng.nextInt() or 1).toUInt().toString(16).uppercase()
-        val layoutMask = ByteArray(VBC4_LAYOUT_DIGEST_SIZE).also(rng::nextBytes)
-        val maskedLayout = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index ->
-            (context.jarLayoutDigest[index].toInt() xor layoutMask[index].toInt()).toByte()
-        }
-        try {
-            sb.appendLine()
-            sb.appendLine("#define JS_VBC4_BUILD_KEY_GENERATED 1")
-            sb.appendLine("#define JS_VBC4_NATIVE_SECRET_SLOT_COUNT $shareCount")
-            sb.appendLine("#define JS_VBC4_NATIVE_SECRET_TOKEN 0x${token}u")
-            sb.appendLine("static const unsigned char js_vbc4_native_secret_slots[$shareCount][32] = {")
-            for (slot in 0 until shareCount) {
-                sb.appendLine("    { ${cBytes(shares[slotOrder[slot]])} },")
-            }
-            sb.appendLine("};")
-            sb.appendLine("static const unsigned char js_vbc4_layout_digest_masked[32] = { ${cBytes(maskedLayout)} };")
-            sb.appendLine("static const unsigned char js_vbc4_layout_digest_mask[32] = { ${cBytes(layoutMask)} };")
-            sb.appendLine("#define JS_VBC4_SECRET_SLOT_BYTE(slot, index) (js_vbc4_native_secret_slots[(slot)][(index)])")
-            sb.appendLine("#define JS_VBC4_BUILD_KEY_SLOT_COUNT JS_VBC4_NATIVE_SECRET_SLOT_COUNT")
-            sb.appendLine("#define JS_VBC4_BUILD_KEY_SLOT_0 ${slotForShare[0]}")
-            for (shareIndex in 1 until shareCount) {
-                sb.appendLine("#define JS_VBC4_BUILD_KEY_SLOT_$shareIndex ${slotForShare[shareIndex]}")
-            }
-            sb.appendLine("#define JS_VBC4_COPY_SCOPED_MASTER_KEY(out) do { \\")
-            sb.appendLine("    for (int _js_vbc4_i = 0; _js_vbc4_i < 32; _js_vbc4_i++) { \\")
-            sb.appendLine("        unsigned char _js_vbc4_v = 0; \\")
-            for (shareIndex in 0 until shareCount) {
-                sb.appendLine("        _js_vbc4_v = (unsigned char)(_js_vbc4_v ^ JS_VBC4_SECRET_SLOT_BYTE(JS_VBC4_BUILD_KEY_SLOT_$shareIndex, _js_vbc4_i)); \\")
-            }
-            sb.appendLine("        (out)[_js_vbc4_i] = _js_vbc4_v; \\")
-            sb.appendLine("    } \\")
-            sb.appendLine("} while (0)")
-            sb.appendLine("#define JS_VBC4_LAYOUT_DIGEST_AT(index) ((unsigned char)(js_vbc4_layout_digest_masked[(index)] ^ js_vbc4_layout_digest_mask[(index)]))")
-            sb.appendLine("#define JS_VBC4_DISPATCH_MIX_A 0x${(rng.nextInt() or 1).toUInt().toString(16).uppercase()}u")
-            sb.appendLine("#define JS_VBC4_DISPATCH_MIX_B 0x${(rng.nextInt() or 1).toUInt().toString(16).uppercase()}u")
-            sb.appendLine("#define JS_VBC4_DISPATCH_MIX_C 0x${(rng.nextInt() or 1).toUInt().toString(16).uppercase()}u")
-            sb.appendLine("#define JS_VBC4_DISPATCH_STEP_MASK ${listOf(7, 15, 31)[rng.nextInt(3)]}")
-            sb.appendLine("#define JS_NATIVE_PARSER_PROFILE ${context.nativeVmProfile.parserRowProfile}")
-            sb.appendLine("#define JS_NATIVE_OPERAND_PROFILE ${context.nativeVmProfile.operandAccessProfile}")
-            sb.appendLine("#define JS_NATIVE_VM_PROFILE_ID 0x${context.nativeVmProfile.authenticatedId.toUInt().toString(16).uppercase()}u")
-        } finally {
-            for (share in shares) java.util.Arrays.fill(share, 0)
-            java.util.Arrays.fill(maskedLayout, 0)
-            java.util.Arrays.fill(layoutMask, 0)
-        }
+    private fun appendVbc4BuildProfile(sb: StringBuilder, context: Vbc4BuildContext, rng: Random) {
+        sb.appendLine()
+        sb.appendLine("/* Build diversity only. Root and layout material arrive through the one-shot boot ABI. */")
+        sb.appendLine("#define JS_VBC4_RUNTIME_BOOT_MATERIAL 1")
+        sb.appendLine("#define JS_VBC4_DISPATCH_MIX_A 0x${(rng.nextInt() or 1).toUInt().toString(16).uppercase()}u")
+        sb.appendLine("#define JS_VBC4_DISPATCH_MIX_B 0x${(rng.nextInt() or 1).toUInt().toString(16).uppercase()}u")
+        sb.appendLine("#define JS_VBC4_DISPATCH_MIX_C 0x${(rng.nextInt() or 1).toUInt().toString(16).uppercase()}u")
+        sb.appendLine("#define JS_VBC4_DISPATCH_STEP_MASK ${listOf(7, 15, 31)[rng.nextInt(3)]}")
+        sb.appendLine("#define JS_NATIVE_PARSER_PROFILE ${context.nativeVmProfile.parserRowProfile}")
+        sb.appendLine("#define JS_NATIVE_OPERAND_PROFILE ${context.nativeVmProfile.operandAccessProfile}")
+        sb.appendLine("#define JS_NATIVE_VM_PROFILE_ID 0x${context.nativeVmProfile.authenticatedId.toUInt().toString(16).uppercase()}u")
     }
 
     private fun cBytes(bytes: ByteArray): String = bytes.toCByteArrayLiteral()

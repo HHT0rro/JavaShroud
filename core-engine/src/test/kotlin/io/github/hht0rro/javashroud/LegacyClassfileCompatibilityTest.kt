@@ -99,11 +99,13 @@ class LegacyClassfileCompatibilityTest {
             allowOptInPasses = true,
         )
 
-        val output = captureStdout {
-            dispatchRequest(
-                buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())),
-                EngineKernel(),
-            )
+        val output = withTestBootSecret {
+            captureStdout {
+                dispatchRequest(
+                    buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())),
+                    EngineKernel(),
+                )
+            }
         }
         assertTrue(Files.exists(outputJar), "Output jar should exist for pass=$passId")
         return LegacyRunResult(outputJar = outputJar, events = output.trim().lines().filter { it.isNotBlank() }.map(::parseEventType))

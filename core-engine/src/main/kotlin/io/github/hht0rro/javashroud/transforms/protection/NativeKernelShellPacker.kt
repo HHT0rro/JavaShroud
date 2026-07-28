@@ -6,11 +6,13 @@ import java.nio.ByteOrder
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Arrays
+import javax.crypto.Cipher
 import javax.crypto.Mac
+import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 internal object NativeKernelShellPacker {
-    const val PACKER_VERSION: Int = 3
+    const val PACKER_VERSION: Int = 5
     const val LOADER_MARKER: String = "JS_NATIVE_SHELL_LOADER_V1"
     const val MAX_STUB_MARKER: String = "JS_NATIVE_MAX_STUB_V1"
     const val MAX_PAYLOAD_MARKER: String = "JS_NATIVE_MAX_PAYLOAD_V1"
@@ -18,6 +20,9 @@ internal object NativeKernelShellPacker {
 
     private const val maxCompressionCodecNone = 0
     private const val maxCompressionCodecZstd = 1
+    const val BOOT_SECRET_ENV: String = "JAVASHROUD_BOOT_SECRET_V1"
+    const val BOOT_SECRET_FILE_ENV: String = "JAVASHROUD_BOOT_SECRET_FILE_V1"
+    @Volatile internal var buildBootSecretProvider: (() -> ByteArray?)? = null
 
     private val blockMagic = byteArrayOf(0x4A, 0x53, 0x4B, 0x53, 0x48, 0x45, 0x4C, 0x31) // JSKSHEL1
     private val endMagic = byteArrayOf(0x4A, 0x53, 0x4B, 0x53, 0x45, 0x4E, 0x44, 0x31) // JSKSEND1
@@ -51,14 +56,15 @@ internal object NativeKernelShellPacker {
     )
 
     data class MaxPayloadBundle(
-        val headerBytes: ByteArray,
+        val headerPrefix: ByteArray,
+        val encryptedHeader: ByteArray,
+        val headerTag: ByteArray,
         val encodedPayload: ByteArray,
         val payloadMac: ByteArray,
-        val sectionDigest: ByteArray,
-        val bogusMetadataDigest: ByteArray,
+        val artifactBindingCommitment: ByteArray,
+        val sectionDigestHmac: ByteArray,
         val bindingTag: ByteArray,
         val streamKey: ByteArray,
-        val nativeMac: ByteArray,
         val nonce: ByteArray,
         val layoutProfile: Int,
         val dispatcherProfile: Int,
@@ -69,8 +75,16 @@ internal object NativeKernelShellPacker {
         val chunkCount: Int,
         val chunkTags: ByteArray,
     ) {
+        val headerBytes: ByteArray get() = headerPrefix + encryptedHeader + headerTag
+
         internal fun wipeSensitive() {
+            Arrays.fill(payloadMac, 0)
+            Arrays.fill(artifactBindingCommitment, 0)
             Arrays.fill(streamKey, 0)
+            Arrays.fill(sectionDigestHmac, 0)
+            Arrays.fill(bindingTag, 0)
+            Arrays.fill(nonce, 0)
+            Arrays.fill(chunkTags, 0)
         }
     }
 
@@ -89,7 +103,6 @@ internal object NativeKernelShellPacker {
         val nonceSize: Int = 0,
         val layoutProfile: Int = 0,
         val dispatcherProfile: Int = 0,
-        val bogusMetadataDigestValid: Boolean = false,
         val macValid: Boolean = false,
         val bindingTagValid: Boolean = false,
     )
@@ -159,33 +172,37 @@ internal object NativeKernelShellPacker {
         seed: Long,
         keyMaterial: ByteArray,
         bootstrapNativeIndexDigest: ByteArray,
+        bootSecret: ByteArray,
     ): MaxPayloadBundle {
         require(bytes.isNotEmpty()) { "max native shell requires non-empty inner native bytes" }
-        val key = deriveShellKey(seed, Level.MAX, platform, outputName, keyMaterial + bootstrapNativeIndexDigest)
-        var streamKeyOnFailure: ByteArray? = null
-        var bundleCompleted = false
-        var profileSeedToWipe: ByteArray? = null
-        var dispatcherSeedToWipe: ByteArray? = null
+        require(bootSecret.size == 32) { "max native shell boot secret must be exactly 32 bytes" }
+        val temporaryBuffers = mutableListOf<ByteArray>()
+        val outputBuffers = mutableListOf<ByteArray>()
+        fun temporary(value: ByteArray): ByteArray = value.also { temporaryBuffers += it }
+        fun output(value: ByteArray): ByteArray = value.also { outputBuffers += it }
+        var completed = false
         return try {
-            val nonce = ByteArray(16).also { SecureRandom().nextBytes(it) }
-            val profileSeed = sha256(key + nonce + platform.toByteArray(Charsets.UTF_8)).also { profileSeedToWipe = it }
+            val combinedKeyMaterial = temporary(keyMaterial + bootstrapNativeIndexDigest)
+            val key = temporary(deriveShellKey(seed, Level.MAX, platform, outputName, combinedKeyMaterial))
+            val shellSeed = temporary(ByteArray(32).also { SecureRandom().nextBytes(it) })
+            val nonce = output(ByteArray(16).also { SecureRandom().nextBytes(it) })
+            val seedNonce = temporary(ByteArray(16).also { SecureRandom().nextBytes(it) })
+            val bindingTag = output(maxBindingTag(platform, outputName, bootstrapNativeIndexDigest, key))
+            val zeroBinding = temporary(ByteArray(32))
+            val profileSeed = temporary(shellKdf(shellSeed, "javashroud-native-shell-profiles-v3", nonce, bindingTag))
             val layoutProfile = ((readLongPrefix(profileSeed) ushr 1) % 7L).toInt()
-            val dispatcherSeed = sha256(nonce + key).also { dispatcherSeedToWipe = it }
-            val dispatcherProfile = ((readLongPrefix(dispatcherSeed) ushr 1) % 11L).toInt()
-            val streamKey = sha256(key + nonce + "javashroud-native-shell-stream-key-v2".toByteArray(Charsets.US_ASCII))
-                .also { streamKeyOnFailure = it }
-            val compressed = Vbc4ZstdCodec.compress(bytes)
+            val dispatcherSlice = temporary(profileSeed.copyOfRange(8, 16))
+            val dispatcherProfile = ((readLongPrefix(dispatcherSlice) ushr 1) % 11L).toInt()
+            val compressed = temporary(Vbc4ZstdCodec.compress(bytes))
             val compressionCodec = if (compressed.size < bytes.size) maxCompressionCodecZstd else maxCompressionCodecNone
             val storedPayload = if (compressionCodec == maxCompressionCodecZstd) compressed else bytes
-            val encoded = encodeMaxPayloadForStub(storedPayload, streamKey, nonce, layoutProfile, dispatcherProfile, MAX_PAYLOAD_CHUNK_SIZE)
-            val sectionDigest = sha256(bytes)
-            val bogusMetadataDigest = maxBogusMetadataDigest(seed, key, nonce, layoutProfile, dispatcherProfile, sectionDigest)
-            val bindingTag = maxBindingTag(platform, outputName, bootstrapNativeIndexDigest, sectionDigest)
-            val headerBytes = ByteArrayOutputStream().apply {
-                write(MAX_PAYLOAD_MARKER.toByteArray(Charsets.US_ASCII))
-                write(0)
-                writeIntLe(PACKER_VERSION)
-                writeIntLe(Level.MAX.id)
+            val streamKey = output(shellKdf(shellSeed, "javashroud-native-shell-stream-key-v3", nonce, bindingTag))
+            val encoded = encodeMaxPayloadForStub(storedPayload, streamKey, nonce, bindingTag, MAX_PAYLOAD_CHUNK_SIZE)
+            output(encoded.encodedPayload)
+            output(encoded.chunkTags)
+            val innerDigestMaterial = temporary("javashroud-native-shell-inner-digest-v3".toByteArray(Charsets.US_ASCII) + bytes)
+            val sectionDigestHmac = output(hmac(streamKey, innerDigestMaterial))
+            val sensitiveHeader = temporary(ByteArrayOutputStream().apply {
                 writeString(platform)
                 writeString(outputName)
                 writeString(innerFileType(outputName))
@@ -195,42 +212,52 @@ internal object NativeKernelShellPacker {
                 writeIntLe(compressionCodec)
                 writeIntLe(encoded.chunkSize)
                 writeIntLe(encoded.chunkCount)
-                writeIntLe(nonce.size)
                 writeIntLe(layoutProfile)
                 writeIntLe(dispatcherProfile)
-                write(nonce)
-                write(sectionDigest)
-                write(bogusMetadataDigest)
+                write(sectionDigestHmac)
                 write(bindingTag)
                 writeIntLe(encoded.chunkTags.size)
                 write(encoded.chunkTags)
-            }.toByteArray()
-            val payloadMac = hmac(key, headerBytes + encoded.encodedPayload + bootstrapNativeIndexDigest)
-            val nativeMac = shellMac32(streamKey, headerBytes, encoded.encodedPayload, bindingTag)
+            }.toByteArray())
+            val headerKey = temporary(shellKdf(shellSeed, "javashroud-native-shell-header-key-v3", nonce, zeroBinding))
+            val headerIvMaterial = temporary(shellKdf(shellSeed, "javashroud-native-shell-header-iv-v3", nonce, zeroBinding))
+            val headerIv = temporary(headerIvMaterial.copyOf(16))
+            val headerAesKey = temporary(headerKey.copyOf(16))
+            val encryptedHeader = output(aesCtr(sensitiveHeader, headerAesKey, headerIv))
+            val headerTagKey = temporary(shellKdf(shellSeed, "javashroud-native-shell-header-hmac-v3", nonce, zeroBinding))
+            val headerTag = output(hmac(headerTagKey, encryptedHeader))
+            val seedKey = temporary(shellKdf(bootSecret, "javashroud-native-shell-seed-key-v3", seedNonce, zeroBinding))
+            val seedIvMaterial = temporary(shellKdf(bootSecret, "javashroud-native-shell-seed-iv-v3", seedNonce, zeroBinding))
+            val seedIv = temporary(seedIvMaterial.copyOf(16))
+            val seedAesKey = temporary(seedKey.copyOf(16))
+            val encryptedSeed = temporary(aesCtr(shellSeed, seedAesKey, seedIv))
+            val seedTagKey = temporary(shellKdf(bootSecret, "javashroud-native-shell-seed-hmac-v3", seedNonce, zeroBinding))
+            val seedTag = temporary(hmac(seedTagKey, encryptedSeed))
+            val headerPrefix = output(ByteArrayOutputStream().apply {
+                write(MAX_PAYLOAD_MARKER.toByteArray(Charsets.US_ASCII))
+                write(0)
+                writeIntLe(PACKER_VERSION)
+                writeIntLe(Level.MAX.id)
+                writeIntLe(nonce.size)
+                write(nonce)
+                writeIntLe(seedNonce.size)
+                write(seedNonce)
+                write(encryptedSeed)
+                write(seedTag)
+                writeIntLe(encryptedHeader.size)
+            }.toByteArray())
+            val headerBytesForMac = temporary(headerPrefix + encryptedHeader + headerTag)
+            val payloadMac = output(maxBuildPayloadMac(bootSecret, nonce, headerBytesForMac, encoded.encodedPayload))
+            val artifactBindingCommitment = output(maxArtifactBindingCommitment(bootSecret, nonce, bindingTag))
             MaxPayloadBundle(
-                headerBytes = headerBytes,
-                encodedPayload = encoded.encodedPayload,
-                payloadMac = payloadMac,
-                sectionDigest = sectionDigest,
-                bogusMetadataDigest = bogusMetadataDigest,
-                bindingTag = bindingTag,
-                streamKey = streamKey,
-                nativeMac = nativeMac,
-                nonce = nonce,
-                layoutProfile = layoutProfile,
-                dispatcherProfile = dispatcherProfile,
-                originalSize = bytes.size,
-                storedPayloadSize = storedPayload.size,
-                compressionCodec = compressionCodec,
-                chunkSize = encoded.chunkSize,
-                chunkCount = encoded.chunkCount,
-                chunkTags = encoded.chunkTags,
-            ).also { bundleCompleted = true }
+                headerPrefix, encryptedHeader, headerTag, encoded.encodedPayload, payloadMac, artifactBindingCommitment,
+                sectionDigestHmac, bindingTag,
+                streamKey, nonce, layoutProfile, dispatcherProfile,
+                bytes.size, storedPayload.size, compressionCodec, encoded.chunkSize, encoded.chunkCount, encoded.chunkTags,
+            ).also { completed = true }
         } finally {
-            Arrays.fill(key, 0)
-            profileSeedToWipe?.let { Arrays.fill(it, 0) }
-            dispatcherSeedToWipe?.let { Arrays.fill(it, 0) }
-            if (!bundleCompleted) streamKeyOnFailure?.let { Arrays.fill(it, 0) }
+            temporaryBuffers.forEach { Arrays.fill(it, 0) }
+            if (!completed) outputBuffers.forEach { Arrays.fill(it, 0) }
         }
     }
 
@@ -241,180 +268,85 @@ internal object NativeKernelShellPacker {
         seed: Long,
         keyMaterial: ByteArray,
         bootstrapNativeIndexDigest: ByteArray,
+        bootSecret: ByteArray,
+        artifactBindingCommitment: ByteArray,
     ): MaxPayloadInspection {
-        val parsed = parseMaxPayloadHeader(headerBytes) ?: return MaxPayloadInspection(present = false)
-        val key = deriveShellKey(seed, Level.MAX, parsed.platform, parsed.outputName, keyMaterial + bootstrapNativeIndexDigest)
+        val parsed = parseMaxPayloadHeader(headerBytes, bootSecret) ?: return MaxPayloadInspection(present = false)
+        val combinedKeyMaterial = keyMaterial + bootstrapNativeIndexDigest
+        val key = deriveShellKey(seed, Level.MAX, parsed.platform, parsed.outputName, combinedKeyMaterial)
+        var stored: ByteArray? = null
+        var inner: ByteArray? = null
         return try {
-            val macValid = parsed.version == PACKER_VERSION &&
-                parsed.level == Level.MAX &&
-                parsed.originalSize > 0 &&
-                parsed.storedPayloadSize > 0 &&
-                parsed.encodedPayloadSize == encodedPayload.size &&
-                parsed.compressionCodec in setOf(maxCompressionCodecNone, maxCompressionCodecZstd) &&
-                parsed.chunkSize > 0 &&
-                parsed.chunkCount == chunkCountFor(parsed.encodedPayloadSize, parsed.chunkSize) &&
-                parsed.chunkTags.size == parsed.chunkCount * 4 &&
-                parsed.nonce.size == parsed.nonceSize &&
-                hmac(key, headerBytes + encodedPayload + bootstrapNativeIndexDigest).contentEquals(payloadMac)
-            val bindingTagValid = maxBindingTag(parsed.platform, parsed.outputName, bootstrapNativeIndexDigest, parsed.sectionDigest)
-                .contentEquals(parsed.bindingTag)
-            val bogusMetadataDigestValid = maxBogusMetadataDigest(seed, key, parsed.nonce, parsed.layoutProfile, parsed.dispatcherProfile, parsed.sectionDigest)
-                .contentEquals(parsed.bogusMetadataDigest)
+            val actualPayloadMac = maxBuildPayloadMac(bootSecret, parsed.nonce, headerBytes, encodedPayload)
+            val expectedBindingTag = maxBindingTag(parsed.platform, parsed.outputName, bootstrapNativeIndexDigest, key)
+            val expectedArtifactBinding = maxArtifactBindingCommitment(bootSecret, parsed.nonce, parsed.bindingTag)
+            val macValid = parsed.version == PACKER_VERSION && parsed.level == Level.MAX &&
+                parsed.originalSize > 0 && parsed.storedPayloadSize > 0 && parsed.encodedPayloadSize == encodedPayload.size &&
+                parsed.compressionCodec in setOf(maxCompressionCodecNone, maxCompressionCodecZstd) && parsed.chunkSize > 0 &&
+                parsed.chunkCount == chunkCountFor(parsed.encodedPayloadSize, parsed.chunkSize) && parsed.chunkTags.size == parsed.chunkCount * 32 &&
+                payloadMac.size == 32 && MessageDigest.isEqual(actualPayloadMac, payloadMac)
+            val expectedBindingValid = MessageDigest.isEqual(expectedBindingTag, parsed.bindingTag)
+            val artifactBindingValid = artifactBindingCommitment.size == 32 &&
+                MessageDigest.isEqual(expectedArtifactBinding, artifactBindingCommitment)
+            Arrays.fill(actualPayloadMac, 0)
+            Arrays.fill(expectedBindingTag, 0)
+            Arrays.fill(expectedArtifactBinding, 0)
+            if (macValid && expectedBindingValid && artifactBindingValid) {
+                stored = decodeMaxPayloadForStub(
+                    encodedPayload,
+                    parsed.streamKey,
+                    parsed.nonce,
+                    parsed.bindingTag,
+                    parsed.chunkSize,
+                    parsed.chunkTags,
+                )
+                inner = when (parsed.compressionCodec) {
+                    maxCompressionCodecNone -> stored?.takeIf { it.size == parsed.originalSize }
+                    maxCompressionCodecZstd -> stored?.let { Vbc4ZstdCodec.decompress(it, parsed.originalSize) }
+                    else -> null
+                }
+            }
+            val bindingTagValid = inner?.let {
+                expectedBindingValid && artifactBindingValid
+            } ?: false
+            val digestValid = inner?.let {
+                val material = "javashroud-native-shell-inner-digest-v3".toByteArray(Charsets.US_ASCII) + it
+                val digest = hmac(parsed.streamKey, material)
+                val valid = MessageDigest.isEqual(digest, parsed.sectionDigestHmac)
+                Arrays.fill(material, 0); Arrays.fill(digest, 0)
+                valid
+            } ?: false
             MaxPayloadInspection(
-                present = true,
-                version = parsed.version,
-                platform = parsed.platform,
-                outputName = parsed.outputName,
-                innerFileType = parsed.innerFileType,
-                originalSize = parsed.originalSize,
-                storedPayloadSize = parsed.storedPayloadSize,
-                encodedPayloadSize = parsed.encodedPayloadSize,
-                compressionCodec = parsed.compressionCodec,
-                chunkSize = parsed.chunkSize,
-                chunkCount = parsed.chunkCount,
-                nonceSize = parsed.nonceSize,
-                layoutProfile = parsed.layoutProfile,
-                dispatcherProfile = parsed.dispatcherProfile,
-                bogusMetadataDigestValid = bogusMetadataDigestValid,
-                macValid = macValid,
-                bindingTagValid = bindingTagValid,
+                present = true, version = parsed.version, platform = parsed.platform, outputName = parsed.outputName,
+                innerFileType = parsed.innerFileType, originalSize = parsed.originalSize, storedPayloadSize = parsed.storedPayloadSize,
+                encodedPayloadSize = parsed.encodedPayloadSize, compressionCodec = parsed.compressionCodec, chunkSize = parsed.chunkSize,
+                chunkCount = parsed.chunkCount, nonceSize = parsed.nonce.size, layoutProfile = parsed.layoutProfile,
+                dispatcherProfile = parsed.dispatcherProfile, macValid = macValid,
+                bindingTagValid = bindingTagValid && digestValid,
             )
         } finally {
+            Arrays.fill(combinedKeyMaterial, 0)
             Arrays.fill(key, 0)
+            stored?.fill(0)
+            if (inner !== stored) inner?.fill(0)
+            parsed.wipeSensitive()
         }
     }
 
-    fun renderMaxPayloadHeader(bundle: MaxPayloadBundle): String {
-        val streamKeyPlan = buildScopedStreamKeyPlan(bundle)
-        return try {
-            buildString {
+    fun renderMaxPayloadHeader(bundle: MaxPayloadBundle): String = buildString {
         appendLine("/* AUTO-GENERATED JavaShroud max native shell payload - DO NOT EDIT */")
         appendLine("#ifndef JS_SHELL_PAYLOAD_INC")
         appendLine("#define JS_SHELL_PAYLOAD_INC")
         appendLine("#define JS_NATIVE_MAX_STUB_MARKER \"$MAX_STUB_MARKER\"")
         appendLine("#define JS_NATIVE_MAX_PAYLOAD_MARKER \"$MAX_PAYLOAD_MARKER\"")
         appendLine("#define JS_SHELL_PROTOCOL_VERSION $PACKER_VERSION")
-        appendLine("#define JS_SHELL_LAYOUT_PROFILE ${bundle.layoutProfile}")
-        appendLine("#define JS_SHELL_DISPATCHER_PROFILE ${bundle.dispatcherProfile}")
-        appendLine("#define JS_SHELL_ORIGINAL_PAYLOAD_SIZE ${bundle.originalSize}u")
-        appendLine("#define JS_SHELL_STORED_PAYLOAD_SIZE ${bundle.storedPayloadSize}u")
-        appendLine("#define JS_SHELL_COMPRESSION_CODEC ${bundle.compressionCodec}u")
-        appendLine("#define JS_SHELL_CHUNK_SIZE ${bundle.chunkSize}u")
-        appendLine("#define JS_SHELL_CHUNK_COUNT ${bundle.chunkCount}u")
+        appendLine("#define JS_SHELL_ENCRYPTED_HEADER_SIZE ${bundle.encryptedHeader.size}u")
         appendLine("static const unsigned char js_shell_payload_header[] = { ${bundle.headerBytes.toCByteArrayLiteral()} };")
         appendLine("static const unsigned char js_shell_payload_bytes[] = { ${bundle.encodedPayload.toCByteArrayLiteral()} };")
-        appendLine("static const unsigned char js_shell_payload_mac[32] = { ${bundle.nativeMac.toCByteArrayLiteral()} };")
         appendLine("static const unsigned char js_shell_build_hmac[32] = { ${bundle.payloadMac.toCByteArrayLiteral()} };")
-        streamKeyPlan.lanes.forEachIndexed { lane, bytes ->
-            appendLine("static const unsigned char js_shell_key_material_${streamKeyPlan.symbolToken}_$lane[${bytes.size}] = { ${bytes.toCByteArrayLiteral()} };")
-        }
-        appendLine("#define JS_SHELL_STREAM_KEY_LANE_COUNT ${streamKeyPlan.lanes.size}")
-        appendLine("#define JS_SHELL_COPY_SCOPED_STREAM_KEY(out, header_nonce, binding, layout_profile, dispatcher_profile) do { \\")
-        appendLine("    static const unsigned char _js_shell_lane_order[${streamKeyPlan.laneOrder.size}] = { ${streamKeyPlan.laneOrder.joinToString(", ") { "${it}u" }} }; \\")
-        appendLine("    for (unsigned int _js_shell_i = 0; _js_shell_i < 32u; _js_shell_i++) { \\")
-        appendLine("        unsigned char _js_shell_v = (unsigned char)((header_nonce)[(_js_shell_i * ${streamKeyPlan.nonceStride}u + ${streamKeyPlan.nonceOffset}u) & 15u] ^ (binding)[(_js_shell_i * ${streamKeyPlan.bindingStride}u + ${streamKeyPlan.bindingOffset}u) & 31u] ^ 0x${"%02X".format(streamKeyPlan.profileSalt)}u ^ ((layout_profile) * 29u) ^ ((dispatcher_profile) * 47u)); \\")
-        appendLine("        for (unsigned int _js_shell_s = 0; _js_shell_s < ${streamKeyPlan.laneOrder.size}u; _js_shell_s++) { \\")
-        appendLine("            unsigned int _js_shell_lane = _js_shell_lane_order[_js_shell_s]; \\")
-        streamKeyPlan.lanes.indices.forEach { lane ->
-            val prefix = if (lane == 0) "if" else "else if"
-            appendLine("            $prefix (_js_shell_lane == ${lane}u) _js_shell_v = (unsigned char)(_js_shell_v ^ js_shell_key_material_${streamKeyPlan.symbolToken}_$lane[(_js_shell_i * ${streamKeyPlan.indexStrides[lane]}u + ${streamKeyPlan.indexOffsets[lane]}u) % ${streamKeyPlan.laneWidths[lane]}u]); \\")
-        }
-        appendLine("        } \\")
-        appendLine("        (out)[_js_shell_i] = (unsigned char)((_js_shell_v >> ${streamKeyPlan.rotateRight}) | (_js_shell_v << ${8 - streamKeyPlan.rotateRight})); \\")
-        appendLine("    } \\")
-        appendLine("} while (0)")
-        appendLine("static const unsigned char js_shell_section_digest[32] = { ${bundle.sectionDigest.toCByteArrayLiteral()} };")
-        appendLine("static const unsigned char js_shell_bogus_metadata_digest[32] = { ${bundle.bogusMetadataDigest.toCByteArrayLiteral()} };")
-        appendLine("static const unsigned char js_shell_binding_tag[32] = { ${bundle.bindingTag.toCByteArrayLiteral()} };")
-        appendLine("#define JS_SHELL_PAYLOAD_HEADER_SIZE ${bundle.headerBytes.size}")
-        appendLine("#define JS_SHELL_PAYLOAD_SIZE ${bundle.encodedPayload.size}")
+        appendLine("#define JS_SHELL_PAYLOAD_HEADER_SIZE ${bundle.headerBytes.size}u")
+        appendLine("#define JS_SHELL_PAYLOAD_SIZE ${bundle.encodedPayload.size}u")
         appendLine("#endif")
-            }
-        } finally {
-            streamKeyPlan.lanes.forEach { Arrays.fill(it, 0) }
-        }
-    }
-
-    private data class ScopedStreamKeyPlan(
-        val lanes: Array<ByteArray>,
-        val laneWidths: IntArray,
-        val laneOrder: IntArray,
-        val indexStrides: IntArray,
-        val indexOffsets: IntArray,
-        val nonceStride: Int,
-        val nonceOffset: Int,
-        val bindingStride: Int,
-        val bindingOffset: Int,
-        val profileSalt: Int,
-        val rotateRight: Int,
-        val symbolToken: String,
-    )
-
-    private fun buildScopedStreamKeyPlan(bundle: MaxPayloadBundle): ScopedStreamKeyPlan {
-        require(bundle.streamKey.size == 32) { "max shell stream key must be 32 bytes" }
-        val random = SecureRandom()
-        val laneCount = 3 + random.nextInt(4)
-        val laneOrder = (0 until laneCount).shuffled(random).toIntArray()
-        val laneWidths = intArrayOf(37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97)
-            .toList().shuffled(random).take(laneCount).toIntArray()
-        val indexStrides = IntArray(laneCount) { lane -> 1 + random.nextInt(laneWidths[lane] - 1) }
-        val indexOffsets = IntArray(laneCount) { lane -> random.nextInt(laneWidths[lane]) }
-        val oddStrides = intArrayOf(1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31)
-        val nonceStride = oddStrides[random.nextInt(oddStrides.size)]
-        val nonceOffset = random.nextInt(16)
-        val bindingStride = oddStrides[random.nextInt(oddStrides.size)]
-        val bindingOffset = random.nextInt(32)
-        val profileSalt = random.nextInt(256)
-        val rotateRight = 1 + random.nextInt(7)
-        val lanes = Array(laneCount) { lane -> ByteArray(laneWidths[lane]).also(random::nextBytes) }
-        var planCompleted = false
-        try {
-        val controlledLane = laneOrder.last()
-        for (keyIndex in bundle.streamKey.indices) {
-            val rotated = ((bundle.streamKey[keyIndex].toInt() and 0xFF) shl rotateRight or
-                ((bundle.streamKey[keyIndex].toInt() and 0xFF) ushr (8 - rotateRight))) and 0xFF
-            val domainByte = (bundle.nonce[(keyIndex * nonceStride + nonceOffset) and 15].toInt() and 0xFF) xor
-                (bundle.bindingTag[(keyIndex * bindingStride + bindingOffset) and 31].toInt() and 0xFF) xor
-                (profileSalt and 0xFF) xor (bundle.layoutProfile * 29) xor (bundle.dispatcherProfile * 47)
-            var residual = rotated xor (domainByte and 0xFF)
-            for (lane in laneOrder.dropLast(1)) {
-                residual = residual xor (lanes[lane][(keyIndex * indexStrides[lane] + indexOffsets[lane]) % laneWidths[lane]].toInt() and 0xFF)
-            }
-            val lastIndex = (keyIndex * indexStrides[controlledLane] + indexOffsets[controlledLane]) % laneWidths[controlledLane]
-            lanes[controlledLane][lastIndex] = residual.toByte()
-        }
-        val reconstructed = ByteArray(bundle.streamKey.size)
-        try {
-            for (keyIndex in reconstructed.indices) {
-                var value = ((bundle.nonce[(keyIndex * nonceStride + nonceOffset) and 15].toInt() and 0xFF) xor
-                    (bundle.bindingTag[(keyIndex * bindingStride + bindingOffset) and 31].toInt() and 0xFF) xor
-                    profileSalt xor (bundle.layoutProfile * 29) xor (bundle.dispatcherProfile * 47)) and 0xFF
-                for (lane in laneOrder) {
-                    value = value xor (lanes[lane][(keyIndex * indexStrides[lane] + indexOffsets[lane]) % laneWidths[lane]].toInt() and 0xFF)
-                }
-                reconstructed[keyIndex] = (((value ushr rotateRight) or (value shl (8 - rotateRight))) and 0xFF).toByte()
-            }
-            require(reconstructed.contentEquals(bundle.streamKey)) { "generated max shell scoped key program diverged from the payload stream key" }
-        } finally {
-            Arrays.fill(reconstructed, 0)
-        }
-        return ScopedStreamKeyPlan(
-            lanes = lanes,
-            laneWidths = laneWidths,
-            laneOrder = laneOrder,
-            indexStrides = indexStrides,
-            indexOffsets = indexOffsets,
-            nonceStride = nonceStride,
-            nonceOffset = nonceOffset,
-            bindingStride = bindingStride,
-            bindingOffset = bindingOffset,
-            profileSalt = profileSalt and 0xFF,
-            rotateRight = rotateRight,
-            symbolToken = ByteArray(6).also(random::nextBytes).joinToString("") { "%02x".format(it.toInt() and 0xFF) },
-        ).also { planCompleted = true }
-        } finally {
-            if (!planCompleted) lanes.forEach { Arrays.fill(it, 0) }
-        }
     }
 
     fun inspect(bytes: ByteArray, seed: Long, keyMaterial: ByteArray): ShellInspection {
@@ -471,15 +403,22 @@ internal object NativeKernelShellPacker {
         val compressionCodec: Int,
         val chunkSize: Int,
         val chunkCount: Int,
-        val nonceSize: Int,
         val layoutProfile: Int,
         val dispatcherProfile: Int,
         val nonce: ByteArray,
-        val sectionDigest: ByteArray,
-        val bogusMetadataDigest: ByteArray,
+        val sectionDigestHmac: ByteArray,
         val bindingTag: ByteArray,
         val chunkTags: ByteArray,
-    )
+        val streamKey: ByteArray,
+    ) {
+        fun wipeSensitive() {
+            Arrays.fill(nonce, 0)
+            Arrays.fill(sectionDigestHmac, 0)
+            Arrays.fill(bindingTag, 0)
+            Arrays.fill(chunkTags, 0)
+            Arrays.fill(streamKey, 0)
+        }
+    }
 
     private fun parseBlock(bytes: ByteArray): ParsedBlock? {
         if (bytes.size < 12) return null
@@ -529,58 +468,70 @@ internal object NativeKernelShellPacker {
         }
     }
 
-    private fun parseMaxPayloadHeader(headerBytes: ByteArray): ParsedMaxPayloadHeader? {
+    private fun parseMaxPayloadHeader(headerBytes: ByteArray, bootSecret: ByteArray): ParsedMaxPayloadHeader? {
+        val temporaryBuffers = mutableListOf<ByteArray>()
+        val outputBuffers = mutableListOf<ByteArray>()
+        fun temporary(value: ByteArray): ByteArray = value.also { temporaryBuffers += it }
+        fun output(value: ByteArray): ByteArray = value.also { outputBuffers += it }
+        var result: ParsedMaxPayloadHeader? = null
         return try {
-        val reader = BlockReader(headerBytes)
-        val marker = reader.readCString()
-        if (marker != MAX_PAYLOAD_MARKER) return null
-        val version = reader.readIntLe()
-        val levelId = reader.readIntLe()
-        val level = Level.entries.firstOrNull { it.id == levelId } ?: return null
-        val platform = reader.readString()
-        val outputName = reader.readString()
-        val innerFileType = reader.readString()
-        val originalSize = reader.readIntLe()
-        val storedPayloadSize = reader.readIntLe()
-        val encodedPayloadSize = reader.readIntLe()
-        val compressionCodec = reader.readIntLe()
-        val chunkSize = reader.readIntLe()
-        val chunkCount = reader.readIntLe()
-        val nonceSize = reader.readIntLe()
-        val layoutProfile = reader.readIntLe()
-        val dispatcherProfile = reader.readIntLe()
-        val nonce = reader.readBytes(nonceSize)
-        val sectionDigest = reader.readBytes(32)
-        val bogusMetadataDigest = reader.readBytes(32)
-        val bindingTag = reader.readBytes(32)
-        val chunkTagsSize = reader.readIntLe()
-        val chunkTags = reader.readBytes(chunkTagsSize)
-        if (!reader.exhausted()) return null
-        ParsedMaxPayloadHeader(
-            version = version,
-            level = level,
-            platform = platform,
-            outputName = outputName,
-            innerFileType = innerFileType,
-            originalSize = originalSize,
-            storedPayloadSize = storedPayloadSize,
-            encodedPayloadSize = encodedPayloadSize,
-            compressionCodec = compressionCodec,
-            chunkSize = chunkSize,
-            chunkCount = chunkCount,
-            nonceSize = nonceSize,
-            layoutProfile = layoutProfile,
-            dispatcherProfile = dispatcherProfile,
-            nonce = nonce,
-            sectionDigest = sectionDigest,
-            bogusMetadataDigest = bogusMetadataDigest,
-            bindingTag = bindingTag,
-            chunkTags = chunkTags,
-        )
-    } catch (_: IllegalArgumentException) {
-        null
-    }
-
+            val reader = BlockReader(headerBytes)
+            if (reader.readCString() != MAX_PAYLOAD_MARKER) return null
+            val version = reader.readIntLe()
+            val level = Level.entries.firstOrNull { it.id == reader.readIntLe() } ?: return null
+            val nonce = output(reader.readBytes(reader.readIntLe()))
+            val seedNonce = temporary(reader.readBytes(reader.readIntLe()))
+            val encryptedSeed = temporary(reader.readBytes(32))
+            val seedTag = temporary(reader.readBytes(32))
+            val encryptedHeader = temporary(reader.readBytes(reader.readIntLe()))
+            val headerTag = temporary(reader.readBytes(32))
+            if (!reader.exhausted() || nonce.size != 16 || seedNonce.size != 16 || bootSecret.size != 32) return null
+            val zeroBinding = temporary(ByteArray(32))
+            val seedTagKey = temporary(shellKdf(bootSecret, "javashroud-native-shell-seed-hmac-v3", seedNonce, zeroBinding))
+            val actualSeedTag = temporary(hmac(seedTagKey, encryptedSeed))
+            if (!MessageDigest.isEqual(actualSeedTag, seedTag)) return null
+            val seedKey = temporary(shellKdf(bootSecret, "javashroud-native-shell-seed-key-v3", seedNonce, zeroBinding))
+            val seedIvMaterial = temporary(shellKdf(bootSecret, "javashroud-native-shell-seed-iv-v3", seedNonce, zeroBinding))
+            val seedIv = temporary(seedIvMaterial.copyOf(16))
+            val seedAesKey = temporary(seedKey.copyOf(16))
+            val shellSeed = temporary(aesCtr(encryptedSeed, seedAesKey, seedIv))
+            val headerTagKey = temporary(shellKdf(shellSeed, "javashroud-native-shell-header-hmac-v3", nonce, zeroBinding))
+            val actualHeaderTag = temporary(hmac(headerTagKey, encryptedHeader))
+            if (!MessageDigest.isEqual(actualHeaderTag, headerTag)) return null
+            val headerKey = temporary(shellKdf(shellSeed, "javashroud-native-shell-header-key-v3", nonce, zeroBinding))
+            val headerIvMaterial = temporary(shellKdf(shellSeed, "javashroud-native-shell-header-iv-v3", nonce, zeroBinding))
+            val headerIv = temporary(headerIvMaterial.copyOf(16))
+            val headerAesKey = temporary(headerKey.copyOf(16))
+            val plain = temporary(aesCtr(encryptedHeader, headerAesKey, headerIv))
+            val inner = BlockReader(plain)
+            val platform = inner.readString()
+            val outputName = inner.readString()
+            val innerFileType = inner.readString()
+            val originalSize = inner.readIntLe()
+            val storedSize = inner.readIntLe()
+            val encodedSize = inner.readIntLe()
+            val codec = inner.readIntLe()
+            val chunkSize = inner.readIntLe()
+            val chunkCount = inner.readIntLe()
+            val layout = inner.readIntLe()
+            val dispatcher = inner.readIntLe()
+            val digest = output(inner.readBytes(32))
+            val bindingTag = output(inner.readBytes(32))
+            val chunkTagsSize = inner.readIntLe()
+            if (chunkCount < 0 || chunkCount > Int.MAX_VALUE / 32 || chunkTagsSize != chunkCount * 32) return null
+            val tags = output(inner.readBytes(chunkTagsSize))
+            if (!inner.exhausted()) return null
+            val streamKey = output(shellKdf(shellSeed, "javashroud-native-shell-stream-key-v3", nonce, bindingTag))
+            ParsedMaxPayloadHeader(
+                version, level, platform, outputName, innerFileType, originalSize, storedSize, encodedSize,
+                codec, chunkSize, chunkCount, layout, dispatcher, nonce, digest, bindingTag, tags, streamKey,
+            ).also { result = it }
+        } catch (_: IllegalArgumentException) {
+            null
+        } finally {
+            temporaryBuffers.forEach { Arrays.fill(it, 0) }
+            if (result == null) outputBuffers.forEach { Arrays.fill(it, 0) }
+        }
     }
 
     private class BlockReader(private val bytes: ByteArray) {
@@ -609,119 +560,106 @@ internal object NativeKernelShellPacker {
     }
 
     fun decodeMaxPayloadForTest(bundle: MaxPayloadBundle): ByteArray? {
-        val stored = decodeMaxPayloadForStub(
-            bytes = bundle.encodedPayload,
-            streamKey = bundle.streamKey,
-            nonce = bundle.nonce,
-            layoutProfile = bundle.layoutProfile,
-            dispatcherProfile = bundle.dispatcherProfile,
-            chunkSize = bundle.chunkSize,
-            expectedChunkTags = bundle.chunkTags,
-        ) ?: return null
-        return when (bundle.compressionCodec) {
+        val stored = decodeMaxPayloadForStub(bundle.encodedPayload, bundle.streamKey, bundle.nonce, bundle.bindingTag,
+            bundle.chunkSize, bundle.chunkTags) ?: return null
+        val decoded = when (bundle.compressionCodec) {
             maxCompressionCodecNone -> stored.takeIf { it.size == bundle.originalSize }
             maxCompressionCodecZstd -> Vbc4ZstdCodec.decompress(stored, bundle.originalSize)
             else -> null
+        } ?: run {
+            Arrays.fill(stored, 0)
+            return null
         }
+        val material = "javashroud-native-shell-inner-digest-v3".toByteArray(Charsets.US_ASCII) + decoded
+        val digest = hmac(bundle.streamKey, material)
+        Arrays.fill(material, 0)
+        val valid = MessageDigest.isEqual(digest, bundle.sectionDigestHmac)
+        Arrays.fill(digest, 0)
+        if (decoded !== stored) Arrays.fill(stored, 0)
+        if (!valid) Arrays.fill(decoded, 0)
+        return decoded.takeIf { valid }
     }
 
-    private data class MaxEncodedPayload(
-        val encodedPayload: ByteArray,
-        val chunkSize: Int,
-        val chunkCount: Int,
-        val chunkTags: ByteArray,
-    )
+    private data class MaxEncodedPayload(val encodedPayload: ByteArray, val chunkSize: Int, val chunkCount: Int, val chunkTags: ByteArray)
 
-    private fun encodeMaxPayloadForStub(bytes: ByteArray, streamKey: ByteArray, nonce: ByteArray, layoutProfile: Int, dispatcherProfile: Int, chunkSize: Int): MaxEncodedPayload {
+    private fun encodeMaxPayloadForStub(bytes: ByteArray, streamKey: ByteArray, nonce: ByteArray, bindingTag: ByteArray, chunkSize: Int): MaxEncodedPayload {
         require(chunkSize > 0) { "max payload chunk size must be positive" }
         val out = bytes.copyOf()
         val chunkCount = chunkCountFor(out.size, chunkSize)
-        val tags = ByteArray(chunkCount * 4)
-        for (chunkIndex in 0 until chunkCount) {
-            val offset = chunkIndex * chunkSize
-            val length = minOf(chunkSize, out.size - offset)
-            encodeMaxPayloadChunk(out, offset, length, streamKey, nonce, layoutProfile, dispatcherProfile, chunkIndex)
-            val tag = shellChunkTag32(streamKey, nonce, layoutProfile, dispatcherProfile, chunkIndex, out, offset, length)
-            writeIntLe(tags, chunkIndex * 4, tag)
-        }
-        return MaxEncodedPayload(out, chunkSize, chunkCount, tags)
-    }
-
-    private fun decodeMaxPayloadForStub(bytes: ByteArray, streamKey: ByteArray, nonce: ByteArray, layoutProfile: Int, dispatcherProfile: Int, chunkSize: Int, expectedChunkTags: ByteArray): ByteArray? {
-        if (chunkSize <= 0) return null
-        val out = bytes.copyOf()
-        val chunkCount = chunkCountFor(out.size, chunkSize)
-        if (expectedChunkTags.size != chunkCount * 4) return null
-        for (chunkIndex in 0 until chunkCount) {
-            val offset = chunkIndex * chunkSize
-            val length = minOf(chunkSize, out.size - offset)
-            val tag = shellChunkTag32(streamKey, nonce, layoutProfile, dispatcherProfile, chunkIndex, out, offset, length)
-            if (tag != readIntLe(expectedChunkTags, chunkIndex * 4)) return null
-            encodeMaxPayloadChunk(out, offset, length, streamKey, nonce, layoutProfile, dispatcherProfile, chunkIndex)
-        }
-        return out
-    }
-
-    private fun encodeMaxPayloadChunk(bytes: ByteArray, offset: Int, length: Int, streamKey: ByteArray, nonce: ByteArray, layoutProfile: Int, dispatcherProfile: Int, chunkIndex: Int) {
-        var state = shellSeed32(streamKey, nonce, layoutProfile, dispatcherProfile) xor shellMix32(chunkIndex * 0x45D9F3B)
-        for (index in 0 until length) {
-            state = shellMix32(state + index + chunkIndex * 0x119DE1F3 + 0x9E3779B9u.toInt())
-            bytes[offset + index] = (bytes[offset + index].toInt() xor (state and 0xFF)).toByte()
-        }
-    }
-
-    private fun shellChunkTag32(key: ByteArray, nonce: ByteArray, layoutProfile: Int, dispatcherProfile: Int, chunkIndex: Int, bytes: ByteArray, offset: Int, length: Int): Int {
-        var state = shellSeed32(key, nonce, layoutProfile, dispatcherProfile) xor shellMix32(chunkIndex xor length)
-        for (index in 0 until length) {
-            val value = (bytes[offset + index].toInt() and 0xFF) + index * 17 + chunkIndex * 131
-            state = shellMix32(state xor value)
-        }
-        return shellMix32(state xor length xor (chunkIndex * 0x9E3779B9u.toInt()))
-    }
-
-    private fun chunkCountFor(size: Int, chunkSize: Int): Int = if (size == 0) 0 else (size + chunkSize - 1) / chunkSize
-
-    private fun shellMac32(key: ByteArray, header: ByteArray, payload: ByteArray, bindingTag: ByteArray): ByteArray {
-        val state = intArrayOf(
-            0x4A534D32, 0x9E3779B9u.toInt(), 0x243F6A88, 0xB7E15162u.toInt(),
-            0xDEADBEEFu.toInt(), 0x8BADF00Du.toInt(), 0xC001D00Du.toInt(), 0x13579BDF,
-        )
-        val parts = listOf(key, header, payload, bindingTag)
-        for ((partIndex, part) in parts.withIndex()) {
-            for (index in part.indices) {
-                val v = (part[index].toInt() and 0xFF) + index * 17 + partIndex * 131
-                val slot = (index + partIndex) and 7
-                state[slot] = shellMix32(state[slot] xor v xor state[(slot + 3) and 7])
+        val tags = ByteArray(chunkCount * 32)
+        var completed = false
+        return try {
+            for (chunkIndex in 0 until chunkCount) {
+                val offset = chunkIndex * chunkSize
+                val length = minOf(chunkSize, out.size - offset)
+                encodeMaxPayloadChunk(out, offset, length, streamKey, nonce, bindingTag, chunkIndex)
+                val tag = maxPayloadChunkTag(streamKey, nonce, bindingTag, chunkIndex, out, offset, length)
+                try {
+                    System.arraycopy(tag, 0, tags, chunkIndex * 32, 32)
+                } finally {
+                    Arrays.fill(tag, 0)
+                }
+            }
+            MaxEncodedPayload(out, chunkSize, chunkCount, tags).also { completed = true }
+        } finally {
+            if (!completed) {
+                Arrays.fill(out, 0)
+                Arrays.fill(tags, 0)
             }
         }
-        val total = key.size + header.size + payload.size + bindingTag.size
-        val out = ByteArray(32)
-        for (round in 0 until 8) {
-            state[round] = shellMix32(state[round] xor state[(round + 1) and 7] xor total)
-            out[round * 4] = (state[round] and 0xFF).toByte()
-            out[round * 4 + 1] = ((state[round] ushr 8) and 0xFF).toByte()
-            out[round * 4 + 2] = ((state[round] ushr 16) and 0xFF).toByte()
-            out[round * 4 + 3] = ((state[round] ushr 24) and 0xFF).toByte()
+    }
+
+    private fun decodeMaxPayloadForStub(bytes: ByteArray, streamKey: ByteArray, nonce: ByteArray, bindingTag: ByteArray, chunkSize: Int, expectedChunkTags: ByteArray): ByteArray? {
+        if (chunkSize <= 0) return null
+        val out = bytes.copyOf()
+        var completed = false
+        return try {
+            val chunkCount = chunkCountFor(out.size, chunkSize)
+            if (chunkCount > Int.MAX_VALUE / 32 || expectedChunkTags.size != chunkCount * 32) return null
+            for (chunkIndex in 0 until chunkCount) {
+                val offset = chunkIndex * chunkSize
+                val length = minOf(chunkSize, out.size - offset)
+                val tag = maxPayloadChunkTag(streamKey, nonce, bindingTag, chunkIndex, out, offset, length)
+                val expectedTag = expectedChunkTags.copyOfRange(chunkIndex * 32, chunkIndex * 32 + 32)
+                val valid = try {
+                    MessageDigest.isEqual(tag, expectedTag)
+                } finally {
+                    Arrays.fill(tag, 0)
+                    Arrays.fill(expectedTag, 0)
+                }
+                if (!valid) return null
+                encodeMaxPayloadChunk(out, offset, length, streamKey, nonce, bindingTag, chunkIndex)
+            }
+            out.also { completed = true }
+        } finally {
+            if (!completed) Arrays.fill(out, 0)
         }
-        return out
     }
 
-    private fun shellSeed32(key: ByteArray, nonce: ByteArray, layoutProfile: Int, dispatcherProfile: Int): Int {
-        var state = 0x6D617870 xor (layoutProfile * 0x45D9F3B) xor (dispatcherProfile * 0x119DE1F3)
-        for (index in key.indices) state = shellMix32(state xor (key[index].toInt() and 0xFF) xor (index * 131))
-        for (index in 0 until 16) state = shellMix32(state xor (nonce[index].toInt() and 0xFF) xor (index * 257))
-        return state
+    private fun encodeMaxPayloadChunk(bytes: ByteArray, offset: Int, length: Int, streamKey: ByteArray, nonce: ByteArray, bindingTag: ByteArray, chunkIndex: Int) {
+        val sensitive = mutableListOf<ByteArray>()
+        fun track(value: ByteArray): ByteArray = value.also { sensitive += it }
+        try {
+            val chunkKey = track(shellKdf(streamKey, "javashroud-native-shell-chunk-aes-v3", nonce, bindingTag, chunkIndex))
+            val chunkIvMaterial = track(shellKdf(streamKey, "javashroud-native-shell-chunk-iv-v3", nonce, bindingTag, chunkIndex))
+            val chunkIv = track(chunkIvMaterial.copyOf(16))
+            val aesKey = track(chunkKey.copyOf(16))
+            val plain = track(bytes.copyOfRange(offset, offset + length))
+            val encrypted = track(aesCtr(plain, aesKey, chunkIv))
+            System.arraycopy(encrypted, 0, bytes, offset, length)
+        } finally {
+            sensitive.forEach { Arrays.fill(it, 0) }
+        }
     }
 
-    private fun shellMix32(input: Int): Int {
-        var x = input
-        x = x xor (x ushr 16)
-        x *= 0x7FEB352D
-        x = x xor (x ushr 15)
-        x *= 0x846CA68Bu.toInt()
-        x = x xor (x ushr 16)
-        return x
+    private fun maxPayloadChunkTag(streamKey: ByteArray, nonce: ByteArray, bindingTag: ByteArray, chunkIndex: Int, bytes: ByteArray, offset: Int, length: Int): ByteArray {
+        val tagKey = shellKdf(streamKey, "javashroud-native-shell-chunk-hmac-v3", nonce, bindingTag, chunkIndex)
+        val ciphertext = bytes.copyOfRange(offset, offset + length)
+        return try { hmac(tagKey, ciphertext) } finally { Arrays.fill(tagKey, 0); Arrays.fill(ciphertext, 0) }
     }
+
+    private fun chunkCountFor(size: Int, chunkSize: Int): Int = if (size == 0) 0 else 1 + (size - 1) / chunkSize
+
     private fun encodePayload(bytes: ByteArray, key: ByteArray, nonce: ByteArray, rounds: Int, reverse: Boolean): ByteArray {
         val out = bytes.copyOf()
         repeat(rounds) { round -> xorStream(out, key, nonce, round) }
@@ -773,25 +711,142 @@ internal object NativeKernelShellPacker {
             update(keyMaterial)
         }.digest()
 
-    private fun maxBindingTag(platform: String, outputName: String, bootstrapNativeIndexDigest: ByteArray, sectionDigest: ByteArray): ByteArray =
-        sha256(
-            MAX_STUB_MARKER.toByteArray(Charsets.US_ASCII) +
-                MAX_PAYLOAD_MARKER.toByteArray(Charsets.US_ASCII) +
-                platform.toByteArray(Charsets.UTF_8) + byteArrayOf(0) +
-                outputName.toByteArray(Charsets.UTF_8) + byteArrayOf(0) +
-                bootstrapNativeIndexDigest + sectionDigest,
-        )
+    private fun maxBindingTag(
+        platform: String,
+        outputName: String,
+        bootstrapNativeIndexDigest: ByteArray,
+        shellBindingKey: ByteArray,
+    ): ByteArray = MessageDigest.getInstance("SHA-256").apply {
+        update(MAX_STUB_MARKER.toByteArray(Charsets.US_ASCII))
+        update(MAX_PAYLOAD_MARKER.toByteArray(Charsets.US_ASCII))
+        update(platform.toByteArray(Charsets.UTF_8))
+        update(0)
+        update(outputName.toByteArray(Charsets.UTF_8))
+        update(0)
+        update(bootstrapNativeIndexDigest)
+        update(shellBindingKey)
+    }.digest()
 
-    private fun maxBogusMetadataDigest(seed: Long, key: ByteArray, nonce: ByteArray, layoutProfile: Int, dispatcherProfile: Int, sectionDigest: ByteArray): ByteArray =
-        MessageDigest.getInstance("SHA-256").apply {
-            update("javashroud-native-max-bogus-section-metadata-v1".toByteArray(Charsets.US_ASCII))
-            updateLong(seed)
-            update(key)
-            update(nonce)
-            updateInt(layoutProfile)
-            updateInt(dispatcherProfile)
-            update(sectionDigest)
-        }.digest()
+    private fun maxBuildPayloadMac(
+        bootSecret: ByteArray,
+        nonce: ByteArray,
+        headerBytes: ByteArray,
+        encodedPayload: ByteArray,
+    ): ByteArray {
+        val zeroBinding = ByteArray(32)
+        val commitmentKey = shellKdf(
+            bootSecret,
+            "javashroud-native-shell-build-hmac-v3",
+            nonce,
+            zeroBinding,
+        )
+        val headerDigest = sha256(headerBytes)
+        val payloadDigest = sha256(encodedPayload)
+        val digestPair = headerDigest + payloadDigest
+        return try {
+            hmac(commitmentKey, digestPair)
+        } finally {
+            Arrays.fill(zeroBinding, 0)
+            Arrays.fill(commitmentKey, 0)
+            Arrays.fill(headerDigest, 0)
+            Arrays.fill(payloadDigest, 0)
+            Arrays.fill(digestPair, 0)
+        }
+    }
+
+    private fun maxArtifactBindingCommitment(
+        bootSecret: ByteArray,
+        nonce: ByteArray,
+        bindingTag: ByteArray,
+    ): ByteArray = shellKdf(
+        bootSecret,
+        "javashroud-native-shell-artifact-binding-v3",
+        nonce,
+        bindingTag,
+    )
+
+    private fun shellKdf(key: ByteArray, domain: String, nonce: ByteArray, bindingTag: ByteArray, value: Int = 0): ByteArray {
+        require(key.size == 32 && nonce.size == 16 && bindingTag.size == 32)
+        val material = ByteArrayOutputStream().apply {
+            write(nonce); write(bindingTag)
+            write((value ushr 24) and 0xFF); write((value ushr 16) and 0xFF); write((value ushr 8) and 0xFF); write(value and 0xFF)
+            write(domain.toByteArray(Charsets.US_ASCII))
+        }.toByteArray()
+        return try {
+            hmac(key, material)
+        } finally {
+            Arrays.fill(material, 0)
+        }
+    }
+
+    private fun aesCtr(bytes: ByteArray, key: ByteArray, iv: ByteArray): ByteArray = Cipher.getInstance("AES/CTR/NoPadding").run {
+        init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+        doFinal(bytes)
+    }
+
+    internal fun requireBootSecretForBuild(): ByteArray {
+        buildBootSecretProvider?.invoke()?.let { provided ->
+            try {
+                require(provided.size == 32) { "max native shell build boot secret provider must return exactly 32 bytes" }
+                return provided.copyOf()
+            } finally {
+                Arrays.fill(provided, 0)
+            }
+        }
+        val environment = System.getenv(BOOT_SECRET_ENV)?.takeIf { it.isNotEmpty() }
+        val file = System.getenv(BOOT_SECRET_FILE_ENV)?.takeIf { it.isNotEmpty() }
+        return parseBootSecret(environment, file)
+            ?: throw IllegalStateException("max native shell requires boot KEK via buildBootSecretProvider, $BOOT_SECRET_ENV, or $BOOT_SECRET_FILE_ENV")
+    }
+
+    internal fun parseBootSecret(encoded: String?, fileName: String?): ByteArray? {
+        if (!encoded.isNullOrEmpty()) return decodeHexBootSecret(encoded)
+        if (fileName.isNullOrBlank()) return null
+        val bytes = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(fileName))
+        if (bytes.size == 32) return bytes
+        return try {
+            decodeHexBootSecret(bytes)
+        } finally {
+            Arrays.fill(bytes, 0)
+        }
+    }
+
+    private fun decodeHexBootSecret(encoded: CharSequence): ByteArray? {
+        if (encoded.length != 64) return null
+        val decoded = ByteArray(32)
+        for (index in decoded.indices) {
+            val high = hexNibble(encoded[index * 2].code)
+            val low = hexNibble(encoded[index * 2 + 1].code)
+            if (high < 0 || low < 0) {
+                Arrays.fill(decoded, 0)
+                return null
+            }
+            decoded[index] = ((high shl 4) or low).toByte()
+        }
+        return decoded
+    }
+
+    private fun decodeHexBootSecret(encoded: ByteArray): ByteArray? {
+        if (encoded.size != 64) return null
+        val decoded = ByteArray(32)
+        for (index in decoded.indices) {
+            val high = hexNibble(encoded[index * 2].toInt() and 0xFF)
+            val low = hexNibble(encoded[index * 2 + 1].toInt() and 0xFF)
+            if (high < 0 || low < 0) {
+                Arrays.fill(decoded, 0)
+                return null
+            }
+            decoded[index] = ((high shl 4) or low).toByte()
+        }
+        return decoded
+    }
+
+    private fun hexNibble(value: Int): Int = when (value) {
+        in '0'.code..'9'.code -> value - '0'.code
+        in 'a'.code..'f'.code -> value - 'a'.code + 10
+        in 'A'.code..'F'.code -> value - 'A'.code + 10
+        else -> -1
+    }
 
     private fun innerFileType(outputName: String): String = when {
         outputName.endsWith(".dll", ignoreCase = true) -> "pe64-dll"
@@ -807,7 +862,7 @@ internal object NativeKernelShellPacker {
 
     private fun sha256(bytes: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(bytes)
 
-    private fun readLongPrefix(bytes: ByteArray): Long = ByteBuffer.wrap(bytes.copyOfRange(0, 8)).order(ByteOrder.BIG_ENDIAN).long
+    private fun readLongPrefix(bytes: ByteArray): Long = ByteBuffer.wrap(bytes, 0, 8).order(ByteOrder.BIG_ENDIAN).long
 
     private fun ByteArrayOutputStream.writeIntLe(value: Int) {
         write(value and 0xFF)

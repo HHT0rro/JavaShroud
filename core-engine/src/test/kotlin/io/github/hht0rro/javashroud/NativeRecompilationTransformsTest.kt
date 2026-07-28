@@ -15,6 +15,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
@@ -126,7 +127,7 @@ class NativeRecompilationTransformsTest {
     }
 
     @Test
-    fun generateDiversifiedSecrets_embeds_matching_vbc4_build_key_shares() {
+    fun generateDiversifiedSecrets_excludes_vbc4_root_material_and_keeps_public_profiles() {
         val context = Vbc4BuildContext(
             masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (index * 7 + 3).toByte() },
             nativeSeed = 0x13572468L,
@@ -135,14 +136,15 @@ class NativeRecompilationTransformsTest {
         )
 
         val secrets = NativeRecompilationTransforms.generateDiversifiedSecrets(42L, java.util.Random(42L), context)
-        val reconstructed = reconstructNativeBuildKey(secrets)
-
-        assertTrue(secrets.contains("JS_VBC4_BUILD_KEY_GENERATED"), "Native VBC4 build key marker must be generated")
-        assertTrue(context.masterKey.contentEquals(reconstructed), "Generated native VBC4 slot table must reconstruct the Kotlin build master key")
+        assertTrue(secrets.contains("JS_VBC4_RUNTIME_BOOT_MATERIAL"), "Native source must declare the runtime boot-material contract")
+        assertFalse(secrets.contains("js_vbc4_native_secret_slots"), "Native source must not embed recomposable master-key slots")
+        assertFalse(secrets.contains("JS_VBC4_COPY_SCOPED_MASTER_KEY"), "Native source must not emit a master-key reconstruction macro")
+        assertFalse(secrets.contains("JS_VBC4_LAYOUT_DIGEST_AT"), "Native source must not emit a layout-digest accessor backed by rodata")
+        assertFalse(containsCByteLiteral(secrets, context.masterKey), "Native source must not contain the build master key bytes")
+        assertFalse(containsCByteLiteral(secrets, context.jarLayoutDigest), "Native source must not contain the layout digest bytes")
         assertFalse(secrets.contains("JS_VBC4_BUILD_KEY_SHARE_A"), "Generated native VBC4 material must not expose a stable share A symbol")
         assertFalse(secrets.contains("JS_VBC4_BUILD_KEY_SHARE_B"), "Generated native VBC4 material must not expose a stable share B symbol")
         assertFalse(secrets.contains("static const unsigned char JS_VBC4_LAYOUT_DIGEST[32]"), "Generated native VBC4 material must not expose a stable layout digest symbol")
-        assertTrue(secrets.contains("JS_VBC4_LAYOUT_DIGEST_AT"), "Native VBC4 layout digest must be exposed only through an accessor")
         assertTrue(secrets.contains("#define JS_VBC4_DISPATCH_MIX_A"), "Native VBC4 dispatch mix must be generated per build")
         assertTrue(secrets.contains("#define JS_NATIVE_PARSER_PROFILE 2"), "Native parser row family must be selected at compile time")
         assertTrue(secrets.contains("#define JS_NATIVE_OPERAND_PROFILE 1"), "Native operand accessor family must be selected at compile time")
@@ -276,6 +278,8 @@ class NativeRecompilationTransformsTest {
         assertTrue(source.contains("protectedSectionKey"), "Native cache key and secrets must retain per-build protected-section material")
         assertTrue(source.contains("NativeKernelShellPacker.pack"), "standard Zig-compiled native artifacts must pass through the shell overlay packer after section sealing")
         assertTrue(source.contains("buildMaxPayloadBundle"), "max native artifacts must build an authenticated payload bundle after section sealing")
+        assertTrue(source.contains("shellBindingCommitment = payloadBundle.artifactBindingCommitment.copyOf()"), "max native artifacts must return the independent binding for encrypted boot.dat emission")
+        assertFalse(source.contains("renderMaxArtifactBindingHeader") || source.contains("js_shell_binding.inc"), "the replay expectation must not be compiled into the outer shell")
         assertTrue(source.contains("compileShellStubWithZig"), "max native artifacts must compile an outer stub shell")
     }
     @Test
@@ -434,7 +438,9 @@ class NativeRecompilationTransformsTest {
         assertFalse(resource.contains("js_jni_cache.initialized ? js_jni_cache.thread_get_context_class_loader"), "Manual mapped resource loading must not reuse cached Thread virtual method IDs")
         assertFalse(resource.contains("js_jni_cache.initialized ? js_jni_cache.input_stream_read_all_bytes"), "Manual mapped resource loading must not reuse cached InputStream virtual method IDs")
         assertTrue(resource.contains("if (!js_vm_preload_in_progress)"), "Preload resource loading must not consult the dispatch-frame active host loader")
-        val preloadBody = core.substringAfter("jsn_k9(JNIEnv *env, jclass cls)").substringBefore("JS_HIDDEN jbyteArray JNICALL jsn_k10")
+        val preloadBody = core.substringAfter(
+            "jsn_k9(JNIEnv *env, jclass cls, jbyteArray preload_index, jbyteArray commitments, jbyteArray startup_nonce)",
+        ).substringBefore("JS_HIDDEN jbyteArray JNICALL jsn_k10")
         assertTrue(
             preloadBody.contains("js_vm_preload_in_progress = 0;") && preloadBody.contains("js_vm_preload_in_progress = 1;"),
             "Native preload must keep lazy resource loading disabled until the authenticated VM catalog is registered",
@@ -623,6 +629,9 @@ class NativeRecompilationTransformsTest {
         val result = diagnostics.results.singleOrNull()
         assertTrue(result != null, "linux-x64 max native recompilation should produce one shell artifact; messages=${diagnostics.messages.joinToString { it.message }}")
         val bytes = result!!.bytes
+        val commitment = assertNotNull(result.shellBindingCommitment, "MAX recompilation must return the boot.dat shell binding")
+        assertEquals(32, commitment.size)
+        assertFalse(bytes.indexOfSlice(commitment) >= 0, "the boot.dat shell binding must not be compiled into the outer library")
         assertTrue(bytes.containsAscii("JNI_OnLoad"), "outer shell must export JNI_OnLoad")
         assertTrue(bytes.containsAscii("JS_NATIVE_MAX_STUB_V1"), "outer shell must carry the max stub marker")
         assertTrue(bytes.containsAscii("JS_NATIVE_MAX_PAYLOAD_V1"), "outer shell must carry the authenticated max payload marker")
@@ -631,6 +640,7 @@ class NativeRecompilationTransformsTest {
 
         val innerBytes = innerDiagnostics.results.singleOrNull()?.bytes
         assertTrue(innerBytes != null, "linux-x64 off recompilation should expose the sealed inner kernel for reverse-evidence comparison")
+        assertNull(innerDiagnostics.results.single().shellBindingCommitment, "off recompilation must not arm a MAX shell binding")
         assertFalse(
             bytes.indexOfSlice(innerBytes!!.copyOfRange(0, minOf(96, innerBytes.size))) >= 0,
             "max outer stub must not contain the inner js_kernel ELF header as a raw embedded dynamic library",
@@ -666,6 +676,9 @@ class NativeRecompilationTransformsTest {
         val result = diagnostics.results.singleOrNull()
         assertTrue(result != null, "windows-x64 max native recompilation should produce one shell artifact; messages=${diagnostics.messages.joinToString { it.message }}")
         val bytes = result!!.bytes
+        val commitment = assertNotNull(result.shellBindingCommitment, "MAX recompilation must return the boot.dat shell binding")
+        assertEquals(32, commitment.size)
+        assertFalse(bytes.indexOfSlice(commitment) >= 0, "the boot.dat shell binding must not be compiled into the outer library")
         assertTrue(bytes.containsAscii("JNI_OnLoad"), "outer shell must export JNI_OnLoad")
         assertTrue(bytes.containsAscii("JS_NATIVE_MAX_STUB_V1"), "outer shell must carry the max stub marker")
         assertTrue(bytes.containsAscii("JS_NATIVE_MAX_PAYLOAD_V1"), "outer shell must carry the authenticated max payload marker")
@@ -688,6 +701,9 @@ class NativeRecompilationTransformsTest {
         assertEquals(emptyList(), diagnostics.messages.filter { it.level == "error" }.map { it.message }, "macOS max shell cross-compilation should not report errors")
         assertEquals(setOf("macos-x64", "macos-arm64"), diagnostics.results.map { it.platform }.toSet(), "max shell should emit both macOS outer stub targets")
         diagnostics.results.forEach { result ->
+            val commitment = assertNotNull(result.shellBindingCommitment, "${result.platform} MAX recompilation must return a boot.dat shell binding")
+            assertEquals(32, commitment.size)
+            assertFalse(result.bytes.indexOfSlice(commitment) >= 0, "${result.platform} shell binding must not be compiled into the outer library")
             assertTrue(result.bytes.containsAscii("JNI_OnLoad"), "${result.platform} outer shell must export JNI_OnLoad")
             assertTrue(result.bytes.containsAscii("JS_NATIVE_MAX_STUB_V1"), "${result.platform} outer shell must carry the max stub marker")
             assertTrue(result.bytes.containsAscii("JS_NATIVE_MAX_PAYLOAD_V1"), "${result.platform} outer shell must carry the authenticated max payload marker")
@@ -820,34 +836,8 @@ class NativeRecompilationTransformsTest {
             .toByteArray()
     }
 
-    private fun parseNativeSecretSlots(source: String): List<ByteArray> {
-        val table = Regex("""(?s)static const unsigned char js_vbc4_native_secret_slots\[\d+]\[32] = \{\s*(.*?)\s*};""")
-            .find(source)?.groupValues?.get(1)
-            ?: error("Missing native secret slot table")
-        return Regex("""\{([^}]*)}""").findAll(table)
-            .map { match ->
-                match.groupValues[1].split(",")
-                    .map { token -> token.trim().removePrefix("0x").removeSuffix("u").toInt(16).toByte() }
-                    .toByteArray()
-            }
-            .toList()
-    }
-
-    private fun reconstructNativeBuildKey(source: String): ByteArray {
-        val slots = parseNativeSecretSlots(source)
-        val slotOrder = Regex("""#define JS_VBC4_BUILD_KEY_SLOT_(\d+) (\d+)""").findAll(source)
-            .toList()
-            .sortedBy { it.groupValues[1].toInt() }
-            .map { it.groupValues[2].toInt() }
-            .toList()
-        require(slotOrder.isNotEmpty()) { "Missing native build key slot order" }
-        val out = ByteArray(VBC4_MASTER_KEY_SIZE)
-        for (slotIndex in slotOrder) {
-            val slot = slots[slotIndex]
-            for (index in out.indices) out[index] = (out[index].toInt() xor slot[index].toInt()).toByte()
-        }
-        return out
-    }
+    private fun containsCByteLiteral(source: String, bytes: ByteArray): Boolean =
+        source.contains(bytes.joinToString(", ") { byte -> "0x%02Xu".format(byte.toInt() and 0xFF) })
 
     private fun cBytesForTest(bytes: ByteArray): String = bytes.joinToString(", ") { byte ->
         "0x%02Xu".format(byte.toInt() and 0xFF)

@@ -67,6 +67,13 @@ flowchart LR
 - Java 层只加载外层 stub，不保留 Java 解包 fallback；资源、索引、profile 或外壳 metadata 被篡改时直接 fail-closed。
 - Native kernel 与 VMBC 资源、bootstrap index、resource path 和 manifest mesh 绑定，降低跨产物直接替换与重放的可行性。
 
+启用 `jni-microkernel-loader` 时，构建端与运行端必须通过同一类入口提供同一个 256-bit Boot KEK。构建产物只写入 AES-GCM 认证加密的 `META-INF/.r/boot.dat`，不写入 KEK；缺少 KEK、格式错误或认证失败都会 fail-closed：
+
+- 环境变量 `JAVASHROUD_BOOT_SECRET_V1`：严格 64 个十六进制字符；
+- 环境变量 `JAVASHROUD_BOOT_SECRET_FILE_V1` 指向的文件：32 个原始字节或 64 个十六进制字符。
+
+`nativePackingLevel=max` 外壳在 inner kernel 加载前运行，因此 JVM helper 与外壳严格共享上述环境变量/密钥文件契约。每个平台的外壳绑定期望值只存在于加密 `boot.dat` 中，并由 JVM 在 `JNI_OnLoad` 期间一次性交付，Native 库内不再自带可整体替换的期望值。部署时应通过密钥管理系统注入并定期轮换，禁止把 KEK 写入普通配置文件、JAR、Native 库或源码仓库。
+
 | 平台 | 当前加固边界 |
 | --- | --- |
 | Windows x64 | PE64 内存映射，覆盖 section、relocation、import / export、TLS、`DllMain`、`JNI_OnLoad` 与 ABI table 校验 |

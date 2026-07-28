@@ -361,7 +361,8 @@ class Vbc4OnlyContractTest {
             "Build serializer must take VBC4 master key material and layout digest through an explicit scoped key",
         )
         assertFalse(nativeHelpers.contains("JS_VBC4_MASTER_KEY_SHARE_A") || nativeHelpers.contains("JS_VBC4_MASTER_KEY_SHARE_B"), "Native helper must not retain repository-fixed VBC4 master key shares")
-        assertTrue(nativeHelpers.contains("JS_VBC4_COPY_SCOPED_MASTER_KEY") && nativeHelpers.contains("JS_VBC4_SECRET_SLOT_BYTE"), "Native helper must consume per-build generated VBC4 secret slots through accessors")
+        assertFalse(nativeHelpers.contains("JS_VBC4_COPY_SCOPED_MASTER_KEY") || nativeHelpers.contains("JS_VBC4_SECRET_SLOT_BYTE"), "Native helper must not consume build-time master-key slots from rodata")
+        assertTrue(nativeHelpers.contains("js_runtime_master_key_shares") && nativeHelpers.contains("jsn_k7"), "Native helper must use only one-shot runtime-installed boot material")
         assertFalse(nativeHelpers.contains("JS_VBC4_BUILD_KEY_SHARE_A") || nativeHelpers.contains("JS_VBC4_BUILD_KEY_SHARE_B"), "Native helper must not retain a stable A/B share extraction recipe")
         assertFalse(nativeHelpers.contains("static unsigned char JS_VBC4_MASTER_KEY"), "Native helper must not retain a resident plaintext VBC4 master key")
         assertFalse(nativeHelpers.contains("g_vbc4_inner_pad") || nativeHelpers.contains("g_vbc4_outer_pad"), "Native helper must not retain long-lived HMAC pads for VBC4 master material")
@@ -409,8 +410,18 @@ class Vbc4OnlyContractTest {
         assertTrue(nativeHelpers.contains("method_local_profile") && nativeHelpers.contains("p->method_local_profile = 0"), "Native VM program state must retain and initialize parsed method-local profile")
         assertTrue(nativeHelpers.contains("JS_VBC4_FLAG_NESTED_VM") && nativeHelpers.contains("nested_vm_profile"), "Native parser must bind nested-VM flag to a non-zero method-local profile")
         assertTrue(nativeHelpers.contains("JS_VBC4_FLAG_MIXED_OPERAND_ENVELOPE") && nativeHelpers.contains("js_vbc4_read_mixed_operand_row") && nativeHelpers.contains("js_vbc4_row_envelopes_mutually_exclusive"), "Native parser must decode mixed operand rows and reject incompatible row-mode flag combinations")
-        assertTrue(nativeSymbols.contains("strtoul(parts[5], NULL, 16)"), "Native VM parser must parse the sixth metadata field as the method-local profile")
-        assertTrue(nativeSymbols.contains("part_count == 13") && nativeSymbols.contains("p->native_vm_profile_id = (uint32_t)strtoul(parts[11]") && nativeSymbols.contains("p->dispatch_profile_tag = (uint32_t)strtoul(parts[12]") && nativeSymbols.contains("p->resource_path = js_strdup(parts[9])"), "Native VM parser must require and parse the profile id, dispatch tag, and resource path")
+        assertTrue(nativeSymbols.contains("js_vm_parse_hex_u32_strict(parts[3], &method_local_profile)"), "Native VM parser must strictly parse the v2 method-local profile field")
+        assertTrue(
+            nativeSymbols.contains("part_count == 11") && nativeSymbols.contains("part_count = 12") &&
+                nativeSymbols.contains("vbc4-meta-v2") &&
+                nativeSymbols.contains("js_vm_parse_hex_u32_strict(parts[9], &native_vm_profile_id)") &&
+                nativeSymbols.contains("js_vm_parse_hex_u32_strict(parts[10], &dispatch_profile_tag)") &&
+                nativeSymbols.contains("resource_path = js_strdup(parts[7])") &&
+                nativeSymbols.contains("/* Publish only after every authenticated field has parsed successfully. */") &&
+                nativeSymbols.contains("p->native_vm_profile_id = native_vm_profile_id") &&
+                nativeSymbols.contains("p->dispatch_profile_tag = dispatch_profile_tag"),
+            "Native VM parser must strictly validate all keyed identity metadata v2 fields before atomically publishing them",
+        )
         assertTrue(nativeHelpers.contains("js_vm_method_local_salt") && nativeHelpers.contains("program->method_local_profile"), "Native dispatch salt must mix the method-local profile")
     }
 
@@ -456,7 +467,8 @@ class Vbc4OnlyContractTest {
         assertFalse(helperSource.contains("RUNTIME_RESOURCE_KEY"), "JniMicrokernelHelper source must not retain the repository-fixed resource key field")
         assertFalse(helperSource.contains("runtimeResourceKey()"), "JniMicrokernelHelper must not assemble a globally-applicable runtime resource key")
         assertTrue(helperSource.contains("partitionResourceKey(") && helperSource.contains("Arrays.fill(resourceKey, (byte) 0)"), "JniMicrokernelHelper must assemble per-partition keys on demand and wipe temporary copies")
-        assertTrue(deploymentSource.contains("injectRuntimeResourceKey") && deploymentSource.contains("RuntimeKeyPartitions"), "Helper deployment must inject the per-build partition key domains into JniMicrokernelHelper")
+        assertFalse(deploymentSource.contains("injectRuntimeResourceKey"), "Helper deployment must not inject Java bytecode key domains")
+        assertTrue(deploymentSource.contains("BootMaterialEnvelope.encode"), "Helper deployment must carry partition keys only inside the authenticated boot envelope")
     }
     @Test
     fun production_sources_only_keep_current_vbc4_format_marker() {

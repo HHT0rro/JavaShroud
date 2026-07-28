@@ -182,7 +182,9 @@ class CrossMethodOutliningExecutionTest {
             ),
         )
         try {
-            dispatchRequest(buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())), EngineKernel())
+            withTestBootSecret {
+                dispatchRequest(buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())), EngineKernel())
+            }
         } finally {
             Files.deleteIfExists(configPath)
         }
@@ -353,6 +355,7 @@ class CrossMethodOutliningExecutionTest {
 
     private fun runJava(jarPath: Path): ProcessResult {
         val process = ProcessBuilder("java", "-jar", jarPath.toAbsolutePath().normalize().toString())
+            .withTestBootSecret()
             .redirectErrorStream(true)
             .start()
         val completed = process.waitFor(60, TimeUnit.SECONDS)
@@ -368,8 +371,8 @@ class CrossMethodOutliningExecutionTest {
         val os = System.getProperty("os.name").lowercase()
         val arch = System.getProperty("os.arch").lowercase()
         return when {
-            os.contains("win") -> "windows-x64"
-            os.contains("mac") && arch.contains("aarch64") -> "macos-arm64"
+            os.startsWith("windows") -> "windows-x64"
+            os.contains("mac") && (arch == "aarch64" || arch == "arm64") -> "macos-arm64"
             os.contains("mac") -> "macos-x64"
             else -> "linux-x64"
         }

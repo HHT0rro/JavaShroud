@@ -14,7 +14,7 @@ internal fun runJavaProcessWithTimeout(
     processBuilder: ProcessBuilder,
     timeoutSeconds: Long = 30,
 ): JavaProcessResult {
-    val process = processBuilder.redirectErrorStream(true).start()
+    val process = processBuilder.withTestBootSecret().redirectErrorStream(true).start()
     val output = ByteArrayOutputStream()
     val reader = thread(start = true, isDaemon = true, name = "javashroud-test-process-output") {
         process.inputStream.use { input -> input.copyTo(output) }

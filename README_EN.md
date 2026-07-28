@@ -68,6 +68,13 @@ The user-facing name is **Native hardening**. The `jni-microkernel-loader.native
 - The Java layer loads only the outer stub and keeps no Java unpacking fallback. Resource, index, profile, or shell-metadata tampering fails closed.
 - The Native kernel is bound to VMBC resources, the bootstrap index, resource paths, and the manifest mesh to reduce direct cross-artifact replacement and replay.
 
+When `jni-microkernel-loader` is enabled, the build and runtime must receive the same 256-bit Boot KEK through the same input class. The artifact stores only the AES-GCM authenticated `META-INF/.r/boot.dat` envelope, never the KEK; a missing or malformed KEK and authentication failure all fail closed:
+
+- environment variable `JAVASHROUD_BOOT_SECRET_V1`: exactly 64 hexadecimal characters;
+- a file named by `JAVASHROUD_BOOT_SECRET_FILE_V1`: 32 raw bytes or 64 hexadecimal characters.
+
+The `nativePackingLevel=max` shell runs before the inner kernel is loaded, so the JVM helper and shell strictly share the environment-variable/file contract above. Each platform's expected shell binding exists only inside encrypted `boot.dat` and is delivered once by the JVM during `JNI_OnLoad`; the Native library no longer embeds an expectation that can be replayed with the whole shell bundle. Inject and rotate the KEK through deployment secret management; do not place it in ordinary configuration files, JARs, Native libraries, or the source repository.
+
 | Platform | Current hardening boundary |
 | --- | --- |
 | Windows x64 | PE64 in-memory mapping with section, relocation, import / export, TLS, `DllMain`, `JNI_OnLoad`, and ABI-table validation |
