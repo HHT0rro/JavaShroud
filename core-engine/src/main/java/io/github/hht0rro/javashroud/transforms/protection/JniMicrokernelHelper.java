@@ -697,6 +697,10 @@ public final class JniMicrokernelHelper {
         int close = descriptor.indexOf(')');
         if (descriptor.length() <= close + 1) throw new IllegalArgumentException("invalid method descriptor");
         Class<?>[] parameterTypes = descriptorParameterTypes(descriptor, loader);
+        if (descriptor.charAt(close + 1) == 'V') {
+            if (descriptor.length() != close + 2) throw new IllegalArgumentException("invalid method descriptor");
+            return MethodType.methodType(void.class, parameterTypes);
+        }
         TypeParseResult returnType = parseDescriptorType(descriptor, close + 1, loader);
         return MethodType.methodType(returnType.type, parameterTypes);
     }
