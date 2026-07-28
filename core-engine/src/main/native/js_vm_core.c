@@ -1003,20 +1003,6 @@ static int js_vbc4_cfg_decode_index(int seed, int instruction_count, int encoded
     return decoded <= (uint32_t)instruction_count ? (int)decoded : -1;
 }
 
-static int js_vm_opcode_target_operand(jint opcode, int operand_index) {
-    opcode = js_vm_canonical_opcode(opcode);
-    switch (opcode) {
-        case JS_VM_GOTO: case JS_VM_JSR:
-        case JS_VM_IFEQ: case JS_VM_IFNE: case JS_VM_IFLT: case JS_VM_IFGE: case JS_VM_IFGT: case JS_VM_IFLE:
-        case JS_VM_IF_ICMPEQ: case JS_VM_IF_ICMPNE: case JS_VM_IF_ICMPLT: case JS_VM_IF_ICMPGE:
-        case JS_VM_IF_ICMPGT: case JS_VM_IF_ICMPLE: case JS_VM_IF_ACMPEQ: case JS_VM_IF_ACMPNE:
-        case JS_VM_IFNULL: case JS_VM_IFNONNULL: return operand_index == 0;
-        case JS_VM_TABLESWITCH: return operand_index == 2 || operand_index >= 3;
-        case JS_VM_LOOKUPSWITCH: return operand_index == 1 || (operand_index >= 3 && (operand_index & 1) != 0);
-        default: return 0;
-    }
-}
-
 JS_HIDDEN int js_vm_resident_key_mask_from_nonce(const unsigned char nonce[16]) {
     uint32_t x = 0xA5C3E21Fu;
     if (nonce) {
@@ -1951,6 +1937,20 @@ JS_PROTECTED static jint js_vm_canonical_opcode(jint opcode) {
         case JS_VM_INSTANCEOF_ALT: return JS_VM_INSTANCEOF;
         case JS_VM_MULTIANEWARRAY_ALT: return JS_VM_MULTIANEWARRAY;
         default: return opcode;
+    }
+}
+
+static int js_vm_opcode_target_operand(jint opcode, int operand_index) {
+    opcode = js_vm_canonical_opcode(opcode);
+    switch (opcode) {
+        case JS_VM_GOTO: case JS_VM_JSR:
+        case JS_VM_IFEQ: case JS_VM_IFNE: case JS_VM_IFLT: case JS_VM_IFGE: case JS_VM_IFGT: case JS_VM_IFLE:
+        case JS_VM_IF_ICMPEQ: case JS_VM_IF_ICMPNE: case JS_VM_IF_ICMPLT: case JS_VM_IF_ICMPGE:
+        case JS_VM_IF_ICMPGT: case JS_VM_IF_ICMPLE: case JS_VM_IF_ACMPEQ: case JS_VM_IF_ACMPNE:
+        case JS_VM_IFNULL: case JS_VM_IFNONNULL: return operand_index == 0;
+        case JS_VM_TABLESWITCH: return operand_index == 2 || operand_index >= 3;
+        case JS_VM_LOOKUPSWITCH: return operand_index == 1 || (operand_index >= 3 && (operand_index & 1) != 0);
+        default: return 0;
     }
 }
 
