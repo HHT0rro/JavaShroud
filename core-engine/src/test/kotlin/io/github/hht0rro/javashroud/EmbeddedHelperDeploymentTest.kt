@@ -107,33 +107,41 @@ class EmbeddedHelperDeploymentTest {
     @Test
     fun jni_microkernel_helper_parses_boot_kek_without_trimmed_text_copies() {
         val helperSource = Files.readString(resolveWorkspacePath("core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
+        val bootSecretStart = helperSource.indexOf("private static byte[] loadBootSecret()")
+        val bootSecretEnd = helperSource.indexOf("private static byte[] decryptBootMaterial", bootSecretStart)
+        assertTrue(bootSecretStart >= 0 && bootSecretEnd > bootSecretStart, "Boot KEK loader must remain locatable.")
+        val bootSecretLoader = helperSource.substring(bootSecretStart, bootSecretEnd)
 
-        assertFalse(helperSource.contains("encoded.trim()"), "Runtime boot KEK parsing must match the strict native environment contract.")
-        assertFalse(helperSource.contains("new String(bytes, StandardCharsets.US_ASCII)"), "Boot KEK files must be decoded directly from the wipeable byte buffer.")
-        assertTrue(helperSource.contains("return hexToBytes(bytes);"), "Runtime boot KEK files must use direct byte-array hex decoding.")
+        assertFalse(bootSecretLoader.contains("encoded.trim()"), "Runtime boot KEK parsing must match the strict native environment contract.")
+        assertFalse(bootSecretLoader.contains("new String(bytes, StandardCharsets.US_ASCII)"), "Boot KEK files must be decoded directly from the wipeable byte buffer.")
+        assertTrue(bootSecretLoader.contains("return hexToBytes(bytes);"), "Runtime boot KEK files must use direct byte-array hex decoding.")
     }
 
     @Test
     fun bundle_native_libraries_replaces_existing_kernel_resources_with_recompiled_outputs() {
         val deploymentSource = Files.readString(resolveWorkspacePath("core-engine/src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/EmbeddedHelperDeployment.kt"))
+        val bundleStart = deploymentSource.indexOf("internal fun bundleNativeLibrariesIfAvailable")
+        val bundleEnd = deploymentSource.indexOf("internal fun nativeLibraryContainsRequiredJniVmAbi", bundleStart)
+        assertTrue(bundleStart >= 0 && bundleEnd > bundleStart, "Native bundling function must remain locatable.")
+        val bundleSource = deploymentSource.substring(bundleStart, bundleEnd)
         val retainedFilter = "val retainedJarEntries = artifact.jarEntries.filterNot { entry ->"
         val rejectedEntries = "isNativeKernelResource(entry.name) || entry.name == BootMaterialEnvelope.RESOURCE_PATH"
         val appendRecompiled = "val updatedJarEntries = retainedJarEntries + newEntries"
 
         assertTrue(
-            deploymentSource.contains(retainedFilter),
+            bundleSource.contains(retainedFilter),
             "Native bundling must remove pre-existing js_kernel resources before adding max outer stubs.",
         )
         assertTrue(
-            deploymentSource.contains(rejectedEntries),
+            bundleSource.contains(rejectedEntries),
             "Native bundling must replace both pre-existing kernels and the provisional boot envelope.",
         )
         assertTrue(
-            deploymentSource.contains(appendRecompiled),
+            bundleSource.contains(appendRecompiled),
             "Native bundling must package only retained non-kernel resources plus freshly recompiled native outputs.",
         )
         assertTrue(
-            deploymentSource.indexOf(retainedFilter) < deploymentSource.indexOf(appendRecompiled),
+            bundleSource.indexOf(retainedFilter) < bundleSource.indexOf(appendRecompiled),
             "Existing native kernel resources must be filtered before the final JAR entry list is assembled.",
         )
     }

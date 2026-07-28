@@ -54,9 +54,9 @@ class JniMicrokernelHelperJava8CompatibilityTest {
         assertTrue(
             calls.any {
                 it.first == "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper" &&
-                    it.second == "privateLookup"
+                    it.second == "resolveMethodHandle"
             },
-            "VM method-handle resolution must use the Java 8 compatibility shim",
+            "VM method-handle resolution must delegate to the Java 8-compatible shared resolver",
         )
     }
 
