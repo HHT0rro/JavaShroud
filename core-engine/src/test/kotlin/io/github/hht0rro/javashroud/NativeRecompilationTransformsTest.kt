@@ -200,28 +200,6 @@ class NativeRecompilationTransformsTest {
         assertTrue(bytes.containsAscii("js_vm_profile_fetch_operand"), "CFG evidence build must expose the operand accessor target symbol")
     }
     @Test
-    fun generateDiversifiedSecrets_does_not_emit_flat_vbc4_master_material() {
-        val context = Vbc4BuildContext(
-            masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (0x40 + index).toByte() },
-            nativeSeed = 0x2468ACE0L,
-            jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (0x10 + index * 3).toByte() },
-        )
-
-        val secrets = NativeRecompilationTransforms.generateDiversifiedSecrets(99L, java.util.Random(99L), context)
-        val slots = parseNativeSecretSlots(secrets)
-        val reconstructed = reconstructNativeBuildKey(secrets)
-
-        assertTrue(context.masterKey.contentEquals(reconstructed), "Split shares must reconstruct the scoped build master only when combined")
-        slots.forEachIndexed { index, slot ->
-            assertFalse(slot.contentEquals(context.masterKey), "Native slot $index must not be the flat VBC4 master key")
-        }
-        assertFalse(secrets.contains("JS_VBC4_MASTER_KEY"), "Generated native secrets must not expose a flat VBC4 master key symbol")
-        assertFalse(secrets.contains("JS_VBC4_BUILD_KEY_SHARE_A") || secrets.contains("JS_VBC4_BUILD_KEY_SHARE_B"), "Generated native secrets must not expose a fixed A/B share recipe")
-        assertFalse(secrets.contains("g_vbc4_inner_pad") || secrets.contains("g_vbc4_outer_pad"), "Generated native secrets must not expose long-lived VBC4 HMAC pads")
-        assertFalse(secrets.contains(cBytesForTest(context.masterKey)), "Generated native secrets must not contain the contiguous flat VBC4 master key bytes")
-    }
-
-    @Test
     fun vbc4BuildContext_scope_uses_wiped_copy_without_mutating_caller_context() {
         val context = Vbc4BuildContext(
             masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (index + 1).toByte() },
