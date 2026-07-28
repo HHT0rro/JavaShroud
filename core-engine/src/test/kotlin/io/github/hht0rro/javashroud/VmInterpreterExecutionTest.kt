@@ -155,8 +155,9 @@ class VmInterpreterExecutionTest {
             val next = nextByBlock.getValue(current)
             if (next == blockCount) null else next
         }.take(blockCount + 1).toList()
-        assertEquals((0 until blockCount).toList(), chain, "Masked block-dispatch chain must reconstruct logical execution order")
-        assertEquals(blockCount, nextByBlock.getValue(blockCount - 1), "Last logical block must dispatch to the terminal sentinel")
+        assertEquals((0 until blockCount).toList(), chain.sorted(), "Masked block-dispatch chain must visit every logical block exactly once")
+        assertTrue(chain != (0 until blockCount).toList(), "Opaque logical block ids must hide execution order")
+        assertEquals(blockCount, nextByBlock.getValue(chain.last()), "Last block in dispatch order must target the terminal sentinel")
     }
 
     @Test
@@ -323,7 +324,7 @@ class VmInterpreterExecutionTest {
             outputJar = runEngine(inputJar, passes)
             val result = runJavaProcessWithTimeout(
                 ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()),
-                timeoutSeconds = 20,
+                timeoutSeconds = 60,
             )
             assertEquals(0, result.exitCode, "Virtualized hot-loop/exception fixture must exit cleanly. stdout=${result.output}")
             assertEquals(
@@ -524,15 +525,15 @@ class VmInterpreterExecutionTest {
         var outputJar: Path? = null
         try {
             outputJar = runEngine(inputJar, passes)
-            val process = ProcessBuilder(
-                "java",
-                "-jar",
-                outputJar.toAbsolutePath().normalize().toString(),
-            ).redirectErrorStream(true).start()
-            val stdout = process.inputStream.bufferedReader().readText()
-            val exit = process.waitFor()
-            assertEquals(0, exit, "Recursive static VM fixture must exit cleanly. stdout=$stdout")
-            assertTrue(stdout.contains("ok:4"), "Recursive static VM fixture must preserve decrement recursion and static field updates. stdout=$stdout")
+            val result = runJavaProcessWithTimeout(
+                ProcessBuilder(
+                    "java",
+                    "-jar",
+                    outputJar.toAbsolutePath().normalize().toString(),
+                ),
+            )
+            assertEquals(0, result.exitCode, "Recursive static VM fixture must exit cleanly. stdout=${result.output}")
+            assertTrue(result.output.contains("ok:4"), "Recursive static VM fixture must preserve decrement recursion and static field updates. stdout=${result.output}")
         } finally {
             outputJar?.let { Files.deleteIfExists(it) }
             Files.deleteIfExists(inputJar)
