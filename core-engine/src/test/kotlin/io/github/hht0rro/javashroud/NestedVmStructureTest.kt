@@ -6,6 +6,9 @@ import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.NativeVmBuildProfile
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4EntryMetadata
 import io.github.hht0rro.javashroud.transforms.protection.VmBytecodeSerializer
+import io.github.hht0rro.javashroud.transforms.protection.deriveVbc4Identity
+import io.github.hht0rro.javashroud.transforms.protection.deriveVbc4OwnerIdentity
+import io.github.hht0rro.javashroud.transforms.protection.vbc4ArgumentTagVector
 import org.objectweb.asm.Opcodes
 import kotlin.test.Test
 import kotlin.test.assertEquals
