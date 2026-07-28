@@ -410,7 +410,3 @@ jsn_k6(
  * and dispatch can take one of several native paths. VBC4-only resource handling
  * rejects old non-authenticated VM bytecode streams.
  */
-
-
-
-\n
