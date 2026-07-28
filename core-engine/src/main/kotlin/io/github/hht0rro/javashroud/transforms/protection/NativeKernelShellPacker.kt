@@ -193,7 +193,8 @@ internal object NativeKernelShellPacker {
             val layoutProfile = ((readLongPrefix(profileSeed) ushr 1) % 7L).toInt()
             val dispatcherSlice = temporary(profileSeed.copyOfRange(8, 16))
             val dispatcherProfile = ((readLongPrefix(dispatcherSlice) ushr 1) % 11L).toInt()
-            val compressed = temporary(Vbc4ZstdCodec.compress(bytes))
+            val compressed = Vbc4ZstdCodec.compress(bytes)
+            if (compressed !== bytes) temporaryBuffers += compressed
             val compressionCodec = if (compressed.size < bytes.size) maxCompressionCodecZstd else maxCompressionCodecNone
             val storedPayload = if (compressionCodec == maxCompressionCodecZstd) compressed else bytes
             val streamKey = output(shellKdf(shellSeed, "javashroud-native-shell-stream-key-v3", nonce, bindingTag))
@@ -478,7 +479,8 @@ internal object NativeKernelShellPacker {
             val reader = BlockReader(headerBytes)
             if (reader.readCString() != MAX_PAYLOAD_MARKER) return null
             val version = reader.readIntLe()
-            val level = Level.entries.firstOrNull { it.id == reader.readIntLe() } ?: return null
+            val levelId = reader.readIntLe()
+            val level = Level.entries.firstOrNull { it.id == levelId } ?: return null
             val nonce = output(reader.readBytes(reader.readIntLe()))
             val seedNonce = temporary(reader.readBytes(reader.readIntLe()))
             val encryptedSeed = temporary(reader.readBytes(32))
