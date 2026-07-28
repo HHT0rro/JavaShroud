@@ -1,6 +1,7 @@
 package io.github.hht0rro.javashroud
 
 import io.github.hht0rro.javashroud.transforms.protection.NativeKernelShellPacker
+import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith

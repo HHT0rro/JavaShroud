@@ -232,6 +232,20 @@ class BasicBlockShuffleSemanticTest {
         }
     }
 
+    private fun currentNativeTargetPlatform(): String {
+        val os = System.getProperty("os.name", "").lowercase()
+        val arch = System.getProperty("os.arch", "").lowercase()
+        val x64 = arch == "amd64" || arch == "x86_64" || arch == "x64"
+        val arm64 = arch == "aarch64" || arch == "arm64"
+        return when {
+            os.startsWith("windows") && x64 -> "windows-x64"
+            os == "linux" && x64 -> "linux-x64"
+            "mac" in os && arm64 -> "macos-arm64"
+            "mac" in os && x64 -> "macos-x64"
+            else -> error("unsupported test platform: $os/$arch")
+        }
+    }
+
     private fun fixedVbc4Context(): Vbc4BuildContext = Vbc4BuildContext(
         masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (index * 19 + 7).toByte() },
         nativeSeed = 0x5642_4334L,

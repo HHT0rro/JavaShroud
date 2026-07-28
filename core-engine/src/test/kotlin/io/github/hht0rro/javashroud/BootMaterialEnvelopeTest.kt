@@ -17,6 +17,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFails
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -100,7 +101,7 @@ class BootMaterialEnvelopeTest {
 
             clear.invoke(null)
             validate.invoke(null, material)
-            val failure = assertFails<InvocationTargetException> { verify.invoke(null) }
+            val failure = assertFailsWith<InvocationTargetException> { verify.invoke(null) }
             assertTrue(failure.cause is SecurityException, "an unconsumed MAX binding must reject the loaded library")
         } finally {
             clear.invoke(null)
