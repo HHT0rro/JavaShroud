@@ -415,8 +415,18 @@ class Vbc4IdentityConfidentialityTest {
     private class Cursor(private val bytes: ByteArray) {
         private var offset = 0
 
-        fun u2(): Int = take(2).u2(0)
-        fun i4(): Int = take(4).i4(0)
+        fun u2(): Int {
+            val value = take(2)
+            return ((value[0].toInt() and 0xFF) shl 8) or (value[1].toInt() and 0xFF)
+        }
+
+        fun i4(): Int {
+            val value = take(4)
+            return ((value[0].toInt() and 0xFF) shl 24) or
+                ((value[1].toInt() and 0xFF) shl 16) or
+                ((value[2].toInt() and 0xFF) shl 8) or
+                (value[3].toInt() and 0xFF)
+        }
         fun bytes(length: Int): ByteArray = take(length)
         fun exhausted(): Boolean = offset == bytes.size
 
