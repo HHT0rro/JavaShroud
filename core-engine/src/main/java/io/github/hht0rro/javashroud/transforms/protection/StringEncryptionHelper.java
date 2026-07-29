@@ -11,10 +11,14 @@ public final class StringEncryptionHelper {
 
     private StringEncryptionHelper() { }
 
-    public static native byte[] nativeDecodeString(byte[] payload, int seed, int flags);
+    public static native byte[] nativeDecodeString(byte[] payload, int seed, int flags, long classIdentityHigh, long classIdentityLow);
 
-    public static String cachedDecodeString(byte[] payload, int seed, int flags) {
-        String key = seed + ":" + flags + ":" + new String(payload, StandardCharsets.ISO_8859_1);
-        return CACHE.computeIfAbsent(key, ignored -> new String(nativeDecodeString(payload, seed, flags), StandardCharsets.UTF_8));
+    public static String cachedDecodeString(byte[] payload, int seed, int flags, long classIdentityHigh, long classIdentityLow) {
+        String key = seed + ":" + flags + ":" + Long.toHexString(classIdentityHigh) + ":" +
+            Long.toHexString(classIdentityLow) + ":" + new String(payload, StandardCharsets.ISO_8859_1);
+        return CACHE.computeIfAbsent(key, ignored -> new String(
+            nativeDecodeString(payload, seed, flags, classIdentityHigh, classIdentityLow),
+            StandardCharsets.UTF_8
+        ));
     }
 }

@@ -5,274 +5,191 @@
 <h1 align="center">JavaShroud</h1>
 
 <p align="center">
-  <strong>A Java obfuscation, virtualization, and native hardening toolchain</strong>
+  <strong>A Java obfuscation, virtualization, and Native packing toolchain</strong>
 </p>
 
 <p align="center">
+  <img alt="Version" src="https://img.shields.io/badge/version-0.12-5b6ee1" />
   <img alt="License" src="https://img.shields.io/badge/license-GPL--3.0-blue" />
   <img alt="JDK" src="https://img.shields.io/badge/JDK-21%2B-orange" />
   <img alt="Desktop" src="https://img.shields.io/badge/desktop-Wails%20%2B%20Vue-42b883" />
 </p>
-
 <p align="center">
   <a href="README.md">简体中文</a> · <strong>English</strong>
 </p>
 
 ## Positioning
 
-JavaShroud is a Java obfuscation and hardening project built around bytecode transformation, method virtualization, a native microkernel, and a desktop workflow. It includes conventional Java obfuscation capabilities such as renaming, string protection, control-flow transformation, and metadata cleanup, while also providing a VMBC / NBVM (native bytecode VM) execution path for high-value methods.
+JavaShroud is a Java obfuscation and hardening toolchain: a Kotlin engine performs bytecode transformation, selected methods can be lowered into VMBC resources executed by a Native bytecode VM (NBVM), and a Wails + Vue desktop app handles configuration and task management.
 
-The project follows a Kerckhoffs-oriented design philosophy: protection strength should not rely on the permanent secrecy of the implementation. It should instead come from per-artifact key material, structural diversity, runtime authentication, context binding, and the execution boundary between Java and Native code.
+The design is Kerckhoffs-oriented: protection strength comes from per-artifact keys, layouts, opcode dialects, and the Java / Native execution boundary, not from long-term secrecy of the implementation. The artifact ships with everything needed to run, so the goal is to raise the cost of analysis and cross-sample reuse rather than claim absolute irreversibility.
 
-JavaShroud protects self-contained deliverables. Key material, runtime logic, and protected code must eventually ship with the artifact, so it cannot fully match the security model of online services, HSM-backed designs, or external authorization systems. The practical goal is not to claim irreversibility; it is to reduce the value of a universal deobfuscation template and raise the cost of targeted recovery, batch analysis, and automated reuse.
+## Core Capabilities
 
-## VMBC And Native Execution
+| Area | Pass / entry point |
+| --- | --- |
+| Renaming | `rename-classes`, `rename-packages`, `rename-methods`, `rename-fields` (stable) |
+| Constants and strings | `integer-constant-obfuscation`, `string-encryption`, `field-string-encryption` |
+| Control flow | `control-flow-obfuscation`, `control-flow-flattening`, `reference-proxy`, `invoke-dynamic-indirection`, `condy-constant-indirection` |
+| Method virtualization | `method-virtualization`: JVM bytecode lowering to VBC4, executed by the NBVM |
+| Resource and class encryption | JSRP resource envelopes, `class-encryption-loader`, `method-body-delayed-decryption` |
+| Runtime defenses | `anti-instrumentation`, `anti-dump-protection`, `environment-bound-keys`, `callsite-rotation-protection`, `anti-symbolic-execution`, `exception-semantic-virtualization` |
+| Native packing | `jni-microkernel-loader`: authenticated shell + inner-kernel packing + platform loaders |
+| Desktop workflow | Wails + Vue UI, configuration editing, engine task management |
 
-In JavaShroud, VMBC / NBVM refers to one code path: `method-virtualization` converts selected Java methods into VBC4 / VMBC resources, `JniMicrokernelHelper.executeVmResource` enters the native dispatcher, and execution continues in the native bytecode VM path represented by `js_vm_execute_resource`. In this repository, NBVM is shorthand for that native bytecode VM execution path rather than a separate subproject.
+26 passes are registered; the default pipeline contains only `strip-compile-debug-info`. Stable passes are enabled by default. Experimental passes must be enabled explicitly in the config, and opt-in passes additionally require `allowOptInPasses = true`. The full list, parameters, and enablement boundaries are in [docs/TECHNICAL_EN.md](docs/TECHNICAL_EN.md).
 
-The core value of this path is that the original method body leaves the ordinary Java bytecode form. Key semantics are moved into an execution protocol constrained by authenticated resources, entry tokens, opcode dialects, constant-pool handling, block dispatch, and native runtime state.
+## Resource Envelopes: JSRP
 
-Implemented mechanisms include:
+JSRP is the project's protected resource envelope format (magic `JSRP`, current version 7). VM bytecode, Native libraries, manifests, and the bootstrap index are all sealed through `RuntimeResourceCodec`:
 
-| Layer | Mechanism | Purpose |
-| --- | --- | --- |
-| Method virtualization | VBC4-only, native-only, strict virtualization, entry token, dispatcher stub | Prevents the original method body from remaining as directly decompilable Java bytecode |
-| VMBC encoding | Opcode aliases, super-operator folding, block split / coalesce, exception masking | Reduces stable one-to-one recovery of opcodes, control flow, and exception edges |
-| Resource protection | JSRP envelope, AES/CTR, HMAC, nonce, zstd section, decoy / slice / opaque path | Raises the cost of offline enumeration, extraction, and replay of VMBC resources |
-| Keys and state | Per-build / per-method material, state-bound seed unwrap, runtime resource key, layout digest | Prevents the public algorithm from directly becoming a cross-sample unpacking script |
-| Native runtime | JNI microkernel, native VM parser / executor, register IR, lazy CP decrypt, resident masking, wipe | Shortens plaintext windows and moves the analysis surface across JVM and Native boundaries |
-| Runtime defense | Anti-instrumentation, anti-dump, anti-JVMTI / agent checks, trampoline checks, integrity gates | Adds friction against common hooks, instrumentation, dumps, and replacement loading |
+- Layout: a 27-byte header + 96 bytes of encrypted metadata + an AES-CTR body + a 32-byte HMAC-SHA256 tag. Keys and IVs for metadata and body are derived from the partition key via HMAC domain separation.
+- Keys come from a build-time CSPRNG-generated partition table (`RuntimeKeyPartitions`) and are selected per resource partition; any change to header, metadata, or body fails tag verification.
+- The body is zstd-compressed by default (`Vbc4ZstdCodec`); metadata records the SHA-256 of both plaintext and compressed bytes, and decode re-checks lengths and hashes at each step.
 
-### VMBC / NBVM Flow
+Field layout and the decode flow are documented in [docs/TECHNICAL_EN.md](docs/TECHNICAL_EN.md).
+
+## VMBC / NBVM Execution Path
+
+`method-virtualization` lowers selected Java methods into VBC4 bytecode (`VmBytecodeSerializer`) sealed as JSRP resources; the original method body is replaced by a dispatcher stub. At runtime the stub calls `JniMicrokernelHelper.executeVmResource(entryToken, …)` to enter the JNI microkernel, and the Native VM behind `js_vm_execute_resource` authenticates, parses, executes, and wipes sensitive state.
 
 ```mermaid
-%%{init: {"themeVariables": {"fontSize": "19px", "fontFamily": "Arial, sans-serif"}, "flowchart": {"nodeSpacing": 30, "rankSpacing": 34, "curve": "basis"}} }%%
 flowchart LR
-  classDef main fill:#172033,stroke:#5b6ee1,color:#f8fafc,stroke-width:1px,font-size:19px;
-  classDef runtime fill:#142820,stroke:#42b883,color:#f8fafc,stroke-width:1px,font-size:19px;
-  classDef gate fill:#3b1f1f,stroke:#ef4444,color:#fff,stroke-width:1px,font-size:19px;
-
-  A["Business method<br/>select / check"] --> B["Build transform<br/>ASM capture / VMBC lowering"]
-  B --> C["Resource package<br/>VBC4 / JSRP / HMAC"]
-  C --> D["Native entry<br/>stub / JNI microkernel"]
-  D --> E["NBVM execution<br/>parse / guard / dispatch"]
-  E --> F["Consistent output<br/>return / wipe"]
-
-  A -.-> G["Strict hit but incompatible<br/>build-time fail-closed"]
-  D -.-> H["ABI / resource / guard failure<br/>runtime fail-closed"]
-  E -.-> H
-
-  class A,B,C main;
-  class D,E,F runtime;
-  class G,H gate;
+  A["Method selection and compatibility checks"] --> B["VBC4 lowering"]
+  B --> C["JSRP sealed envelope"]
+  C --> D["dispatcher stub"]
+  D --> E["JNI microkernel"]
+  E --> F["NBVM authenticated execution"]
+  A -.incompatible.-> X["build-time fail-closed"]
+  E -.authentication failure.-> Y["runtime fail-closed"]
 ```
 
-### VMBC Encryption -> Decryption -> Execution Path
+Execution entry is bound to per-artifact entry tokens, opcode dialects, resource paths, layout digests, and the dispatcher profile (`DispatcherProfile`). Methods that are not selected or not compatible stay within the ordinary bytecode-obfuscation boundary.
 
-`method-virtualization` does not directly migrate Java methods into native functions. At build time, it converts method bodies into VBC4 / VMBC resources; at runtime, a sealed JNI microkernel authenticates, decrypts, parses, and executes those resources. The current implementation follows this path:
+## Native Packing
 
-1. **Build-time method selection and capture**: `MethodVirtualizationTransforms` selects virtualizable methods according to rules, `methodSelection`, `strictVirtualization`, instruction-count limits, and compatibility checks. Matching method bodies are captured through ASM. In strict virtualization scenarios, explicit method matches that are unsupported by VBC4 fail closed instead of silently retaining plaintext implementations.
-2. **Lowering into VMBC / register IR**: `VmBytecodeSerializer` lowers JVM bytecode into a VBC4 logical program and emits method metadata, constant-pool data, exception tables, and register-executable instruction blocks. Serialization introduces structural diversity through opcode dialects, super-operator folding, block split / coalesce, block dispatch tokens, and nested VM micro-streams.
-3. **Inner VBC4 encryption**: The VBC4 payload uses per-build and per-method derived material. The constant-pool index, constant-pool entries, instruction blocks, exception table, and padding derive AES/CTR keys and IVs by section and block. The payload carries an HMAC-SHA256 trailer, while `wrappedSeed`, `nonce`, `layoutDigest`, the entry token, resource path, and session integrity material participate in validation and key derivation.
-4. **Outer JSRP resource envelope**: The generated VBC4 bytes are wrapped by `RuntimeResourceCodec` as a `JSRP` runtime resource. The envelope contains encrypted metadata, an AES/CTR body, HMAC, nonce, kind / variant / layer domains, and plain / stored hashes. Compressible resources use zstd sections. VM resources may also be sliced and accompanied by manifests, decoys, and opaque paths to reduce stable resource fingerprints.
-5. **Dispatcher stub replacement**: The original Java method body is replaced with a lightweight dispatcher stub. The stub carries or indirectly references `entryToken`, the resource path, and argument arrays, then calls `JniMicrokernelHelper.executeVmResource` or a token-only specialized entrypoint. The hot path no longer exposes the original business instruction sequence.
-6. **Runtime sealed native kernel loading**: `JniMicrokernelHelper` loads the bundled native microkernel, installs the runtime resource key, preloads the VM resource index, and performs ABI, boot-token, and self-check validation. VBC4 mode has no Java fallback. Missing native support, ABI mismatch, resource authentication failure, or token mismatch refuses execution.
-7. **Runtime decryption and authentication**: The native side first decodes the `JSRP` envelope, then enters the VBC4 parser through `js_vm_execute_resource` or `js_vm_execute_resource_by_token`. `js_vm_core.c` validates the magic, version, required flags, HMAC, key id, wrapped seed, layout state, and integrity state, then decrypts the CP index, CP entries, instruction blocks, and exception section as needed. Constant-pool entries use lazy decryption to reduce plaintext residency.
-8. **Native VM execution and cleanup**: The parsed register IR is executed by the native dispatcher. Execution includes block dispatch validation, resident masking, opcode masking, anti-trace / trampoline checks, and exception-semantics handling. Completion and failure paths clear programs, constant-pool data, symbol caches, decoded operands, and derived key material through `js_vbc4_wipe_volatile`.
+The user-facing name is **Native hardening**; the implementation is a two-layer shell-kernel structure (`NativeKernelShellPacker`):
 
-The data flow is summarized below:
+- The Java layer `System.load`s the outer `js_kernel_<platform>` stub directly; the complete inner kernel is sealed inside the shell as an authenticated, encoded payload.
+- `JNI_OnLoad` verifies the header, section digest, layout and dispatcher profile, payload binding, chunk tags, and payload MAC in sequence; any failure rejects execution, and there is no Java unpacking fallback.
+- The Native kernel is bound to VMBC resources, the bootstrap index, resource paths, and the manifest, so a shell cannot be transplanted or replayed across artifacts.
+- The `jni-microkernel-loader.nativePackingLevel` option has `off` / `standard` / `max` levels, with `max` as the current high-strength default.
 
-```text
-Original Java method body
-  -> ASM capture and compatibility validation
-  -> VBC4 / VMBC register IR
-  -> Section-encrypted VBC4 payload + HMAC
-  -> JSRP runtime resource / slice / manifest / decoy
-  -> Java dispatcher stub(entryToken, args)
-  -> sealed JNI native VM unpack, decrypt, execute, wipe
-```
+### Boot KEK Contract
 
-The security boundary of this path is the instantiated execution protocol, not the secrecy of a single algorithm. Even when the format and implementation are public, each artifact has distinct build-root material, runtime resource keys, layout digests, resource paths, entry tokens, opcode dialects, block layouts, and native profiles. This design does not claim irreversible protection: a targeted reverse-engineering effort with the target environment, sufficient privileges, and sufficient time can still observe runtime state. JavaShroud's objective is to reduce the feasibility of turning one analysis effort into a reusable cross-sample VMBC unpacking and reconstruction template.
+With `jni-microkernel-loader` enabled, the build side and the runtime side must hold the same 256-bit Boot KEK. The artifact only contains the AES-GCM sealed `META-INF/.r/boot.dat` (`BootMaterialEnvelope`, carrying the master key, JAR layout digest, partition key slots, and per-platform shell binding commitments); the KEK itself never enters the artifact:
 
-These capabilities have clear boundaries: `method-virtualization` only protects selected and compatible methods. Methods that are not virtualized remain ordinary bytecode-obfuscation targets. A self-contained artifact still contains the material required for execution, so a sufficiently privileged and targeted reverse-engineering effort can continue layer by layer. JavaShroud focuses on engineering cost increase, not absolute resistance to analysis.
+- environment variable `JAVASHROUD_BOOT_SECRET_V1`: exactly 64 hexadecimal characters;
+- the file named by `JAVASHROUD_BOOT_SECRET_FILE_V1`: 32 raw bytes or 64 hexadecimal characters.
+
+A missing or malformed KEK and authentication failures all fail closed. Shell binding commitments exist only inside the encrypted boot.dat and are delivered once by the JVM during `JNI_OnLoad`; the Native library does not embed an expectation that could be swapped with the shell bundle. Inject and rotate the KEK through deployment secret management; do not place it in configuration files, JARs, Native libraries, or the source repository.
+
+### Platform Boundaries
+
+| Platform | Current packing boundary |
+| --- | --- |
+| Windows x64 | PE64 in-memory mapping with section, relocation, import / export, TLS, `DllMain`, `JNI_OnLoad`, and ABI-table validation |
+| Linux x64 | Anonymous-memory ELF64 loader with `PT_LOAD` / `PT_DYNAMIC`, hash, symbol, RELA / PLT, initializer, and entrypoint validation |
+| macOS x64 / arm64 | Outer stub plus Mach-O metadata, rebase / bind, export-trie, and initializer validation; unsupported anonymous execution mapping fails closed |
+
+The shell protocol and KEK delivery chain are documented in [docs/TECHNICAL_EN.md](docs/TECHNICAL_EN.md).
 
 ## Compared With JNIC / Native Obfuscation
 
-Traditional JNIC or Native obfuscation usually converts Java methods into C/C++ code and calls the resulting native functions through JNI. Its primary protection boundary is migration from Java to Native: less logic is exposed in the Java layer, and the attacker must analyze local libraries, symbols, exported functions, and machine code.
-
-JavaShroud's VMBC path is closer to a virtual execution model. The Native layer is not merely a container for translated method functions; it participates in resource authentication, VMBC parsing, instruction dispatch, state binding, and runtime validation. Even after entering the Native layer, the attacker faces a protocol spanning Java stubs, VMBC resources, the JNI microkernel, and native VM state, rather than a single native function that maps directly back to the original Java method.
-
-| Dimension | JNIC / Native obfuscation | JavaShroud VMBC / NBVM path |
+| Dimension | Typical JNIC / Native obfuscation | JavaShroud VMBC / NBVM |
 | --- | --- | --- |
-| Core idea | Move Java methods into Native functions | Convert method semantics into VMBC resources executed by a native VM |
-| Main analysis target | JNI bridge, exported functions, machine code, symbol recovery | Dispatcher stub, resource envelope, virtual instructions, interpreter state, Native boundary |
-| Risk after open sourcing | Fixed conversion templates and JNI shapes may be pattern-matched | Implementation can be studied, but each artifact still requires material/layout/runtime adaptation |
-| Dynamic observation challenge | Hook JNI or native function parameters / return values | Recover VM state, instruction semantics, key derivation, and dispatch path together |
-| Engineering tradeoff | Suitable for moving a small set of key methods to Native code | Suitable for systematic virtualization and diversified protection of high-value Java logic |
+| Conversion target | Java method to native function | Java method to VMBC resource |
+| Execution | JNI calls the corresponding native function | Native VM authenticates, parses, and dispatches virtual instructions |
+| Main analysis surface | JNI bridge, exports, and machine code | Dispatcher, resource envelope, virtual ISA, VM state, and Native boundary |
+| Diversification | Native compiler output | Per-artifact keys, layout, opcodes, tokens, and runtime profiles |
 
-The two approaches are not mutually exclusive. JavaShroud adds a VM protocol and artifact-specific instantiation layer over the Native boundary, making Native code part of the execution model rather than only a place to hide translated code.
+The two approaches are not mutually exclusive; in JavaShroud the Native layer is part of a virtual execution protocol, not only a place to move code.
 
-## General Capabilities
+## Compatibility
 
-Beyond the VMBC / native VM path, JavaShroud currently exposes 26 executable pass bindings:
+- The JavaShroud engine itself builds and runs on JDK 21+.
+- Renaming, metadata cleanup, and most basic passes can process Java 8 classfiles without raising the classfile version.
+- `ConstantDynamic` features require Java 11+; VMBC, the Native loader, and most runtime defense passes target Java 11+ runtimes.
+- Native packing depends on the target platform, JNI, and the local build toolchain; release acceptance should use the actual packaged artifact.
 
-| Module | Representative capabilities |
-| --- | --- |
-| Metadata | Compile debug info, line number, local variable, and source metadata cleanup |
-| Renaming | Class, package, method, and field renaming |
-| Encryption | String encryption and field string encryption |
-| Obfuscation | Integer constant obfuscation, static initializer perturbation, anti-decompiler structure, invokedynamic indirection, control-flow obfuscation, reference proxy, control-flow flattening, condy constant indirection |
-| Loader protection | Class encryption loader and method body delayed decryption |
-| Runtime defense | Callsite rotation, environment-bound keys, anti-symbolic execution, exception semantic virtualization |
-| Native kernel | Anti-instrumentation, anti-dump, JNI microkernel loader |
-
-The default pipeline stays conservative. High-risk capabilities are disabled by default and must be selected explicitly in rules. Strong protection passes can affect compatibility, performance, and debugging, so they should be applied to authorized protection scenarios and carefully selected classes or methods.
-
-## Technology Stack
-
-| Layer | Technology |
-| --- | --- |
-| Core engine | Kotlin 2.1, JDK 21, ASM 9.9, Jackson TOML, Gradle |
-| Native runtime | C11, JNI, Zig / MSVC toolchain, vendored zstd decompression sources |
-| Desktop host | Go, Wails v2, WebView2 |
-| Frontend | Vue 3, Vite, TypeScript, Naive UI, lucide-vue-next, xterm, Tailwind CSS |
-| Tests | Kotlin test / JUnit Platform, Go test, frontend parser check scripts |
-
-## Compatibility Notes
-
-The JavaShroud engine itself requires JDK 21+ to build and run. In this section, legacy compatibility refers to the obfuscated artifact's classfile and target runtime. The default rule is: passes that do not require Java 11+ features must not raise Java 8 classfiles (major 52), and must not write out-of-range features such as `ConstantDynamic`.
-
-| Pass | Minimum target artifact | Compatibility conclusion and limits |
-| --- | --- | --- |
-| `strip-compile-debug-info` | Java 8 / classfile 52 | Removes debug attributes only; does not raise classfile version. |
-| `rename-classes` | Java 8 / classfile 52 | Does not raise classfile version; keep reflected names, resource paths, and public API classes. |
-| `rename-packages` | Java 8 / classfile 52 | Does not raise classfile version; verify resource lookup and custom ClassLoader code. |
-| `rename-methods` | Java 8 / classfile 52 | Does not raise classfile version; keep reflection, serialization hooks, framework entrypoints, and inheritance-sensitive methods. |
-| `rename-fields` | Java 8 / classfile 52 | Does not raise classfile version; keep reflective fields, serializers, DI, and data binding fields. |
-| `field-string-encryption` | Java 8 / classfile 52 | Does not raise classfile version; rewrites static initialization paths. |
-| `integer-constant-obfuscation` | Java 8 / classfile 52 | Does not raise classfile version; uses Java 8-compatible arithmetic bytecode. |
-| `static-init-perturbation` | Java 8 / classfile 52 | Does not raise classfile version; changes `<clinit>` structure, so validate initialization-order-sensitive code. |
-| `anti-decompiler-structure` | Java 8 / classfile 52 | Does not raise classfile version; adds exception/dead-code structures, so validate older verifiers. |
-| `invoke-dynamic-indirection` | Java 8 / classfile 52 | May introduce `invokedynamic` in Java 8 artifacts without raising classfile version; Java 7 or older is not a target. |
-| `control-flow-obfuscation` | Java 8 / classfile 52 | Does not raise classfile version; validate performance and exception-sensitive paths. |
-| `reference-proxy` | Java 8 / classfile 52 | Does not raise classfile version; inserts proxy call sites, so validate stack/reflective scenarios. |
-| `control-flow-flattening` | Java 8 / classfile 52 | Does not raise classfile version; rewrites dispatch and exception regions. |
-| `condy-constant-indirection` | Java 11 / classfile 55 | Writes `ConstantDynamic` only for Java 11+ classfiles; Java 8 input must skip or fall back without condy or version raising. |
-| `member-hide` | Java 8 / classfile 52 | Does not raise classfile version; changes synthetic/access flag visibility. |
-| `anti-symbolic-execution` | Java 11+ target runtime | Injects a Java 11/classfile 55 runtime helper; not treated as a Java 8 artifact-compatible pass. |
-| `exception-semantic-virtualization` | Java 11+ target runtime | Injects a Java 11/classfile 55 runtime helper; changes exception behavior and stack shapes, so validate exception-sensitive paths. |
-| `string-encryption` | Java 11+ target runtime | Requires `jni-microkernel-loader` and native-backed decoding; not treated as a Java 8 runtime-compatible pass. |
-| `class-encryption-loader` | Java 11+ target runtime | Requires `jni-microkernel-loader`, platform native libraries, and custom loading paths; native/metadata failures are fail-closed. |
-| `method-body-delayed-decryption` | Java 11+; `hidden-class-redirect` requires JDK 15+ | Requires native/helper support and changes method-body restoration paths. |
-| `method-virtualization` | Java 11+ target runtime | VBC4/native-only; requires `jni-microkernel-loader` and platform native libraries. Old resources/profiles fail closed. |
-| `callsite-rotation-protection` | Java 11+ target runtime | Uses runtime callsite/linking perturbation; validate proxies, debugging, and performance. |
-| `environment-bound-keys` | Java 11+ target runtime | Requires `jni-microkernel-loader` and stable environment material; environment changes can break startup/decryption. |
-| `anti-instrumentation` | Java 11+ target runtime | Requires platform native libraries; can conflict with agents, APM, debuggers, and test tools. |
-| `anti-dump-protection` | Java 8 (`field-scramble`) / Java 11+ (native modes) | `field-scramble` should not raise version; `jni-key-hold/full` require the native loader. |
-| `jni-microkernel-loader` | Java 11+ target runtime | Enabled only as a dependency of helper/native passes; requires a supported platform and native build chain. |
-
-## Common Commands
-
-### Core Engine
+## Quick Start
 
 ```powershell
-# Build the core engine JAR
+# Build the core engine
 .\gradlew.bat :core-engine:jar
 
-# Run core engine tests
-.\gradlew.bat :core-engine:test
+# Inspect the CLI schema (pass list, parameters, default pipeline)
+java -jar build\core-engine\libs\obfuscator-engine-0.12.jar -schema
 
-# Inspect the engine schema
-java -jar build\core-engine\libs\obfuscator-engine.jar -schema
-
-# Process a JAR with a config file; use the actual CLI schema as the authority
-java -jar build\core-engine\libs\obfuscator-engine.jar -config path\to\config.toml
+# Process a JAR with a TOML configuration
+java -jar build\core-engine\libs\obfuscator-engine-0.12.jar -config path\to\config.toml
 ```
 
-### Desktop Frontend
+Minimal configuration example:
+
+```toml
+inputJarPath = "app.jar"
+outputJarPath = "app-obf.jar"
+allowOptInPasses = true
+
+[[passes]]
+id = "rename-classes"
+enabled = true
+
+[[passes]]
+id = "control-flow-flattening"
+enabled = true
+
+[ruleSet]
+[[ruleSet.rules]]
+target = "class **"
+action = "obfuscate"
+
+[[ruleSet.rules]]
+target = "class com.example.api.**"
+action = "exclude"
+```
+
+Config fields, rule syntax, and a complete example enabling VMBC and Native packing are in [docs/TECHNICAL_EN.md](docs/TECHNICAL_EN.md).
+
+Desktop development:
 
 ```powershell
-# Install frontend dependencies
 corepack yarn --cwd desktop-app\frontend install --immutable
-
-# Build the Vue / Vite frontend
 corepack yarn --cwd desktop-app\frontend build
 
-# Run frontend parser checks
-corepack yarn --cwd desktop-app\frontend check:capabilities
-corepack yarn --cwd desktop-app\frontend check:events
-```
-
-### Desktop Host
-
-```powershell
-# Validate Go / Wails-side code
 Set-Location desktop-app
 go build ./...
 go test ./...
-
-# Build with Wails; requires the Wails CLI to be installed
-wails build
 ```
 
-### Windows Release
+Full Windows release entrypoint:
 
 ```powershell
-# Full release entrypoint
 .\build-release.bat
 ```
 
-The full release script builds the engine JAR, the GraalVM native engine, the frontend bundle, and the Wails desktop application. Release acceptance should be based on the expected artifacts, such as `build\release\javashroud-windows-amd64\javashroud.exe`, existing and running successfully, not only on individual Gradle, Yarn, or Go commands returning success.
-
-GitHub Releases are created by `.github/workflows/release.yml` when a `v*` tag is pushed. The release order is to push `dev` and `main` first, then push or recreate a `v`-prefixed tag such as `v0.9.2-dev`; the bare `0.9.2-dev` tag does not trigger the release workflow and will not appear as a `github-actions` release.
-
-### 0.9.2-dev Acceptance Notes
-
-`0.9.2-dev` bumps the engine version to `0.9.2-dev` and the VBC capability version to `4.55`. This release fixes the interaction between `condy-constant-indirection` and `method-virtualization` under strict `all-compatible` max-parameter coverage: engine-generated `ConstantDynamic` LDC values now enter the native VM through a guarded opcode, preserving string and int condy bootstrap semantics while unknown bootstrap shapes still fail closed.
-
-This is not a downgrade fix that skips methods or disables strict mode. `methodSelection = "all-compatible"` still covers compatible methods containing guarded condy LDC instructions, and the previously failing real-JAR matrix case `demo.jar` / `pair-condy-constant-indirection__method-virtualization-params-max` now obfuscates and runs according to its baseline.
-
-### 0.9.1-dev Acceptance Notes
-
-`0.9.1-dev` bumps the engine version to `0.9.1-dev` and the VBC capability version to `4.54`. This release focuses on preserving ABI compatibility when fullconfig processes artifacts that were already sealed by VBC4. For older sealed VM artifacts that contain `META-INF/.r/vm.idx` but no current-run `vm-current.idx`, runtime resources, helper ABI, native loader wiring, and passes that would rewrite the old VM call surface preserve the existing ABI. Fresh inputs and artifacts produced by the current run continue to use the current VBC4 max-strength/native-only path; this is not a weakening of protection for new artifacts.
-
-Before release, `E:\xbeng\Documents\javashroud-config-full.toml` was applied to every JAR under `E:\XiangMu\TestJar`. `demo.jar`, `demo-shrouded.jar`, `jvm-obf-tester.jar`, `TEST.jar`, `TEST-shrouded.jar`, and `TEST-shrouded-full-run.jar` all completed obfuscation and ran according to their baselines. `SimpleFiveInARow-obf-test.jar` completed its 12 self-checks and then kept the UI process alive. `ugly-1.0.0.jar` matched its input baseline by exiting because it has no main manifest.
+The release script builds the core engine, the GraalVM native engine, frontend assets, and the Wails desktop application into `build\release\javashroud-windows-amd64\`. `.github/workflows/release.yml` builds and publishes a GitHub Release when a `v*` tag is pushed.
 
 ## Repository Layout
 
 ```text
-.
-├─ core-engine/                 # Kotlin/Java core obfuscation engine
-│  ├─ src/main/kotlin/          # passes, schema, artifact handling, VMBC, runtime resources
-│  ├─ src/main/java/            # runtime helpers, including JNI microkernel and protection helpers
-│  ├─ src/main/native/          # C/JNI native runtime, VM executor, anti-debug, vendored zstd sources
-│  └─ src/test/kotlin/          # engine, pass, VMBC, native, and regression tests
-├─ desktop-app/                 # Wails desktop host
-│  ├─ frontend/                 # Vue 3 + Vite + TypeScript frontend
-│  ├─ *.go                      # Go/Wails backend, engine process bridge, event bridge
-│  └─ wails.json                # Wails configuration
-├─ gradle/                      # Gradle wrapper
-├─ assets/                      # README and release presentation assets
-├─ build-release.bat            # Windows release entrypoint
-├─ LICENSE                      # GPLv3 license text
-├─ THIRD_PARTY_NOTICES.md       # Third-party notices
-└─ SECURITY.md                  # Security and authorized-use notes
+core-engine/          Kotlin / Java engine, VMBC, and Native runtime
+desktop-app/          Go / Wails desktop host and Vue frontend
+annotations/          JavaShroud annotation module
+docs/                 Deep-dive documentation (TECHNICAL.md / TECHNICAL_EN.md)
+scripts/              Verification and utility scripts
+assets/               README and release assets
+build-release.bat     Windows release entrypoint
 ```
 
-## License And Third-Party Components
+## License
 
-This repository includes the GNU General Public License Version 3 text in `LICENSE`; the repository license should be treated according to that file. Use, modification, and redistribution of this project or derivative works must comply with GPLv3 requirements, including source availability, preservation of copyright notices, and compatible licensing of derivative works.
-
-The project also depends on or vendors third-party components. In particular, `core-engine/src/main/native/zstd/` vendors Zstandard decompression sources, and `THIRD_PARTY_NOTICES.md` / `NOTICE` state that JavaShroud uses the BSD-style license option for those vendored files. ASM, Jackson, Kotlin, Gradle, JUnit, Wails, Vue, Vite, TypeScript, Naive UI, lucide, xterm, and Go dependencies remain under their respective upstream licenses. Binary or source redistribution should preserve the corresponding copyright notices, license texts, and notices.
+JavaShroud is released under the [GNU GPL v3](LICENSE). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [NOTICE](NOTICE) for third-party and vendored-source notices.
 
 ## Acknowledgements
-
-JavaShroud's design and implementation were informed by many open-source obfuscation, virtualization, and native protection projects. Without the engineering experience accumulated by these projects, JavaShroud would not have its current direction.
 
 - [Open-MyJ2c](https://github.com/MyJ2c/Open-MyJ2c)
 - [native-obfuscator](https://github.com/radioegor146/native-obfuscator)
 - [skidfuscator-java-obfuscator](https://github.com/skidfuscatordev/skidfuscator-java-obfuscator)
 - [Tigress_protection](https://github.com/JonathanSalwan/Tigress_protection)
-- code-encryptor-master
-- jar-obfuscator-main
-- obfuscator-master

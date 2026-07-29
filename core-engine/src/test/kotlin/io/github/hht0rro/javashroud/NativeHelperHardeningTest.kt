@@ -47,10 +47,11 @@ class NativeHelperHardeningTest {
             nativeSource.contains("Java_io_github_hht0rro_javashroud_transforms_protection_StringEncryptionHelper"),
             "StringEncryptionHelper must not expose a traditional Java_* JNI export symbol.",
         )
-        assertTrue(helperSource.contains("public static native byte[] nativeDecodeString(byte[] payload, int seed, int flags);"))
+        assertTrue(helperSource.contains("public static native byte[] nativeDecodeString(byte[] payload, int seed, int flags, long classIdentityHigh, long classIdentityLow);"))
         assertTrue(!helperSource.contains("public static String decode("), "StringEncryptionHelper must not expose a Java string-decoder trampoline.")
-        assertTrue(helperSource.contains("public static String cachedDecodeString(byte[] payload, int seed, int flags)"), "StringEncryptionHelper should expose only the native-backed cached string materialization API.")
-        assertTrue(helperSource.contains("nativeDecodeString(payload, seed, flags)"), "Cached materialization must still delegate decryption to the native microkernel.")
+        assertTrue(helperSource.contains("public static String cachedDecodeString(byte[] payload, int seed, int flags, long classIdentityHigh, long classIdentityLow)"), "StringEncryptionHelper should expose only the native-backed cached string materialization API.")
+        assertTrue(helperSource.contains("nativeDecodeString(payload, seed, flags, classIdentityHigh, classIdentityLow)"), "Cached materialization must still delegate decryption to the native microkernel.")
+        assertTrue(nativeSource.contains("javashroud-string-class-v1") && nativeSource.contains("class_identity_high"), "String material must be derived through a per-class native KDF domain.")
         assertTrue(helperSource.contains("ConcurrentHashMap"), "Repeated string materialization must be cached outside target classes to avoid hot-path native decrypt loops.")
         assertTrue(helperSource.contains("JniMicrokernelHelper.loadKernel"), "String helper must load through the JNI microkernel.")
         assertFalse(helperSource.contains("Base64"), "String helper must not retain legacy Base64 payload handling.")
@@ -77,7 +78,8 @@ class NativeHelperHardeningTest {
         )
         for (fingerprint in listOf(
             "nativeExecuteVmResource",
-            "nativeInstallRuntimeResourceKey",
+            "nativeInstallBootMaterial",
+            "nativeAbortBootMaterial",
             "nativePreloadRuntimeResources",
             "nativeCheckInstrumentation",
             "nativeCheckJvmTiAgents",
@@ -111,6 +113,34 @@ class NativeHelperHardeningTest {
         assertEquals("java/lang/Thread", decodeNativeSecret(include, "THREAD_CLASS", seed))
         assertEquals("java/lang/Runtime", decodeNativeSecret(include, "RUNTIME_CLASS", seed))
         assertEquals("java/lang/StackTraceElement", decodeNativeSecret(include, "STACK_TRACE_ELEMENT_CLASS", seed))
+    }
+
+    @Test
+    fun native_key_integrity_constants_match_decoded_obfuscated_key() {
+        val kernelSource = Files.readString(sourcePath("src/main/native/js_kernel.c"))
+        val helperSource = Files.readString(sourcePath("src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
+        val encoded = requireNotNull(
+            Regex("""(?s)static volatile unsigned char JS_KEY_OBF\[\]\s*=\s*\{([^}]*)\};""").find(kernelSource),
+        ).groupValues[1].parseCBytes()
+        assertEquals(16, encoded.size, "native integrity key must retain its 16-byte encoded form")
+
+        val decoded = encoded.mapIndexed { index, value ->
+            val base = 0xA5 + index * 0x1F
+            val mask = (base + (base ushr 3) + index * 17) and 0xFF
+            ((value.toInt() and 0xFF) - mask) and 0xFF
+        }
+        var decodedHash = 0x811C9DC5L
+        decoded.forEach { value ->
+            decodedHash = ((decodedHash xor value.toLong()) * 0x01000193L) and 0xFFFFFFFFL
+        }
+        val nativeHash = requireNotNull(
+            Regex("""g_key_valid\s*=\s*\(chk\s*==\s*0x([0-9A-Fa-f]+)u\)""").find(kernelSource),
+        ).groupValues[1].toLong(16)
+        val javaHash = requireNotNull(
+            Regex("""token\s*\^=\s*0x([0-9A-Fa-f]+)L;\s*//\s*FNV1a\(decoded native key\)""").find(helperSource),
+        ).groupValues[1].toLong(16)
+        assertEquals(decodedHash, nativeHash, "native key self-check must match the decoded JS_KEY_OBF FNV1a32")
+        assertEquals(decodedHash, javaHash, "Java boot-token derivation must mirror the native decoded-key FNV1a32")
     }
 
 
@@ -865,17 +895,22 @@ class NativeHelperHardeningTest {
     }
 
     @Test
-    fun native_vm_programs_are_preloaded_into_native_memory_cache() {
+    fun native_vm_catalog_commitments_gate_lazy_native_program_loading() {
         val nativeSource = nativeRuntimeSources()
         val helperSource = Files.readString(Path.of("src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
         assertTrue(
             nativeSource.contains("js_vm_ephemeral_cache_get") &&
                 nativeSource.contains("js_vm_ephemeral_cache_put") &&
-                nativeSource.contains("jsn_k9(JNIEnv *env, jclass cls)") &&
-                nativeSource.contains("META-INF/.r/vm-current.idx") &&
-                nativeSource.contains("META-INF/.r/vm.idx") &&
-                helperSource.contains("nativePreloadRuntimeResources();"),
-            "Native VM resources must preload into a resident native program cache after kernel load.",
+                nativeSource.contains("jsn_k9(JNIEnv *env, jclass cls, jbyteArray preload_index, jbyteArray commitments, jbyteArray startup_nonce)") &&
+                !nativeSource.contains("META-INF/.r/vm-current.idx") &&
+                !nativeSource.contains("META-INF/.r/vm.idx") &&
+                helperSource.contains("nativePreloadRuntimeResources(catalog[0], catalog[1], startupNonce);") &&
+                helperSource.contains("vmStartupSecureRandom().nextBytes(nonce);") &&
+                helperSource.contains("SecureRandom.getInstance(\"Windows-PRNG\")") &&
+                helperSource.contains("catch (NoSuchAlgorithmException ignored)") &&
+                helperSource.contains("return new SecureRandom();") &&
+                helperSource.contains("Arrays.fill(startupNonce, (byte) 0);"),
+            "Native VM catalog commitments must be verified before lazy native program loading is enabled.",
         )
         assertFalse(helperSource.contains("nativePreloadVmResource"), "Java helper must not expose per-resource VM preload bridging.")
         assertTrue(
@@ -884,23 +919,23 @@ class NativeHelperHardeningTest {
             "Native-to-native VM nesting must be bounded so recursive virtualized methods fall back to JVM-managed dispatch.",
         )
         assertTrue(
-            nativeSource.contains("dst->symbols = NULL;") &&
-                nativeSource.contains("dst->symbol_count = 0;") &&
-                nativeSource.contains("js_vm_symbol_cache_clear_entry(env, &execution.symbols[si])"),
-            "Execution programs must own an isolated symbol cache instead of sharing source program realloc state.",
+            nativeSource.contains("execution.symbols = p->symbols;") &&
+                nativeSource.contains("execution.symbol_cache_owner = p->symbol_cache_owner ? p->symbol_cache_owner : p;") &&
+                nativeSource.contains("js_vm_symbol_cache_lock_enter();") &&
+                nativeSource.contains("js_vm_symbol_cache_lock_leave();"),
+            "Per-invocation execution copies must share the locked symbol table owned by the persistent program.",
         )
-        val preloadBody = nativeFunctionBody(nativeSource, "jsn_k9(JNIEnv *env, jclass cls)")
+        val preloadBody = nativeFunctionBody(nativeSource, "jsn_k9(JNIEnv *env, jclass cls, jbyteArray preload_index, jbyteArray commitments, jbyteArray startup_nonce)")
         assertTrue(
-            preloadBody.contains("js_vm_load_resource_bytes") &&
-                preloadBody.contains("js_runtime_resource_decode_owned") &&
-                preloadBody.contains("js_vm_prepare_resource_program_bound(env, cls") &&
-                preloadBody.contains("js_vm_ephemeral_cache_put"),
-            "Runtime resource index decoding and per-resource preload dispatch must be native-owned.",
+            preloadBody.contains("js_vm_commitments_install") &&
+                preloadBody.contains("js_vm_register_preload_index_entries") &&
+                !preloadBody.contains("js_vm_prepare_resource_program_bound"),
+            "Startup must install authenticated ciphertext commitments and call gates without decrypting method bodies.",
         )
         val executeBody = nativeFunctionBody(nativeSource, "js_vm_execute_resource(JNIEnv *env, jclass resource_cls, jlong entry_token, jstring resourcePath, jobjectArray args)")
         assertTrue(
-            executeBody.contains("js_vm_ephemeral_cache_get") && !executeBody.contains("= js_vm_prepare_resource_program"),
-            "nativeExecuteVmResource must be cache-only; resource stream reads are allowed only during native preload.",
+            executeBody.contains("js_vm_ephemeral_cache_get") && executeBody.contains("js_vm_preload_indexed_program_on_demand"),
+            "nativeExecuteVmResource must load a committed program on demand and cache the validated result.",
         )
         assertTrue(
             nativeSource.contains("js_runtime_resource_decode_owned") &&
@@ -940,17 +975,106 @@ class NativeHelperHardeningTest {
     }
 
     @Test
+    fun native_vm_runtime_session_leaf_is_installed_once_and_verified_before_execution() {
+        val nativeSource = nativeRuntimeSources()
+        val helperSource = Files.readString(Path.of("src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
+        val buildSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/Vbc4BuildContext.kt"))
+
+        assertTrue(helperSource.contains("byte[] startupNonce = createVmStartupNonce();"))
+        assertFalse(helperSource.contains("static final byte[] VM_STARTUP_NONCE"), "Java must not retain the startup nonce after JNI transfer")
+        assertTrue(nativeSource.contains("if (!nonce || nonce_len != 32 || js_vm_startup_nonce_ready) return 0;"))
+        assertTrue(nativeSource.contains("if (!nonzero) return 0;"), "All-zero startup nonces must fail closed")
+        assertTrue(nativeSource.contains("js_vm_bind_runtime_session(parsed_program, entry_token, resource_path)"))
+        assertTrue(nativeSource.contains("if (!p || !js_vm_verify_runtime_session(p)) return 0;"))
+        assertTrue(nativeSource.contains("javashroud-vbc4-vm-build-key-v1") && nativeSource.contains("javashroud-vbc4-vm-method-key-v1") && nativeSource.contains("javashroud-vbc4-vm-session-key-v1"))
+        assertTrue(buildSource.contains("VBC4_VM_BUILD_KEY_DOMAIN") && buildSource.contains("VBC4_VM_METHOD_KEY_DOMAIN") && buildSource.contains("VBC4_VM_SESSION_KEY_DOMAIN"))
+        val storedMacBody = nativeFunctionBody(nativeSource, "js_vbc4_hmac_sha256_with_nonce(")
+        assertFalse(storedMacBody.contains("js_vm_startup_nonce"), "Persisted VBC4 MAC verification must stay independent of the runtime session")
+    }
+
+    @Test
+    fun native_vm_session_metadata_and_failed_preload_state_are_closed_as_one_domain() {
+        val nativeSource = nativeRuntimeSources()
+        val abortBody = nativeFunctionBody(nativeSource, "js_vm_abort_preload_state(JNIEnv *env)")
+        listOf(
+            "js_vm_preload_in_progress = 0",
+            "js_vm_ephemeral_cache_clear(env)",
+            "js_vm_call_gate_reset()",
+            "js_vm_shared_dispatch_pool",
+            "js_vm_shared_dispatch_epoch = 0",
+            "js_vm_shared_dispatch_seeded = 0",
+            "js_vm_clear_startup_nonce()",
+        ).forEach { cleanup ->
+            assertTrue(abortBody.contains(cleanup), "Failed preload cleanup must include $cleanup")
+        }
+
+        val preloadBody = nativeFunctionBody(
+            nativeSource,
+            "jsn_k9(JNIEnv *env, jclass cls, jbyteArray preload_index, jbyteArray commitments, jbyteArray startup_nonce)",
+        )
+        val postNonceInstall = preloadBody.substringAfter(
+            "int index_len = (*env)->GetArrayLength(env, preload_index);",
+            missingDelimiterValue = "",
+        )
+        assertTrue(postNonceInstall.isNotEmpty(), "Preload body must expose the post-nonce catalog validation phase")
+        val failureReturns = Regex("""\breturn\s*;""").findAll(postNonceInstall).toList()
+        assertTrue(failureReturns.isNotEmpty(), "Post-nonce catalog validation must retain explicit fail-closed exits")
+        var priorReturnEnd = 0
+        failureReturns.forEachIndexed { index, match ->
+            val failurePath = postNonceInstall.substring(priorReturnEnd, match.range.last + 1)
+            assertTrue(
+                failurePath.contains("js_vm_abort_preload_state(env);"),
+                "Post-nonce preload failure exit ${index + 1} must clear the complete session domain",
+            )
+            priorReturnEnd = match.range.last + 1
+        }
+
+        val tagBody = nativeFunctionBody(nativeSource, "js_vm_runtime_session_tag(")
+        listOf(
+            "js_vm_write_be64_tmp(token_bytes, (uint64_t)program->entry_token)",
+            "js_write_be32_tmp(profile_bytes, program->method_local_profile)",
+            "js_write_be32_tmp(native_profile_bytes, program->native_vm_profile_id)",
+            "js_write_be32_tmp(dispatch_tag_bytes, program->dispatch_profile_tag)",
+            "js_write_be32_tmp(flags_bytes, program->vbc4_flags)",
+            "js_write_be32_tmp(nested_profile_bytes, program->nested_vm_profile)",
+            "js_write_be32_tmp(call_flags_bytes, program->is_static ? 1u : 0u)",
+            "return_desc_byte[0] = (unsigned char)program->return_desc",
+        ).forEach { metadataBinding ->
+            assertTrue(tagBody.contains(metadataBinding), "Runtime session tag must bind $metadataBinding")
+        }
+        val tagParts = tagBody.substringAfter("const unsigned char *parts").substringBefore("};")
+        listOf(
+            "token_bytes",
+            "program->resource_path",
+            "program->nonce",
+            "profile_bytes",
+            "native_profile_bytes",
+            "dispatch_tag_bytes",
+            "flags_bytes",
+            "nested_profile_bytes",
+            "call_flags_bytes",
+            "program->method_identity",
+            "program->owner_identity",
+            "program->argument_tags",
+            "return_desc_byte",
+        ).forEach { tagInput ->
+            assertTrue(tagParts.contains(tagInput), "Runtime session HMAC inputs must include $tagInput")
+        }
+    }
+
+    @Test
     fun native_vm_preload_registers_full_index_before_resource_resolution() {
         val nativeSource = nativeRuntimeSources()
-        val preloadBody = nativeFunctionBody(nativeSource, "jsn_k9(JNIEnv *env, jclass cls)")
+        val preloadBody = nativeFunctionBody(nativeSource, "jsn_k9(JNIEnv *env, jclass cls, jbyteArray preload_index, jbyteArray commitments, jbyteArray startup_nonce)")
 
+        val commitmentIndex = preloadBody.indexOf("js_vm_commitments_install")
         val registerIndex = preloadBody.indexOf("js_vm_register_preload_index_entries(index_bytes, index_len)")
-        val preloadFlagIndex = preloadBody.indexOf("js_vm_preload_in_progress++")
+        val preloadFlagIndex = preloadBody.indexOf("js_vm_preload_in_progress = 1")
         val perResourceIndex = preloadBody.indexOf("js_vm_prepare_resource_program_bound(env, cls")
-        assertTrue(registerIndex >= 0, "Preload must register every indexed entry before parsing any resource.")
-        assertTrue(preloadFlagIndex > registerIndex, "Preload must expose a guarded re-entry window only after the index is registered.")
-        assertTrue(perResourceIndex > preloadFlagIndex, "Per-resource parsing must happen after full-index registration.")
-        assertTrue(preloadBody.contains("js_vm_preload_in_progress--"), "Preload must always leave the guarded re-entry window.")
+        assertTrue(commitmentIndex >= 0, "Preload must install the authenticated ciphertext commitment table.")
+        assertTrue(registerIndex > commitmentIndex, "Call gates must be registered only after catalog payload validation.")
+        assertTrue(preloadFlagIndex > registerIndex, "Lazy resource loading must open only after atomic catalog registration.")
+        assertTrue(perResourceIndex < 0, "Startup catalog verification must not decrypt method bodies.")
 
         val executeBody = nativeFunctionBody(nativeSource, "js_vm_execute_resource(JNIEnv *env, jclass resource_cls, jlong entry_token, jstring resourcePath, jobjectArray args)")
         assertTrue(
@@ -975,7 +1099,7 @@ class NativeHelperHardeningTest {
     fun native_vm_resident_block_rotation_rewraps_window_not_single_opcode_only() {
         val nativeSource = nativeRuntimeSources()
         val rotateBody = nativeFunctionBody(nativeSource, "js_vm_rotate_resident_block(js_vm_program *p")
-        val executeBody = nativeFunctionBody(nativeSource, "js_vm_execute(JNIEnv *env, js_vm_program *p")
+        val executeBody = nativeFunctionBody(nativeSource, "js_vm_execute_with_preset_locals(JNIEnv *env, js_vm_program *p")
 
         assertTrue(
             nativeSource.contains("resident_rotation_epoch") &&
@@ -997,13 +1121,13 @@ class NativeHelperHardeningTest {
     fun native_dispatch_rotation_uses_dynamic_runtime_gate() {
         val nativeSource = nativeRuntimeSources()
         val gateBody = nativeFunctionBody(nativeSource, "js_vm_dispatch_rotation_due")
-        val executeBody = nativeFunctionBody(nativeSource, "js_vm_execute(JNIEnv *env, js_vm_program *p")
+        val executeBody = nativeFunctionBody(nativeSource, "js_vm_execute_with_preset_locals(JNIEnv *env, js_vm_program *p")
 
         assertTrue(nativeSource.contains("js_vm_dispatch_rotation_due"), "VM dispatch should use a dynamic rotation gate")
         assertTrue(gateBody.contains("JS_VBC4_DISPATCH_STEP_MASK") && gateBody.contains("interval = 3u +") && gateBody.contains("phase"),
             "Dynamic gate should preserve the build mask as one input but add state-derived intervals")
-        assertTrue(executeBody.contains("js_vm_dispatch_rotation_due(p, vm_dispatch_drift_state, dispatch_step, fault_pc, sp)"),
-            "Execute loop must not schedule resident rotation solely from a fixed step mask")
+        assertTrue(executeBody.contains("js_vm_profile_transition_due(js_vm_dispatch_profile, p, vm_dispatch_drift_state, dispatch_step, fault_pc, sp)"),
+            "Execute loop must route resident rotation through a dispatcher-profile transition gate instead of a fixed step mask")
     }
 
     @Test
@@ -1054,7 +1178,11 @@ class NativeHelperHardeningTest {
         assertTrue(nestedBody.contains("JS_VBC4_NESTED_FIELD_OPCODE_BASE"), "Nested VM decoder must parse second-level field micro-ops.")
         assertTrue(nestedBody.contains("js_vbc4_nested_row_checksum"), "Nested VM decoder must validate row checksums before lowering to register rows.")
         assertTrue(nativeSource.contains("js_vm_decode_nested_register_block(block_plain"), "VBC4 parser must expand nested microcode before register validation.")
-        assertTrue(nativeSource.contains("p->nested_vm_profile != p->method_local_profile"), "Metadata profile mismatch must fail closed instead of silently accepting a malformed nested block.")
+        assertTrue(
+            nativeSource.contains("if (p->nested_vm_profile == 0u) p->nested_vm_profile = nested_profile;") &&
+                nativeSource.contains("else if (p->nested_vm_profile != nested_profile) JS_VM_PARSE_FAIL;"),
+            "Nested VM metadata must bind the first decoded profile and fail closed when later blocks disagree.",
+        )
     }
 
     @Test
@@ -1069,28 +1197,33 @@ class NativeHelperHardeningTest {
         )
         val executeBody = nativeFunctionBody(nativeSource, "js_vm_execute_resource(JNIEnv *env, jclass resource_cls, jlong entry_token, jstring resourcePath, jobjectArray args)")
         assertTrue(
-            executeBody.contains("js_vm_ephemeral_cache_get") && !executeBody.contains("= js_vm_prepare_resource_program"),
-            "nativeExecuteVmResource must be cache-only; resource stream reads are allowed only during native preload.",
+            executeBody.contains("js_vm_ephemeral_cache_get") &&
+                executeBody.contains("js_vm_preload_indexed_program_on_demand") &&
+                !executeBody.contains("js_vm_prepare_resource_program_bound"),
+            "nativeExecuteVmResource must resolve a cache miss only through the catalog-registered on-demand loader.",
         )
         assertTrue(
             nativeSource.contains("js_runtime_resource_decode_owned") &&
                 nativeSource.contains("js_runtime_resource_decode_current_owned") &&
-                nativeSource.contains("jsrp-auth-v2") &&
-                nativeSource.contains("raw[4] == 6") &&
+                nativeSource.contains("jsrp-auth-v3") &&
+                nativeSource.contains("raw[4] == 7") &&
                 nativeSource.contains("js_runtime_hmac_sha256") &&
+                nativeSource.contains("js_runtime_resource_key_slot_ready[key_slot]") &&
                 !nativeSource.contains("js_vm_decode_resource_layer") &&
                 !nativeSource.contains("js_vm_resource_hmac"),
-            "Native VM must own current AES-CTR/HMAC/zstd runtime-resource unsealing after the helper installs the build-local key.",
+            "Native VM must own current AES-CTR/HMAC/zstd runtime-resource unsealing with per-partition key slots after the helper installs the per-build key domains.",
         )
         assertTrue(
             helperSource.contains("version == RUNTIME_RESOURCE_VERSION") &&
-                helperSource.contains("LEGACY_RUNTIME_RESOURCE_VERSION") &&
-                helperSource.contains("decodeRuntimeResourceCurrent(raw)") &&
-                helperSource.contains("decodeRuntimeResourceLegacy(raw)") &&
+                helperSource.contains("partitionResourceKey(partitionId)") &&
+                helperSource.contains("runtimeResourcePartitionCount()") &&
+                helperSource.contains("decodeRuntimeResourceCurrent(raw, allowCompressed)") &&
+                helperSource.contains("jsrp-auth-v3") &&
                 helperSource.contains("throw new IllegalArgumentException(\"unsupported runtime resource envelope\")") &&
                 !helperSource.contains("decoded != null ? decoded : raw") &&
                 helperSource.contains("constantTimeEquals(expected, raw, tagOffset)") &&
-                helperSource.contains("AES/CTR/NoPadding") &&
+                helperSource.contains("aesCtrCrypt(key, iv, bytes)") &&
+                helperSource.contains("aesEncryptBlock") &&
                 !helperSource.contains("ZstdDecompressor") &&
                 !helperSource.contains("zstdDecompressRuntimeResource"),
             "Java helper must fail closed without carrying Java zstd decode code in the obfuscated product.",
@@ -1202,8 +1335,8 @@ class NativeHelperHardeningTest {
             "Native VM must encode parsed operands for resident program storage and decode only into a temporary instruction copy.",
         )
         assertTrue(
-            nativeSource.contains("decoded_ops[operand_index] = js_vm_load_resident_operand(p, resident_index, operand_index)"),
-            "VM execution must decode operands into per-iteration temporary storage.",
+            nativeSource.contains("decoded_ops[operand_index] = js_vm_profile_fetch_operand(p, js_vm_dispatch_profile, resident_index, operand_index"),
+            "VM execution must decode operands into per-iteration temporary storage through a dispatcher-profile operand fetch path.",
         )
         assertTrue(
             nativeSource.contains("js_vbc4_wipe_volatile(decoded_ops"),
@@ -1302,22 +1435,54 @@ class NativeHelperHardeningTest {
         )
     }
     @Test
+    fun native_vm_reports_granular_sliced_resource_reassemble_failures() {
+        val nativeSource = nativeRuntimeSources()
+        for (stage in listOf(
+            "reassemble-manifest-alloc",
+            "reassemble-manifest-newline",
+            "reassemble-header",
+            "reassemble-mesh-digest",
+            "reassemble-alloc",
+            "reassemble-row",
+            "reassemble-mesh-link",
+            "reassemble-shard-load",
+            "reassemble-shard-digest",
+            "reassemble-missing-shard",
+            "reassemble-count",
+        )) {
+            assertTrue(
+                nativeSource.contains("js_vm_set_prepare_stage(\"$stage\")"),
+                "Sliced VBC4 resource reassembly failures must report granular preload stage: $stage",
+            )
+        }
+        assertTrue(
+            nativeSource.contains("js_vm_prepare_stage_has_prefix(\"reassemble-\")") &&
+                nativeSource.contains("if (!js_vm_prepare_stage_has_prefix(\"reassemble-\")) js_vm_set_prepare_stage(\"reassemble\")"),
+            "The caller must preserve granular reassemble-* diagnostics instead of overwriting them with the generic stage.",
+        )
+    }
+    @Test
     fun native_vm_state_bound_resources_derive_keys_from_runtime_context() {
         val nativeSource = nativeRuntimeSources()
+        val stateBindingBody = nativeFunctionBody(
+            nativeSource,
+            "js_vm_build_state_binding(jlong entry_token, const char *resource_path, unsigned char *out, int out_cap)",
+        )
         assertTrue(
             nativeSource.contains("JS_VBC4_REQUIRED_FLAGS") && nativeSource.contains("require full VBC4 max-strength feature set") &&
                 nativeSource.contains("js_vbc4_unwrap_seed(vbc4_nonce, vbc4_wrapped_seed, state_binding, state_binding_len, &build_seed)"),
             "VBC4 resources must fail-hard unless runtime binding material participates in seed unwrapping.",
         )
         assertTrue(
-                nativeSource.contains("out[binding_len++] = 0") &&
-                nativeSource.contains("memcpy(out + binding_len, binding_resource_path, resource_len)") &&
-                nativeSource.contains("memcpy(out + binding_len, layout_digest_hex, layout_len)") &&
-                nativeSource.contains("entry_token") &&
-                nativeSource.contains("resource_path ? resource_path") &&
-                nativeSource.contains("entry_integrity") &&
-                nativeSource.contains("JS_VBC4_LAYOUT_DIGEST"),
-            "nativeExecuteVmResource path must bind entry token, resource path, entry integrity, and layout digest into the parser context.",
+            stateBindingBody.contains("out[binding_len++] = 0") &&
+                stateBindingBody.contains("(unsigned long long)entry_token") &&
+                stateBindingBody.contains("resource_path ? resource_path : \"\"") &&
+                stateBindingBody.contains("memcpy(out + binding_len, binding_resource_path, resource_len)") &&
+                stateBindingBody.contains("js_vm_write_clean_entry_integrity_bytes(entry_integrity)") &&
+                stateBindingBody.contains("entry_integrity[0], entry_integrity[1], entry_integrity[2], entry_integrity[3]") &&
+                stateBindingBody.contains("js_vbc4_copy_scoped_layout_digest(layout_digest)") &&
+                stateBindingBody.contains("memcpy(out + binding_len, layout_digest_hex, layout_len)"),
+            "nativeExecuteVmResource path must bind entry token, resource path, entry integrity, and runtime layout material into the parser context.",
         )
         assertFalse(
             nativeSource.contains("js_vm_stack_context_state") ||
@@ -1456,8 +1621,8 @@ class NativeHelperHardeningTest {
 
         val directoryLoadCalls = callsByMethod.getValue("tryLoadBundledNativeFromDirectory(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[BLjava/io/File;)Z")
         assertTrue(
-            directoryLoadCalls.any { it.first == "java/io/File" && it.second == "createTempFile" && it.third == "(Ljava/lang/String;Ljava/lang/String;Ljava/io/File;)Ljava/io/File;" },
-            "Bundled native extraction must use File.createTempFile(prefix, suffix, directory) so Linux noexec tmp can be bypassed. Calls=$directoryLoadCalls",
+            directoryLoadCalls.any { it.first == "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper" && it.second == "createUniqueTempFile" },
+            "Bundled native extraction must create a unique file in the selected explicit directory. Calls=$directoryLoadCalls",
         )
         assertTrue(
             directoryLoadCalls.any { it.first == "java/lang/System" && it.second == "load" },
@@ -1489,13 +1654,8 @@ class NativeHelperHardeningTest {
 
         val loadKernelCalls = callsByMethod.getValue("loadKernel(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V")
         val bundledIndex = loadKernelCalls.indexOfFirst { it.second == "tryLoadBundledNative" }
-        val systemIndex = loadKernelCalls.indexOfFirst { it.second == "tryLoadNative" }
         assertTrue(bundledIndex >= 0, "loadKernel must attempt bundled native loading")
-        assertTrue(systemIndex >= 0, "loadKernel may still fall back to system java.library.path loading")
-        assertTrue(
-            bundledIndex < systemIndex,
-            "Bundled native library must be tried before system library path to avoid stale js_kernel shadowing. Calls=$loadKernelCalls",
-        )
+        assertFalse(loadKernelCalls.any { it.second == "tryLoadNative" }, "bundled verification failure must fail closed without a system library fallback")
 
         val abiCalls = callsByMethod.getValue("verifyNativeAbiAfterLoad()Z")
         assertTrue(
@@ -1549,12 +1709,14 @@ class NativeHelperHardeningTest {
     }
 
     @Test
-    fun vm_exception_table_contains_decoy_entries_beyond_instruction_range() {
+    fun vm_exception_table_decoys_use_valid_ranges_and_unresolvable_catch_types() {
         val source = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/VmBytecodeSerializer.kt"))
 
-        assertTrue(source.contains("decoyCount"), "VM serializer must generate decoy exception entries")
-        assertTrue(source.contains("decoyBase"), "Decoy exceptions must use crypto-derived offsets beyond instruction range")
-        assertTrue(source.contains("Decoy ranges are placed BEYOND"), "Decoy exception ranges must be explicitly beyond real instructions")
+        assertTrue(source.contains("prepareDecoyExceptionTypeCpIndexes"), "VM serializer must prepare decoy catch types before freezing the CP layout")
+        assertTrue(source.contains("javashroud/decoy/E"), "Decoy handlers must use unresolvable, non-Throwable catch types")
+        assertTrue(source.contains("% instructionCount"), "Decoy exception offsets must remain inside the executable instruction range")
+        assertTrue(source.contains("entries.add(insertionPoint, decoy)"), "Decoy handlers must be mixed with real exception entries")
+        assertFalse(source.contains("decoyBase"), "Out-of-range decoy offsets remain mechanically removable")
     }
 
     @Test
@@ -1586,27 +1748,49 @@ class NativeHelperHardeningTest {
     }
 
     @Test
-    fun native_vm_execution_uses_per_invocation_mutable_program_copy() {
+    fun native_vm_execution_flat_copies_mutable_instructions_per_invocation() {
         val nativeSource = nativeRuntimeSources()
-        val executeRegisterBody = nativeFunctionBody(nativeSource, "js_vm_execute_register(JNIEnv *env, js_vm_program *p, jobjectArray args, char ret_desc, js_vm_value *ret)")
+        val executeRegisterBody = nativeFunctionBody(nativeSource, "js_vm_execute_register_with_preset_locals(JNIEnv *env, js_vm_program *p, jobjectArray args, const js_vm_value *preset_locals, int preset_count, char ret_desc, js_vm_value *ret)")
 
-        assertTrue(executeRegisterBody.contains("js_vm_program execution;"), "Each invocation must allocate its own mutable execution program.")
-        assertTrue(executeRegisterBody.contains("js_vm_build_execution_program_from_registers(p, &execution)"), "Each invocation must rebuild executable opcodes from immutable register IR.")
-        assertTrue(executeRegisterBody.contains("js_vm_execute(env, &execution, args, ret_desc, ret)"), "The interpreter must run against the per-invocation copy.")
+        assertTrue(executeRegisterBody.contains("js_vm_program execution;"), "Each invocation must allocate its own execution header.")
+        assertTrue(executeRegisterBody.contains("malloc((size_t)p->insn_count * sizeof(js_vm_insn))") && executeRegisterBody.contains("memcpy(execution.insns, p->insns"), "Each invocation must flat-copy the mutable resident instruction array.")
+        assertTrue(executeRegisterBody.contains("execution.borrowed_insn_operands = 1"), "Immutable operand arrays may be borrowed to avoid a deep clone.")
+        assertTrue(executeRegisterBody.contains("execution.symbol_cache_owner = p->symbol_cache_owner ? p->symbol_cache_owner : p"), "Resolved symbols must remain owned by the persistent program cache.")
+        assertTrue(executeRegisterBody.contains("js_vm_execute_with_preset_locals(env, &execution"), "The interpreter must run against the per-invocation copy.")
         assertTrue(executeRegisterBody.contains("js_vm_clear_execution_program(&execution)"), "The per-invocation copy must be wiped after execution.")
-        assertFalse(executeRegisterBody.contains("js_vm_get_execution_program"), "Execution must not share a mutable cached program across EDT/background VM invocations.")
-        assertFalse(nativeSource.contains("execution_cache"), "Parsed programs must never retain a shared mutable execution cache.")
+        assertFalse(executeRegisterBody.contains("js_vm_execute(env, p,"), "Execution must not mutate the persistent cached opcode array.")
     }
 
     @Test
-    fun native_vm_preload_validates_without_caching_mutable_execution_program() {
+    fun native_vm_on_demand_load_caches_a_validated_resident_program() {
         val nativeSource = nativeRuntimeSources()
         val preloadBody = nativeFunctionBody(nativeSource, "jsn_k8(JNIEnv *env, jclass cls, jlong entryToken, jstring resourcePath)")
 
-        assertTrue(preloadBody.contains("js_vm_program validation;"), "Preload should build only a temporary validation execution program.")
-        assertTrue(preloadBody.contains("js_vm_build_execution_program_from_registers(program, &validation)"), "Preload must validate register IR can lower to executable VM form.")
-        assertTrue(preloadBody.contains("js_vm_clear_execution_program(&validation)"), "Temporary validation execution program must be wiped immediately.")
-        assertFalse(preloadBody.contains("js_vm_get_execution_program"), "Preload must not create a cached mutable execution program shared by later calls.")
+        assertTrue(preloadBody.contains("js_vm_program validation;"), "On-demand loading must build a temporary validation execution program.")
+        assertTrue(preloadBody.contains("js_vm_build_execution_program_from_registers(program, &validation)"), "On-demand loading must prove register IR can lower to executable VM form.")
+        assertTrue(preloadBody.contains("js_vm_adopt_validated_execution_program(program, &validation)"), "The persistent program must adopt only the validated resident instruction form.")
+        assertTrue(preloadBody.contains("js_vm_clear_execution_program(&validation)"), "The temporary validation container must be wiped after adoption.")
+        assertTrue(preloadBody.contains("js_vm_ephemeral_cache_put(entryToken, path, program)"), "The validated resident program must enter the native cache for per-invocation flat copies.")
+    }
+
+    @Test
+    fun native_vm_lazy_preload_waits_for_the_concurrent_loader() {
+        val nativeSource = nativeRuntimeSources()
+        val markBody = nativeFunctionBody(nativeSource, "js_vm_call_gate_mark_loading(jlong entry_token, const char *resource_path)")
+        val clearBody = nativeFunctionBody(nativeSource, "js_vm_call_gate_clear_loading(jlong entry_token)")
+        val waitBody = nativeFunctionBody(nativeSource, "js_vm_call_gate_wait_for_program(jlong entry_token, const char *resource_path)")
+        val lazyBody = nativeFunctionBody(nativeSource, "js_vm_preload_indexed_program_on_demand(JNIEnv *env, jclass resource_cls, jlong entry_token, const char *resource_path, jstring resourcePath)")
+        val legacyBody = nativeFunctionBody(nativeSource, "jsn_k8(JNIEnv *env, jclass cls, jlong entryToken, jstring resourcePath)")
+        val publishIndex = lazyBody.indexOf("js_vm_ephemeral_cache_put(entry_token, resource_path, program)")
+        val clearIndex = lazyBody.lastIndexOf("js_vm_call_gate_clear_loading(entry_token);")
+
+        assertTrue(markBody.contains("js_vm_cache_lock_enter();") && markBody.contains("js_vm_cache_lock_leave();"), "Lazy preload ownership must be selected under the native cache lock.")
+        assertTrue(clearBody.contains("js_vm_cache_lock_enter();") && clearBody.contains("js_vm_cache_lock_leave();"), "Lazy preload completion must publish under the native cache lock.")
+        assertTrue(waitBody.contains("for (int attempt = 0; attempt < JS_VM_PRELOAD_WAIT_ATTEMPTS; attempt++)") && waitBody.contains("js_vm_call_gate_wait_pause();"), "A concurrent lazy preload must use a bounded wait.")
+        assertTrue(waitBody.contains("js_vm_ephemeral_cache_get(entry_token, resource_path)"), "A waiting preload must re-read the resident program cache.")
+        assertTrue(lazyBody.contains("return js_vm_call_gate_wait_for_program(entry_token, resource_path);"), "A losing lazy preload caller must wait for and reuse the owning loader's program.")
+        assertTrue(publishIndex >= 0 && clearIndex > publishIndex, "The owner must publish the resident program before clearing its loading state.")
+        assertTrue(legacyBody.contains("cached = js_vm_call_gate_wait_for_program(entryToken, path);") && legacyBody.contains("if (!cached) js_vm_fail_closed(env"), "The legacy preload entry must also wait and fail closed when the owner does not publish a program.")
     }
 
     @Test
@@ -1635,7 +1819,7 @@ class NativeHelperHardeningTest {
         val nativeSource = nativeRuntimeSources()
         val resolver = nativeFunctionBody(nativeSource, "js_vm_resolve_method_symbol(JNIEnv *env, js_vm_program *p, int cp_idx, int symbol_kind, int opcode)")
 
-        val getMethodIdx = resolver.indexOf("GetMethodID(env, cls, lookup_name, mr.desc)")
+        val getMethodIdx = resolver.indexOf("js_vm_lookup_method_id(env, cls, lookup_name, mr.desc")
         val addIdx = resolver.indexOf("js_vm_symbol_cache_add(env, p, cp_idx, symbol_kind, cls, mid", getMethodIdx)
         val successFreeIdx = resolver.indexOf("\n    free(mapped_method);", addIdx)
         assertTrue(getMethodIdx >= 0 && addIdx > getMethodIdx && successFreeIdx > addIdx, "Mapped method lookup name must remain alive until self-call metadata is cached.")

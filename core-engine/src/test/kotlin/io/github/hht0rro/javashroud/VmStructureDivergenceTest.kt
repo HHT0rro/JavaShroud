@@ -9,10 +9,12 @@ import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceCodec
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.NativeVmBuildProfile
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4EntryMetadata
 import io.github.hht0rro.javashroud.transforms.protection.VmBytecodeSerializer
+import io.github.hht0rro.javashroud.transforms.protection.vbc4CfgDecodeIndex
+import io.github.hht0rro.javashroud.transforms.protection.vbc4CfgEncodeIndex
 import io.github.hht0rro.javashroud.transforms.protection.applyMethodVirtualization
 import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import org.objectweb.asm.Opcodes
@@ -25,6 +27,18 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class VmStructureDivergenceTest {
+
+    @Test
+    fun build_local_parser_profile_selects_exactly_one_non_nested_row_family() {
+        val plain = serializedLayout(seed = 0x1200, contextSeed = 0x2200, nativeVmProfile = NativeVmBuildProfile(0, 0))
+        val register = serializedLayout(seed = 0x1200, contextSeed = 0x2200, nativeVmProfile = NativeVmBuildProfile(1, 1))
+        val mixed = serializedLayout(seed = 0x1200, contextSeed = 0x2200, nativeVmProfile = NativeVmBuildProfile(2, 2))
+
+        assertEquals(0, plain.flags and (0x4000 or 0x8000))
+        assertEquals(0x4000, register.flags and (0x4000 or 0x8000))
+        assertEquals(0x8000, mixed.flags and (0x4000 or 0x8000))
+        assertEquals(3, setOf(sha256Hex(plain.payload), sha256Hex(register.payload), sha256Hex(mixed.payload)).size)
+    }
     private companion object {
         const val VBC4_FLAG_NESTED_VM_TEST = 0x1000
     }
@@ -89,7 +103,9 @@ class VmStructureDivergenceTest {
 
         for (entry in snapshot.entries) {
             val legacyPayload = entry.token xor dispatchMask(effectiveSeed, entry.blockId, snapshot.blockCount)
-            val expectedNext = if (entry.blockId + 1 < snapshot.blockCount) entry.blockId + 1 else snapshot.blockCount
+            val chain = dispatchChain(snapshot)
+            val chainIndex = chain.indexOf(entry.blockId)
+            val expectedNext = if (chainIndex + 1 < chain.size) chain[chainIndex + 1] else snapshot.blockCount
             assertTrue(
                 legacyPayload !in 0..snapshot.blockCount,
                 "multi-block dispatch must not emit legacy raw-next ids",
@@ -105,7 +121,30 @@ class VmStructureDivergenceTest {
             .map { serializedLayout(0x7800_0000 + it) }
             .first { it.blockIds != (0 until it.blockCount).toList() }
 
-        assertEquals((0 until snapshot.blockCount).toList(), dispatchChain(snapshot), "state-bound dispatch chain must recover logical execution order from shuffled storage")
+        val chain = dispatchChain(snapshot)
+        assertEquals(snapshot.blockCount, chain.size, "state-bound dispatch chain must visit every logical block")
+        assertEquals((0 until snapshot.blockCount).toSet(), chain.toSet(), "state-bound dispatch chain must be a full block-id permutation")
+        assertEquals(0, chain.first(), "native dispatch must retain block zero as its authenticated entry")
+        assertTrue(
+            chain.drop(1) != (1 until snapshot.blockCount).toList() || snapshot.blockCount == 2,
+            "logical block ids after entry must be build-secret shuffled when more than one permutation exists",
+        )
+    }
+
+    @Test
+    fun cfg_instruction_ids_are_build_keyed_and_round_trip_all_branch_targets() {
+        val instructionCount = 257
+        val firstSeed = 0x1357_2468
+        val secondSeed = 0x2468_1357
+        val first = (0..instructionCount).map { vbc4CfgEncodeIndex(firstSeed, instructionCount, it) }
+        val second = (0..instructionCount).map { vbc4CfgEncodeIndex(secondSeed, instructionCount, it) }
+
+        assertEquals(first.size, first.toSet().size, "CFG storage ids must be bijective inside one method")
+        assertTrue(first != (0..instructionCount).toList(), "CFG storage ids must not expose raw JVM instruction indexes")
+        assertTrue(first != second, "CFG storage ids must diverge across build seeds")
+        first.forEachIndexed { index, encoded ->
+            assertEquals(index, vbc4CfgDecodeIndex(firstSeed, instructionCount, encoded), "native-equivalent inverse must recover every target")
+        }
     }
 
     @Test
@@ -156,8 +195,8 @@ class VmStructureDivergenceTest {
         assertTrue(first != differentSeed, "resident rotation dump must diverge across resident build seeds")
         assertTrue(first != differentDispatch, "resident rotation dump must diverge across shared dispatch drift state")
     }
-    private fun serializedLayout(seed: Int, contextSeed: Int = seed, nestedProfile: Int = 0, structureEntropy: ByteArray? = null): LayoutSnapshot {
-        val context = fixedContext(contextSeed)
+    private fun serializedLayout(seed: Int, contextSeed: Int = seed, nestedProfile: Int = 0, structureEntropy: ByteArray? = null, nativeVmProfile: NativeVmBuildProfile? = null): LayoutSnapshot {
+        val context = fixedContext(contextSeed, nativeVmProfile)
         return withVbc4BuildContext(context) {
             val serializer = if (structureEntropy == null) {
                 VmBytecodeSerializer(
@@ -282,7 +321,7 @@ class VmStructureDivergenceTest {
         )
         assertEquals(3, result.transformedMemberCount, "full-chain fixture must virtualize every selected method")
         result.artifact.jarEntries
-            .filter { entry -> entry.name.isVmResourceName() || entry.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE }
+            .filter { entry -> entry.name.isVmResourceName() }
             .sortedBy { it.name }
     }
 
@@ -372,10 +411,14 @@ class VmStructureDivergenceTest {
         .digest(bytes)
         .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xFF) }
 
-    private fun fixedContext(seed: Int): Vbc4BuildContext = Vbc4BuildContext(
+    private fun fixedContext(seed: Int, nativeVmProfile: NativeVmBuildProfile? = null): Vbc4BuildContext = Vbc4BuildContext(
         masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (seed ushr ((index and 3) * 8) xor index * 17).toByte() },
         nativeSeed = seed.toLong() xor 0x5A5A_1357L,
         jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (seed.rotateLeft(index and 31) xor index * 31).toByte() },
+        nativeVmProfile = nativeVmProfile ?: NativeVmBuildProfile.fromBuildMaterial(
+            seed.toLong() xor 0x5A5A_1357L,
+            ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (seed.rotateLeft(index and 31) xor index * 31).toByte() },
+        ),
     )
 
     private data class FullChainSnapshot(

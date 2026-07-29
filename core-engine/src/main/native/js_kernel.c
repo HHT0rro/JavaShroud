@@ -65,7 +65,7 @@ static void js_decode_key(void) {
     }
     /* Anti-tamper self-check: decoded key FNV1a must match the expected constant. */
     unsigned int chk = fnv1a_hash(g_decoded_key, 16);
-    g_key_valid = (chk == 0xAD3B3ED7u) ? 1 : 0;
+    g_key_valid = (chk == 0xCC4A1511u) ? 1 : 0;
 }
 
 static unsigned int fnv1a_hash(const unsigned char* data, int len) {
@@ -410,6 +410,3 @@ jsn_k6(
  * and dispatch can take one of several native paths. VBC4-only resource handling
  * rejects old non-authenticated VM bytecode streams.
  */
-
-
-

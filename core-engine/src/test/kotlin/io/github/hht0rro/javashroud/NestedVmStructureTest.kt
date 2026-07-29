@@ -3,8 +3,12 @@ package io.github.hht0rro.javashroud
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.NativeVmBuildProfile
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4EntryMetadata
 import io.github.hht0rro.javashroud.transforms.protection.VmBytecodeSerializer
+import io.github.hht0rro.javashroud.transforms.protection.deriveVbc4Identity
+import io.github.hht0rro.javashroud.transforms.protection.deriveVbc4OwnerIdentity
+import io.github.hht0rro.javashroud.transforms.protection.vbc4ArgumentTagVector
 import org.objectweb.asm.Opcodes
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -27,8 +31,10 @@ class NestedVmStructureTest {
     @Test
     fun nested_micro_stream_is_reproducible_when_structure_entropy_is_fixed() {
         val entropy = fixedStructureEntropy()
-        val first = nestedBlock(seed = 0x1357_2468, contextSeed = 0x1122_3344, profile = 0x5566_7788, structureEntropy = entropy)
-        val second = nestedBlock(seed = 0x1357_2468, contextSeed = 0x1122_3344, profile = 0x5566_7788, structureEntropy = entropy)
+        val nativeProfile = NativeVmBuildProfile(1, 2)
+        val context = fixedContext(0x1122_3344, nativeProfile)
+        val first = nestedBlock(seed = 0x1357_2468, contextSeed = 0x1122_3344, profile = 0x5566_7788, structureEntropy = entropy, nativeVmProfile = nativeProfile, contextOverride = context)
+        val second = nestedBlock(seed = 0x1357_2468, contextSeed = 0x1122_3344, profile = 0x5566_7788, structureEntropy = entropy, nativeVmProfile = nativeProfile, contextOverride = context)
 
         assertEquals(first.bytes.toList(), second.bytes.toList(), "Fixed test entropy must keep nested VM stream reproducible")
         assertEquals(first.dialect, second.dialect, "Fixed test entropy must keep nested VM dialect reproducible")
@@ -69,19 +75,33 @@ class NestedVmStructureTest {
         )
     }
 
-    private fun nestedBlock(seed: Int, contextSeed: Int, profile: Int, structureEntropy: ByteArray? = null): NestedSnapshot {
-        val context = fixedContext(contextSeed)
+    @Test
+    fun nested_micro_stream_is_independent_of_non_nested_parser_family() {
+        val entropy = fixedStructureEntropy()
+        val snapshots = (0..2).map { parserProfile ->
+            nestedBlock(
+                seed = 0x3141_5926,
+                contextSeed = 0x2718_2818,
+                profile = 0x1234_5678,
+                structureEntropy = entropy,
+                nativeVmProfile = NativeVmBuildProfile(parserProfile, parserProfile),
+            )
+        }
+        assertTrue(snapshots.all { it.magic == 0x4E56 && it.version == 1 && it.microCount == it.rowCount * 7 }, "Every native parser profile must preserve the nested VM envelope contract")
+        assertEquals(3, snapshots.map { it.bytes.toList() }.toSet().size, "Nested VM bytes must still bind the authenticated build-local native profile id")
+    }
+
+    private fun nestedBlock(seed: Int, contextSeed: Int, profile: Int, structureEntropy: ByteArray? = null, nativeVmProfile: NativeVmBuildProfile? = null, contextOverride: Vbc4BuildContext? = null): NestedSnapshot {
+        val context = contextOverride ?: fixedContext(contextSeed, nativeVmProfile)
         val entryMetadata = Vbc4EntryMetadata(
                 entryToken = 0x1122_3344_5566_7788L,
-                ownerToken = "owner-token",
-                methodToken = "method-token",
                 returnDescriptor = "I",
                 methodLocalProfile = profile,
-                originalOwner = "example/NestedVm",
-                originalName = "verifyLicense",
-                originalDescriptor = "()I",
+                methodIdentity = context.deriveVbc4Identity("example/NestedVm", "verifyLicense", "()I"),
+                ownerIdentity = context.deriveVbc4OwnerIdentity("example/NestedVm"),
+                argumentTags = vbc4ArgumentTagVector("()I"),
                 resourcePath = "META-INF/.r/nested.bin",
-                originalAccess = Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC,
+                isStatic = true,
             )
         val serializer = if (structureEntropy == null) {
             VmBytecodeSerializer(
@@ -138,10 +158,14 @@ class NestedVmStructureTest {
         )
     }
 
-    private fun fixedContext(seed: Int): Vbc4BuildContext = Vbc4BuildContext(
+    private fun fixedContext(seed: Int, nativeVmProfile: NativeVmBuildProfile? = null): Vbc4BuildContext = Vbc4BuildContext(
         masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (seed ushr ((index and 3) * 8) xor index * 19).toByte() },
         nativeSeed = seed.toLong() xor 0x1357_2468L,
         jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (seed.rotateLeft(index and 31) xor index * 29).toByte() },
+        nativeVmProfile = nativeVmProfile ?: NativeVmBuildProfile.fromBuildMaterial(
+            seed.toLong() xor 0x1357_2468L,
+            ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (seed.rotateLeft(index and 31) xor index * 29).toByte() },
+        ),
     )
 
     private fun fixedStructureEntropy(): ByteArray = ByteArray(32) { index -> (index * 19 + 7).toByte() }

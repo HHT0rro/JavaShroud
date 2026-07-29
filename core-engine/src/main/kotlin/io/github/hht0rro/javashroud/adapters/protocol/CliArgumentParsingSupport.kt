@@ -3,7 +3,10 @@ package io.github.hht0rro.javashroud.adapters.protocol
 import java.nio.file.Path
 
 internal fun matchesCommand(spec: EngineCommandSpec, args: Array<String>): Boolean =
-    args.size == spec.expectedArgCount && args.firstOrNull() == spec.flag
+    args.size == spec.expectedArgCount && args.firstOrNull() == spec.flag && when (spec) {
+        garbageCollectApplyCommandSpec -> args.getOrNull(1) == "--apply"
+        else -> true
+    }
 
 internal fun ensureCommand(spec: EngineCommandSpec, args: Array<String>): Unit {
     if (!matchesCommand(spec, args)) {

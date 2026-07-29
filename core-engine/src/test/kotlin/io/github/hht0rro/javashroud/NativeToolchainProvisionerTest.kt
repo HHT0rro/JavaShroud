@@ -41,6 +41,8 @@ class NativeToolchainProvisionerTest {
         assertEquals("windows-x86_64", NativeToolchainProvisioner.detectPlatform("Windows 11", "amd64"))
         assertEquals("linux-x86_64", NativeToolchainProvisioner.detectPlatform("Linux", "x86_64"))
         assertEquals("macos-aarch64", NativeToolchainProvisioner.detectPlatform("Mac OS X", "arm64"))
+        assertEquals(null, NativeToolchainProvisioner.detectPlatform("Darwin", "amd64"))
+        assertEquals(null, NativeToolchainProvisioner.detectPlatform("NotWindows", "amd64"))
     }
 
     @Test

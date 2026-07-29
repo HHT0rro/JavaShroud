@@ -83,6 +83,14 @@ typedef struct {
     jfieldID float_type_field;
     jfieldID double_type_field;
     jfieldID void_type_field;
+    jfieldID integer_value_field;
+    jfieldID boolean_value_field;
+    jfieldID byte_value_field;
+    jfieldID short_value_field;
+    jfieldID character_value_field;
+    jfieldID long_value_field;
+    jfieldID float_value_field;
+    jfieldID double_value_field;
 } js_jni_cache_state;
 
 JS_HIDDEN extern js_jni_cache_state js_jni_cache;
@@ -93,5 +101,30 @@ JS_HIDDEN char* js_lookup_bound_class(JNIEnv *env, const char *original);
 JS_HIDDEN char* js_lookup_bound_method(JNIEnv *env, const char *original_class, const char *method_name, const char *signature);
 JS_HIDDEN void js_vm_mark_hot_integrity_baseline_clean(void);
 JS_HIDDEN void js_runtime_on_unload_cleanup(JNIEnv *env);
+
+#define JS_NATIVE_ABI_TABLE_VERSION 6u
+
+typedef struct js_native_abi_table {
+    unsigned int version;
+    jint (JNICALL *native_init)(JNIEnv *env, jclass cls, jstring platform);
+    jint (JNICALL *native_verify)(JNIEnv *env, jclass cls, jbyteArray data, jbyteArray expected_mac);
+    jint (JNICALL *native_heartbeat)(JNIEnv *env, jclass cls);
+    jbyteArray (JNICALL *native_decrypt_aes)(JNIEnv *env, jclass cls, jbyteArray encrypted, jbyteArray keyArr, jbyteArray ivArr);
+    jstring (JNICALL *native_get_version)(JNIEnv *env, jclass cls);
+    jlong (JNICALL *native_get_boot_token)(JNIEnv *env, jclass cls);
+    jboolean (JNICALL *native_install_boot_material)(JNIEnv *env, jclass cls, jbyteArray material);
+    jboolean (JNICALL *native_is_boot_material_ready)(JNIEnv *env, jclass cls);
+    void (JNICALL *native_abort_boot_material)(JNIEnv *env, jclass cls);
+    void (JNICALL *native_preload_runtime_resources)(JNIEnv *env, jclass cls, jbyteArray preload_index, jbyteArray commitments, jbyteArray startup_nonce);
+    jbyteArray (JNICALL *native_derive_class_encryption_key)(JNIEnv *env, jclass cls, jbyteArray keyIdArr, jbyteArray saltArr, jint length);
+    jobject (JNICALL *execute_vm_resource)(JNIEnv *env, jclass cls, jlong entryToken, jstring resourcePath, jobjectArray args);
+    jobject (JNICALL *execute_vm_resource_by_token)(JNIEnv *env, jclass cls, jlong entryToken, jobjectArray args);
+    void (JNICALL *execute_vm_resource_void)(JNIEnv *env, jclass cls, jlong entryToken);
+    jint (JNICALL *execute_vm_resource_int)(JNIEnv *env, jclass cls, jlong entryToken);
+    jint (JNICALL *execute_vm_resource_int_int)(JNIEnv *env, jclass cls, jlong entryToken, jint arg0);
+    void (JNICALL *execute_vm_resource_int_void)(JNIEnv *env, jclass cls, jlong entryToken, jint arg0);
+} js_native_abi_table;
+
+JS_EXPORT const js_native_abi_table *js_native_abi_table_v1(void);
 
 #endif

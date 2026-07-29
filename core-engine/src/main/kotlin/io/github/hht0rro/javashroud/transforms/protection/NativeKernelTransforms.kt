@@ -189,7 +189,7 @@ private fun isJavaShroudRuntimeStateClass(classNode: ClassNode): Boolean {
             when (instruction) {
                 is org.objectweb.asm.tree.LdcInsnNode -> {
                     val value = instruction.cst as? String ?: continue
-                    if (value == "META-INF/.r/vm.idx" || value == "META-INF/.r/vm-current.idx" || value.startsWith("META-INF/2b/") || value == "JSRP" || value == "JSBI") {
+                    if (value.startsWith("META-INF/2b/") || value == "JSRP" || value == "JSBI") {
                         hasRuntimeResourceState = true
                     }
                     if (value == "j.b" || value == "j.m" || value == "j.l") {
@@ -256,10 +256,14 @@ private fun isPriorSealedRuntimeDependencyCall(call: MethodInsnNode): Boolean {
         "loadKernel",
         "executeVmResource",
         "executeVmResourceVoid",
+        "executeVmResourceInt",
+        "executeVmResourceIntInt",
         "executeVmResourceIntVoid",
         "nativeExecuteVmResource",
         "nativeExecuteVmResourceByToken",
         "nativeExecuteVmResourceVoid",
+        "nativeExecuteVmResourceInt",
+        "nativeExecuteVmResourceIntInt",
         "nativeExecuteVmResourceIntVoid",
     )
 }
@@ -270,6 +274,8 @@ private fun isJavaShroudVmDispatchCall(call: MethodInsnNode): Boolean {
             "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;",
             "(J[Ljava/lang/Object;)Ljava/lang/Object;",
             "(J)V",
+            "(J)I",
+            "(JI)I",
             "(JI)V",
         )
     ) return false
@@ -278,8 +284,12 @@ private fun isJavaShroudVmDispatchCall(call: MethodInsnNode): Boolean {
             "nativeExecuteVmResourceByToken",
             "executeVmResource",
             "nativeExecuteVmResourceVoid",
+            "nativeExecuteVmResourceInt",
+            "nativeExecuteVmResourceIntInt",
             "nativeExecuteVmResourceIntVoid",
             "executeVmResourceVoid",
+            "executeVmResourceInt",
+            "executeVmResourceIntInt",
             "executeVmResourceIntVoid",
         )
     ) return true
@@ -727,8 +737,12 @@ fun applyJniMicrokernelLoader(
     val supportedKernelComponents = setOf("loader", "decrypt", "vm", "guards", "all")
     require(kernelComponents in supportedKernelComponents) { "jni-microkernel-loader kernelComponents '$kernelComponents' is not supported; supported values: ${supportedKernelComponents.joinToString("", "")}" }
     val targetPlatform = (params["targetPlatform"] as? String) ?: "auto"
-    val supportedTargetPlatforms = setOf("auto", "windows-x64", "linux-x64", "macos-x64", "macos-arm64")
-    require(targetPlatform in supportedTargetPlatforms) { "jni-microkernel-loader targetPlatform '$targetPlatform' is not supported; supported values: ${supportedTargetPlatforms.joinToString("", "")}" }
+    val targetPlatforms = EmbeddedHelperDeployment.resolveNativeCompileTargetPlatforms(targetPlatform)
+    val runtimeTargetPlatform = when {
+        targetPlatform.trim() == "auto" -> "auto"
+        targetPlatform.trim() == "all" -> "all"
+        else -> targetPlatforms.joinToString(",")
+    }
     val diversifiedVirtualization = (params["diversifiedVirtualization"] as? Boolean) ?: true
     val vmMode = if (diversifiedVirtualization) "vm-diverse" else "vm-off"
 
@@ -801,7 +815,7 @@ fun applyJniMicrokernelLoader(
                 return object : MethodVisitor(Opcodes.ASM9, superMv) {
                     override fun visitCode() {
                         super.visitCode()
-                        emitJniMicrokernelLoad(this, kernelComponents, targetPlatform, vmMode)
+                        emitJniMicrokernelLoad(this, kernelComponents, runtimeTargetPlatform, vmMode)
                         classModified = true
                     }
                 }
@@ -814,7 +828,7 @@ fun applyJniMicrokernelLoader(
                 if (!clinitSeen && !isInterfaceClass) {
                     val mv = super.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null)
                     mv.visitCode()
-                    emitJniMicrokernelLoad(mv, kernelComponents, targetPlatform, vmMode)
+                    emitJniMicrokernelLoad(mv, kernelComponents, runtimeTargetPlatform, vmMode)
                     mv.visitInsn(Opcodes.RETURN)
                     mv.visitMaxs(0, 0)
                     mv.visitEnd()
@@ -917,9 +931,12 @@ fun applyDiversifiedVmToClasses(
                             stateBinding = vmStateBinding(entryToken, resourcePath),
                             entryMetadata = Vbc4EntryMetadata(
                                 entryToken = entryToken,
-                                ownerToken = dispatchClassToken,
-                                methodToken = dispatchMethodToken,
-                                returnDescriptor = org.objectweb.asm.Type.getReturnType(descriptor).descriptor,
+                                returnDescriptor = vbc4ReturnTag(descriptor),
+                                methodIdentity = buildContext.deriveVbc4Identity(className, name, descriptor),
+                                ownerIdentity = buildContext.deriveVbc4OwnerIdentity(className),
+                                argumentTags = vbc4ArgumentTagVector(descriptor),
+                                resourcePath = resourcePath,
+                                isStatic = access and org.objectweb.asm.Opcodes.ACC_STATIC != 0,
                             ),
                             buildContext = buildContext,
                         )

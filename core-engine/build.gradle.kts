@@ -13,6 +13,7 @@ val slf4jVersion = rootProject.extra["slf4jVersion"] as String
 val snakeyamlVersion = rootProject.extra["snakeyamlVersion"] as String
 val commonsIoVersion = rootProject.extra["commonsIoVersion"] as String
 val commonsCompressVersion = rootProject.extra["commonsCompressVersion"] as String
+val xzVersion = rootProject.extra["xzVersion"] as String
 val guavaVersion = rootProject.extra["guavaVersion"] as String
 val gsonVersion = rootProject.extra["gsonVersion"] as String
 val jphantomVersion = rootProject.extra["jphantomVersion"] as String
@@ -45,6 +46,19 @@ application {
     mainClass.set("io.github.hht0rro.javashroud.MainKt")
 }
 
+// Runtime helper classes under src/main/java are embedded into obfuscated
+// output jars and must load on the oldest supported runtime (Java 8).
+tasks.withType<JavaCompile>().configureEach {
+    sourceCompatibility = "8"
+    targetCompatibility = "8"
+}
+
+// Engine bytecode stays at 21; helper sources are the only Java inputs and
+// they are intentionally emitted as Java 8 bytecode for embedded runtimes.
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+    jvmTargetValidationMode.set(org.jetbrains.kotlin.gradle.dsl.jvm.JvmTargetValidationMode.WARNING)
+}
+
 dependencies {
     implementation("org.jetbrains.kotlin:kotlin-stdlib")
     implementation("org.jetbrains.kotlin:kotlin-reflect")
@@ -61,6 +75,7 @@ dependencies {
     implementation("org.yaml:snakeyaml:$snakeyamlVersion")
     implementation("commons-io:commons-io:$commonsIoVersion")
     implementation("org.apache.commons:commons-compress:$commonsCompressVersion")
+    implementation("org.tukaani:xz:$xzVersion")
     implementation("com.google.guava:guava:$guavaVersion")
     implementation("com.google.code.gson:gson:$gsonVersion")
 
@@ -84,7 +99,7 @@ tasks.named<JavaExec>("run") {
 
 tasks.processResources {
     from(file("src/main/native")) {
-        include("js_kernel.c", "js_helpers.c", "js_native_common.c", "js_native_common.h", "js_crypto.c", "js_crypto.h", "js_antidebug.c", "js_antidebug.h", "js_protected_section.c", "js_protected_section.h", "js_vm_core.c", "js_vm_core.h", "js_vm_resource.c", "js_vm_resource.h", "js_vm_symbol.c", "js_vm_symbol.h", "js_vm_internal.h", "js_jni_runtime.c", "js_jni_runtime.h", "native_secrets.inc")
+        include("js_kernel.c", "js_helpers.c", "js_native_common.c", "js_native_common.h", "js_crypto.c", "js_crypto.h", "js_antidebug.c", "js_antidebug.h", "js_protected_section.c", "js_protected_section.h", "js_protected_section_linux.ld", "js_vm_core.c", "js_vm_core.h", "js_vm_resource.c", "js_vm_resource.h", "js_vm_symbol.c", "js_vm_symbol.h", "js_vm_internal.h", "js_jni_runtime.c", "js_jni_runtime.h", "native_secrets.inc", "js_shell_stub.c", "js_shell_stub.h", "js_shell_crypto.c", "js_shell_crypto.h", "js_shell_loader.h", "js_shell_loader_pe.c", "js_shell_loader_elf.c", "js_shell_loader_macho.c")
         into("META-INF/native-src")
     }
     from(file("src/main/native/zstd")) {
@@ -134,7 +149,7 @@ tasks.jar {
     // These are used by NativeRecompilationTransforms to generate per-output
     // diversified native libraries when a zig toolchain is available.
     from(file("src/main/native")) {
-        include("js_kernel.c", "js_helpers.c", "js_native_common.c", "js_native_common.h", "js_crypto.c", "js_crypto.h", "js_antidebug.c", "js_antidebug.h", "js_protected_section.c", "js_protected_section.h", "js_vm_core.c", "js_vm_core.h", "js_vm_resource.c", "js_vm_resource.h", "js_vm_symbol.c", "js_vm_symbol.h", "js_vm_internal.h", "js_jni_runtime.c", "js_jni_runtime.h", "native_secrets.inc")
+        include("js_kernel.c", "js_helpers.c", "js_native_common.c", "js_native_common.h", "js_crypto.c", "js_crypto.h", "js_antidebug.c", "js_antidebug.h", "js_protected_section.c", "js_protected_section.h", "js_protected_section_linux.ld", "js_vm_core.c", "js_vm_core.h", "js_vm_resource.c", "js_vm_resource.h", "js_vm_symbol.c", "js_vm_symbol.h", "js_vm_internal.h", "js_jni_runtime.c", "js_jni_runtime.h", "native_secrets.inc", "js_shell_stub.c", "js_shell_stub.h", "js_shell_crypto.c", "js_shell_crypto.h", "js_shell_loader.h", "js_shell_loader_pe.c", "js_shell_loader_elf.c", "js_shell_loader_macho.c")
         into("META-INF/native-src")
     }
     from(file("src/main/native/zstd")) {

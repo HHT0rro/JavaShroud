@@ -1,9 +1,15 @@
 #include "js_jni_runtime.h"
 #include "js_antidebug.h"
+#include "js_protected_section.h"
+#include "js_vm_core.h"
 #include "js_vm_resource.h"
 
 #include <stdlib.h>
 #include <string.h>
+
+#define JS_SHELL_MANUAL_MAP_RESERVED ((void *)(uintptr_t)0x4A5353484D4D4150ULL)
+
+static volatile int js_jni_runtime_manual_mapped_shell = 0;
 
 JS_HIDDEN js_jni_cache_state js_jni_cache;
 
@@ -13,8 +19,10 @@ extern jint JNICALL jsn_k3(JNIEnv* env, jclass clazz);
 extern jbyteArray JNICALL jsn_k4(JNIEnv* env, jclass clazz, jbyteArray encrypted, jbyteArray keyArr, jbyteArray ivArr);
 extern jstring JNICALL jsn_k5(JNIEnv* env, jclass clazz);
 extern jlong JNICALL jsn_k6(JNIEnv* env, jclass clazz);
-JS_HIDDEN void JNICALL jsn_k7(JNIEnv *env, jclass cls, jbyteArray keyArr);
-JS_HIDDEN void JNICALL jsn_k9(JNIEnv *env, jclass cls);
+JS_HIDDEN jboolean JNICALL jsn_k7(JNIEnv *env, jclass cls, jbyteArray material);
+JS_HIDDEN jboolean JNICALL jsn_k11(JNIEnv *env, jclass cls);
+JS_HIDDEN void JNICALL jsn_k12(JNIEnv *env, jclass cls);
+JS_HIDDEN void JNICALL jsn_k9(JNIEnv *env, jclass cls, jbyteArray preload_index, jbyteArray commitments, jbyteArray startup_nonce);
 JS_HIDDEN jbyteArray JNICALL jsn_k10(JNIEnv *env, jclass cls, jbyteArray keyIdArr, jbyteArray saltArr, jint length);
 JS_HIDDEN void JNICALL jsn_r0(JNIEnv *env, jclass cls, jstring jdl, jstring jresp);
 JS_HIDDEN void JNICALL jsn_r1(JNIEnv *env, jclass cls, jstring jdm, jstring jresp);
@@ -27,10 +35,225 @@ JS_HIDDEN jstring JNICALL jsn_r13(JNIEnv *env, jclass cls, jstring encoded);
 JS_HIDDEN jstring JNICALL jsn_r16(JNIEnv *env, jclass cls, jstring bindingSource, jstring salt);
 JS_HIDDEN void JNICALL jsn_r17(JNIEnv *env, jclass cls, jstring expectedToken, jstring bindingSource, jstring salt);
 JS_HIDDEN jobject JNICALL jsn_r20(JNIEnv *env, jclass cls, jlong entryToken, jstring resourcePath, jobjectArray args);
-JS_HIDDEN jbyteArray JNICALL jsn_r21(JNIEnv *env, jclass cls, jbyteArray payload, jint seed, jint flags);
+JS_HIDDEN jbyteArray JNICALL jsn_r21(JNIEnv *env, jclass cls, jbyteArray payload, jint seed, jint flags, jlong classIdentityHigh, jlong classIdentityLow);
 JS_HIDDEN jobject JNICALL jsn_r22(JNIEnv *env, jclass cls, jlong entryToken, jobjectArray args);
 JS_HIDDEN void JNICALL jsn_r23(JNIEnv *env, jclass cls, jlong entryToken);
 JS_HIDDEN void JNICALL jsn_r24(JNIEnv *env, jclass cls, jlong entryToken, jint arg0);
+JS_HIDDEN jint JNICALL jsn_r25(JNIEnv *env, jclass cls, jlong entryToken);
+JS_HIDDEN jint JNICALL jsn_r26(JNIEnv *env, jclass cls, jlong entryToken, jint arg0);
+
+static void js_protected_runtime_failure(JNIEnv *env) {
+    if (!env || (*env)->ExceptionCheck(env)) return;
+    jclass failure = (*env)->FindClass(env, "java/lang/SecurityException");
+    if (!failure || (*env)->ExceptionCheck(env)) return;
+    (*env)->ThrowNew(env, failure, "native protected section lifecycle failure");
+    (*env)->DeleteLocalRef(env, failure);
+}
+
+static int js_protected_runtime_enter(JNIEnv *env) {
+    if (js_protected_section_enter()) return 1;
+    js_protected_runtime_failure(env);
+    return 0;
+}
+
+static int js_protected_runtime_leave(JNIEnv *env) {
+    if (js_protected_section_leave()) return 1;
+    js_protected_runtime_failure(env);
+    return 0;
+}
+
+static jint JNICALL jsw_k0(JNIEnv *env, jclass cls, jstring platform) {
+    if (!js_protected_runtime_enter(env)) return JNI_ERR;
+    jint result = jsn_k0(env, cls, platform);
+    return js_protected_runtime_leave(env) ? result : JNI_ERR;
+}
+
+static jint JNICALL jsw_k1(JNIEnv *env, jclass cls, jbyteArray data, jbyteArray expected_mac) {
+    if (!js_protected_runtime_enter(env)) return JNI_ERR;
+    jint result = jsn_k1(env, cls, data, expected_mac);
+    return js_protected_runtime_leave(env) ? result : JNI_ERR;
+}
+
+static jint JNICALL jsw_k3(JNIEnv *env, jclass cls) {
+    if (!js_protected_runtime_enter(env)) return JNI_ERR;
+    jint result = jsn_k3(env, cls);
+    return js_protected_runtime_leave(env) ? result : JNI_ERR;
+}
+
+static jbyteArray JNICALL jsw_k4(JNIEnv *env, jclass cls, jbyteArray encrypted, jbyteArray keyArr, jbyteArray ivArr) {
+    if (!js_protected_runtime_enter(env)) return NULL;
+    jbyteArray result = jsn_k4(env, cls, encrypted, keyArr, ivArr);
+    return js_protected_runtime_leave(env) ? result : NULL;
+}
+
+static jstring JNICALL jsw_k5(JNIEnv *env, jclass cls) {
+    if (!js_protected_runtime_enter(env)) return NULL;
+    jstring result = jsn_k5(env, cls);
+    return js_protected_runtime_leave(env) ? result : NULL;
+}
+
+static jlong JNICALL jsw_k6(JNIEnv *env, jclass cls) {
+    if (!js_protected_runtime_enter(env)) return 0;
+    jlong result = jsn_k6(env, cls);
+    return js_protected_runtime_leave(env) ? result : 0;
+}
+
+static jboolean JNICALL jsw_k7(JNIEnv *env, jclass cls, jbyteArray material) {
+    if (!js_protected_runtime_enter(env)) return JNI_FALSE;
+    jboolean result = jsn_k7(env, cls, material);
+    return js_protected_runtime_leave(env) ? result : JNI_FALSE;
+}
+
+static jboolean JNICALL jsw_k11(JNIEnv *env, jclass cls) {
+    if (!js_protected_runtime_enter(env)) return JNI_FALSE;
+    jboolean result = jsn_k11(env, cls);
+    return js_protected_runtime_leave(env) ? result : JNI_FALSE;
+}
+
+static void JNICALL jsw_k12(JNIEnv *env, jclass cls) {
+    if (!js_protected_runtime_enter(env)) return;
+    jsn_k12(env, cls);
+    (void)js_protected_runtime_leave(env);
+}
+
+static void JNICALL jsw_k9(JNIEnv *env, jclass cls, jbyteArray preload_index, jbyteArray commitments, jbyteArray startup_nonce) {
+    if (!js_protected_runtime_enter(env)) return;
+    jsn_k9(env, cls, preload_index, commitments, startup_nonce);
+    (void)js_protected_runtime_leave(env);
+}
+
+static jbyteArray JNICALL jsw_k10(JNIEnv *env, jclass cls, jbyteArray keyIdArr, jbyteArray saltArr, jint length) {
+    if (!js_protected_runtime_enter(env)) return NULL;
+    jbyteArray result = jsn_k10(env, cls, keyIdArr, saltArr, length);
+    return js_protected_runtime_leave(env) ? result : NULL;
+}
+
+static void JNICALL jsw_r0(JNIEnv *env, jclass cls, jstring a, jstring b) {
+    if (!js_protected_runtime_enter(env)) return;
+    jsn_r0(env, cls, a, b);
+    (void)js_protected_runtime_leave(env);
+}
+
+static void JNICALL jsw_r1(JNIEnv *env, jclass cls, jstring a, jstring b) {
+    if (!js_protected_runtime_enter(env)) return;
+    jsn_r1(env, cls, a, b);
+    (void)js_protected_runtime_leave(env);
+}
+
+static void JNICALL jsw_r2(JNIEnv *env, jclass cls, jstring value) {
+    if (!js_protected_runtime_enter(env)) return;
+    jsn_r2(env, cls, value);
+    (void)js_protected_runtime_leave(env);
+}
+
+static void JNICALL jsw_r3(JNIEnv *env, jclass cls, jstring value) {
+    if (!js_protected_runtime_enter(env)) return;
+    jsn_r3(env, cls, value);
+    (void)js_protected_runtime_leave(env);
+}
+
+static void JNICALL jsw_r4(JNIEnv *env, jclass cls, jstring value, jclass ownerClass) {
+    if (!js_protected_runtime_enter(env)) return;
+    jsn_r4(env, cls, value, ownerClass);
+    (void)js_protected_runtime_leave(env);
+}
+
+static jstring JNICALL jsw_r11(JNIEnv *env, jclass cls, jbyteArray value) {
+    if (!js_protected_runtime_enter(env)) return NULL;
+    jstring result = jsn_r11(env, cls, value);
+    return js_protected_runtime_leave(env) ? result : NULL;
+}
+
+static jstring JNICALL jsw_r12(JNIEnv *env, jclass cls, jstring value) {
+    if (!js_protected_runtime_enter(env)) return NULL;
+    jstring result = jsn_r12(env, cls, value);
+    return js_protected_runtime_leave(env) ? result : NULL;
+}
+
+static jstring JNICALL jsw_r13(JNIEnv *env, jclass cls, jstring value) {
+    if (!js_protected_runtime_enter(env)) return NULL;
+    jstring result = jsn_r13(env, cls, value);
+    return js_protected_runtime_leave(env) ? result : NULL;
+}
+
+static jstring JNICALL jsw_r16(JNIEnv *env, jclass cls, jstring bindingSource, jstring salt) {
+    if (!js_protected_runtime_enter(env)) return NULL;
+    jstring result = jsn_r16(env, cls, bindingSource, salt);
+    return js_protected_runtime_leave(env) ? result : NULL;
+}
+
+static void JNICALL jsw_r17(JNIEnv *env, jclass cls, jstring expectedToken, jstring bindingSource, jstring salt) {
+    if (!js_protected_runtime_enter(env)) return;
+    jsn_r17(env, cls, expectedToken, bindingSource, salt);
+    (void)js_protected_runtime_leave(env);
+}
+
+static jobject JNICALL jsw_r20(JNIEnv *env, jclass cls, jlong entryToken, jstring resourcePath, jobjectArray args) {
+    if (!js_protected_runtime_enter(env)) return NULL;
+    jobject result = jsn_r20(env, cls, entryToken, resourcePath, args);
+    return js_protected_runtime_leave(env) ? result : NULL;
+}
+
+static jbyteArray JNICALL jsw_r21(JNIEnv *env, jclass cls, jbyteArray payload, jint seed, jint flags, jlong classIdentityHigh, jlong classIdentityLow) {
+    if (!js_protected_runtime_enter(env)) return NULL;
+    jbyteArray result = jsn_r21(env, cls, payload, seed, flags, classIdentityHigh, classIdentityLow);
+    return js_protected_runtime_leave(env) ? result : NULL;
+}
+
+static jobject JNICALL jsw_r22(JNIEnv *env, jclass cls, jlong entryToken, jobjectArray args) {
+    if (!js_protected_runtime_enter(env)) return NULL;
+    jobject result = jsn_r22(env, cls, entryToken, args);
+    return js_protected_runtime_leave(env) ? result : NULL;
+}
+
+static void JNICALL jsw_r23(JNIEnv *env, jclass cls, jlong entryToken) {
+    if (!js_protected_runtime_enter(env)) return;
+    jsn_r23(env, cls, entryToken);
+    (void)js_protected_runtime_leave(env);
+}
+
+static void JNICALL jsw_r24(JNIEnv *env, jclass cls, jlong entryToken, jint arg0) {
+    if (!js_protected_runtime_enter(env)) return;
+    jsn_r24(env, cls, entryToken, arg0);
+    (void)js_protected_runtime_leave(env);
+}
+
+static jint JNICALL jsw_r25(JNIEnv *env, jclass cls, jlong entryToken) {
+    if (!js_protected_runtime_enter(env)) return 0;
+    jint result = jsn_r25(env, cls, entryToken);
+    return js_protected_runtime_leave(env) ? result : 0;
+}
+
+static jint JNICALL jsw_r26(JNIEnv *env, jclass cls, jlong entryToken, jint arg0) {
+    if (!js_protected_runtime_enter(env)) return 0;
+    jint result = jsn_r26(env, cls, entryToken, arg0);
+    return js_protected_runtime_leave(env) ? result : 0;
+}
+
+static const js_native_abi_table js_native_abi_table_instance = {
+    JS_NATIVE_ABI_TABLE_VERSION,
+    jsw_k0,
+    jsw_k1,
+    jsw_k3,
+    jsw_k4,
+    jsw_k5,
+    jsw_k6,
+    jsw_k7,
+    jsw_k11,
+    jsw_k12,
+    jsw_k9,
+    jsw_k10,
+    jsw_r20,
+    jsw_r22,
+    jsw_r23,
+    jsw_r25,
+    jsw_r26,
+    jsw_r24,
+};
+
+JS_EXPORT const js_native_abi_table *js_native_abi_table_v1(void) {
+    return &js_native_abi_table_instance;
+}
 
 static jclass js_jni_cache_global_class(JNIEnv *env, const char *name) {
     jclass local = (*env)->FindClass(env, name);
@@ -91,6 +314,7 @@ JS_HIDDEN int js_jni_cache_init(JNIEnv *env) {
 #define JS_JNI_CLASS(field, name) do { js_jni_cache.field = js_jni_cache_global_class(env, name); if (!js_jni_cache.field) goto fail; } while (0)
 #define JS_JNI_METHOD(field, cls, name, sig) do { js_jni_cache.field = (*env)->GetMethodID(env, js_jni_cache.cls, name, sig); if (!js_jni_cache_require_member(env, js_jni_cache.field)) goto fail; } while (0)
 #define JS_JNI_STATIC_METHOD(field, cls, name, sig) do { js_jni_cache.field = (*env)->GetStaticMethodID(env, js_jni_cache.cls, name, sig); if (!js_jni_cache_require_member(env, js_jni_cache.field)) goto fail; } while (0)
+#define JS_JNI_FIELD(field, cls, name, sig) do { js_jni_cache.field = (*env)->GetFieldID(env, js_jni_cache.cls, name, sig); if (!js_jni_cache_require_member(env, js_jni_cache.field)) goto fail; } while (0)
 #define JS_JNI_STATIC_FIELD(field, cls, name, sig) do { js_jni_cache.field = (*env)->GetStaticFieldID(env, js_jni_cache.cls, name, sig); if (!js_jni_cache_require_member(env, js_jni_cache.field)) goto fail; } while (0)
 
     JS_JNI_CLASS(object_class, "java/lang/Object");
@@ -127,7 +351,12 @@ JS_HIDDEN int js_jni_cache_init(JNIEnv *env) {
     JS_JNI_METHOD(class_get_component_type, class_class, "getComponentType", "()Ljava/lang/Class;");
     JS_JNI_STATIC_METHOD(thread_current_thread, thread_class, "currentThread", "()Ljava/lang/Thread;");
     JS_JNI_METHOD(thread_get_context_class_loader, thread_class, "getContextClassLoader", "()Ljava/lang/ClassLoader;");
-    JS_JNI_METHOD(input_stream_read_all_bytes, input_stream_class, "readAllBytes", "()[B");
+    /* readAllBytes is Java 9+; keep the runtime loadable on Java 8 by treating it as optional. */
+    js_jni_cache.input_stream_read_all_bytes = (*env)->GetMethodID(env, js_jni_cache.input_stream_class, "readAllBytes", "()[B");
+    if ((*env)->ExceptionCheck(env) || !js_jni_cache.input_stream_read_all_bytes) {
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        js_jni_cache.input_stream_read_all_bytes = NULL;
+    }
     JS_JNI_METHOD(input_stream_close, input_stream_class, "close", "()V");
     JS_JNI_METHOD(string_builder_init, string_builder_class, "<init>", "()V");
     JS_JNI_METHOD(string_builder_append_string, string_builder_class, "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;");
@@ -186,30 +415,44 @@ JS_HIDDEN int js_jni_cache_init(JNIEnv *env) {
     JS_JNI_STATIC_FIELD(float_type_field, float_class, "TYPE", "Ljava/lang/Class;");
     JS_JNI_STATIC_FIELD(double_type_field, double_class, "TYPE", "Ljava/lang/Class;");
     JS_JNI_STATIC_FIELD(void_type_field, void_class, "TYPE", "Ljava/lang/Class;");
+    JS_JNI_FIELD(integer_value_field, integer_class, "value", "I");
+    JS_JNI_FIELD(boolean_value_field, boolean_class, "value", "Z");
+    JS_JNI_FIELD(byte_value_field, byte_class, "value", "B");
+    JS_JNI_FIELD(short_value_field, short_class, "value", "S");
+    JS_JNI_FIELD(character_value_field, character_class, "value", "C");
+    JS_JNI_FIELD(long_value_field, long_class, "value", "J");
+    JS_JNI_FIELD(float_value_field, float_class, "value", "F");
+    JS_JNI_FIELD(double_value_field, double_class, "value", "D");
 
     js_jni_cache.initialized = 1;
 #undef JS_JNI_CLASS
 #undef JS_JNI_METHOD
 #undef JS_JNI_STATIC_METHOD
+#undef JS_JNI_FIELD
 #undef JS_JNI_STATIC_FIELD
     return 1;
 fail:
 #undef JS_JNI_CLASS
 #undef JS_JNI_METHOD
 #undef JS_JNI_STATIC_METHOD
+#undef JS_JNI_FIELD
 #undef JS_JNI_STATIC_FIELD
     js_jni_cache_destroy(env);
     return 0;
 }
 
 static int js_register_natives(JNIEnv *env, const char *class_name, const JNINativeMethod *methods, int count, int required) {
-    jclass cls = js_vm_find_registration_class(env, class_name);
+    jclass cls = required ? js_vm_find_registration_class(env, class_name) : (*env)->FindClass(env, class_name);
     if (!cls) {
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        js_vm_clear_exception(env);
         return required ? 0 : 1;
     }
     if ((*env)->RegisterNatives(env, cls, methods, count) != 0) {
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        js_vm_clear_exception(env);
+        return required ? 0 : 1;
+    }
+    if ((*env)->ExceptionCheck(env)) {
+        js_vm_clear_exception(env);
         return required ? 0 : 1;
     }
     return 1;
@@ -261,49 +504,53 @@ static int js_register_native_group(JNIEnv *env, char *owner, JNINativeMethod *m
 
 static int js_register_all_natives(JNIEnv *env) {
     JNINativeMethod jni_microkernel_methods[] = {
-        {js_native_name("In", "it", ""), "(Ljava/lang/String;)I", (void*)jsn_k0},
-        {js_native_name("Ver", "ify", ""), "([B[B)I", (void*)jsn_k1},
-        {js_native_name("Heart", "beat", ""), "()I", (void*)jsn_k3},
-        {js_native_name("Get", "Ver", "sion"), "()Ljava/lang/String;", (void*)jsn_k5},
-        {js_native_name("Get", "Boot", "Token"), "()J", (void*)jsn_k6},
-        {js_native_name("Install", "RuntimeResource", "Key"), "([B)V", (void*)jsn_k7},
-        {js_native_name("Preload", "Runtime", "Resources"), "()V", (void*)jsn_k9},
-        {js_native_name("De", "crypt", "Aes"), "([B[B[B)[B", (void*)jsn_k4},
-        {js_native_name("Derive", "ClassEncryption", "Key"), "([B[BI)[B", (void*)jsn_k10},
-        {js_native_name("Ex", "ecuteVm", "Resource"), "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;", (void*)jsn_r20},
-        {js_native_name("Ex", "ecuteVmResource", "ByToken"), "(J[Ljava/lang/Object;)Ljava/lang/Object;", (void*)jsn_r22},
-        {js_native_name("Ex", "ecuteVmResource", "Void"), "(J)V", (void*)jsn_r23},
-        {js_native_name("Ex", "ecuteVmResourceInt", "Void"), "(JI)V", (void*)jsn_r24},
+        {js_native_name("In", "it", ""), "(Ljava/lang/String;)I", (void*)jsw_k0},
+        {js_native_name("Ver", "ify", ""), "([B[B)I", (void*)jsw_k1},
+        {js_native_name("Heart", "beat", ""), "()I", (void*)jsw_k3},
+        {js_native_name("Get", "Ver", "sion"), "()Ljava/lang/String;", (void*)jsw_k5},
+        {js_native_name("Get", "Boot", "Token"), "()J", (void*)jsw_k6},
+        {js_native_name("Install", "Boot", "Material"), "([B)Z", (void*)jsw_k7},
+        {js_native_name("Is", "BootMaterial", "Ready"), "()Z", (void*)jsw_k11},
+        {js_native_name("Abort", "Boot", "Material"), "()V", (void*)jsw_k12},
+        {js_native_name("Preload", "Runtime", "Resources"), "([B[B[B)V", (void*)jsw_k9},
+        {js_native_name("De", "crypt", "Aes"), "([B[B[B)[B", (void*)jsw_k4},
+        {js_native_name("Derive", "ClassEncryption", "Key"), "([B[BI)[B", (void*)jsw_k10},
+        {js_native_name("Ex", "ecuteVm", "Resource"), "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;", (void*)jsw_r20},
+        {js_native_name("Ex", "ecuteVmResource", "ByToken"), "(J[Ljava/lang/Object;)Ljava/lang/Object;", (void*)jsw_r22},
+        {js_native_name("Ex", "ecuteVmResource", "Void"), "(J)V", (void*)jsw_r23},
+        {js_native_name("Ex", "ecuteVmResource", "Int"), "(J)I", (void*)jsw_r25},
+        {js_native_name("Ex", "ecuteVmResourceInt", "Int"), "(JI)I", (void*)jsw_r26},
+        {js_native_name("Ex", "ecuteVmResourceInt", "Void"), "(JI)V", (void*)jsw_r24},
     };
     if (!js_register_native_group(env, js_helper_owner("Jni", "Micro", "kernel", "Helper"), jni_microkernel_methods, (int)(sizeof(jni_microkernel_methods) / sizeof(jni_microkernel_methods[0])), 1)) return 0;
 
-    JNINativeMethod anti_instrumentation_methods[] = {{js_native_name("Check", "Instr", "umentation"), "(Ljava/lang/String;Ljava/lang/String;)V", (void*)jsn_r0}};
+    JNINativeMethod anti_instrumentation_methods[] = {{js_native_name("Check", "Instr", "umentation"), "(Ljava/lang/String;Ljava/lang/String;)V", (void*)jsw_r0}};
     if (!js_register_native_group(env, js_helper_owner("An", "tiInstr", "umentation", "Helper"), anti_instrumentation_methods, 1, 0)) return 0;
 
-    JNINativeMethod anti_jvmti_methods[] = {{js_native_name("Check", "JvmTi", "Agents"), "(Ljava/lang/String;Ljava/lang/String;)V", (void*)jsn_r1}};
+    JNINativeMethod anti_jvmti_methods[] = {{js_native_name("Check", "JvmTi", "Agents"), "(Ljava/lang/String;Ljava/lang/String;)V", (void*)jsw_r1}};
     if (!js_register_native_group(env, js_helper_owner("An", "tiJvm", "Ti", "Helper"), anti_jvmti_methods, 1, 0)) return 0;
 
-    JNINativeMethod anti_bytebuddy_methods[] = {{js_native_name("Check", "Byte", "Buddy"), "(Ljava/lang/String;)V", (void*)jsn_r2}};
+    JNINativeMethod anti_bytebuddy_methods[] = {{js_native_name("Check", "Byte", "Buddy"), "(Ljava/lang/String;)V", (void*)jsw_r2}};
     if (!js_register_native_group(env, js_helper_owner("An", "tiByte", "Buddy", "Helper"), anti_bytebuddy_methods, 1, 0)) return 0;
 
     JNINativeMethod anti_dump_runtime_methods[] = {
-        {js_native_name("Init", "ialize", "Protection"), "(Ljava/lang/String;)V", (void*)jsn_r3},
-        {js_native_name("Init", "ialize", "Protection"), "(Ljava/lang/String;Ljava/lang/Class;)V", (void*)jsn_r4},
+        {js_native_name("Init", "ialize", "Protection"), "(Ljava/lang/String;)V", (void*)jsw_r3},
+        {js_native_name("Init", "ialize", "Protection"), "(Ljava/lang/String;Ljava/lang/Class;)V", (void*)jsw_r4},
     };
     if (!js_register_native_group(env, js_helper_owner("An", "tiDump", "Runtime", "Helper"), anti_dump_runtime_methods, 2, 0)) return 0;
 
     JNINativeMethod anti_dump_methods[] = {
-        {js_native_name("Build", "String", ""), "([B)Ljava/lang/String;", (void*)jsn_r11},
-        {js_native_name("Build", "StringFrom", "B64"), "(Ljava/lang/String;)Ljava/lang/String;", (void*)jsn_r12},
-        {js_native_name("Decode", "String", ""), "(Ljava/lang/String;)Ljava/lang/String;", (void*)jsn_r13},
+        {js_native_name("Build", "String", ""), "([B)Ljava/lang/String;", (void*)jsw_r11},
+        {js_native_name("Build", "StringFrom", "B64"), "(Ljava/lang/String;)Ljava/lang/String;", (void*)jsw_r12},
+        {js_native_name("Decode", "String", ""), "(Ljava/lang/String;)Ljava/lang/String;", (void*)jsw_r13},
     };
     if (!js_register_native_group(env, js_helper_owner("An", "tiDump", "", "Helper"), anti_dump_methods, 3, 0)) return 0;
 
-    JNINativeMethod string_encryption_methods[] = {{js_native_name("Decode", "String", ""), "([BII)[B", (void*)jsn_r21}};
+    JNINativeMethod string_encryption_methods[] = {{js_native_name("Decode", "String", ""), "([BIIJJ)[B", (void*)jsw_r21}};
     if (!js_register_native_group(env, js_helper_owner("String", "Encryption", "", "Helper"), string_encryption_methods, 1, 0)) return 0;
     JNINativeMethod environment_methods[] = {
-        {js_native_name("Derive", "Key", ""), "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", (void*)jsn_r16},
-        {js_native_name("Verify", "Environment", ""), "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", (void*)jsn_r17},
+        {js_native_name("Derive", "Key", ""), "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", (void*)jsw_r16},
+        {js_native_name("Verify", "Environment", ""), "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", (void*)jsw_r17},
     };
     if (!js_register_native_group(env, js_helper_owner("Environment", "Binding", "", "Helper"), environment_methods, 2, 0)) return 0;
 
@@ -311,22 +558,37 @@ static int js_register_all_natives(JNIEnv *env) {
 }
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
+    if (reserved == JS_SHELL_MANUAL_MAP_RESERVED) js_jni_runtime_manual_mapped_shell = 1;
+    if (!js_protected_section_enter()) return JNI_ERR;
     js_native_anti_dump_harden();
     js_vm_cache_lock_init();
     (void)reserved;
     JNIEnv *env = NULL;
     if ((*vm)->GetEnv(vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK || env == NULL) {
+        (void)js_protected_section_leave();
         return JNI_ERR;
     }
-    if (!js_jni_cache_init(env)) return JNI_ERR;
-    int ok = js_register_all_natives(env);
+    if (!js_jni_cache_init(env)) {
+        (void)js_protected_section_leave();
+        return JNI_ERR;
+    }
+    int ok = 1;
+    if (!js_jni_runtime_manual_mapped_shell) {
+        ok = js_register_all_natives(env);
+        if (ok && (*env)->ExceptionCheck(env)) {
+            js_vm_clear_exception(env);
+            ok = 0;
+        }
+    }
     if (ok) js_vm_mark_hot_integrity_baseline_clean();
     if (!ok) js_jni_cache_destroy(env);
+    if (!js_protected_section_leave()) ok = 0;
     return ok ? JNI_VERSION_1_6 : JNI_ERR;
 }
 
 JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *reserved) {
     (void)reserved;
+    if (js_jni_runtime_manual_mapped_shell) return;
     JNIEnv *env = NULL;
     if ((*vm)->GetEnv(vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK) env = NULL;
     js_runtime_on_unload_cleanup(env);

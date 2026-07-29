@@ -22,6 +22,7 @@ import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_CLEAN_ENTRY_INTEGRITY_HEX
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.hkdfSha256
 import io.github.hht0rro.javashroud.transforms.protection.requireVbc4BuildContext
 
 /**
@@ -34,7 +35,7 @@ data class StringEncryptionConfig(
 )
 
 private const val STRING_HELPER_OWNER = "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper"
-private const val STRING_HELPER_DECODE_DESC = "([BII)Ljava/lang/String;"
+private const val STRING_HELPER_DECODE_DESC = "([BIIJJ)Ljava/lang/String;"
 private const val SHROUD_ENCRYPT_DESC = "Lio/github/hht0rro/javashroud/bytecode/ShroudEncrypt;"
 
 /**
@@ -52,6 +53,9 @@ fun encryptClassStrings(
 
     val random = deterministicRandom(config.seed, classNode.name)
     val classSalt = mix32(classNode.name.hashCode() + random.nextInt())
+    val classIdentity = deriveStringClassIdentity(classNode.name)
+    val classIdentityHigh = readLongBe(classIdentity, 0)
+    val classIdentityLow = readLongBe(classIdentity, 8)
     var encryptedCount = 0
 
     for (method in classNode.methods) {
@@ -65,8 +69,8 @@ fun encryptClassStrings(
             if (!shouldEncryptString(value, config, annotated)) continue
             val literalSeed = mix32(methodSalt + encryptedCount + random.nextInt())
             val flags = mix32(classSalt.rotateLeft(5) + methodSalt.rotateRight(3) + encryptedCount)
-            val payload = encodeStringPayload(value, literalSeed, flags)
-            instructions.insert(insn, buildDecodeCallsite(literalSeed, flags, payload))
+            val payload = encodeStringPayload(value, literalSeed, flags, classIdentity)
+            instructions.insert(insn, buildDecodeCallsite(literalSeed, flags, classIdentityHigh, classIdentityLow, payload))
             instructions.remove(insn)
             encryptedCount++
         }
@@ -187,11 +191,15 @@ private fun shouldEncryptString(value: String, config: StringEncryptionConfig, a
 private fun buildDecodeCallsite(
     seed: Int,
     flags: Int,
+    classIdentityHigh: Long,
+    classIdentityLow: Long,
     payload: ByteArray,
 ): InsnList = InsnList().apply {
     addByteArray(payload)
     addInt(seed)
     addInt(flags)
+    add(LdcInsnNode(classIdentityHigh))
+    add(LdcInsnNode(classIdentityLow))
     add(MethodInsnNode(Opcodes.INVOKESTATIC, STRING_HELPER_OWNER, "cachedDecodeString", STRING_HELPER_DECODE_DESC, false))
 }
 
@@ -221,51 +229,89 @@ private fun InsnList.addInt(value: Int) {
     }
 }
 
-internal fun encodeStringPayload(input: String, seed: Int, flags: Int): ByteArray {
+internal fun encodeStringPayload(input: String, seed: Int, flags: Int, classIdentity: ByteArray): ByteArray {
     val plain = input.toByteArray(Charsets.UTF_8)
-    return stringPayloadAesCtr(plain, seed, flags)
+    return stringPayloadAesCtr(plain, seed, flags, classIdentity)
 }
 
-internal fun decodeStringPayload(payload: ByteArray, seed: Int, flags: Int): ByteArray = stringPayloadAesCtr(payload, seed, flags)
+internal fun decodeStringPayload(payload: ByteArray, seed: Int, flags: Int, classIdentity: ByteArray): ByteArray =
+    stringPayloadAesCtr(payload, seed, flags, classIdentity)
 
-private fun stringPayloadAesCtr(data: ByteArray, seed: Int, flags: Int): ByteArray {
-    // TASK-203 audit: string-encryption derivation root is Vbc4BuildContext
-    // (master key + layout digest via session-integrity material), using
-    // HMAC-SHA256 keyed PRF. This is cryptographically sound (not enumerable,
-    // not non-cryptographic). Unification to the shared HKDF-SHA256 skeleton
-    // (TASK-101) is deferred: it changes byte output and requires synchronized
-    // native jsn_r21 changes + target-platform smoke testing.
+private fun stringPayloadAesCtr(data: ByteArray, seed: Int, flags: Int, classIdentity: ByteArray): ByteArray {
+    require(classIdentity.size == 16) { "string class identity must be 16 bytes" }
     val buildContext = requireVbc4BuildContext()
     val cipher = Cipher.getInstance("AES/CTR/NoPadding")
     cipher.init(
         Cipher.ENCRYPT_MODE,
-        SecretKeySpec(stringPayloadAesKey(buildContext, seed, flags, data.size), "AES"),
-        IvParameterSpec(stringPayloadAesIv(buildContext, seed, flags, data.size)),
+        SecretKeySpec(stringPayloadAesKey(buildContext, seed, flags, data.size, classIdentity), "AES"),
+        IvParameterSpec(stringPayloadAesIv(buildContext, seed, flags, data.size, classIdentity)),
     )
     return cipher.doFinal(data)
 }
 
-private fun stringPayloadAesKey(buildContext: Vbc4BuildContext, seed: Int, flags: Int, length: Int): ByteArray =
-    stringPayloadHmac(buildContext, "js-string-aes-key", seed, flags, length).copyOfRange(0, 16)
+private fun stringPayloadAesKey(buildContext: Vbc4BuildContext, seed: Int, flags: Int, length: Int, classIdentity: ByteArray): ByteArray =
+    stringPayloadHmac(buildContext, "js-string-aes-key", seed, flags, length, classIdentity).copyOfRange(0, 16)
 
-private fun stringPayloadAesIv(buildContext: Vbc4BuildContext, seed: Int, flags: Int, length: Int): ByteArray =
-    stringPayloadHmac(buildContext, "js-string-aes-iv", seed, flags, length).copyOfRange(0, 16)
+private fun stringPayloadAesIv(buildContext: Vbc4BuildContext, seed: Int, flags: Int, length: Int, classIdentity: ByteArray): ByteArray =
+    stringPayloadHmac(buildContext, "js-string-aes-iv", seed, flags, length, classIdentity).copyOfRange(0, 16)
 
-private fun stringPayloadHmac(buildContext: Vbc4BuildContext, label: String, seed: Int, flags: Int, length: Int): ByteArray {
+internal fun deriveStringEncryptionRoot(buildContext: Vbc4BuildContext): ByteArray {
+    val masterKey = buildContext.copyMasterKey()
+    return try {
+        hkdfSha256(
+            ikm = masterKey,
+            salt = "javashroud-string-root-v1".toByteArray(Charsets.US_ASCII),
+            info = buildContext.jarLayoutDigest,
+            length = 32,
+        )
+    } finally {
+        java.util.Arrays.fill(masterKey, 0)
+    }
+}
+
+internal fun deriveStringClassIdentity(classInternalName: String): ByteArray {
+    val digest = MessageDigest.getInstance("SHA-256")
+    digest.update("javashroud-string-class-identity-v1".toByteArray(Charsets.US_ASCII))
+    digest.update(0)
+    digest.update(classInternalName.toByteArray(Charsets.UTF_8))
+    return digest.digest().copyOfRange(0, 16)
+}
+
+private fun stringPayloadHmac(
+    buildContext: Vbc4BuildContext,
+    label: String,
+    seed: Int,
+    flags: Int,
+    length: Int,
+    classIdentity: ByteArray,
+): ByteArray {
     val parts = listOf(
         label.toByteArray(Charsets.US_ASCII),
         intBytes(seed),
         intBytes(flags),
         intBytes(length),
     )
-    val sessionMaterial = MessageDigest.getInstance("SHA-256").apply {
-        update("vbc4-session-integrity".toByteArray(Charsets.US_ASCII))
-        update(buildContext.copyMasterKey())
-        update(buildContext.jarLayoutDigest)
-        update(cleanEntryIntegrityBytes())
-    }.digest()
-    val scopedKey = hmacSha256(sessionMaterial, parts)
-    return hmacSha256(scopedKey, parts)
+    val stringRoot = deriveStringEncryptionRoot(buildContext)
+    return try {
+        val classKey = hkdfSha256(
+            ikm = stringRoot,
+            salt = "javashroud-string-class-v1".toByteArray(Charsets.US_ASCII),
+            info = classIdentity,
+            length = 32,
+        )
+        try {
+            val scopedKey = hmacSha256(classKey, parts)
+            try {
+                hmacSha256(scopedKey, parts)
+            } finally {
+                java.util.Arrays.fill(scopedKey, 0)
+            }
+        } finally {
+            java.util.Arrays.fill(classKey, 0)
+        }
+    } finally {
+        java.util.Arrays.fill(stringRoot, 0)
+    }
 }
 
 private fun hmacSha256(key: ByteArray, parts: List<ByteArray>): ByteArray {
@@ -275,16 +321,18 @@ private fun hmacSha256(key: ByteArray, parts: List<ByteArray>): ByteArray {
     return mac.doFinal()
 }
 
-private fun cleanEntryIntegrityBytes(): ByteArray = VBC4_CLEAN_ENTRY_INTEGRITY_HEX.chunked(2)
-    .map { it.toInt(16).toByte() }
-    .toByteArray()
-
 private fun intBytes(value: Int): ByteArray = byteArrayOf(
     ((value ushr 24) and 0xFF).toByte(),
     ((value ushr 16) and 0xFF).toByte(),
     ((value ushr 8) and 0xFF).toByte(),
     (value and 0xFF).toByte(),
 )
+
+private fun readLongBe(bytes: ByteArray, offset: Int): Long {
+    var value = 0L
+    for (index in 0 until 8) value = (value shl 8) or (bytes[offset + index].toLong() and 0xFFL)
+    return value
+}
 private fun mix32(value: Int): Int {
     var x = value
     x += x.rotateRight(16)

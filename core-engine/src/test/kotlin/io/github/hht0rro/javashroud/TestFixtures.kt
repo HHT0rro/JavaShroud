@@ -12,8 +12,26 @@ import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
 import io.github.hht0rro.javashroud.model.config.PassSpec
 import io.github.hht0rro.javashroud.model.config.RuleSet
 import io.github.hht0rro.javashroud.model.config.RuleSpec
+import io.github.hht0rro.javashroud.transforms.protection.NativeKernelShellPacker
 import java.nio.file.Files
 import java.nio.file.Path
+
+internal val TEST_BOOT_SECRET: ByteArray = ByteArray(32) { index -> (index * 13 + 7).toByte() }
+internal val TEST_BOOT_SECRET_HEX: String = TEST_BOOT_SECRET.joinToString("") { byte -> "%02x".format(byte.toInt() and 0xFF) }
+
+internal inline fun <T> withTestBootSecret(block: () -> T): T {
+    val previous = NativeKernelShellPacker.buildBootSecretProvider
+    NativeKernelShellPacker.buildBootSecretProvider = { TEST_BOOT_SECRET.copyOf() }
+    return try {
+        block()
+    } finally {
+        NativeKernelShellPacker.buildBootSecretProvider = previous
+    }
+}
+
+internal fun ProcessBuilder.withTestBootSecret(): ProcessBuilder = apply {
+    environment()[NativeKernelShellPacker.BOOT_SECRET_ENV] = TEST_BOOT_SECRET_HEX
+}
 
 internal fun testConfig(
     inputJarPath: String = "C:/tmp/input.jar",

@@ -28,6 +28,7 @@ class ModuleRegistrySmokeTest {
         assertEquals(
             listOf(
                 "strip-compile-debug-info",
+                "member-shuffle",
             ),
             ids,
         )

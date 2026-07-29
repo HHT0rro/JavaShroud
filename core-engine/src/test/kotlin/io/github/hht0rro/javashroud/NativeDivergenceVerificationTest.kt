@@ -1,6 +1,8 @@
 package io.github.hht0rro.javashroud
 
 import io.github.hht0rro.javashroud.transforms.protection.NativeRecompilationTransforms
+import io.github.hht0rro.javashroud.transforms.protection.NativeVmBuildProfile
+import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
 import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
@@ -9,6 +11,37 @@ import java.nio.file.Files
 import java.nio.file.Path
 
 class NativeDivergenceVerificationTest {
+
+    @Test
+    fun native_source_compiles_exactly_one_parser_and_operand_family_per_profile() {
+        val source = Files.readString(Path.of(NATIVE_INTERPRETER_CODEGEN_SOURCE))
+        assertTrue(source.contains("#if JS_NATIVE_PARSER_PROFILE != 0"))
+        assertTrue(source.contains("#if JS_NATIVE_PARSER_PROFILE == 2"))
+        assertTrue(source.contains("js_vbc4_read_native_row"))
+        assertTrue(source.contains("#if JS_NATIVE_OPERAND_PROFILE == 0"))
+        assertTrue(source.contains("#elif JS_NATIVE_OPERAND_PROFILE == 1"))
+        assertTrue(source.contains("#elif JS_NATIVE_OPERAND_PROFILE == 2"))
+        val operandAccessor = source.substringAfter("JS_PROTECTED static jint js_vm_profile_fetch_operand").substringBefore("JS_PROTECTED jint js_vm_resident_exception_mask")
+        assertFalse(operandAccessor.contains("if (profile =="), "Operand family must no longer be selected by a runtime profile branch")
+
+        val generatedProfiles = (0..2).flatMap { parser ->
+            (0..2).map { operand ->
+                val context = Vbc4BuildContext(
+                    masterKey = ByteArray(32) { it.toByte() },
+                    nativeSeed = 0x1234_5678L,
+                    jarLayoutDigest = ByteArray(32) { (it * 3).toByte() },
+                    nativeVmProfile = NativeVmBuildProfile(parser, operand),
+                )
+                NativeRecompilationTransforms.generateDiversifiedSecrets(7L, java.util.Random(7L), context)
+            }
+        }
+        assertTrue(generatedProfiles.withIndex().all { (index, secrets) ->
+            val parser = index / 3
+            val operand = index % 3
+            secrets.contains("#define JS_NATIVE_PARSER_PROFILE $parser") &&
+                secrets.contains("#define JS_NATIVE_OPERAND_PROFILE $operand")
+        }, "All 3x3 build-local profile combinations must generate explicit compile-time macros")
+    }
 
     @Test
     fun diversifiedSecrets_differ_across_10_seeds() {
@@ -58,6 +91,10 @@ class NativeDivergenceVerificationTest {
         }
 
         assertTrue(outputs.all { it.contains("VBC4_INTERPRETER_CODEGEN") }, "Interpreter codegen must mark every generated dispatch layout")
+        assertTrue(outputs.all { output ->
+            output.contains("js_vm_profile_case_salt(js_vm_dispatch_profile") &&
+                output.contains("js_vm_profile_case_matches(js_vm_dispatch_profile")
+        }, "Interpreter codegen must preserve profile-aware salt and case matching in every generated dispatch shape")
         assertTrue(outputs.any { it.contains("js_vm_handler_variant_") }, "Interpreter codegen must inject per-build handler variants")
         assertTrue(outputs.any { it.contains("VBC4_HANDLER_RELOCATION") }, "Interpreter codegen must inject per-build handler relocation trampolines")
         assertTrue(outputs.flatMap(::dispatchRelocationShapes).toSet().size > 1,

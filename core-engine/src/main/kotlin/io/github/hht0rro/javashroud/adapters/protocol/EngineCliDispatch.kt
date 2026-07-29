@@ -2,6 +2,7 @@ package io.github.hht0rro.javashroud.adapters.protocol
 
 import io.github.hht0rro.javashroud.capabilities.buildEngineSchemaPayload
 import io.github.hht0rro.javashroud.kernel.EngineKernel
+import io.github.hht0rro.javashroud.maintenance.RuntimeGarbageCollector
 import io.github.hht0rro.javashroud.model.protocol.EngineEvent
 
 // --- single dispatch entry point ---
@@ -17,6 +18,7 @@ internal fun handleResolvedRequest(request: EngineCliRequest, kernel: EngineKern
 internal fun dispatchRequest(request: EngineCliRequest, kernel: EngineKernel): Unit {
     when (request) {
         SchemaCommandRequest -> handleSchemaCommand()
+        is GarbageCollectCommandRequest -> handleGarbageCollectCommand(request)
         is InspectCommandRequest -> handleInspectCommand(request = request, kernel = kernel)
         is RunCommandRequest -> handleRunCommand(request = request.runRequest, kernel = kernel)
     }
@@ -36,12 +38,17 @@ private fun handleRunCommand(request: EngineRunRequest, kernel: EngineKernel): U
     kernel.run(request.config, request.configPath, ::writeEvent)
 }
 
+private fun handleGarbageCollectCommand(request: GarbageCollectCommandRequest): Unit {
+    val result = RuntimeGarbageCollector.collect(apply = request.apply)
+    writeProtocolTextLine(buildGarbageCollectionReport(result))
+}
+
 // --- failure handling ---
 
 fun handleCommandFailure(command: EngineCommand, error: Throwable): Nothing {
     return when (command) {
         EngineCommand.Run -> failWithEvent(error)
-        EngineCommand.Schema, EngineCommand.Inspect -> failWithStderr(error)
+        EngineCommand.Schema, EngineCommand.Inspect, EngineCommand.GarbageCollect -> failWithStderr(error)
     }
 }
 

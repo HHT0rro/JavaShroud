@@ -9,6 +9,7 @@ val slf4jVersion = "2.0.17"
 val snakeyamlVersion = "2.5"
 val commonsIoVersion = "2.20.0"
 val commonsCompressVersion = "1.28.0"
+val xzVersion = "1.10"
 val guavaVersion = "33.4.8-jre"
 val gsonVersion = "2.13.1"
 val jphantomVersion = "1.4.4"
@@ -16,7 +17,7 @@ val dex2jarVersion = "2.4.28"
 val cafed00dVersion = "2.1.4"
 val jlinkerVersion = "1.0.7"
 val aircompressorVersion = "0.27"
-val javaShroudVersion = "0.9.2-dev"
+val javaShroudVersion = "0.12"
 val javaShroudVbcVersion = "4.55"
 
 allprojects {
@@ -34,6 +35,7 @@ allprojects {
         set("snakeyamlVersion", snakeyamlVersion)
         set("commonsIoVersion", commonsIoVersion)
         set("commonsCompressVersion", commonsCompressVersion)
+        set("xzVersion", xzVersion)
         set("guavaVersion", guavaVersion)
         set("gsonVersion", gsonVersion)
         set("jphantomVersion", jphantomVersion)

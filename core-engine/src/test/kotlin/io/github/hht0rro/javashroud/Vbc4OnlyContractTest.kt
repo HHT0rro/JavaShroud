@@ -1,6 +1,6 @@
 package io.github.hht0rro.javashroud
 
-import io.github.hht0rro.javashroud.capabilities.buildEngineSchemaPayload
+import io.github.hht0rro.javashroud.transforms.protection.RuntimeKeyPartitions
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
@@ -10,6 +10,7 @@ import io.github.hht0rro.javashroud.transforms.protection.VmBytecodeSerializer
 import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.encodeNativeDiversifiedVmResource
 import io.github.hht0rro.javashroud.transforms.protection.vmStateBinding
+import io.github.hht0rro.javashroud.transforms.protection.vbc4MixedOperandRowToken
 import org.objectweb.asm.Opcodes
 import java.nio.file.Files
 import java.nio.file.Path
@@ -72,11 +73,13 @@ class Vbc4OnlyContractTest {
         }
 
         val first = serializedFor("META-INF/vm/a.bin")
+        val repeat = serializedFor("META-INF/vm/a.bin")
         val second = serializedFor("META-INF/vm/b.bin")
 
         assertEquals("VBC4", first.copyOfRange(0, 4).toString(Charsets.US_ASCII))
         assertEquals("VBC4", second.copyOfRange(0, 4).toString(Charsets.US_ASCII))
-        assertTrue(first.copyOfRange(6, 22).contentEquals(second.copyOfRange(6, 22)), "Same program and seed should keep nonce stable")
+        assertFalse(first.copyOfRange(6, 22).contentEquals(repeat.copyOfRange(6, 22)), "Fresh per-entry constant-pool sealing must diversify the VBC4 nonce")
+        assertFalse(first.copyOfRange(6, 22).contentEquals(second.copyOfRange(6, 22)), "Independent VBC4 serializations must not reuse a nonce")
         assertFalse(first.copyOfRange(26, 42).contentEquals(second.copyOfRange(26, 42)), "Wrapped seed token must change when resource-path binding changes")
         assertFalse(first.copyOfRange(first.size - 33, first.size - 1).contentEquals(second.copyOfRange(second.size - 33, second.size - 1)), "VBC4 MAC must authenticate the binding-derived seed token")
     }
@@ -116,7 +119,10 @@ class Vbc4OnlyContractTest {
         )
 
         assertTrue(codecSource.contains("AES/CTR/NoPadding"), "Build-time runtime resource sealing must use AES-CTR plus HMAC authentication")
-        assertTrue(helperSource.contains("AES/CTR/NoPadding"), "Runtime resource unsealing must use AES-CTR plus HMAC authentication")
+        assertTrue(
+            helperSource.contains("aesCtrCrypt(key, iv, bytes)") && helperSource.contains("aesEncryptBlock") && helperSource.contains("hmacSha256(byte[] key"),
+            "Runtime resource unsealing must use the Java 8-compatible AES-CTR plus HMAC implementation",
+        )
         forbiddenRuntimeStreamMarkers.forEach { marker ->
             assertFalse(combinedSource.contains(marker), "Runtime resource codec/helper must fail closed against legacy user-reachable XOR stream marker: $marker")
         }
@@ -124,17 +130,19 @@ class Vbc4OnlyContractTest {
     }
 
     @Test
-    fun runtime_resource_compress_parameter_changes_authenticated_storage() = withVbc4BuildContext(fixedVbc4Context()) {
+    fun runtime_resource_compress_parameter_changes_authenticated_partitioned_storage() = withVbc4BuildContext(fixedPartitionedVbc4Context()) {
         val plain = ByteArray(32768) { 0x41 }
         val compressed = RuntimeResourceCodec.encode(plain, RuntimeResourceKind.VmBytecode, seed = 0x2468_1357, variantId = 4, layerCount = 3, compress = true)
         val stored = RuntimeResourceCodec.encode(plain, RuntimeResourceKind.VmBytecode, seed = 0x2468_1357, variantId = 4, layerCount = 3, compress = false)
 
+        assertEquals(7, compressed[4].toInt() and 0xFF, "Runtime resources must use the partitioned JSRP v7 envelope")
+        assertEquals(7, stored[4].toInt() and 0xFF, "Uncompressed runtime resources must still use the partitioned JSRP v7 envelope")
         assertTrue(compressed.size < stored.size, "compress=true should store compressible VM resources smaller than forced plain storage")
         assertEquals(plain.toList(), RuntimeResourceCodec.decode(compressed)?.toList(), "compressed resource must round-trip")
         assertEquals(plain.toList(), RuntimeResourceCodec.decode(stored)?.toList(), "uncompressed resource must round-trip")
         val tampered = compressed.copyOf()
-        tampered[25] = (tampered[25].toInt() xor 0x11).toByte()
-        assertEquals(null, RuntimeResourceCodec.decode(tampered), "metadata compressed flag and hashes must be MAC-authenticated")
+        tampered[27] = (tampered[27].toInt() xor 0x11).toByte()
+        assertEquals(null, RuntimeResourceCodec.decode(tampered), "partitioned metadata and hashes must be MAC-authenticated")
     }
 
     @Test
@@ -146,12 +154,12 @@ class Vbc4OnlyContractTest {
 
         assertTrue(helperSource.contains("nativeVerify(byte[] data, byte[] expectedMac)"), "Java nativeVerify ABI must accept a keyed MAC byte array, not a recomputable int hash")
         assertTrue(sealingSource.contains("addMethod(jniHelper, \"nativeVerify\", \"([B[B)I\")"), "Sealed helper rename plan must preserve the byte-array MAC signature")
-        assertTrue(nativeHelpers.contains("\"([B[B)I\", (void*)jsn_k1"), "JNI registration must bind nativeVerify to the keyed MAC signature")
+        assertTrue(nativeHelpers.contains("\"([B[B)I\", (void*)jsw_k1"), "JNI registration must bind nativeVerify to the keyed MAC signature through the lifecycle wrapper")
         assertTrue(nativeKernel.contains("js_native_keyed_mac64"), "Native verify must compute a keyed MAC using native secret material")
         assertTrue(nativeKernel.contains("js_consttime_eq8"), "Native verify must compare MACs without early-exit equality")
         assertFalse(nativeKernel.contains("computed = fnv1a_hash((const unsigned char*)bytes, len)"), "Native verify must not use unkeyed FNV over attacker-controlled bytes")
         assertFalse(helperSource.contains("nativeVerify(byte[] data, int expectedHash)"), "Java nativeVerify ABI must not retain the old int hash parameter")
-        assertFalse(nativeHelpers.contains("\"([BI)I\", (void*)jsn_k1"), "JNI registration must not retain the old int hash signature")
+        assertFalse(nativeHelpers.contains("\"([BI)I\", (void*)jsw_k1"), "JNI registration wrapper must not retain the old int hash signature")
     }
 
     @Test
@@ -175,9 +183,10 @@ class Vbc4OnlyContractTest {
     @Test
     fun jni_helper_rejects_legacy_runtime_resource_envelopes() {
         val source = Files.readString(resolveSource("src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
+        val codecSource = Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/RuntimeResourceCodec.kt"))
 
         assertFalse(source.contains("decodeRuntimeResourceV"), "JNI helper must not retain numbered runtime-resource decoder entrypoints")
-        assertTrue(source.contains("RUNTIME_RESOURCE_VERSION = 6"), "JNI helper must pin runtime resources to the current opaque VBC4-only envelope version")
+        assertTrue(source.contains("RUNTIME_RESOURCE_VERSION = 7"), "JNI helper must pin runtime resources to the current partitioned envelope version")
         assertFalse(source.contains("decoded != null ? decoded : raw"), "JNI helper must not pass through raw pre-VBC4 or unsealed resources")
         assertTrue(source.contains("throw new IllegalArgumentException(\"unsupported runtime resource envelope\")"), "JNI helper must fail closed on non-current runtime resources")
         assertFalse(source.contains("transformRuntimeResourceLayer"), "JNI helper must not retain legacy seed-derived runtime-resource transforms")
@@ -185,6 +194,14 @@ class Vbc4OnlyContractTest {
         assertFalse(source.contains("sealedResourceMix"), "JNI helper must not retain legacy sealed native mixing")
         assertFalse(source.contains("legacyNativeRoot"), "JNI helper must not load raw legacy native resources")
         assertFalse(source.contains("bundledLibraryNames"), "JNI helper must not enumerate raw legacy native library names")
+        assertTrue(codecSource.contains("private const val version = 7"), "Build-time codec must pin the only supported JSRP envelope to v7")
+        listOf("legacyVersion", "decodeWithKey", "decodeCurrent", "decodeLegacy", "jsrp-auth-v2").forEach { marker ->
+            assertFalse(codecSource.contains(marker), "Build-time codec must not retain pre-v7 compatibility marker: $marker")
+        }
+
+        val helperClass = Class.forName("io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper")
+        val decode = helperClass.getDeclaredMethod("decodeRuntimeResourceEnvelope", ByteArray::class.java)
+        assertEquals(null, decode.invoke(null, "JSRP".toByteArray(Charsets.US_ASCII)), "A four-byte JSRP prefix must fail closed without reading a missing version byte")
     }
 
     @Test
@@ -236,7 +253,8 @@ class Vbc4OnlyContractTest {
     @Test
     fun anti_dump_full_initialization_does_not_poison_vbc4_constant_pool_decode() {
         val nativeCore = Files.readString(resolveSource("src/main/native/js_vm_core.c"))
-        val antiDumpInit = nativeCore.substringAfter("JS_LOCAL void JNICALL\njsn_r4")
+        val normalizedNativeCore = nativeCore.replace("\r\n", "\n")
+        val antiDumpInit = normalizedNativeCore.substringAfter("JS_LOCAL void JNICALL\njsn_r4")
             .substringBefore("JS_LOCAL jstring JNICALL\njsn_r11")
 
         assertTrue(
@@ -250,19 +268,44 @@ class Vbc4OnlyContractTest {
     }
 
     @Test
-    fun preload_uses_owned_binding_path_when_parsing_state_bound_vbc4_resources() {
-        val nativeCore = Files.readString(resolveSource("src/main/native/js_vm_core.c"))
-        val preloadBody = nativeCore.substringAfter("JS_LOCAL void JNICALL\njsn_k9")
-            .substringBefore("JS_HIDDEN char* js_lookup_bound_class")
+    fun lazy_preload_uses_call_gate_owned_binding_path_for_state_bound_vbc4_resources() {
+        val nativeResource = Files.readString(resolveSource("src/main/native/js_vm_resource.c"))
+        assertTrue(
+            nativeResource.contains("const char *gate_path = binding_resource_path") &&
+                nativeResource.contains("js_vm_call_gate_register_profile((jlong)token, gate_path, expected_profile)"),
+            "Catalog registration must copy the authenticated binding path into the persistent call gate",
+        )
+        assertTrue(
+            nativeResource.contains("js_vm_prepare_resource_program_bound(env, resource_cls, entry_token, resourcePath, resource_path)"),
+            "On-demand parsing must use the call-gate-owned binding path for VBC4 state binding",
+        )
+    }
 
-        assertTrue(
-            preloadBody.contains("char *cache_resource_path = preload_binding_path ? js_strdup(preload_binding_path) : NULL"),
-            "Preload must keep an owned binding path copy before wiping index-backed resource path strings",
-        )
-        assertTrue(
-            preloadBody.contains("js_vm_prepare_resource_program_bound(env, cls, (jlong)token, resource_jstr, cache_path)"),
-            "Preload parsing must use the owned cache_path for VBC4 state binding, not a wiped/freed preload_binding_path pointer",
-        )
+    @Test
+    fun typed_catalog_plan_binds_manifest_mesh_and_method_profile() {
+        val virtualizationSource = Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/MethodVirtualizationTransforms.kt"))
+        val catalogSource = Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/RuntimeVmCatalog.kt"))
+        val nativeCore = Files.readString(resolveSource("src/main/native/js_vm_core.c"))
+        val nativeResource = Files.readString(resolveSource("src/main/native/js_vm_resource.c"))
+        val nativeResourceHeader = Files.readString(resolveSource("src/main/native/js_vm_resource.h"))
+
+        assertTrue(virtualizationSource.contains("RuntimeVmCatalogMethod") && virtualizationSource.contains("methodLocalProfile") &&
+            catalogSource.contains("jsc1-method-auth-v1") && catalogSource.contains("runtimeVmCatalogMethodAuthTag"),
+            "Typed catalog plan must authenticate resource, manifest, mesh and method-local profile material")
+        assertTrue(nativeCore.contains("js_vm_preload_entry_auth_matches") && nativeCore.contains("invalid VM preload profile auth"),
+            "Native preload parser must verify the V2 entry auth tag before loading VM resources")
+        assertTrue(nativeResource.contains("program->method_local_profile != gate->expected_profile") && nativeResource.contains("native VM preload profile mismatch"),
+            "Native preload parser must bind index profile to the parsed VM metadata profile")
+        assertTrue(nativeResourceHeader.contains("expected_profile") && nativeResource.contains("js_vm_call_gate_register_profile"),
+            "Preload call gates must retain the expected method-local profile for on-demand native loading")
+        assertTrue(nativeResource.contains("js_manifest_mesh_link_matches") && nativeResource.contains("js_manifest_peer_link_matches") && nativeResource.contains("js_manifest_order_token"),
+            "Native sliced-resource reassembly must validate meshLink, peerLink and shard order tokens instead of ignoring tail mesh fields")
+        assertTrue(nativeResource.contains("peer_ordinal >= manifest_entry_count") && nativeResource.contains("peer_ordinal == manifest_ordinal"),
+            "Native sliced-resource reassembly must fail closed on invalid peer ordinals")
+        assertTrue(virtualizationSource.contains("shard.peerLink(mesh, ordinal, peer, entryCount)"),
+            "Generated peerLink material must include mesh entry-count binding that native reassembly can independently recompute")
+        assertTrue(catalogSource.contains("fun renamed(resourceRenameMap") && catalogSource.contains("method.copy("),
+            "Runtime sealing must rename typed catalog records and recompute their JSC1 method auth tags")
     }
 
     @Test
@@ -277,6 +320,12 @@ class Vbc4OnlyContractTest {
         assertTrue(source.contains("js_vm_case_match"), "C interpreter dispatch must avoid plain opcode-to-handler equality checks")
         assertTrue(source.contains("js_vm_dispatch_drift_step"), "C interpreter dispatch must rotate a per-execution drift state")
         assertTrue(source.contains("js_vm_dispatch_progress_salt"), "C interpreter dispatch salt must include execution-progress drift")
+        assertTrue(source.contains("js_vm_dispatch_profile_for") && source.contains("js_vm_profile_next_pc"), "C interpreter must derive a per-program dispatcher profile and use it for VPC updates")
+        assertTrue(source.contains("js_vm_profile_case_salt") && source.contains("js_vm_profile_case_salt(js_vm_dispatch_profile"), "C interpreter dispatch profile must reshape handler matching salt")
+        assertTrue(source.contains("js_vm_profile_case_matches") && source.contains("switch ((opcode ^ expected") && source.contains("selectors[(salt >> 31) & 1u]"), "C interpreter must use multiple profile-specific handler match forms instead of one stable case matcher")
+        assertTrue(source.contains("js_vm_profile_transition_due") && source.contains("js_vm_profile_transition_due(js_vm_dispatch_profile"), "C interpreter must route block-transition decisions through dispatcher profile-specific logic")
+        assertTrue(source.contains("js_vm_profile_fetch_operand") && source.contains("resident_index = fault_pc"), "C interpreter dispatch profile must reshape operand fetch without relying on sequential pc-1")
+        assertTrue(source.contains("js_vm_dispatch_profile_tag_matches") && source.contains("dispatch profile tag mismatch"), "C interpreter must fail closed when authenticated dispatch profile metadata does not match the parsed program")
         assertTrue(source.contains("dispatch_step & JS_VBC4_DISPATCH_STEP_MASK"), "C interpreter dispatch drift must rotate with a per-build mask during normal execution")
         assertFalse(source.contains("#define JS_VM_DISPATCH(insn_ptr) switch"), "C interpreter must not expose textbook switch dispatch in the VM main loop")
         assertFalse(source.contains("js_vm_dispatch_table[256]"), "C interpreter must not expose a fixed 256-entry computed-goto dispatch table")
@@ -314,7 +363,8 @@ class Vbc4OnlyContractTest {
             "Build serializer must take VBC4 master key material and layout digest through an explicit scoped key",
         )
         assertFalse(nativeHelpers.contains("JS_VBC4_MASTER_KEY_SHARE_A") || nativeHelpers.contains("JS_VBC4_MASTER_KEY_SHARE_B"), "Native helper must not retain repository-fixed VBC4 master key shares")
-        assertTrue(nativeHelpers.contains("JS_VBC4_COPY_SCOPED_MASTER_KEY") && nativeHelpers.contains("JS_VBC4_SECRET_SLOT_BYTE"), "Native helper must consume per-build generated VBC4 secret slots through accessors")
+        assertFalse(nativeHelpers.contains("JS_VBC4_COPY_SCOPED_MASTER_KEY") || nativeHelpers.contains("JS_VBC4_SECRET_SLOT_BYTE"), "Native helper must not consume build-time master-key slots from rodata")
+        assertTrue(nativeHelpers.contains("js_runtime_master_key_shares") && nativeHelpers.contains("jsn_k7"), "Native helper must use only one-shot runtime-installed boot material")
         assertFalse(nativeHelpers.contains("JS_VBC4_BUILD_KEY_SHARE_A") || nativeHelpers.contains("JS_VBC4_BUILD_KEY_SHARE_B"), "Native helper must not retain a stable A/B share extraction recipe")
         assertFalse(nativeHelpers.contains("static unsigned char JS_VBC4_MASTER_KEY"), "Native helper must not retain a resident plaintext VBC4 master key")
         assertFalse(nativeHelpers.contains("g_vbc4_inner_pad") || nativeHelpers.contains("g_vbc4_outer_pad"), "Native helper must not retain long-lived HMAC pads for VBC4 master material")
@@ -349,13 +399,63 @@ class Vbc4OnlyContractTest {
 
         assertTrue(serializerSource.contains("val methodLocalProfile: Int = 0"), "VBC4 metadata must carry a method-local profile slot")
         assertTrue(serializerSource.contains("methodLocalProfile.toUInt().toString(16)"), "VBC4 metadata must serialize the method-local profile")
+        assertTrue(serializerSource.contains("vbc4DispatchProfileTag") && serializerSource.contains("dispatchProfileTag.toUInt().toString(16)"), "VBC4 metadata must serialize an authenticated dispatch profile tag")
+        assertTrue(serializerSource.contains("nativeVmProfileId.toUInt().toString(16)") && serializerSource.contains("nativeVmProfileId * 0x27D4EB2D"), "VBC4 metadata authentication must bind the build-local native VM profile")
         assertTrue(virtualizationSource.contains("methodLocalHandlerProfile(methodSelection") && virtualizationSource.contains("selectionMode != MethodSelectionMode.CriticalPlus"), "method-local profiles must be gated to critical-plus selection")
         assertTrue(virtualizationSource.contains("license") && virtualizationSource.contains("auth") && virtualizationSource.contains("signature"), "critical-plus method-local profile detection must cover license/auth/signature method names")
         assertTrue(serializerSource.contains("VBC4_FLAG_NESTED_VM") && serializerSource.contains("entryMetadata.methodLocalProfile != 0"), "High-value method-local profiles must mark resources with the nested-VM flag")
+        assertTrue(serializerSource.contains("VBC4_FLAG_MIXED_OPERAND_ENVELOPE") && serializerSource.contains("serializeMixedOperandEnvelopeBlock") && serializerSource.contains("writeMixedOperandRow"), "VBC4 serializer must support a mixed stack/register operand row envelope")
+        assertTrue(serializerSource.contains("serializeSingleBlock(blk, logicalProgram.registerCount, nestedVm, registerRowEnvelope, mixedOperandEnvelope, blk.blockId)"), "Shuffled blocks must derive row-envelope masks from logical block ids rather than physical storage ordinals")
+        assertTrue(serializerSource.contains("serializationBuildContext.nativeVmProfile.parserRowProfile == 1") && serializerSource.contains("serializationBuildContext.nativeVmProfile.parserRowProfile == 2"), "Non-nested row format must be selected by the shared build-local native parser profile")
+        assertTrue(serializerSource.contains("Integer.remainderUnsigned(") && serializerSource.contains("vbc4RegisterRowMix(effectiveBuildSeed, blockId, rowIndex, i, 0x71)"), "Register-row permutations must use the same unsigned remainder semantics as the native uint32_t decoder")
+        assertTrue(serializerSource.contains("parserRowProfile == 1") && serializerSource.contains("parserRowProfile == 2") && serializerSource.contains("if (nestedVm) return serializeNestedBlock") && serializerSource.contains("if (registerRowEnvelope) return serializeEnvelopeBlock") && serializerSource.contains("if (mixedOperandEnvelope) return serializeMixedOperandEnvelopeBlock"), "nested, register-row and mixed operand envelopes must be selected as mutually exclusive build-local row modes")
         assertTrue(nativeHelpers.contains("method_local_profile") && nativeHelpers.contains("p->method_local_profile = 0"), "Native VM program state must retain and initialize parsed method-local profile")
         assertTrue(nativeHelpers.contains("JS_VBC4_FLAG_NESTED_VM") && nativeHelpers.contains("nested_vm_profile"), "Native parser must bind nested-VM flag to a non-zero method-local profile")
-        assertTrue(nativeSymbols.contains("strtoul(parts[5], NULL, 16)"), "Native VM parser must parse the sixth metadata field as the method-local profile")
+        assertTrue(nativeHelpers.contains("JS_VBC4_FLAG_MIXED_OPERAND_ENVELOPE") && nativeHelpers.contains("js_vbc4_read_mixed_operand_row") && nativeHelpers.contains("js_vbc4_row_envelopes_mutually_exclusive"), "Native parser must decode mixed operand rows and reject incompatible row-mode flag combinations")
+        assertTrue(nativeSymbols.contains("js_vm_parse_hex_u32_strict(parts[3], &method_local_profile)"), "Native VM parser must strictly parse the v2 method-local profile field")
+        assertTrue(
+            nativeSymbols.contains("part_count == 11") && nativeSymbols.contains("part_count = 12") &&
+                nativeSymbols.contains("vbc4-meta-v2") &&
+                nativeSymbols.contains("js_vm_parse_hex_u32_strict(parts[9], &native_vm_profile_id)") &&
+                nativeSymbols.contains("js_vm_parse_hex_u32_strict(parts[10], &dispatch_profile_tag)") &&
+                nativeSymbols.contains("resource_path = js_strdup(parts[7])") &&
+                nativeSymbols.contains("/* Publish only after every authenticated field has parsed successfully. */") &&
+                nativeSymbols.contains("p->native_vm_profile_id = native_vm_profile_id") &&
+                nativeSymbols.contains("p->dispatch_profile_tag = dispatch_profile_tag"),
+            "Native VM parser must strictly validate all keyed identity metadata v2 fields before atomically publishing them",
+        )
         assertTrue(nativeHelpers.contains("js_vm_method_local_salt") && nativeHelpers.contains("program->method_local_profile"), "Native dispatch salt must mix the method-local profile")
+    }
+
+    @Test
+    fun mixed_operand_row_tokens_are_shape_disjoint_and_native_decodes_the_tagged_shape() {
+        val regressionSeeds = listOf(0, 62, 173, 3515, Int.MIN_VALUE, Int.MAX_VALUE)
+        for (seed in regressionSeeds) {
+            for (blockId in 0..7) {
+                for (rowIndex in 0..255) {
+                    val tokens = (0..2).map { shape ->
+                        vbc4MixedOperandRowToken(seed, blockId, rowIndex, shape)
+                    }
+                    assertEquals(3, tokens.toSet().size, "Mixed-row shapes must not share a token at seed=$seed block=$blockId row=$rowIndex")
+                    tokens.forEachIndexed { shape, token ->
+                        assertEquals(shape, token ushr 14, "Mixed-row token must carry its parser shape")
+                    }
+                }
+            }
+        }
+
+        val nativeHelpers = nativeRuntimeSources()
+        assertTrue(
+            nativeHelpers.contains("return ((shape & 0x3u) << 14) | payload;") &&
+                nativeHelpers.contains("uint32_t shape = (token >> 14) & 0x3u;") &&
+                nativeHelpers.contains("shape >= 3u || token != js_vbc4_mixed_row_token"),
+            "Native profile-2 parser must derive and authenticate an unambiguous row shape from the token",
+        )
+        assertTrue(
+            nativeHelpers.contains("if (block_pos != (int)block_plain_sz) JS_VM_PARSE_FAIL;") &&
+                nativeHelpers.contains("if (insn_pos != (int)insn_plain_sz) JS_VM_PARSE_FAIL;"),
+            "Native parser must reject authenticated instruction blocks with trailing bytes after the sentinel",
+        )
     }
 
     @Test
@@ -365,10 +465,12 @@ class Vbc4OnlyContractTest {
         val deploymentSource = Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/EmbeddedHelperDeployment.kt"))
 
         assertFalse(codecSource.contains("private val masterKey = byteArrayOf"), "RuntimeResourceCodec must not keep a repository-fixed resource master key")
-        assertTrue(codecSource.contains("copyRuntimeResourceKey()"), "RuntimeResourceCodec must draw resource authentication key material from the VBC4 build context")
+        assertTrue(codecSource.contains("runtimeKeyPartitions"), "RuntimeResourceCodec must draw per-partition key domains from the VBC4 build context")
         assertFalse(helperSource.contains("RUNTIME_RESOURCE_KEY"), "JniMicrokernelHelper source must not retain the repository-fixed resource key field")
-        assertTrue(helperSource.contains("runtimeResourceKey()") && helperSource.contains("Arrays.fill(key, (byte) 0)"), "JniMicrokernelHelper must use an injected runtime resource key and wipe temporary copies")
-        assertTrue(deploymentSource.contains("injectRuntimeResourceKey") && deploymentSource.contains("copyRuntimeResourceKey()"), "Helper deployment must inject the build-local runtime resource key into JniMicrokernelHelper")
+        assertFalse(helperSource.contains("runtimeResourceKey()"), "JniMicrokernelHelper must not assemble a globally-applicable runtime resource key")
+        assertTrue(helperSource.contains("partitionResourceKey(") && helperSource.contains("Arrays.fill(resourceKey, (byte) 0)"), "JniMicrokernelHelper must assemble per-partition keys on demand and wipe temporary copies")
+        assertFalse(deploymentSource.contains("injectRuntimeResourceKey"), "Helper deployment must not inject Java bytecode key domains")
+        assertTrue(deploymentSource.contains("BootMaterialEnvelope.encode"), "Helper deployment must carry partition keys only inside the authenticated boot envelope")
     }
     @Test
     fun production_sources_only_keep_current_vbc4_format_marker() {
@@ -584,18 +686,53 @@ class Vbc4OnlyContractTest {
     }
 
     @Test
-    fun native_critical_region_protection_has_encrypted_section_and_load_time_decrypt() {
+    fun native_critical_region_protection_has_encrypted_section_and_scoped_runtime_lifecycle() {
         val nativeHelpers = nativeRuntimeSources()
-        // Protected code section + load-time decrypt constructor.
+        // Protected code section + scoped SEALED -> OPEN -> SEALED/BROKEN lifecycle.
         assertTrue(nativeHelpers.contains("JS_PROTECTED_SECTION_NAME") && nativeHelpers.contains("\".jsx\""),
             "Native kernel must define a dedicated protected code section")
-        assertTrue(nativeHelpers.contains("__attribute__((constructor))") && nativeHelpers.contains("js_protected_section_unseal"),
-            "Native kernel must decrypt the protected section at load time before use")
-        assertTrue(nativeHelpers.contains("js_protected_section_xor") && nativeHelpers.contains("JS_PROTECTED_SECTION_KEY"),
-            "Native kernel must carry the keystream decrypt path and embedded key")
+        assertTrue(
+            nativeHelpers.contains("JS_PROTECTED_SECTION_SEALED") &&
+                nativeHelpers.contains("JS_PROTECTED_SECTION_OPEN") &&
+                nativeHelpers.contains("JS_PROTECTED_SECTION_BROKEN") &&
+                nativeHelpers.contains("js_protected_section_enter") &&
+                nativeHelpers.contains("js_protected_section_leave") &&
+                nativeHelpers.contains("js_protected_runtime_refs"),
+            "Native kernel must use a fail-closed, reference-counted protected-section lifecycle",
+        )
+        assertTrue(nativeHelpers.contains("js_protected_section_xor") && nativeHelpers.contains("JS_PROTECTED_COPY_SCOPED_KEY"),
+            "Native kernel must reconstruct protected-section material only for the scoped keystream path")
+        assertFalse(nativeHelpers.contains("JS_PROTECTED_SECTION_KEY[32]") || nativeHelpers.contains("js_protected_section_key("),
+            "Native kernel must not expose a complete protected-section key array or getter")
+        assertTrue(nativeHelpers.contains("js_vbc4_wipe_volatile(key, sizeof(key))"),
+            "Protected-section scoped key material must be wiped after each transition")
+        assertFalse(
+            nativeHelpers.contains("PAGE_EXECUTE_READWRITE") || nativeHelpers.contains("PROT_READ | PROT_WRITE | PROT_EXEC"),
+            "Protected-section transitions must preserve strict W^X and never request RWX pages",
+        )
+        assertTrue(
+            nativeHelpers.contains("PAGE_READWRITE") && nativeHelpers.contains("PAGE_EXECUTE_READ") &&
+                nativeHelpers.contains("PROT_READ | PROT_WRITE") && nativeHelpers.contains("PROT_READ | PROT_EXEC"),
+            "Windows and Linux protected-section transitions must use distinct write and execute permissions",
+        )
+        assertTrue(
+            nativeHelpers.contains("jsw_r20") && nativeHelpers.contains("(void*)jsw_r20") &&
+                nativeHelpers.contains("jsw_k0") && nativeHelpers.contains("js_native_abi_table_instance"),
+            "Direct JNI registration and the outer-shell inner ABI must both route through lifecycle trampolines",
+        )
         // Critical hot functions must be placed in the protected section.
         assertTrue(nativeHelpers.contains("JS_PROTECTED static jint js_vm_canonical_opcode"),
             "Opcode canonicalization must live in the protected section")
+        listOf(
+            "JS_PROTECTED int js_vm_parse_program",
+            "JS_PROTECTED unsigned char* js_runtime_resource_decode_owned",
+            "JS_PROTECTED int js_vm_register_preload_index_entries",
+            "JS_PROTECTED jint js_vm_store_resident_opcode",
+            "JS_PROTECTED jint js_vm_load_resident_operand",
+            "JS_PROTECTED int js_vm_load_resident_build_seed",
+        ).forEach { signature ->
+            assertTrue(nativeHelpers.contains(signature), ".jsx protected section must cover native VM parser/resource/preload/resident hot path '$signature'.")
+        }
         // The build-time patcher must exist and be wired into recompilation.
         val packer = Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeProtectedSectionPacker.kt"))
         assertTrue(packer.contains("sealIfPossible") && packer.contains("relocOverlapsPeSection") && packer.contains("elfRelocationOverlapsSection"),
@@ -603,6 +740,123 @@ class Vbc4OnlyContractTest {
         val recompile = Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeRecompilationTransforms.kt"))
         assertTrue(recompile.contains("NativeProtectedSectionPacker.sealIfPossible"),
             "Recompilation must invoke the protected-section patcher on produced native binaries")
+    }
+
+    @Test
+    fun native_protected_section_broken_state_drains_active_leases_before_disabling_pages() {
+        val source = Files.readString(resolveSource("src/main/native/js_protected_section.c"))
+        val markBroken = source.substringAfter("static void js_protected_mark_broken_locked(void)")
+            .substringBefore("static void js_protected_finish_broken_locked(void)")
+        val finishBroken = source.substringAfter("static void js_protected_finish_broken_locked(void)")
+            .substringBefore("static int js_protected_open_locked(void)")
+        val enter = source.substringAfter("JS_HIDDEN int js_protected_section_enter(void)")
+            .substringBefore("JS_HIDDEN int js_protected_section_leave(void)")
+        val leave = source.substringAfter("JS_HIDDEN int js_protected_section_leave(void)")
+            .substringBefore("JS_HIDDEN unsigned int js_protected_section_state(void)")
+
+        assertTrue(markBroken.contains("state = JS_PROTECTED_SECTION_BROKEN"), "BROKEN must be a sticky state transition")
+        assertFalse(markBroken.contains("js_protected_runtime_refs = 0u"), "BROKEN transition must preserve active leases for orderly drain")
+        assertTrue(
+            markBroken.contains("js_protected_runtime_refs == 0u") && markBroken.contains("js_protected_set_disabled()"),
+            "BROKEN may disable the protected pages immediately only when no lease is active",
+        )
+        assertTrue(
+            enter.substringAfter("state == JS_PROTECTED_SECTION_BROKEN").substringBefore("else if").contains("ok = 0"),
+            "BROKEN must reject every new lease",
+        )
+        assertTrue(
+            leave.contains("js_protected_runtime_refs--") &&
+                leave.contains("if (js_protected_runtime_refs == 0u) js_protected_finish_broken_locked()"),
+            "Existing BROKEN leases must drain and only the final leave may finish page shutdown",
+        )
+        assertTrue(
+            finishBroken.indexOf("js_protected_section_xor") in 0 until finishBroken.indexOf("js_protected_set_disabled"),
+            "Final BROKEN leave must attempt re-encryption before disabling the pages",
+        )
+        assertTrue(
+            source.contains("PAGE_NOACCESS") && source.contains("PROT_NONE"),
+            "BROKEN shutdown must provide Windows and Linux no-access page transitions",
+        )
+    }
+
+    @Test
+    fun native_protected_section_execute_transition_failure_restores_ciphertext_and_disables_pages() {
+        val source = Files.readString(resolveSource("src/main/native/js_protected_section.c"))
+        val open = source.substringAfter("static int js_protected_open_locked(void)")
+            .substringBefore("static int js_protected_seal_locked(void)")
+        val executeFailure = open.substringAfter("if (!js_protected_set_execute())")
+            .substringBefore("js_protected_seal_marker.state = JS_PROTECTED_SECTION_OPEN")
+
+        assertTrue(
+            executeFailure.contains("js_protected_section_xor") && executeFailure.contains("js_protected_flush"),
+            "An RX transition failure after decryption must attempt to restore ciphertext and flush it",
+        )
+        assertTrue(
+            executeFailure.indexOf("js_protected_section_xor") < executeFailure.indexOf("js_protected_mark_broken_locked"),
+            "Ciphertext restoration must precede the BROKEN transition",
+        )
+        assertTrue(
+            executeFailure.contains("js_protected_mark_broken_locked") &&
+                source.substringAfter("static void js_protected_mark_broken_locked(void)")
+                    .substringBefore("static void js_protected_finish_broken_locked(void)")
+                    .contains("js_protected_set_disabled()"),
+            "A zero-reference execute transition failure must end with disabled pages",
+        )
+    }
+
+    @Test
+    fun native_protected_section_external_ingress_is_exhaustively_lease_wrapped() {
+        val runtime = Files.readString(resolveSource("src/main/native/js_jni_runtime.c"))
+        val protectedSources = listOf(
+            "src/main/native/js_vm_core.c",
+            "src/main/native/js_vm_resource.c",
+        ).joinToString("\n") { relativePath -> Files.readString(resolveSource(relativePath)) }
+
+        val wrapperPattern = Regex(
+            "(?ms)^static\\s+[^;\\n]*?\\b(jsw_[A-Za-z0-9_]+)\\s*\\([^;]*?\\)\\s*\\{(.*?)(?=^static\\s+[^;\\n]*?\\bjsw_[A-Za-z0-9_]+\\s*\\(|^static const js_native_abi_table)",
+        )
+        val wrappers = wrapperPattern.findAll(runtime).associate { match ->
+            match.groupValues[1] to match.groupValues[2]
+        }
+        assertTrue(wrappers.isNotEmpty(), "Protected native ingress must define lifecycle wrappers")
+        wrappers.forEach { (name, body) ->
+            assertEquals(1, Regex("\\bjs_protected_runtime_enter\\s*\\(").findAll(body).count(), "$name must acquire exactly one outer .jsx lease")
+            assertEquals(1, Regex("\\bjs_protected_runtime_leave\\s*\\(").findAll(body).count(), "$name must release exactly one outer .jsx lease")
+        }
+
+        val registrationBody = runtime.substringAfter("static int js_register_all_natives")
+            .substringBefore("JNIEXPORT jint JNICALL JNI_OnLoad")
+        val registeredPointers = Regex("\\(void\\s*\\*\\)\\s*([A-Za-z_][A-Za-z0-9_]*)")
+            .findAll(registrationBody)
+            .map { match -> match.groupValues[1] }
+            .toSet()
+        assertTrue(registeredPointers.isNotEmpty(), "Direct JNI registration must expose native entrypoints")
+        assertTrue(
+            registeredPointers.all { pointer -> pointer.startsWith("jsw_") && pointer in wrappers },
+            "Every direct JNI entrypoint must resolve to a lease wrapper: ${'$'}registeredPointers",
+        )
+
+        val abiInitializer = runtime.substringAfter("static const js_native_abi_table js_native_abi_table_instance = {")
+            .substringBefore("};")
+        val abiPointers = Regex("(?m)^\\s*(js[a-zA-Z0-9_]+),\\s*$")
+            .findAll(abiInitializer)
+            .map { match -> match.groupValues[1] }
+            .toSet()
+        assertTrue(abiPointers.isNotEmpty(), "Inner native ABI must expose callable entrypoints")
+        assertTrue(
+            abiPointers.all { pointer -> pointer.startsWith("jsw_") && pointer in wrappers },
+            "Every inner ABI entrypoint must resolve to a lease wrapper: ${'$'}abiPointers",
+        )
+
+        val protectedFunctions = Regex(
+            "(?m)^\\s*JS_PROTECTED\\b[^;\\n]*?\\b([A-Za-z_][A-Za-z0-9_]*)\\s*\\(",
+        ).findAll(protectedSources).map { match -> match.groupValues[1] }.toSet()
+        assertTrue(protectedFunctions.isNotEmpty(), ".jsx contract must discover protected native functions")
+        val externallyReachablePointers = registeredPointers + abiPointers
+        assertTrue(
+            protectedFunctions.intersect(externallyReachablePointers).isEmpty(),
+            "A JS_PROTECTED function must not bypass the outer lease through JNI or ABI registration",
+        )
     }
 
     @Test
@@ -670,6 +924,9 @@ class Vbc4OnlyContractTest {
         nativeSeed = 0x5642_4334L,
         jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (index * 23 + 11).toByte() },
     )
+
+    private fun fixedPartitionedVbc4Context(): Vbc4BuildContext =
+        fixedVbc4Context().copy(runtimeKeyPartitions = RuntimeKeyPartitions.generate())
 
     private fun fixedStructureEntropy(): ByteArray = ByteArray(32) { index -> (index * 7 + 13).toByte() }
 

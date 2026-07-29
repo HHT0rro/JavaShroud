@@ -15,10 +15,10 @@ import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployme
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceCodec
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.applyMethodVirtualization
 import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.requireVbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
@@ -26,6 +26,7 @@ import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
 import java.nio.file.Files
 import java.nio.file.Path
+import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import java.util.jar.JarEntry
 import java.util.jar.JarInputStream
@@ -73,17 +74,9 @@ class CrossMethodOutliningExecutionTest {
     @Test
     fun cross_method_outlining_emits_shared_mesh_manifests_and_non_standalone_shards() {
         val context = defaultVbc4BuildContext()
-        val decodedResources = decodedCrossMethodResources(context = context, seed = 73)
+        val (decodedResources, catalogPlan) = decodedCrossMethodResources(context = context, seed = 73)
 
-        val preloadIndex = decodedResources[VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE]
-            ?.decodeToString()
-            ?.trim()
-            ?.lines()
-            .orEmpty()
-            .associate { line ->
-                val parts = line.split('|')
-                parts[2] to parts[3].toInt()
-            }
+        val preloadIndex = catalogPlan.methods.associate { method -> method.manifestPath to method.shardCount }
         val manifests = decodedResources.filterValues { bytes -> bytes.decodeToString().startsWith("VBC4S|1|") }
         assertTrue(manifests.size >= 3, "Cross-method outlining must emit one slice manifest per virtualized method")
         assertEquals(manifests.keys, preloadIndex.keys, "VM preload index must cover every cross-method slice manifest")
@@ -104,13 +97,21 @@ class CrossMethodOutliningExecutionTest {
             val assembled = ByteArray(totalSize)
             val shardLines = lines.drop(1)
             assertEquals(shardCount, shardLines.size, "Manifest must enumerate every shard")
+            var previousOrderToken: String? = null
             for (line in shardLines) {
                 val parts = line.split('|')
+                val index = parts[0].toInt()
                 val offset = parts[1].toInt()
                 val length = parts[2].toInt()
+                val digest = parts[3]
                 val shardPath = parts[4]
                 val peerOrdinal = parts[6].toInt()
                 val shardBytes = assertNotNull(decodedResources[shardPath], "Manifest shard path must resolve to an emitted opaque resource")
+                val orderToken = shardOrderToken(header[4], ownOrdinal, index, shardPath, digest)
+                previousOrderToken?.let { previous ->
+                    assertTrue(previous <= orderToken, "Manifest shard order must match native reassemble order-token validation")
+                }
+                previousOrderToken = orderToken
                 referencedPeerOrdinals += peerOrdinal
                 assertTrue(peerOrdinal in 0 until manifests.size, "Shard peer ordinal must point into shared manifest mesh")
                 assertTrue(peerOrdinal != ownOrdinal, "Cross-method shard peer link must point at another method manifest")
@@ -133,9 +134,9 @@ class CrossMethodOutliningExecutionTest {
 
     @Test
     fun cross_method_outlining_is_not_reproducible_for_same_seed_and_vbc4_context() {
-        val first = encodedCrossMethodResources(context = fixedContext(0x4A53_0001), seed = 73)
-        val second = encodedCrossMethodResources(context = fixedContext(0x4A53_0001), seed = 73)
-        val differentContext = encodedCrossMethodResources(context = fixedContext(0x4A53_0002), seed = 73)
+        val first = encodedCrossMethodResources(context = fixedContext(0x4A53_0001), seed = 73).first
+        val second = encodedCrossMethodResources(context = fixedContext(0x4A53_0001), seed = 73).first
+        val differentContext = encodedCrossMethodResources(context = fixedContext(0x4A53_0002), seed = 73).first
 
         assertTrue(
             first.map { it.name } != second.map { it.name } ||
@@ -149,6 +150,13 @@ class CrossMethodOutliningExecutionTest {
         )
     }
 
+    private fun shardOrderToken(mesh: String, ordinal: Int, index: Int, path: String, digest: String): String {
+        val material = "vbc4-shard-order\u0000$mesh\u0000$ordinal\u0000$index\u0000$path\u0000$digest"
+        return MessageDigest.getInstance("SHA-256")
+            .digest(material.toByteArray(Charsets.UTF_8))
+            .take(8)
+            .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xFF) }
+    }
     private fun runEngine(inputJar: Path): Path {
         val outputJar = inputJar.resolveSibling("javashroud-cross-method-output.jar")
         val configPath = inputJar.resolveSibling("javashroud-cross-method-config.toml")
@@ -174,7 +182,9 @@ class CrossMethodOutliningExecutionTest {
             ),
         )
         try {
-            dispatchRequest(buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())), EngineKernel())
+            withTestBootSecret {
+                dispatchRequest(buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())), EngineKernel())
+            }
         } finally {
             Files.deleteIfExists(configPath)
         }
@@ -261,15 +271,15 @@ class CrossMethodOutliningExecutionTest {
             )
             assertEquals(3, result.transformedMemberCount, "Fixture must virtualize all selected cross-method entries")
             result.artifact.jarEntries
-                .filter { entry -> entry.name.isVmResourceName() || entry.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE }
-                .sortedBy { it.name }
+                .filter { entry -> entry.name.isVmResourceName() }
+                .sortedBy { it.name } to requireNotNull(requireVbc4BuildContext().runtimeVmCatalogPlanOrNull())
         }
 
     private fun decodedCrossMethodResources(context: Vbc4BuildContext, seed: Int) =
         withVbc4BuildContext(context) {
-            encodedCrossMethodResources(context, seed)
-                .mapNotNull { entry -> RuntimeResourceCodec.decode(entry.bytes)?.let { entry.name to it } }
-                .toMap()
+            val (entries, plan) = encodedCrossMethodResources(context, seed)
+            entries.mapNotNull { entry -> RuntimeResourceCodec.decode(entry.bytes)?.let { entry.name to it } }
+                .toMap() to plan
         }
 
     private fun crossMethodArtifact() = testAttachedArtifact(
@@ -325,7 +335,9 @@ class CrossMethodOutliningExecutionTest {
                                         (descriptor == "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;" ||
                                             descriptor == "(J[Ljava/lang/Object;)Ljava/lang/Object;" ||
                                             descriptor == "(J)V" ||
-                                            descriptor == "(JI)V")
+                                            descriptor == "(JI)V" ||
+                                            descriptor == "(J)I" ||
+                                            descriptor == "(JI)I")
                                     ) {
                                         found = true
                                     }
@@ -343,6 +355,7 @@ class CrossMethodOutliningExecutionTest {
 
     private fun runJava(jarPath: Path): ProcessResult {
         val process = ProcessBuilder("java", "-jar", jarPath.toAbsolutePath().normalize().toString())
+            .withTestBootSecret()
             .redirectErrorStream(true)
             .start()
         val completed = process.waitFor(60, TimeUnit.SECONDS)
@@ -358,8 +371,8 @@ class CrossMethodOutliningExecutionTest {
         val os = System.getProperty("os.name").lowercase()
         val arch = System.getProperty("os.arch").lowercase()
         return when {
-            os.contains("win") -> "windows-x64"
-            os.contains("mac") && arch.contains("aarch64") -> "macos-arm64"
+            os.startsWith("windows") -> "windows-x64"
+            os.contains("mac") && (arch == "aarch64" || arch == "arm64") -> "macos-arm64"
             os.contains("mac") -> "macos-x64"
             else -> "linux-x64"
         }

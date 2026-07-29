@@ -160,11 +160,13 @@ class AdvancedPassCombinationVerificationTest {
             val configPath = inputJar.resolveSibling("javashroud-$scenarioName-config.toml")
             writeRunConfig(configPath, inputJar, outputJar, passes, allowRedundantPasses)
 
-            val output = captureStdout {
-                dispatchRequest(
-                    buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())),
-                    EngineKernel(),
-                )
+            val output = withTestBootSecret {
+                captureStdout {
+                    dispatchRequest(
+                        buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())),
+                        EngineKernel(),
+                    )
+                }
             }
 
             val events = output.trim().lines().filter { it.isNotBlank() }.map(::parseEventType)

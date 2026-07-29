@@ -11,8 +11,8 @@ import kotlin.test.assertFailsWith
 /**
  * Item #4 contract: the build-time native patcher must (a) encrypt the ".jsx"
  * protected code section in place, (b) flip the in-binary seal marker so the load-time
- * constructor knows to decrypt, and (c) fail open (return the input unchanged) when
- * the section/marker is absent or relocations overlap the protected section. The
+ * runtime lifecycle can open it on demand, and (c) reject a protected section whose
+ * runtime pages overlap another mapped section. The
  * keystream must match the C decrypt path (block i = SHA-256(key || le32(i))), so
  * XOR-ing twice restores the plaintext.
  */
@@ -40,7 +40,7 @@ class NativeProtectedSectionPackerTest {
     @Test
     fun seals_elf64_jsx_section_records_runtime_bounds_and_uses_reversible_keystream() {
         val key = ByteArray(32) { (it * 11 + 1).toByte() }
-        val jsxPlain = ByteArray(0x70) { (it * 17 + 9).toByte() }
+        val jsxPlain = ByteArray(0x1000) { (it * 17 + 9).toByte() }
         val elf = MinimalElf64.build(jsxPlain)
         val sealed = NativeProtectedSectionPacker.sealIfPossible(elf.bytes, key)
 
@@ -87,6 +87,22 @@ class NativeProtectedSectionPackerTest {
         assertTrue(out.contentEquals(pe.bytes), "PE relocation overlap must fail open")
     }
 
+    @Test
+    fun fails_closed_when_pe_jsx_starts_inside_another_sections_runtime_page() {
+        val pe = MinimalPe.build(ByteArray(0x40) { (it + 5).toByte() }, jsxRvaOverride = 0x1800)
+        assertFailsWith<NativeProtectedSectionPacker.NativeProtectedSectionSealException> {
+            NativeProtectedSectionPacker.sealIfPossible(pe.bytes, ByteArray(32), failClosed = true)
+        }
+    }
+
+    @Test
+    fun fails_closed_when_elf_jsx_shares_its_runtime_page_with_text() {
+        val elf = MinimalElf64.build(ByteArray(0x1000) { (it + 7).toByte() }, includeOverlappingText = true)
+        assertFailsWith<NativeProtectedSectionPacker.NativeProtectedSectionSealException> {
+            NativeProtectedSectionPacker.sealIfPossible(elf.bytes, ByteArray(32), failClosed = true)
+        }
+    }
+
     private fun xorKeystream(buf: ByteArray, key: ByteArray) {
         var produced = 0
         var counter = 0
@@ -128,7 +144,12 @@ class NativeProtectedSectionPackerTest {
 
         private val sealMagic = byteArrayOf(0x4A, 0x53, 0x58, 0x53, 0x45, 0x41, 0x4C, 0x31)
 
-        fun build(jsxBody: ByteArray, includeJsx: Boolean = true, includeRelocationOverlap: Boolean = false): Result {
+        fun build(
+            jsxBody: ByteArray,
+            includeJsx: Boolean = true,
+            includeRelocationOverlap: Boolean = false,
+            jsxRvaOverride: Int? = null,
+        ): Result {
             val fileAlign = 0x200
             val sectionAlign = 0x1000
             val dosSize = 0x40
@@ -163,6 +184,7 @@ class NativeProtectedSectionPackerTest {
             val opt = coff + 20
             writeLe16(buf, opt + 0, 0x20b)
             writeLe32(buf, opt + 16, 0x1000)
+            writeLe32(buf, opt + 32, sectionAlign)
             writeLe32(buf, opt + 108, 16)
 
             var rva = sectionAlign
@@ -178,11 +200,11 @@ class NativeProtectedSectionPackerTest {
             var jsxRva = 0
             if (includeJsx) {
                 rva += align(dataBody.size, sectionAlign)
-                jsxRva = rva
+                jsxRva = jsxRvaOverride ?: rva
                 val o = secTableOff + 40
                 putName(buf, o, ".jsx")
                 writeLe32(buf, o + 8, jsxBody.size)
-                writeLe32(buf, o + 12, rva)
+                writeLe32(buf, o + 12, jsxRva)
                 writeLe32(buf, o + 16, jsxRawSize)
                 writeLe32(buf, o + 20, jsxRawPtr)
                 writeLe32(buf, o + 36, 0x60000020)
@@ -219,17 +241,23 @@ class NativeProtectedSectionPackerTest {
 
         private val sealMagic = byteArrayOf(0x4A, 0x53, 0x58, 0x53, 0x45, 0x41, 0x4C, 0x31)
 
-        fun build(jsxBody: ByteArray, includeRelocationOverlap: Boolean = false): Result {
+        fun build(
+            jsxBody: ByteArray,
+            includeRelocationOverlap: Boolean = false,
+            includeOverlappingText: Boolean = false,
+        ): Result {
             val dataBody = ByteArray(0x40)
             val markerInData = 0x10
             System.arraycopy(sealMagic, 0, dataBody, markerInData, 8)
-            val dataOff = align(0x40, 0x100)
-            val jsxOff = align(dataOff + dataBody.size, 0x100)
+            val programHeaderOff = 0x40
+            val programHeaderSize = 56
+            val dataOff = 0x1000
+            val jsxOff = 0x2000
             val relaOff = align(jsxOff + jsxBody.size, 0x100)
             val shstr = buildStringTable()
             val shstrOff = align(relaOff + if (includeRelocationOverlap) 24 else 0, 0x100)
             val shOff = align(shstrOff + shstr.bytes.size, 0x100)
-            val sectionCount = if (includeRelocationOverlap) 5 else 4
+            val sectionCount = 4 + (if (includeRelocationOverlap) 1 else 0) + (if (includeOverlappingText) 1 else 0)
             val total = shOff + sectionCount * 64
             val buf = ByteArray(total)
             val dataAddress = 0x3000L
@@ -240,14 +268,26 @@ class NativeProtectedSectionPackerTest {
             writeLe16(buf, 0x10, 3)
             writeLe16(buf, 0x12, 62)
             writeLe32(buf, 0x14, 1)
+            writeLe64(buf, 0x20, programHeaderOff.toLong())
             writeLe64(buf, 0x28, shOff.toLong())
             writeLe16(buf, 0x34, 64)
+            writeLe16(buf, 0x36, programHeaderSize)
+            writeLe16(buf, 0x38, 1)
             writeLe16(buf, 0x3A, 64)
             writeLe16(buf, 0x3C, sectionCount)
             writeLe16(buf, 0x3E, sectionCount - 1)
 
             System.arraycopy(dataBody, 0, buf, dataOff, dataBody.size)
             System.arraycopy(jsxBody, 0, buf, jsxOff, jsxBody.size)
+            writeProgramHeader(
+                buf = buf,
+                off = programHeaderOff,
+                flags = 0x5,
+                rawOffset = jsxOff,
+                address = jsxAddress,
+                size = jsxBody.size,
+                alignment = 0x1000,
+            )
             if (includeRelocationOverlap) {
                 writeLe64(buf, relaOff, jsxAddress + 4)
                 writeLe64(buf, relaOff + 8, 0)
@@ -257,12 +297,14 @@ class NativeProtectedSectionPackerTest {
 
             writeSection(buf, shOff + 64, shstr.dataName, 1, 0x3, dataAddress, dataOff, dataBody.size)
             writeSection(buf, shOff + 128, shstr.jsxName, 1, 0x6, jsxAddress, jsxOff, jsxBody.size)
-            if (includeRelocationOverlap) {
-                writeSection(buf, shOff + 192, shstr.relaName, 4, 0x0, 0, relaOff, 24, info = 2, entrySize = 24)
-                writeSection(buf, shOff + 256, shstr.shstrName, 3, 0x0, 0, shstrOff, shstr.bytes.size)
-            } else {
-                writeSection(buf, shOff + 192, shstr.shstrName, 3, 0x0, 0, shstrOff, shstr.bytes.size)
+            var nextSection = 3
+            if (includeOverlappingText) {
+                writeSection(buf, shOff + nextSection++ * 64, shstr.textName, 1, 0x6, jsxAddress + 0x800, jsxOff + 0x800, 0x20)
             }
+            if (includeRelocationOverlap) {
+                writeSection(buf, shOff + nextSection++ * 64, shstr.relaName, 4, 0x0, 0, relaOff, 24, info = 2, entrySize = 24)
+            }
+            writeSection(buf, shOff + nextSection * 64, shstr.shstrName, 3, 0x0, 0, shstrOff, shstr.bytes.size)
             return Result(buf, jsxOff, jsxAddress, dataOff + markerInData + 8)
         }
 
@@ -270,6 +312,7 @@ class NativeProtectedSectionPackerTest {
             val bytes: ByteArray,
             val dataName: Int,
             val jsxName: Int,
+            val textName: Int,
             val relaName: Int,
             val shstrName: Int,
         )
@@ -284,9 +327,10 @@ class NativeProtectedSectionPackerTest {
             }
             val dataName = add(".data")
             val jsxName = add(".jsx")
+            val textName = add(".text")
             val relaName = add(".rela.jsx")
             val shstrName = add(".shstrtab")
-            return StringTable(names.toByteArray(), dataName, jsxName, relaName, shstrName)
+            return StringTable(names.toByteArray(), dataName, jsxName, textName, relaName, shstrName)
         }
     }
 
@@ -318,6 +362,25 @@ class NativeProtectedSectionPackerTest {
             writeLe64(buf, off + 32, rawSize.toLong())
             writeLe32(buf, off + 44, info)
             writeLe64(buf, off + 56, entrySize.toLong())
+        }
+
+        fun writeProgramHeader(
+            buf: ByteArray,
+            off: Int,
+            flags: Int,
+            rawOffset: Int,
+            address: Long,
+            size: Int,
+            alignment: Int,
+        ) {
+            writeLe32(buf, off, 1)
+            writeLe32(buf, off + 4, flags)
+            writeLe64(buf, off + 8, rawOffset.toLong())
+            writeLe64(buf, off + 16, address)
+            writeLe64(buf, off + 24, address)
+            writeLe64(buf, off + 32, size.toLong())
+            writeLe64(buf, off + 40, size.toLong())
+            writeLe64(buf, off + 48, alignment.toLong())
         }
 
         fun writeLe16(b: ByteArray, o: Int, v: Int) {

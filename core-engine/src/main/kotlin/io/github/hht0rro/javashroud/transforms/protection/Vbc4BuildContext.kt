@@ -12,15 +12,21 @@ import javax.crypto.spec.SecretKeySpec
  *
  * Method resources are serialized before the native microkernel is recompiled,
  * so both phases must derive the same build-local root key from the same run
- * context. The key is never kept as a repository source constant; it is only
- * materialized in memory and in the per-output generated native include.
+ * context. Root material is never kept as a repository or generated-native
+ * constant; it is sealed into boot.dat and materialized only in runtime memory.
  */
 internal data class Vbc4BuildContext(
     val masterKey: ByteArray,
     val nativeSeed: Long,
     val jarLayoutDigest: ByteArray,
     val runtimeResourceKey: ByteArray = generateRuntimeResourceKey(masterKey, jarLayoutDigest, nativeSeed),
+    val runtimeKeyPartitions: RuntimeKeyPartitions = RuntimeKeyPartitions.generate(),
+    val nativeVmProfile: NativeVmBuildProfile = NativeVmBuildProfile.fromBuildMaterial(nativeSeed, jarLayoutDigest),
+    val productionBuildEvidence: CandidateProductionBuildEvidence = CandidateProductionBuildEvidence.disabled(nativeVmProfile),
 ) {
+    private var runtimeVmCatalogPlan: RuntimeVmCatalogPlan? = null
+    private var bootSecretSnapshot: ByteArray? = null
+
     init {
         require(masterKey.size == VBC4_MASTER_KEY_SIZE) { "VBC4 master key must be 32 bytes" }
         require(jarLayoutDigest.size == VBC4_LAYOUT_DIGEST_SIZE) { "VBC4 layout digest must be 32 bytes" }
@@ -29,6 +35,19 @@ internal data class Vbc4BuildContext(
 
     fun copyMasterKey(): ByteArray = masterKey.copyOf()
     fun copyRuntimeResourceKey(): ByteArray = runtimeResourceKey.copyOf()
+    fun publishRuntimeVmCatalogPlan(plan: RuntimeVmCatalogPlan) {
+        runtimeVmCatalogPlan = plan
+    }
+
+    fun runtimeVmCatalogPlanOrNull(): RuntimeVmCatalogPlan? = runtimeVmCatalogPlan
+
+    @Synchronized
+    fun copyBootSecretForBuild(): ByteArray {
+        val snapshot = bootSecretSnapshot ?: NativeKernelShellPacker.requireBootSecretForBuild().also {
+            bootSecretSnapshot = it
+        }
+        return snapshot.copyOf()
+    }
 
     /**
      * Derive a build-local sub key from the per-build runtime resource root key
@@ -38,30 +57,130 @@ internal data class Vbc4BuildContext(
      * that needs build-local key material, so Kotlin (build) and the Java/native
      * runtime recompute byte-for-byte identical keys from the same root.
      */
-    fun deriveSubKey(label: String, length: Int, vararg info: ByteArray): ByteArray =
-        hkdfSha256(
-            ikm = runtimeResourceKey,
-            salt = label.toByteArray(Charsets.US_ASCII),
-            info = concatBytes(info),
-            length = length,
-        )
+    fun deriveSubKey(label: String, length: Int, vararg info: ByteArray): ByteArray {
+        val ikm = runtimeKeyPartitions.copyAnchorKey()
+        return try {
+            hkdfSha256(
+                ikm = ikm,
+                salt = label.toByteArray(Charsets.US_ASCII),
+                info = concatBytes(info),
+                length = length,
+            )
+        } finally {
+            java.util.Arrays.fill(ikm, 0)
+        }
+    }
 
+    /** Stable per-build VM authority; runtime session material is derived from this root. */
+    fun deriveVmBuildKey(): ByteArray = hkdfSha256(
+        ikm = masterKey,
+        salt = VBC4_VM_BUILD_KEY_DOMAIN,
+        info = jarLayoutDigest,
+        length = VBC4_VM_DOMAIN_KEY_SIZE,
+    )
+
+    /** Stable per-method leaf; [methodIdentity] is the canonical call-gate binding. */
+    fun deriveVmMethodKey(methodIdentity: ByteArray, methodNonce: ByteArray): ByteArray {
+        require(methodIdentity.isNotEmpty()) { "VBC4 VM method identity must not be empty" }
+        require(methodNonce.size == VBC4_VM_METHOD_NONCE_SIZE) {
+            "VBC4 VM method nonce must be $VBC4_VM_METHOD_NONCE_SIZE bytes"
+        }
+        val buildKey = deriveVmBuildKey()
+        return try {
+            hkdfSha256(
+                ikm = buildKey,
+                salt = VBC4_VM_METHOD_KEY_DOMAIN,
+                info = concatBytes(arrayOf(methodIdentity, methodNonce)),
+                length = VBC4_VM_DOMAIN_KEY_SIZE,
+            )
+        } finally {
+            java.util.Arrays.fill(buildKey, 0)
+        }
+    }
+
+    /** Per-process/per-method runtime leaf. It is never used for stored VBC4 MACs. */
+    fun deriveVmRuntimeSessionLeaf(
+        startupNonce: ByteArray,
+        methodIdentity: ByteArray,
+        methodNonce: ByteArray,
+    ): ByteArray {
+        require(startupNonce.size == VBC4_VM_STARTUP_NONCE_SIZE) {
+            "VBC4 VM startup nonce must be $VBC4_VM_STARTUP_NONCE_SIZE bytes"
+        }
+        val methodKey = deriveVmMethodKey(methodIdentity, methodNonce)
+        return try {
+            hkdfSha256(
+                ikm = methodKey,
+                salt = VBC4_VM_SESSION_KEY_DOMAIN,
+                info = startupNonce,
+                length = VBC4_VM_DOMAIN_KEY_SIZE,
+            )
+        } finally {
+            java.util.Arrays.fill(methodKey, 0)
+        }
+    }
+
+    @Synchronized
     fun scopedCopy(): Vbc4BuildContext = copy(
         masterKey = masterKey.copyOf(),
         jarLayoutDigest = jarLayoutDigest.copyOf(),
         runtimeResourceKey = runtimeResourceKey.copyOf(),
-    )
+        runtimeKeyPartitions = runtimeKeyPartitions.deepCopy(),
+        productionBuildEvidence = productionBuildEvidence,
+    ).also { copy ->
+        copy.runtimeVmCatalogPlan = runtimeVmCatalogPlan
+        copy.bootSecretSnapshot = bootSecretSnapshot?.copyOf()
+    }
 
+    @Synchronized
     fun wipe() {
         java.util.Arrays.fill(masterKey, 0)
         java.util.Arrays.fill(jarLayoutDigest, 0)
         java.util.Arrays.fill(runtimeResourceKey, 0)
+        runtimeKeyPartitions.wipe()
+        bootSecretSnapshot?.let { java.util.Arrays.fill(it, 0) }
+        bootSecretSnapshot = null
+        runtimeVmCatalogPlan = null
+    }
+}
+
+internal data class NativeVmBuildProfile(
+    val parserRowProfile: Int,
+    val operandAccessProfile: Int,
+) {
+    init {
+        require(parserRowProfile in 0..2) { "native VM parser row profile must be in 0..2" }
+        require(operandAccessProfile in 0..2) { "native VM operand access profile must be in 0..2" }
+    }
+
+    val authenticatedId: Int
+        get() = parserRowProfile or (operandAccessProfile shl 8)
+
+    companion object {
+        fun fromBuildMaterial(nativeSeed: Long, jarLayoutDigest: ByteArray): NativeVmBuildProfile {
+            require(jarLayoutDigest.size == VBC4_LAYOUT_DIGEST_SIZE) { "VBC4 layout digest must be 32 bytes" }
+            val digest = MessageDigest.getInstance("SHA-256")
+            digest.update("javashroud-native-vm-profile-v1".toByteArray(Charsets.US_ASCII))
+            digest.update(longBytes(nativeSeed))
+            digest.update(jarLayoutDigest)
+            val material = digest.digest()
+            return NativeVmBuildProfile(
+                parserRowProfile = (material[0].toInt() and 0xFF) % 3,
+                operandAccessProfile = (material[1].toInt() and 0xFF) % 3,
+            )
+        }
     }
 }
 
 internal const val VBC4_MASTER_KEY_SIZE = 32
 internal const val VBC4_LAYOUT_DIGEST_SIZE = 32
 internal const val VBC4_RUNTIME_RESOURCE_KEY_SIZE = 32
+internal const val VBC4_VM_DOMAIN_KEY_SIZE = 32
+internal const val VBC4_VM_METHOD_NONCE_SIZE = 16
+internal const val VBC4_VM_STARTUP_NONCE_SIZE = 32
+internal val VBC4_VM_BUILD_KEY_DOMAIN = "javashroud-vbc4-vm-build-key-v1".toByteArray(Charsets.US_ASCII)
+internal val VBC4_VM_METHOD_KEY_DOMAIN = "javashroud-vbc4-vm-method-key-v1".toByteArray(Charsets.US_ASCII)
+internal val VBC4_VM_SESSION_KEY_DOMAIN = "javashroud-vbc4-vm-session-key-v1".toByteArray(Charsets.US_ASCII)
 
 private val explicitRunContext = ThreadLocal<Vbc4BuildContext?>()
 
@@ -102,22 +221,23 @@ internal fun buildVbc4BuildContext(config: ObfuscationConfig, artifact: Bytecode
     val randomSeedBytes = ByteArray(Long.SIZE_BYTES)
     SecureRandom().nextBytes(randomSeedBytes)
     val nativeSeed = readLong(seedBytes, 0) xor readLong(seedBytes, 8) xor readLong(randomSeedBytes, 0)
-    val masterKey = generateMasterKey(layoutDigest, nativeSeed)
-    val inheritedRuntimeResourceKey = if (config.enablesPass("method-virtualization")) {
-        priorRuntimeResourceKey(artifact)
-    } else {
-        null
+    val masterKey = MaxBuildSecurityPlan.withProductionBuildLeaf(
+        inputDigest = layoutDigest,
+        configurationDigest = seedBytes,
+    ) { buildLeaf ->
+        generateMasterKey(layoutDigest, nativeSeed, buildLeaf)
     }
+    val profile = NativeVmBuildProfile.fromBuildMaterial(nativeSeed, layoutDigest)
     return Vbc4BuildContext(
         masterKey = masterKey,
         nativeSeed = nativeSeed,
         jarLayoutDigest = layoutDigest,
-        runtimeResourceKey = inheritedRuntimeResourceKey ?: generateRuntimeResourceKey(masterKey, layoutDigest, nativeSeed),
+        runtimeResourceKey = generateRuntimeResourceKey(masterKey, layoutDigest, nativeSeed),
+        runtimeKeyPartitions = RuntimeKeyPartitions.generate(),
+        nativeVmProfile = profile,
+        productionBuildEvidence = CandidateProductionBuildEvidence.forConfig(config, profile),
     )
 }
-
-private fun ObfuscationConfig.enablesPass(passId: String): Boolean =
-    passes.any { it.enabled && it.id == passId }
 
 private fun generateStandaloneVbc4BuildContext(): Vbc4BuildContext {
     val random = SecureRandom()
@@ -132,10 +252,15 @@ private fun generateStandaloneVbc4BuildContext(): Vbc4BuildContext {
         nativeSeed = nativeSeed,
         jarLayoutDigest = layoutDigest,
         runtimeResourceKey = generateRuntimeResourceKey(masterKey, layoutDigest, nativeSeed),
+        runtimeKeyPartitions = RuntimeKeyPartitions.generate(),
     )
 }
 
-private fun generateMasterKey(layoutDigest: ByteArray, nativeSeed: Long): ByteArray {
+private fun generateMasterKey(
+    layoutDigest: ByteArray,
+    nativeSeed: Long,
+    buildAuthority: ByteArray = ByteArray(0),
+): ByteArray {
     val random = SecureRandom()
     val entropy = ByteArray(64)
     random.nextBytes(entropy)
@@ -143,6 +268,7 @@ private fun generateMasterKey(layoutDigest: ByteArray, nativeSeed: Long): ByteAr
     digest.update("javashroud-vbc4-build-root".toByteArray(Charsets.US_ASCII))
     digest.update(longBytes(nativeSeed))
     digest.update(layoutDigest)
+    digest.update(buildAuthority)
     digest.update(entropy)
     return digest.digest()
 }

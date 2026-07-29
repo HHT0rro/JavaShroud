@@ -87,7 +87,7 @@ object NativeKernelPacker {
 
     private fun hmacBootstrapNativeIndex(bytes: ByteArray, offset: Int, length: Int): ByteArray {
         val mac = Mac.getInstance("HmacSHA256")
-        val key = requireVbc4BuildContext().copyRuntimeResourceKey()
+        val key = requireVbc4BuildContext().runtimeKeyPartitions.copyAnchorKey()
         return try {
             mac.init(SecretKeySpec(key, "HmacSHA256"))
             mac.update("jsbi-auth".toByteArray(Charsets.US_ASCII))
@@ -107,4 +107,3 @@ object NativeKernelPacker {
 
 
 }
-

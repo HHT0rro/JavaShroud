@@ -18,6 +18,13 @@ typedef struct {
     unsigned int section_size;
 } js_protected_seal;
 
-JS_HIDDEN const unsigned char* js_protected_section_key(int *len);
+#define JS_PROTECTED_SECTION_OPEN 0u
+#define JS_PROTECTED_SECTION_SEALED 1u
+#define JS_PROTECTED_SECTION_BROKEN 2u
+
+JS_HIDDEN int js_protected_section_enter(void);
+JS_HIDDEN int js_protected_section_leave(void);
+JS_HIDDEN unsigned int js_protected_section_state(void);
+JS_HIDDEN unsigned int js_protected_section_refcount(void);
 
 #endif

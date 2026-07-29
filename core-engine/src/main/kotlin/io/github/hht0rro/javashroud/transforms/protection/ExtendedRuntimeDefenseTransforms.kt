@@ -49,18 +49,8 @@ fun applyExceptionSemanticVirtualization(
     val random = seed?.let { SecureRandom(it.toString().toByteArray()) } ?: SecureRandom()
 
     val flowControlExceptionOriginalOwner = "io/github/hht0rro/javashroud/transforms/protection/FlowControlException"
-    val preservesExistingVmRuntime = artifact.jarEntries.any { it.name == VBC4_VM_PRELOAD_INDEX_RESOURCE } &&
-        artifact.jarEntries.none { it.name == VBC4_VM_CURRENT_PRELOAD_INDEX_RESOURCE }
-    val flowControlExceptionOwner = if (preservesExistingVmRuntime) {
-        flowControlExceptionOriginalOwner
-    } else {
-        sealedRuntimeHelperInternalName(flowControlExceptionOriginalOwner)
-    }
-    val flowStateAccessorName = if (preservesExistingVmRuntime) {
-        "getState"
-    } else {
-        sealedRuntimeHelperMethodName(flowControlExceptionOriginalOwner, "getState", "()I")
-    }
+    val flowControlExceptionOwner = sealedRuntimeHelperInternalName(flowControlExceptionOriginalOwner)
+    val flowStateAccessorName = sealedRuntimeHelperMethodName(flowControlExceptionOriginalOwner, "getState", "()I")
     val reflectionObservedClasses = reflectionObservedClassNames(artifact)
 
     var classCount = 0

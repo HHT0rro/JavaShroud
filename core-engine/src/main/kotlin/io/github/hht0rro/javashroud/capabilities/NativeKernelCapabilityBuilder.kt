@@ -219,13 +219,13 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
 
                 key = "targetPlatform",
 
-                type = "enum",
+                type = "string",
 
                 defaultValue = JsonNodeFactory.instance.textNode("auto"),
 
-                options = listOf("auto", "windows-x64", "linux-x64", "macos-x64", "macos-arm64"),
+                options = null,
 
-                description = "目标平台。",
+                description = "原生微内核目标平台。支持 auto（当前构建平台）、all（全部受支持平台），或以逗号分隔的平台列表，例如 windows-x64,linux-x64。",
 
             ),
 
@@ -280,6 +280,23 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
                     "aggressive 额外启用反虚拟机检测、完整性自校验和反脱壳保护。",
 
                 hidden = true,
+
+            ),
+
+
+            ParamSchema(
+
+                key = "nativePackingLevel",
+
+                type = "enum",
+
+                defaultValue = JsonNodeFactory.instance.textNode("max"),
+
+                options = listOf("off", "standard", "max"),
+
+                description = "Zig 编译后 native 加壳级别。off 保持原生动态库；standard 保留可加载前缀并追加认证 overlay；max 生成外层 stub shell，并将完整 js_kernel 作为认证编码 payload 绑定到 stub 和 native bootstrap index。",
+
+                hidden = false,
 
             ),
 

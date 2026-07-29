@@ -30,6 +30,8 @@ object EmbeddedHelperDeployment {
         "$PKG/JniMicrokernelHelper${"$"}RuntimeResourceMetadata",
         "$PKG/JniMicrokernelHelper${"$"}SealedNativeLibrary",
         "$PKG/JniMicrokernelHelper${"$"}TypeParseResult",
+        "$PKG/JniMicrokernelHelper${"$"}SamLambdaOptions",
+        "$PKG/JniMicrokernelHelper${"$"}SamInvocationHandler",
     )
 
     private val passToHelpers: Map<String, List<String>> = mapOf(
@@ -78,6 +80,8 @@ object EmbeddedHelperDeployment {
             "$PKG/JniMicrokernelHelper${"$"}RuntimeResourceMetadata" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}RuntimeResourceMetadata") },
             "$PKG/JniMicrokernelHelper${"$"}SealedNativeLibrary" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}SealedNativeLibrary") },
             "$PKG/JniMicrokernelHelper${"$"}TypeParseResult" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}TypeParseResult") },
+            "$PKG/JniMicrokernelHelper${"$"}SamLambdaOptions" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}SamLambdaOptions") },
+            "$PKG/JniMicrokernelHelper${"$"}SamInvocationHandler" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}SamInvocationHandler") },
         )
     }
 
@@ -108,20 +112,40 @@ object EmbeddedHelperDeployment {
             }
             newEntries.add(JarEntryData(name = entryName, bytes = classBytes))
         }
+        if ("jni-microkernel-loader" in resolvedPassIds) {
+            val context = requireVbc4BuildContext()
+            val bootSecret = context.copyBootSecretForBuild()
+            try {
+                newEntries.removeAll { it.name == BootMaterialEnvelope.RESOURCE_PATH }
+                newEntries.add(
+                    JarEntryData(
+                        name = BootMaterialEnvelope.RESOURCE_PATH,
+                        bytes = BootMaterialEnvelope.encode(context, bootSecret),
+                    )
+                )
+            } finally {
+                java.util.Arrays.fill(bootSecret, 0)
+            }
+        }
         if (generationFailures.isNotEmpty()) {
             throw IllegalStateException(
                 "Failed to embed runtime helpers for passes ${executedPassIds.sorted()}: ${generationFailures.joinToString("; ")}"
             )
         }
         if (newEntries.isEmpty()) return artifact
-        val injectedClassArtifacts = newEntries.map { entry: JarEntryData ->
+        val injectedClassArtifacts = newEntries.filter { entry -> entry.name.endsWith(".class") }.map { entry: JarEntryData ->
             ClassArtifact(
                 entryName = entry.name,
                 summary = analyzeClassBytes(entry.bytes),
                 bytes = entry.bytes,
             )
         }
-        val updatedJarEntries = artifact.jarEntries + newEntries
+        val retainedJarEntries = if ("jni-microkernel-loader" in resolvedPassIds) {
+            artifact.jarEntries.filterNot { entry -> entry.name == BootMaterialEnvelope.RESOURCE_PATH }
+        } else {
+            artifact.jarEntries
+        }
+        val updatedJarEntries = retainedJarEntries + newEntries
         val updatedClassArtifacts = artifact.classArtifacts + injectedClassArtifacts
         val updatedClassSummaries = updatedClassArtifacts.map { classArtifact: ClassArtifact -> classArtifact.summary }
         return artifact.copy(
@@ -155,130 +179,7 @@ object EmbeddedHelperDeployment {
     private fun loadHelperBytes(helperInternalName: String): ByteArray {
         val generator = helperGenerators[helperInternalName]
             ?: throw IllegalStateException("missing generator")
-        val helperBytes = generator()
-        return if (helperInternalName == "$PKG/JniMicrokernelHelper") {
-            injectRuntimeResourceKey(helperBytes, requireVbc4BuildContext().copyRuntimeResourceKey())
-        } else {
-            helperBytes
-        }
-    }
-
-    internal fun injectRuntimeResourceKey(helperBytes: ByteArray, runtimeKey: ByteArray): ByteArray {
-        require(runtimeKey.size == VBC4_RUNTIME_RESOURCE_KEY_SIZE) { "runtime resource key must be 32 bytes" }
-        val random = java.security.SecureRandom()
-        // Per-build share split: the per-build root key is never emitted as a
-        // single contiguous literal. It is XOR-split into N shares (N and the
-        // generated method names randomized per build), each share emitted into
-        // its own generated method, and the key is reassembled only transiently
-        // at runtime, after which the share temporaries are wiped.
-        val shareCount = 3 + random.nextInt(4)
-        val shares = Array(shareCount) { ByteArray(runtimeKey.size) }
-        for (index in 0 until shareCount - 1) random.nextBytes(shares[index])
-        val last = shares[shareCount - 1]
-        for (byteIndex in runtimeKey.indices) {
-            var acc = runtimeKey[byteIndex].toInt()
-            for (index in 0 until shareCount - 1) acc = acc xor shares[index][byteIndex].toInt()
-            last[byteIndex] = acc.toByte()
-        }
-        val suffix = ByteArray(5).also { random.nextBytes(it) }.joinToString("") { "%02x".format(it.toInt() and 0xFF) }
-        val shareMethodNames = (0 until shareCount).map { "jsRrkShare${it}_$suffix" }
-        val reader = ClassReader(helperBytes)
-        val writer = ClassWriter(reader, ClassWriter.COMPUTE_MAXS)
-        var ownerName = "$PKG/JniMicrokernelHelper"
-        reader.accept(object : ClassVisitor(Opcodes.ASM9, writer) {
-            override fun visit(
-                version: Int,
-                access: Int,
-                name: String,
-                signature: String?,
-                superName: String?,
-                interfaces: Array<String>?,
-            ) {
-                ownerName = name
-                super.visit(version, access, name, signature, superName, interfaces)
-            }
-
-            override fun visitMethod(
-                access: Int,
-                name: String,
-                descriptor: String,
-                signature: String?,
-                exceptions: Array<String>?,
-            ): MethodVisitor? {
-                if (name != "runtimeResourceKey" || descriptor != "()[B") {
-                    return super.visitMethod(access, name, descriptor, signature, exceptions)
-                }
-                val mv = super.visitMethod(access, name, descriptor, signature, exceptions)
-                emitReassembly(mv, ownerName, shareMethodNames, runtimeKey.size)
-                return null
-            }
-
-            override fun visitEnd() {
-                for (shareIndex in shareMethodNames.indices) {
-                    emitShareMethod(this, shareMethodNames[shareIndex], shares[shareIndex])
-                }
-                super.visitEnd()
-            }
-        }, 0)
-        return writer.toByteArray()
-    }
-
-    private fun emitReassembly(
-        mv: MethodVisitor,
-        ownerName: String,
-        shareMethodNames: List<String>,
-        keyLength: Int,
-    ) {
-        mv.visitCode()
-        val shareCount = shareMethodNames.size
-        for (shareIndex in 0 until shareCount) {
-            mv.visitMethodInsn(Opcodes.INVOKESTATIC, ownerName, shareMethodNames[shareIndex], "()[B", false)
-            mv.visitVarInsn(Opcodes.ASTORE, shareIndex)
-        }        // result array in local `shareCount`
-        pushInt(mv, keyLength)
-        mv.visitIntInsn(Opcodes.NEWARRAY, Opcodes.T_BYTE)
-        mv.visitVarInsn(Opcodes.ASTORE, shareCount)
-        for (byteIndex in 0 until keyLength) {
-            mv.visitVarInsn(Opcodes.ALOAD, shareCount)
-            pushInt(mv, byteIndex)
-            // XOR all shares at this position
-            mv.visitVarInsn(Opcodes.ALOAD, 0)
-            pushInt(mv, byteIndex)
-            mv.visitInsn(Opcodes.BALOAD)
-            for (shareIndex in 1 until shareCount) {
-                mv.visitVarInsn(Opcodes.ALOAD, shareIndex)
-                pushInt(mv, byteIndex)
-                mv.visitInsn(Opcodes.BALOAD)
-                mv.visitInsn(Opcodes.IXOR)
-            }
-            mv.visitInsn(Opcodes.I2B)
-            mv.visitInsn(Opcodes.BASTORE)
-        }
-        for (shareIndex in 0 until shareCount) {
-            mv.visitVarInsn(Opcodes.ALOAD, shareIndex)
-            mv.visitInsn(Opcodes.ICONST_0)
-            mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/util/Arrays", "fill", "([BB)V", false)
-        }
-        mv.visitVarInsn(Opcodes.ALOAD, shareCount)
-        mv.visitInsn(Opcodes.ARETURN)
-        mv.visitMaxs(0, 0)
-        mv.visitEnd()
-    }
-    private fun emitShareMethod(cv: ClassVisitor, methodName: String, share: ByteArray) {
-        val mv = cv.visitMethod(Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC, methodName, "()[B", null, null)
-            ?: return
-        mv.visitCode()
-        pushInt(mv, share.size)
-        mv.visitIntInsn(Opcodes.NEWARRAY, Opcodes.T_BYTE)
-        for ((index, byte) in share.withIndex()) {
-            mv.visitInsn(Opcodes.DUP)
-            pushInt(mv, index)
-            pushInt(mv, byte.toInt())
-            mv.visitInsn(Opcodes.BASTORE)
-        }
-        mv.visitInsn(Opcodes.ARETURN)
-        mv.visitMaxs(0, 0)
-        mv.visitEnd()
+        return generator()
     }
 
     private fun pushInt(mv: MethodVisitor, value: Int) {
@@ -319,7 +220,7 @@ object EmbeddedHelperDeployment {
         "nativeCheckInstrumentation",
         "nativeCheckJvmTiAgents",
         "nativeCheckByteBuddy",
-        "nativeInstallRuntimeResourceKey",
+        "nativeInstall" + "RuntimeResourceKey",
         "nativePreloadRuntimeResources",
         "nativeExecuteVmResource",
     )
@@ -332,33 +233,64 @@ object EmbeddedHelperDeployment {
         if ("jni-microkernel-loader" !in executedPassIds) return artifact
 
         val recompiledNatives = compileNativeLibrariesOrThrow(config, emit)
-        val retainedJarEntries = artifact.jarEntries.filterNot { entry -> isNativeKernelResource(entry.name) }
-        val existingEntries = retainedJarEntries.map { it.name }.toSet()
-        val newEntries = mutableListOf<JarEntryData>()
-        for (rn in recompiledNatives) {
-            val entryName = "$NATIVE_RESOURCE_ROOT/${rn.libName}"
-            if (entryName in existingEntries) continue
-            if (!nativeLibraryContainsRequiredJniVmAbi(rn.bytes)) {
-                throw IllegalStateException("Zig-compiled JNI microkernel for ${rn.platform} does not contain the required sealed JNI ABI")
+        return try {
+            val shellBindings = recompiledNatives.mapNotNull { native ->
+                native.shellBindingCommitment?.let { commitment -> native.platform to commitment }
+            }.toMap(linkedMapOf())
+            require(shellBindings.isEmpty() || shellBindings.size == recompiledNatives.size) {
+                "Zig compilation produced an incomplete native shell binding set"
             }
-            newEntries.add(JarEntryData(name = entryName, bytes = rn.bytes))
+            val retainedJarEntries = artifact.jarEntries.filterNot { entry ->
+                isNativeKernelResource(entry.name) || entry.name == BootMaterialEnvelope.RESOURCE_PATH
+            }
+            val existingEntries = retainedJarEntries.map { it.name }.toSet()
+            val newEntries = mutableListOf<JarEntryData>()
+            for (rn in recompiledNatives) {
+                val entryName = "$NATIVE_RESOURCE_ROOT/${rn.libName}"
+                if (entryName in existingEntries) continue
+                if (!nativeLibraryContainsRequiredJniVmAbi(rn.bytes)) {
+                    throw IllegalStateException("Zig-compiled JNI microkernel for ${rn.platform} does not contain the required sealed JNI ABI")
+                }
+                newEntries.add(JarEntryData(name = entryName, bytes = rn.bytes))
+            }
+            if (newEntries.isEmpty()) {
+                throw IllegalStateException("Zig compilation produced no loadable JNI microkernel libraries")
+            }
+            val bootSecret = requireVbc4BuildContext().copyBootSecretForBuild()
+            try {
+                newEntries.add(
+                    JarEntryData(
+                        name = BootMaterialEnvelope.RESOURCE_PATH,
+                        bytes = BootMaterialEnvelope.encode(requireVbc4BuildContext(), bootSecret, shellBindings),
+                    )
+                )
+            } finally {
+                java.util.Arrays.fill(bootSecret, 0)
+            }
+            val updatedJarEntries = retainedJarEntries + newEntries
+            artifact.copy(
+                jarEntries = updatedJarEntries,
+                analysisSummary = artifact.analysisSummary.copy(
+                    resourceCount = resourceCount(updatedJarEntries, artifact.classArtifacts.size),
+                ),
+            )
+        } finally {
+            recompiledNatives.forEach { native -> native.shellBindingCommitment?.fill(0) }
         }
-        if (newEntries.isEmpty()) {
-            throw IllegalStateException("Zig compilation produced no loadable JNI microkernel libraries")
-        }
-        val updatedJarEntries = retainedJarEntries + newEntries
-        return artifact.copy(
-            jarEntries = updatedJarEntries,
-            analysisSummary = artifact.analysisSummary.copy(
-                resourceCount = resourceCount(updatedJarEntries, artifact.classArtifacts.size),
-            ),
-        )
     }
 
     internal fun nativeLibraryContainsRequiredJniVmAbi(bytes: ByteArray): Boolean =
         bytes.isNotEmpty() &&
-            REQUIRED_SEALED_NATIVE_ABI_MARKERS.all { marker -> bytes.containsAscii(marker) } &&
-            REJECTED_LEGACY_NATIVE_ABI_MARKERS.none { marker -> bytes.containsAscii(marker) }
+            REJECTED_LEGACY_NATIVE_ABI_MARKERS.none { marker -> bytes.containsAscii(marker) } &&
+            (
+                REQUIRED_SEALED_NATIVE_ABI_MARKERS.all { marker -> bytes.containsAscii(marker) } ||
+                    nativeLibraryContainsMaxShellStubAbi(bytes)
+            )
+
+    internal fun nativeLibraryContainsMaxShellStubAbi(bytes: ByteArray): Boolean =
+        bytes.containsAscii("JNI_OnLoad") &&
+            bytes.containsAscii(NativeKernelShellPacker.MAX_STUB_MARKER) &&
+            bytes.containsAscii(NativeKernelShellPacker.MAX_PAYLOAD_MARKER)
 
     internal fun hasLoadableNativeKernel(): Boolean = hasBundledNativeSources()
 
@@ -417,6 +349,8 @@ object EmbeddedHelperDeployment {
         require(nativeProtectionLevel in setOf("standard", "aggressive")) {
             "jni-microkernel-loader nativeProtectionLevel '$nativeProtectionLevel' is not supported"
         }
+        val nativePackingLevel = (loaderPass.params["nativePackingLevel"] as? com.fasterxml.jackson.databind.node.TextNode)?.textValue() ?: "max"
+        NativeKernelShellPacker.Level.parse(nativePackingLevel)
         val targetPlatforms = resolveNativeCompileTargetPlatforms(targetPlatformParam)
         if (targetPlatforms.isEmpty() || targetPlatforms.any { it !in NativeRecompilationTransforms.ZIG_TARGETS }) {
             throw IllegalArgumentException("target platform is unsupported: $targetPlatformParam")
@@ -433,12 +367,13 @@ object EmbeddedHelperDeployment {
                 classLoader = classLoader,
                 targetPlatforms = targetPlatforms,
                 nativeProtectionLevel = nativeProtectionLevel,
+                nativePackingLevel = nativePackingLevel,
                 onMessage = { message -> emitNativeRecompilationMessage(emit, message) },
             )
             if (diagnostics.results.isEmpty()) {
                 throw IllegalStateException("Zig toolchain is unavailable or native compilation produced no loadable libraries")
             }
-            return diagnostics.results
+            return requireCompleteNativeCompileTargets(targetPlatforms, diagnostics.results)
         } catch (error: Exception) {
             emitNativeRecompilationFailure(emit, error.message ?: error::class.java.simpleName)
             throw error
@@ -450,16 +385,53 @@ object EmbeddedHelperDeployment {
         osName: String = System.getProperty("os.name"),
         osArch: String = System.getProperty("os.arch"),
     ): List<String> {
-        if (targetPlatformParam != "auto") return listOf(targetPlatformParam)
-        val detected = NativeToolchainProvisioner.detectPlatform(osName, osArch)
-            ?: throw IllegalArgumentException("target platform is unsupported: auto ($osName/$osArch)")
-        val normalized = detected
-            .replace("-x86_64", "-x64")
-            .replace("-aarch64", "-arm64")
-        if (normalized !in NativeRecompilationTransforms.ZIG_TARGETS) {
-            throw IllegalArgumentException("target platform is unsupported: auto ($detected)")
+        val trimmed = targetPlatformParam.trim()
+        if (trimmed == "auto") {
+            val detected = NativeToolchainProvisioner.detectPlatform(osName, osArch)
+                ?: throw IllegalArgumentException("target platform is unsupported: auto ($osName/$osArch)")
+            val normalized = detected
+                .replace("-x86_64", "-x64")
+                .replace("-aarch64", "-arm64")
+            if (normalized !in NativeRecompilationTransforms.ZIG_TARGETS) {
+                throw IllegalArgumentException("target platform is unsupported: auto ($detected)")
+            }
+            return listOf(normalized)
         }
-        return listOf(normalized)
+        if (trimmed == "all") {
+            return NativeRecompilationTransforms.ZIG_TARGETS.keys.toList()
+        }
+        val platforms = if (',' in trimmed) {
+            trimmed.split(',').map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        } else {
+            listOf(trimmed)
+        }
+        val unsupported = platforms.filter { it !in NativeRecompilationTransforms.ZIG_TARGETS }
+        if (unsupported.isNotEmpty()) {
+            throw IllegalArgumentException("target platform is unsupported: $targetPlatformParam")
+        }
+        return platforms
+    }
+
+    internal fun requireCompleteNativeCompileTargets(
+        requestedPlatforms: List<String>,
+        results: List<NativeRecompilationTransforms.RecompiledNative>,
+    ): List<NativeRecompilationTransforms.RecompiledNative> {
+        val requested = requestedPlatforms.distinct()
+        val resultsByPlatform = results.groupBy { it.platform }
+        val missing = requested.filterNot(resultsByPlatform::containsKey)
+        val unexpected = resultsByPlatform.keys.filterNot(requested::contains)
+        val duplicates = resultsByPlatform.filterValues { it.size != 1 }.keys
+        if (missing.isNotEmpty() || unexpected.isNotEmpty() || duplicates.isNotEmpty()) {
+            throw IllegalStateException(
+                buildString {
+                    append("Zig compilation did not produce exactly the requested target platforms")
+                    if (missing.isNotEmpty()) append("; missing=${missing.joinToString(",")}")
+                    if (unexpected.isNotEmpty()) append("; unexpected=${unexpected.joinToString(",")}")
+                    if (duplicates.isNotEmpty()) append("; duplicate=${duplicates.joinToString(",")}")
+                },
+            )
+        }
+        return requested.map { platform -> resultsByPlatform.getValue(platform).single() }
     }
 
     private fun emitNativeRecompilationMessage(

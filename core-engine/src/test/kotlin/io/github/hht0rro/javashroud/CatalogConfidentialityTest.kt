@@ -1,0 +1,173 @@
+package io.github.hht0rro.javashroud
+
+import io.github.hht0rro.javashroud.analysis.analyzeClassBytes
+import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
+import io.github.hht0rro.javashroud.model.artifact.JarEntryData
+import io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing
+import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceCodec
+import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceKind
+import io.github.hht0rro.javashroud.transforms.protection.RuntimeVmCatalog
+import io.github.hht0rro.javashroud.transforms.protection.RuntimeVmCatalogMethod
+import io.github.hht0rro.javashroud.transforms.protection.RuntimeVmCatalogPlan
+import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.VBC4_VM_CATALOG_RESOURCE
+import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.encodeSealedNativeBindingLines
+import java.io.ByteArrayInputStream
+import java.io.DataInputStream
+import java.security.MessageDigest
+import kotlin.test.Test
+import kotlin.test.assertContentEquals
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+class CatalogConfidentialityTest {
+    @Test
+    fun catalog_root_is_anchor_encrypted_and_round_trips() {
+        val context = Vbc4BuildContext(
+            masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { (it * 7 + 3).toByte() },
+            nativeSeed = 0x13572468L,
+            jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { (it * 11 + 5).toByte() },
+        )
+        withVbc4BuildContext(context) {
+            val resource = RuntimeResourceCodec.encodeForPartition(
+                "payload".toByteArray(), RuntimeResourceKind.VmBytecode, 1, 1, 3, 0, false,
+            )
+            val path = "META-INF/.r/a.bin"
+            val plan = RuntimeVmCatalogPlan(listOf(RuntimeVmCatalogMethod(
+                entryToken = 1,
+                resourcePath = path,
+                manifestPath = path,
+                shardCount = 1,
+                mesh = MessageDigest.getInstance("SHA-256").digest("mesh".toByteArray()).joinToString("") { "%02x".format(it) },
+                methodLocalProfile = 0,
+            )))
+            val built = RuntimeVmCatalog.build(listOf(JarEntryData(path, resource)), plan, VBC4_VM_CATALOG_RESOURCE, context.nativeSeed)
+            val sealedRoot = built.entries.single { it.name == VBC4_VM_CATALOG_RESOURCE }.bytes
+            assertFalse(sealedRoot.decodeToString().startsWith("JSC1|"))
+            val plain = RuntimeResourceCodec.decode(sealedRoot) ?: error("catalog root did not decode")
+            assertContentEquals("JSC1|".toByteArray(), plain.copyOfRange(0, 5))
+        }
+    }
+
+    @Test
+    fun sealed_native_bootstrap_keeps_only_locator_rows_and_encrypts_bindings_separately() {
+        val context = Vbc4BuildContext(
+            masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { (it * 13 + 7).toByte() },
+            nativeSeed = 0x24681357L,
+            jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { (it * 17 + 9).toByte() },
+        )
+        val helperName = "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper"
+        val helperBytes = checkNotNull(javaClass.classLoader.getResourceAsStream("$helperName.class")).use { it.readBytes() }
+        val helperArtifact = ClassArtifact(
+            entryName = "$helperName.class",
+            summary = analyzeClassBytes(helperBytes),
+            bytes = helperBytes,
+        )
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(helperArtifact),
+            jarEntries = listOf(
+                JarEntryData(helperArtifact.entryName, helperArtifact.bytes),
+                JarEntryData("META-INF/js-native/js_kernel_windows-x64.dll", "native".toByteArray()),
+            ),
+        )
+
+        val sealed = withVbc4BuildContext(context) {
+            RuntimeArtifactSealing.seal(artifact, context.nativeSeed, rewritesVmRuntime = false)
+        }
+        val jsbiEntries = sealed.jarEntries.filter { it.bytes.startsWithAscii("JSBI") }
+        val jsbi = jsbiEntries.single { decodeJsbiPayload(it.bytes).decodeToString().contains("windows-x64|") }
+        val bootstrapPlain = decodeJsbiPayload(jsbi.bytes).decodeToString()
+        assertTrue(bootstrapPlain.lineSequence().filter { it.isNotBlank() }.all { it.split('|').size == 3 && it.first() != 'B' && it.first() != 'M' })
+        assertFalse(jsbi.bytes.containsAscii("B|"), "bootstrap locator must not expose class bindings")
+        assertFalse(jsbi.bytes.containsAscii("M|"), "bootstrap locator must not expose method bindings")
+
+        val decodedAnchorEntries = withVbc4BuildContext(context) {
+            sealed.jarEntries.mapNotNull { entry ->
+                RuntimeResourceCodec.decode(entry.bytes)?.let { plain -> entry to plain }
+            }
+        }
+        val bindingResources = decodedAnchorEntries.filter { (_, plain) ->
+            plain.containsAscii("B|") || plain.containsAscii("M|")
+        }
+        assertEquals(1, bindingResources.size, "one anchor-encrypted binding resource must be emitted")
+        assertFalse(sealed.jarEntries.any { it.name == "META-INF/.r/bindings.dat" }, "legacy plaintext binding path must not survive sealing")
+        val (bindingResource, bindingPlain) = bindingResources.single()
+        assertTrue(bindingPlain.containsAscii("B|"), "binding plaintext must contain class rows after decryption")
+        assertFalse(bindingResource.bytes.containsAscii("B|"), "binding ciphertext must not expose class rows")
+        assertFalse(bindingResource.bytes.containsAscii("M|"), "binding ciphertext must not expose method rows")
+        assertEquals(context.runtimeKeyPartitions.anchorSlotId, RuntimeResourceCodec.partitionId(bindingResource.bytes))
+        assertEquals(0, sealed.jarEntries.count { entry -> entry.bytes.containsAscii("B|") || entry.bytes.containsAscii("M|") })
+
+        val rewrittenHelper = sealed.classArtifacts.single().bytes
+        val bindingPath = bindingResource.name
+        assertTrue(classUtf8Constants(rewrittenHelper).contains(bindingPath), "rewritten helper must reference the separately sealed binding resource")
+    }
+
+    @Test
+    fun sealed_native_binding_decoder_round_trips_and_rejects_tampering() {
+        val context = Vbc4BuildContext(
+            masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { (it * 19 + 3).toByte() },
+            nativeSeed = 0x33557799L,
+            jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { (it * 23 + 1).toByte() },
+        )
+        withVbc4BuildContext(context) {
+            val encoded = encodeSealedNativeBindingLines(
+                listOf("B|0123456789abcdef|r/ab/C0123456789abcdef012345", "M|fedcba9876543210|m_0123456789abcdef"),
+                context.nativeSeed,
+            )
+            assertFalse(encoded.containsAscii("B|"))
+            assertFalse(encoded.containsAscii("M|"))
+
+            val decoded = RuntimeResourceCodec.decode(encoded) ?: error("binding envelope did not decode")
+            assertTrue(decoded.decodeToString().contains("B|0123456789abcdef|"))
+            assertTrue(decoded.decodeToString().contains("M|fedcba9876543210|"))
+
+            val tampered = encoded.copyOf().also { it[it.size / 2] = (it[it.size / 2].toInt() xor 0x40).toByte() }
+            assertEquals(null, RuntimeResourceCodec.decode(tampered), "binding envelope tampering must fail closed")
+        }
+    }
+
+    private fun decodeJsbiPayload(bytes: ByteArray): ByteArray {
+        val size = (bytes[5].toInt() and 0xFF) or
+            ((bytes[6].toInt() and 0xFF) shl 8) or
+            ((bytes[7].toInt() and 0xFF) shl 16) or
+            ((bytes[8].toInt() and 0xFF) shl 24)
+        return bytes.copyOfRange(9, 9 + size)
+    }
+
+    private fun ByteArray.startsWithAscii(value: String): Boolean =
+        size >= value.length && value.indices.all { index -> this[index] == value[index].code.toByte() }
+
+    private fun ByteArray.containsAscii(value: String): Boolean {
+        val needle = value.toByteArray(Charsets.US_ASCII)
+        if (needle.isEmpty() || size < needle.size) return false
+        return (0..size - needle.size).any { offset -> needle.indices.all { index -> this[offset + index] == needle[index] } }
+    }
+
+    private fun classUtf8Constants(bytes: ByteArray): Set<String> {
+        val input = DataInputStream(ByteArrayInputStream(bytes))
+        check(input.readInt() == 0xCAFEBABE.toInt())
+        input.readUnsignedShort()
+        input.readUnsignedShort()
+        val count = input.readUnsignedShort()
+        val values = linkedSetOf<String>()
+        var index = 1
+        while (index < count) {
+            when (val tag = input.readUnsignedByte()) {
+                1 -> values += input.readUTF()
+                3, 4 -> input.skipBytes(4)
+                5, 6 -> { input.skipBytes(8); index++ }
+                7, 8, 16, 19, 20 -> input.skipBytes(2)
+                9, 10, 11, 12, 17, 18 -> input.skipBytes(4)
+                15 -> input.skipBytes(3)
+                else -> error("unsupported class constant tag $tag")
+            }
+            index++
+        }
+        return values
+    }
+}

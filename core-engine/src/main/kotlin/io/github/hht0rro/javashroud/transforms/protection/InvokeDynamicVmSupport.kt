@@ -14,6 +14,20 @@ internal data class NormalizedInvokeDynamic(
     val bootstrapMethodArguments: Array<Any>,
 )
 
+internal data class SamLambdaMetafactoryRecipe(
+    val impl: Handle,
+    val samType: Type,
+    val instantiatedType: Type,
+    val flags: Int,
+    val markerInterfaces: List<Type>,
+    val bridgeTypes: List<Type>,
+)
+
+private const val LAMBDA_FLAG_SERIALIZABLE = 1
+private const val LAMBDA_FLAG_MARKERS = 2
+private const val LAMBDA_FLAG_BRIDGES = 4
+private const val LAMBDA_SUPPORTED_FLAGS = LAMBDA_FLAG_SERIALIZABLE or LAMBDA_FLAG_MARKERS or LAMBDA_FLAG_BRIDGES
+
 internal fun normalizeNativeVmInvokeDynamic(
     name: String,
     descriptor: String,
@@ -81,17 +95,85 @@ private fun decryptBootstrapString(encryptedBase64: String, keyBase64: String): 
     return cipher.doFinal(encrypted.copyOfRange(16, encrypted.size)).toString(Charsets.UTF_8)
 }
 
-private fun isSupportedSamLambdaMetafactory(indy: NormalizedInvokeDynamic): Boolean {
-    if (indy.bootstrapMethodHandle.owner != "java/lang/invoke/LambdaMetafactory" || indy.bootstrapMethodHandle.name != "metafactory") return false
-    val returnType = Type.getReturnType(indy.descriptor)
-    if (indy.bootstrapMethodArguments.size < 3 || indy.bootstrapMethodArguments[1] !is Handle) return false
-    val samType = indy.bootstrapMethodArguments[0] as? Type ?: return false
-    val instantiatedType = indy.bootstrapMethodArguments[2] as? Type ?: return false
-    if (returnType.sort != Type.OBJECT) return false
-    return when (returnType.internalName) {
-        "java/lang/Runnable" -> indy.name == "run" && samType.descriptor == "()V" && instantiatedType.descriptor == "()V"
-        "java/util/function/IntUnaryOperator" -> indy.name == "applyAsInt" && samType.descriptor == "(I)I" && Type.getArgumentTypes(instantiatedType.descriptor).size == 1 && Type.getReturnType(instantiatedType.descriptor).sort == Type.INT
-        "java/util/function/Function" -> indy.name == "apply" && samType.descriptor == "(Ljava/lang/Object;)Ljava/lang/Object;" && Type.getArgumentTypes(instantiatedType.descriptor).size == 1
-        else -> false
+internal fun extractSamLambdaMetafactoryRecipe(indy: NormalizedInvokeDynamic): SamLambdaMetafactoryRecipe? {
+    if (indy.bootstrapMethodHandle.owner != "java/lang/invoke/LambdaMetafactory") return null
+    if (indy.bootstrapMethodArguments.size < 3) return null
+    val samType = indy.bootstrapMethodArguments[0] as? Type ?: return null
+    val impl = indy.bootstrapMethodArguments[1] as? Handle ?: return null
+    val instantiatedType = indy.bootstrapMethodArguments[2] as? Type ?: return null
+    if (indy.bootstrapMethodHandle.name == "metafactory") {
+        if (indy.bootstrapMethodArguments.size != 3) return null
+        return SamLambdaMetafactoryRecipe(impl, samType, instantiatedType, 0, emptyList(), emptyList())
     }
+    if (indy.bootstrapMethodHandle.name != "altMetafactory" || indy.bootstrapMethodArguments.size < 4) return null
+    val flags = indy.bootstrapMethodArguments[3] as? Int ?: return null
+    if (flags and LAMBDA_SUPPORTED_FLAGS.inv() != 0) return null
+    var cursor = 4
+    val markers = mutableListOf<Type>()
+    if (flags and LAMBDA_FLAG_MARKERS != 0) {
+        val markerCount = indy.bootstrapMethodArguments.getOrNull(cursor++) as? Int ?: return null
+        if (markerCount < 0 || markerCount > 64 || cursor + markerCount > indy.bootstrapMethodArguments.size) return null
+        repeat(markerCount) {
+            val marker = indy.bootstrapMethodArguments[cursor++] as? Type ?: return null
+            if (marker.sort != Type.OBJECT) return null
+            markers += marker
+        }
+    }
+    val bridges = mutableListOf<Type>()
+    if (flags and LAMBDA_FLAG_BRIDGES != 0) {
+        val bridgeCount = indy.bootstrapMethodArguments.getOrNull(cursor++) as? Int ?: return null
+        if (bridgeCount < 0 || bridgeCount > 64 || cursor + bridgeCount > indy.bootstrapMethodArguments.size) return null
+        repeat(bridgeCount) {
+            val bridge = indy.bootstrapMethodArguments[cursor++] as? Type ?: return null
+            if (bridge.sort != Type.METHOD) return null
+            bridges += bridge
+        }
+    }
+    if (cursor != indy.bootstrapMethodArguments.size) return null
+    return SamLambdaMetafactoryRecipe(impl, samType, instantiatedType, flags, markers, bridges)
+}
+
+internal fun encodeSamLambdaMetafactoryConstant(
+    name: String,
+    descriptor: String,
+    recipe: SamLambdaMetafactoryRecipe,
+): String = listOf(
+    "lambda",
+    name,
+    descriptor,
+    recipe.impl.tag.toString(),
+    recipe.impl.owner,
+    recipe.impl.name,
+    recipe.impl.desc,
+    recipe.samType.descriptor,
+    recipe.instantiatedType.descriptor,
+    encodeSamLambdaOptions(recipe),
+).joinToString("|")
+
+private fun encodeSamLambdaOptions(recipe: SamLambdaMetafactoryRecipe): String {
+    fun encodeDescriptor(type: Type): String = Base64.getUrlEncoder().withoutPadding()
+        .encodeToString(type.descriptor.toByteArray(Charsets.US_ASCII))
+    return listOf(
+        recipe.flags.toString(16),
+        recipe.markerInterfaces.joinToString(",") { encodeDescriptor(it) },
+        recipe.bridgeTypes.joinToString(",") { encodeDescriptor(it) },
+    ).joinToString(";")
+}
+
+private fun isSupportedSamLambdaMetafactory(indy: NormalizedInvokeDynamic): Boolean {
+    val recipe = extractSamLambdaMetafactoryRecipe(indy) ?: return false
+    val samType = recipe.samType
+    val instantiatedType = recipe.instantiatedType
+    val returnType = Type.getReturnType(indy.descriptor)
+    if (returnType.sort != Type.OBJECT) return false
+    if (indy.name.isBlank() || samType.sort != Type.METHOD || instantiatedType.sort != Type.METHOD) return false
+    if (Type.getArgumentTypes(samType.descriptor).size != Type.getArgumentTypes(instantiatedType.descriptor).size) return false
+    if (recipe.bridgeTypes.any { Type.getArgumentTypes(it.descriptor).size != Type.getArgumentTypes(samType.descriptor).size }) return false
+    return recipe.impl.tag in setOf(
+        org.objectweb.asm.Opcodes.H_INVOKEVIRTUAL,
+        org.objectweb.asm.Opcodes.H_INVOKESTATIC,
+        org.objectweb.asm.Opcodes.H_INVOKESPECIAL,
+        org.objectweb.asm.Opcodes.H_NEWINVOKESPECIAL,
+        org.objectweb.asm.Opcodes.H_INVOKEINTERFACE,
+    )
 }

@@ -22,8 +22,15 @@ internal data class RunCommandRequest(
     override val command: EngineCommand = EngineCommand.Run
 }
 
+internal data class GarbageCollectCommandRequest(
+    val apply: Boolean,
+) : EngineCliRequest {
+    override val command: EngineCommand = EngineCommand.GarbageCollect
+}
+
 internal fun buildCommandRequest(command: EngineCommand, args: Array<String>): EngineCliRequest = when (command) {
     EngineCommand.Schema -> SchemaCommandRequest
     EngineCommand.Inspect -> InspectCommandRequest(parseInspectJarPath(args))
     EngineCommand.Run -> RunCommandRequest(buildRunRequest(args))
+    EngineCommand.GarbageCollect -> GarbageCollectCommandRequest(parseGarbageCollectApply(args))
 }
