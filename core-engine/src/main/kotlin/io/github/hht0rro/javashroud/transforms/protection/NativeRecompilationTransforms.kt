@@ -777,7 +777,7 @@ object NativeRecompilationTransforms {
         val globalCacheBase = environment["ZIG_GLOBAL_CACHE_DIR"]?.let(Path::of)
         val localCacheBase = environment["ZIG_LOCAL_CACHE_DIR"]?.let(Path::of)
         val retryScope = Integer.toUnsignedString(processBuilder.command().hashCode(), 16)
-        repeat(3) { attempt ->
+        repeat(ZIG_COMPILE_ATTEMPTS) { attempt ->
             if (attempt > 0) {
                 globalCacheBase?.let { environment["ZIG_GLOBAL_CACHE_DIR"] = it.resolve("retry-$retryScope-$attempt").toString() }
                 localCacheBase?.let { environment["ZIG_LOCAL_CACHE_DIR"] = it.resolve("retry-$retryScope-$attempt").toString() }
@@ -793,13 +793,17 @@ object NativeRecompilationTransforms {
                 output = when {
                     exitCode == 0 && !outputPresent && output.isBlank() -> outputStatus
                     exitCode == 0 && !outputPresent -> "$output\n$outputStatus"
+                    exitCode != 0 && !outputPresent && output.isNotBlank() ->
+                        "$output\nZig exited with code $exitCode and produced no output artifact: $expectedOutput"
                     else -> output.ifBlank { "Zig exited with code $exitCode without diagnostics" }
                 },
             )
+            val missingArtifactWithoutCompilerError =
+                !outputPresent && output.lineSequence().none(::isActionableZigCompilerError)
             val transientFailure =
-                (exitCode == 0 && !outputPresent) || output.isBlank() || isTransientZigFileOpenFailure(output)
-            if (lastResult.success || !transientFailure || attempt == 2) return@synchronized lastResult
-            Thread.sleep(250L)
+                missingArtifactWithoutCompilerError || output.isBlank() || isTransientZigFileOpenFailure(output)
+            if (lastResult.success || !transientFailure || attempt == ZIG_COMPILE_ATTEMPTS - 1) return@synchronized lastResult
+            Thread.sleep(ZIG_RETRY_BASE_DELAY_MS * (attempt + 1L))
         }
         lastResult
     }
@@ -813,12 +817,22 @@ object NativeRecompilationTransforms {
     private fun isTransientZigFileOpenFailure(output: String): Boolean =
         output.contains("file_open Unexpected") ||
             output.contains("CacheCheckFailed") ||
+            (output.contains("failed to spawn zig clang") && output.contains("AccessDenied")) ||
             output.lineSequence().any { line ->
                 val trimmed = line.trimEnd()
                 trimmed.endsWith("note: Unexpected") ||
                     (trimmed.contains("note: unable to load") && trimmed.endsWith(": Unexpected")) ||
                     Regex(""":\d+:\d+: error: Unexpected$""").containsMatchIn(trimmed)
             }
+
+    private fun isActionableZigCompilerError(line: String): Boolean {
+        val normalized = line.trim().lowercase()
+        return normalized.startsWith("error:") || normalized.startsWith("fatal:") ||
+            normalized.contains(": error:") || normalized.contains(": fatal:")
+    }
+
+    private const val ZIG_COMPILE_ATTEMPTS = 6
+    private const val ZIG_RETRY_BASE_DELAY_MS = 500L
     internal fun generateDiversifiedSecrets(
         seed: Long,
         rng: Random,

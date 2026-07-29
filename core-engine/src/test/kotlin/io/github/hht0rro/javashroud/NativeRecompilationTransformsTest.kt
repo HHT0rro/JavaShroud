@@ -44,10 +44,16 @@ class NativeRecompilationTransformsTest {
         assertTrue(retryBody.contains("file_open Unexpected"), "Transient Zig file-open failures must remain retryable.")
         assertTrue(retryBody.contains("CacheCheckFailed"), "Transient Zig cache-check failures must be retried before failing native compilation.")
         assertTrue(retryBody.contains("note: unable to load"), "Transient Zig standard-library reads must be retried before failing native compilation.")
+        assertTrue(retryBody.contains("failed to spawn zig clang") && retryBody.contains("AccessDenied"), "Transient Zig child-compiler spawn failures must be retried.")
         assertTrue(compileBody.contains("output.isBlank()"), "Undiagnosed Zig failures must receive the same bounded retry treatment.")
         assertTrue(compileBody.contains("expectedOutput"), "Zig retries must verify that the compiler produced the requested artifact.")
         assertTrue(compileBody.contains("outputPresent"), "A zero-exit Zig process without an artifact must remain a failed compile.")
+        assertTrue(compileBody.contains("missingArtifactWithoutCompilerError"), "A warning-only Zig exit without an artifact must receive bounded retries.")
+        assertTrue(retryBody.contains("isActionableZigCompilerError"), "Real compiler and linker errors must stay distinguishable from warning-only transient exits.")
         assertTrue(compileBody.contains("retry-\$retryScope-\$attempt"), "A Zig retry must not reuse cache state left by the failed attempt.")
+        assertTrue(compileBody.contains("ZIG_COMPILE_ATTEMPTS"), "Transient Zig I/O failures must use the bounded compile-attempt policy.")
+        assertTrue(retryBody.contains("ZIG_COMPILE_ATTEMPTS = 6"), "Repeated Zig standard-library read failures need enough bounded attempts to recover.")
+        assertTrue(compileBody.contains("ZIG_RETRY_BASE_DELAY_MS * (attempt + 1L)"), "Zig retries must use increasing backoff instead of immediate cache churn.")
     }
 
     @Test
