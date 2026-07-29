@@ -710,7 +710,7 @@ object NativeRecompilationTransforms {
             val pb = ProcessBuilder(cmd)
             configureZigCache(pb, outputPath)
             pb.redirectErrorStream(true)
-            runZigCompileWithRetry(pb)
+            runZigCompileWithRetry(pb, outputPath)
         } catch (error: Exception) {
             ZigCompileResult(false, error.message ?: error::class.java.simpleName)
         }
@@ -765,13 +765,13 @@ object NativeRecompilationTransforms {
             val pb = ProcessBuilder(cmd)
             configureZigCache(pb, outputPath)
             pb.redirectErrorStream(true)
-            runZigCompileWithRetry(pb)
+            runZigCompileWithRetry(pb, outputPath)
         } catch (error: Exception) {
             ZigCompileResult(false, error.message ?: error::class.java.simpleName)
         }
     }
 
-    private fun runZigCompileWithRetry(processBuilder: ProcessBuilder): ZigCompileResult = synchronized(zigCompileLock) {
+    private fun runZigCompileWithRetry(processBuilder: ProcessBuilder, expectedOutput: Path): ZigCompileResult = synchronized(zigCompileLock) {
         var lastResult = ZigCompileResult(false, "Zig compilation did not start")
         val environment = processBuilder.environment()
         val globalCacheBase = environment["ZIG_GLOBAL_CACHE_DIR"]?.let(Path::of)
@@ -782,14 +782,22 @@ object NativeRecompilationTransforms {
                 globalCacheBase?.let { environment["ZIG_GLOBAL_CACHE_DIR"] = it.resolve("retry-$retryScope-$attempt").toString() }
                 localCacheBase?.let { environment["ZIG_LOCAL_CACHE_DIR"] = it.resolve("retry-$retryScope-$attempt").toString() }
             }
+            Files.deleteIfExists(expectedOutput)
             val process = processBuilder.start()
             val output = process.inputStream.bufferedReader().readText()
             val exitCode = process.waitFor()
+            val outputPresent = Files.isRegularFile(expectedOutput) && Files.size(expectedOutput) > 0L
+            val outputStatus = "Zig exited successfully but produced no output artifact: $expectedOutput"
             lastResult = ZigCompileResult(
-                success = exitCode == 0,
-                output = output.ifBlank { "Zig exited with code $exitCode without diagnostics" },
+                success = exitCode == 0 && outputPresent,
+                output = when {
+                    exitCode == 0 && !outputPresent && output.isBlank() -> outputStatus
+                    exitCode == 0 && !outputPresent -> "$output\n$outputStatus"
+                    else -> output.ifBlank { "Zig exited with code $exitCode without diagnostics" }
+                },
             )
-            val transientFailure = output.isBlank() || isTransientZigFileOpenFailure(output)
+            val transientFailure =
+                (exitCode == 0 && !outputPresent) || output.isBlank() || isTransientZigFileOpenFailure(output)
             if (lastResult.success || !transientFailure || attempt == 2) return@synchronized lastResult
             Thread.sleep(250L)
         }

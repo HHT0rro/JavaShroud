@@ -45,6 +45,8 @@ class NativeRecompilationTransformsTest {
         assertTrue(retryBody.contains("CacheCheckFailed"), "Transient Zig cache-check failures must be retried before failing native compilation.")
         assertTrue(retryBody.contains("note: unable to load"), "Transient Zig standard-library reads must be retried before failing native compilation.")
         assertTrue(compileBody.contains("output.isBlank()"), "Undiagnosed Zig failures must receive the same bounded retry treatment.")
+        assertTrue(compileBody.contains("expectedOutput"), "Zig retries must verify that the compiler produced the requested artifact.")
+        assertTrue(compileBody.contains("outputPresent"), "A zero-exit Zig process without an artifact must remain a failed compile.")
         assertTrue(compileBody.contains("retry-\$retryScope-\$attempt"), "A Zig retry must not reuse cache state left by the failed attempt.")
     }
 
