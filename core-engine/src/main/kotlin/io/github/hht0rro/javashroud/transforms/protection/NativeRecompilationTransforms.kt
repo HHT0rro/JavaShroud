@@ -806,8 +806,10 @@ object NativeRecompilationTransforms {
         output.contains("file_open Unexpected") ||
             output.contains("CacheCheckFailed") ||
             output.lineSequence().any { line ->
-                line.trimEnd().endsWith("note: Unexpected") ||
-                    Regex(""":\d+:\d+: error: Unexpected$""").containsMatchIn(line.trimEnd())
+                val trimmed = line.trimEnd()
+                trimmed.endsWith("note: Unexpected") ||
+                    (trimmed.contains("note: unable to load") && trimmed.endsWith(": Unexpected")) ||
+                    Regex(""":\d+:\d+: error: Unexpected$""").containsMatchIn(trimmed)
             }
     internal fun generateDiversifiedSecrets(
         seed: Long,
