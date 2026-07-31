@@ -2135,7 +2135,7 @@ private val VBC4_COMPARE_BUILDER_OPCODES = setOf(
 private val VBC4_PREDICATE_BRANCH_OPCODES = setOf(
     VmOpcodes.VM_IFEQ, VmOpcodes.VM_IFNE, VmOpcodes.VM_IFLT, VmOpcodes.VM_IFGE, VmOpcodes.VM_IFGT, VmOpcodes.VM_IFLE,
 )
-// Item #7: semantic-fusion set for folded super-operators. Broader than the non-folded
+// Semantic-fusion set for folded super-operators. Broader than the non-folded
 // super set so more `const, <binop>` idioms (arithmetic + bitwise + shift) collapse into
 // a single SUPER_INT_ARITH handler at rest, reducing one-to-one opcode mapping residue.
 // Expansion reproduces the method's exact base ops, so semantics are preserved.

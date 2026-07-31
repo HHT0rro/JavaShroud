@@ -274,7 +274,7 @@ object NativeRecompilationTransforms {
                     val rawBytes = if (compileResult.fromCache) {
                         compileResult.bytes
                     } else {
-                        // Item #4: native critical-region pre-decrypt protection. The compiled
+                        // Native critical-region pre-decrypt protection. The compiled
                         // kernel emits selected pure, relocation-free hot functions into a
                         // dedicated, page-isolated ".jsx" code section plus a guarded runtime
                         // enter/leave lifecycle. Here we encrypt that section in-place for supported

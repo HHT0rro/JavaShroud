@@ -96,7 +96,7 @@ Decode order: check magic / version -> length and partition-id bounds -> constan
 
 ### Runtime Entry
 
-Dispatcher stubs call the `executeVmResource` overload family on `JniMicrokernelHelper` (Object / void / int / int-int / int-void shapes). When the Native kernel is not ready they throw `SecurityException`; there is no Java-side VM fallback. The JNI entry point is `js_vm_execute_resource` (`js_vm_core.c` / `js_vm_resource.c`), and virtual instruction dispatch lives in `js_vm_dispatcher.c`.
+Dispatcher stubs call the `executeVmResource` overload family on `JniMicrokernelHelper` (Object / void / int / int-int / int-void shapes). When the Native kernel is not ready they throw `SecurityException`; there is no Java-side VM fallback. The JNI entry point is `js_vm_execute_resource` (`js_vm_core.c` / `js_vm_resource.c`), and `js_vm_core.c` implements virtual instruction dispatch.
 
 ## Native Packing Protocol
 
@@ -128,7 +128,7 @@ The JVM delivers the material once during `JNI_OnLoad` via `nativeInstallBootMat
 | Linux x64 | Anonymous-memory ELF64 loader: `PT_LOAD` / `PT_DYNAMIC`, hash, symbols, RELA / PLT, initializers, entrypoint |
 | macOS x64 / arm64 | Mach-O metadata, rebase / bind, export trie, initializers; unsupported anonymous execution mapping fails closed |
 
-Native sources live under `core-engine/src/main/native/`: `js_kernel.c` (JNI entry and shell), `js_vm_core.c` / `js_vm_core.h` (VM core), `js_vm_dispatcher.c` (instruction dispatch), `js_vm_resource.c` (resource authentication and parsing).
+Native sources live under `core-engine/src/main/native/`: `js_kernel.c` (JNI entry and shell), `js_vm_core.c` / `js_vm_core.h` (VM core and instruction dispatch), `js_vm_resource.c` (resource authentication and parsing).
 
 ## Security Model
 
@@ -220,4 +220,4 @@ $env:JAVASHROUD_BOOT_SECRET_V1 = "<64 hex characters>"
 | Boot material envelope | `.../transforms/protection/BootMaterialEnvelope.kt` |
 | Shell packing | `.../transforms/protection/NativeKernelShellPacker.kt`, `.../transforms/protection/NativeKernelPacker.kt` |
 | Runtime JNI helper | `core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java` |
-| Native VM and shell | `core-engine/src/main/native/js_kernel.c`, `js_vm_core.c`, `js_vm_core.h`, `js_vm_dispatcher.c`, `js_vm_resource.c` |
+| Native VM and shell | `core-engine/src/main/native/js_kernel.c`, `js_vm_core.c`, `js_vm_core.h`, `js_vm_resource.c` |

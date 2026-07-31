@@ -9,7 +9,7 @@ import kotlin.test.assertTrue
 import kotlin.test.assertFailsWith
 
 /**
- * Item #4 contract: the build-time native patcher must (a) encrypt the ".jsx"
+ * The build-time native patcher must (a) encrypt the ".jsx"
  * protected code section in place, (b) flip the in-binary seal marker so the load-time
  * runtime lifecycle can open it on demand, and (c) reject a protected section whose
  * runtime pages overlap another mapped section. The

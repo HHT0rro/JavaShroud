@@ -96,7 +96,7 @@ JSRP（magic `0x4A 0x53 0x52 0x50`，版本 7）是统一的受保护资源封�
 
 ### 运行时入口
 
-dispatcher stub 调 `JniMicrokernelHelper` 的 `executeVmResource` 系列重载（Object / void / int / int-int / int-void 形态）。Native 未就绪时直接抛 `SecurityException`，不存在 Java 侧 VM fallback。JNI 侧入口为 `js_vm_execute_resource`（`js_vm_core.c` / `js_vm_resource.c`），虚拟指令调度在 `js_vm_dispatcher.c`。
+dispatcher stub 调 `JniMicrokernelHelper` 的 `executeVmResource` 系列重载（Object / void / int / int-int / int-void 形态）。Native 未就绪时直接抛 `SecurityException`，不存在 Java 侧 VM fallback。JNI 侧入口为 `js_vm_execute_resource`（`js_vm_core.c` / `js_vm_resource.c`），虚拟指令调度由 `js_vm_core.c` 实现。
 
 ## Native 加壳协议
 
@@ -128,7 +128,7 @@ JVM 在 `JNI_OnLoad` 期间通过 `nativeInstallBootMaterial` 一次性交付，
 | Linux x64 | 匿名内存 ELF64 loader：`PT_LOAD` / `PT_DYNAMIC`、hash、symbol、RELA / PLT、initializer、入口点 |
 | macOS x64 / arm64 | Mach-O metadata、rebase / bind、export trie、initializer；不满足匿名执行映射条件时 fail-closed |
 
-Native 源码位于 `core-engine/src/main/native/`：`js_kernel.c`（JNI 入口与外壳）、`js_vm_core.c` / `js_vm_core.h`（VM 核心）、`js_vm_dispatcher.c`（指令调度）、`js_vm_resource.c`（资源认证与解析）。
+Native 源码位于 `core-engine/src/main/native/`：`js_kernel.c`（JNI 入口与外壳）、`js_vm_core.c` / `js_vm_core.h`（VM 核心与指令调度）、`js_vm_resource.c`（资源认证与解析）。
 
 ## 安全模型
 
@@ -220,4 +220,4 @@ $env:JAVASHROUD_BOOT_SECRET_V1 = "<64 个十六进制字符>"
 | boot 材料封装 | `.../transforms/protection/BootMaterialEnvelope.kt` |
 | 外壳打包 | `.../transforms/protection/NativeKernelShellPacker.kt`、`.../transforms/protection/NativeKernelPacker.kt` |
 | 运行时 JNI helper | `core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java` |
-| Native VM 与外壳 | `core-engine/src/main/native/js_kernel.c`、`js_vm_core.c`、`js_vm_core.h`、`js_vm_dispatcher.c`、`js_vm_resource.c` |
+| Native VM 与外壳 | `core-engine/src/main/native/js_kernel.c`、`js_vm_core.c`、`js_vm_core.h`、`js_vm_resource.c` |
