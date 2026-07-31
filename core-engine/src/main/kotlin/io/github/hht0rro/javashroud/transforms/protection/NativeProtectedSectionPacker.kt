@@ -3,7 +3,7 @@ package io.github.hht0rro.javashroud.transforms.protection
 import java.security.MessageDigest
 
 /**
- * Item #4: build-time encryptor for the native critical-region protected section.
+ * Build-time encryptor for the native critical-region protected section.
  *
  * The recompiled JNI kernel emits selected pure, relocation-free hot functions into a
  * dedicated, page-isolated protected code section. Runtime wrappers decrypt that section

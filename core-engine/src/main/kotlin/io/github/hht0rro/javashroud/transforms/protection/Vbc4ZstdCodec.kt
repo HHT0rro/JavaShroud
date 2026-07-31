@@ -1,8 +1,6 @@
 package io.github.hht0rro.javashroud.transforms.protection
 
 internal object Vbc4ZstdCodec {
-    const val CompressionLevel: Int = 22
-
     private const val Magic = 0xFD2FB528.toInt()
     private const val SingleSegmentFlag = 0x20
     private const val ContentChecksumFlag = 0x04

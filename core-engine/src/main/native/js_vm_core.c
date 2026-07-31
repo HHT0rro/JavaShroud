@@ -1296,7 +1296,7 @@ JS_HIDDEN void js_vm_free_program(JNIEnv *env, js_vm_program *p) {
 #include <intrin.h>
 #endif
 #endif
-/* ---- Item #4: native critical-region pre-decrypt protection ----
+/* ---- Native critical-region pre-decrypt protection ----
  *
  * Selected pure, relocation-free hot functions are emitted into a dedicated code
  * section (".jsx" on PE/ELF targets). At build time a native-format-aware patcher
@@ -1477,7 +1477,7 @@ static JS_THREAD_LOCAL int js_vm_guest_frame_count = 0;
 #define JS_VM_NESTED_DISPATCH_MAX_DEPTH 1
 static JS_THREAD_LOCAL int js_vm_nested_dispatch_depth = 0;
 
-/* ---- Item #6: cross-method shared VM dispatcher-state pool ----
+/* ---- Shared VM dispatcher-state pool ----
  *
  * A process-wide pool of dispatcher-state words plus a running epoch. Every virtualized
  * method seeds its per-run dispatch-drift state from this shared pool (mixed with its
@@ -5903,7 +5903,7 @@ static int js_vm_reg_super_original_allowed(jint super_opcode, jint original_opc
     }
 }
 
-/* Item #7: a folded super-operator fuses `const, <binop>` where <binop> ranges over the
+/* A folded super-operator fuses `const, <binop>` where <binop> ranges over the
  * arithmetic, bitwise, and shift integer families. Expansion reproduces the two base ops
  * exactly, so semantics are preserved while many idioms collapse into one handler. */
 static int js_vm_folded_fusion_second_allowed(jint canonical_second) {
@@ -6166,7 +6166,7 @@ static int js_vm_execute_with_preset_locals(JNIEnv *env, js_vm_program *p, jobje
     *ret = js_vm_null_value();
     int dispatch_step = 0;
     uint32_t vm_trace_state = 0;  /* accumulates anti-trace detection state */
-    uint32_t vm_dispatch_drift_state = js_vm_dispatch_drift_step(p, js_vm_shared_dispatch_seed_for(p), 0, pc, sp);  /* self-modifying dispatch salt state, seeded from shared cross-method pool (item #6) */
+    uint32_t vm_dispatch_drift_state = js_vm_dispatch_drift_step(p, js_vm_shared_dispatch_seed_for(p), 0, pc, sp);
     uint32_t js_vm_dispatch_profile = js_vm_dispatch_profile_for(p);
     uint64_t requested_step_limit = (uint64_t)(p->insn_count > 0 ? p->insn_count : 1) * UINT64_C(250000);
     if (requested_step_limit < UINT64_C(1000000)) requested_step_limit = UINT64_C(1000000);
@@ -6648,8 +6648,7 @@ static int js_vm_execute_with_preset_locals(JNIEnv *env, js_vm_program *p, jobje
     js_vm_clear_value_range(stack, stack_cap);
     if (locals_heap) free(locals);
     if (stack_heap) free(stack);
-    /* Item #6: evolve the shared cross-method dispatcher pool so subsequent virtualized
-     * methods observe state produced by this one (interprocedural slice scheduling). */
+    /* Publish this execution state for later virtualized methods. */
     js_vm_shared_dispatch_evolve(p, vm_dispatch_drift_state, dispatch_step);
     js_vm_trace_poison_seed = saved_trace_poison_seed;
     return ok;
