@@ -51,7 +51,7 @@
 | pass | 参数键 |
 | --- | --- |
 | `method-virtualization` | `seed`、`methodSelection`（`safe` / `critical-auto` / `critical-plus` / `all-compatible`）、`strictVirtualization`、`maxInstructions`、`maxBroadVirtualizedMethods` |
-| `jni-microkernel-loader` | `kernelComponents`、`targetPlatform`、`diversifiedVirtualization`、`nativeRecompilation`、`nativeProtectionLevel`、`nativePackingLevel`（`off` / `standard` / `max`）、`seed` |
+| `jni-microkernel-loader` | `kernelComponents`、`targetPlatform`、`diversifiedVirtualization`、`nativeRecompilation`、`nativeProtectionLevel`、`nativePackingLevel`（`off` / `standard` / `max` / `max-hardening`）、`bootKeyDelivery`（`external-file` / `embedded`）、`seed` |
 | `string-encryption` | `scope`（`all-strings` / `annotated` / `length-threshold`）、`lengthThreshold`、`seed` |
 | `anti-instrumentation` | `detectionLevel`、`response`、`seed` |
 | `anti-dump-protection` | `protectionLevel` |
@@ -104,21 +104,21 @@ dispatcher stub 调 `JniMicrokernelHelper` 的 `executeVmResource` 系列重载�
 
 `NativeKernelShellPacker` / `NativeKernelPacker` 生成外层 `js_kernel_<platform>` stub，完整 inner kernel 以认证编码 payload 封装在外壳内。加载链（`JniMicrokernelHelper`）：
 
-1. 解析平台后缀，读取 bootstrap 索引 `META-INF/.r/0.dat`（版本 1），得到密封 Native 库清单。
+1. 解析平台后缀；普通档位可读取传统 bootstrap 索引，`max-hardening` 则从当前构建派生的认证 catalog 解析 Native 库清单，产物不暴露固定全局索引路径。
 2. 解码密封库资源，写入临时目录（`~/.javashroud/native` 等候选路径），`System.load` 加载外层 stub。
 3. `nativeInit` 初始化（返回码 2 时重试一次）。
-4. 安装 boot 材料（见下），随后发布密封绑定 `META-INF/.r/bindings.dat`，预加载运行时资源进 native。
+4. 安装 boot 材料（见下），随后发布当前构建绑定并预加载运行时资源进 native；加载完成后 Java 侧短时资源密钥副本立即清零。
 5. ABI 自检：调用 `nativeGetBootToken` 与本地镜像值做 XOR 比对，拦截库被整体替换（如 Frida `Interceptor.replace`）的情况；失败置 `nativeSelfCheckFailed`，后续执行全部拒绝。
 
 `JNI_OnLoad` 逐级校验 header、section digest、layout 与 dispatcher profile、payload binding、分块 tag、payload MAC，任何一级失败拒绝执行。
 
 ### Boot 材料封装（boot.dat）
 
-产物内只存放 `META-INF/.r/boot.dat`（magic `JSBM`，版本 2，`BootMaterialEnvelope`）。封装方式为 AES-GCM（128-bit tag，12 字节随机 nonce），AAD 为 `javashroud-boot-material-v2`，密钥即 256-bit Boot KEK。
+普通档位的 `BootMaterialEnvelope` 使用 `JSBM` 版本 2；`max-hardening` 使用版本 3，并把当前产物的 32 字节 sidecar binding 放入认证头。两种版本都使用 AES-GCM（128-bit tag、12 字节随机 nonce）；版本 2 的 AAD 为 `javashroud-boot-material-v2`，版本 3 额外认证 `javashroud-boot-material-v3 || binding`。
 
 明文布局：版本（1）+ 资源分区数（1）+ 总槽数（1，范围 2..17）+ 平台绑定数（1）+ master key（64）+ JAR layout digest（32）+ 各槽分区密钥（槽数 × 32）+ 平台绑定项（每项 1 字节平台 id + 32 字节非零承诺）。平台 id：`windows-x64=1`、`linux-x64=2`、`macos-x64=3`、`macos-arm64=4`。
 
-JVM 在 `JNI_OnLoad` 期间通过 `nativeInstallBootMaterial` 一次性交付，`nativeIsBootMaterialReady` 确认，并检查外壳确实消费了绑定承诺。KEK 本身从环境变量 `JAVASHROUD_BOOT_SECRET_V1`（64 个十六进制字符）或 `JAVASHROUD_BOOT_SECRET_FILE_V1` 指向的文件（32 原始字节或 64 十六进制字符）读取，缺失、格式错误、GCM 认证失败都 fail-closed。
+`max-hardening` 构建自动生成同包 `*.jar.boot-kek.jsbk` sidecar（二进制 `JSBK` v1 或 `JSBK1.` URL-safe 文本，118 字节二进制载荷）。Native 外壳先认证 sidecar 与版本 3 envelope，再通过 `nativeInstallBootEnvelope` 将已认证的短时明文交给 inner kernel；Java 不再重复解封最终 boot material。普通档位仍可通过 `JAVASHROUD_BOOT_SECRET_V1`（64 个十六进制字符）或 raw/hex 文件输入。缺失、格式错误、跨产物 binding、GCM 认证失败和重复安装均 fail-closed。sidecar 与 JAR 同包是易用性设计，不把密钥绝对不可静态获取作为安全承诺。
 
 ### 平台 loader 边界
 
@@ -138,6 +138,7 @@ Native 源码位于 `core-engine/src/main/native/`：`js_kernel.c`（JNI 入口�
   - 构建期：`strictVirtualization` 下方法含 VBC4 不支持的字节码或超出 `maxInstructions` 时构建失败；缺 KEK 或格式错误时构建失败。
   - 加载期：KEK 缺失 / 格式错误 / GCM 认证失败；boot token ABI 自检失败；外壳绑定承诺未被消费；密封索引或绑定缺失。
   - 运行期：JSRP tag / 哈希不匹配；资源路径或 profile 被篡改。
+- `max-hardening` 的资源解码在 Native 已安装后走 `nativeDecodeRuntimeResource`；Java 只保留加载/预加载所需的短时副本，失败、异常、重复加载和线程卸载路径均清零。
 - 非目标：产物自包含运行所需材料，不宣称绝对不可逆；目标是提高单次分析和跨样本批量复用的成本。
 
 ## 配置参考
@@ -181,7 +182,7 @@ params = { scope = "all-strings" }
 [[passes]]
 id = "jni-microkernel-loader"
 enabled = true
-params = { nativePackingLevel = "max" }
+params = { nativePackingLevel = "max", bootKeyDelivery = "embedded" }
 
 [[passes]]
 id = "method-virtualization"
@@ -203,6 +204,28 @@ action = "exclude"
 ```powershell
 $env:JAVASHROUD_BOOT_SECRET_V1 = "<64 个十六进制字符>"
 ```
+
+最大防护档位必须显式选择，不会由普通 `max` 隐式升级：
+
+```toml
+[[passes]]
+id = "jni-microkernel-loader"
+enabled = true
+params = { nativeProtectionLevel = "aggressive", nativePackingLevel = "max-hardening", targetPlatform = "windows-x64" }
+
+[[passes]]
+id = "method-virtualization"
+enabled = true
+params = { methodSelection = "all-compatible", strictVirtualization = true }
+```
+
+`bootKeyDelivery = "external-file"`（默认）会把构建使用的 KEK 写到与 JAR 同名的 sidecar：普通 `max` 为 `app-obf.jar.boot-secret.hex`（64 个十六进制字符），`max-hardening` 为 `app-obf.jar.boot-kek.jsbk`（`JSBK1.` 文本）。sidecar 需要与 JAR 一起分发，并运行前设置：
+
+```powershell
+$env:JAVASHROUD_BOOT_SECRET_FILE_V1 = "app-obf.jar.boot-kek.jsbk"
+```
+
+设置 `bootKeyDelivery = "embedded"` 时，Boot KEK 会作为随机路径的密封资源写入最终 JAR；显式环境变量仍具有更高优先级，但直接 `java -jar` 不再需要 sidecar。
 
 ## 证据索引
 

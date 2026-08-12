@@ -73,16 +73,16 @@ The user-facing name is **Native hardening**; the implementation is a two-layer 
 - The Java layer `System.load`s the outer `js_kernel_<platform>` stub directly; the complete inner kernel is sealed inside the shell as an authenticated, encoded payload.
 - `JNI_OnLoad` verifies the header, section digest, layout and dispatcher profile, payload binding, chunk tags, and payload MAC in sequence; any failure rejects execution, and there is no Java unpacking fallback.
 - The Native kernel is bound to VMBC resources, the bootstrap index, resource paths, and the manifest, so a shell cannot be transplanted or replayed across artifacts.
-- The `jni-microkernel-loader.nativePackingLevel` option has `off` / `standard` / `max` levels, with `max` as the current high-strength default.
+- The `jni-microkernel-loader.nativePackingLevel` option has `off` / `standard` / `max` / `max-hardening` levels, with `max` as the current high-strength default; `bootKeyDelivery` defaults to `external-file` and can be set explicitly to `embedded`.
 
 ### Boot KEK Contract
 
-With `jni-microkernel-loader` enabled, the build side and the runtime side must hold the same 256-bit Boot KEK. The artifact only contains the AES-GCM sealed `META-INF/.r/boot.dat` (`BootMaterialEnvelope`, carrying the master key, JAR layout digest, partition key slots, and per-platform shell binding commitments); the KEK itself never enters the artifact:
+With `jni-microkernel-loader` enabled, the build side and the runtime side must hold the same 256-bit Boot KEK. The artifact always contains the AES-GCM sealed `META-INF/.r/boot.dat` (`BootMaterialEnvelope`, carrying the master key, JAR layout digest, partition key slots, and per-platform shell binding commitments). The default `bootKeyDelivery = "external-file"` keeps the KEK outside the artifact; explicit `bootKeyDelivery = "embedded"` stores the build sidecar bytes under a randomized sealed resource path so direct `java -jar` startup no longer needs a sidecar file.
 
 - environment variable `JAVASHROUD_BOOT_SECRET_V1`: exactly 64 hexadecimal characters;
 - the file named by `JAVASHROUD_BOOT_SECRET_FILE_V1`: 32 raw bytes or 64 hexadecimal characters.
 
-A missing or malformed KEK and authentication failures all fail closed. Shell binding commitments exist only inside the encrypted boot.dat and are delivered once by the JVM during `JNI_OnLoad`; the Native library does not embed an expectation that could be swapped with the shell bundle. Inject and rotate the KEK through deployment secret management; do not place it in configuration files, JARs, Native libraries, or the source repository.
+Runtime lookup order is `JAVASHROUD_BOOT_SECRET_V1` → `JAVASHROUD_BOOT_SECRET_FILE_V1` → the embedded JAR resource. If an explicit environment variable is present but malformed or fails authentication, startup fails directly instead of falling back to the embedded value. A missing or malformed KEK and authentication failures all fail closed. Shell binding commitments exist only inside the encrypted boot.dat and are delivered once by the JVM during `JNI_OnLoad`; the Native library does not embed an expectation that could be swapped with the shell bundle. In the default external mode, inject and rotate the KEK through deployment secret management; do not place it in configuration files, Native libraries, or the source repository.
 
 ### Platform Boundaries
 

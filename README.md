@@ -73,16 +73,16 @@ flowchart LR
 - 外层 `js_kernel_<platform>` stub 由 Java 层 `System.load` 直接加载；完整 inner kernel 以认证编码 payload 封装在外壳内。
 - `JNI_OnLoad` 逐级校验 header、section digest、layout 与 dispatcher profile、payload binding、分块 tag 和 payload MAC；任何一级失败都拒绝执行，Java 层没有解包 fallback。
 - Native kernel 与 VMBC 资源、bootstrap 索引、资源路径和 manifest 绑定，同一份外壳不能跨产物直接替换或重放。
-- 配置项 `jni-microkernel-loader.nativePackingLevel` 分 `off` / `standard` / `max` 三档，`max` 为当前默认高强度档。
+- 配置项 `jni-microkernel-loader.nativePackingLevel` 分 `off` / `standard` / `max` / `max-hardening` 四档，`max` 为当前默认高强度档；`bootKeyDelivery` 默认 `external-file`，可显式改为 `embedded`。
 
 ### Boot KEK 契约
 
-启用 `jni-microkernel-loader` 时，构建端与运行端必须拿到同一个 256-bit Boot KEK。产物里只写 AES-GCM 加密的 `META-INF/.r/boot.dat`（`BootMaterialEnvelope`，内含 master key、JAR layout digest、分区密钥槽和各平台外壳绑定承诺），KEK 不进产物：
+启用 `jni-microkernel-loader` 时，构建端与运行端必须拿到同一个 256-bit Boot KEK。产物始终包含 AES-GCM 加密的 `META-INF/.r/boot.dat`（`BootMaterialEnvelope`，内含 master key、JAR layout digest、分区密钥槽和各平台外壳绑定承诺）。默认 `bootKeyDelivery = "external-file"`，KEK 不进产物；显式选择 `bootKeyDelivery = "embedded"` 时，构建使用的 sidecar 字节会写入随机密封资源路径，直接 `java -jar` 不再要求旁置文件。
 
 - 环境变量 `JAVASHROUD_BOOT_SECRET_V1`：严格 64 个十六进制字符；
 - 环境变量 `JAVASHROUD_BOOT_SECRET_FILE_V1` 指向的文件：32 个原始字节或 64 个十六进制字符。
 
-缺 KEK、格式错误、认证失败都会 fail-closed。外壳绑定承诺只存在于加密 boot.dat 内，由 JVM 在 `JNI_OnLoad` 期间一次性交付，Native 库内不自带可整体替换的期望值。部署时经密钥管理注入并定期轮换，不要写进配置文件、JAR、Native 库或源码仓库。
+运行时按 `JAVASHROUD_BOOT_SECRET_V1` → `JAVASHROUD_BOOT_SECRET_FILE_V1` → JAR 内嵌资源的顺序读取；显式环境变量存在但格式或认证无效时直接失败，不回退到内嵌值。缺 KEK、格式错误、认证失败都会 fail-closed。外壳绑定承诺只存在于加密 boot.dat 内，由 JVM 在 `JNI_OnLoad` 期间一次性交付，Native 库内不自带可整体替换的期望值。使用默认外部模式时，应通过密钥管理注入并定期轮换，不要把 KEK 写进配置文件、Native 库或源码仓库。
 
 ### 平台边界
 

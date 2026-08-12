@@ -51,7 +51,7 @@ Frequently used parameter keys (run `-schema` for the full parameter schema):
 | Pass | Parameter keys |
 | --- | --- |
 | `method-virtualization` | `seed`, `methodSelection` (`safe` / `critical-auto` / `critical-plus` / `all-compatible`), `strictVirtualization`, `maxInstructions`, `maxBroadVirtualizedMethods` |
-| `jni-microkernel-loader` | `kernelComponents`, `targetPlatform`, `diversifiedVirtualization`, `nativeRecompilation`, `nativeProtectionLevel`, `nativePackingLevel` (`off` / `standard` / `max`), `seed` |
+| `jni-microkernel-loader` | `kernelComponents`, `targetPlatform`, `diversifiedVirtualization`, `nativeRecompilation`, `nativeProtectionLevel`, `nativePackingLevel` (`off` / `standard` / `max` / `max-hardening`), `bootKeyDelivery` (`external-file` / `embedded`), `seed` |
 | `string-encryption` | `scope` (`all-strings` / `annotated` / `length-threshold`), `lengthThreshold`, `seed` |
 | `anti-instrumentation` | `detectionLevel`, `response`, `seed` |
 | `anti-dump-protection` | `protectionLevel` |
@@ -104,21 +104,21 @@ Dispatcher stubs call the `executeVmResource` overload family on `JniMicrokernel
 
 `NativeKernelShellPacker` / `NativeKernelPacker` produce the outer `js_kernel_<platform>` stub; the complete inner kernel is sealed inside the shell as an authenticated, encoded payload. The load chain (`JniMicrokernelHelper`):
 
-1. Resolve the platform suffix, read the bootstrap index `META-INF/.r/0.dat` (version 1), and obtain the sealed Native library list.
+1. Resolve the platform suffix. Ordinary profiles may read the legacy bootstrap index; `max-hardening` resolves a build-derived authenticated catalog and does not expose a fixed global index path.
 2. Decode the sealed library resource, write it to a temporary directory (candidates include `~/.javashroud/native`), and `System.load` the outer stub.
 3. `nativeInit` initialization (retried once on return code 2).
-4. Install the boot material (see below), publish the sealed bindings `META-INF/.r/bindings.dat`, and preload runtime resources into native.
+4. Install the boot material (see below), publish the current-build bindings, and preload runtime resources into native; after loading, Java's short-lived resource-key copies are wiped.
 5. ABI self-check: `nativeGetBootToken` is XOR-compared against the local mirror value, catching wholesale library replacement (for example Frida `Interceptor.replace`); failure sets `nativeSelfCheckFailed` and all later execution is rejected.
 
 `JNI_OnLoad` verifies the header, section digest, layout and dispatcher profile, payload binding, chunk tags, and payload MAC in sequence; any failure rejects execution.
 
 ### Boot Material Envelope (boot.dat)
 
-The artifact only stores `META-INF/.r/boot.dat` (magic `JSBM`, version 2, `BootMaterialEnvelope`). Sealing uses AES-GCM (128-bit tag, 12-byte random nonce) with AAD `javashroud-boot-material-v2`; the key is the 256-bit Boot KEK.
+The ordinary profile uses `BootMaterialEnvelope` `JSBM` version 2. `max-hardening` uses version 3 and places the current artifact's 32-byte sidecar binding in the authenticated header. Both versions use AES-GCM (128-bit tag, 12-byte random nonce); version 2 uses AAD `javashroud-boot-material-v2`, while version 3 additionally authenticates `javashroud-boot-material-v3 || binding`.
 
 Plaintext layout: version (1) + resource partition count (1) + total slots (1, range 2..17) + platform binding count (1) + master key (64) + JAR layout digest (32) + per-slot partition keys (slots x 32) + platform binding entries (1-byte platform id + 32-byte non-zero commitment each). Platform ids: `windows-x64=1`, `linux-x64=2`, `macos-x64=3`, `macos-arm64=4`.
 
-The JVM delivers the material once during `JNI_OnLoad` via `nativeInstallBootMaterial`, confirms with `nativeIsBootMaterialReady`, and checks that the shell actually consumed the binding commitment. The KEK itself is read from `JAVASHROUD_BOOT_SECRET_V1` (64 hex characters) or from the file named by `JAVASHROUD_BOOT_SECRET_FILE_V1` (32 raw bytes or 64 hex characters); a missing or malformed KEK and GCM authentication failure all fail closed.
+For `max-hardening`, the build emits a co-located `*.jar.boot-kek.jsbk` sidecar (binary `JSBK` v1 or `JSBK1.` URL-safe text, 118-byte binary payload). The Native shell authenticates the sidecar and version 3 envelope, then uses `nativeInstallBootEnvelope` to deliver authenticated short-lived plaintext to the inner kernel; Java does not perform the final boot-material unsealing twice. Ordinary profiles may still use `JAVASHROUD_BOOT_SECRET_V1` (64 hex characters) or a raw/hex file. Missing or malformed input, cross-artifact binding, GCM authentication failure, and repeated installation all fail closed. Co-locating the sidecar is an operational convenience, not a claim that the key is impossible to obtain statically.
 
 ### Platform Loader Boundaries
 
@@ -138,6 +138,7 @@ Native sources live under `core-engine/src/main/native/`: `js_kernel.c` (JNI ent
   - Build time: under `strictVirtualization`, a method with VBC4-unsupported bytecode or beyond `maxInstructions` fails the build; a missing or malformed KEK fails the build.
   - Load time: missing / malformed KEK or GCM authentication failure; boot-token ABI self-check failure; shell binding commitment not consumed; missing sealed index or bindings.
   - Runtime: JSRP tag / hash mismatch; tampered resource paths or profiles.
+- After Native installation, `max-hardening` decodes runtime resources through `nativeDecodeRuntimeResource`; Java retains only short-lived load/preload copies and wipes them on failure, exceptions, repeated loads, and unload cleanup.
 - Non-goals: the artifact is self-contained and carries all material needed to run; the project does not claim absolute irreversibility. The goal is to raise the cost of one-off analysis and cross-sample bulk reuse.
 
 ## Configuration Reference
@@ -181,7 +182,7 @@ params = { scope = "all-strings" }
 [[passes]]
 id = "jni-microkernel-loader"
 enabled = true
-params = { nativePackingLevel = "max" }
+params = { nativePackingLevel = "max", bootKeyDelivery = "embedded" }
 
 [[passes]]
 id = "method-virtualization"
@@ -203,6 +204,28 @@ Set the same KEK before building and running:
 ```powershell
 $env:JAVASHROUD_BOOT_SECRET_V1 = "<64 hex characters>"
 ```
+
+The strongest profile is explicit; ordinary `max` is not implicitly upgraded:
+
+```toml
+[[passes]]
+id = "jni-microkernel-loader"
+enabled = true
+params = { nativeProtectionLevel = "aggressive", nativePackingLevel = "max-hardening", targetPlatform = "windows-x64" }
+
+[[passes]]
+id = "method-virtualization"
+enabled = true
+params = { methodSelection = "all-compatible", strictVirtualization = true }
+```
+
+With the default `bootKeyDelivery = "external-file"`, distribute the generated sidecar next to the JAR: ordinary `max` emits `app-obf.jar.boot-secret.hex` (64 hexadecimal characters), while `max-hardening` emits `app-obf.jar.boot-kek.jsbk` (`JSBK1.` text). Set it at runtime:
+
+```powershell
+$env:JAVASHROUD_BOOT_SECRET_FILE_V1 = "app-obf.jar.boot-kek.jsbk"
+```
+
+With `bootKeyDelivery = "embedded"`, the Boot KEK is stored under a randomized sealed resource path in the final JAR. Explicit environment variables retain higher priority, but direct `java -jar` startup no longer requires a sidecar.
 
 ## Evidence Index
 
