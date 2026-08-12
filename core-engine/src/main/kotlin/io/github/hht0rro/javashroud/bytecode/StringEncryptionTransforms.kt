@@ -84,7 +84,7 @@ fun encryptClassStrings(
 }
 
 
-private fun expandStringConcatRecipes(method: MethodNode) {
+internal fun expandStringConcatRecipes(method: MethodNode) {
     val instructions = method.instructions ?: return
     for (insn in instructions.toArray()) {
         val indy = insn as? InvokeDynamicInsnNode ?: continue

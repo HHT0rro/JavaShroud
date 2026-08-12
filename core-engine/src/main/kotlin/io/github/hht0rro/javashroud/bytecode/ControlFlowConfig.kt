@@ -4,6 +4,8 @@ package io.github.hht0rro.javashroud.bytecode
  * Configuration for control flow obfuscation, extracted from pass params.
  */
 data class ControlFlowConfig(
+    val branchInjection: String = "none",
+    val handlerSplit: String = "none",
     val density: Int = 5,
     val dispatchMode: String = "if-chain",
     val algebraicFamily: String = "mixed",
@@ -15,6 +17,8 @@ data class ControlFlowConfig(
 )
 
 fun buildControlFlowConfig(params: Map<String, Any>): ControlFlowConfig = ControlFlowConfig(
+    branchInjection = (params["branchInjection"] as? String) ?: "none",
+    handlerSplit = (params["handlerSplit"] as? String) ?: "none",
     density = (params["density"] as? Int)?.coerceIn(1, 10) ?: 5,
     dispatchMode = (params["dispatchMode"] as? String) ?: "if-chain",
     algebraicFamily = (params["algebraicFamily"] as? String) ?: "mixed",

@@ -21,11 +21,25 @@ import java.util.Random
  * flow edges visible to decompilers and static analysis tools, without
  * altering actual runtime behaviour.
  *
+ * When [ControlFlowConfig.branchInjection] or [ControlFlowConfig.handlerSplit]
+ * are enabled, conditional-edge injection and handler splitting run first on the
+ * original class, and predicate/dispatch rewriting then applies to the combined
+ * result.
+ *
  * Uses the ASM Tree API with [computeFramesWriter] so frames are
  * recomputed from scratch after mutation.  All inserted branches are
  * stack-neutral and local-neutral.
  */
 fun obfuscateControlFlow(classBytes: ByteArray, config: ControlFlowConfig = ControlFlowConfig()): ByteArray {
+    val edgeTransformed = if (config.branchInjection == "none" && config.handlerSplit == "none") {
+        classBytes
+    } else {
+        applyEdgeInjectionObfuscation(classBytes, config)
+    }
+    return obfuscatePredicateDispatch(edgeTransformed, config)
+}
+
+private fun obfuscatePredicateDispatch(classBytes: ByteArray, config: ControlFlowConfig): ByteArray {
     val classNode = ClassNode()
     val reader = ClassReader(classBytes)
     reader.accept(classNode, 0)

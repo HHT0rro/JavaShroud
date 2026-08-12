@@ -3,6 +3,7 @@ package io.github.hht0rro.javashroud
 import io.github.hht0rro.javashroud.compatibility.buildOrderingConstraints
 import io.github.hht0rro.javashroud.compatibility.hardConflictPairs
 import io.github.hht0rro.javashroud.compatibility.softConflictPairs
+import io.github.hht0rro.javashroud.model.schema.OrderingConstraint
 import io.github.hht0rro.javashroud.transforms.protection.planPassOrdering
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -123,6 +124,107 @@ class PassOrderingPlannerRegressionTest {
 
         assertTrue(result.accepted, "Planner should accept reduced default pipeline")
         assertEquals(listOf("strip-compile-debug-info"), result.orderedPasses)
+    }
+
+    @Test
+    fun resolver_profile_planner_reorders_constants_descriptor_rewrite_indy_and_flow() {
+        val result = planPassOrdering(
+            passIds = listOf(
+                "control-flow-obfuscation",
+                "invoke-dynamic-indirection",
+                "rename-methods",
+                "string-encryption",
+                "integer-constant-obfuscation",
+            ),
+            orderingConstraints = buildOrderingConstraints(),
+            hardConflicts = hardConflictPairs,
+            softConflicts = softConflictPairs,
+            passParams = mapOf(
+                "control-flow-obfuscation" to mapOf<String, Any?>("branchInjection" to "normal"),
+                "invoke-dynamic-indirection" to mapOf<String, Any?>("callSiteForm" to "constant-resolver"),
+                "rename-methods" to mapOf<String, Any?>("descriptorPadding" to "fixed", "parameterPacking" to "object-array"),
+                "string-encryption" to mapOf<String, Any?>("decoderBackend" to "jvm-resolver"),
+                "integer-constant-obfuscation" to mapOf<String, Any?>("rewriteMode" to "resolver"),
+            ),
+        )
+
+        assertTrue(result.accepted, "Resolver profile pipeline should be orderable: ${result.diagnostics}")
+        assertTrue(result.resolverProfileActive)
+        assertBefore(result.orderedPasses, "string-encryption", "rename-methods")
+        assertBefore(result.orderedPasses, "integer-constant-obfuscation", "rename-methods")
+        assertBefore(result.orderedPasses, "rename-methods", "invoke-dynamic-indirection")
+        assertBefore(result.orderedPasses, "invoke-dynamic-indirection", "control-flow-obfuscation")
+    }
+
+    @Test
+    fun resolver_profile_planner_rejects_hard_conflicts_without_fallback_mode() {
+        val result = planPassOrdering(
+            passIds = listOf("string-encryption", "class-encryption-loader", "method-virtualization"),
+            orderingConstraints = buildOrderingConstraints(),
+            hardConflicts = hardConflictPairs,
+            softConflicts = softConflictPairs,
+            passParams = mapOf("string-encryption" to mapOf<String, Any?>("decoderBackend" to "jvm-resolver")),
+        )
+
+        assertTrue(result.resolverProfileActive)
+        assertTrue(!result.accepted, "Resolver profile hard conflicts must be rejected: ${result.diagnostics}")
+        assertTrue(result.diagnostics.any { it.causeId == "hard-conflict" })
+        assertEquals(emptyList(), result.orderedPasses, "Resolver profile conflicts must not retain a fallback execution order")
+    }
+
+    @Test
+    fun resolver_profile_planner_rejects_unsatisfied_hard_dependencies_without_fallback_order() {
+        val result = planPassOrdering(
+            passIds = listOf("control-flow-obfuscation", "invoke-dynamic-indirection", "string-encryption"),
+            orderingConstraints = listOf(
+                OrderingConstraint("invoke-dynamic-indirection", "control-flow-obfuscation", "test dependency"),
+            ),
+            hardConflicts = emptySet(),
+            softConflicts = emptySet(),
+            mode = "validate-only",
+            passParams = mapOf("string-encryption" to mapOf<String, Any?>("decoderBackend" to "jvm-resolver")),
+        )
+
+        assertTrue(result.resolverProfileActive)
+        assertTrue(!result.accepted, "Resolver profile ordering violations must be rejected: ${result.diagnostics}")
+        assertTrue(result.diagnostics.any { it.causeId == "ordering-violation" })
+        assertEquals(emptyList(), result.orderedPasses, "Resolver profile ordering violations must not retain a fallback execution order")
+    }
+
+    @Test
+    fun resolver_profile_planner_rejects_ordering_cycles() {
+        val result = planPassOrdering(
+            passIds = listOf("string-encryption", "invoke-dynamic-indirection", "control-flow-obfuscation"),
+            orderingConstraints = listOf(
+                OrderingConstraint("invoke-dynamic-indirection", "control-flow-obfuscation", "test edge"),
+                OrderingConstraint("control-flow-obfuscation", "invoke-dynamic-indirection", "test cycle"),
+            ),
+            hardConflicts = emptySet(),
+            softConflicts = emptySet(),
+            passParams = mapOf("string-encryption" to mapOf<String, Any?>("decoderBackend" to "jvm-resolver")),
+        )
+
+        assertTrue(result.resolverProfileActive)
+        assertTrue(!result.accepted, "Resolver profile cycles must be rejected: ${result.diagnostics}")
+        assertTrue(result.diagnostics.any { it.causeId == "circular-dependency" })
+        assertEquals(emptyList(), result.orderedPasses, "Resolver profile cycles must not retain a fallback execution order")
+    }
+
+    @Test
+    fun legacy_planner_retains_original_order_for_cyclic_constraints() {
+        val passIds = listOf("first", "second")
+        val result = planPassOrdering(
+            passIds = passIds,
+            orderingConstraints = listOf(
+                OrderingConstraint("first", "second", "test edge"),
+                OrderingConstraint("second", "first", "test cycle"),
+            ),
+            hardConflicts = emptySet(),
+            softConflicts = emptySet(),
+        )
+
+        assertTrue(!result.accepted, "Legacy cyclic constraints should remain diagnosable")
+        assertEquals(passIds, result.orderedPasses, "Legacy planner should preserve its fallback order")
     }
 
     private fun assertBefore(orderedPasses: List<String>, before: String, after: String) {

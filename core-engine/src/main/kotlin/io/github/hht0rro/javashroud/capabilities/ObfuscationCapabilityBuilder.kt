@@ -15,6 +15,36 @@ internal fun obfuscationCapabilityBindings(): List<CapabilityBinding> = listOf(
         requiresOptIn = true,
         defaultEnabled = false,
         compatibilityNotes = LAYOUT_SENSITIVE_COMPATIBILITY_NOTE,
+        params = listOf(
+            ParamSchema(
+                key = "rewriteMode",
+                type = "enum",
+                defaultValue = JsonNodeFactory.instance.textNode("arithmetic"),
+                options = listOf("arithmetic", "resolver"),
+                description = "Rewriting mode: arithmetic preserves arithmetic-equivalent rewriting; resolver replaces constants with class-local resolver call sites.",
+            ),
+            ParamSchema(
+                key = "intCoverage",
+                type = "enum",
+                defaultValue = JsonNodeFactory.instance.textNode("none"),
+                options = listOf("none", "normal", "aggressive"),
+                description = "Integer constant coverage level for resolver mode: none disables, aggressive is the highest level.",
+            ),
+            ParamSchema(
+                key = "longCoverage",
+                type = "enum",
+                defaultValue = JsonNodeFactory.instance.textNode("none"),
+                options = listOf("none", "normal"),
+                description = "Long constant coverage level for resolver mode: none disables, normal is the highest level.",
+            ),
+            ParamSchema(
+                key = "resolverCodec",
+                type = "enum",
+                defaultValue = JsonNodeFactory.instance.textNode("xor"),
+                options = listOf("xor", "des"),
+                description = "Resolver payload codec for resolver mode.",
+            ),
+        ),
     ),
     CapabilityBinding(
         id = "static-init-perturbation",
@@ -48,6 +78,22 @@ internal fun obfuscationCapabilityBindings(): List<CapabilityBinding> = listOf(
         requiresOptIn = true,
         defaultEnabled = false,
         compatibilityNotes = "Java 8 classfile 兼容：输出可包含 invokedynamic，但不应抬升 classfile major version。会改变调用点链接形态，请验证反射、agent、AOT 和安全管理策略。",
+        params = listOf(
+            ParamSchema(
+                key = "callSiteForm",
+                type = "enum",
+                defaultValue = JsonNodeFactory.instance.textNode("bootstrap-table"),
+                options = listOf("bootstrap-table", "constant-resolver"),
+                description = "Call-site form: bootstrap-table rewrites static calls through a per-class bootstrap lookup table; constant-resolver wraps class-local resolver members in first-resolve constant call sites.",
+            ),
+            ParamSchema(
+                key = "seed",
+                type = "number",
+                defaultValue = JsonNodeFactory.instance.nullNode(),
+                options = null,
+                description = "Deterministic seed for the constant-resolver call-site layout. Null or absent means random.",
+            ),
+        ),
     ),
     CapabilityBinding(
         id = "control-flow-obfuscation",
@@ -61,6 +107,20 @@ internal fun obfuscationCapabilityBindings(): List<CapabilityBinding> = listOf(
         defaultEnabled = false,
         compatibilityNotes = LAYOUT_SENSITIVE_COMPATIBILITY_NOTE,
         params = listOf(
+            ParamSchema(
+                key = "branchInjection",
+                type = "enum",
+                defaultValue = JsonNodeFactory.instance.textNode("none"),
+                options = listOf("none", "light", "normal", "aggressive"),
+                description = "Conditional-edge injection level based on state-field perturbation, combined with predicate and dispatch rewriting: none disables, aggressive is the highest level.",
+            ),
+            ParamSchema(
+                key = "handlerSplit",
+                type = "enum",
+                defaultValue = JsonNodeFactory.instance.textNode("none"),
+                options = listOf("none", "light", "heavy"),
+                description = "Same-type exception handler split and relay level, combined with predicate and dispatch rewriting: none disables, heavy is the highest level.",
+            ),
             ParamSchema(
                 key = "density",
                 type = "number",

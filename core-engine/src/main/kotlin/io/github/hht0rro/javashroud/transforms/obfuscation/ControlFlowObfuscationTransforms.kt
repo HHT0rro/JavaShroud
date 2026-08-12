@@ -11,6 +11,8 @@ import io.github.hht0rro.javashroud.transforms.unchangedTransformResult
 import io.github.hht0rro.javashroud.transforms.updatedArtifactTransformResult
 
 fun applyControlFlowObfuscation(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, params: Map<String, Any>): TransformResult {
+    validateControlFlowObfuscationParams(params)
+
     val matchedClassNames = eligibleClassNamesForAction(artifact.classArtifacts, ruleMatches, "control-flow-obfuscation")
     if (matchedClassNames.isEmpty()) return unchangedTransformResult(artifact)
 
@@ -35,4 +37,18 @@ fun applyControlFlowObfuscation(artifact: BytecodeArtifact, ruleMatches: List<Ru
         transformedClassCount = classCount,
         transformedMemberCount = 0,
     )
+}
+
+private fun validateControlFlowObfuscationParams(params: Map<String, Any>) {
+    val branchInjection = params["branchInjection"] as? String
+    val supportedBranchInjectionLevels = setOf("none", "light", "normal", "aggressive")
+    require(branchInjection == null || branchInjection in supportedBranchInjectionLevels) {
+        "control-flow-obfuscation branchInjection '$branchInjection' is not supported; supported values: ${supportedBranchInjectionLevels.joinToString(", ")}"
+    }
+
+    val handlerSplit = params["handlerSplit"] as? String
+    val supportedHandlerSplitLevels = setOf("none", "light", "heavy")
+    require(handlerSplit == null || handlerSplit in supportedHandlerSplitLevels) {
+        "control-flow-obfuscation handlerSplit '$handlerSplit' is not supported; supported values: ${supportedHandlerSplitLevels.joinToString(", ")}"
+    }
 }

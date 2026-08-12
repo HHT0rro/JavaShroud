@@ -48,6 +48,11 @@ internal fun executeKernelRun(
     emit(preparation.summaryEvent)
     val registeredPasses = buildRegisteredPasses(config)
     val enabledPassIds = config.passes.filter { it.enabled }.map { it.id }
+    val planningPassParams: Map<String, Map<String, Any?>> = config.passes
+        .filter { it.enabled }
+        .associate { passSpec: PassSpec ->
+            passSpec.id to passSpec.params.mapValues { (_, value) -> value as Any? }
+        }
     val availablePassIds = io.github.hht0rro.javashroud.passes.executablePassRegistry.keys
     val optInPassIds = registeredPasses.filter { it.executable.descriptor.definition.requiresOptIn }.map { it.spec.id }.toSet()
     val planningResult = io.github.hht0rro.javashroud.transforms.protection.planPassOrdering(
@@ -59,8 +64,22 @@ internal fun executeKernelRun(
         optInPassIds = optInPassIds,
         mode = "auto-sort",
         strictness = "warn",
+        passParams = planningPassParams,
     )
     if (!planningResult.accepted) {
+        if (planningResult.resolverProfileActive) {
+            val failureMessage = planningFailureMessage(planningResult)
+            emit(
+                EngineEvent(
+                    level = "error",
+                    type = "error",
+                    message = failureMessage,
+                    progress = null,
+                    outPath = null,
+                ),
+            )
+            throw IllegalArgumentException(failureMessage)
+        }
         val warningEvent = EngineEvent(
             level = "warn",
             type = "warn",

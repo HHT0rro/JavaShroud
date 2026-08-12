@@ -13,7 +13,7 @@ class ParamsWiringTest {
 
         val controlFlow = assertNotNull(registry["control-flow-obfuscation"])
         assertEquals(
-            listOf("density", "dispatchMode", "algebraicFamily"),
+            listOf("branchInjection", "handlerSplit", "density", "dispatchMode", "algebraicFamily"),
             controlFlow.definition.params.map { it.key },
         )
 
@@ -25,8 +25,13 @@ class ParamsWiringTest {
 
         val stringEncryption = assertNotNull(registry["string-encryption"])
         assertEquals(
-            listOf("scope", "lengthThreshold", "seed"),
+            listOf("decoderBackend", "strength", "payloadCodec", "scope", "lengthThreshold", "seed"),
             stringEncryption.definition.params.map { it.key },
+        )
+        assertEquals(
+            "auto",
+            stringEncryption.definition.params.single { it.key == "payloadCodec" }.defaultValue?.asText(),
+            "payloadCodec defaults to auto so strength selects the resolver codec",
         )
 
         val methodVirtualization = assertNotNull(registry["method-virtualization"])

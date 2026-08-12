@@ -98,6 +98,7 @@ const commonParamDescriptions: Readonly<Record<string, LocalizedText>> = {
   frequency: text('插入频率：每隔多少条指令插入一个不透明谓词或噪声逻辑；值越小覆盖越密。', 'Insertion frequency: inserts an opaque predicate or noise block every N instructions. Smaller values mean denser coverage.'),
   handlerComplexity: text('处理器复杂度：控制虚假异常处理器或分发块中放入多少噪声逻辑。', 'Handler complexity: controls how much noise logic is placed inside bogus exception handlers or dispatcher blocks.'),
   kernelComponents: text('内核组件集：选择 JNI 微内核携带哪些能力，例如加载器、解密器或调度桥。', 'Kernel components: selects which JNI microkernel capabilities ship, such as loader, decryptor, or dispatch bridge.'),
+  bootKeyDelivery: text('Boot KEK 交付方式：external-file 使用独立 sidecar；embedded 把 KEK 密封到最终 JAR 中以便直接启动。', 'Boot KEK delivery: external-file uses a separate sidecar; embedded seals the KEK into the final JAR for direct startup.'),
   keyMode: text('密钥作用域：选择密钥按类、按方法还是全局复用；粒度越细，泄露影响面越小。', 'Key scope: chooses per-class, per-method, or global key reuse. Finer scope reduces blast radius after disclosure.'),
   layerMode: text('解密层级：选择单层或多层解密 stub；多层更难逆向，但会增加调用和初始化成本。', 'Layer mode: chooses single or multi-layer decrypt stubs. More layers are harder to reverse but add call and initialization cost.'),
   lengthThreshold: text('长度阈值：按长度过滤时，只有达到该长度的字符串才会参与加密。', 'Length threshold: when length filtering is active, only strings at or above this length are encrypted.'),
@@ -105,7 +106,7 @@ const commonParamDescriptions: Readonly<Record<string, LocalizedText>> = {
   methodSelection: text('方法选择策略：控制广义类规则虚拟化哪些方法，可保守选择、自动识别关键方法或强制覆盖所有 VM 兼容方法。', 'Method selection strategy: controls which methods broad class rules virtualize, from conservative selection to critical auto-detection or all VM-compatible methods.'),
   mode: text('工作模式：控制该 pass 的主要行为分支，例如自动排序、仅校验、拒绝冲突或延迟解密。', 'Mode: controls the main behavior branch for this pass, such as auto-sort, validate-only, reject-conflicts, or delayed decryption.'),
   nativeProtectionLevel: text('native 反逆向保护级别：standard 包含反调试与反反汇编扰动；aggressive 额外启用反虚拟机检测和完整性自校验。', 'Native anti-reverse protection level: standard includes anti-debug and anti-disassembly diversity; aggressive adds anti-VM detection and integrity self-check.'),
-  nativePackingLevel: text('native 加壳级别：off 保持原生动态库；standard 是兼容 overlay，不是真壳；max 生成外层 stub shell，并把完整 js_kernel 作为认证编码 payload 保护。', 'Native packing level: off keeps the raw dynamic library; standard is a compatibility overlay, not a true shell; max emits an outer stub shell and protects the complete js_kernel as an authenticated encoded payload.'),
+  nativePackingLevel: text('native 加壳级别：off 保持原生动态库；standard 是兼容 overlay；max 保留普通 stub shell；max-hardening 显式启用断代协议、构建级 profile 与完整 js_kernel 认证 payload。', 'Native packing level: off keeps the raw dynamic library; standard is a compatibility overlay; max keeps the regular stub shell; max-hardening explicitly enables the breaking protocol, per-build profiles, and an authenticated complete js_kernel payload.'),
   nativeRecompilation: text('混淆时编译：强制使用 Zig 从内置 C 源码编译 native 微内核；优先使用本机 Zig，缺失时下载到用户目录 .javashroud/zig（Windows 形如 C:\\Users\\<用户名>\\.javashroud\\zig）。', 'Compile during obfuscation: requires Zig to build the native microkernel from bundled C sources; uses local Zig first and downloads under the user .javashroud/zig directory when missing.'),
   pattern: text('插入模式：选择噪声块或分发块使用的字节码形态，例如死分支、算术空操作或字段噪声。', 'Insertion pattern: selects the bytecode shape for noise or dispatcher blocks, such as dead branches, arithmetic no-ops, or field noise.'),
   preservePackageDepth: text('保留包层级：重命名包路径时保留前几层，兼顾反射、资源路径和包级约定。', 'Preserve package depth: keeps the first N package segments during package renaming for reflection, resource paths, or package conventions.'),
@@ -114,10 +115,22 @@ const commonParamDescriptions: Readonly<Record<string, LocalizedText>> = {
   rotationStrategy: text('轮换策略：决定调用点或目标绑定按 epoch、计数器、线程局部或随机方式切换。', 'Rotation strategy: controls whether call sites or target bindings rotate by epoch, counter, thread-local state, or randomness.'),
   scope: text('作用范围：选择哪些字符串、类或载荷进入该 pass 的处理范围。', 'Scope: selects which strings, classes, or payloads are processed by this pass.'),
   seed: text('种子：作为非秘密个性化输入；具体 pass 是否可复现以能力说明为准，VMBC/NBVM 输出始终包含每产物随机材料。', 'Seed: non-secret personalization input. Reproducibility depends on the pass; VMBC/NBVM output always includes per-artifact random material.'),
-  strategy: text('字符串加密策略：选择 AES、RSA、混合或逐字符串随机策略。', 'String encryption strategy: chooses AES, RSA, hybrid, or per-string random strategy.'),
   targetPlatform: text('目标平台：选择原生微内核产物面向的系统和架构。', 'Target platform: selects the operating system and architecture for the native microkernel artifact.'),
   trapDensity: text('陷阱密度：控制符号执行陷阱的注入频率；越密越难约束求解，也越重。', 'Trap density: controls symbolic-execution trap frequency. Denser traps are harder to solve and heavier to run.'),
   virtualizationLevel: text('虚拟化级别：选择只保护关键路径还是更激进地虚拟化语义。', 'Virtualization level: chooses whether only key paths or more aggressive semantics are virtualized.'),
+  decoderBackend: text('解密器后端：native-kernel 使用 JNI 微内核解密（自动启用 JNI 加载器）；jvm-resolver 使用纯 JVM 内置解析器，无 native 依赖。', 'Decoder backend: native-kernel uses the JNI microkernel decoder (auto-enables the JNI loader); jvm-resolver uses a self-contained JVM resolver with no native dependency.'),
+  strength: text('保护强度：字符串解析器的保护等级，共 standard、strong、flow-guarded、max 四档，最高为 max；仅 jvm-resolver 后端生效。', 'Protection strength: string resolver level from standard up to the highest level max; applies to the jvm-resolver backend only.'),
+  payloadCodec: text('载荷编码：解析器载荷的编码族；auto 按强度自动派生，或手动选择 xor、indexed、des。', 'Payload codec: resolver payload encoding family; auto derives it from strength, or pick xor, indexed, or des manually.'),
+  rewriteMode: text('重写方式：arithmetic 算术等价改写；resolver 常量解析器调用点。', 'Rewriting mode: arithmetic keeps arithmetic-equivalent rewriting; resolver replaces constants with class-local resolver call sites.'),
+  intCoverage: text('int 覆盖等级：resolver 模式下 int 常量的覆盖范围，none 关闭，最高为 aggressive。', 'int coverage: integer constant coverage in resolver mode; none disables, aggressive is the highest level.'),
+  longCoverage: text('long 覆盖等级：resolver 模式下 long 常量的覆盖范围，none 关闭，最高为 normal。', 'long coverage: long constant coverage in resolver mode; none disables, normal is the highest level.'),
+  resolverCodec: text('解析器编码：resolver 模式下常量载荷的编码族，可选 xor 或 des。', 'Resolver codec: constant payload encoding family in resolver mode, either xor or des.'),
+  callSiteForm: text('调用点形态：bootstrap-table 为每类引导查找表；constant-resolver 为常量解析器调用点，首次解析后转为常量目标。', 'Call-site form: bootstrap-table uses a per-class bootstrap lookup table; constant-resolver wraps resolver members in first-resolve constant call sites.'),
+  branchInjection: text('条件边注入等级：基于状态字段的条件边扰动，与谓词分发叠加；none 关闭，最高为 aggressive。', 'Branch injection level: state-field conditional-edge perturbation combined with predicate dispatch; none disables, aggressive is the highest level.'),
+  handlerSplit: text('异常处理器拆分等级：同类型 handler 拆分与中继，与谓词分发叠加；none 关闭，最高为 heavy。', 'Handler split level: same-type handler split and relay combined with predicate dispatch; none disables, heavy is the highest level.'),
+  descriptorPadding: text('描述符填充：为符合条件的直接调用方法追加上下文参数；off 关闭，fixed 固定追加 long，random 按种子随机 int 或 long。', 'Descriptor padding: appends a context parameter to eligible direct-call methods; off disables, fixed appends a long, random picks int or long per method.'),
+  parameterPacking: text('参数打包：object-array 将符合条件的直接调用参数打包为单个 Object[]；off 关闭。', 'Parameter packing: object-array lowers eligible direct-call parameters into a single Object[]; off disables.'),
+  returnSensitiveNaming: text('返回类型敏感命名：允许按含返回类型的最终 JVM 描述符复用短名称。', 'Return-sensitive naming: allows short-name reuse keyed by final JVM descriptors, including return types.'),
 }
 
 const optionLabels: Readonly<Record<string, LocalizedText>> = {
@@ -155,7 +168,9 @@ const optionLabels: Readonly<Record<string, LocalizedText>> = {
   'dynamic-proxy': text('动态代理', 'Dynamic proxy'),
   'encrypted-table': text('加密分发表', 'Encrypted table'),
   'entry-exit': text('入口/出口块', 'Entry/exit blocks'),
+  embedded: text('内嵌到 JAR', 'Embedded in JAR'),
   epoch: text('Epoch', 'Epoch'),
+  'external-file': text('外部伴随文件', 'External sidecar file'),
   fail: text('报错停止', 'Fail'),
   'field-noise': text('字段读写噪声', 'Field noise'),
   'field-scramble': text('字段扰乱', 'Field scramble'),
@@ -233,6 +248,25 @@ const optionLabels: Readonly<Record<string, LocalizedText>> = {
   warn: text('警告', 'Warn'),
   'windows-x64': text('Windows x64', 'Windows x64'),
   'arithmetic-split': text('算术分裂', 'Arithmetic split'),
+  none: text('关闭', 'Off'),
+  off: text('关闭', 'Off'),
+  normal: text('标准', 'Normal'),
+  light: text('轻度', 'Light'),
+  heavy: text('重度', 'Heavy'),
+  fixed: text('固定', 'Fixed'),
+  'object-array': text('Object[] 打包', 'Object[] packing'),
+  strong: text('强化', 'Strong'),
+  'flow-guarded': text('流防护', 'Flow guarded'),
+  max: text('最高', 'Max'),
+  arithmetic: text('算术改写', 'Arithmetic'),
+  resolver: text('常量解析器', 'Resolver'),
+  xor: text('XOR', 'XOR'),
+  des: text('DES', 'DES'),
+  indexed: text('索引置换', 'Indexed'),
+  'bootstrap-table': text('引导查找表', 'Bootstrap table'),
+  'constant-resolver': text('常量解析器调用点', 'Constant resolver'),
+  'native-kernel': text('Native 微内核', 'Native kernel'),
+  'jvm-resolver': text('JVM 内置解析器', 'JVM resolver'),
 }
 
 const passCopies: Readonly<Record<string, LocalizedPassCopy>> = {
@@ -270,7 +304,7 @@ const passCopies: Readonly<Record<string, LocalizedPassCopy>> = {
   },
   'control-flow-obfuscation': {
     name: text('控制流混淆', 'Control-flow obfuscation'),
-    description: text('通过不透明谓词、分发逻辑和代数恒等式重组方法控制流。', 'Restructures method control flow using opaque predicates, dispatch logic, and algebraic identities.'),
+    description: text('通过不透明谓词、分发逻辑和代数恒等式重组方法控制流，可叠加条件边注入与异常处理器拆分。', 'Restructures method control flow using opaque predicates, dispatch logic, and algebraic identities, with optional conditional-edge injection and handler splitting.'),
   },
   'environment-bound-keys': {
     name: text('环境绑定密钥', 'Environment-bound keys'),
@@ -286,11 +320,11 @@ const passCopies: Readonly<Record<string, LocalizedPassCopy>> = {
   },
   'integer-constant-obfuscation': {
     name: text('整数常量混淆', 'Integer constant obfuscation'),
-    description: text('把整数常量改写为等价表达式，避免简单常量模式被直接匹配。', 'Rewrites integer constants into equivalent expressions to avoid direct constant pattern matching.'),
+    description: text('把整数/长整数常量改写为等价表达式或常量解析器调用，避免简单常量模式被直接匹配。', 'Rewrites integer and long constants into equivalent expressions or constant-resolver calls to avoid direct constant pattern matching.'),
   },
   'invoke-dynamic-indirection': {
     name: text('InvokeDynamic 间接调用', 'InvokeDynamic indirection'),
-    description: text('把静态调用改写为由 bootstrap 查找表解析的 invokedynamic 调用。', 'Rewrites direct calls into invokedynamic calls resolved through bootstrap lookup tables.'),
+    description: text('把静态调用改写为 invokedynamic：每类引导查找表，或首次解析后转为常量目标的常量解析器调用点。', 'Rewrites direct calls into invokedynamic calls: per-class bootstrap lookup tables, or first-resolve constant-resolver call sites.'),
   },
   'jni-microkernel-loader': {
     name: text('JNI 微内核加载器', 'JNI microkernel loader'),
@@ -348,7 +382,7 @@ const passCopies: Readonly<Record<string, LocalizedPassCopy>> = {
   },
   'string-encryption': {
     name: text('字符串加密', 'String encryption'),
-    description: text('加密字符串常量并注入解密逻辑，支持多种算法、密钥作用域和过滤范围。', 'Encrypts string constants and injects decrypt logic with configurable algorithms, key scopes, and filtering.'),
+    description: text('加密字符串常量并注入解密逻辑；解密器后端可选 JNI 微内核或纯 JVM 内置解析器，支持强度、载荷编码与过滤范围。', 'Encrypts string constants and injects decrypt logic; decoder backend can be the JNI microkernel or a self-contained JVM resolver, with strength, payload codec, and scope controls.'),
   },
   'strip-compile-debug-info': {
     name: text('清理编译调试信息', 'Strip compile debug info'),

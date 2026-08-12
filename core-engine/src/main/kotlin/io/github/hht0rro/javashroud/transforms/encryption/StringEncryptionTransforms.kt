@@ -2,7 +2,9 @@ package io.github.hht0rro.javashroud.transforms.encryption
 
 import io.github.hht0rro.javashroud.analysis.eligibleClassNamesForAction
 import io.github.hht0rro.javashroud.bytecode.StringEncryptionConfig
+import io.github.hht0rro.javashroud.bytecode.EmbeddedStringResolverConfig
 import io.github.hht0rro.javashroud.bytecode.encryptClassStrings
+import io.github.hht0rro.javashroud.bytecode.encryptClassStringsEmbeddedResolver
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.transforms.TransformResult
@@ -16,15 +18,23 @@ fun encryptStrings(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, par
         return unchangedTransformResult(artifact)
     }
 
-    val config = buildStringEncryptionConfig(params)
+    val encryptClass: (ByteArray) -> ByteArray = when (val backend = params["decoderBackend"]) {
+        null, "native-kernel" -> {
+            val config = buildStringEncryptionConfig(params - "decoderBackend")
+            ({ classBytes: ByteArray -> encryptClassStrings(classBytes, config) })
+        }
+        "jvm-resolver" -> {
+            val config = buildEmbeddedStringResolverConfig(params)
+            ({ classBytes: ByteArray -> encryptClassStringsEmbeddedResolver(classBytes, config) })
+        }
+        is String -> throw IllegalArgumentException("string-encryption decoderBackend '$backend' is not supported; supported values: native-kernel, jvm-resolver")
+        else -> throw IllegalArgumentException("string-encryption decoderBackend must be a string")
+    }
     var classCount = 0
 
     val updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
         if (matchedClassNames.contains(classArtifact.summary.internalName)) {
-            val encryptedBytes = encryptClassStrings(
-                classArtifact.bytes,
-                config = config,
-            )
+            val encryptedBytes = encryptClass(classArtifact.bytes)
             if (!encryptedBytes.contentEquals(classArtifact.bytes)) {
                 classCount++
                 reanalyzedClassArtifact(classArtifact, encryptedBytes)
@@ -46,6 +56,35 @@ fun encryptStrings(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, par
         transformedClassCount = classCount,
         transformedMemberCount = classCount,
     )
+}
+
+private fun buildEmbeddedStringResolverConfig(params: Map<String, Any>): EmbeddedStringResolverConfig {
+    val scope = (params["scope"] as? String) ?: "all-strings"
+    val lengthThreshold = when (val raw = params["lengthThreshold"]) {
+        is Int -> raw
+        is Long -> raw.toInt()
+        is Number -> raw.toInt()
+        null -> 3
+        else -> throw IllegalArgumentException("string-encryption lengthThreshold must be a number")
+    }
+    val seed = (params["seed"] as? Int)?.toLong() ?: (params["seed"] as? Long)
+    val strength = optionalStringParam(params, "strength") ?: "max"
+    val payloadCodec = optionalStringParam(params, "payloadCodec")?.takeUnless { it == "auto" }
+
+    validateStringEncryptionConfig(scope, lengthThreshold)
+    return EmbeddedStringResolverConfig(
+        scope = scope,
+        lengthThreshold = lengthThreshold,
+        seed = seed,
+        strength = strength,
+        payloadCodec = payloadCodec,
+    )
+}
+
+private fun optionalStringParam(params: Map<String, Any>, key: String): String? = when (val raw = params[key]) {
+    null -> null
+    is String -> raw
+    else -> throw IllegalArgumentException("string-encryption $key must be a string")
 }
 
 private fun buildStringEncryptionConfig(params: Map<String, Any>): StringEncryptionConfig {
@@ -70,10 +109,10 @@ private fun buildStringEncryptionConfig(params: Map<String, Any>): StringEncrypt
 }
 
 private fun rejectLegacyStringEncryptionParams(params: Map<String, Any>) {
-    val legacyKeys = listOf("strategy", "algorithm", "layerMode", "keyMode").filter(params::containsKey)
+    val legacyKeys = listOf("strategy", "algorithm", "layerMode", "keyMode", "mode", "codecFamily").filter(params::containsKey)
     require(legacyKeys.isEmpty()) {
-        "string-encryption legacy params were removed: ${legacyKeys.joinToString(", ")}; " +
-            "native-backed string encryption accepts only scope, lengthThreshold, and seed"
+        "string-encryption params were removed: ${legacyKeys.joinToString(", ")}; " +
+            "supported params are decoderBackend, strength, payloadCodec, scope, lengthThreshold, and seed"
     }
 }
 

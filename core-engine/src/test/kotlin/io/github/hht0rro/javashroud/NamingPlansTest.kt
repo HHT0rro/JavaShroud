@@ -159,6 +159,26 @@ class NamingPlansTest {
     }
 
     @Test
+    fun buildMethodRenameMap_aggressive_mode_reuses_short_names_only_for_distinct_full_descriptors() {
+        val owner = "com/example/Foo"
+        val intMethod = MemberKey(owner, "intValue", "()I")
+        val longMethod = MemberKey(owner, "longValue", "()J")
+        val collidingMethod = MemberKey(owner, "otherIntValue", "()I")
+        val map = buildMethodRenameMap(
+            listOf(
+                MatchedMember(owner = owner, kind = MemberKind.METHOD, name = intMethod.name, descriptor = intMethod.descriptor),
+                MatchedMember(owner = owner, kind = MemberKind.METHOD, name = longMethod.name, descriptor = longMethod.descriptor),
+                MatchedMember(owner = owner, kind = MemberKind.METHOD, name = collidingMethod.name, descriptor = collidingMethod.descriptor),
+            ),
+            returnSensitive = true,
+        )
+
+        val intName = map.getValue(intMethod).renamedName
+        assertEquals(intName, map.getValue(longMethod).renamedName)
+        assertFalse(intName == map.getValue(collidingMethod).renamedName)
+    }
+
+    @Test
     fun buildMethodRenameMap_excludes_fields() {
         val matchedMembers = listOf(
             MatchedMember(owner = "com/example/Foo", kind = MemberKind.FIELD, name = "value", descriptor = "I"),

@@ -1,5 +1,6 @@
 package io.github.hht0rro.javashroud
 
+import com.fasterxml.jackson.databind.node.JsonNodeFactory
 import io.github.hht0rro.javashroud.config.validateConfig
 import io.github.hht0rro.javashroud.model.config.PassSpec
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -90,6 +91,40 @@ class PassCompatibilityRegressionTest {
     @Test
     fun string_encryption_auto_includes_jni_microkernel_loader() {
         assertAutoIncludedJniLoaderDependency("string-encryption")
+    }
+
+    @Test
+    fun jvm_resolver_string_encryption_does_not_include_jni_microkernel_loader() {
+        val configPath = Files.createTempFile("javashroud-jvm-resolver-string", ".json")
+        val inputJar = Files.createTempFile("javashroud-jvm-resolver-string-input", ".jar")
+        val outputJar = Files.createTempFile("javashroud-jvm-resolver-string-output", ".jar")
+        JarOutputStream(Files.newOutputStream(inputJar)).use { }
+        try {
+            val validated = validateConfig(
+                config = testConfig(
+                    inputJarPath = inputJar.toAbsolutePath().normalize().toString(),
+                    outputJarPath = outputJar.toAbsolutePath().normalize().toString(),
+                    passes = listOf(
+                        PassSpec(
+                            id = "string-encryption",
+                            enabled = true,
+                            params = mapOf("decoderBackend" to JsonNodeFactory.instance.textNode("jvm-resolver")),
+                        ),
+                    ),
+                    allowOptInPasses = true,
+                ),
+                configPath = configPath,
+            )
+
+            assertTrue(
+                validated.passes.none { it.id == "jni-microkernel-loader" && it.enabled },
+                "JVM-resolver string encryption must not auto-include JNI, actual passes: ${validated.passes.map { it.id }}",
+            )
+        } finally {
+            Files.deleteIfExists(configPath)
+            Files.deleteIfExists(inputJar)
+            Files.deleteIfExists(outputJar)
+        }
     }
 
     @Test

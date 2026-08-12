@@ -1,6 +1,7 @@
 package io.github.hht0rro.javashroud.transforms.rename
 
 import io.github.hht0rro.javashroud.analysis.eligibleMembersForAction
+import io.github.hht0rro.javashroud.bytecode.isResolverMemberName
 import io.github.hht0rro.javashroud.bytecode.remapFields
 import io.github.hht0rro.javashroud.bytecode.remapMethods
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
@@ -17,31 +18,67 @@ import io.github.hht0rro.javashroud.naming.canRenameMethod
 import io.github.hht0rro.javashroud.transforms.reanalyzedClassArtifact
 import io.github.hht0rro.javashroud.transforms.unchangedTransformResult
 import io.github.hht0rro.javashroud.transforms.updatedArtifactTransformResult
+import org.objectweb.asm.ClassReader
+import org.objectweb.asm.tree.ClassNode
 
 fun renameMethods(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, params: Map<String, Any>): TransformResult {
     val config = buildRenameConfig(params)
-    val runtimeBoundClassNames = priorRuntimeBoundClassNames(artifact)
-    val externallyBoundSignatures = externallyBoundMethodSignatures(artifact)
-    val inArtifactOverrideSignatures = inArtifactOverrideMethodSignatures(artifact)
-    val protectedSignatures = externallyBoundSignatures + inArtifactOverrideSignatures
-    val matchedMembers = eligibleMembersForAction(artifact.classArtifacts, ruleMatches, "rename-methods")
+    val originalMatchedMembers = eligibleMembersForAction(artifact.classArtifacts, ruleMatches, "rename-methods")
         .filter { it.kind == MemberKind.METHOD }
-        .filter { it.owner !in runtimeBoundClassNames }
+    val initialRuntimeBoundClassNames = priorRuntimeBoundClassNames(artifact)
+    val initialProtectedSignatures = externallyBoundMethodSignatures(artifact) + inArtifactOverrideMethodSignatures(artifact)
+    val parameterCandidates = originalMatchedMembers
+        .filterNot { isResolverMemberName(it.name) }
+        .filter { it.owner !in initialRuntimeBoundClassNames }
         .filter { canRenameMethod(it.name) }
         .filter { artifact.classArtifactIndex[it.owner]?.summary?.accessFlags?.and(org.objectweb.asm.Opcodes.ACC_ENUM) == 0 }
+        .filter { methodSignature(it.name, it.descriptor) !in initialProtectedSignatures }
+    val parameterResult = applyMethodDescriptorPadding(artifact, parameterCandidates, params)
+    val workingArtifact = parameterResult.artifact
+    val runtimeBoundClassNames = priorRuntimeBoundClassNames(workingArtifact)
+    val externallyBoundSignatures = externallyBoundMethodSignatures(workingArtifact)
+    val inArtifactOverrideSignatures = inArtifactOverrideMethodSignatures(workingArtifact)
+    val protectedSignatures = externallyBoundSignatures + inArtifactOverrideSignatures
+    val matchedMembers = originalMatchedMembers
+        .map { member ->
+            val key = MemberKey(member.owner, member.name, member.descriptor)
+            parameterResult.descriptors[key]?.let { descriptor -> member.copy(descriptor = descriptor) } ?: member
+        }
+        .filterNot { isResolverMemberName(it.name) }
+        .filter { it.owner !in runtimeBoundClassNames }
+        .filter { canRenameMethod(it.name) }
+        .filter { workingArtifact.classArtifactIndex[it.owner]?.summary?.accessFlags?.and(org.objectweb.asm.Opcodes.ACC_ENUM) == 0 }
         .filter { methodSignature(it.name, it.descriptor) !in protectedSignatures }
-    val methodRenameMap = buildMethodRenameMap(matchedMembers, config)
+    val returnSensitiveNaming = (params["returnSensitiveNaming"] as? Boolean) == true
+    val occupiedMethodKeys = declaredMethodKeys(workingArtifact)
+    val methodRenameMap = buildMethodRenameMap(
+        matchedMembers,
+        config,
+        returnSensitive = returnSensitiveNaming,
+        occupiedMethodKeys = occupiedMethodKeys,
+    )
     if (methodRenameMap.isEmpty()) {
-        return unchangedTransformResult(artifact)
+        return if (parameterResult.transformedMemberCount == 0) {
+            unchangedTransformResult(artifact)
+        } else {
+            updatedArtifactTransformResult(
+                artifact = artifact,
+                updatedClassArtifacts = workingArtifact.classArtifacts,
+                transformedClassCount = workingArtifact.classArtifacts.count { updated ->
+                    artifact.classArtifactIndex[updated.summary.internalName]?.bytes?.contentEquals(updated.bytes) == false
+                },
+                transformedMemberCount = parameterResult.transformedMemberCount,
+            )
+        }
     }
 
-    val entryPointMethodKeys = entryPointMethodKeys(artifact).intersect(methodRenameMap.keys)
+    val entryPointMethodKeys = entryPointMethodKeys(workingArtifact).intersect(methodRenameMap.keys)
     val bridgeMethodKeys = methodRenameMap.keys.filter { key ->
         methodSignature(key.name, key.descriptor) in externallyBoundSignatures
     }.toSet() + entryPointMethodKeys
-    val nativeMethodKeys = nativeMethodKeys(artifact).intersect(methodRenameMap.keys)
+    val nativeMethodKeys = nativeMethodKeys(workingArtifact).intersect(methodRenameMap.keys)
     val methodStringRewriteMap = methodReflectionStringRewriteMap(methodRenameMap)
-    val updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
+    val updatedClassArtifacts = workingArtifact.classArtifacts.map { classArtifact ->
         reanalyzedClassArtifact(
             classArtifact,
             remapMethods(
@@ -55,17 +92,17 @@ fun renameMethods(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, para
     }
 
     val updatedArtifact = updatedArtifactTransformResult(
-        artifact = artifact,
+        artifact = workingArtifact,
         updatedClassArtifacts = updatedClassArtifacts,
         transformedClassCount = affectedOwnerCount(methodRenameMap),
-        transformedMemberCount = methodRenameMap.size,
+        transformedMemberCount = methodRenameMap.size + parameterResult.transformedMemberCount,
     ).artifact
 
     return updatedArtifactTransformResult(
         artifact = updatedArtifact.copy(jarEntries = mergeMethodRenameMapEntry(updatedArtifact.jarEntries, methodRenameMap)),
         updatedClassArtifacts = updatedArtifact.classArtifacts,
         transformedClassCount = affectedOwnerCount(methodRenameMap),
-        transformedMemberCount = methodRenameMap.size,
+        transformedMemberCount = methodRenameMap.size + parameterResult.transformedMemberCount,
     )
 }
 
@@ -85,15 +122,43 @@ fun renameFields(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, param
         reanalyzedClassArtifact(classArtifact, remapFields(classArtifact.bytes, fieldRenameMap, fieldStringRewriteMap))
     }
 
-    return updatedArtifactTransformResult(
+    val transformed = updatedArtifactTransformResult(
         artifact = artifact,
         updatedClassArtifacts = updatedClassArtifacts,
         transformedClassCount = affectedOwnerCount(fieldRenameMap),
         transformedMemberCount = fieldRenameMap.size,
     )
+    return transformed.copy(
+        artifact = transformed.artifact.copy(
+            jarEntries = mergeFieldRenameMapEntry(
+                jarEntries = transformed.artifact.jarEntries,
+                fieldRenameMap = fieldRenameMap,
+            ),
+        ),
+    )
 }
 
 internal const val METHOD_RENAME_BINDINGS_RESOURCE = "META-INF/.javashroud/method-renames.idx"
+internal const val FIELD_RENAME_BINDINGS_RESOURCE = "META-INF/.javashroud/field-renames.idx"
+
+private fun mergeFieldRenameMapEntry(
+    jarEntries: List<JarEntryData>,
+    fieldRenameMap: Map<MemberKey, MemberRename>,
+): List<JarEntryData> {
+    val existingLines = jarEntries
+        .firstOrNull { it.name == FIELD_RENAME_BINDINGS_RESOURCE }
+        ?.bytes
+        ?.toString(Charsets.UTF_8)
+        ?.lineSequence()
+        ?.filter { it.isNotBlank() }
+        ?.toList()
+        .orEmpty()
+    val newLines = fieldRenameMap.values.map { rename ->
+        listOf(rename.owner, rename.originalName, rename.descriptor, rename.renamedName).joinToString("|")
+    }
+    val merged = (existingLines + newLines).distinct().joinToString(separator = "\n", postfix = "\n").toByteArray(Charsets.UTF_8)
+    return jarEntries.filterNot { it.name == FIELD_RENAME_BINDINGS_RESOURCE } + JarEntryData(FIELD_RENAME_BINDINGS_RESOURCE, merged)
+}
 
 private fun mergeMethodRenameMapEntry(
     jarEntries: List<JarEntryData>,
@@ -142,6 +207,14 @@ private fun affectedOwnerCount(memberRenameMap: Map<MemberKey, MemberRename>): I
     return memberRenameMap.keys.map { it.owner }.toSet().size
 }
 
+private fun declaredMethodKeys(artifact: BytecodeArtifact): Set<MemberKey> = buildSet {
+    artifact.classArtifacts.forEach { classArtifact ->
+        val node = ClassNode()
+        ClassReader(classArtifact.bytes).accept(node, ClassReader.SKIP_CODE or ClassReader.SKIP_DEBUG or ClassReader.SKIP_FRAMES)
+        node.methods.forEach { method -> add(MemberKey(node.name, method.name, method.desc)) }
+    }
+}
+
 private fun methodReflectionStringRewriteMap(methodRenameMap: Map<MemberKey, MemberRename>): Map<String, Map<String, String>> =
     methodRenameMap.values
         .groupBy { rename -> rename.originalName }
@@ -169,4 +242,3 @@ private fun nativeMethodKeys(artifact: BytecodeArtifact): Set<MemberKey> = artif
             .map { method -> MemberKey(classArtifact.summary.internalName, method.name, method.descriptor) }
     }
     .toSet()
-

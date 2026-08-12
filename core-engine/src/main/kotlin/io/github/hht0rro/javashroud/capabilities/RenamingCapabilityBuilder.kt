@@ -57,6 +57,30 @@ private val packageRenamingParams = renamingParams + ParamSchema(
         "关闭后，每个原始包段对应一个重命名包段。",
 )
 
+private val methodRenamingParams = renamingParams + listOf(
+    ParamSchema(
+        key = "descriptorPadding",
+        type = "enum",
+        defaultValue = JsonNodeFactory.instance.textNode("off"),
+        options = listOf("off", "fixed", "random"),
+        description = "Descriptor padding policy for eligible direct calls: off disables, fixed appends a long context parameter, random picks int or long per method.",
+    ),
+    ParamSchema(
+        key = "parameterPacking",
+        type = "enum",
+        defaultValue = JsonNodeFactory.instance.textNode("off"),
+        options = listOf("off", "object-array"),
+        description = "Parameter packing policy: object-array lowers eligible direct-call parameters into a single Object[].",
+    ),
+    ParamSchema(
+        key = "returnSensitiveNaming",
+        type = "boolean",
+        defaultValue = JsonNodeFactory.instance.booleanNode(false),
+        options = null,
+        description = "Allow short-name reuse using final JVM descriptors, including return types.",
+    ),
+)
+
 internal fun renamingCapabilityBindings(): List<CapabilityBinding> = listOf(
     CapabilityBinding(
         id = "rename-classes",
@@ -92,7 +116,7 @@ internal fun renamingCapabilityBindings(): List<CapabilityBinding> = listOf(
         risk = "medium",
         requiresOptIn = true,
         compatibilityNotes = "May break reflection, inheritance-sensitive lookups, serialization hooks, and framework method discovery without explicit keep rules.",
-        params = renamingParams,
+        params = methodRenamingParams,
     ),
     CapabilityBinding(
         id = "rename-fields",

@@ -1,6 +1,7 @@
 package io.github.hht0rro.javashroud
 
 import io.github.hht0rro.javashroud.bytecode.encryptClassStrings
+import io.github.hht0rro.javashroud.model.schema.requiredPassIdsFor
 import io.github.hht0rro.javashroud.modules.buildModuleRegistry
 import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
@@ -86,7 +87,10 @@ class StringEncryptionSmokeTest {
         assertTrue(registry.containsKey("string-encryption"), "string-encryption should be in module registry")
         val module = registry["string-encryption"]!!
         assertTrue(module.definition.tagIds.contains("encryption"), "Should have encryption tag")
-        assertTrue(module.definition.requiredPassIds.contains("jni-microkernel-loader"), "Should require JNI microkernel loader")
+        assertTrue(
+            module.definition.requiredPassIdsFor(emptyMap()).contains("jni-microkernel-loader"),
+            "Should require JNI microkernel loader for the default native-kernel decoder backend",
+        )
     }
 
     private fun buildTestClassWithStrings(vararg strings: String): ByteArray {

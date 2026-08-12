@@ -1,5 +1,6 @@
 package io.github.hht0rro.javashroud.transforms.protection
 
+import com.fasterxml.jackson.databind.JsonNode
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
@@ -50,6 +51,8 @@ fun applyPassOrderingPlanner(
  * @param optInPassIds Set of pass IDs that require explicit opt-in (warn when present).
  * @param mode Planning mode: "auto-sort", "validate-only", "reject-conflicts"
  * @param strictness Strictness level: "silent", "warn", "reject"
+ * @param passParams Parameters keyed by enabled pass ID. Resolver-profile variants
+ * use these to select their strict, parameter-aware ordering path.
  * @return A PlanningResult with the reordered passes and any diagnostics.
  */
 fun planPassOrdering(
@@ -61,8 +64,10 @@ fun planPassOrdering(
     optInPassIds: Set<String> = emptySet(),
     mode: String = "auto-sort",
     strictness: String = "warn",
+    passParams: Map<String, Map<String, Any?>> = emptyMap(),
 ): PlanningResult {
     val diagnostics = mutableListOf<PlanningDiagnostic>()
+    val resolverProfileActive = isResolverProfileRequest(passIds, passParams)
 
     // 1. Validate requested passes exist in the capability registry
     if (availablePassIds != null) {
@@ -78,9 +83,10 @@ fun planPassOrdering(
                 ),
             )
             return PlanningResult(
-                orderedPasses = passIds,
+                orderedPasses = rejectedPassOrder(passIds, resolverProfileActive),
                 diagnostics = diagnostics,
                 accepted = false,
+                resolverProfileActive = resolverProfileActive,
             )
         }
     }
@@ -113,11 +119,12 @@ fun planPassOrdering(
         }
     }
 
-    if (mode == "reject-conflicts" && diagnostics.any { it.level == "error" }) {
+    if ((mode == "reject-conflicts" || resolverProfileActive) && diagnostics.any { it.level == "error" }) {
         return PlanningResult(
-            orderedPasses = passIds,
+            orderedPasses = rejectedPassOrder(passIds, resolverProfileActive),
             diagnostics = diagnostics,
             accepted = false,
+            resolverProfileActive = resolverProfileActive,
         )
     }
 
@@ -136,19 +143,101 @@ fun planPassOrdering(
     }
 
     // 5. Auto-sort using deterministic topological sort
+    val effectiveConstraints = if (resolverProfileActive) {
+        resolverProfileOrderingConstraints(passIds, orderingConstraints)
+    } else {
+        orderingConstraints
+    }
     val orderedPasses = if (mode == "auto-sort") {
-        topologicalSort(passIds, orderingConstraints, diagnostics)
+        topologicalSort(passIds, effectiveConstraints, diagnostics)
+            ?: rejectedPassOrder(passIds, resolverProfileActive)
     } else {
         // Validate-only: check that existing order satisfies constraints
-        validateOrdering(passIds, orderingConstraints, diagnostics)
-        passIds
+        validateOrdering(passIds, effectiveConstraints, diagnostics)
+        if (resolverProfileActive && diagnostics.any { it.level == "error" }) emptyList() else passIds
     }
 
     return PlanningResult(
         orderedPasses = orderedPasses,
         diagnostics = diagnostics,
         accepted = diagnostics.none { it.level == "error" },
+        resolverProfileActive = resolverProfileActive,
     )
+}
+
+private fun rejectedPassOrder(passIds: List<String>, resolverProfileActive: Boolean): List<String> =
+    if (resolverProfileActive) emptyList() else passIds
+
+private fun isResolverProfileRequest(
+    passIds: List<String>,
+    passParams: Map<String, Map<String, Any?>>,
+): Boolean {
+    val selectedParams = passParams.filterKeys { passId -> passId in passIds }
+    fun paramsOf(passId: String): Map<String, Any?> = selectedParams[passId] ?: emptyMap()
+
+    if (planningParamText(paramsOf("string-encryption")["decoderBackend"]) == "jvm-resolver") {
+        return true
+    }
+    if (planningParamText(paramsOf("integer-constant-obfuscation")["rewriteMode"]) == "resolver") {
+        return true
+    }
+    if (planningParamText(paramsOf("invoke-dynamic-indirection")["callSiteForm"]) == "constant-resolver") {
+        return true
+    }
+    val flowParams = paramsOf("control-flow-obfuscation")
+    val branchInjection = planningParamText(flowParams["branchInjection"])
+    if (branchInjection != null && branchInjection != "none") {
+        return true
+    }
+    val handlerSplit = planningParamText(flowParams["handlerSplit"])
+    if (handlerSplit != null && handlerSplit != "none") {
+        return true
+    }
+
+    val renameParams = paramsOf("rename-methods")
+    return planningParamText(renameParams["descriptorPadding"]) in setOf("fixed", "random") ||
+        planningParamText(renameParams["parameterPacking"]) == "object-array" ||
+        planningParamBoolean(renameParams["returnSensitiveNaming"])
+}
+
+private fun planningParamText(value: Any?): String? = when (value) {
+    is String -> value
+    is JsonNode -> if (value.isTextual) value.asText() else null
+    else -> null
+}
+
+private fun planningParamBoolean(value: Any?): Boolean = when (value) {
+    is Boolean -> value
+    is JsonNode -> value.isBoolean && value.booleanValue()
+    else -> false
+}
+
+private fun resolverProfileOrderingConstraints(
+    passIds: List<String>,
+    baseConstraints: List<OrderingConstraint>,
+): List<OrderingConstraint> {
+    val selectedPassIds = passIds.toSet()
+    val overriddenLegacyPairs = setOf("rename-methods" to "string-encryption")
+    val constraints = baseConstraints
+        .filterNot { constraint -> (constraint.before to constraint.after) in overriddenLegacyPairs }
+        .toMutableList()
+
+    fun add(before: String, after: String, reason: String) {
+        if (before !in selectedPassIds || after !in selectedPassIds) return
+        if (constraints.any { it.before == before && it.after == after }) return
+        constraints += OrderingConstraint(before = before, after = after, reason = reason)
+    }
+
+    // The public rename-methods pass owns descriptor expansion, direct-call
+    // rewriting, Object[] lowering, and final name allocation as one atomic
+    // transform. Keep it ahead of indy conversion so its direct call sites are
+    // still available to the descriptor rewriter.
+    add("integer-constant-obfuscation", "rename-methods", "Constant resolvers must be emitted before method descriptor rewriting.")
+    add("string-encryption", "rename-methods", "String resolvers must be emitted before method descriptor rewriting.")
+    add("rename-methods", "invoke-dynamic-indirection", "Descriptor and Object[] rewrites must complete before invokedynamic callsite conversion.")
+    add("invoke-dynamic-indirection", "control-flow-obfuscation", "Invokedynamic resolver callsites must be established before CFG and handler rewriting.")
+    add("rename-methods", "control-flow-obfuscation", "Descriptor and Object[] rewrites must complete before CFG and handler rewriting.")
+    return constraints
 }
 
 /**
@@ -159,12 +248,14 @@ fun planPassOrdering(
  * - All ordering constraints are satisfied.
  * - Passes without mutual constraints preserve their original relative order.
  * - The result is fully deterministic for a given input.
+ *
+ * @return The sorted pass IDs, or null when the selected constraints are cyclic.
  */
 private fun topologicalSort(
     passIds: List<String>,
     constraints: List<OrderingConstraint>,
     diagnostics: MutableList<PlanningDiagnostic>,
-): List<String> {
+): List<String>? {
     // Original index for deterministic tie-breaking
     val originalIndex = passIds.withIndex().associate { (i, id) -> id to i }
 
@@ -219,8 +310,7 @@ private fun topologicalSort(
                 causeId = "circular-dependency",
             ),
         )
-        // Fall back to original order instead of failing the whole planner run
-        return passIds
+        return null
     }
 
     // Only emit reorder diagnostic if the order actually changed
@@ -322,6 +412,7 @@ data class PlanningResult(
     val orderedPasses: List<String>,
     val diagnostics: List<PlanningDiagnostic>,
     val accepted: Boolean,
+    val resolverProfileActive: Boolean = false,
 )
 
 data class PlanningDiagnostic(
