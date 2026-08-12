@@ -1,4 +1,4 @@
-import { applyPassDependencies, applyPassRequiresAnyConstraints, buildPassItemsFromSchema, clonePassItem, disablePassAndDependents } from './pass-catalog'
+import { applyPassDependencies, applyPassRequiresAnyConstraints, buildPassItemsFromSchema, clonePassItem, disablePassAndDependents, requiresAnyPassIdsFor } from './pass-catalog'
 import { hasEnabledSoftCompatibilityConflict, resolvePassCompatibility } from './pass-compatibility'
 import type {
   ClassTreeNode,
@@ -200,7 +200,7 @@ export const togglePass = (state: RunState, passId: string): RunState => {
   const nextPasses = toggledPass?.enabled === true
     ? disablePassAndDependents(state.passes, passId)
     : state.passes.map((passItem: PassItem): PassItem => (
-      passItem.id === passId ? { ...passItem, enabled: true } : passItem
+      passItem.id === passId ? { ...passItem, enabled: true, dependencyAutoEnabled: false } : passItem
     ))
 
   return {
@@ -220,6 +220,7 @@ export const setAllPassesEnabled = (state: RunState, enabled: boolean): RunState
     state.passes.map((passItem: PassItem): PassItem => ({
       ...passItem,
       enabled,
+      dependencyAutoEnabled: false,
     })),
     state.schema?.compatibility ?? [],
     state.schema?.orderingConstraints ?? [],
@@ -228,11 +229,15 @@ export const setAllPassesEnabled = (state: RunState, enabled: boolean): RunState
 
 export const setPassParam = (state: RunState, passId: string, paramKey: string, value: PassParamValue): RunState => ({
   ...state,
-  passes: state.passes.map((passItem: PassItem): PassItem => (
-    passItem.id === passId
-      ? { ...passItem, params: { ...passItem.params, [paramKey]: value } }
-      : passItem
-  )),
+  passes: normalizePasses(
+    state.passes.map((passItem: PassItem): PassItem => (
+      passItem.id === passId
+        ? { ...passItem, params: { ...passItem.params, [paramKey]: value } }
+        : passItem
+    )),
+    state.schema?.compatibility ?? [],
+    state.schema?.orderingConstraints ?? [],
+  ),
 })
 
 export const setAutoScroll = (state: RunState, autoScroll: boolean): RunState => ({
@@ -459,7 +464,7 @@ export const buildObfuscationRequest = (state: RunState): ObfuscationRequest => 
 
   const enabledPassIds = new Set<string>(enabledPasses.map((passSpec: PassSpec): string => passSpec.id))
   const unsatisfiedPass = state.passes.find((passItem: PassItem): boolean => (
-    passItem.enabled && passItem.requiresAnyPassIds.length > 0 && passItem.requiresAnyPassIds.every((passId: string): boolean => !enabledPassIds.has(passId))
+    passItem.enabled && requiresAnyPassIdsFor(passItem).length > 0 && requiresAnyPassIdsFor(passItem).every((passId: string): boolean => !enabledPassIds.has(passId))
   ))
   if (unsatisfiedPass !== undefined) {
     throw new Error(`无法启动混淆：${unsatisfiedPass.id} 需要同时启用至少一个运行时辅助模块。`)
@@ -531,6 +536,11 @@ const cloneEngineSchema = (schema: EngineSchemaPayload): EngineSchemaPayload => 
     tagIds: [...moduleDefinition.tagIds],
     requiredPassIds: [...(moduleDefinition.requiredPassIds ?? [])],
     requiresAnyPassIds: [...(moduleDefinition.requiresAnyPassIds ?? [])],
+    variantRequirements: (moduleDefinition.variantRequirements ?? []).map((requirement) => ({
+      ...requirement,
+      requiredPassIds: [...(requirement.requiredPassIds ?? [])],
+      requiresAnyPassIds: [...(requirement.requiresAnyPassIds ?? [])],
+    })),
     params: moduleDefinition.params.map((paramSchema) => ({ ...paramSchema })),
   })),
   compatibility: schema.compatibility.map((rule) => ({

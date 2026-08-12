@@ -1,6 +1,7 @@
 package io.github.hht0rro.javashroud.capabilities
 
 import io.github.hht0rro.javashroud.model.schema.ParamSchema
+import io.github.hht0rro.javashroud.model.schema.VariantRequirement
 
 private const val schemaVersion: String = "2"
 private const val engineVersion: String = "0.12"
@@ -19,6 +20,7 @@ internal data class CapabilityBinding(
     val compatibilityNotes: String = "",
     val requiredPassIds: List<String> = emptyList(),
     val requiresAnyPassIds: List<String> = emptyList(),
+    val variantRequirements: List<VariantRequirement> = emptyList(),
     val defaultEnabled: Boolean = true,
     val requiresOptIn: Boolean = false,
 )

@@ -35,6 +35,24 @@ fun ModuleTagDefinition.toJsonMap(): Map<String, Any> = mapOf(
     "order" to order,
 )
 
+/**
+ * Declares pass requirements that apply only when an enum/string parameter
+ * selects a particular implementation variant.
+ */
+data class VariantRequirement(
+    val whenParam: String,
+    val equals: String,
+    val requiredPassIds: List<String> = emptyList(),
+    val requiresAnyPassIds: List<String> = emptyList(),
+)
+
+fun VariantRequirement.toJsonMap(): Map<String, Any> = buildMap {
+    put("whenParam", whenParam)
+    put("equals", equals)
+    if (requiredPassIds.isNotEmpty()) put("requiredPassIds", requiredPassIds)
+    if (requiresAnyPassIds.isNotEmpty()) put("requiresAnyPassIds", requiresAnyPassIds)
+}
+
 data class ModuleDefinition(
     val id: String,
     val name: String,
@@ -48,6 +66,7 @@ data class ModuleDefinition(
     val compatibilityNotes: String = "",
     val requiredPassIds: List<String> = emptyList(),
     val requiresAnyPassIds: List<String> = emptyList(),
+    val variantRequirements: List<VariantRequirement> = emptyList(),
     val defaultEnabled: Boolean = true,
     val requiresOptIn: Boolean = false,
 )
@@ -67,7 +86,21 @@ fun ModuleDefinition.toJsonMap(): Map<String, Any> = buildMap {
     if (compatibilityNotes.isNotBlank()) put("compatibilityNotes", compatibilityNotes)
     if (requiredPassIds.isNotEmpty()) put("requiredPassIds", requiredPassIds)
     if (requiresAnyPassIds.isNotEmpty()) put("requiresAnyPassIds", requiresAnyPassIds)
+    if (variantRequirements.isNotEmpty()) put("variantRequirements", variantRequirements.map(VariantRequirement::toJsonMap))
 }
+
+fun ModuleDefinition.requiredPassIdsFor(params: Map<String, JsonNode>): List<String> =
+    (requiredPassIds + matchingVariantRequirements(params).flatMap(VariantRequirement::requiredPassIds)).distinct()
+
+fun ModuleDefinition.requiresAnyPassIdsFor(params: Map<String, JsonNode>): List<String> =
+    (requiresAnyPassIds + matchingVariantRequirements(params).flatMap(VariantRequirement::requiresAnyPassIds)).distinct()
+
+fun ModuleDefinition.matchingVariantRequirements(params: Map<String, JsonNode>): List<VariantRequirement> =
+    variantRequirements.filter { requirement: VariantRequirement ->
+        val value = params[requirement.whenParam]
+            ?: this.params.firstOrNull { schema: ParamSchema -> schema.key == requirement.whenParam }?.defaultValue
+        value?.isTextual == true && value.asText() == requirement.equals
+    }
 
 data class PassCompatibilityRule(
     val passIds: List<String>,

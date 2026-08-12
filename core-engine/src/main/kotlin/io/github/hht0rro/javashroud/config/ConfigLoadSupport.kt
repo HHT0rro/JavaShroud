@@ -4,6 +4,8 @@ import io.github.hht0rro.javashroud.capabilities.buildEngineSchemaPayload
 import io.github.hht0rro.javashroud.compatibility.hardConflictPairs
 import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
 import io.github.hht0rro.javashroud.model.config.PassSpec
+import io.github.hht0rro.javashroud.model.schema.requiredPassIdsFor
+import io.github.hht0rro.javashroud.model.schema.requiresAnyPassIdsFor
 import java.nio.file.Path
 import kotlin.io.path.absolutePathString
 
@@ -59,10 +61,9 @@ fun validateConfig(config: ObfuscationConfig, configPath: Path): ObfuscationConf
 /**
  * Auto-inject missing required dependency passes.
  *
- * When a pass declares requiredPassIds, any missing required pass is automatically
- * inserted into the configuration as enabled before downstream validation. This
- * allows users to specify only the pass they want without manually including all
- * required dependencies (e.g., jni-microkernel-loader for native-kernel passes).
+ * Static and parameter-selected requiredPassIds are inserted into the
+ * configuration before downstream validation. This allows users to specify only
+ * the pass they want without manually including all required dependencies.
  */
 private const val PASS_ORDERING_PLANNER_ID = "pass-ordering-planner"
 
@@ -70,14 +71,15 @@ private fun normalizePassDependencies(passes: List<PassSpec>): List<PassSpec> {
     val enabledIds = passes.filter { it.enabled }.map { it.id }.toMutableSet()
     val result = passes.toMutableList()
     val schema = buildEngineSchemaPayload()
-    val requiredByModule = schema.modules.associate { it.id to it.requiredPassIds }
+    val modulesById = schema.modules.associateBy { it.id }
 
     var changed = true
     while (changed) {
         changed = false
         for (passSpec in result.toList()) {
             if (!passSpec.enabled) continue
-            for (requiredId in requiredByModule[passSpec.id].orEmpty()) {
+            val module = modulesById[passSpec.id] ?: continue
+            for (requiredId in module.requiredPassIdsFor(passSpec.params)) {
                 if (requiredId !in enabledIds) {
                     result.add(PassSpec(id = requiredId, enabled = true, params = emptyMap()))
                     enabledIds += requiredId
@@ -104,10 +106,12 @@ private fun validatePassCompatibility(passes: List<PassSpec>, configPath: Path, 
 
 private fun validateRequiredPassDependencies(passes: List<PassSpec>, configPath: Path) {
     val enabledIds = passes.filter { it.enabled }.map { it.id }.toSet()
-    val missingDependencies = buildEngineSchemaPayload().modules
-        .filter { module -> module.id in enabledIds }
-        .mapNotNull { module ->
-            val missingRequiredPassIds = module.requiredPassIds.filterNot(enabledIds::contains)
+    val modulesById = buildEngineSchemaPayload().modules.associateBy { it.id }
+    val missingDependencies = passes
+        .filter { passSpec -> passSpec.enabled }
+        .mapNotNull { passSpec ->
+            val module = modulesById[passSpec.id] ?: return@mapNotNull null
+            val missingRequiredPassIds = module.requiredPassIdsFor(passSpec.params).filterNot(enabledIds::contains)
             if (missingRequiredPassIds.isEmpty()) {
                 null
             } else {
@@ -129,14 +133,19 @@ private fun validateRequiredPassDependencies(passes: List<PassSpec>, configPath:
 
 private fun validateRequiresAnyPassDependencies(passes: List<PassSpec>, configPath: Path) {
     val enabledIds = passes.filter { it.enabled }.map { it.id }.toSet()
-    val missingAnyDependencies = buildEngineSchemaPayload().modules
-        .filter { module -> module.id in enabledIds && module.requiresAnyPassIds.isNotEmpty() }
-        .filter { module -> module.requiresAnyPassIds.none(enabledIds::contains) }
-        .sortedBy { module -> module.id }
+    val modulesById = buildEngineSchemaPayload().modules.associateBy { it.id }
+    val missingAnyDependencies = passes
+        .filter { passSpec -> passSpec.enabled }
+        .mapNotNull { passSpec ->
+            val module = modulesById[passSpec.id] ?: return@mapNotNull null
+            val requiredAnyPassIds = module.requiresAnyPassIdsFor(passSpec.params)
+            if (requiredAnyPassIds.isEmpty() || requiredAnyPassIds.any(enabledIds::contains)) null else module to requiredAnyPassIds
+        }
+        .sortedBy { (module, _) -> module.id }
 
     if (missingAnyDependencies.isNotEmpty()) {
-        val dependencySummary = missingAnyDependencies.joinToString("; ") { module ->
-            "${module.id} requires any of ${module.requiresAnyPassIds.sorted()}"
+        val dependencySummary = missingAnyDependencies.joinToString("; ") { (module, requiredAnyPassIds) ->
+            "${module.id} requires any of ${requiredAnyPassIds.sorted()}"
         }
         throw IllegalArgumentException(
             "Config validation failed: missing companion passes: $dependencySummary, " +

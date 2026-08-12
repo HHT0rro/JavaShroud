@@ -14,16 +14,28 @@ const helperLoaderPassIds: ReadonlySet<string> = new Set<string>([
   'method-body-delayed-decryption',
 ])
 
-const dependencyIdsForPass = (passItem: Pick<PassItem, 'id' | 'requiredPassIds'>): readonly string[] => [
+export const requiredPassIdsFor = (passItem: Pick<PassItem, 'id' | 'params' | 'requiredPassIds' | 'variantRequirements'>): readonly string[] => [
   ...new Set<string>([
     ...(legacyPassDependencies.get(passItem.id) ?? []),
     ...passItem.requiredPassIds,
+    ...passItem.variantRequirements
+      .filter((requirement): boolean => passItem.params[requirement.whenParam] === requirement.equals)
+      .flatMap((requirement): readonly string[] => requirement.requiredPassIds ?? []),
   ]),
 ]
 
-const buildDependencyMap = (passes: readonly Pick<PassItem, 'id' | 'requiredPassIds'>[]): ReadonlyMap<string, readonly string[]> => new Map<string, readonly string[]>(
+export const requiresAnyPassIdsFor = (passItem: Pick<PassItem, 'params' | 'requiresAnyPassIds' | 'variantRequirements'>): readonly string[] => [
+  ...new Set<string>([
+    ...passItem.requiresAnyPassIds,
+    ...passItem.variantRequirements
+      .filter((requirement): boolean => passItem.params[requirement.whenParam] === requirement.equals)
+      .flatMap((requirement): readonly string[] => requirement.requiresAnyPassIds ?? []),
+  ]),
+]
+
+const buildDependencyMap = (passes: readonly Pick<PassItem, 'id' | 'params' | 'requiredPassIds' | 'variantRequirements'>[]): ReadonlyMap<string, readonly string[]> => new Map<string, readonly string[]>(
   passes
-    .map((passItem): [string, readonly string[]] => [passItem.id, dependencyIdsForPass(passItem)])
+    .map((passItem): [string, readonly string[]] => [passItem.id, requiredPassIdsFor(passItem)])
     .filter(([, dependencyIds]): boolean => dependencyIds.length > 0),
 )
 
@@ -64,15 +76,17 @@ const buildReverseDependencyMap = (dependencyMap: ReadonlyMap<string, readonly s
 }
 
 export const applyPassDependencies = (passes: readonly PassItem[]): readonly PassItem[] => {
-  const enabledPassIds = passes
-    .filter((passItem: PassItem): boolean => passItem.enabled)
+  const explicitEnabledPassIds = passes
+    .filter((passItem: PassItem): boolean => passItem.enabled && passItem.dependencyAutoEnabled !== true)
     .map((passItem: PassItem): string => passItem.id)
   const dependencyMap = buildDependencyMap(passes)
-  const resolvedPassIds = new Set<string>(resolveEnabledDependencyIds(enabledPassIds, dependencyMap))
+  const resolvedPassIds = new Set<string>(resolveEnabledDependencyIds(explicitEnabledPassIds, dependencyMap))
+  const explicitPassIdSet = new Set<string>(explicitEnabledPassIds)
 
   return passes.map((passItem: PassItem): PassItem => ({
     ...passItem,
     enabled: resolvedPassIds.has(passItem.id),
+    dependencyAutoEnabled: resolvedPassIds.has(passItem.id) && !explicitPassIdSet.has(passItem.id),
   }))
 }
 
@@ -80,12 +94,13 @@ export const applyPassRequiresAnyConstraints = (passes: readonly PassItem[]): re
   const enabledPassIds = new Set<string>(passes.filter((passItem: PassItem): boolean => passItem.enabled).map((passItem: PassItem): string => passItem.id))
 
   return passes.map((passItem: PassItem): PassItem => {
-    if (!passItem.enabled || passItem.requiresAnyPassIds.length === 0) {
+    const requiresAnyPassIds = requiresAnyPassIdsFor(passItem)
+    if (!passItem.enabled || requiresAnyPassIds.length === 0) {
       return passItem
     }
 
-    const hasCompanionPass = passItem.requiresAnyPassIds.some((requiredPassId: string): boolean => enabledPassIds.has(requiredPassId))
-    return hasCompanionPass ? passItem : { ...passItem, enabled: false }
+    const hasCompanionPass = requiresAnyPassIds.some((requiredPassId: string): boolean => enabledPassIds.has(requiredPassId))
+    return hasCompanionPass ? passItem : { ...passItem, enabled: false, dependencyAutoEnabled: false }
   })
 }
 
@@ -110,6 +125,7 @@ export const disablePassAndDependents = (passes: readonly PassItem[], passId: st
   return passes.map((passItem: PassItem): PassItem => ({
     ...passItem,
     enabled: disabledPassIds.has(passItem.id) ? false : passItem.enabled,
+    dependencyAutoEnabled: disabledPassIds.has(passItem.id) ? false : passItem.dependencyAutoEnabled,
   }))
 }
 
@@ -120,11 +136,17 @@ export const buildPassItemsFromSchema = (schema: EngineSchemaPayload): readonly 
 
 export const clonePassItem = (passItem: PassItem): PassItem => ({
   ...passItem,
+  dependencyAutoEnabled: passItem.dependencyAutoEnabled === true,
   tagIds: [...passItem.tagIds],
   params: { ...passItem.params },
   paramSchemas: passItem.paramSchemas.map((paramSchema) => ({ ...paramSchema })),
   requiredPassIds: [...passItem.requiredPassIds],
   requiresAnyPassIds: [...passItem.requiresAnyPassIds],
+  variantRequirements: passItem.variantRequirements.map((requirement) => ({
+    ...requirement,
+    requiredPassIds: [...(requirement.requiredPassIds ?? [])],
+    requiresAnyPassIds: [...(requirement.requiresAnyPassIds ?? [])],
+  })),
 })
 
 const createPassItem = (moduleDefinition: ModuleDefinition, defaultPipeline: readonly string[]): PassItem => ({
@@ -142,6 +164,12 @@ const createPassItem = (moduleDefinition: ModuleDefinition, defaultPipeline: rea
   requiresOptIn: moduleDefinition.requiresOptIn ?? false,
   requiredPassIds: [...(moduleDefinition.requiredPassIds ?? [])],
   requiresAnyPassIds: [...(moduleDefinition.requiresAnyPassIds ?? [])],
+  variantRequirements: (moduleDefinition.variantRequirements ?? []).map((requirement) => ({
+    ...requirement,
+    requiredPassIds: [...(requirement.requiredPassIds ?? [])],
+    requiresAnyPassIds: [...(requirement.requiresAnyPassIds ?? [])],
+  })),
+  dependencyAutoEnabled: false,
 })
 
 const buildDefaultParams = (moduleDefinition: ModuleDefinition): Readonly<Record<string, PassParamValue>> => Object.fromEntries(

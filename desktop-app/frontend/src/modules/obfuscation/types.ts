@@ -21,6 +21,13 @@ export interface ModuleTagDefinition {
   readonly description: string
 }
 
+export interface VariantRequirement {
+  readonly whenParam: string
+  readonly equals: string
+  readonly requiredPassIds?: readonly string[]
+  readonly requiresAnyPassIds?: readonly string[]
+}
+
 export interface ModuleDefinition {
   readonly id: string
   readonly name: string
@@ -33,6 +40,7 @@ export interface ModuleDefinition {
   readonly compatibilityNotes?: string
   readonly requiredPassIds?: readonly string[]
   readonly requiresAnyPassIds?: readonly string[]
+  readonly variantRequirements?: readonly VariantRequirement[]
   readonly defaultEnabled?: boolean
   readonly requiresOptIn?: boolean
   readonly params: readonly ParamSchema[]
@@ -88,6 +96,8 @@ export interface PassItem {
   readonly requiresOptIn: boolean
   readonly requiredPassIds: readonly string[]
   readonly requiresAnyPassIds: readonly string[]
+  readonly variantRequirements: readonly VariantRequirement[]
+  readonly dependencyAutoEnabled?: boolean
 }
 
 export interface PassSpec {

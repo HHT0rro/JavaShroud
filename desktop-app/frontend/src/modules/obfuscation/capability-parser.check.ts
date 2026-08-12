@@ -1,5 +1,5 @@
 import { parseEngineSchema } from './capability-parser.ts'
-import { buildPassItemsFromSchema } from './pass-catalog.ts'
+import { applyPassDependencies, buildPassItemsFromSchema } from './pass-catalog.ts'
 import { hasEnabledSoftCompatibilityConflict, resolvePassCompatibility } from './pass-compatibility.ts'
 
 const assert = (condition: boolean, message: string): void => {
@@ -78,6 +78,123 @@ assert(buildPassItemsFromSchema(parsedSchema)[0]?.compatibilityNotes === 'Use on
 assert(!buildPassItemsFromSchema(parsedSchema)[0]?.paramSchemas.some((paramSchema) => paramSchema.key === 'salt'), 'expected hidden params to be omitted from visible param schemas')
 assert(buildPassItemsFromSchema(parsedSchema)[0]?.paramSchemas.some((paramSchema) => paramSchema.key === 'enabled'), 'expected visible params to be included in visible param schemas')
 assert(parsedSchema.defaultPipeline[0] === 'sample-pass', 'expected defaultPipeline to be preserved')
+
+const conditionalRequirementSchema = parseEngineSchema({
+  ...baseSchema,
+  modules: [
+    {
+      ...baseSchema.modules[0],
+      id: 'jni-microkernel-loader',
+      name: 'JNI Loader',
+      defaultEnabled: false,
+      params: [],
+    },
+    {
+      ...baseSchema.modules[0],
+      id: 'string-encryption',
+      name: 'String Encryption',
+      defaultEnabled: false,
+      params: [
+        {
+          key: 'decoderBackend',
+          type: 'enum',
+          defaultValue: 'jvm-resolver',
+          options: ['native-kernel', 'jvm-resolver'],
+          description: 'String encryption decoder backend.',
+        },
+      ],
+      variantRequirements: [
+        {
+          whenParam: 'decoderBackend',
+          equals: 'native-kernel',
+          requiredPassIds: ['jni-microkernel-loader'],
+        },
+      ],
+    },
+  ],
+  defaultPipeline: ['string-encryption'],
+})
+const jvmResolverConditionalPasses = buildPassItemsFromSchema(conditionalRequirementSchema)
+assert(jvmResolverConditionalPasses.find((passItem) => passItem.id === 'jni-microkernel-loader')?.enabled === false, 'expected jvm-resolver string backend to avoid JNI dependency')
+const legacyConditionalPasses = applyPassDependencies(jvmResolverConditionalPasses.map((passItem) => (
+  passItem.id === 'string-encryption'
+    ? { ...passItem, params: { ...passItem.params, decoderBackend: 'native-kernel' } }
+    : passItem
+)))
+assert(legacyConditionalPasses.find((passItem) => passItem.id === 'jni-microkernel-loader')?.enabled === true, 'expected native-kernel string backend to include JNI dependency')
+
+const legacyConditionalRequirementSchema = parseEngineSchema({
+  ...conditionalRequirementSchema,
+  modules: conditionalRequirementSchema.modules.map((module) => (
+    module.id === 'string-encryption'
+      ? {
+          ...module,
+          params: [{
+            key: 'decoderBackend',
+            type: 'enum',
+            defaultValue: 'native-kernel',
+            options: ['native-kernel', 'jvm-resolver'],
+            description: 'String encryption decoder backend.',
+          }],
+        }
+      : module
+  )),
+})
+
+const legacyVariantPasses = buildPassItemsFromSchema(legacyConditionalRequirementSchema)
+assert(legacyVariantPasses.find((passItem) => passItem.id === 'jni-microkernel-loader')?.dependencyAutoEnabled === true, 'expected native-kernel dependency to be marked automatic')
+const jvmResolverVariantPasses = applyPassDependencies(legacyVariantPasses.map((passItem) => (
+  passItem.id === 'string-encryption'
+    ? { ...passItem, params: { ...passItem.params, decoderBackend: 'jvm-resolver' } }
+    : passItem
+)))
+assert(jvmResolverVariantPasses.find((passItem) => passItem.id === 'jni-microkernel-loader')?.enabled === false, 'expected jvm-resolver backend to release an automatic JNI dependency')
+
+const explicitlyEnabledLoaderPasses = applyPassDependencies(jvmResolverVariantPasses.map((passItem) => (
+  passItem.id === 'jni-microkernel-loader'
+    ? { ...passItem, enabled: true, dependencyAutoEnabled: false }
+    : passItem
+)))
+assert(explicitlyEnabledLoaderPasses.find((passItem) => passItem.id === 'jni-microkernel-loader')?.dependencyAutoEnabled === false, 'expected a user-enabled JNI loader to become explicit')
+const restoredLegacyPasses = applyPassDependencies(explicitlyEnabledLoaderPasses.map((passItem) => (
+  passItem.id === 'string-encryption'
+    ? { ...passItem, params: { ...passItem.params, decoderBackend: 'native-kernel' } }
+    : passItem
+)))
+const retainedExplicitLoaderPasses = applyPassDependencies(restoredLegacyPasses.map((passItem) => (
+  passItem.id === 'string-encryption'
+    ? { ...passItem, params: { ...passItem.params, decoderBackend: 'jvm-resolver' } }
+    : passItem
+)))
+assert(retainedExplicitLoaderPasses.find((passItem) => passItem.id === 'jni-microkernel-loader')?.enabled === true, 'expected an explicitly enabled JNI loader to survive the jvm-resolver backend switch')
+
+const sharedDependencySchema = parseEngineSchema({
+  ...legacyConditionalRequirementSchema,
+  modules: [
+    ...legacyConditionalRequirementSchema.modules,
+    {
+      ...baseSchema.modules[0],
+      id: 'other-native-consumer',
+      name: 'Other native consumer',
+      defaultEnabled: false,
+      requiredPassIds: ['jni-microkernel-loader'],
+      params: [],
+    },
+  ],
+  defaultPipeline: ['string-encryption', 'other-native-consumer'],
+})
+const sharedJvmResolverPasses = applyPassDependencies(buildPassItemsFromSchema(sharedDependencySchema).map((passItem) => (
+  passItem.id === 'string-encryption'
+    ? { ...passItem, params: { ...passItem.params, decoderBackend: 'jvm-resolver' } }
+    : passItem
+)))
+assert(sharedJvmResolverPasses.find((passItem) => passItem.id === 'jni-microkernel-loader')?.enabled === true, 'expected another enabled consumer to retain the JNI loader')
+const releasedSharedDependencyPasses = applyPassDependencies(sharedJvmResolverPasses.map((passItem) => (
+  passItem.id === 'other-native-consumer'
+    ? { ...passItem, enabled: false, dependencyAutoEnabled: false }
+    : passItem
+)))
+assert(releasedSharedDependencyPasses.find((passItem) => passItem.id === 'jni-microkernel-loader')?.enabled === false, 'expected JNI loader to release after its last automatic consumer is removed')
 
 expectParseError(
   {

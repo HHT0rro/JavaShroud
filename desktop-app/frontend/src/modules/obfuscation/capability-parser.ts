@@ -1,5 +1,5 @@
 import { parseTomlDocument } from './toml-parser.ts'
-import type { EngineSchemaPayload, ModuleDefinition, ModuleTagDefinition, OrderingConstraint, ParamSchema, PassCompatibilityRule } from './types'
+import type { EngineSchemaPayload, ModuleDefinition, ModuleTagDefinition, OrderingConstraint, ParamSchema, PassCompatibilityRule, VariantRequirement } from './types'
 
 interface EngineSchemaShape {
   readonly schemaVersion?: unknown
@@ -30,6 +30,7 @@ interface ModuleDefinitionShape {
   readonly compatibilityNotes?: unknown
   readonly requiredPassIds?: unknown
   readonly requiresAnyPassIds?: unknown
+  readonly variantRequirements?: unknown
   readonly defaultEnabled?: unknown
   readonly requiresOptIn?: unknown
   readonly params?: unknown
@@ -42,6 +43,13 @@ interface ParamSchemaShape {
   readonly options?: unknown
   readonly description?: unknown
   readonly hidden?: unknown
+}
+
+interface VariantRequirementShape {
+  readonly whenParam?: unknown
+  readonly equals?: unknown
+  readonly requiredPassIds?: unknown
+  readonly requiresAnyPassIds?: unknown
 }
 
 interface PassCompatibilityRuleShape {
@@ -76,6 +84,7 @@ export const parseEngineSchema = (rawSchema: unknown): EngineSchemaPayload => {
   const moduleIds: ReadonlySet<string> = new Set<string>(modules.map((moduleDefinition: ModuleDefinition): string => moduleDefinition.id))
   validateModuleRequiredPassIds(modules, moduleIds, rawSchema)
   validateModuleRequiresAnyPassIds(modules, moduleIds, rawSchema)
+  validateModuleVariantRequirements(modules, moduleIds, rawSchema)
   const schemaVersion: string = parseSupportedSchemaVersion(shape.schemaVersion, rawSchema)
 
   return {
@@ -167,6 +176,7 @@ const parseModules = (modules: unknown, knownTagIds: ReadonlySet<string>, rawSch
       compatibilityNotes: parseOptionalText(shape.compatibilityNotes, `modules[${index}].compatibilityNotes`, rawSchema) ?? undefined,
       requiredPassIds: parseOptionalStringArray(shape.requiredPassIds, `modules[${index}].requiredPassIds`, rawSchema) ?? undefined,
       requiresAnyPassIds: parseOptionalStringArray(shape.requiresAnyPassIds, `modules[${index}].requiresAnyPassIds`, rawSchema) ?? undefined,
+      variantRequirements: parseVariantRequirements(shape.variantRequirements, index, rawSchema) ?? undefined,
       defaultEnabled: parseOptionalBoolean(shape.defaultEnabled, `modules[${index}].defaultEnabled`, rawSchema) ?? undefined,
       requiresOptIn: parseOptionalBoolean(shape.requiresOptIn, `modules[${index}].requiresOptIn`, rawSchema) ?? undefined,
       params: parseParamSchemas(shape.params, index, rawSchema),
@@ -215,6 +225,90 @@ const validateModuleRequiresAnyPassIds = (
         throw new Error(`引擎 schema 解析失败：modules[${moduleIndex}].requiresAnyPassIds[${requiresAnyPassIndex}] 重复，passId=${requiresAnyPassId}，payload=${JSON.stringify(rawSchema)}`)
       }
       seenRequiresAnyPassIds.add(requiresAnyPassId)
+    }
+  })
+}
+
+const validateModuleVariantRequirements = (
+  modules: readonly ModuleDefinition[],
+  moduleIds: ReadonlySet<string>,
+  rawSchema: unknown,
+): void => {
+  modules.forEach((moduleDefinition: ModuleDefinition, moduleIndex: number): void => {
+    const paramsByKey = new Map<string, ParamSchema>(moduleDefinition.params.map((paramSchema: ParamSchema): [string, ParamSchema] => [paramSchema.key, paramSchema]))
+    const seenVariants = new Set<string>()
+    for (const [variantIndex, requirement] of (moduleDefinition.variantRequirements ?? []).entries()) {
+      const whenParam = paramsByKey.get(requirement.whenParam)
+      if (whenParam === undefined) {
+        throw new Error(`引擎 schema 解析失败：modules[${moduleIndex}].variantRequirements[${variantIndex}].whenParam 未声明，paramKey=${requirement.whenParam}，payload=${JSON.stringify(rawSchema)}`)
+      }
+      if (whenParam.type !== 'enum' && whenParam.type !== 'string') {
+        throw new Error(`引擎 schema 解析失败：modules[${moduleIndex}].variantRequirements[${variantIndex}].whenParam 必须引用 enum 或 string 参数，paramKey=${requirement.whenParam}，payload=${JSON.stringify(rawSchema)}`)
+      }
+      if (whenParam.type === 'enum' && !(whenParam.options ?? []).includes(requirement.equals)) {
+        throw new Error(`引擎 schema 解析失败：modules[${moduleIndex}].variantRequirements[${variantIndex}].equals 不属于 enum options，value=${requirement.equals}，payload=${JSON.stringify(rawSchema)}`)
+      }
+      const variantKey = `${requirement.whenParam}=${requirement.equals}`
+      if (seenVariants.has(variantKey)) {
+        throw new Error(`引擎 schema 解析失败：modules[${moduleIndex}].variantRequirements[${variantIndex}] 重复，variant=${variantKey}，payload=${JSON.stringify(rawSchema)}`)
+      }
+      seenVariants.add(variantKey)
+      validateVariantRequirementPassIds(requirement.requiredPassIds ?? [], moduleDefinition.id, moduleIds, moduleIndex, variantIndex, 'requiredPassIds', rawSchema)
+      validateVariantRequirementPassIds(requirement.requiresAnyPassIds ?? [], moduleDefinition.id, moduleIds, moduleIndex, variantIndex, 'requiresAnyPassIds', rawSchema)
+    }
+  })
+}
+
+const validateVariantRequirementPassIds = (
+  passIds: readonly string[],
+  moduleId: string,
+  moduleIds: ReadonlySet<string>,
+  moduleIndex: number,
+  variantIndex: number,
+  propertyName: 'requiredPassIds' | 'requiresAnyPassIds',
+  rawSchema: unknown,
+): void => {
+  const seenPassIds = new Set<string>()
+  for (const [passIndex, passId] of passIds.entries()) {
+    if (!moduleIds.has(passId)) {
+      throw new Error(`引擎 schema 解析失败：modules[${moduleIndex}].variantRequirements[${variantIndex}].${propertyName}[${passIndex}] 未声明，passId=${passId}，payload=${JSON.stringify(rawSchema)}`)
+    }
+    if (passId === moduleId) {
+      throw new Error(`引擎 schema 解析失败：modules[${moduleIndex}].variantRequirements[${variantIndex}].${propertyName}[${passIndex}] 不能引用自身，passId=${passId}，payload=${JSON.stringify(rawSchema)}`)
+    }
+    if (seenPassIds.has(passId)) {
+      throw new Error(`引擎 schema 解析失败：modules[${moduleIndex}].variantRequirements[${variantIndex}].${propertyName}[${passIndex}] 重复，passId=${passId}，payload=${JSON.stringify(rawSchema)}`)
+    }
+    seenPassIds.add(passId)
+  }
+}
+
+const parseVariantRequirements = (
+  value: unknown,
+  moduleIndex: number,
+  rawSchema: unknown,
+): readonly VariantRequirement[] | null => {
+  if (value === undefined || value === null) {
+    return null
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`引擎 schema 解析失败：modules[${moduleIndex}].variantRequirements 必须是数组，payload=${JSON.stringify(rawSchema)}`)
+  }
+  return value.map((item: unknown, index: number): VariantRequirement => {
+    if (!isRecord(item)) {
+      throw new Error(`引擎 schema 解析失败：modules[${moduleIndex}].variantRequirements[${index}] 不是对象，payload=${JSON.stringify(rawSchema)}`)
+    }
+    const shape: VariantRequirementShape = item
+    const requiredPassIds = parseOptionalStringArray(shape.requiredPassIds, `modules[${moduleIndex}].variantRequirements[${index}].requiredPassIds`, rawSchema) ?? []
+    const requiresAnyPassIds = parseOptionalStringArray(shape.requiresAnyPassIds, `modules[${moduleIndex}].variantRequirements[${index}].requiresAnyPassIds`, rawSchema) ?? []
+    if (requiredPassIds.length === 0 && requiresAnyPassIds.length === 0) {
+      throw new Error(`引擎 schema 解析失败：modules[${moduleIndex}].variantRequirements[${index}] 必须声明至少一个依赖，payload=${JSON.stringify(rawSchema)}`)
+    }
+    return {
+      whenParam: parseRequiredText(shape.whenParam, `modules[${moduleIndex}].variantRequirements[${index}].whenParam`, rawSchema),
+      equals: parseRequiredText(shape.equals, `modules[${moduleIndex}].variantRequirements[${index}].equals`, rawSchema),
+      requiredPassIds,
+      requiresAnyPassIds,
     }
   })
 }

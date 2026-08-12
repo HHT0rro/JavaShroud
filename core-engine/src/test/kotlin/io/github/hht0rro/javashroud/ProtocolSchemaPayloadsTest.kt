@@ -7,6 +7,7 @@ import io.github.hht0rro.javashroud.model.schema.EngineSchemaPayload
 import io.github.hht0rro.javashroud.model.schema.ModuleDefinition
 import io.github.hht0rro.javashroud.model.schema.ModuleTagDefinition
 import io.github.hht0rro.javashroud.model.schema.ParamSchema
+import io.github.hht0rro.javashroud.model.schema.VariantRequirement
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -47,6 +48,13 @@ class ProtocolSchemaPayloadsTest {
                         stability = "beta",
                         requiredPassIds = listOf("jni-microkernel-loader"),
                         requiresAnyPassIds = listOf("class-encryption-loader", "method-virtualization"),
+                        variantRequirements = listOf(
+                            VariantRequirement(
+                                whenParam = "mode",
+                                equals = "aggressive",
+                                requiredPassIds = listOf("jni-microkernel-loader"),
+                            ),
+                        ),
                     ),
                 ),
                 compatibility = listOf(
@@ -75,6 +83,12 @@ class ProtocolSchemaPayloadsTest {
         assertEquals("beta", modulePayload["stability"])
         assertEquals(listOf("jni-microkernel-loader"), modulePayload["requiredPassIds"])
         assertEquals(listOf("class-encryption-loader", "method-virtualization"), modulePayload["requiresAnyPassIds"])
+        val variantRequirements = modulePayload["variantRequirements"] as List<*>
+        assertEquals(1, variantRequirements.size)
+        val variantRequirement = variantRequirements.single() as Map<*, *>
+        assertEquals("mode", variantRequirement["whenParam"])
+        assertEquals("aggressive", variantRequirement["equals"])
+        assertEquals(listOf("jni-microkernel-loader"), variantRequirement["requiredPassIds"])
 
         val params = modulePayload["params"] as List<*>
         assertEquals(1, params.size)
