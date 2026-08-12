@@ -141,7 +141,7 @@ static int js_vm_mac_sysctl_traced(void) {
 #endif
 }
 
-static int js_vm_strong_debugger_probe_now(void) {
+JS_HIDDEN int js_vm_strong_debugger_present_now(void) {
     int signals = 0;
 #if defined(__linux__) || defined(__ANDROID__)
     if (js_vm_syscall_tracer_pid_present()) signals++;
@@ -161,7 +161,7 @@ JS_HIDDEN int js_vm_strong_debugger_present(void) {
     static int probe_countdown = 0;
     static int cached_verdict = 0;
     if (probe_countdown <= 0) {
-        cached_verdict = js_vm_strong_debugger_probe_now();
+        cached_verdict = js_vm_strong_debugger_present_now();
         probe_countdown = JS_VM_STRONG_DBG_PROBE_PERIOD;
     } else {
         probe_countdown--;

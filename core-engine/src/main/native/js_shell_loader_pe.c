@@ -4,6 +4,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -12,6 +13,15 @@ static const char *g_js_shell_loader_failure = "pe64 loader has not started";
 
 typedef BOOL (WINAPI *js_shell_dll_main)(HINSTANCE instance, DWORD reason, LPVOID reserved);
 typedef void (NTAPI *js_shell_tls_callback)(PVOID dll_handle, DWORD reason, PVOID reserved);
+
+#define JS_SHELL_MAX_PE_SECTIONS 96u
+
+typedef struct js_shell_pe_headers {
+    IMAGE_NT_HEADERS64 nt;
+    IMAGE_SECTION_HEADER sections[JS_SHELL_MAX_PE_SECTIONS];
+} js_shell_pe_headers;
+
+_Static_assert(offsetof(js_shell_pe_headers, sections) == sizeof(IMAGE_NT_HEADERS64), "PE section view must be contiguous");
 
 static void js_shell_loader_fail(const char *reason) {
     g_js_shell_loader_failure = reason;
@@ -57,6 +67,28 @@ static void *js_shell_rva(void *image, DWORD rva) {
     return (void *)((uintptr_t)image + (uintptr_t)rva);
 }
 
+static WORD js_shell_read_word(const void *source) {
+    WORD value;
+    memcpy(&value, source, sizeof(value));
+    return value;
+}
+
+static DWORD js_shell_read_dword(const void *source) {
+    DWORD value;
+    memcpy(&value, source, sizeof(value));
+    return value;
+}
+
+static uintptr_t js_shell_read_uintptr(const void *source) {
+    uintptr_t value;
+    memcpy(&value, source, sizeof(value));
+    return value;
+}
+
+static void js_shell_write_uintptr(void *destination, uintptr_t value) {
+    memcpy(destination, &value, sizeof(value));
+}
+
 static int js_shell_rva_range_contains(const IMAGE_NT_HEADERS64 *nt, DWORD rva, size_t size) {
     return rva <= nt->OptionalHeader.SizeOfImage && size <= (size_t)nt->OptionalHeader.SizeOfImage - (size_t)rva;
 }
@@ -91,43 +123,46 @@ static int js_shell_apply_relocations(void *image, const IMAGE_NT_HEADERS64 *nt,
             js_shell_loader_fail("pe64 relocation block header is truncated");
             return 0;
         }
-        IMAGE_BASE_RELOCATION *block = (IMAGE_BASE_RELOCATION *)js_shell_rva(image, dir.VirtualAddress + offset);
-        if (!block->SizeOfBlock || block->SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION) || block->SizeOfBlock > dir.Size - offset) {
+        const unsigned char *block_bytes = (const unsigned char *)js_shell_rva(image, dir.VirtualAddress + offset);
+        IMAGE_BASE_RELOCATION block;
+        memcpy(&block, block_bytes, sizeof(block));
+        if (!block.SizeOfBlock || block.SizeOfBlock < sizeof(IMAGE_BASE_RELOCATION) || block.SizeOfBlock > dir.Size - offset) {
             js_shell_loader_fail("pe64 relocation block is outside the relocation directory");
             return 0;
         }
-        if (!js_shell_image_range_contains(image, nt, block, block->SizeOfBlock)) {
+        if (!js_shell_image_range_contains(image, nt, block_bytes, block.SizeOfBlock)) {
             js_shell_loader_fail("pe64 relocation block is outside the mapped image");
             return 0;
         }
-        DWORD entry_count = (block->SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
-        WORD *entries = (WORD *)(block + 1);
+        DWORD entry_count = (block.SizeOfBlock - sizeof(IMAGE_BASE_RELOCATION)) / sizeof(WORD);
+        const unsigned char *entries = block_bytes + sizeof(IMAGE_BASE_RELOCATION);
         for (DWORD i = 0; i < entry_count; i++) {
-            WORD type = entries[i] >> 12;
-            WORD reloc_offset = entries[i] & 0x0fffu;
+            WORD entry = js_shell_read_word(entries + (size_t)i * sizeof(WORD));
+            WORD type = entry >> 12;
+            WORD reloc_offset = entry & 0x0fffu;
             if (type == IMAGE_REL_BASED_ABSOLUTE) continue;
             if (type != IMAGE_REL_BASED_DIR64) {
                 js_shell_loader_fail("pe64 relocation type is not supported by the max shell loader");
                 return 0;
             }
-            if (block->VirtualAddress > UINT32_MAX - reloc_offset) {
+            if (block.VirtualAddress > UINT32_MAX - reloc_offset) {
                 js_shell_loader_fail("pe64 relocation target slot is outside the mapped image");
                 return 0;
             }
-            DWORD target_rva = block->VirtualAddress + reloc_offset;
-            uintptr_t *slot = (uintptr_t *)js_shell_rva(image, target_rva);
-            if (!js_shell_rva_range_contains(nt, target_rva, sizeof(*slot))) {
+            DWORD target_rva = block.VirtualAddress + reloc_offset;
+            void *slot = js_shell_rva(image, target_rva);
+            if (!js_shell_rva_range_contains(nt, target_rva, sizeof(uintptr_t))) {
                 js_shell_loader_fail("pe64 relocation target slot is outside the mapped image");
                 return 0;
             }
-            *slot += delta;
+            js_shell_write_uintptr(slot, js_shell_read_uintptr(slot) + delta);
         }
-        offset += block->SizeOfBlock;
+        offset += block.SizeOfBlock;
     }
     return 1;
 }
 
-static FARPROC js_shell_import_symbol(void *image, const IMAGE_NT_HEADERS64 *nt, HMODULE module, IMAGE_THUNK_DATA64 *name_thunk) {
+static FARPROC js_shell_import_symbol(void *image, const IMAGE_NT_HEADERS64 *nt, HMODULE module, const IMAGE_THUNK_DATA64 *name_thunk) {
     if (name_thunk->u1.Ordinal & IMAGE_ORDINAL_FLAG64) {
         return GetProcAddress(module, (LPCSTR)(uintptr_t)IMAGE_ORDINAL64(name_thunk->u1.Ordinal));
     }
@@ -135,12 +170,14 @@ static FARPROC js_shell_import_symbol(void *image, const IMAGE_NT_HEADERS64 *nt,
         js_shell_loader_fail("pe64 import-by-name header is outside the mapped image");
         return 0;
     }
-    IMAGE_IMPORT_BY_NAME *by_name = (IMAGE_IMPORT_BY_NAME *)js_shell_rva(image, (DWORD)name_thunk->u1.AddressOfData);
-    if (!js_shell_image_cstring_contains(image, nt, (const char *)by_name->Name)) {
+    const char *import_name = (const char *)js_shell_rva(
+        image,
+        (DWORD)name_thunk->u1.AddressOfData + (DWORD)offsetof(IMAGE_IMPORT_BY_NAME, Name));
+    if (!js_shell_image_cstring_contains(image, nt, import_name)) {
         js_shell_loader_fail("pe64 import symbol name is outside the mapped image");
         return 0;
     }
-    return GetProcAddress(module, (LPCSTR)by_name->Name);
+    return GetProcAddress(module, import_name);
 }
 
 static int js_shell_resolve_imports(void *image, const IMAGE_NT_HEADERS64 *nt) {
@@ -150,23 +187,26 @@ static int js_shell_resolve_imports(void *image, const IMAGE_NT_HEADERS64 *nt) {
         js_shell_loader_fail("pe64 import directory is outside the mapped image");
         return 0;
     }
-    IMAGE_IMPORT_DESCRIPTOR *desc = (IMAGE_IMPORT_DESCRIPTOR *)js_shell_rva(image, dir.VirtualAddress);
+    const unsigned char *descriptors = (const unsigned char *)js_shell_rva(image, dir.VirtualAddress);
     DWORD descriptor_count = dir.Size / sizeof(IMAGE_IMPORT_DESCRIPTOR);
-    for (DWORD desc_index = 0; desc_index < descriptor_count; desc_index++, desc++) {
-        if (!js_shell_image_range_contains(image, nt, desc, sizeof(*desc))) {
+    for (DWORD desc_index = 0; desc_index < descriptor_count; desc_index++) {
+        const unsigned char *desc_bytes = descriptors + (size_t)desc_index * sizeof(IMAGE_IMPORT_DESCRIPTOR);
+        IMAGE_IMPORT_DESCRIPTOR desc;
+        if (!js_shell_image_range_contains(image, nt, desc_bytes, sizeof(desc))) {
             js_shell_loader_fail("pe64 import descriptor is outside the mapped image");
             return 0;
         }
-        if (!desc->OriginalFirstThunk && !desc->FirstThunk && !desc->Name) return 1;
-        if (!desc->Name) {
+        memcpy(&desc, desc_bytes, sizeof(desc));
+        if (!desc.OriginalFirstThunk && !desc.FirstThunk && !desc.Name) return 1;
+        if (!desc.Name) {
             js_shell_loader_fail("pe64 import descriptor is missing a DLL name");
             return 0;
         }
-        if (!js_shell_rva_range_contains(nt, desc->Name, 1)) {
+        if (!js_shell_rva_range_contains(nt, desc.Name, 1)) {
             js_shell_loader_fail("pe64 import DLL name is outside the mapped image");
             return 0;
         }
-        const char *dll_name = (const char *)js_shell_rva(image, desc->Name);
+        const char *dll_name = (const char *)js_shell_rva(image, desc.Name);
         if (!js_shell_image_cstring_contains(image, nt, dll_name)) {
             js_shell_loader_fail("pe64 import DLL name is outside the mapped image");
             return 0;
@@ -176,24 +216,28 @@ static int js_shell_resolve_imports(void *image, const IMAGE_NT_HEADERS64 *nt) {
             js_shell_loader_fail("pe64 import DLL could not be loaded");
             return 0;
         }
-        IMAGE_THUNK_DATA64 *name_thunk = (IMAGE_THUNK_DATA64 *)js_shell_rva(image, desc->OriginalFirstThunk ? desc->OriginalFirstThunk : desc->FirstThunk);
-        IMAGE_THUNK_DATA64 *iat = (IMAGE_THUNK_DATA64 *)js_shell_rva(image, desc->FirstThunk);
-        DWORD name_thunk_rva = desc->OriginalFirstThunk ? desc->OriginalFirstThunk : desc->FirstThunk;
-        DWORD iat_rva = desc->FirstThunk;
-        for (DWORD thunk_index = 0;; thunk_index++, name_thunk++, iat++) {
+        DWORD name_thunk_rva = desc.OriginalFirstThunk ? desc.OriginalFirstThunk : desc.FirstThunk;
+        DWORD iat_rva = desc.FirstThunk;
+        for (DWORD thunk_index = 0;; thunk_index++) {
             size_t thunk_offset = (size_t)thunk_index * sizeof(IMAGE_THUNK_DATA64);
             if (thunk_offset > UINT32_MAX || name_thunk_rva > UINT32_MAX - (DWORD)thunk_offset || iat_rva > UINT32_MAX - (DWORD)thunk_offset ||
-                !js_shell_rva_range_contains(nt, name_thunk_rva + (DWORD)thunk_offset, sizeof(*name_thunk)) || !js_shell_rva_range_contains(nt, iat_rva + (DWORD)thunk_offset, sizeof(*iat))) {
+                !js_shell_rva_range_contains(nt, name_thunk_rva + (DWORD)thunk_offset, sizeof(IMAGE_THUNK_DATA64)) ||
+                !js_shell_rva_range_contains(nt, iat_rva + (DWORD)thunk_offset, sizeof(IMAGE_THUNK_DATA64))) {
                 js_shell_loader_fail("pe64 import thunk slot is outside the mapped image");
                 return 0;
             }
-            if (!name_thunk->u1.AddressOfData) break;
-            FARPROC symbol = js_shell_import_symbol(image, nt, module, name_thunk);
+            const void *name_thunk_bytes = js_shell_rva(image, name_thunk_rva + (DWORD)thunk_offset);
+            void *iat_bytes = js_shell_rva(image, iat_rva + (DWORD)thunk_offset);
+            IMAGE_THUNK_DATA64 name_thunk;
+            memcpy(&name_thunk, name_thunk_bytes, sizeof(name_thunk));
+            if (!name_thunk.u1.AddressOfData) break;
+            FARPROC symbol = js_shell_import_symbol(image, nt, module, &name_thunk);
             if (!symbol) {
                 js_shell_loader_fail("pe64 import symbol could not be resolved");
                 return 0;
             }
-            iat->u1.Function = (ULONGLONG)(uintptr_t)symbol;
+            ULONGLONG function = (ULONGLONG)(uintptr_t)symbol;
+            memcpy(iat_bytes, &function, sizeof(function));
         }
     }
     js_shell_loader_fail("pe64 import descriptor table is missing a terminator");
@@ -201,8 +245,11 @@ static int js_shell_resolve_imports(void *image, const IMAGE_NT_HEADERS64 *nt) {
 }
 
 static void js_shell_run_tls_callbacks(void *image, js_shell_tls_callback *callbacks, DWORD reason) {
-    for (; callbacks && *callbacks; callbacks++) {
-        (*callbacks)(image, reason, 0);
+    for (; callbacks; callbacks++) {
+        js_shell_tls_callback callback;
+        memcpy(&callback, callbacks, sizeof(callback));
+        if (!callback) break;
+        callback(image, reason, 0);
     }
 }
 
@@ -240,19 +287,22 @@ static int js_shell_validate_tls_callbacks(void *image, const IMAGE_NT_HEADERS64
     if (out_callbacks) *out_callbacks = 0;
     IMAGE_DATA_DIRECTORY dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
     if (!dir.VirtualAddress || !dir.Size) return 1;
-    IMAGE_TLS_DIRECTORY64 *tls = (IMAGE_TLS_DIRECTORY64 *)js_shell_rva(image, dir.VirtualAddress);
-    if (!js_shell_image_range_contains(image, nt, tls, sizeof(*tls))) {
+    const void *tls_bytes = js_shell_rva(image, dir.VirtualAddress);
+    IMAGE_TLS_DIRECTORY64 tls;
+    if (!js_shell_image_range_contains(image, nt, tls_bytes, sizeof(tls))) {
         js_shell_loader_fail("pe64 TLS directory is outside the mapped image");
         return 0;
     }
-    if (!tls->AddressOfCallBacks) return 1;
-    js_shell_tls_callback *callbacks = (js_shell_tls_callback *)(uintptr_t)tls->AddressOfCallBacks;
+    memcpy(&tls, tls_bytes, sizeof(tls));
+    if (!tls.AddressOfCallBacks) return 1;
+    js_shell_tls_callback *callbacks = (js_shell_tls_callback *)(uintptr_t)tls.AddressOfCallBacks;
     for (;;) {
         if (!js_shell_image_range_contains(image, nt, callbacks, sizeof(*callbacks))) {
             js_shell_loader_fail("pe64 TLS callback table is outside the mapped image");
             return 0;
         }
-        js_shell_tls_callback callback = *callbacks;
+        js_shell_tls_callback callback;
+        memcpy(&callback, callbacks, sizeof(callback));
         if (!callback) break;
         if (!js_shell_pointer_in_range(exec_low, exec_high, (const void *)callback)) {
             js_shell_loader_fail("pe64 TLS callback is outside executable image pages");
@@ -260,7 +310,7 @@ static int js_shell_validate_tls_callbacks(void *image, const IMAGE_NT_HEADERS64
         }
         callbacks++;
     }
-    if (out_callbacks) *out_callbacks = (js_shell_tls_callback *)(uintptr_t)tls->AddressOfCallBacks;
+    if (out_callbacks) *out_callbacks = (js_shell_tls_callback *)(uintptr_t)tls.AddressOfCallBacks;
     return 1;
 }
 
@@ -294,38 +344,42 @@ static void *js_shell_find_export(void *image, const IMAGE_NT_HEADERS64 *nt, con
         js_shell_loader_fail("pe64 export directory is outside the mapped image");
         return 0;
     }
-    IMAGE_EXPORT_DIRECTORY *exports = (IMAGE_EXPORT_DIRECTORY *)js_shell_rva(image, dir.VirtualAddress);
-    if (!js_shell_image_range_contains(image, nt, exports, sizeof(*exports))) {
+    const void *export_bytes = js_shell_rva(image, dir.VirtualAddress);
+    IMAGE_EXPORT_DIRECTORY exports;
+    if (!js_shell_image_range_contains(image, nt, export_bytes, sizeof(exports))) {
         js_shell_loader_fail("pe64 export directory header is outside the mapped image");
         return 0;
     }
-    if (!js_shell_rva_range_contains(nt, exports->AddressOfNames, (size_t)exports->NumberOfNames * sizeof(DWORD)) ||
-        !js_shell_rva_range_contains(nt, exports->AddressOfNameOrdinals, (size_t)exports->NumberOfNames * sizeof(WORD)) ||
-        !js_shell_rva_range_contains(nt, exports->AddressOfFunctions, (size_t)exports->NumberOfFunctions * sizeof(DWORD))) {
+    memcpy(&exports, export_bytes, sizeof(exports));
+    if (!js_shell_rva_range_contains(nt, exports.AddressOfNames, (size_t)exports.NumberOfNames * sizeof(DWORD)) ||
+        !js_shell_rva_range_contains(nt, exports.AddressOfNameOrdinals, (size_t)exports.NumberOfNames * sizeof(WORD)) ||
+        !js_shell_rva_range_contains(nt, exports.AddressOfFunctions, (size_t)exports.NumberOfFunctions * sizeof(DWORD))) {
         js_shell_loader_fail("pe64 export name or function table is outside the mapped image");
         return 0;
     }
-    DWORD *names = (DWORD *)js_shell_rva(image, exports->AddressOfNames);
-    WORD *ordinals = (WORD *)js_shell_rva(image, exports->AddressOfNameOrdinals);
-    DWORD *functions = (DWORD *)js_shell_rva(image, exports->AddressOfFunctions);
-    for (DWORD i = 0; i < exports->NumberOfNames; i++) {
-        if (!js_shell_rva_range_contains(nt, names[i], 1)) {
+    const unsigned char *names = (const unsigned char *)js_shell_rva(image, exports.AddressOfNames);
+    const unsigned char *ordinals = (const unsigned char *)js_shell_rva(image, exports.AddressOfNameOrdinals);
+    const unsigned char *functions = (const unsigned char *)js_shell_rva(image, exports.AddressOfFunctions);
+    for (DWORD i = 0; i < exports.NumberOfNames; i++) {
+        DWORD name_rva = js_shell_read_dword(names + (size_t)i * sizeof(DWORD));
+        if (!js_shell_rva_range_contains(nt, name_rva, 1)) {
             js_shell_loader_fail("pe64 export name is outside the mapped image");
             return 0;
         }
-        const char *export_name = (const char *)js_shell_rva(image, names[i]);
+        const char *export_name = (const char *)js_shell_rva(image, name_rva);
         if (!js_shell_image_cstring_contains(image, nt, export_name)) {
             js_shell_loader_fail("pe64 export name is outside the mapped image");
             return 0;
         }
         if (strcmp(export_name, name) != 0) continue;
-        WORD ordinal = ordinals[i];
-        if (ordinal >= exports->NumberOfFunctions) return 0;
-        if (!js_shell_rva_range_contains(nt, functions[ordinal], 1)) {
+        WORD ordinal = js_shell_read_word(ordinals + (size_t)i * sizeof(WORD));
+        if (ordinal >= exports.NumberOfFunctions) return 0;
+        DWORD function_rva = js_shell_read_dword(functions + (size_t)ordinal * sizeof(DWORD));
+        if (!js_shell_rva_range_contains(nt, function_rva, 1)) {
             js_shell_loader_fail("pe64 export symbol address is outside the mapped image");
             return 0;
         }
-        return js_shell_rva(image, functions[ordinal]);
+        return js_shell_rva(image, function_rva);
     }
     return 0;
 }
@@ -339,14 +393,23 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
     js_shell_loader_trace("start");
     const unsigned char *bytes = payload->decoded_payload;
     size_t size = payload->decoded_payload_size;
-    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)bytes;
-    if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || !js_shell_validate_range((size_t)dos->e_lfanew, sizeof(IMAGE_NT_HEADERS64), size)) {
+    IMAGE_DOS_HEADER dos;
+    js_shell_pe_headers headers;
+    memcpy(&dos, bytes, sizeof(dos));
+    if (dos.e_magic != IMAGE_DOS_SIGNATURE || dos.e_lfanew <= 0 || !js_shell_validate_range((size_t)dos.e_lfanew, sizeof(IMAGE_NT_HEADERS64), size)) {
         js_shell_loader_fail("pe64 DOS/NT headers are invalid");
         return 0;
     }
-    const IMAGE_NT_HEADERS64 *nt_src = (const IMAGE_NT_HEADERS64 *)(bytes + dos->e_lfanew);
+    memset(&headers, 0, sizeof(headers));
+    memcpy(&headers.nt, bytes + dos.e_lfanew, sizeof(headers.nt));
+    const IMAGE_NT_HEADERS64 *nt_src = &headers.nt;
     if (nt_src->Signature != IMAGE_NT_SIGNATURE || nt_src->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 || nt_src->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
         js_shell_loader_fail("pe64 payload is not a supported AMD64 PE image");
+        return 0;
+    }
+    if (nt_src->FileHeader.SizeOfOptionalHeader != sizeof(IMAGE_OPTIONAL_HEADER64) ||
+        nt_src->FileHeader.NumberOfSections == 0 || nt_src->FileHeader.NumberOfSections > JS_SHELL_MAX_PE_SECTIONS) {
+        js_shell_loader_fail("pe64 optional header or section count is invalid");
         return 0;
     }
     if (!(nt_src->FileHeader.Characteristics & IMAGE_FILE_DLL) || nt_src->OptionalHeader.SizeOfImage == 0) {
@@ -361,11 +424,15 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
         js_shell_loader_fail("pe64 header range is outside the mapped image");
         return 0;
     }
-    if (!js_shell_validate_range((size_t)dos->e_lfanew + sizeof(IMAGE_NT_HEADERS64), (size_t)nt_src->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER), size)) {
+    if (!js_shell_validate_range((size_t)dos.e_lfanew + sizeof(IMAGE_NT_HEADERS64), (size_t)nt_src->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER), size)) {
         js_shell_loader_fail("pe64 section table is out of range");
         return 0;
     }
-    const IMAGE_SECTION_HEADER *section_src = IMAGE_FIRST_SECTION(nt_src);
+    memcpy(
+        headers.sections,
+        bytes + dos.e_lfanew + sizeof(IMAGE_NT_HEADERS64),
+        (size_t)nt_src->FileHeader.NumberOfSections * sizeof(IMAGE_SECTION_HEADER));
+    const IMAGE_SECTION_HEADER *section_src = headers.sections;
     for (WORD i = 0; i < nt_src->FileHeader.NumberOfSections; i++) {
         DWORD permissions = section_src[i].Characteristics & (IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_WRITE);
         if (permissions == (IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_WRITE)) {
@@ -383,8 +450,8 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
     if (header_size > size) header_size = size;
     memcpy(image, bytes, header_size);
     js_shell_loader_trace("mapped headers");
-    IMAGE_NT_HEADERS64 *nt = (IMAGE_NT_HEADERS64 *)((unsigned char *)image + dos->e_lfanew);
-    IMAGE_SECTION_HEADER *section = IMAGE_FIRST_SECTION(nt);
+    IMAGE_NT_HEADERS64 *nt = &headers.nt;
+    IMAGE_SECTION_HEADER *section = headers.sections;
     for (WORD i = 0; i < nt->FileHeader.NumberOfSections; i++) {
         if (section[i].SizeOfRawData == 0) continue;
         if (!js_shell_validate_range(section[i].PointerToRawData, section[i].SizeOfRawData, size)) {

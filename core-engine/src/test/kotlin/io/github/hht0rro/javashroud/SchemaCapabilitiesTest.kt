@@ -75,10 +75,43 @@ class SchemaCapabilitiesTest {
     }
 
     @Test
-    fun invoke_dynamic_indirection_schema_has_no_fake_bootstrap_strategy_param() {
+    fun resolver_profile_capability_schema_exposes_only_fused_params() {
+        val obfuscationModules = buildObfuscationCapabilityDefinitions().associateBy { it.id }
+        val integerParams = obfuscationModules.getValue("integer-constant-obfuscation").params.map { it.key }
+        val invokeDynamicParams = obfuscationModules.getValue("invoke-dynamic-indirection").params.map { it.key }
+        val controlFlowParams = obfuscationModules.getValue("control-flow-obfuscation").params.map { it.key }
+        val renameMethodParams = buildRenamingCapabilityDefinitions().single { it.id == "rename-methods" }.params.map { it.key }
+
+        assertEquals(listOf("rewriteMode", "intCoverage", "longCoverage", "resolverCodec"), integerParams)
+        assertEquals(listOf("callSiteForm", "seed"), invokeDynamicParams)
+        assertEquals(listOf("branchInjection", "handlerSplit", "density", "dispatchMode", "algebraicFamily"), controlFlowParams)
+        assertTrue(renameMethodParams.containsAll(listOf("descriptorPadding", "parameterPacking", "returnSensitiveNaming")))
+    }
+
+    @Test
+    fun string_encryption_schema_requires_jni_only_for_native_kernel_backend() {
+        val module = buildEncryptionCapabilityDefinitions().single { it.id == "string-encryption" }
+
+        assertTrue(module.requiredPassIds.isEmpty())
+        assertEquals(
+            listOf("decoderBackend", "strength", "payloadCodec", "scope", "lengthThreshold", "seed"),
+            module.params.map { it.key },
+        )
+        assertEquals("native-kernel", module.params.single { it.key == "decoderBackend" }.defaultValue?.asText())
+        assertEquals("max", module.params.single { it.key == "strength" }.defaultValue?.asText())
+        assertEquals("auto", module.params.single { it.key == "payloadCodec" }.defaultValue?.asText())
+        assertEquals(
+            listOf("jni-microkernel-loader"),
+            module.variantRequirements.single { it.whenParam == "decoderBackend" && it.equals == "native-kernel" }.requiredPassIds,
+        )
+    }
+
+    @Test
+    fun invoke_dynamic_indirection_schema_exposes_call_site_form() {
         val module = buildObfuscationCapabilityDefinitions().single { it.id == "invoke-dynamic-indirection" }
 
-        assertTrue(module.params.isEmpty())
+        assertEquals(listOf("callSiteForm", "seed"), module.params.map { it.key })
+        assertEquals(listOf("bootstrap-table", "constant-resolver"), module.params.single { it.key == "callSiteForm" }.options)
     }
 
     @Test
@@ -370,10 +403,11 @@ class SchemaCapabilitiesTest {
         val packingLevel = jniModule.params.singleOrNull { it.key == "nativePackingLevel" }
         assertTrue(packingLevel != null, "nativePackingLevel param should exist")
         assertEquals("max", packingLevel!!.defaultValue?.asText(), "nativePackingLevel should default to max")
-        assertEquals(listOf("off", "standard", "max"), packingLevel.options)
+        assertEquals(listOf("off", "standard", "max", "max-hardening"), packingLevel.options)
         assertFalse(packingLevel.hidden, "nativePackingLevel should be visible")
         assertTrue(packingLevel.description.contains("standard") && packingLevel.description.contains("overlay"), "nativePackingLevel schema must describe standard as overlay compatibility")
         assertTrue(packingLevel.description.contains("max") && packingLevel.description.contains("stub shell"), "nativePackingLevel schema must describe max as the stub shell mode")
+        assertTrue(packingLevel.description.contains("max-hardening") && packingLevel.description.contains("断代协议"), "nativePackingLevel schema must describe the explicit hardening profile")
         assertTrue(packingLevel.description.contains("完整 js_kernel"), "nativePackingLevel schema must state that max protects the complete js_kernel")
 
         assertTrue(
@@ -451,7 +485,11 @@ class SchemaCapabilitiesTest {
             payload.defaultPipeline +
                 payload.compatibility.flatMap { it.passIds } +
                 payload.orderingConstraints.flatMap { listOf(it.before, it.after) } +
-                payload.modules.flatMap { it.requiredPassIds + it.requiresAnyPassIds }
+                payload.modules.flatMap { module ->
+                    module.requiredPassIds +
+                        module.requiresAnyPassIds +
+                        module.variantRequirements.flatMap { requirement -> requirement.requiredPassIds + requirement.requiresAnyPassIds }
+                }
             ).toSet()
 
         val unknownIds = referencedIds - moduleIds

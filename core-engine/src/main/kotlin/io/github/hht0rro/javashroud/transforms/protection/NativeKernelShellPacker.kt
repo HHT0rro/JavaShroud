@@ -31,13 +31,21 @@ internal object NativeKernelShellPacker {
     enum class Level(val id: Int) {
         OFF(0),
         STANDARD(1),
-        MAX(2);
+        MAX(2),
+        MAX_HARDENING(3);
+
+        val usesStubShell: Boolean
+            get() = this == MAX || this == MAX_HARDENING
+
+        val configValue: String
+            get() = name.lowercase().replace('_', '-')
 
         companion object {
             fun parse(value: String): Level = when (value.lowercase()) {
                 "off" -> OFF
                 "standard" -> STANDARD
                 "max" -> MAX
+                "max-hardening" -> MAX_HARDENING
                 else -> throw IllegalArgumentException("jni-microkernel-loader nativePackingLevel '$value' is not supported")
             }
         }
@@ -56,12 +64,14 @@ internal object NativeKernelShellPacker {
     )
 
     data class MaxPayloadBundle(
+        val level: Level,
         val headerPrefix: ByteArray,
         val encryptedHeader: ByteArray,
         val headerTag: ByteArray,
         val encodedPayload: ByteArray,
         val payloadMac: ByteArray,
         val artifactBindingCommitment: ByteArray,
+        val bootSidecarBinding: ByteArray,
         val sectionDigestHmac: ByteArray,
         val bindingTag: ByteArray,
         val streamKey: ByteArray,
@@ -80,6 +90,7 @@ internal object NativeKernelShellPacker {
         internal fun wipeSensitive() {
             Arrays.fill(payloadMac, 0)
             Arrays.fill(artifactBindingCommitment, 0)
+            Arrays.fill(bootSidecarBinding, 0)
             Arrays.fill(streamKey, 0)
             Arrays.fill(sectionDigestHmac, 0)
             Arrays.fill(bindingTag, 0)
@@ -173,9 +184,13 @@ internal object NativeKernelShellPacker {
         keyMaterial: ByteArray,
         bootstrapNativeIndexDigest: ByteArray,
         bootSecret: ByteArray,
+        level: Level = Level.MAX,
+        bootSidecarBinding: ByteArray = ByteArray(32),
     ): MaxPayloadBundle {
         require(bytes.isNotEmpty()) { "max native shell requires non-empty inner native bytes" }
         require(bootSecret.size == 32) { "max native shell boot secret must be exactly 32 bytes" }
+        require(bootSidecarBinding.size == 32) { "max native shell sidecar binding must be exactly 32 bytes" }
+        require(level.usesStubShell) { "native stub shell requires max or max-hardening" }
         val temporaryBuffers = mutableListOf<ByteArray>()
         val outputBuffers = mutableListOf<ByteArray>()
         fun temporary(value: ByteArray): ByteArray = value.also { temporaryBuffers += it }
@@ -183,9 +198,10 @@ internal object NativeKernelShellPacker {
         var completed = false
         return try {
             val combinedKeyMaterial = temporary(keyMaterial + bootstrapNativeIndexDigest)
-            val key = temporary(deriveShellKey(seed, Level.MAX, platform, outputName, combinedKeyMaterial))
+            val key = temporary(deriveShellKey(seed, level, platform, outputName, combinedKeyMaterial))
             val shellSeed = temporary(ByteArray(32).also { SecureRandom().nextBytes(it) })
             val nonce = output(ByteArray(16).also { SecureRandom().nextBytes(it) })
+            val sidecarBinding = output(bootSidecarBinding.copyOf())
             val seedNonce = temporary(ByteArray(16).also { SecureRandom().nextBytes(it) })
             val bindingTag = output(maxBindingTag(platform, outputName, bootstrapNativeIndexDigest, key))
             val zeroBinding = temporary(ByteArray(32))
@@ -238,7 +254,7 @@ internal object NativeKernelShellPacker {
                 write(MAX_PAYLOAD_MARKER.toByteArray(Charsets.US_ASCII))
                 write(0)
                 writeIntLe(PACKER_VERSION)
-                writeIntLe(Level.MAX.id)
+                writeIntLe(level.id)
                 writeIntLe(nonce.size)
                 write(nonce)
                 writeIntLe(seedNonce.size)
@@ -251,7 +267,8 @@ internal object NativeKernelShellPacker {
             val payloadMac = output(maxBuildPayloadMac(bootSecret, nonce, headerBytesForMac, encoded.encodedPayload))
             val artifactBindingCommitment = output(maxArtifactBindingCommitment(bootSecret, nonce, bindingTag))
             MaxPayloadBundle(
-                headerPrefix, encryptedHeader, headerTag, encoded.encodedPayload, payloadMac, artifactBindingCommitment,
+                level,
+                headerPrefix, encryptedHeader, headerTag, encoded.encodedPayload, payloadMac, artifactBindingCommitment, sidecarBinding,
                 sectionDigestHmac, bindingTag,
                 streamKey, nonce, layoutProfile, dispatcherProfile,
                 bytes.size, storedPayload.size, compressionCodec, encoded.chunkSize, encoded.chunkCount, encoded.chunkTags,
@@ -274,14 +291,14 @@ internal object NativeKernelShellPacker {
     ): MaxPayloadInspection {
         val parsed = parseMaxPayloadHeader(headerBytes, bootSecret) ?: return MaxPayloadInspection(present = false)
         val combinedKeyMaterial = keyMaterial + bootstrapNativeIndexDigest
-        val key = deriveShellKey(seed, Level.MAX, parsed.platform, parsed.outputName, combinedKeyMaterial)
+        val key = deriveShellKey(seed, parsed.level, parsed.platform, parsed.outputName, combinedKeyMaterial)
         var stored: ByteArray? = null
         var inner: ByteArray? = null
         return try {
             val actualPayloadMac = maxBuildPayloadMac(bootSecret, parsed.nonce, headerBytes, encodedPayload)
             val expectedBindingTag = maxBindingTag(parsed.platform, parsed.outputName, bootstrapNativeIndexDigest, key)
             val expectedArtifactBinding = maxArtifactBindingCommitment(bootSecret, parsed.nonce, parsed.bindingTag)
-            val macValid = parsed.version == PACKER_VERSION && parsed.level == Level.MAX &&
+            val macValid = parsed.version == PACKER_VERSION && parsed.level.usesStubShell &&
                 parsed.originalSize > 0 && parsed.storedPayloadSize > 0 && parsed.encodedPayloadSize == encodedPayload.size &&
                 parsed.compressionCodec in setOf(maxCompressionCodecNone, maxCompressionCodecZstd) && parsed.chunkSize > 0 &&
                 parsed.chunkCount == chunkCountFor(parsed.encodedPayloadSize, parsed.chunkSize) && parsed.chunkTags.size == parsed.chunkCount * 32 &&
@@ -341,10 +358,12 @@ internal object NativeKernelShellPacker {
         appendLine("#define JS_NATIVE_MAX_STUB_MARKER \"$MAX_STUB_MARKER\"")
         appendLine("#define JS_NATIVE_MAX_PAYLOAD_MARKER \"$MAX_PAYLOAD_MARKER\"")
         appendLine("#define JS_SHELL_PROTOCOL_VERSION $PACKER_VERSION")
+        appendLine("#define JS_SHELL_PROTOCOL_LEVEL ${bundle.level.id}u")
         appendLine("#define JS_SHELL_ENCRYPTED_HEADER_SIZE ${bundle.encryptedHeader.size}u")
         appendLine("static const unsigned char js_shell_payload_header[] = { ${bundle.headerBytes.toCByteArrayLiteral()} };")
         appendLine("static const unsigned char js_shell_payload_bytes[] = { ${bundle.encodedPayload.toCByteArrayLiteral()} };")
         appendLine("static const unsigned char js_shell_build_hmac[32] = { ${bundle.payloadMac.toCByteArrayLiteral()} };")
+        appendLine("static const unsigned char js_shell_boot_sidecar_binding[32] = { ${bundle.bootSidecarBinding.toCByteArrayLiteral()} };")
         appendLine("#define JS_SHELL_PAYLOAD_HEADER_SIZE ${bundle.headerBytes.size}u")
         appendLine("#define JS_SHELL_PAYLOAD_SIZE ${bundle.encodedPayload.size}u")
         appendLine("#endif")
@@ -805,11 +824,42 @@ internal object NativeKernelShellPacker {
         if (!encoded.isNullOrEmpty()) return decodeHexBootSecret(encoded)
         if (fileName.isNullOrBlank()) return null
         val bytes = java.nio.file.Files.readAllBytes(java.nio.file.Path.of(fileName))
-        if (bytes.size == 32) return bytes
         return try {
-            decodeHexBootSecret(bytes)
+            if (bytes.size == 32) {
+                bytes.copyOf()
+            } else {
+                decodeBootKekSidecar(bytes) ?: decodeHexBootSecret(bytes)
+            }
         } finally {
             Arrays.fill(bytes, 0)
+        }
+    }
+
+    /**
+     * Build-time external-file mode also accepts the authenticated JSBK1
+     * sidecar emitted for max-hardening.  Raw and hexadecimal files continue
+     * through the legacy parser; malformed sidecars fail closed instead of
+     * being mistaken for hexadecimal input.
+     */
+    private fun decodeBootKekSidecar(bytes: ByteArray): ByteArray? {
+        val text = bytes.size >= BootKekSidecar.TEXT_PREFIX.length &&
+            bytes.copyOfRange(0, BootKekSidecar.TEXT_PREFIX.length)
+                .toString(Charsets.US_ASCII) == BootKekSidecar.TEXT_PREFIX
+        val binding = if (text) {
+            BootKekSidecar.embeddedBindingText(bytes.toString(Charsets.US_ASCII))
+        } else {
+            BootKekSidecar.embeddedBinding(bytes)
+        } ?: return null
+        return try {
+            if (text) {
+                BootKekSidecar.decodeText(bytes.toString(Charsets.US_ASCII), binding)
+            } else {
+                BootKekSidecar.decode(bytes, binding)
+            }
+        } catch (_: IllegalArgumentException) {
+            null
+        } finally {
+            Arrays.fill(binding, 0)
         }
     }
 

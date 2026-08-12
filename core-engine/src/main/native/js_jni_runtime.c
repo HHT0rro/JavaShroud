@@ -24,6 +24,9 @@ JS_HIDDEN jboolean JNICALL jsn_k11(JNIEnv *env, jclass cls);
 JS_HIDDEN void JNICALL jsn_k12(JNIEnv *env, jclass cls);
 JS_HIDDEN void JNICALL jsn_k9(JNIEnv *env, jclass cls, jbyteArray preload_index, jbyteArray commitments, jbyteArray startup_nonce);
 JS_HIDDEN jbyteArray JNICALL jsn_k10(JNIEnv *env, jclass cls, jbyteArray keyIdArr, jbyteArray saltArr, jint length);
+JS_HIDDEN jbyteArray JNICALL jsn_k14(JNIEnv *env, jclass cls, jbyteArray keyIdArr, jbyteArray saltArr, jbyteArray nonceArr, jbyteArray ciphertextArr, jbyteArray aadArr, jint keyLength);
+JS_HIDDEN jstring JNICALL jsn_k15(JNIEnv *env, jclass cls, jbyteArray valueArr);
+JS_HIDDEN jbyteArray JNICALL jsn_k13(JNIEnv *env, jclass cls, jbyteArray encoded);
 JS_HIDDEN void JNICALL jsn_r0(JNIEnv *env, jclass cls, jstring jdl, jstring jresp);
 JS_HIDDEN void JNICALL jsn_r1(JNIEnv *env, jclass cls, jstring jdm, jstring jresp);
 JS_HIDDEN void JNICALL jsn_r2(JNIEnv *env, jclass cls, jstring jresp);
@@ -32,8 +35,9 @@ JS_HIDDEN void JNICALL jsn_r4(JNIEnv *env, jclass cls, jstring jpl, jclass owner
 JS_HIDDEN jstring JNICALL jsn_r11(JNIEnv *env, jclass cls, jbyteArray encodedBytes);
 JS_HIDDEN jstring JNICALL jsn_r12(JNIEnv *env, jclass cls, jstring encodedB64);
 JS_HIDDEN jstring JNICALL jsn_r13(JNIEnv *env, jclass cls, jstring encoded);
-JS_HIDDEN jstring JNICALL jsn_r16(JNIEnv *env, jclass cls, jstring bindingSource, jstring salt);
-JS_HIDDEN void JNICALL jsn_r17(JNIEnv *env, jclass cls, jstring expectedToken, jstring bindingSource, jstring salt);
+JS_HIDDEN jstring JNICALL jsn_r16(JNIEnv *env, jclass cls, jstring bindingSource, jstring salt, jstring expectedFingerprint);
+JS_HIDDEN void JNICALL jsn_r17(JNIEnv *env, jclass cls, jstring expectedToken, jstring bindingSource, jstring salt, jstring expectedFingerprint);
+JS_HIDDEN jstring JNICALL jsn_r18(JNIEnv *env, jclass cls);
 JS_HIDDEN jobject JNICALL jsn_r20(JNIEnv *env, jclass cls, jlong entryToken, jstring resourcePath, jobjectArray args);
 JS_HIDDEN jbyteArray JNICALL jsn_r21(JNIEnv *env, jclass cls, jbyteArray payload, jint seed, jint flags, jlong classIdentityHigh, jlong classIdentityLow);
 JS_HIDDEN jobject JNICALL jsn_r22(JNIEnv *env, jclass cls, jlong entryToken, jobjectArray args);
@@ -99,6 +103,7 @@ static jlong JNICALL jsw_k6(JNIEnv *env, jclass cls) {
 }
 
 static jboolean JNICALL jsw_k7(JNIEnv *env, jclass cls, jbyteArray material) {
+    if (!js_vm_sensitive_path_guard(env, (const void*)jsw_k7, 1)) return JNI_FALSE;
     if (!js_protected_runtime_enter(env)) return JNI_FALSE;
     jboolean result = jsn_k7(env, cls, material);
     return js_protected_runtime_leave(env) ? result : JNI_FALSE;
@@ -123,8 +128,29 @@ static void JNICALL jsw_k9(JNIEnv *env, jclass cls, jbyteArray preload_index, jb
 }
 
 static jbyteArray JNICALL jsw_k10(JNIEnv *env, jclass cls, jbyteArray keyIdArr, jbyteArray saltArr, jint length) {
+    if (!js_vm_sensitive_path_guard(env, (const void*)jsw_k10, 1)) return NULL;
     if (!js_protected_runtime_enter(env)) return NULL;
     jbyteArray result = jsn_k10(env, cls, keyIdArr, saltArr, length);
+    return js_protected_runtime_leave(env) ? result : NULL;
+}
+
+static jbyteArray JNICALL jsw_k14(JNIEnv *env, jclass cls, jbyteArray keyIdArr, jbyteArray saltArr, jbyteArray nonceArr, jbyteArray ciphertextArr, jbyteArray aadArr, jint keyLength) {
+    if (!js_vm_sensitive_path_guard(env, (const void*)jsw_k14, 1)) return NULL;
+    if (!js_protected_runtime_enter(env)) return NULL;
+    jbyteArray result = jsn_k14(env, cls, keyIdArr, saltArr, nonceArr, ciphertextArr, aadArr, keyLength);
+    return js_protected_runtime_leave(env) ? result : NULL;
+}
+
+static jstring JNICALL jsw_k15(JNIEnv *env, jclass cls, jbyteArray valueArr) {
+    if (!js_vm_sensitive_path_guard(env, (const void*)jsw_k15, 1)) return NULL;
+    if (!js_protected_runtime_enter(env)) return NULL;
+    jstring result = jsn_k15(env, cls, valueArr);
+    return js_protected_runtime_leave(env) ? result : NULL;
+}
+
+static jbyteArray JNICALL jsw_k13(JNIEnv *env, jclass cls, jbyteArray encoded) {
+    if (!js_protected_runtime_enter(env)) return NULL;
+    jbyteArray result = jsn_k13(env, cls, encoded);
     return js_protected_runtime_leave(env) ? result : NULL;
 }
 
@@ -176,16 +202,22 @@ static jstring JNICALL jsw_r13(JNIEnv *env, jclass cls, jstring value) {
     return js_protected_runtime_leave(env) ? result : NULL;
 }
 
-static jstring JNICALL jsw_r16(JNIEnv *env, jclass cls, jstring bindingSource, jstring salt) {
+static jstring JNICALL jsw_r16(JNIEnv *env, jclass cls, jstring bindingSource, jstring salt, jstring expectedFingerprint) {
     if (!js_protected_runtime_enter(env)) return NULL;
-    jstring result = jsn_r16(env, cls, bindingSource, salt);
+    jstring result = jsn_r16(env, cls, bindingSource, salt, expectedFingerprint);
     return js_protected_runtime_leave(env) ? result : NULL;
 }
 
-static void JNICALL jsw_r17(JNIEnv *env, jclass cls, jstring expectedToken, jstring bindingSource, jstring salt) {
+static void JNICALL jsw_r17(JNIEnv *env, jclass cls, jstring expectedToken, jstring bindingSource, jstring salt, jstring expectedFingerprint) {
     if (!js_protected_runtime_enter(env)) return;
-    jsn_r17(env, cls, expectedToken, bindingSource, salt);
+    jsn_r17(env, cls, expectedToken, bindingSource, salt, expectedFingerprint);
     (void)js_protected_runtime_leave(env);
+}
+
+static jstring JNICALL jsw_r18(JNIEnv *env, jclass cls) {
+    if (!js_protected_runtime_enter(env)) return NULL;
+    jstring result = jsn_r18(env, cls);
+    return js_protected_runtime_leave(env) ? result : NULL;
 }
 
 static jobject JNICALL jsw_r20(JNIEnv *env, jclass cls, jlong entryToken, jstring resourcePath, jobjectArray args) {
@@ -195,6 +227,7 @@ static jobject JNICALL jsw_r20(JNIEnv *env, jclass cls, jlong entryToken, jstrin
 }
 
 static jbyteArray JNICALL jsw_r21(JNIEnv *env, jclass cls, jbyteArray payload, jint seed, jint flags, jlong classIdentityHigh, jlong classIdentityLow) {
+    if (!js_vm_sensitive_path_guard(env, (const void*)jsw_r21, 1)) return NULL;
     if (!js_protected_runtime_enter(env)) return NULL;
     jbyteArray result = jsn_r21(env, cls, payload, seed, flags, classIdentityHigh, classIdentityLow);
     return js_protected_runtime_leave(env) ? result : NULL;
@@ -243,6 +276,9 @@ static const js_native_abi_table js_native_abi_table_instance = {
     jsw_k12,
     jsw_k9,
     jsw_k10,
+    jsw_k14,
+    jsw_k15,
+    jsw_k13,
     jsw_r20,
     jsw_r22,
     jsw_r23,
@@ -502,28 +538,7 @@ static int js_register_native_group(JNIEnv *env, char *owner, JNINativeMethod *m
     return ok;
 }
 
-static int js_register_all_natives(JNIEnv *env) {
-    JNINativeMethod jni_microkernel_methods[] = {
-        {js_native_name("In", "it", ""), "(Ljava/lang/String;)I", (void*)jsw_k0},
-        {js_native_name("Ver", "ify", ""), "([B[B)I", (void*)jsw_k1},
-        {js_native_name("Heart", "beat", ""), "()I", (void*)jsw_k3},
-        {js_native_name("Get", "Ver", "sion"), "()Ljava/lang/String;", (void*)jsw_k5},
-        {js_native_name("Get", "Boot", "Token"), "()J", (void*)jsw_k6},
-        {js_native_name("Install", "Boot", "Material"), "([B)Z", (void*)jsw_k7},
-        {js_native_name("Is", "BootMaterial", "Ready"), "()Z", (void*)jsw_k11},
-        {js_native_name("Abort", "Boot", "Material"), "()V", (void*)jsw_k12},
-        {js_native_name("Preload", "Runtime", "Resources"), "([B[B[B)V", (void*)jsw_k9},
-        {js_native_name("De", "crypt", "Aes"), "([B[B[B)[B", (void*)jsw_k4},
-        {js_native_name("Derive", "ClassEncryption", "Key"), "([B[BI)[B", (void*)jsw_k10},
-        {js_native_name("Ex", "ecuteVm", "Resource"), "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;", (void*)jsw_r20},
-        {js_native_name("Ex", "ecuteVmResource", "ByToken"), "(J[Ljava/lang/Object;)Ljava/lang/Object;", (void*)jsw_r22},
-        {js_native_name("Ex", "ecuteVmResource", "Void"), "(J)V", (void*)jsw_r23},
-        {js_native_name("Ex", "ecuteVmResource", "Int"), "(J)I", (void*)jsw_r25},
-        {js_native_name("Ex", "ecuteVmResourceInt", "Int"), "(JI)I", (void*)jsw_r26},
-        {js_native_name("Ex", "ecuteVmResourceInt", "Void"), "(JI)V", (void*)jsw_r24},
-    };
-    if (!js_register_native_group(env, js_helper_owner("Jni", "Micro", "kernel", "Helper"), jni_microkernel_methods, (int)(sizeof(jni_microkernel_methods) / sizeof(jni_microkernel_methods[0])), 1)) return 0;
-
+static int js_register_optional_natives(JNIEnv *env) {
     JNINativeMethod anti_instrumentation_methods[] = {{js_native_name("Check", "Instr", "umentation"), "(Ljava/lang/String;Ljava/lang/String;)V", (void*)jsw_r0}};
     if (!js_register_native_group(env, js_helper_owner("An", "tiInstr", "umentation", "Helper"), anti_instrumentation_methods, 1, 0)) return 0;
 
@@ -548,13 +563,46 @@ static int js_register_all_natives(JNIEnv *env) {
 
     JNINativeMethod string_encryption_methods[] = {{js_native_name("Decode", "String", ""), "([BIIJJ)[B", (void*)jsw_r21}};
     if (!js_register_native_group(env, js_helper_owner("String", "Encryption", "", "Helper"), string_encryption_methods, 1, 0)) return 0;
-    JNINativeMethod environment_methods[] = {
-        {js_native_name("Derive", "Key", ""), "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", (void*)jsw_r16},
-        {js_native_name("Verify", "Environment", ""), "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", (void*)jsw_r17},
-    };
-    if (!js_register_native_group(env, js_helper_owner("Environment", "Binding", "", "Helper"), environment_methods, 2, 0)) return 0;
 
+    JNINativeMethod environment_methods[] = {
+        {js_native_name("Derive", "Key", ""), "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", (void*)jsw_r16},
+        {js_native_name("Verify", "Environment", ""), "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", (void*)jsw_r17},
+        {js_native_name("Get", "Machine", "Fingerprint"), "()Ljava/lang/String;", (void*)jsw_r18},
+    };
+    if (!js_register_native_group(env, js_helper_owner("Environment", "Binding", "", "Helper"), environment_methods, 3, 0)) return 0;
     return 1;
+}
+
+JS_HIDDEN int js_jni_register_deferred_natives(JNIEnv *env) {
+    if (!env || !js_jni_cache.initialized) return 0;
+    return js_register_optional_natives(env);
+}
+
+static int js_register_all_natives(JNIEnv *env) {
+    JNINativeMethod jni_microkernel_methods[] = {
+        {js_native_name("In", "it", ""), "(Ljava/lang/String;)I", (void*)jsw_k0},
+        {js_native_name("Ver", "ify", ""), "([B[B)I", (void*)jsw_k1},
+        {js_native_name("Heart", "beat", ""), "()I", (void*)jsw_k3},
+        {js_native_name("Get", "Ver", "sion"), "()Ljava/lang/String;", (void*)jsw_k5},
+        {js_native_name("Get", "Boot", "Token"), "()J", (void*)jsw_k6},
+        {js_native_name("Install", "Boot", "Material"), "([B)Z", (void*)jsw_k7},
+        {js_native_name("Is", "BootMaterial", "Ready"), "()Z", (void*)jsw_k11},
+        {js_native_name("Abort", "Boot", "Material"), "()V", (void*)jsw_k12},
+        {js_native_name("Preload", "Runtime", "Resources"), "([B[B[B)V", (void*)jsw_k9},
+        {js_native_name("De", "crypt", "Aes"), "([B[B[B)[B", (void*)jsw_k4},
+        {js_native_name("Derive", "ClassEncryption", "Key"), "([B[BI)[B", (void*)jsw_k10},
+        {js_native_name("De", "cryptClass", "Bytes"), "([B[B[B[B[BI)[B", (void*)jsw_k14},
+        {js_native_name("Sealed", "Binding", "Key"), "([B)Ljava/lang/String;", (void*)jsw_k15},
+        {js_native_name("Decode", "Runtime", "Resource"), "([B)[B", (void*)jsw_k13},
+        {js_native_name("Ex", "ecuteVm", "Resource"), "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;", (void*)jsw_r20},
+        {js_native_name("Ex", "ecuteVmResource", "ByToken"), "(J[Ljava/lang/Object;)Ljava/lang/Object;", (void*)jsw_r22},
+        {js_native_name("Ex", "ecuteVmResource", "Void"), "(J)V", (void*)jsw_r23},
+        {js_native_name("Ex", "ecuteVmResource", "Int"), "(J)I", (void*)jsw_r25},
+        {js_native_name("Ex", "ecuteVmResourceInt", "Int"), "(JI)I", (void*)jsw_r26},
+        {js_native_name("Ex", "ecuteVmResourceInt", "Void"), "(JI)V", (void*)jsw_r24},
+    };
+    if (!js_register_native_group(env, js_helper_owner("Jni", "Micro", "kernel", "Helper"), jni_microkernel_methods, (int)(sizeof(jni_microkernel_methods) / sizeof(jni_microkernel_methods[0])), 1)) return 0;
+    return js_register_optional_natives(env);
 }
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {

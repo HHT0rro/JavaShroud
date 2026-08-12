@@ -10,6 +10,7 @@ import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.model.protocol.EngineEvent
 import org.objectweb.asm.*
+import java.util.HexFormat
 
 /**
  * Embedded Runtime Helper Deployment.
@@ -40,7 +41,10 @@ object EmbeddedHelperDeployment {
             "$PKG/ClassEncryptionLoaderHelper${"$"}ParsedMetadata",
             "$PKG/ClassEncryptionLoaderHelper${"$"}SharedDecryptingClassLoader",
         ) + runtimeResourceDecodeHelpers,
-        "string-encryption" to listOf("$PKG/StringEncryptionHelper"),
+        "string-encryption" to listOf(
+            "$PKG/StringEncryptionHelper",
+            "$PKG/StringEncryptionHelper${"$"}CachePolicy",
+        ),
         "method-body-delayed-decryption" to listOf(
             "$PKG/MethodBodyDecryptionHelper",
             "$PKG/MethodBodyDecryptionHelper${"$"}ParsedMetadata",
@@ -65,6 +69,7 @@ object EmbeddedHelperDeployment {
             "$PKG/MethodBodyDecryptionHelper" to { loadClasspathHelperByName("MethodBodyDecryptionHelper") },
             "$PKG/MethodBodyDecryptionHelper${"$"}ParsedMetadata" to { loadClasspathHelperByName("MethodBodyDecryptionHelper${"$"}ParsedMetadata") },
             "$PKG/StringEncryptionHelper" to { loadClasspathHelperByName("StringEncryptionHelper") },
+            "$PKG/StringEncryptionHelper${"$"}CachePolicy" to { loadClasspathHelperByName("StringEncryptionHelper${"$"}CachePolicy") },
             "$PKG/BootstrapEncryptionHelper" to { loadClasspathHelperByName("BootstrapEncryptionHelper") },
             "$PKG/CallsiteRotationHelper" to ::generateCallsiteRotationHelper,
             "$PKG/EnvironmentBindingHelper" to { loadClasspathHelperByName("EnvironmentBindingHelper") },
@@ -241,7 +246,9 @@ object EmbeddedHelperDeployment {
                 "Zig compilation produced an incomplete native shell binding set"
             }
             val retainedJarEntries = artifact.jarEntries.filterNot { entry ->
-                isNativeKernelResource(entry.name) || entry.name == BootMaterialEnvelope.RESOURCE_PATH
+                isNativeKernelResource(entry.name) ||
+                    entry.name == BootMaterialEnvelope.RESOURCE_PATH ||
+                    entry.name == BootKekSidecar.EMBEDDED_RESOURCE_PATH
             }
             val existingEntries = retainedJarEntries.map { it.name }.toSet()
             val newEntries = mutableListOf<JarEntryData>()
@@ -267,6 +274,14 @@ object EmbeddedHelperDeployment {
             } finally {
                 java.util.Arrays.fill(bootSecret, 0)
             }
+            if (bootKeyDelivery(config) == BootKekSidecar.DELIVERY_EMBEDDED) {
+                newEntries.add(
+                    JarEntryData(
+                        name = BootKekSidecar.EMBEDDED_RESOURCE_PATH,
+                        bytes = embeddedBootKekBytes(requireNotNull(config)),
+                    ),
+                )
+            }
             val updatedJarEntries = retainedJarEntries + newEntries
             artifact.copy(
                 jarEntries = updatedJarEntries,
@@ -276,6 +291,37 @@ object EmbeddedHelperDeployment {
             )
         } finally {
             recompiledNatives.forEach { native -> native.shellBindingCommitment?.fill(0) }
+        }
+    }
+
+    private fun bootKeyDelivery(config: io.github.hht0rro.javashroud.model.config.ObfuscationConfig?): String {
+        val loaderPass = config?.passes?.firstOrNull { it.id == "jni-microkernel-loader" && it.enabled }
+            ?: return BootKekSidecar.DELIVERY_EXTERNAL_FILE
+        val delivery = loaderPass.params["bootKeyDelivery"]?.asText() ?: BootKekSidecar.DELIVERY_EXTERNAL_FILE
+        require(delivery == BootKekSidecar.DELIVERY_EXTERNAL_FILE || delivery == BootKekSidecar.DELIVERY_EMBEDDED) {
+            "jni-microkernel-loader bootKeyDelivery '$delivery' is not supported"
+        }
+        return delivery
+    }
+
+    private fun embeddedBootKekBytes(config: io.github.hht0rro.javashroud.model.config.ObfuscationConfig): ByteArray {
+        val loaderPass = config.passes.first { it.id == "jni-microkernel-loader" && it.enabled }
+        val maxHardening = loaderPass.params["nativePackingLevel"]?.asText() == "max-hardening"
+        val context = requireVbc4BuildContext()
+        val secret = context.copyBootSecretForBuild()
+        return try {
+            if (maxHardening) {
+                val binding = context.copyBootSidecarBindingForBuild()
+                try {
+                    BootKekSidecar.encodeText(secret, binding).toByteArray(Charsets.US_ASCII)
+                } finally {
+                    binding.fill(0)
+                }
+            } else {
+                HexFormat.of().formatHex(secret).toByteArray(Charsets.US_ASCII)
+            }
+        } finally {
+            secret.fill(0)
         }
     }
 
@@ -297,6 +343,8 @@ object EmbeddedHelperDeployment {
     private fun hasBundledNativeSources(): Boolean = listOf(
         "js_kernel.c",
         "js_helpers.c",
+        "js_native_common.c",
+        "js_machine_id.c",
         "native_secrets.inc",
         "zstd/zstd.h",
         "zstd/zstd_errors.h",

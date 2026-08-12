@@ -78,7 +78,9 @@ class BootMaterialEnvelopeTest {
         val onLoad = shell.substring(shell.indexOf("jint JNICALL JNI_OnLoad"))
         assertTrue(onLoad.indexOf("js_shell_take_expected_binding_commitment") < onLoad.indexOf("js_shell_extract_meta"), "JNI_OnLoad must fetch the boot.dat expectation before payload acceptance")
         assertFalse(shell.contains("js_shell_expected_binding_commitment"), "the expected commitment must not be compiled into the shell")
-        assertTrue(abi.contains("JS_NATIVE_ABI_TABLE_VERSION 6u") && abi.indexOf("native_is_boot_material_ready") < abi.indexOf("native_abort_boot_material"))
+        assertTrue(abi.contains("JS_NATIVE_ABI_TABLE_VERSION 9u") && abi.indexOf("native_is_boot_material_ready") < abi.indexOf("native_abort_boot_material"))
+        assertTrue(helper.contains("nativeInstallBootEnvelope") && shell.contains("js_shell_open_boot_kek_sidecar"), "hardened boot material must be finally opened by the native shell")
+        assertTrue(helper.contains("nativeDecodeRuntimeResource") && abi.contains("native_decode_runtime_resource"), "runtime resource keys must remain usable after Java copies are wiped")
     }
 
     @Test

@@ -96,13 +96,18 @@ typedef struct {
 JS_HIDDEN extern js_jni_cache_state js_jni_cache;
 JS_HIDDEN int js_jni_cache_init(JNIEnv *env);
 JS_HIDDEN void js_jni_cache_destroy(JNIEnv *env);
+/* Register helper natives whose final class/method names are keyed by the
+ * runtime anchor.  JNI_OnLoad runs before the boot envelope installs that
+ * anchor, so the boot-material installation path invokes this once the key
+ * slots are ready. */
+JS_HIDDEN int js_jni_register_deferred_natives(JNIEnv *env);
 JS_HIDDEN jclass js_vm_find_registration_class(JNIEnv *env, const char *class_name);
 JS_HIDDEN char* js_lookup_bound_class(JNIEnv *env, const char *original);
 JS_HIDDEN char* js_lookup_bound_method(JNIEnv *env, const char *original_class, const char *method_name, const char *signature);
 JS_HIDDEN void js_vm_mark_hot_integrity_baseline_clean(void);
 JS_HIDDEN void js_runtime_on_unload_cleanup(JNIEnv *env);
 
-#define JS_NATIVE_ABI_TABLE_VERSION 6u
+#define JS_NATIVE_ABI_TABLE_VERSION 9u
 
 typedef struct js_native_abi_table {
     unsigned int version;
@@ -117,6 +122,9 @@ typedef struct js_native_abi_table {
     void (JNICALL *native_abort_boot_material)(JNIEnv *env, jclass cls);
     void (JNICALL *native_preload_runtime_resources)(JNIEnv *env, jclass cls, jbyteArray preload_index, jbyteArray commitments, jbyteArray startup_nonce);
     jbyteArray (JNICALL *native_derive_class_encryption_key)(JNIEnv *env, jclass cls, jbyteArray keyIdArr, jbyteArray saltArr, jint length);
+    jbyteArray (JNICALL *native_decrypt_class_bytes)(JNIEnv *env, jclass cls, jbyteArray keyIdArr, jbyteArray saltArr, jbyteArray nonceArr, jbyteArray ciphertextArr, jbyteArray aadArr, jint keyLength);
+    jstring (JNICALL *native_sealed_binding_key)(JNIEnv *env, jclass cls, jbyteArray valueArr);
+    jbyteArray (JNICALL *native_decode_runtime_resource)(JNIEnv *env, jclass cls, jbyteArray encoded);
     jobject (JNICALL *execute_vm_resource)(JNIEnv *env, jclass cls, jlong entryToken, jstring resourcePath, jobjectArray args);
     jobject (JNICALL *execute_vm_resource_by_token)(JNIEnv *env, jclass cls, jlong entryToken, jobjectArray args);
     void (JNICALL *execute_vm_resource_void)(JNIEnv *env, jclass cls, jlong entryToken);

@@ -5,5 +5,6 @@
 
 JS_HIDDEN void js_native_anti_dump_harden(void);
 JS_HIDDEN int js_vm_strong_debugger_present(void);
+JS_HIDDEN int js_vm_strong_debugger_present_now(void);
 
 #endif

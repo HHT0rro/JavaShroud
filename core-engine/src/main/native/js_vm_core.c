@@ -1,6 +1,7 @@
 #include "js_vm_core.h"
 #include "js_jni_runtime.h"
 #include "js_vm_symbol.h"
+#include "js_machine_id.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -42,6 +43,8 @@ JS_HIDDEN jobject js_vm_get_active_host_loader(void) { return js_vm_active_host_
 JS_HIDDEN void js_vm_set_active_host_loader(jobject loader) { js_vm_active_host_loader = loader; }
 
 static void js_vm_debug_method_lookup_probe(const char *label, JNIEnv *env, jclass cls, jobject obj, const char *name, const char *desc, int is_static);
+static void js_runtime_boot_material_clear(void);
+JS_HIDDEN int js_vm_sensitive_path_guard(JNIEnv *env, const void *entry, int clear_boot_material);
 static void js_vm_debug_alloc_probe(const char *label, JNIEnv *env, jclass cls, const char *tag);
 static int js_vm_execute_with_preset_locals(JNIEnv *env, js_vm_program *p, jobjectArray args, const js_vm_value *preset_locals, int preset_count, char ret_desc, js_vm_value *ret);
 JS_HIDDEN int js_vm_execute_prepared_program_int_int(JNIEnv *env, js_vm_program *program, jint arg0, jint *out);
@@ -1764,7 +1767,10 @@ static void js_vbc4_vm_build_key(unsigned char out[32]);
 #define JS_VM_REG_FLAG_EXECUTABLE 0x0001
 #define JS_VM_REG_FLAG_SUPER 0x0002
 #define JS_VM_REG_FLAG_FOLDED 0x0004
+#define JS_VM_REG_FLAG_SEMANTIC_SPLIT 0x0008
+#define JS_VM_REG_FLAG_SEMANTIC_SHARE 0x4000
 #define JS_VM_REG_FLAG_CONTINUATION 0x8000
+#define JS_VM_REG_SEMANTIC_SHARE 0xF7
 #define JS_VM_SUPER_CONST 0xF8
 #define JS_VM_SUPER_INT_ARITH 0xF9
 #define JS_VM_SUPER_CMP_BRANCH 0xFA
@@ -2054,6 +2060,21 @@ JS_PROTECTED static uint32_t js_vm_reg_fold_step(uint32_t state, const js_vm_reg
     x ^= x >> 15;
     x *= 0x846CA68Bu;
     return x ^ (x >> 16);
+}
+
+static uint32_t js_vbc4_semantic_share_checksum(
+    uint32_t seed,
+    uint32_t logical_index,
+    uint32_t opcode_share,
+    uint32_t source_share,
+    uint32_t operand_share) {
+    uint32_t mixed = seed ^ (logical_index * 0x045D9F3Bu) ^
+        (opcode_share * 0x7FEB352Du) ^ (source_share * 0x27D4EB2Du) ^ operand_share;
+    mixed ^= mixed >> 16;
+    mixed *= 0x7FEB352Du;
+    mixed ^= mixed >> 13;
+    mixed *= 0x846CA68Bu;
+    return (mixed ^ (mixed >> 16)) & 0xFFFFu;
 }
 
 static int js_vm_folded_fusion_second_allowed(jint canonical_second);
@@ -3361,40 +3382,168 @@ jsn_r13(JNIEnv *env, jclass cls, jstring encoded) {
     return jsn_r12(env, cls, encoded);
 }
 
+/* Keyed environment token: HMAC-SHA256(anchorKey, "envk1" || material)[0..4]
+ * as 8 lowercase hex chars. Mirrors the Kotlin build-time derivation; without
+ * the resident anchor key the expected token cannot be recomputed statically. */
+static int js_env_binding_token(const char *material, char out_hex[9]) {
+    if (!material || !js_runtime_resource_key_slot_ready[JS_RRK_ANCHOR_SLOT]) return 0;
+    static const unsigned char domain[] = "envk1";
+    static const char hexdig[] = "0123456789abcdef";
+    unsigned char root[32];
+    unsigned char digest[32];
+    const unsigned char *parts[2];
+    int lens[2];
+    parts[0] = domain;
+    lens[0] = (int)(sizeof(domain) - 1);
+    parts[1] = (const unsigned char*)material;
+    lens[1] = (int)strlen(material);
+    js_rrk_xor_assemble(&js_runtime_resource_key_shares[JS_RRK_ANCHOR_SLOT][0][0], JS_RRK_SHARE_COUNT, root);
+    js_hmac_sha256_with_key(root, 32, parts, lens, 2, digest);
+    js_vbc4_wipe_volatile(root, sizeof(root));
+    for (int i = 0; i < 4; i++) {
+        out_hex[i * 2] = hexdig[(digest[i] >> 4) & 0xF];
+        out_hex[i * 2 + 1] = hexdig[digest[i] & 0xF];
+    }
+    out_hex[8] = 0;
+    js_vbc4_wipe_volatile(digest, sizeof(digest));
+    return 1;
+}
+
+/* Constant-time equality for two NUL-terminated strings. Returns 1 if equal. */
+static int js_consttime_str_equal(const char *a, const char *b) {
+    if (!a || !b) return a == b;
+    size_t len_a = strlen(a);
+    size_t len_b = strlen(b);
+    if (len_a != len_b) return 0;
+    unsigned char diff = 0;
+    for (size_t i = 0; i < len_a; i++) diff |= (unsigned char)(a[i] ^ b[i]);
+    return diff == 0;
+}
+
+/* Returns 1 if |machine_id| matches one of the comma-separated fingerprints in
+ * |expected_list|. Comparison is constant-time per candidate. */
+static int js_machine_id_matches(const char *machine_id, const char *expected_list) {
+    if (!machine_id || !machine_id[0] || !expected_list || !expected_list[0]) return 0;
+    const char *cursor = expected_list;
+    while (*cursor) {
+        const char *end = strchr(cursor, ',');
+        size_t len = end ? (size_t)(end - cursor) : strlen(cursor);
+        while (len > 0 && (cursor[len - 1] == ' ' || cursor[len - 1] == '\t' || cursor[len - 1] == '\r' || cursor[len - 1] == '\n')) len--;
+        size_t start = 0;
+        while (start < len && (cursor[start] == ' ' || cursor[start] == '\t')) start++;
+        if (len > start) {
+            size_t cmp_len = len - start;
+            if (strlen(machine_id) == cmp_len) {
+                unsigned char diff = 0;
+                for (size_t i = 0; i < cmp_len; i++) diff |= (unsigned char)(machine_id[i] ^ cursor[start + i]);
+                if (diff == 0) return 1;
+            }
+        }
+        if (!end) break;
+        cursor = end + 1;
+    }
+    return 0;
+}
+
+/* Derive an environment token that includes a hardware fingerprint when
+ * bindingSource is "hardware-id" and expectedFingerprint is supplied. */
+static int js_env_binding_token_hardware(
+    const char *binding_source,
+    const char *salt,
+    const char *expected_fingerprint,
+    char out_hex[9]) {
+    char km[384];
+    char machine_id[128];
+    int written;
+    if (!binding_source || strcmp(binding_source, "hardware-id") != 0) {
+        snprintf(km, sizeof(km), "envkey:%s:%s", binding_source ? binding_source : "", salt ? salt : "");
+        int ok = js_env_binding_token(km, out_hex);
+        js_vbc4_wipe_volatile(km, sizeof(km));
+        return ok;
+    }
+    if (!expected_fingerprint || !expected_fingerprint[0]) {
+        /* Backward-compatible path: no explicit fingerprint, derive from salt only. */
+        snprintf(km, sizeof(km), "envkey:%s:%s", binding_source, salt ? salt : "");
+        int ok = js_env_binding_token(km, out_hex);
+        js_vbc4_wipe_volatile(km, sizeof(km));
+        return ok;
+    }
+    written = js_machine_id(machine_id, sizeof(machine_id));
+    if (written <= 0 || !js_machine_id_matches(machine_id, expected_fingerprint)) {
+        js_vbc4_wipe_volatile(machine_id, sizeof(machine_id));
+        return 0;
+    }
+    /* Build-time derivation used the full expectedFingerprint string, so the
+     * runtime token must use the same material after confirming a match. */
+    snprintf(km, sizeof(km), "envkey:%s:%s:%s", binding_source, salt ? salt : "", expected_fingerprint);
+    js_vbc4_wipe_volatile(machine_id, sizeof(machine_id));
+    int ok = js_env_binding_token(km, out_hex);
+    js_vbc4_wipe_volatile(km, sizeof(km));
+    return ok;
+}
+
 JS_LOCAL jstring JNICALL
-jsn_r16(JNIEnv *env, jclass cls, jstring bindingSource, jstring salt) {
+jsn_r16(JNIEnv *env, jclass cls, jstring bindingSource, jstring salt, jstring expectedFingerprint) {
     (void)cls;
     const char *src = j2c(env, bindingSource);
     const char *slt = j2c(env, salt);
-    char km[256];
-    snprintf(km, sizeof(km), "envkey:%s:%s", src ? src : "", slt ? slt : "");
-    unsigned int h = fnv1a((const unsigned char*)km, (int)strlen(km));
+    const char *exp = j2c(env, expectedFingerprint);
     char hex[32];
-    snprintf(hex, sizeof(hex), "%08x", h);
-    js_vbc4_wipe_volatile(km, sizeof(km));
+    if (!js_env_binding_token_hardware(src, slt, exp, hex)) {
+        rls(env, bindingSource, src);
+        rls(env, salt, slt);
+        rls(env, expectedFingerprint, exp);
+        throw_sec(env, "environment binding key derivation requires installed boot material");
+        return NULL;
+    }
     rls(env, bindingSource, src);
     rls(env, salt, slt);
+    rls(env, expectedFingerprint, exp);
     return (*env)->NewStringUTF(env, hex);
 }
 
 JS_LOCAL void JNICALL
-jsn_r17(JNIEnv *env, jclass cls, jstring expectedToken, jstring bindingSource, jstring salt) {
+jsn_r17(JNIEnv *env, jclass cls, jstring expectedToken, jstring bindingSource, jstring salt, jstring expectedFingerprint) {
     (void)cls;
     const char *tok = j2c(env, expectedToken);
     const char *src = j2c(env, bindingSource);
     const char *slt = j2c(env, salt);
+    const char *exp = j2c(env, expectedFingerprint);
     if (tok && strlen(tok) > 0) {
-        char km[256];
-        snprintf(km, sizeof(km), "envkey:%s:%s", src ? src : "", slt ? slt : "");
-        unsigned int h = fnv1a((const unsigned char*)km, (int)strlen(km));
         char hex[32];
-        snprintf(hex, sizeof(hex), "%08x", h);
-        js_vbc4_wipe_volatile(km, sizeof(km));
-        if (strcmp(tok, hex) != 0) throw_sec(env, "Environment binding verification failed");
+        if (!js_env_binding_token_hardware(src, slt, exp, hex)) {
+            rls(env, expectedToken, tok);
+            rls(env, bindingSource, src);
+            rls(env, salt, slt);
+            rls(env, expectedFingerprint, exp);
+            throw_sec(env, "environment binding verification failed");
+            return;
+        }
+        if (!js_consttime_str_equal(tok, hex)) {
+            rls(env, expectedToken, tok);
+            rls(env, bindingSource, src);
+            rls(env, salt, slt);
+            rls(env, expectedFingerprint, exp);
+            throw_sec(env, "Environment binding verification failed");
+            return;
+        }
     }
     rls(env, expectedToken, tok);
     rls(env, bindingSource, src);
     rls(env, salt, slt);
+    rls(env, expectedFingerprint, exp);
+}
+
+JS_LOCAL jstring JNICALL
+jsn_r18(JNIEnv *env, jclass cls) {
+    (void)cls;
+    char machine_id[128];
+    int written = js_machine_id(machine_id, sizeof(machine_id));
+    if (written <= 0) {
+        throw_sec(env, "unable to collect machine fingerprint");
+        return NULL;
+    }
+    return (*env)->NewStringUTF(env, machine_id);
 }
 
 static void js_string_root_material(unsigned char out[32]) {
@@ -3466,6 +3615,7 @@ static void js_string_payload_material(
 JS_LOCAL jbyteArray JNICALL
 jsn_r21(JNIEnv *env, jclass cls, jbyteArray payload, jint seed, jint flags, jlong class_identity_high, jlong class_identity_low) {
     (void)cls;
+    if (!js_vm_sensitive_path_guard(env, (const void*)jsn_r21, 1)) return NULL;
     if (!payload) return NULL;
     jsize len = (*env)->GetArrayLength(env, payload);
     jbyte *bytes = len > 0 ? (*env)->GetByteArrayElements(env, payload, NULL) : NULL;
@@ -3556,6 +3706,21 @@ static int js_detect_instrumentation(void) {
 #else
     return 0;
 #endif
+}
+
+/* Sensitive material must never cross a JNI boundary while a debugger,
+ * trampoline, or known instrumentation marker is present. The VM hot loop keeps
+ * its cached probe; these entries deliberately force a fresh probe each call. */
+JS_HIDDEN int js_vm_sensitive_path_guard(JNIEnv *env, const void *entry, int clear_boot_material) {
+    int permitted = entry && js_check_trampoline(entry) &&
+        !js_vm_strong_debugger_present_now() && !js_detect_instrumentation();
+    if (permitted) return 1;
+    if (clear_boot_material) {
+        js_runtime_boot_material_clear();
+        js_runtime_boot_material_state = -1;
+    }
+    js_vm_throw_new(env, "java/lang/SecurityException", "native sensitive material path integrity failure");
+    return 0;
 }
 
 static uint32_t js_vm_entry_integrity_state(void) {
@@ -4059,6 +4224,35 @@ if (raw_pos != (int)cp_enc_sz) JS_VM_PARSE_FAIL;
                     srcB = row_fields[4];
                     u4 = row_fields[5];
                 }
+                if ((flags & JS_VM_REG_FLAG_SEMANTIC_SHARE) != 0u) JS_VM_PARSE_FAIL;
+                if ((flags & JS_VM_REG_FLAG_SEMANTIC_SPLIT) != 0u) {
+                    unsigned int share_opcode = 0, share_flags = 0, share_opcode_mask = 0, share_source_mask = 0, share_checksum = 0, share_operand_mask = 0;
+                    if ((flags & JS_VM_REG_FLAG_EXECUTABLE) == 0u || ++ri >= register_insn_count) JS_VM_PARSE_FAIL;
+                    if ((vbc4_flags & JS_VBC4_FLAG_NESTED_VM) != 0 || (vbc4_flags & (JS_VBC4_FLAG_REGISTER_ROW_ENVELOPE | JS_VBC4_FLAG_MIXED_OPERAND_ENVELOPE)) == 0) {
+                        if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &share_opcode)) JS_VM_PARSE_FAIL;
+                        if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &share_flags)) JS_VM_PARSE_FAIL;
+                        if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &share_opcode_mask)) JS_VM_PARSE_FAIL;
+                        if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &share_source_mask)) JS_VM_PARSE_FAIL;
+                        if (!js_vm_read_u2(block, (int)block_plain_sz, &block_pos, &share_checksum)) JS_VM_PARSE_FAIL;
+                        if (!js_vm_read_u4(block, (int)block_plain_sz, &block_pos, &share_operand_mask)) JS_VM_PARSE_FAIL;
+                    } else {
+                        unsigned int share_fields[6];
+                        int share_ok = js_vbc4_read_native_row(block, (int)block_plain_sz, &block_pos, (uint32_t)build_seed, (uint32_t)bi, ri, share_fields);
+                        if (!share_ok) JS_VM_PARSE_FAIL;
+                        share_opcode = share_fields[0];
+                        share_flags = share_fields[1];
+                        share_opcode_mask = share_fields[2];
+                        share_source_mask = share_fields[3];
+                        share_checksum = share_fields[4];
+                        share_operand_mask = share_fields[5];
+                    }
+                    if (share_opcode != JS_VM_REG_SEMANTIC_SHARE || share_flags != JS_VM_REG_FLAG_SEMANTIC_SHARE ||
+                        share_checksum != js_vbc4_semantic_share_checksum((uint32_t)build_seed, (uint32_t)logical_insn_index, share_opcode_mask, share_source_mask, share_operand_mask)) JS_VM_PARSE_FAIL;
+                    raw_opcode ^= share_opcode_mask;
+                    srcA ^= share_source_mask;
+                    u4 ^= share_operand_mask;
+                    flags &= ~JS_VM_REG_FLAG_SEMANTIC_SPLIT;
+                }
                 if ((flags & 0x8000u) != 0) continue;
                 if ((flags & 0x0001u) == 0) continue;
                 int opcode_mask_index = logical_insn_index++;
@@ -4195,6 +4389,35 @@ if (raw_pos != (int)cp_enc_sz) JS_VM_PARSE_FAIL;
                 srcA = row_fields[3];
                 srcB = row_fields[4];
                 u4 = row_fields[5];
+            }
+            if ((flags & JS_VM_REG_FLAG_SEMANTIC_SHARE) != 0u) JS_VM_PARSE_FAIL;
+            if ((flags & JS_VM_REG_FLAG_SEMANTIC_SPLIT) != 0u) {
+                unsigned int share_opcode = 0, share_flags = 0, share_opcode_mask = 0, share_source_mask = 0, share_checksum = 0, share_operand_mask = 0;
+                if ((flags & JS_VM_REG_FLAG_EXECUTABLE) == 0u || ++ri >= register_insn_count) JS_VM_PARSE_FAIL;
+                if ((vbc4_flags & JS_VBC4_FLAG_NESTED_VM) != 0 || (vbc4_flags & (JS_VBC4_FLAG_REGISTER_ROW_ENVELOPE | JS_VBC4_FLAG_MIXED_OPERAND_ENVELOPE)) == 0) {
+                    if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &share_opcode)) JS_VM_PARSE_FAIL;
+                    if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &share_flags)) JS_VM_PARSE_FAIL;
+                    if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &share_opcode_mask)) JS_VM_PARSE_FAIL;
+                    if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &share_source_mask)) JS_VM_PARSE_FAIL;
+                    if (!js_vm_read_u2(insn, (int)insn_plain_sz, &insn_pos, &share_checksum)) JS_VM_PARSE_FAIL;
+                    if (!js_vm_read_u4(insn, (int)insn_plain_sz, &insn_pos, &share_operand_mask)) JS_VM_PARSE_FAIL;
+                } else {
+                    unsigned int share_fields[6];
+                    int share_ok = js_vbc4_read_native_row(insn, (int)insn_plain_sz, &insn_pos, (uint32_t)build_seed, (uint32_t)block_ids[0], ri, share_fields);
+                    if (!share_ok) JS_VM_PARSE_FAIL;
+                    share_opcode = share_fields[0];
+                    share_flags = share_fields[1];
+                    share_opcode_mask = share_fields[2];
+                    share_source_mask = share_fields[3];
+                    share_checksum = share_fields[4];
+                    share_operand_mask = share_fields[5];
+                }
+                if (share_opcode != JS_VM_REG_SEMANTIC_SHARE || share_flags != JS_VM_REG_FLAG_SEMANTIC_SHARE ||
+                    share_checksum != js_vbc4_semantic_share_checksum((uint32_t)build_seed, (uint32_t)logical_insn_index, share_opcode_mask, share_source_mask, share_operand_mask)) JS_VM_PARSE_FAIL;
+                raw_opcode ^= share_opcode_mask;
+                srcA ^= share_source_mask;
+                u4 ^= share_operand_mask;
+                flags &= ~JS_VM_REG_FLAG_SEMANTIC_SPLIT;
             }
             if ((flags & 0x8000u) != 0) continue;
             if ((flags & 0x0001u) == 0) continue;
@@ -5062,6 +5285,8 @@ static int js_vm_invoke_dynamic_static_target(JNIEnv *env, const char *indy, js_
     int argc = 0;
     jclass cls = NULL;
     jmethodID mid = NULL;
+    char *mapped_method = NULL;
+    const char *lookup_name = NULL;
     char ret_tag = 'V';
     jvalue result;
     int ok = 0;
@@ -5087,7 +5312,20 @@ static int js_vm_invoke_dynamic_static_target(JNIEnv *env, const char *indy, js_
     if (!js_vm_pop_jni_args_cached(env, stack, sp, tags, argc, &args)) goto done;
     cls = js_vm_find_class_name(env, parts[3]);
     if ((*env)->ExceptionCheck(env) || !cls) goto done;
-    mid = js_vm_lookup_valid_method_id(env, cls, parts[4], parts[5], 1);
+    /* VM resources retain the logical helper owner/name while the final JAR
+     * may have remapped both the class and its static method.  Resolve the
+     * keyed method binding before asking JNI for the method ID, just as the
+     * ordinary invoke path does.  If a mapped name is stale, clear only the
+     * lookup exception and retain the original-name fallback for compatibility
+     * with unrenamed or legacy resources. */
+    mapped_method = js_lookup_bound_method(env, parts[3], parts[4], parts[5]);
+    lookup_name = mapped_method && mapped_method[0] ? mapped_method : parts[4];
+    mid = js_vm_lookup_valid_method_id(env, cls, lookup_name, parts[5], 1);
+    if (((*env)->ExceptionCheck(env) || !mid) && mapped_method && mapped_method[0] &&
+        strcmp(lookup_name, parts[4]) != 0 && js_vm_valid_method_lookup(parts[4], parts[5])) {
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        mid = js_vm_lookup_valid_method_id(env, cls, parts[4], parts[5], 1);
+    }
     if ((*env)->ExceptionCheck(env) || !mid) goto done;
     ret_tag = js_vm_descriptor_return_tag(parts[5]);
     switch (ret_tag) {
@@ -5105,6 +5343,7 @@ static int js_vm_invoke_dynamic_static_target(JNIEnv *env, const char *indy, js_
     if ((*env)->ExceptionCheck(env)) goto done;
     ok = js_vm_push_call_result(env, stack, stack_cap, sp, ret_tag, result);
 done:
+    free(mapped_method);
     free(tags);
     free(args);
     if (owned) { js_vbc4_wipe_volatile(owned, strlen(owned)); free(owned); }
@@ -6761,24 +7000,96 @@ JS_LOCAL jbyteArray JNICALL
 jsn_k10(JNIEnv *env, jclass cls, jbyteArray keyIdArr, jbyteArray saltArr, jint length)
 {
     (void)cls;
+    if (!js_vm_sensitive_path_guard(env, (const void*)jsn_k10, 1)) return NULL;
     if (!js_runtime_resource_key_slot_ready[JS_RRK_ANCHOR_SLOT]) return NULL;
     if (length < 1 || length > 64) return NULL;
     if (!keyIdArr || !saltArr) return NULL;
     jsize id_len = (*env)->GetArrayLength(env, keyIdArr);
     jsize salt_len = (*env)->GetArrayLength(env, saltArr);
-    if (id_len < 0 || salt_len < 0 || (id_len + salt_len) > 4096) return NULL;    unsigned char *info = (unsigned char*)malloc((size_t)(id_len + salt_len) > 0 ? (size_t)(id_len + salt_len) : 1);
+    if (id_len < 0 || salt_len < 0 || id_len > 4096 || salt_len > 4096 || id_len > 4096 - salt_len) return NULL;
+    size_t info_len = (size_t)id_len + (size_t)salt_len;
+    unsigned char *info = (unsigned char*)malloc(info_len != 0u ? info_len : 1u);
     if (!info) return NULL;
     if (id_len > 0) (*env)->GetByteArrayRegion(env, keyIdArr, 0, id_len, (jbyte*)info);
     if (salt_len > 0) (*env)->GetByteArrayRegion(env, saltArr, 0, salt_len, (jbyte*)(info + id_len));
+    if ((*env)->ExceptionCheck(env)) {
+        js_vbc4_wipe_volatile(info, info_len);
+        free(info);
+        return NULL;
+    }
     unsigned char derived[64];
-    int ok = js_hkdf_sha256_class_key(info, (int)(id_len + salt_len), derived, (int)length);
-    js_vbc4_wipe_volatile(info, (size_t)(id_len + salt_len));
+    int ok = js_hkdf_sha256_class_key(info, (int)info_len, derived, (int)length);
+    js_vbc4_wipe_volatile(info, info_len);
     free(info);
     if (!ok) { js_vbc4_wipe_volatile(derived, sizeof(derived)); return NULL; }
     jbyteArray out = (*env)->NewByteArray(env, length);
     if (out) (*env)->SetByteArrayRegion(env, out, 0, length, (jbyte*)derived);
     js_vbc4_wipe_volatile(derived, sizeof(derived));
     return out;
+}
+
+JS_LOCAL jbyteArray JNICALL
+jsn_k14(JNIEnv *env, jclass cls, jbyteArray key_id_array, jbyteArray salt_array,
+        jbyteArray nonce_array, jbyteArray ciphertext_array, jbyteArray aad_array,
+        jint key_length)
+{
+    (void)cls;
+    if (!js_vm_sensitive_path_guard(env, (const void*)jsn_k14, 1)) return NULL;
+    if (!env || !key_id_array || !salt_array || !nonce_array || !ciphertext_array || !aad_array) return NULL;
+    if (key_length != 16 && key_length != 32) return NULL;
+    if (!js_runtime_resource_key_slot_ready[JS_RRK_ANCHOR_SLOT]) return NULL;
+
+    jsize key_id_len = (*env)->GetArrayLength(env, key_id_array);
+    jsize salt_len = (*env)->GetArrayLength(env, salt_array);
+    jsize nonce_len = (*env)->GetArrayLength(env, nonce_array);
+    jsize ciphertext_len = (*env)->GetArrayLength(env, ciphertext_array);
+    jsize aad_len = (*env)->GetArrayLength(env, aad_array);
+    if (key_id_len < 0 || salt_len < 0 || nonce_len != 12 || ciphertext_len < 16 ||
+        aad_len < 0 || ciphertext_len > 64 * 1024 * 1024 || aad_len > 1024 * 1024) return NULL;
+    if (key_id_len > 4096 || salt_len > 4096 || key_id_len > 4096 - salt_len) return NULL;
+
+    size_t info_len = (size_t)key_id_len + (size_t)salt_len;
+    unsigned char *info = (unsigned char*)malloc(info_len != 0u ? info_len : 1u);
+    unsigned char nonce[12] = {0};
+    unsigned char *ciphertext = (unsigned char*)malloc((size_t)ciphertext_len);
+    unsigned char *aad = (unsigned char*)malloc((size_t)aad_len != 0u ? (size_t)aad_len : 1u);
+    unsigned char derived[32] = {0};
+    size_t plain_len = (size_t)ciphertext_len - 16u;
+    unsigned char *plain = plain_len != 0u ? (unsigned char*)malloc(plain_len) : NULL;
+    jbyteArray result = NULL;
+    int ok = 0;
+
+    if (!info || !ciphertext || !aad || (plain_len != 0u && !plain)) goto cleanup;
+    if (key_id_len > 0) (*env)->GetByteArrayRegion(env, key_id_array, 0, key_id_len, (jbyte*)info);
+    if (salt_len > 0) (*env)->GetByteArrayRegion(env, salt_array, 0, salt_len, (jbyte*)(info + key_id_len));
+    (*env)->GetByteArrayRegion(env, nonce_array, 0, nonce_len, (jbyte*)nonce);
+    (*env)->GetByteArrayRegion(env, ciphertext_array, 0, ciphertext_len, (jbyte*)ciphertext);
+    if (aad_len > 0) (*env)->GetByteArrayRegion(env, aad_array, 0, aad_len, (jbyte*)aad);
+    if ((*env)->ExceptionCheck(env)) goto cleanup;
+
+    if (!js_hkdf_sha256_class_key(info, (int)info_len, derived, key_length)) goto cleanup;
+    if (!js_aes_gcm_decrypt(derived, (size_t)key_length, nonce, aad, (size_t)aad_len,
+                            ciphertext, (size_t)ciphertext_len, plain)) {
+        js_vm_throw_new(env, "java/lang/SecurityException", "encrypted class authentication failed");
+        goto cleanup;
+    }
+    result = (*env)->NewByteArray(env, (jsize)plain_len);
+    if (!result) goto cleanup;
+    if (plain_len > 0u) (*env)->SetByteArrayRegion(env, result, 0, (jsize)plain_len, (const jbyte*)plain);
+    if ((*env)->ExceptionCheck(env)) {
+        result = NULL;
+        goto cleanup;
+    }
+    ok = 1;
+
+cleanup:
+    if (info) { js_vbc4_wipe_volatile(info, info_len); free(info); }
+    js_vbc4_wipe_volatile(nonce, sizeof(nonce));
+    if (ciphertext) { js_vbc4_wipe_volatile(ciphertext, (size_t)ciphertext_len); free(ciphertext); }
+    if (aad) { js_vbc4_wipe_volatile(aad, (size_t)aad_len); free(aad); }
+    js_vbc4_wipe_volatile(derived, sizeof(derived));
+    if (plain) { js_vbc4_wipe_volatile(plain, plain_len); free(plain); }
+    return ok ? result : NULL;
 }
 
 /* Fill a share with per-process entropy so a memory dump of any single share
@@ -6830,6 +7141,7 @@ JS_LOCAL jboolean JNICALL
 jsn_k7(JNIEnv *env, jclass cls, jbyteArray material)
 {
     (void)cls;
+    if (!js_vm_sensitive_path_guard(env, (const void*)jsn_k7, 1)) return JNI_FALSE;
     if (!env || !material || js_runtime_boot_material_state != 0) return JNI_FALSE;
     jsize length = (*env)->GetArrayLength(env, material);
     if (length < (jsize)(4 + 64 + 64) ||
@@ -6845,7 +7157,7 @@ jsn_k7(JNIEnv *env, jclass cls, jbyteArray material)
     int partition_count = raw[1] & 0xFF;
     int slot_count = raw[2] & 0xFF;
     int binding_count = raw[3] & 0xFF;
-    int valid = raw[0] == 2 && partition_count >= 1 && partition_count <= JS_RRK_RESOURCE_SLOTS &&
+    int valid = (raw[0] == 2 || raw[0] == 3) && partition_count >= 1 && partition_count <= JS_RRK_RESOURCE_SLOTS &&
         slot_count == partition_count + 1 && binding_count >= 0 && binding_count <= 4 &&
         length == (jsize)(4 + 64 + slot_count * 32 + binding_count * 33);
     if (valid) {
@@ -6879,6 +7191,15 @@ jsn_k7(JNIEnv *env, jclass cls, jbyteArray material)
         js_runtime_resource_key_slot_ready[JS_RRK_ANCHOR_SLOT] = 1;
         js_runtime_resource_partition_count = partition_count;
         js_runtime_boot_material_state = 2;
+        /* JNI_OnLoad necessarily runs before this authenticated boot envelope
+         * is installed.  Retry the optional helper registrations now that the
+         * anchor slot is live, so keyed class/method bindings (notably the
+         * string-encryption helper) resolve to their final renamed members. */
+        if (!js_jni_register_deferred_natives(env)) {
+            js_runtime_boot_material_clear();
+            js_runtime_boot_material_state = -1;
+            valid = 0;
+        }
     } else {
         js_runtime_boot_material_clear();
     }
@@ -6897,6 +7218,42 @@ jsn_k11(JNIEnv *env, jclass cls)
         if (!js_runtime_resource_key_slot_ready[slot]) return JNI_FALSE;
     }
     return JNI_TRUE;
+}
+
+JS_LOCAL jbyteArray JNICALL
+jsn_k13(JNIEnv *env, jclass cls, jbyteArray encoded)
+{
+    (void)cls;
+    if (!env || !encoded || js_runtime_boot_material_state != 2) return NULL;
+    jsize raw_len = (*env)->GetArrayLength(env, encoded);
+    if (raw_len <= 0 || raw_len > 64 * 1024 * 1024) return NULL;
+    unsigned char *raw = (unsigned char*)malloc((size_t)raw_len);
+    if (!raw) return NULL;
+    (*env)->GetByteArrayRegion(env, encoded, 0, raw_len, (jbyte*)raw);
+    if ((*env)->ExceptionCheck(env)) {
+        js_vbc4_wipe_volatile(raw, (size_t)raw_len);
+        free(raw);
+        return NULL;
+    }
+    int plain_len = 0;
+    unsigned char *plain = js_runtime_resource_decode_owned(raw, (int)raw_len, &plain_len);
+    js_vbc4_wipe_volatile(raw, (size_t)raw_len);
+    free(raw);
+    if (!plain || plain_len < 0) {
+        if (plain) {
+            js_vbc4_wipe_volatile(plain, (size_t)(plain_len > 0 ? plain_len : 0));
+            free(plain);
+        }
+        return NULL;
+    }
+    jbyteArray result = (*env)->NewByteArray(env, (jsize)plain_len);
+    if (result && plain_len > 0) {
+        (*env)->SetByteArrayRegion(env, result, 0, (jsize)plain_len, (const jbyte*)plain);
+    }
+    js_vbc4_wipe_volatile(plain, (size_t)plain_len);
+    free(plain);
+    if ((*env)->ExceptionCheck(env)) return NULL;
+    return result;
 }
 
 JS_LOCAL void JNICALL
@@ -7187,15 +7544,60 @@ jsn_k9(JNIEnv *env, jclass cls, jbyteArray preload_index, jbyteArray commitments
     js_vbc4_wipe_volatile(index_bytes, (size_t)index_len);
     free(index_bytes);
 }
+/* Keyed binding identity: HMAC-SHA256(anchorKey, "jsb1" || value)[0..8] as 16
+ * lowercase hex chars. Mirrors the Kotlin build-time and Java runtime mirrors;
+ * without the resident anchor key the identity cannot be recomputed statically. */
+static int js_sealed_binding_key(const char *value, size_t value_len, char out_hex[17]) {
+    if (!value || !js_runtime_resource_key_slot_ready[JS_RRK_ANCHOR_SLOT]) return 0;
+    static const unsigned char domain[] = "jsb1";
+    static const char hexdig[] = "0123456789abcdef";
+    unsigned char root[32];
+    unsigned char digest[32];
+    const unsigned char *parts[2];
+    int lens[2];
+    parts[0] = domain;
+    lens[0] = (int)(sizeof(domain) - 1);
+    parts[1] = (const unsigned char*)value;
+    lens[1] = (int)value_len;
+    js_rrk_xor_assemble(&js_runtime_resource_key_shares[JS_RRK_ANCHOR_SLOT][0][0], JS_RRK_SHARE_COUNT, root);
+    js_hmac_sha256_with_key(root, 32, parts, lens, 2, digest);
+    js_vbc4_wipe_volatile(root, sizeof(root));
+    for (int i = 0; i < 8; i++) {
+        out_hex[i * 2] = hexdig[(digest[i] >> 4) & 0xF];
+        out_hex[i * 2 + 1] = hexdig[digest[i] & 0xF];
+    }
+    out_hex[16] = 0;
+    js_vbc4_wipe_volatile(digest, sizeof(digest));
+    return 1;
+}
+
+JS_LOCAL jstring JNICALL jsn_k15(JNIEnv *env, jclass cls, jbyteArray value_array) {
+    (void)cls;
+    if (!js_vm_sensitive_path_guard(env, (const void*)jsn_k15, 1)) return NULL;
+    if (!env || !value_array) return NULL;
+    jsize value_len = (*env)->GetArrayLength(env, value_array);
+    if (value_len < 1 || value_len > 1024 * 1024) return NULL;
+    unsigned char *value = (unsigned char*)malloc((size_t)value_len);
+    char out_hex[17] = {0};
+    jstring result = NULL;
+    if (!value) return NULL;
+    (*env)->GetByteArrayRegion(env, value_array, 0, value_len, (jbyte*)value);
+    if ((*env)->ExceptionCheck(env)) goto cleanup;
+    if (!js_sealed_binding_key((const char*)value, (size_t)value_len, out_hex)) {
+        js_vm_throw_new(env, "java/lang/SecurityException", "native binding key unavailable");
+        goto cleanup;
+    }
+    result = (*env)->NewStringUTF(env, out_hex);
+
+cleanup:
+    js_vbc4_wipe_volatile(value, (size_t)value_len);
+    free(value);
+    js_vbc4_wipe_volatile(out_hex, sizeof(out_hex));
+    return result;
+}
+
 JS_HIDDEN char* js_lookup_bound_class(JNIEnv *env, const char *original) {
     if (!original) return NULL;
-    unsigned long long original_hash = 0xcbf29ce484222325ULL;
-    for (const unsigned char *p = (const unsigned char*)original; *p; ++p) {
-        original_hash ^= (unsigned long long)(*p);
-        original_hash *= 0x100000001b3ULL;
-    }
-    char original_key[17];
-    snprintf(original_key, sizeof(original_key), "%016llx", original_hash);
     char *loader_owner = js_helper_owner("Jni", "Micro", "kernel", "Helper");
     int is_loader_owner = loader_owner && !strcmp(original, loader_owner);
     free(loader_owner);
@@ -7204,6 +7606,8 @@ JS_HIDDEN char* js_lookup_bound_class(JNIEnv *env, const char *original) {
         if (loader && loader[0]) return loader;
         free(loader);
     }
+    char original_key[17];
+    if (!js_sealed_binding_key(original, strlen(original), original_key)) return NULL;
     char *bindings = sys_prop(env, "j.b");
     if (!bindings) return NULL;
     size_t original_len = strlen(original_key);
@@ -7229,14 +7633,15 @@ JS_HIDDEN char* js_lookup_bound_class(JNIEnv *env, const char *original) {
 }
 JS_HIDDEN char* js_lookup_bound_method(JNIEnv *env, const char *original_class, const char *method_name, const char *signature) {
     if (!original_class || !method_name || !signature) return NULL;
-    unsigned long long key_hash = 0xcbf29ce484222325ULL;
-    for (const unsigned char *p = (const unsigned char*)original_class; *p; ++p) { key_hash ^= (unsigned long long)(*p); key_hash *= 0x100000001b3ULL; }
-    key_hash ^= (unsigned long long)'#'; key_hash *= 0x100000001b3ULL;
-    for (const unsigned char *p = (const unsigned char*)method_name; *p; ++p) { key_hash ^= (unsigned long long)(*p); key_hash *= 0x100000001b3ULL; }
-    key_hash ^= (unsigned long long)'#'; key_hash *= 0x100000001b3ULL;
-    for (const unsigned char *p = (const unsigned char*)signature; *p; ++p) { key_hash ^= (unsigned long long)(*p); key_hash *= 0x100000001b3ULL; }
+    size_t material_len = strlen(original_class) + 1 + strlen(method_name) + 1 + strlen(signature);
+    char *material = (char*)malloc(material_len + 1);
+    if (!material) return NULL;
+    snprintf(material, material_len + 1, "%s#%s#%s", original_class, method_name, signature);
     char lookup_key[17];
-    snprintf(lookup_key, sizeof(lookup_key), "%016llx", key_hash);
+    int keyed = js_sealed_binding_key(material, material_len, lookup_key);
+    js_vbc4_wipe_volatile(material, material_len + 1);
+    free(material);
+    if (!keyed) return NULL;
     char *bindings = sys_prop(env, "j.m");
     if (!bindings) return NULL;
     size_t key_len = strlen(lookup_key);
@@ -7260,6 +7665,42 @@ JS_HIDDEN char* js_lookup_bound_method(JNIEnv *env, const char *original_class, 
     free(bindings);
     return NULL;
 }
+
+JS_HIDDEN char* js_lookup_bound_field(JNIEnv *env, const char *original_class, const char *field_name, const char *descriptor) {
+    if (!original_class || !field_name || !descriptor) return NULL;
+    size_t material_len = strlen(original_class) + 1 + strlen(field_name) + 1 + strlen(descriptor);
+    char *material = (char*)malloc(material_len + 1);
+    if (!material) return NULL;
+    snprintf(material, material_len + 1, "%s#%s#%s", original_class, field_name, descriptor);
+    char lookup_key[17];
+    int keyed = js_sealed_binding_key(material, material_len, lookup_key);
+    js_vbc4_wipe_volatile(material, material_len + 1);
+    free(material);
+    if (!keyed) return NULL;
+    char *bindings = sys_prop(env, "j.f");
+    if (!bindings) return NULL;
+    size_t key_len = strlen(lookup_key);
+    char *cursor = bindings;
+    while (*cursor) {
+        char *line = cursor;
+        char *eol = strchr(cursor, '\n');
+        if (eol) *eol = 0;
+        size_t line_len = strlen(line);
+        while (line_len > 0 && (line[line_len - 1] == '\r' || line[line_len - 1] == ' ' || line[line_len - 1] == '\t')) {
+            line[--line_len] = 0;
+        }
+        if (line_len > key_len + 1 && !strncmp(line, lookup_key, key_len) && line[key_len] == '=') {
+            char *mapped = js_strdup(line + key_len + 1);
+            free(bindings);
+            return mapped;
+        }
+        if (!eol) break;
+        cursor = eol + 1;
+    }
+    free(bindings);
+    return NULL;
+}
+
 JS_HIDDEN void js_vm_mark_hot_integrity_baseline_clean(void) {
     js_vm_hot_integrity_baseline_clean = js_vm_hot_integrity_clean();
 }

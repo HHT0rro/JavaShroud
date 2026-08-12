@@ -16,6 +16,7 @@ set "SRC7=%SCRIPT_DIR%js_vm_core.c"
 set "SRC8=%SCRIPT_DIR%js_vm_resource.c"
 set "SRC9=%SCRIPT_DIR%js_vm_symbol.c"
 set "SRC10=%SCRIPT_DIR%js_jni_runtime.c"
+set "SRC11=%SCRIPT_DIR%js_machine_id.c"
 set "BUILD_DIR=%SCRIPT_DIR%build"
 set "ZSTD_DIR=%SCRIPT_DIR%zstd"
 
@@ -50,7 +51,7 @@ if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 
 echo [1/2] Compiling modular native kernel for Windows x64...
 call "%VCVARSALL%" x64 >nul
-cl /nologo /O2 /LD /DZSTDLIB_VISIBLE= /DZSTDERRORLIB_VISIBLE= /DXXH_PUBLIC_API= /Fe:"%BUILD_DIR%\js_kernel_windows-x64.dll" "%SRC1%" "%SRC2%" "%SRC3%" "%SRC4%" "%SRC5%" "%SRC6%" "%SRC7%" "%SRC8%" "%SRC9%" "%SRC10%" "%ZSTD_DIR%\common\debug.c" "%ZSTD_DIR%\common\entropy_common.c" "%ZSTD_DIR%\common\error_private.c" "%ZSTD_DIR%\common\fse_decompress.c" "%ZSTD_DIR%\common\xxhash.c" "%ZSTD_DIR%\common\zstd_common.c" "%ZSTD_DIR%\decompress\huf_decompress.c" "%ZSTD_DIR%\decompress\zstd_ddict.c" "%ZSTD_DIR%\decompress\zstd_decompress.c" "%ZSTD_DIR%\decompress\zstd_decompress_block.c" /I"%JAVA_HOME%\include" /I"%JAVA_HOME%\include\win32" /I"%ZSTD_DIR%" /I"%ZSTD_DIR%\common" /I"%ZSTD_DIR%\decompress" /link /INCREMENTAL:NO /EXPORT:JNI_OnLoad /EXPORT:JNI_OnUnload
+cl /nologo /O2 /LD /DZSTDLIB_VISIBLE= /DZSTDERRORLIB_VISIBLE= /DXXH_PUBLIC_API= /Fe:"%BUILD_DIR%\js_kernel_windows-x64.dll" "%SRC1%" "%SRC2%" "%SRC3%" "%SRC4%" "%SRC5%" "%SRC6%" "%SRC7%" "%SRC8%" "%SRC9%" "%SRC10%" "%SRC11%" "%ZSTD_DIR%\common\debug.c" "%ZSTD_DIR%\common\entropy_common.c" "%ZSTD_DIR%\common\error_private.c" "%ZSTD_DIR%\common\fse_decompress.c" "%ZSTD_DIR%\common\xxhash.c" "%ZSTD_DIR%\common\zstd_common.c" "%ZSTD_DIR%\decompress\huf_decompress.c" "%ZSTD_DIR%\decompress\zstd_ddict.c" "%ZSTD_DIR%\decompress\zstd_decompress.c" "%ZSTD_DIR%\decompress\zstd_decompress_block.c" /I"%JAVA_HOME%\include" /I"%JAVA_HOME%\include\win32" /I"%ZSTD_DIR%" /I"%ZSTD_DIR%\common" /I"%ZSTD_DIR%\decompress" /link /INCREMENTAL:NO /EXPORT:JNI_OnLoad /EXPORT:JNI_OnUnload
 if errorlevel 1 (
   echo Compilation failed.
   exit /b 1

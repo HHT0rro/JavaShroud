@@ -222,6 +222,11 @@ internal class VmBytecodeSerializer(
     internal fun productionEvidence(): ProductionMethodEvidence = finalProductionEvidence
         ?: error("VBC4 production evidence requested before serialization completed")
 
+    internal fun logicalProgramForTest(metadataCpIndex: Int = 0): VmLogicalProgram =
+        Vbc4CryptoScope.use(vbc4MasterKey, vbc4LayoutDigest) {
+            lowerToLogicalProgram(metadataCpIndex)
+        }
+
     fun serialize(): ByteArray {
         check(!sensitiveMaterialCleared) { "VBC4 serializer is one-shot" }
         return try {
@@ -445,16 +450,19 @@ internal class VmBytecodeSerializer(
             val rows = mutableListOf<VmRegisterInstruction>()
             for (group in blockGroups) {
                 val maskIndex = globalMaskIndex
-                rows.add(
-                    VmRegisterInstruction(
-                        opcode = group.maskedOpcodeBase xor vbc4OpcodeMask(effectiveBuildSeed, maskIndex),
-                        flags = group.primaryFlags,
-                        dst = group.primaryDst,
-                        srcA = group.primarySrcA,
-                        srcB = group.primarySrcB,
-                        operand = group.primaryOperand,
-                    ),
+                val primary = VmRegisterInstruction(
+                    opcode = group.maskedOpcodeBase xor vbc4OpcodeMask(effectiveBuildSeed, maskIndex),
+                    flags = group.primaryFlags,
+                    dst = group.primaryDst,
+                    srcA = group.primarySrcA,
+                    srcB = group.primarySrcB,
+                    operand = group.primaryOperand,
                 )
+                if (semanticSplitEligible(group)) {
+                    rows.addAll(semanticSplitRows(primary, maskIndex, blockId))
+                } else {
+                    rows.add(primary)
+                }
                 rows.addAll(group.continuations)
                 globalMaskIndex += group.maskSlots
             }
@@ -468,6 +476,48 @@ internal class VmBytecodeSerializer(
             registerCount = instructions.maxOfOrNull { it.operands.size }?.coerceAtLeast(1) ?: 1,
             blocks = blocks,
         )
+    }
+
+    private fun semanticSplitEligible(group: LogicalGroup): Boolean =
+        serializationBuildContext.maxHardening && group.maskedOpcodeBase != VBC4_REG_META &&
+            group.maskSlots == 1
+
+    /**
+     * Split one executable row into an authenticated head/share pair. Neither
+     * stored row contains the real opcode, logical PC or operand by itself; the
+     * generated native parser recombines the pair before canonical lowering.
+     */
+    private fun semanticSplitRows(primary: VmRegisterInstruction, logicalIndex: Int, blockId: Int): List<VmRegisterInstruction> {
+        val opcodeShare = (structureSelector("semantic-opcode-share", logicalIndex, blockId, primary.opcode) and 0xFFFF) or 1
+        val sourceShare = (structureSelector("semantic-source-share", logicalIndex, blockId, primary.srcA) and 0xFFFF) or 1
+        val operandShare = structureSelector("semantic-operand-share", logicalIndex, blockId, primary.operand) xor 0x6D2B79F5
+        val checksum = semanticShareChecksum(logicalIndex, opcodeShare, sourceShare, operandShare)
+        return listOf(
+            primary.copy(
+                opcode = primary.opcode xor opcodeShare,
+                flags = primary.flags or VBC4_REG_FLAG_SEMANTIC_SPLIT,
+                srcA = primary.srcA xor sourceShare,
+                operand = primary.operand xor operandShare,
+            ),
+            VmRegisterInstruction(
+                opcode = VBC4_REG_SEMANTIC_SHARE,
+                flags = VBC4_REG_FLAG_SEMANTIC_SHARE,
+                dst = opcodeShare,
+                srcA = sourceShare,
+                srcB = checksum,
+                operand = operandShare,
+            ),
+        )
+    }
+
+    private fun semanticShareChecksum(logicalIndex: Int, opcodeShare: Int, sourceShare: Int, operandShare: Int): Int {
+        var mixed = effectiveBuildSeed xor (logicalIndex * 0x45D9F3B) xor
+            (opcodeShare * 0x7FEB352D) xor (sourceShare * 0x27D4EB2D) xor operandShare
+        mixed = mixed xor (mixed ushr 16)
+        mixed *= 0x7FEB352D
+        mixed = mixed xor (mixed ushr 13)
+        mixed *= 0x846CA68B.toInt()
+        return (mixed xor (mixed ushr 16)) and 0xFFFF
     }
 
     private data class LogicalGroup(
@@ -820,18 +870,28 @@ internal class VmBytecodeSerializer(
         if (cpIndexMap.isEmpty()) return program
         var maskIndex = 0
         val remappedBlocks = program.blocks.map { block ->
-            val remappedInsns = block.instructions.map { insn ->
-                val decodedOpcode = if ((insn.flags and VBC4_REG_FLAG_CONTINUATION) == 0) {
-                    insn.opcode xor vbc4OpcodeMask(effectiveBuildSeed, maskIndex++)
+            val remappedInsns = block.instructions.mapIndexed { rowIndex, insn ->
+                val semanticShare = if ((insn.flags and VBC4_REG_FLAG_SEMANTIC_SPLIT) != 0) {
+                    block.instructions.getOrNull(rowIndex + 1)?.also { share ->
+                        check(share.opcode == VBC4_REG_SEMANTIC_SHARE && share.flags == VBC4_REG_FLAG_SEMANTIC_SHARE) {
+                            "VBC4 semantic split row is missing its authenticated share"
+                        }
+                    }
+                } else {
+                    null
+                }
+                val decodedOpcode = if ((insn.flags and (VBC4_REG_FLAG_CONTINUATION or VBC4_REG_FLAG_SEMANTIC_SHARE)) == 0) {
+                    (insn.opcode xor (semanticShare?.dst ?: 0)) xor vbc4OpcodeMask(effectiveBuildSeed, maskIndex++)
                 } else {
                     insn.opcode
                 }
+                val logicalOperand = insn.operand xor (semanticShare?.operand ?: 0)
                 val newOperand = when {
-                    decodedOpcode == VBC4_REG_META && insn.operand == metadataCpIndex && insn.operand in cpIndexMap.indices -> cpIndexMap[insn.operand]
-                    vbc4OpcodeUsesZeroBasedCpOperand(decodedOpcode) && insn.operand in cpIndexMap.indices -> cpIndexMap[insn.operand]
-                    else -> insn.operand
+                    decodedOpcode == VBC4_REG_META && logicalOperand == metadataCpIndex && logicalOperand in cpIndexMap.indices -> cpIndexMap[logicalOperand]
+                    vbc4OpcodeUsesZeroBasedCpOperand(decodedOpcode) && logicalOperand in cpIndexMap.indices -> cpIndexMap[logicalOperand]
+                    else -> logicalOperand
                 }
-                insn.copy(operand = newOperand)
+                insn.copy(operand = newOperand xor (semanticShare?.operand ?: 0))
             }
             block.copy(instructions = remappedInsns)
         }
@@ -2118,10 +2178,13 @@ private const val VBC4_STORED_ZSTD_FLAG = 0x80000000.toInt()
 private const val VBC4_REG_FLAG_EXECUTABLE = 0x0001
 private const val VBC4_REG_FLAG_SUPER = 0x0002
 private const val VBC4_REG_FLAG_FOLDED = 0x0004
+private const val VBC4_REG_FLAG_SEMANTIC_SPLIT = 0x0008
+private const val VBC4_REG_FLAG_SEMANTIC_SHARE = 0x4000
 private const val VBC4_REG_FLAG_CONTINUATION = 0x8000
 private const val VBC4_MAX_LOGICAL_BLOCKS = 12
 private const val VBC4_REG_META = 0xFD
 private const val VBC4_REG_OPERAND_CONT = 0xFC
+private const val VBC4_REG_SEMANTIC_SHARE = 0xF7
 private const val VBC4_SUPER_BASE = 0xF8
 private const val VBC4_SUPER_CONST = 0xF8
 private const val VBC4_SUPER_INT_ARITH = 0xF9

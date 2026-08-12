@@ -147,6 +147,24 @@ static jmethodID js_vm_lookup_method_id(JNIEnv *env, jclass cls, const char *nam
     return mid;
 }
 
+static jfieldID js_vm_lookup_field_id(JNIEnv *env, jclass cls, const char *name, const char *desc, int is_static) {
+    if (!env || !cls || !name || !name[0] || !desc || !desc[0]) return NULL;
+    if (strlen(name) > 512u || strlen(desc) > 4096u) return NULL;
+    char *safe_name = js_vm_bounded_lookup_copy(name, 512u);
+    char *safe_desc = js_vm_bounded_lookup_copy(desc, 4096u);
+    if (!safe_name || !safe_desc) {
+        free(safe_name);
+        free(safe_desc);
+        return NULL;
+    }
+    jfieldID fid = is_static ? (*env)->GetStaticFieldID(env, cls, safe_name, safe_desc) : (*env)->GetFieldID(env, cls, safe_name, safe_desc);
+    js_vbc4_wipe_volatile(safe_name, strlen(safe_name));
+    js_vbc4_wipe_volatile(safe_desc, strlen(safe_desc));
+    free(safe_name);
+    free(safe_desc);
+    return fid;
+}
+
 static js_vm_program *js_vm_symbol_owner(js_vm_program *p) {
     return (p && p->symbol_cache_owner) ? p->symbol_cache_owner : p;
 }
@@ -290,9 +308,21 @@ JS_HIDDEN int js_vm_resolve_field_symbol(JNIEnv *env, js_vm_program *p, int cp_i
     }
     jclass cls = js_vm_find_class_name(env, fr.owner);
     if ((*env)->ExceptionCheck(env) || !cls) { js_vm_free_method_ref(&fr); return 0; }
-    jfieldID fid = (symbol_kind == 2) ? (*env)->GetStaticFieldID(env, cls, fr.name, fr.desc) : (*env)->GetFieldID(env, cls, fr.name, fr.desc);
-    if ((*env)->ExceptionCheck(env) || !fid) { js_vm_free_method_ref(&fr); return 0; }
-    int ok = js_vm_symbol_cache_add(env, p, cp_idx, symbol_kind, cls, NULL, fid, (unsigned char)tag, &fr, fr.name, 0, 0) != NULL;
+    char *mapped_field = js_lookup_bound_field(env, fr.owner, fr.name, fr.desc);
+    const char *lookup_name = mapped_field && mapped_field[0] ? mapped_field : fr.name;
+    jfieldID fid = js_vm_lookup_field_id(env, cls, lookup_name, fr.desc, symbol_kind == 2);
+    if (((*env)->ExceptionCheck(env) || !fid) && mapped_field && mapped_field[0] && strcmp(lookup_name, fr.name) != 0) {
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        fid = js_vm_lookup_field_id(env, cls, fr.name, fr.desc, symbol_kind == 2);
+    }
+    if ((*env)->ExceptionCheck(env) || !fid) {
+        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        free(mapped_field);
+        js_vm_free_method_ref(&fr);
+        return 0;
+    }
+    int ok = js_vm_symbol_cache_add(env, p, cp_idx, symbol_kind, cls, NULL, fid, (unsigned char)tag, &fr, lookup_name, 0, 0) != NULL;
+    free(mapped_field);
     js_vm_free_method_ref(&fr);
     return ok;
 }

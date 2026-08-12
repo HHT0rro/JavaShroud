@@ -99,7 +99,7 @@ tasks.named<JavaExec>("run") {
 
 tasks.processResources {
     from(file("src/main/native")) {
-        include("js_kernel.c", "js_helpers.c", "js_native_common.c", "js_native_common.h", "js_crypto.c", "js_crypto.h", "js_antidebug.c", "js_antidebug.h", "js_protected_section.c", "js_protected_section.h", "js_protected_section_linux.ld", "js_vm_core.c", "js_vm_core.h", "js_vm_resource.c", "js_vm_resource.h", "js_vm_symbol.c", "js_vm_symbol.h", "js_vm_internal.h", "js_jni_runtime.c", "js_jni_runtime.h", "native_secrets.inc", "js_shell_stub.c", "js_shell_stub.h", "js_shell_crypto.c", "js_shell_crypto.h", "js_shell_loader.h", "js_shell_loader_pe.c", "js_shell_loader_elf.c", "js_shell_loader_macho.c")
+        include("js_kernel.c", "js_helpers.c", "js_native_common.c", "js_native_common.h", "js_crypto.c", "js_crypto.h", "js_antidebug.c", "js_antidebug.h", "js_protected_section.c", "js_protected_section.h", "js_protected_section_linux.ld", "js_vm_core.c", "js_vm_core.h", "js_vm_resource.c", "js_vm_resource.h", "js_vm_symbol.c", "js_vm_symbol.h", "js_vm_internal.h", "js_jni_runtime.c", "js_jni_runtime.h", "js_machine_id.c", "js_machine_id.h", "native_secrets.inc", "js_shell_stub.c", "js_shell_stub.h", "js_shell_crypto.c", "js_shell_crypto.h", "js_shell_loader.h", "js_shell_loader_pe.c", "js_shell_loader_elf.c", "js_shell_loader_macho.c")
         into("META-INF/native-src")
     }
     from(file("src/main/native/zstd")) {
@@ -149,7 +149,7 @@ tasks.jar {
     // These are used by NativeRecompilationTransforms to generate per-output
     // diversified native libraries when a zig toolchain is available.
     from(file("src/main/native")) {
-        include("js_kernel.c", "js_helpers.c", "js_native_common.c", "js_native_common.h", "js_crypto.c", "js_crypto.h", "js_antidebug.c", "js_antidebug.h", "js_protected_section.c", "js_protected_section.h", "js_protected_section_linux.ld", "js_vm_core.c", "js_vm_core.h", "js_vm_resource.c", "js_vm_resource.h", "js_vm_symbol.c", "js_vm_symbol.h", "js_vm_internal.h", "js_jni_runtime.c", "js_jni_runtime.h", "native_secrets.inc", "js_shell_stub.c", "js_shell_stub.h", "js_shell_crypto.c", "js_shell_crypto.h", "js_shell_loader.h", "js_shell_loader_pe.c", "js_shell_loader_elf.c", "js_shell_loader_macho.c")
+        include("js_kernel.c", "js_helpers.c", "js_native_common.c", "js_native_common.h", "js_crypto.c", "js_crypto.h", "js_antidebug.c", "js_antidebug.h", "js_protected_section.c", "js_protected_section.h", "js_protected_section_linux.ld", "js_vm_core.c", "js_vm_core.h", "js_vm_resource.c", "js_vm_resource.h", "js_vm_symbol.c", "js_vm_symbol.h", "js_vm_internal.h", "js_jni_runtime.c", "js_jni_runtime.h", "js_machine_id.c", "js_machine_id.h", "native_secrets.inc", "js_shell_stub.c", "js_shell_stub.h", "js_shell_crypto.c", "js_shell_crypto.h", "js_shell_loader.h", "js_shell_loader_pe.c", "js_shell_loader_elf.c", "js_shell_loader_macho.c")
         into("META-INF/native-src")
     }
     from(file("src/main/native/zstd")) {

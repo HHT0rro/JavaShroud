@@ -201,6 +201,9 @@ class ClassEncryptionLoaderRuntimeRegressionTest {
         val helperSource = Files.readString(sourcePath("src/main/java/io/github/hht0rro/javashroud/transforms/protection/ClassEncryptionLoaderHelper.java"))
         assertFalse("AES/CBC/PKCS5Padding" in helperSource, "Class encryption helper must not keep CBC decrypt fallback")
         assertFalse("Legacy direct-key" in helperSource, "Class encryption helper must not accept legacy direct-key metadata")
+        assertFalse("javax.crypto.Cipher" in helperSource, "Class encryption helper must not expose a Java JCA decrypt hook")
+        assertFalse("deriveClassEncryptionKey(" in helperSource, "Class encryption helper must not receive the native-derived class key")
+        assertTrue("decryptClassBytes(" in helperSource, "Class encryption helper must delegate class decryption to the native bridge")
     }
     private fun injectedHelperInternalNames(jarPath: Path): Set<String> {
         val names = mutableSetOf<String>()

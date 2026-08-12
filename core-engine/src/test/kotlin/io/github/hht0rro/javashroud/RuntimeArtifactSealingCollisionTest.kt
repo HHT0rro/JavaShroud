@@ -55,6 +55,55 @@ class RuntimeArtifactSealingCollisionTest {
     }
 
     @Test
+    fun `sealed string helper keeps its CachePolicy nested runtime class`() {
+        val outerName = "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper"
+        val innerName = "$outerName${"$"}CachePolicy"
+        val seed = 0x4A53524CL
+        val outerBytes = loadClassBytes("$outerName.class")
+        val innerBytes = loadClassBytes("$innerName.class")
+        val outerArtifact = ClassArtifact(
+            entryName = "$outerName.class",
+            summary = analyzeClassBytes(outerBytes),
+            bytes = outerBytes,
+        )
+        val innerArtifact = ClassArtifact(
+            entryName = "$innerName.class",
+            summary = analyzeClassBytes(innerBytes),
+            bytes = innerBytes,
+        )
+
+        val sealed = withVbc4BuildContext(defaultVbc4BuildContext()) {
+            RuntimeArtifactSealing.seal(
+                artifact = testAttachedArtifact(
+                    classArtifacts = listOf(outerArtifact, innerArtifact),
+                    jarEntries = listOf(
+                        JarEntryData(outerArtifact.entryName, outerArtifact.bytes),
+                        JarEntryData(innerArtifact.entryName, innerArtifact.bytes),
+                    ),
+                ),
+                seed = seed,
+            )
+        }
+        val sealedOuterName = sealedRuntimeHelperInternalName(outerName, seed)
+        val sealedOuter = sealed.classArtifacts.single { it.summary.internalName == sealedOuterName }
+        val sealedInner = sealed.classArtifacts.single {
+            it.summary.internalName.startsWith("$sealedOuterName${"$"}I")
+        }
+        val sealedEntryNames = sealed.jarEntries.map { it.name }.toSet()
+        val sealedOuterNode = ClassNode()
+        org.objectweb.asm.ClassReader(sealedOuter.bytes).accept(sealedOuterNode, org.objectweb.asm.ClassReader.SKIP_FRAMES)
+
+        assertFalse("$outerName.class" in sealedEntryNames)
+        assertFalse("$innerName.class" in sealedEntryNames)
+        assertTrue("$sealedOuterName.class" in sealedEntryNames)
+        assertTrue("${sealedInner.summary.internalName}.class" in sealedEntryNames)
+        assertTrue(
+            sealedOuterNode.innerClasses.any { it.name == sealedInner.summary.internalName },
+            "The sealed StringEncryptionHelper must retain a link to its sealed CachePolicy nested enum.",
+        )
+    }
+
+    @Test
     fun `sealed runtime helper names avoid existing jar entries during re-obfuscation`() {
         val helperName = "io/github/hht0rro/javashroud/transforms/protection/AntiDumpRuntimeHelper"
         val helperBytes = loadClassBytes("$helperName.class")
@@ -172,6 +221,50 @@ class RuntimeArtifactSealingCollisionTest {
             helperSource.contains("mergeLoaderProperties"),
             "j.l must not become a permanent merged owner list; it is a current-helper dispatch scope.",
         )
+    }
+
+    @Test
+    fun `sealed class encryption manifest commits renamed resources in either entry order`() {
+        val encryptedResource = "__jse/probe/EncryptedTarget.enc"
+        val manifest = "probe.EncryptedTarget\t$encryptedResource\tmetadata\n"
+        val entryOrders = listOf(
+            "manifest-first" to listOf(
+                JarEntryData("__jse/index.tab", manifest.toByteArray(Charsets.UTF_8)),
+                JarEntryData(encryptedResource, byteArrayOf(0x01, 0x02, 0x03)),
+            ),
+            "encrypted-resource-first" to listOf(
+                JarEntryData(encryptedResource, byteArrayOf(0x01, 0x02, 0x03)),
+                JarEntryData("__jse/index.tab", manifest.toByteArray(Charsets.UTF_8)),
+            ),
+        )
+
+        for ((order, entries) in entryOrders) {
+            withVbc4BuildContext(defaultVbc4BuildContext()) {
+                val sealed = RuntimeArtifactSealing.seal(
+                    artifact = testAttachedArtifact(classArtifacts = emptyList(), jarEntries = entries),
+                    seed = 0x4A53524CL,
+                    rewritesVmRuntime = false,
+                )
+                val sealedManifest = sealed.jarEntries.asSequence()
+                    .mapNotNull { entry ->
+                        runCatching { RuntimeResourceCodec.decode(entry.bytes)?.decodeToString() }.getOrNull()
+                    }
+                    .single { it.startsWith("probe.EncryptedTarget\t") }
+                val columns = sealedManifest.trim().split('\t')
+                val sealedResource = columns[1]
+
+                assertEquals("probe.EncryptedTarget", columns[0], "$order must preserve the binary class name")
+                assertTrue(sealedResource != encryptedResource, "$order must rewrite the manifest resource path")
+                assertTrue(
+                    sealed.jarEntries.any { it.name == sealedResource },
+                    "$order manifest must point to a JAR entry that exists after sealing",
+                )
+                assertFalse(
+                    sealed.jarEntries.any { it.name == encryptedResource },
+                    "$order must remove the original encrypted resource path",
+                )
+            }
+        }
     }
 
     private fun loadClassBytes(resourceName: String): ByteArray =

@@ -14,6 +14,9 @@ import org.objectweb.asm.tree.InvokeDynamicInsnNode
 import org.objectweb.asm.tree.LdcInsnNode
 import org.objectweb.asm.tree.MethodInsnNode
 import java.security.SecureRandom
+import java.util.Arrays
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 
 // --- Phase 3: Runtime Defense Transforms ---
 
@@ -157,6 +160,8 @@ fun applyEnvironmentBoundKeys(
     val bindingSource = (params["bindingSource"] as? String) ?: "jvm-params"
     val supportedBindingSources = setOf("hardware-id", "jvm-params", "certificate-fingerprint", "combined")
     require(bindingSource in supportedBindingSources) { "environment-bound-keys bindingSource '$bindingSource' is not supported; supported values: ${supportedBindingSources.joinToString("", "")}" }
+    val expectedFingerprint = (params["expectedFingerprint"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
+    val bindBootSecret = (params["bindBootSecret"] as? Boolean) ?: false
     val seed = (params["seed"] as? Int)?.toLong() ?: (params["seed"] as? Long)
     val random = seed?.let { SecureRandom(it.toString().toByteArray()) } ?: SecureRandom()
 
@@ -164,7 +169,13 @@ fun applyEnvironmentBoundKeys(
     // Generate salt and derive expected key at obfuscation time using real KDF
     val saltBytes = ByteArray(16).also { random.nextBytes(it) }
     val saltB64 = java.util.Base64.getEncoder().encodeToString(saltBytes)
-    val expectedKey = deriveEnvironmentBindingKeyFallback(bindingSource, saltB64)
+    if (bindingSource == "hardware-id" && expectedFingerprint == null) {
+        System.err.println("[JavaShroud] warning: environment-bound-keys bindingSource=hardware-id without expectedFingerprint; verification will use the current build host fingerprint and may fail at runtime")
+    }
+    if (bindBootSecret && expectedFingerprint == null) {
+        throw IllegalArgumentException("environment-bound-keys bindBootSecret=true requires expectedFingerprint")
+    }
+    val expectedKey = deriveEnvironmentBindingKeyFallback(bindingSource, saltB64, expectedFingerprint)
 
     var classCount = 0
 
@@ -188,7 +199,7 @@ fun applyEnvironmentBoundKeys(
                 return object : MethodVisitor(Opcodes.ASM9, superMv) {
                     override fun visitInsn(opcode: Int) {
                         if (opcode == Opcodes.RETURN) {
-                            emitEnvironmentBindingCheck(this, expectedKey, bindingSource, saltB64)
+                            emitEnvironmentBindingCheck(this, expectedKey, bindingSource, saltB64, expectedFingerprint)
                             classModified = true
                         }
                         super.visitInsn(opcode)
@@ -200,7 +211,7 @@ fun applyEnvironmentBoundKeys(
                 if (!hasClinit) {
                     val mv = super.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null)
                     mv.visitCode()
-                    emitEnvironmentBindingCheck(mv, expectedKey, bindingSource, saltB64)
+                    emitEnvironmentBindingCheck(mv, expectedKey, bindingSource, saltB64, expectedFingerprint)
                     mv.visitInsn(Opcodes.RETURN)
                     mv.visitMaxs(3, 0)
                     mv.visitEnd()
@@ -227,25 +238,38 @@ fun applyEnvironmentBoundKeys(
     )
 }
 
-private fun deriveEnvironmentBindingKeyFallback(bindingSource: String, saltB64: String): String {
-    val material = "envkey:$bindingSource:$saltB64".toByteArray(Charsets.UTF_8)
-    var hash = 0x811c9dc5.toInt()
-    for (byte in material) {
-        hash = hash xor (byte.toInt() and 0xFF)
-        hash *= 0x01000193
+private fun deriveEnvironmentBindingKeyFallback(bindingSource: String, saltB64: String, expectedFingerprint: String?): String {
+    // Keyed environment token: HMAC-SHA256(anchorKey, "envk1" || material)[0..4].
+    // The expected token can no longer be recomputed from the artifact alone.
+    // When expectedFingerprint is supplied, material includes it so the token is
+    // bound to a specific machine fingerprint.
+    val materialBuilder = StringBuilder("envkey:").append(bindingSource).append(':').append(saltB64)
+    if (expectedFingerprint != null) {
+        materialBuilder.append(':').append(expectedFingerprint)
     }
-    return hash.toUInt().toString(16).padStart(8, '0')
+    val material = materialBuilder.toString().toByteArray(Charsets.UTF_8)
+    val key = requireVbc4BuildContext().runtimeKeyPartitions.copyAnchorKey()
+    return try {
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(key, "HmacSHA256"))
+        mac.update("envk1".toByteArray(Charsets.US_ASCII))
+        val digest = mac.doFinal(material)
+        digest.copyOfRange(0, 4).joinToString("") { "%02x".format(it) }
+    } finally {
+        Arrays.fill(key, 0)
+    }
 }
 
-private fun emitEnvironmentBindingCheck(mv: MethodVisitor, expectedKey: String, bindingSource: String, saltB64: String) {
+private fun emitEnvironmentBindingCheck(mv: MethodVisitor, expectedKey: String, bindingSource: String, saltB64: String, expectedFingerprint: String?) {
     mv.visitLdcInsn(expectedKey)
     mv.visitLdcInsn(bindingSource)
     mv.visitLdcInsn(saltB64)
+    mv.visitLdcInsn(expectedFingerprint ?: "")
     mv.visitMethodInsn(
         Opcodes.INVOKESTATIC,
         "io/github/hht0rro/javashroud/transforms/protection/EnvironmentBindingHelper",
         "verifyEnvironment",
-        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
         false,
     )
 }

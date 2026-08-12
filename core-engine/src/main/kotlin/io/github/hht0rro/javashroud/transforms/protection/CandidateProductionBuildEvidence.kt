@@ -220,7 +220,7 @@ internal class CandidateProductionBuildEvidence private constructor(
         fun forConfig(config: ObfuscationConfig, profile: NativeVmBuildProfile): CandidateProductionBuildEvidence {
             val maxLoader = config.passes.any { pass ->
                 pass.id == "jni-microkernel-loader" && pass.enabled &&
-                    pass.params["nativePackingLevel"]?.asText() == "max"
+                    pass.params["nativePackingLevel"]?.asText() in setOf("max", "max-hardening")
             }
             val virtualized = config.passes.any { it.id == "method-virtualization" && it.enabled }
             return CandidateProductionBuildEvidence(maxLoader && virtualized, profile.parserRowProfile)

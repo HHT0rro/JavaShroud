@@ -179,3 +179,153 @@ JS_HIDDEN void js_aes128_encrypt_block(const unsigned char in[16], const unsigne
 }
 
 JS_HIDDEN void js_ctr_inc(unsigned char counter[16]) { for (int i = 15; i >= 0; i--) { counter[i] = (unsigned char)(counter[i] + 1u); if (counter[i] != 0) break; } }
+
+
+static void js_aes256_expand_key(const unsigned char key[32], unsigned char expanded[240]) {
+    int bytes = 32;
+    unsigned char rcon = 0x01u;
+    unsigned char temp[4];
+    memcpy(expanded, key, 32u);
+    while (bytes < 240) {
+        memcpy(temp, expanded + bytes - 4, sizeof(temp));
+        if ((bytes & 31) == 0) {
+            unsigned char first = temp[0];
+            temp[0] = (unsigned char)(JS_AES_SBOX[temp[1]] ^ rcon);
+            temp[1] = JS_AES_SBOX[temp[2]];
+            temp[2] = JS_AES_SBOX[temp[3]];
+            temp[3] = JS_AES_SBOX[first];
+            rcon = js_aes_xtime(rcon);
+        } else if ((bytes & 31) == 16) {
+            for (int i = 0; i < 4; i++) temp[i] = JS_AES_SBOX[temp[i]];
+        }
+        for (int i = 0; i < 4; i++, bytes++) expanded[bytes] = (unsigned char)(expanded[bytes - 32] ^ temp[i]);
+    }
+    js_vbc4_wipe_volatile(temp, sizeof(temp));
+}
+
+static void js_aes256_encrypt_block(const unsigned char in[16], const unsigned char key[32], unsigned char out[16]) {
+    unsigned char state[16], expanded[240];
+    memcpy(state, in, sizeof(state));
+    js_aes256_expand_key(key, expanded);
+    js_aes_add_round_key(state, expanded);
+    for (int round = 1; round <= 14; round++) {
+        js_aes_sub_bytes(state);
+        js_aes_shift_rows(state);
+        if (round != 14) js_aes_mix_columns(state);
+        js_aes_add_round_key(state, expanded + round * 16);
+    }
+    memcpy(out, state, sizeof(state));
+    js_vbc4_wipe_volatile(state, sizeof(state));
+    js_vbc4_wipe_volatile(expanded, sizeof(expanded));
+}
+
+static void js_aes_gcm_encrypt_block(const unsigned char in[16], const unsigned char *key, size_t key_len, unsigned char out[16]) {
+    if (key_len == 16u) js_aes128_encrypt_block(in, key, out);
+    else js_aes256_encrypt_block(in, key, out);
+}
+
+static void js_aes_gcm_inc32(unsigned char counter[16]) {
+    for (int i = 15; i >= 12; i--) if (++counter[i] != 0u) break;
+}
+
+static void js_aes_gcm_multiply(unsigned char value[16], const unsigned char hash_subkey[16]) {
+    unsigned char product[16] = {0};
+    unsigned char factor[16];
+    memcpy(factor, hash_subkey, sizeof(factor));
+    for (unsigned int bit = 0; bit < 128u; bit++) {
+        unsigned char mask = (unsigned char)(0u - ((value[bit / 8u] >> (7u - (bit & 7u))) & 1u));
+        unsigned char lsb = (unsigned char)(factor[15] & 1u);
+        for (unsigned int i = 0; i < 16u; i++) product[i] ^= (unsigned char)(factor[i] & mask);
+        for (int i = 15; i > 0; i--) factor[i] = (unsigned char)((factor[i] >> 1) | (factor[i - 1] << 7));
+        factor[0] = (unsigned char)(factor[0] >> 1);
+        factor[0] ^= (unsigned char)(0xe1u & (unsigned char)(0u - lsb));
+    }
+    memcpy(value, product, sizeof(product));
+    js_vbc4_wipe_volatile(product, sizeof(product));
+    js_vbc4_wipe_volatile(factor, sizeof(factor));
+}
+
+static void js_aes_gcm_hash_block(unsigned char state[16], const unsigned char hash_subkey[16], const unsigned char block[16]) {
+    for (unsigned int i = 0; i < 16u; i++) state[i] ^= block[i];
+    js_aes_gcm_multiply(state, hash_subkey);
+}
+
+static void js_aes_gcm_hash_update(unsigned char state[16], const unsigned char hash_subkey[16], const unsigned char *data, size_t len) {
+    unsigned char partial[16] = {0};
+    while (len >= 16u) {
+        js_aes_gcm_hash_block(state, hash_subkey, data);
+        data += 16u;
+        len -= 16u;
+    }
+    if (len != 0u) {
+        memcpy(partial, data, len);
+        js_aes_gcm_hash_block(state, hash_subkey, partial);
+    }
+    js_vbc4_wipe_volatile(partial, sizeof(partial));
+}
+
+static void js_aes_gcm_store_be64(unsigned char out[8], uint64_t value) {
+    for (unsigned int i = 0; i < 8u; i++) out[7u - i] = (unsigned char)(value >> (i * 8u));
+}
+
+static int js_aes_gcm_consttime_equal(const unsigned char *left, const unsigned char *right, size_t len) {
+    unsigned int diff = 0u;
+    if (!left || !right) return 0;
+    for (size_t i = 0; i < len; i++) diff |= (unsigned int)(left[i] ^ right[i]);
+    return diff == 0u;
+}
+
+JS_HIDDEN int js_aes_gcm_decrypt(
+    const unsigned char *key,
+    size_t key_len,
+    const unsigned char nonce[12],
+    const unsigned char *aad,
+    size_t aad_len,
+    const unsigned char *ciphertext_and_tag,
+    size_t ciphertext_and_tag_len,
+    unsigned char *plain_out
+) {
+    unsigned char hash_subkey[16] = {0}, ghash[16] = {0}, j0[16] = {0}, counter[16] = {0};
+    unsigned char stream[16] = {0}, tag_mask[16] = {0}, calculated_tag[16] = {0}, lengths[16] = {0};
+    size_t ciphertext_len = 0u;
+    int ok = 0;
+    if (!ciphertext_and_tag || ciphertext_and_tag_len < 16u) return 0;
+    ciphertext_len = ciphertext_and_tag_len - 16u;
+    if (!key || (key_len != 16u && key_len != 32u) || !nonce || (!aad && aad_len != 0u) ||
+        (!plain_out && ciphertext_len != 0u)) goto cleanup;
+    if (aad_len > (size_t)(UINT64_MAX / 8u) || ciphertext_len > (size_t)(UINT64_MAX / 8u)) goto cleanup;
+    if ((uint64_t)(ciphertext_len / 16u) + (ciphertext_len % 16u != 0u ? 1u : 0u) > (uint64_t)UINT32_MAX - 1u) goto cleanup;
+
+    memcpy(j0, nonce, 12u);
+    j0[15] = 1u;
+    js_aes_gcm_encrypt_block((const unsigned char[16]){0}, key, key_len, hash_subkey);
+    js_aes_gcm_hash_update(ghash, hash_subkey, aad, aad_len);
+    js_aes_gcm_hash_update(ghash, hash_subkey, ciphertext_and_tag, ciphertext_len);
+    js_aes_gcm_store_be64(lengths, (uint64_t)aad_len * 8u);
+    js_aes_gcm_store_be64(lengths + 8u, (uint64_t)ciphertext_len * 8u);
+    js_aes_gcm_hash_block(ghash, hash_subkey, lengths);
+    js_aes_gcm_encrypt_block(j0, key, key_len, tag_mask);
+    for (unsigned int i = 0; i < 16u; i++) calculated_tag[i] = (unsigned char)(ghash[i] ^ tag_mask[i]);
+    ok = js_aes_gcm_consttime_equal(calculated_tag, ciphertext_and_tag + ciphertext_len, sizeof(calculated_tag));
+    if (!ok) goto cleanup;
+
+    memcpy(counter, j0, sizeof(counter));
+    for (size_t offset = 0u; offset < ciphertext_len; offset += 16u) {
+        size_t take = ciphertext_len - offset < 16u ? ciphertext_len - offset : 16u;
+        js_aes_gcm_inc32(counter);
+        js_aes_gcm_encrypt_block(counter, key, key_len, stream);
+        for (size_t i = 0u; i < take; i++) plain_out[offset + i] = (unsigned char)(ciphertext_and_tag[offset + i] ^ stream[i]);
+    }
+
+cleanup:
+    if (!ok && plain_out && ciphertext_len != 0u) js_vbc4_wipe_volatile(plain_out, ciphertext_len);
+    js_vbc4_wipe_volatile(hash_subkey, sizeof(hash_subkey));
+    js_vbc4_wipe_volatile(ghash, sizeof(ghash));
+    js_vbc4_wipe_volatile(j0, sizeof(j0));
+    js_vbc4_wipe_volatile(counter, sizeof(counter));
+    js_vbc4_wipe_volatile(stream, sizeof(stream));
+    js_vbc4_wipe_volatile(tag_mask, sizeof(tag_mask));
+    js_vbc4_wipe_volatile(calculated_tag, sizeof(calculated_tag));
+    js_vbc4_wipe_volatile(lengths, sizeof(lengths));
+    return ok;
+}

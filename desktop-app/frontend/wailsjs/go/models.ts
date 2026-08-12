@@ -39,6 +39,7 @@ export namespace main {
 	    rules: RuleItem[];
 	    allowOptInPasses: boolean;
 	    allowRedundantPasses: boolean;
+	    allowAnnotationPasses: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new ObfuscationRequest(source);
@@ -52,6 +53,7 @@ export namespace main {
 	        this.rules = this.convertValues(source["rules"], RuleItem);
 	        this.allowOptInPasses = source["allowOptInPasses"];
 	        this.allowRedundantPasses = source["allowRedundantPasses"];
+	        this.allowAnnotationPasses = source["allowAnnotationPasses"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

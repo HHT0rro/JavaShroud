@@ -1,5 +1,6 @@
 package io.github.hht0rro.javashroud.transforms.protection
 
+import java.io.InputStream
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
@@ -53,6 +54,8 @@ object NativeRecompilationTransforms {
         "js_vm_internal.h",
         "js_jni_runtime.c",
         "js_jni_runtime.h",
+        "js_machine_id.c",
+        "js_machine_id.h",
         "native_secrets.inc",
         "js_shell_stub.c",
         "js_shell_stub.h",
@@ -221,9 +224,9 @@ object NativeRecompilationTransforms {
                 vbc4BuildContext = vbc4BuildContext,
                 protectedSectionKey = protectedSectionKey,
                 nativeProtectionLevel = nativeProtectionLevel,
-                nativePackingLevel = nativePackingLevel.name.lowercase(),
+                nativePackingLevel = nativePackingLevel.configValue,
                 nativeShellPackerVersion = NativeKernelShellPacker.PACKER_VERSION,
-                nativeShellPayloadProfile = "${nativePackingLevel.name.lowercase()}-payload-v7-boot-dat-binding-encrypted-header-aesctr-hmac-chunks",
+                nativeShellPayloadProfile = "${nativePackingLevel.configValue}-payload-v7-boot-dat-binding-encrypted-header-aesctr-hmac-chunks",
                 nativeShellLoaderProfile = nativeShellLoaderProfile(platform),
             )
             NativeCompileTask(
@@ -233,7 +236,7 @@ object NativeRecompilationTransforms {
                 outputPath = outputPath,
                 cachePath = nativeArtifactCacheDirectory().resolve("$cacheKey-$outputName"),
                 nativeProtectionLevel = nativeProtectionLevel,
-                nativePackingLevel = nativePackingLevel.name.lowercase(),
+                nativePackingLevel = nativePackingLevel.configValue,
             )
         }
         // Zig's Windows cache has produced intermittent `file_open Unexpected`
@@ -245,7 +248,7 @@ object NativeRecompilationTransforms {
                 // MAX output is encrypted for the current external boot KEK. Reusing a cached
                 // outer library could bind the artifact to an earlier provider secret, so the
                 // seed envelope is always rebuilt even outside production-evidence mode.
-                val forceProductionCompile = task.nativePackingLevel == NativeKernelShellPacker.Level.MAX.name.lowercase()
+                val forceProductionCompile = nativePackingLevel.usesStubShell
                 task to compileOrLoadNativeArtifact(
                     toolchain.zigPath,
                     srcDir,
@@ -301,11 +304,22 @@ object NativeRecompilationTransforms {
                                 report(NativeToolchainProvisioner.ResolutionMessage("info", "Applied standard native shell overlay for ${task.platform}", 94))
                                 shellPacked
                             }
-                            NativeKernelShellPacker.Level.MAX -> {
+                            NativeKernelShellPacker.Level.MAX,
+                            NativeKernelShellPacker.Level.MAX_HARDENING -> {
                                 val bootSecret = vbc4BuildContext.copyBootSecretForBuild()
+                                val bootSidecarBinding = if (nativePackingLevel == NativeKernelShellPacker.Level.MAX_HARDENING) {
+                                    vbc4BuildContext.copyBootSidecarBindingForBuild()
+                                } else {
+                                    ByteArray(32)
+                                }
                                 var bootstrapDigest: ByteArray? = null
                                 try {
-                                    val currentBootstrapDigest = nativeBootstrapIndexDigest(task.platform, task.outputName, vbc4BuildContext)
+                                    val currentBootstrapDigest = nativeBootstrapIndexDigest(
+                                        task.platform,
+                                        task.outputName,
+                                        vbc4BuildContext,
+                                        nativeSourceDigest,
+                                    )
                                     bootstrapDigest = currentBootstrapDigest
                                     val shellKeyMaterial = protectedSectionKey + vbc4BuildContext.runtimeResourceKey + vbc4BuildContext.jarLayoutDigest
                                     val payloadBundle = try {
@@ -317,6 +331,8 @@ object NativeRecompilationTransforms {
                                             keyMaterial = shellKeyMaterial,
                                             bootstrapNativeIndexDigest = currentBootstrapDigest,
                                             bootSecret = bootSecret,
+                                            level = nativePackingLevel,
+                                            bootSidecarBinding = bootSidecarBinding,
                                         )
                                     } finally {
                                         shellKeyMaterial.fill(0)
@@ -336,16 +352,17 @@ object NativeRecompilationTransforms {
                                     } finally {
                                         payloadBundle.wipeSensitive()
                                     }
-                                    report(NativeToolchainProvisioner.ResolutionMessage("info", "Applied max native stub shell for ${task.platform}; inner kernel is carried as authenticated payload", 94))
+                                    report(NativeToolchainProvisioner.ResolutionMessage("info", "Applied ${nativePackingLevel.configValue} native stub shell for ${task.platform}; inner kernel is carried as authenticated payload", 94))
                                     Files.readAllBytes(task.outputPath)
                                 } finally {
                                     bootstrapDigest?.fill(0)
+                                    bootSidecarBinding.fill(0)
                                     bootSecret.fill(0)
                                 }
                             }
                         }
                     }
-                    if (task.nativePackingLevel == NativeKernelShellPacker.Level.MAX.name.lowercase()) {
+                    if (nativePackingLevel.usesStubShell) {
                         recordProductionNativeEvidence(
                             context = vbc4BuildContext,
                             task = task,
@@ -365,7 +382,7 @@ object NativeRecompilationTransforms {
                 } finally {
                     shellBindingCommitment?.fill(0)
                     preSealInner.fill(0)
-                    if (task.nativePackingLevel == NativeKernelShellPacker.Level.MAX.name.lowercase()) {
+                    if (nativePackingLevel.usesStubShell) {
                         compileResult.bytes.fill(0)
                     }
                 }
@@ -386,13 +403,25 @@ object NativeRecompilationTransforms {
     }
 
 
-    private fun nativeBootstrapIndexDigest(platform: String, outputName: String, context: Vbc4BuildContext): ByteArray =
+    internal fun nativeBootstrapIndexDigest(
+        platform: String,
+        outputName: String,
+        context: Vbc4BuildContext,
+        nativeSourceDigest: ByteArray,
+    ): ByteArray =
         MessageDigest.getInstance("SHA-256").apply {
-            updateUtf8("javashroud-native-bootstrap-index-v1")
+            updateUtf8(if (context.maxHardening) "javashroud-native-bootstrap-index-hardening-v2" else "javashroud-native-bootstrap-index-v1")
             updateUtf8(platform)
             updateUtf8(outputName)
             update(context.jarLayoutDigest)
             update(context.runtimeResourceKey)
+            if (context.maxHardening) {
+                val manifest = context.vmManifestProtocol()
+                updateInt(context.nativeVmProfile.authenticatedId)
+                updateUtf8(manifest.magic)
+                updateUtf8(manifest.version)
+                update(nativeSourceDigest)
+            }
         }.digest()
 
     private fun nativeShellLoaderProfile(platform: String): String = when {
@@ -478,7 +507,7 @@ object NativeRecompilationTransforms {
         error("production native function body is truncated: $functionName")
     }
 
-    private data class ZigCompileResult(val success: Boolean, val output: String)
+    internal data class ZigCompileResult(val success: Boolean, val output: String)
 
     private data class NativeArtifactBuildResult(
         val success: Boolean,
@@ -680,6 +709,7 @@ object NativeRecompilationTransforms {
             srcDir.resolve("js_vm_resource.c").toString(),
             srcDir.resolve("js_vm_symbol.c").toString(),
             srcDir.resolve("js_jni_runtime.c").toString(),
+            srcDir.resolve("js_machine_id.c").toString(),
             srcDir.resolve("zstd/common/debug.c").toString(),
             srcDir.resolve("zstd/common/entropy_common.c").toString(),
             srcDir.resolve("zstd/common/error_private.c").toString(),
@@ -700,6 +730,7 @@ object NativeRecompilationTransforms {
         }
         if (zigTarget.contains("windows")) {
             cmd.add("-Wl,--no-entry")
+            cmd.add("-ladvapi32")
         }
         if (zigTarget.contains("linux")) {
             cmd.add("-Wl,-T,${srcDir.resolve("js_protected_section_linux.ld")}")
@@ -709,7 +740,6 @@ object NativeRecompilationTransforms {
         return try {
             val pb = ProcessBuilder(cmd)
             configureZigCache(pb, outputPath)
-            pb.redirectErrorStream(true)
             runZigCompileWithRetry(pb, outputPath)
         } catch (error: Exception) {
             ZigCompileResult(false, error.message ?: error::class.java.simpleName)
@@ -764,19 +794,24 @@ object NativeRecompilationTransforms {
         return try {
             val pb = ProcessBuilder(cmd)
             configureZigCache(pb, outputPath)
-            pb.redirectErrorStream(true)
             runZigCompileWithRetry(pb, outputPath)
         } catch (error: Exception) {
             ZigCompileResult(false, error.message ?: error::class.java.simpleName)
         }
     }
 
-    private fun runZigCompileWithRetry(processBuilder: ProcessBuilder, expectedOutput: Path): ZigCompileResult = synchronized(zigCompileLock) {
+    internal fun runZigCompileWithRetry(
+        processBuilder: ProcessBuilder,
+        expectedOutput: Path,
+        timeoutMs: Long = zigCompileTimeoutMs(),
+    ): ZigCompileResult = synchronized(zigCompileLock) {
+        require(timeoutMs > 0L) { "Zig compile timeout must be positive" }
         var lastResult = ZigCompileResult(false, "Zig compilation did not start")
         val environment = processBuilder.environment()
         val globalCacheBase = environment["ZIG_GLOBAL_CACHE_DIR"]?.let(Path::of)
         val localCacheBase = environment["ZIG_LOCAL_CACHE_DIR"]?.let(Path::of)
         val retryScope = Integer.toUnsignedString(processBuilder.command().hashCode(), 16)
+        processBuilder.redirectErrorStream(false)
         repeat(ZIG_COMPILE_ATTEMPTS) { attempt ->
             if (attempt > 0) {
                 globalCacheBase?.let { environment["ZIG_GLOBAL_CACHE_DIR"] = it.resolve("retry-$retryScope-$attempt").toString() }
@@ -784,9 +819,33 @@ object NativeRecompilationTransforms {
             }
             Files.deleteIfExists(expectedOutput)
             val process = processBuilder.start()
-            val output = process.inputStream.bufferedReader().readText()
-            val exitCode = process.waitFor()
+            val stdout = ZigOutputDrain(process.inputStream, "javashroud-zig-stdout")
+            val stderr = ZigOutputDrain(process.errorStream, "javashroud-zig-stderr")
+            stdout.start()
+            stderr.start()
+            val completed = try {
+                process.waitFor(timeoutMs, TimeUnit.MILLISECONDS)
+            } catch (error: InterruptedException) {
+                Thread.currentThread().interrupt()
+                terminateZigProcessTree(process)
+                val output = collectZigProcessOutput(process, stdout, stderr)
+                return@synchronized ZigCompileResult(
+                    false,
+                    appendZigDiagnostic(output, "Zig compilation was interrupted; terminated process tree."),
+                )
+            }
+            if (!completed) {
+                terminateZigProcessTree(process)
+                val output = collectZigProcessOutput(process, stdout, stderr)
+                return@synchronized ZigCompileResult(
+                    false,
+                    appendZigDiagnostic(output, "Zig compilation timed out after $timeoutMs ms; terminated process tree."),
+                )
+            }
+            val exitCode = process.exitValue()
             val outputPresent = Files.isRegularFile(expectedOutput) && Files.size(expectedOutput) > 0L
+            if (exitCode != 0 || !outputPresent) terminateZigProcessTree(process)
+            val output = collectZigProcessOutput(process, stdout, stderr)
             val outputStatus = "Zig exited successfully but produced no output artifact: $expectedOutput"
             lastResult = ZigCompileResult(
                 success = exitCode == 0 && outputPresent,
@@ -807,6 +866,90 @@ object NativeRecompilationTransforms {
         }
         lastResult
     }
+
+    private class ZigOutputDrain(
+        private val stream: InputStream,
+        threadName: String,
+    ) {
+        @Volatile
+        private var content = ""
+
+        private val worker = Thread(
+            { content = runCatching { stream.bufferedReader().use { it.readText() } }.getOrDefault("") },
+            threadName,
+        ).apply { isDaemon = true }
+
+        fun start() = worker.start()
+
+        fun await(timeoutMs: Long): Boolean = try {
+            worker.join(timeoutMs)
+            !worker.isAlive
+        } catch (error: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+
+        fun close() {
+            runCatching { stream.close() }
+        }
+
+        fun output(): String = content
+    }
+
+    private fun collectZigProcessOutput(process: Process, stdout: ZigOutputDrain, stderr: ZigOutputDrain): String {
+        val stdoutFinished = stdout.await(ZIG_OUTPUT_DRAIN_TIMEOUT_MS)
+        val stderrFinished = stderr.await(ZIG_OUTPUT_DRAIN_TIMEOUT_MS)
+        if (!stdoutFinished || !stderrFinished) {
+            terminateZigProcessTree(process)
+            stdout.close()
+            stderr.close()
+            stdout.await(ZIG_OUTPUT_DRAIN_TIMEOUT_MS)
+            stderr.await(ZIG_OUTPUT_DRAIN_TIMEOUT_MS)
+        }
+        return listOf(stdout.output(), stderr.output()).filter { it.isNotBlank() }.joinToString("\n")
+    }
+
+    private fun appendZigDiagnostic(output: String, diagnostic: String): String =
+        if (output.isBlank()) diagnostic else "$output\n$diagnostic"
+
+    private fun terminateZigProcessTree(process: Process) {
+        if (isWindowsHost()) {
+            runCatching {
+                val killer = ProcessBuilder("taskkill", "/PID", process.pid().toString(), "/T", "/F")
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                    .start()
+                try {
+                    if (!killer.waitFor(ZIG_PROCESS_CLEANUP_TIMEOUT_MS, TimeUnit.MILLISECONDS)) killer.destroyForcibly()
+                } catch (error: InterruptedException) {
+                    killer.destroyForcibly()
+                    Thread.currentThread().interrupt()
+                }
+            }
+        }
+        runCatching {
+            process.toHandle().descendants().use { descendants ->
+                descendants.forEach { handle -> if (handle.isAlive) handle.destroyForcibly() }
+            }
+        }
+        if (process.isAlive) {
+            process.destroy()
+            try {
+                if (!process.waitFor(ZIG_PROCESS_CLEANUP_TIMEOUT_MS, TimeUnit.MILLISECONDS)) process.destroyForcibly()
+            } catch (error: InterruptedException) {
+                process.destroyForcibly()
+                Thread.currentThread().interrupt()
+            }
+        }
+    }
+
+    private fun zigCompileTimeoutMs(): Long {
+        val configured = System.getProperty(ZIG_COMPILE_TIMEOUT_PROPERTY)
+            ?: System.getenv(ZIG_COMPILE_TIMEOUT_ENV)
+        return configured?.trim()?.toLongOrNull()?.takeIf { it > 0L } ?: DEFAULT_ZIG_COMPILE_TIMEOUT_MS
+    }
+
+    private fun isWindowsHost(): Boolean = System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
 
     private fun configureZigCache(processBuilder: ProcessBuilder, outputPath: Path) {
         val buildRoot = outputPath.parent?.parent ?: return
@@ -833,6 +976,11 @@ object NativeRecompilationTransforms {
 
     private const val ZIG_COMPILE_ATTEMPTS = 6
     private const val ZIG_RETRY_BASE_DELAY_MS = 500L
+    private const val ZIG_COMPILE_TIMEOUT_PROPERTY = "javashroud.zig.compile.timeout.ms"
+    private const val ZIG_COMPILE_TIMEOUT_ENV = "JS_VBC4_ZIG_COMPILE_TIMEOUT_MS"
+    private const val DEFAULT_ZIG_COMPILE_TIMEOUT_MS = 15 * 60 * 1000L
+    private const val ZIG_OUTPUT_DRAIN_TIMEOUT_MS = 5_000L
+    private const val ZIG_PROCESS_CLEANUP_TIMEOUT_MS = 5_000L
     internal fun generateDiversifiedSecrets(
         seed: Long,
         rng: Random,
@@ -990,6 +1138,7 @@ object NativeRecompilationTransforms {
     }
 
     private fun appendVbc4BuildProfile(sb: StringBuilder, context: Vbc4BuildContext, rng: Random) {
+        val manifestProtocol = context.vmManifestProtocol()
         sb.appendLine()
         sb.appendLine("/* Build diversity only. Root and layout material arrive through the one-shot boot ABI. */")
         sb.appendLine("#define JS_VBC4_RUNTIME_BOOT_MATERIAL 1")
@@ -1000,6 +1149,8 @@ object NativeRecompilationTransforms {
         sb.appendLine("#define JS_NATIVE_PARSER_PROFILE ${context.nativeVmProfile.parserRowProfile}")
         sb.appendLine("#define JS_NATIVE_OPERAND_PROFILE ${context.nativeVmProfile.operandAccessProfile}")
         sb.appendLine("#define JS_NATIVE_VM_PROFILE_ID 0x${context.nativeVmProfile.authenticatedId.toUInt().toString(16).uppercase()}u")
+        sb.appendLine("#define JS_VBC4_MANIFEST_MAGIC \"${manifestProtocol.magic}\"")
+        sb.appendLine("#define JS_VBC4_MANIFEST_VERSION \"${manifestProtocol.version}\"")
     }
 
     private fun cBytes(bytes: ByteArray): String = bytes.toCByteArrayLiteral()

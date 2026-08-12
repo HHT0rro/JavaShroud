@@ -30,7 +30,12 @@ internal inline fun <T> withTestBootSecret(block: () -> T): T {
 }
 
 internal fun ProcessBuilder.withTestBootSecret(): ProcessBuilder = apply {
-    environment()[NativeKernelShellPacker.BOOT_SECRET_ENV] = TEST_BOOT_SECRET_HEX
+    val processEnvironment = environment()
+    if (processEnvironment.containsKey(NativeKernelShellPacker.BOOT_SECRET_FILE_ENV)) {
+        processEnvironment.remove(NativeKernelShellPacker.BOOT_SECRET_ENV)
+    } else {
+        processEnvironment[NativeKernelShellPacker.BOOT_SECRET_ENV] = TEST_BOOT_SECRET_HEX
+    }
 }
 
 internal fun testConfig(

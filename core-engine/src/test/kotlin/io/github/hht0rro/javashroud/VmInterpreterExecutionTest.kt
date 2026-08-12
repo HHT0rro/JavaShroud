@@ -10,6 +10,7 @@ import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZ
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.NativeVmBuildProfile
+import io.github.hht0rro.javashroud.transforms.protection.NativeKernelShellPacker
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeKeyPartitions
 import io.github.hht0rro.javashroud.transforms.protection.VmBytecodeSerializer
 import org.objectweb.asm.ClassReader
@@ -392,6 +393,70 @@ class VmInterpreterExecutionTest {
         }
     }
 
+    @Test
+    fun max_hardening_semantic_split_preserves_branch_switch_exception_nested_cross_method_and_continuation_semantics() {
+        if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) return
+        val passes = listOf("method-virtualization", "jni-microkernel-loader")
+        val inputJar = buildMaxHardeningSemanticSplitFixtureJar(Files.createTempFile("javashroud-vm-max-hardening-split", ".jar"))
+        var outputJar: Path? = null
+        var sidecar: Path? = null
+        try {
+            val baseline = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", inputJar.toAbsolutePath().normalize().toString()),
+                timeoutSeconds = 20,
+            )
+            assertEquals(0, baseline.exitCode, "Baseline semantic-split fixture must exit cleanly. stdout=${baseline.output}")
+            val baselineOutput = normalizeLineEndings(baseline.output)
+            assertEquals("92\n102\n85\n211\n81", baselineOutput, "Baseline semantic-split fixture contract changed")
+
+            outputJar = runEngine(
+                inputJar = inputJar,
+                passIds = passes,
+                passParams = mapOf(
+                    "method-virtualization" to mapOf(
+                        "methodSelection" to "critical-plus",
+                        "strictVirtualization" to true,
+                        "maxInstructions" to 99999,
+                        "highValueMethods" to "nestedVerify,sparseLookup,priorityCheck,crossMethod",
+                        "highValueMethodDeny" to "main",
+                    ),
+                    "jni-microkernel-loader" to mapOf(
+                        "nativePackingLevel" to "max-hardening",
+                    ),
+                ),
+                outputTag = "max-hardening-semantic-split",
+            )
+            sidecar = outputJar.resolveSibling(outputJar.fileName.toString() + ".boot-kek.jsbk")
+            assertTrue(Files.isRegularFile(sidecar), "max-hardening build must emit a JSBK sidecar: $sidecar")
+            listOf("nestedVerify", "sparseLookup", "priorityCheck", "crossMethod").forEach { method ->
+                assertTrue(
+                    methodInvokesNativeVmDispatcher(outputJar, "e2e/SemanticSplitRoot", method, "(I)I"),
+                    "max-hardening semantic-split fixture must virtualize $method",
+                )
+            }
+
+            val hardenedProcess = ProcessBuilder(
+                "java",
+                "-Xverify:all",
+                "-jar",
+                outputJar.toAbsolutePath().normalize().toString(),
+            )
+            hardenedProcess.environment()[NativeKernelShellPacker.BOOT_SECRET_FILE_ENV] = sidecar.toAbsolutePath().normalize().toString()
+            hardenedProcess.environment().remove(NativeKernelShellPacker.BOOT_SECRET_ENV)
+            val hardened = runJavaProcessWithTimeout(hardenedProcess, timeoutSeconds = 90)
+            assertEquals(0, hardened.exitCode, "max-hardening semantic-split fixture must verify and run. stdout=${hardened.output}")
+            assertEquals(
+                baselineOutput,
+                normalizeLineEndings(hardened.output),
+                "Semantic split must preserve branch/switch, ordered exception handlers, nested VM calls, cross-method dispatch, and continuation operands",
+            )
+        } finally {
+            outputJar?.let(Files::deleteIfExists)
+            sidecar?.let(Files::deleteIfExists)
+            Files.deleteIfExists(inputJar)
+        }
+    }
+
     private fun buildRenamedMainBridgeFixtureJar(target: Path): Path = buildJavaSourceFixtureJar(
         target = target,
         mainClass = "e2e.RenamedMainRoot",
@@ -430,6 +495,64 @@ class VmInterpreterExecutionTest {
                         acc += compare(i * 3L, 120L - i, i / 3.0f, i / 2.0d);
                     }
                     System.out.println(acc);
+                }
+            }
+        """.trimIndent(),
+    )
+
+    private fun buildMaxHardeningSemanticSplitFixtureJar(target: Path): Path = buildJavaSourceFixtureJar(
+        target = target,
+        mainClass = "e2e.SemanticSplitRoot",
+        sourceFile = "SemanticSplitRoot.java",
+        source = """
+            package e2e;
+
+            public final class SemanticSplitRoot {
+                private static int nestedVerify(int value) {
+                    switch (value) {
+                        case 0: return 7;
+                        case 1: return 11;
+                        case 2: return 13;
+                        default: return 17;
+                    }
+                }
+
+                private static int sparseLookup(int value) {
+                    switch (value) {
+                        case -1: return 3;
+                        case 9: return 5;
+                        case 127: return 7;
+                        default: return 11;
+                    }
+                }
+
+                private static int priorityCheck(int value) {
+                    try {
+                        try {
+                            if (value == 0) return 8 / (value - value);
+                            if (value == 1) throw new IllegalStateException();
+                            return value + 19;
+                        } catch (ArithmeticException first) {
+                            return 31;
+                        }
+                    } catch (RuntimeException second) {
+                        return 37;
+                    }
+                }
+
+                private static int crossMethod(int value) {
+                    int left = nestedVerify(value & 3);
+                    int middle = sparseLookup(value);
+                    int right = priorityCheck(value);
+                    return left + middle + right + (value > 3 ? 41 : 43);
+                }
+
+                public static void main(String[] args) {
+                    System.out.println(crossMethod(0));
+                    System.out.println(crossMethod(1));
+                    System.out.println(crossMethod(9));
+                    System.out.println(crossMethod(127));
+                    System.out.println(crossMethod(-1));
                 }
             }
         """.trimIndent(),
@@ -840,15 +963,19 @@ class VmInterpreterExecutionTest {
         val configPath = inputJar.resolveSibling("javashroud-vm-cfg-$tag.toml")
         writeRunConfig(configPath, inputJar, outputJar, passIds, passParams)
         try {
-            withTestBootSecret {
-                if (contextOverride == null) {
-                    dispatchRequest(buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())), EngineKernel())
-                } else {
-                    io.github.hht0rro.javashroud.kernel.executeKernelRun(
-                        config = io.github.hht0rro.javashroud.config.loadValidatedConfig(configPath),
-                        configPath = configPath,
-                        vbc4BuildContextOverride = contextOverride,
-                    )
+            if (contextOverride == null && passParams["jni-microkernel-loader"]?.get("nativePackingLevel") == "max-hardening") {
+                dispatchRequest(buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())), EngineKernel())
+            } else {
+                withTestBootSecret {
+                    if (contextOverride == null) {
+                        dispatchRequest(buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())), EngineKernel())
+                    } else {
+                        io.github.hht0rro.javashroud.kernel.executeKernelRun(
+                            config = io.github.hht0rro.javashroud.config.loadValidatedConfig(configPath),
+                            configPath = configPath,
+                            vbc4BuildContextOverride = contextOverride,
+                        )
+                    }
                 }
             }
         } finally {
@@ -936,6 +1063,8 @@ class VmInterpreterExecutionTest {
         val maxLen = 180 - prefix.length
         return if (clean.length > maxLen) clean.substring(0, maxLen) else clean
     }
+
+    private fun normalizeLineEndings(output: String): String = output.trim().replace("\r\n", "\n")
 
     private fun fixedVbc4Context(): Vbc4BuildContext = Vbc4BuildContext(
         masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (index * 29 + 3).toByte() },

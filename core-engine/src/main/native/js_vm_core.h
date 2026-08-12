@@ -77,10 +77,15 @@ JS_HIDDEN jclass js_vm_primitive_class(JNIEnv *env, char tag);
 JS_HIDDEN jclass js_vm_find_registration_class(JNIEnv *env, const char *class_name);
 JS_HIDDEN char* js_lookup_bound_class(JNIEnv *env, const char *original);
 JS_HIDDEN char* js_lookup_bound_method(JNIEnv *env, const char *original_class, const char *method_name, const char *signature);
+JS_HIDDEN char* js_lookup_bound_field(JNIEnv *env, const char *original_class, const char *field_name, const char *descriptor);
 JS_HIDDEN jclass js_vm_find_class_name(JNIEnv *env, const char *name);
 JS_HIDDEN jobject js_vm_new_multi_array(JNIEnv *env, const char *descriptor, jint *dimensions, int dim_count);
 JS_HIDDEN jobject js_vm_new_throwable(JNIEnv *env, const char *class_name, const char *message);
 JS_HIDDEN int js_vm_throw_new(JNIEnv *env, const char *class_name, const char *message);
+/* Checks a concrete native entry at every sensitive JNI boundary. Both the
+ * RegisterNatives wrapper and its implementation call this so wrapper and
+ * direct-entry trampoline tampering independently fail closed. */
+JS_HIDDEN int js_vm_sensitive_path_guard(JNIEnv *env, const void *entry, int clear_boot_material);
 JS_HIDDEN int js_vm_is_array_object(JNIEnv *env, jobject obj);
 JS_HIDDEN jobject js_vm_clone_array(JNIEnv *env, jobject array);
 JS_HIDDEN jobject js_vm_new_primitive_array(JNIEnv *env, jint type_code, jint count);

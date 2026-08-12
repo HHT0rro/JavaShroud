@@ -23,9 +23,11 @@ internal data class Vbc4BuildContext(
     val runtimeKeyPartitions: RuntimeKeyPartitions = RuntimeKeyPartitions.generate(),
     val nativeVmProfile: NativeVmBuildProfile = NativeVmBuildProfile.fromBuildMaterial(nativeSeed, jarLayoutDigest),
     val productionBuildEvidence: CandidateProductionBuildEvidence = CandidateProductionBuildEvidence.disabled(nativeVmProfile),
+    val maxHardening: Boolean = false,
 ) {
     private var runtimeVmCatalogPlan: RuntimeVmCatalogPlan? = null
     private var bootSecretSnapshot: ByteArray? = null
+    private var bootSidecarBindingSnapshot: ByteArray? = null
 
     init {
         require(masterKey.size == VBC4_MASTER_KEY_SIZE) { "VBC4 master key must be 32 bytes" }
@@ -41,10 +43,31 @@ internal data class Vbc4BuildContext(
 
     fun runtimeVmCatalogPlanOrNull(): RuntimeVmCatalogPlan? = runtimeVmCatalogPlan
 
+    fun vmManifestProtocol(): Vbc4ManifestProtocol {
+        if (!maxHardening) return Vbc4ManifestProtocol(magic = "VBC4S", version = "1")
+        val token = deriveSubKey("javashroud-vbc4-manifest-token-v2", 8, jarLayoutDigest)
+        return try {
+            Vbc4ManifestProtocol(
+                magic = "H" + token.joinToString("") { byte -> "%02x".format(byte.toInt() and 0xFF) },
+                version = "2",
+            )
+        } finally {
+            java.util.Arrays.fill(token, 0)
+        }
+    }
+
     @Synchronized
     fun copyBootSecretForBuild(): ByteArray {
         val snapshot = bootSecretSnapshot ?: NativeKernelShellPacker.requireBootSecretForBuild().also {
             bootSecretSnapshot = it
+        }
+        return snapshot.copyOf()
+    }
+
+    @Synchronized
+    fun copyBootSidecarBindingForBuild(): ByteArray {
+        val snapshot = bootSidecarBindingSnapshot ?: BootKekSidecar.requireArtifactBindingForBuild().also {
+            bootSidecarBindingSnapshot = it
         }
         return snapshot.copyOf()
     }
@@ -130,6 +153,7 @@ internal data class Vbc4BuildContext(
     ).also { copy ->
         copy.runtimeVmCatalogPlan = runtimeVmCatalogPlan
         copy.bootSecretSnapshot = bootSecretSnapshot?.copyOf()
+        copy.bootSidecarBindingSnapshot = bootSidecarBindingSnapshot?.copyOf()
     }
 
     @Synchronized
@@ -139,7 +163,9 @@ internal data class Vbc4BuildContext(
         java.util.Arrays.fill(runtimeResourceKey, 0)
         runtimeKeyPartitions.wipe()
         bootSecretSnapshot?.let { java.util.Arrays.fill(it, 0) }
+        bootSidecarBindingSnapshot?.let { java.util.Arrays.fill(it, 0) }
         bootSecretSnapshot = null
+        bootSidecarBindingSnapshot = null
         runtimeVmCatalogPlan = null
     }
 }
@@ -170,6 +196,14 @@ internal data class NativeVmBuildProfile(
             )
         }
     }
+}
+
+internal data class Vbc4ManifestProtocol(
+    val magic: String,
+    val version: String,
+) {
+    val prefix: String
+        get() = "$magic|$version|"
 }
 
 internal const val VBC4_MASTER_KEY_SIZE = 32
@@ -236,6 +270,10 @@ internal fun buildVbc4BuildContext(config: ObfuscationConfig, artifact: Bytecode
         runtimeKeyPartitions = RuntimeKeyPartitions.generate(),
         nativeVmProfile = profile,
         productionBuildEvidence = CandidateProductionBuildEvidence.forConfig(config, profile),
+        maxHardening = config.passes.any { pass ->
+            pass.enabled && pass.id == "jni-microkernel-loader" &&
+                pass.params["nativePackingLevel"]?.asText() == "max-hardening"
+        },
     )
 }
 

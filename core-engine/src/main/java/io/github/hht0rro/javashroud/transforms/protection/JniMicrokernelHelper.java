@@ -60,20 +60,29 @@ public final class JniMicrokernelHelper {
     private static volatile long nativeBootToken = 0L;
     private static volatile boolean nativeSelfCheckFailed = false;
     private static volatile boolean sealedNativeBindingsPublished = false;
+    private static volatile boolean bootSecretEnvBindingEnabled = false;
+    private static volatile String[] bootSecretExpectedFingerprints = new String[0];
     private static volatile byte[][] runtimeResourceKeys;
     private static volatile int runtimeResourcePartitionCount;
     private static volatile int anchorResourcePartition = -1;
     private static volatile byte[] expectedShellBindingCommitment;
     private static volatile Thread expectedShellBindingThread;
     private static volatile int shellBindingHandoffState;
+    private static volatile byte[] nativeShellBootSecret;
+    private static volatile Thread nativeShellBootSecretThread;
     private static final String SEALED_NATIVE_INDEX_RESOURCE = "META-INF/.r/0.dat";
     private static final String SEALED_NATIVE_BINDINGS_RESOURCE = "META-INF/.r/bindings.dat";
     private static final String BOOT_MATERIAL_RESOURCE = "META-INF/.r/boot.dat";
+    private static final String EMBEDDED_BOOT_SECRET_RESOURCE = "META-INF/.r/kek.dat";
     private static final String BOOT_SECRET_ENV = "JAVASHROUD_BOOT_SECRET_V1";
     private static final String BOOT_SECRET_FILE_ENV = "JAVASHROUD_BOOT_SECRET_FILE_V1";
     private static final int BOOT_MATERIAL_VERSION = 2;
+    private static final int HARDENED_BOOT_MATERIAL_VERSION = 3;
     private static final int SHELL_BINDING_COMMITMENT_SIZE = 32;
     private static final byte[] BOOT_MATERIAL_AAD = "javashroud-boot-material-v2".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] HARDENED_BOOT_MATERIAL_AAD = "javashroud-boot-material-v3".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] BOOT_SIDECAR_TEXT_PREFIX = "JSBK1.".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] BOOT_SIDECAR_KEY_DOMAIN = "JavaShroud/BootKekSidecar/v1/key".getBytes(StandardCharsets.US_ASCII);
     private static final String VM_CATALOG_RESOURCE = "META-INF/.r/vm.catalog";
     private static final int RUNTIME_RESOURCE_VERSION = 7;
     private static final int NATIVE_ANCHOR_KEY_SLOT = 16;
@@ -96,11 +105,16 @@ public final class JniMicrokernelHelper {
     static native String nativeGetVersion();
     static native long nativeGetBootToken();
     static native boolean nativeInstallBootMaterial(byte[] material);
+    static native boolean nativeInstallBootEnvelope(byte[] envelope, byte[] sidecar);
     static native boolean nativeIsBootMaterialReady();
     static native void nativeAbortBootMaterial();
     static native void nativePreloadRuntimeResources(byte[] preloadIndex, byte[] commitments, byte[] startupNonce);
+    static native byte[] nativeDecodeRuntimeResource(byte[] encoded);
     public static native byte[] nativeDecryptAes(byte[] encrypted, byte[] key, byte[] iv);
     public static native byte[] nativeDeriveClassEncryptionKey(byte[] keyId, byte[] salt, int length);
+    static native byte[] nativeDecryptClassBytes(byte[] keyId, byte[] salt, byte[] nonce, byte[] ciphertext, byte[] aad, int keyLength);
+    static native String nativeSealedBindingKey(byte[] value);
+    public static native String nativeGetMachineFingerprint();
 
     public static native Object nativeExecuteVmResource(long entryToken, String resourcePath, Object[] args);
     public static native Object nativeExecuteVmResourceByToken(long entryToken, Object[] args);
@@ -938,17 +952,24 @@ public final class JniMicrokernelHelper {
     }
 
     private static String sealedBindingKey(String value) {
-        long hash = 0xCBF29CE484222325L;
-        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
-        for (byte b : bytes) {
-            hash ^= b & 0xFFL;
-            hash *= 0x100000001B3L;
+        byte[] encoded = value.getBytes(StandardCharsets.UTF_8);
+        try {
+            String key = nativeSealedBindingKey(encoded);
+            if (!isHex(key, 16, 16)) throw new SecurityException("native binding lookup failed");
+            return key;
+        } catch (UnsatisfiedLinkError e) {
+            throw new SecurityException("native binding lookup unavailable", e);
+        } finally {
+            Arrays.fill(encoded, (byte) 0);
         }
-        String hex = Long.toHexString(hash);
-        return hex.length() >= 16 ? hex : "0000000000000000".substring(hex.length()) + hex;
     }
 
     private static void preloadRuntimeResourcesIntoNative() {
+        // Class-encryption-only artifacts still require the native boot/decrypt
+        // bridge but intentionally have no VM catalog.  Do not make loader-only
+        // startup fail closed on a catalog that is not part of this artifact;
+        // VM-producing artifacts continue through the authenticated catalog path.
+        if (!hasVmCatalogResource()) return;
         byte[][] catalog = null;
         byte[] startupNonce = createVmStartupNonce();
         try {
@@ -964,6 +985,28 @@ public final class JniMicrokernelHelper {
                 Arrays.fill(catalog[1], (byte) 0);
             }
             Arrays.fill(startupNonce, (byte) 0);
+        }
+    }
+
+    private static boolean hasVmCatalogResource() {
+        JarFile catalogJar = openCatalogJar();
+        if (catalogJar != null) {
+            try {
+                JarEntry entry = catalogJar.getJarEntry(VM_CATALOG_RESOURCE);
+                return entry != null && !entry.isDirectory();
+            } catch (Exception ignored) {
+                return false;
+            } finally {
+                try {
+                    catalogJar.close();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+        try (InputStream in = resourceStream(VM_CATALOG_RESOURCE)) {
+            return in != null;
+        } catch (Exception ignored) {
+            return false;
         }
     }
 
@@ -1211,17 +1254,44 @@ public final class JniMicrokernelHelper {
     }
 
     private static void installBootMaterialIntoNative(String platformSuffix) throws Exception {
-        clearJavaBootMaterial();
         byte[] envelope;
         try (InputStream in = resourceStream(BOOT_MATERIAL_RESOURCE)) {
             if (in == null) throw new SecurityException("missing encrypted boot material envelope");
             envelope = readAll(in);
         }
+        int envelopeVersion = envelope.length > 4 ? envelope[4] & 0xFF : -1;
+        if (envelopeVersion == HARDENED_BOOT_MATERIAL_VERSION) {
+            byte[] sidecar = null;
+            try {
+                if (runtimeResourceKeys == null) {
+                    throw new SecurityException("hardened Java boot material was not prepared for native load");
+                }
+                sidecar = readBootKekSidecarBinary();
+                if (!nativeInstallBootEnvelope(envelope, sidecar) || !nativeIsBootMaterialReady()) {
+                    throw new SecurityException("native boot envelope installation failed");
+                }
+                clearExpectedShellBindingCommitment();
+            } catch (Throwable error) {
+                clearJavaBootMaterial();
+                try {
+                    nativeAbortBootMaterial();
+                } catch (Throwable ignored) {
+                }
+                throw error;
+            } finally {
+                if (sidecar != null) Arrays.fill(sidecar, (byte) 0);
+                Arrays.fill(envelope, (byte) 0);
+            }
+            return;
+        }
+
+        clearJavaBootMaterial();
         byte[] bootSecret = null;
         byte[] material = null;
         boolean published = false;
         try {
-            bootSecret = loadBootSecret();
+            bootSecret = loadBootSecret(envelope);
+            publishNativeShellBootSecret(bootSecret);
             material = decryptBootMaterial(envelope, bootSecret);
             validateAndPublishJavaBootMaterial(material, platformSuffix);
             published = true;
@@ -1246,6 +1316,55 @@ public final class JniMicrokernelHelper {
         }
     }
 
+    private static byte[] readBootKekSidecarBinary() throws Exception {
+        String explicitEnvironmentSecret = System.getenv(BOOT_SECRET_ENV);
+        if (explicitEnvironmentSecret != null) {
+            throw new SecurityException("hardened boot material requires JAVASHROUD_BOOT_SECRET_FILE_V1 or the embedded Boot KEK sidecar");
+        }
+        String fileName = System.getenv(BOOT_SECRET_FILE_ENV);
+        byte[] bytes;
+        if (fileName != null) {
+            if (fileName.length() == 0) throw new SecurityException("Boot KEK sidecar file path is empty");
+            try (InputStream in = new FileInputStream(fileName)) {
+                bytes = readAll(in);
+            }
+        } else {
+            try (InputStream in = resourceStream(EMBEDDED_BOOT_SECRET_RESOURCE)) {
+                if (in == null) throw new SecurityException("Boot KEK sidecar is missing");
+                bytes = readAll(in);
+            }
+        }
+        byte[] encoded = null;
+        byte[] binary = null;
+        boolean accepted = false;
+        try {
+            boolean text = bytes.length >= BOOT_SIDECAR_TEXT_PREFIX.length;
+            for (int index = 0; text && index < BOOT_SIDECAR_TEXT_PREFIX.length; index++) {
+                text = bytes[index] == BOOT_SIDECAR_TEXT_PREFIX[index];
+            }
+            if (text) {
+                encoded = Arrays.copyOfRange(bytes, BOOT_SIDECAR_TEXT_PREFIX.length, bytes.length);
+                if (encoded.length == 0) throw new SecurityException("empty Boot KEK sidecar");
+                try {
+                    binary = Base64.getUrlDecoder().decode(encoded);
+                } catch (IllegalArgumentException error) {
+                    throw new SecurityException("Boot KEK sidecar encoding is invalid", error);
+                }
+            } else {
+                binary = bytes.clone();
+            }
+            if (binary.length != 118 || !isBootKekSidecar(binary)) {
+                throw new SecurityException("unsupported Boot KEK sidecar");
+            }
+            accepted = true;
+            return binary;
+        } finally {
+            Arrays.fill(bytes, (byte) 0);
+            if (encoded != null) Arrays.fill(encoded, (byte) 0);
+            if (!accepted && binary != null) Arrays.fill(binary, (byte) 0);
+        }
+    }
+
     private static void prepareJavaBootMaterialForLoad(String platformSuffix) throws Exception {
         clearJavaBootMaterial();
         byte[] envelope;
@@ -1257,7 +1376,10 @@ public final class JniMicrokernelHelper {
         byte[] material = null;
         boolean published = false;
         try {
-            bootSecret = loadBootSecret();
+            bootSecret = loadBootSecret(envelope);
+            // JNI_OnLoad decrypts the max shell before Java can invoke any native method.
+            // Keep the validated KEK available for the fixed Java bridge until System.load returns.
+            publishNativeShellBootSecret(bootSecret);
             material = decryptBootMaterial(envelope, bootSecret);
             validateAndPublishJavaBootMaterial(material, platformSuffix);
             published = true;
@@ -1269,35 +1391,219 @@ public final class JniMicrokernelHelper {
         }
     }
 
-    private static byte[] loadBootSecret() throws Exception {
+    private static byte[] loadBootSecret(byte[] bootEnvelope) throws Exception {
         String encoded = System.getenv(BOOT_SECRET_ENV);
-        if (encoded != null && encoded.length() != 0) {
-            if (encoded.length() != 64) throw new SecurityException("boot KEK must be 64 hexadecimal characters");
-            byte[] decoded;
-            try {
-                decoded = hexToBytes(encoded);
-            } catch (IllegalArgumentException error) {
-                throw new SecurityException("boot KEK must be hexadecimal", error);
-            }
-            if (decoded.length != 32) throw new SecurityException("boot KEK must be 32 bytes");
-            return decoded;
-        }
-        String fileName = System.getenv(BOOT_SECRET_FILE_ENV);
-        if (fileName == null || fileName.length() == 0) {
-            throw new SecurityException("boot KEK is missing");
-        }
-        byte[] bytes;
-        try (InputStream in = new FileInputStream(fileName)) {
-            bytes = readAll(in);
-        }
-        if (bytes.length == 32) return bytes;
+        byte[] decoded;
+        byte[] sidecarBinding = bootSidecarBinding(bootEnvelope);
         try {
-            if (bytes.length != 64) throw new SecurityException("boot KEK file must contain 32 raw bytes or 64 hexadecimal characters");
-            return hexToBytes(bytes);
-        } catch (IllegalArgumentException error) {
-            throw new SecurityException("boot KEK file must contain hexadecimal characters", error);
+            if (encoded != null) {
+                if (sidecarBinding != null) throw new SecurityException("hardened boot material requires a sealed Boot KEK sidecar file");
+                if (encoded.length() != 64) throw new SecurityException("boot KEK must be 64 hexadecimal characters");
+                try {
+                    decoded = hexToBytes(encoded);
+                } catch (IllegalArgumentException error) {
+                    throw new SecurityException("boot KEK must be hexadecimal", error);
+                }
+                if (decoded.length != 32) throw new SecurityException("boot KEK must be 32 bytes");
+            } else {
+                String fileName = System.getenv(BOOT_SECRET_FILE_ENV);
+                byte[] bytes;
+                if (fileName != null) {
+                    if (fileName.length() == 0) throw new SecurityException("boot KEK sidecar file path is empty");
+                    try (InputStream in = new FileInputStream(fileName)) {
+                        bytes = readAll(in);
+                    }
+                } else {
+                    try (InputStream in = resourceStream(EMBEDDED_BOOT_SECRET_RESOURCE)) {
+                        if (in == null) throw new SecurityException("boot KEK is missing");
+                        bytes = readAll(in);
+                    }
+                }
+                try {
+                    decoded = decodeBootSecretBytes(bytes, sidecarBinding);
+                } catch (IllegalArgumentException error) {
+                    throw new SecurityException("boot KEK sidecar or hexadecimal file is invalid", error);
+                } finally {
+                    Arrays.fill(bytes, (byte) 0);
+                }
+            }
         } finally {
-            Arrays.fill(bytes, (byte) 0);
+            if (sidecarBinding != null) Arrays.fill(sidecarBinding, (byte) 0);
+        }
+        if (bootSecretEnvBindingEnabled) {
+            try {
+                decoded = unmaskBootSecret(decoded);
+            } catch (SecurityException error) {
+                Arrays.fill(decoded, (byte) 0);
+                throw error;
+            }
+        }
+        return decoded;
+    }
+
+    private static byte[] decodeBootSecretBytes(byte[] bytes, byte[] sidecarBinding) throws Exception {
+        if (isBootKekSidecar(bytes)) {
+            if (sidecarBinding == null) throw new SecurityException("sealed Boot KEK sidecar requires a hardened boot envelope");
+            return decodeBootKekSidecar(bytes, sidecarBinding);
+        }
+        if (bytes.length == 32) {
+            if (sidecarBinding != null) throw new SecurityException("hardened boot material rejects raw Boot KEK files");
+            return bytes.clone();
+        }
+        if (sidecarBinding != null) throw new SecurityException("hardened boot material rejects hexadecimal Boot KEK files");
+        if (bytes.length != 64) throw new SecurityException("boot KEK file must contain 32 raw bytes or 64 hexadecimal characters");
+        return hexToBytes(bytes);
+    }
+
+    private static byte[] unmaskBootSecret(byte[] maskedKek) throws Exception {
+        if (maskedKek == null || maskedKek.length != 32) {
+            throw new SecurityException("masked boot KEK must be 32 bytes");
+        }
+        String fingerprint = nativeGetMachineFingerprint();
+        if (fingerprint == null || fingerprint.length() == 0) {
+            throw new SecurityException("boot KEK environment binding requires a machine fingerprint");
+        }
+        String[] expected = bootSecretExpectedFingerprints;
+        boolean matched = false;
+        for (String candidate : expected) {
+            if (candidate != null && constantTimeStringEqual(fingerprint, candidate.trim())) {
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) {
+            throw new SecurityException("boot KEK environment binding mismatch");
+        }
+        byte[] fingerprintBytes = fingerprint.getBytes(StandardCharsets.UTF_8);
+        byte[] mask = deriveBootEnvMask(fingerprintBytes);
+        Arrays.fill(fingerprintBytes, (byte) 0);
+        byte[] kek = new byte[32];
+        for (int i = 0; i < 32; i++) {
+            kek[i] = (byte) (maskedKek[i] ^ mask[i]);
+        }
+        Arrays.fill(mask, (byte) 0);
+        return kek;
+    }
+
+    private static byte[] deriveBootEnvMask(byte[] fingerprintBytes) throws Exception {
+        javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+        byte[] key = new byte[32];
+        Arrays.fill(key, (byte) 0);
+        try {
+            mac.init(new javax.crypto.spec.SecretKeySpec(key, "HmacSHA256"));
+            mac.update("javashroud-boot-env-mask-v1".getBytes(StandardCharsets.US_ASCII));
+            byte[] digest = mac.doFinal(fingerprintBytes);
+            byte[] mask = Arrays.copyOf(digest, 32);
+            Arrays.fill(digest, (byte) 0);
+            return mask;
+        } finally {
+            Arrays.fill(key, (byte) 0);
+        }
+    }
+
+    private static boolean constantTimeStringEqual(String a, String b) {
+        if (a == null || b == null) return a == b;
+        byte[] aBytes = a.getBytes(StandardCharsets.UTF_8);
+        byte[] bBytes = b.getBytes(StandardCharsets.UTF_8);
+        boolean equal;
+        try {
+            if (aBytes.length != bBytes.length) return false;
+            int diff = 0;
+            for (int i = 0; i < aBytes.length; i++) {
+                diff |= (aBytes[i] ^ bBytes[i]) & 0xFF;
+            }
+            equal = diff == 0;
+        } finally {
+            Arrays.fill(aBytes, (byte) 0);
+            Arrays.fill(bBytes, (byte) 0);
+        }
+        return equal;
+    }
+
+    private static byte[] bootSidecarBinding(byte[] envelope) {
+        if (envelope == null || envelope.length < 4 + 2 + 32 + 1 + 12 + 4 + 16) return null;
+        if ((envelope[0] & 0xFF) != 0x4A || (envelope[1] & 0xFF) != 0x53 ||
+            (envelope[2] & 0xFF) != 0x42 || (envelope[3] & 0xFF) != 0x4D ||
+            (envelope[4] & 0xFF) != HARDENED_BOOT_MATERIAL_VERSION || (envelope[5] & 0xFF) != 32) return null;
+        return Arrays.copyOfRange(envelope, 6, 38);
+    }
+
+    private static boolean isBootKekSidecar(byte[] bytes) {
+        if (bytes == null) return false;
+        if (bytes.length >= BOOT_SIDECAR_TEXT_PREFIX.length) {
+            boolean text = true;
+            for (int index = 0; index < BOOT_SIDECAR_TEXT_PREFIX.length; index++) {
+                text &= bytes[index] == BOOT_SIDECAR_TEXT_PREFIX[index];
+            }
+            if (text) return true;
+        }
+        return bytes.length >= 4 && (bytes[0] & 0xFF) == 0x4A && (bytes[1] & 0xFF) == 0x53 &&
+            (bytes[2] & 0xFF) == 0x42 && (bytes[3] & 0xFF) == 0x4B;
+    }
+
+    private static byte[] decodeBootKekSidecar(byte[] bytes, byte[] expectedBinding) throws Exception {
+        byte[] binary = null;
+        byte[] encoded = null;
+        byte[] header = null;
+        byte[] binding = null;
+        byte[] salt = null;
+        byte[] nonce = null;
+        byte[] keyMaterial = null;
+        byte[] wrappingKey = null;
+        byte[] aad = null;
+        byte[] plaintext = null;
+        boolean accepted = false;
+        try {
+            boolean text = bytes.length >= BOOT_SIDECAR_TEXT_PREFIX.length;
+            for (int index = 0; text && index < BOOT_SIDECAR_TEXT_PREFIX.length; index++) {
+                text = bytes[index] == BOOT_SIDECAR_TEXT_PREFIX[index];
+            }
+            if (text) {
+                encoded = Arrays.copyOfRange(bytes, BOOT_SIDECAR_TEXT_PREFIX.length, bytes.length);
+                if (encoded.length == 0) throw new SecurityException("empty Boot KEK sidecar");
+                binary = Base64.getUrlDecoder().decode(encoded);
+            } else {
+                binary = bytes.clone();
+            }
+            if (binary.length != 118 || (binary[0] & 0xFF) != 0x4A || (binary[1] & 0xFF) != 0x53 ||
+                (binary[2] & 0xFF) != 0x42 || (binary[3] & 0xFF) != 0x4B ||
+                (binary[4] & 0xFF) != 1 || (binary[5] & 0xFF) != 0 ||
+                (binary[6] & 0xFF) != 16 || (binary[7] & 0xFF) != 12 ||
+                readSealedResourceLe16(binary, 8) != 48) {
+                throw new SecurityException("unsupported Boot KEK sidecar");
+            }
+            header = Arrays.copyOfRange(binary, 0, 10);
+            binding = Arrays.copyOfRange(binary, 10, 42);
+            if (expectedBinding == null || expectedBinding.length != 32 || !MessageDigest.isEqual(binding, expectedBinding)) {
+                throw new SecurityException("Boot KEK sidecar artifact binding mismatch");
+            }
+            salt = Arrays.copyOfRange(binary, 42, 58);
+            nonce = Arrays.copyOfRange(binary, 58, 70);
+            keyMaterial = concat(BOOT_SIDECAR_KEY_DOMAIN, salt);
+            javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(expectedBinding, "HmacSHA256"));
+            wrappingKey = mac.doFinal(keyMaterial);
+            aad = concat(header, binding, salt, nonce);
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(wrappingKey, "AES"), new GCMParameterSpec(128, nonce));
+            cipher.updateAAD(aad);
+            plaintext = cipher.doFinal(binary, 70, 48);
+            if (plaintext.length != 32) throw new SecurityException("Boot KEK sidecar plaintext length mismatch");
+            accepted = true;
+            return plaintext;
+        } catch (IllegalArgumentException error) {
+            throw new SecurityException("Boot KEK sidecar encoding is invalid", error);
+        } finally {
+            if (binary != null) Arrays.fill(binary, (byte) 0);
+            if (encoded != null) Arrays.fill(encoded, (byte) 0);
+            if (header != null) Arrays.fill(header, (byte) 0);
+            if (binding != null) Arrays.fill(binding, (byte) 0);
+            if (salt != null) Arrays.fill(salt, (byte) 0);
+            if (nonce != null) Arrays.fill(nonce, (byte) 0);
+            if (keyMaterial != null) Arrays.fill(keyMaterial, (byte) 0);
+            if (wrappingKey != null) Arrays.fill(wrappingKey, (byte) 0);
+            if (aad != null) Arrays.fill(aad, (byte) 0);
+            if (!accepted && plaintext != null) Arrays.fill(plaintext, (byte) 0);
         }
     }
 
@@ -1305,27 +1611,45 @@ public final class JniMicrokernelHelper {
         if (envelope == null || envelope.length < 4 + 2 + 12 + 4 + 16 || bootSecret.length != 32) {
             throw new SecurityException("malformed boot material envelope");
         }
+        int version = envelope[4] & 0xFF;
         if ((envelope[0] & 0xFF) != 0x4A || (envelope[1] & 0xFF) != 0x53 ||
             (envelope[2] & 0xFF) != 0x42 || (envelope[3] & 0xFF) != 0x4D ||
-            (envelope[4] & 0xFF) != BOOT_MATERIAL_VERSION) {
+            (version != BOOT_MATERIAL_VERSION && version != HARDENED_BOOT_MATERIAL_VERSION)) {
             throw new SecurityException("unsupported boot material envelope");
         }
-        int nonceLength = envelope[5] & 0xFF;
-        if (nonceLength != 12 || 6 + nonceLength + 4 > envelope.length) throw new SecurityException("malformed boot material nonce");
-        int sealedLengthOffset = 6 + nonceLength;
+        byte[] sidecarBinding = null;
+        int nonceLengthOffset = 5;
+        if (version == HARDENED_BOOT_MATERIAL_VERSION) {
+            int bindingLength = envelope[5] & 0xFF;
+            if (bindingLength != 32 || 6 + bindingLength >= envelope.length) {
+                throw new SecurityException("malformed hardened boot binding");
+            }
+            sidecarBinding = Arrays.copyOfRange(envelope, 6, 6 + bindingLength);
+            nonceLengthOffset = 6 + bindingLength;
+        }
+        int nonceLength = envelope[nonceLengthOffset] & 0xFF;
+        int nonceOffset = nonceLengthOffset + 1;
+        if (nonceLength != 12 || nonceOffset + nonceLength + 4 > envelope.length) throw new SecurityException("malformed boot material nonce");
+        int sealedLengthOffset = nonceOffset + nonceLength;
         int sealedLength = readSealedResourceLe32(envelope, sealedLengthOffset);
         int sealedOffset = sealedLengthOffset + 4;
         if (sealedLength < 16 || sealedOffset + sealedLength != envelope.length) throw new SecurityException("malformed boot material payload");
-        byte[] nonce = Arrays.copyOfRange(envelope, 6, 6 + nonceLength);
+        byte[] nonce = Arrays.copyOfRange(envelope, nonceOffset, nonceOffset + nonceLength);
         try {
             Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
             cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(bootSecret, "AES"), new GCMParameterSpec(128, nonce));
-            cipher.updateAAD(BOOT_MATERIAL_AAD);
+            if (version == HARDENED_BOOT_MATERIAL_VERSION) {
+                cipher.updateAAD(HARDENED_BOOT_MATERIAL_AAD);
+                cipher.updateAAD(sidecarBinding);
+            } else {
+                cipher.updateAAD(BOOT_MATERIAL_AAD);
+            }
             return cipher.doFinal(envelope, sealedOffset, sealedLength);
         } catch (Exception error) {
             throw new SecurityException("boot material envelope authentication failed", error);
         } finally {
             Arrays.fill(nonce, (byte) 0);
+            if (sidecarBinding != null) Arrays.fill(sidecarBinding, (byte) 0);
         }
     }
 
@@ -1337,8 +1661,9 @@ public final class JniMicrokernelHelper {
         if (runtimeResourceKeys != null || expectedShellBindingCommitment != null) {
             throw new SecurityException("boot material is already installed");
         }
+        int materialVersion = material == null || material.length == 0 ? -1 : material[0] & 0xFF;
         if (material == null || material.length < 4 + 64 + 64 ||
-            (material[0] & 0xFF) != BOOT_MATERIAL_VERSION) {
+            (materialVersion != BOOT_MATERIAL_VERSION && materialVersion != HARDENED_BOOT_MATERIAL_VERSION)) {
             throw new SecurityException("malformed boot material");
         }
         int partitionCount = material[1] & 0xFF;
@@ -1409,6 +1734,35 @@ public final class JniMicrokernelHelper {
         shellBindingHandoffState = 0;
         if (keys != null) for (byte[] key : keys) if (key != null) Arrays.fill(key, (byte) 0);
         if (shellBinding != null) Arrays.fill(shellBinding, (byte) 0);
+        clearNativeShellBootSecret();
+    }
+
+    private static synchronized void publishNativeShellBootSecret(byte[] bootSecret) {
+        clearNativeShellBootSecret();
+        if (bootSecret == null || bootSecret.length != 32) {
+            throw new SecurityException("native shell boot secret must be 32 bytes");
+        }
+        nativeShellBootSecret = Arrays.copyOf(bootSecret, bootSecret.length);
+        nativeShellBootSecretThread = Thread.currentThread();
+    }
+
+    private static synchronized void clearNativeShellBootSecret() {
+        byte[] secret = nativeShellBootSecret;
+        nativeShellBootSecret = null;
+        nativeShellBootSecretThread = null;
+        if (secret != null) Arrays.fill(secret, (byte) 0);
+    }
+
+    /* Fixed JNI_OnLoad bridge. The max shell uses this only when no external
+     * Boot KEK environment variable/file was supplied. */
+    private static synchronized byte[] takeBootSecretForNativeShell() {
+        if (nativeShellBootSecret == null || nativeShellBootSecretThread != Thread.currentThread()) return null;
+        byte[] secret = nativeShellBootSecret;
+        nativeShellBootSecret = null;
+        nativeShellBootSecretThread = null;
+        byte[] result = Arrays.copyOf(secret, secret.length);
+        Arrays.fill(secret, (byte) 0);
+        return result;
     }
 
     private static synchronized void clearExpectedShellBindingCommitment() {
@@ -1498,15 +1852,26 @@ public final class JniMicrokernelHelper {
             return false;
         }
         if (nativeBytes == null || nativeBytes.length == 0) return false;
-        for (File extractDirectory : nativeExtractDirectories()) {
-            if (tryLoadBundledNativeFromDirectory(platformSuffix, resourcePath, suffix, nativeBytes, extractDirectory)) return true;
+        try {
+            for (File extractDirectory : nativeExtractDirectories()) {
+                if (tryLoadBundledNativeFromDirectory(platformSuffix, resourcePath, suffix, nativeBytes, extractDirectory)) return true;
+            }
+            return false;
+        } finally {
+            Arrays.fill(nativeBytes, (byte) 0);
         }
-        return false;
     }
 
     private static boolean tryLoadBundledNativeFromDirectory(String platformSuffix, String resourcePath, String suffix, byte[] nativeBytes, File extractDirectory) {
         File tempLib = null;
         String previousLoaderOwner = System.getProperty(sealedLoaderPropertyName());
+        String previousClassBindings = System.getProperty(sealedBindingPropertyName());
+        String previousMethodBindings = System.getProperty(sealedMethodBindingPropertyName());
+        String previousFieldBindings = System.getProperty(sealedFieldBindingPropertyName());
+        boolean previousBootSecretEnvBindingEnabled = bootSecretEnvBindingEnabled;
+        String[] previousBootSecretExpectedFingerprints = bootSecretExpectedFingerprints == null
+            ? new String[0]
+            : bootSecretExpectedFingerprints.clone();
         boolean ok = false;
         try {
             if (!ensureNativeExtractDirectory(extractDirectory)) return false;
@@ -1521,13 +1886,12 @@ public final class JniMicrokernelHelper {
             tempLib.setWritable(true, true);
             tempLib.setExecutable(true, true);
             prepareJavaBootMaterialForLoad(platformSuffix);
-            publishSealedNativeLoaderOwner();
+            publishSealedNativeBindings();
+            sealedNativeBindingsPublished = true;
             System.load(tempLib.getAbsolutePath());
             verifyShellBindingHandoffAfterLoad();
             loadMessage = "native:bundled:" + platformSuffix + ":" + initializeNativeKernel(platformSuffix);
             installBootMaterialIntoNative(platformSuffix);
-            publishSealedNativeBindings();
-            sealedNativeBindingsPublished = true;
             try {
                 preloadRuntimeResourcesIntoNative();
                 if (verifyNativeAbiAfterLoad()) {
@@ -1536,6 +1900,7 @@ public final class JniMicrokernelHelper {
                 }
                 return ok;
             } finally {
+                clearJavaBootMaterial();
                 if (!ok) {
                     sealedNativeBindingsPublished = false;
                 }
@@ -1556,7 +1921,17 @@ public final class JniMicrokernelHelper {
                 } catch (Throwable ignored) {
                 }
                 sealedNativeBindingsPublished = false;
+                bootSecretEnvBindingEnabled = previousBootSecretEnvBindingEnabled;
+                String[] currentBootSecretExpectedFingerprints = bootSecretExpectedFingerprints;
+                bootSecretExpectedFingerprints = previousBootSecretExpectedFingerprints;
+                if (currentBootSecretExpectedFingerprints != null &&
+                    currentBootSecretExpectedFingerprints != previousBootSecretExpectedFingerprints) {
+                    Arrays.fill(currentBootSecretExpectedFingerprints, null);
+                }
                 restoreLoaderProperty(previousLoaderOwner);
+                restoreProperty(sealedBindingPropertyName(), previousClassBindings);
+                restoreProperty(sealedMethodBindingPropertyName(), previousMethodBindings);
+                restoreProperty(sealedFieldBindingPropertyName(), previousFieldBindings);
             }
         }
     }
@@ -1637,6 +2012,7 @@ public final class JniMicrokernelHelper {
             }
             StringBuilder bindings = new StringBuilder();
             StringBuilder methodBindings = new StringBuilder();
+            StringBuilder fieldBindings = new StringBuilder();
             String[] lines = bindingText.split("\n");
             for (String line : lines) {
                 String[] parts = line.trim().split("\\|", -1);
@@ -1646,10 +2022,17 @@ public final class JniMicrokernelHelper {
                 } else if (parts.length == 3 && "M".equals(parts[0])) {
                     if (methodBindings.length() > 0) methodBindings.append('\n');
                     methodBindings.append(parts[1]).append('=').append(parts[2]);
+                } else if (parts.length == 3 && "F".equals(parts[0])) {
+                    if (fieldBindings.length() > 0) fieldBindings.append('\n');
+                    fieldBindings.append(parts[1]).append('=').append(parts[2]);
+                } else if (parts.length == 3 && "E".equals(parts[0])) {
+                    bootSecretEnvBindingEnabled = "true".equalsIgnoreCase(parts[1]);
+                    bootSecretExpectedFingerprints = parts[2].isEmpty() ? new String[0] : parts[2].split(",");
                 }
             }
             if (bindings.length() > 0) System.setProperty(sealedBindingPropertyName(), mergeBindingProperties(System.getProperty(sealedBindingPropertyName()), bindings.toString()));
             if (methodBindings.length() > 0) System.setProperty(sealedMethodBindingPropertyName(), mergeBindingProperties(System.getProperty(sealedMethodBindingPropertyName()), methodBindings.toString()));
+            if (fieldBindings.length() > 0) System.setProperty(sealedFieldBindingPropertyName(), mergeBindingProperties(System.getProperty(sealedFieldBindingPropertyName()), fieldBindings.toString()));
         } catch (SecurityException e) {
             throw e;
         } catch (Throwable e) {
@@ -1668,11 +2051,15 @@ public final class JniMicrokernelHelper {
     }
 
     private static void restoreLoaderProperty(String previous) {
+        restoreProperty(sealedLoaderPropertyName(), previous);
+    }
+
+    private static void restoreProperty(String name, String previous) {
         try {
             if (previous == null) {
-                System.clearProperty(sealedLoaderPropertyName());
+                System.clearProperty(name);
             } else {
-                System.setProperty(sealedLoaderPropertyName(), previous);
+                System.setProperty(name, previous);
             }
         } catch (Throwable ignored) {
         }
@@ -1713,6 +2100,10 @@ public final class JniMicrokernelHelper {
         return new String(new char[]{'j', '.', 'm'});
     }
 
+    private static String sealedFieldBindingPropertyName() {
+        return new String(new char[]{'j', '.', 'f'});
+    }
+
     private static String legacySealedNativeBindingsResource() {
         return new String(new char[]{'M','E','T','A','-','I','N','F','/','.','r','/','b','i','n','d','i','n','g','s','.','d','a','t'});
     }
@@ -1720,8 +2111,17 @@ public final class JniMicrokernelHelper {
     private static String sealedNativeIndexText() {
         try (InputStream in = resourceStream(SEALED_NATIVE_INDEX_RESOURCE)) {
             if (in == null) return null;
-            byte[] decoded = decodeBootstrapNativeIndex(readAll(in));
-            return decoded == null ? null : new String(decoded, StandardCharsets.UTF_8);
+            byte[] raw = readAll(in);
+            byte[] decoded = null;
+            try {
+                decoded = hasRuntimeResourceHeader(raw)
+                    ? decodeRuntimeResource(raw, true)
+                    : decodeBootstrapNativeIndex(raw);
+                return decoded == null ? null : new String(decoded, StandardCharsets.UTF_8);
+            } finally {
+                Arrays.fill(raw, (byte) 0);
+                if (decoded != null) Arrays.fill(decoded, (byte) 0);
+            }
         } catch (Exception ignored) {
             return null;
         }
@@ -1790,7 +2190,22 @@ public final class JniMicrokernelHelper {
     }
 
     public static byte[] decodeRuntimeResourceForNative(byte[] raw) {
-        byte[] decoded = decodeRuntimeResource(raw);
+        byte[] decoded;
+        if (loadState == LOAD_READY && nativeIsBootMaterialReady()) {
+            try {
+                decoded = nativeDecodeRuntimeResource(raw);
+            } catch (LinkageError ignored) {
+                decoded = null;
+            }
+            // Keep manifest discovery self-contained when an older shell or a
+            // platform build does not expose the optional native resource
+            // decoder. The same authenticated partition keys and hashes are
+            // checked by the Java fallback; a tampered envelope still fails
+            // closed rather than being accepted by the fallback.
+            if (decoded == null) decoded = decodeRuntimeResource(raw);
+        } else {
+            decoded = decodeRuntimeResource(raw);
+        }
         if (decoded == null) throw new IllegalArgumentException("unsupported runtime resource envelope");
         return decoded;
     }
@@ -1810,7 +2225,9 @@ public final class JniMicrokernelHelper {
     }
 
     public static byte[] decodeRuntimeResourceEnvelope(byte[] raw) {
-        return decodeRuntimeResource(raw);
+        return loadState == LOAD_READY && nativeIsBootMaterialReady()
+            ? nativeDecodeRuntimeResource(raw)
+            : decodeRuntimeResource(raw);
     }
 
     private static byte[] decodeBootstrapNativeIndex(byte[] raw) {
@@ -1828,7 +2245,7 @@ public final class JniMicrokernelHelper {
     }
 
     private static byte[] decodeRuntimeResource(byte[] raw) {
-        return decodeRuntimeResource(raw, false);
+        return decodeRuntimeResource(raw, true);
     }
 
     private static byte[] decodeRuntimeResource(byte[] raw, boolean allowCompressed) {
@@ -2156,6 +2573,26 @@ public final class JniMicrokernelHelper {
             throw new SecurityException("class-encryption key derivation requires the sealed native kernel; no Java fallback (" + loadMessage + ")");
         }
         return nativeDeriveClassEncryptionKey(keyId, salt, length);
+    }
+
+    public static byte[] decryptClassBytes(byte[] keyId, byte[] salt, byte[] nonce, byte[] ciphertext, byte[] aad, int keyLength) {
+        if (keyId == null || salt == null || nonce == null || ciphertext == null || aad == null) {
+            throw new SecurityException("encrypted class metadata is incomplete");
+        }
+        if (nonce.length != 12 || ciphertext.length < 16 || (keyLength != 16 && keyLength != 32)) {
+            throw new SecurityException("encrypted class metadata is invalid");
+        }
+        if (!isNativeLoaded()) loadKernel("loader", "auto", "vm-diverse");
+        if (!isNativeLoaded()) {
+            throw new SecurityException("class-encryption decryption requires the sealed native kernel; no Java fallback (" + loadMessage + ")");
+        }
+        try {
+            byte[] result = nativeDecryptClassBytes(keyId, salt, nonce, ciphertext, aad, keyLength);
+            if (result == null) throw new SecurityException("native class decryption returned no plaintext");
+            return result;
+        } catch (UnsatisfiedLinkError error) {
+            throw new SecurityException("class-encryption native decoder is not registered for the sealed helper", error);
+        }
     }
 
     private static boolean isDecimal(String value) {

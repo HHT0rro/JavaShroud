@@ -160,11 +160,18 @@ public final class ClassEncryptionLoaderHelper {
             }
         }
         if (className == null) {
-            // Legacy fallback: extract binary class name from resource path: __jse/e2e/Root.enc -> e2e.Root
-            className = resourcePath
-                .replace("__jse/", "")
-                .replace(".enc", "")
-                .replace('/', '.');
+            if (resourcePath.startsWith("__jse/") && resourcePath.endsWith(".enc")) {
+                // Legacy fallback: __jse/e2e/Root.enc -> e2e.Root.  Sealed
+                // resource paths must always resolve through the authenticated
+                // manifest and are never interpreted as binary class names.
+                className = resourcePath
+                    .substring("__jse/".length(), resourcePath.length() - ".enc".length())
+                    .replace('/', '.');
+            } else {
+                throw new IllegalStateException(
+                    "Encrypted class manifest does not contain sealed resource: " + resourcePath
+                );
+            }
         }
         // Resolve through the single shared loader so that this class and every
         // class it references (siblings, inner classes) live in one namespace.
@@ -195,18 +202,26 @@ public final class ClassEncryptionLoaderHelper {
                 ConcurrentHashMap<String, String[]> m = new ConcurrentHashMap<>();
                 try {
                     byte[] manifestBytes = readManifestBytes();
-                    if (manifestBytes != null) {
-                        String text = new String(manifestBytes, java.nio.charset.StandardCharsets.UTF_8);
-                        for (String line : text.split("\n")) {
-                            if (line.isEmpty()) continue;
-                            String[] cols = line.split("\t");
-                            if (cols.length >= 3) {
-                                // key: binary name a.b.C ; value: [resourcePath, keyMetadata]
-                                m.put(cols[0].replace('/', '.'), new String[]{cols[1], cols[2]});
-                            }
+                    if (manifestBytes == null) {
+                        throw new IllegalStateException("Encrypted class manifest is unavailable or failed authentication");
+                    }
+                    String text = new String(manifestBytes, java.nio.charset.StandardCharsets.UTF_8);
+                    for (String line : text.split("\n")) {
+                        if (line.isEmpty()) continue;
+                        String[] cols = line.split("\t");
+                        if (cols.length >= 3) {
+                            // key: binary name a.b.C ; value: [resourcePath, keyMetadata]
+                            m.put(cols[0].replace('/', '.'), new String[]{cols[1], cols[2]});
                         }
                     }
-                } catch (Exception ignored) { }
+                    if (m.isEmpty()) {
+                        throw new IllegalStateException("Encrypted class manifest contains no authenticated entries");
+                    }
+                } catch (RuntimeException e) {
+                    throw e;
+                } catch (Exception e) {
+                    throw new IllegalStateException("Encrypted class manifest could not be loaded", e);
+                }
                 manifest = m;
             }
             return manifest;
@@ -291,13 +306,15 @@ public final class ClassEncryptionLoaderHelper {
             String resourcePath = entry[0];
             String keyMetadata = entry[1];
             ParsedMetadata metadata = parseMetadata(binaryName, resourcePath, keyMetadata);
-            byte[] key = JniMicrokernelHelper.deriveClassEncryptionKey(metadata.keyId, metadata.salt, metadata.keyLength);
             byte[] encryptedBytes = readResource(resourcePath);
-            try {
-                return decryptBytes(encryptedBytes, metadata.strategy, key, metadata.nonce, metadata.aad);
-            } finally {
-                java.util.Arrays.fill(key, (byte) 0);
-            }
+            return JniMicrokernelHelper.decryptClassBytes(
+                metadata.keyId,
+                metadata.salt,
+                metadata.nonce,
+                encryptedBytes,
+                metadata.aad,
+                metadata.keyLength
+            );
         } catch (Exception e) {
             throw new IllegalStateException("Failed to decrypt encrypted class: " + binaryName, e);
         }
@@ -336,18 +353,6 @@ public final class ClassEncryptionLoaderHelper {
             throw new SecurityException("Encrypted class metadata AAD mismatch: " + binaryName);
         }
         return new ParsedMetadata(strategy, keyId, salt, nonce, aad, "aes-256".equals(strategy) ? 32 : 16);
-    }
-
-    private static byte[] decryptBytes(byte[] data, String strategy, byte[] key, byte[] nonce, byte[] aad) throws Exception {
-        if (!("aes-128".equals(strategy) || "aes-256".equals(strategy))) {
-            throw new IllegalStateException("Unsupported encrypted class resource format");
-        }
-        if (nonce == null || nonce.length != 12) throw new SecurityException("Invalid AES-GCM nonce length");
-        javax.crypto.Cipher cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
-        javax.crypto.spec.SecretKeySpec keySpec = new javax.crypto.spec.SecretKeySpec(key, "AES");
-        cipher.init(javax.crypto.Cipher.DECRYPT_MODE, keySpec, new javax.crypto.spec.GCMParameterSpec(128, nonce));
-        cipher.updateAAD(aad);
-        return cipher.doFinal(data);
     }
 
     private static byte[] aad(String className, String resourcePath, String strategy, String keyMode) {
@@ -482,8 +487,12 @@ public final class ClassEncryptionLoaderHelper {
             if (bytes == null) {
                 throw new ClassNotFoundException(name);
             }
- ProtectionDomain domain = ClassEncryptionLoaderHelper.class.getProtectionDomain(); 
- return defineClass(name, bytes, 0, bytes.length, domain); 
+            try {
+                ProtectionDomain domain = ClassEncryptionLoaderHelper.class.getProtectionDomain();
+                return defineClass(name, bytes, 0, bytes.length, domain);
+            } finally {
+                java.util.Arrays.fill(bytes, (byte) 0);
+            }
         }
 
         @Override

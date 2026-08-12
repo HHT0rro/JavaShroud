@@ -1,6 +1,7 @@
 package io.github.hht0rro.javashroud
 
 import io.github.hht0rro.javashroud.transforms.protection.NativeKernelShellPacker
+import io.github.hht0rro.javashroud.transforms.protection.BootKekSidecar
 import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -203,6 +204,25 @@ class NativeKernelShellPackerTest {
         }
         assertEquals(null, NativeKernelShellPacker.parseBootSecret("abcd", null))
         assertEquals(null, NativeKernelShellPacker.parseBootSecret(" $encoded", null))
+    }
+
+    @Test
+    fun boot_secret_parser_accepts_authenticated_jsbk_sidecar_files() {
+        val binding = ByteArray(32) { index -> (index * 19 + 5).toByte() }
+        val sidecar = BootKekSidecar.encodeText(bootSecret, binding)
+        val secretFile = java.nio.file.Files.createTempFile("javashroud-shell-secret", ".jsbk")
+        try {
+            java.nio.file.Files.writeString(secretFile, sidecar, Charsets.US_ASCII)
+            val parsed = NativeKernelShellPacker.parseBootSecret(null, secretFile.toString())
+            try {
+                assertTrue(parsed != null && parsed.contentEquals(bootSecret))
+            } finally {
+                parsed?.fill(0)
+            }
+        } finally {
+            binding.fill(0)
+            java.nio.file.Files.deleteIfExists(secretFile)
+        }
     }
 
     @Test

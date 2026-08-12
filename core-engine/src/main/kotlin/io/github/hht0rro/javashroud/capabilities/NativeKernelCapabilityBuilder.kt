@@ -292,9 +292,25 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
 
                 defaultValue = JsonNodeFactory.instance.textNode("max"),
 
-                options = listOf("off", "standard", "max"),
+                options = listOf("off", "standard", "max", "max-hardening"),
 
-                description = "Zig 编译后 native 加壳级别。off 保持原生动态库；standard 保留可加载前缀并追加认证 overlay；max 生成外层 stub shell，并将完整 js_kernel 作为认证编码 payload 绑定到 stub 和 native bootstrap index。",
+                description = "Zig 编译后 native 加壳级别。off 保持原生动态库；standard 保留可加载前缀并追加认证 overlay；max 生成兼容的 stub shell；max-hardening 显式启用断代协议、构建级 profile 与完整 js_kernel 认证 payload，不与普通 max 隐式等价。",
+
+                hidden = false,
+
+            ),
+
+            ParamSchema(
+
+                key = "bootKeyDelivery",
+
+                type = "enum",
+
+                defaultValue = JsonNodeFactory.instance.textNode("external-file"),
+
+                options = listOf("external-file", "embedded"),
+
+                description = "Boot KEK 交付方式。external-file 保留独立 sidecar；embedded 将构建使用的 KEK 作为密封资源写入最终 JAR，使产物可直接启动。",
 
                 hidden = false,
 

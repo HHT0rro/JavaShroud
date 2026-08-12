@@ -107,7 +107,7 @@ class EmbeddedHelperDeploymentTest {
     @Test
     fun jni_microkernel_helper_parses_boot_kek_without_trimmed_text_copies() {
         val helperSource = Files.readString(resolveWorkspacePath("core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
-        val bootSecretStart = helperSource.indexOf("private static byte[] loadBootSecret()")
+        val bootSecretStart = helperSource.indexOf("private static byte[] loadBootSecret(byte[] bootEnvelope)")
         val bootSecretEnd = helperSource.indexOf("private static byte[] decryptBootMaterial", bootSecretStart)
         assertTrue(bootSecretStart >= 0 && bootSecretEnd > bootSecretStart, "Boot KEK loader must remain locatable.")
         val bootSecretLoader = helperSource.substring(bootSecretStart, bootSecretEnd)
@@ -125,7 +125,8 @@ class EmbeddedHelperDeploymentTest {
         assertTrue(bundleStart >= 0 && bundleEnd > bundleStart, "Native bundling function must remain locatable.")
         val bundleSource = deploymentSource.substring(bundleStart, bundleEnd)
         val retainedFilter = "val retainedJarEntries = artifact.jarEntries.filterNot { entry ->"
-        val rejectedEntries = "isNativeKernelResource(entry.name) || entry.name == BootMaterialEnvelope.RESOURCE_PATH"
+        val rejectedNativeEntries = "isNativeKernelResource(entry.name)"
+        val rejectedBootEnvelope = "entry.name == BootMaterialEnvelope.RESOURCE_PATH"
         val appendRecompiled = "val updatedJarEntries = retainedJarEntries + newEntries"
 
         assertTrue(
@@ -133,7 +134,7 @@ class EmbeddedHelperDeploymentTest {
             "Native bundling must remove pre-existing js_kernel resources before adding max outer stubs.",
         )
         assertTrue(
-            bundleSource.contains(rejectedEntries),
+            bundleSource.contains(rejectedNativeEntries) && bundleSource.contains(rejectedBootEnvelope),
             "Native bundling must replace both pre-existing kernels and the provisional boot envelope.",
         )
         assertTrue(
@@ -191,6 +192,10 @@ class EmbeddedHelperDeploymentTest {
         assertTrue(
             "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper.class" in entries,
             "string-encryption must embed its native decode helper.",
+        )
+        assertTrue(
+            "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper${"$"}CachePolicy.class" in entries,
+            "string-encryption must embed StringEncryptionHelper${"$"}CachePolicy because the helper links to this nested enum at runtime.",
         )
     }
     @Test

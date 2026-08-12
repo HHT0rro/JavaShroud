@@ -38,7 +38,7 @@ class NativeRecompilationTransformsTest {
     @Test
     fun native_recompilation_retries_known_zig_cache_failures() {
         val source = java.nio.file.Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeRecompilationTransforms.kt"))
-        val compileBody = source.substringAfter("private fun runZigCompileWithRetry").substringBefore("private fun isTransientZigFileOpenFailure")
+        val compileBody = source.substringAfter("internal fun runZigCompileWithRetry").substringBefore("private fun isTransientZigFileOpenFailure")
         val retryBody = source.substringAfter("private fun isTransientZigFileOpenFailure").substringBefore("internal fun generateDiversifiedSecrets")
 
         assertTrue(retryBody.contains("file_open Unexpected"), "Transient Zig file-open failures must remain retryable.")
@@ -54,6 +54,67 @@ class NativeRecompilationTransformsTest {
         assertTrue(compileBody.contains("ZIG_COMPILE_ATTEMPTS"), "Transient Zig I/O failures must use the bounded compile-attempt policy.")
         assertTrue(retryBody.contains("ZIG_COMPILE_ATTEMPTS = 6"), "Repeated Zig standard-library read failures need enough bounded attempts to recover.")
         assertTrue(compileBody.contains("ZIG_RETRY_BASE_DELAY_MS * (attempt + 1L)"), "Zig retries must use increasing backoff instead of immediate cache churn.")
+        assertTrue(compileBody.contains("waitFor(timeoutMs, TimeUnit.MILLISECONDS)"), "Each Zig attempt must have a bounded wait.")
+        assertTrue(compileBody.contains("process.inputStream") && compileBody.contains("process.errorStream"), "Zig stdout and stderr must be drained independently.")
+        assertTrue(compileBody.contains("taskkill") && compileBody.contains("\"/T\"") && compileBody.contains("\"/F\""), "Windows Zig failures must clean the process tree.")
+        assertTrue(source.contains("JS_VBC4_ZIG_COMPILE_TIMEOUT_MS"), "The Zig compile timeout must be externally configurable.")
+    }
+
+    @Test
+    fun native_recompilation_drains_stdout_and_stderr_without_deadlock() {
+        val workDir = java.nio.file.Files.createTempDirectory("javashroud-zig-output-")
+        try {
+            val command = if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
+                listOf(
+                    "cmd.exe", "/d", "/c",
+                    "(for /L %i in (1,1,1000) do @(echo stdout-%i & echo stderr-%i 1>&2)) & echo error: deliberate 1>&2 & exit /b 1",
+                )
+            } else {
+                listOf(
+                    "sh", "-c",
+                    "i=0; while [ \$i -lt 1000 ]; do printf 'stdout-%s\\n' \"\$i\"; printf 'stderr-%s\\n' \"\$i\" >&2; i=\$((i+1)); done; printf 'error: deliberate\\n' >&2; exit 1",
+                )
+            }
+
+            val result = NativeRecompilationTransforms.runZigCompileWithRetry(
+                ProcessBuilder(command),
+                workDir.resolve("missing-native-output"),
+                timeoutMs = 5_000L,
+            )
+
+            assertFalse(result.success)
+            assertTrue(result.output.contains("stdout-999"), "The stdout drain must consume the entire compiler output.")
+            assertTrue(result.output.contains("stderr-999"), "The stderr drain must consume the entire compiler output.")
+            assertTrue(result.output.contains("error: deliberate"), "Compiler diagnostics must be preserved after parallel draining.")
+        } finally {
+            java.nio.file.Files.deleteIfExists(workDir)
+        }
+    }
+
+    @Test
+    fun native_recompilation_terminates_timed_out_processes() {
+        val workDir = java.nio.file.Files.createTempDirectory("javashroud-zig-timeout-")
+        try {
+            val command = if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
+                listOf("cmd.exe", "/d", "/c", "echo stdout-ready & echo stderr-ready 1>&2 & ping -n 10 127.0.0.1 > nul")
+            } else {
+                listOf("sh", "-c", "printf 'stdout-ready\\n'; printf 'stderr-ready\\n' >&2; sleep 10")
+            }
+            val startedAt = System.nanoTime()
+            val result = NativeRecompilationTransforms.runZigCompileWithRetry(
+                ProcessBuilder(command),
+                workDir.resolve("missing-native-output"),
+                timeoutMs = 250L,
+            )
+            val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000L
+
+            assertFalse(result.success)
+            assertTrue(result.output.contains("timed out"), "A hung Zig compiler must report the timeout.")
+            assertTrue(result.output.contains("stdout-ready") && result.output.contains("stderr-ready"), "Output emitted before timeout must be retained.")
+            assertTrue(elapsedMs < 5_000L, "A timed-out Zig compiler must be cleaned up promptly, took $elapsedMs ms.")
+        } finally {
+            java.nio.file.Files.deleteIfExists(workDir)
+        }
     }
 
     @Test
@@ -629,14 +690,16 @@ class NativeRecompilationTransformsTest {
                 nativePackingLevel = "off",
             )
         }
-        val diagnostics = withVbc4BuildContext(context) {
-            NativeRecompilationTransforms.recompileWithDiagnostics(
-                seed = 424242L,
-                classLoader = NativeRecompilationTransforms::class.java.classLoader,
-                targetPlatforms = listOf("linux-x64"),
-                nativeProtectionLevel = "standard",
-                nativePackingLevel = "max",
-            )
+        val diagnostics = withTestBootSecret {
+            withVbc4BuildContext(context) {
+                NativeRecompilationTransforms.recompileWithDiagnostics(
+                    seed = 424242L,
+                    classLoader = NativeRecompilationTransforms::class.java.classLoader,
+                    targetPlatforms = listOf("linux-x64"),
+                    nativeProtectionLevel = "standard",
+                    nativePackingLevel = "max",
+                )
+            }
         }
 
         val result = diagnostics.results.singleOrNull()
@@ -676,14 +739,16 @@ class NativeRecompilationTransformsTest {
 
     @Test
     fun windows_max_native_recompile_emits_outer_stub_shell_artifact() {
-        val diagnostics = withVbc4BuildContext(defaultVbc4BuildContext()) {
-            NativeRecompilationTransforms.recompileWithDiagnostics(
-                seed = 525252L,
-                classLoader = NativeRecompilationTransforms::class.java.classLoader,
-                targetPlatforms = listOf("windows-x64"),
-                nativeProtectionLevel = "standard",
-                nativePackingLevel = "max",
-            )
+        val diagnostics = withTestBootSecret {
+            withVbc4BuildContext(defaultVbc4BuildContext()) {
+                NativeRecompilationTransforms.recompileWithDiagnostics(
+                    seed = 525252L,
+                    classLoader = NativeRecompilationTransforms::class.java.classLoader,
+                    targetPlatforms = listOf("windows-x64"),
+                    nativeProtectionLevel = "standard",
+                    nativePackingLevel = "max",
+                )
+            }
         }
 
         val result = diagnostics.results.singleOrNull()
@@ -701,14 +766,16 @@ class NativeRecompilationTransformsTest {
 
     @Test
     fun macos_max_native_recompile_emits_fail_closed_outer_stub_shell_artifacts() {
-        val diagnostics = withVbc4BuildContext(defaultVbc4BuildContext()) {
-            NativeRecompilationTransforms.recompileWithDiagnostics(
-                seed = 626262L,
-                classLoader = NativeRecompilationTransforms::class.java.classLoader,
-                targetPlatforms = listOf("macos-x64", "macos-arm64"),
-                nativeProtectionLevel = "standard",
-                nativePackingLevel = "max",
-            )
+        val diagnostics = withTestBootSecret {
+            withVbc4BuildContext(defaultVbc4BuildContext()) {
+                NativeRecompilationTransforms.recompileWithDiagnostics(
+                    seed = 626262L,
+                    classLoader = NativeRecompilationTransforms::class.java.classLoader,
+                    targetPlatforms = listOf("macos-x64", "macos-arm64"),
+                    nativeProtectionLevel = "standard",
+                    nativePackingLevel = "max",
+                )
+            }
         }
 
         assertEquals(emptyList(), diagnostics.messages.filter { it.level == "error" }.map { it.message }, "macOS max shell cross-compilation should not report errors")
@@ -739,23 +806,27 @@ class NativeRecompilationTransformsTest {
                 nativePackingLevel = "off",
             )
         }
-        val maxDiagnostics = withVbc4BuildContext(context) {
-            NativeRecompilationTransforms.recompileWithDiagnostics(
-                seed = 737373L,
-                classLoader = NativeRecompilationTransforms::class.java.classLoader,
-                targetPlatforms = platforms,
-                nativeProtectionLevel = "standard",
-                nativePackingLevel = "max",
-            )
+        val maxDiagnostics = withTestBootSecret {
+            withVbc4BuildContext(context) {
+                NativeRecompilationTransforms.recompileWithDiagnostics(
+                    seed = 737373L,
+                    classLoader = NativeRecompilationTransforms::class.java.classLoader,
+                    targetPlatforms = platforms,
+                    nativeProtectionLevel = "standard",
+                    nativePackingLevel = "max",
+                )
+            }
         }
-        val macosDiagnostics = withVbc4BuildContext(context) {
-            NativeRecompilationTransforms.recompileWithDiagnostics(
-                seed = 737373L,
-                classLoader = NativeRecompilationTransforms::class.java.classLoader,
-                targetPlatforms = listOf("macos-x64", "macos-arm64"),
-                nativeProtectionLevel = "standard",
-                nativePackingLevel = "max",
-            )
+        val macosDiagnostics = withTestBootSecret {
+            withVbc4BuildContext(context) {
+                NativeRecompilationTransforms.recompileWithDiagnostics(
+                    seed = 737373L,
+                    classLoader = NativeRecompilationTransforms::class.java.classLoader,
+                    targetPlatforms = listOf("macos-x64", "macos-arm64"),
+                    nativeProtectionLevel = "standard",
+                    nativePackingLevel = "max",
+                )
+            }
         }
 
         assertEquals(platforms.toSet(), maxDiagnostics.results.map { it.platform }.toSet(), "Windows/Linux max recompilation must produce reportable outer stubs. diagnostics=${maxDiagnostics.messages.joinToString(" | ") { "${it.level}:${it.message}" }}")

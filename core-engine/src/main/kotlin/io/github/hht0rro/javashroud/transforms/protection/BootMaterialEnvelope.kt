@@ -15,9 +15,11 @@ import javax.crypto.spec.SecretKeySpec
 internal object BootMaterialEnvelope {
     const val RESOURCE_PATH: String = "META-INF/.r/boot.dat"
     private const val VERSION = 2
+    private const val HARDENED_VERSION = 3
     private const val SHELL_BINDING_SIZE = 32
     private val MAGIC = byteArrayOf(0x4A, 0x53, 0x42, 0x4D) // JSBM
     private val AAD = "javashroud-boot-material-v2".toByteArray(Charsets.US_ASCII)
+    private val HARDENED_AAD = "javashroud-boot-material-v3".toByteArray(Charsets.US_ASCII)
     private val PLATFORM_IDS = linkedMapOf(
         "windows-x64" to 1,
         "linux-x64" to 2,
@@ -34,6 +36,8 @@ internal object BootMaterialEnvelope {
         val partitions = context.runtimeKeyPartitions
         require(partitions.totalSlots in 2..17) { "boot material slot count is unsupported" }
         require(shellBindingCommitments.size <= PLATFORM_IDS.size) { "too many native shell binding commitments" }
+        val envelopeVersion = if (context.maxHardening) HARDENED_VERSION else VERSION
+        val sidecarBinding = if (context.maxHardening) context.copyBootSidecarBindingForBuild() else ByteArray(0)
         val platformBindings = shellBindingCommitments.map { (platform, commitment) ->
             val platformId = PLATFORM_IDS[platform]
                 ?: throw IllegalArgumentException("native shell binding platform is unsupported: $platform")
@@ -43,7 +47,7 @@ internal object BootMaterialEnvelope {
             platformId to commitment
         }.sortedBy { it.first }
         val plain = ByteArray(4 + 64 + partitions.totalSlots * 32 + platformBindings.size * (1 + SHELL_BINDING_SIZE))
-        plain[0] = VERSION.toByte()
+        plain[0] = envelopeVersion.toByte()
         plain[1] = partitions.resourcePartitionCount.toByte()
         plain[2] = partitions.totalSlots.toByte()
         plain[3] = platformBindings.size.toByte()
@@ -69,11 +73,20 @@ internal object BootMaterialEnvelope {
             SecureRandom().nextBytes(nonce)
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(bootSecret, "AES"), GCMParameterSpec(128, nonce))
-            cipher.updateAAD(AAD)
+            if (envelopeVersion == HARDENED_VERSION) {
+                cipher.updateAAD(HARDENED_AAD)
+                cipher.updateAAD(sidecarBinding)
+            } else {
+                cipher.updateAAD(AAD)
+            }
             sealed = cipher.doFinal(plain)
-            ByteArrayOutputStream(MAGIC.size + 2 + nonce.size + 4 + sealed.size).apply {
+            ByteArrayOutputStream(MAGIC.size + 3 + sidecarBinding.size + nonce.size + 4 + sealed.size).apply {
                 write(MAGIC)
-                write(VERSION)
+                write(envelopeVersion)
+                if (envelopeVersion == HARDENED_VERSION) {
+                    write(sidecarBinding.size)
+                    write(sidecarBinding)
+                }
                 write(nonce.size)
                 write(nonce)
                 writeLe32(sealed.size)
@@ -83,6 +96,7 @@ internal object BootMaterialEnvelope {
             Arrays.fill(plain, 0)
             Arrays.fill(nonce, 0)
             Arrays.fill(sealed, 0)
+            Arrays.fill(sidecarBinding, 0)
         }
     }
 

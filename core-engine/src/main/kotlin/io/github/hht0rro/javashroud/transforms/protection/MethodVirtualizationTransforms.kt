@@ -715,8 +715,9 @@ private data class VmSliceManifestPlan(
     val shards: List<VmSliceShard>,
 ) {
     fun toJarEntry(keyRandom: SecureRandom, mesh: String, ordinal: Int, entryCount: Int, meshPeers: List<VmSliceMeshPeer>): JarEntryData {
+        val protocol = requireVbc4BuildContext().vmManifestProtocol()
         val manifest = StringBuilder()
-        manifest.append("VBC4S|1|")
+        manifest.append(protocol.prefix)
             .append(totalSize).append('|')
             .append(shards.size).append('|')
             .append(mesh).append('|')

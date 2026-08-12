@@ -9,6 +9,7 @@
 #include "js_jni_runtime.h"
 #include "js_vm_core.h"
 #include "js_vm_symbol.h"
+#include "native_secrets.inc"
 #include "zstd.h"
 
 #include <stdlib.h>
@@ -23,6 +24,14 @@
 
 #define JS_VM_CALL_GATE_SIZE 8192
 #define JS_VM_PRELOAD_WAIT_ATTEMPTS 10000
+
+#ifndef JS_VBC4_MANIFEST_MAGIC
+#define JS_VBC4_MANIFEST_MAGIC "VBC4S"
+#endif
+#ifndef JS_VBC4_MANIFEST_VERSION
+#define JS_VBC4_MANIFEST_VERSION "1"
+#endif
+#define JS_VBC4_MANIFEST_PREFIX JS_VBC4_MANIFEST_MAGIC "|" JS_VBC4_MANIFEST_VERSION "|"
 
 typedef struct {
     char original[JS_VM_CALL_GATE_KEY_LEN];
@@ -125,6 +134,8 @@ JS_HIDDEN void js_vm_cache_lock_destroy(void) {
 
 JS_HIDDEN int js_vm_resource_alias_register(const char *original_path, const char *sealed_path) {
     if (!original_path || !sealed_path || !original_path[0] || !sealed_path[0]) return 0;
+    /* Reject instead of truncating: aliases are authenticated path bindings. */
+    if (strlen(original_path) >= JS_VM_CALL_GATE_KEY_LEN || strlen(sealed_path) >= JS_VM_CALL_GATE_KEY_LEN) return 0;
     if (strcmp(original_path, sealed_path) == 0) return 1;
     for (int i = 0; i < JS_VM_CALL_GATE_SIZE; i++) {
         if (js_vm_resource_aliases[i].active && strcmp(js_vm_resource_aliases[i].original, original_path) == 0) {
@@ -164,6 +175,7 @@ static uint32_t js_vm_call_gate_hash_token(jlong token) {
 
 JS_HIDDEN int js_vm_call_gate_register_profile(jlong entry_token, const char *resource_path, uint32_t expected_profile) {
     if (entry_token == 0 || !resource_path || !resource_path[0]) return 0;
+    if (strlen(resource_path) >= JS_VM_CALL_GATE_KEY_LEN) return 0;
     if (js_vm_call_gate_count >= JS_VM_CALL_GATE_SIZE - 1) return 0;
     uint32_t h = js_vm_call_gate_hash_token(entry_token) % JS_VM_CALL_GATE_SIZE;
     for (int i = 0; i < JS_VM_CALL_GATE_SIZE; i++) {
@@ -769,7 +781,9 @@ JS_PROTECTED static int js_manifest_order_token(const char *mesh, uint32_t ordin
 }
 
 JS_HIDDEN unsigned char* js_vm_reassemble_sliced_resource(JNIEnv *env, jclass helper_cls, unsigned char *decoded, int decoded_len, int *out_len) {
-    if (!decoded || decoded_len < 10 || !out_len || memcmp(decoded, "VBC4S|1|", 8) != 0) return decoded;
+    const size_t manifest_prefix_len = sizeof(JS_VBC4_MANIFEST_PREFIX) - 1u;
+    if (!decoded || decoded_len <= (int)manifest_prefix_len || !out_len ||
+        memcmp(decoded, JS_VBC4_MANIFEST_PREFIX, manifest_prefix_len) != 0) return decoded;
     char *manifest = (char*)calloc((size_t)decoded_len + 1u, 1u);
     if (!manifest) { js_vm_set_prepare_stage("reassemble-manifest-alloc"); return NULL; }
     memcpy(manifest, decoded, (size_t)decoded_len);
@@ -793,7 +807,8 @@ JS_HIDDEN unsigned char* js_vm_reassemble_sliced_resource(JNIEnv *env, jclass he
     uint32_t shard_count = 0;
     uint32_t manifest_ordinal = 0;
     uint32_t manifest_entry_count = 0;
-    if (!magic || strcmp(magic, "VBC4S") != 0 || !version || strcmp(version, "1") != 0 ||
+    if (!magic || strcmp(magic, JS_VBC4_MANIFEST_MAGIC) != 0 ||
+        !version || strcmp(version, JS_VBC4_MANIFEST_VERSION) != 0 ||
         !js_parse_u32_token(total_text, &total_len) || !js_parse_u32_token(count_text, &shard_count) ||
         !mesh_text || strlen(mesh_text) != 64u || !js_parse_u32_token(ordinal_text, &manifest_ordinal) ||
         !js_parse_u32_token(entry_count_text, &manifest_entry_count) || manifest_entry_count == 0 ||
