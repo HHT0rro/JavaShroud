@@ -53,6 +53,9 @@ build-release.summary.txt
 tmp-smoke-public-release/
 
 # Local agent and index state
+.gradle-codex/
+.serena/
+scripts/__pycache__/
 .codegraph/
 .cursor/
 plan/
