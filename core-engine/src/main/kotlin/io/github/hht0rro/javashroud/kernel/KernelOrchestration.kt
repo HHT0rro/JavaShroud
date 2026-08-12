@@ -9,6 +9,7 @@ import io.github.hht0rro.javashroud.model.config.RuleSet
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.model.passes.PassContext
 import io.github.hht0rro.javashroud.model.protocol.EngineEvent
+import io.github.hht0rro.javashroud.maintenance.RuntimeGarbageCollector
 import io.github.hht0rro.javashroud.passes.RegisteredPass
 import io.github.hht0rro.javashroud.passes.buildRegisteredPasses
 import io.github.hht0rro.javashroud.passes.requireExecutablePass
@@ -175,6 +176,7 @@ internal fun executeWithOrderedPasses(
         }
     } finally {
         if (ownsVbc4BuildContext) vbc4BuildContext.wipe()
+        RuntimeGarbageCollector.collect(apply = true)
     }
 }
 
