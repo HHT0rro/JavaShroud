@@ -107,7 +107,171 @@ JS_HIDDEN char* js_lookup_bound_method(JNIEnv *env, const char *original_class, 
 JS_HIDDEN void js_vm_mark_hot_integrity_baseline_clean(void);
 JS_HIDDEN void js_runtime_on_unload_cleanup(JNIEnv *env);
 
-#define JS_NATIVE_ABI_TABLE_VERSION 9u
+/*
+ * Internal AKEN-7 evaluator contract.  This is deliberately a native-only
+ * page-local primitive, not a JNI ABI and not a generic resource decoder.
+ * The future typed page route must supply one already-authenticated descriptor
+ * binding plus exactly seven fragments for the current handle only.
+ */
+#define JS_AKEN_EVALUATOR_STATE_WIDTH 32u
+#define JS_AKEN_EVALUATOR_FRAGMENT_COUNT 7u
+
+typedef struct {
+    uint8_t kind_id;
+    const unsigned char *logical_identity;
+    size_t logical_identity_len;
+    jint page_index;
+    jint target_size;
+    const unsigned char *codec_variant;
+    size_t codec_variant_len;
+    const unsigned char *layout_variant;
+    size_t layout_variant_len;
+    const unsigned char *encoded_handle;
+    size_t encoded_handle_len;
+    const unsigned char *locator_token;
+    size_t locator_token_len;
+    /* Public canonical commitment expected from the seven dispersed shape shares. */
+    const unsigned char *artifact_commitment;
+    size_t artifact_commitment_len;
+} js_aken_evaluator_binding;
+
+typedef struct {
+    jint ordinal;
+    jint family;
+    const unsigned char *shape;
+    size_t shape_len;
+    const unsigned char *call_token;
+    size_t call_token_len;
+    const uint32_t *table_permutation;
+    size_t table_permutation_len;
+} js_aken_evaluator_fragment;
+
+/*
+ * Reconstructs exactly one current-page 32-byte DEK from the complete AKEN-7
+ * graph after validating all page bindings, fragment tags, and the canonical
+ * artifact commitment reconstructed from the graph's dispersed shape shares.
+ * The caller owns out_dek and must use it only in the terminal page-open scope
+ * before wiping it with js_vbc4_wipe_volatile(). Any malformed or incomplete
+ * graph returns 0 and clears out_dek.
+ */
+JS_HIDDEN int js_aken_evaluator_recover_dek(
+    const js_aken_evaluator_binding *binding,
+    const js_aken_evaluator_fragment *fragments,
+    size_t fragment_count,
+    unsigned char out_dek[JS_AKEN_EVALUATOR_STATE_WIDTH]
+);
+
+/*
+ * Internal AKEN v4 current-page envelope contract.  The envelope is a
+ * locator-private record and is deliberately separate from the typed JNI
+ * call-site proof: callers give parse() the envelope bytes plus the original
+ * raw proof that the typed bridge received.  No member here is a JNI ABI,
+ * resource decoder, resource catalog, or key-export surface.
+ *
+ * Inline envelopes carry the exact descriptor encoding.  Compact envelopes
+ * intentionally retain only fixed-size bindings; an artifact-specific native
+ * locator must subsequently supply its one resolved descriptor and route to
+ * verify_resolved_bindings() before a page-open path can use the record.
+ */
+#define JS_AKEN_NATIVE_PAGE_ENVELOPE_MAX_SIZE 4096u
+#define JS_AKEN_NATIVE_PAGE_ENVELOPE_VERSION 1u
+#define JS_AKEN_NATIVE_PAGE_ENVELOPE_FORM_INLINE_DESCRIPTOR 1u
+#define JS_AKEN_NATIVE_PAGE_ENVELOPE_FORM_COMPACT_LOCATOR 2u
+#define JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE 24u
+#define JS_AKEN_NATIVE_PAGE_ENVELOPE_LOCATOR_SIZE 16u
+#define JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE 32u
+#define JS_AKEN_NATIVE_PAGE_ENVELOPE_FIXED_SIZE \
+    (1u + 1u + 8u + 1u + 4u + JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE + \
+        JS_AKEN_NATIVE_PAGE_ENVELOPE_LOCATOR_SIZE + \
+        (6u * JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE))
+#define JS_AKEN_NATIVE_PAGE_ENVELOPE_MAX_INLINE_DESCRIPTOR_SIZE \
+    (JS_AKEN_NATIVE_PAGE_ENVELOPE_MAX_SIZE - JS_AKEN_NATIVE_PAGE_ENVELOPE_FIXED_SIZE - 4u)
+#define JS_AKEN_NATIVE_PAGE_DESCRIPTOR_MAX_SIZE (384u * 1024u)
+#define JS_AKEN_NATIVE_PAGE_ROUTE_MAX_SIZE (128u * 1024u)
+
+typedef struct {
+    /* Expected current-page values from the typed route / generated locator. */
+    uint64_t entry_token;
+    uint8_t resource_kind;
+    jint page_index;
+    const unsigned char *encoded_handle;
+    size_t encoded_handle_len;
+    /* This is the original typed JNI proof, never an encoded envelope. */
+    const unsigned char *raw_call_site_proof;
+    size_t raw_call_site_proof_len;
+} js_aken_native_page_request;
+
+typedef struct {
+    /* Set only by a successful parse(); resolver checks require this marker. */
+    uint8_t parsed;
+    uint8_t form;
+    uint64_t entry_token;
+    uint8_t resource_kind;
+    jint page_index;
+    unsigned char encoded_handle[JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE];
+    unsigned char locator_token[JS_AKEN_NATIVE_PAGE_ENVELOPE_LOCATOR_SIZE];
+    unsigned char evaluator_fingerprint[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE];
+    unsigned char artifact_commitment[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE];
+    unsigned char descriptor_binding[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE];
+    unsigned char call_site_proof_binding[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE];
+    unsigned char route_binding[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE];
+    /* Borrowed from encoded envelope bytes; wipe() never writes this input. */
+    const unsigned char *inline_descriptor;
+    size_t inline_descriptor_len;
+} js_aken_native_page_envelope;
+
+/*
+ * One artifact-specific locator result for the envelope's current page.  The
+ * locator owns the pointed-to descriptor and route bytes; this compact
+ * binding primitive neither resolves them nor makes them available to Java.
+ */
+typedef struct {
+    uint8_t resource_kind;
+    jint page_index;
+    const unsigned char *encoded_handle;
+    size_t encoded_handle_len;
+    const unsigned char *locator_token;
+    size_t locator_token_len;
+    const unsigned char *evaluator_fingerprint;
+    size_t evaluator_fingerprint_len;
+    const unsigned char *artifact_commitment;
+    size_t artifact_commitment_len;
+    const unsigned char *descriptor_encoding;
+    size_t descriptor_encoding_len;
+    const unsigned char *route_encoding;
+    size_t route_encoding_len;
+} js_aken_native_page_resolved_descriptor;
+
+/*
+ * Strictly parses at most one 4096-byte envelope, verifies the complete
+ * envelope binding, and binds it to the independently supplied raw proof and
+ * expected current-page request.  Inline descriptor bindings are checked
+ * immediately.  Compact records succeed only as pending resolver records and
+ * require js_aken_native_page_envelope_verify_resolved_bindings() next.
+ */
+JS_HIDDEN int js_aken_native_page_envelope_parse(
+    const unsigned char *encoded_envelope,
+    size_t encoded_envelope_len,
+    const js_aken_native_page_request *request,
+    js_aken_native_page_envelope *out_envelope
+);
+
+/*
+ * Verifies one resolver-supplied current-page identity, descriptor, and route
+ * against a parsed envelope.  It performs binding checks only; it does not
+ * parse arbitrary resources, decrypt a payload, derive a key, or expose data
+ * to Java.  For inline form the descriptor bytes must exactly equal the inline
+ * frame; compact form requires this check before use.
+ */
+JS_HIDDEN int js_aken_native_page_envelope_verify_resolved_bindings(
+    const js_aken_native_page_envelope *envelope,
+    const js_aken_native_page_resolved_descriptor *resolved
+);
+
+/* Clears copied public bindings and borrowed-pointer metadata in one output record. */
+JS_HIDDEN void js_aken_native_page_envelope_wipe(js_aken_native_page_envelope *envelope);
+
+#define JS_NATIVE_ABI_TABLE_VERSION 10u
 
 typedef struct js_native_abi_table {
     unsigned int version;
@@ -131,6 +295,10 @@ typedef struct js_native_abi_table {
     jint (JNICALL *execute_vm_resource_int)(JNIEnv *env, jclass cls, jlong entryToken);
     jint (JNICALL *execute_vm_resource_int_int)(JNIEnv *env, jclass cls, jlong entryToken, jint arg0);
     void (JNICALL *execute_vm_resource_int_void)(JNIEnv *env, jclass cls, jlong entryToken, jint arg0);
+    jobject (JNICALL *execute_aken_vm_page)(JNIEnv *env, jclass cls, jlong entryToken, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof, jobjectArray args);
+    jbyteArray (JNICALL *decode_aken_string_page)(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof);
+    jbyteArray (JNICALL *read_aken_class_page)(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof);
+    jbyteArray (JNICALL *map_aken_native_chunk)(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof);
 } js_native_abi_table;
 
 JS_EXPORT const js_native_abi_table *js_native_abi_table_v1(void);
