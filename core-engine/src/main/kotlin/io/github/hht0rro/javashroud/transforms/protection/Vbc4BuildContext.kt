@@ -5,6 +5,7 @@ import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenBuildPlan
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4FinalizationLayout
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4MethodCandidate
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4RouteCandidateRef
 import java.security.MessageDigest
 import java.security.SecureRandom
 import javax.crypto.Mac
@@ -163,6 +164,38 @@ internal data class Vbc4BuildContext(
             return block(snapshots.toList())
         } finally {
             snapshots.forEach { it.wipe() }
+        }
+    }
+
+    /**
+     * Gives the pre-seal routing stage a scoped projection of registered VBC4
+     * candidates. The projection contains only the entry token and logical VM
+     * resource path, never the serialized program or another planner input.
+     */
+    fun <T> withAkenVbc4RouteCandidateRefsForBuild(
+        block: (List<AkenVbc4RouteCandidateRef>) -> T,
+    ): T {
+        val snapshots = synchronized(this) {
+            check(akenBuildPlan?.isWiped() != false) {
+                "AKEN VBC4 route candidates must be projected before page-plan initialization"
+            }
+            check(akenVbc4FinalizationLayout?.isWiped != false) {
+                "AKEN VBC4 route candidates cannot be projected after finalization layout publication"
+            }
+            check(akenVbc4MethodCandidates.isNotEmpty()) { "AKEN VBC4 method candidates are not initialized" }
+            akenVbc4MethodCandidates.values
+                .sortedBy { candidate -> candidate.entryToken }
+                .map { candidate ->
+                    AkenVbc4RouteCandidateRef.create(
+                        entryToken = candidate.entryToken,
+                        logicalVmResourcePath = candidate.logicalMethod.logicalVmResourcePath,
+                    )
+                }
+        }
+        try {
+            return block(snapshots.toList())
+        } finally {
+            snapshots.forEach { candidate -> candidate.wipe() }
         }
     }
 
