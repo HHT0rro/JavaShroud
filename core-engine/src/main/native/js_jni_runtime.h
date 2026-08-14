@@ -188,6 +188,14 @@ JS_HIDDEN int js_aken_evaluator_recover_dek(
     (JS_AKEN_NATIVE_PAGE_ENVELOPE_MAX_SIZE - JS_AKEN_NATIVE_PAGE_ENVELOPE_FIXED_SIZE - 4u)
 #define JS_AKEN_NATIVE_PAGE_DESCRIPTOR_MAX_SIZE (384u * 1024u)
 #define JS_AKEN_NATIVE_PAGE_ROUTE_MAX_SIZE (128u * 1024u)
+#define JS_AKEN_NATIVE_PAGE_RESOURCE_KIND_VBC4_METHOD 1u
+
+/* Generated compiler-record limits; records themselves remain opaque. */
+#define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_VERSION 1u
+#define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_BINDING_SIZE JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE
+#define JS_AKEN_NATIVE_PAGE_LOCATOR_MAX_RECORD_COUNT 65535u
+#define JS_AKEN_NATIVE_PAGE_LOCATOR_MAX_RECORD_SIZE (512u * 1024u)
+#define JS_AKEN_NATIVE_PAGE_LOCATOR_MAX_BLOB_SIZE (64u * 1024u * 1024u)
 
 typedef struct {
     /* Expected current-page values from the typed route / generated locator. */
@@ -200,6 +208,26 @@ typedef struct {
     const unsigned char *raw_call_site_proof;
     size_t raw_call_site_proof_len;
 } js_aken_native_page_request;
+
+/*
+ * One verified record borrowed from the generated native locator blob.  The
+ * pointed-to frames stay owned by that immutable compiler input; wipe() clears
+ * only this metadata and never writes the blob.
+ */
+typedef struct {
+    uint8_t parsed;
+    uint64_t entry_token;
+    uint8_t resource_kind;
+    jint page_index;
+    const unsigned char *encoded_handle;
+    size_t encoded_handle_len;
+    const unsigned char *native_envelope;
+    size_t native_envelope_len;
+    const unsigned char *descriptor_encoding;
+    size_t descriptor_encoding_len;
+    const unsigned char *route_encoding;
+    size_t route_encoding_len;
+} js_aken_native_page_locator_record;
 
 typedef struct {
     /* Set only by a successful parse(); resolver checks require this marker. */
@@ -270,6 +298,24 @@ JS_HIDDEN int js_aken_native_page_envelope_verify_resolved_bindings(
 
 /* Clears copied public bindings and borrowed-pointer metadata in one output record. */
 JS_HIDDEN void js_aken_native_page_envelope_wipe(js_aken_native_page_envelope *envelope);
+
+/*
+ * Resolves exactly one record from the generated compiler locator. lookup()
+ * validates the entire opaque table and succeeds only for one exact request
+ * match. resolve() binds that record's descriptor and route to an already
+ * parsed envelope, retains the verified descriptor in out_resolved for the
+ * immediate page-opener scope, and never exposes a generic decoder or catalog.
+ */
+JS_HIDDEN int js_aken_native_page_locator_lookup(
+    const js_aken_native_page_request *request,
+    js_aken_native_page_locator_record *out_record
+);
+JS_HIDDEN int js_aken_native_page_locator_resolve(
+    const js_aken_native_page_locator_record *record,
+    const js_aken_native_page_envelope *envelope,
+    js_aken_native_page_resolved_descriptor *out_resolved
+);
+JS_HIDDEN void js_aken_native_page_locator_record_wipe(js_aken_native_page_locator_record *record);
 
 #define JS_NATIVE_ABI_TABLE_VERSION 10u
 

@@ -63,41 +63,28 @@ static void js_aken_bridge_unavailable(JNIEnv *env, const char *purpose) {
     (*env)->DeleteLocalRef(env, failure);
 }
 
-static int js_aken_bridge_request_is_valid(JNIEnv *env, jbyteArray encoded_handle, jint page_index, jbyteArray call_site_proof) {
+static int js_aken_bridge_request_shape_is_valid(
+    JNIEnv *env,
+    jbyteArray encoded_handle,
+    jint page_index,
+    jbyteArray call_site_proof
+) {
     if (!env || !encoded_handle || !call_site_proof || page_index < 0 ||
-        (*env)->GetArrayLength(env, encoded_handle) != 24 ||
+        (*env)->GetArrayLength(env, encoded_handle) != (jsize)JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE ||
         (*env)->GetArrayLength(env, call_site_proof) <= 0 ||
-        (*env)->GetArrayLength(env, call_site_proof) > 4096) {
-        js_aken_bridge_unavailable(env, "AKEN page request is invalid");
+        (*env)->GetArrayLength(env, call_site_proof) > (jsize)JS_AKEN_NATIVE_PAGE_ENVELOPE_MAX_SIZE ||
+        (*env)->ExceptionCheck(env)) {
         return 0;
     }
-    if ((*env)->ExceptionCheck(env)) return 0;
     return 1;
 }
 
-/*
- * The generated include is native-private compiler input.  This bounded
- * structural scan intentionally exposes neither a catalog nor a decode API:
- * it merely keeps the exact opaque current-page records live in the compiled
- * image and rejects malformed generated geometry before the future resolver
- * attempts an exact handle/proof lookup.
- */
-static int js_aken_native_page_locator_has_compiled_records(void) {
-    volatile unsigned int fold = 0xA5C35A7Du;
-    size_t record_index;
-    if (JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_COUNT == 0u || JS_AKEN_NATIVE_PAGE_LOCATOR_BLOB_SIZE == 0u) return 0;
-    for (record_index = 0u; record_index < (size_t)JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_COUNT; ++record_index) {
-        const unsigned int offset = js_aken_native_page_locator_record_offsets[record_index];
-        const unsigned int length = js_aken_native_page_locator_record_lengths[record_index];
-        size_t byte_index;
-        if (length == 0u || offset >= JS_AKEN_NATIVE_PAGE_LOCATOR_BLOB_SIZE ||
-            length > JS_AKEN_NATIVE_PAGE_LOCATOR_BLOB_SIZE - offset) return 0;
-        if (js_aken_native_page_locator_blob[offset] != JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_FORMAT_VERSION) return 0;
-        for (byte_index = 0u; byte_index < (size_t)length; ++byte_index) {
-            fold = ((fold << 5) | (fold >> 27)) ^ js_aken_native_page_locator_blob[(size_t)offset + byte_index];
-        }
+static int js_aken_bridge_request_is_valid(JNIEnv *env, jbyteArray encoded_handle, jint page_index, jbyteArray call_site_proof) {
+    if (!js_aken_bridge_request_shape_is_valid(env, encoded_handle, page_index, call_site_proof)) {
+        js_aken_bridge_unavailable(env, "AKEN page request is invalid");
+        return 0;
     }
-    return fold != 0u || js_aken_native_page_locator_blob[0] == JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_FORMAT_VERSION;
+    return 1;
 }
 
 /*
@@ -943,18 +930,336 @@ cleanup:
     return ok;
 }
 
-static jobject JNICALL jsw_a0(JNIEnv *env, jclass cls, jlong entry_token, jbyteArray encoded_handle, jint page_index, jbyteArray call_site_proof, jobjectArray args) {
-    (void)cls; (void)entry_token; (void)args;
-    if (!js_vm_sensitive_path_guard(env, (const void*)jsw_a0, 0)) return NULL;
-    if (!js_protected_runtime_enter(env)) return NULL;
-    if (js_aken_bridge_request_is_valid(env, encoded_handle, page_index, call_site_proof)) {
-        if (js_aken_native_page_locator_has_compiled_records()) {
-            js_aken_bridge_unavailable(env, "AKEN VM page executor is unavailable");
-        } else {
-            js_aken_bridge_unavailable(env, "AKEN VM page route is unavailable");
-        }
+/*
+ * AKEN v4 generated current-page locator parser.  The include remains opaque
+ * compiler input: every borrowed frame is constrained to exactly one record,
+ * the complete table geometry is validated before a lookup succeeds, and no
+ * function here decodes a resource or creates a catalog surface.
+ */
+#define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_BINDING_DOMAIN \
+    "AKEN-v4-native-page-locator-compile-input-v1"
+
+static int js_aken_native_page_locator_record_is_well_formed(
+    const js_aken_native_page_locator_record *record,
+    int require_successful_parse
+) {
+    if (!record || (require_successful_parse && record->parsed != 1u) ||
+        !js_aken_native_page_envelope_kind_is_valid(record->resource_kind) || record->page_index < 0) {
+        return 0;
     }
-    (void)js_protected_runtime_leave(env);
+    if (!record->encoded_handle ||
+        record->encoded_handle_len != JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE ||
+        !record->native_envelope || record->native_envelope_len == 0u ||
+        record->native_envelope_len > JS_AKEN_NATIVE_PAGE_ENVELOPE_MAX_SIZE ||
+        !record->descriptor_encoding || record->descriptor_encoding_len == 0u ||
+        record->descriptor_encoding_len > JS_AKEN_NATIVE_PAGE_DESCRIPTOR_MAX_SIZE ||
+        !record->route_encoding || record->route_encoding_len == 0u ||
+        record->route_encoding_len > JS_AKEN_NATIVE_PAGE_ROUTE_MAX_SIZE) {
+        return 0;
+    }
+    return 1;
+}
+
+static int js_aken_native_page_locator_digest_record(
+    const js_aken_native_page_locator_record *record,
+    unsigned char out_binding[JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_BINDING_SIZE]
+) {
+    static const unsigned char domain[] = JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_BINDING_DOMAIN;
+    js_sha256_ctx ctx;
+    int ok = 0;
+    if (!out_binding) return 0;
+    js_vbc4_wipe_volatile(out_binding, JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_BINDING_SIZE);
+    memset(&ctx, 0, sizeof(ctx));
+    if (!js_aken_native_page_locator_record_is_well_formed(record, 0)) goto cleanup;
+    js_sha256_init(&ctx);
+    js_sha256_update(&ctx, domain, (int)(sizeof(domain) - 1u));
+    js_aken_native_page_envelope_update_u64be(&ctx, record->entry_token);
+    js_sha256_update(&ctx, &record->resource_kind, 1);
+    js_aken_native_page_envelope_update_u32be(&ctx, (uint32_t)record->page_index);
+    if (!js_aken_native_page_envelope_update_framed(
+            &ctx,
+            record->encoded_handle,
+            record->encoded_handle_len) ||
+        !js_aken_native_page_envelope_update_framed(
+            &ctx,
+            record->native_envelope,
+            record->native_envelope_len) ||
+        !js_aken_native_page_envelope_update_framed(
+            &ctx,
+            record->descriptor_encoding,
+            record->descriptor_encoding_len) ||
+        !js_aken_native_page_envelope_update_framed(
+            &ctx,
+            record->route_encoding,
+            record->route_encoding_len)) {
+        goto cleanup;
+    }
+    js_sha256_final(&ctx, out_binding);
+    ok = 1;
+cleanup:
+    js_vbc4_wipe_volatile(&ctx, sizeof(ctx));
+    if (!ok) js_vbc4_wipe_volatile(out_binding, JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_BINDING_SIZE);
+    return ok;
+}
+
+JS_HIDDEN void js_aken_native_page_locator_record_wipe(js_aken_native_page_locator_record *record) {
+    if (!record) return;
+    js_vbc4_wipe_volatile(record, sizeof(*record));
+}
+
+static int js_aken_native_page_locator_record_parse(
+    const unsigned char *encoded_record,
+    size_t encoded_record_len,
+    js_aken_native_page_locator_record *out_record
+) {
+    js_aken_native_page_envelope_reader reader = {0};
+    unsigned char received_binding[JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_BINDING_SIZE] = {0};
+    unsigned char expected_binding[JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_BINDING_SIZE] = {0};
+    uint8_t record_version = 0u;
+    uint32_t page_index = 0u;
+    uint32_t encoded_handle_len = 0u;
+    uint32_t native_envelope_len = 0u;
+    uint32_t descriptor_encoding_len = 0u;
+    uint32_t route_encoding_len = 0u;
+    int ok = 0;
+    if (!out_record) goto cleanup;
+    js_aken_native_page_locator_record_wipe(out_record);
+    if (!encoded_record || encoded_record_len == 0u ||
+        encoded_record_len > JS_AKEN_NATIVE_PAGE_LOCATOR_MAX_RECORD_SIZE ||
+        JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_FORMAT_VERSION != JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_VERSION) {
+        goto cleanup;
+    }
+    reader.bytes = encoded_record;
+    reader.length = encoded_record_len;
+    reader.offset = 0u;
+    if (!js_aken_native_page_envelope_reader_read_u8(&reader, &record_version) ||
+        record_version != JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_VERSION ||
+        !js_aken_native_page_envelope_reader_read_u64be(&reader, &out_record->entry_token) ||
+        !js_aken_native_page_envelope_reader_read_u8(&reader, &out_record->resource_kind) ||
+        !js_aken_native_page_envelope_kind_is_valid(out_record->resource_kind) ||
+        !js_aken_native_page_envelope_reader_read_u32be(&reader, &page_index) ||
+        page_index > (uint32_t)INT_MAX) {
+        goto cleanup;
+    }
+    out_record->page_index = (jint)page_index;
+    if (!js_aken_native_page_envelope_reader_read_u32be(&reader, &encoded_handle_len) ||
+        encoded_handle_len != JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE ||
+        !js_aken_native_page_envelope_reader_read_ref(
+            &reader,
+            &out_record->encoded_handle,
+            (size_t)encoded_handle_len) ||
+        !js_aken_native_page_envelope_reader_read_u32be(&reader, &native_envelope_len) ||
+        native_envelope_len == 0u || native_envelope_len > JS_AKEN_NATIVE_PAGE_ENVELOPE_MAX_SIZE ||
+        !js_aken_native_page_envelope_reader_read_ref(
+            &reader,
+            &out_record->native_envelope,
+            (size_t)native_envelope_len) ||
+        !js_aken_native_page_envelope_reader_read_u32be(&reader, &descriptor_encoding_len) ||
+        descriptor_encoding_len == 0u || descriptor_encoding_len > JS_AKEN_NATIVE_PAGE_DESCRIPTOR_MAX_SIZE ||
+        !js_aken_native_page_envelope_reader_read_ref(
+            &reader,
+            &out_record->descriptor_encoding,
+            (size_t)descriptor_encoding_len) ||
+        !js_aken_native_page_envelope_reader_read_u32be(&reader, &route_encoding_len) ||
+        route_encoding_len == 0u || route_encoding_len > JS_AKEN_NATIVE_PAGE_ROUTE_MAX_SIZE ||
+        !js_aken_native_page_envelope_reader_read_ref(
+            &reader,
+            &out_record->route_encoding,
+            (size_t)route_encoding_len) ||
+        !js_aken_native_page_envelope_reader_read_bytes(
+            &reader,
+            received_binding,
+            sizeof(received_binding)) ||
+        reader.offset != reader.length) {
+        goto cleanup;
+    }
+    out_record->encoded_handle_len = (size_t)encoded_handle_len;
+    out_record->native_envelope_len = (size_t)native_envelope_len;
+    out_record->descriptor_encoding_len = (size_t)descriptor_encoding_len;
+    out_record->route_encoding_len = (size_t)route_encoding_len;
+    if (!js_aken_native_page_locator_record_is_well_formed(out_record, 0) ||
+        !js_aken_native_page_locator_digest_record(out_record, expected_binding) ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            received_binding,
+            expected_binding,
+            sizeof(received_binding))) {
+        goto cleanup;
+    }
+    out_record->parsed = 1u;
+    ok = 1;
+cleanup:
+    js_vbc4_wipe_volatile(received_binding, sizeof(received_binding));
+    js_vbc4_wipe_volatile(expected_binding, sizeof(expected_binding));
+    js_vbc4_wipe_volatile(&reader, sizeof(reader));
+    if (!ok && out_record) js_aken_native_page_locator_record_wipe(out_record);
+    return ok;
+}
+
+JS_HIDDEN int js_aken_native_page_locator_lookup(
+    const js_aken_native_page_request *request,
+    js_aken_native_page_locator_record *out_record
+) {
+    const unsigned char *blob = (const unsigned char *)(const void *)js_aken_native_page_locator_blob;
+    const size_t record_count = (size_t)JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_COUNT;
+    const size_t blob_size = (size_t)JS_AKEN_NATIVE_PAGE_LOCATOR_BLOB_SIZE;
+    js_aken_native_page_locator_record candidate = {0};
+    js_aken_native_page_locator_record matched = {0};
+    size_t expected_offset = 0u;
+    size_t match_count = 0u;
+    size_t record_index;
+    int ok = 0;
+    if (!out_record) goto cleanup;
+    js_aken_native_page_locator_record_wipe(out_record);
+    if (!js_aken_native_page_request_is_valid(request) ||
+        record_count == 0u || record_count > JS_AKEN_NATIVE_PAGE_LOCATOR_MAX_RECORD_COUNT ||
+        blob_size == 0u || blob_size > JS_AKEN_NATIVE_PAGE_LOCATOR_MAX_BLOB_SIZE ||
+        JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_FORMAT_VERSION != JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_VERSION) {
+        goto cleanup;
+    }
+    for (record_index = 0u; record_index < record_count; ++record_index) {
+        const size_t offset = (size_t)js_aken_native_page_locator_record_offsets[record_index];
+        const size_t length = (size_t)js_aken_native_page_locator_record_lengths[record_index];
+        if (offset != expected_offset || length == 0u ||
+            length > JS_AKEN_NATIVE_PAGE_LOCATOR_MAX_RECORD_SIZE ||
+            offset > blob_size || length > blob_size - offset) {
+            goto cleanup;
+        }
+        if (!js_aken_native_page_locator_record_parse(blob + offset, length, &candidate)) goto cleanup;
+        if (candidate.entry_token == request->entry_token &&
+            candidate.resource_kind == request->resource_kind &&
+            candidate.page_index == request->page_index &&
+            js_aken_native_page_envelope_constant_time_equal(
+                candidate.encoded_handle,
+                request->encoded_handle,
+                JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE)) {
+            if (match_count == 0u) matched = candidate;
+            ++match_count;
+        }
+        expected_offset += length;
+        js_aken_native_page_locator_record_wipe(&candidate);
+    }
+    if (expected_offset != blob_size || match_count != 1u) goto cleanup;
+    *out_record = matched;
+    ok = 1;
+cleanup:
+    js_aken_native_page_locator_record_wipe(&candidate);
+    js_aken_native_page_locator_record_wipe(&matched);
+    if (!ok && out_record) js_aken_native_page_locator_record_wipe(out_record);
+    return ok;
+}
+
+JS_HIDDEN int js_aken_native_page_locator_resolve(
+    const js_aken_native_page_locator_record *record,
+    const js_aken_native_page_envelope *envelope,
+    js_aken_native_page_resolved_descriptor *out_resolved
+) {
+    int identity_matches = 0;
+    int ok = 0;
+    if (!out_resolved) goto cleanup;
+    js_vbc4_wipe_volatile(out_resolved, sizeof(*out_resolved));
+    if (!js_aken_native_page_locator_record_is_well_formed(record, 1) ||
+        !js_aken_native_page_envelope_record_is_well_formed(envelope, 1)) {
+        goto cleanup;
+    }
+    identity_matches = record->entry_token == envelope->entry_token &&
+        record->resource_kind == envelope->resource_kind &&
+        record->page_index == envelope->page_index &&
+        js_aken_native_page_envelope_constant_time_equal(
+            record->encoded_handle,
+            envelope->encoded_handle,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE);
+    if (!identity_matches) goto cleanup;
+    out_resolved->resource_kind = record->resource_kind;
+    out_resolved->page_index = record->page_index;
+    out_resolved->encoded_handle = record->encoded_handle;
+    out_resolved->encoded_handle_len = record->encoded_handle_len;
+    out_resolved->locator_token = envelope->locator_token;
+    out_resolved->locator_token_len = JS_AKEN_NATIVE_PAGE_ENVELOPE_LOCATOR_SIZE;
+    out_resolved->evaluator_fingerprint = envelope->evaluator_fingerprint;
+    out_resolved->evaluator_fingerprint_len = JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE;
+    out_resolved->artifact_commitment = envelope->artifact_commitment;
+    out_resolved->artifact_commitment_len = JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE;
+    out_resolved->descriptor_encoding = record->descriptor_encoding;
+    out_resolved->descriptor_encoding_len = record->descriptor_encoding_len;
+    out_resolved->route_encoding = record->route_encoding;
+    out_resolved->route_encoding_len = record->route_encoding_len;
+    ok = js_aken_native_page_envelope_verify_resolved_bindings(envelope, out_resolved);
+cleanup:
+    if (!ok && out_resolved) js_vbc4_wipe_volatile(out_resolved, sizeof(*out_resolved));
+    return ok;
+}
+
+static jobject JNICALL jsw_a0(JNIEnv *env, jclass cls, jlong entry_token, jbyteArray encoded_handle, jint page_index, jbyteArray call_site_proof, jobjectArray args) {
+    unsigned char native_handle[JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE] = {0};
+    unsigned char native_call_site_proof[JS_AKEN_NATIVE_PAGE_ENVELOPE_MAX_SIZE] = {0};
+    js_aken_native_page_request request;
+    js_aken_native_page_locator_record record;
+    js_aken_native_page_envelope envelope;
+    js_aken_native_page_resolved_descriptor resolved;
+    jsize proof_length = 0;
+    int protected_runtime_entered = 0;
+    (void)cls;
+    (void)args;
+    memset(&request, 0, sizeof(request));
+    memset(&record, 0, sizeof(record));
+    memset(&envelope, 0, sizeof(envelope));
+    memset(&resolved, 0, sizeof(resolved));
+    if (!js_vm_sensitive_path_guard(env, (const void*)jsw_a0, 0)) goto cleanup;
+    if (!js_protected_runtime_enter(env)) goto cleanup;
+    protected_runtime_entered = 1;
+    if (!js_aken_bridge_request_shape_is_valid(env, encoded_handle, page_index, call_site_proof)) {
+        js_aken_bridge_unavailable(env, "AKEN VM page route is invalid");
+        goto cleanup;
+    }
+    proof_length = (*env)->GetArrayLength(env, call_site_proof);
+    if ((*env)->ExceptionCheck(env)) goto cleanup;
+    if (proof_length <= 0 || (size_t)proof_length > sizeof(native_call_site_proof)) {
+        js_aken_bridge_unavailable(env, "AKEN VM page route is invalid");
+        goto cleanup;
+    }
+    (*env)->GetByteArrayRegion(
+        env,
+        encoded_handle,
+        0,
+        (jsize)sizeof(native_handle),
+        (jbyte *)native_handle);
+    if ((*env)->ExceptionCheck(env)) goto cleanup;
+    (*env)->GetByteArrayRegion(
+        env,
+        call_site_proof,
+        0,
+        proof_length,
+        (jbyte *)native_call_site_proof);
+    if ((*env)->ExceptionCheck(env)) goto cleanup;
+    request.entry_token = (uint64_t)entry_token;
+    request.resource_kind = JS_AKEN_NATIVE_PAGE_RESOURCE_KIND_VBC4_METHOD;
+    request.page_index = page_index;
+    request.encoded_handle = native_handle;
+    request.encoded_handle_len = sizeof(native_handle);
+    request.raw_call_site_proof = native_call_site_proof;
+    request.raw_call_site_proof_len = (size_t)proof_length;
+    if (!js_aken_native_page_locator_lookup(&request, &record)) {
+        js_aken_bridge_unavailable(env, "AKEN VM page route is unavailable");
+        goto cleanup;
+    }
+    if (!js_aken_native_page_envelope_parse(
+            record.native_envelope,
+            record.native_envelope_len,
+            &request,
+            &envelope) ||
+        !js_aken_native_page_locator_resolve(&record, &envelope, &resolved)) {
+        js_aken_bridge_unavailable(env, "AKEN VM page route is invalid");
+        goto cleanup;
+    }
+    js_aken_bridge_unavailable(env, "AKEN VM page executor is unavailable");
+cleanup:
+    js_vbc4_wipe_volatile(&resolved, sizeof(resolved));
+    js_aken_native_page_envelope_wipe(&envelope);
+    js_aken_native_page_locator_record_wipe(&record);
+    js_vbc4_wipe_volatile(&request, sizeof(request));
+    js_vbc4_wipe_volatile(native_handle, sizeof(native_handle));
+    js_vbc4_wipe_volatile(native_call_site_proof, sizeof(native_call_site_proof));
+    if (protected_runtime_entered) (void)js_protected_runtime_leave(env);
     return NULL;
 }
 
