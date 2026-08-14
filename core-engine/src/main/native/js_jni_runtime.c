@@ -1,4 +1,5 @@
 #include "js_jni_runtime.h"
+#include "js_aken_page_locator.inc"
 #include "js_antidebug.h"
 #include "js_protected_section.h"
 #include "js_vm_core.h"
@@ -72,6 +73,31 @@ static int js_aken_bridge_request_is_valid(JNIEnv *env, jbyteArray encoded_handl
     }
     if ((*env)->ExceptionCheck(env)) return 0;
     return 1;
+}
+
+/*
+ * The generated include is native-private compiler input.  This bounded
+ * structural scan intentionally exposes neither a catalog nor a decode API:
+ * it merely keeps the exact opaque current-page records live in the compiled
+ * image and rejects malformed generated geometry before the future resolver
+ * attempts an exact handle/proof lookup.
+ */
+static int js_aken_native_page_locator_has_compiled_records(void) {
+    volatile unsigned int fold = 0xA5C35A7Du;
+    size_t record_index;
+    if (JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_COUNT == 0u || JS_AKEN_NATIVE_PAGE_LOCATOR_BLOB_SIZE == 0u) return 0;
+    for (record_index = 0u; record_index < (size_t)JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_COUNT; ++record_index) {
+        const unsigned int offset = js_aken_native_page_locator_record_offsets[record_index];
+        const unsigned int length = js_aken_native_page_locator_record_lengths[record_index];
+        size_t byte_index;
+        if (length == 0u || offset >= JS_AKEN_NATIVE_PAGE_LOCATOR_BLOB_SIZE ||
+            length > JS_AKEN_NATIVE_PAGE_LOCATOR_BLOB_SIZE - offset) return 0;
+        if (js_aken_native_page_locator_blob[offset] != JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_FORMAT_VERSION) return 0;
+        for (byte_index = 0u; byte_index < (size_t)length; ++byte_index) {
+            fold = ((fold << 5) | (fold >> 27)) ^ js_aken_native_page_locator_blob[(size_t)offset + byte_index];
+        }
+    }
+    return fold != 0u || js_aken_native_page_locator_blob[0] == JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_FORMAT_VERSION;
 }
 
 /*
@@ -922,7 +948,11 @@ static jobject JNICALL jsw_a0(JNIEnv *env, jclass cls, jlong entry_token, jbyteA
     if (!js_vm_sensitive_path_guard(env, (const void*)jsw_a0, 0)) return NULL;
     if (!js_protected_runtime_enter(env)) return NULL;
     if (js_aken_bridge_request_is_valid(env, encoded_handle, page_index, call_site_proof)) {
-        js_aken_bridge_unavailable(env, "AKEN VM page route is unavailable");
+        if (js_aken_native_page_locator_has_compiled_records()) {
+            js_aken_bridge_unavailable(env, "AKEN VM page executor is unavailable");
+        } else {
+            js_aken_bridge_unavailable(env, "AKEN VM page route is unavailable");
+        }
     }
     (void)js_protected_runtime_leave(env);
     return NULL;

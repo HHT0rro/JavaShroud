@@ -16,6 +16,14 @@ import javax.crypto.spec.SecretKeySpec
 object NativeRecompilationTransforms {
 
     private val zigCompileLock = Any()
+    private const val AKEN_NATIVE_PAGE_LOCATOR_RECORD_VERSION = 1
+    private const val AKEN_NATIVE_PAGE_LOCATOR_MAX_RECORD_COUNT = 65_535
+    private const val AKEN_NATIVE_PAGE_LOCATOR_MAX_RECORD_BYTES = 512 * 1024
+    private const val AKEN_NATIVE_PAGE_LOCATOR_MAX_BLOB_BYTES = 64 * 1024 * 1024
+    private const val AKEN_NATIVE_PAGE_LOCATOR_BYTES_PER_LINE = 12
+    private const val AKEN_NATIVE_PAGE_LOCATOR_INTS_PER_LINE = 8
+    private const val AKEN_NATIVE_PAGE_LOCATOR_HEX_DIGITS = "0123456789ABCDEF"
+
 
     private const val NATIVE_SRC_RESOURCE_ROOT = "META-INF/native-src"
 
@@ -57,6 +65,7 @@ object NativeRecompilationTransforms {
         "js_machine_id.c",
         "js_machine_id.h",
         "native_secrets.inc",
+        "js_aken_page_locator.inc",
         "js_shell_stub.c",
         "js_shell_stub.h",
         "js_shell_crypto.c",
@@ -188,6 +197,11 @@ object NativeRecompilationTransforms {
         return try {
         val secretsContent = generateDiversifiedSecrets(secretsSeed, rng, vbc4BuildContext, protectedSectionKey)
         Files.write(srcDir.resolve("native_secrets.inc"), secretsContent.toByteArray(StandardCharsets.UTF_8))
+        Files.writeString(
+            srcDir.resolve("js_aken_page_locator.inc"),
+            generateAkenNativePageLocatorInclude(vbc4BuildContext, rng),
+            StandardCharsets.UTF_8,
+        )
 
         for (name in NATIVE_DIVERSIFICATION_TARGETS) {
             val original = Files.readString(srcDir.resolve(name), StandardCharsets.UTF_8)
@@ -981,6 +995,135 @@ object NativeRecompilationTransforms {
     private const val DEFAULT_ZIG_COMPILE_TIMEOUT_MS = 15 * 60 * 1000L
     private const val ZIG_OUTPUT_DRAIN_TIMEOUT_MS = 5_000L
     private const val ZIG_PROCESS_CLEANUP_TIMEOUT_MS = 5_000L
+    /**
+     * Renders the artifact-specific native-private current-page locator table.
+     *
+     * The only source for non-empty records is the build-only finalization
+     * layout. Each callback record is copied by the layout and wiped when this
+     * renderer returns; the generated include contains no plaintext, DEK,
+     * global slot table, arbitrary resource decoder, or Java-visible catalog.
+     * The table order is independently permuted for every native build so a
+     * later resolver cannot rely on method/page enumeration order.
+     */
+    internal fun generateAkenNativePageLocatorInclude(
+        vbc4BuildContext: Vbc4BuildContext,
+        rng: Random,
+    ): String {
+        val layout = vbc4BuildContext.akenVbc4FinalizationLayoutOrNull()
+        return if (layout == null) {
+            renderAkenNativePageLocatorInclude(emptyList(), rng)
+        } else {
+            layout.withNativeLocatorRecordsForBuild { records ->
+                renderAkenNativePageLocatorInclude(records, rng)
+            }
+        }
+    }
+
+    private fun renderAkenNativePageLocatorInclude(
+        records: List<ByteArray>,
+        rng: Random,
+    ): String {
+        require(records.size <= AKEN_NATIVE_PAGE_LOCATOR_MAX_RECORD_COUNT) {
+            "AKEN native page locator contains too many current-page records"
+        }
+        val ordered = records.toMutableList()
+        for (index in ordered.lastIndex downTo 1) {
+            val peer = rng.nextInt(index + 1)
+            val current = ordered[index]
+            ordered[index] = ordered[peer]
+            ordered[peer] = current
+        }
+        val offsets = IntArray(ordered.size)
+        val lengths = IntArray(ordered.size)
+        var blob = ByteArray(0)
+        try {
+            var totalLength = 0
+            ordered.forEachIndexed { index, record ->
+                require(record.isNotEmpty() && record.size <= AKEN_NATIVE_PAGE_LOCATOR_MAX_RECORD_BYTES) {
+                    "AKEN native page locator contains an invalid current-page record"
+                }
+                require((record[0].toInt() and 0xFF) == AKEN_NATIVE_PAGE_LOCATOR_RECORD_VERSION) {
+                    "AKEN native page locator compiler record version is unsupported"
+                }
+                require(totalLength <= AKEN_NATIVE_PAGE_LOCATOR_MAX_BLOB_BYTES - record.size) {
+                    "AKEN native page locator compiler blob exceeds its bounded size"
+                }
+                offsets[index] = totalLength
+                lengths[index] = record.size
+                totalLength += record.size
+            }
+            blob = ByteArray(totalLength)
+            ordered.forEachIndexed { index, record ->
+                record.copyInto(blob, destinationOffset = offsets[index])
+            }
+            return buildString {
+                appendLine("/* AUTO-GENERATED AKEN v4 native current-page locator - DO NOT EDIT */")
+                appendLine("#ifndef JS_AKEN_PAGE_LOCATOR_INC")
+                appendLine("#define JS_AKEN_PAGE_LOCATOR_INC")
+                appendLine("#include <stddef.h>")
+                appendLine("#define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_FORMAT_VERSION ${AKEN_NATIVE_PAGE_LOCATOR_RECORD_VERSION}u")
+                appendLine("#define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_COUNT ${ordered.size}u")
+                appendLine("#define JS_AKEN_NATIVE_PAGE_LOCATOR_BLOB_SIZE ${blob.size}u")
+                appendLine()
+                appendAkenNativeLocatorByteArray("js_aken_native_page_locator_blob", blob)
+                appendAkenNativeLocatorIntArray("js_aken_native_page_locator_record_offsets", offsets)
+                appendAkenNativeLocatorIntArray("js_aken_native_page_locator_record_lengths", lengths)
+                appendLine("#endif")
+            }
+        } finally {
+            blob.fill(0)
+            offsets.fill(0)
+            lengths.fill(0)
+        }
+    }
+
+    private fun StringBuilder.appendAkenNativeLocatorByteArray(name: String, value: ByteArray) {
+        append("static const volatile unsigned char ")
+        append(name)
+        append('[')
+        append(maxOf(1, value.size))
+        appendLine("] = {")
+        if (value.isEmpty()) {
+            appendLine("    0u")
+        } else {
+            value.forEachIndexed { index, byte ->
+                if (index % AKEN_NATIVE_PAGE_LOCATOR_BYTES_PER_LINE == 0) append("    ")
+                val unsigned = byte.toInt() and 0xFF
+                append("0x")
+                append(AKEN_NATIVE_PAGE_LOCATOR_HEX_DIGITS[unsigned ushr 4])
+                append(AKEN_NATIVE_PAGE_LOCATOR_HEX_DIGITS[unsigned and 0x0F])
+                append('u')
+                if (index != value.lastIndex) append(", ")
+                if (index % AKEN_NATIVE_PAGE_LOCATOR_BYTES_PER_LINE == AKEN_NATIVE_PAGE_LOCATOR_BYTES_PER_LINE - 1 || index == value.lastIndex) {
+                    appendLine()
+                }
+            }
+        }
+        appendLine("};")
+    }
+
+    private fun StringBuilder.appendAkenNativeLocatorIntArray(name: String, value: IntArray) {
+        append("static const volatile unsigned int ")
+        append(name)
+        append('[')
+        append(maxOf(1, value.size))
+        appendLine("] = {")
+        if (value.isEmpty()) {
+            appendLine("    0u")
+        } else {
+            value.forEachIndexed { index, entry ->
+                if (index % AKEN_NATIVE_PAGE_LOCATOR_INTS_PER_LINE == 0) append("    ")
+                append(entry)
+                append('u')
+                if (index != value.lastIndex) append(", ")
+                if (index % AKEN_NATIVE_PAGE_LOCATOR_INTS_PER_LINE == AKEN_NATIVE_PAGE_LOCATOR_INTS_PER_LINE - 1 || index == value.lastIndex) {
+                    appendLine()
+                }
+            }
+        }
+        appendLine("};")
+    }
+
     internal fun generateDiversifiedSecrets(
         seed: Long,
         rng: Random,
