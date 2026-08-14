@@ -1192,6 +1192,838 @@ cleanup:
 }
 
 /*
+ * Current-page-only AKEN v4 runtime descriptor parser.  The Kotlin descriptor
+ * format is deliberately parsed here instead of through a Java object graph:
+ * this gives the native terminal a single, non-enumerable route/proof/evaluator
+ * view whose borrowed bytes remain scoped to the already matched locator row.
+ */
+#define JS_AKEN_DESCRIPTOR_VERSION 1u
+#define JS_AKEN_DESCRIPTOR_MAX_SIZE (384u * 1024u)
+#define JS_AKEN_DESCRIPTOR_MAX_ROUTE_SIZE (128u * 1024u)
+#define JS_AKEN_DESCRIPTOR_MAX_PROOF_SIZE (160u * 1024u)
+#define JS_AKEN_DESCRIPTOR_MAX_PLAN_SIZE (128u * 1024u)
+#define JS_AKEN_DESCRIPTOR_MAX_FRAGMENT_SIZE (12u * 1024u)
+#define JS_AKEN_DESCRIPTOR_MAX_RESOURCE_PATH_SIZE 4096u
+#define JS_AKEN_DESCRIPTOR_MAX_VARIANT_SIZE 256u
+#define JS_AKEN_DESCRIPTOR_MAX_MERKLE_DEPTH 64u
+#define JS_AKEN_DESCRIPTOR_MAX_CALL_SITE_PROOF_SIZE 4096u
+#define JS_AKEN_DESCRIPTOR_EVALUATOR_PLAN_VERSION 1u
+#define JS_AKEN_DESCRIPTOR_FRAGMENT_VERSION 1u
+#define JS_AKEN_DESCRIPTOR_IDENTITY_VERSION 1u
+#define JS_AKEN_DESCRIPTOR_ROUTE_VERSION 1u
+#define JS_AKEN_DESCRIPTOR_PROOF_VERSION 1u
+
+static const unsigned char JS_AKEN_DESCRIPTOR_EVALUATOR_DOMAIN[] = "AKEN-v4-evaluator-graph";
+static const unsigned char JS_AKEN_DESCRIPTOR_INTEGRITY_LEAF_DOMAIN[] = "AKEN-v4-integrity-leaf";
+static const unsigned char JS_AKEN_DESCRIPTOR_INTEGRITY_NODE_DOMAIN[] = "AKEN-v4-integrity-node";
+
+/* These terminal-codec helpers are defined below the descriptor parser. */
+static int js_aken_native_page_open_ascii_equal(
+    const unsigned char *left,
+    size_t left_len,
+    const unsigned char *right,
+    size_t right_len
+);
+static int js_aken_native_page_open_layout_parse(
+    const unsigned char *layout,
+    size_t layout_len,
+    size_t *out_prefix_len,
+    size_t *out_suffix_len,
+    int *out_header_after_body
+);
+
+typedef struct {
+    const unsigned char *bytes;
+    size_t length;
+    size_t offset;
+} js_aken_native_descriptor_cursor;
+
+typedef struct {
+    uint8_t resource_kind;
+    jint page_index;
+    const unsigned char *encoded_handle;
+    const unsigned char *locator_token;
+    const unsigned char *evaluator_fingerprint;
+    const unsigned char *logical_identity;
+    size_t logical_identity_len;
+} js_aken_native_descriptor_identity;
+
+typedef struct {
+    js_aken_native_descriptor_identity identity;
+    const unsigned char *identity_encoding;
+    size_t identity_encoding_len;
+    const unsigned char *resource_path;
+    size_t resource_path_len;
+    uint32_t resource_offset;
+    uint32_t stored_length;
+    const unsigned char *codec_variant;
+    size_t codec_variant_len;
+    const unsigned char *layout_variant;
+    size_t layout_variant_len;
+} js_aken_native_descriptor_route;
+
+typedef struct {
+    js_aken_native_descriptor_identity identity;
+    const unsigned char *identity_encoding;
+    size_t identity_encoding_len;
+    const unsigned char *artifact_commitment;
+    const unsigned char *mesh_root;
+    const unsigned char *leaf_digest;
+    const unsigned char *merkle_siblings[JS_AKEN_DESCRIPTOR_MAX_MERKLE_DEPTH];
+    uint8_t merkle_sibling_is_left[JS_AKEN_DESCRIPTOR_MAX_MERKLE_DEPTH];
+    size_t merkle_sibling_count;
+    const unsigned char *call_site_proof;
+    size_t call_site_proof_len;
+    const unsigned char *codec_variant;
+    size_t codec_variant_len;
+    const unsigned char *layout_variant;
+    size_t layout_variant_len;
+} js_aken_native_descriptor_proof;
+
+static int js_aken_native_descriptor_cursor_remaining(
+    const js_aken_native_descriptor_cursor *cursor,
+    size_t amount
+) {
+    return cursor && amount <= cursor->length && cursor->offset <= cursor->length - amount;
+}
+
+static int js_aken_native_descriptor_read_u8(
+    js_aken_native_descriptor_cursor *cursor,
+    uint8_t *out_value
+) {
+    if (!cursor || !out_value || !js_aken_native_descriptor_cursor_remaining(cursor, 1u)) return 0;
+    *out_value = cursor->bytes[cursor->offset++];
+    return 1;
+}
+
+static int js_aken_native_descriptor_read_u32be(
+    js_aken_native_descriptor_cursor *cursor,
+    uint32_t *out_value
+) {
+    const unsigned char *value = NULL;
+    if (!cursor || !out_value || !js_aken_native_descriptor_cursor_remaining(cursor, 4u)) return 0;
+    value = cursor->bytes + cursor->offset;
+    *out_value = ((uint32_t)value[0] << 24) |
+        ((uint32_t)value[1] << 16) |
+        ((uint32_t)value[2] << 8) |
+        (uint32_t)value[3];
+    cursor->offset += 4u;
+    return 1;
+}
+
+static int js_aken_native_descriptor_read_fixed(
+    js_aken_native_descriptor_cursor *cursor,
+    size_t length,
+    const unsigned char **out_value
+) {
+    if (!cursor || !out_value || !js_aken_native_descriptor_cursor_remaining(cursor, length)) return 0;
+    *out_value = cursor->bytes + cursor->offset;
+    cursor->offset += length;
+    return 1;
+}
+
+static int js_aken_native_descriptor_read_frame(
+    js_aken_native_descriptor_cursor *cursor,
+    size_t maximum_length,
+    int allow_empty,
+    const unsigned char **out_value,
+    size_t *out_length
+) {
+    uint32_t encoded_length = 0u;
+    size_t length = 0u;
+    if (!cursor || !out_value || !out_length || !js_aken_native_descriptor_read_u32be(cursor, &encoded_length)) {
+        return 0;
+    }
+    length = (size_t)encoded_length;
+    if (length > maximum_length || (!allow_empty && length == 0u) ||
+        !js_aken_native_descriptor_cursor_remaining(cursor, length)) {
+        return 0;
+    }
+    *out_value = cursor->bytes + cursor->offset;
+    *out_length = length;
+    cursor->offset += length;
+    return 1;
+}
+
+static int js_aken_native_descriptor_cursor_finished(const js_aken_native_descriptor_cursor *cursor) {
+    return cursor && cursor->offset == cursor->length;
+}
+
+static int js_aken_native_descriptor_parse_identity(
+    const unsigned char *encoded,
+    size_t encoded_len,
+    js_aken_native_descriptor_identity *out_identity
+) {
+    js_aken_native_descriptor_cursor cursor;
+    uint8_t version = 0u;
+    uint8_t kind = 0u;
+    uint32_t page = 0u;
+    if (!out_identity) return 0;
+    js_vbc4_wipe_volatile(out_identity, sizeof(*out_identity));
+    if (!encoded || encoded_len == 0u || encoded_len > (96u * 1024u)) return 0;
+    cursor.bytes = encoded;
+    cursor.length = encoded_len;
+    cursor.offset = 0u;
+    if (!js_aken_native_descriptor_read_u8(&cursor, &version) || version != JS_AKEN_DESCRIPTOR_IDENTITY_VERSION ||
+        !js_aken_native_descriptor_read_u8(&cursor, &kind) || kind < 1u || kind > 4u ||
+        !js_aken_native_descriptor_read_u32be(&cursor, &page) || page > (uint32_t)INT_MAX ||
+        !js_aken_native_descriptor_read_fixed(&cursor, JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE, &out_identity->encoded_handle) ||
+        !js_aken_native_descriptor_read_fixed(&cursor, JS_AKEN_NATIVE_PAGE_ENVELOPE_LOCATOR_SIZE, &out_identity->locator_token) ||
+        !js_aken_native_descriptor_read_fixed(&cursor, JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE, &out_identity->evaluator_fingerprint) ||
+        !js_aken_native_descriptor_read_frame(
+            &cursor,
+            JS_AKEN_EVALUATOR_MAX_LOGICAL_IDENTITY_BYTES,
+            0,
+            &out_identity->logical_identity,
+            &out_identity->logical_identity_len) ||
+        !js_aken_native_descriptor_cursor_finished(&cursor)) {
+        js_vbc4_wipe_volatile(out_identity, sizeof(*out_identity));
+        return 0;
+    }
+    out_identity->resource_kind = kind;
+    out_identity->page_index = (jint)page;
+    return 1;
+}
+
+static int js_aken_native_descriptor_identity_equal(
+    const js_aken_native_descriptor_identity *left,
+    const js_aken_native_descriptor_identity *right
+) {
+    return left && right &&
+        left->resource_kind == right->resource_kind &&
+        left->page_index == right->page_index &&
+        left->logical_identity_len == right->logical_identity_len &&
+        js_aken_native_page_envelope_constant_time_equal(
+            left->encoded_handle,
+            right->encoded_handle,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE) &&
+        js_aken_native_page_envelope_constant_time_equal(
+            left->locator_token,
+            right->locator_token,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_LOCATOR_SIZE) &&
+        js_aken_native_page_envelope_constant_time_equal(
+            left->evaluator_fingerprint,
+            right->evaluator_fingerprint,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) &&
+        js_aken_native_page_envelope_constant_time_equal(
+            left->logical_identity,
+            right->logical_identity,
+            left->logical_identity_len);
+}
+
+static int js_aken_native_descriptor_identity_matches_current(
+    const js_aken_native_descriptor_identity *identity,
+    const js_aken_native_page_request *request,
+    const js_aken_native_page_envelope *envelope,
+    const js_aken_native_page_resolved_descriptor *resolved
+) {
+    return identity && request && envelope && resolved &&
+        identity->resource_kind == request->resource_kind &&
+        identity->resource_kind == envelope->resource_kind &&
+        identity->resource_kind == resolved->resource_kind &&
+        identity->page_index == request->page_index &&
+        identity->page_index == envelope->page_index &&
+        identity->page_index == resolved->page_index &&
+        js_aken_native_page_envelope_constant_time_equal(
+            identity->encoded_handle,
+            request->encoded_handle,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE) &&
+        js_aken_native_page_envelope_constant_time_equal(
+            identity->encoded_handle,
+            envelope->encoded_handle,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE) &&
+        js_aken_native_page_envelope_constant_time_equal(
+            identity->encoded_handle,
+            resolved->encoded_handle,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE) &&
+        js_aken_native_page_envelope_constant_time_equal(
+            identity->locator_token,
+            envelope->locator_token,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_LOCATOR_SIZE) &&
+        js_aken_native_page_envelope_constant_time_equal(
+            identity->locator_token,
+            resolved->locator_token,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_LOCATOR_SIZE) &&
+        js_aken_native_page_envelope_constant_time_equal(
+            identity->evaluator_fingerprint,
+            envelope->evaluator_fingerprint,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) &&
+        js_aken_native_page_envelope_constant_time_equal(
+            identity->evaluator_fingerprint,
+            resolved->evaluator_fingerprint,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE);
+}
+
+static int js_aken_native_descriptor_route_path_is_valid(
+    const unsigned char *path,
+    size_t path_len
+) {
+    size_t segment_start = 0u;
+    if (!path || path_len == 0u || path_len > JS_AKEN_DESCRIPTOR_MAX_RESOURCE_PATH_SIZE ||
+        path[0] == (unsigned char)'/' || path[path_len - 1u] == (unsigned char)'/') {
+        return 0;
+    }
+    for (size_t index = 0u; index <= path_len; index++) {
+        const int at_end = index == path_len;
+        const int separator = !at_end && path[index] == (unsigned char)'/';
+        if (!at_end && (path[index] == 0u || path[index] == (unsigned char)'\\')) return 0;
+        if (!at_end && !separator) continue;
+        if (index == segment_start ||
+            (index - segment_start == 1u && path[segment_start] == (unsigned char)'.') ||
+            (index - segment_start == 2u && path[segment_start] == (unsigned char)'.' &&
+                path[segment_start + 1u] == (unsigned char)'.')) {
+            return 0;
+        }
+        segment_start = index + 1u;
+    }
+    return 1;
+}
+
+static int js_aken_native_descriptor_parse_route(
+    const unsigned char *encoded,
+    size_t encoded_len,
+    js_aken_native_descriptor_route *out_route
+) {
+    js_aken_native_descriptor_cursor cursor;
+    uint8_t version = 0u;
+    uint32_t offset = 0u;
+    uint32_t length = 0u;
+    const unsigned char *identity = NULL;
+    size_t identity_len = 0u;
+    if (!out_route) return 0;
+    js_vbc4_wipe_volatile(out_route, sizeof(*out_route));
+    if (!encoded || encoded_len == 0u || encoded_len > JS_AKEN_DESCRIPTOR_MAX_ROUTE_SIZE) return 0;
+    cursor.bytes = encoded;
+    cursor.length = encoded_len;
+    cursor.offset = 0u;
+    if (!js_aken_native_descriptor_read_u8(&cursor, &version) || version != JS_AKEN_DESCRIPTOR_ROUTE_VERSION ||
+        !js_aken_native_descriptor_read_frame(&cursor, 96u * 1024u, 0, &identity, &identity_len) ||
+        !js_aken_native_descriptor_parse_identity(identity, identity_len, &out_route->identity) ||
+        !js_aken_native_descriptor_read_frame(
+            &cursor,
+            JS_AKEN_DESCRIPTOR_MAX_RESOURCE_PATH_SIZE,
+            0,
+            &out_route->resource_path,
+            &out_route->resource_path_len) ||
+        !js_aken_native_descriptor_read_u32be(&cursor, &offset) || offset > (uint32_t)INT_MAX ||
+        !js_aken_native_descriptor_read_u32be(&cursor, &length) || length == 0u || length > (uint32_t)INT_MAX ||
+        !js_aken_native_descriptor_read_frame(
+            &cursor,
+            JS_AKEN_DESCRIPTOR_MAX_VARIANT_SIZE,
+            0,
+            &out_route->codec_variant,
+            &out_route->codec_variant_len) ||
+        !js_aken_native_descriptor_read_frame(
+            &cursor,
+            JS_AKEN_DESCRIPTOR_MAX_VARIANT_SIZE,
+            0,
+            &out_route->layout_variant,
+            &out_route->layout_variant_len) ||
+        !js_aken_native_descriptor_cursor_finished(&cursor)) {
+        js_vbc4_wipe_volatile(out_route, sizeof(*out_route));
+        return 0;
+    }
+    out_route->identity_encoding = identity;
+    out_route->identity_encoding_len = identity_len;
+    out_route->resource_offset = offset;
+    out_route->stored_length = length;
+    return 1;
+}
+
+static int js_aken_native_descriptor_parse_proof(
+    const unsigned char *encoded,
+    size_t encoded_len,
+    js_aken_native_descriptor_proof *out_proof
+) {
+    js_aken_native_descriptor_cursor cursor;
+    uint8_t version = 0u;
+    uint32_t sibling_count = 0u;
+    const unsigned char *identity = NULL;
+    size_t identity_len = 0u;
+    if (!out_proof) return 0;
+    js_vbc4_wipe_volatile(out_proof, sizeof(*out_proof));
+    if (!encoded || encoded_len == 0u || encoded_len > JS_AKEN_DESCRIPTOR_MAX_PROOF_SIZE) return 0;
+    cursor.bytes = encoded;
+    cursor.length = encoded_len;
+    cursor.offset = 0u;
+    if (!js_aken_native_descriptor_read_u8(&cursor, &version) || version != JS_AKEN_DESCRIPTOR_PROOF_VERSION ||
+        !js_aken_native_descriptor_read_frame(&cursor, 96u * 1024u, 0, &identity, &identity_len) ||
+        !js_aken_native_descriptor_parse_identity(identity, identity_len, &out_proof->identity) ||
+        !js_aken_native_descriptor_read_fixed(&cursor, JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE, &out_proof->artifact_commitment) ||
+        !js_aken_native_descriptor_read_fixed(&cursor, JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE, &out_proof->mesh_root) ||
+        !js_aken_native_descriptor_read_fixed(&cursor, JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE, &out_proof->leaf_digest) ||
+        !js_aken_native_descriptor_read_u32be(&cursor, &sibling_count) || sibling_count > JS_AKEN_DESCRIPTOR_MAX_MERKLE_DEPTH) {
+        js_vbc4_wipe_volatile(out_proof, sizeof(*out_proof));
+        return 0;
+    }
+    for (uint32_t index = 0u; index < sibling_count; index++) {
+        const unsigned char *sibling = NULL;
+        uint8_t direction = 0u;
+        if (!js_aken_native_descriptor_read_fixed(&cursor, JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE, &sibling) ||
+            !js_aken_native_descriptor_read_u8(&cursor, &direction) || direction > 1u) {
+            js_vbc4_wipe_volatile(out_proof, sizeof(*out_proof));
+            return 0;
+        }
+        out_proof->merkle_siblings[index] = sibling;
+        out_proof->merkle_sibling_is_left[index] = direction;
+    }
+    out_proof->identity_encoding = identity;
+    out_proof->identity_encoding_len = identity_len;
+    out_proof->merkle_sibling_count = sibling_count;
+    if (!js_aken_native_descriptor_read_frame(
+            &cursor,
+            JS_AKEN_DESCRIPTOR_MAX_CALL_SITE_PROOF_SIZE,
+            0,
+            &out_proof->call_site_proof,
+            &out_proof->call_site_proof_len) ||
+        !js_aken_native_descriptor_read_frame(
+            &cursor,
+            JS_AKEN_DESCRIPTOR_MAX_VARIANT_SIZE,
+            0,
+            &out_proof->codec_variant,
+            &out_proof->codec_variant_len) ||
+        !js_aken_native_descriptor_read_frame(
+            &cursor,
+            JS_AKEN_DESCRIPTOR_MAX_VARIANT_SIZE,
+            0,
+            &out_proof->layout_variant,
+            &out_proof->layout_variant_len) ||
+        !js_aken_native_descriptor_cursor_finished(&cursor)) {
+        js_vbc4_wipe_volatile(out_proof, sizeof(*out_proof));
+        return 0;
+    }
+    return 1;
+}
+
+static int js_aken_native_descriptor_parse_fragment(
+    const unsigned char *encoded,
+    size_t encoded_len,
+    uint8_t expected_role,
+    jint expected_ordinal_min,
+    jint expected_ordinal_max,
+    js_aken_evaluator_fragment *out_fragment,
+    uint32_t permutations[JS_AKEN_EVALUATOR_STATE_WIDTH]
+) {
+    js_aken_native_descriptor_cursor cursor;
+    uint8_t version = 0u;
+    uint8_t role = 0u;
+    uint32_t ordinal = 0u;
+    uint32_t family = 0u;
+    uint32_t table_length = 0u;
+    if (!out_fragment || !permutations || !encoded || encoded_len == 0u || encoded_len > JS_AKEN_DESCRIPTOR_MAX_FRAGMENT_SIZE) {
+        return 0;
+    }
+    js_vbc4_wipe_volatile(out_fragment, sizeof(*out_fragment));
+    js_vbc4_wipe_volatile(permutations, JS_AKEN_EVALUATOR_STATE_WIDTH * sizeof(permutations[0]));
+    cursor.bytes = encoded;
+    cursor.length = encoded_len;
+    cursor.offset = 0u;
+    if (!js_aken_native_descriptor_read_u8(&cursor, &version) || version != JS_AKEN_DESCRIPTOR_FRAGMENT_VERSION ||
+        !js_aken_native_descriptor_read_u8(&cursor, &role) || role != expected_role ||
+        !js_aken_native_descriptor_read_u32be(&cursor, &ordinal) || ordinal > (uint32_t)INT_MAX ||
+        (jint)ordinal < expected_ordinal_min || (jint)ordinal > expected_ordinal_max ||
+        !js_aken_native_descriptor_read_u32be(&cursor, &family) || family >= 16u) {
+        goto cleanup;
+    }
+    out_fragment->ordinal = (jint)ordinal;
+    out_fragment->family = (jint)family;
+    if (!js_aken_native_descriptor_read_frame(
+            &cursor,
+            JS_AKEN_EVALUATOR_MAX_FRAGMENT_BYTES,
+            0,
+            &out_fragment->shape,
+            &out_fragment->shape_len) ||
+        !js_aken_native_descriptor_read_frame(
+            &cursor,
+            JS_AKEN_EVALUATOR_MAX_FRAGMENT_BYTES,
+            0,
+            &out_fragment->call_token,
+            &out_fragment->call_token_len) ||
+        !js_aken_native_descriptor_read_u32be(&cursor, &table_length) ||
+        table_length != JS_AKEN_EVALUATOR_STATE_WIDTH) {
+        goto cleanup;
+    }
+    for (uint32_t index = 0u; index < table_length; index++) {
+        if (!js_aken_native_descriptor_read_u32be(&cursor, &permutations[index]) ||
+            permutations[index] >= JS_AKEN_EVALUATOR_STATE_WIDTH) {
+            goto cleanup;
+        }
+    }
+    if (!js_aken_native_descriptor_cursor_finished(&cursor)) goto cleanup;
+    out_fragment->table_permutation = permutations;
+    out_fragment->table_permutation_len = JS_AKEN_EVALUATOR_STATE_WIDTH;
+    if (!js_aken_evaluator_fragment_is_valid(out_fragment)) goto cleanup;
+    return 1;
+cleanup:
+    js_vbc4_wipe_volatile(out_fragment, sizeof(*out_fragment));
+    js_vbc4_wipe_volatile(permutations, JS_AKEN_EVALUATOR_STATE_WIDTH * sizeof(permutations[0]));
+    return 0;
+}
+
+static int js_aken_native_descriptor_update_fragment_group(
+    js_sha256_ctx *ctx,
+    uint8_t role,
+    const js_aken_evaluator_fragment *fragments,
+    size_t fragment_count
+) {
+    if (!ctx || !fragments || fragment_count > (size_t)INT_MAX) return 0;
+    js_aken_evaluator_update_u32be(ctx, (uint32_t)fragment_count);
+    for (size_t index = 0u; index < fragment_count; index++) {
+        const js_aken_evaluator_fragment *fragment = &fragments[index];
+        if (!js_aken_evaluator_fragment_is_valid(fragment)) return 0;
+        js_sha256_update(ctx, &role, 1);
+        js_aken_evaluator_update_u32be(ctx, (uint32_t)index);
+        js_aken_evaluator_update_u32be(ctx, (uint32_t)fragment->ordinal);
+        js_aken_evaluator_update_u32be(ctx, (uint32_t)fragment->family);
+        if (!js_aken_evaluator_update_framed(ctx, fragment->shape, fragment->shape_len)) return 0;
+        js_aken_evaluator_update_u32be(ctx, (uint32_t)fragment->table_permutation_len);
+        for (size_t table_index = 0u; table_index < fragment->table_permutation_len; table_index++) {
+            js_aken_evaluator_update_u32be(ctx, fragment->table_permutation[table_index]);
+        }
+        if (!js_aken_evaluator_update_framed(ctx, fragment->call_token, fragment->call_token_len)) return 0;
+    }
+    return 1;
+}
+
+static int js_aken_native_descriptor_fingerprint_matches(const js_aken_native_page_descriptor_view *view) {
+    js_sha256_ctx ctx;
+    unsigned char actual[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE] = {0};
+    int ok = 0;
+    if (!view || !js_aken_evaluator_binding_is_valid(&view->binding) ||
+        !js_aken_evaluator_graph_is_valid(view->fragments, JS_AKEN_EVALUATOR_FRAGMENT_COUNT)) {
+        goto cleanup;
+    }
+    js_sha256_init(&ctx);
+    js_sha256_update(
+        &ctx,
+        JS_AKEN_DESCRIPTOR_EVALUATOR_DOMAIN,
+        (int)(sizeof(JS_AKEN_DESCRIPTOR_EVALUATOR_DOMAIN) - 1u));
+    js_sha256_update(&ctx, &view->binding.kind_id, 1);
+    if (!js_aken_evaluator_update_framed(&ctx, view->binding.logical_identity, view->binding.logical_identity_len)) {
+        goto cleanup;
+    }
+    js_aken_evaluator_update_u32be(&ctx, (uint32_t)view->binding.page_index);
+    js_aken_evaluator_update_u32be(&ctx, (uint32_t)view->binding.target_size);
+    if (!js_aken_evaluator_update_framed(&ctx, view->binding.codec_variant, view->binding.codec_variant_len) ||
+        !js_aken_evaluator_update_framed(&ctx, view->binding.layout_variant, view->binding.layout_variant_len) ||
+        !js_aken_evaluator_update_framed(&ctx, view->binding.encoded_handle, view->binding.encoded_handle_len) ||
+        !js_aken_evaluator_update_framed(&ctx, view->binding.locator_token, view->binding.locator_token_len) ||
+        !js_aken_native_descriptor_update_fragment_group(&ctx, 1u, &view->fragments[0], 3u) ||
+        !js_aken_native_descriptor_update_fragment_group(&ctx, 2u, &view->fragments[3], 3u) ||
+        !js_aken_native_descriptor_update_fragment_group(&ctx, 3u, &view->fragments[6], 1u)) {
+        goto cleanup;
+    }
+    js_sha256_final(&ctx, actual);
+    ok = js_aken_native_page_envelope_constant_time_equal(
+        actual,
+        view->binding.evaluator_fingerprint,
+        JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE);
+cleanup:
+    js_vbc4_wipe_volatile(actual, sizeof(actual));
+    return ok;
+}
+
+JS_HIDDEN void js_aken_native_page_descriptor_view_wipe(js_aken_native_page_descriptor_view *view) {
+    if (!view) return;
+    js_vbc4_wipe_volatile(view, sizeof(*view));
+}
+
+static int js_aken_native_descriptor_integrity_leaf(
+    const unsigned char *identity,
+    size_t identity_len,
+    const unsigned char *payload,
+    size_t payload_len,
+    unsigned char out_digest[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE]
+) {
+    js_sha256_ctx ctx;
+    if (!out_digest || !identity || identity_len == 0u || !payload || payload_len == 0u ||
+        identity_len > (size_t)INT_MAX || payload_len > (size_t)INT_MAX) {
+        return 0;
+    }
+    js_sha256_init(&ctx);
+    js_sha256_update(
+        &ctx,
+        JS_AKEN_DESCRIPTOR_INTEGRITY_LEAF_DOMAIN,
+        (int)(sizeof(JS_AKEN_DESCRIPTOR_INTEGRITY_LEAF_DOMAIN) - 1u));
+    if (!js_aken_evaluator_update_framed(&ctx, identity, identity_len) ||
+        !js_aken_evaluator_update_framed(&ctx, payload, payload_len)) {
+        return 0;
+    }
+    js_sha256_final(&ctx, out_digest);
+    return 1;
+}
+
+static int js_aken_native_descriptor_integrity_node(
+    const unsigned char left[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE],
+    const unsigned char right[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE],
+    unsigned char out_digest[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE]
+) {
+    js_sha256_ctx ctx;
+    if (!left || !right || !out_digest) return 0;
+    js_sha256_init(&ctx);
+    js_sha256_update(
+        &ctx,
+        JS_AKEN_DESCRIPTOR_INTEGRITY_NODE_DOMAIN,
+        (int)(sizeof(JS_AKEN_DESCRIPTOR_INTEGRITY_NODE_DOMAIN) - 1u));
+    if (!js_aken_evaluator_update_framed(&ctx, left, JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) ||
+        !js_aken_evaluator_update_framed(&ctx, right, JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE)) {
+        return 0;
+    }
+    js_sha256_final(&ctx, out_digest);
+    return 1;
+}
+
+JS_HIDDEN int js_aken_native_page_descriptor_verify_payload_mesh(
+    const js_aken_native_page_descriptor_view *view,
+    const unsigned char *encoded_payload,
+    size_t encoded_payload_len
+) {
+    unsigned char current[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE] = {0};
+    unsigned char next[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE] = {0};
+    int ok = 0;
+    if (!view || view->parsed != 1u || !js_aken_evaluator_binding_is_valid(&view->binding) ||
+        !view->leaf_identity_encoding || view->leaf_identity_encoding_len == 0u ||
+        !view->mesh_root || !view->leaf_digest ||
+        view->merkle_sibling_count > JS_AKEN_DESCRIPTOR_MAX_MERKLE_DEPTH ||
+        !encoded_payload || encoded_payload_len == 0u) {
+        goto cleanup;
+    }
+    if (!js_aken_native_descriptor_integrity_leaf(
+            view->leaf_identity_encoding,
+            view->leaf_identity_encoding_len,
+            encoded_payload,
+            encoded_payload_len,
+            current) ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            current,
+            view->leaf_digest,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE)) {
+        goto cleanup;
+    }
+    for (size_t index = 0u; index < view->merkle_sibling_count; index++) {
+        const unsigned char *sibling = view->merkle_siblings[index];
+        if (!sibling || view->merkle_sibling_is_left[index] > 1u ||
+            !js_aken_native_descriptor_integrity_node(
+                view->merkle_sibling_is_left[index] ? sibling : current,
+                view->merkle_sibling_is_left[index] ? current : sibling,
+                next)) {
+            goto cleanup;
+        }
+        memcpy(current, next, sizeof(current));
+        js_vbc4_wipe_volatile(next, sizeof(next));
+    }
+    ok = js_aken_native_page_envelope_constant_time_equal(
+        current,
+        view->mesh_root,
+        JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE);
+cleanup:
+    js_vbc4_wipe_volatile(current, sizeof(current));
+    js_vbc4_wipe_volatile(next, sizeof(next));
+    return ok;
+}
+
+JS_HIDDEN int js_aken_native_page_descriptor_parse_current(
+    const js_aken_native_page_request *request,
+    const js_aken_native_page_envelope *envelope,
+    const js_aken_native_page_resolved_descriptor *resolved,
+    js_aken_native_page_descriptor_view *out_view
+) {
+    js_aken_native_descriptor_cursor descriptor_cursor;
+    js_aken_native_descriptor_cursor plan_cursor;
+    js_aken_native_descriptor_route route;
+    js_aken_native_descriptor_proof proof;
+    const unsigned char *route_bytes = NULL;
+    const unsigned char *proof_bytes = NULL;
+    const unsigned char *plan_bytes = NULL;
+    const unsigned char *fingerprint = NULL;
+    size_t route_len = 0u;
+    size_t proof_len = 0u;
+    size_t plan_len = 0u;
+    uint8_t version = 0u;
+    uint8_t plan_version = 0u;
+    uint32_t target_size = 0u;
+    size_t layout_prefix_len = 0u;
+    size_t layout_suffix_len = 0u;
+    int layout_header_after_body = 0;
+    int ok = 0;
+    if (!out_view) goto cleanup;
+    js_aken_native_page_descriptor_view_wipe(out_view);
+    js_vbc4_wipe_volatile(&route, sizeof(route));
+    js_vbc4_wipe_volatile(&proof, sizeof(proof));
+    if (!js_aken_native_page_request_is_valid(request) ||
+        !js_aken_native_page_envelope_record_is_well_formed(envelope, 1) ||
+        !js_aken_native_page_resolved_descriptor_is_well_formed(resolved) ||
+        !js_aken_native_page_envelope_verify_resolved_bindings(envelope, resolved) ||
+        !resolved->descriptor_encoding || resolved->descriptor_encoding_len == 0u ||
+        resolved->descriptor_encoding_len > JS_AKEN_DESCRIPTOR_MAX_SIZE) {
+        goto cleanup;
+    }
+    descriptor_cursor.bytes = resolved->descriptor_encoding;
+    descriptor_cursor.length = resolved->descriptor_encoding_len;
+    descriptor_cursor.offset = 0u;
+    if (!js_aken_native_descriptor_read_u8(&descriptor_cursor, &version) || version != JS_AKEN_DESCRIPTOR_VERSION ||
+        !js_aken_native_descriptor_read_frame(
+            &descriptor_cursor,
+            JS_AKEN_DESCRIPTOR_MAX_ROUTE_SIZE,
+            0,
+            &route_bytes,
+            &route_len) ||
+        !js_aken_native_descriptor_parse_route(route_bytes, route_len, &route) ||
+        !js_aken_native_descriptor_read_frame(
+            &descriptor_cursor,
+            JS_AKEN_DESCRIPTOR_MAX_PROOF_SIZE,
+            0,
+            &proof_bytes,
+            &proof_len) ||
+        !js_aken_native_descriptor_parse_proof(proof_bytes, proof_len, &proof) ||
+        !js_aken_native_descriptor_read_u32be(&descriptor_cursor, &target_size) || target_size > (uint32_t)INT_MAX ||
+        !js_aken_evaluator_target_size_is_valid(route.identity.resource_kind, (jint)target_size) ||
+        !js_aken_native_descriptor_read_frame(
+            &descriptor_cursor,
+            JS_AKEN_DESCRIPTOR_MAX_PLAN_SIZE,
+            0,
+            &plan_bytes,
+            &plan_len) ||
+        !js_aken_native_descriptor_cursor_finished(&descriptor_cursor)) {
+        goto cleanup;
+    }
+    if (!js_aken_native_descriptor_identity_equal(&route.identity, &proof.identity) ||
+        route.identity_encoding_len != proof.identity_encoding_len ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            route.identity_encoding,
+            proof.identity_encoding,
+            route.identity_encoding_len) ||
+        !js_aken_native_descriptor_identity_matches_current(&route.identity, request, envelope, resolved) ||
+        !js_aken_native_descriptor_route_path_is_valid(route.resource_path, route.resource_path_len) ||
+        !js_aken_native_page_open_ascii_equal(
+            route.codec_variant,
+            route.codec_variant_len,
+            (const unsigned char *)"aes-256-gcm-v4",
+            sizeof("aes-256-gcm-v4") - 1u) ||
+        !js_aken_native_page_open_layout_parse(
+            route.layout_variant,
+            route.layout_variant_len,
+            &layout_prefix_len,
+            &layout_suffix_len,
+            &layout_header_after_body) ||
+        route.codec_variant_len != proof.codec_variant_len ||
+        route.layout_variant_len != proof.layout_variant_len ||
+        proof.call_site_proof_len != request->raw_call_site_proof_len ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            route.codec_variant,
+            proof.codec_variant,
+            route.codec_variant_len) ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            route.layout_variant,
+            proof.layout_variant,
+            route.layout_variant_len) ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            proof.call_site_proof,
+            request->raw_call_site_proof,
+            proof.call_site_proof_len) ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            proof.artifact_commitment,
+            envelope->artifact_commitment,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            proof.artifact_commitment,
+            resolved->artifact_commitment,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE)) {
+        goto cleanup;
+    }
+    out_view->binding.kind_id = route.identity.resource_kind;
+    out_view->binding.logical_identity = route.identity.logical_identity;
+    out_view->binding.logical_identity_len = route.identity.logical_identity_len;
+    out_view->binding.page_index = route.identity.page_index;
+    out_view->binding.target_size = (jint)target_size;
+    out_view->binding.codec_variant = route.codec_variant;
+    out_view->binding.codec_variant_len = route.codec_variant_len;
+    out_view->binding.layout_variant = route.layout_variant;
+    out_view->binding.layout_variant_len = route.layout_variant_len;
+    out_view->binding.encoded_handle = route.identity.encoded_handle;
+    out_view->binding.encoded_handle_len = JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE;
+    out_view->binding.locator_token = route.identity.locator_token;
+    out_view->binding.locator_token_len = JS_AKEN_NATIVE_PAGE_ENVELOPE_LOCATOR_SIZE;
+    out_view->binding.artifact_commitment = proof.artifact_commitment;
+    out_view->binding.artifact_commitment_len = JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE;
+
+    plan_cursor.bytes = plan_bytes;
+    plan_cursor.length = plan_len;
+    plan_cursor.offset = 0u;
+    if (!js_aken_native_descriptor_read_u8(&plan_cursor, &plan_version) ||
+        plan_version != JS_AKEN_DESCRIPTOR_EVALUATOR_PLAN_VERSION) {
+        goto cleanup;
+    }
+    for (size_t index = 0u; index < JS_AKEN_EVALUATOR_FRAGMENT_COUNT; index++) {
+        const unsigned char *fragment_bytes = NULL;
+        size_t fragment_len = 0u;
+        uint8_t role = index < 3u ? 1u : (index < 6u ? 2u : 3u);
+        jint ordinal_min = index < 3u ? 0 : (index < 6u ? 3 : 6);
+        jint ordinal_max = index < 3u ? 2 : (index < 6u ? 5 : 6);
+        if (!js_aken_native_descriptor_read_frame(
+                &plan_cursor,
+                JS_AKEN_DESCRIPTOR_MAX_FRAGMENT_SIZE,
+                0,
+                &fragment_bytes,
+                &fragment_len) ||
+            !js_aken_native_descriptor_parse_fragment(
+                fragment_bytes,
+                fragment_len,
+                role,
+                ordinal_min,
+                ordinal_max,
+                &out_view->fragments[index],
+                out_view->fragment_permutations[index])) {
+            goto cleanup;
+        }
+    }
+    if (!js_aken_native_descriptor_read_fixed(
+            &plan_cursor,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE,
+            &fingerprint) ||
+        !js_aken_native_descriptor_cursor_finished(&plan_cursor)) {
+        goto cleanup;
+    }
+    out_view->binding.evaluator_fingerprint = fingerprint;
+    out_view->binding.evaluator_fingerprint_len = JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE;
+    if (!js_aken_native_page_envelope_constant_time_equal(
+            fingerprint,
+            route.identity.evaluator_fingerprint,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            fingerprint,
+            envelope->evaluator_fingerprint,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            fingerprint,
+            resolved->evaluator_fingerprint,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) ||
+        !js_aken_native_descriptor_fingerprint_matches(out_view)) {
+        goto cleanup;
+    }
+    out_view->leaf_identity_encoding = route.identity_encoding;
+    out_view->leaf_identity_encoding_len = route.identity_encoding_len;
+    out_view->mesh_root = proof.mesh_root;
+    out_view->leaf_digest = proof.leaf_digest;
+    out_view->merkle_sibling_count = proof.merkle_sibling_count;
+    for (size_t index = 0u; index < proof.merkle_sibling_count; index++) {
+        out_view->merkle_siblings[index] = proof.merkle_siblings[index];
+        out_view->merkle_sibling_is_left[index] = proof.merkle_sibling_is_left[index];
+    }
+    out_view->resource_path = route.resource_path;
+    out_view->resource_path_len = route.resource_path_len;
+    out_view->resource_offset = route.resource_offset;
+    out_view->stored_length = route.stored_length;
+    out_view->parsed = 1u;
+    ok = 1;
+cleanup:
+    js_vbc4_wipe_volatile(&route, sizeof(route));
+    js_vbc4_wipe_volatile(&proof, sizeof(proof));
+    if (!ok && out_view) js_aken_native_page_descriptor_view_wipe(out_view);
+    return ok;
+}
+
+/*
  * AKEN v4 native terminal bound-payload opener.
  *
  * The locator/envelope layer deliberately leaves the descriptor opaque.  This
@@ -1721,6 +2553,37 @@ cleanup:
     js_vbc4_wipe_volatile(layout_hash, sizeof(layout_hash));
     js_vbc4_wipe_volatile(dek, sizeof(dek));
     if (!ok && out_page) js_vbc4_wipe_volatile(out_page, sizeof(*out_page));
+    return ok;
+}
+
+JS_HIDDEN int js_aken_native_page_open_current_view_payload(
+    const js_aken_native_page_request *request,
+    const js_aken_native_page_envelope *envelope,
+    const js_aken_native_page_resolved_descriptor *resolved,
+    const js_aken_native_page_descriptor_view *view,
+    const unsigned char *encoded_payload,
+    size_t encoded_payload_len,
+    js_aken_native_opened_page *out_page
+) {
+    int ok = 0;
+    if (!out_page) return 0;
+    js_vbc4_wipe_volatile(out_page, sizeof(*out_page));
+    if (!view || view->parsed != 1u ||
+        !js_aken_native_page_descriptor_verify_payload_mesh(
+            view, encoded_payload, encoded_payload_len)) {
+        return 0;
+    }
+    ok = js_aken_native_page_open_bound_payload(
+        request,
+        envelope,
+        resolved,
+        &view->binding,
+        view->fragments,
+        JS_AKEN_EVALUATOR_FRAGMENT_COUNT,
+        encoded_payload,
+        encoded_payload_len,
+        out_page);
+    if (!ok) js_vbc4_wipe_volatile(out_page, sizeof(*out_page));
     return ok;
 }
 

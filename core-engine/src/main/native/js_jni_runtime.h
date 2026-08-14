@@ -273,6 +273,32 @@ typedef struct {
 } js_aken_native_page_resolved_descriptor;
 
 /*
+ * Borrowed, current-page-only view over one verified AKEN runtime descriptor.
+ * The parser never allocates or exposes a catalog: byte/string frames point
+ * into the already locator-bound descriptor; only the native-endian evaluator
+ * permutation rows are copied for immediate terminal evaluation.  wipe() must
+ * run before the surrounding locator/envelope/descriptor lifetime ends.
+ */
+typedef struct {
+    uint8_t parsed;
+    js_aken_evaluator_binding binding;
+    js_aken_evaluator_fragment fragments[JS_AKEN_EVALUATOR_FRAGMENT_COUNT];
+    uint32_t fragment_permutations[JS_AKEN_EVALUATOR_FRAGMENT_COUNT][JS_AKEN_EVALUATOR_STATE_WIDTH];
+    /* Exact route/proof leaf encoding used only for the current mesh leaf. */
+    const unsigned char *leaf_identity_encoding;
+    size_t leaf_identity_encoding_len;
+    const unsigned char *mesh_root;
+    const unsigned char *leaf_digest;
+    const unsigned char *merkle_siblings[64u];
+    uint8_t merkle_sibling_is_left[64u];
+    size_t merkle_sibling_count;
+    const unsigned char *resource_path;
+    size_t resource_path_len;
+    uint32_t resource_offset;
+    uint32_t stored_length;
+} js_aken_native_page_descriptor_view;
+
+/*
  * Strictly parses at most one 4096-byte envelope, verifies the complete
  * envelope binding, and binds it to the independently supplied raw proof and
  * expected current-page request.  Inline descriptor bindings are checked
@@ -317,6 +343,24 @@ JS_HIDDEN int js_aken_native_page_locator_resolve(
     const js_aken_native_page_envelope *envelope,
     js_aken_native_page_resolved_descriptor *out_resolved
 );
+/*
+ * Parses exactly the current resolver-bound descriptor and validates its route,
+ * proof and AKEN-7 graph against request/envelope/resolved bindings.  It has no
+ * arbitrary descriptor/resource entry point and does not yet load a payload.
+ */
+JS_HIDDEN int js_aken_native_page_descriptor_parse_current(
+    const js_aken_native_page_request *request,
+    const js_aken_native_page_envelope *envelope,
+    const js_aken_native_page_resolved_descriptor *resolved,
+    js_aken_native_page_descriptor_view *out_view
+);
+JS_HIDDEN void js_aken_native_page_descriptor_view_wipe(js_aken_native_page_descriptor_view *view);
+/* Verifies only the exact encrypted payload selected by this parsed current-page view. */
+JS_HIDDEN int js_aken_native_page_descriptor_verify_payload_mesh(
+    const js_aken_native_page_descriptor_view *view,
+    const unsigned char *encoded_payload,
+    size_t encoded_payload_len
+);
 JS_HIDDEN void js_aken_native_page_locator_record_wipe(js_aken_native_page_locator_record *record);
 
 /*
@@ -349,6 +393,16 @@ JS_HIDDEN int js_aken_native_page_open_bound_payload(
     const js_aken_evaluator_binding *binding,
     const js_aken_evaluator_fragment *fragments,
     size_t fragment_count,
+    const unsigned char *encoded_payload,
+    size_t encoded_payload_len,
+    js_aken_native_opened_page *out_page
+);
+/* Parser-driven native page opener: mesh-authenticates the current payload before terminal AEAD open. */
+JS_HIDDEN int js_aken_native_page_open_current_view_payload(
+    const js_aken_native_page_request *request,
+    const js_aken_native_page_envelope *envelope,
+    const js_aken_native_page_resolved_descriptor *resolved,
+    const js_aken_native_page_descriptor_view *view,
     const unsigned char *encoded_payload,
     size_t encoded_payload_len,
     js_aken_native_opened_page *out_page
