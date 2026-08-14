@@ -392,6 +392,7 @@ class AkenBuildPlan private constructor(
      * Register exactly one page. The kind, logical identity, page index triple
      * is unique within a plan regardless of requested codec/layout names.
      */
+    @JvmOverloads
     @Synchronized
     fun registerPage(
         kind: AkenResourceKind,
@@ -399,10 +400,17 @@ class AkenBuildPlan private constructor(
         pageIndex: Int,
         codecVariant: String = "gcm",
         layoutVariant: String = "default",
+        targetPageSize: Int? = null,
     ): Page {
         requireLive()
         require(identity.isNotEmpty()) { "AKEN page identity must not be empty" }
         require(pageIndex >= 0) { "AKEN page index must be non-negative" }
+        val allowedTargetSizes = pageSizePolicy.allowedSizes(kind)
+        targetPageSize?.let { requestedTargetSize ->
+            require(requestedTargetSize in allowedTargetSizes) {
+                "AKEN requested page target size is unsupported for resource kind"
+            }
+        }
 
         val identityCopy = identity.copyOf()
         val registrationKey = registrationKey(kind, identityCopy, pageIndex)
@@ -425,7 +433,10 @@ class AkenBuildPlan private constructor(
 
         try {
             layout = AkenPageLayout.create(layoutVariant, random)
-            val targetSize = pageSizePolicy.choose(kind, random)
+            val targetSize = targetPageSize ?: pageSizePolicy.choose(kind, random)
+            require(targetSize in allowedTargetSizes) {
+                "AKEN selected page target size is unsupported for resource kind"
+            }
             // Handles are part of the evaluator-state binding.  Mint them
             // before the first fragment and bind them again into the final
             // graph fingerprint below.

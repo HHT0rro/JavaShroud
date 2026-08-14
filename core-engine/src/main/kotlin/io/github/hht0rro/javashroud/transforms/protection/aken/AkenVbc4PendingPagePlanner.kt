@@ -158,6 +158,7 @@ internal object AkenVbc4PendingPagePlanner {
                         resourceOffset = nextResourceOffset,
                         pageIndex = cluster.pageIndex,
                         callSiteProof = callSiteProof,
+                        targetPageSize = partition.targetSize,
                         random = random,
                     )
                     pendingPages += pending

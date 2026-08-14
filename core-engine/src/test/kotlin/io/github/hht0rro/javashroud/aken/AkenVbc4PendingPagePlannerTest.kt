@@ -1,5 +1,9 @@
 package io.github.hht0rro.javashroud.aken
 
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenArtifactEntry
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenBuildPlan
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRuntimePageDescriptor
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4FinalizationLayout
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4LogicalMethodIdentity
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4MethodCandidate
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4PendingPage
@@ -63,6 +67,7 @@ class AkenVbc4PendingPagePlannerTest {
                 assertEquals(listOf(0, 1, 2), pages.map { it.pageIndex })
                 assertTrue(pages.all { it.entryToken == entryToken })
                 assertTrue(pages.all { it.resourcePath == route.futureContainerPath })
+                assertEquals(partitions.map { it.targetSize }, pages.map { it.targetPageSize })
                 var expectedOffset = 0
                 pages.forEach { page ->
                     assertEquals(expectedOffset, page.resourceOffset)
@@ -125,6 +130,85 @@ class AkenVbc4PendingPagePlannerTest {
             assertTrue(candidate.isWiped)
             assertTrue(!route.futureContainerPath.isBlank())
         } finally {
+            candidate.wipe()
+            route.wipe()
+            Arrays.fill(program, 0)
+        }
+    }
+
+    @Test
+    fun propagates_block_cluster_targets_into_finalized_runtime_descriptors() {
+        val program = framedVbc4(
+            blockIds = listOf(10, 20, 30, 40, 50),
+            encryptedPayloadLengths = listOf(288, 168, 588, 88, 188),
+        )
+        val entryToken = 0x4A4B_454E_0000_0E10L
+        val route = AkenVbc4PreSealRoute.create(
+            entryToken = entryToken,
+            logicalVmResourcePath = "META-INF/vbc4/target-propagation.bin",
+            futureContainerPath = "META-INF/.aken/vbc4/target-propagation-container.bin",
+        )
+        val candidate = candidate(entryToken, route.logicalVmResourcePath, program)
+        val expectedTargets = listOf(512, 768, 1024)
+        var layout: AkenVbc4FinalizationLayout? = null
+        try {
+            val batch = AkenVbc4PendingPagePlanner.partitionAndWipe(
+                candidate = candidate,
+                route = route,
+                callSiteProofForPage = { pageIndex ->
+                    ByteArray(37) { index -> (pageIndex * 41 + index * 7 + 5).toByte() }
+                },
+                targetSizeForPage = { pageIndex -> expectedTargets[pageIndex] },
+                random = DeterministicSecureRandom(0x4F4B),
+            )
+            assertTrue(candidate.isWiped)
+            val partitions = batch.partitionsForBuild()
+            assertEquals(expectedTargets, partitions.map { it.targetSize })
+
+            batch.consumePendingPagesForBuild { pages ->
+                assertEquals(expectedTargets, pages.map { it.targetPageSize })
+                assertEquals(List(pages.size) { route.futureContainerPath }, pages.map { it.resourcePath })
+                var expectedOffset = 0
+                pages.forEach { page ->
+                    assertEquals(expectedOffset, page.resourceOffset)
+                    expectedOffset += page.expectedStoredLength
+                }
+
+                val commitment = AkenVbc4FinalizationLayout.reserve(
+                    pendingPages = pages,
+                    fixedEntries = emptyList(),
+                )
+                val commitmentBytes = commitment.copyBytes()
+                val plan = try {
+                    AkenBuildPlan.create(commitmentBytes, FirstSizeSecureRandom())
+                } finally {
+                    Arrays.fill(commitmentBytes, 0)
+                }
+                layout = AkenVbc4FinalizationLayout.materializeAndWipe(
+                    plan = plan,
+                    commitment = commitment,
+                    pendingPages = pages,
+                    fixedEntries = emptyList(),
+                )
+                assertTrue(plan.isWiped())
+            }
+
+            val finalized = checkNotNull(layout)
+            finalized.withNativeLocatorRecordsForBuild { records ->
+                val descriptors = records
+                    .map(::descriptorFromNativeLocatorRecord)
+                    .sortedBy { it.pageIndex }
+                assertEquals(listOf(0, 1, 2), descriptors.map { it.pageIndex })
+                assertEquals(expectedTargets, descriptors.map { it.targetPageSize })
+                assertEquals(
+                    List(descriptors.size) { route.futureContainerPath },
+                    descriptors.map { it.route.resourcePath },
+                )
+            }
+            assertTrue(finalized.verifyWriterEquivalentArtifactForBuild(artifactEntriesFor(finalized)))
+            assertTrue(batch.isWiped)
+        } finally {
+            layout?.wipe()
             candidate.wipe()
             route.wipe()
             Arrays.fill(program, 0)
@@ -203,6 +287,82 @@ class AkenVbc4PendingPagePlannerTest {
         out.write(((value ushr 16) and 0xFF).toInt())
         out.write(((value ushr 8) and 0xFF).toInt())
         out.write((value and 0xFF).toInt())
+    }
+
+    private fun artifactEntriesFor(layout: AkenVbc4FinalizationLayout): List<AkenArtifactEntry> =
+        layout.entriesForBuild().map { entry ->
+            val bytes = entry.copyBytesForBuild()
+            try {
+                AkenArtifactEntry(entry.name, bytes)
+            } finally {
+                Arrays.fill(bytes, 0)
+            }
+        }
+
+    private fun descriptorFromNativeLocatorRecord(record: ByteArray): AkenRuntimePageDescriptor {
+        require(record.size >= 1 + Long.SIZE_BYTES + 1 + Int.SIZE_BYTES + 32) {
+            "AKEN native locator record is too short for a descriptor"
+        }
+        require((record[0].toInt() and 0xFF) == 1) {
+            "unexpected AKEN native locator record version"
+        }
+        var cursor = 1 + Long.SIZE_BYTES + 1 + Int.SIZE_BYTES
+
+        fun readFrame(label: String): ByteArray {
+            require(cursor + Int.SIZE_BYTES <= record.size) {
+                "AKEN native locator $label frame length is truncated"
+            }
+            val length =
+                ((record[cursor++].toInt() and 0xFF) shl 24) or
+                    ((record[cursor++].toInt() and 0xFF) shl 16) or
+                    ((record[cursor++].toInt() and 0xFF) shl 8) or
+                    (record[cursor++].toInt() and 0xFF)
+            require(length >= 0 && length <= record.size - cursor) {
+                "AKEN native locator $label frame length is invalid"
+            }
+            val endExclusive = cursor + length
+            return record.copyOfRange(cursor, endExclusive).also {
+                cursor = endExclusive
+            }
+        }
+
+        var handle: ByteArray? = null
+        var envelope: ByteArray? = null
+        var descriptorBytes: ByteArray? = null
+        var route: ByteArray? = null
+        try {
+            handle = readFrame("handle")
+            envelope = readFrame("envelope")
+            descriptorBytes = readFrame("descriptor")
+            route = readFrame("route")
+            require(cursor + 32 == record.size) {
+                "AKEN native locator record binding length is invalid"
+            }
+            return AkenRuntimePageDescriptor.decode(checkNotNull(descriptorBytes))
+        } finally {
+            handle?.let { Arrays.fill(it, 0) }
+            envelope?.let { Arrays.fill(it, 0) }
+            descriptorBytes?.let { Arrays.fill(it, 0) }
+            route?.let { Arrays.fill(it, 0) }
+        }
+    }
+
+    private class FirstSizeSecureRandom : SecureRandom() {
+        private var state: Int = 0x4A4B_454E
+
+        override fun nextBytes(bytes: ByteArray) {
+            bytes.indices.forEach { index ->
+                state = state * 1_103_515_245 + 12_345
+                bytes[index] = (state ushr 16).toByte()
+            }
+        }
+
+        override fun nextInt(bound: Int): Int {
+            require(bound > 0)
+            return 0
+        }
+
+        override fun nextBoolean(): Boolean = false
     }
 
     private class DeterministicSecureRandom(seed: Int) : SecureRandom() {

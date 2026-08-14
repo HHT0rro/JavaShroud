@@ -20,6 +20,7 @@ internal class AkenVbc4PendingPage private constructor(
     val resourcePath: String,
     val resourceOffset: Int,
     val pageIndex: Int,
+    val targetPageSize: Int,
     val layoutVariant: String,
     logicalIdentity: ByteArray,
     plaintext: ByteArray,
@@ -41,6 +42,9 @@ internal class AkenVbc4PendingPage private constructor(
         require(pageIndex >= 0) { "AKEN VBC4 pending-page index must be non-negative" }
         require(resourceOffset >= 0) { "AKEN VBC4 pending-page offset must be non-negative" }
         require(isValidResourcePath(resourcePath)) { "AKEN VBC4 pending-page resource path is invalid" }
+        require(targetPageSize in AkenPageSizePolicy.DEFAULT.allowedSizes(AkenResourceKind.Vbc4Method)) {
+            "AKEN VBC4 pending-page target size is unsupported"
+        }
         validateLayout(layoutVariant)
         require(expectedStoredLength > 0) { "AKEN VBC4 pending-page stored length is invalid" }
     }
@@ -126,7 +130,8 @@ internal class AkenVbc4PendingPage private constructor(
         /**
          * Builds a page reservation with a freshly randomized physical frame.
          * A caller that already reserved a frame may instead pass its complete
-         * [layoutVariant] so the later evaluator graph binds that exact frame.
+         * [layoutVariant] and [targetPageSize] so the later evaluator graph
+         * binds that exact frame and VBC4 block-cluster geometry.
          */
         fun create(
             entryToken: Long,
@@ -137,19 +142,28 @@ internal class AkenVbc4PendingPage private constructor(
             callSiteProof: ByteArray,
             resourceOffset: Int = 0,
             layoutVariant: String? = null,
+            targetPageSize: Int? = null,
             random: SecureRandom = SecureRandom(),
         ): AkenVbc4PendingPage {
+            targetPageSize?.let { requestedTargetSize ->
+                require(requestedTargetSize in AkenPageSizePolicy.DEFAULT.allowedSizes(AkenResourceKind.Vbc4Method)) {
+                    "AKEN requested VBC4 page target size is unsupported"
+                }
+            }
             var generatedLayout: AkenPageLayout? = null
             val selectedVariant = try {
                 layoutVariant ?: AkenPageLayout.create("vbc4", random).also { generatedLayout = it }.variant
             } finally {
                 generatedLayout?.wipe()
             }
+            val selectedTargetPageSize =
+                targetPageSize ?: AkenPageSizePolicy.DEFAULT.choose(AkenResourceKind.Vbc4Method, random)
             return AkenVbc4PendingPage(
                 entryToken = entryToken,
                 resourcePath = resourcePath,
                 resourceOffset = resourceOffset,
                 pageIndex = pageIndex,
+                targetPageSize = selectedTargetPageSize,
                 layoutVariant = selectedVariant,
                 logicalIdentity = logicalIdentity,
                 plaintext = plaintext,
@@ -562,6 +576,7 @@ internal class AkenVbc4FinalizationLayout private constructor(
                             identity = identity,
                             pageIndex = pending.pageIndex,
                             layoutVariant = pending.layoutVariant,
+                            targetPageSize = pending.targetPageSize,
                         )
                         registeredPages += registered
                         requests += pending.toEmissionRequest(registered)
@@ -580,6 +595,15 @@ internal class AkenVbc4FinalizationLayout private constructor(
                         val pending = pageDefinitions[key]
                             ?: error("AKEN VBC4 finalization emitted an unknown logical page")
                         require(emission.entryToken == pending.entryToken) { "AKEN VBC4 finalization entry-token binding drifted" }
+                        val descriptorBytes = emission.copyDescriptorBytesForBuild()
+                        try {
+                            val descriptor = AkenRuntimePageDescriptor.decode(descriptorBytes)
+                            require(descriptor.targetPageSize == pending.targetPageSize) {
+                                "AKEN VBC4 finalization evaluator target size drifted from its block-cluster page"
+                            }
+                        } finally {
+                            Arrays.fill(descriptorBytes, 0)
+                        }
                         require(emission.resourcePath == pending.resourcePath && emission.resourceOffset == pending.resourceOffset) {
                             "AKEN VBC4 finalization route drifted from its reservation"
                         }
