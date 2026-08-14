@@ -404,6 +404,286 @@ class AkenNativePageLocatorResolverNativeTest {
         }
     }
 
+    @Test
+    fun production_vbc4_page_opens_only_from_its_bound_native_payload_context() {
+        val zig = findZig()
+        assumeTrue(zig != null, "Zig is required to compile the AKEN bound-payload opener probe")
+
+        val sourceNativeDir = resolveSource("src/main/native/js_jni_runtime.c").parent
+        val sourceInclude = sourceNativeDir.resolve("js_aken_page_locator.inc")
+        val probeSource = resolveSource("src/test/native/aken_native_bound_payload_probe.c")
+        val originalInclude = Files.readAllBytes(sourceInclude)
+        val identity = "fixture:aken-native-bound-payload".encodeToByteArray()
+        val plaintext = ByteArray(733) { index -> ((index * 29 + 17) and 0xFF).toByte() }
+        val rawProof = ByteArray(67) { index -> ((index * 11 + 5) and 0xFF).toByte() }
+        val entryToken = 0x414B_454E_0000_2001L
+        val page = AkenVbc4PendingPage.create(
+            entryToken = entryToken,
+            logicalIdentity = identity,
+            plaintext = plaintext,
+            resourcePath = "META-INF/.aken/vbc4/bound-payload.bin",
+            pageIndex = 0,
+            targetPageSize = 768,
+            callSiteProof = rawProof,
+            random = SecureRandom(),
+        )
+        val tempDir = Files.createTempDirectory("javashroud-aken-native-bound-payload-")
+        var context: Vbc4BuildContext? = null
+        var layout: AkenVbc4FinalizationLayout? = null
+        var currentPage: ProductionCurrentPage? = null
+        var compilerRecord: ByteArray? = null
+        var entryBytes: ByteArray? = null
+        var payload: ByteArray? = null
+        var generatedIncludeBytes: ByteArray? = null
+        var generatedFixtureBytes: ByteArray? = null
+        try {
+            val commitment = AkenVbc4FinalizationLayout.reserve(
+                pendingPages = listOf(page),
+                fixedEntries = emptyList(),
+            )
+            val buildContext = defaultVbc4BuildContext()
+            context = buildContext
+            val planCommitment = commitment.copyBytes()
+            val plan = try {
+                buildContext.initializeAkenBuildPlan(planCommitment)
+            } finally {
+                Arrays.fill(planCommitment, 0)
+            }
+            val finalized = AkenVbc4FinalizationLayout.materializeAndWipe(
+                plan = plan,
+                commitment = commitment,
+                pendingPages = listOf(page),
+                fixedEntries = emptyList(),
+            )
+            layout = finalized
+            buildContext.publishAkenVbc4FinalizationLayout(finalized)
+            compilerRecord = buildContext.withAkenNativeLocatorRecordsForBuild { records ->
+                assertEquals(1, records.size)
+                records.single().copyOf()
+            }
+            val selectedPage = parseProductionCurrentPage(checkNotNull(compilerRecord))
+            currentPage = selectedPage
+            assertEquals(entryToken, selectedPage.entryToken)
+            assertEquals(AkenResourceKind.Vbc4Method, selectedPage.resourceKind)
+            assertEquals(0, selectedPage.pageIndex)
+
+            val descriptor = decodeProductionCurrentPageDescriptor(checkNotNull(compilerRecord))
+            assertEquals(selectedPage.resourceKind, descriptor.resourceKind)
+            assertEquals(selectedPage.pageIndex, descriptor.pageIndex)
+            val route = descriptor.route
+            val entry = finalized.entriesForBuild().single { it.name == route.resourcePath }
+            entryBytes = entry.copyBytesForBuild()
+            val endExclusive = route.resourceOffset.toLong() + route.storedLength.toLong()
+            require(endExclusive <= checkNotNull(entryBytes).size.toLong()) {
+                "production AKEN route exceeds its final entry"
+            }
+            payload = checkNotNull(entryBytes).copyOfRange(route.resourceOffset, endExclusive.toInt())
+            assertEquals(route.storedLength, checkNotNull(payload).size)
+
+            val include = NativeRecompilationTransforms.generateAkenNativePageLocatorInclude(
+                buildContext,
+                Random(0xA4E2),
+            )
+            generatedIncludeBytes = include.toByteArray(StandardCharsets.US_ASCII)
+            assertFalse(include.contains(plaintext.decodeToString()), "native locator include must not contain plaintext")
+
+            val fixtureInclude = productionBoundPayloadFixtureInclude(
+                currentPage = selectedPage,
+                rawCallSiteProof = rawProof,
+                descriptor = descriptor,
+                encodedPayload = checkNotNull(payload),
+                expectedPlaintext = plaintext,
+            )
+            generatedFixtureBytes = fixtureInclude.toByteArray(StandardCharsets.US_ASCII)
+            val compiled = compileProbe(
+                zig = checkNotNull(zig),
+                root = tempDir,
+                sourceNativeDir = sourceNativeDir,
+                probeSource = probeSource,
+                include = include,
+                additionalNativeFiles = mapOf(
+                    "aken_native_bound_payload_fixture.inc" to checkNotNull(generatedFixtureBytes),
+                ),
+            )
+            val result = runProbe(compiled, "bound-payload")
+            assertEquals(0, result.exitCode, "production AKEN bound-payload opener must pass:\n${result.output}")
+            assertTrue(result.output.contains("AKEN native bound payload probe: PASS"), result.output)
+
+            buildContext.wipe()
+            assertTrue(finalized.isWiped)
+        } finally {
+            try {
+                assertContentEquals(
+                    originalInclude,
+                    Files.readAllBytes(sourceInclude),
+                    "the repository's default empty locator include must remain untouched",
+                )
+            } finally {
+                compilerRecord?.let { Arrays.fill(it, 0) }
+                currentPage?.wipe()
+                entryBytes?.let { Arrays.fill(it, 0) }
+                payload?.let { Arrays.fill(it, 0) }
+                generatedIncludeBytes?.let { Arrays.fill(it, 0) }
+                generatedFixtureBytes?.let { Arrays.fill(it, 0) }
+                layout?.wipe()
+                context?.wipe()
+                Arrays.fill(originalInclude, 0)
+                Arrays.fill(identity, 0)
+                Arrays.fill(plaintext, 0)
+                Arrays.fill(rawProof, 0)
+                page.wipe()
+                deleteTree(tempDir)
+            }
+        }
+    }
+
+    private fun productionBoundPayloadFixtureInclude(
+        currentPage: ProductionCurrentPage,
+        rawCallSiteProof: ByteArray,
+        descriptor: AkenRuntimePageDescriptor,
+        encodedPayload: ByteArray,
+        expectedPlaintext: ByteArray,
+    ): String {
+        require(currentPage.resourceKind == AkenResourceKind.Vbc4Method)
+        require(rawCallSiteProof.isNotEmpty())
+        require(encodedPayload.isNotEmpty())
+        require(expectedPlaintext.isNotEmpty())
+
+        var logicalIdentity: ByteArray? = null
+        var handle: AkenHandle? = null
+        var handleEncoding: ByteArray? = null
+        var locatorToken: ByteArray? = null
+        var evaluatorFingerprint: ByteArray? = null
+        var artifactCommitment: ByteArray? = null
+        var descriptorProof: ByteArray? = null
+        var codecVariant: ByteArray? = null
+        var layoutVariant: ByteArray? = null
+        val fragments = ArrayList<BoundPayloadFragmentFixture>()
+        try {
+            logicalIdentity = descriptor.logicalIdentity
+            handle = descriptor.handle
+            handleEncoding = handle.encoded
+            locatorToken = handle.locatorToken
+            evaluatorFingerprint = descriptor.evaluatorPlan.fingerprint
+            artifactCommitment = descriptor.proof.artifactCanonicalCommitment
+            descriptorProof = descriptor.proof.callSiteProof
+            codecVariant = descriptor.route.codecVariant.toByteArray(StandardCharsets.UTF_8)
+            layoutVariant = descriptor.route.layoutVariant.toByteArray(StandardCharsets.UTF_8)
+
+            require(MessageDigest.isEqual(currentPage.encodedHandle, checkNotNull(handleEncoding))) {
+                "AKEN bound-payload fixture handle does not match its native locator record"
+            }
+            require(MessageDigest.isEqual(rawCallSiteProof, checkNotNull(descriptorProof))) {
+                "AKEN bound-payload fixture raw proof does not match descriptor proof"
+            }
+            val handleFingerprint = handle.evaluatorPlanFingerprint
+            try {
+                require(MessageDigest.isEqual(handleFingerprint, checkNotNull(evaluatorFingerprint))) {
+                    "AKEN bound-payload fixture handle fingerprint does not match evaluator plan"
+                }
+            } finally {
+                Arrays.fill(handleFingerprint, 0)
+            }
+
+            val evaluatorPlan = descriptor.evaluatorPlan
+            val sourceFragments = evaluatorPlan.javaFragments + evaluatorPlan.nativeFragments + listOf(evaluatorPlan.terminal)
+            require(sourceFragments.size == 7) { "AKEN bound-payload fixture graph must contain seven fragments" }
+            sourceFragments.forEach { fragment ->
+                fragments += BoundPayloadFragmentFixture(
+                    ordinal = fragment.ordinal,
+                    family = fragment.family,
+                    shape = fragment.shape,
+                    callToken = fragment.callToken,
+                    tablePermutation = fragment.tablePermutation,
+                )
+            }
+            require(fragments.map { it.ordinal }.sorted() == (0 until 7).toList()) {
+                "AKEN bound-payload fixture graph ordinals are incomplete or duplicated"
+            }
+
+            val token = currentPage.entryToken.toULong().toString(16).uppercase().padStart(16, '0')
+            return buildString {
+                appendLine("/* AUTO-GENERATED AKEN v4 native bound-payload fixture - DO NOT EDIT */")
+                appendLine("#ifndef JS_AKEN_NATIVE_BOUND_PAYLOAD_FIXTURE_INC")
+                appendLine("#define JS_AKEN_NATIVE_BOUND_PAYLOAD_FIXTURE_INC")
+                appendLine("#include <stdint.h>")
+                appendLine()
+                appendLine("#define TEST_ENTRY_TOKEN UINT64_C(0x$token)")
+                appendLine("#define TEST_RESOURCE_KIND ${descriptor.resourceKind.id}u")
+                appendLine("#define TEST_PAGE_INDEX ${descriptor.pageIndex}")
+                appendLine("#define TEST_TARGET_PAGE_SIZE ${descriptor.targetPageSize}")
+                appendLine()
+                appendBoundPayloadBytes("TEST_ENCODED_HANDLE", currentPage.encodedHandle)
+                appendBoundPayloadBytes("TEST_RAW_CALL_SITE_PROOF", rawCallSiteProof)
+                appendBoundPayloadBytes("TEST_LOGICAL_IDENTITY", checkNotNull(logicalIdentity))
+                appendBoundPayloadBytes("TEST_CODEC_VARIANT", checkNotNull(codecVariant))
+                appendBoundPayloadBytes("TEST_LAYOUT_VARIANT", checkNotNull(layoutVariant))
+                appendBoundPayloadBytes("TEST_LOCATOR_TOKEN", checkNotNull(locatorToken))
+                appendBoundPayloadBytes("TEST_EVALUATOR_FINGERPRINT", checkNotNull(evaluatorFingerprint))
+                appendBoundPayloadBytes("TEST_ARTIFACT_COMMITMENT", checkNotNull(artifactCommitment))
+                appendBoundPayloadBytes("TEST_ENCODED_PAYLOAD", encodedPayload)
+                appendBoundPayloadBytes("TEST_EXPECTED_PLAINTEXT", expectedPlaintext)
+                appendLine()
+                fragments.forEachIndexed { index, fragment ->
+                    appendBoundPayloadBytes("TEST_FRAGMENT_${index}_SHAPE", fragment.shape)
+                    appendBoundPayloadBytes("TEST_FRAGMENT_${index}_CALL_TOKEN", fragment.callToken)
+                    appendBoundPayloadInts("TEST_FRAGMENT_${index}_TABLE", fragment.tablePermutation)
+                    appendLine()
+                }
+                appendLine("static const js_aken_evaluator_fragment TEST_EVALUATOR_FRAGMENTS[JS_AKEN_EVALUATOR_FRAGMENT_COUNT] = {")
+                fragments.forEachIndexed { index, fragment ->
+                    appendLine("    {")
+                    appendLine("        .ordinal = ${fragment.ordinal},")
+                    appendLine("        .family = ${fragment.family},")
+                    appendLine("        .shape = TEST_FRAGMENT_${index}_SHAPE,")
+                    appendLine("        .shape_len = sizeof(TEST_FRAGMENT_${index}_SHAPE),")
+                    appendLine("        .call_token = TEST_FRAGMENT_${index}_CALL_TOKEN,")
+                    appendLine("        .call_token_len = sizeof(TEST_FRAGMENT_${index}_CALL_TOKEN),")
+                    appendLine("        .table_permutation = TEST_FRAGMENT_${index}_TABLE,")
+                    appendLine("        .table_permutation_len = sizeof(TEST_FRAGMENT_${index}_TABLE) / sizeof(TEST_FRAGMENT_${index}_TABLE[0]),")
+                    appendLine(if (index == fragments.lastIndex) "    }" else "    },")
+                }
+                appendLine("};")
+                appendLine("#endif")
+            }
+        } finally {
+            logicalIdentity?.let { Arrays.fill(it, 0) }
+            handleEncoding?.let { Arrays.fill(it, 0) }
+            locatorToken?.let { Arrays.fill(it, 0) }
+            evaluatorFingerprint?.let { Arrays.fill(it, 0) }
+            artifactCommitment?.let { Arrays.fill(it, 0) }
+            descriptorProof?.let { Arrays.fill(it, 0) }
+            codecVariant?.let { Arrays.fill(it, 0) }
+            layoutVariant?.let { Arrays.fill(it, 0) }
+            fragments.forEach(BoundPayloadFragmentFixture::wipe)
+            handle?.wipe()
+        }
+    }
+
+    private fun StringBuilder.appendBoundPayloadBytes(name: String, value: ByteArray) {
+        require(value.isNotEmpty()) { "AKEN native bound-payload fixture byte array must not be empty" }
+        append("static const unsigned char ").append(name).append('[').append(value.size).appendLine("] = {")
+        value.forEachIndexed { index, byte ->
+            if (index % 12 == 0) append("    ")
+            append("0x%02Xu".format(byte.toInt() and 0xFF))
+            if (index != value.lastIndex) append(", ")
+            if (index % 12 == 11 || index == value.lastIndex) appendLine()
+        }
+        appendLine("};")
+    }
+
+    private fun StringBuilder.appendBoundPayloadInts(name: String, value: IntArray) {
+        require(value.size == 32) { "AKEN native evaluator permutation must have width 32" }
+        append("static const uint32_t ").append(name).append('[').append(value.size).appendLine("] = {")
+        value.forEachIndexed { index, entry ->
+            if (index % 8 == 0) append("    ")
+            append(entry.toUInt()).append('u')
+            if (index != value.lastIndex) append(", ")
+            if (index % 8 == 7 || index == value.lastIndex) appendLine()
+        }
+        appendLine("};")
+    }
+
     private fun parseProductionCurrentPage(record: ByteArray): ProductionCurrentPage {
         require(record.size in 1..(512 * 1024)) {
             "production AKEN compiler record size is invalid"
@@ -478,6 +758,53 @@ class AkenNativePageLocatorResolverNativeTest {
             if (!retainHandle) Arrays.fill(encodedHandle, 0)
             Arrays.fill(nativeEnvelope, 0)
             Arrays.fill(descriptor, 0)
+            Arrays.fill(route, 0)
+            Arrays.fill(binding, 0)
+        }
+    }
+
+    /**
+     * Decodes the descriptor portion of a compiler record after
+     * [parseProductionCurrentPage] has already verified the record binding.
+     * The decoder retains only the immutable descriptor object; every temporary
+     * record frame is cleared before returning.
+     */
+    private fun decodeProductionCurrentPageDescriptor(record: ByteArray): AkenRuntimePageDescriptor {
+        require(record.size in 1..(512 * 1024)) {
+            "production AKEN compiler record size is invalid"
+        }
+        val input = ByteBuffer.wrap(record).order(ByteOrder.BIG_ENDIAN)
+        require(input.remaining() >= 1 + Long.SIZE_BYTES + 1 + Int.SIZE_BYTES + Int.SIZE_BYTES) {
+            "production AKEN compiler record is truncated"
+        }
+        require((input.get().toInt() and 0xFF) == COMPILER_RECORD_VERSION) {
+            "production AKEN compiler record version is unsupported"
+        }
+        input.long
+        requireNotNull(AkenResourceKind.fromId(input.get().toInt() and 0xFF)) {
+            "production AKEN compiler record resource kind is unsupported"
+        }
+        require(input.int >= 0) { "production AKEN compiler record page index is invalid" }
+
+        val encodedHandle = readProductionCurrentPageFrame(
+            input,
+            maxLength = AkenHandle.ENCODED_HANDLE_SIZE,
+            label = "encoded handle",
+        )
+        val nativeEnvelope = readProductionCurrentPageFrame(input, maxLength = 4096, label = "native envelope")
+        val descriptorBytes = readProductionCurrentPageFrame(input, maxLength = 384 * 1024, label = "descriptor")
+        val route = readProductionCurrentPageFrame(input, maxLength = 128 * 1024, label = "route")
+        val binding = ByteArray(AkenArtifactCommitment.DIGEST_SIZE)
+        try {
+            require(input.remaining() == binding.size) {
+                "production AKEN compiler record binding length is invalid"
+            }
+            input.get(binding)
+            return AkenRuntimePageDescriptor.decode(descriptorBytes)
+        } finally {
+            Arrays.fill(encodedHandle, 0)
+            Arrays.fill(nativeEnvelope, 0)
+            Arrays.fill(descriptorBytes, 0)
             Arrays.fill(route, 0)
             Arrays.fill(binding, 0)
         }
@@ -625,6 +952,21 @@ class AkenNativePageLocatorResolverNativeTest {
         appendLine("};")
     }
 
+
+    private class BoundPayloadFragmentFixture(
+        val ordinal: Int,
+        val family: Int,
+        val shape: ByteArray,
+        val callToken: ByteArray,
+        val tablePermutation: IntArray,
+    ) {
+        fun wipe() {
+            Arrays.fill(shape, 0)
+            Arrays.fill(callToken, 0)
+            Arrays.fill(tablePermutation, 0)
+        }
+    }
+
     private class ProductionCurrentPage(
         val entryToken: Long,
         val resourceKind: AkenResourceKind,
@@ -648,11 +990,18 @@ class AkenNativePageLocatorResolverNativeTest {
         sourceNativeDir: Path,
         probeSource: Path,
         include: String,
+        additionalNativeFiles: Map<String, ByteArray> = emptyMap(),
     ): CompiledProbe {
         val scenarioDir = Files.createDirectories(root.resolve("valid"))
         val nativeDir = scenarioDir.resolve("native")
         copyTree(sourceNativeDir, nativeDir)
         Files.writeString(nativeDir.resolve("js_aken_page_locator.inc"), include, StandardCharsets.UTF_8)
+        additionalNativeFiles.forEach { (name, bytes) ->
+            require(name.isNotBlank() && !name.contains('/') && !name.contains('\\')) {
+                "additional native fixture file name is invalid"
+            }
+            Files.write(nativeDir.resolve(name), bytes)
+        }
 
         val probe = scenarioDir.resolve("aken_native_page_locator_probe.c")
         Files.copy(probeSource, probe, StandardCopyOption.REPLACE_EXISTING)
@@ -1035,7 +1384,8 @@ class AkenNativePageLocatorResolverNativeTest {
         output.isBlank() ||
             output.contains("CacheCheckFailed") ||
             output.contains("file_open Unexpected") ||
-            output.contains("sub-compilation of mingw-w64")
+            output.contains("sub-compilation of mingw-w64") ||
+            (output.contains("unable to load '") && output.contains("': Unexpected"))
 
     private fun findZig(): String? = listOfNotNull(System.getenv("JAVASHROUD_ZIG"), "zig").firstOrNull { candidate ->
         runCatching {
@@ -1071,8 +1421,21 @@ class AkenNativePageLocatorResolverNativeTest {
     }
 
     private fun deleteTree(path: Path) {
-        Files.walk(path).use { paths ->
-            paths.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+        var lastFileSystemFailure: java.nio.file.FileSystemException? = null
+        repeat(20) { attempt ->
+            if (!Files.exists(path)) return
+            try {
+                Files.walk(path).use { paths ->
+                    paths.sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+                }
+                return
+            } catch (failure: java.nio.file.FileSystemException) {
+                lastFileSystemFailure = failure
+                Thread.sleep(100L * (attempt + 1L))
+            }
+        }
+        throw checkNotNull(lastFileSystemFailure) {
+            "Unable to delete native probe tree after bounded retry"
         }
     }
 

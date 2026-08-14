@@ -130,6 +130,8 @@ typedef struct {
     size_t encoded_handle_len;
     const unsigned char *locator_token;
     size_t locator_token_len;
+    const unsigned char *evaluator_fingerprint;
+    size_t evaluator_fingerprint_len;
     /* Public canonical commitment expected from the seven dispersed shape shares. */
     const unsigned char *artifact_commitment;
     size_t artifact_commitment_len;
@@ -316,6 +318,42 @@ JS_HIDDEN int js_aken_native_page_locator_resolve(
     js_aken_native_page_resolved_descriptor *out_resolved
 );
 JS_HIDDEN void js_aken_native_page_locator_record_wipe(js_aken_native_page_locator_record *record);
+
+/*
+ * Native-only ownership for one opened current page.  This is intentionally
+ * not a JNI type and has no enumeration or arbitrary-resource decode API.
+ * Callers must wipe it immediately after the page-local VM/string/class/chunk
+ * consumer finishes with the plaintext.
+ */
+typedef struct {
+    unsigned char *bytes;
+    size_t length;
+} js_aken_native_opened_page;
+
+/*
+ * Low-level terminal codec primitive for one page slice that has already been
+ * selected by a native current-page resolver.  The supplied request, parsed
+ * envelope, resolved descriptor, evaluator binding, and AKEN-7 graph must all
+ * describe that same page. Its payload parameter is native-private compiler
+ * input: no JNI entry point exposes this signature, and the future
+ * descriptor/route/proof parser is responsible for obtaining the exact route
+ * slice before calling it. The function reconstructs the page-local DEK,
+ * authenticates the AKEN AES-256-GCM frame and AAD bindings, transfers the
+ * resulting plaintext into [out_page], then wipes every transient buffer and
+ * the DEK. On failure it returns 0 and leaves [out_page] wiped.
+ */
+JS_HIDDEN int js_aken_native_page_open_bound_payload(
+    const js_aken_native_page_request *request,
+    const js_aken_native_page_envelope *envelope,
+    const js_aken_native_page_resolved_descriptor *resolved,
+    const js_aken_evaluator_binding *binding,
+    const js_aken_evaluator_fragment *fragments,
+    size_t fragment_count,
+    const unsigned char *encoded_payload,
+    size_t encoded_payload_len,
+    js_aken_native_opened_page *out_page
+);
+JS_HIDDEN void js_aken_native_opened_page_wipe(js_aken_native_opened_page *page);
 
 #define JS_NATIVE_ABI_TABLE_VERSION 10u
 

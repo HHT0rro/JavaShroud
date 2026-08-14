@@ -147,6 +147,8 @@ static int js_aken_evaluator_binding_is_valid(const js_aken_evaluator_binding *b
         binding->layout_variant_len > JS_AKEN_EVALUATOR_MAX_FRAGMENT_BYTES) return 0;
     if (!binding->encoded_handle || binding->encoded_handle_len != 24u ||
         !binding->locator_token || binding->locator_token_len != 16u ||
+        !binding->evaluator_fingerprint ||
+        binding->evaluator_fingerprint_len != JS_AKEN_EVALUATOR_STATE_WIDTH ||
         !binding->artifact_commitment || binding->artifact_commitment_len != JS_AKEN_EVALUATOR_STATE_WIDTH) return 0;
     return 1;
 }
@@ -1186,6 +1188,539 @@ JS_HIDDEN int js_aken_native_page_locator_resolve(
     ok = js_aken_native_page_envelope_verify_resolved_bindings(envelope, out_resolved);
 cleanup:
     if (!ok && out_resolved) js_vbc4_wipe_volatile(out_resolved, sizeof(*out_resolved));
+    return ok;
+}
+
+/*
+ * AKEN v4 native terminal bound-payload opener.
+ *
+ * The locator/envelope layer deliberately leaves the descriptor opaque.  This
+ * terminal primitive therefore consumes only a current-page evaluator binding
+ * that the artifact-specific compiler generated beside that descriptor.  It
+ * cross-binds every public member to the already-resolved locator result before
+ * reconstructing a DEK, and it never publishes the DEK or accepts a JNI
+ * generic-decode request.
+ */
+#define JS_AKEN_NATIVE_PAGE_CODEC_VERSION 4u
+#define JS_AKEN_NATIVE_PAGE_HEADER_SIZE 202u
+#define JS_AKEN_NATIVE_PAGE_GCM_TAG_SIZE 16u
+#define JS_AKEN_NATIVE_PAGE_NONCE_SIZE 12u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_VERSION 0u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_KIND 1u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_PAGE_INDEX 2u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_PLAINTEXT_LENGTH 6u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_NONCE 10u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_COMMITMENT 22u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_IDENTITY_HASH 54u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_EVALUATOR_FINGERPRINT 86u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_CODEC_HASH 118u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_LAYOUT_HASH 150u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_LOCATOR 182u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_CIPHERTEXT_LENGTH 198u
+#define JS_AKEN_NATIVE_PAGE_MAX_ENCODED_SIZE (16u * 1024u * 1024u)
+
+static const unsigned char JS_AKEN_NATIVE_PAGE_AAD_DOMAIN[] = "AKEN-v4-page-aad";
+static const unsigned char JS_AKEN_NATIVE_PAGE_CANONICAL_CODEC[] = "aes-256-gcm-v4";
+static const unsigned char JS_AKEN_NATIVE_PAGE_LAYOUT_PREFIX[] = "aken4-frame1";
+
+static int js_aken_native_page_open_size_add(size_t *value, size_t addend) {
+    if (!value || addend > SIZE_MAX - *value) return 0;
+    *value += addend;
+    return 1;
+}
+
+static uint32_t js_aken_native_page_open_read_u32be(const unsigned char value[4]) {
+    return ((uint32_t)value[0] << 24) |
+        ((uint32_t)value[1] << 16) |
+        ((uint32_t)value[2] << 8) |
+        (uint32_t)value[3];
+}
+
+static void js_aken_native_page_open_write_u32be(unsigned char target[4], uint32_t value) {
+    target[0] = (unsigned char)(value >> 24);
+    target[1] = (unsigned char)(value >> 16);
+    target[2] = (unsigned char)(value >> 8);
+    target[3] = (unsigned char)value;
+}
+
+static int js_aken_native_page_open_ascii_equal(
+    const unsigned char *value,
+    size_t value_len,
+    const unsigned char *expected,
+    size_t expected_len
+) {
+    return value && expected && value_len == expected_len && memcmp(value, expected, value_len) == 0;
+}
+
+static int js_aken_native_page_open_sha256(
+    const unsigned char *value,
+    size_t value_len,
+    unsigned char out_digest[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE]
+) {
+    js_sha256_ctx context;
+    int ok = 0;
+    if (!out_digest) return 0;
+    js_vbc4_wipe_volatile(out_digest, JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE);
+    memset(&context, 0, sizeof(context));
+    if (!value || value_len == 0u || value_len > (size_t)INT_MAX) goto cleanup;
+    js_sha256_init(&context);
+    js_sha256_update(&context, value, (int)value_len);
+    js_sha256_final(&context, out_digest);
+    ok = 1;
+cleanup:
+    js_vbc4_wipe_volatile(&context, sizeof(context));
+    if (!ok) js_vbc4_wipe_volatile(out_digest, JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE);
+    return ok;
+}
+
+static int js_aken_native_page_open_layout_decimal(
+    const unsigned char *value,
+    size_t value_len,
+    size_t minimum,
+    size_t maximum,
+    size_t *out_value
+) {
+    size_t decoded = 0u;
+    if (!value || !out_value || value_len == 0u || (value_len > 1u && value[0] == (unsigned char)'0')) return 0;
+    for (size_t index = 0u; index < value_len; index++) {
+        unsigned char character = value[index];
+        unsigned int digit = 0u;
+        if (character < (unsigned char)'0' || character > (unsigned char)'9') return 0;
+        digit = (unsigned int)(character - (unsigned char)'0');
+        if (decoded > (maximum - (size_t)digit) / 10u) return 0;
+        decoded = decoded * 10u + (size_t)digit;
+    }
+    if (decoded < minimum || decoded > maximum || (decoded & 3u) != 0u) return 0;
+    *out_value = decoded;
+    return 1;
+}
+
+static int js_aken_native_page_open_base64url_value(unsigned char character, unsigned int *out_value) {
+    unsigned int value = 0u;
+    if (!out_value) return 0;
+    if (character >= (unsigned char)'A' && character <= (unsigned char)'Z') {
+        value = (unsigned int)(character - (unsigned char)'A');
+    } else if (character >= (unsigned char)'a' && character <= (unsigned char)'z') {
+        value = 26u + (unsigned int)(character - (unsigned char)'a');
+    } else if (character >= (unsigned char)'0' && character <= (unsigned char)'9') {
+        value = 52u + (unsigned int)(character - (unsigned char)'0');
+    } else if (character == (unsigned char)'-') {
+        value = 62u;
+    } else if (character == (unsigned char)'_') {
+        value = 63u;
+    } else {
+        return 0;
+    }
+    *out_value = value;
+    return 1;
+}
+
+static int js_aken_native_page_open_layout_parse(
+    const unsigned char *variant,
+    size_t variant_len,
+    size_t *out_prefix_len,
+    size_t *out_suffix_len,
+    int *out_header_after_body
+) {
+    const unsigned char *parts[6] = {0};
+    size_t lengths[6] = {0};
+    size_t part_count = 0u;
+    size_t start = 0u;
+    size_t prefix_len = 0u;
+    size_t suffix_len = 0u;
+    int header_after_body = 0;
+    int ok = 0;
+    if (!variant || !out_prefix_len || !out_suffix_len || !out_header_after_body ||
+        variant_len == 0u || variant_len > JS_AKEN_EVALUATOR_MAX_FRAGMENT_BYTES) {
+        goto cleanup;
+    }
+    for (size_t index = 0u; index <= variant_len; index++) {
+        if (index == variant_len || variant[index] == (unsigned char)':') {
+            if (part_count >= 6u || index < start) goto cleanup;
+            parts[part_count] = variant + start;
+            lengths[part_count] = index - start;
+            part_count++;
+            start = index + 1u;
+        }
+    }
+    if (part_count != 6u ||
+        !js_aken_native_page_open_ascii_equal(
+            parts[0],
+            lengths[0],
+            JS_AKEN_NATIVE_PAGE_LAYOUT_PREFIX,
+            sizeof(JS_AKEN_NATIVE_PAGE_LAYOUT_PREFIX) - 1u) ||
+        lengths[1] == 0u || lengths[1] > 32u ||
+        !((parts[1][0] >= (unsigned char)'a' && parts[1][0] <= (unsigned char)'z') ||
+            (parts[1][0] >= (unsigned char)'0' && parts[1][0] <= (unsigned char)'9')) ||
+        !js_aken_native_page_open_layout_decimal(parts[2], lengths[2], 12u, 60u, &prefix_len) ||
+        !js_aken_native_page_open_layout_decimal(parts[3], lengths[3], 8u, 40u, &suffix_len)) {
+        goto cleanup;
+    }
+    for (size_t index = 1u; index < lengths[1]; index++) {
+        unsigned char character = parts[1][index];
+        if (!((character >= (unsigned char)'a' && character <= (unsigned char)'z') ||
+            (character >= (unsigned char)'0' && character <= (unsigned char)'9') ||
+            character == (unsigned char)'.' || character == (unsigned char)'_' || character == (unsigned char)'-')) {
+            goto cleanup;
+        }
+    }
+    if (js_aken_native_page_open_ascii_equal(parts[4], lengths[4], (const unsigned char *)"head", 4u)) {
+        header_after_body = 0;
+    } else if (js_aken_native_page_open_ascii_equal(parts[4], lengths[4], (const unsigned char *)"tail", 4u)) {
+        header_after_body = 1;
+    } else {
+        goto cleanup;
+    }
+    if (lengths[5] != 11u) goto cleanup;
+    for (size_t index = 0u; index < lengths[5]; index++) {
+        unsigned int marker_value = 0u;
+        if (!js_aken_native_page_open_base64url_value(parts[5][index], &marker_value) ||
+            (index + 1u == lengths[5] && (marker_value & 0x03u) != 0u)) {
+            goto cleanup;
+        }
+    }
+    *out_prefix_len = prefix_len;
+    *out_suffix_len = suffix_len;
+    *out_header_after_body = header_after_body;
+    ok = 1;
+cleanup:
+    js_vbc4_wipe_volatile(parts, sizeof(parts));
+    js_vbc4_wipe_volatile(lengths, sizeof(lengths));
+    return ok;
+}
+
+static int js_aken_native_page_open_write_framed(
+    unsigned char *target,
+    size_t target_len,
+    size_t *offset,
+    const unsigned char *value,
+    size_t value_len
+) {
+    size_t next = 0u;
+    if (!target || !offset || (value_len != 0u && !value) || value_len > (size_t)UINT32_MAX ||
+        *offset > target_len || !js_aken_native_page_open_size_add(&next, *offset) ||
+        !js_aken_native_page_open_size_add(&next, 4u) ||
+        !js_aken_native_page_open_size_add(&next, value_len) || next > target_len) {
+        return 0;
+    }
+    js_aken_native_page_open_write_u32be(target + *offset, (uint32_t)value_len);
+    *offset += 4u;
+    if (value_len != 0u) memcpy(target + *offset, value, value_len);
+    *offset += value_len;
+    return 1;
+}
+
+static int js_aken_native_page_open_build_aad(
+    const js_aken_evaluator_binding *binding,
+    const unsigned char header[JS_AKEN_NATIVE_PAGE_HEADER_SIZE],
+    const unsigned char *prefix,
+    size_t prefix_len,
+    const unsigned char *suffix,
+    size_t suffix_len,
+    unsigned char **out_aad,
+    size_t *out_aad_len
+) {
+    size_t total = 0u;
+    size_t offset = 0u;
+    unsigned char *aad = NULL;
+    int ok = 0;
+    if (!binding || !header || (prefix_len != 0u && !prefix) || (suffix_len != 0u && !suffix) ||
+        !out_aad || !out_aad_len) {
+        goto cleanup;
+    }
+    *out_aad = NULL;
+    *out_aad_len = 0u;
+    if (!js_aken_native_page_open_size_add(&total, sizeof(JS_AKEN_NATIVE_PAGE_AAD_DOMAIN) - 1u) ||
+        !js_aken_native_page_open_size_add(&total, binding->artifact_commitment_len) ||
+        !js_aken_native_page_open_size_add(&total, 4u + binding->logical_identity_len) ||
+        !js_aken_native_page_open_size_add(&total, 4u) ||
+        !js_aken_native_page_open_size_add(&total, 1u) ||
+        !js_aken_native_page_open_size_add(&total, binding->evaluator_fingerprint_len) ||
+        !js_aken_native_page_open_size_add(&total, 4u + binding->codec_variant_len) ||
+        !js_aken_native_page_open_size_add(&total, 4u + binding->layout_variant_len) ||
+        !js_aken_native_page_open_size_add(&total, binding->locator_token_len) ||
+        !js_aken_native_page_open_size_add(&total, 4u + JS_AKEN_NATIVE_PAGE_HEADER_SIZE) ||
+        !js_aken_native_page_open_size_add(&total, 4u + prefix_len) ||
+        !js_aken_native_page_open_size_add(&total, 4u + suffix_len) ||
+        total == 0u || total > JS_AKEN_NATIVE_PAGE_MAX_ENCODED_SIZE) {
+        goto cleanup;
+    }
+    aad = (unsigned char *)malloc(total);
+    if (!aad) goto cleanup;
+    memcpy(aad + offset, JS_AKEN_NATIVE_PAGE_AAD_DOMAIN, sizeof(JS_AKEN_NATIVE_PAGE_AAD_DOMAIN) - 1u);
+    offset += sizeof(JS_AKEN_NATIVE_PAGE_AAD_DOMAIN) - 1u;
+    memcpy(aad + offset, binding->artifact_commitment, binding->artifact_commitment_len);
+    offset += binding->artifact_commitment_len;
+    if (!js_aken_native_page_open_write_framed(aad, total, &offset, binding->logical_identity, binding->logical_identity_len)) {
+        goto cleanup;
+    }
+    if (offset > total || total - offset < 5u) goto cleanup;
+    js_aken_native_page_open_write_u32be(aad + offset, (uint32_t)binding->page_index);
+    offset += 4u;
+    aad[offset++] = binding->kind_id;
+    memcpy(aad + offset, binding->evaluator_fingerprint, binding->evaluator_fingerprint_len);
+    offset += binding->evaluator_fingerprint_len;
+    if (!js_aken_native_page_open_write_framed(aad, total, &offset, binding->codec_variant, binding->codec_variant_len) ||
+        !js_aken_native_page_open_write_framed(aad, total, &offset, binding->layout_variant, binding->layout_variant_len)) {
+        goto cleanup;
+    }
+    if (offset > total || binding->locator_token_len > total - offset) goto cleanup;
+    memcpy(aad + offset, binding->locator_token, binding->locator_token_len);
+    offset += binding->locator_token_len;
+    if (!js_aken_native_page_open_write_framed(aad, total, &offset, header, JS_AKEN_NATIVE_PAGE_HEADER_SIZE) ||
+        !js_aken_native_page_open_write_framed(aad, total, &offset, prefix, prefix_len) ||
+        !js_aken_native_page_open_write_framed(aad, total, &offset, suffix, suffix_len) ||
+        offset != total) {
+        goto cleanup;
+    }
+    *out_aad = aad;
+    *out_aad_len = total;
+    aad = NULL;
+    ok = 1;
+cleanup:
+    if (aad) {
+        js_vbc4_wipe_volatile(aad, total);
+        free(aad);
+    }
+    return ok;
+}
+
+static int js_aken_native_page_open_bindings_match(
+    const js_aken_native_page_request *request,
+    const js_aken_native_page_envelope *envelope,
+    const js_aken_native_page_resolved_descriptor *resolved,
+    const js_aken_evaluator_binding *binding
+) {
+    if (!js_aken_native_page_request_is_valid(request) ||
+        !js_aken_native_page_envelope_record_is_well_formed(envelope, 1) ||
+        !js_aken_native_page_resolved_descriptor_is_well_formed(resolved) ||
+        !js_aken_evaluator_binding_is_valid(binding) ||
+        !js_aken_native_page_envelope_verify_resolved_bindings(envelope, resolved)) {
+        return 0;
+    }
+    return binding->kind_id == request->resource_kind &&
+        binding->kind_id == envelope->resource_kind &&
+        binding->kind_id == resolved->resource_kind &&
+        binding->page_index == request->page_index &&
+        binding->page_index == envelope->page_index &&
+        binding->page_index == resolved->page_index &&
+        js_aken_native_page_envelope_constant_time_equal(
+            binding->encoded_handle,
+            request->encoded_handle,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE) &&
+        js_aken_native_page_envelope_constant_time_equal(
+            binding->encoded_handle,
+            envelope->encoded_handle,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE) &&
+        js_aken_native_page_envelope_constant_time_equal(
+            binding->encoded_handle,
+            resolved->encoded_handle,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE) &&
+        js_aken_native_page_envelope_constant_time_equal(
+            binding->locator_token,
+            envelope->locator_token,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_LOCATOR_SIZE) &&
+        js_aken_native_page_envelope_constant_time_equal(
+            binding->locator_token,
+            resolved->locator_token,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_LOCATOR_SIZE) &&
+        js_aken_native_page_envelope_constant_time_equal(
+            binding->evaluator_fingerprint,
+            envelope->evaluator_fingerprint,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) &&
+        js_aken_native_page_envelope_constant_time_equal(
+            binding->evaluator_fingerprint,
+            resolved->evaluator_fingerprint,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) &&
+        js_aken_native_page_envelope_constant_time_equal(
+            binding->artifact_commitment,
+            envelope->artifact_commitment,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) &&
+        js_aken_native_page_envelope_constant_time_equal(
+            binding->artifact_commitment,
+            resolved->artifact_commitment,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE);
+}
+
+JS_HIDDEN void js_aken_native_opened_page_wipe(js_aken_native_opened_page *page) {
+    if (!page) return;
+    if (page->bytes) {
+        js_vbc4_wipe_volatile(page->bytes, page->length);
+        free(page->bytes);
+    }
+    js_vbc4_wipe_volatile(page, sizeof(*page));
+}
+
+JS_HIDDEN int js_aken_native_page_open_bound_payload(
+    const js_aken_native_page_request *request,
+    const js_aken_native_page_envelope *envelope,
+    const js_aken_native_page_resolved_descriptor *resolved,
+    const js_aken_evaluator_binding *binding,
+    const js_aken_evaluator_fragment *fragments,
+    size_t fragment_count,
+    const unsigned char *encoded_payload,
+    size_t encoded_payload_len,
+    js_aken_native_opened_page *out_page
+) {
+    const unsigned char *header = NULL;
+    const unsigned char *body = NULL;
+    const unsigned char *prefix = NULL;
+    const unsigned char *suffix = NULL;
+    const unsigned char *nonce = NULL;
+    size_t prefix_len = 0u;
+    size_t suffix_len = 0u;
+    size_t header_offset = 0u;
+    size_t body_offset = 0u;
+    size_t expected_total = 0u;
+    size_t declared_plain_len = 0u;
+    size_t declared_body_len = 0u;
+    int header_after_body = 0;
+    unsigned char identity_hash[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE] = {0};
+    unsigned char codec_hash[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE] = {0};
+    unsigned char layout_hash[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE] = {0};
+    unsigned char dek[JS_AKEN_EVALUATOR_STATE_WIDTH] = {0};
+    unsigned char *aad = NULL;
+    size_t aad_len = 0u;
+    unsigned char *plain = NULL;
+    int ok = 0;
+    if (!out_page) goto cleanup;
+    js_vbc4_wipe_volatile(out_page, sizeof(*out_page));
+    if (!encoded_payload || encoded_payload_len == 0u || encoded_payload_len > JS_AKEN_NATIVE_PAGE_MAX_ENCODED_SIZE ||
+        !js_aken_native_page_open_bindings_match(request, envelope, resolved, binding) ||
+        !js_aken_native_page_open_ascii_equal(
+            binding->codec_variant,
+            binding->codec_variant_len,
+            JS_AKEN_NATIVE_PAGE_CANONICAL_CODEC,
+            sizeof(JS_AKEN_NATIVE_PAGE_CANONICAL_CODEC) - 1u) ||
+        !js_aken_native_page_open_layout_parse(
+            binding->layout_variant,
+            binding->layout_variant_len,
+            &prefix_len,
+            &suffix_len,
+            &header_after_body)) {
+        goto cleanup;
+    }
+    expected_total = prefix_len;
+    if (!js_aken_native_page_open_size_add(&expected_total, JS_AKEN_NATIVE_PAGE_HEADER_SIZE) ||
+        !js_aken_native_page_open_size_add(&expected_total, JS_AKEN_NATIVE_PAGE_GCM_TAG_SIZE) ||
+        !js_aken_native_page_open_size_add(&expected_total, suffix_len) ||
+        encoded_payload_len < expected_total) {
+        goto cleanup;
+    }
+    if (header_after_body) {
+        header_offset = encoded_payload_len - suffix_len - JS_AKEN_NATIVE_PAGE_HEADER_SIZE;
+        body_offset = prefix_len;
+    } else {
+        header_offset = prefix_len;
+        body_offset = prefix_len + JS_AKEN_NATIVE_PAGE_HEADER_SIZE;
+    }
+    if (header_offset > encoded_payload_len ||
+        JS_AKEN_NATIVE_PAGE_HEADER_SIZE > encoded_payload_len - header_offset ||
+        body_offset > encoded_payload_len) {
+        goto cleanup;
+    }
+    header = encoded_payload + header_offset;
+    declared_plain_len = (size_t)js_aken_native_page_open_read_u32be(
+        header + JS_AKEN_NATIVE_PAGE_OFFSET_PLAINTEXT_LENGTH);
+    declared_body_len = (size_t)js_aken_native_page_open_read_u32be(
+        header + JS_AKEN_NATIVE_PAGE_OFFSET_CIPHERTEXT_LENGTH);
+    if (declared_plain_len == 0u || declared_plain_len > JS_AKEN_NATIVE_PAGE_MAX_ENCODED_SIZE ||
+        declared_plain_len > SIZE_MAX - JS_AKEN_NATIVE_PAGE_GCM_TAG_SIZE ||
+        declared_body_len != declared_plain_len + JS_AKEN_NATIVE_PAGE_GCM_TAG_SIZE) {
+        goto cleanup;
+    }
+    expected_total = prefix_len;
+    if (!js_aken_native_page_open_size_add(&expected_total, JS_AKEN_NATIVE_PAGE_HEADER_SIZE) ||
+        !js_aken_native_page_open_size_add(&expected_total, declared_body_len) ||
+        !js_aken_native_page_open_size_add(&expected_total, suffix_len) ||
+        expected_total != encoded_payload_len ||
+        declared_body_len > encoded_payload_len - body_offset) {
+        goto cleanup;
+    }
+    if (header_after_body && header_offset != body_offset + declared_body_len) goto cleanup;
+    if (!header_after_body && header_offset + JS_AKEN_NATIVE_PAGE_HEADER_SIZE != body_offset) goto cleanup;
+    prefix = encoded_payload;
+    suffix = encoded_payload + encoded_payload_len - suffix_len;
+    body = encoded_payload + body_offset;
+    nonce = header + JS_AKEN_NATIVE_PAGE_OFFSET_NONCE;
+    if ((header[JS_AKEN_NATIVE_PAGE_OFFSET_VERSION] & 0xFFu) != JS_AKEN_NATIVE_PAGE_CODEC_VERSION ||
+        header[JS_AKEN_NATIVE_PAGE_OFFSET_KIND] != binding->kind_id ||
+        (jint)js_aken_native_page_open_read_u32be(header + JS_AKEN_NATIVE_PAGE_OFFSET_PAGE_INDEX) != binding->page_index ||
+        !js_aken_native_page_open_sha256(binding->logical_identity, binding->logical_identity_len, identity_hash) ||
+        !js_aken_native_page_open_sha256(
+            JS_AKEN_NATIVE_PAGE_CANONICAL_CODEC,
+            sizeof(JS_AKEN_NATIVE_PAGE_CANONICAL_CODEC) - 1u,
+            codec_hash) ||
+        !js_aken_native_page_open_sha256(binding->layout_variant, binding->layout_variant_len, layout_hash) ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            header + JS_AKEN_NATIVE_PAGE_OFFSET_COMMITMENT,
+            binding->artifact_commitment,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            header + JS_AKEN_NATIVE_PAGE_OFFSET_IDENTITY_HASH,
+            identity_hash,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            header + JS_AKEN_NATIVE_PAGE_OFFSET_EVALUATOR_FINGERPRINT,
+            binding->evaluator_fingerprint,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            header + JS_AKEN_NATIVE_PAGE_OFFSET_CODEC_HASH,
+            codec_hash,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            header + JS_AKEN_NATIVE_PAGE_OFFSET_LAYOUT_HASH,
+            layout_hash,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            header + JS_AKEN_NATIVE_PAGE_OFFSET_LOCATOR,
+            binding->locator_token,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_LOCATOR_SIZE)) {
+        goto cleanup;
+    }
+    if (!js_aken_native_page_open_build_aad(
+            binding,
+            header,
+            prefix,
+            prefix_len,
+            suffix,
+            suffix_len,
+            &aad,
+            &aad_len) ||
+        !js_aken_evaluator_recover_dek(binding, fragments, fragment_count, dek)) {
+        goto cleanup;
+    }
+    plain = (unsigned char *)malloc(declared_plain_len);
+    if (!plain ||
+        !js_aes_gcm_decrypt(
+            dek,
+            sizeof(dek),
+            nonce,
+            aad,
+            aad_len,
+            body,
+            declared_body_len,
+            plain)) {
+        goto cleanup;
+    }
+    out_page->bytes = plain;
+    out_page->length = declared_plain_len;
+    plain = NULL;
+    ok = 1;
+cleanup:
+    if (plain) {
+        js_vbc4_wipe_volatile(plain, declared_plain_len);
+        free(plain);
+    }
+    if (aad) {
+        js_vbc4_wipe_volatile(aad, aad_len);
+        free(aad);
+    }
+    js_vbc4_wipe_volatile(identity_hash, sizeof(identity_hash));
+    js_vbc4_wipe_volatile(codec_hash, sizeof(codec_hash));
+    js_vbc4_wipe_volatile(layout_hash, sizeof(layout_hash));
+    js_vbc4_wipe_volatile(dek, sizeof(dek));
+    if (!ok && out_page) js_vbc4_wipe_volatile(out_page, sizeof(*out_page));
     return ok;
 }
 
