@@ -394,15 +394,12 @@ object EmbeddedHelperDeployment {
 
         val targetPlatformParam = (loaderPass.params["targetPlatform"] as? com.fasterxml.jackson.databind.node.TextNode)?.textValue() ?: "auto"
         val nativeProtectionLevel = (loaderPass.params["nativeProtectionLevel"] as? com.fasterxml.jackson.databind.node.TextNode)?.textValue() ?: "standard"
-        require(nativeProtectionLevel in setOf("standard", "aggressive")) {
-            "jni-microkernel-loader nativeProtectionLevel '$nativeProtectionLevel' is not supported"
-        }
         val nativePackingLevel = (loaderPass.params["nativePackingLevel"] as? com.fasterxml.jackson.databind.node.TextNode)?.textValue() ?: "max"
-        NativeKernelShellPacker.Level.parse(nativePackingLevel)
-        val targetPlatforms = resolveNativeCompileTargetPlatforms(targetPlatformParam)
-        if (targetPlatforms.isEmpty() || targetPlatforms.any { it !in NativeRecompilationTransforms.ZIG_TARGETS }) {
-            throw IllegalArgumentException("target platform is unsupported: $targetPlatformParam")
-        }
+        val request = NativeRecompilationRequest.forTargets(
+            nativeProtectionLevel = nativeProtectionLevel,
+            nativePackingLevel = NativeKernelShellPacker.Level.parse(nativePackingLevel),
+            targetPlatforms = resolveNativeCompileTargetPlatforms(targetPlatformParam),
+        )
 
         val seedNode = loaderPass.params["seed"]
         val seed = (seedNode as? com.fasterxml.jackson.databind.node.NumericNode)?.longValue()
@@ -413,15 +410,16 @@ object EmbeddedHelperDeployment {
             val diagnostics = NativeRecompilationTransforms.recompileWithDiagnostics(
                 seed = seed,
                 classLoader = classLoader,
-                targetPlatforms = targetPlatforms,
-                nativeProtectionLevel = nativeProtectionLevel,
-                nativePackingLevel = nativePackingLevel,
+                request = request,
                 onMessage = { message -> emitNativeRecompilationMessage(emit, message) },
             )
             if (diagnostics.results.isEmpty()) {
                 throw IllegalStateException("Zig toolchain is unavailable or native compilation produced no loadable libraries")
             }
-            return requireCompleteNativeCompileTargets(targetPlatforms, diagnostics.results)
+            return requireCompleteNativeCompileTargets(
+                request.routes.map(NativeRecompilationRoute::platform),
+                diagnostics.results,
+            )
         } catch (error: Exception) {
             emitNativeRecompilationFailure(emit, error.message ?: error::class.java.simpleName)
             throw error

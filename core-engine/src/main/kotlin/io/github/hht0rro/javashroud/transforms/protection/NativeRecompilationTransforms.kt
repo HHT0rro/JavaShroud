@@ -27,19 +27,14 @@ object NativeRecompilationTransforms {
 
     private const val NATIVE_SRC_RESOURCE_ROOT = "META-INF/native-src"
 
-    internal val ZIG_TARGETS = mapOf(
-        "windows-x64" to "x86_64-windows-gnu",
-        "linux-x64" to "x86_64-linux-gnu",
-        "macos-x64" to "x86_64-macos-none",
-        "macos-arm64" to "aarch64-macos-none",
-    )
-
-    private val OUTPUT_NAMES = mapOf(
-        "windows-x64" to "js_kernel_windows-x64.dll",
-        "linux-x64" to "js_kernel_linux-x64.so",
-        "macos-x64" to "js_kernel_macos-x64.dylib",
-        "macos-arm64" to "js_kernel_macos-arm64.dylib",
-    )
+    /**
+     * Compatibility projection for existing configuration and test callers.
+     * NativeRecompilationRoute remains the single source of platform metadata.
+     */
+    internal val ZIG_TARGETS: Map<String, String> =
+        NativeRecompilationRoute.canonicalPlatformOrder.associateWith { platform ->
+            NativeRecompilationRoute.forPlatform(platform).zigTarget
+        }
 
     private val NATIVE_SOURCE_FILES = listOf(
         "js_kernel.c",
@@ -107,13 +102,19 @@ object NativeRecompilationTransforms {
     ): RecompiledNative? = recompileWithDiagnosticsInternal(
         seed = seed,
         classLoader = classLoader,
-        targetPlatforms = listOf(targetPlatform),
-        nativeProtectionLevel = nativeProtectionLevel,
-        nativePackingLevel = "off",
+        request = NativeRecompilationRequest.forTargets(
+            nativeProtectionLevel = nativeProtectionLevel,
+            nativePackingLevel = NativeKernelShellPacker.Level.OFF,
+            targetPlatforms = listOf(targetPlatform),
+        ),
         cfgEvidenceExports = true,
         evidenceRandom = evidenceRandom,
     ).results.singleOrNull()
 
+    /**
+     * Compatibility adapter for raw callers. Production configuration should
+     * construct NativeRecompilationRequest once at its boundary instead.
+     */
     fun recompileWithDiagnostics(
         seed: Long,
         classLoader: ClassLoader,
@@ -121,29 +122,40 @@ object NativeRecompilationTransforms {
         nativeProtectionLevel: String = "standard",
         nativePackingLevel: String = "max",
         onMessage: (NativeToolchainProvisioner.ResolutionMessage) -> Unit = {},
+    ): RecompilationDiagnostics {
+        val request = NativeRecompilationRequest.forTargets(
+            nativeProtectionLevel = nativeProtectionLevel,
+            nativePackingLevel = NativeKernelShellPacker.Level.parse(nativePackingLevel),
+            targetPlatforms = targetPlatforms,
+        )
+        return recompileWithDiagnostics(
+            seed = seed,
+            classLoader = classLoader,
+            request = request,
+            onMessage = onMessage,
+        )
+    }
+
+    internal fun recompileWithDiagnostics(
+        seed: Long,
+        classLoader: ClassLoader,
+        request: NativeRecompilationRequest,
+        onMessage: (NativeToolchainProvisioner.ResolutionMessage) -> Unit = {},
     ): RecompilationDiagnostics = recompileWithDiagnosticsInternal(
         seed = seed,
         classLoader = classLoader,
-        targetPlatforms = targetPlatforms,
-        nativeProtectionLevel = nativeProtectionLevel,
-        nativePackingLevel = nativePackingLevel,
+        request = request,
         onMessage = onMessage,
     )
 
     private fun recompileWithDiagnosticsInternal(
         seed: Long,
         classLoader: ClassLoader,
-        targetPlatforms: Collection<String>,
-        nativeProtectionLevel: String,
-        nativePackingLevel: String,
+        request: NativeRecompilationRequest,
         onMessage: (NativeToolchainProvisioner.ResolutionMessage) -> Unit = {},
         cfgEvidenceExports: Boolean = false,
         evidenceRandom: Random? = null,
     ): RecompilationDiagnostics {
-        require(nativeProtectionLevel in setOf("standard", "aggressive")) {
-            "jni-microkernel-loader nativeProtectionLevel '$nativeProtectionLevel' is not supported"
-        }
-        val parsedNativePackingLevel = NativeKernelShellPacker.Level.parse(nativePackingLevel)
         val messages = mutableListOf<NativeToolchainProvisioner.ResolutionMessage>()
         fun report(message: NativeToolchainProvisioner.ResolutionMessage) {
             messages += message
@@ -153,7 +165,7 @@ object NativeRecompilationTransforms {
         val toolchain = resolution.toolchain ?: return RecompilationDiagnostics(emptyList(), messages)
         val workDir = Files.createTempDirectory("javashroud-native-recompile-")
         return try {
-            val results = doRecompile(seed, classLoader, toolchain, workDir, targetPlatforms, nativeProtectionLevel, parsedNativePackingLevel, cfgEvidenceExports, evidenceRandom, ::report)
+            val results = doRecompile(seed, classLoader, toolchain, workDir, request, cfgEvidenceExports, evidenceRandom, ::report)
             RecompilationDiagnostics(results, messages)
         } finally {
             workDir.toFile().deleteRecursively()
@@ -165,14 +177,14 @@ object NativeRecompilationTransforms {
         classLoader: ClassLoader,
         toolchain: NativeToolchainProvisioner.ZigToolchain,
         workDir: Path,
-        targetPlatforms: Collection<String>,
-        nativeProtectionLevel: String,
-        nativePackingLevel: NativeKernelShellPacker.Level,
+        request: NativeRecompilationRequest,
         cfgEvidenceExports: Boolean,
         evidenceRandom: Random?,
         report: (NativeToolchainProvisioner.ResolutionMessage) -> Unit,
     ): List<RecompiledNative> {
         val vbc4BuildContext = requireVbc4BuildContext()
+        val nativeProtectionLevel = request.nativeProtectionLevel
+        val nativePackingLevel = request.nativePackingLevel
         require(!cfgEvidenceExports || evidenceRandom != null) { "CFG evidence compilation requires an explicit deterministic random stream" }
         require(cfgEvidenceExports || evidenceRandom == null) { "Evidence-only random stream must not enter production native recompilation" }
         val rng: Random = evidenceRandom ?: nativeBuildSecureRandom(seed, vbc4BuildContext)
@@ -224,14 +236,12 @@ object NativeRecompilationTransforms {
 
         val nativeSourceDigest = digestNativeSourceTree(srcDir)
         val toolchainIdentity = zigToolchainIdentity(toolchain)
-        val compileTasks = targetPlatforms.mapNotNull { platform ->
-            val target = ZIG_TARGETS[platform] ?: return@mapNotNull null
-            val outputName = OUTPUT_NAMES[platform] ?: return@mapNotNull null
-            val outputPath = workDir.resolve(platform).resolve(outputName)
+        val compileTasks = request.routes.map { route ->
+            val outputPath = workDir.resolve(route.platform).resolve(route.outputName)
             val cacheKey = nativeArtifactCacheKey(
-                taskPlatform = platform,
-                zigTarget = target,
-                outputName = outputName,
+                taskPlatform = route.platform,
+                zigTarget = route.zigTarget,
+                outputName = route.outputName,
                 sourceDigest = nativeSourceDigest,
                 toolchainIdentity = toolchainIdentity,
                 seed = seed,
@@ -241,14 +251,14 @@ object NativeRecompilationTransforms {
                 nativePackingLevel = nativePackingLevel.configValue,
                 nativeShellPackerVersion = NativeKernelShellPacker.PACKER_VERSION,
                 nativeShellPayloadProfile = "${nativePackingLevel.configValue}-payload-v7-boot-dat-binding-encrypted-header-aesctr-hmac-chunks",
-                nativeShellLoaderProfile = nativeShellLoaderProfile(platform),
+                nativeShellLoaderProfile = route.shellLoaderProfile,
             )
             NativeCompileTask(
-                platform = platform,
-                zigTarget = target,
-                outputName = outputName,
+                platform = route.platform,
+                zigTarget = route.zigTarget,
+                outputName = route.outputName,
                 outputPath = outputPath,
-                cachePath = nativeArtifactCacheDirectory().resolve("$cacheKey-$outputName"),
+                cachePath = nativeArtifactCacheDirectory().resolve("$cacheKey-${route.outputName}"),
                 nativeProtectionLevel = nativeProtectionLevel,
                 nativePackingLevel = nativePackingLevel.configValue,
             )
@@ -438,14 +448,12 @@ object NativeRecompilationTransforms {
             }
         }.digest()
 
-    private fun nativeShellLoaderProfile(platform: String): String = when {
-        platform.startsWith("windows-") -> "pe64-memory-loader-headerdir-reloc-import-export-tlsrange-execbounds-v22"
-        platform.startsWith("linux-") -> "elf64-anonymous-loader-dynnull-hashbounds-strbounds-rela-init-execbounds-v6"
-        platform.startsWith("macos-") -> "macho64-validated-fail-closed-v2"
-        else -> "unknown-loader-fail-closed-v1"
-    }
-
-    internal fun nativeShellLoaderProfileForTest(platform: String): String = nativeShellLoaderProfile(platform)
+    internal fun nativeShellLoaderProfileForTest(platform: String): String =
+        if (NativeRecompilationRoute.isKnownPlatform(platform)) {
+            NativeRecompilationRoute.forPlatform(platform).shellLoaderProfile
+        } else {
+            "unknown-loader-fail-closed-v1"
+        }
 
     private data class NativeCompileTask(
         val platform: String,

@@ -136,4 +136,19 @@ class NativeRecompilationRequestTest {
             )
         }
     }
+
+    @Test
+    fun raw_recompilation_adapter_uses_typed_route_validation_before_toolchain_resolution() {
+        val error = assertFailsWith<IllegalArgumentException> {
+            NativeRecompilationTransforms.recompileWithDiagnostics(
+                seed = 0xA6E4_0001L,
+                classLoader = javaClass.classLoader,
+                targetPlatforms = listOf("windows-x64", "windows-x64"),
+                nativeProtectionLevel = "standard",
+                nativePackingLevel = "off",
+            )
+        }
+
+        assertTrue(error.message.orEmpty().contains("unique"))
+    }
 }
