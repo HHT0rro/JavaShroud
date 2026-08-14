@@ -118,7 +118,7 @@ internal object AkenVbc4BlockClusterPlanner {
         cursor.readU2("flags")
         val blockCount = cursor.readU2("block count")
         require(blockCount > 0) { "AKEN VBC4 block planner requires at least one block" }
-        cursor.readU4("constant-pool plain length")
+        cursor.readLength("constant-pool plain length")
         val constantPoolEncryptedLength = cursor.readLength("constant-pool encrypted length")
         cursor.skip(constantPoolEncryptedLength, "constant-pool encrypted bytes")
 
@@ -142,6 +142,9 @@ internal object AkenVbc4BlockClusterPlanner {
             require(plainLength > 0) { "AKEN VBC4 block planner found an empty physical block" }
             require(storedLength > 0) { "AKEN VBC4 block planner found an empty stored block" }
             require(encryptedLength > 0) { "AKEN VBC4 block planner found an empty encrypted block" }
+            require(storedLength == encryptedLength) {
+                "AKEN VBC4 block planner found a non-length-preserving physical block cipher"
+            }
             cursor.skip(encryptedLength, "block[$ordinal] encrypted bytes")
             blocks += ParsedBlock(
                 storageOrdinal = ordinal,
@@ -152,9 +155,12 @@ internal object AkenVbc4BlockClusterPlanner {
         }
         val blockRegionEndExclusive = cursor.position
 
-        cursor.readU4("exception plain length")
-        cursor.readU4("exception stored length")
+        cursor.readLength("exception plain length")
+        val exceptionStoredLength = cursor.readLength("exception stored length")
         val exceptionEncryptedLength = cursor.readLength("exception encrypted length")
+        require(exceptionStoredLength == exceptionEncryptedLength) {
+            "AKEN VBC4 block planner found a non-length-preserving exception cipher"
+        }
         cursor.skip(exceptionEncryptedLength, "exception encrypted bytes")
         val paddingLength = cursor.readLength("padding length")
         cursor.skip(paddingLength, "padding bytes")

@@ -76,12 +76,57 @@ class AkenVbc4BlockClusterPlannerTest {
         )
         val badMagic = valid.copyOf().also { it[0] = 'X'.code.toByte() }
         val truncated = valid.copyOf(valid.size - 1)
+        val invalidAuthenticationLengthMarker = valid.copyOf().also { it[it.lastIndex] = 31 }
+        val trailingByte = valid.copyOf(valid.size + 1).also { it[it.lastIndex] = 1 }
         val duplicateBlockId = framedVbc4(
             blockIds = listOf(3, 3),
             encodedPayloadLengths = listOf(100, 100),
         )
+        val overlongConstantPoolPlainLength = framedVbc4(
+            blockIds = listOf(4),
+            encodedPayloadLengths = listOf(100),
+            constantPoolPlainLength = Int.MAX_VALUE.toLong() + 1L,
+        )
+        val overlongPlainBlockLength = framedVbc4(
+            blockIds = listOf(5),
+            encodedPayloadLengths = listOf(100),
+            plainPayloadLengths = listOf(Int.MAX_VALUE.toLong() + 1L),
+        )
+        val overlongExceptionPlainLength = framedVbc4(
+            blockIds = listOf(6),
+            encodedPayloadLengths = listOf(100),
+            exceptionPlainLength = Int.MAX_VALUE.toLong() + 1L,
+        )
+        val overlongExceptionStoredLength = framedVbc4(
+            blockIds = listOf(7),
+            encodedPayloadLengths = listOf(100),
+            exceptionStoredLength = Int.MAX_VALUE.toLong() + 1L,
+        )
+        val mismatchedBlockCiphertextLength = framedVbc4(
+            blockIds = listOf(8),
+            encodedPayloadLengths = listOf(100),
+            storedPayloadLengths = listOf(99),
+        )
+        val mismatchedExceptionCiphertextLength = framedVbc4(
+            blockIds = listOf(9),
+            encodedPayloadLengths = listOf(100),
+            exceptionStoredLength = 1,
+            exceptionEncryptedLength = 2,
+        )
         try {
-            listOf(badMagic, truncated, duplicateBlockId).forEach { malformed ->
+            listOf(
+                badMagic,
+                truncated,
+                invalidAuthenticationLengthMarker,
+                trailingByte,
+                duplicateBlockId,
+                overlongConstantPoolPlainLength,
+                overlongPlainBlockLength,
+                overlongExceptionPlainLength,
+                overlongExceptionStoredLength,
+                mismatchedBlockCiphertextLength,
+                mismatchedExceptionCiphertextLength,
+            ).forEach { malformed ->
                 val candidate = candidate(malformed)
                 try {
                     assertFailsWith<IllegalArgumentException> {
@@ -119,8 +164,25 @@ class AkenVbc4BlockClusterPlannerTest {
     private fun framedVbc4(
         blockIds: List<Int>,
         encodedPayloadLengths: List<Int>,
+        constantPoolPlainLength: Long = 0L,
+        plainPayloadLengths: List<Long> = encodedPayloadLengths.map { it.toLong() },
+        storedPayloadLengths: List<Int> = encodedPayloadLengths,
+        exceptionPlainLength: Long = 0L,
+        exceptionStoredLength: Long = 0L,
+        exceptionEncryptedLength: Int = 0,
     ): ByteArray {
-        require(blockIds.isNotEmpty() && blockIds.size == encodedPayloadLengths.size)
+        require(
+            blockIds.isNotEmpty() &&
+                blockIds.size == encodedPayloadLengths.size &&
+                blockIds.size == plainPayloadLengths.size &&
+                blockIds.size == storedPayloadLengths.size,
+        )
+        require(
+            constantPoolPlainLength >= 0 &&
+                exceptionPlainLength >= 0 &&
+                exceptionStoredLength >= 0 &&
+                exceptionEncryptedLength >= 0,
+        )
         val out = ByteArrayOutputStream()
         out.write("VBC4".encodeToByteArray())
         writeU2(out, 4)
@@ -129,7 +191,7 @@ class AkenVbc4BlockClusterPlannerTest {
         out.write(ByteArray(16))
         writeU2(out, 0)
         writeU2(out, blockIds.size)
-        writeU4(out, 0)
+        writeU4(out, constantPoolPlainLength)
         writeU4(out, 4)
         out.write(byteArrayOf(1, 2, 3, 4))
         blockIds.forEachIndexed { ordinal, blockId ->
@@ -138,15 +200,19 @@ class AkenVbc4BlockClusterPlannerTest {
             writeU4(out, ordinal.toLong() + 101)
         }
         encodedPayloadLengths.forEachIndexed { ordinal, encryptedLength ->
-            require(encryptedLength > 0)
-            writeU4(out, encryptedLength.toLong())
-            writeU4(out, encryptedLength.toLong())
+            val plainLength = plainPayloadLengths[ordinal]
+            val storedLength = storedPayloadLengths[ordinal]
+            require(plainLength >= 0)
+            require(storedLength > 0 && encryptedLength > 0)
+            writeU4(out, plainLength)
+            writeU4(out, storedLength.toLong())
             writeU4(out, encryptedLength.toLong())
             out.write(ByteArray(encryptedLength) { index -> (ordinal * 17 + index).toByte() })
         }
-        writeU4(out, 0)
-        writeU4(out, 0)
-        writeU4(out, 0)
+        writeU4(out, exceptionPlainLength)
+        writeU4(out, exceptionStoredLength)
+        writeU4(out, exceptionEncryptedLength.toLong())
+        out.write(ByteArray(exceptionEncryptedLength))
         writeU4(out, 0)
         out.write(ByteArray(32))
         out.write(32)
