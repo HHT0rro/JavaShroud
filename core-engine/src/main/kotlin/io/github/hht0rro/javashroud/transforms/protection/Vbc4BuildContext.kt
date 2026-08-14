@@ -2,6 +2,8 @@ package io.github.hht0rro.javashroud.transforms.protection
 
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenBuildPlan
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4FinalizationLayout
 import java.security.MessageDigest
 import java.security.SecureRandom
 import javax.crypto.Mac
@@ -26,6 +28,14 @@ internal data class Vbc4BuildContext(
     val maxHardening: Boolean = false,
 ) {
     private var runtimeVmCatalogPlan: RuntimeVmCatalogPlan? = null
+    /** Build-only AKEN v4 page/evaluator plan; never serialized into runtime output. */
+    private var akenBuildPlan: AkenBuildPlan? = null
+    /**
+     * Build-only pre-seal VBC4 layout. It owns final page geometry and native
+     * current-page compiler records until recompilation/final sealing consumes
+     * them; it is not a runtime page directory.
+     */
+    private var akenVbc4FinalizationLayout: AkenVbc4FinalizationLayout? = null
     private var bootSecretSnapshot: ByteArray? = null
     private var bootSidecarBindingSnapshot: ByteArray? = null
 
@@ -42,6 +52,77 @@ internal data class Vbc4BuildContext(
     }
 
     fun runtimeVmCatalogPlanOrNull(): RuntimeVmCatalogPlan? = runtimeVmCatalogPlan
+
+    /**
+     * Return the scoped AKEN v4 plan, creating it lazily from the artifact
+     * commitment. The plan is build-only and is wiped with this context.
+     *
+     * A build context may represent only one canonical artifact. Reusing a live
+     * plan with a different commitment would make pages authenticate against an
+     * unrelated artifact representation, so reject it immediately instead of
+     * deferring the mismatch to the final writer verification.
+     */
+    @Synchronized
+    fun initializeAkenBuildPlan(commitment: ByteArray): AkenBuildPlan {
+        require(commitment.size == VBC4_LAYOUT_DIGEST_SIZE) { "AKEN artifact commitment must be 32 bytes" }
+        val existing = akenBuildPlan
+        if (existing != null && !existing.isWiped()) {
+            val plannedCommitment = existing.artifactCanonicalCommitment
+            try {
+                require(java.security.MessageDigest.isEqual(plannedCommitment, commitment)) {
+                    "AKEN v4 build plan is already bound to a different artifact commitment"
+                }
+            } finally {
+                java.util.Arrays.fill(plannedCommitment, 0)
+            }
+            return existing
+        }
+        return AkenBuildPlan.create(commitment = commitment).also { akenBuildPlan = it }
+    }
+
+    @Synchronized
+    fun akenBuildPlanOrNull(): AkenBuildPlan? = akenBuildPlan?.takeUnless { it.isWiped() }
+
+    @Synchronized
+    fun requireAkenBuildPlan(): AkenBuildPlan = akenBuildPlanOrNull()
+        ?: error("AKEN v4 build plan is not initialized")
+
+    /**
+     * Publishes the one build-only page layout produced by consuming the scoped
+     * AKEN plan. A live plan and a finalized layout must never coexist: the
+     * former contains build authority, while the latter contains only encrypted
+     * page/output records for native compilation and final-writer verification.
+     */
+    @Synchronized
+    fun publishAkenVbc4FinalizationLayout(layout: AkenVbc4FinalizationLayout) {
+        require(!layout.isWiped) { "cannot publish a wiped AKEN VBC4 finalization layout" }
+        require(akenBuildPlan?.isWiped() != false) {
+            "AKEN VBC4 finalization requires the scoped build plan to be consumed first"
+        }
+        val existing = akenVbc4FinalizationLayout
+        require(existing == null || existing.isWiped) {
+            "AKEN VBC4 finalization layout is already published for this build context"
+        }
+        akenVbc4FinalizationLayout = layout
+    }
+
+    @Synchronized
+    fun akenVbc4FinalizationLayoutOrNull(): AkenVbc4FinalizationLayout? =
+        akenVbc4FinalizationLayout?.takeUnless { it.isWiped }
+
+    @Synchronized
+    fun requireAkenVbc4FinalizationLayout(): AkenVbc4FinalizationLayout =
+        akenVbc4FinalizationLayoutOrNull()
+            ?: error("AKEN VBC4 finalization layout is not initialized")
+
+    /**
+     * Narrow native compiler bridge. The callback receives fresh bounded
+     * current-page record copies and they are wiped by the layout after it
+     * returns; this context never exposes a runtime traversal or a key array.
+     */
+    @Synchronized
+    fun <T> withAkenNativeLocatorRecordsForBuild(block: (List<ByteArray>) -> T): T =
+        requireAkenVbc4FinalizationLayout().withNativeLocatorRecordsForBuild(block)
 
     fun vmManifestProtocol(): Vbc4ManifestProtocol {
         if (!maxHardening) return Vbc4ManifestProtocol(magic = "VBC4S", version = "1")
@@ -154,6 +235,8 @@ internal data class Vbc4BuildContext(
         copy.runtimeVmCatalogPlan = runtimeVmCatalogPlan
         copy.bootSecretSnapshot = bootSecretSnapshot?.copyOf()
         copy.bootSidecarBindingSnapshot = bootSidecarBindingSnapshot?.copyOf()
+        // AKEN plan state is intentionally not copied: each scoped build gets
+        // an independent page/evaluator graph and wipes it on scope exit.
     }
 
     @Synchronized
@@ -167,6 +250,10 @@ internal data class Vbc4BuildContext(
         bootSecretSnapshot = null
         bootSidecarBindingSnapshot = null
         runtimeVmCatalogPlan = null
+        akenBuildPlan?.wipe()
+        akenBuildPlan = null
+        akenVbc4FinalizationLayout?.wipe()
+        akenVbc4FinalizationLayout = null
     }
 }
 
@@ -218,6 +305,16 @@ internal val VBC4_VM_SESSION_KEY_DOMAIN = "javashroud-vbc4-vm-session-key-v1".to
 
 private val explicitRunContext = ThreadLocal<Vbc4BuildContext?>()
 
+/**
+ * Class-scoped access to the active build context. The top-level compatibility
+ * helper below delegates here, and native recompilation uses this explicit
+ * access surface.
+ */
+internal object Vbc4BuildContexts {
+    fun requireCurrent(): Vbc4BuildContext = explicitRunContext.get()
+        ?: error("VBC4 build context is not initialized")
+}
+
 internal fun <T> withVbc4BuildContext(context: Vbc4BuildContext, block: () -> T): T {
     val previous = explicitRunContext.get()
     val scoped = context.scopedCopy()
@@ -232,8 +329,7 @@ internal fun <T> withVbc4BuildContext(context: Vbc4BuildContext, block: () -> T)
 
 internal fun currentVbc4BuildContextOrNull(): Vbc4BuildContext? = explicitRunContext.get()
 
-internal fun requireVbc4BuildContext(): Vbc4BuildContext = currentVbc4BuildContextOrNull()
-    ?: error("VBC4 build context is not initialized")
+internal fun requireVbc4BuildContext(): Vbc4BuildContext = Vbc4BuildContexts.requireCurrent()
 
 internal fun defaultVbc4BuildContext(): Vbc4BuildContext = generateStandaloneVbc4BuildContext()
 

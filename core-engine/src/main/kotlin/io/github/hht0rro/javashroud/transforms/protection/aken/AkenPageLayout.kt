@@ -146,7 +146,15 @@ class AkenPageLayout private constructor(
 
         /** Mint a new physical frame for one build page. */
         internal fun create(family: String, random: SecureRandom): AkenPageLayout {
-            val normalizedFamily = normalizeFamily(family)
+            // A finalization reservation chooses the physical frame before the
+            // artifact commitment exists, then passes its exact serialized
+            // variant into AkenBuildPlan after that commitment is known.  Keep
+            // that replay narrow and explicit: ordinary callers still provide a
+            // family name, while only a valid full frame descriptor can request
+            // a pre-reserved layout.
+            val requested = family.trim()
+            if (requested.startsWith("$FORMAT_PREFIX:")) return fromVariant(requested)
+            val normalizedFamily = normalizeFamily(requested)
             val marker = ByteArray(ROUTING_MARKER_SIZE).also(random::nextBytes)
             return try {
                 AkenPageLayout(
