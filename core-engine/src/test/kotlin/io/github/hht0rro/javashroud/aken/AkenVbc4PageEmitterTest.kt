@@ -22,6 +22,7 @@ class AkenVbc4PageEmitterTest {
         }
         val methodIdentity = "fixture:aken-vbc4-emitter:method".encodeToByteArray()
         val expectedIdentity = methodIdentity.copyOf()
+        val expectedEntryToken = 0x4A4B_454E_0000_0123L
         val expectedProofs = listOf(
             byteArrayOf(0x11, 0x12, 0x13),
             byteArrayOf(0x21, 0x22, 0x23),
@@ -34,6 +35,7 @@ class AkenVbc4PageEmitterTest {
 
         val request0 = requestFor(
             page = page0,
+            entryToken = expectedEntryToken,
             identity = expectedIdentity,
             plaintext = "first VBC4 page".encodeToByteArray(),
             resourcePath = "META-INF/.aken/vbc4/method-0.bin",
@@ -41,6 +43,7 @@ class AkenVbc4PageEmitterTest {
         )
         val request1 = requestFor(
             page = page1,
+            entryToken = expectedEntryToken,
             identity = expectedIdentity,
             plaintext = "second VBC4 page".encodeToByteArray(),
             resourcePath = "META-INF/.aken/vbc4/method-1.bin",
@@ -60,6 +63,7 @@ class AkenVbc4PageEmitterTest {
                 pages.map { it.resourcePath },
             )
             assertTrue(pages.all { it.storedLength > 0 })
+            assertTrue(pages.all { it.entryToken == expectedEntryToken })
 
             pages.forEachIndexed { index, page ->
                 val descriptorBytes = page.copyDescriptorBytesForBuild()
@@ -124,6 +128,7 @@ class AkenVbc4PageEmitterTest {
 
     private fun requestFor(
         page: AkenBuildPlan.Page,
+        entryToken: Long,
         identity: ByteArray,
         plaintext: ByteArray,
         resourcePath: String,
@@ -131,6 +136,7 @@ class AkenVbc4PageEmitterTest {
     ): AkenVbc4PageEmissionRequest = try {
         AkenVbc4PageEmissionRequest.create(
             page = page,
+            entryToken = entryToken,
             logicalIdentity = identity,
             plaintext = plaintext,
             resourcePath = resourcePath,

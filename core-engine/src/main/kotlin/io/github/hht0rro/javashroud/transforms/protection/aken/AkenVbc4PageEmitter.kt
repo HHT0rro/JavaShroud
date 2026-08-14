@@ -16,6 +16,7 @@ import kotlin.jvm.JvmSynthetic
  */
 internal class AkenVbc4PageEmissionRequest private constructor(
     internal val page: AkenBuildPlan.Page,
+    val entryToken: Long,
     logicalIdentity: ByteArray,
     plaintext: ByteArray,
     val resourcePath: String,
@@ -105,6 +106,7 @@ internal class AkenVbc4PageEmissionRequest private constructor(
 
         fun create(
             page: AkenBuildPlan.Page,
+            entryToken: Long,
             logicalIdentity: ByteArray,
             plaintext: ByteArray,
             resourcePath: String,
@@ -112,6 +114,7 @@ internal class AkenVbc4PageEmissionRequest private constructor(
             callSiteProof: ByteArray,
         ): AkenVbc4PageEmissionRequest = AkenVbc4PageEmissionRequest(
             page = page,
+            entryToken = entryToken,
             logicalIdentity = logicalIdentity,
             plaintext = plaintext,
             resourcePath = resourcePath,
@@ -131,6 +134,7 @@ internal class AkenVbc4PageEmissionRequest private constructor(
  * arbitrary resource/key pair.
  */
 internal class AkenVbc4PageEmission private constructor(
+    val entryToken: Long,
     val resourcePath: String,
     val resourceOffset: Int,
     val storedLength: Int,
@@ -236,7 +240,10 @@ internal class AkenVbc4PageEmission private constructor(
     }
 
     companion object {
-        internal fun fromMaterialized(page: AkenMaterializedPage): AkenVbc4PageEmission {
+        internal fun fromMaterialized(
+            page: AkenMaterializedPage,
+            entryToken: Long,
+        ): AkenVbc4PageEmission {
             val descriptor = page.descriptorForBuild
             require(descriptor.resourceKind == AkenResourceKind.Vbc4Method) {
                 "AKEN VBC4 emitter received a non-VBC4 materialized page"
@@ -275,6 +282,7 @@ internal class AkenVbc4PageEmission private constructor(
                 evaluatorFingerprint = handle.evaluatorPlanFingerprint
 
                 return AkenVbc4PageEmission(
+                    entryToken = entryToken,
                     resourcePath = route.resourcePath,
                     resourceOffset = route.resourceOffset,
                     storedLength = route.storedLength,
@@ -399,6 +407,10 @@ internal object AkenVbc4PageEmitter {
             requestList.forEach { request ->
                 inputList += request.toMaterializationInput()
             }
+            val requestsByPageIndex = requestList.associateBy { it.pageIndex }
+            require(requestsByPageIndex.size == requestList.size) {
+                "AKEN VBC4 page emission contains duplicate page indices"
+            }
 
             materialization = AkenPageMaterializer.materializeAndWipe(plan, inputList)
             val materializedPages = materialization.pagesForBuild()
@@ -411,7 +423,13 @@ internal object AkenVbc4PageEmitter {
 
             meshRoot = materialization.copyMeshRootForBuild()
             materializedPages.forEach { materialized ->
-                emittedPages += AkenVbc4PageEmission.fromMaterialized(materialized)
+                val materializedPageIndex = materialized.descriptorForBuild.pageIndex
+                val request = requestsByPageIndex[materializedPageIndex]
+                    ?: error("AKEN VBC4 materialization emitted an unknown page index")
+                emittedPages += AkenVbc4PageEmission.fromMaterialized(
+                    page = materialized,
+                    entryToken = request.entryToken,
+                )
             }
             output = AkenVbc4PageEmissionSet.create(checkNotNull(meshRoot), emittedPages)
             completed = true
