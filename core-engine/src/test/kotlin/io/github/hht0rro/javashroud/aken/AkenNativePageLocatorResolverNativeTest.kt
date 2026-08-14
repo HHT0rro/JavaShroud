@@ -1,5 +1,7 @@
 package io.github.hht0rro.javashroud.aken
 
+import io.github.hht0rro.javashroud.transforms.protection.NativeRecompilationTransforms
+import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenArtifactCommitment
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHandle
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHighValueLeafIdentity
@@ -12,6 +14,9 @@ import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRuntimeEvalua
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRuntimeEvaluatorRole
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRuntimePageDescriptor
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenSealingProofMetadata
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4FinalizationLayout
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4PendingPage
+import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -20,8 +25,10 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
+import java.security.SecureRandom
 import java.util.Arrays
 import java.util.Comparator
+import java.util.Random
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -143,6 +150,489 @@ class AkenNativePageLocatorResolverNativeTest {
                 Arrays.fill(handleB, 0)
                 deleteTree(tempDir)
             }
+        }
+    }
+
+    @Test
+    fun published_finalization_layout_production_include_compiles_and_resolves_one_current_page() {
+        val zig = findZig()
+        assumeTrue(zig != null, "Zig is required to compile the production AKEN locator probe")
+
+        val sourceNativeDir = resolveSource("src/main/native/js_jni_runtime.c").parent
+        val sourceInclude = sourceNativeDir.resolve("js_aken_page_locator.inc")
+        val originalInclude = Files.readAllBytes(sourceInclude)
+        val identity0 = "fixture:aken-native-production-resolver:first".encodeToByteArray()
+        val identity1 = "fixture:aken-native-production-resolver:second".encodeToByteArray()
+        val identity2 = "fixture:aken-native-production-resolver:third".encodeToByteArray()
+        val plaintext0 = "first production renderer plaintext must not enter native include".encodeToByteArray()
+        val plaintext1 = "second production renderer plaintext must not enter native include".encodeToByteArray()
+        val plaintext2 = "third production renderer plaintext must not enter native include".encodeToByteArray()
+        val proof0 = ByteArray(37) { index -> (index * 5 + 3).toByte() }
+        val proof1 = ByteArray(41) { index -> (index * 7 + 11).toByte() }
+        val proof2 = ByteArray(43) { index -> (index * 13 + 17).toByte() }
+        val firstToken = 0x414B_454E_0000_1001L
+        val secondToken = 0x414B_454E_0000_1002L
+        val thirdToken = 0x414B_454E_0000_1003L
+        val page0 = AkenVbc4PendingPage.create(
+            entryToken = firstToken,
+            logicalIdentity = identity0,
+            plaintext = plaintext0,
+            resourcePath = "META-INF/.aken/vbc4/production-renderer.bin",
+            pageIndex = 0,
+            targetPageSize = 512,
+            callSiteProof = proof0,
+            random = SecureRandom(),
+        )
+        val page1Offset = page0.expectedStoredLength + 19
+        val page1 = AkenVbc4PendingPage.create(
+            entryToken = secondToken,
+            logicalIdentity = identity1,
+            plaintext = plaintext1,
+            resourcePath = "META-INF/.aken/vbc4/production-renderer.bin",
+            resourceOffset = page1Offset,
+            pageIndex = 0,
+            targetPageSize = 768,
+            callSiteProof = proof1,
+            random = SecureRandom(),
+        )
+        val page2 = AkenVbc4PendingPage.create(
+            entryToken = thirdToken,
+            logicalIdentity = identity2,
+            plaintext = plaintext2,
+            resourcePath = "META-INF/.aken/vbc4/production-renderer.bin",
+            resourceOffset = page1Offset + page1.expectedStoredLength + 23,
+            pageIndex = 0,
+            targetPageSize = 1024,
+            callSiteProof = proof2,
+            random = SecureRandom(),
+        )
+        val tempDir = Files.createTempDirectory("javashroud-aken-production-native-locator-")
+        var context: Vbc4BuildContext? = null
+        var layout: AkenVbc4FinalizationLayout? = null
+        var compilerRecords: List<ByteArray> = emptyList()
+        var currentPage: ProductionCurrentPage? = null
+        var generatedIncludeBytes: ByteArray? = null
+        var validBlob: ByteArray? = null
+        var generatedOffsets: IntArray? = null
+        var generatedLengths: IntArray? = null
+        var generatedProbeBytes: ByteArray? = null
+        try {
+            val commitment = AkenVbc4FinalizationLayout.reserve(
+                pendingPages = listOf(page0, page1, page2),
+                fixedEntries = emptyList(),
+            )
+            val buildContext = defaultVbc4BuildContext()
+            context = buildContext
+            val planCommitment = commitment.copyBytes()
+            val plan = try {
+                buildContext.initializeAkenBuildPlan(planCommitment)
+            } finally {
+                Arrays.fill(planCommitment, 0)
+            }
+            val finalized = AkenVbc4FinalizationLayout.materializeAndWipe(
+                plan = plan,
+                commitment = commitment,
+                pendingPages = listOf(page0, page1, page2),
+                fixedEntries = emptyList(),
+            )
+            layout = finalized
+            buildContext.publishAkenVbc4FinalizationLayout(finalized)
+            compilerRecords = buildContext.withAkenNativeLocatorRecordsForBuild { records ->
+                records.map { record -> record.copyOf() }
+            }
+            assertEquals(3, compilerRecords.size)
+
+            for (record in compilerRecords) {
+                val candidate = parseProductionCurrentPage(record)
+                if (
+                    candidate.entryToken == firstToken &&
+                    candidate.resourceKind == AkenResourceKind.Vbc4Method &&
+                    candidate.pageIndex == 0
+                ) {
+                    check(currentPage == null) {
+                        "production compiler records must have one exact first-page request identity"
+                    }
+                    currentPage = candidate
+                } else {
+                    candidate.wipe()
+                }
+            }
+            val selectedPage = checkNotNull(currentPage)
+            assertEquals(AkenResourceKind.Vbc4Method, selectedPage.resourceKind)
+            assertEquals(0, selectedPage.pageIndex)
+
+            val include = NativeRecompilationTransforms.generateAkenNativePageLocatorInclude(
+                buildContext,
+                Random(0xA4E1),
+            )
+            generatedIncludeBytes = include.toByteArray(StandardCharsets.US_ASCII)
+            assertFalse(include.contains(plaintext0.decodeToString()))
+            assertFalse(include.contains(plaintext1.decodeToString()))
+            assertFalse(include.contains(plaintext2.decodeToString()))
+
+            val renderedBlob = parseGeneratedUnsignedByteArray(include, "js_aken_native_page_locator_blob")
+            val renderedOffsets = parseGeneratedUnsignedIntArray(include, "js_aken_native_page_locator_record_offsets")
+            val renderedLengths = parseGeneratedUnsignedIntArray(include, "js_aken_native_page_locator_record_lengths")
+            validBlob = renderedBlob
+            generatedOffsets = renderedOffsets
+            generatedLengths = renderedLengths
+            assertEquals(3, renderedOffsets.size)
+            assertEquals(3, renderedLengths.size)
+            var expectedOffset = 0
+            for (index in renderedOffsets.indices) {
+                assertEquals(expectedOffset, renderedOffsets[index], "production renderer must emit a contiguous native table")
+                assertTrue(renderedLengths[index] > 0)
+                expectedOffset += renderedLengths[index]
+            }
+            assertEquals(renderedBlob.size, expectedOffset)
+
+            val matchedRecordIndexes = ArrayList<Int>()
+            for (index in renderedOffsets.indices) {
+                val offset = renderedOffsets[index]
+                val length = renderedLengths[index]
+                val record = renderedBlob.copyOfRange(offset, offset + length)
+                try {
+                    val candidate = parseProductionCurrentPage(record)
+                    try {
+                        if (
+                            candidate.entryToken == selectedPage.entryToken &&
+                            candidate.resourceKind == selectedPage.resourceKind &&
+                            candidate.pageIndex == selectedPage.pageIndex &&
+                            MessageDigest.isEqual(candidate.encodedHandle, selectedPage.encodedHandle)
+                        ) {
+                            matchedRecordIndexes += index
+                        }
+                    } finally {
+                        candidate.wipe()
+                    }
+                } finally {
+                    Arrays.fill(record, 0)
+                }
+            }
+            assertEquals(1, matchedRecordIndexes.size, "production include must retain exactly one current-page record")
+            val selectedRecordIndex = matchedRecordIndexes.single()
+
+            generatedProbeBytes = productionRendererProbeSource(selectedPage, proof0)
+                .toByteArray(StandardCharsets.US_ASCII)
+            val generatedProbeSource = tempDir.resolve("production-current-page-probe.c")
+            Files.write(generatedProbeSource, checkNotNull(generatedProbeBytes))
+            val compiled = compileProbe(
+                zig = checkNotNull(zig),
+                root = tempDir,
+                sourceNativeDir = sourceNativeDir,
+                probeSource = generatedProbeSource,
+                include = include,
+            )
+            val valid = runProbe(compiled, "production-valid")
+            assertEquals(0, valid.exitCode, "production generated locator must resolve its current page:\n${valid.output}")
+            assertTrue(valid.output.contains("AKEN native page locator probe: PASS"), valid.output)
+
+            val bindingTamperedBlob = renderedBlob.copyOf()
+            try {
+                val bindingByteOffset = renderedOffsets[selectedRecordIndex] + renderedLengths[selectedRecordIndex] - 1
+                bindingTamperedBlob[bindingByteOffset] =
+                    (bindingTamperedBlob[bindingByteOffset].toInt() xor 0x01).toByte()
+                val tamperedExecutable = compiled.directory.resolve(
+                    if (isWindows()) "production-record-binding-tamper.exe" else "production-record-binding-tamper",
+                )
+                patchGeneratedTable(compiled.executable, tamperedExecutable, renderedBlob, bindingTamperedBlob)
+                assertFailClosed(
+                    "production renderer record-binding tamper",
+                    runProbe(CompiledProbe(compiled.directory, tamperedExecutable), "production-record-binding-tamper"),
+                )
+            } finally {
+                Arrays.fill(bindingTamperedBlob, 0)
+            }
+
+            val originalOffsetBytes = encodeNativeUnsignedInts(renderedOffsets)
+            val nonContiguousOffsets = renderedOffsets.copyOf().also { it[1] += 1 }
+            val nonContiguousOffsetBytes = encodeNativeUnsignedInts(nonContiguousOffsets)
+            try {
+                val tamperedExecutable = compiled.directory.resolve(
+                    if (isWindows()) "production-non-contiguous-offset.exe" else "production-non-contiguous-offset",
+                )
+                patchGeneratedTable(
+                    compiled.executable,
+                    tamperedExecutable,
+                    originalOffsetBytes,
+                    nonContiguousOffsetBytes,
+                )
+                assertFailClosed(
+                    "production renderer non-contiguous offsets",
+                    runProbe(CompiledProbe(compiled.directory, tamperedExecutable), "production-non-contiguous-offset"),
+                )
+            } finally {
+                Arrays.fill(originalOffsetBytes, 0)
+                Arrays.fill(nonContiguousOffsets, 0)
+                Arrays.fill(nonContiguousOffsetBytes, 0)
+            }
+
+            buildContext.wipe()
+            assertTrue(finalized.isWiped)
+        } finally {
+            try {
+                assertContentEquals(
+                    originalInclude,
+                    Files.readAllBytes(sourceInclude),
+                    "the repository's default empty locator include must remain untouched",
+                )
+            } finally {
+                compilerRecords.forEach { Arrays.fill(it, 0) }
+                currentPage?.wipe()
+                generatedIncludeBytes?.let { Arrays.fill(it, 0) }
+                validBlob?.let { Arrays.fill(it, 0) }
+                generatedOffsets?.fill(0)
+                generatedLengths?.fill(0)
+                generatedProbeBytes?.let { Arrays.fill(it, 0) }
+                layout?.wipe()
+                context?.wipe()
+                Arrays.fill(originalInclude, 0)
+                Arrays.fill(identity0, 0)
+                Arrays.fill(identity1, 0)
+                Arrays.fill(identity2, 0)
+                Arrays.fill(plaintext0, 0)
+                Arrays.fill(plaintext1, 0)
+                Arrays.fill(plaintext2, 0)
+                Arrays.fill(proof0, 0)
+                Arrays.fill(proof1, 0)
+                Arrays.fill(proof2, 0)
+                page0.wipe()
+                page1.wipe()
+                page2.wipe()
+                deleteTree(tempDir)
+            }
+        }
+    }
+
+    private fun parseProductionCurrentPage(record: ByteArray): ProductionCurrentPage {
+        require(record.size in 1..(512 * 1024)) {
+            "production AKEN compiler record size is invalid"
+        }
+        val input = ByteBuffer.wrap(record).order(ByteOrder.BIG_ENDIAN)
+        require(input.remaining() >= 1 + Long.SIZE_BYTES + 1 + Int.SIZE_BYTES + Int.SIZE_BYTES) {
+            "production AKEN compiler record is truncated"
+        }
+        require((input.get().toInt() and 0xFF) == 1) {
+            "production AKEN compiler record version is unsupported"
+        }
+        val entryToken = input.long
+        val resourceKind = requireNotNull(AkenResourceKind.fromId(input.get().toInt() and 0xFF)) {
+            "production AKEN compiler record resource kind is unsupported"
+        }
+        val pageIndex = input.int
+        require(pageIndex >= 0) { "production AKEN compiler record page index is invalid" }
+
+        val encodedHandle = readProductionCurrentPageFrame(
+            input,
+            maxLength = AkenHandle.ENCODED_HANDLE_SIZE,
+            label = "encoded handle",
+        )
+        val nativeEnvelope = readProductionCurrentPageFrame(input, maxLength = 4096, label = "native envelope")
+        val descriptor = readProductionCurrentPageFrame(
+            input,
+            maxLength = 384 * 1024,
+            label = "descriptor",
+        )
+        val route = readProductionCurrentPageFrame(
+            input,
+            maxLength = 128 * 1024,
+            label = "route",
+        )
+        val binding = ByteArray(AkenArtifactCommitment.DIGEST_SIZE)
+        var retainHandle = false
+        try {
+            require(encodedHandle.size == AkenHandle.ENCODED_HANDLE_SIZE) {
+                "production AKEN compiler record handle size is invalid"
+            }
+            require(nativeEnvelope.isNotEmpty())
+            require(descriptor.isNotEmpty())
+            require(route.isNotEmpty())
+            require(input.remaining() == binding.size) {
+                "production AKEN compiler record binding length is invalid"
+            }
+            input.get(binding)
+            val expectedBinding = compilerRecordBinding(
+                entryToken = entryToken,
+                resourceKind = resourceKind,
+                pageIndex = pageIndex,
+                encodedHandle = encodedHandle,
+                nativeEnvelope = nativeEnvelope,
+                descriptor = descriptor,
+                route = route,
+            )
+            try {
+                require(MessageDigest.isEqual(binding, expectedBinding)) {
+                    "production AKEN compiler record binding is invalid"
+                }
+            } finally {
+                Arrays.fill(expectedBinding, 0)
+            }
+            retainHandle = true
+            return ProductionCurrentPage(
+                entryToken = entryToken,
+                resourceKind = resourceKind,
+                pageIndex = pageIndex,
+                encodedHandle = encodedHandle,
+            )
+        } finally {
+            if (!retainHandle) Arrays.fill(encodedHandle, 0)
+            Arrays.fill(nativeEnvelope, 0)
+            Arrays.fill(descriptor, 0)
+            Arrays.fill(route, 0)
+            Arrays.fill(binding, 0)
+        }
+    }
+
+    private fun readProductionCurrentPageFrame(
+        input: ByteBuffer,
+        maxLength: Int,
+        label: String,
+    ): ByteArray {
+        require(input.remaining() >= Int.SIZE_BYTES) { "production AKEN compiler record $label length is truncated" }
+        val length = input.int
+        require(length in 1..maxLength && length <= input.remaining()) {
+            "production AKEN compiler record $label length is invalid"
+        }
+        return ByteArray(length).also(input::get)
+    }
+
+    private fun parseGeneratedUnsignedByteArray(include: String, name: String): ByteArray =
+        generatedArrayInitializer(include, name)
+            .let { initializer ->
+                Regex("0x([0-9A-F]{2})u").findAll(initializer)
+                    .map { match -> match.groupValues[1].toInt(16).toByte() }
+                    .toList()
+                    .toByteArray()
+            }
+
+    private fun parseGeneratedUnsignedIntArray(include: String, name: String): IntArray =
+        generatedArrayInitializer(include, name)
+            .let { initializer ->
+                Regex("(\\d+)u").findAll(initializer)
+                    .map { match -> match.groupValues[1].toInt() }
+                    .toList()
+                    .toIntArray()
+            }
+
+    private fun generatedArrayInitializer(include: String, name: String): String {
+        val start = include.indexOf("$name[")
+        require(start >= 0) { "missing generated array $name" }
+        val open = include.indexOf('{', start)
+        val close = include.indexOf("};", open)
+        require(open >= 0 && close > open) { "malformed generated array $name" }
+        return include.substring(open + 1, close)
+    }
+
+    private fun productionRendererProbeSource(
+        currentPage: ProductionCurrentPage,
+        rawCallSiteProof: ByteArray,
+    ): String {
+        require(currentPage.resourceKind == AkenResourceKind.Vbc4Method)
+        require(rawCallSiteProof.isNotEmpty())
+        val token = currentPage.entryToken.toULong().toString(16).uppercase().padStart(16, '0')
+        return buildString {
+            appendLine("#include \"js_jni_runtime.h\"")
+            appendLine("#include \"js_crypto.h\"")
+            appendLine()
+            appendLine("#include <stdint.h>")
+            appendLine("#include <stdio.h>")
+            appendLine("#include <string.h>")
+            appendLine()
+            appendLine("#define TEST_CHECK(condition) do { \\")
+            appendLine("    if (!(condition)) { \\")
+            appendLine("        fprintf(stderr, \"AKEN native locator probe failed: %s (%s:%d)\\n\", #condition, __FILE__, __LINE__); \\")
+            appendLine("        return 0; \\")
+            appendLine("    } \\")
+            appendLine("} while (0)")
+            appendLine()
+            appendProbeUnsignedBytes("TEST_HANDLE", currentPage.encodedHandle)
+            appendProbeUnsignedBytes("TEST_PROOF", rawCallSiteProof)
+            appendLine()
+            appendLine("static int test_current_page(void) {")
+            appendLine("    js_aken_native_page_request request;")
+            appendLine("    js_aken_native_page_locator_record record;")
+            appendLine("    js_aken_native_page_locator_record missing;")
+            appendLine("    js_aken_native_page_envelope envelope;")
+            appendLine("    js_aken_native_page_resolved_descriptor resolved;")
+            appendLine()
+            appendLine("    memset(&request, 0, sizeof(request));")
+            appendLine("    memset(&record, 0, sizeof(record));")
+            appendLine("    memset(&missing, 0, sizeof(missing));")
+            appendLine("    memset(&envelope, 0, sizeof(envelope));")
+            appendLine("    memset(&resolved, 0, sizeof(resolved));")
+            appendLine("    request.entry_token = UINT64_C(0x$token);")
+            appendLine("    request.resource_kind = JS_AKEN_NATIVE_PAGE_RESOURCE_KIND_VBC4_METHOD;")
+            appendLine("    request.page_index = ${currentPage.pageIndex};")
+            appendLine("    request.encoded_handle = TEST_HANDLE;")
+            appendLine("    request.encoded_handle_len = sizeof(TEST_HANDLE);")
+            appendLine("    request.raw_call_site_proof = TEST_PROOF;")
+            appendLine("    request.raw_call_site_proof_len = sizeof(TEST_PROOF);")
+            appendLine()
+            appendLine("    TEST_CHECK(js_aken_native_page_locator_lookup(&request, &record));")
+            appendLine("    TEST_CHECK(record.parsed == 1u);")
+            appendLine("    TEST_CHECK(record.entry_token == request.entry_token);")
+            appendLine("    TEST_CHECK(record.resource_kind == request.resource_kind);")
+            appendLine("    TEST_CHECK(record.page_index == request.page_index);")
+            appendLine("    TEST_CHECK(record.native_envelope_len != 0u);")
+            appendLine("    TEST_CHECK(record.descriptor_encoding_len != 0u);")
+            appendLine("    TEST_CHECK(record.route_encoding_len != 0u);")
+            appendLine("    TEST_CHECK(js_aken_native_page_envelope_parse(")
+            appendLine("        record.native_envelope, record.native_envelope_len, &request, &envelope));")
+            appendLine("    TEST_CHECK(js_aken_native_page_locator_resolve(&record, &envelope, &resolved));")
+            appendLine("    TEST_CHECK(resolved.descriptor_encoding == record.descriptor_encoding);")
+            appendLine("    TEST_CHECK(resolved.descriptor_encoding_len == record.descriptor_encoding_len);")
+            appendLine("    TEST_CHECK(resolved.route_encoding == record.route_encoding);")
+            appendLine("    TEST_CHECK(resolved.route_encoding_len == record.route_encoding_len);")
+            appendLine()
+            appendLine("    envelope.route_binding[0] ^= 0x01u;")
+            appendLine("    TEST_CHECK(!js_aken_native_page_locator_resolve(&record, &envelope, &resolved));")
+            appendLine("    TEST_CHECK(resolved.descriptor_encoding == NULL);")
+            appendLine("    TEST_CHECK(resolved.route_encoding == NULL);")
+            appendLine("    js_aken_native_page_envelope_wipe(&envelope);")
+            appendLine("    TEST_CHECK(js_aken_native_page_envelope_parse(")
+            appendLine("        record.native_envelope, record.native_envelope_len, &request, &envelope));")
+            appendLine("    TEST_CHECK(js_aken_native_page_locator_resolve(&record, &envelope, &resolved));")
+            appendLine()
+            appendLine("    request.page_index += 1;")
+            appendLine("    TEST_CHECK(!js_aken_native_page_locator_lookup(&request, &missing));")
+            appendLine("    TEST_CHECK(missing.parsed == 0u);")
+            appendLine()
+            appendLine("    js_vbc4_wipe_volatile(&resolved, sizeof(resolved));")
+            appendLine("    js_aken_native_page_envelope_wipe(&envelope);")
+            appendLine("    js_aken_native_page_locator_record_wipe(&record);")
+            appendLine("    js_aken_native_page_locator_record_wipe(&missing);")
+            appendLine("    js_vbc4_wipe_volatile(&request, sizeof(request));")
+            appendLine("    return 1;")
+            appendLine("}")
+            appendLine()
+            appendLine("int main(void) {")
+            appendLine("    if (!test_current_page()) return 1;")
+            appendLine("    puts(\"AKEN native page locator probe: PASS\");")
+            appendLine("    return 0;")
+            appendLine("}")
+        }
+    }
+
+    private fun StringBuilder.appendProbeUnsignedBytes(name: String, value: ByteArray) {
+        require(value.isNotEmpty())
+        appendLine("static const unsigned char $name[${value.size}] = {")
+        value.forEachIndexed { index, byte ->
+            if (index % 12 == 0) append("    ")
+            append("0x%02Xu".format(byte.toInt() and 0xFF))
+            if (index != value.lastIndex) append(", ")
+            if (index % 12 == 11 || index == value.lastIndex) appendLine()
+        }
+        appendLine("};")
+    }
+
+    private class ProductionCurrentPage(
+        val entryToken: Long,
+        val resourceKind: AkenResourceKind,
+        val pageIndex: Int,
+        val encodedHandle: ByteArray,
+    ) {
+        fun wipe() {
+            Arrays.fill(encodedHandle, 0)
         }
     }
 
