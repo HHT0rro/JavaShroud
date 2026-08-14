@@ -126,6 +126,59 @@ class AkenVbc4PageEmitterTest {
         }
     }
 
+    @Test
+    fun page_zero_for_distinct_methods_is_correlated_by_handle_not_global_page_index() {
+        val commitment = ByteArray(AkenArtifactCommitment.DIGEST_SIZE) { index -> (index * 23 + 5).toByte() }
+        val firstIdentity = "fixture:aken-vbc4-emitter:first".encodeToByteArray()
+        val secondIdentity = "fixture:aken-vbc4-emitter:second".encodeToByteArray()
+        val firstProof = byteArrayOf(0x31, 0x32, 0x33)
+        val secondProof = byteArrayOf(0x41, 0x42, 0x43)
+        val firstEntryToken = 0x4A4B_454E_0000_0201L
+        val secondEntryToken = 0x4A4B_454E_0000_0202L
+        val plan = AkenBuildPlan.create(commitment, SecureRandom())
+        commitment.fill(0)
+        val firstPage = plan.registerPage(AkenResourceKind.Vbc4Method, firstIdentity, pageIndex = 0)
+        val secondPage = plan.registerPage(AkenResourceKind.Vbc4Method, secondIdentity, pageIndex = 0)
+        val firstRequest = requestFor(
+            page = firstPage,
+            entryToken = firstEntryToken,
+            identity = firstIdentity,
+            plaintext = "first method page zero".encodeToByteArray(),
+            resourcePath = "META-INF/.aken/vbc4/first-method-page-0.bin",
+            callSiteProof = firstProof,
+        )
+        val secondRequest = requestFor(
+            page = secondPage,
+            entryToken = secondEntryToken,
+            identity = secondIdentity,
+            plaintext = "second method page zero".encodeToByteArray(),
+            resourcePath = "META-INF/.aken/vbc4/second-method-page-0.bin",
+            callSiteProof = secondProof,
+        )
+        Arrays.fill(firstIdentity, 0)
+        Arrays.fill(secondIdentity, 0)
+
+        val output = AkenVbc4PageEmitter.emitAndWipe(plan, listOf(firstRequest, secondRequest))
+        try {
+            assertTrue(plan.isWiped())
+            assertTrue(firstRequest.isWiped)
+            assertTrue(secondRequest.isWiped)
+
+            val pagesByPath = output.pagesForBuild().associateBy { it.resourcePath }
+            assertEquals(2, pagesByPath.size)
+            val firstEmission = checkNotNull(pagesByPath["META-INF/.aken/vbc4/first-method-page-0.bin"])
+            val secondEmission = checkNotNull(pagesByPath["META-INF/.aken/vbc4/second-method-page-0.bin"])
+            assertEquals(0, firstEmission.pageIndex)
+            assertEquals(0, secondEmission.pageIndex)
+            assertEquals(firstEntryToken, firstEmission.entryToken)
+            assertEquals(secondEntryToken, secondEmission.entryToken)
+        } finally {
+            output.wipe()
+            Arrays.fill(firstProof, 0)
+            Arrays.fill(secondProof, 0)
+        }
+    }
+
     private fun requestFor(
         page: AkenBuildPlan.Page,
         entryToken: Long,

@@ -2,6 +2,7 @@ package io.github.hht0rro.javashroud.transforms.protection.aken
 
 import java.security.MessageDigest
 import java.util.Arrays
+import java.util.Base64
 import kotlin.jvm.JvmSynthetic
 
 /**
@@ -407,9 +408,13 @@ internal object AkenVbc4PageEmitter {
             requestList.forEach { request ->
                 inputList += request.toMaterializationInput()
             }
-            val requestsByPageIndex = requestList.associateBy { it.pageIndex }
-            require(requestsByPageIndex.size == requestList.size) {
-                "AKEN VBC4 page emission contains duplicate page indices"
+            // Page indices are local to a logical VBC4 method.  Different
+            // methods may therefore both have page zero; use the opaque page
+            // handle as the build-only correlation key rather than turning the
+            // batch into a single global page-index namespace.
+            val requestsByHandle = requestList.associateBy(::requestHandleBinding)
+            require(requestsByHandle.size == requestList.size) {
+                "AKEN VBC4 page emission contains duplicate page handle bindings"
             }
 
             materialization = AkenPageMaterializer.materializeAndWipe(plan, inputList)
@@ -423,9 +428,8 @@ internal object AkenVbc4PageEmitter {
 
             meshRoot = materialization.copyMeshRootForBuild()
             materializedPages.forEach { materialized ->
-                val materializedPageIndex = materialized.descriptorForBuild.pageIndex
-                val request = requestsByPageIndex[materializedPageIndex]
-                    ?: error("AKEN VBC4 materialization emitted an unknown page index")
+                val request = requestsByHandle[materializedHandleBinding(materialized)]
+                    ?: error("AKEN VBC4 materialization emitted an unknown page handle binding")
                 emittedPages += AkenVbc4PageEmission.fromMaterialized(
                     page = materialized,
                     entryToken = request.entryToken,
@@ -449,6 +453,26 @@ internal object AkenVbc4PageEmitter {
                 output?.wipe()
                 emittedPages.forEach { it.wipe() }
             }
+        }
+    }
+
+    private fun requestHandleBinding(request: AkenVbc4PageEmissionRequest): String {
+        val encoded = request.page.handle.encoded
+        return try {
+            Base64.getUrlEncoder().withoutPadding().encodeToString(encoded)
+        } finally {
+            Arrays.fill(encoded, 0)
+        }
+    }
+
+    private fun materializedHandleBinding(page: AkenMaterializedPage): String {
+        val handle = page.descriptorForBuild.handle
+        val encoded = handle.encoded
+        return try {
+            Base64.getUrlEncoder().withoutPadding().encodeToString(encoded)
+        } finally {
+            Arrays.fill(encoded, 0)
+            handle.wipe()
         }
     }
 }
