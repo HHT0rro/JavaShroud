@@ -4,6 +4,7 @@ import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenBuildPlan
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4FinalizationLayout
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4MethodCandidate
 import java.security.MessageDigest
 import java.security.SecureRandom
 import javax.crypto.Mac
@@ -30,6 +31,12 @@ internal data class Vbc4BuildContext(
     private var runtimeVmCatalogPlan: RuntimeVmCatalogPlan? = null
     /** Build-only AKEN v4 page/evaluator plan; never serialized into runtime output. */
     private var akenBuildPlan: AkenBuildPlan? = null
+    /**
+     * Build-only VBC4 method snapshots captured after legacy emission succeeds.
+     * These are logical sources for a later page planner, not final routes,
+     * descriptors, native records, or a runtime catalog.
+     */
+    private val akenVbc4MethodCandidates = LinkedHashMap<Long, AkenVbc4MethodCandidate>()
     /**
      * Build-only pre-seal VBC4 layout. It owns final page geometry and native
      * current-page compiler records until recompilation/final sealing consumes
@@ -86,6 +93,78 @@ internal data class Vbc4BuildContext(
     @Synchronized
     fun requireAkenBuildPlan(): AkenBuildPlan = akenBuildPlanOrNull()
         ?: error("AKEN v4 build plan is not initialized")
+
+    /**
+     * Atomically snapshots real VBC4 method programs for a later AKEN page
+     * planner. Callers retain ownership of [candidates]; this context copies
+     * them and never exposes its internal instances to a callback.
+     *
+     * Candidates must be registered before an AKEN build plan exists. A plan is
+     * bound to final artifact material, whereas candidates still carry only
+     * logical method inputs and must not be mistaken for finalized page state.
+     */
+    @Synchronized
+    fun registerAkenVbc4MethodCandidates(candidates: Iterable<AkenVbc4MethodCandidate>) {
+        require(akenBuildPlan?.isWiped() != false) {
+            "AKEN VBC4 method candidates must be registered before page-plan initialization"
+        }
+        require(akenVbc4FinalizationLayout?.isWiped != false) {
+            "AKEN VBC4 method candidates cannot be registered after finalization layout publication"
+        }
+        val incoming = candidates.toList()
+        require(incoming.isNotEmpty()) { "AKEN VBC4 method candidate batch must not be empty" }
+        require(incoming.none { it.isWiped }) { "cannot register a wiped AKEN VBC4 method candidate" }
+
+        val incomingTokens = incoming.map { it.entryToken }
+        require(incomingTokens.distinct().size == incomingTokens.size) {
+            "AKEN VBC4 method candidate batch contains duplicate entry tokens"
+        }
+        val incomingPaths = incoming.map { it.logicalMethod.logicalVmResourcePath }
+        require(incomingPaths.distinct().size == incomingPaths.size) {
+            "AKEN VBC4 method candidate batch contains duplicate logical resource paths"
+        }
+        require(incomingTokens.none { it in akenVbc4MethodCandidates }) {
+            "AKEN VBC4 method candidate entry token is already registered"
+        }
+        require(incomingPaths.none { path -> akenVbc4MethodCandidates.values.any { it.logicalMethod.logicalVmResourcePath == path } }) {
+            "AKEN VBC4 method candidate logical resource path is already registered"
+        }
+
+        val snapshots = ArrayList<AkenVbc4MethodCandidate>(incoming.size)
+        try {
+            incoming.forEach { candidate -> snapshots += candidate.copyForBuild() }
+            snapshots.forEach { candidate ->
+                check(akenVbc4MethodCandidates.put(candidate.entryToken, candidate) == null) {
+                    "AKEN VBC4 method candidate entry token is already registered"
+                }
+            }
+        } catch (error: Throwable) {
+            snapshots.forEach { candidate ->
+                if (akenVbc4MethodCandidates[candidate.entryToken] === candidate) {
+                    akenVbc4MethodCandidates.remove(candidate.entryToken)
+                }
+                candidate.wipe()
+            }
+            throw error
+        }
+    }
+
+    /**
+     * Gives a later build-only planner deep candidate copies. The copies are
+     * invalidated and wiped immediately after [block] returns; runtime code
+     * never receives this collection or an arbitrary resource lookup API.
+     */
+    fun <T> withAkenVbc4MethodCandidatesForBuild(block: (List<AkenVbc4MethodCandidate>) -> T): T {
+        val snapshots = synchronized(this) {
+            check(akenVbc4MethodCandidates.isNotEmpty()) { "AKEN VBC4 method candidates are not initialized" }
+            akenVbc4MethodCandidates.values.map { it.copyForBuild() }
+        }
+        try {
+            return block(snapshots.toList())
+        } finally {
+            snapshots.forEach { it.wipe() }
+        }
+    }
 
     /**
      * Publishes the one build-only page layout produced by consuming the scoped
@@ -250,6 +329,8 @@ internal data class Vbc4BuildContext(
         bootSecretSnapshot = null
         bootSidecarBindingSnapshot = null
         runtimeVmCatalogPlan = null
+        akenVbc4MethodCandidates.values.forEach { it.wipe() }
+        akenVbc4MethodCandidates.clear()
         akenBuildPlan?.wipe()
         akenBuildPlan = null
         akenVbc4FinalizationLayout?.wipe()

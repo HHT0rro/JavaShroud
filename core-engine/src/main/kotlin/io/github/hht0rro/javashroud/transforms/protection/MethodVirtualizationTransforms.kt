@@ -9,6 +9,8 @@ import io.github.hht0rro.javashroud.model.transforms.TransformResult
 import io.github.hht0rro.javashroud.transforms.reanalyzedClassArtifact
 import io.github.hht0rro.javashroud.transforms.unchangedTransformResult
 import io.github.hht0rro.javashroud.transforms.updatedArtifactTransformResult
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4LogicalMethodIdentity
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4MethodCandidate
 import org.objectweb.asm.*
 import org.objectweb.asm.Type
 import org.objectweb.asm.tree.ClassNode
@@ -239,6 +241,7 @@ fun applyMethodVirtualization(
             .map { it.name + it.descriptor }
             .toMutableSet()
         var classModified = false
+        val akenMethodCandidatesForClass = mutableListOf<AkenVbc4MethodCandidate>()
 
         val cv = object : ClassVisitor(Opcodes.ASM9, cw) {
             override fun visitMethod(
@@ -416,50 +419,73 @@ fun applyMethodVirtualization(
                             bodyCapture.replayTo(vmMethodVisitor)
                             return
                         }
-                        val slicedResource = slicedVmResources(random, keyRandom, className, vmMethodName, vmDescriptor, methodSeed, methodEntropy, vmBytes, resourcePath)
-                        val methodEvidence = serializer.productionEvidence()
-                        buildContext.productionBuildEvidence.recordMethod(
-                            CandidateProductionBuildEvidence.MethodObservation(
-                                semanticId = CandidateProductionBuildEvidence.semanticId(
-                                    className,
-                                    guestOriginalName,
-                                    guestOriginalDescriptor,
+                        try {
+                            val slicedResource = slicedVmResources(random, keyRandom, className, vmMethodName, vmDescriptor, methodSeed, methodEntropy, vmBytes, resourcePath)
+                            val methodEvidence = serializer.productionEvidence()
+                            buildContext.productionBuildEvidence.recordMethod(
+                                CandidateProductionBuildEvidence.MethodObservation(
+                                    semanticId = CandidateProductionBuildEvidence.semanticId(
+                                        className,
+                                        guestOriginalName,
+                                        guestOriginalDescriptor,
+                                    ),
+                                    entryToken = entryToken,
+                                    sourceResourcePath = slicedResource.manifestPath,
+                                    opcodeStreamSha256 = methodEvidence.opcodeStreamSha256,
+                                    operandStreamSha256 = methodEvidence.operandStreamSha256,
+                                    methodEncodingSha256 = methodEvidence.methodEncodingSha256,
                                 ),
+                            )
+                            val decoyResources = decoyVmResources(random, keyRandom, className, vmMethodName, vmDescriptor, methodSeed, methodEntropy, vmBytes, slicedResource.reservedPaths)
+                            val preloadEntry = VmPreloadEntry(
                                 entryToken = entryToken,
-                                sourceResourcePath = slicedResource.manifestPath,
-                                opcodeStreamSha256 = methodEvidence.opcodeStreamSha256,
-                                operandStreamSha256 = methodEvidence.operandStreamSha256,
-                                methodEncodingSha256 = methodEvidence.methodEncodingSha256,
-                            ),
-                        )
-                        val decoyResources = decoyVmResources(random, keyRandom, className, vmMethodName, vmDescriptor, methodSeed, methodEntropy, vmBytes, slicedResource.reservedPaths)
-                        val preloadEntry = VmPreloadEntry(
-                            entryToken = entryToken,
-                            resourcePath = resourcePath,
-                            manifestPath = slicedResource.manifestPath,
-                            shardCount = slicedResource.shardCount,
-                            methodLocalProfile = methodLocalProfile,
-                            manifestPlan = slicedResource.manifestPlan,
-                        )
-                        vmPreloadEntries += preloadEntry
-                        vmResourcePlans += PlannedMethodVmResources(
-                            ordinal = nextVmResourceOrdinal++,
-                            resources = slicedResource.resources + decoyResources,
-                        )
+                                resourcePath = resourcePath,
+                                manifestPath = slicedResource.manifestPath,
+                                shardCount = slicedResource.shardCount,
+                                methodLocalProfile = methodLocalProfile,
+                                manifestPlan = slicedResource.manifestPlan,
+                            )
+                            vmPreloadEntries += preloadEntry
+                            vmResourcePlans += PlannedMethodVmResources(
+                                ordinal = nextVmResourceOrdinal++,
+                                resources = slicedResource.resources + decoyResources,
+                            )
 
-                        val hotDispatchMethod = specializedVmDispatchMethod(vmDescriptor, vmMethodAccess) ?: JNI_MICROKERNEL_VM_DISPATCH_METHOD
-                        val hotDispatchDescriptor = specializedVmDispatchDescriptor(vmDescriptor, vmMethodAccess) ?: VM_TOKEN_DISPATCH_DESCRIPTOR
-                        generateVmDispatcher(
-                            vmMethodVisitor, className, vmMethodName, vmDescriptor, vmMethodAccess,
-                            opcodeMapping, handlerOrder, VBC4_DISPATCH_LAYOUT, random, resourcePath,
-                            entryToken = entryToken,
-                            dispatchOwner = JNI_MICROKERNEL_DISPATCH_OWNER,
-                            dispatchMethod = hotDispatchMethod,
-                            dispatchDescriptor = hotDispatchDescriptor,
-                        )
-                        classModified = true
-                        methodCount++
-                        if (!restrictToMatchedMethods) broadVirtualizedMethodCount++
+                            val logicalIdentity = buildContext
+                                .deriveVbc4Identity(className, vmMethodName, vmDescriptor)
+                                .toByteArray(Charsets.UTF_8)
+                            try {
+                                akenMethodCandidatesForClass += AkenVbc4MethodCandidate.create(
+                                    entryToken = entryToken,
+                                    logicalMethod = AkenVbc4LogicalMethodIdentity.create(
+                                        dispatchClassToken = dispatchClassToken,
+                                        dispatchMethodToken = dispatchMethodToken,
+                                        descriptor = vmDescriptor,
+                                        logicalVmResourcePath = resourcePath,
+                                    ),
+                                    logicalIdentity = logicalIdentity,
+                                    serializedProgram = vmBytes,
+                                )
+                            } finally {
+                                java.util.Arrays.fill(logicalIdentity, 0)
+                            }
+
+                            val hotDispatchMethod = specializedVmDispatchMethod(vmDescriptor, vmMethodAccess) ?: JNI_MICROKERNEL_VM_DISPATCH_METHOD
+                            val hotDispatchDescriptor = specializedVmDispatchDescriptor(vmDescriptor, vmMethodAccess) ?: VM_TOKEN_DISPATCH_DESCRIPTOR
+                            generateVmDispatcher(
+                                vmMethodVisitor, className, vmMethodName, vmDescriptor, vmMethodAccess,
+                                opcodeMapping, handlerOrder, VBC4_DISPATCH_LAYOUT, random, resourcePath,
+                                entryToken = entryToken,
+                                dispatchOwner = JNI_MICROKERNEL_DISPATCH_OWNER,
+                                dispatchMethod = hotDispatchMethod,
+                                dispatchDescriptor = hotDispatchDescriptor,
+                            )
+                            classModified = true
+                            methodCount++
+                            if (!restrictToMatchedMethods) broadVirtualizedMethodCount++
+                        } finally {
+                            java.util.Arrays.fill(vmBytes, 0)
+                        }
                     }
                 }
             }
@@ -468,12 +494,27 @@ fun applyMethodVirtualization(
         try {
             cr.accept(cv, ClassReader.SKIP_FRAMES)
         } catch (error: Exception) {
+            akenMethodCandidatesForClass.forEach { it.wipe() }
+            akenMethodCandidatesForClass.clear()
             if (restrictToMatchedMethods || strictVirtualization) throw error
             return@map classArtifact
         }
-        if (!classModified) return@map classArtifact
+        if (!classModified) {
+            akenMethodCandidatesForClass.forEach { it.wipe() }
+            akenMethodCandidatesForClass.clear()
+            return@map classArtifact
+        }
+        val reanalyzedArtifact = reanalyzedClassArtifact(classArtifact, cw.toByteArray())
+        try {
+            if (akenMethodCandidatesForClass.isNotEmpty()) {
+                buildContext.registerAkenVbc4MethodCandidates(akenMethodCandidatesForClass)
+            }
+        } finally {
+            akenMethodCandidatesForClass.forEach { it.wipe() }
+            akenMethodCandidatesForClass.clear()
+        }
         classCount++
-        reanalyzedClassArtifact(classArtifact, cw.toByteArray())
+        reanalyzedArtifact
     }
 
     if (classCount == 0) return unchangedTransformResult(artifact)
