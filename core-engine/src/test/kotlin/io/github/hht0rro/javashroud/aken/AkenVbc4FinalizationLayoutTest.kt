@@ -4,6 +4,7 @@ import io.github.hht0rro.javashroud.transforms.protection.aken.AkenArtifactCommi
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenArtifactEntry
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenBuildPlan
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRootShardRange
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4DispatchBinding
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4FinalizationLayout
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4PendingPage
 import java.security.MessageDigest
@@ -116,6 +117,54 @@ class AkenVbc4FinalizationLayoutTest {
                 assertEquals(originalNativeRecordByte, records.first()[0])
             }
 
+            var retainedDispatchBindings: List<AkenVbc4DispatchBinding> = emptyList()
+            layout.withPageZeroDispatchBindingsForBuild { bindings ->
+                retainedDispatchBindings = bindings.toList()
+                assertEquals(2, bindings.size)
+                assertEquals(
+                    setOf(0x4A4B_454E_0000_1010L, 0x4A4B_454E_0000_2020L),
+                    bindings.mapTo(linkedSetOf()) { binding -> binding.entryToken },
+                )
+                bindings.forEach { binding ->
+                    val handle = binding.copyEncodedHandleForBuild()
+                    val proof = binding.copyCallSiteProofForBuild()
+                    val logicalIdentity = binding.copyLogicalIdentityForBuild()
+                    try {
+                        assertEquals(0, binding.pageIndex)
+                        assertTrue(logicalIdentity.isNotEmpty())
+                        assertTrue(
+                            binding.matchesForBuild(
+                                entryToken = binding.entryToken,
+                                encodedHandle = handle,
+                                pageIndex = 0,
+                                callSiteProof = proof,
+                            ),
+                        )
+                        handle[0] = (handle[0].toInt() xor 0x55).toByte()
+                        assertFalse(
+                            binding.matchesForBuild(
+                                entryToken = binding.entryToken,
+                                encodedHandle = handle,
+                                pageIndex = 0,
+                                callSiteProof = proof,
+                            ),
+                        )
+                    } finally {
+                        Arrays.fill(handle, 0)
+                        Arrays.fill(proof, 0)
+                        Arrays.fill(logicalIdentity, 0)
+                    }
+                }
+            }
+            assertTrue(retainedDispatchBindings.all { binding -> binding.isWiped })
+            assertFailsWith<IllegalStateException> {
+                retainedDispatchBindings.first().copyEncodedHandleForBuild()
+            }
+            layout.withPageZeroDispatchBindingsForBuild { bindings ->
+                assertEquals(2, bindings.size)
+                assertTrue(bindings.none { binding -> binding.isWiped })
+            }
+
             val payloadTampered = artifactEntries(layout) { name, bytes ->
                 if (name == page1.resourcePath) {
                     bytes[page1.resourceOffset + 3] = (bytes[page1.resourceOffset + 3].toInt() xor 0x44).toByte()
@@ -134,6 +183,7 @@ class AkenVbc4FinalizationLayoutTest {
             assertTrue(layout.isWiped)
             assertFailsWith<IllegalStateException> { layout.entriesForBuild() }
             assertFailsWith<IllegalStateException> { layout.withNativeLocatorRecordsForBuild { } }
+            assertFailsWith<IllegalStateException> { layout.withPageZeroDispatchBindingsForBuild { } }
         } finally {
             layout.wipe()
         }

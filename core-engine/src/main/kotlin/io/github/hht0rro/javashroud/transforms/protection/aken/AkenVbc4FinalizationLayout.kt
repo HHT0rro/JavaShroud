@@ -241,6 +241,114 @@ internal class AkenVbc4FinalizationEntry private constructor(
 }
 
 /**
+ * Build-only binding for the first page of exactly one virtualized method.
+ *
+ * The binding is deliberately callback-scoped: callers receive defensive
+ * copies of the opaque handle, proof, and logical identity, and the owning
+ * layout wipes every binding immediately after the callback returns. It is not
+ * a runtime catalog and exposes no page enumeration or decode operation.
+ */
+internal class AkenVbc4DispatchBinding private constructor(
+    val entryToken: Long,
+    val pageIndex: Int,
+    encodedHandle: ByteArray,
+    callSiteProof: ByteArray,
+    logicalIdentity: ByteArray,
+) : AutoCloseable {
+    private var encodedHandleValue = encodedHandle.copyOf()
+    private var callSiteProofValue = callSiteProof.copyOf()
+    private var logicalIdentityValue = logicalIdentity.copyOf()
+    private var wiped = false
+
+    init {
+        require(pageIndex == 0) { "AKEN VBC4 dispatch binding must target page zero" }
+        require(encodedHandleValue.size == AkenHandle.ENCODED_HANDLE_SIZE) {
+            "AKEN VBC4 dispatch binding has an invalid handle length"
+        }
+        require(callSiteProofValue.isNotEmpty() && callSiteProofValue.size <= 4096) {
+            "AKEN VBC4 dispatch binding has an invalid call-site proof"
+        }
+        require(logicalIdentityValue.isNotEmpty()) {
+            "AKEN VBC4 dispatch binding has an empty logical identity"
+        }
+    }
+
+    internal val isWiped: Boolean
+        get() = wiped
+
+    internal fun copyEncodedHandleForBuild(): ByteArray {
+        requireLive()
+        return encodedHandleValue.copyOf()
+    }
+
+    internal fun copyCallSiteProofForBuild(): ByteArray {
+        requireLive()
+        return callSiteProofValue.copyOf()
+    }
+
+    internal fun copyLogicalIdentityForBuild(): ByteArray {
+        requireLive()
+        return logicalIdentityValue.copyOf()
+    }
+
+    internal fun matchesForBuild(
+        entryToken: Long,
+        encodedHandle: ByteArray,
+        pageIndex: Int,
+        callSiteProof: ByteArray,
+    ): Boolean =
+        !wiped &&
+            this.entryToken == entryToken &&
+            this.pageIndex == pageIndex &&
+            MessageDigest.isEqual(encodedHandleValue, encodedHandle) &&
+            MessageDigest.isEqual(callSiteProofValue, callSiteProof)
+
+    override fun close() = wipe()
+
+    internal fun wipe() {
+        if (wiped) return
+        Arrays.fill(encodedHandleValue, 0)
+        Arrays.fill(callSiteProofValue, 0)
+        Arrays.fill(logicalIdentityValue, 0)
+        encodedHandleValue = ByteArray(0)
+        callSiteProofValue = ByteArray(0)
+        logicalIdentityValue = ByteArray(0)
+        wiped = true
+    }
+
+    private fun requireLive() {
+        check(!wiped) { "AKEN VBC4 dispatch binding has been wiped" }
+    }
+
+    internal companion object {
+        fun fromPageZeroEmission(emission: AkenVbc4PageEmission): AkenVbc4DispatchBinding {
+            require(emission.pageIndex == 0) { "AKEN VBC4 dispatch binding source must be page zero" }
+            val handle = emission.copyHandleForBuild()
+            var encodedHandle: ByteArray? = null
+            var callSiteProof: ByteArray? = null
+            var logicalIdentity: ByteArray? = null
+            try {
+                encodedHandle = handle.encoded
+                callSiteProof = emission.copyCallSiteProofForBuild()
+                logicalIdentity = emission.copyLogicalIdentityForBuild()
+                return AkenVbc4DispatchBinding(
+                    entryToken = emission.entryToken,
+                    pageIndex = emission.pageIndex,
+                    encodedHandle = encodedHandle,
+                    callSiteProof = callSiteProof,
+                    logicalIdentity = logicalIdentity,
+                )
+            } finally {
+                handle.wipe()
+                encodedHandle?.let { Arrays.fill(it, 0) }
+                callSiteProof?.let { Arrays.fill(it, 0) }
+                logicalIdentity?.let { Arrays.fill(it, 0) }
+            }
+        }
+    }
+}
+
+/**
  * Pre-seal VBC4 layout reservation plus current-page native compiler inputs.
  *
  * This is the deliberately narrow S1 bridge between page planning and the
@@ -299,6 +407,33 @@ internal class AkenVbc4FinalizationLayout private constructor(
             return block(records.toList())
         } finally {
             records.forEach { Arrays.fill(it, 0) }
+        }
+    }
+
+    /**
+     * Supplies one callback-scoped page-zero binding per virtualized method.
+     * No binding survives the callback and no non-zero page is exposed through
+     * this dispatcher-facing API.
+     */
+    internal fun <T> withPageZeroDispatchBindingsForBuild(
+        block: (List<AkenVbc4DispatchBinding>) -> T,
+    ): T {
+        requireLive()
+        val pages = checkNotNull(emissionsValue).pagesForBuild()
+        val expectedEntryTokens = pages.mapTo(linkedSetOf()) { page -> page.entryToken }
+        val bindings = ArrayList<AkenVbc4DispatchBinding>(expectedEntryTokens.size)
+        try {
+            pages
+                .asSequence()
+                .filter { page -> page.pageIndex == 0 }
+                .sortedBy { page -> page.entryToken }
+                .forEach { page -> bindings += AkenVbc4DispatchBinding.fromPageZeroEmission(page) }
+            require(bindings.mapTo(linkedSetOf()) { binding -> binding.entryToken } == expectedEntryTokens) {
+                "AKEN VBC4 finalization is missing a unique page-zero dispatch binding"
+            }
+            return block(bindings.toList())
+        } finally {
+            bindings.forEach { binding -> binding.wipe() }
         }
     }
 
