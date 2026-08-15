@@ -162,6 +162,10 @@ internal fun executeWithOrderedPasses(
                 artifact = passExecution.context.artifact,
                 executedPassIds = executedPassIds,
             )
+            io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.reserveAkenVbc4PreSealRoutesIfNeeded(
+                artifact = artifactWithHelpers,
+                seed = vbc4BuildContext.nativeSeed,
+            )
             val artifactWithNative = io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment.bundleNativeLibrariesIfAvailable(
                 artifact = artifactWithHelpers,
                 executedPassIds = executedPassIds,

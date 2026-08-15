@@ -1,16 +1,67 @@
 package io.github.hht0rro.javashroud.transforms.protection
 
+import io.github.hht0rro.javashroud.model.artifact.JarEntryData
+import io.github.hht0rro.javashroud.testAttachedArtifact
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4LogicalMethodIdentity
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4MethodCandidate
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4PreSealRouteAllocator
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4PreSealRouteReservation
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4RouteCandidateRef
+import io.github.hht0rro.javashroud.transforms.protection.requireVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import java.util.Arrays
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
 
 class AkenVbc4PreSealRouteReservationTest {
+    @Test
+    fun production_sealing_stage_reserves_scoped_aken_page_container_routes() {
+        val context = Vbc4BuildContext(
+            masterKey = ByteArray(32) { index -> (index * 7 + 3).toByte() },
+            nativeSeed = 0x4A4B_454E_0000_0011L,
+            jarLayoutDigest = ByteArray(32) { index -> (index * 11 + 5).toByte() },
+        )
+        val logicalPath = "META-INF/vbc4/production-route.bin"
+        val program = ByteArray(96) { index -> (index * 13 + 7).toByte() }
+        val identity = ByteArray(32) { index -> (index * 17 + 9).toByte() }
+        val candidate = candidate(
+            entryToken = 0x414B_454E_0000_0011L,
+            logicalVmResourcePath = logicalPath,
+            logicalIdentity = identity,
+            serializedProgram = program,
+        )
+        try {
+            withVbc4BuildContext(context) {
+                val scoped = requireVbc4BuildContext()
+                scoped.registerAkenVbc4MethodCandidates(listOf(candidate))
+                candidate.wipe()
+
+                val artifact = testAttachedArtifact(
+                    classArtifacts = emptyList(),
+                    jarEntries = listOf(JarEntryData("META-INF/existing.bin", byteArrayOf(1, 2, 3))),
+                )
+                assertTrue(RuntimeArtifactSealing.reserveAkenVbc4PreSealRoutesIfNeeded(artifact, scoped.nativeSeed))
+                assertTrue(RuntimeArtifactSealing.reserveAkenVbc4PreSealRoutesIfNeeded(artifact, scoped.nativeSeed))
+
+                scoped.requireAkenVbc4PreSealRouteReservation().withRoutesForBuild { routes ->
+                    assertEquals(1, routes.size)
+                    assertEquals(0x414B_454E_0000_0011L, routes.single().entryToken)
+                    assertEquals(logicalPath, routes.single().logicalVmResourcePath)
+                    assertFalse(routes.single().futureContainerPath.isBlank())
+                    assertFalse(routes.single().futureContainerPath == "META-INF/existing.bin")
+                }
+            }
+        } finally {
+            candidate.wipe()
+            context.wipe()
+            java.util.Arrays.fill(identity, 0)
+            java.util.Arrays.fill(program, 0)
+        }
+    }
+
     @Test
     fun route_reservation_uses_only_scoped_candidate_refs_and_wipes_every_snapshot() {
         val masterKey = ByteArray(32) { index -> (index * 7 + 3).toByte() }

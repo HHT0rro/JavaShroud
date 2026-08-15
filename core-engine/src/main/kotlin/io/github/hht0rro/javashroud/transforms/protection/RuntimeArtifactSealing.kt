@@ -98,6 +98,47 @@ object RuntimeArtifactSealing {
         return enabledPassIds.any { it in AUTO_SEALED_HELPER_PASSES }
     }
 
+    /**
+     * Reserves artifact-specific future VBC4 page-container names before native
+     * recompilation. This stage deliberately emits no resource and receives only
+     * scoped candidate references; page programs, handles, proofs, and evaluator
+     * state remain owned by the later build-only page planner.
+     */
+    internal fun reserveAkenVbc4PreSealRoutesIfNeeded(
+        artifact: BytecodeArtifact,
+        seed: Long,
+    ): Boolean {
+        val context = currentVbc4BuildContextOrNull() ?: return false
+        if (!context.hasAkenVbc4MethodCandidates()) return false
+        if (context.akenVbc4PreSealRouteReservationOrNull() != null) return true
+
+        val occupiedEntryPaths = linkedSetOf<String>().apply {
+            artifact.jarEntries.forEach { entry -> add(entry.name) }
+            artifact.classArtifacts.forEach { classArtifact -> add(classArtifact.entryName) }
+        }
+        context.reserveAkenVbc4PreSealRoutes(
+            occupiedEntryPaths = occupiedEntryPaths,
+            allocator = io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4PreSealRouteAllocator {
+                    candidate,
+                    ordinal,
+                    reservedEntryPaths,
+                ->
+                val routeIdentity =
+                    "aken-vbc4-page-container|" + candidate.entryToken + "|" + candidate.logicalVmResourcePath
+                val preferred = sealedResourceName(seed, "a4", routeIdentity, ordinal)
+                uniqueSealedResourceName(
+                    seed = seed,
+                    kind = "a4",
+                    originalName = routeIdentity,
+                    index = ordinal,
+                    preferredName = preferred,
+                    reservedEntryNames = reservedEntryPaths,
+                )
+            },
+        )
+        return true
+    }
+
     fun sealIfRequested(artifact: BytecodeArtifact, config: ObfuscationConfig): BytecodeArtifact {
         if (!isRequested(config)) return artifact
         val maxHardening = config.passes.any { pass ->
@@ -127,6 +168,16 @@ object RuntimeArtifactSealing {
         maxHardening: Boolean = false,
     ): BytecodeArtifact {
         val reservedEntryNames = artifact.jarEntries.map { it.name }.toMutableSet()
+        currentVbc4BuildContextOrNull()
+            ?.akenVbc4PreSealRouteReservationOrNull()
+            ?.withRoutesForBuild { routes ->
+                routes.forEach { route ->
+                    require(route.futureContainerPath !in reservedEntryNames) {
+                        "AKEN VBC4 pre-seal route collides with the sealing input namespace"
+                    }
+                    reservedEntryNames += route.futureContainerPath
+                }
+            }
         var sealedNativeBindingsResource: String? = null
         val bootMaterialResource = if (maxHardening) {
             uniqueSealedResourceName(

@@ -5,6 +5,8 @@ import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenBuildPlan
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4FinalizationLayout
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4MethodCandidate
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4PreSealRouteAllocator
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4PreSealRouteReservation
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4RouteCandidateRef
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -44,6 +46,8 @@ internal data class Vbc4BuildContext(
      * them; it is not a runtime page directory.
      */
     private var akenVbc4FinalizationLayout: AkenVbc4FinalizationLayout? = null
+    /** Build-only future container routes reserved before native recompilation. */
+    private var akenVbc4PreSealRouteReservation: AkenVbc4PreSealRouteReservation? = null
     private var bootSecretSnapshot: ByteArray? = null
     private var bootSidecarBindingSnapshot: ByteArray? = null
 
@@ -200,6 +204,57 @@ internal data class Vbc4BuildContext(
     }
 
     /**
+     * Reserves the future page-container namespace for the registered VBC4
+     * methods. The reservation is build-only and is owned by this context until
+     * the context is wiped; callers must not retain or wipe the returned owner.
+     *
+     * The allocator receives only scoped route candidate references, never the
+     * serialized method program, page plaintext, evaluator state, or key
+     * material. A context may publish at most one reservation.
+     */
+    @Synchronized
+    fun reserveAkenVbc4PreSealRoutes(
+        occupiedEntryPaths: Set<String>,
+        allocator: AkenVbc4PreSealRouteAllocator,
+    ): AkenVbc4PreSealRouteReservation {
+        require(akenBuildPlan?.isWiped() != false) {
+            "AKEN VBC4 pre-seal routes must be reserved before page-plan initialization"
+        }
+        require(akenVbc4FinalizationLayout?.isWiped != false) {
+            "AKEN VBC4 pre-seal routes cannot be reserved after finalization layout publication"
+        }
+        check(akenVbc4MethodCandidates.isNotEmpty()) {
+            "AKEN VBC4 method candidates are not initialized"
+        }
+        val existing = akenVbc4PreSealRouteReservation
+        require(existing == null || existing.isWiped) {
+            "AKEN VBC4 pre-seal route reservation is already published"
+        }
+        val reservation = withAkenVbc4RouteCandidateRefsForBuild { refs ->
+            AkenVbc4PreSealRouteReservation.reserve(
+                candidateRefs = refs,
+                occupiedEntryPaths = occupiedEntryPaths,
+                allocator = allocator,
+            )
+        }
+        akenVbc4PreSealRouteReservation = reservation
+        return reservation
+    }
+
+    @Synchronized
+    fun akenVbc4PreSealRouteReservationOrNull(): AkenVbc4PreSealRouteReservation? =
+        akenVbc4PreSealRouteReservation?.takeUnless { it.isWiped }
+
+    @Synchronized
+    fun requireAkenVbc4PreSealRouteReservation(): AkenVbc4PreSealRouteReservation =
+        akenVbc4PreSealRouteReservation
+            ?.takeUnless { it.isWiped }
+            ?: error("AKEN VBC4 pre-seal route reservation is not initialized")
+
+    @Synchronized
+    fun hasAkenVbc4MethodCandidates(): Boolean = akenVbc4MethodCandidates.isNotEmpty()
+
+    /**
      * Publishes the one build-only page layout produced by consuming the scoped
      * AKEN plan. A live plan and a finalized layout must never coexist: the
      * former contains build authority, while the latter contains only encrypted
@@ -345,6 +400,8 @@ internal data class Vbc4BuildContext(
         productionBuildEvidence = productionBuildEvidence,
     ).also { copy ->
         copy.runtimeVmCatalogPlan = runtimeVmCatalogPlan
+        // Pre-seal route reservations are intentionally not copied across scopes;
+        // a copied reservation could outlive the candidate namespace it binds.
         copy.bootSecretSnapshot = bootSecretSnapshot?.copyOf()
         copy.bootSidecarBindingSnapshot = bootSidecarBindingSnapshot?.copyOf()
         // AKEN plan state is intentionally not copied: each scoped build gets
@@ -368,6 +425,8 @@ internal data class Vbc4BuildContext(
         akenBuildPlan = null
         akenVbc4FinalizationLayout?.wipe()
         akenVbc4FinalizationLayout = null
+        akenVbc4PreSealRouteReservation?.wipe()
+        akenVbc4PreSealRouteReservation = null
     }
 }
 

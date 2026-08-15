@@ -168,6 +168,9 @@ internal class AkenVbc4PreSealRouteReservation private constructor(
     @Volatile
     private var wiped: Boolean = false
 
+    internal val isWiped: Boolean
+        get() = wiped
+
     /**
      * Gives the sealing stage fresh route copies. They are invalidated directly
      * after [block] returns, preventing a route snapshot from living beyond its
