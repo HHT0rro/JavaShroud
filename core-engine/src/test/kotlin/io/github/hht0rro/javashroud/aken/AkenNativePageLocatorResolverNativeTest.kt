@@ -1012,6 +1012,7 @@ class AkenNativePageLocatorResolverNativeTest {
             directory = scenarioDir,
             label = "compile-0",
             zigCache = scenarioDir.resolve("zig-cache-0"),
+            timeoutSeconds = 300L,
         )
         for (attempt in 1..5) {
             if (compile.exitCode == 0 || !isTransientZigFailure(compile.output)) break
@@ -1020,6 +1021,7 @@ class AkenNativePageLocatorResolverNativeTest {
                 directory = scenarioDir,
                 label = "compile-$attempt",
                 zigCache = scenarioDir.resolve("zig-cache-$attempt"),
+                timeoutSeconds = 300L,
             )
         }
         assertEquals(0, compile.exitCode, "valid native fixture must compile:\n${compile.output}")
@@ -1362,7 +1364,14 @@ class AkenNativePageLocatorResolverNativeTest {
         }
     }
 
-    private fun run(command: List<String>, directory: Path, label: String, zigCache: Path? = null): ProcessResult {
+    private fun run(
+        command: List<String>,
+        directory: Path,
+        label: String,
+        zigCache: Path? = null,
+        timeoutSeconds: Long = 180L,
+    ): ProcessResult {
+        require(timeoutSeconds > 0L) { "process timeout must be positive" }
         val outputFile = directory.resolve("$label.log")
         val builder = ProcessBuilder(command)
             .directory(directory.toFile())
@@ -1373,10 +1382,13 @@ class AkenNativePageLocatorResolverNativeTest {
             builder.environment()["ZIG_LOCAL_CACHE_DIR"] = cache.resolve("local").toString()
         }
         val process = builder.start()
-        val completed = process.waitFor(180, TimeUnit.SECONDS)
+        val completed = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
         if (!completed) process.destroyForcibly().waitFor(10, TimeUnit.SECONDS)
         val output = Files.readString(outputFile, StandardCharsets.UTF_8)
-        assertTrue(completed, "process timed out: ${command.joinToString(" ")}\n$output")
+        assertTrue(
+            completed,
+            "process timed out after ${timeoutSeconds}s: ${command.joinToString(" ")}\n$output",
+        )
         return ProcessResult(process.exitValue(), output)
     }
 

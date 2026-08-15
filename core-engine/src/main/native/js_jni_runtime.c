@@ -2556,6 +2556,79 @@ cleanup:
     return ok;
 }
 
+/*
+ * Loads and copies only the exact current encrypted page slice named by a
+ * parsed AKEN route. The path, offset, and length originate exclusively from
+ * js_aken_native_page_descriptor_parse_current(); this helper deliberately
+ * bypasses legacy alias, commitment, and generic decode paths.
+ */
+static int js_aken_native_page_load_current_route_slice(
+    JNIEnv *env,
+    jclass helper_cls,
+    const js_aken_native_page_descriptor_view *view,
+    unsigned char **out_payload,
+    size_t *out_payload_len
+) {
+    char resource_path[JS_AKEN_DESCRIPTOR_MAX_RESOURCE_PATH_SIZE + 1u];
+    jstring resource_path_j = NULL;
+    js_vm_loaded_resource loaded;
+    unsigned char *payload = NULL;
+    jsize raw_length = 0;
+    size_t offset = 0u;
+    size_t stored_length = 0u;
+    int ok = 0;
+    memset(&loaded, 0, sizeof(loaded));
+    if (!out_payload || !out_payload_len) goto cleanup;
+    *out_payload = NULL;
+    *out_payload_len = 0u;
+    if (!env || !helper_cls || !view || view->parsed != 1u ||
+        !view->resource_path || view->resource_path_len == 0u ||
+        view->resource_path_len > JS_AKEN_DESCRIPTOR_MAX_RESOURCE_PATH_SIZE ||
+        view->stored_length == 0u ||
+        view->stored_length > JS_AKEN_NATIVE_PAGE_MAX_ENCODED_SIZE) {
+        goto cleanup;
+    }
+    memcpy(resource_path, view->resource_path, view->resource_path_len);
+    resource_path[view->resource_path_len] = '\0';
+    resource_path_j = (*env)->NewStringUTF(env, resource_path);
+    js_vbc4_wipe_volatile(resource_path, sizeof(resource_path));
+    if (!resource_path_j || (*env)->ExceptionCheck(env)) goto cleanup;
+    loaded = js_vm_load_resource_bytes_with_loader(env, helper_cls, resource_path_j);
+    if (!loaded.bytes || (*env)->ExceptionCheck(env)) goto cleanup;
+    raw_length = (*env)->GetArrayLength(env, loaded.bytes);
+    if ((*env)->ExceptionCheck(env) || raw_length <= 0) goto cleanup;
+    offset = (size_t)view->resource_offset;
+    stored_length = (size_t)view->stored_length;
+    if (offset > (size_t)raw_length || stored_length > (size_t)raw_length - offset) goto cleanup;
+    payload = (unsigned char *)malloc(stored_length);
+    if (!payload) goto cleanup;
+    (*env)->GetByteArrayRegion(
+        env,
+        loaded.bytes,
+        (jsize)offset,
+        (jsize)stored_length,
+        (jbyte *)payload);
+    if ((*env)->ExceptionCheck(env)) goto cleanup;
+    *out_payload = payload;
+    *out_payload_len = stored_length;
+    payload = NULL;
+    ok = 1;
+cleanup:
+    if (payload) {
+        js_vbc4_wipe_volatile(payload, stored_length);
+        free(payload);
+    }
+    if (loaded.bytes) (*env)->DeleteLocalRef(env, loaded.bytes);
+    if (loaded.loader) (*env)->DeleteLocalRef(env, loaded.loader);
+    if (resource_path_j) (*env)->DeleteLocalRef(env, resource_path_j);
+    js_vbc4_wipe_volatile(resource_path, sizeof(resource_path));
+    if (!ok && out_payload && out_payload_len) {
+        *out_payload = NULL;
+        *out_payload_len = 0u;
+    }
+    return ok;
+}
+
 JS_HIDDEN int js_aken_native_page_open_current_view_payload(
     const js_aken_native_page_request *request,
     const js_aken_native_page_envelope *envelope,
@@ -2594,14 +2667,19 @@ static jobject JNICALL jsw_a0(JNIEnv *env, jclass cls, jlong entry_token, jbyteA
     js_aken_native_page_locator_record record;
     js_aken_native_page_envelope envelope;
     js_aken_native_page_resolved_descriptor resolved;
+    js_aken_native_page_descriptor_view descriptor_view;
+    js_aken_native_opened_page opened_page;
+    unsigned char *encoded_payload = NULL;
+    size_t encoded_payload_len = 0u;
     jsize proof_length = 0;
     int protected_runtime_entered = 0;
-    (void)cls;
     (void)args;
     memset(&request, 0, sizeof(request));
     memset(&record, 0, sizeof(record));
     memset(&envelope, 0, sizeof(envelope));
     memset(&resolved, 0, sizeof(resolved));
+    memset(&descriptor_view, 0, sizeof(descriptor_view));
+    memset(&opened_page, 0, sizeof(opened_page));
     if (!js_vm_sensitive_path_guard(env, (const void*)jsw_a0, 0)) goto cleanup;
     if (!js_protected_runtime_enter(env)) goto cleanup;
     protected_runtime_entered = 1;
@@ -2645,12 +2723,41 @@ static jobject JNICALL jsw_a0(JNIEnv *env, jclass cls, jlong entry_token, jbyteA
             record.native_envelope_len,
             &request,
             &envelope) ||
-        !js_aken_native_page_locator_resolve(&record, &envelope, &resolved)) {
+        !js_aken_native_page_locator_resolve(&record, &envelope, &resolved) ||
+        !js_aken_native_page_descriptor_parse_current(
+            &request,
+            &envelope,
+            &resolved,
+            &descriptor_view)) {
         js_aken_bridge_unavailable(env, "AKEN VM page route is invalid");
         goto cleanup;
     }
+    if (!js_aken_native_page_load_current_route_slice(
+            env,
+            cls,
+            &descriptor_view,
+            &encoded_payload,
+            &encoded_payload_len) ||
+        !js_aken_native_page_open_current_view_payload(
+            &request,
+            &envelope,
+            &resolved,
+            &descriptor_view,
+            encoded_payload,
+            encoded_payload_len,
+            &opened_page)) {
+        js_aken_bridge_unavailable(env, "AKEN VM page authentication failed");
+        goto cleanup;
+    }
+    js_aken_native_opened_page_wipe(&opened_page);
     js_aken_bridge_unavailable(env, "AKEN VM page executor is unavailable");
 cleanup:
+    js_aken_native_opened_page_wipe(&opened_page);
+    if (encoded_payload) {
+        js_vbc4_wipe_volatile(encoded_payload, encoded_payload_len);
+        free(encoded_payload);
+    }
+    js_aken_native_page_descriptor_view_wipe(&descriptor_view);
     js_vbc4_wipe_volatile(&resolved, sizeof(resolved));
     js_aken_native_page_envelope_wipe(&envelope);
     js_aken_native_page_locator_record_wipe(&record);
