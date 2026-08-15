@@ -10,10 +10,11 @@ import java.util.Base64
  * commitment exists.
  *
  * The physical frame is chosen here because its exact length is part of the
- * canonical reservation.  The page handle, evaluator graph and DEK are still
- * minted only after [AkenArtifactCommitment.reserve] has produced the final
- * commitment.  This keeps the pre-seal phase from inventing a reusable root or
- * serializing a plaintext/page-key catalog into a runtime artifact.
+ * canonical reservation. The evaluator graph and DEK are still minted only
+ * after [AkenArtifactCommitment.reserve] has produced the final commitment.
+ * Page zero may carry one preassigned opaque handle encoding so an already
+ * generated VBC4 dispatcher can address precisely that page; it is neither a
+ * key nor a traversal capability.
  */
 internal class AkenVbc4PendingPage private constructor(
     val entryToken: Long,
@@ -26,10 +27,12 @@ internal class AkenVbc4PendingPage private constructor(
     plaintext: ByteArray,
     callSiteProof: ByteArray,
     val logicalBindingPath: String,
+    encodedHandleOverride: ByteArray?,
 ) : AutoCloseable {
     private var logicalIdentityValue: ByteArray = logicalIdentity.copyOf()
     private var plaintextValue: ByteArray = plaintext.copyOf()
     private var callSiteProofValue: ByteArray = callSiteProof.copyOf()
+    private var encodedHandleOverrideValue: ByteArray? = encodedHandleOverride?.copyOf()
 
     @Volatile
     private var wiped: Boolean = false
@@ -39,6 +42,11 @@ internal class AkenVbc4PendingPage private constructor(
         require(plaintextValue.isNotEmpty()) { "AKEN VBC4 pending-page plaintext must not be empty" }
         require(callSiteProofValue.isNotEmpty() && callSiteProofValue.size <= MAX_CALL_SITE_PROOF_SIZE) {
             "AKEN VBC4 pending-page call-site proof length is invalid"
+        }
+        encodedHandleOverrideValue?.let { encodedHandle ->
+            require(pageIndex == 0 && encodedHandle.size == AkenHandle.ENCODED_HANDLE_SIZE) {
+                "AKEN VBC4 pending-page handle override is invalid"
+            }
         }
         require(pageIndex >= 0) { "AKEN VBC4 pending-page index must be non-negative" }
         require(resourceOffset >= 0) { "AKEN VBC4 pending-page offset must be non-negative" }
@@ -82,6 +90,12 @@ internal class AkenVbc4PendingPage private constructor(
         return callSiteProofValue.copyOf()
     }
 
+    /** Build-only optional page-zero handle preassigned by the generated dispatcher. */
+    internal fun copyEncodedHandleOverrideForBuild(): ByteArray? {
+        requireLive()
+        return encodedHandleOverrideValue?.copyOf()
+    }
+
     internal fun identityPageKeyForBuild(): String {
         requireLive()
         return identityPageKey(logicalIdentityValue, pageIndex)
@@ -117,9 +131,11 @@ internal class AkenVbc4PendingPage private constructor(
         Arrays.fill(logicalIdentityValue, 0)
         Arrays.fill(plaintextValue, 0)
         Arrays.fill(callSiteProofValue, 0)
+        encodedHandleOverrideValue?.let { Arrays.fill(it, 0) }
         logicalIdentityValue = ByteArray(0)
         plaintextValue = ByteArray(0)
         callSiteProofValue = ByteArray(0)
+        encodedHandleOverrideValue = null
         wiped = true
     }
 
@@ -148,6 +164,7 @@ internal class AkenVbc4PendingPage private constructor(
             targetPageSize: Int? = null,
             random: SecureRandom = SecureRandom(),
             logicalBindingPath: String = resourcePath,
+            encodedHandleOverride: ByteArray? = null,
         ): AkenVbc4PendingPage {
             targetPageSize?.let { requestedTargetSize ->
                 require(requestedTargetSize in AkenPageSizePolicy.DEFAULT.allowedSizes(AkenResourceKind.Vbc4Method)) {
@@ -173,6 +190,7 @@ internal class AkenVbc4PendingPage private constructor(
                 plaintext = plaintext,
                 callSiteProof = callSiteProof,
                 logicalBindingPath = logicalBindingPath,
+                encodedHandleOverride = encodedHandleOverride,
             )
         }
 
@@ -716,6 +734,7 @@ internal class AkenVbc4FinalizationLayout private constructor(
 
                 pages.forEach { pending ->
                     val identity = pending.copyLogicalIdentityForBuild()
+                    val encodedHandleOverride = pending.copyEncodedHandleOverrideForBuild()
                     try {
                         val registered = plan.registerPage(
                             kind = AkenResourceKind.Vbc4Method,
@@ -723,11 +742,13 @@ internal class AkenVbc4FinalizationLayout private constructor(
                             pageIndex = pending.pageIndex,
                             layoutVariant = pending.layoutVariant,
                             targetPageSize = pending.targetPageSize,
+                            encodedHandleOverride = encodedHandleOverride,
                         )
                         registeredPages += registered
                         requests += pending.toEmissionRequest(registered)
                     } finally {
                         Arrays.fill(identity, 0)
+                        encodedHandleOverride?.let { Arrays.fill(it, 0) }
                     }
                 }
                 emissions = AkenVbc4PageEmitter.emitAndWipe(plan, requests)

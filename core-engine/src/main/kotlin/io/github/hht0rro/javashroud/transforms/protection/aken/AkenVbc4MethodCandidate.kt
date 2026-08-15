@@ -49,21 +49,25 @@ internal data class AkenVbc4LogicalMethodIdentity private constructor(
  * Build-only VBC4 method candidate captured before final artifact routes,
  * page frames, and the canonical commitment are available.
  *
- * This owner deliberately retains neither an AKEN handle, evaluator graph,
- * page descriptor, nor a call-site proof. It is only the hand-off from method
- * virtualization to the later page planner, which splits the serialised VBC4
- * program on basic-block boundaries and converts it into page-local pending
- * inputs. It is never serialized into the artifact or exposed by a runtime
- * API.
+ * This owner never retains an evaluator graph, page descriptor, or DEK. A
+ * dispatcher-bearing candidate may additionally hold one opaque page-zero
+ * handle/proof pair, minted before canonical commitment so the generated
+ * method body can bind to the same exact page without a post-seal class
+ * rewrite. It is only the hand-off from method virtualization to the later
+ * page planner and is never serialized as a runtime catalog.
  */
 internal class AkenVbc4MethodCandidate private constructor(
     val entryToken: Long,
     val logicalMethod: AkenVbc4LogicalMethodIdentity,
     logicalIdentity: ByteArray,
     serializedProgram: ByteArray,
+    pageZeroEncodedHandle: ByteArray?,
+    pageZeroCallSiteProof: ByteArray?,
 ) : AutoCloseable {
     private var logicalIdentityValue: ByteArray = logicalIdentity.copyOf()
     private var serializedProgramValue: ByteArray = serializedProgram.copyOf()
+    private var pageZeroEncodedHandleValue: ByteArray? = pageZeroEncodedHandle?.copyOf()
+    private var pageZeroCallSiteProofValue: ByteArray? = pageZeroCallSiteProof?.copyOf()
 
     @Volatile
     private var wiped: Boolean = false
@@ -71,6 +75,19 @@ internal class AkenVbc4MethodCandidate private constructor(
     init {
         require(logicalIdentityValue.isNotEmpty()) { "AKEN VBC4 method candidate identity must not be empty" }
         require(serializedProgramValue.isNotEmpty()) { "AKEN VBC4 method candidate program must not be empty" }
+        require((pageZeroEncodedHandleValue == null) == (pageZeroCallSiteProofValue == null)) {
+            "AKEN VBC4 page-zero dispatch binding must include both handle and proof"
+        }
+        pageZeroEncodedHandleValue?.let { encodedHandle ->
+            require(encodedHandle.size == AkenHandle.ENCODED_HANDLE_SIZE) {
+                "AKEN VBC4 page-zero dispatch handle has an invalid length"
+            }
+        }
+        pageZeroCallSiteProofValue?.let { callSiteProof ->
+            require(callSiteProof.isNotEmpty() && callSiteProof.size <= MAX_CALL_SITE_PROOF_SIZE) {
+                "AKEN VBC4 page-zero dispatch proof has an invalid length"
+            }
+        }
     }
 
     val isWiped: Boolean
@@ -86,6 +103,22 @@ internal class AkenVbc4MethodCandidate private constructor(
         return serializedProgramValue.copyOf()
     }
 
+    internal val hasPageZeroDispatchBindingForBuild: Boolean
+        get() {
+            requireLive()
+            return pageZeroEncodedHandleValue != null
+        }
+
+    internal fun copyPageZeroEncodedHandleForBuild(): ByteArray? {
+        requireLive()
+        return pageZeroEncodedHandleValue?.copyOf()
+    }
+
+    internal fun copyPageZeroCallSiteProofForBuild(): ByteArray? {
+        requireLive()
+        return pageZeroCallSiteProofValue?.copyOf()
+    }
+
     internal fun copyForBuild(): AkenVbc4MethodCandidate {
         requireLive()
         return AkenVbc4MethodCandidate(
@@ -93,6 +126,8 @@ internal class AkenVbc4MethodCandidate private constructor(
             logicalMethod = logicalMethod,
             logicalIdentity = logicalIdentityValue,
             serializedProgram = serializedProgramValue,
+            pageZeroEncodedHandle = pageZeroEncodedHandleValue,
+            pageZeroCallSiteProof = pageZeroCallSiteProofValue,
         )
     }
 
@@ -102,8 +137,12 @@ internal class AkenVbc4MethodCandidate private constructor(
         if (wiped) return
         Arrays.fill(logicalIdentityValue, 0)
         Arrays.fill(serializedProgramValue, 0)
+        pageZeroEncodedHandleValue?.let { Arrays.fill(it, 0) }
+        pageZeroCallSiteProofValue?.let { Arrays.fill(it, 0) }
         logicalIdentityValue = ByteArray(0)
         serializedProgramValue = ByteArray(0)
+        pageZeroEncodedHandleValue = null
+        pageZeroCallSiteProofValue = null
         wiped = true
     }
 
@@ -112,19 +151,28 @@ internal class AkenVbc4MethodCandidate private constructor(
     }
 
     companion object {
+        private const val MAX_CALL_SITE_PROOF_SIZE = 4096
+
         fun create(
             entryToken: Long,
             logicalMethod: AkenVbc4LogicalMethodIdentity,
             logicalIdentity: ByteArray,
             serializedProgram: ByteArray,
+            pageZeroEncodedHandle: ByteArray? = null,
+            pageZeroCallSiteProof: ByteArray? = null,
         ): AkenVbc4MethodCandidate {
             require(logicalIdentity.isNotEmpty()) { "AKEN VBC4 method candidate identity must not be empty" }
             require(serializedProgram.isNotEmpty()) { "AKEN VBC4 method candidate program must not be empty" }
+            require((pageZeroEncodedHandle == null) == (pageZeroCallSiteProof == null)) {
+                "AKEN VBC4 page-zero dispatch binding must include both handle and proof"
+            }
             return AkenVbc4MethodCandidate(
                 entryToken = entryToken,
                 logicalMethod = logicalMethod,
                 logicalIdentity = logicalIdentity,
                 serializedProgram = serializedProgram,
+                pageZeroEncodedHandle = pageZeroEncodedHandle,
+                pageZeroCallSiteProof = pageZeroCallSiteProof,
             )
         }
     }

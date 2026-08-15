@@ -401,10 +401,20 @@ class AkenBuildPlan private constructor(
         codecVariant: String = "gcm",
         layoutVariant: String = "default",
         targetPageSize: Int? = null,
+        encodedHandleOverride: ByteArray? = null,
     ): Page {
         requireLive()
         require(identity.isNotEmpty()) { "AKEN page identity must not be empty" }
         require(pageIndex >= 0) { "AKEN page index must be non-negative" }
+        encodedHandleOverride?.let { encodedHandle ->
+            require(
+                kind == AkenResourceKind.Vbc4Method &&
+                    pageIndex == 0 &&
+                    encodedHandle.size == AkenHandle.ENCODED_HANDLE_SIZE,
+            ) {
+                "AKEN preassigned handle is only valid for a VBC4 page-zero dispatch binding"
+            }
+        }
         val allowedTargetSizes = pageSizePolicy.allowedSizes(kind)
         targetPageSize?.let { requestedTargetSize ->
             require(requestedTargetSize in allowedTargetSizes) {
@@ -440,7 +450,8 @@ class AkenBuildPlan private constructor(
             // Handles are part of the evaluator-state binding.  Mint them
             // before the first fragment and bind them again into the final
             // graph fingerprint below.
-            encodedHandle = ByteArray(AkenHandle.ENCODED_HANDLE_SIZE).also(random::nextBytes)
+            encodedHandle = encodedHandleOverride?.copyOf()
+                ?: ByteArray(AkenHandle.ENCODED_HANDLE_SIZE).also(random::nextBytes)
             locator = ByteArray(AkenHandle.LOCATOR_TOKEN_SIZE).also(random::nextBytes)
             dek = ByteArray(AkenEvaluatorState.STATE_WIDTH).also(random::nextBytes)
             evaluatorShares = AkenEvaluatorState.splitDek(checkNotNull(dek), random)
@@ -540,7 +551,9 @@ class AkenBuildPlan private constructor(
             } finally {
                 Arrays.fill(recovered, 0)
             }
-            records[handle.encodedKey()] = Record(page, dek)
+            val handleKey = handle.encodedKey()
+            require(handleKey !in records) { "AKEN page handle encoding is already registered" }
+            records[handleKey] = Record(page, dek)
             registrationKeys += registrationKey
             success = true
             return page

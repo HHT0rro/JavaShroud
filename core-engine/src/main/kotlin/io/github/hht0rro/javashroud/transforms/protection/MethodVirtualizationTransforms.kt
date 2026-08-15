@@ -9,6 +9,7 @@ import io.github.hht0rro.javashroud.model.transforms.TransformResult
 import io.github.hht0rro.javashroud.transforms.reanalyzedClassArtifact
 import io.github.hht0rro.javashroud.transforms.unchangedTransformResult
 import io.github.hht0rro.javashroud.transforms.updatedArtifactTransformResult
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHandle
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4LogicalMethodIdentity
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4MethodCandidate
 import org.objectweb.asm.*
@@ -31,6 +32,8 @@ private const val VM_INT_INT_DISPATCH_DESCRIPTOR = "(JI)I"
 private const val VM_INT_VOID_DISPATCH_DESCRIPTOR = "(JI)V"
 private const val JNI_MICROKERNEL_DISPATCH_OWNER = "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper"
 private const val JNI_MICROKERNEL_VM_DISPATCH_METHOD = "executeVmResource"
+private const val JNI_MICROKERNEL_AKEN_VM_PAGE_DISPATCH_METHOD = "executeAkenVmPage"
+private const val AKEN_VM_PAGE_DISPATCH_DESCRIPTOR = "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
 private const val VBC4_DISPATCH_LAYOUT = "vbc4-native"
 private val VBC4_ALLOWED_PARAMS = setOf(
     "seed",
@@ -454,32 +457,46 @@ fun applyMethodVirtualization(
                             val logicalIdentity = buildContext
                                 .deriveVbc4Identity(className, vmMethodName, vmDescriptor)
                                 .toByteArray(Charsets.UTF_8)
+                            val pageZeroEncodedHandle = ByteArray(AkenHandle.ENCODED_HANDLE_SIZE).also(keyRandom::nextBytes)
+                            val pageZeroCallSiteProof = AkenVbc4CallSiteProof.derive(
+                                seed = buildContext.nativeSeed,
+                                entryToken = entryToken,
+                                logicalVmResourcePath = resourcePath,
+                                pageIndex = 0,
+                            )
                             try {
-                                akenMethodCandidatesForClass += AkenVbc4MethodCandidate.create(
+                                try {
+                                    akenMethodCandidatesForClass += AkenVbc4MethodCandidate.create(
+                                        entryToken = entryToken,
+                                        logicalMethod = AkenVbc4LogicalMethodIdentity.create(
+                                            dispatchClassToken = dispatchClassToken,
+                                            dispatchMethodToken = dispatchMethodToken,
+                                            descriptor = vmDescriptor,
+                                            logicalVmResourcePath = resourcePath,
+                                        ),
+                                        logicalIdentity = logicalIdentity,
+                                        serializedProgram = vmBytes,
+                                        pageZeroEncodedHandle = pageZeroEncodedHandle,
+                                        pageZeroCallSiteProof = pageZeroCallSiteProof,
+                                    )
+                                } finally {
+                                    java.util.Arrays.fill(logicalIdentity, 0)
+                                }
+
+                                generateVmDispatcher(
+                                    vmMethodVisitor, className, vmMethodName, vmDescriptor, vmMethodAccess,
+                                    opcodeMapping, handlerOrder, VBC4_DISPATCH_LAYOUT, random, resourcePath,
                                     entryToken = entryToken,
-                                    logicalMethod = AkenVbc4LogicalMethodIdentity.create(
-                                        dispatchClassToken = dispatchClassToken,
-                                        dispatchMethodToken = dispatchMethodToken,
-                                        descriptor = vmDescriptor,
-                                        logicalVmResourcePath = resourcePath,
-                                    ),
-                                    logicalIdentity = logicalIdentity,
-                                    serializedProgram = vmBytes,
+                                    dispatchOwner = JNI_MICROKERNEL_DISPATCH_OWNER,
+                                    dispatchMethod = JNI_MICROKERNEL_AKEN_VM_PAGE_DISPATCH_METHOD,
+                                    dispatchDescriptor = AKEN_VM_PAGE_DISPATCH_DESCRIPTOR,
+                                    akenEncodedHandle = pageZeroEncodedHandle,
+                                    akenCallSiteProof = pageZeroCallSiteProof,
                                 )
                             } finally {
-                                java.util.Arrays.fill(logicalIdentity, 0)
+                                java.util.Arrays.fill(pageZeroEncodedHandle, 0)
+                                java.util.Arrays.fill(pageZeroCallSiteProof, 0)
                             }
-
-                            val hotDispatchMethod = specializedVmDispatchMethod(vmDescriptor, vmMethodAccess) ?: JNI_MICROKERNEL_VM_DISPATCH_METHOD
-                            val hotDispatchDescriptor = specializedVmDispatchDescriptor(vmDescriptor, vmMethodAccess) ?: VM_TOKEN_DISPATCH_DESCRIPTOR
-                            generateVmDispatcher(
-                                vmMethodVisitor, className, vmMethodName, vmDescriptor, vmMethodAccess,
-                                opcodeMapping, handlerOrder, VBC4_DISPATCH_LAYOUT, random, resourcePath,
-                                entryToken = entryToken,
-                                dispatchOwner = JNI_MICROKERNEL_DISPATCH_OWNER,
-                                dispatchMethod = hotDispatchMethod,
-                                dispatchDescriptor = hotDispatchDescriptor,
-                            )
                             classModified = true
                             methodCount++
                             if (!restrictToMatchedMethods) broadVirtualizedMethodCount++
@@ -3029,6 +3046,8 @@ internal fun generateVmDispatcher(
     dispatchOwner: String = JNI_MICROKERNEL_DISPATCH_OWNER,
     dispatchMethod: String = JNI_MICROKERNEL_VM_DISPATCH_METHOD,
     dispatchDescriptor: String = VM_LEGACY_DISPATCH_DESCRIPTOR,
+    akenEncodedHandle: ByteArray? = null,
+    akenCallSiteProof: ByteArray? = null,
 ) {
     mv.visitCode()
 
@@ -3043,10 +3062,26 @@ internal fun generateVmDispatcher(
     // corrupts it (JVM VerifyError: Bad local variable type).
     val parameterSlotCount = argTypes.sumOf { it.size } + if (isStatic) 0 else 1
     val localBase = parameterSlotCount + 1 // after params + this + 1 gap slot
+    val usesAkenPageDispatch = dispatchDescriptor == AKEN_VM_PAGE_DISPATCH_DESCRIPTOR
     val usesTokenOnlyDispatch = dispatchDescriptor == VM_TOKEN_DISPATCH_DESCRIPTOR
     val usesVoidSpecializedDispatch = dispatchDescriptor == VM_VOID_DISPATCH_DESCRIPTOR || dispatchDescriptor == VM_INT_VOID_DISPATCH_DESCRIPTOR
     val usesPrimitiveIntDispatch = dispatchDescriptor == VM_INT_DISPATCH_DESCRIPTOR || dispatchDescriptor == VM_INT_INT_DISPATCH_DESCRIPTOR
-    if (!usesTokenOnlyDispatch && !usesVoidSpecializedDispatch && !usesPrimitiveIntDispatch) {
+    require((akenEncodedHandle == null) == (akenCallSiteProof == null)) {
+        "AKEN VM dispatcher requires both page-zero handle and call-site proof"
+    }
+    if (usesAkenPageDispatch) {
+        require(akenEncodedHandle?.size == AkenHandle.ENCODED_HANDLE_SIZE) {
+            "AKEN VM dispatcher page-zero handle has an invalid length"
+        }
+        require(akenCallSiteProof != null && akenCallSiteProof.isNotEmpty() && akenCallSiteProof.size <= 4096) {
+            "AKEN VM dispatcher call-site proof has an invalid length"
+        }
+    } else {
+        require(akenEncodedHandle == null && akenCallSiteProof == null) {
+            "non-AKEN VM dispatcher cannot carry page-zero binding material"
+        }
+    }
+    if (!usesAkenPageDispatch && !usesTokenOnlyDispatch && !usesVoidSpecializedDispatch && !usesPrimitiveIntDispatch) {
         // Legacy dispatch paths keep the obfuscated resource path argument for compatibility.
         emitObfuscatedString(mv, resourcePath, random)
         mv.visitVarInsn(Opcodes.ASTORE, localBase)
@@ -3060,12 +3095,18 @@ internal fun generateVmDispatcher(
         }
     }
     if (handlerOrder.size > opcodeMapping.size) {
-        emitDispatcherMorphBlock(mv, opcodeMapping, handlerOrder, dispatchLayout, localBase + if (usesTokenOnlyDispatch || usesVoidSpecializedDispatch || usesPrimitiveIntDispatch) 0 else 1, random)
+        emitDispatcherMorphBlock(mv, opcodeMapping, handlerOrder, dispatchLayout, localBase + if (usesAkenPageDispatch || usesTokenOnlyDispatch || usesVoidSpecializedDispatch || usesPrimitiveIntDispatch) 0 else 1, random)
     }
-    emitDeadCodeShadowDispatch(mv, localBase + if (usesTokenOnlyDispatch || usesVoidSpecializedDispatch || usesPrimitiveIntDispatch) 8 else 9, random, usesPrimitiveIntDispatch)
+    emitDeadCodeShadowDispatch(mv, localBase + if (usesAkenPageDispatch || usesTokenOnlyDispatch || usesVoidSpecializedDispatch || usesPrimitiveIntDispatch) 8 else 9, random, usesPrimitiveIntDispatch)
     mv.visitLdcInsn(entryToken)
-    if (!usesTokenOnlyDispatch && !usesVoidSpecializedDispatch && !usesPrimitiveIntDispatch) {
+    if (!usesAkenPageDispatch && !usesTokenOnlyDispatch && !usesVoidSpecializedDispatch && !usesPrimitiveIntDispatch) {
         mv.visitVarInsn(Opcodes.ALOAD, localBase)
+    }
+
+    if (usesAkenPageDispatch) {
+        emitObfuscatedByteArray(mv, checkNotNull(akenEncodedHandle), random)
+        mv.visitInsn(Opcodes.ICONST_0)
+        emitObfuscatedByteArray(mv, checkNotNull(akenCallSiteProof), random)
     }
 
     if (usesVoidSpecializedDispatch) {
@@ -3174,6 +3215,26 @@ private fun emitObfuscatedString(mv: MethodVisitor, value: String, random: Secur
     mv.visitInsn(Opcodes.DUP_X1)
     mv.visitInsn(Opcodes.SWAP)
     mv.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/String", "<init>", "([C)V", false)
+}
+
+private fun emitObfuscatedByteArray(
+    mv: MethodVisitor,
+    value: ByteArray,
+    random: SecureRandom,
+) {
+    pushInt(mv, value.size)
+    mv.visitIntInsn(Opcodes.NEWARRAY, Opcodes.T_BYTE)
+    for (index in value.indices) {
+        val mask = random.nextInt(256)
+        val encoded = (value[index].toInt() and 0xFF) xor mask
+        mv.visitInsn(Opcodes.DUP)
+        pushInt(mv, index)
+        pushInt(mv, encoded)
+        pushInt(mv, mask)
+        mv.visitInsn(Opcodes.IXOR)
+        mv.visitInsn(Opcodes.I2B)
+        mv.visitInsn(Opcodes.BASTORE)
+    }
 }
 
 private fun pushInt(mv: MethodVisitor, value: Int) {

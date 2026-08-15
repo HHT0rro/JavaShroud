@@ -55,6 +55,9 @@ public final class JniMicrokernelHelper {
     private static final int LOAD_READY = 2;
     private static volatile int loadState = LOAD_UNTRIED;
     private static volatile String loadMessage = "";
+    /* AKEN readiness is deliberately independent from the legacy boot-material loader. */
+    private static volatile int akenLoadState = LOAD_UNTRIED;
+    private static volatile String akenLoadMessage = "";
     private static volatile boolean diversifiedVmEnabled = false;
     private static volatile String vmSelfCheck = "";
     private static volatile long nativeBootToken = 0L;
@@ -72,6 +75,12 @@ public final class JniMicrokernelHelper {
     private static volatile Thread nativeShellBootSecretThread;
     private static final String SEALED_NATIVE_INDEX_RESOURCE = "META-INF/.r/0.dat";
     private static final String SEALED_NATIVE_BINDINGS_RESOURCE = "META-INF/.r/bindings.dat";
+    private static final String AKEN_NATIVE_LOCATOR_RESOURCE = "META-INF/aken/native.locator";
+    private static final String AKEN_NATIVE_RESOURCE_ROOT = "META-INF/";
+    private static final String AKEN_NATIVE_LOCATOR_RECORD = "AKEN_NATIVE_LOCATOR_V1";
+    private static final int AKEN_NATIVE_LOCATOR_MAX_BYTES = 16 * 1024;
+    private static final int AKEN_NATIVE_MAX_LIBRARY_BYTES = 256 * 1024 * 1024;
+    private static final int AKEN_NATIVE_SHA256_LENGTH = 32;
     private static final String BOOT_MATERIAL_RESOURCE = "META-INF/.r/boot.dat";
     private static final String EMBEDDED_BOOT_SECRET_RESOURCE = "META-INF/.r/kek.dat";
     private static final String BOOT_SECRET_ENV = "JAVASHROUD_BOOT_SECRET_V1";
@@ -115,6 +124,358 @@ public final class JniMicrokernelHelper {
     static native byte[] nativeDecryptClassBytes(byte[] keyId, byte[] salt, byte[] nonce, byte[] ciphertext, byte[] aad, int keyLength);
     static native String nativeSealedBindingKey(byte[] value);
     public static native String nativeGetMachineFingerprint();
+
+    /* ---- AKEN v4 typed page bridge ----
+     * These declarations intentionally accept only a page-local handle, page index,
+     * and call-site proof.  They never accept caller-supplied ciphertext, key bytes,
+     * locator metadata, or a generic resource buffer.
+     */
+    static native Object nativeExecuteAkenVmPage(long entryToken, byte[] encodedHandle, int pageIndex, byte[] callSiteProof, Object[] args);
+    static native byte[] nativeDecodeAkenStringPage(byte[] encodedHandle, int pageIndex, byte[] callSiteProof);
+    static native byte[] nativeReadAkenClassPage(byte[] encodedHandle, int pageIndex, byte[] callSiteProof);
+    static native byte[] nativeMapAkenNativeChunk(byte[] encodedHandle, int pageIndex, byte[] callSiteProof);
+
+    public static Object executeAkenVmPage(long entryToken, byte[] encodedHandle, int pageIndex, byte[] callSiteProof, Object[] args) {
+        requireAkenPageRequest(encodedHandle, pageIndex, callSiteProof, "VM");
+        ensureAkenNativeKernel();
+        try {
+            Object result = nativeExecuteAkenVmPage(entryToken, encodedHandle, pageIndex, callSiteProof, args);
+            if (result == null) throw new SecurityException("AKEN VM page execution failed closed");
+            return result;
+        } catch (UnsatisfiedLinkError error) {
+            throw new SecurityException("AKEN VM page bridge is not registered for the sealed helper", error);
+        }
+    }
+
+    public static byte[] decodeAkenStringPage(byte[] encodedHandle, int pageIndex, byte[] callSiteProof) {
+        requireAkenPageRequest(encodedHandle, pageIndex, callSiteProof, "string");
+        ensureAkenNativeKernel();
+        return requireAkenPageResult(nativeDecodeAkenStringPage(encodedHandle, pageIndex, callSiteProof), "string");
+    }
+
+    public static byte[] readAkenClassPage(byte[] encodedHandle, int pageIndex, byte[] callSiteProof) {
+        requireAkenPageRequest(encodedHandle, pageIndex, callSiteProof, "class");
+        ensureAkenNativeKernel();
+        return requireAkenPageResult(nativeReadAkenClassPage(encodedHandle, pageIndex, callSiteProof), "class");
+    }
+
+    public static byte[] mapAkenNativeChunk(byte[] encodedHandle, int pageIndex, byte[] callSiteProof) {
+        requireAkenPageRequest(encodedHandle, pageIndex, callSiteProof, "native");
+        ensureAkenNativeKernel();
+        return requireAkenPageResult(nativeMapAkenNativeChunk(encodedHandle, pageIndex, callSiteProof), "native");
+    }
+
+    private static void requireAkenPageRequest(byte[] encodedHandle, int pageIndex, byte[] callSiteProof, String purpose) {
+        if (encodedHandle == null || encodedHandle.length != 24 || pageIndex < 0 || callSiteProof == null || callSiteProof.length == 0 || callSiteProof.length > 4096) {
+            throw new SecurityException("AKEN " + purpose + " page request is invalid");
+        }
+    }
+
+    private static void ensureAkenNativeKernel() {
+        if (akenLoadState == LOAD_UNTRIED) loadAkenNativeKernel();
+        if (akenLoadState != LOAD_READY) {
+            throw new SecurityException("AKEN page access requires the sealed native kernel; no Java fallback (" + akenLoadMessage + ")");
+        }
+    }
+
+    /**
+     * Load only the AKEN-specific raw JNI artifact.  This path intentionally
+     * does not read boot material, publish legacy sealed bindings, install a
+     * boot envelope, or preload the old VM catalog.
+     */
+    private static synchronized void loadAkenNativeKernel() {
+        if (akenLoadState != LOAD_UNTRIED) return;
+        akenLoadState = LOAD_LOADING;
+        try {
+            String platformSuffix = detectPlatform();
+            if (platformSuffix == null) {
+                akenLoadMessage = "aken:native-unavailable";
+                akenLoadState = LOAD_FAILED;
+                return;
+            }
+            if (!tryLoadAkenBundledNative(platformSuffix)) {
+                if (akenLoadMessage == null || akenLoadMessage.length() == 0) {
+                    akenLoadMessage = "aken:bundled-native-unavailable";
+                }
+                akenLoadState = LOAD_FAILED;
+                return;
+            }
+            akenLoadState = LOAD_READY;
+        } catch (Throwable error) {
+            akenLoadMessage = debugNativeLoadMessage("aken:native-exception", error);
+            akenLoadState = LOAD_FAILED;
+        }
+    }
+
+    private static boolean tryLoadAkenBundledNative(String platformSuffix) {
+        AkenNativeLibrary locator;
+        try {
+            locator = readAkenNativeLocator(platformSuffix);
+        } catch (SecurityException error) {
+            akenLoadMessage = "aken:native-locator-invalid:" + platformSuffix;
+            return false;
+        }
+        return tryLoadAkenBundledNativeResource(platformSuffix, locator);
+    }
+
+    private static boolean tryLoadAkenBundledNativeResource(String platformSuffix, AkenNativeLibrary locator) {
+        byte[] nativeBytes = null;
+        byte[] actualDigest = null;
+        File tempLib = null;
+        String previousLoaderOwner = System.getProperty(sealedLoaderPropertyName());
+        boolean loaded = false;
+        try (InputStream in = resourceStream(locator.resourcePath)) {
+            if (in == null) {
+                akenLoadMessage = "aken:native-resource-missing:" + platformSuffix;
+                return false;
+            }
+            nativeBytes = readAllBounded(in, locator.storedLength);
+            if (nativeBytes.length != locator.storedLength || hasAkenRejectedLegacyHeader(nativeBytes)) {
+                akenLoadMessage = "aken:native-resource-invalid:" + platformSuffix;
+                return false;
+            }
+            actualDigest = sha256(nativeBytes);
+            if (!MessageDigest.isEqual(locator.sha256, actualDigest)) {
+                akenLoadMessage = "aken:native-resource-digest-mismatch:" + platformSuffix;
+                return false;
+            }
+            for (File extractDirectory : nativeExtractDirectories()) {
+                if (!ensureNativeExtractDirectory(extractDirectory)) continue;
+                tempLib = createUniqueTempFile(nativeTempPrefix(locator.resourcePath), locator.fileSuffix, extractDirectory);
+                tempLib.deleteOnExit();
+                try (FileOutputStream out = new FileOutputStream(tempLib)) {
+                    out.write(nativeBytes);
+                }
+                tempLib.setReadable(true, true);
+                tempLib.setWritable(true, true);
+                tempLib.setExecutable(true, true);
+                // Keep only the owner binding needed by RegisterNatives; do not
+                // publish the legacy binding resource or any boot-derived state.
+                publishSealedNativeLoaderOwner();
+                System.load(tempLib.getAbsolutePath());
+                int initResult = initializeNativeKernel(platformSuffix);
+                if (initResult < 0) {
+                    akenLoadMessage = "aken:native-init-failed:" + initResult;
+                    return false;
+                }
+                if (!verifyAkenNativeAbiAfterLoad()) return false;
+                akenLoadMessage = "aken:native:bundled:" + platformSuffix + ":" + initResult;
+                loaded = true;
+                return true;
+            }
+            akenLoadMessage = "aken:native-extract-unavailable:" + platformSuffix;
+            return false;
+        } catch (UnsatisfiedLinkError error) {
+            akenLoadMessage = debugNativeLoadMessage("aken:native-load-error", error);
+            return false;
+        } catch (Throwable error) {
+            akenLoadMessage = debugNativeLoadMessage("aken:native-init-error", error);
+            return false;
+        } finally {
+            if (nativeBytes != null) Arrays.fill(nativeBytes, (byte) 0);
+            if (actualDigest != null) Arrays.fill(actualDigest, (byte) 0);
+            locator.clear();
+            if (!loaded && tempLib != null) tempLib.delete();
+            if (!loaded) restoreLoaderProperty(previousLoaderOwner);
+        }
+    }
+
+    private static boolean verifyAkenNativeAbiAfterLoad() {
+        byte[] handle = new byte[24];
+        byte[] proof = new byte[] { 1 };
+        try {
+            try {
+                nativeExecuteAkenVmPage(0L, handle, 0, proof, null);
+            } catch (SecurityException expectedRouteFailure) {
+                // The current native bridge is intentionally fail-closed until page routing lands.
+            }
+            try {
+                nativeDecodeAkenStringPage(handle, 0, proof);
+            } catch (SecurityException expectedRouteFailure) {
+                // Registered typed route reached native code.
+            }
+            try {
+                nativeReadAkenClassPage(handle, 0, proof);
+            } catch (SecurityException expectedRouteFailure) {
+                // Registered typed route reached native code.
+            }
+            try {
+                nativeMapAkenNativeChunk(handle, 0, proof);
+            } catch (SecurityException expectedRouteFailure) {
+                // Registered typed route reached native code.
+            }
+            return true;
+        } catch (UnsatisfiedLinkError error) {
+            akenLoadMessage = "aken:abi-missing:typed-page-bridge";
+            return false;
+        } catch (Throwable error) {
+            akenLoadMessage = "aken:abi-probe-failed:" + error.getClass().getName();
+            return false;
+        } finally {
+            Arrays.fill(handle, (byte) 0);
+            Arrays.fill(proof, (byte) 0);
+        }
+    }
+
+    private static byte[] requireAkenPageResult(byte[] result, String purpose) {
+        if (result == null) throw new SecurityException("AKEN " + purpose + " page access failed closed");
+        return result;
+    }
+
+    /**
+     * Resolve exactly one raw AKEN native artifact for the active platform.
+     * This parser intentionally has no compatibility branch for JSBI, JSRP,
+     * boot envelopes, bindings, or a general resource catalog.
+     */
+    private static AkenNativeLibrary readAkenNativeLocator(String expectedPlatform) {
+        byte[] raw = null;
+        try (InputStream in = resourceStream(AKEN_NATIVE_LOCATOR_RESOURCE)) {
+            if (in == null) throw new SecurityException("AKEN native locator is missing");
+            raw = readAllBounded(in, AKEN_NATIVE_LOCATOR_MAX_BYTES);
+            if (raw.length == 0 || hasAkenRejectedLegacyHeader(raw) || !isAscii(raw)) {
+                throw new SecurityException("AKEN native locator is not raw metadata");
+            }
+            String text = new String(raw, StandardCharsets.US_ASCII);
+            AkenNativeLibrary selected = null;
+            String[] lines = text.split("\\n", -1);
+            if (lines.length == 0 || (lines.length > 1 && lines[lines.length - 1].length() == 0)) {
+                throw new SecurityException("AKEN native locator has invalid line layout");
+            }
+            LinkedHashSet<String> seenPlatforms = new LinkedHashSet<>();
+            for (String line : lines) {
+                if (line.length() == 0 || line.indexOf('\r') >= 0) {
+                    throw new SecurityException("AKEN native locator has an empty or CRLF record");
+                }
+                String[] fields = line.split("\\|", -1);
+                if (fields.length != 6 || !AKEN_NATIVE_LOCATOR_RECORD.equals(fields[0])) {
+                    throw new SecurityException("AKEN native locator record is malformed");
+                }
+                String platform = fields[1];
+                String resourcePath = fields[2];
+                String fileSuffix = fields[3];
+                if (!isAkenNativePlatform(platform) || !seenPlatforms.add(platform)) {
+                    throw new SecurityException("AKEN native locator platform is invalid or duplicated");
+                }
+                if (!isAkenNativeResourcePath(resourcePath) || !isAkenNativeSuffix(platform, fileSuffix) ||
+                    !resourcePath.endsWith(fileSuffix)) {
+                    throw new SecurityException("AKEN native locator route is invalid");
+                }
+                int storedLength = parseAkenNativeLength(fields[4]);
+                byte[] digest = parseAkenNativeSha256(fields[5]);
+                if (platform.equals(expectedPlatform)) {
+                    if (selected != null) {
+                        Arrays.fill(digest, (byte) 0);
+                        throw new SecurityException("AKEN native locator has duplicate active platform");
+                    }
+                    selected = new AkenNativeLibrary(resourcePath, fileSuffix, storedLength, digest);
+                } else {
+                    Arrays.fill(digest, (byte) 0);
+                }
+            }
+            if (selected == null) throw new SecurityException("AKEN native locator has no active platform route");
+            return selected;
+        } catch (SecurityException error) {
+            throw error;
+        } catch (Exception error) {
+            throw new SecurityException("AKEN native locator is unreadable", error);
+        } finally {
+            if (raw != null) Arrays.fill(raw, (byte) 0);
+        }
+    }
+
+    private static boolean isAkenNativePlatform(String platform) {
+        return "windows-x64".equals(platform) ||
+            "linux-x64".equals(platform) ||
+            "macos-x64".equals(platform) ||
+            "macos-arm64".equals(platform);
+    }
+
+    private static boolean isAkenNativeSuffix(String platform, String suffix) {
+        return ("windows-x64".equals(platform) && ".dll".equals(suffix)) ||
+            ("linux-x64".equals(platform) && ".so".equals(suffix)) ||
+            (("macos-x64".equals(platform) || "macos-arm64".equals(platform)) && ".dylib".equals(suffix));
+    }
+
+    private static boolean isAkenNativeResourcePath(String resourcePath) {
+        if (resourcePath == null || !resourcePath.startsWith(AKEN_NATIVE_RESOURCE_ROOT) ||
+            resourcePath.length() == AKEN_NATIVE_RESOURCE_ROOT.length() || resourcePath.indexOf('\\') >= 0 ||
+            resourcePath.indexOf('\u0000') >= 0 || resourcePath.indexOf('|') >= 0 ||
+            resourcePath.indexOf('\r') >= 0 || resourcePath.indexOf('\n') >= 0) {
+            return false;
+        }
+        String tail = resourcePath.substring(AKEN_NATIVE_RESOURCE_ROOT.length());
+        String[] segments = tail.split("/", -1);
+        for (String segment : segments) {
+            if (segment.length() == 0 || ".".equals(segment) || "..".equals(segment)) return false;
+            for (int index = 0; index < segment.length(); index++) {
+                char character = segment.charAt(index);
+                if (!((character >= 'a' && character <= 'z') ||
+                    (character >= 'A' && character <= 'Z') ||
+                    (character >= '0' && character <= '9') ||
+                    character == '.' || character == '_' || character == '-')) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private static int parseAkenNativeLength(String value) {
+        if (!isDecimal(value)) throw new SecurityException("AKEN native locator length is invalid");
+        try {
+            int parsed = Integer.parseInt(value);
+            if (parsed <= 0 || parsed > AKEN_NATIVE_MAX_LIBRARY_BYTES) {
+                throw new SecurityException("AKEN native locator length is invalid");
+            }
+            return parsed;
+        } catch (NumberFormatException error) {
+            throw new SecurityException("AKEN native locator length is invalid", error);
+        }
+    }
+
+    private static byte[] parseAkenNativeSha256(String value) {
+        if (value == null || value.length() != AKEN_NATIVE_SHA256_LENGTH * 2) {
+            throw new SecurityException("AKEN native locator SHA-256 is invalid");
+        }
+        byte[] digest = new byte[AKEN_NATIVE_SHA256_LENGTH];
+        for (int index = 0; index < digest.length; index++) {
+            char hi = value.charAt(index * 2);
+            char lo = value.charAt(index * 2 + 1);
+            if (hi < '0' || hi > 'f' || lo < '0' || lo > 'f' ||
+                (hi > '9' && hi < 'a') || (lo > '9' && lo < 'a')) {
+                Arrays.fill(digest, (byte) 0);
+                throw new SecurityException("AKEN native locator SHA-256 is invalid");
+            }
+            int high = Character.digit(hi, 16);
+            int low = Character.digit(lo, 16);
+            if (high < 0 || low < 0) {
+                Arrays.fill(digest, (byte) 0);
+                throw new SecurityException("AKEN native locator SHA-256 is invalid");
+            }
+            digest[index] = (byte) ((high << 4) | low);
+        }
+        return digest;
+    }
+
+    private static boolean isAscii(byte[] bytes) {
+        for (byte value : bytes) if ((value & 0x80) != 0) return false;
+        return true;
+    }
+
+    private static boolean hasAkenRejectedLegacyHeader(byte[] bytes) {
+        return hasAkenHeader(bytes, 'J', 'S', 'R', 'P') ||
+            hasAkenHeader(bytes, 'J', 'S', 'B', 'I') ||
+            hasAkenHeader(bytes, 'J', 'S', 'B', 'M') ||
+            hasAkenHeader(bytes, 'J', 'S', 'B', 'K');
+    }
+
+    private static boolean hasAkenHeader(byte[] bytes, char first, char second, char third, char fourth) {
+        return bytes != null && bytes.length >= 4 &&
+            (bytes[0] & 0xFF) == first &&
+            (bytes[1] & 0xFF) == second &&
+            (bytes[2] & 0xFF) == third &&
+            (bytes[3] & 0xFF) == fourth;
+    }
 
     public static native Object nativeExecuteVmResource(long entryToken, String resourcePath, Object[] args);
     public static native Object nativeExecuteVmResourceByToken(long entryToken, Object[] args);
@@ -2802,6 +3163,25 @@ public final class JniMicrokernelHelper {
         throw new java.io.IOException("cannot create unique temp file in " + dir);
     }
 
+    private static byte[] readAllBounded(InputStream in, int maxBytes) throws IOException {
+        if (in == null || maxBytes <= 0) throw new IOException("invalid bounded stream request");
+        ByteArrayOutputStream out = new ByteArrayOutputStream(Math.min(maxBytes, 1024));
+        byte[] buffer = new byte[1024];
+        int total = 0;
+        try {
+            int read;
+            while ((read = in.read(buffer)) >= 0) {
+                if (read == 0) continue;
+                if (read > maxBytes - total) throw new IOException("stream exceeds configured limit");
+                out.write(buffer, 0, read);
+                total += read;
+            }
+            return out.toByteArray();
+        } finally {
+            Arrays.fill(buffer, (byte) 0);
+        }
+    }
+
     private static byte[] readAll(InputStream in) throws Exception {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         byte[] buf = new byte[1024];
@@ -2827,6 +3207,24 @@ public final class JniMicrokernelHelper {
 
         public int hashCode() {
             return resourcePath.hashCode() * 31 + fileSuffix.hashCode();
+        }
+    }
+
+    private static final class AkenNativeLibrary {
+        final String resourcePath;
+        final String fileSuffix;
+        final int storedLength;
+        final byte[] sha256;
+
+        AkenNativeLibrary(String resourcePath, String fileSuffix, int storedLength, byte[] sha256) {
+            this.resourcePath = resourcePath;
+            this.fileSuffix = fileSuffix;
+            this.storedLength = storedLength;
+            this.sha256 = sha256;
+        }
+
+        void clear() {
+            Arrays.fill(sha256, (byte) 0);
         }
     }
 

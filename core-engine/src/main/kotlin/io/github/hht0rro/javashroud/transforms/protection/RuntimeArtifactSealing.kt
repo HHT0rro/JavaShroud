@@ -8,6 +8,8 @@ import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenArtifactCommitment
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenArtifactEntry
 import io.github.hht0rro.javashroud.transforms.rename.FIELD_RENAME_BINDINGS_RESOURCE
 import io.github.hht0rro.javashroud.transforms.rename.METHOD_RENAME_BINDINGS_RESOURCE
 import org.objectweb.asm.ClassReader
@@ -79,6 +81,7 @@ private val SEALED_RUNTIME_HELPERS = listOf(
     "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper",
     "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper${"$"}RuntimeResourceMetadata",
     "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper${"$"}SealedNativeLibrary",
+    "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper${"$"}AkenNativeLibrary",
     "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper${"$"}TypeParseResult",
     "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper${"$"}SamLambdaOptions",
     "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper${"$"}SamInvocationHandler",
@@ -194,6 +197,18 @@ object RuntimeArtifactSealing {
                     reservedEntryNames += route.futureContainerPath
                 }
             }
+        val akenNativeLocatorResource = if (artifact.jarEntries.any { entry -> isAkenNativeKernelResource(entry.name) }) {
+            uniqueSealedResourceName(
+                seed = seed,
+                kind = "a",
+                originalName = "aken-native-locator",
+                index = 0,
+                preferredName = sealedResourceName(seed, "a", "aken-native-locator", 0),
+                reservedEntryNames = reservedEntryNames,
+            ).also(reservedEntryNames::add)
+        } else {
+            null
+        }
         var sealedNativeBindingsResource: String? = null
         val bootMaterialResource = if (maxHardening) {
             uniqueSealedResourceName(
@@ -258,6 +273,9 @@ object RuntimeArtifactSealing {
             LEGACY_SEALED_NATIVE_INDEX_RESOURCE to sealedNativeIndexResource,
             VBC4_VM_CATALOG_RESOURCE to vmCatalogResource,
         )
+        akenNativeLocatorResource?.let { sealedPath ->
+            helperStringRewriteMap[AKEN_NATIVE_LOCATOR_LOGICAL_RESOURCE] = sealedPath
+        }
         if (maxHardening) {
             helperStringRewriteMap[BootMaterialEnvelope.RESOURCE_PATH] = bootMaterialResource
         }
@@ -315,7 +333,7 @@ object RuntimeArtifactSealing {
                         seed = seed,
                         originalName = entry.name,
                         index = index,
-                        suffix = nativeSpec.storageSuffix,
+                        suffix = nativeSpec.loadSuffix,
                         reservedEntryNames = reservedEntryNames,
                     )
                     reservedEntryNames += sealedName
@@ -399,7 +417,10 @@ object RuntimeArtifactSealing {
             helperClassRenameMap.isEmpty() &&
             embeddedBootKekResource == null &&
             !hasBootMaterialToRename
-        ) return artifact
+        ) {
+            publishAkenArtifactCommitment(artifact)
+            return artifact
+        }
 
         val rewrittenClassArtifacts = artifact.classArtifacts.map { classArtifact ->
             rewriteClassArtifact(
@@ -454,10 +475,29 @@ object RuntimeArtifactSealing {
                     )
                 }
             }
+            if (sealedNativeSpecs.isNotEmpty()) {
+                val locatorPath = checkNotNull(akenNativeLocatorResource)
+                val nativeBytesByPath = runtimeEntries.associate { entry -> entry.name to entry.bytes }
+                val locatorEntries = sealedNativeSpecs.map { spec ->
+                    val nativeBytes = checkNotNull(nativeBytesByPath[spec.resourceName]) {
+                        "AKEN native locator target was not emitted: ${spec.resourceName}"
+                    }
+                    AkenNativeLocator.entry(
+                        platform = spec.platform,
+                        resourcePath = spec.resourceName,
+                        fileSuffix = spec.loadSuffix,
+                        storedBytes = nativeBytes,
+                    )
+                }
+                runtimeEntries += JarEntryData(
+                    name = locatorPath,
+                    bytes = AkenNativeLocator.encode(locatorEntries),
+                )
+            }
             runtimeEntries
         }
         val rewrittenSummaries = rewrittenClassArtifacts.map { it.summary }
-        return artifact.copy(
+        val sealedArtifact = artifact.copy(
             jarEntries = synchronizedJarEntries,
             classArtifacts = rewrittenClassArtifacts,
             classArtifactIndex = classArtifactIndex(rewrittenClassArtifacts),
@@ -468,14 +508,58 @@ object RuntimeArtifactSealing {
                 classNameIndex = classSummaryIndex(rewrittenSummaries),
             ),
         )
+        // This is deliberately the last sealing-stage hook: resource names,
+        // helper rewrites, and injected native entries have reached their final
+        // artifact representation.  It intentionally does not use the early
+        // jar-layout digest, RuntimeResourceCodec, or any boot material.
+        //
+        // No root-shard ranges are supplied yet because the current legacy
+        // output has not reserved AKEN root-shard byte ranges.  The metadata
+        // layer nonetheless owns the canonical final-entry representation now,
+        // so a later AKEN emitter can reserve shards and call the same API
+        // without reviving a boot/root-key path.
+        publishAkenArtifactCommitment(sealedArtifact)
+        return sealedArtifact
     }
+}
+
+/**
+ * Build-only transition hook for the AKEN v4 sealing pipeline.
+ *
+ * It is intentionally internal and returns no artifact metadata: current
+ * legacy runtime readers must remain behaviorally unchanged until the native
+ * AKEN handle path emits per-page route/proof records.  When an AKEN plan has
+ * already been initialized by that later phase, its commitment is required to
+ * match this final representation; this catches accidental early-plan use.
+ */
+internal fun publishAkenArtifactCommitment(artifact: BytecodeArtifact): AkenArtifactCommitment {
+    val classesByEntry = artifact.classArtifacts.associateBy { classArtifact -> classArtifact.entryName }
+    val finalEntries = artifact.jarEntries.map { entry ->
+        val finalBytes = classesByEntry[entry.name]?.bytes ?: entry.bytes
+        AkenArtifactEntry(name = entry.name, bytes = finalBytes)
+    }
+    val commitment = AkenArtifactCommitment.compute(finalEntries)
+    val context = currentVbc4BuildContextOrNull()
+    val plan = context?.akenBuildPlanOrNull()
+    if (plan != null) {
+        val plannedCommitment = plan.artifactCanonicalCommitment
+        val computedCommitment = commitment.bytes
+        try {
+            check(Arrays.equals(plannedCommitment, computedCommitment)) {
+                "AKEN v4 build plan commitment does not match final sealed artifact"
+            }
+        } finally {
+            Arrays.fill(plannedCommitment, 0)
+            Arrays.fill(computedCommitment, 0)
+        }
+    }
+    return commitment
 }
 
 private data class SealedNativeSpec(
     val platform: String,
     val resourceName: String,
     val loadSuffix: String,
-    val storageSuffix: String,
 )
 
 private data class SealedMemberRef(
@@ -657,6 +741,7 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     addMethod(jniHelper, "executeVmResourceInt", "(J)I")
     addMethod(jniHelper, "executeVmResourceIntInt", "(JI)I")
     addMethod(jniHelper, "executeVmResourceIntVoid", "(JI)V")
+    addMethod(jniHelper, "executeAkenVmPage", "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;")
     addMethod(jniHelper, "nativeInit", "(Ljava/lang/String;)I")
     addMethod(jniHelper, "nativeVerify", "([B[B)I")
     addMethod(jniHelper, "nativeHeartbeat", "()I")
@@ -743,6 +828,10 @@ private fun isClassEncryptionResource(entryName: String): Boolean =
 private fun isClassEncryptionManifestResource(entryName: String): Boolean =
     entryName == LEGACY_CLASS_ENCRYPTION_MANIFEST_RESOURCE
 
+private fun isAkenNativeKernelResource(entryName: String): Boolean =
+    entryName.startsWith(AKEN_NATIVE_RESOURCE_ROOT) &&
+        (entryName.endsWith(".dll") || entryName.endsWith(".so") || entryName.endsWith(".dylib"))
+
 private fun isNativeKernelResource(entryName: String): Boolean =
     entryName.startsWith(LEGACY_NATIVE_RESOURCE_ROOT) &&
         (entryName.endsWith(".dll") || entryName.endsWith(".so") || entryName.endsWith(".dylib"))
@@ -759,7 +848,7 @@ private fun nativeSpecFor(entryName: String): SealedNativeSpec {
         .removeSuffix(".dll")
         .removeSuffix(".so")
         .removeSuffix(".dylib")
-    return SealedNativeSpec(platform = platform, resourceName = entryName, loadSuffix = loadSuffix, storageSuffix = ".bin")
+    return SealedNativeSpec(platform = platform, resourceName = entryName, loadSuffix = loadSuffix)
 }
 
 private fun sealedNativeIndexResourceName(seed: Long): String =

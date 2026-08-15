@@ -1,6 +1,7 @@
 package io.github.hht0rro.javashroud.transforms.protection.aken
 
 import java.security.SecureRandom
+import java.security.MessageDigest
 import java.util.Arrays
 
 /**
@@ -146,10 +147,27 @@ internal object AkenVbc4PendingPagePlanner {
                     frameSuffixLength = suffixLength,
                 )
                 var pagePlaintext: ByteArray? = null
+                var derivedCallSiteProof: ByteArray? = null
                 var callSiteProof: ByteArray? = null
+                var encodedHandleOverride: ByteArray? = null
                 try {
                     pagePlaintext = source.copyOfRange(serializedStart, serializedEndExclusive)
-                    callSiteProof = callSiteProofForPage(cluster.pageIndex)
+                    derivedCallSiteProof = callSiteProofForPage(cluster.pageIndex)
+                    if (cluster.pageIndex == 0 && candidate.hasPageZeroDispatchBindingForBuild) {
+                        encodedHandleOverride = candidate.copyPageZeroEncodedHandleForBuild()
+                        callSiteProof = candidate.copyPageZeroCallSiteProofForBuild()
+                        require(
+                            MessageDigest.isEqual(
+                                checkNotNull(derivedCallSiteProof),
+                                checkNotNull(callSiteProof),
+                            ),
+                        ) {
+                            "AKEN VBC4 page-zero dispatch proof drifted from the pending page proof"
+                        }
+                    } else {
+                        callSiteProof = derivedCallSiteProof
+                        derivedCallSiteProof = null
+                    }
                     val pending = AkenVbc4PendingPage.create(
                         entryToken = candidate.entryToken,
                         logicalIdentity = checkNotNull(logicalIdentity),
@@ -161,6 +179,7 @@ internal object AkenVbc4PendingPagePlanner {
                         targetPageSize = partition.targetSize,
                         random = random,
                         logicalBindingPath = route.logicalVmResourcePath,
+                        encodedHandleOverride = encodedHandleOverride,
                     )
                     pendingPages += pending
                     val nextOffset = nextResourceOffset.toLong() + pending.expectedStoredLength.toLong()
@@ -171,7 +190,9 @@ internal object AkenVbc4PendingPagePlanner {
                     partitions += partition
                 } finally {
                     pagePlaintext?.let { Arrays.fill(it, 0) }
+                    derivedCallSiteProof?.let { Arrays.fill(it, 0) }
                     callSiteProof?.let { Arrays.fill(it, 0) }
+                    encodedHandleOverride?.let { Arrays.fill(it, 0) }
                 }
                 expectedSerializedStart = serializedEndExclusive
             }

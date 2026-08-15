@@ -137,6 +137,92 @@ class AkenVbc4PendingPagePlannerTest {
     }
 
     @Test
+    fun preserves_a_preassigned_page_zero_dispatch_binding_through_finalization() {
+        val entryToken = 0x4A4B_454E_0000_0D80L
+        val logicalPath = "META-INF/vbc4/preassigned-page-zero.bin"
+        val program = framedVbc4(blockIds = listOf(7), encryptedPayloadLengths = listOf(144))
+        val expectedHandle = ByteArray(24) { index -> (index * 19 + 5).toByte() }
+        val expectedProof = ByteArray(37) { index -> (index * 11 + 9).toByte() }
+        val candidate = candidate(
+            entryToken = entryToken,
+            logicalPath = logicalPath,
+            program = program,
+            pageZeroEncodedHandle = expectedHandle,
+            pageZeroCallSiteProof = expectedProof,
+        )
+        val route = AkenVbc4PreSealRoute.create(
+            entryToken = entryToken,
+            logicalVmResourcePath = logicalPath,
+            futureContainerPath = "META-INF/.aken/vbc4/preassigned-page-zero.bin",
+        )
+        var layout: AkenVbc4FinalizationLayout? = null
+        try {
+            val batch = AkenVbc4PendingPagePlanner.partitionAndWipe(
+                candidate = candidate,
+                route = route,
+                callSiteProofForPage = { pageIndex ->
+                    assertEquals(0, pageIndex)
+                    expectedProof.copyOf()
+                },
+                targetSizeForPage = { 512 },
+                random = DeterministicSecureRandom(0x51C0),
+            )
+            assertTrue(candidate.isWiped)
+            batch.consumePendingPagesForBuild { pages ->
+                val pending = pages.single()
+                val pendingHandle = pending.copyEncodedHandleOverrideForBuild()
+                val pendingProof = pending.copyCallSiteProofForBuild()
+                try {
+                    assertContentEquals(expectedHandle, checkNotNull(pendingHandle))
+                    assertContentEquals(expectedProof, pendingProof)
+                } finally {
+                    pendingHandle?.let { Arrays.fill(it, 0) }
+                    Arrays.fill(pendingProof, 0)
+                }
+
+                val commitment = AkenVbc4FinalizationLayout.reserve(
+                    pendingPages = pages,
+                    fixedEntries = emptyList(),
+                )
+                val commitmentBytes = commitment.copyBytes()
+                val plan = try {
+                    AkenBuildPlan.create(commitmentBytes, DeterministicSecureRandom(0x51C1))
+                } finally {
+                    Arrays.fill(commitmentBytes, 0)
+                }
+                layout = AkenVbc4FinalizationLayout.materializeAndWipe(
+                    plan = plan,
+                    commitment = commitment,
+                    pendingPages = pages,
+                    fixedEntries = emptyList(),
+                )
+                assertTrue(plan.isWiped())
+            }
+            checkNotNull(layout).withPageZeroDispatchBindingsForBuild { bindings ->
+                val binding = bindings.single()
+                val handle = binding.copyEncodedHandleForBuild()
+                val proof = binding.copyCallSiteProofForBuild()
+                try {
+                    assertEquals(entryToken, binding.entryToken)
+                    assertEquals(0, binding.pageIndex)
+                    assertContentEquals(expectedHandle, handle)
+                    assertContentEquals(expectedProof, proof)
+                } finally {
+                    Arrays.fill(handle, 0)
+                    Arrays.fill(proof, 0)
+                }
+            }
+        } finally {
+            layout?.wipe()
+            candidate.wipe()
+            route.wipe()
+            Arrays.fill(program, 0)
+            Arrays.fill(expectedHandle, 0)
+            Arrays.fill(expectedProof, 0)
+        }
+    }
+
+    @Test
     fun propagates_block_cluster_targets_into_finalized_runtime_descriptors() {
         val program = framedVbc4(
             blockIds = listOf(10, 20, 30, 40, 50),
@@ -224,6 +310,8 @@ class AkenVbc4PendingPagePlannerTest {
         entryToken: Long,
         logicalPath: String,
         program: ByteArray,
+        pageZeroEncodedHandle: ByteArray? = null,
+        pageZeroCallSiteProof: ByteArray? = null,
     ): AkenVbc4MethodCandidate {
         val identity = ByteArray(32) { index -> (index * 13 + 7).toByte() }
         val logicalMethod = AkenVbc4LogicalMethodIdentity.create(
@@ -238,6 +326,8 @@ class AkenVbc4PendingPagePlannerTest {
                 logicalMethod = logicalMethod,
                 logicalIdentity = identity,
                 serializedProgram = program,
+                pageZeroEncodedHandle = pageZeroEncodedHandle,
+                pageZeroCallSiteProof = pageZeroCallSiteProof,
             )
         } finally {
             Arrays.fill(identity, 0)
