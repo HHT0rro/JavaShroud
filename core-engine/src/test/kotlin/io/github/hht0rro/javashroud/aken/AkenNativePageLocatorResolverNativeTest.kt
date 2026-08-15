@@ -18,6 +18,7 @@ import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4Finalizat
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4PendingPage
 import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
@@ -537,6 +538,167 @@ class AkenNativePageLocatorResolverNativeTest {
         }
     }
 
+    @Test
+    fun production_vbc4_current_page_loads_and_authenticates_through_real_jni() {
+        val zig = findZig()
+        val platform = currentAkenHostPlatform()
+        assumeTrue(zig != null, "Zig is required to compile the real AKEN JNI current-page fixture")
+        assumeTrue(platform != null, "The real AKEN JNI current-page fixture supports release-gate host platforms only")
+
+        val sourceNativeDir = resolveSource("src/main/native/js_jni_runtime.c").parent
+        val sourceInclude = sourceNativeDir.resolve("js_aken_page_locator.inc")
+        val originalInclude = Files.readAllBytes(sourceInclude)
+        val identity = "fixture:aken-real-jni-current-page".encodeToByteArray()
+        val plaintext = ByteArray(719) { index -> ((index * 37 + 23) and 0xFF).toByte() }
+        val rawProof = ByteArray(71) { index -> ((index * 13 + 9) and 0xFF).toByte() }
+        val entryToken = 0x414B_454E_0000_3001L
+        val page = AkenVbc4PendingPage.create(
+            entryToken = entryToken,
+            logicalIdentity = identity,
+            plaintext = plaintext,
+            resourcePath = "META-INF/.aken/vbc4/real-jni-current-page.bin",
+            pageIndex = 0,
+            targetPageSize = 768,
+            callSiteProof = rawProof,
+            random = SecureRandom(),
+        )
+        val tempDir = Files.createTempDirectory("javashroud-aken-real-jni-current-page-")
+        var context: Vbc4BuildContext? = null
+        var layout: AkenVbc4FinalizationLayout? = null
+        var currentPage: ProductionCurrentPage? = null
+        var compilerRecord: ByteArray? = null
+        var entryBytes: ByteArray? = null
+        var generatedIncludeBytes: ByteArray? = null
+        var tamperedEntryBytes: ByteArray? = null
+        try {
+            val commitment = AkenVbc4FinalizationLayout.reserve(
+                pendingPages = listOf(page),
+                fixedEntries = emptyList(),
+            )
+            val buildContext = defaultVbc4BuildContext()
+            context = buildContext
+            val planCommitment = commitment.copyBytes()
+            val plan = try {
+                buildContext.initializeAkenBuildPlan(planCommitment)
+            } finally {
+                Arrays.fill(planCommitment, 0)
+            }
+            val finalized = AkenVbc4FinalizationLayout.materializeAndWipe(
+                plan = plan,
+                commitment = commitment,
+                pendingPages = listOf(page),
+                fixedEntries = emptyList(),
+            )
+            layout = finalized
+            buildContext.publishAkenVbc4FinalizationLayout(finalized)
+            compilerRecord = buildContext.withAkenNativeLocatorRecordsForBuild { records ->
+                assertEquals(1, records.size)
+                records.single().copyOf()
+            }
+            val selectedPage = parseProductionCurrentPage(checkNotNull(compilerRecord))
+            currentPage = selectedPage
+            assertEquals(entryToken, selectedPage.entryToken)
+            assertEquals(AkenResourceKind.Vbc4Method, selectedPage.resourceKind)
+            assertEquals(0, selectedPage.pageIndex)
+
+            val descriptor = decodeProductionCurrentPageDescriptor(checkNotNull(compilerRecord))
+            val route = descriptor.route
+            val entry = finalized.entriesForBuild().single { it.name == route.resourcePath }
+            entryBytes = entry.copyBytesForBuild()
+            val endExclusive = route.resourceOffset.toLong() + route.storedLength.toLong()
+            require(endExclusive <= checkNotNull(entryBytes).size.toLong()) {
+                "production AKEN real JNI route exceeds its final entry"
+            }
+
+            val include = NativeRecompilationTransforms.generateAkenNativePageLocatorInclude(
+                buildContext,
+                Random(0xA4E3),
+            )
+            generatedIncludeBytes = include.toByteArray(StandardCharsets.US_ASCII)
+            assertFalse(include.contains(plaintext.decodeToString()), "real JNI locator include must not contain plaintext")
+
+            val nativeLibrary = compileAkenJniLibrary(
+                zig = checkNotNull(zig),
+                root = tempDir,
+                sourceNativeDir = sourceNativeDir,
+                include = include,
+                platform = checkNotNull(platform),
+            )
+            val runtimeRoot = prepareAkenJniRuntimeFixture(
+                root = tempDir,
+                platform = platform,
+                nativeLibrary = nativeLibrary,
+                pageResourcePath = route.resourcePath,
+                pageResourceBytes = checkNotNull(entryBytes),
+                entryToken = selectedPage.entryToken,
+                encodedHandle = selectedPage.encodedHandle,
+                pageIndex = selectedPage.pageIndex,
+                callSiteProof = rawProof,
+            )
+
+            val authenticated = runAkenJniRuntimeFixture(
+                runtimeRoot = runtimeRoot,
+                extractDirectory = tempDir.resolve("extract-good"),
+                expectedMessage = "AKEN VM page executor is unavailable",
+                label = "jni-authenticated",
+            )
+            assertEquals(0, authenticated.exitCode, "real JNI authenticated current-page route must reach the executor boundary:\n${authenticated.output}")
+            assertTrue(
+                authenticated.output.contains("AKEN real JNI current page fixture: PASS:authenticated"),
+                authenticated.output,
+            )
+            assertFalse(authenticated.output.contains("WARNING in native method"), authenticated.output)
+            assertFalse(authenticated.output.contains("FATAL ERROR in native method"), authenticated.output)
+            assertFalse(authenticated.output.contains("JNI DETECTED ERROR IN APPLICATION"), authenticated.output)
+
+            tamperedEntryBytes = checkNotNull(entryBytes).copyOf()
+            val tamperOffset = route.resourceOffset + (route.storedLength / 2)
+            require(tamperOffset in tamperedEntryBytes.indices) { "real JNI tamper offset is outside the current page entry" }
+            tamperedEntryBytes[tamperOffset] = (tamperedEntryBytes[tamperOffset].toInt() xor 0x5A).toByte()
+            writeClasspathResource(runtimeRoot, route.resourcePath, tamperedEntryBytes)
+
+            val tampered = runAkenJniRuntimeFixture(
+                runtimeRoot = runtimeRoot,
+                extractDirectory = tempDir.resolve("extract-tampered"),
+                expectedMessage = "AKEN VM page authentication failed",
+                label = "jni-tampered",
+            )
+            assertEquals(0, tampered.exitCode, "real JNI tampered current-page route must fail closed at authentication:\n${tampered.output}")
+            assertTrue(
+                tampered.output.contains("AKEN real JNI current page fixture: PASS:tampered"),
+                tampered.output,
+            )
+            assertFalse(tampered.output.contains("WARNING in native method"), tampered.output)
+            assertFalse(tampered.output.contains("FATAL ERROR in native method"), tampered.output)
+            assertFalse(tampered.output.contains("JNI DETECTED ERROR IN APPLICATION"), tampered.output)
+
+            buildContext.wipe()
+            assertTrue(finalized.isWiped)
+        } finally {
+            try {
+                assertContentEquals(
+                    originalInclude,
+                    Files.readAllBytes(sourceInclude),
+                    "the repository's default empty locator include must remain untouched",
+                )
+            } finally {
+                compilerRecord?.let { Arrays.fill(it, 0) }
+                currentPage?.wipe()
+                entryBytes?.let { Arrays.fill(it, 0) }
+                generatedIncludeBytes?.let { Arrays.fill(it, 0) }
+                tamperedEntryBytes?.let { Arrays.fill(it, 0) }
+                layout?.wipe()
+                context?.wipe()
+                Arrays.fill(originalInclude, 0)
+                Arrays.fill(identity, 0)
+                Arrays.fill(plaintext, 0)
+                Arrays.fill(rawProof, 0)
+                page.wipe()
+                deleteTree(tempDir)
+            }
+        }
+    }
+
     private fun productionBoundPayloadFixtureInclude(
         currentPage: ProductionCurrentPage,
         rawCallSiteProof: ByteArray,
@@ -982,6 +1144,352 @@ class AkenNativePageLocatorResolverNativeTest {
         assertTrue(result.exitCode != 0, "$scenario must not permit the probe to pass:\n${result.output}")
         assertTrue(result.output.contains("AKEN native locator probe failed"), "$scenario must reach the reject path:\n${result.output}")
         assertFalse(result.output.contains("AKEN native page locator probe: PASS"), "$scenario unexpectedly passed:\n${result.output}")
+    }
+
+
+    private fun compileAkenJniLibrary(
+        zig: String,
+        root: Path,
+        sourceNativeDir: Path,
+        include: String,
+        platform: AkenHostPlatform,
+    ): Path {
+        val scenarioDir = Files.createDirectories(root.resolve("jni-native"))
+        val nativeDir = scenarioDir.resolve("native")
+        copyTree(sourceNativeDir, nativeDir)
+        Files.writeString(nativeDir.resolve("js_aken_page_locator.inc"), include, StandardCharsets.UTF_8)
+        if (platform.platformId.startsWith("macos-")) {
+            Files.writeString(
+                nativeDir.resolve("macos-exported-symbols.txt"),
+                "_JNI_OnLoad\n_JNI_OnUnload\n_js_native_abi_table_v1\n",
+                StandardCharsets.US_ASCII,
+            )
+        }
+
+        val library = scenarioDir.resolve("aken-current-page${platform.fileSuffix}")
+        val command = compileAkenJniLibraryCommand(
+            zig = zig,
+            nativeDir = nativeDir,
+            library = library,
+            platform = platform,
+        )
+        var compile = run(
+            command = command,
+            directory = scenarioDir,
+            label = "compile-jni-0",
+            zigCache = scenarioDir.resolve("zig-cache-0"),
+            timeoutSeconds = 300L,
+        )
+        for (attempt in 1..5) {
+            if (compile.exitCode == 0 || !isTransientZigFailure(compile.output)) break
+            compile = run(
+                command = command,
+                directory = scenarioDir,
+                label = "compile-jni-$attempt",
+                zigCache = scenarioDir.resolve("zig-cache-$attempt"),
+                timeoutSeconds = 300L,
+            )
+        }
+        assertEquals(0, compile.exitCode, "real AKEN JNI fixture must compile:\n${compile.output}")
+        assertTrue(Files.isRegularFile(library) && Files.size(library) > 0L, "real AKEN JNI fixture library is missing")
+        return library
+    }
+
+    private fun compileAkenJniLibraryCommand(
+        zig: String,
+        nativeDir: Path,
+        library: Path,
+        platform: AkenHostPlatform,
+    ): List<String> = buildList {
+        addAll(
+            listOf(
+                zig,
+                "cc",
+                "-target",
+                platform.zigTarget,
+                "-std=c11",
+                "-O2",
+                "-shared",
+                "-fwrapv",
+                "-fno-exceptions",
+                "-fvisibility=hidden",
+                "-fno-unwind-tables",
+                "-fno-asynchronous-unwind-tables",
+                "-DZSTD_DISABLE_ASM=1",
+                "-DZSTDLIB_VISIBLE=",
+                "-DZSTDERRORLIB_VISIBLE=",
+                "-DXXH_PUBLIC_API=",
+                "-DJS_NATIVE_PROTECTION_NONE=1",
+                "-DJS_AKEN_JNI_FIXTURE_DIAGNOSTICS=1",
+                "-o",
+                library.toString(),
+            ),
+        )
+        addAll(FULL_NATIVE_SOURCES.map { name -> nativeDir.resolve(name).toString() })
+        addAll(
+            listOf(
+                "-I",
+                nativeDir.toString(),
+                "-I",
+                nativeDir.resolve("cross-compile").toString(),
+                "-I",
+                nativeDir.resolve("zstd").toString(),
+                "-I",
+                nativeDir.resolve("zstd/common").toString(),
+                "-I",
+                nativeDir.resolve("zstd/decompress").toString(),
+            ),
+        )
+        when {
+            platform.platformId == "windows-x64" -> {
+                add("-Wl,--no-entry")
+                add("-ladvapi32")
+            }
+            platform.platformId == "linux-x64" -> {
+                add("-Wl,-T,${nativeDir.resolve("js_protected_section_linux.ld")}")
+            }
+            platform.platformId.startsWith("macos-") -> {
+                add("-Wl,-exported_symbols_list,${nativeDir.resolve("macos-exported-symbols.txt")}")
+            }
+        }
+    }
+
+    private fun prepareAkenJniRuntimeFixture(
+        root: Path,
+        platform: AkenHostPlatform,
+        nativeLibrary: Path,
+        pageResourcePath: String,
+        pageResourceBytes: ByteArray,
+        entryToken: Long,
+        encodedHandle: ByteArray,
+        pageIndex: Int,
+        callSiteProof: ByteArray,
+    ): Path {
+        require(pageResourceBytes.isNotEmpty()) { "real AKEN JNI page resource must not be empty" }
+        require(encodedHandle.size == AkenHandle.ENCODED_HANDLE_SIZE) { "real AKEN JNI handle size is invalid" }
+        require(pageIndex >= 0) { "real AKEN JNI page index is invalid" }
+        require(callSiteProof.isNotEmpty()) { "real AKEN JNI call-site proof must not be empty" }
+
+        val runtimeRoot = Files.createDirectories(root.resolve("runtime-classes"))
+        val sourceDir = Files.createDirectories(root.resolve("runtime-source"))
+        val source = sourceDir.resolve("$AKEN_JNI_FIXTURE_MAIN.java")
+        Files.writeString(
+            source,
+            akenJniHarnessSource(
+                entryToken = entryToken,
+                encodedHandle = encodedHandle,
+                pageIndex = pageIndex,
+                callSiteProof = callSiteProof,
+            ),
+            StandardCharsets.UTF_8,
+        )
+
+        val helperClasspath = jniHelperClasspathEntry()
+        val javac = javaTool("javac")
+        val compile = run(
+            command = listOf(
+                javac.toString(),
+                "-source",
+                "8",
+                "-target",
+                "8",
+                "-classpath",
+                helperClasspath.toString(),
+                "-d",
+                runtimeRoot.toString(),
+                source.toString(),
+            ),
+            directory = root,
+            label = "compile-jni-harness",
+            timeoutSeconds = 60L,
+        )
+        assertEquals(0, compile.exitCode, "real AKEN JNI Java harness must compile:\n${compile.output}")
+
+        val nativeResourcePath = "META-INF/aken/runtime/aken-current-page${platform.fileSuffix}"
+        val nativeBytes = Files.readAllBytes(nativeLibrary)
+        try {
+            writeClasspathResource(runtimeRoot, nativeResourcePath, nativeBytes)
+            val locator = buildString {
+                append("AKEN_NATIVE_LOCATOR_V1")
+                append('|')
+                append(platform.platformId)
+                append('|')
+                append(nativeResourcePath)
+                append('|')
+                append(platform.fileSuffix)
+                append('|')
+                append(nativeBytes.size)
+                append('|')
+                append(sha256Hex(nativeBytes))
+            }.toByteArray(StandardCharsets.US_ASCII)
+            try {
+                writeClasspathResource(runtimeRoot, "META-INF/aken/native.locator", locator)
+            } finally {
+                Arrays.fill(locator, 0)
+            }
+        } finally {
+            Arrays.fill(nativeBytes, 0)
+        }
+        writeClasspathResource(runtimeRoot, pageResourcePath, pageResourceBytes)
+        return runtimeRoot
+    }
+
+    private fun runAkenJniRuntimeFixture(
+        runtimeRoot: Path,
+        extractDirectory: Path,
+        expectedMessage: String,
+        label: String,
+    ): ProcessResult {
+        Files.createDirectories(extractDirectory)
+        val isolatedHome = Files.createDirectories(extractDirectory.resolve("home"))
+        val helperClasspath = jniHelperClasspathEntry()
+        val classpath = runtimeRoot.toAbsolutePath().normalize().toString() +
+            File.pathSeparator +
+            helperClasspath.toAbsolutePath().normalize().toString()
+        return run(
+            command = listOf(
+                javaTool("java").toString(),
+                "-Xverify:all",
+                "-Xcheck:jni",
+                "-Djavashroud.debugNativeLoad=true",
+                "-Djavashroud.native.extract.dir=${extractDirectory.toAbsolutePath().normalize()}",
+                "-Djava.io.tmpdir=${extractDirectory.toAbsolutePath().normalize()}",
+                "-Duser.home=${isolatedHome.toAbsolutePath().normalize()}",
+                "-classpath",
+                classpath,
+                AKEN_JNI_FIXTURE_MAIN,
+                expectedMessage,
+            ),
+            directory = runtimeRoot.parent,
+            label = label,
+            timeoutSeconds = 120L,
+        )
+    }
+
+    private fun akenJniHarnessSource(
+        entryToken: Long,
+        encodedHandle: ByteArray,
+        pageIndex: Int,
+        callSiteProof: ByteArray,
+    ): String = """
+        import io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper;
+
+        public final class $AKEN_JNI_FIXTURE_MAIN {
+            private static final long ENTRY_TOKEN = ${entryToken}L;
+            private static final int PAGE_INDEX = $pageIndex;
+            private static final String HANDLE = "${hexLower(encodedHandle)}";
+            private static final String PROOF = "${hexLower(callSiteProof)}";
+
+            public static void main(String[] args) {
+                if (args.length != 1) {
+                    System.err.println("expected one failure-message argument");
+                    System.exit(2);
+                }
+                String expectedMessage = args[0];
+                try {
+                    JniMicrokernelHelper.executeAkenVmPage(
+                        ENTRY_TOKEN,
+                        decodeHex(HANDLE),
+                        PAGE_INDEX,
+                        decodeHex(PROOF),
+                        new Object[0]
+                    );
+                    System.err.println("AKEN real JNI current-page route unexpectedly returned");
+                    System.exit(3);
+                } catch (SecurityException error) {
+                    if (!expectedMessage.equals(error.getMessage())) {
+                        System.err.println("unexpected AKEN real JNI failure: " + error.getMessage());
+                        error.printStackTrace(System.err);
+                        System.exit(4);
+                    }
+                    String outcome = expectedMessage.indexOf("executor") >= 0 ? "authenticated" : "tampered";
+                    System.out.println("AKEN real JNI current page fixture: PASS:" + outcome);
+                }
+            }
+
+            private static byte[] decodeHex(String value) {
+                if ((value.length() & 1) != 0) throw new IllegalArgumentException("odd hex length");
+                byte[] out = new byte[value.length() / 2];
+                for (int index = 0; index < out.length; index++) {
+                    int high = Character.digit(value.charAt(index * 2), 16);
+                    int low = Character.digit(value.charAt(index * 2 + 1), 16);
+                    if (high < 0 || low < 0) throw new IllegalArgumentException("invalid hex");
+                    out[index] = (byte) ((high << 4) | low);
+                }
+                return out;
+            }
+        }
+    """.trimIndent()
+
+    private fun writeClasspathResource(root: Path, resourcePath: String, bytes: ByteArray) {
+        require(bytes.isNotEmpty()) { "classpath fixture resource must not be empty" }
+        val segments = resourcePath.split('/')
+        require(
+            segments.isNotEmpty() &&
+                segments.all { segment -> segment.isNotEmpty() && segment != "." && segment != ".." },
+        ) {
+            "classpath fixture resource path is invalid"
+        }
+        var target = root.toAbsolutePath().normalize()
+        for (segment in segments) target = target.resolve(segment)
+        target = target.normalize()
+        require(target.startsWith(root.toAbsolutePath().normalize())) { "classpath fixture resource escapes its root" }
+        Files.createDirectories(checkNotNull(target.parent))
+        Files.write(target, bytes)
+    }
+
+    private fun jniHelperClasspathEntry(): Path {
+        val helper = Class.forName(
+            "io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper",
+            false,
+            javaClass.classLoader,
+        )
+        val location = checkNotNull(helper.protectionDomain.codeSource?.location) {
+            "JniMicrokernelHelper code source is unavailable"
+        }
+        return Path.of(location.toURI()).toAbsolutePath().normalize()
+    }
+
+    private fun javaTool(name: String): Path {
+        val executable = name + if (isWindows()) ".exe" else ""
+        val javaHome = Path.of(System.getProperty("java.home")).toAbsolutePath().normalize()
+        val candidates = listOf(
+            javaHome.resolve("bin").resolve(executable),
+            javaHome.parent?.resolve("bin")?.resolve(executable),
+        ).filterNotNull()
+        return candidates.firstOrNull { Files.isRegularFile(it) }
+            ?: error("Unable to locate $executable from java.home=$javaHome")
+    }
+
+    private fun currentAkenHostPlatform(): AkenHostPlatform? {
+        val osName = System.getProperty("os.name", "").lowercase()
+        val osArch = System.getProperty("os.arch", "").lowercase()
+        val x64 = osArch == "amd64" || osArch == "x86_64"
+        val arm64 = osArch == "aarch64" || osArch == "arm64"
+        return when {
+            osName.startsWith("windows") && x64 ->
+                AkenHostPlatform("windows-x64", "x86_64-windows-gnu", ".dll")
+            osName.contains("linux") && x64 ->
+                AkenHostPlatform("linux-x64", "x86_64-linux-gnu", ".so")
+            osName.contains("mac") && x64 ->
+                AkenHostPlatform("macos-x64", "x86_64-macos", ".dylib")
+            osName.contains("mac") && arm64 ->
+                AkenHostPlatform("macos-arm64", "aarch64-macos", ".dylib")
+            else -> null
+        }
+    }
+
+    private fun sha256Hex(bytes: ByteArray): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+        return try {
+            hexLower(digest)
+        } finally {
+            Arrays.fill(digest, 0)
+        }
+    }
+
+    private fun hexLower(bytes: ByteArray): String = buildString(bytes.size * 2) {
+        for (value in bytes) append((value.toInt() and 0xFF).toString(16).padStart(2, '0'))
     }
 
     private fun compileProbe(
@@ -1487,11 +1995,18 @@ class AkenNativePageLocatorResolverNativeTest {
         digest.update(value)
     }
 
+    private data class AkenHostPlatform(
+        val platformId: String,
+        val zigTarget: String,
+        val fileSuffix: String,
+    )
+
     private data class CompiledProbe(val directory: Path, val executable: Path)
 
     private data class ProcessResult(val exitCode: Int, val output: String)
 
     private companion object {
+        const val AKEN_JNI_FIXTURE_MAIN = "AkenCurrentPageJniFixtureMain"
         const val COMPILER_RECORD_VERSION = 1
         val COMPILER_RECORD_BINDING_DOMAIN =
             "AKEN-v4-native-page-locator-compile-input-v1".toByteArray(StandardCharsets.US_ASCII)

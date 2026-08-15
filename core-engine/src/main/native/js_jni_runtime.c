@@ -10,6 +10,20 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(JS_AKEN_JNI_FIXTURE_DIAGNOSTICS)
+#include <stdio.h>
+
+static void js_aken_jni_fixture_onload_failure(const char *stage) {
+    fputs("AKEN_JNI_ONLOAD_FAIL:", stderr);
+    fputs(stage, stderr);
+    fputc('\n', stderr);
+    fflush(stderr);
+}
+#define JS_AKEN_JNI_FIXTURE_ONLOAD_FAILURE(stage) js_aken_jni_fixture_onload_failure(stage)
+#else
+#define JS_AKEN_JNI_FIXTURE_ONLOAD_FAILURE(stage) ((void)0)
+#endif
+
 #define JS_SHELL_MANUAL_MAP_RESERVED ((void *)(uintptr_t)0x4A5353484D4D4150ULL)
 
 static volatile int js_jni_runtime_manual_mapped_shell = 0;
@@ -3359,10 +3373,10 @@ static int js_register_all_natives(JNIEnv *env) {
         {js_native_name("Ex", "ecuteVmResource", "Int"), "(J)I", (void*)jsw_r25},
         {js_native_name("Ex", "ecuteVmResourceInt", "Int"), "(JI)I", (void*)jsw_r26},
         {js_native_name("Ex", "ecuteVmResourceInt", "Void"), "(JI)V", (void*)jsw_r24},
-        {js_native_name("nativeExecuteAkenVmPage", "", ""), "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;", (void*)jsw_a0},
-        {js_native_name("nativeDecodeAkenStringPage", "", ""), "([BI[B)[B", (void*)jsw_a1},
-        {js_native_name("nativeReadAkenClassPage", "", ""), "([BI[B)[B", (void*)jsw_a2},
-        {js_native_name("nativeMapAkenNativeChunk", "", ""), "([BI[B)[B", (void*)jsw_a3},
+        {js_native_name("Execute", "AkenVm", "Page"), "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;", (void*)jsw_a0},
+        {js_native_name("Decode", "AkenString", "Page"), "([BI[B)[B", (void*)jsw_a1},
+        {js_native_name("Read", "AkenClass", "Page"), "([BI[B)[B", (void*)jsw_a2},
+        {js_native_name("Map", "AkenNative", "Chunk"), "([BI[B)[B", (void*)jsw_a3},
     };
     if (!js_register_native_group(env, js_helper_owner("Jni", "Micro", "kernel", "Helper"), jni_microkernel_methods, (int)(sizeof(jni_microkernel_methods) / sizeof(jni_microkernel_methods[0])), 1)) return 0;
     return js_register_optional_natives(env);
@@ -3370,30 +3384,40 @@ static int js_register_all_natives(JNIEnv *env) {
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     if (reserved == JS_SHELL_MANUAL_MAP_RESERVED) js_jni_runtime_manual_mapped_shell = 1;
-    if (!js_protected_section_enter()) return JNI_ERR;
+    if (!js_protected_section_enter()) {
+        JS_AKEN_JNI_FIXTURE_ONLOAD_FAILURE("protected-enter");
+        return JNI_ERR;
+    }
     js_native_anti_dump_harden();
     js_vm_cache_lock_init();
     (void)reserved;
     JNIEnv *env = NULL;
     if ((*vm)->GetEnv(vm, (void**)&env, JNI_VERSION_1_6) != JNI_OK || env == NULL) {
+        JS_AKEN_JNI_FIXTURE_ONLOAD_FAILURE("get-env");
         (void)js_protected_section_leave();
         return JNI_ERR;
     }
     if (!js_jni_cache_init(env)) {
+        JS_AKEN_JNI_FIXTURE_ONLOAD_FAILURE("cache-init");
         (void)js_protected_section_leave();
         return JNI_ERR;
     }
     int ok = 1;
     if (!js_jni_runtime_manual_mapped_shell) {
         ok = js_register_all_natives(env);
+        if (!ok) JS_AKEN_JNI_FIXTURE_ONLOAD_FAILURE("register-all");
         if (ok && (*env)->ExceptionCheck(env)) {
+            JS_AKEN_JNI_FIXTURE_ONLOAD_FAILURE("pending-exception");
             js_vm_clear_exception(env);
             ok = 0;
         }
     }
     if (ok) js_vm_mark_hot_integrity_baseline_clean();
     if (!ok) js_jni_cache_destroy(env);
-    if (!js_protected_section_leave()) ok = 0;
+    if (!js_protected_section_leave()) {
+        JS_AKEN_JNI_FIXTURE_ONLOAD_FAILURE("protected-leave");
+        ok = 0;
+    }
     return ok ? JNI_VERSION_1_6 : JNI_ERR;
 }
 
