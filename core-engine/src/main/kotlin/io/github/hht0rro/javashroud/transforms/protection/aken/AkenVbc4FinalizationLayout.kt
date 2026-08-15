@@ -281,6 +281,12 @@ internal class AkenVbc4FinalizationLayout private constructor(
         return finalEntriesValue.toList()
     }
 
+    /** Build-only membership check for a route already emitted by this layout. */
+    internal fun hasEntryForBuild(name: String): Boolean {
+        requireLive()
+        return finalEntriesValue.any { entry -> entry.name == name }
+    }
+
     /**
      * Supplies copies of one current-page native locator record per page to a
      * native code generator, then wipes every callback copy before returning.
