@@ -42,6 +42,7 @@ class AkenRuntimePageDescriptorTest {
                 assertEquals(descriptor.route.resourcePath, decoded.route.resourcePath)
                 assertEquals(descriptor.route.resourceOffset, decoded.route.resourceOffset)
                 assertEquals(descriptor.route.storedLength, decoded.route.storedLength)
+                assertEquals(descriptor.route.logicalBindingPath, decoded.route.logicalBindingPath)
                 assertContentEquals(descriptor.proof.callSiteProof, decoded.proof.callSiteProof)
                 assertContentEquals(descriptor.evaluatorPlan.fingerprint, decoded.evaluatorPlan.fingerprint)
                 assertEquals(3, decoded.evaluatorPlan.javaFragments.size)
@@ -212,6 +213,7 @@ class AkenRuntimePageDescriptorTest {
         storedLength = 113,
         codecVariant = page.codecVariant,
         layoutVariant = page.layoutVariant,
+        logicalBindingPath = "META-INF/vbc4/logical-binding-${page.pageIndex}.bin",
     )
 
     private fun proofFor(plan: AkenBuildPlan, page: AkenBuildPlan.Page): AkenSealingProofMetadata {

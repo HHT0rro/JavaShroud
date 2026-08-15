@@ -168,6 +168,7 @@ class AkenVbc4PendingPagePlannerTest {
             batch.consumePendingPagesForBuild { pages ->
                 assertEquals(expectedTargets, pages.map { it.targetPageSize })
                 assertEquals(List(pages.size) { route.futureContainerPath }, pages.map { it.resourcePath })
+                assertEquals(List(pages.size) { route.logicalVmResourcePath }, pages.map { it.logicalBindingPath })
                 var expectedOffset = 0
                 pages.forEach { page ->
                     assertEquals(expectedOffset, page.resourceOffset)
@@ -203,6 +204,10 @@ class AkenVbc4PendingPagePlannerTest {
                 assertEquals(
                     List(descriptors.size) { route.futureContainerPath },
                     descriptors.map { it.route.resourcePath },
+                )
+                assertEquals(
+                    List(descriptors.size) { route.logicalVmResourcePath },
+                    descriptors.map { it.route.logicalBindingPath },
                 )
             }
             assertTrue(finalized.verifyWriterEquivalentArtifactForBuild(artifactEntriesFor(finalized)))

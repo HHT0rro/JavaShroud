@@ -18,6 +18,7 @@ internal class AkenPageMaterializationInput private constructor(
     val resourcePath: String,
     val resourceOffset: Int,
     callSiteProof: ByteArray,
+    val logicalBindingPath: String,
 ) : AutoCloseable {
     private var plaintextValue: ByteArray = plaintext.copyOf()
     private var callSiteProofValue: ByteArray = callSiteProof.copyOf()
@@ -31,6 +32,9 @@ internal class AkenPageMaterializationInput private constructor(
             "AKEN materialization call-site proof length is invalid"
         }
         require(resourceOffset >= 0) { "AKEN materialization resource offset must be non-negative" }
+        require(logicalBindingPath.isNotBlank() && '\u0000' !in logicalBindingPath && '\\' !in logicalBindingPath) {
+            "AKEN materialization logical binding path is invalid"
+        }
     }
 
     val isWiped: Boolean
@@ -70,12 +74,14 @@ internal class AkenPageMaterializationInput private constructor(
             resourcePath: String,
             resourceOffset: Int = 0,
             callSiteProof: ByteArray,
+            logicalBindingPath: String = resourcePath,
         ): AkenPageMaterializationInput = AkenPageMaterializationInput(
             page = page,
             plaintext = plaintext,
             resourcePath = resourcePath,
             resourceOffset = resourceOffset,
             callSiteProof = callSiteProof,
+            logicalBindingPath = logicalBindingPath,
         )
     }
 }
@@ -445,6 +451,7 @@ internal object AkenPageMaterializer {
                                 storedLength = payload.size,
                                 codecVariant = page.codecVariant,
                                 layoutVariant = page.layoutVariant,
+                                logicalBindingPath = input.logicalBindingPath,
                             )
                             return PageDraft(
                                 handle = handle,
@@ -562,7 +569,8 @@ internal object AkenPageMaterializer {
             require(
                 route.resourcePath == draft.route.resourcePath &&
                     route.resourceOffset == draft.route.resourceOffset &&
-                    route.storedLength == draft.route.storedLength,
+                    route.storedLength == draft.route.storedLength &&
+                    route.logicalBindingPath == draft.route.logicalBindingPath,
             ) {
                 "AKEN materialized descriptor route does not bind the emitted payload range"
             }

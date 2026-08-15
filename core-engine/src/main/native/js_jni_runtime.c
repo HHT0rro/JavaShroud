@@ -1224,7 +1224,7 @@ cleanup:
 #define JS_AKEN_DESCRIPTOR_EVALUATOR_PLAN_VERSION 1u
 #define JS_AKEN_DESCRIPTOR_FRAGMENT_VERSION 1u
 #define JS_AKEN_DESCRIPTOR_IDENTITY_VERSION 1u
-#define JS_AKEN_DESCRIPTOR_ROUTE_VERSION 1u
+#define JS_AKEN_DESCRIPTOR_ROUTE_VERSION 2u
 #define JS_AKEN_DESCRIPTOR_PROOF_VERSION 1u
 
 static const unsigned char JS_AKEN_DESCRIPTOR_EVALUATOR_DOMAIN[] = "AKEN-v4-evaluator-graph";
@@ -1274,6 +1274,8 @@ typedef struct {
     size_t codec_variant_len;
     const unsigned char *layout_variant;
     size_t layout_variant_len;
+    const unsigned char *logical_binding_path;
+    size_t logical_binding_path_len;
 } js_aken_native_descriptor_route;
 
 typedef struct {
@@ -1533,6 +1535,12 @@ static int js_aken_native_descriptor_parse_route(
             0,
             &out_route->layout_variant,
             &out_route->layout_variant_len) ||
+        !js_aken_native_descriptor_read_frame(
+            &cursor,
+            JS_AKEN_DESCRIPTOR_MAX_RESOURCE_PATH_SIZE,
+            0,
+            &out_route->logical_binding_path,
+            &out_route->logical_binding_path_len) ||
         !js_aken_native_descriptor_cursor_finished(&cursor)) {
         js_vbc4_wipe_volatile(out_route, sizeof(*out_route));
         return 0;
@@ -1909,6 +1917,9 @@ JS_HIDDEN int js_aken_native_page_descriptor_parse_current(
             route.identity_encoding_len) ||
         !js_aken_native_descriptor_identity_matches_current(&route.identity, request, envelope, resolved) ||
         !js_aken_native_descriptor_route_path_is_valid(route.resource_path, route.resource_path_len) ||
+        !js_aken_native_descriptor_route_path_is_valid(
+            route.logical_binding_path,
+            route.logical_binding_path_len) ||
         !js_aken_native_page_open_ascii_equal(
             route.codec_variant,
             route.codec_variant_len,
@@ -2026,6 +2037,8 @@ JS_HIDDEN int js_aken_native_page_descriptor_parse_current(
     }
     out_view->resource_path = route.resource_path;
     out_view->resource_path_len = route.resource_path_len;
+    out_view->logical_binding_path = route.logical_binding_path;
+    out_view->logical_binding_path_len = route.logical_binding_path_len;
     out_view->resource_offset = route.resource_offset;
     out_view->stored_length = route.stored_length;
     out_view->parsed = 1u;

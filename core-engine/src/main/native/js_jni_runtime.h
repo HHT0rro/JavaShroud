@@ -294,6 +294,8 @@ typedef struct {
     size_t merkle_sibling_count;
     const unsigned char *resource_path;
     size_t resource_path_len;
+    const unsigned char *logical_binding_path;
+    size_t logical_binding_path_len;
     uint32_t resource_offset;
     uint32_t stored_length;
 } js_aken_native_page_descriptor_view;

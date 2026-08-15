@@ -23,6 +23,7 @@ internal class AkenVbc4PageEmissionRequest private constructor(
     val resourcePath: String,
     val resourceOffset: Int,
     callSiteProof: ByteArray,
+    val logicalBindingPath: String,
 ) : AutoCloseable {
     private var logicalIdentityValue: ByteArray = logicalIdentity.copyOf()
     private var plaintextValue: ByteArray = plaintext.copyOf()
@@ -42,6 +43,9 @@ internal class AkenVbc4PageEmissionRequest private constructor(
         }
         require(resourcePath.isNotBlank() && '\u0000' !in resourcePath) {
             "AKEN VBC4 resource path is invalid"
+        }
+        require(logicalBindingPath.isNotBlank() && '\u0000' !in logicalBindingPath && '\\' !in logicalBindingPath) {
+            "AKEN VBC4 logical binding path is invalid"
         }
         require(resourceOffset >= 0) { "AKEN VBC4 resource offset must be non-negative" }
         verifyPageBinding()
@@ -67,6 +71,7 @@ internal class AkenVbc4PageEmissionRequest private constructor(
                 resourcePath = resourcePath,
                 resourceOffset = resourceOffset,
                 callSiteProof = callSiteProof,
+                logicalBindingPath = logicalBindingPath,
             )
         } finally {
             Arrays.fill(plaintext, 0)
@@ -113,6 +118,7 @@ internal class AkenVbc4PageEmissionRequest private constructor(
             resourcePath: String,
             resourceOffset: Int = 0,
             callSiteProof: ByteArray,
+            logicalBindingPath: String = resourcePath,
         ): AkenVbc4PageEmissionRequest = AkenVbc4PageEmissionRequest(
             page = page,
             entryToken = entryToken,
@@ -121,6 +127,7 @@ internal class AkenVbc4PageEmissionRequest private constructor(
             resourcePath = resourcePath,
             resourceOffset = resourceOffset,
             callSiteProof = callSiteProof,
+            logicalBindingPath = logicalBindingPath,
         )
     }
 }

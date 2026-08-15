@@ -160,6 +160,7 @@ internal object AkenVbc4PendingPagePlanner {
                         callSiteProof = callSiteProof,
                         targetPageSize = partition.targetSize,
                         random = random,
+                        logicalBindingPath = route.logicalVmResourcePath,
                     )
                     pendingPages += pending
                     val nextOffset = nextResourceOffset.toLong() + pending.expectedStoredLength.toLong()

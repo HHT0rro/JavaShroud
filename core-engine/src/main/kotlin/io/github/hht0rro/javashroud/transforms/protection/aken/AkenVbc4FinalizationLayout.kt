@@ -25,6 +25,7 @@ internal class AkenVbc4PendingPage private constructor(
     logicalIdentity: ByteArray,
     plaintext: ByteArray,
     callSiteProof: ByteArray,
+    val logicalBindingPath: String,
 ) : AutoCloseable {
     private var logicalIdentityValue: ByteArray = logicalIdentity.copyOf()
     private var plaintextValue: ByteArray = plaintext.copyOf()
@@ -42,6 +43,7 @@ internal class AkenVbc4PendingPage private constructor(
         require(pageIndex >= 0) { "AKEN VBC4 pending-page index must be non-negative" }
         require(resourceOffset >= 0) { "AKEN VBC4 pending-page offset must be non-negative" }
         require(isValidResourcePath(resourcePath)) { "AKEN VBC4 pending-page resource path is invalid" }
+        require(isValidResourcePath(logicalBindingPath)) { "AKEN VBC4 pending-page logical binding path is invalid" }
         require(targetPageSize in AkenPageSizePolicy.DEFAULT.allowedSizes(AkenResourceKind.Vbc4Method)) {
             "AKEN VBC4 pending-page target size is unsupported"
         }
@@ -99,6 +101,7 @@ internal class AkenVbc4PendingPage private constructor(
                 resourcePath = resourcePath,
                 resourceOffset = resourceOffset,
                 callSiteProof = proof,
+                logicalBindingPath = logicalBindingPath,
             )
         } finally {
             Arrays.fill(identity, 0)
@@ -144,6 +147,7 @@ internal class AkenVbc4PendingPage private constructor(
             layoutVariant: String? = null,
             targetPageSize: Int? = null,
             random: SecureRandom = SecureRandom(),
+            logicalBindingPath: String = resourcePath,
         ): AkenVbc4PendingPage {
             targetPageSize?.let { requestedTargetSize ->
                 require(requestedTargetSize in AkenPageSizePolicy.DEFAULT.allowedSizes(AkenResourceKind.Vbc4Method)) {
@@ -168,6 +172,7 @@ internal class AkenVbc4PendingPage private constructor(
                 logicalIdentity = logicalIdentity,
                 plaintext = plaintext,
                 callSiteProof = callSiteProof,
+                logicalBindingPath = logicalBindingPath,
             )
         }
 

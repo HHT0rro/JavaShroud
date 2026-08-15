@@ -877,16 +877,12 @@ class AkenRoutingMetadata private constructor(
     val storedLength: Int,
     val codecVariant: String,
     val layoutVariant: String,
+    val logicalBindingPath: String,
 ) {
     init {
         require(resourceOffset >= 0 && storedLength > 0) { "AKEN route bounds are invalid" }
-        require(resourcePath.isNotBlank() && '\u0000' !in resourcePath && '\\' !in resourcePath) {
-            "AKEN route path is invalid"
-        }
-        require(!resourcePath.startsWith('/') && !resourcePath.endsWith('/') &&
-            resourcePath.split('/').none { it.isEmpty() || it == "." || it == ".." }) {
-            "AKEN route path must be a normalized relative entry name"
-        }
+        requireNormalizedPath(resourcePath, "AKEN route path")
+        requireNormalizedPath(logicalBindingPath, "AKEN logical binding path")
         require(codecVariant.isNotBlank() && layoutVariant.isNotBlank()) { "AKEN route variants must be non-blank" }
     }
 
@@ -916,11 +912,12 @@ class AkenRoutingMetadata private constructor(
         writeInt(out, storedLength)
         writeString(out, codecVariant)
         writeString(out, layoutVariant)
+        writeString(out, logicalBindingPath)
         out.toByteArray()
     }
 
     companion object {
-        private const val ROUTE_VERSION = 1
+        private const val ROUTE_VERSION = 2
         private const val MAX_RESOURCE_PATH_SIZE = 4096
         private const val MAX_VARIANT_SIZE = 256
 
@@ -932,9 +929,10 @@ class AkenRoutingMetadata private constructor(
             storedLength: Int,
             codecVariant: String,
             layoutVariant: String,
+            logicalBindingPath: String = resourcePath,
         ): AkenRoutingMetadata = AkenRoutingMetadata(
             AkenHighValueLeafIdentity.fromHandle(handle, logicalIdentity), resourcePath,
-            resourceOffset, storedLength, codecVariant, layoutVariant,
+            resourceOffset, storedLength, codecVariant, layoutVariant, logicalBindingPath,
         )
 
         fun decode(encoded: ByteArray): AkenRoutingMetadata {
@@ -948,11 +946,21 @@ class AkenRoutingMetadata private constructor(
                 val length = reader.readInt("AKEN route length")
                 val codec = reader.readString(MAX_VARIANT_SIZE, "AKEN route codec")
                 val layout = reader.readString(MAX_VARIANT_SIZE, "AKEN route layout")
+                val logicalBindingPath = reader.readString(MAX_RESOURCE_PATH_SIZE, "AKEN logical binding path")
                 reader.requireFullyRead("AKEN route")
-                AkenRoutingMetadata(identity, path, offset, length, codec, layout)
+                AkenRoutingMetadata(identity, path, offset, length, codec, layout, logicalBindingPath)
             } finally {
                 Arrays.fill(identityBytes, 0)
             }
+        }
+
+        private fun requireNormalizedPath(value: String, label: String) {
+            require(value.isNotBlank() && '\u0000' !in value && '\\' !in value) { "$label is invalid" }
+            require(
+                !value.startsWith('/') &&
+                    !value.endsWith('/') &&
+                    value.split('/').none { it.isEmpty() || it == "." || it == ".." },
+            ) { "$label must be a normalized relative entry name" }
         }
     }
 }
@@ -970,8 +978,10 @@ object AkenSealingMetadata {
         storedLength: Int,
         codecVariant: String,
         layoutVariant: String,
+        logicalBindingPath: String = resourcePath,
     ): AkenRoutingMetadata = AkenRoutingMetadata.fromHandle(
         handle, logicalIdentity, resourcePath, resourceOffset, storedLength, codecVariant, layoutVariant,
+        logicalBindingPath,
     )
 }
 
