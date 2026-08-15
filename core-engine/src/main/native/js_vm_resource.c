@@ -12,6 +12,7 @@
 #include "native_secrets.inc"
 #include "zstd.h"
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -1117,6 +1118,79 @@ JS_HIDDEN js_vm_program* js_vm_prepare_resource_program_bound(JNIEnv *env, jclas
 
 JS_HIDDEN js_vm_program* js_vm_prepare_resource_program(JNIEnv *env, jclass resource_cls, jlong entry_token, jstring resourcePath) {
     return js_vm_prepare_resource_program_bound(env, resource_cls, entry_token, resourcePath, NULL);
+}
+
+#define JS_VM_AKEN_LOGICAL_BINDING_PATH_MAX 1024u
+
+JS_HIDDEN js_vm_program* js_vm_prepare_aken_complete_frame_program(
+    JNIEnv *env,
+    jlong entry_token,
+    const unsigned char *frame,
+    size_t frame_len,
+    const unsigned char *logical_binding_path,
+    size_t logical_binding_path_len,
+    const unsigned char *artifact_commitment,
+    size_t artifact_commitment_len
+) {
+    js_vm_program *program = NULL;
+    js_vm_program validation;
+    char *binding_path = NULL;
+    unsigned char binding_buf[1200] = {0};
+    int binding_len = 0;
+    int ok = 0;
+    memset(&validation, 0, sizeof(validation));
+    if (!env || entry_token == 0 || !frame || frame_len == 0u || frame_len > (size_t)INT_MAX ||
+        !logical_binding_path || logical_binding_path_len == 0u ||
+        logical_binding_path_len > JS_VM_AKEN_LOGICAL_BINDING_PATH_MAX ||
+        memchr(logical_binding_path, '\0', logical_binding_path_len) != NULL ||
+        !artifact_commitment || artifact_commitment_len != 32u) {
+        goto cleanup;
+    }
+    binding_path = (char *)malloc(logical_binding_path_len + 1u);
+    program = (js_vm_program *)calloc(1, sizeof(js_vm_program));
+    if (!binding_path || !program) goto cleanup;
+    memcpy(binding_path, logical_binding_path, logical_binding_path_len);
+    binding_path[logical_binding_path_len] = '\0';
+
+    binding_len = js_vm_build_state_binding(entry_token, binding_path, binding_buf, (int)sizeof(binding_buf));
+    if (binding_len <= 0 || !js_vm_resource_integrity_clean() ||
+        !js_vm_parse_program(frame, (int)frame_len, program, binding_buf, binding_len)) {
+        goto cleanup;
+    }
+    program->entry_token = entry_token;
+    program->return_desc = js_vm_return_descriptor_from_meta(program, entry_token);
+    if (!program->return_desc || !program->resource_path || strcmp(program->resource_path, binding_path) != 0) {
+        goto cleanup;
+    }
+    if (!js_vm_build_execution_program_from_registers(program, &validation) ||
+        !js_vm_adopt_validated_execution_program(program, &validation)) {
+        goto cleanup;
+    }
+    js_vm_clear_execution_program(&validation);
+
+    /*
+     * The artifact commitment is public integrity material, not a key. In the
+     * current transition runtime it supplies an artifact-local session nonce
+     * when no legacy preload session exists; an already-installed nonce remains
+     * authoritative for a legacy-compatible process.
+     */
+    (void)js_vm_install_startup_nonce(artifact_commitment, (int)artifact_commitment_len);
+    if (!js_vm_bind_runtime_session(program, entry_token, binding_path)) goto cleanup;
+    ok = 1;
+
+cleanup:
+    js_vbc4_wipe_volatile(binding_buf, sizeof(binding_buf));
+    js_vm_clear_execution_program(&validation);
+    if (binding_path) {
+        js_vbc4_wipe_volatile(binding_path, logical_binding_path_len);
+        free(binding_path);
+    }
+    if (!ok && program) {
+        js_vm_free_program(env, program);
+        free(program);
+        program = NULL;
+    }
+    return program;
 }
 
 JS_HIDDEN js_vm_program* js_vm_preload_indexed_program_on_demand(JNIEnv *env, jclass resource_cls, jlong entry_token, const char *resource_path, jstring resourcePath) {

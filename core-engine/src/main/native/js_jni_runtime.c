@@ -2696,11 +2696,13 @@ static jobject JNICALL jsw_a0(JNIEnv *env, jclass cls, jlong entry_token, jbyteA
     js_aken_native_page_resolved_descriptor resolved;
     js_aken_native_page_descriptor_view descriptor_view;
     js_aken_native_opened_page opened_page;
+    js_vm_program *program = NULL;
     unsigned char *encoded_payload = NULL;
     size_t encoded_payload_len = 0u;
     jsize proof_length = 0;
     int protected_runtime_entered = 0;
-    (void)args;
+    int execution_completed = 0;
+    jobject result = NULL;
     memset(&request, 0, sizeof(request));
     memset(&record, 0, sizeof(record));
     memset(&envelope, 0, sizeof(envelope));
@@ -2776,8 +2778,23 @@ static jobject JNICALL jsw_a0(JNIEnv *env, jclass cls, jlong entry_token, jbyteA
         js_aken_bridge_unavailable(env, "AKEN VM page authentication failed");
         goto cleanup;
     }
+    program = js_vm_prepare_aken_complete_frame_program(
+        env,
+        entry_token,
+        opened_page.bytes,
+        opened_page.length,
+        descriptor_view.logical_binding_path,
+        descriptor_view.logical_binding_path_len,
+        descriptor_view.binding.artifact_commitment,
+        descriptor_view.binding.artifact_commitment_len);
     js_aken_native_opened_page_wipe(&opened_page);
-    js_aken_bridge_unavailable(env, "AKEN VM page executor is unavailable");
+    if (!program) {
+        js_aken_bridge_unavailable(env, "AKEN VM page frame is invalid");
+        goto cleanup;
+    }
+    result = js_vm_execute_cached_program(env, cls, program, args);
+    if ((*env)->ExceptionCheck(env)) goto cleanup;
+    execution_completed = 1;
 cleanup:
     js_aken_native_opened_page_wipe(&opened_page);
     if (encoded_payload) {
@@ -2791,8 +2808,16 @@ cleanup:
     js_vbc4_wipe_volatile(&request, sizeof(request));
     js_vbc4_wipe_volatile(native_handle, sizeof(native_handle));
     js_vbc4_wipe_volatile(native_call_site_proof, sizeof(native_call_site_proof));
-    if (protected_runtime_entered) (void)js_protected_runtime_leave(env);
-    return NULL;
+    if (program) {
+        js_vm_free_program(env, program);
+        free(program);
+    }
+    if (protected_runtime_entered && !js_protected_runtime_leave(env)) execution_completed = 0;
+    if (!execution_completed && result) {
+        (*env)->DeleteLocalRef(env, result);
+        result = NULL;
+    }
+    return execution_completed ? result : NULL;
 }
 
 static jbyteArray JNICALL jsw_a1(JNIEnv *env, jclass cls, jbyteArray encoded_handle, jint page_index, jbyteArray call_site_proof) {

@@ -46,6 +46,21 @@ JS_HIDDEN int js_vm_commitment_matches(const char *path, const unsigned char *ra
 JS_HIDDEN void js_vm_commitments_reset(void);
 JS_HIDDEN js_vm_program* js_vm_prepare_resource_program_bound(JNIEnv *env, jclass resource_cls, jlong entry_token, jstring resourcePath, const char *binding_path_override);
 JS_HIDDEN js_vm_program* js_vm_prepare_resource_program(JNIEnv *env, jclass resource_cls, jlong entry_token, jstring resourcePath);
+/*
+ * Prepares exactly one complete VBC4 frame already authenticated and opened by
+ * the AKEN current-page terminal. This is a native-private one-shot path: it
+ * neither loads an arbitrary resource nor registers/caches a catalog entry.
+ */
+JS_HIDDEN js_vm_program* js_vm_prepare_aken_complete_frame_program(
+    JNIEnv *env,
+    jlong entry_token,
+    const unsigned char *frame,
+    size_t frame_len,
+    const unsigned char *logical_binding_path,
+    size_t logical_binding_path_len,
+    const unsigned char *artifact_commitment,
+    size_t artifact_commitment_len
+);
 JS_HIDDEN js_vm_program* js_vm_preload_indexed_program_on_demand(JNIEnv *env, jclass resource_cls, jlong entry_token, const char *resource_path, jstring resourcePath);
 JS_HIDDEN jobject js_vm_execute_cached_program(JNIEnv *env, jclass resource_cls, js_vm_program *program, jobjectArray args);
 JS_HIDDEN jobject js_vm_execute_resource(JNIEnv *env, jclass resource_cls, jlong entry_token, jstring resourcePath, jobjectArray args);

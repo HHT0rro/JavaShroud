@@ -1,7 +1,10 @@
 package io.github.hht0rro.javashroud.aken
 
 import io.github.hht0rro.javashroud.transforms.protection.NativeRecompilationTransforms
+import io.github.hht0rro.javashroud.transforms.protection.NativeVmBuildProfile
+import io.github.hht0rro.javashroud.transforms.protection.Vbc4EntryMetadata
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.VmBytecodeSerializer
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenArtifactCommitment
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHandle
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHighValueLeafIdentity
@@ -17,6 +20,8 @@ import io.github.hht0rro.javashroud.transforms.protection.aken.AkenSealingProofM
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4FinalizationLayout
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4PendingPage
 import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.vmStateBinding
+import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
@@ -37,6 +42,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.objectweb.asm.Opcodes
 
 class AkenNativePageLocatorResolverNativeTest {
     @Test
@@ -539,7 +545,7 @@ class AkenNativePageLocatorResolverNativeTest {
     }
 
     @Test
-    fun production_vbc4_current_page_loads_and_authenticates_through_real_jni() {
+    fun production_single_page_vbc4_executes_and_authenticates_through_real_jni() {
         val zig = findZig()
         val platform = currentAkenHostPlatform()
         assumeTrue(zig != null, "Zig is required to compile the real AKEN JNI current-page fixture")
@@ -549,34 +555,62 @@ class AkenNativePageLocatorResolverNativeTest {
         val sourceInclude = sourceNativeDir.resolve("js_aken_page_locator.inc")
         val originalInclude = Files.readAllBytes(sourceInclude)
         val identity = "fixture:aken-real-jni-current-page".encodeToByteArray()
-        val plaintext = ByteArray(719) { index -> ((index * 37 + 23) and 0xFF).toByte() }
         val rawProof = ByteArray(71) { index -> ((index * 13 + 9) and 0xFF).toByte() }
         val entryToken = 0x414B_454E_0000_3001L
-        val page = AkenVbc4PendingPage.create(
-            entryToken = entryToken,
-            logicalIdentity = identity,
-            plaintext = plaintext,
-            resourcePath = "META-INF/.aken/vbc4/real-jni-current-page.bin",
-            pageIndex = 0,
-            targetPageSize = 768,
-            callSiteProof = rawProof,
-            random = SecureRandom(),
-        )
+        val logicalBindingPath = "META-INF/vm/aken-real-jni-current-page.vbc4"
         val tempDir = Files.createTempDirectory("javashroud-aken-real-jni-current-page-")
         var context: Vbc4BuildContext? = null
+        var pendingPage: AkenVbc4PendingPage? = null
         var layout: AkenVbc4FinalizationLayout? = null
         var currentPage: ProductionCurrentPage? = null
         var compilerRecord: ByteArray? = null
         var entryBytes: ByteArray? = null
         var generatedIncludeBytes: ByteArray? = null
         var tamperedEntryBytes: ByteArray? = null
+        var plaintext: ByteArray? = null
+        var bootMaterial: ByteArray? = null
         try {
+            val buildContext = akenVbc4ExecutorContext()
+            context = buildContext
+            plaintext = withVbc4BuildContext(buildContext) {
+                val serializer = VmBytecodeSerializer(
+                    buildSeed = 0x2468_1357,
+                    stateBinding = vmStateBinding(entryToken, logicalBindingPath),
+                    entryMetadata = Vbc4EntryMetadata(
+                        entryToken = entryToken,
+                        returnDescriptor = "I",
+                        methodIdentity = "11".repeat(32),
+                        ownerIdentity = "22".repeat(32),
+                        resourcePath = logicalBindingPath,
+                        isStatic = true,
+                    ),
+                    buildContext = buildContext,
+                    structureEntropy = ByteArray(32) { index -> (index * 17 + 3).toByte() },
+                )
+                serializer.visitCode()
+                serializer.visitInsn(Opcodes.ICONST_2)
+                serializer.visitInsn(Opcodes.IRETURN)
+                serializer.visitMaxs(1, 0)
+                serializer.visitEnd()
+                serializer.serialize()
+            }
+            bootMaterial = runtimeBootMaterial(buildContext)
+            pendingPage = AkenVbc4PendingPage.create(
+                entryToken = entryToken,
+                logicalIdentity = identity,
+                plaintext = checkNotNull(plaintext),
+                resourcePath = "META-INF/.aken/vbc4/real-jni-current-page.bin",
+                pageIndex = 0,
+                targetPageSize = 2048,
+                callSiteProof = rawProof,
+                random = SecureRandom(),
+                logicalBindingPath = logicalBindingPath,
+            )
+
             val commitment = AkenVbc4FinalizationLayout.reserve(
-                pendingPages = listOf(page),
+                pendingPages = listOf(checkNotNull(pendingPage)),
                 fixedEntries = emptyList(),
             )
-            val buildContext = defaultVbc4BuildContext()
-            context = buildContext
             val planCommitment = commitment.copyBytes()
             val plan = try {
                 buildContext.initializeAkenBuildPlan(planCommitment)
@@ -586,7 +620,7 @@ class AkenNativePageLocatorResolverNativeTest {
             val finalized = AkenVbc4FinalizationLayout.materializeAndWipe(
                 plan = plan,
                 commitment = commitment,
-                pendingPages = listOf(page),
+                pendingPages = listOf(checkNotNull(pendingPage)),
                 fixedEntries = emptyList(),
             )
             layout = finalized
@@ -603,6 +637,7 @@ class AkenNativePageLocatorResolverNativeTest {
 
             val descriptor = decodeProductionCurrentPageDescriptor(checkNotNull(compilerRecord))
             val route = descriptor.route
+            assertEquals(logicalBindingPath, route.logicalBindingPath)
             val entry = finalized.entriesForBuild().single { it.name == route.resourcePath }
             entryBytes = entry.copyBytesForBuild()
             val endExclusive = route.resourceOffset.toLong() + route.storedLength.toLong()
@@ -615,7 +650,10 @@ class AkenNativePageLocatorResolverNativeTest {
                 Random(0xA4E3),
             )
             generatedIncludeBytes = include.toByteArray(StandardCharsets.US_ASCII)
-            assertFalse(include.contains(plaintext.decodeToString()), "real JNI locator include must not contain plaintext")
+            assertFalse(
+                include.contains(checkNotNull(plaintext).decodeToString()),
+                "real JNI locator include must not contain plaintext",
+            )
 
             val nativeLibrary = compileAkenJniLibrary(
                 zig = checkNotNull(zig),
@@ -634,17 +672,18 @@ class AkenNativePageLocatorResolverNativeTest {
                 encodedHandle = selectedPage.encodedHandle,
                 pageIndex = selectedPage.pageIndex,
                 callSiteProof = rawProof,
+                bootMaterial = checkNotNull(bootMaterial),
             )
 
             val authenticated = runAkenJniRuntimeFixture(
                 runtimeRoot = runtimeRoot,
                 extractDirectory = tempDir.resolve("extract-good"),
-                expectedMessage = "AKEN VM page executor is unavailable",
-                label = "jni-authenticated",
+                expectedOutcome = "result:2",
+                label = "jni-executed",
             )
-            assertEquals(0, authenticated.exitCode, "real JNI authenticated current-page route must reach the executor boundary:\n${authenticated.output}")
+            assertEquals(0, authenticated.exitCode, "real JNI authenticated complete VBC4 page must execute:\n${authenticated.output}")
             assertTrue(
-                authenticated.output.contains("AKEN real JNI current page fixture: PASS:authenticated"),
+                authenticated.output.contains("AKEN real JNI current page fixture: PASS:executed"),
                 authenticated.output,
             )
             assertFalse(authenticated.output.contains("WARNING in native method"), authenticated.output)
@@ -660,7 +699,7 @@ class AkenNativePageLocatorResolverNativeTest {
             val tampered = runAkenJniRuntimeFixture(
                 runtimeRoot = runtimeRoot,
                 extractDirectory = tempDir.resolve("extract-tampered"),
-                expectedMessage = "AKEN VM page authentication failed",
+                expectedOutcome = "error:AKEN VM page authentication failed",
                 label = "jni-tampered",
             )
             assertEquals(0, tampered.exitCode, "real JNI tampered current-page route must fail closed at authentication:\n${tampered.output}")
@@ -687,13 +726,14 @@ class AkenNativePageLocatorResolverNativeTest {
                 entryBytes?.let { Arrays.fill(it, 0) }
                 generatedIncludeBytes?.let { Arrays.fill(it, 0) }
                 tamperedEntryBytes?.let { Arrays.fill(it, 0) }
+                bootMaterial?.let { Arrays.fill(it, 0) }
+                plaintext?.let { Arrays.fill(it, 0) }
                 layout?.wipe()
                 context?.wipe()
                 Arrays.fill(originalInclude, 0)
                 Arrays.fill(identity, 0)
-                Arrays.fill(plaintext, 0)
                 Arrays.fill(rawProof, 0)
-                page.wipe()
+                pendingPage?.wipe()
                 deleteTree(tempDir)
             }
         }
@@ -1254,6 +1294,46 @@ class AkenNativePageLocatorResolverNativeTest {
         }
     }
 
+    private fun akenVbc4ExecutorContext(): Vbc4BuildContext = Vbc4BuildContext(
+        masterKey = ByteArray(32) { index -> (index * 7 + 0x31).toByte() },
+        nativeSeed = 0x414B_454E_5634_3001L,
+        jarLayoutDigest = ByteArray(32) { index -> (index * 11 + 0x17).toByte() },
+        nativeVmProfile = NativeVmBuildProfile(
+            parserRowProfile = 0,
+            operandAccessProfile = 0,
+        ),
+    )
+
+    /**
+     * Transitional test-only material for the still-legacy inner VBC4 parser.
+     * The production AKEN route, locator, evaluator and page opener never carry
+     * this array; the fixture installs it only inside its isolated child JVM.
+     */
+    private fun runtimeBootMaterial(context: Vbc4BuildContext): ByteArray {
+        val partitions = context.runtimeKeyPartitions
+        val material = ByteArray(4 + 64 + partitions.totalSlots * 32)
+        return try {
+            material[0] = 2
+            material[1] = partitions.resourcePartitionCount.toByte()
+            material[2] = partitions.totalSlots.toByte()
+            material[3] = 0
+            context.masterKey.copyInto(material, destinationOffset = 4)
+            context.jarLayoutDigest.copyInto(material, destinationOffset = 36)
+            for (slot in 0 until partitions.totalSlots) {
+                val key = partitions.copyKeyForSlot(slot)
+                try {
+                    key.copyInto(material, destinationOffset = 68 + slot * 32)
+                } finally {
+                    Arrays.fill(key, 0)
+                }
+            }
+            material
+        } catch (error: Throwable) {
+            Arrays.fill(material, 0)
+            throw error
+        }
+    }
+
     private fun prepareAkenJniRuntimeFixture(
         root: Path,
         platform: AkenHostPlatform,
@@ -1264,11 +1344,13 @@ class AkenNativePageLocatorResolverNativeTest {
         encodedHandle: ByteArray,
         pageIndex: Int,
         callSiteProof: ByteArray,
+        bootMaterial: ByteArray,
     ): Path {
         require(pageResourceBytes.isNotEmpty()) { "real AKEN JNI page resource must not be empty" }
         require(encodedHandle.size == AkenHandle.ENCODED_HANDLE_SIZE) { "real AKEN JNI handle size is invalid" }
         require(pageIndex >= 0) { "real AKEN JNI page index is invalid" }
         require(callSiteProof.isNotEmpty()) { "real AKEN JNI call-site proof must not be empty" }
+        require(bootMaterial.isNotEmpty()) { "real AKEN JNI transitional VBC4 boot material must not be empty" }
 
         val runtimeRoot = Files.createDirectories(root.resolve("runtime-classes"))
         val sourceDir = Files.createDirectories(root.resolve("runtime-source"))
@@ -1280,6 +1362,7 @@ class AkenNativePageLocatorResolverNativeTest {
                 encodedHandle = encodedHandle,
                 pageIndex = pageIndex,
                 callSiteProof = callSiteProof,
+                bootMaterial = bootMaterial,
             ),
             StandardCharsets.UTF_8,
         )
@@ -1337,7 +1420,7 @@ class AkenNativePageLocatorResolverNativeTest {
     private fun runAkenJniRuntimeFixture(
         runtimeRoot: Path,
         extractDirectory: Path,
-        expectedMessage: String,
+        expectedOutcome: String,
         label: String,
     ): ProcessResult {
         Files.createDirectories(extractDirectory)
@@ -1358,7 +1441,7 @@ class AkenNativePageLocatorResolverNativeTest {
                 "-classpath",
                 classpath,
                 AKEN_JNI_FIXTURE_MAIN,
-                expectedMessage,
+                expectedOutcome,
             ),
             directory = runtimeRoot.parent,
             label = label,
@@ -1371,21 +1454,47 @@ class AkenNativePageLocatorResolverNativeTest {
         encodedHandle: ByteArray,
         pageIndex: Int,
         callSiteProof: ByteArray,
+        bootMaterial: ByteArray,
     ): String = """
         import io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper;
+        import java.lang.reflect.Method;
+        import java.util.Arrays;
 
         public final class $AKEN_JNI_FIXTURE_MAIN {
             private static final long ENTRY_TOKEN = ${entryToken}L;
             private static final int PAGE_INDEX = $pageIndex;
             private static final String HANDLE = "${hexLower(encodedHandle)}";
             private static final String PROOF = "${hexLower(callSiteProof)}";
+            private static final String BOOT_MATERIAL = "${hexLower(bootMaterial)}";
 
-            public static void main(String[] args) {
+            public static void main(String[] args) throws Exception {
                 if (args.length != 1) {
-                    System.err.println("expected one failure-message argument");
+                    System.err.println("expected one outcome argument");
                     System.exit(2);
                 }
-                String expectedMessage = args[0];
+                installBootMaterial();
+                String expectedOutcome = args[0];
+                if (expectedOutcome.startsWith("result:")) {
+                    Object result = JniMicrokernelHelper.executeAkenVmPage(
+                        ENTRY_TOKEN,
+                        decodeHex(HANDLE),
+                        PAGE_INDEX,
+                        decodeHex(PROOF),
+                        new Object[0]
+                    );
+                    String expectedValue = expectedOutcome.substring("result:".length());
+                    if (!expectedValue.equals(String.valueOf(result))) {
+                        System.err.println("unexpected AKEN real JNI result: " + result);
+                        System.exit(3);
+                    }
+                    System.out.println("AKEN real JNI current page fixture: PASS:executed");
+                    return;
+                }
+                if (!expectedOutcome.startsWith("error:")) {
+                    System.err.println("unsupported outcome: " + expectedOutcome);
+                    System.exit(4);
+                }
+                String expectedMessage = expectedOutcome.substring("error:".length());
                 try {
                     JniMicrokernelHelper.executeAkenVmPage(
                         ENTRY_TOKEN,
@@ -1395,15 +1504,35 @@ class AkenNativePageLocatorResolverNativeTest {
                         new Object[0]
                     );
                     System.err.println("AKEN real JNI current-page route unexpectedly returned");
-                    System.exit(3);
+                    System.exit(5);
                 } catch (SecurityException error) {
                     if (!expectedMessage.equals(error.getMessage())) {
                         System.err.println("unexpected AKEN real JNI failure: " + error.getMessage());
                         error.printStackTrace(System.err);
-                        System.exit(4);
+                        System.exit(6);
                     }
-                    String outcome = expectedMessage.indexOf("executor") >= 0 ? "authenticated" : "tampered";
-                    System.out.println("AKEN real JNI current page fixture: PASS:" + outcome);
+                    System.out.println("AKEN real JNI current page fixture: PASS:tampered");
+                }
+            }
+
+            private static void installBootMaterial() throws Exception {
+                byte[] material = decodeHex(BOOT_MATERIAL);
+                try {
+                    Method ensureKernel = JniMicrokernelHelper.class.getDeclaredMethod("ensureAkenNativeKernel");
+                    ensureKernel.setAccessible(true);
+                    ensureKernel.invoke(null);
+
+                    Method method = JniMicrokernelHelper.class.getDeclaredMethod(
+                        "nativeInstallBootMaterial",
+                        byte[].class
+                    );
+                    method.setAccessible(true);
+                    Object installed = method.invoke(null, (Object) material);
+                    if (!Boolean.TRUE.equals(installed)) {
+                        throw new IllegalStateException("transitional VBC4 boot material was rejected");
+                    }
+                } finally {
+                    Arrays.fill(material, (byte) 0);
                 }
             }
 
