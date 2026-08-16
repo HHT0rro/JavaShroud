@@ -3,6 +3,10 @@ package io.github.hht0rro.javashroud.transforms.protection
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenBuildPlan
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenStringPageCandidate
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenStringPagePreSealRouteAllocator
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenStringPagePreSealRouteReservation
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenStringPageRouteCandidateRef
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4FinalizationLayout
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4MethodCandidate
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4PreSealRouteAllocator
@@ -48,6 +52,14 @@ internal data class Vbc4BuildContext(
     private var akenVbc4FinalizationLayout: AkenVbc4FinalizationLayout? = null
     /** Build-only future container routes reserved before native recompilation. */
     private var akenVbc4PreSealRouteReservation: AkenVbc4PreSealRouteReservation? = null
+    /**
+     * Build-only StringPage candidates captured after generated bootstraps
+     * receive their own handle/proof bindings but before sealing chooses final
+     * resource names. This is never copied into a scoped runtime context.
+     */
+    private val akenStringPageCandidates = LinkedHashMap<String, AkenStringPageCandidate>()
+    /** Build-only final StringPage routes reserved before page materialization. */
+    private var akenStringPagePreSealRouteReservation: AkenStringPagePreSealRouteReservation? = null
     private var bootSecretSnapshot: ByteArray? = null
     private var bootSidecarBindingSnapshot: ByteArray? = null
 
@@ -255,6 +267,154 @@ internal data class Vbc4BuildContext(
     fun hasAkenVbc4MethodCandidates(): Boolean = akenVbc4MethodCandidates.isNotEmpty()
 
     /**
+     * Atomically snapshots StringPage sources for later pre-seal routing and
+     * materialization. The context retains private copies only; generated
+     * bytecode, runtime helpers, and scoped build copies do not receive this
+     * plaintext collection or an enumerating lookup API.
+     */
+    @Synchronized
+    fun registerAkenStringPageCandidates(candidates: Iterable<AkenStringPageCandidate>) {
+        require(akenBuildPlan?.isWiped() != false) {
+            "AKEN StringPage candidates must be registered before page-plan initialization"
+        }
+        require(akenVbc4FinalizationLayout?.isWiped != false) {
+            "AKEN StringPage candidates cannot be registered after finalization layout publication"
+        }
+        val reservation = akenStringPagePreSealRouteReservation
+        require(reservation == null || reservation.isWiped) {
+            "AKEN StringPage candidates cannot be registered after pre-seal route reservation"
+        }
+        val incoming = candidates.toList()
+        require(incoming.isNotEmpty()) { "AKEN StringPage candidate batch must not be empty" }
+        require(incoming.none { it.isWiped }) { "cannot register a wiped AKEN StringPage candidate" }
+
+        val incomingKeys = incoming.map { it.identityPageKeyForBuild() }
+        require(incomingKeys.distinct().size == incomingKeys.size) {
+            "AKEN StringPage candidate batch contains duplicate logical page identities"
+        }
+        require(incomingKeys.none { it in akenStringPageCandidates }) {
+            "AKEN StringPage candidate logical page identity is already registered"
+        }
+
+        val snapshots = ArrayList<Pair<String, AkenStringPageCandidate>>(incoming.size)
+        try {
+            incoming.forEach { candidate ->
+                snapshots += candidate.identityPageKeyForBuild() to candidate.copyForBuild()
+            }
+            snapshots.forEach { (identityPageKey, candidate) ->
+                check(akenStringPageCandidates.put(identityPageKey, candidate) == null) {
+                    "AKEN StringPage candidate logical page identity is already registered"
+                }
+            }
+        } catch (error: Throwable) {
+            snapshots.forEach { (identityPageKey, candidate) ->
+                if (akenStringPageCandidates[identityPageKey] === candidate) {
+                    akenStringPageCandidates.remove(identityPageKey)
+                }
+                candidate.wipe()
+            }
+            throw error
+        }
+    }
+
+    /**
+     * Supplies deep, scoped StringPage candidate copies to the later
+     * materializer. Every callback copy is wiped as the scope closes.
+     */
+    fun <T> withAkenStringPageCandidatesForBuild(block: (List<AkenStringPageCandidate>) -> T): T {
+        val snapshots = synchronized(this) {
+            check(akenStringPageCandidates.isNotEmpty()) { "AKEN StringPage candidates are not initialized" }
+            akenStringPageCandidates.values
+                .sortedBy { it.identityPageKeyForBuild() }
+                .map { it.copyForBuild() }
+        }
+        try {
+            return block(snapshots.toList())
+        } finally {
+            snapshots.forEach { it.wipe() }
+        }
+    }
+
+    /**
+     * Supplies sealing only the logical-page route key and logical binding
+     * path. The projection excludes UTF-8 plaintext, handle bytes, proof,
+     * layout data, and all evaluator inputs.
+     */
+    fun <T> withAkenStringPageRouteCandidateRefsForBuild(
+        block: (List<AkenStringPageRouteCandidateRef>) -> T,
+    ): T {
+        val snapshots = synchronized(this) {
+            check(akenBuildPlan?.isWiped() != false) {
+                "AKEN StringPage route candidates must be projected before page-plan initialization"
+            }
+            check(akenVbc4FinalizationLayout?.isWiped != false) {
+                "AKEN StringPage route candidates cannot be projected after finalization layout publication"
+            }
+            check(akenStringPageCandidates.isNotEmpty()) { "AKEN StringPage candidates are not initialized" }
+            akenStringPageCandidates.values
+                .sortedBy { it.identityPageKeyForBuild() }
+                .map { candidate ->
+                    AkenStringPageRouteCandidateRef.create(
+                        identityPageKey = candidate.identityPageKeyForBuild(),
+                        logicalBindingPath = candidate.logicalBindingPath,
+                    )
+                }
+        }
+        try {
+            return block(snapshots.toList())
+        } finally {
+            snapshots.forEach { it.wipe() }
+        }
+    }
+
+    /**
+     * Reserves one future resource path per registered StringPage. The route
+     * reservation stays build-only and may be created only once before the
+     * common AKEN page plan is initialized.
+     */
+    @Synchronized
+    fun reserveAkenStringPagePreSealRoutes(
+        occupiedEntryPaths: Set<String>,
+        allocator: AkenStringPagePreSealRouteAllocator,
+    ): AkenStringPagePreSealRouteReservation {
+        require(akenBuildPlan?.isWiped() != false) {
+            "AKEN StringPage pre-seal routes must be reserved before page-plan initialization"
+        }
+        require(akenVbc4FinalizationLayout?.isWiped != false) {
+            "AKEN StringPage pre-seal routes cannot be reserved after finalization layout publication"
+        }
+        check(akenStringPageCandidates.isNotEmpty()) {
+            "AKEN StringPage candidates are not initialized"
+        }
+        val existing = akenStringPagePreSealRouteReservation
+        require(existing == null || existing.isWiped) {
+            "AKEN StringPage pre-seal route reservation is already published"
+        }
+        val created = withAkenStringPageRouteCandidateRefsForBuild { refs ->
+            AkenStringPagePreSealRouteReservation.reserve(
+                candidateRefs = refs,
+                occupiedEntryPaths = occupiedEntryPaths,
+                allocator = allocator,
+            )
+        }
+        akenStringPagePreSealRouteReservation = created
+        return created
+    }
+
+    @Synchronized
+    fun akenStringPagePreSealRouteReservationOrNull(): AkenStringPagePreSealRouteReservation? =
+        akenStringPagePreSealRouteReservation?.takeUnless { it.isWiped }
+
+    @Synchronized
+    fun requireAkenStringPagePreSealRouteReservation(): AkenStringPagePreSealRouteReservation =
+        akenStringPagePreSealRouteReservation
+            ?.takeUnless { it.isWiped }
+            ?: error("AKEN StringPage pre-seal route reservation is not initialized")
+
+    @Synchronized
+    fun hasAkenStringPageCandidates(): Boolean = akenStringPageCandidates.isNotEmpty()
+
+    /**
      * Publishes the one build-only page layout produced by consuming the scoped
      * AKEN plan. A live plan and a finalized layout must never coexist: the
      * former contains build authority, while the latter contains only encrypted
@@ -399,8 +559,9 @@ internal data class Vbc4BuildContext(
         productionBuildEvidence = productionBuildEvidence,
     ).also { copy ->
         copy.runtimeVmCatalogPlan = runtimeVmCatalogPlan
-        // Pre-seal route reservations are intentionally not copied across scopes;
-        // a copied reservation could outlive the candidate namespace it binds.
+        // Candidate sources and pre-seal route reservations are intentionally
+        // not copied across scopes; either copy could outlive the candidate
+        // namespace and plaintext ownership it binds.
         copy.bootSecretSnapshot = bootSecretSnapshot?.copyOf()
         copy.bootSidecarBindingSnapshot = bootSidecarBindingSnapshot?.copyOf()
         // AKEN plan state is intentionally not copied: each scoped build gets
@@ -420,12 +581,16 @@ internal data class Vbc4BuildContext(
         runtimeVmCatalogPlan = null
         akenVbc4MethodCandidates.values.forEach { it.wipe() }
         akenVbc4MethodCandidates.clear()
+        akenStringPageCandidates.values.forEach { it.wipe() }
+        akenStringPageCandidates.clear()
         akenBuildPlan?.wipe()
         akenBuildPlan = null
         akenVbc4FinalizationLayout?.wipe()
         akenVbc4FinalizationLayout = null
         akenVbc4PreSealRouteReservation?.wipe()
         akenVbc4PreSealRouteReservation = null
+        akenStringPagePreSealRouteReservation?.wipe()
+        akenStringPagePreSealRouteReservation = null
     }
 }
 
