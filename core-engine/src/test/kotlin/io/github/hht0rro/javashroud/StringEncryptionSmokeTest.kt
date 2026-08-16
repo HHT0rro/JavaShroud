@@ -1,16 +1,21 @@
 package io.github.hht0rro.javashroud
 
 import io.github.hht0rro.javashroud.bytecode.encryptClassStrings
+import io.github.hht0rro.javashroud.bytecode.poolClassStrings
+import io.github.hht0rro.javashroud.bytecode.StringEncryptionConfig
 import io.github.hht0rro.javashroud.model.schema.requiredPassIdsFor
 import io.github.hht0rro.javashroud.modules.buildModuleRegistry
 import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.requireVbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
+import java.util.Arrays
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
@@ -20,47 +25,82 @@ class StringEncryptionSmokeTest {
     @Test
     fun encryptClassStrings_replaces_ldc_strings_with_native_cached_callsite() {
         val classBytes = buildTestClassWithStrings("Hello", "World")
-        val encrypted = withVbc4BuildContext(defaultVbc4BuildContext()) {
-            encryptClassStrings(classBytes)
-        }
-
-        assertTrue(classBytes.size > 0)
-        assertTrue(encrypted.contentEquals(classBytes).not(), "Expected encrypted bytes to differ from original")
-
-        val encryptedText = String(encrypted, Charsets.ISO_8859_1)
-        assertFalse(encryptedText.contains("a_dx"), "Legacy decrypt method names must not be injected")
-        assertFalse(encryptedText.contains("AES/ECB"), "Legacy AES stub must not be injected")
-        assertFalse(encryptedText.contains("PKCS8EncodedKeySpec"), "Legacy RSA private-key stub must not be injected")
-
-        val reader = ClassReader(encrypted)
-        var foundSyntheticStringArray = false
-        var foundHelperInvoke = false
-        var foundOriginalLiteral = false
-        reader.accept(object : ClassVisitor(Opcodes.ASM9) {
-            override fun visitField(access: Int, name: String, descriptor: String, signature: String?, value: Any?): org.objectweb.asm.FieldVisitor? {
-                if ((access and Opcodes.ACC_SYNTHETIC) != 0 && descriptor == "[Ljava/lang/String;") {
-                    foundSyntheticStringArray = true
-                }
-                return super.visitField(access, name, descriptor, signature, value)
-            }
-
-            override fun visitMethod(access: Int, name: String, descriptor: String, signature: String?, exceptions: Array<out String>?): MethodVisitor {
-                return object : MethodVisitor(Opcodes.ASM9) {
-                    override fun visitLdcInsn(value: Any?) {
-                        if (value == "Hello" || value == "World") foundOriginalLiteral = true
-                    }
-
-                    override fun visitMethodInsn(opcode: Int, owner: String, name: String, descriptor: String, isInterface: Boolean) {
-                        if (opcode == Opcodes.INVOKESTATIC && owner == "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper" && name == "cachedDecodeString") {
-                            foundHelperInvoke = true
+        val context = defaultVbc4BuildContext()
+        try {
+            val encrypted = withVbc4BuildContext(context) {
+                encryptClassStrings(classBytes).also {
+                    requireVbc4BuildContext().withAkenStringPageCandidatesForBuild { candidates ->
+                        assertEquals(2, candidates.size, "Each protected literal must register one StringPage candidate")
+                        val identities = candidates.map { it.copyLogicalIdentityForBuild() }
+                        val plaintexts = candidates.map { it.copyPlaintextForBuild() }
+                        val handles = candidates.map { it.copyEncodedHandleForBuild() }
+                        val proofs = candidates.map { it.copyCallSiteProofForBuild() }
+                        try {
+                            assertTrue(candidates.all { it.pageIndex == 0 })
+                            assertTrue(identities.all { it.size == 32 })
+                            assertFalse(identities[0].contentEquals(identities[1]), "StringPage identities must be page-local")
+                            assertTrue(handles.all { it.size == 24 })
+                            assertFalse(handles[0].contentEquals(handles[1]), "StringPage handles must be page-local")
+                            assertTrue(proofs.all { it.size == 32 })
+                            assertFalse(proofs[0].contentEquals(proofs[1]), "StringPage call-site proofs must be page-local")
+                            assertEquals(setOf("Hello", "World"), plaintexts.map { plaintext -> plaintext.decodeToString() }.toSet())
+                            assertEquals(2, candidates.map { candidate -> candidate.logicalBindingPath }.distinct().size)
+                        } finally {
+                            identities.forEach { identity -> Arrays.fill(identity, 0) }
+                            plaintexts.forEach { plaintext -> Arrays.fill(plaintext, 0) }
+                            handles.forEach { handle -> Arrays.fill(handle, 0) }
+                            proofs.forEach { proof -> Arrays.fill(proof, 0) }
                         }
                     }
                 }
             }
-        }, 0)
-        assertFalse(foundSyntheticStringArray, "String encryption must not add reflection-visible fields to business classes")
-        assertTrue(foundHelperInvoke, "Should invoke StringEncryptionHelper.cachedDecodeString directly")
-        assertFalse(foundOriginalLiteral, "Original literals should be removed from LDC sites")
+
+            assertTrue(classBytes.isNotEmpty())
+            assertTrue(encrypted.contentEquals(classBytes).not(), "Expected encrypted bytes to differ from original")
+
+            val encryptedText = String(encrypted, Charsets.ISO_8859_1)
+            assertFalse(encryptedText.contains("a_dx"), "Legacy decrypt method names must not be injected")
+            assertFalse(encryptedText.contains("AES/ECB"), "Legacy AES stub must not be injected")
+            assertFalse(encryptedText.contains("PKCS8EncodedKeySpec"), "Legacy RSA private-key stub must not be injected")
+
+            val reader = ClassReader(encrypted)
+            var foundSyntheticStringArray = false
+            var akenHelperInvokeCount = 0
+            var foundLegacyHelperInvoke = false
+            var foundOriginalLiteral = false
+            reader.accept(object : ClassVisitor(Opcodes.ASM9) {
+                override fun visitField(access: Int, name: String, descriptor: String, signature: String?, value: Any?): org.objectweb.asm.FieldVisitor? {
+                    if ((access and Opcodes.ACC_SYNTHETIC) != 0 && descriptor == "[Ljava/lang/String;") {
+                        foundSyntheticStringArray = true
+                    }
+                    return super.visitField(access, name, descriptor, signature, value)
+                }
+
+                override fun visitMethod(access: Int, name: String, descriptor: String, signature: String?, exceptions: Array<out String>?): MethodVisitor {
+                    return object : MethodVisitor(Opcodes.ASM9) {
+                        override fun visitLdcInsn(value: Any?) {
+                            if (value == "Hello" || value == "World") foundOriginalLiteral = true
+                        }
+
+                        override fun visitMethodInsn(opcode: Int, owner: String, name: String, descriptor: String, isInterface: Boolean) {
+                            if (opcode != Opcodes.INVOKESTATIC || owner != "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper") return
+                            if (name == "cachedDecodeAkenStringPage" && descriptor == "([BI[B)Ljava/lang/String;") {
+                                akenHelperInvokeCount++
+                            }
+                            if (name == "cachedDecodeString" || descriptor == "([BIIJJ)Ljava/lang/String;") {
+                                foundLegacyHelperInvoke = true
+                            }
+                        }
+                    }
+                }
+            }, 0)
+            assertFalse(foundSyntheticStringArray, "String encryption must not add reflection-visible fields to business classes")
+            assertEquals(2, akenHelperInvokeCount, "Each literal should invoke the typed AKEN StringPage helper")
+            assertFalse(foundLegacyHelperInvoke, "Production call sites must not use the legacy inline string payload decoder")
+            assertFalse(foundOriginalLiteral, "Original literals should be removed from LDC sites")
+        } finally {
+            context.wipe()
+        }
     }
 
     @Test
@@ -79,6 +119,27 @@ class StringEncryptionSmokeTest {
             }
         }, 0)
         assertTrue(className.isNotEmpty(), "Class name should be preserved")
+    }
+
+    @Test
+    fun string_array_pool_does_not_rewrite_classes_with_typed_aken_string_pages() {
+        val context = defaultVbc4BuildContext()
+        try {
+            val encrypted = withVbc4BuildContext(context) {
+                encryptClassStrings(
+                    buildTestClassWithStrings("protected-value", "x"),
+                    StringEncryptionConfig(lengthThreshold = 3),
+                )
+            }
+
+            val pooled = poolClassStrings(encrypted)
+            assertTrue(
+                pooled.contentEquals(encrypted),
+                "String array pooling must leave a class with a typed AKEN page callsite unchanged.",
+            )
+        } finally {
+            context.wipe()
+        }
     }
 
     @Test

@@ -56,7 +56,6 @@ JS_HIDDEN jstring JNICALL jsn_r16(JNIEnv *env, jclass cls, jstring bindingSource
 JS_HIDDEN void JNICALL jsn_r17(JNIEnv *env, jclass cls, jstring expectedToken, jstring bindingSource, jstring salt, jstring expectedFingerprint);
 JS_HIDDEN jstring JNICALL jsn_r18(JNIEnv *env, jclass cls);
 JS_HIDDEN jobject JNICALL jsn_r20(JNIEnv *env, jclass cls, jlong entryToken, jstring resourcePath, jobjectArray args);
-JS_HIDDEN jbyteArray JNICALL jsn_r21(JNIEnv *env, jclass cls, jbyteArray payload, jint seed, jint flags, jlong classIdentityHigh, jlong classIdentityLow);
 JS_HIDDEN jobject JNICALL jsn_r22(JNIEnv *env, jclass cls, jlong entryToken, jobjectArray args);
 JS_HIDDEN void JNICALL jsn_r23(JNIEnv *env, jclass cls, jlong entryToken);
 JS_HIDDEN void JNICALL jsn_r24(JNIEnv *env, jclass cls, jlong entryToken, jint arg0);
@@ -3648,13 +3647,6 @@ static jobject JNICALL jsw_r20(JNIEnv *env, jclass cls, jlong entryToken, jstrin
     return js_protected_runtime_leave(env) ? result : NULL;
 }
 
-static jbyteArray JNICALL jsw_r21(JNIEnv *env, jclass cls, jbyteArray payload, jint seed, jint flags, jlong classIdentityHigh, jlong classIdentityLow) {
-    if (!js_vm_sensitive_path_guard(env, (const void*)jsw_r21, 1)) return NULL;
-    if (!js_protected_runtime_enter(env)) return NULL;
-    jbyteArray result = jsn_r21(env, cls, payload, seed, flags, classIdentityHigh, classIdentityLow);
-    return js_protected_runtime_leave(env) ? result : NULL;
-}
-
 static jobject JNICALL jsw_r22(JNIEnv *env, jclass cls, jlong entryToken, jobjectArray args) {
     if (!js_protected_runtime_enter(env)) return NULL;
     jobject result = jsn_r22(env, cls, entryToken, args);
@@ -3986,9 +3978,6 @@ static int js_register_optional_natives(JNIEnv *env) {
         {js_native_name("Decode", "String", ""), "(Ljava/lang/String;)Ljava/lang/String;", (void*)jsw_r13},
     };
     if (!js_register_native_group(env, js_helper_owner("An", "tiDump", "", "Helper"), anti_dump_methods, 3, 0)) return 0;
-
-    JNINativeMethod string_encryption_methods[] = {{js_native_name("Decode", "String", ""), "([BIIJJ)[B", (void*)jsw_r21}};
-    if (!js_register_native_group(env, js_helper_owner("String", "Encryption", "", "Helper"), string_encryption_methods, 1, 0)) return 0;
 
     JNINativeMethod environment_methods[] = {
         {js_native_name("Derive", "Key", ""), "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", (void*)jsw_r16},

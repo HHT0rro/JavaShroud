@@ -14,6 +14,7 @@ import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.requireVbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.sealedRuntimeHelperInternalName
+import io.github.hht0rro.javashroud.transforms.protection.sealedRuntimeHelperMethodName
 import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -92,6 +93,13 @@ class RuntimeArtifactSealingCollisionTest {
         val sealedEntryNames = sealed.jarEntries.map { it.name }.toSet()
         val sealedOuterNode = ClassNode()
         org.objectweb.asm.ClassReader(sealedOuter.bytes).accept(sealedOuterNode, org.objectweb.asm.ClassReader.SKIP_FRAMES)
+        val akenStringPageDescriptor = "([BI[B)Ljava/lang/String;"
+        val sealedAkenStringPageMethod = sealedRuntimeHelperMethodName(
+            outerName,
+            "cachedDecodeAkenStringPage",
+            akenStringPageDescriptor,
+            seed,
+        )
 
         assertFalse("$outerName.class" in sealedEntryNames)
         assertFalse("$innerName.class" in sealedEntryNames)
@@ -100,6 +108,14 @@ class RuntimeArtifactSealingCollisionTest {
         assertTrue(
             sealedOuterNode.innerClasses.any { it.name == sealedInner.summary.internalName },
             "The sealed StringEncryptionHelper must retain a link to its sealed CachePolicy nested enum.",
+        )
+        assertTrue(
+            sealedOuterNode.methods.any { it.name == sealedAkenStringPageMethod && it.desc == akenStringPageDescriptor },
+            "The typed AKEN StringPage helper method must be sealed with the relocated helper.",
+        )
+        assertFalse(
+            sealedOuterNode.methods.any { it.name == "cachedDecodeAkenStringPage" && it.desc == akenStringPageDescriptor },
+            "The relocated StringPage helper must not retain its fixed production method name.",
         )
     }
 

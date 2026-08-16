@@ -15,15 +15,12 @@ import org.objectweb.asm.tree.TypeInsnNode
 import org.objectweb.asm.tree.VarInsnNode
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.util.Arrays
+import java.util.Base64
 import java.util.Random
-import javax.crypto.Cipher
-import javax.crypto.Mac
-import javax.crypto.spec.IvParameterSpec
-import javax.crypto.spec.SecretKeySpec
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_CLEAN_ENTRY_INTEGRITY_HEX
-import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.hkdfSha256
 import io.github.hht0rro.javashroud.transforms.protection.requireVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHandle
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenStringPageCandidate
 
 /**
  * Configuration for native-backed string encryption.
@@ -35,8 +32,26 @@ data class StringEncryptionConfig(
 )
 
 private const val STRING_HELPER_OWNER = "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper"
-private const val STRING_HELPER_DECODE_DESC = "([BIIJJ)Ljava/lang/String;"
+private const val STRING_HELPER_AKEN_DECODE_DESC = "([BI[B)Ljava/lang/String;"
 private const val SHROUD_ENCRYPT_DESC = "Lio/github/hht0rro/javashroud/bytecode/ShroudEncrypt;"
+private const val AKEN_STRING_PAGE_INDEX = 0
+private const val AKEN_STRING_PAGE_NONCE_SIZE = 16
+
+private val AKEN_STRING_PAGE_IDENTITY_DOMAIN =
+    "AKEN-v4-string-page-logical-identity-v1".toByteArray(Charsets.US_ASCII)
+private val AKEN_STRING_PAGE_HANDLE_DOMAIN =
+    "AKEN-v4-string-page-handle-v1".toByteArray(Charsets.US_ASCII)
+private val AKEN_STRING_PAGE_PROOF_DOMAIN =
+    "AKEN-v4-string-page-call-site-proof-v1".toByteArray(Charsets.US_ASCII)
+private val AKEN_STRING_PAGE_PATH_DOMAIN =
+    "AKEN-v4-string-page-logical-path-v1".toByteArray(Charsets.US_ASCII)
+private val AKEN_STRING_PAGE_PATH_ROOTS = arrayOf(
+    "META-INF/.a4/s",
+    "META-INF/.r4/p",
+    "assets/.a4/s",
+    "META-INF/.j4/r",
+)
+private val AKEN_STRING_PAGE_PATH_SUFFIXES = arrayOf(".bin", ".dat", ".p", ".r")
 
 /**
  * Replaces string LDC constants with native-backed cached decode callsites.
@@ -52,35 +67,86 @@ fun encryptClassStrings(
     if ((classNode.access and Opcodes.ACC_INTERFACE) != 0) return classBytes
 
     val random = deterministicRandom(config.seed, classNode.name)
-    val classSalt = mix32(classNode.name.hashCode() + random.nextInt())
-    val classIdentity = deriveStringClassIdentity(classNode.name)
-    val classIdentityHigh = readLongBe(classIdentity, 0)
-    val classIdentityLow = readLongBe(classIdentity, 8)
+    val candidateRandom = SecureRandom()
+    val candidates = ArrayList<AkenStringPageCandidate>()
     var encryptedCount = 0
 
-    for (method in classNode.methods) {
-        if ((method.access and (Opcodes.ACC_ABSTRACT or Opcodes.ACC_NATIVE)) != 0) continue
-        expandStringConcatRecipes(method)
-        val annotated = hasShroudEncryptAnnotation(method)
-        val instructions = method.instructions ?: continue
-        val methodSalt = mix32(classSalt + method.name.hashCode() * 31 + method.desc.hashCode())
-        for (insn in instructions.toArray()) {
-            val value = (insn as? LdcInsnNode)?.cst as? String ?: continue
-            if (!shouldEncryptString(value, config, annotated)) continue
-            val literalSeed = mix32(methodSalt + encryptedCount + random.nextInt())
-            val flags = mix32(classSalt.rotateLeft(5) + methodSalt.rotateRight(3) + encryptedCount)
-            val payload = encodeStringPayload(value, literalSeed, flags, classIdentity)
-            instructions.insert(insn, buildDecodeCallsite(literalSeed, flags, classIdentityHigh, classIdentityLow, payload))
-            instructions.remove(insn)
-            encryptedCount++
+    try {
+        for (method in classNode.methods) {
+            if ((method.access and (Opcodes.ACC_ABSTRACT or Opcodes.ACC_NATIVE)) != 0) continue
+            expandStringConcatRecipes(method)
+            val annotated = hasShroudEncryptAnnotation(method)
+            val instructions = method.instructions ?: continue
+            var methodLiteralOrdinal = 0
+            for (insn in instructions.toArray()) {
+                val value = (insn as? LdcInsnNode)?.cst as? String ?: continue
+                if (value.isEmpty() || !shouldEncryptString(value, config, annotated)) continue
+
+                val buildNonce = ByteArray(AKEN_STRING_PAGE_NONCE_SIZE).also(random::nextBytes)
+                var logicalIdentity: ByteArray? = null
+                var plaintext: ByteArray? = null
+                var encodedHandle: ByteArray? = null
+                var callSiteProof: ByteArray? = null
+                var candidate: AkenStringPageCandidate? = null
+                try {
+                    logicalIdentity = deriveAkenStringPageIdentity(
+                        classInternalName = classNode.name,
+                        methodName = method.name,
+                        methodDescriptor = method.desc,
+                        classLiteralOrdinal = encryptedCount,
+                        methodLiteralOrdinal = methodLiteralOrdinal,
+                        buildNonce = buildNonce,
+                    )
+                    encodedHandle = deriveAkenStringPageHandle(logicalIdentity, buildNonce)
+                    val logicalBindingPath = akenStringPageLogicalBindingPath(logicalIdentity, encodedHandle)
+                    callSiteProof = deriveAkenStringPageCallSiteProof(
+                        logicalIdentity = logicalIdentity,
+                        encodedHandle = encodedHandle,
+                        pageIndex = AKEN_STRING_PAGE_INDEX,
+                        logicalBindingPath = logicalBindingPath,
+                    )
+                    plaintext = value.toByteArray(Charsets.UTF_8)
+                    candidate = AkenStringPageCandidate.create(
+                        logicalIdentity = logicalIdentity,
+                        plaintext = plaintext,
+                        pageIndex = AKEN_STRING_PAGE_INDEX,
+                        callSiteProof = callSiteProof,
+                        encodedHandle = encodedHandle,
+                        logicalBindingPath = logicalBindingPath,
+                        random = candidateRandom,
+                    )
+                    val decodeCallsite = buildAkenStringPageDecodeCallsite(
+                        encodedHandle = encodedHandle,
+                        pageIndex = AKEN_STRING_PAGE_INDEX,
+                        callSiteProof = callSiteProof,
+                    )
+                    instructions.insert(insn, decodeCallsite)
+                    instructions.remove(insn)
+                    candidates += candidate
+                    candidate = null
+                    encryptedCount++
+                    methodLiteralOrdinal++
+                } finally {
+                    candidate?.wipe()
+                    Arrays.fill(buildNonce, 0)
+                    logicalIdentity?.let { Arrays.fill(it, 0) }
+                    plaintext?.let { Arrays.fill(it, 0) }
+                    encodedHandle?.let { Arrays.fill(it, 0) }
+                    callSiteProof?.let { Arrays.fill(it, 0) }
+                }
+            }
         }
+
+        if (encryptedCount == 0) return classBytes
+
+        val writer = computeFramesWriter(reader)
+        classNode.accept(writer)
+        val transformed = writer.toByteArray()
+        requireVbc4BuildContext().registerAkenStringPageCandidates(candidates)
+        return transformed
+    } finally {
+        candidates.forEach { it.wipe() }
     }
-
-    if (encryptedCount == 0) return classBytes
-
-    val writer = computeFramesWriter(reader)
-    classNode.accept(writer)
-    return writer.toByteArray()
 }
 
 
@@ -173,11 +239,6 @@ private fun deterministicRandom(seed: Long?, className: String): Random = if (se
     Random(value + className.hashCode().toLong())
 }
 
-private fun hiddenMemberName(prefix: String, className: String, salt: Int, random: Random): String {
-    val value = mix32(className.hashCode() + salt + random.nextInt())
-    return "_${prefix}_${value.toUInt().toString(36)}"
-}
-
 private fun hasShroudEncryptAnnotation(method: MethodNode): Boolean =
     method.visibleAnnotations.orEmpty().any { it.desc == SHROUD_ENCRYPT_DESC } ||
         method.invisibleAnnotations.orEmpty().any { it.desc == SHROUD_ENCRYPT_DESC }
@@ -188,19 +249,23 @@ private fun shouldEncryptString(value: String, config: StringEncryptionConfig, a
     else -> true
 }
 
-private fun buildDecodeCallsite(
-    seed: Int,
-    flags: Int,
-    classIdentityHigh: Long,
-    classIdentityLow: Long,
-    payload: ByteArray,
+private fun buildAkenStringPageDecodeCallsite(
+    encodedHandle: ByteArray,
+    pageIndex: Int,
+    callSiteProof: ByteArray,
 ): InsnList = InsnList().apply {
-    addByteArray(payload)
-    addInt(seed)
-    addInt(flags)
-    add(LdcInsnNode(classIdentityHigh))
-    add(LdcInsnNode(classIdentityLow))
-    add(MethodInsnNode(Opcodes.INVOKESTATIC, STRING_HELPER_OWNER, "cachedDecodeString", STRING_HELPER_DECODE_DESC, false))
+    addByteArray(encodedHandle)
+    addInt(pageIndex)
+    addByteArray(callSiteProof)
+    add(
+        MethodInsnNode(
+            Opcodes.INVOKESTATIC,
+            STRING_HELPER_OWNER,
+            "cachedDecodeAkenStringPage",
+            STRING_HELPER_AKEN_DECODE_DESC,
+            false,
+        ),
+    )
 }
 
 private fun InsnList.addByteArray(bytes: ByteArray) {
@@ -229,96 +294,98 @@ private fun InsnList.addInt(value: Int) {
     }
 }
 
-internal fun encodeStringPayload(input: String, seed: Int, flags: Int, classIdentity: ByteArray): ByteArray {
-    val plain = input.toByteArray(Charsets.UTF_8)
-    return stringPayloadAesCtr(plain, seed, flags, classIdentity)
-}
+private fun deriveAkenStringPageIdentity(
+    classInternalName: String,
+    methodName: String,
+    methodDescriptor: String,
+    classLiteralOrdinal: Int,
+    methodLiteralOrdinal: Int,
+    buildNonce: ByteArray,
+): ByteArray = MessageDigest.getInstance("SHA-256").apply {
+    update(AKEN_STRING_PAGE_IDENTITY_DOMAIN)
+    updateAkenString(classInternalName)
+    updateAkenString(methodName)
+    updateAkenString(methodDescriptor)
+    updateAkenInt(classLiteralOrdinal)
+    updateAkenInt(methodLiteralOrdinal)
+    updateAkenBytes(buildNonce)
+}.digest()
 
-internal fun decodeStringPayload(payload: ByteArray, seed: Int, flags: Int, classIdentity: ByteArray): ByteArray =
-    stringPayloadAesCtr(payload, seed, flags, classIdentity)
-
-private fun stringPayloadAesCtr(data: ByteArray, seed: Int, flags: Int, classIdentity: ByteArray): ByteArray {
-    require(classIdentity.size == 16) { "string class identity must be 16 bytes" }
-    val buildContext = requireVbc4BuildContext()
-    val cipher = Cipher.getInstance("AES/CTR/NoPadding")
-    cipher.init(
-        Cipher.ENCRYPT_MODE,
-        SecretKeySpec(stringPayloadAesKey(buildContext, seed, flags, data.size, classIdentity), "AES"),
-        IvParameterSpec(stringPayloadAesIv(buildContext, seed, flags, data.size, classIdentity)),
-    )
-    return cipher.doFinal(data)
-}
-
-private fun stringPayloadAesKey(buildContext: Vbc4BuildContext, seed: Int, flags: Int, length: Int, classIdentity: ByteArray): ByteArray =
-    stringPayloadHmac(buildContext, "js-string-aes-key", seed, flags, length, classIdentity).copyOfRange(0, 16)
-
-private fun stringPayloadAesIv(buildContext: Vbc4BuildContext, seed: Int, flags: Int, length: Int, classIdentity: ByteArray): ByteArray =
-    stringPayloadHmac(buildContext, "js-string-aes-iv", seed, flags, length, classIdentity).copyOfRange(0, 16)
-
-internal fun deriveStringEncryptionRoot(buildContext: Vbc4BuildContext): ByteArray {
-    val masterKey = buildContext.copyMasterKey()
-    return try {
-        hkdfSha256(
-            ikm = masterKey,
-            salt = "javashroud-string-root-v1".toByteArray(Charsets.US_ASCII),
-            info = buildContext.jarLayoutDigest,
-            length = 32,
-        )
-    } finally {
-        java.util.Arrays.fill(masterKey, 0)
-    }
-}
-
-internal fun deriveStringClassIdentity(classInternalName: String): ByteArray {
-    val digest = MessageDigest.getInstance("SHA-256")
-    digest.update("javashroud-string-class-identity-v1".toByteArray(Charsets.US_ASCII))
-    digest.update(0)
-    digest.update(classInternalName.toByteArray(Charsets.UTF_8))
-    return digest.digest().copyOfRange(0, 16)
-}
-
-private fun stringPayloadHmac(
-    buildContext: Vbc4BuildContext,
-    label: String,
-    seed: Int,
-    flags: Int,
-    length: Int,
-    classIdentity: ByteArray,
+private fun deriveAkenStringPageHandle(
+    logicalIdentity: ByteArray,
+    buildNonce: ByteArray,
 ): ByteArray {
-    val parts = listOf(
-        label.toByteArray(Charsets.US_ASCII),
-        intBytes(seed),
-        intBytes(flags),
-        intBytes(length),
-    )
-    val stringRoot = deriveStringEncryptionRoot(buildContext)
+    val digest = digestAkenBinding(AKEN_STRING_PAGE_HANDLE_DOMAIN, logicalIdentity, buildNonce)
     return try {
-        val classKey = hkdfSha256(
-            ikm = stringRoot,
-            salt = "javashroud-string-class-v1".toByteArray(Charsets.US_ASCII),
-            info = classIdentity,
-            length = 32,
-        )
-        try {
-            val scopedKey = hmacSha256(classKey, parts)
-            try {
-                hmacSha256(scopedKey, parts)
-            } finally {
-                java.util.Arrays.fill(scopedKey, 0)
-            }
-        } finally {
-            java.util.Arrays.fill(classKey, 0)
-        }
+        digest.copyOf(AkenHandle.ENCODED_HANDLE_SIZE)
     } finally {
-        java.util.Arrays.fill(stringRoot, 0)
+        Arrays.fill(digest, 0)
     }
 }
 
-private fun hmacSha256(key: ByteArray, parts: List<ByteArray>): ByteArray {
-    val mac = Mac.getInstance("HmacSHA256")
-    mac.init(SecretKeySpec(key, "HmacSHA256"))
-    for (part in parts) mac.update(part)
-    return mac.doFinal()
+private fun deriveAkenStringPageCallSiteProof(
+    logicalIdentity: ByteArray,
+    encodedHandle: ByteArray,
+    pageIndex: Int,
+    logicalBindingPath: String,
+): ByteArray {
+    val pageBytes = intBytes(pageIndex)
+    val pathBytes = logicalBindingPath.toByteArray(Charsets.UTF_8)
+    return try {
+        digestAkenBinding(
+            AKEN_STRING_PAGE_PROOF_DOMAIN,
+            logicalIdentity,
+            encodedHandle,
+            pageBytes,
+            pathBytes,
+        )
+    } finally {
+        Arrays.fill(pageBytes, 0)
+        Arrays.fill(pathBytes, 0)
+    }
+}
+
+private fun akenStringPageLogicalBindingPath(
+    logicalIdentity: ByteArray,
+    encodedHandle: ByteArray,
+): String {
+    val digest = digestAkenBinding(AKEN_STRING_PAGE_PATH_DOMAIN, logicalIdentity, encodedHandle)
+    return try {
+        val token = Base64.getUrlEncoder().withoutPadding().encodeToString(digest)
+        val root = AKEN_STRING_PAGE_PATH_ROOTS[(digest[0].toInt() and 0xFF) % AKEN_STRING_PAGE_PATH_ROOTS.size]
+        val prefixLength = 2 + ((digest[1].toInt() and 0xFF) % 3)
+        val suffix = AKEN_STRING_PAGE_PATH_SUFFIXES[(digest[2].toInt() and 0xFF) % AKEN_STRING_PAGE_PATH_SUFFIXES.size]
+        "$root/${token.substring(0, prefixLength)}/${token.substring(prefixLength)}$suffix"
+    } finally {
+        Arrays.fill(digest, 0)
+    }
+}
+
+private fun digestAkenBinding(domain: ByteArray, vararg values: ByteArray): ByteArray =
+    MessageDigest.getInstance("SHA-256").apply {
+        update(domain)
+        values.forEach(::updateAkenBytes)
+    }.digest()
+
+private fun MessageDigest.updateAkenString(value: String) {
+    val encoded = value.toByteArray(Charsets.UTF_8)
+    try {
+        updateAkenBytes(encoded)
+    } finally {
+        Arrays.fill(encoded, 0)
+    }
+}
+
+private fun MessageDigest.updateAkenBytes(value: ByteArray) {
+    updateAkenInt(value.size)
+    update(value)
+}
+
+private fun MessageDigest.updateAkenInt(value: Int) {
+    update((value ushr 24).toByte())
+    update((value ushr 16).toByte())
+    update((value ushr 8).toByte())
+    update(value.toByte())
 }
 
 private fun intBytes(value: Int): ByteArray = byteArrayOf(
@@ -327,18 +394,3 @@ private fun intBytes(value: Int): ByteArray = byteArrayOf(
     ((value ushr 8) and 0xFF).toByte(),
     (value and 0xFF).toByte(),
 )
-
-private fun readLongBe(bytes: ByteArray, offset: Int): Long {
-    var value = 0L
-    for (index in 0 until 8) value = (value shl 8) or (bytes[offset + index].toLong() and 0xFFL)
-    return value
-}
-private fun mix32(value: Int): Int {
-    var x = value
-    x += x.rotateRight(16)
-    x *= 0x7FEB352D
-    x += x.rotateRight(15)
-    x *= 0x846CA68B.toInt()
-    x += x.rotateRight(16)
-    return x
-}

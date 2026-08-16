@@ -16,34 +16,6 @@ public final class StringEncryptionHelper {
 
     private StringEncryptionHelper() { }
 
-    public static native byte[] nativeDecodeString(byte[] payload, int seed, int flags, long classIdentityHigh, long classIdentityLow);
-
-    public static String cachedDecodeString(byte[] payload, int seed, int flags, long classIdentityHigh, long classIdentityLow) {
-        ensureLegacyNativeStringDecoder();
-        CachePolicy cachePolicy = configuredCachePolicy();
-        activateCachePolicy(cachePolicy);
-        if (!JniMicrokernelHelper.isNativeLoaded()) {
-            throw new SecurityException("string-encryption requires the sealed native kernel (" +
-                JniMicrokernelHelper.getLoadStatus() + ")");
-        }
-        try {
-            Supplier<String> decoder = () -> decodedNativeString(
-                payload,
-                seed,
-                flags,
-                classIdentityHigh,
-                classIdentityLow
-            );
-            if (cachePolicy == CachePolicy.OFF) return decodedValue(decoder);
-
-            String key = seed + ":" + flags + ":" + Long.toHexString(classIdentityHigh) + ":" +
-                Long.toHexString(classIdentityLow) + ":" + new String(payload, StandardCharsets.ISO_8859_1);
-            return cachedValue(cachePolicy, key, decoder);
-        } catch (UnsatisfiedLinkError error) {
-            throw new SecurityException("string-encryption native decoder is not registered for the sealed helper", error);
-        }
-    }
-
     /**
      * Opens one AKEN v4 StringPage through its typed native route and applies
      * the existing cache policy only to the resulting JVM String.  The
@@ -60,19 +32,6 @@ public final class StringEncryptionHelper {
             return cachedValue(cachePolicy, akenStringPageCacheKey(encodedHandle, pageIndex, callSiteProof), decoder);
         } catch (UnsatisfiedLinkError error) {
             throw new SecurityException("AKEN string page native decoder is not registered for the sealed helper", error);
-        }
-    }
-
-    private static String decodedNativeString(byte[] payload, int seed, int flags, long classIdentityHigh, long classIdentityLow) {
-        return new String(
-            nativeDecodeString(payload, seed, flags, classIdentityHigh, classIdentityLow),
-            StandardCharsets.UTF_8
-        );
-    }
-
-    private static void ensureLegacyNativeStringDecoder() {
-        if (!JniMicrokernelHelper.isNativeLoaded()) {
-            JniMicrokernelHelper.loadKernel("decrypt", "auto", "vm-diverse");
         }
     }
 

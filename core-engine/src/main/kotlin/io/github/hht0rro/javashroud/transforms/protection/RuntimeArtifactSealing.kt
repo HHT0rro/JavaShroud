@@ -805,7 +805,7 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     addMethod(classEncryption, "initializeClass", "(Ljava/lang/String;Ljava/lang/String;)V")
 
     val stringEncryption = "$PROTECTION_HELPER_PACKAGE/StringEncryptionHelper"
-    addMethod(stringEncryption, "nativeDecodeString", "([BIIJJ)[B")
+    addMethod(stringEncryption, "cachedDecodeAkenStringPage", "([BI[B)Ljava/lang/String;")
 
     val methodBody = "$PROTECTION_HELPER_PACKAGE/MethodBodyDecryptionHelper"
     addMethod(methodBody, "invokeEncrypted", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Class;Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;")

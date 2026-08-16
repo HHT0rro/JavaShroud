@@ -32,28 +32,34 @@ import kotlin.test.assertTrue
 
 class NativeHelperHardeningTest {
     @Test
-    fun string_encryption_helper_uses_split_native_registration_and_fail_closed_java_layer() {
+    fun string_encryption_helper_uses_typed_aken_page_route_and_fail_closed_java_layer() {
         val nativeSource = nativeRuntimeSources()
         val helperSource = Files.readString(sourcePath("src/main/java/io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper.java"))
 
-        assertTrue(nativeSource.contains("jsn_r21"), "StringEncryptionHelper native decode entry must be implemented.")
-        assertTrue(nativeSource.contains("jsn_r21") && nativeSource.contains("js_vbc4_aes_material") && nativeSource.contains("js_vbc4_hmac_sha256"), "String decode must use native AES-CTR with HMAC-derived key material.")
         assertTrue(
-            nativeSource.contains("js_helper_owner(\"String\", \"Encryption\", \"\", \"Helper\")") &&
-                nativeSource.contains("js_native_name(\"Decode\", \"String\", \"\")"),
-            "StringEncryptionHelper registration must keep owner and method names split at registration time.",
+            nativeSource.contains("nativeDecodeAkenStringPage") &&
+                nativeSource.contains("([BI[B)[B") &&
+                nativeSource.contains("jsw_a1"),
+            "String pages must be registered through the typed AKEN native route.",
         )
         assertFalse(
             nativeSource.contains("Java_io_github_hht0rro_javashroud_transforms_protection_StringEncryptionHelper"),
             "StringEncryptionHelper must not expose a traditional Java_* JNI export symbol.",
         )
-        assertTrue(helperSource.contains("public static native byte[] nativeDecodeString(byte[] payload, int seed, int flags, long classIdentityHigh, long classIdentityLow);"))
-        assertTrue(!helperSource.contains("public static String decode("), "StringEncryptionHelper must not expose a Java string-decoder trampoline.")
-        assertTrue(helperSource.contains("public static String cachedDecodeString(byte[] payload, int seed, int flags, long classIdentityHigh, long classIdentityLow)"), "StringEncryptionHelper should expose only the native-backed cached string materialization API.")
-        assertTrue(helperSource.contains("nativeDecodeString(payload, seed, flags, classIdentityHigh, classIdentityLow)"), "Cached materialization must still delegate decryption to the native microkernel.")
-        assertTrue(nativeSource.contains("javashroud-string-class-v1") && nativeSource.contains("class_identity_high"), "String material must be derived through a per-class native KDF domain.")
+        assertTrue(helperSource.contains("public static String cachedDecodeAkenStringPage(byte[] encodedHandle, int pageIndex, byte[] callSiteProof)"))
+        assertTrue(helperSource.contains("JniMicrokernelHelper.decodeAkenStringPage(encodedHandle, pageIndex, callSiteProof)"), "String pages must delegate only to the typed AKEN bridge.")
+        assertTrue(helperSource.contains("Arrays.fill(opened, (byte) 0)"), "The native page buffer must be wiped after UTF-8 materialization.")
+        assertFalse(helperSource.contains("nativeDecodeString(byte[]"), "The legacy inline native string declaration must be removed.")
+        assertFalse(helperSource.contains("cachedDecodeString"), "The legacy inline cached string API must be removed.")
+        assertFalse(helperSource.contains("ensureLegacyNativeStringDecoder"), "The legacy native loader path must be removed from the string helper.")
+        assertFalse(nativeSource.contains("jsn_r21"), "The legacy inline native string entry must be removed.")
+        assertFalse(nativeSource.contains("jsw_r21"), "The legacy inline native wrapper must be removed.")
+        assertFalse(nativeSource.contains("([BIIJJ)[B"), "The legacy inline native descriptor must be removed.")
+        assertFalse(nativeSource.contains("javashroud-string-root-v1"), "The legacy string root domain must be removed.")
+        assertFalse(nativeSource.contains("javashroud-string-class-v1"), "The legacy class-scoped string domain must be removed.")
+        assertFalse(nativeSource.contains("js-string-aes-key"), "The legacy string AES key label must be removed.")
+        assertFalse(nativeSource.contains("js-string-aes-iv"), "The legacy string AES IV label must be removed.")
         assertTrue(helperSource.contains("ConcurrentHashMap"), "Repeated string materialization must be cached outside target classes to avoid hot-path native decrypt loops.")
-        assertTrue(helperSource.contains("JniMicrokernelHelper.loadKernel"), "String helper must load through the JNI microkernel.")
         assertFalse(helperSource.contains("Base64"), "String helper must not retain legacy Base64 payload handling.")
     }
     @Test
@@ -1466,8 +1472,9 @@ class NativeHelperHardeningTest {
         val nativeSource = nativeRuntimeSources()
         val stateBindingBody = nativeFunctionBody(
             nativeSource,
-            "js_vm_build_state_binding(jlong entry_token, const char *resource_path, unsigned char *out, int out_cap)",
+            "js_vm_build_state_binding_with_layout_digest(",
         )
+        val stateBindingWrapper = nativeFunctionBody(nativeSource, "js_vm_build_state_binding(")
         assertTrue(
             nativeSource.contains("JS_VBC4_REQUIRED_FLAGS") && nativeSource.contains("require full VBC4 max-strength feature set") &&
                 nativeSource.contains("js_vbc4_unwrap_seed(vbc4_nonce, vbc4_wrapped_seed, state_binding, state_binding_len, &build_seed)"),
@@ -1480,8 +1487,10 @@ class NativeHelperHardeningTest {
                 stateBindingBody.contains("memcpy(out + binding_len, binding_resource_path, resource_len)") &&
                 stateBindingBody.contains("js_vm_write_clean_entry_integrity_bytes(entry_integrity)") &&
                 stateBindingBody.contains("entry_integrity[0], entry_integrity[1], entry_integrity[2], entry_integrity[3]") &&
-                stateBindingBody.contains("js_vbc4_copy_scoped_layout_digest(layout_digest)") &&
-                stateBindingBody.contains("memcpy(out + binding_len, layout_digest_hex, layout_len)"),
+                stateBindingBody.contains("memcpy(out + binding_len, layout_digest_hex, layout_len)") &&
+                stateBindingWrapper.contains("js_vbc4_copy_scoped_layout_digest(layout_digest)") &&
+                stateBindingWrapper.contains("js_vm_build_state_binding_with_layout_digest(") &&
+                stateBindingWrapper.contains("js_vbc4_wipe_volatile(layout_digest, sizeof(layout_digest))"),
             "nativeExecuteVmResource path must bind entry token, resource path, entry integrity, and runtime layout material into the parser context.",
         )
         assertFalse(

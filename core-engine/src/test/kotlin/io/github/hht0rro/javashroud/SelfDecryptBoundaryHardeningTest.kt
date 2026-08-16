@@ -45,18 +45,25 @@ class SelfDecryptBoundaryHardeningTest {
         )
         assertTrue("js_vm_strong_debugger_present_now" in antiDebug, "Sensitive paths need a fresh debugger probe")
 
-        listOf("jsn_k7", "jsn_k10", "jsn_k14", "jsn_k15", "jsn_r21").forEach { entry ->
+        listOf("jsn_k7", "jsn_k10", "jsn_k14", "jsn_k15").forEach { entry ->
             assertTrue(
                 "js_vm_sensitive_path_guard(env, (const void*)$entry, 1)" in functionBody(vmCore, entry),
                 "$entry must reject debugger, instrumentation, and trampoline entry before material handling",
             )
         }
-        listOf("jsw_k7", "jsw_k10", "jsw_k14", "jsw_k15", "jsw_r21").forEach { wrapper ->
+        listOf("jsw_k7", "jsw_k10", "jsw_k14", "jsw_k15").forEach { wrapper ->
             assertTrue(
                 "js_vm_sensitive_path_guard(env, (const void*)$wrapper, 1)" in functionBody(jniRuntime, wrapper),
                 "$wrapper must authenticate its RegisterNatives dispatch entry before forwarding sensitive JNI arguments",
             )
         }
+        assertTrue("jsw_a1" in jniRuntime, "The typed AKEN string page wrapper must remain registered.")
+        val akenWrapper = functionBody(jniRuntime, "jsw_a1")
+        assertTrue("js_vm_sensitive_path_guard(env, (const void*)jsw_a1, 0)" in akenWrapper)
+        assertTrue("js_aken_native_page_open_current_view_payload" in akenWrapper)
+        assertFalse("jsn_r21" in vmCore, "The legacy inline string page entry must not remain in the native VM core.")
+        assertFalse("jsw_r21" in jniRuntime, "The legacy inline string wrapper must not remain in the JNI runtime.")
+        assertTrue("nativeDecodeAkenStringPage" in jniRuntime, "The typed AKEN string page registration must remain present.")
         assertTrue(
             "id_len > 4096 - salt_len" in functionBody(vmCore, "jsn_k10"),
             "legacy class-key derivation must bound the pair without signed jsize addition",

@@ -12,6 +12,11 @@ import org.objectweb.asm.tree.IntInsnNode
 import org.objectweb.asm.tree.TypeInsnNode
 import org.objectweb.asm.tree.InsnNode
 
+private const val STRING_ENCRYPTION_HELPER_OWNER =
+    "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper"
+private const val AKEN_STRING_PAGE_DECODE_NAME = "cachedDecodeAkenStringPage"
+private const val AKEN_STRING_PAGE_DECODE_DESC = "([BI[B)Ljava/lang/String;"
+
 /**
  * String array pool transform.
  *
@@ -34,7 +39,7 @@ fun poolClassStrings(classBytes: ByteArray): ByteArray {
         return classBytes
     }
 
-    if (containsNativeStringDecodeCallsite(classNode)) {
+    if (containsAkenStringPageDecodeCallsite(classNode)) {
         return classBytes
     }
 
@@ -114,14 +119,17 @@ fun poolClassStrings(classBytes: ByteArray): ByteArray {
     return writer.toByteArray()
 }
 
-private fun containsNativeStringDecodeCallsite(classNode: ClassNode): Boolean =
+private fun containsAkenStringPageDecodeCallsite(classNode: ClassNode): Boolean =
     classNode.methods.any { method ->
         val insns = method.instructions ?: return@any false
         insns.any { insn ->
             insn is MethodInsnNode &&
                 insn.opcode == Opcodes.INVOKESTATIC &&
-                insn.owner.startsWith("r/") &&
-                insn.desc == "([BIIJJ)[B"
+                insn.desc == AKEN_STRING_PAGE_DECODE_DESC &&
+                (
+                    (insn.owner == STRING_ENCRYPTION_HELPER_OWNER && insn.name == AKEN_STRING_PAGE_DECODE_NAME) ||
+                        insn.owner.startsWith("r/")
+                    )
         }
     }
 

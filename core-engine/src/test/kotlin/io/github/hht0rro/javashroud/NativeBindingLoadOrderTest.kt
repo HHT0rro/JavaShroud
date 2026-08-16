@@ -25,28 +25,49 @@ class NativeBindingLoadOrderTest {
     }
 
     @Test
-    fun max_shell_boot_secret_is_published_before_system_load() {
+    fun aken_raw_loader_does_not_reintroduce_legacy_boot_material() {
         val helperSource = Files.readString(
             Path.of("src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"),
         )
-        val prepareStart = helperSource.indexOf("private static void prepareJavaBootMaterialForLoad")
-        val prepareEnd = helperSource.indexOf("private static byte[] loadBootSecret", prepareStart)
-        val prepare = helperSource.substring(prepareStart, prepareEnd)
-        assertTrue(prepare.contains("publishNativeShellBootSecret(bootSecret)"))
-        assertTrue(helperSource.indexOf("publishNativeShellBootSecret(bootSecret)") < helperSource.indexOf("System.load(tempLib.getAbsolutePath())"))
+        val loaderStart = helperSource.indexOf("private static boolean tryLoadAkenBundledNativeResource")
+        val loaderEnd = helperSource.indexOf("\n    private static", loaderStart + 1)
+        assertTrue(loaderStart >= 0 && loaderEnd > loaderStart)
+        val loader = helperSource.substring(loaderStart, loaderEnd)
+        assertTrue(
+            loader.indexOf("System.load(tempLib.getAbsolutePath());") >= 0 &&
+                !loader.contains("prepareJavaBootMaterialForLoad") &&
+                !loader.contains("publishNativeShellBootSecret") &&
+                !loader.contains("nativeInstallBootEnvelope"),
+            "The AKEN raw loader must load only the typed native artifact and must not publish legacy boot material.",
+        )
 
         val shellSource = Files.readString(Path.of("src/main/native/js_shell_stub.c"))
-        assertTrue(shellSource.contains("takeBootSecretForNativeShell"))
-        assertTrue(shellSource.contains("js_shell_load_boot_secret(env, boot_secret)"))
+        assertTrue(shellSource.contains("nativeDecodeAkenStringPage"))
+        assertTrue(shellSource.contains("js_shell_decode_aken_string_page"))
+        assertTrue(shellSource.contains("nativeReadAkenClassPage"))
     }
 
     @Test
-    fun string_encryption_reports_kernel_load_failure_before_native_call() {
+    fun string_encryption_uses_typed_aken_bridge_and_native_fail_closed_order() {
         val source = Files.readString(
             Path.of("src/main/java/io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper.java"),
         )
-        assertTrue(source.indexOf("JniMicrokernelHelper.isNativeLoaded()") < source.indexOf("nativeDecodeString(payload"))
-        assertTrue(source.contains("JniMicrokernelHelper.getLoadStatus()"))
+        assertTrue(source.contains("JniMicrokernelHelper.decodeAkenStringPage(encodedHandle, pageIndex, callSiteProof)"))
+        assertTrue(source.indexOf("requireAkenStringPageRequest") < source.indexOf("decodeAkenStringPage(encodedHandle, pageIndex, callSiteProof)"))
+        assertTrue(source.contains("AKEN string page native decoder is not registered for the sealed helper"))
+        assertTrue(!source.contains("nativeDecodeString(payload"))
+        assertTrue(!source.contains("JniMicrokernelHelper.loadKernel"))
+
+        val kernelSource = Files.readString(
+            Path.of("src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"),
+        )
+        val bridgeStart = kernelSource.indexOf("public static byte[] decodeAkenStringPage")
+        val bridgeEnd = kernelSource.indexOf("public static byte[] readAkenClassPage", bridgeStart)
+        assertTrue(bridgeStart >= 0 && bridgeEnd > bridgeStart)
+        val bridge = kernelSource.substring(bridgeStart, bridgeEnd)
+        assertTrue(bridge.indexOf("requireAkenPageRequest") < bridge.indexOf("ensureAkenNativeKernel()"))
+        assertTrue(bridge.indexOf("ensureAkenNativeKernel()") < bridge.indexOf("nativeDecodeAkenStringPage"))
+        assertTrue(kernelSource.contains("no Java fallback"), "AKEN page access must fail closed without a Java decoder fallback.")
         assertTrue(source.contains("catch (UnsatisfiedLinkError error)"))
     }
 
