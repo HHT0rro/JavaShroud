@@ -7,8 +7,6 @@ import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4MethodCan
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4PreSealRouteAllocator
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4PreSealRouteReservation
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4RouteCandidateRef
-import io.github.hht0rro.javashroud.transforms.protection.requireVbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import java.util.Arrays
 import kotlin.test.Test
 import kotlin.test.assertEquals

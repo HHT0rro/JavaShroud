@@ -1,5 +1,6 @@
 package io.github.hht0rro.javashroud.aken
 
+import io.github.hht0rro.javashroud.transforms.protection.AkenVbc4InnerMaterial
 import io.github.hht0rro.javashroud.transforms.protection.NativeRecompilationTransforms
 import io.github.hht0rro.javashroud.transforms.protection.NativeVmBuildProfile
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4EntryMetadata
@@ -246,6 +247,7 @@ class AkenNativePageLocatorResolverNativeTest {
                 commitment = commitment,
                 pendingPages = listOf(page0, page1, page2),
                 fixedEntries = emptyList(),
+                vbc4StateBindingLayoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(),
             )
             layout = finalized
             buildContext.publishAkenVbc4FinalizationLayout(finalized)
@@ -466,6 +468,7 @@ class AkenNativePageLocatorResolverNativeTest {
                 commitment = commitment,
                 pendingPages = listOf(page),
                 fixedEntries = emptyList(),
+                vbc4StateBindingLayoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(),
             )
             layout = finalized
             buildContext.publishAkenVbc4FinalizationLayout(finalized)
@@ -627,6 +630,7 @@ class AkenNativePageLocatorResolverNativeTest {
                 commitment = commitment,
                 pendingPages = listOf(checkNotNull(pendingPage)),
                 fixedEntries = emptyList(),
+                vbc4StateBindingLayoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(),
             )
             layout = finalized
             buildContext.publishAkenVbc4FinalizationLayout(finalized)
@@ -858,6 +862,7 @@ class AkenNativePageLocatorResolverNativeTest {
                         commitment = commitment,
                         pendingPages = pages,
                         fixedEntries = emptyList(),
+                        vbc4StateBindingLayoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(),
                     )
                     layout = finalized
                     buildContext.publishAkenVbc4FinalizationLayout(finalized)
@@ -1143,7 +1148,7 @@ class AkenNativePageLocatorResolverNativeTest {
         require(input.remaining() >= 1 + Long.SIZE_BYTES + 1 + Int.SIZE_BYTES + Int.SIZE_BYTES) {
             "production AKEN compiler record is truncated"
         }
-        require((input.get().toInt() and 0xFF) == 1) {
+        require((input.get().toInt() and 0xFF) == COMPILER_RECORD_VERSION) {
             "production AKEN compiler record version is unsupported"
         }
         val entryToken = input.long
@@ -1169,6 +1174,7 @@ class AkenNativePageLocatorResolverNativeTest {
             maxLength = 128 * 1024,
             label = "route",
         )
+        val vbc4StateBindingLayoutDigest = ByteArray(AkenArtifactCommitment.DIGEST_SIZE)
         val binding = ByteArray(AkenArtifactCommitment.DIGEST_SIZE)
         var retainHandle = false
         try {
@@ -1178,9 +1184,10 @@ class AkenNativePageLocatorResolverNativeTest {
             require(nativeEnvelope.isNotEmpty())
             require(descriptor.isNotEmpty())
             require(route.isNotEmpty())
-            require(input.remaining() == binding.size) {
+            require(input.remaining() == vbc4StateBindingLayoutDigest.size + binding.size) {
                 "production AKEN compiler record binding length is invalid"
             }
+            input.get(vbc4StateBindingLayoutDigest)
             input.get(binding)
             val expectedBinding = compilerRecordBinding(
                 entryToken = entryToken,
@@ -1190,6 +1197,7 @@ class AkenNativePageLocatorResolverNativeTest {
                 nativeEnvelope = nativeEnvelope,
                 descriptor = descriptor,
                 route = route,
+                vbc4StateBindingLayoutDigest = vbc4StateBindingLayoutDigest,
             )
             try {
                 require(MessageDigest.isEqual(binding, expectedBinding)) {
@@ -1210,6 +1218,7 @@ class AkenNativePageLocatorResolverNativeTest {
             Arrays.fill(nativeEnvelope, 0)
             Arrays.fill(descriptor, 0)
             Arrays.fill(route, 0)
+            Arrays.fill(vbc4StateBindingLayoutDigest, 0)
             Arrays.fill(binding, 0)
         }
     }
@@ -1245,11 +1254,13 @@ class AkenNativePageLocatorResolverNativeTest {
         val nativeEnvelope = readProductionCurrentPageFrame(input, maxLength = 4096, label = "native envelope")
         val descriptorBytes = readProductionCurrentPageFrame(input, maxLength = 384 * 1024, label = "descriptor")
         val route = readProductionCurrentPageFrame(input, maxLength = 128 * 1024, label = "route")
+        val vbc4StateBindingLayoutDigest = ByteArray(AkenArtifactCommitment.DIGEST_SIZE)
         val binding = ByteArray(AkenArtifactCommitment.DIGEST_SIZE)
         try {
-            require(input.remaining() == binding.size) {
+            require(input.remaining() == vbc4StateBindingLayoutDigest.size + binding.size) {
                 "production AKEN compiler record binding length is invalid"
             }
+            input.get(vbc4StateBindingLayoutDigest)
             input.get(binding)
             return AkenRuntimePageDescriptor.decode(descriptorBytes)
         } finally {
@@ -1257,6 +1268,7 @@ class AkenNativePageLocatorResolverNativeTest {
             Arrays.fill(nativeEnvelope, 0)
             Arrays.fill(descriptorBytes, 0)
             Arrays.fill(route, 0)
+            Arrays.fill(vbc4StateBindingLayoutDigest, 0)
             Arrays.fill(binding, 0)
         }
     }
@@ -2029,6 +2041,9 @@ class AkenNativePageLocatorResolverNativeTest {
         val logicalIdentity = "fixture:native-locator:$seed".toByteArray(StandardCharsets.US_ASCII)
         val locatorToken = ByteArray(AkenHandle.LOCATOR_TOKEN_SIZE) { index -> (seed * 3 + index * 11).toByte() }
         val commitment = ByteArray(AkenArtifactCommitment.DIGEST_SIZE) { index -> (seed + index * 19).toByte() }
+        val vbc4StateBindingLayoutDigest = ByteArray(AkenArtifactCommitment.DIGEST_SIZE) { index ->
+            (seed * 17 + index * 29 + 11).toByte()
+        }
         val javaFragments = List(3) { ordinal -> runtimeFragment(AkenRuntimeEvaluatorRole.Java, ordinal, seed) }
         val nativeFragments = List(3) { ordinal -> runtimeFragment(AkenRuntimeEvaluatorRole.Native, ordinal + 3, seed) }
         val terminal = runtimeFragment(AkenRuntimeEvaluatorRole.Terminal, 6, seed)
@@ -2111,11 +2126,13 @@ class AkenNativePageLocatorResolverNativeTest {
                 nativeEnvelope = checkNotNull(envelopeBytes),
                 descriptor = checkNotNull(descriptorBytes),
                 route = checkNotNull(routeBytes),
+                vbc4StateBindingLayoutDigest = vbc4StateBindingLayoutDigest,
             )
         } finally {
             Arrays.fill(logicalIdentity, 0)
             Arrays.fill(locatorToken, 0)
             Arrays.fill(commitment, 0)
+            Arrays.fill(vbc4StateBindingLayoutDigest, 0)
             fingerprint?.let { Arrays.fill(it, 0) }
             descriptorBytes?.let { Arrays.fill(it, 0) }
             routeBytes?.let { Arrays.fill(it, 0) }
@@ -2133,8 +2150,21 @@ class AkenNativePageLocatorResolverNativeTest {
         nativeEnvelope: ByteArray,
         descriptor: ByteArray,
         route: ByteArray,
+        vbc4StateBindingLayoutDigest: ByteArray,
     ): ByteArray {
-        val binding = compilerRecordBinding(entryToken, resourceKind, pageIndex, encodedHandle, nativeEnvelope, descriptor, route)
+        require(vbc4StateBindingLayoutDigest.size == AkenArtifactCommitment.DIGEST_SIZE) {
+            "production AKEN compiler record VBC4 state-binding layout digest is invalid"
+        }
+        val binding = compilerRecordBinding(
+            entryToken = entryToken,
+            resourceKind = resourceKind,
+            pageIndex = pageIndex,
+            encodedHandle = encodedHandle,
+            nativeEnvelope = nativeEnvelope,
+            descriptor = descriptor,
+            route = route,
+            vbc4StateBindingLayoutDigest = vbc4StateBindingLayoutDigest,
+        )
         try {
             return ByteArrayOutputStream().use { out ->
                 out.write(COMPILER_RECORD_VERSION)
@@ -2145,6 +2175,7 @@ class AkenNativePageLocatorResolverNativeTest {
                 writeFramed(out, nativeEnvelope)
                 writeFramed(out, descriptor)
                 writeFramed(out, route)
+                out.write(vbc4StateBindingLayoutDigest)
                 out.write(binding)
                 out.toByteArray()
             }
@@ -2161,6 +2192,7 @@ class AkenNativePageLocatorResolverNativeTest {
         nativeEnvelope: ByteArray,
         descriptor: ByteArray,
         route: ByteArray,
+        vbc4StateBindingLayoutDigest: ByteArray,
     ): ByteArray = MessageDigest.getInstance("SHA-256").apply {
         update(COMPILER_RECORD_BINDING_DOMAIN)
         updateLong(this, entryToken)
@@ -2170,6 +2202,7 @@ class AkenNativePageLocatorResolverNativeTest {
         updateFramed(this, nativeEnvelope)
         updateFramed(this, descriptor)
         updateFramed(this, route)
+        update(vbc4StateBindingLayoutDigest)
     }.digest()
 
     private fun renderInclude(records: List<ByteArray>, offsets: IntArray = contiguousOffsets(records)): String {
@@ -2183,7 +2216,7 @@ class AkenNativePageLocatorResolverNativeTest {
                 appendLine("#ifndef JS_AKEN_PAGE_LOCATOR_INC")
                 appendLine("#define JS_AKEN_PAGE_LOCATOR_INC")
                 appendLine("#include <stddef.h>")
-                appendLine("#define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_FORMAT_VERSION 1u")
+                appendLine("#define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_FORMAT_VERSION 2u")
                 appendLine("#define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_COUNT ${records.size}u")
                 appendLine("#define JS_AKEN_NATIVE_PAGE_LOCATOR_BLOB_SIZE ${blob.size}u")
                 appendLine()
@@ -2390,9 +2423,9 @@ class AkenNativePageLocatorResolverNativeTest {
 
     private companion object {
         const val AKEN_JNI_FIXTURE_MAIN = "AkenCurrentPageJniFixtureMain"
-        const val COMPILER_RECORD_VERSION = 1
+        const val COMPILER_RECORD_VERSION = 2
         val COMPILER_RECORD_BINDING_DOMAIN =
-            "AKEN-v4-native-page-locator-compile-input-v1".toByteArray(StandardCharsets.US_ASCII)
+            "AKEN-v4-native-page-locator-compile-input-v2".toByteArray(StandardCharsets.US_ASCII)
         val FULL_NATIVE_SOURCES = listOf(
             "js_kernel.c",
             "js_helpers.c",

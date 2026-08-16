@@ -29,11 +29,13 @@ internal class AkenNativePageLocatorCompileInput private constructor(
     nativeEnvelope: ByteArray,
     resolvedDescriptor: ByteArray,
     routeEncoding: ByteArray,
+    vbc4StateBindingLayoutDigest: ByteArray,
 ) : AutoCloseable {
     private var encodedHandleValue: ByteArray = encodedHandle.copyOf()
     private var nativeEnvelopeValue: ByteArray = nativeEnvelope.copyOf()
     private var resolvedDescriptorValue: ByteArray = resolvedDescriptor.copyOf()
     private var routeEncodingValue: ByteArray = routeEncoding.copyOf()
+    private var vbc4StateBindingLayoutDigestValue: ByteArray = vbc4StateBindingLayoutDigest.copyOf()
     private var recordBindingValue: ByteArray = compilerRecordBinding(
         entryToken = entryToken,
         resourceKind = resourceKind,
@@ -42,6 +44,7 @@ internal class AkenNativePageLocatorCompileInput private constructor(
         nativeEnvelope = nativeEnvelopeValue,
         resolvedDescriptor = resolvedDescriptorValue,
         routeEncoding = routeEncodingValue,
+        vbc4StateBindingLayoutDigest = vbc4StateBindingLayoutDigestValue,
     )
 
     @Volatile
@@ -69,6 +72,9 @@ internal class AkenNativePageLocatorCompileInput private constructor(
         }
         require(routeEncodingValue.isNotEmpty() && routeEncodingValue.size <= MAX_ROUTE_BYTES) {
             "AKEN native page locator route length is invalid"
+        }
+        require(vbc4StateBindingLayoutDigestValue.size == VBC4_STATE_BINDING_LAYOUT_DIGEST_SIZE) {
+            "AKEN native page locator VBC4 state-binding layout digest length is invalid"
         }
         require(recordBindingValue.size == RECORD_BINDING_SIZE) {
             "AKEN native page locator record binding length is invalid"
@@ -107,6 +113,15 @@ internal class AkenNativePageLocatorCompileInput private constructor(
     }
 
     /**
+     * Returns the public VBC4 state-binding layout digest for this one current
+     * page. It is compiler-only integrity metadata, never a DEK or root key.
+     */
+    internal fun copyVbc4StateBindingLayoutDigestForCompiler(): ByteArray {
+        requireLive()
+        return vbc4StateBindingLayoutDigestValue.copyOf()
+    }
+
+    /**
      * Emits a framed native compiler record for exactly one page. The record
      * contains no DEK, plaintext, raw proof, root-key chain, or resource list.
      */
@@ -121,6 +136,7 @@ internal class AkenNativePageLocatorCompileInput private constructor(
             writeFramed(out, nativeEnvelopeValue)
             writeFramed(out, resolvedDescriptorValue)
             writeFramed(out, routeEncodingValue)
+            out.write(vbc4StateBindingLayoutDigestValue)
             out.write(recordBindingValue)
             out.toByteArray().also { encoded ->
                 require(encoded.size <= MAX_COMPILER_RECORD_BYTES) {
@@ -185,11 +201,13 @@ internal class AkenNativePageLocatorCompileInput private constructor(
         Arrays.fill(nativeEnvelopeValue, 0)
         Arrays.fill(resolvedDescriptorValue, 0)
         Arrays.fill(routeEncodingValue, 0)
+        Arrays.fill(vbc4StateBindingLayoutDigestValue, 0)
         Arrays.fill(recordBindingValue, 0)
         encodedHandleValue = ByteArray(0)
         nativeEnvelopeValue = ByteArray(0)
         resolvedDescriptorValue = ByteArray(0)
         routeEncodingValue = ByteArray(0)
+        vbc4StateBindingLayoutDigestValue = ByteArray(0)
         recordBindingValue = ByteArray(0)
         wiped = true
     }
@@ -249,6 +267,7 @@ internal class AkenNativePageLocatorCompileInput private constructor(
                 nativeEnvelope = nativeEnvelopeValue,
                 resolvedDescriptor = resolvedDescriptorValue,
                 routeEncoding = routeEncodingValue,
+                vbc4StateBindingLayoutDigest = vbc4StateBindingLayoutDigestValue,
             )
             require(MessageDigest.isEqual(expectedBinding, recordBindingValue)) {
                 "AKEN native page locator compiler record binding is invalid"
@@ -266,14 +285,15 @@ internal class AkenNativePageLocatorCompileInput private constructor(
     }
 
     companion object {
-        private const val COMPILER_RECORD_VERSION = 1
+        private const val COMPILER_RECORD_VERSION = 2
         private const val MAX_ENVELOPE_BYTES = 4096
         private const val MAX_DESCRIPTOR_BYTES = 384 * 1024
         private const val MAX_ROUTE_BYTES = 128 * 1024
         private const val MAX_COMPILER_RECORD_BYTES = 512 * 1024
         private const val RECORD_BINDING_SIZE = 32
+        private const val VBC4_STATE_BINDING_LAYOUT_DIGEST_SIZE = 32
         private val RECORD_BINDING_DOMAIN =
-            "AKEN-v4-native-page-locator-compile-input-v1".toByteArray(Charsets.US_ASCII)
+            "AKEN-v4-native-page-locator-compile-input-v2".toByteArray(Charsets.US_ASCII)
 
         /**
          * Converts one independently materialized VBC4 page into native compile
@@ -282,7 +302,13 @@ internal class AkenNativePageLocatorCompileInput private constructor(
          * compiler consumes it.
          */
         @JvmSynthetic
-        fun fromVbc4Emission(emission: AkenVbc4PageEmission): AkenNativePageLocatorCompileInput {
+        fun fromVbc4Emission(
+            emission: AkenVbc4PageEmission,
+            vbc4StateBindingLayoutDigest: ByteArray,
+        ): AkenNativePageLocatorCompileInput {
+            require(vbc4StateBindingLayoutDigest.size == VBC4_STATE_BINDING_LAYOUT_DIGEST_SIZE) {
+                "AKEN native page locator VBC4 state-binding layout digest length is invalid"
+            }
             var descriptorBytes: ByteArray? = null
             var routeBytes: ByteArray? = null
             var rawCallSiteProof: ByteArray? = null
@@ -340,6 +366,7 @@ internal class AkenNativePageLocatorCompileInput private constructor(
                     nativeEnvelope = envelopeBytes,
                     resolvedDescriptor = descriptorBytes,
                     routeEncoding = routeBytes,
+                    vbc4StateBindingLayoutDigest = vbc4StateBindingLayoutDigest,
                 )
             } finally {
                 descriptorBytes?.let { Arrays.fill(it, 0) }
@@ -361,6 +388,7 @@ internal class AkenNativePageLocatorCompileInput private constructor(
             nativeEnvelope: ByteArray,
             resolvedDescriptor: ByteArray,
             routeEncoding: ByteArray,
+            vbc4StateBindingLayoutDigest: ByteArray,
         ): ByteArray = MessageDigest.getInstance("SHA-256").apply {
             update(RECORD_BINDING_DOMAIN)
             updateLong(this, entryToken)
@@ -370,6 +398,7 @@ internal class AkenNativePageLocatorCompileInput private constructor(
             updateFramed(this, nativeEnvelope)
             updateFramed(this, resolvedDescriptor)
             updateFramed(this, routeEncoding)
+            update(vbc4StateBindingLayoutDigest)
         }.digest()
 
         private fun writeLong(out: ByteArrayOutputStream, value: Long) {

@@ -83,6 +83,7 @@ class AkenVbc4FinalizationLayoutTest {
             pendingPages = listOf(page0, page1),
             fixedEntries = fixedEntries,
             rootShardRanges = listOf(rootShard),
+            vbc4StateBindingLayoutDigest = ByteArray(32) { index -> (index * 29 + 5).toByte() },
         )
         try {
             assertTrue(plan.isWiped())

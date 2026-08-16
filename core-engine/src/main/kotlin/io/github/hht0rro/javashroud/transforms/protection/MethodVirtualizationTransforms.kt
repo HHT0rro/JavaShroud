@@ -1,10 +1,12 @@
 package io.github.hht0rro.javashroud.transforms.protection
 import io.github.hht0rro.javashroud.analysis.eligibleClassNamesForAction
+import io.github.hht0rro.javashroud.analysis.eligibleMembersForAction
 import io.github.hht0rro.javashroud.analysis.matchedMembersForAction
 import io.github.hht0rro.javashroud.bytecode.computeFramesWriter
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.model.analysis.RuleMatch
+import io.github.hht0rro.javashroud.model.config.RuleSetScope
 import io.github.hht0rro.javashroud.model.transforms.TransformResult
 import io.github.hht0rro.javashroud.transforms.reanalyzedClassArtifact
 import io.github.hht0rro.javashroud.transforms.unchangedTransformResult
@@ -159,13 +161,21 @@ fun applyMethodVirtualization(
     val buildContext = requireVbc4BuildContext()
     val matchedClassNames = eligibleClassNamesForAction(artifact.classArtifacts, ruleMatches, "method-virtualization")
     if (matchedClassNames.isEmpty()) return unchangedTransformResult(artifact)
-    val explicitlyMatchedMethods = matchedMembersForAction(ruleMatches, "method-virtualization")
+    val eligibleMethodKeys = eligibleMembersForAction(artifact.classArtifacts, ruleMatches, "method-virtualization")
+        .asSequence()
         .filter { it.kind.name == "METHOD" }
         .map { MethodSelectionKey(it.owner, it.name, it.descriptor) }
         .toSet()
-    val restrictToMatchedMethods = ruleMatches.any {
+    val explicitlyMatchedMethodKeys = matchedMembersForAction(ruleMatches, "method-virtualization")
+        .asSequence()
+        .filter { it.kind.name == "METHOD" }
+        .map { MethodSelectionKey(it.owner, it.name, it.descriptor) }
+        .toSet()
+    val selectedOnlyScope = ruleMatches.any { it.ruleSetScope == RuleSetScope.SELECTED_ONLY }
+    val globalDirectMemberScope = !selectedOnlyScope && ruleMatches.any {
         it.rule.action == "method-virtualization" && it.selector.memberPattern != null
     }
+    val strictRuleScope = selectedOnlyScope || globalDirectMemberScope
 
     rejectUnsupportedVbc4Params(params)
     val seed = (params["seed"] as? Int)?.toLong() ?: (params["seed"] as? Long)
@@ -253,21 +263,22 @@ fun applyMethodVirtualization(
                 val superMv = super.visitMethod(access, name, descriptor, signature, exceptions)
 
                 val methodKey = MethodSelectionKey(className, name, descriptor)
-                val explicitlySelected = methodKey in explicitlyMatchedMethods
+                val selectedByRule = methodKey in eligibleMethodKeys
+                val explicitlySelected = methodKey in explicitlyMatchedMethodKeys
                 if (name == "<init>" || name == "<clinit>") {
-                    if (restrictToMatchedMethods && explicitlySelected) {
+                    if (strictRuleScope && explicitlySelected) {
                         throw IllegalArgumentException("method-virtualization strictVirtualization cannot virtualize $className#$name$descriptor because JVM initializer methods cannot be replaced by a native dispatcher")
                     }
                     return superMv
                 }
                 if (isEnumValuesHelper(classArtifact.summary.accessFlags, access, name, descriptor)) return superMv
                 if (access and (Opcodes.ACC_ABSTRACT or Opcodes.ACC_NATIVE) != 0) {
-                    if (restrictToMatchedMethods && explicitlySelected) {
+                    if (strictRuleScope && explicitlySelected) {
                         throw IllegalArgumentException("method-virtualization strictVirtualization cannot virtualize $className#$name$descriptor because abstract/native methods have no JVM Code attribute")
                     }
                     return superMv
                 }
-                if (restrictToMatchedMethods && !explicitlySelected) return superMv
+                if (selectedOnlyScope && !selectedByRule || globalDirectMemberScope && !explicitlySelected) return superMv
 
                 val bodyCapture = MethodBodyCapture()
                 return object : MethodVisitor(Opcodes.ASM9, bodyCapture) {
@@ -329,21 +340,24 @@ fun applyMethodVirtualization(
                         } else {
                             bodyCapture.selectedBy(methodSelection, access, name, descriptor)
                         }
-                        val deniedByHighValueList = !restrictToMatchedMethods && matchesMethodSelector(highValueMethodDeny, className, name, descriptor)
+                        // selected-only class targets establish an independent strict range, but
+                        // non-explicit members still use the normal broad compatibility gates. Legacy
+                        // direct-member rules preserve their historic strict behavior.
+                        val deniedByHighValueList = !globalDirectMemberScope && matchesMethodSelector(highValueMethodDeny, className, name, descriptor)
                         val selectedByHighValue = methodSelection == MethodSelectionMode.CriticalPlus &&
                             !deniedByHighValueList &&
                             bodyCapture.highValueSelected(className, name, descriptor, highValueMethods)
                         val selectedForBroad = !deniedByHighValueList && (selectedByMethodSelection || selectedByHighValue)
-                        val withinBroadBudget = restrictToMatchedMethods || maxBroadVirtualizedMethods <= 0 || broadVirtualizedMethodCount < maxBroadVirtualizedMethods
+                        val withinBroadBudget = !globalDirectMemberScope && (maxBroadVirtualizedMethods <= 0 || broadVirtualizedMethodCount < maxBroadVirtualizedMethods)
                         val selectedWithinBroadBudget = selectedForBroad && withinBroadBudget
-                        val shouldFailClosedForMethod = restrictToMatchedMethods || (strictVirtualization && selectedWithinBroadBudget)
-                        val unsupportedBySelection = !restrictToMatchedMethods && !selectedWithinBroadBudget
+                        val shouldFailClosedForMethod = explicitlySelected || (strictVirtualization && selectedWithinBroadBudget)
+                        val unsupportedBySelection = !explicitlySelected && !selectedWithinBroadBudget
                         if (bodyCapture.hasDirectNativeDefenseCall && !strictVirtualization) {
                             bodyCapture.replayTo(superMv)
                             return
                         }
                         if (shouldFailClosedForMethod && (!bodyCapture.nativeVmCompatible || bodyCapture.hasUnsupportedInvokeDynamic)) {
-                            val unsupportedLabel = if (restrictToMatchedMethods) "explicit" else "selected"
+                            val unsupportedLabel = if (explicitlySelected) "explicit" else "selected"
                             throw IllegalArgumentException("method-virtualization cannot virtualize unsupported $unsupportedLabel method $className#$name$descriptor${bodyCapture.unsupportedReasonSuffix()}")
                         }
 
@@ -351,7 +365,7 @@ fun applyMethodVirtualization(
                             bodyCapture.replayTo(superMv)
                             return
                         }
-                        if (!restrictToMatchedMethods && (!bodyCapture.nativeVmCompatible || bodyCapture.hasUnsupportedInvokeDynamic)) {
+                        if (!explicitlySelected && (!bodyCapture.nativeVmCompatible || bodyCapture.hasUnsupportedInvokeDynamic)) {
                             bodyCapture.replayTo(superMv)
                             return
                         }
@@ -418,7 +432,7 @@ fun applyMethodVirtualization(
                             bodyCapture.replayTo(serializer)
                             serializer.serialize()
                         } catch (error: RuntimeException) {
-                            if (restrictToMatchedMethods || strictVirtualization) throw error
+                            if (strictRuleScope || strictVirtualization) throw error
                             bodyCapture.replayTo(vmMethodVisitor)
                             return
                         }
@@ -453,7 +467,6 @@ fun applyMethodVirtualization(
                                 ordinal = nextVmResourceOrdinal++,
                                 resources = slicedResource.resources + decoyResources,
                             )
-
                             val logicalIdentity = buildContext
                                 .deriveVbc4Identity(className, vmMethodName, vmDescriptor)
                                 .toByteArray(Charsets.UTF_8)
@@ -499,7 +512,11 @@ fun applyMethodVirtualization(
                             }
                             classModified = true
                             methodCount++
-                            if (!restrictToMatchedMethods) broadVirtualizedMethodCount++
+                            // Direct method selectors are explicit overrides and do not consume the
+                            // broad-selection budget. Class-scoped members — both legacy global and
+                            // selected-only — still use that budget so an independent Pass scope cannot silently
+                            // bypass maxBroadVirtualizedMethods.
+                            if (!globalDirectMemberScope && !explicitlySelected) broadVirtualizedMethodCount++
                         } finally {
                             java.util.Arrays.fill(vmBytes, 0)
                         }
@@ -513,7 +530,7 @@ fun applyMethodVirtualization(
         } catch (error: Exception) {
             akenMethodCandidatesForClass.forEach { it.wipe() }
             akenMethodCandidatesForClass.clear()
-            if (restrictToMatchedMethods || strictVirtualization) throw error
+            if (strictRuleScope || strictVirtualization) throw error
             return@map classArtifact
         }
         if (!classModified) {
@@ -710,8 +727,13 @@ private fun interproceduralVmSliceMesh(entries: List<VmPreloadEntry>): String {
 
 
 internal fun vmStateBinding(entryToken: Long, resourcePath: String): String {
-    val layoutDigestHex = requireVbc4BuildContext().jarLayoutDigest.toHexLower()
-    return "${entryToken.toULong().toString(16)}\u0000$resourcePath\u0000$VBC4_CLEAN_ENTRY_INTEGRITY_HEX\u0000$layoutDigestHex"
+    val layoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest()
+    return try {
+        val layoutDigestHex = layoutDigest.toHexLower()
+        "${entryToken.toULong().toString(16)}\u0000$resourcePath\u0000$VBC4_CLEAN_ENTRY_INTEGRITY_HEX\u0000$layoutDigestHex"
+    } finally {
+        java.util.Arrays.fill(layoutDigest, 0)
+    }
 }
 
 internal fun vmEntryToken(classToken: String, methodToken: String, descriptor: String, resourcePath: String, methodSeed: Int): Long {

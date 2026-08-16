@@ -631,9 +631,11 @@ JS_HIDDEN js_vm_loaded_resource js_vm_load_resource_bytes_with_loader(JNIEnv *en
     if (!resourcePath) return result;
     jobject loader = NULL;
     jobject stream = NULL;
+    int loader_is_borrowed = 0;
     if (!js_vm_preload_in_progress) {
         loader = js_vm_get_active_host_loader();
         stream = js_vm_resource_from_loader(env, loader, resourcePath);
+        loader_is_borrowed = stream != NULL;
     }
     if (!stream) {
         loader = js_vm_context_class_loader(env);
@@ -648,7 +650,12 @@ JS_HIDDEN js_vm_loaded_resource js_vm_load_resource_bytes_with_loader(JNIEnv *en
         stream = js_vm_resource_from_helper_class(env, helper_cls, resourcePath);
     }
     result.bytes = js_vm_read_stream_bytes(env, stream);
-    result.loader = result.bytes && loader ? loader : NULL;
+    /* The active dispatch loader belongs to its enclosing VM execution scope.
+     * js_vm_loaded_resource exposes only locally acquired fallback loaders for
+     * caller cleanup; returning the borrowed active loader lets a page slice
+     * release the outer scope's JNI reference and leaves subsequent sibling
+     * page loads with a dangling jobject. */
+    result.loader = result.bytes && loader && !loader_is_borrowed ? loader : NULL;
     return result;
 }
 
@@ -1130,7 +1137,9 @@ JS_HIDDEN js_vm_program* js_vm_prepare_aken_complete_frame_program(
     const unsigned char *logical_binding_path,
     size_t logical_binding_path_len,
     const unsigned char *artifact_commitment,
-    size_t artifact_commitment_len
+    size_t artifact_commitment_len,
+    const unsigned char *state_binding_layout_digest,
+    size_t state_binding_layout_digest_len
 ) {
     js_vm_program *program = NULL;
     js_vm_program validation;
@@ -1143,23 +1152,37 @@ JS_HIDDEN js_vm_program* js_vm_prepare_aken_complete_frame_program(
         !logical_binding_path || logical_binding_path_len == 0u ||
         logical_binding_path_len > JS_VM_AKEN_LOGICAL_BINDING_PATH_MAX ||
         memchr(logical_binding_path, '\0', logical_binding_path_len) != NULL ||
-        !artifact_commitment || artifact_commitment_len != 32u) {
+        !artifact_commitment || artifact_commitment_len != 32u ||
+        !state_binding_layout_digest || state_binding_layout_digest_len != 32u) {
         goto cleanup;
     }
     binding_path = (char *)malloc(logical_binding_path_len + 1u);
     program = (js_vm_program *)calloc(1, sizeof(js_vm_program));
-    if (!binding_path || !program) goto cleanup;
+    if (!binding_path || !program) {
+        goto cleanup;
+    }
     memcpy(binding_path, logical_binding_path, logical_binding_path_len);
     binding_path[logical_binding_path_len] = '\0';
 
-    binding_len = js_vm_build_state_binding(entry_token, binding_path, binding_buf, (int)sizeof(binding_buf));
+    binding_len = js_vm_build_state_binding_with_layout_digest(
+        entry_token,
+        binding_path,
+        state_binding_layout_digest,
+        binding_buf,
+        (int)sizeof(binding_buf));
     if (binding_len <= 0 || !js_vm_resource_integrity_clean() ||
         !js_vm_parse_program(frame, (int)frame_len, program, binding_buf, binding_len)) {
         goto cleanup;
     }
     program->entry_token = entry_token;
     program->return_desc = js_vm_return_descriptor_from_meta(program, entry_token);
-    if (!program->return_desc || !program->resource_path || strcmp(program->resource_path, binding_path) != 0) {
+    if (!program->return_desc) {
+        goto cleanup;
+    }
+    if (!program->resource_path) {
+        goto cleanup;
+    }
+    if (strcmp(program->resource_path, binding_path) != 0) {
         goto cleanup;
     }
     if (!js_vm_build_execution_program_from_registers(program, &validation) ||
@@ -1175,7 +1198,9 @@ JS_HIDDEN js_vm_program* js_vm_prepare_aken_complete_frame_program(
      * authoritative for a legacy-compatible process.
      */
     (void)js_vm_install_startup_nonce(artifact_commitment, (int)artifact_commitment_len);
-    if (!js_vm_bind_runtime_session(program, entry_token, binding_path)) goto cleanup;
+    if (!js_vm_bind_runtime_session(program, entry_token, binding_path)) {
+        goto cleanup;
+    }
     ok = 1;
 
 cleanup:

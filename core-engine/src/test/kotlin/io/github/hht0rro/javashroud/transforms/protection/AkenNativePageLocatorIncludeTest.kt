@@ -71,6 +71,7 @@ class AkenNativePageLocatorIncludeTest {
                 commitment = commitment,
                 pendingPages = listOf(page0, page1),
                 fixedEntries = emptyList(),
+                vbc4StateBindingLayoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(),
             )
             context.publishAkenVbc4FinalizationLayout(layout)
             expectedRecords = context.withAkenNativeLocatorRecordsForBuild { records ->
@@ -99,7 +100,7 @@ class AkenNativePageLocatorIncludeTest {
                     val expectedEncodings = expectedRecords.map { Base64.getEncoder().encodeToString(it) }.toSet()
                     val actualEncodings = actualRecords.map { Base64.getEncoder().encodeToString(it) }.toSet()
                     assertEquals(expectedEncodings, actualEncodings)
-                    actualRecords.forEach { record -> assertEquals(1, record[0].toInt() and 0xFF) }
+                    actualRecords.forEach { record -> assertEquals(2, record[0].toInt() and 0xFF) }
                 } finally {
                     actualRecords.forEach { Arrays.fill(it, 0) }
                 }

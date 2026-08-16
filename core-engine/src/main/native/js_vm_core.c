@@ -2400,15 +2400,44 @@ static uint32_t js_vbc4_rotl32(uint32_t value, int bits) { int sh = bits & 31; r
 #define JS_VBC4_DISPATCH_STEP_MASK 15
 #endif
 
-/* VBC4 material is reconstructed only into a scoped caller buffer. */
+/*
+ * AKEN v4 keeps the inner VBC4 grammar deterministic with public domain
+ * material after its per-page evaluator has authenticated and opened a page.
+ * These are not a boot key, build root, DEK, or runtime secret; deriving them
+ * from labels prevents the native artifact from carrying contiguous key-like
+ * byte arrays and removes VBC4's dependency on BootMaterialEnvelope state.
+ */
+static void js_aken_vbc4_copy_public_domain_material(
+    const unsigned char *label,
+    int label_len,
+    unsigned char out[32]
+) {
+    js_sha256_ctx ctx;
+    if (!out) return;
+    memset(&ctx, 0, sizeof(ctx));
+    js_sha256_init(&ctx);
+    if (label && label_len > 0) js_sha256_update(&ctx, label, label_len);
+    js_sha256_final(&ctx, out);
+    js_vbc4_wipe_volatile(&ctx, sizeof(ctx));
+}
+
+/* VBC4 compatibility material is reconstructed only into a scoped caller buffer. */
 static void js_vbc4_copy_scoped_master_key(unsigned char out[32]) {
-    if (js_runtime_boot_material_state != 2) { memset(out, 0, 32); return; }
-    js_rrk_xor_assemble(&js_runtime_master_key_shares[0][0], JS_RRK_SHARE_COUNT, out);
+    static const unsigned char label[] =
+        "javashroud-aken-v4-vbc4-inner-crypto-public-v1";
+    js_aken_vbc4_copy_public_domain_material(
+        label,
+        (int)(sizeof(label) - 1u),
+        out);
 }
 
 static void js_vbc4_copy_scoped_layout_digest(unsigned char out[32]) {
-    if (js_runtime_boot_material_state != 2) { memset(out, 0, 32); return; }
-    js_rrk_xor_assemble(&js_runtime_layout_digest_shares[0][0], JS_RRK_SHARE_COUNT, out);
+    static const unsigned char label[] =
+        "javashroud-aken-v4-vbc4-inner-state-binding-public-v1";
+    js_aken_vbc4_copy_public_domain_material(
+        label,
+        (int)(sizeof(label) - 1u),
+        out);
 }
 
 JS_PROTECTED void js_hmac_sha256_with_key(const unsigned char *key, int key_len, const unsigned char **parts, const int *part_lens, int part_count, unsigned char out[32]) {
@@ -2503,7 +2532,7 @@ static void js_vbc4_vm_build_key(unsigned char out[32]) {
 }
 
 JS_HIDDEN int js_vm_copy_runtime_build_key(unsigned char out[32]) {
-    if (!out || js_runtime_boot_material_state != 2) return 0;
+    if (!out) return 0;
     js_vbc4_vm_build_key(out);
     return 1;
 }
@@ -4838,15 +4867,18 @@ static int js_vm_try_invoke_preloaded_nested(JNIEnv *env, js_vm_symbol_cache_ent
 }
 
 
-JS_HIDDEN int js_vm_build_state_binding(jlong entry_token, const char *resource_path, unsigned char *out, int out_cap) {
-    if (!out || out_cap <= 0) return 0;
+JS_HIDDEN int js_vm_build_state_binding_with_layout_digest(
+    jlong entry_token,
+    const char *resource_path,
+    const unsigned char layout_digest[32],
+    unsigned char *out,
+    int out_cap
+) {
+    if (!out || out_cap <= 0 || !layout_digest) return 0;
     char layout_digest_hex[65];
-    unsigned char layout_digest[32];
     unsigned char entry_integrity[4];
     int binding_len = 0;
-    js_vbc4_copy_scoped_layout_digest(layout_digest);
     for (int i = 0; i < 32; i++) snprintf(layout_digest_hex + (i * 2), sizeof(layout_digest_hex) - (size_t)(i * 2), "%02x", layout_digest[i]);
-    js_vbc4_wipe_volatile(layout_digest, sizeof(layout_digest));
     layout_digest_hex[64] = 0;
     js_vm_write_clean_entry_integrity_bytes(entry_integrity);
     int written = snprintf((char*)out, (size_t)out_cap, "%llx", (unsigned long long)entry_token);
@@ -4870,6 +4902,25 @@ JS_HIDDEN int js_vm_build_state_binding(jlong entry_token, const char *resource_
     memcpy(out + binding_len, layout_digest_hex, layout_len);
     binding_len += (int)layout_len;
     js_vbc4_wipe_volatile(layout_digest_hex, sizeof(layout_digest_hex));
+    return binding_len;
+}
+
+JS_HIDDEN int js_vm_build_state_binding(
+    jlong entry_token,
+    const char *resource_path,
+    unsigned char *out,
+    int out_cap
+) {
+    unsigned char layout_digest[32];
+    int binding_len;
+    js_vbc4_copy_scoped_layout_digest(layout_digest);
+    binding_len = js_vm_build_state_binding_with_layout_digest(
+        entry_token,
+        resource_path,
+        layout_digest,
+        out,
+        out_cap);
+    js_vbc4_wipe_volatile(layout_digest, sizeof(layout_digest));
     return binding_len;
 }
 
@@ -4899,20 +4950,6 @@ JS_HIDDEN js_vm_object_result js_vm_execute_prepared_program(JNIEnv *env, js_vm_
         return result;
     }
     if ((*env)->ExceptionCheck(env)) { js_vm_clear_value(&ret); js_vm_guest_frame_restore(guest_frame_saved_count, guest_frame_pushed); return result; }
-    if (js_vm_debug_native_enabled()) {
-        const char *log_path = getenv("JAVASHROUD_DEBUG_NATIVE_LOG");
-        FILE *out = stderr;
-        if (log_path && log_path[0]) {
-            FILE *file = fopen(log_path, "ab");
-            if (file) out = file;
-        }
-        fprintf(out,
-            "JavaShroud native VM return box: entry=%016llx ret=%c valueType=%d\n",
-            (unsigned long long)(program ? program->entry_token : 0),
-            ret_desc,
-            ret.type);
-        if (out != stderr) fclose(out);
-    }
     jobject boxed = js_vm_box_return(env, ret_desc, ret);
     js_vm_clear_value(&ret);
     if ((*env)->ExceptionCheck(env)) { js_vm_guest_frame_restore(guest_frame_saved_count, guest_frame_pushed); return result; }

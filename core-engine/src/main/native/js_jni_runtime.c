@@ -953,7 +953,7 @@ cleanup:
  * function here decodes a resource or creates a catalog surface.
  */
 #define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_BINDING_DOMAIN \
-    "AKEN-v4-native-page-locator-compile-input-v1"
+    "AKEN-v4-native-page-locator-compile-input-v2"
 
 static int js_aken_native_page_locator_record_is_well_formed(
     const js_aken_native_page_locator_record *record,
@@ -970,7 +970,10 @@ static int js_aken_native_page_locator_record_is_well_formed(
         !record->descriptor_encoding || record->descriptor_encoding_len == 0u ||
         record->descriptor_encoding_len > JS_AKEN_NATIVE_PAGE_DESCRIPTOR_MAX_SIZE ||
         !record->route_encoding || record->route_encoding_len == 0u ||
-        record->route_encoding_len > JS_AKEN_NATIVE_PAGE_ROUTE_MAX_SIZE) {
+        record->route_encoding_len > JS_AKEN_NATIVE_PAGE_ROUTE_MAX_SIZE ||
+        !record->vbc4_state_binding_layout_digest ||
+        record->vbc4_state_binding_layout_digest_len !=
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) {
         return 0;
     }
     return 1;
@@ -1010,6 +1013,10 @@ static int js_aken_native_page_locator_digest_record(
             record->route_encoding_len)) {
         goto cleanup;
     }
+    js_sha256_update(
+        &ctx,
+        record->vbc4_state_binding_layout_digest,
+        (int)record->vbc4_state_binding_layout_digest_len);
     js_sha256_final(&ctx, out_binding);
     ok = 1;
 cleanup:
@@ -1082,6 +1089,10 @@ static int js_aken_native_page_locator_record_parse(
             &reader,
             &out_record->route_encoding,
             (size_t)route_encoding_len) ||
+        !js_aken_native_page_envelope_reader_read_ref(
+            &reader,
+            &out_record->vbc4_state_binding_layout_digest,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) ||
         !js_aken_native_page_envelope_reader_read_bytes(
             &reader,
             received_binding,
@@ -1093,6 +1104,8 @@ static int js_aken_native_page_locator_record_parse(
     out_record->native_envelope_len = (size_t)native_envelope_len;
     out_record->descriptor_encoding_len = (size_t)descriptor_encoding_len;
     out_record->route_encoding_len = (size_t)route_encoding_len;
+    out_record->vbc4_state_binding_layout_digest_len =
+        JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE;
     if (!js_aken_native_page_locator_record_is_well_formed(out_record, 0) ||
         !js_aken_native_page_locator_digest_record(out_record, expected_binding) ||
         !js_aken_native_page_envelope_constant_time_equal(
@@ -2908,6 +2921,8 @@ static int js_aken_native_page_open_vbc4_method_sibling(
     const js_aken_native_page_descriptor_view *anchor_view,
     jint expected_page_index,
     uint64_t expected_resource_offset,
+    const unsigned char *expected_state_binding_layout_digest,
+    size_t expected_state_binding_layout_digest_len,
     js_aken_native_opened_page *out_page,
     uint32_t *out_stored_length
 ) {
@@ -2933,6 +2948,15 @@ static int js_aken_native_page_open_vbc4_method_sibling(
         record->parsed != 1u || record->entry_token == 0u ||
         record->resource_kind != JS_AKEN_NATIVE_PAGE_RESOURCE_KIND_VBC4_METHOD ||
         record->page_index != expected_page_index ||
+        !expected_state_binding_layout_digest ||
+        expected_state_binding_layout_digest_len !=
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE ||
+        record->vbc4_state_binding_layout_digest_len !=
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            record->vbc4_state_binding_layout_digest,
+            expected_state_binding_layout_digest,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) ||
         !js_aken_native_page_locator_record_extract_call_site_proof(record, &raw_proof, &raw_proof_len)) {
         goto cleanup;
     }
@@ -3106,7 +3130,13 @@ static jobject JNICALL jsw_a0(JNIEnv *env, jclass cls, jlong entry_token, jbyteA
         !js_aken_native_page_envelope_constant_time_equal(
             method_locator.records[0].encoded_handle,
             record.encoded_handle,
-            JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE)) {
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE) ||
+        method_locator.records[0].vbc4_state_binding_layout_digest_len !=
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            method_locator.records[0].vbc4_state_binding_layout_digest,
+            record.vbc4_state_binding_layout_digest,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE)) {
         js_aken_bridge_unavailable(env, "AKEN VM page authentication failed");
         goto cleanup;
     }
@@ -3135,6 +3165,8 @@ static jobject JNICALL jsw_a0(JNIEnv *env, jclass cls, jlong entry_token, jbyteA
                     &descriptor_view,
                     (jint)page,
                     expected_resource_offset,
+                    record.vbc4_state_binding_layout_digest,
+                    record.vbc4_state_binding_layout_digest_len,
                     &method_pages[page],
                     &sibling_stored_length) ||
                 sibling_stored_length == 0u ||
@@ -3178,7 +3210,9 @@ static jobject JNICALL jsw_a0(JNIEnv *env, jclass cls, jlong entry_token, jbyteA
         descriptor_view.logical_binding_path,
         descriptor_view.logical_binding_path_len,
         descriptor_view.binding.artifact_commitment,
-        descriptor_view.binding.artifact_commitment_len);
+        descriptor_view.binding.artifact_commitment_len,
+        record.vbc4_state_binding_layout_digest,
+        record.vbc4_state_binding_layout_digest_len);
     js_vbc4_wipe_volatile(assembled_frame, assembled_frame_len);
     free(assembled_frame);
     assembled_frame = NULL;
@@ -3225,6 +3259,9 @@ cleanup:
     if (!execution_completed && result) {
         (*env)->DeleteLocalRef(env, result);
         result = NULL;
+    }
+    if (!execution_completed && !(*env)->ExceptionCheck(env)) {
+        js_aken_bridge_unavailable(env, "AKEN VM page execution failed closed");
     }
     return execution_completed ? result : NULL;
 }

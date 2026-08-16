@@ -60,7 +60,9 @@ JS_HIDDEN js_vm_program* js_vm_prepare_aken_complete_frame_program(
     const unsigned char *logical_binding_path,
     size_t logical_binding_path_len,
     const unsigned char *artifact_commitment,
-    size_t artifact_commitment_len
+    size_t artifact_commitment_len,
+    const unsigned char *state_binding_layout_digest,
+    size_t state_binding_layout_digest_len
 );
 JS_HIDDEN js_vm_program* js_vm_preload_indexed_program_on_demand(JNIEnv *env, jclass resource_cls, jlong entry_token, const char *resource_path, jstring resourcePath);
 JS_HIDDEN jobject js_vm_execute_cached_program(JNIEnv *env, jclass resource_cls, js_vm_program *program, jobjectArray args);

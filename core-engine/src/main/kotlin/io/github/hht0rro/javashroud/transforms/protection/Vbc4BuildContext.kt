@@ -342,13 +342,12 @@ internal data class Vbc4BuildContext(
         }
     }
 
-    /** Stable per-build VM authority; runtime session material is derived from this root. */
-    fun deriveVmBuildKey(): ByteArray = hkdfSha256(
-        ikm = masterKey,
-        salt = VBC4_VM_BUILD_KEY_DOMAIN,
-        info = jarLayoutDigest,
-        length = VBC4_VM_DOMAIN_KEY_SIZE,
-    )
+    /**
+     * AKEN v4 VBC4 inner-codec material is public compatibility data, not a
+     * build root. The enclosing per-page evaluator is the confidentiality and
+     * authenticity boundary for protected VBC4 pages.
+     */
+    fun deriveVmBuildKey(): ByteArray = AkenVbc4InnerMaterial.deriveVmBuildKey()
 
     /** Stable per-method leaf; [methodIdentity] is the canonical call-gate binding. */
     fun deriveVmMethodKey(methodIdentity: ByteArray, methodNonce: ByteArray): ByteArray {

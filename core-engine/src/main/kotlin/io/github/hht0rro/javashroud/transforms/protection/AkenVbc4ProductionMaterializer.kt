@@ -47,23 +47,19 @@ internal object AkenVbc4ProductionMaterializer {
                         } ?: error(
                             "AKEN VBC4 pre-seal route is missing for entry token ${candidate.entryToken}",
                         )
-                        try {
-                            batches += AkenVbc4PendingPagePlanner.partitionAndWipe(
-                                candidate = candidate,
-                                route = route,
-                                callSiteProofForPage = { pageIndex ->
-                                    AkenVbc4CallSiteProof.derive(
-                                        seed = seed,
-                                        entryToken = candidate.entryToken,
-                                        logicalVmResourcePath = candidate.logicalMethod.logicalVmResourcePath,
-                                        pageIndex = pageIndex,
-                                    )
-                                },
-                                random = SecureRandom(),
-                            )
-                        } finally {
-                            route.wipe()
-                        }
+                        batches += AkenVbc4PendingPagePlanner.partitionAndWipe(
+                            candidate = candidate,
+                            route = route,
+                            callSiteProofForPage = { pageIndex ->
+                                AkenVbc4CallSiteProof.derive(
+                                    seed = seed,
+                                    entryToken = candidate.entryToken,
+                                    logicalVmResourcePath = candidate.logicalMethod.logicalVmResourcePath,
+                                    pageIndex = pageIndex,
+                                )
+                            },
+                            random = SecureRandom(),
+                        )
                     }
                 }
             }
@@ -126,12 +122,18 @@ internal object AkenVbc4ProductionMaterializer {
                 } finally {
                     Arrays.fill(commitmentBytes, 0)
                 }
-                val finalized = AkenVbc4FinalizationLayout.materializeAndWipe(
-                    plan = plan,
-                    commitment = commitment,
-                    pendingPages = pages,
-                    fixedEntries = fixedEntries,
-                )
+                val stateBindingLayoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest()
+                val finalized = try {
+                    AkenVbc4FinalizationLayout.materializeAndWipe(
+                        plan = plan,
+                        commitment = commitment,
+                        pendingPages = pages,
+                        fixedEntries = fixedEntries,
+                        vbc4StateBindingLayoutDigest = stateBindingLayoutDigest,
+                    )
+                } finally {
+                    Arrays.fill(stateBindingLayoutDigest, 0)
+                }
                 publish(finalized)
                 return
             }

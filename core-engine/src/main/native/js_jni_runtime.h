@@ -193,7 +193,7 @@ JS_HIDDEN int js_aken_evaluator_recover_dek(
 #define JS_AKEN_NATIVE_PAGE_RESOURCE_KIND_VBC4_METHOD 1u
 
 /* Generated compiler-record limits; records themselves remain opaque. */
-#define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_VERSION 1u
+#define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_VERSION 2u
 #define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_BINDING_SIZE JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE
 #define JS_AKEN_NATIVE_PAGE_LOCATOR_MAX_RECORD_COUNT 65535u
 #define JS_AKEN_NATIVE_PAGE_LOCATOR_MAX_RECORD_SIZE (512u * 1024u)
@@ -229,6 +229,13 @@ typedef struct {
     size_t descriptor_encoding_len;
     const unsigned char *route_encoding;
     size_t route_encoding_len;
+    /*
+     * Public VBC4 serialization state-binding digest. This is copied only from
+     * the build-scoped layout digest into the generated current-page record so
+     * the AKEN path never asks the retired boot-material runtime for it.
+     */
+    const unsigned char *vbc4_state_binding_layout_digest;
+    size_t vbc4_state_binding_layout_digest_len;
 } js_aken_native_page_locator_record;
 
 typedef struct {

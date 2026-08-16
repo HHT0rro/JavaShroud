@@ -16,14 +16,14 @@ import javax.crypto.spec.SecretKeySpec
 object NativeRecompilationTransforms {
 
     private val zigCompileLock = Any()
-    private const val AKEN_NATIVE_PAGE_LOCATOR_RECORD_VERSION = 1
+
+    private const val AKEN_NATIVE_PAGE_LOCATOR_RECORD_VERSION = 2
     private const val AKEN_NATIVE_PAGE_LOCATOR_MAX_RECORD_COUNT = 65_535
     private const val AKEN_NATIVE_PAGE_LOCATOR_MAX_RECORD_BYTES = 512 * 1024
     private const val AKEN_NATIVE_PAGE_LOCATOR_MAX_BLOB_BYTES = 64 * 1024 * 1024
     private const val AKEN_NATIVE_PAGE_LOCATOR_BYTES_PER_LINE = 12
     private const val AKEN_NATIVE_PAGE_LOCATOR_INTS_PER_LINE = 8
     private const val AKEN_NATIVE_PAGE_LOCATOR_HEX_DIGITS = "0123456789ABCDEF"
-
 
     private const val NATIVE_SRC_RESOURCE_ROOT = "META-INF/native-src"
 
@@ -182,7 +182,7 @@ object NativeRecompilationTransforms {
         evidenceRandom: Random?,
         report: (NativeToolchainProvisioner.ResolutionMessage) -> Unit,
     ): List<RecompiledNative> {
-        val vbc4BuildContext = requireVbc4BuildContext()
+        val vbc4BuildContext = Vbc4BuildContexts.requireCurrent()
         val nativeProtectionLevel = request.nativeProtectionLevel
         val nativePackingLevel = request.nativePackingLevel
         require(!cfgEvidenceExports || evidenceRandom != null) { "CFG evidence compilation requires an explicit deterministic random stream" }
@@ -250,7 +250,7 @@ object NativeRecompilationTransforms {
                 nativeProtectionLevel = nativeProtectionLevel,
                 nativePackingLevel = nativePackingLevel.configValue,
                 nativeShellPackerVersion = NativeKernelShellPacker.PACKER_VERSION,
-                nativeShellPayloadProfile = "${nativePackingLevel.configValue}-payload-v7-boot-dat-binding-encrypted-header-aesctr-hmac-chunks",
+                nativeShellPayloadProfile = "${nativePackingLevel.configValue}-aken-v4-native-payload-public-binding-lanes-chunk-auth",
                 nativeShellLoaderProfile = route.shellLoaderProfile,
             )
             NativeCompileTask(
@@ -269,9 +269,9 @@ object NativeRecompilationTransforms {
         val compiledResults = compileTasks.map { task ->
             try {
                 Files.createDirectories(task.outputPath.parent)
-                // MAX output is encrypted for the current external boot KEK. Reusing a cached
-                // outer library could bind the artifact to an earlier provider secret, so the
-                // seed envelope is always rebuilt even outside production-evidence mode.
+                // AKEN v4 emits a new CSPRNG binding salt, lane permutation, nonce, and
+                // payload layout for every MAX shell. The outer library therefore must be
+                // rebuilt rather than reused from a prior artifact cache entry.
                 val forceProductionCompile = nativePackingLevel.usesStubShell
                 task to compileOrLoadNativeArtifact(
                     toolchain.zigPath,
@@ -296,7 +296,6 @@ object NativeRecompilationTransforms {
                     continue
                 }
                 val preSealInner = compileResult.bytes.copyOf()
-                var shellBindingCommitment: ByteArray? = null
                 try {
                     val rawBytes = if (compileResult.fromCache) {
                         compileResult.bytes
@@ -330,12 +329,9 @@ object NativeRecompilationTransforms {
                             }
                             NativeKernelShellPacker.Level.MAX,
                             NativeKernelShellPacker.Level.MAX_HARDENING -> {
-                                val bootSecret = vbc4BuildContext.copyBootSecretForBuild()
-                                val bootSidecarBinding = if (nativePackingLevel == NativeKernelShellPacker.Level.MAX_HARDENING) {
-                                    vbc4BuildContext.copyBootSidecarBindingForBuild()
-                                } else {
-                                    ByteArray(32)
-                                }
+                                // AKEN v4 MAX variants use only public per-build binding
+                                // material. Do not materialize Boot KEK/sidecar state here:
+                                // native shell recovery is page/chunk-local and fail-closed.
                                 var bootstrapDigest: ByteArray? = null
                                 try {
                                     val currentBootstrapDigest = nativeBootstrapIndexDigest(
@@ -345,43 +341,28 @@ object NativeRecompilationTransforms {
                                         nativeSourceDigest,
                                     )
                                     bootstrapDigest = currentBootstrapDigest
-                                    val shellKeyMaterial = protectedSectionKey + vbc4BuildContext.runtimeResourceKey + vbc4BuildContext.jarLayoutDigest
-                                    val payloadBundle = try {
-                                        NativeKernelShellPacker.buildMaxPayloadBundle(
-                                            bytes = sectionSealed,
-                                            platform = task.platform,
-                                            outputName = task.outputName,
-                                            seed = seed,
-                                            keyMaterial = shellKeyMaterial,
-                                            bootstrapNativeIndexDigest = currentBootstrapDigest,
-                                            bootSecret = bootSecret,
-                                            level = nativePackingLevel,
-                                            bootSidecarBinding = bootSidecarBinding,
-                                        )
-                                    } finally {
-                                        shellKeyMaterial.fill(0)
-                                    }
+                                    val payloadBundle = NativeKernelShellPacker.buildMaxPayloadBundle(
+                                        bytes = sectionSealed,
+                                        platform = task.platform,
+                                        outputName = task.outputName,
+                                        seed = seed,
+                                        bootstrapNativeIndexDigest = currentBootstrapDigest,
+                                        level = nativePackingLevel,
+                                    )
                                     try {
-                                        shellBindingCommitment = payloadBundle.artifactBindingCommitment.copyOf()
                                         val renderedShellHeader = NativeKernelShellPacker.renderMaxPayloadHeader(payloadBundle)
                                         Files.writeString(srcDir.resolve("js_shell_payload.inc"), renderedShellHeader, StandardCharsets.UTF_8)
                                         val outerResult = compileShellStubWithZig(toolchain.zigPath, srcDir, task.zigTarget, task.outputPath, task.nativeProtectionLevel)
                                         if (!outerResult.success || !Files.exists(task.outputPath) || Files.size(task.outputPath) <= 0) {
                                             throw IllegalStateException("failed to compile max native shell stub for ${task.platform}: ${outerResult.output.take(600)}")
                                         }
-                                    } catch (error: Exception) {
-                                        shellBindingCommitment?.fill(0)
-                                        shellBindingCommitment = null
-                                        throw error
                                     } finally {
                                         payloadBundle.wipeSensitive()
                                     }
-                                    report(NativeToolchainProvisioner.ResolutionMessage("info", "Applied ${nativePackingLevel.configValue} native stub shell for ${task.platform}; inner kernel is carried as authenticated payload", 94))
+                                    report(NativeToolchainProvisioner.ResolutionMessage("info", "Applied ${nativePackingLevel.configValue} AKEN v4 native stub shell for ${task.platform}; inner kernel is carried as a chunk-authenticated payload", 94))
                                     Files.readAllBytes(task.outputPath)
                                 } finally {
                                     bootstrapDigest?.fill(0)
-                                    bootSidecarBinding.fill(0)
-                                    bootSecret.fill(0)
                                 }
                             }
                         }
@@ -399,12 +380,13 @@ object NativeRecompilationTransforms {
                     if (!cfgEvidenceExports && !compileResult.fromCache && EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(rawBytes)) {
                         writeNativeArtifactCache(task.cachePath, rawBytes)
                     }
-                    results.add(RecompiledNative(task.platform, task.outputName, rawBytes, shellBindingCommitment))
+                    // AKEN v4 does not hand a native shell commitment to boot.dat or a
+                    // Java runtime callback. The shell validates its own public binding lanes
+                    // and payload commitment before mapping the inner image.
+                    results.add(RecompiledNative(task.platform, task.outputName, rawBytes))
                     val verb = if (compileResult.fromCache) "Reused cached" else "Compiled"
                     report(NativeToolchainProvisioner.ResolutionMessage("info", "$verb JNI microkernel for ${task.platform} with Zig ${toolchain.zigPath}", 94))
-                    shellBindingCommitment = null
                 } finally {
-                    shellBindingCommitment?.fill(0)
                     preSealInner.fill(0)
                     if (nativePackingLevel.usesStubShell) {
                         compileResult.bytes.fill(0)
@@ -645,7 +627,7 @@ object NativeRecompilationTransforms {
         digest.update(vbc4BuildContext.masterKey)
         digest.update(vbc4BuildContext.runtimeResourceKey)
         digest.update(protectedSectionKey)
-        return digest.digest().toHexLower()
+        return HexEncodingSupport.toHexLower(digest.digest())
     }
 
     private fun digestNativeSourceTree(srcDir: Path): ByteArray {
@@ -1204,7 +1186,7 @@ object NativeRecompilationTransforms {
             val plainBytes = plainText.toByteArray(StandardCharsets.UTF_8)
             val encrypted = aesCtrSecretCrypt(plainBytes, key, iv, index)
             sb.append("static const unsigned char js_secret_${name}[] = { ")
-            sb.append(encrypted.toCByteArrayLiteral())
+            sb.append(HexEncodingSupport.toCByteArrayLiteral(encrypted))
             sb.appendLine(" };")
             sb.appendLine("#define JS_SECRET_LEN_${name} ${plainBytes.size}")
             sb.appendLine("#define JS_SECRET_INDEX_${name} $index")
@@ -1304,7 +1286,7 @@ object NativeRecompilationTransforms {
         sb.appendLine("#define JS_VBC4_MANIFEST_VERSION \"${manifestProtocol.version}\"")
     }
 
-    private fun cBytes(bytes: ByteArray): String = bytes.toCByteArrayLiteral()
+    private fun cBytes(bytes: ByteArray): String = HexEncodingSupport.toCByteArrayLiteral(bytes)
     private fun aesCtrSecretCrypt(data: ByteArray, key: ByteArray, iv: ByteArray, index: Int): ByteArray {
         val cipher = Cipher.getInstance("AES/CTR/NoPadding")
         val counter = iv.copyOf()

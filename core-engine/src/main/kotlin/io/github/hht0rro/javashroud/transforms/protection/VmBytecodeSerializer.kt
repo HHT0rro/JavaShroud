@@ -156,8 +156,9 @@ internal class VmBytecodeSerializer(
     private val serializationBuildContext: Vbc4BuildContext = buildContext
     private val structureEntropyDigest: ByteArray = structureEntropy.copyOf()
     private val effectiveBuildSeed: Int = deriveVbc4StructureSeed(buildContext, buildSeed, entryMetadata, structureEntropy)
-    private val vbc4MasterKey: ByteArray = serializationBuildContext.copyMasterKey()
-    private val vbc4LayoutDigest: ByteArray = serializationBuildContext.jarLayoutDigest.copyOf()
+    private val vbc4PublicCryptoMaterial: ByteArray = AkenVbc4InnerMaterial.copyCryptoDomainMaterial()
+    private val vbc4PublicStateBindingDigest: ByteArray =
+        AkenVbc4InnerMaterial.copyStateBindingLayoutDigest()
     private val opcodeDialectSalt: Int = vbc4OpcodeDialectSalt(effectiveBuildSeed, stateBinding, entryMetadata) xor readMacInt(structureEntropyDigest)
     private val structureSalt: Int = readMacInt(structureEntropyDigest)
     private var sensitiveMaterialCleared: Boolean = false
@@ -223,20 +224,20 @@ internal class VmBytecodeSerializer(
         ?: error("VBC4 production evidence requested before serialization completed")
 
     internal fun logicalProgramForTest(metadataCpIndex: Int = 0): VmLogicalProgram =
-        Vbc4CryptoScope.use(vbc4MasterKey, vbc4LayoutDigest) {
+        Vbc4CryptoScope.use(vbc4PublicCryptoMaterial, vbc4PublicStateBindingDigest) {
             lowerToLogicalProgram(metadataCpIndex)
         }
 
     fun serialize(): ByteArray {
         check(!sensitiveMaterialCleared) { "VBC4 serializer is one-shot" }
         return try {
-            Vbc4CryptoScope.use(vbc4MasterKey, vbc4LayoutDigest) {
+            Vbc4CryptoScope.use(vbc4PublicCryptoMaterial, vbc4PublicStateBindingDigest) {
                 serializeWithActiveKey()
             }
         } finally {
             try {
-                java.util.Arrays.fill(vbc4MasterKey, 0)
-                java.util.Arrays.fill(vbc4LayoutDigest, 0)
+                java.util.Arrays.fill(vbc4PublicCryptoMaterial, 0)
+                java.util.Arrays.fill(vbc4PublicStateBindingDigest, 0)
                 java.util.Arrays.fill(structureEntropyDigest, 0)
                 constantPool.forEach { entry ->
                     if (entry is SealedStringPoolEntry) java.util.Arrays.fill(entry.encoded, 0)

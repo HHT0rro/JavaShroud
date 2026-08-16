@@ -641,6 +641,7 @@ internal class AkenVbc4FinalizationLayout private constructor(
             pendingPages: Iterable<AkenVbc4PendingPage>,
             fixedEntries: Iterable<AkenArtifactEntry>,
             rootShardRanges: Iterable<AkenRootShardRange> = emptyList(),
+            vbc4StateBindingLayoutDigest: ByteArray,
         ): AkenVbc4FinalizationLayout {
             val pages = ArrayList<AkenVbc4PendingPage>()
             val fixed = LinkedHashMap<String, ByteArray>()
@@ -657,8 +658,13 @@ internal class AkenVbc4FinalizationLayout private constructor(
             var emissions: AkenVbc4PageEmissionSet? = null
             var output: AkenVbc4FinalizationLayout? = null
             var planCommitment: ByteArray? = null
+            var stateBindingLayoutDigest: ByteArray? = null
             var completed = false
             try {
+                require(vbc4StateBindingLayoutDigest.size == 32) {
+                    "AKEN VBC4 state-binding layout digest must be 32 bytes"
+                }
+                stateBindingLayoutDigest = vbc4StateBindingLayoutDigest.copyOf()
                 for (page in pendingPages) pages += page
                 require(pages.isNotEmpty()) { "AKEN VBC4 finalization requires at least one pending page" }
                 for (entry in fixedEntries) {
@@ -792,7 +798,10 @@ internal class AkenVbc4FinalizationLayout private constructor(
                         } finally {
                             Arrays.fill(payload, 0)
                         }
-                        compilerInputs += AkenNativePageLocatorCompileInput.fromVbc4Emission(emission)
+                        compilerInputs += AkenNativePageLocatorCompileInput.fromVbc4Emission(
+                            emission = emission,
+                            vbc4StateBindingLayoutDigest = checkNotNull(stateBindingLayoutDigest),
+                        )
                     } finally {
                         Arrays.fill(identity, 0)
                         Arrays.fill(proof, 0)
@@ -839,6 +848,7 @@ internal class AkenVbc4FinalizationLayout private constructor(
                 fixed.values.forEach { Arrays.fill(it, 0) }
                 pageBuffers.values.forEach { Arrays.fill(it, 0) }
                 planCommitment?.let { Arrays.fill(it, 0) }
+                stateBindingLayoutDigest?.let { Arrays.fill(it, 0) }
                 if (!completed) {
                     output?.wipe()
                     emissions?.wipe()

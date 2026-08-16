@@ -195,6 +195,7 @@ class AkenVbc4PendingPagePlannerTest {
                     commitment = commitment,
                     pendingPages = pages,
                     fixedEntries = emptyList(),
+                    vbc4StateBindingLayoutDigest = ByteArray(32) { index -> (index * 31 + 9).toByte() },
                 )
                 assertTrue(plan.isWiped())
             }
@@ -276,6 +277,7 @@ class AkenVbc4PendingPagePlannerTest {
                     commitment = commitment,
                     pendingPages = pages,
                     fixedEntries = emptyList(),
+                    vbc4StateBindingLayoutDigest = ByteArray(32) { index -> (index * 37 + 11).toByte() },
                 )
                 assertTrue(plan.isWiped())
             }
@@ -395,10 +397,10 @@ class AkenVbc4PendingPagePlannerTest {
         }
 
     private fun descriptorFromNativeLocatorRecord(record: ByteArray): AkenRuntimePageDescriptor {
-        require(record.size >= 1 + Long.SIZE_BYTES + 1 + Int.SIZE_BYTES + 32) {
-            "AKEN native locator record is too short for a descriptor"
+        require(record.size >= 1 + Long.SIZE_BYTES + 1 + Int.SIZE_BYTES + 64) {
+            "AKEN native locator record is too short for a v2 descriptor"
         }
-        require((record[0].toInt() and 0xFF) == 1) {
+        require((record[0].toInt() and 0xFF) == 2) {
             "unexpected AKEN native locator record version"
         }
         var cursor = 1 + Long.SIZE_BYTES + 1 + Int.SIZE_BYTES
@@ -425,13 +427,22 @@ class AkenVbc4PendingPagePlannerTest {
         var envelope: ByteArray? = null
         var descriptorBytes: ByteArray? = null
         var route: ByteArray? = null
+        var stateBindingLayoutDigest: ByteArray? = null
+        var recordBinding: ByteArray? = null
         try {
             handle = readFrame("handle")
             envelope = readFrame("envelope")
             descriptorBytes = readFrame("descriptor")
             route = readFrame("route")
-            require(cursor + 32 == record.size) {
-                "AKEN native locator record binding length is invalid"
+            require(cursor + 64 == record.size) {
+                "AKEN native locator v2 tail length is invalid"
+            }
+            stateBindingLayoutDigest = record.copyOfRange(cursor, cursor + 32)
+            cursor += 32
+            recordBinding = record.copyOfRange(cursor, cursor + 32)
+            cursor += 32
+            require(cursor == record.size) {
+                "AKEN native locator record has trailing bytes"
             }
             return AkenRuntimePageDescriptor.decode(checkNotNull(descriptorBytes))
         } finally {
@@ -439,6 +450,8 @@ class AkenVbc4PendingPagePlannerTest {
             envelope?.let { Arrays.fill(it, 0) }
             descriptorBytes?.let { Arrays.fill(it, 0) }
             route?.let { Arrays.fill(it, 0) }
+            stateBindingLayoutDigest?.let { Arrays.fill(it, 0) }
+            recordBinding?.let { Arrays.fill(it, 0) }
         }
     }
 

@@ -58,6 +58,13 @@ JS_HIDDEN void js_vm_clear_exception(JNIEnv *env);
 JS_HIDDEN void js_runtime_sha256(const unsigned char *data, int len, unsigned char out[32]);
 JS_HIDDEN jobject js_vm_fail_closed(JNIEnv *env, const char *reason);
 JS_HIDDEN int js_vm_build_state_binding(jlong entry_token, const char *resource_path, unsigned char *out, int out_cap);
+JS_HIDDEN int js_vm_build_state_binding_with_layout_digest(
+    jlong entry_token,
+    const char *resource_path,
+    const unsigned char layout_digest[32],
+    unsigned char *out,
+    int out_cap
+);
 JS_HIDDEN int js_vm_bind_runtime_session(js_vm_program *program, jlong entry_token, const char *resource_path);
 JS_HIDDEN int js_vm_verify_runtime_session(const js_vm_program *program);
 JS_HIDDEN int js_vm_install_startup_nonce(const unsigned char *nonce, int nonce_len);

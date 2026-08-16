@@ -139,9 +139,11 @@ public final class JniMicrokernelHelper {
         requireAkenPageRequest(encodedHandle, pageIndex, callSiteProof, "VM");
         ensureAkenNativeKernel();
         try {
-            Object result = nativeExecuteAkenVmPage(entryToken, encodedHandle, pageIndex, callSiteProof, args);
-            if (result == null) throw new SecurityException("AKEN VM page execution failed closed");
-            return result;
+            /* A null result is valid for a virtualized void method and for a
+             * reference-returning method whose value is null. The native bridge
+             * reports every unsuccessful execution by throwing SecurityException
+             * before returning to this call site. */
+            return nativeExecuteAkenVmPage(entryToken, encodedHandle, pageIndex, callSiteProof, args);
         } catch (UnsatisfiedLinkError error) {
             throw new SecurityException("AKEN VM page bridge is not registered for the sealed helper", error);
         }

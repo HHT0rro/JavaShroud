@@ -50,7 +50,10 @@ class AkenNativePageLocatorCompileInputTest {
             val emission = output.pagesForBuild().single()
             assertEquals(expectedEntryToken, emission.entryToken)
 
-            compileInput = AkenNativePageLocatorCompileInput.fromVbc4Emission(emission)
+            compileInput = AkenNativePageLocatorCompileInput.fromVbc4Emission(
+                emission = emission,
+                vbc4StateBindingLayoutDigest = ByteArray(32) { index -> (index * 23 + 7).toByte() },
+            )
             val input = checkNotNull(compileInput)
             handleBytes = emission.copyHandleForBuild().let { handle ->
                 try {
