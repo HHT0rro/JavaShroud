@@ -44,13 +44,25 @@ object EmbeddedHelperDeployment {
         "$PKG/JniMicrokernelHelper${"$"}SamLambdaOptions",
         "$PKG/JniMicrokernelHelper${"$"}SamInvocationHandler",
     )
+    /**
+     * Class-encryption uses this set only for its per-class AKEN descriptor
+     * route. The helper has no central catalog or generic resource decoder;
+     * nested classes are emitted explicitly so the relocated runtime can resolve
+     * the parser's private implementation types.
+     */
+    private val akenClassPageRuntimeHelpers = listOf(
+        "$PKG/AkenClassPageRuntimeDescriptor",
+        "$PKG/AkenClassPageRuntimeDescriptor${"$"}PageBinding",
+        "$PKG/AkenClassPageRuntimeDescriptor${"$"}DescriptorReader",
+        "$PKG/AkenClassPageRuntimeDescriptor${"$"}WipableByteAccumulator",
+    )
 
     private val passToHelpers: Map<String, List<String>> = mapOf(
         "class-encryption-loader" to listOf(
             "$PKG/ClassEncryptionLoaderHelper",
             "$PKG/ClassEncryptionLoaderHelper${"$"}ParsedMetadata",
             "$PKG/ClassEncryptionLoaderHelper${"$"}SharedDecryptingClassLoader",
-        ) + runtimeResourceDecodeHelpers,
+        ) + akenClassPageRuntimeHelpers + runtimeResourceDecodeHelpers,
         "string-encryption" to listOf(
             "$PKG/StringEncryptionHelper",
             "$PKG/StringEncryptionHelper${"$"}CachePolicy",
@@ -76,6 +88,10 @@ object EmbeddedHelperDeployment {
             "$PKG/ClassEncryptionLoaderHelper" to { loadClasspathHelperByName("ClassEncryptionLoaderHelper") },
             "$PKG/ClassEncryptionLoaderHelper${"$"}ParsedMetadata" to { loadClasspathHelperByName("ClassEncryptionLoaderHelper${"$"}ParsedMetadata") },
             "$PKG/ClassEncryptionLoaderHelper${"$"}SharedDecryptingClassLoader" to { loadClasspathHelperByName("ClassEncryptionLoaderHelper${"$"}SharedDecryptingClassLoader") },
+            "$PKG/AkenClassPageRuntimeDescriptor" to { loadClasspathHelperByName("AkenClassPageRuntimeDescriptor") },
+            "$PKG/AkenClassPageRuntimeDescriptor${"$"}PageBinding" to { loadClasspathHelperByName("AkenClassPageRuntimeDescriptor${"$"}PageBinding") },
+            "$PKG/AkenClassPageRuntimeDescriptor${"$"}DescriptorReader" to { loadClasspathHelperByName("AkenClassPageRuntimeDescriptor${"$"}DescriptorReader") },
+            "$PKG/AkenClassPageRuntimeDescriptor${"$"}WipableByteAccumulator" to { loadClasspathHelperByName("AkenClassPageRuntimeDescriptor${"$"}WipableByteAccumulator") },
             "$PKG/MethodBodyDecryptionHelper" to { loadClasspathHelperByName("MethodBodyDecryptionHelper") },
             "$PKG/MethodBodyDecryptionHelper${"$"}ParsedMetadata" to { loadClasspathHelperByName("MethodBodyDecryptionHelper${"$"}ParsedMetadata") },
             "$PKG/StringEncryptionHelper" to { loadClasspathHelperByName("StringEncryptionHelper") },

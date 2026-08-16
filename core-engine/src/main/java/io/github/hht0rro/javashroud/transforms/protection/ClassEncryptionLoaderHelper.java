@@ -50,6 +50,25 @@ public final class ClassEncryptionLoaderHelper {
     }
 
     /**
+     * Strictly loads one AKEN v4 ClassPage target by its binary class name.
+     *
+     * <p>This entry intentionally has no resource-path or key-metadata
+     * parameters.  A missing descriptor is a failure for an AKEN stub; ordinary
+     * parent-loaded classes are handled only by the shared loader's internal
+     * dependency resolution path.</p>
+     */
+    public static Class<?> loadAkenClass(String binaryName) {
+        try {
+            return sharedLoader().loadAkenClass(binaryName);
+        } catch (ClassNotFoundException error) {
+            throw new IllegalStateException(
+                "AKEN ClassPage descriptor is unavailable for encrypted class: " + binaryName,
+                error
+            );
+        }
+    }
+
+    /**
      *
      */
     private static volatile sun.misc.Unsafe unsafe;
@@ -487,6 +506,34 @@ public final class ClassEncryptionLoaderHelper {
             if (bytes == null) {
                 throw new ClassNotFoundException(name);
             }
+            return defineClassBytes(name, bytes);
+        }
+
+        private Class<?> loadAkenClass(String name) throws ClassNotFoundException {
+            synchronized (getClassLoadingLock(name)) {
+                Class<?> loaded = findLoadedClass(name);
+                if (loaded != null) {
+                    return loaded;
+                }
+                Class<?> defined = defineAkenClassIfPresent(name);
+                if (defined == null) {
+                    throw new ClassNotFoundException(
+                        "AKEN ClassPage descriptor is unavailable for " + name
+                    );
+                }
+                return defined;
+            }
+        }
+
+        private Class<?> defineAkenClassIfPresent(String name) {
+            byte[] bytes = AkenClassPageRuntimeDescriptor.openClassBytesIfPresent(name);
+            if (bytes == null) {
+                return null;
+            }
+            return defineClassBytes(name, bytes);
+        }
+
+        private Class<?> defineClassBytes(String name, byte[] bytes) {
             try {
                 ProtectionDomain domain = ClassEncryptionLoaderHelper.class.getProtectionDomain();
                 return defineClass(name, bytes, 0, bytes.length, domain);
@@ -500,12 +547,18 @@ public final class ClassEncryptionLoaderHelper {
             synchronized (getClassLoadingLock(name)) {
                 Class<?> c = findLoadedClass(name);
                 if (c == null) {
-                    // Prefer locally decrypting an encrypted application class so it
-                    // and its siblings stay in this loader's namespace; only fall
-                    // back to the parent (JDK + non-encrypted classes) otherwise.
-                    if (manifest().containsKey(name)) {
+                    /*
+                     * Prefer the class-local AKEN route.  It probes only the
+                     * descriptor derivable from this current binary name, then
+                     * opens pages through the typed native ClassPage bridge.
+                     * No central AKEN catalog is consulted.
+                     */
+                    c = defineAkenClassIfPresent(name);
+                    if (c == null && manifest != null && manifest.containsKey(name)) {
+                        // Keep already-initialized legacy manifests working while
+                        // existing artifacts transition to the class-local ABI.
                         c = findClass(name);
-                    } else {
+                    } else if (c == null) {
                         c = super.loadClass(name, false);
                     }
                 }

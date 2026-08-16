@@ -63,6 +63,10 @@ private val SEALED_RUNTIME_HELPERS = listOf(
     "$PROTECTION_HELPER_PACKAGE/ClassEncryptionLoaderHelper",
     "$PROTECTION_HELPER_PACKAGE/ClassEncryptionLoaderHelper${"$"}ParsedMetadata",
     "$PROTECTION_HELPER_PACKAGE/ClassEncryptionLoaderHelper${"$"}SharedDecryptingClassLoader",
+    "$PROTECTION_HELPER_PACKAGE/AkenClassPageRuntimeDescriptor",
+    "$PROTECTION_HELPER_PACKAGE/AkenClassPageRuntimeDescriptor${"$"}PageBinding",
+    "$PROTECTION_HELPER_PACKAGE/AkenClassPageRuntimeDescriptor${"$"}DescriptorReader",
+    "$PROTECTION_HELPER_PACKAGE/AkenClassPageRuntimeDescriptor${"$"}WipableByteAccumulator",
     "$PROTECTION_HELPER_PACKAGE/MethodBodyDecryptionHelper",
     "$PROTECTION_HELPER_PACKAGE/MethodBodyDecryptionHelper${"$"}ParsedMetadata",
     "$PROTECTION_HELPER_PACKAGE/StringEncryptionHelper",
@@ -871,6 +875,7 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
 
     val classEncryption = "$PROTECTION_HELPER_PACKAGE/ClassEncryptionLoaderHelper"
     addMethod(classEncryption, "initializeClass", "(Ljava/lang/String;Ljava/lang/String;)V")
+    addMethod(classEncryption, "loadAkenClass", "(Ljava/lang/String;)Ljava/lang/Class;")
 
     val stringEncryption = "$PROTECTION_HELPER_PACKAGE/StringEncryptionHelper"
     addMethod(stringEncryption, "cachedDecodeAkenStringPage", "([BI[B)Ljava/lang/String;")
