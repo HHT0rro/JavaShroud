@@ -407,12 +407,8 @@ class AkenBuildPlan private constructor(
         require(identity.isNotEmpty()) { "AKEN page identity must not be empty" }
         require(pageIndex >= 0) { "AKEN page index must be non-negative" }
         encodedHandleOverride?.let { encodedHandle ->
-            require(
-                kind == AkenResourceKind.Vbc4Method &&
-                    pageIndex == 0 &&
-                    encodedHandle.size == AkenHandle.ENCODED_HANDLE_SIZE,
-            ) {
-                "AKEN preassigned handle is only valid for a VBC4 page-zero dispatch binding"
+            require(encodedHandle.size == AkenHandle.ENCODED_HANDLE_SIZE) {
+                "AKEN preassigned handle size is invalid"
             }
         }
         val allowedTargetSizes = pageSizePolicy.allowedSizes(kind)
