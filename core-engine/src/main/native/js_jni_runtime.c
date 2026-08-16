@@ -3857,10 +3857,10 @@ static int js_register_all_natives(JNIEnv *env) {
         {js_native_name("Ex", "ecuteVmResource", "Int"), "(J)I", (void*)jsw_r25},
         {js_native_name("Ex", "ecuteVmResourceInt", "Int"), "(JI)I", (void*)jsw_r26},
         {js_native_name("Ex", "ecuteVmResourceInt", "Void"), "(JI)V", (void*)jsw_r24},
-        {js_native_name("Execute", "AkenVm", "Page"), "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;", (void*)jsw_a0},
-        {js_native_name("Decode", "AkenString", "Page"), "([BI[B)[B", (void*)jsw_a1},
-        {js_native_name("Read", "AkenClass", "Page"), "([BI[B)[B", (void*)jsw_a2},
-        {js_native_name("Map", "AkenNative", "Chunk"), "([BI[B)[B", (void*)jsw_a3},
+        {js_native_name_full("nativeExecuteAkenVmPage"), "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;", (void*)jsw_a0},
+        {js_native_name_full("nativeDecodeAkenStringPage"), "([BI[B)[B", (void*)jsw_a1},
+        {js_native_name_full("nativeReadAkenClassPage"), "([BI[B)[B", (void*)jsw_a2},
+        {js_native_name_full("nativeMapAkenNativeChunk"), "([BI[B)[B", (void*)jsw_a3},
     };
     if (!js_register_native_group(env, js_helper_owner("Jni", "Micro", "kernel", "Helper"), jni_microkernel_methods, (int)(sizeof(jni_microkernel_methods) / sizeof(jni_microkernel_methods[0])), 1)) return 0;
     return js_register_optional_natives(env);

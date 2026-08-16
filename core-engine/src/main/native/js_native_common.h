@@ -35,5 +35,6 @@ JS_HIDDEN int contains(const char *s, const char *sub);
 JS_HIDDEN char* js_join_parts(const char *first, ...);
 JS_HIDDEN char* js_helper_owner(const char *a, const char *b, const char *c, const char *d);
 JS_HIDDEN char* js_native_name(const char *a, const char *b, const char *c);
+JS_HIDDEN char* js_native_name_full(const char *name);
 
 #endif

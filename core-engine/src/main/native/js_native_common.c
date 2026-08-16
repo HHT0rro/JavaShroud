@@ -84,3 +84,13 @@ JS_HIDDEN char* js_helper_owner(const char *a, const char *b, const char *c, con
 JS_HIDDEN char* js_native_name(const char *a, const char *b, const char *c) {
     return js_join_parts("na", "tive", a, b, c, NULL);
 }
+
+/*
+ * The AKEN page bridge deliberately keeps its purpose-split ABI names visible
+ * to the registration manifest.  Return an owned copy so the common
+ * registration cleanup can free every method name uniformly.
+ */
+JS_HIDDEN char* js_native_name_full(const char *name) {
+    if (!name) return NULL;
+    return js_join_parts(name, NULL);
+}
