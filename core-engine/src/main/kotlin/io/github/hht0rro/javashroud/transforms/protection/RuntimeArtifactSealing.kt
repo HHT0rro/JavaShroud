@@ -96,6 +96,16 @@ private val SEALED_RUNTIME_HELPERS = listOf(
 object RuntimeArtifactSealing {
     internal data class EnvBindingMetadata(val bindBootSecret: Boolean, val expectedFingerprint: String?)
 
+    /**
+     * New AKEN v4 outputs never retain the retired JSBM/JSBK delivery
+     * resources.  Sealing treats them as input cleanup only and deliberately
+     * emits no replacement path, catalog entry, or helper-string rewrite.
+     */
+    private val RETIRED_AKEN_V4_BOOT_RESOURCE_PATHS = setOf(
+        "META-INF/.r/boot.dat",
+        "META-INF/.r/kek.dat",
+    )
+
     fun isRequested(config: ObfuscationConfig): Boolean {
         val enabledPassIds = config.passes.filter { it.enabled }.map { it.id }.toSet()
         return enabledPassIds.any { it in AUTO_SEALED_HELPER_PASSES }
@@ -210,30 +220,6 @@ object RuntimeArtifactSealing {
             null
         }
         var sealedNativeBindingsResource: String? = null
-        val bootMaterialResource = if (maxHardening) {
-            uniqueSealedResourceName(
-                seed = seed,
-                kind = "k",
-                originalName = "boot-material",
-                index = 0,
-                preferredName = sealedResourceName(seed, "k", "boot-material", 0),
-                reservedEntryNames = reservedEntryNames,
-            ).also(reservedEntryNames::add)
-        } else {
-            BootMaterialEnvelope.RESOURCE_PATH
-        }
-        val embeddedBootKekResource = if (artifact.jarEntries.any { it.name == BootKekSidecar.EMBEDDED_RESOURCE_PATH }) {
-            uniqueSealedResourceName(
-                seed = seed,
-                kind = "e",
-                originalName = "embedded-boot-kek",
-                index = 0,
-                preferredName = sealedResourceName(seed, "e", "embedded-boot-kek", 0),
-                reservedEntryNames = reservedEntryNames,
-            ).also(reservedEntryNames::add)
-        } else {
-            null
-        }
         val vmCatalogPlan = if (rewritesVmRuntime) requireVbc4BuildContext().runtimeVmCatalogPlanOrNull() else null
         val rewritesCurrentVmRuntime = vmCatalogPlan != null
         val vmCatalogResource = if (rewritesCurrentVmRuntime) {
@@ -275,12 +261,6 @@ object RuntimeArtifactSealing {
         )
         akenNativeLocatorResource?.let { sealedPath ->
             helperStringRewriteMap[AKEN_NATIVE_LOCATOR_LOGICAL_RESOURCE] = sealedPath
-        }
-        if (maxHardening) {
-            helperStringRewriteMap[BootMaterialEnvelope.RESOURCE_PATH] = bootMaterialResource
-        }
-        embeddedBootKekResource?.let { sealedPath ->
-            helperStringRewriteMap[BootKekSidecar.EMBEDDED_RESOURCE_PATH] = sealedPath
         }
         if (helperClassRenameMap.isNotEmpty()) {
             sealedNativeBindingsResource = uniqueSealedResourceName(
@@ -356,10 +336,7 @@ object RuntimeArtifactSealing {
 
         val renamedJarEntries = artifact.jarEntries.mapIndexedNotNull { index, entry ->
             when {
-                maxHardening && entry.name == BootMaterialEnvelope.RESOURCE_PATH ->
-                    entry.copy(name = bootMaterialResource)
-                embeddedBootKekResource != null && entry.name == BootKekSidecar.EMBEDDED_RESOURCE_PATH ->
-                    entry.copy(name = embeddedBootKekResource)
+                entry.name in RETIRED_AKEN_V4_BOOT_RESOURCE_PATHS -> null
                 isDelayedMethodResource(entry.name) || isClassEncryptionResource(entry.name) -> {
                     val sealedName = resourceRenameMap.getValue(entry.name)
                     // Rewrite encrypted class bytecode to update helper references
@@ -403,20 +380,15 @@ object RuntimeArtifactSealing {
             }
         }
 
-        // An embedded Boot KEK starts under the fixed logical resource name and
-        // must still be sealed/renamed even when this artifact has no other
-        // runtime resources or helper classes that need rewriting.  Likewise,
-        // max-hardening boot material may be the only entry requiring a path
-        // rewrite.  Do not take the fast path until those explicit delivery
-        // changes have been accounted for.
-        val hasBootMaterialToRename = maxHardening && artifact.jarEntries.any { it.name == BootMaterialEnvelope.RESOURCE_PATH }
+        val hasRetiredAkenV4BootResource = artifact.jarEntries.any { entry ->
+            entry.name in RETIRED_AKEN_V4_BOOT_RESOURCE_PATHS
+        }
         if (
             resourceRenameMap.isEmpty() &&
             vmResourceRenameMap.isEmpty() &&
             sealedNativeSpecs.isEmpty() &&
             helperClassRenameMap.isEmpty() &&
-            embeddedBootKekResource == null &&
-            !hasBootMaterialToRename
+            !hasRetiredAkenV4BootResource
         ) {
             publishAkenArtifactCommitment(artifact)
             return artifact
