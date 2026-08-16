@@ -10,7 +10,6 @@ import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.model.protocol.EngineEvent
 import org.objectweb.asm.*
-import java.util.HexFormat
 
 /**
  * Embedded Runtime Helper Deployment.
@@ -26,10 +25,21 @@ object EmbeddedHelperDeployment {
 
     private const val PKG = "io/github/hht0rro/javashroud/transforms/protection"
     private const val HELPER_RESOURCE_ROOT = "META-INF/javashroud-helpers"
+    /**
+     * New AKEN v4 outputs must not retain a legacy boot envelope or an embedded
+     * boot-KEK sidecar from an input/intermediate artifact.  These paths are
+     * cleanup-only; this deployment layer does not emit a replacement manifest
+     * until the native handle ABI can consume one.
+     */
+    private val legacyBootResourcePaths = setOf(
+        "META-INF/.r/boot.dat",
+        "META-INF/.r/kek.dat",
+    )
     private val runtimeResourceDecodeHelpers = listOf(
         "$PKG/JniMicrokernelHelper",
         "$PKG/JniMicrokernelHelper${"$"}RuntimeResourceMetadata",
         "$PKG/JniMicrokernelHelper${"$"}SealedNativeLibrary",
+        "$PKG/JniMicrokernelHelper${"$"}AkenNativeLibrary",
         "$PKG/JniMicrokernelHelper${"$"}TypeParseResult",
         "$PKG/JniMicrokernelHelper${"$"}SamLambdaOptions",
         "$PKG/JniMicrokernelHelper${"$"}SamInvocationHandler",
@@ -84,6 +94,7 @@ object EmbeddedHelperDeployment {
             "$PKG/JniMicrokernelHelper" to { loadClasspathHelperByName("JniMicrokernelHelper") },
             "$PKG/JniMicrokernelHelper${"$"}RuntimeResourceMetadata" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}RuntimeResourceMetadata") },
             "$PKG/JniMicrokernelHelper${"$"}SealedNativeLibrary" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}SealedNativeLibrary") },
+            "$PKG/JniMicrokernelHelper${"$"}AkenNativeLibrary" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}AkenNativeLibrary") },
             "$PKG/JniMicrokernelHelper${"$"}TypeParseResult" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}TypeParseResult") },
             "$PKG/JniMicrokernelHelper${"$"}SamLambdaOptions" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}SamLambdaOptions") },
             "$PKG/JniMicrokernelHelper${"$"}SamInvocationHandler" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}SamInvocationHandler") },
@@ -117,38 +128,23 @@ object EmbeddedHelperDeployment {
             }
             newEntries.add(JarEntryData(name = entryName, bytes = classBytes))
         }
-        if ("jni-microkernel-loader" in resolvedPassIds) {
-            val context = requireVbc4BuildContext()
-            val bootSecret = context.copyBootSecretForBuild()
-            try {
-                newEntries.removeAll { it.name == BootMaterialEnvelope.RESOURCE_PATH }
-                newEntries.add(
-                    JarEntryData(
-                        name = BootMaterialEnvelope.RESOURCE_PATH,
-                        bytes = BootMaterialEnvelope.encode(context, bootSecret),
-                    )
-                )
-            } finally {
-                java.util.Arrays.fill(bootSecret, 0)
-            }
-        }
         if (generationFailures.isNotEmpty()) {
             throw IllegalStateException(
                 "Failed to embed runtime helpers for passes ${executedPassIds.sorted()}: ${generationFailures.joinToString("; ")}"
             )
         }
-        if (newEntries.isEmpty()) return artifact
+        val retainedJarEntries = if ("jni-microkernel-loader" in resolvedPassIds) {
+            artifact.jarEntries.filterNot { entry -> entry.name in legacyBootResourcePaths }
+        } else {
+            artifact.jarEntries
+        }
+        if (newEntries.isEmpty() && retainedJarEntries.size == artifact.jarEntries.size) return artifact
         val injectedClassArtifacts = newEntries.filter { entry -> entry.name.endsWith(".class") }.map { entry: JarEntryData ->
             ClassArtifact(
                 entryName = entry.name,
                 summary = analyzeClassBytes(entry.bytes),
                 bytes = entry.bytes,
             )
-        }
-        val retainedJarEntries = if ("jni-microkernel-loader" in resolvedPassIds) {
-            artifact.jarEntries.filterNot { entry -> entry.name == BootMaterialEnvelope.RESOURCE_PATH }
-        } else {
-            artifact.jarEntries
         }
         val updatedJarEntries = retainedJarEntries + newEntries
         val updatedClassArtifacts = artifact.classArtifacts + injectedClassArtifacts
@@ -239,16 +235,9 @@ object EmbeddedHelperDeployment {
 
         val recompiledNatives = compileNativeLibrariesOrThrow(config, emit)
         return try {
-            val shellBindings = recompiledNatives.mapNotNull { native ->
-                native.shellBindingCommitment?.let { commitment -> native.platform to commitment }
-            }.toMap(linkedMapOf())
-            require(shellBindings.isEmpty() || shellBindings.size == recompiledNatives.size) {
-                "Zig compilation produced an incomplete native shell binding set"
-            }
             val retainedJarEntries = artifact.jarEntries.filterNot { entry ->
                 isNativeKernelResource(entry.name) ||
-                    entry.name == BootMaterialEnvelope.RESOURCE_PATH ||
-                    entry.name == BootKekSidecar.EMBEDDED_RESOURCE_PATH
+                    entry.name in legacyBootResourcePaths
             }
             val existingEntries = retainedJarEntries.map { it.name }.toSet()
             val newEntries = mutableListOf<JarEntryData>()
@@ -263,25 +252,6 @@ object EmbeddedHelperDeployment {
             if (newEntries.isEmpty()) {
                 throw IllegalStateException("Zig compilation produced no loadable JNI microkernel libraries")
             }
-            val bootSecret = requireVbc4BuildContext().copyBootSecretForBuild()
-            try {
-                newEntries.add(
-                    JarEntryData(
-                        name = BootMaterialEnvelope.RESOURCE_PATH,
-                        bytes = BootMaterialEnvelope.encode(requireVbc4BuildContext(), bootSecret, shellBindings),
-                    )
-                )
-            } finally {
-                java.util.Arrays.fill(bootSecret, 0)
-            }
-            if (bootKeyDelivery(config) == BootKekSidecar.DELIVERY_EMBEDDED) {
-                newEntries.add(
-                    JarEntryData(
-                        name = BootKekSidecar.EMBEDDED_RESOURCE_PATH,
-                        bytes = embeddedBootKekBytes(requireNotNull(config)),
-                    ),
-                )
-            }
             val updatedJarEntries = retainedJarEntries + newEntries
             artifact.copy(
                 jarEntries = updatedJarEntries,
@@ -291,37 +261,6 @@ object EmbeddedHelperDeployment {
             )
         } finally {
             recompiledNatives.forEach { native -> native.shellBindingCommitment?.fill(0) }
-        }
-    }
-
-    private fun bootKeyDelivery(config: io.github.hht0rro.javashroud.model.config.ObfuscationConfig?): String {
-        val loaderPass = config?.passes?.firstOrNull { it.id == "jni-microkernel-loader" && it.enabled }
-            ?: return BootKekSidecar.DELIVERY_EXTERNAL_FILE
-        val delivery = loaderPass.params["bootKeyDelivery"]?.asText() ?: BootKekSidecar.DELIVERY_EXTERNAL_FILE
-        require(delivery == BootKekSidecar.DELIVERY_EXTERNAL_FILE || delivery == BootKekSidecar.DELIVERY_EMBEDDED) {
-            "jni-microkernel-loader bootKeyDelivery '$delivery' is not supported"
-        }
-        return delivery
-    }
-
-    private fun embeddedBootKekBytes(config: io.github.hht0rro.javashroud.model.config.ObfuscationConfig): ByteArray {
-        val loaderPass = config.passes.first { it.id == "jni-microkernel-loader" && it.enabled }
-        val maxHardening = loaderPass.params["nativePackingLevel"]?.asText() == "max-hardening"
-        val context = requireVbc4BuildContext()
-        val secret = context.copyBootSecretForBuild()
-        return try {
-            if (maxHardening) {
-                val binding = context.copyBootSidecarBindingForBuild()
-                try {
-                    BootKekSidecar.encodeText(secret, binding).toByteArray(Charsets.US_ASCII)
-                } finally {
-                    binding.fill(0)
-                }
-            } else {
-                HexFormat.of().formatHex(secret).toByteArray(Charsets.US_ASCII)
-            }
-        } finally {
-            secret.fill(0)
         }
     }
 

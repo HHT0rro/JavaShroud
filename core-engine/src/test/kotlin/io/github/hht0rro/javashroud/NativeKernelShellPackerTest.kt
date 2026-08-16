@@ -1,20 +1,16 @@
 package io.github.hht0rro.javashroud
 
 import io.github.hht0rro.javashroud.transforms.protection.NativeKernelShellPacker
-import io.github.hht0rro.javashroud.transforms.protection.BootKekSidecar
-import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
-import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 class NativeKernelShellPackerTest {
     private val nativeBytes = "MZfake-loadable-native-JNI_OnLoad-j.l-j.b-j.m-(J[Ljava/lang/Object;)Ljava/lang/Object;".toByteArray()
     private val keyMaterial = ByteArray(32) { index -> (index * 3 + 1).toByte() }
     private val bootstrapDigest = ByteArray(32) { index -> (0xA0 + index).toByte() }
-    private val bootSecret = ByteArray(32) { index -> (0xD3 xor index).toByte() }
 
     @Test
     fun off_level_returns_original_bytes() {
@@ -71,30 +67,13 @@ class NativeKernelShellPackerTest {
     }
 
     @Test
-    fun max_payload_bundle_carries_authenticated_stub_bound_metadata() {
-        val bundle = NativeKernelShellPacker.buildMaxPayloadBundle(
-            bytes = nativeBytes,
-            platform = "linux-x64",
-            outputName = "js_kernel_linux-x64.so",
-            seed = 23L,
-            keyMaterial = keyMaterial,
-            bootstrapNativeIndexDigest = bootstrapDigest,
-            bootSecret = bootSecret,
-        )
-        val inspection = NativeKernelShellPacker.inspectMaxPayloadBundle(
-            headerBytes = bundle.headerBytes,
-            encodedPayload = bundle.encodedPayload,
-            payloadMac = bundle.payloadMac,
-            seed = 23L,
-            keyMaterial = keyMaterial,
-            bootstrapNativeIndexDigest = bootstrapDigest,
-            bootSecret = bootSecret,
-            artifactBindingCommitment = bundle.artifactBindingCommitment,
-        )
+    fun aken_v4_payload_bundle_carries_chunk_local_authenticated_metadata() {
+        val bundle = maxBundle(seed = 23L)
+        val inspection = inspect(bundle)
 
-        assertTrue(inspection.present, "max payload header must parse")
-        assertTrue(inspection.macValid, "max payload must authenticate with VBC4/runtime/protected-section key material")
-        assertTrue(inspection.bindingTagValid, "max payload binding tag must cover stub and bootstrap index material")
+        assertTrue(inspection.present, "AKEN v4 payload header must parse")
+        assertTrue(inspection.macValid, "AKEN v4 payload commitment must authenticate header and payload")
+        assertTrue(inspection.bindingTagValid, "AKEN v4 payload must authenticate its decoded inner image")
         assertEquals("linux-x64", inspection.platform)
         assertEquals("js_kernel_linux-x64.so", inspection.outputName)
         assertEquals("elf64-so", inspection.innerFileType)
@@ -102,59 +81,49 @@ class NativeKernelShellPackerTest {
         assertEquals(bundle.storedPayloadSize, inspection.storedPayloadSize)
         assertEquals(bundle.encodedPayload.size, inspection.encodedPayloadSize)
         assertEquals(bundle.compressionCodec, inspection.compressionCodec)
-        assertEquals(NativeKernelShellPacker.MAX_PAYLOAD_CHUNK_SIZE, inspection.chunkSize)
+        assertTrue(bundle.chunkSize in setOf(1024, 1536, 2048, 3072), "native chunks must use an AKEN v4 randomized page size")
+        assertEquals(bundle.chunkSize, inspection.chunkSize)
         assertEquals(bundle.chunkCount, inspection.chunkCount)
         assertEquals(16, inspection.nonceSize)
-        assertTrue(bundle.chunkCount >= 1, "max payload must be split into authenticated chunk metadata")
-        assertEquals(bundle.chunkCount * 32, bundle.chunkTags.size, "each max payload chunk must carry a 256-bit HMAC tag")
+        assertTrue(bundle.chunkCount >= 1, "AKEN v4 payload must be split into authenticated chunk metadata")
+        assertEquals(bundle.chunkCount * 32, bundle.chunkTags.size, "each native chunk must carry a 256-bit HMAC tag")
         assertTrue(NativeKernelShellPacker.decodeMaxPayloadForTest(bundle)!!.contentEquals(nativeBytes), "test decoder should recover the original inner kernel bytes")
-        assertFalse(bundle.encodedPayload.contentEquals(nativeBytes), "inner kernel must not be stored as plaintext payload")
-        assertTrue(bundle.headerBytes.containsAscii(NativeKernelShellPacker.MAX_PAYLOAD_MARKER), "payload prefix must carry max payload marker")
-        assertFalse(bundle.headerBytes.containsAscii("linux-x64") || bundle.headerBytes.containsAscii("js_kernel_linux-x64.so"), "sensitive payload header fields must be encrypted")
+        assertFalse(bundle.encodedPayload.contentEquals(nativeBytes), "inner kernel must not be stored as a plaintext payload")
+        assertTrue(bundle.headerBytes.containsAscii(NativeKernelShellPacker.MAX_PAYLOAD_MARKER), "payload prefix must carry the AKEN v4 marker")
+        assertTrue(bundle.headerBytes.containsAscii("linux-x64"), "artifact routing metadata is public framing, not a key source")
+
         val renderedHeader = NativeKernelShellPacker.renderMaxPayloadHeader(bundle)
-        assertTrue(renderedHeader.contains(NativeKernelShellPacker.MAX_STUB_MARKER), "generated C header must bind to the max stub marker")
+        assertTrue(renderedHeader.contains(NativeKernelShellPacker.MAX_STUB_MARKER), "generated C header must bind to the AKEN native stub marker")
+        assertTrue(renderedHeader.contains("js_shell_payload_header"), "generated C header must carry the authenticated payload header")
+        assertTrue(renderedHeader.contains("js_shell_aken_payload_commitment"), "generated C header must carry the public payload commitment")
+        assertTrue(renderedHeader.contains("js_shell_aken_binding_lane_0"), "binding salt must be emitted only as shuffled C lanes")
+        assertTrue(renderedHeader.contains("js_shell_aken_binding_lane_order"), "header must carry the lane reconstruction order")
         assertFalse(renderedHeader.contains("js_shell_stream_key[32]"), "generated C header must not expose a complete contiguous stream key")
-        assertFalse(renderedHeader.contains("JS_SHELL_STREAM_KEY_LANE_COUNT") || renderedHeader.contains("JS_SHELL_COPY_SCOPED_STREAM_KEY") || renderedHeader.contains("js_shell_key_material_"), "generated C header must not emit a statically evaluable lane program")
-        assertFalse(
-            listOf(
-                "JS_SHELL_ORIGINAL_PAYLOAD_SIZE",
-                "JS_SHELL_STORED_PAYLOAD_SIZE",
-                "JS_SHELL_COMPRESSION_CODEC",
-                "JS_SHELL_CHUNK_SIZE",
-                "JS_SHELL_CHUNK_COUNT",
-            ).any(renderedHeader::contains),
-            "generated C header must not duplicate encrypted payload metadata as plaintext macros",
-        )
-        assertTrue(renderedHeader.contains("js_shell_payload_header"), "generated C header must carry the authenticated encrypted shell seed envelope")
-        assertTrue(renderedHeader.contains("js_shell_build_hmac"), "generated C header must carry the boot-keyed payload commitment")
-        assertFalse(renderedHeader.contains("js_shell_expected_binding_commitment"), "payload header must not carry the independent artifact commitment")
-        assertFalse(renderedHeader.contains(cBytesForTest(bundle.artifactBindingCommitment)), "artifact commitment must be delivered through boot.dat instead of compiled into the shell")
+        assertFalse(renderedHeader.contains("js_shell_build_hmac") || renderedHeader.contains("js_shell_expected_binding_commitment"))
+        assertFalse(renderedHeader.contains("JAVASHROUD_BOOT_SECRET_") || renderedHeader.contains("JSBK1") || renderedHeader.contains("kek.dat"))
+        assertFalse(renderedHeader.contains(cBytesForTest(bundle.bindingSalt)), "the binding salt must not appear as one contiguous C literal")
         assertFalse(renderedHeader.contains(cBytesForTest(bundle.streamKey)), "generated C header must not contain the complete payload stream key literal")
     }
 
     @Test
-    fun max_header_seed_envelope_and_ciphertext_fail_closed_when_tampered() {
-        val bundle = NativeKernelShellPacker.buildMaxPayloadBundle(nativeBytes, "windows-x64", "js_kernel_windows-x64.dll", 24L, keyMaterial, bootstrapDigest, bootSecret)
-        val tampered = bundle.headerBytes.copyOf().also { it[it.lastIndex] = (it.last().toInt() xor 1).toByte() }
-        val wrongBootSecret = bootSecret.copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() }
-        assertFalse(NativeKernelShellPacker.inspectMaxPayloadBundle(tampered, bundle.encodedPayload, bundle.payloadMac, 24L, keyMaterial, bootstrapDigest, bootSecret, bundle.artifactBindingCommitment).present)
-        assertFalse(NativeKernelShellPacker.inspectMaxPayloadBundle(bundle.headerBytes, bundle.encodedPayload, bundle.payloadMac, 24L, keyMaterial, bootstrapDigest, wrongBootSecret, bundle.artifactBindingCommitment).present)
+    fun aken_v4_payload_commitment_fails_closed_for_header_payload_or_binding_salt_tamper() {
+        val bundle = maxBundle(seed = 24L, platform = "windows-x64", outputName = "js_kernel_windows-x64.dll")
+        val tamperedHeader = bundle.headerBytes.copyOf().also { it[it.lastIndex] = (it.last().toInt() xor 1).toByte() }
+        val tamperedPayload = bundle.encodedPayload.copyOf().also { it[it.lastIndex] = (it.last().toInt() xor 1).toByte() }
+        val tamperedBindingSalt = bundle.bindingSalt.copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() }
+
+        assertTrue(inspect(bundle).macValid, "control payload must authenticate")
+        assertFalse(inspect(bundle, headerBytes = tamperedHeader).macValid, "header tampering must fail the payload commitment")
+        assertFalse(inspect(bundle, encodedPayload = tamperedPayload).macValid, "payload tampering must fail the payload commitment")
+        assertFalse(inspect(bundle, bindingSalt = tamperedBindingSalt).macValid, "binding-lane tampering must fail the payload commitment")
     }
 
     @Test
-    fun max_payload_defaults_to_zstd_then_chunk_authenticated_encoding_when_smaller() {
-        val compressibleNative = ByteArray(20000) { 0x5A.toByte() }
-        val bundle = NativeKernelShellPacker.buildMaxPayloadBundle(
-            bytes = compressibleNative,
-            platform = "linux-x64",
-            outputName = "js_kernel_linux-x64.so",
-            seed = 41L,
-            keyMaterial = keyMaterial,
-            bootstrapNativeIndexDigest = bootstrapDigest,
-            bootSecret = bootSecret,
-        )
+    fun aken_v4_payload_uses_zstd_then_chunk_authenticated_encoding_when_smaller() {
+        val compressibleNative = ByteArray(20_000) { 0x5A.toByte() }
+        val bundle = maxBundle(bytes = compressibleNative, seed = 41L)
 
-        assertEquals(1, bundle.compressionCodec, "compressible max payload should use the bundled zstd frame codec")
+        assertEquals(1, bundle.compressionCodec, "compressible AKEN payload should use the bundled zstd frame codec")
         assertTrue(bundle.storedPayloadSize < compressibleNative.size, "stored zstd frame should be smaller than the original inner kernel")
         assertTrue(bundle.chunkCount >= 1, "encoded payload must still carry per-chunk tags after compression")
         assertTrue(NativeKernelShellPacker.decodeMaxPayloadForTest(bundle)!!.contentEquals(compressibleNative), "zstd + chunk decode should recover the original inner kernel")
@@ -164,122 +133,42 @@ class NativeKernelShellPackerTest {
     }
 
     @Test
-    fun native_max_decoder_uses_hmac_derived_aes_ctr_chunk_subkeys() {
+    fun native_aken_v4_decoder_uses_hmac_derived_aes_ctr_chunk_subkeys() {
         val source = java.nio.file.Files.readString(resolveSource("src/main/native/js_shell_crypto.c"))
-        assertTrue(source.contains("javashroud-native-shell-chunk-aes-v3") && source.contains("javashroud-native-shell-chunk-hmac-v3"))
+        assertTrue(source.contains("javashroud-aken-v4-native-shell-chunk-aes-v1"))
+        assertTrue(source.contains("javashroud-aken-v4-native-shell-chunk-hmac-v1"))
+        assertTrue(source.contains("javashroud-aken-v4-native-shell-chunk-iv-v1"))
         assertTrue(source.contains("js_shell_aes128_ctr_xor") && source.contains("js_shell_hmac_sha256"))
+        assertFalse(source.contains("javashroud-native-shell-chunk-aes-v3") || source.contains("javashroud-native-shell-chunk-hmac-v3"))
         assertFalse(source.contains("js_shell_mix32") || source.contains("xorshift"))
     }
 
     @Test
-    fun native_max_stub_opens_boot_envelope_before_inner_image_load() {
+    fun native_aken_v4_stub_validates_binding_lanes_and_commitment_before_inner_image_load() {
         val source = java.nio.file.Files.readString(resolveSource("src/main/native/js_shell_stub.c"))
-        val open = source.indexOf("js_shell_open_seed_envelope")
-        val decode = source.indexOf("js_shell_decode_payload_chunks", open)
+        val reconstruct = source.indexOf("js_shell_reconstruct_aken_binding_salt")
+        val commitment = source.indexOf("js_shell_verify_aken_payload_commitment", reconstruct)
+        val extract = source.indexOf("js_shell_extract_aken_meta", commitment)
+        val decode = source.indexOf("js_shell_decode_payload_chunks", extract)
         val load = source.indexOf("js_shell_load_inner_image", decode)
-        assertTrue(open >= 0 && decode > open && load > decode)
-        assertTrue(source.contains("JAVASHROUD_BOOT_SECRET_V1") && source.contains("JAVASHROUD_BOOT_SECRET_FILE_V1"))
-        assertFalse(source.contains("JavaShroudBootSecretProviderV1"))
-        assertTrue(source.contains("js_shell_verify_build_hmac") && source.contains("js_shell_build_hmac"))
-        assertTrue(source.contains("js_shell_take_expected_binding_commitment") && source.contains("takeExpectedShellBindingCommitment"))
-        assertFalse(source.contains("js_shell_binding.inc") || source.contains("js_shell_expected_binding_commitment"))
-        assertFalse(source.contains("JS_SHELL_COPY_SCOPED_STREAM_KEY") || source.contains("JS_SHELL_STREAM_KEY_LANE_COUNT"))
-        assertTrue(source.contains("native_install_boot_material") && source.contains("native_is_boot_material_ready") && source.contains("native_abort_boot_material"))
-        assertTrue(source.contains("native_abort_boot_name") && source.contains("mapped_abort_boot") && source.contains("methods[7].signature = \"()V\""))
-        assertFalse(source.contains("native_install_runtime_resource_key"))
+
+        assertTrue(reconstruct >= 0 && commitment > reconstruct && extract > commitment && decode > extract && load > decode)
+        assertTrue(source.contains("js_shell_fail_onload"), "all native metadata failures must be fail-closed")
+        assertFalse(source.contains("JAVASHROUD_BOOT_SECRET_") || source.contains("JSBK1"))
+        assertFalse(source.contains("js_shell_load_boot_secret") || source.contains("js_shell_open_seed_envelope"))
+        assertFalse(source.contains("js_shell_take_expected_binding_commitment") || source.contains("takeExpectedShellBindingCommitment"))
+        assertFalse(source.contains("js_shell_build_hmac") || source.contains("js_shell_expected_binding_commitment"))
     }
 
     @Test
-    fun boot_secret_parser_is_strict_and_supports_hex() {
-        val encoded = bootSecret.joinToString("") { "%02x".format(it.toInt() and 0xFF) }
-        assertTrue(NativeKernelShellPacker.parseBootSecret(encoded, null)!!.contentEquals(bootSecret))
-        val secretFile = java.nio.file.Files.createTempFile("javashroud-shell-secret", ".txt")
-        try {
-            java.nio.file.Files.writeString(secretFile, encoded, Charsets.US_ASCII)
-            assertTrue(NativeKernelShellPacker.parseBootSecret(null, secretFile.toString())!!.contentEquals(bootSecret))
-            java.nio.file.Files.writeString(secretFile, "$encoded\r\n", Charsets.US_ASCII)
-            assertEquals(null, NativeKernelShellPacker.parseBootSecret(null, secretFile.toString()))
-        } finally {
-            java.nio.file.Files.deleteIfExists(secretFile)
-        }
-        assertEquals(null, NativeKernelShellPacker.parseBootSecret("abcd", null))
-        assertEquals(null, NativeKernelShellPacker.parseBootSecret(" $encoded", null))
-    }
-
-    @Test
-    fun boot_secret_parser_accepts_authenticated_jsbk_sidecar_files() {
-        val binding = ByteArray(32) { index -> (index * 19 + 5).toByte() }
-        val sidecar = BootKekSidecar.encodeText(bootSecret, binding)
-        val secretFile = java.nio.file.Files.createTempFile("javashroud-shell-secret", ".jsbk")
-        try {
-            java.nio.file.Files.writeString(secretFile, sidecar, Charsets.US_ASCII)
-            val parsed = NativeKernelShellPacker.parseBootSecret(null, secretFile.toString())
-            try {
-                assertTrue(parsed != null && parsed.contentEquals(bootSecret))
-            } finally {
-                parsed?.fill(0)
-            }
-        } finally {
-            binding.fill(0)
-            java.nio.file.Files.deleteIfExists(secretFile)
-        }
-    }
-
-    @Test
-    fun boot_secret_provider_result_is_copied_and_wiped() {
-        val provided = bootSecret.copyOf()
+    fun aken_v4_max_build_does_not_invoke_legacy_provider_seam() {
         val previous = NativeKernelShellPacker.buildBootSecretProvider
-        NativeKernelShellPacker.buildBootSecretProvider = { provided }
+        NativeKernelShellPacker.buildBootSecretProvider = { error("AKEN v4 native payload must not invoke a boot-secret provider") }
         try {
-            val loaded = NativeKernelShellPacker.requireBootSecretForBuild()
-            try {
-                assertTrue(loaded.contentEquals(bootSecret), "build must receive an independent copy of the provider KEK")
-                assertTrue(provided.all { it == 0.toByte() }, "provider-owned KEK buffer must be wiped immediately after copying")
-                assertFalse(loaded === provided, "build code must not retain the provider-owned KEK buffer")
-            } finally {
-                loaded.fill(0)
-            }
+            val bundle = maxBundle(seed = 45L)
+            assertTrue(inspect(bundle).macValid)
         } finally {
             NativeKernelShellPacker.buildBootSecretProvider = previous
-        }
-    }
-
-    @Test
-    fun build_context_snapshots_boot_secret_once_per_run() {
-        var providerCalls = 0
-        val previous = NativeKernelShellPacker.buildBootSecretProvider
-        val context = defaultVbc4BuildContext()
-        NativeKernelShellPacker.buildBootSecretProvider = {
-            providerCalls++
-            ByteArray(32) { providerCalls.toByte() }
-        }
-        try {
-            val first = context.copyBootSecretForBuild()
-            val second = context.copyBootSecretForBuild()
-            try {
-                assertEquals(1, providerCalls)
-                assertTrue(first.contentEquals(second))
-                assertFalse(first === second)
-            } finally {
-                first.fill(0)
-                second.fill(0)
-            }
-        } finally {
-            context.wipe()
-            NativeKernelShellPacker.buildBootSecretProvider = previous
-        }
-    }
-
-    @Test
-    fun max_build_fails_closed_without_boot_secret_contract() {
-        val previousProvider = NativeKernelShellPacker.buildBootSecretProvider
-        try {
-            NativeKernelShellPacker.buildBootSecretProvider = null
-            if (System.getenv(NativeKernelShellPacker.BOOT_SECRET_ENV).isNullOrBlank() && System.getenv(NativeKernelShellPacker.BOOT_SECRET_FILE_ENV).isNullOrBlank()) {
-                assertFailsWith<IllegalStateException> { NativeKernelShellPacker.requireBootSecretForBuild() }
-            }
-        } finally {
-            NativeKernelShellPacker.buildBootSecretProvider = previousProvider
         }
     }
 
@@ -301,151 +190,84 @@ class NativeKernelShellPackerTest {
     }
 
     @Test
-    fun tampering_max_payload_or_bootstrap_binding_fails_mac_validation() {
-        val bundle = NativeKernelShellPacker.buildMaxPayloadBundle(
-            bytes = nativeBytes,
-            platform = "linux-x64",
-            outputName = "js_kernel_linux-x64.so",
-            seed = 29L,
-            keyMaterial = keyMaterial,
-            bootstrapNativeIndexDigest = bootstrapDigest,
-            bootSecret = bootSecret,
-        )
-        val tamperedPayload = bundle.encodedPayload.copyOf()
-        tamperedPayload[tamperedPayload.lastIndex] = (tamperedPayload.last().toInt() xor 0x23).toByte()
-        val wrongBootstrapDigest = bootstrapDigest.copyOf().also { it[0] = (it[0].toInt() xor 0x55).toByte() }
+    fun aken_v4_payload_components_are_not_cross_bundle_interchangeable() {
+        val first = maxBundle(seed = 47L)
+        val second = maxBundle(bytes = nativeBytes + 0x41.toByte(), seed = 47L)
 
-        assertTrue(
-            NativeKernelShellPacker.inspectMaxPayloadBundle(bundle.headerBytes, bundle.encodedPayload, bundle.payloadMac, 29L, keyMaterial, bootstrapDigest, bootSecret, bundle.artifactBindingCommitment).macValid,
-            "control max payload should authenticate",
+        assertTrue(inspect(first).bindingTagValid)
+        assertTrue(inspect(second).bindingTagValid)
+        assertFalse(
+            inspect(second, payloadCommitment = first.payloadCommitment, bindingSalt = first.bindingSalt).macValid,
+            "a second bundle cannot use the first bundle's commitment and binding lanes",
         )
         assertFalse(
-            NativeKernelShellPacker.inspectMaxPayloadBundle(bundle.headerBytes, tamperedPayload, bundle.payloadMac, 29L, keyMaterial, bootstrapDigest, bootSecret, bundle.artifactBindingCommitment).macValid,
-            "tampered max payload must fail MAC validation",
-        )
-        assertFalse(
-            NativeKernelShellPacker.inspectMaxPayloadBundle(
-                bundle.headerBytes,
-                bundle.encodedPayload,
-                bundle.payloadMac,
-                29L,
-                keyMaterial,
-                wrongBootstrapDigest,
-                bootSecret,
-                bundle.artifactBindingCommitment,
-            ).bindingTagValid,
-            "bootstrap native index digest must be bound into the independent artifact commitment",
-        )
-    }
-
-
-    @Test
-    fun max_artifact_binding_commitment_rejects_cross_artifact_replay() {
-        val bundle = NativeKernelShellPacker.buildMaxPayloadBundle(
-            nativeBytes,
-            "linux-x64",
-            "js_kernel_linux-x64.so",
-            47L,
-            keyMaterial,
-            bootstrapDigest,
-            bootSecret,
-        )
-        val replayedBundle = NativeKernelShellPacker.buildMaxPayloadBundle(
-            nativeBytes + 0x41.toByte(),
-            "linux-x64",
-            "js_kernel_linux-x64.so",
-            47L,
-            keyMaterial,
-            bootstrapDigest,
-            bootSecret,
-        )
-        assertTrue(
-            NativeKernelShellPacker.inspectMaxPayloadBundle(
-                bundle.headerBytes,
-                bundle.encodedPayload,
-                bundle.payloadMac,
-                47L,
-                keyMaterial,
-                bootstrapDigest,
-                bootSecret,
-                bundle.artifactBindingCommitment,
-            ).bindingTagValid,
-        )
-        assertFalse(
-            NativeKernelShellPacker.inspectMaxPayloadBundle(
-                replayedBundle.headerBytes,
-                replayedBundle.encodedPayload,
-                replayedBundle.payloadMac,
-                47L,
-                keyMaterial,
-                bootstrapDigest,
-                bootSecret,
-                bundle.artifactBindingCommitment,
-            ).bindingTagValid,
-            "a complete header/payload/MAC replay must fail against the original boot.dat commitment",
+            inspect(first, headerBytes = second.headerBytes, encodedPayload = first.encodedPayload).macValid,
+            "header and payload components cannot be mixed across bundles",
         )
     }
 
     @Test
-    fun max_payload_binding_tag_changes_with_platform_output_and_bootstrap_index() {
-        val linux = NativeKernelShellPacker.buildMaxPayloadBundle(
-            bytes = nativeBytes,
-            platform = "linux-x64",
-            outputName = "js_kernel_linux-x64.so",
-            seed = 37L,
-            keyMaterial = keyMaterial,
-            bootstrapNativeIndexDigest = bootstrapDigest,
-            bootSecret = bootSecret,
-        )
-        val windows = NativeKernelShellPacker.buildMaxPayloadBundle(
-            bytes = nativeBytes,
-            platform = "windows-x64",
-            outputName = "js_kernel_windows-x64.dll",
-            seed = 37L,
-            keyMaterial = keyMaterial,
-            bootstrapNativeIndexDigest = bootstrapDigest,
-            bootSecret = bootSecret,
-        )
-        val renamed = NativeKernelShellPacker.buildMaxPayloadBundle(
-            bytes = nativeBytes,
-            platform = "linux-x64",
-            outputName = "js_kernel_linux-x64-renamed.so",
-            seed = 37L,
-            keyMaterial = keyMaterial,
-            bootstrapNativeIndexDigest = bootstrapDigest,
-            bootSecret = bootSecret,
-        )
-        val wrongBootstrapDigest = bootstrapDigest.copyOf().also { it[it.lastIndex] = (it.last().toInt() xor 0x33).toByte() }
+    fun aken_v4_binding_tag_is_artifact_specific_and_build_randomized() {
+        val linux = maxBundle(seed = 37L)
+        val windows = maxBundle(seed = 37L, platform = "windows-x64", outputName = "js_kernel_windows-x64.dll")
+        val renamed = maxBundle(seed = 37L, outputName = "js_kernel_linux-x64-renamed.so")
+        val changedBootstrap = maxBundle(seed = 37L, bootstrapNativeIndexDigest = bootstrapDigest.copyOf().also { it[it.lastIndex] = (it.last().toInt() xor 0x33).toByte() })
 
-        assertFalse(linux.bindingTag.contentEquals(windows.bindingTag), "binding tag must be platform-bound")
-        assertFalse(linux.bindingTag.contentEquals(renamed.bindingTag), "binding tag must be output-name-bound")
-        assertTrue(
-            NativeKernelShellPacker.inspectMaxPayloadBundle(linux.headerBytes, linux.encodedPayload, linux.payloadMac, 37L, keyMaterial, bootstrapDigest, bootSecret, linux.artifactBindingCommitment).bindingTagValid,
-            "control max payload binding tag should validate",
-        )
-        assertFalse(
-            NativeKernelShellPacker.inspectMaxPayloadBundle(linux.headerBytes, linux.encodedPayload, linux.payloadMac, 37L, keyMaterial, wrongBootstrapDigest, bootSecret, linux.artifactBindingCommitment).bindingTagValid,
-            "binding tag must reject a bootstrap native index digest mismatch",
-        )
+        assertFalse(linux.bindingTag.contentEquals(windows.bindingTag), "binding tag must vary with platform")
+        assertFalse(linux.bindingTag.contentEquals(renamed.bindingTag), "binding tag must vary with output name")
+        assertFalse(linux.bindingTag.contentEquals(changedBootstrap.bindingTag), "binding tag must vary with the bootstrap index digest")
+        assertTrue(inspect(linux).bindingTagValid, "control payload must authenticate and decode")
     }
 
     @Test
     fun tampering_chunk_hmac_fails_before_inner_decode() {
-        val bundle = NativeKernelShellPacker.buildMaxPayloadBundle(nativeBytes, "linux-x64", "js_kernel_linux-x64.so", 31L, keyMaterial, bootstrapDigest, bootSecret)
+        val bundle = maxBundle(seed = 31L)
         val tamperedTags = bundle.copy(chunkTags = bundle.chunkTags.copyOf().also { it[0] = (it[0].toInt() xor 0x5A).toByte() })
         assertEquals(null, NativeKernelShellPacker.decodeMaxPayloadForTest(tamperedTags))
     }
 
     @Test
-    fun repeated_max_payloads_diverge_while_same_seed_remains_verifiable() {
-        val first = NativeKernelShellPacker.buildMaxPayloadBundle(nativeBytes, "linux-x64", "js_kernel_linux-x64.so", 17L, keyMaterial, bootstrapDigest, bootSecret)
-        val second = NativeKernelShellPacker.buildMaxPayloadBundle(nativeBytes, "linux-x64", "js_kernel_linux-x64.so", 17L, keyMaterial, bootstrapDigest, bootSecret)
+    fun repeated_aken_v4_payloads_diverge_while_each_build_remains_verifiable() {
+        val first = maxBundle(seed = 17L)
+        val second = maxBundle(seed = 17L)
 
-        assertFalse(first.encodedPayload.contentEquals(second.encodedPayload), "per-build nonce must make max payloads diverge")
-        assertTrue(NativeKernelShellPacker.inspectMaxPayloadBundle(first.headerBytes, first.encodedPayload, first.payloadMac, 17L, keyMaterial, bootstrapDigest, bootSecret, first.artifactBindingCommitment).macValid)
-        assertTrue(NativeKernelShellPacker.inspectMaxPayloadBundle(second.headerBytes, second.encodedPayload, second.payloadMac, 17L, keyMaterial, bootstrapDigest, bootSecret, second.artifactBindingCommitment).macValid)
-        assertNotEquals(first.layoutProfile to first.dispatcherProfile, -1 to -1, "payload profiles must be populated")
+        assertTrue(
+            !first.encodedPayload.contentEquals(second.encodedPayload) ||
+                !first.bindingSalt.contentEquals(second.bindingSalt) ||
+                !first.bindingLaneOrder.contentEquals(second.bindingLaneOrder),
+            "per-build AKEN v4 nonce, binding lanes, or layout must diverge",
+        )
+        assertTrue(inspect(first).macValid)
+        assertTrue(inspect(second).macValid)
+        assertTrue(first.layoutProfile >= 0 && first.dispatcherProfile >= 0, "payload profiles must be populated")
     }
+
+    private fun maxBundle(
+        bytes: ByteArray = nativeBytes,
+        seed: Long,
+        platform: String = "linux-x64",
+        outputName: String = "js_kernel_linux-x64.so",
+        bootstrapNativeIndexDigest: ByteArray = bootstrapDigest,
+    ): NativeKernelShellPacker.MaxPayloadBundle = NativeKernelShellPacker.buildMaxPayloadBundle(
+        bytes = bytes,
+        platform = platform,
+        outputName = outputName,
+        seed = seed,
+        bootstrapNativeIndexDigest = bootstrapNativeIndexDigest,
+    )
+
+    private fun inspect(
+        bundle: NativeKernelShellPacker.MaxPayloadBundle,
+        headerBytes: ByteArray = bundle.headerBytes,
+        encodedPayload: ByteArray = bundle.encodedPayload,
+        payloadCommitment: ByteArray = bundle.payloadCommitment,
+        bindingSalt: ByteArray = bundle.bindingSalt,
+    ): NativeKernelShellPacker.MaxPayloadInspection = NativeKernelShellPacker.inspectMaxPayloadBundle(
+        headerBytes = headerBytes,
+        encodedPayload = encodedPayload,
+        payloadCommitment = payloadCommitment,
+        bindingSalt = bindingSalt,
+    )
 
     private fun cBytesForTest(bytes: ByteArray): String = bytes.joinToString(", ") { byte -> "0x%02Xu".format(byte.toInt() and 0xFF) }
 
