@@ -1,9 +1,7 @@
 package io.github.hht0rro.javashroud.transforms.protection.aken
 
-import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Arrays
-import java.util.Base64
 
 /**
  * Build-only ownership record for one UTF-8 string page whose generated
@@ -98,17 +96,7 @@ internal class AkenPendingStringPage private constructor(
      */
     internal fun identityPageKeyForBuild(): String {
         requireLive()
-        val digest = MessageDigest.getInstance("SHA-256")
-        digest.update(IDENTITY_PAGE_KEY_DOMAIN)
-        digest.update(AkenResourceKind.StringPage.id.toByte())
-        updateInt(digest, pageIndex)
-        updateFramed(digest, logicalIdentityValue)
-        val encoded = digest.digest()
-        return try {
-            Base64.getUrlEncoder().withoutPadding().encodeToString(encoded)
-        } finally {
-            Arrays.fill(encoded, 0)
-        }
+        return akenStringPageIdentityPageKey(logicalIdentityValue, pageIndex)
     }
 
     /**
@@ -169,9 +157,6 @@ internal class AkenPendingStringPage private constructor(
 
     companion object {
         private const val MAX_CALL_SITE_PROOF_SIZE = 4096
-        private val IDENTITY_PAGE_KEY_DOMAIN =
-            "AKEN-v4-pending-string-page-key-v1".toByteArray(Charsets.US_ASCII)
-
         /**
          * Reserves one StringPage frame. A pre-reserved complete layout variant
          * and target can be supplied by a broader build planner; otherwise this
@@ -235,16 +220,5 @@ internal class AkenPendingStringPage private constructor(
             }
         }
 
-        private fun updateFramed(digest: MessageDigest, value: ByteArray) {
-            updateInt(digest, value.size)
-            digest.update(value)
-        }
-
-        private fun updateInt(digest: MessageDigest, value: Int) {
-            digest.update((value ushr 24).toByte())
-            digest.update((value ushr 16).toByte())
-            digest.update((value ushr 8).toByte())
-            digest.update(value.toByte())
-        }
     }
 }
