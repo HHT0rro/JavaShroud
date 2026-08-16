@@ -37,7 +37,10 @@ class AkenClassPageProductionMaterializerTest {
         try {
             withVbc4BuildContext(context) {
                 val scoped = requireVbc4BuildContext()
-                scoped.registerAkenClassPageCandidates(listOf(candidate))
+                scoped.registerAkenClassPageCandidatesForClass(
+                    internalName = "fixture/ProductionMaterializer",
+                    candidates = listOf(candidate),
+                )
                 candidate.wipe()
                 Arrays.fill(identity, 0)
                 Arrays.fill(plaintext, 0)
@@ -87,6 +90,14 @@ class AkenClassPageProductionMaterializerTest {
                 assertFalse(nativeLocatorInclude.contains("production typed class materialization"))
                 layout.withPageZeroDispatchBindingsForBuild { bindings ->
                     assertTrue(bindings.isEmpty())
+                }
+                scoped.withAkenClassPageDescriptorSourcesForBuild { sources ->
+                    assertEquals(1, sources.size)
+                    assertEquals("fixture/ProductionMaterializer", sources.single().internalName)
+                    layout.withClassPageBindingsForBuild { bindings ->
+                        assertEquals(1, bindings.size)
+                        assertTrue(sources.single().matchesBindingForBuild(bindings.single()))
+                    }
                 }
             }
         } finally {

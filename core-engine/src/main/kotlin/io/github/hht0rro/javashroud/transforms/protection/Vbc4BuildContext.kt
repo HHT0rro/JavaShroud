@@ -4,6 +4,7 @@ import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenBuildPlan
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPageCandidate
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPageDescriptorSource
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPagePreSealRouteAllocator
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPagePreSealRouteReservation
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPageRouteCandidateRef
@@ -70,6 +71,13 @@ internal data class Vbc4BuildContext(
      * expose a build-wide class-page directory.
      */
     private val akenClassPageCandidates = LinkedHashMap<String, AkenClassPageCandidate>()
+    /**
+     * Build-only class-local identity map used after page materialization to
+     * construct one descriptor per encrypted class. It owns neither class
+     * plaintext nor a final handle/proof and is never projected into runtime.
+     */
+    private val akenClassPageDescriptorSources =
+        LinkedHashMap<String, List<AkenClassPageDescriptorSource>>()
     /** Build-only final ClassPage routes reserved before page materialization. */
     private var akenClassPagePreSealRouteReservation: AkenClassPagePreSealRouteReservation? = null
 
@@ -433,6 +441,33 @@ internal data class Vbc4BuildContext(
      */
     @Synchronized
     fun registerAkenClassPageCandidates(candidates: Iterable<AkenClassPageCandidate>) {
+        registerAkenClassPageCandidatesInternal(
+            internalName = null,
+            candidates = candidates,
+        )
+    }
+
+    /**
+     * Registers every page for one encrypted class as an atomic build-only
+     * batch. The class-local source map carries only logical identity and page
+     * topology, so a later finalization callback can create exactly one
+     * descriptor without turning the runtime into a catalog.
+     */
+    @Synchronized
+    fun registerAkenClassPageCandidatesForClass(
+        internalName: String,
+        candidates: Iterable<AkenClassPageCandidate>,
+    ) {
+        registerAkenClassPageCandidatesInternal(
+            internalName = internalName,
+            candidates = candidates,
+        )
+    }
+
+    private fun registerAkenClassPageCandidatesInternal(
+        internalName: String?,
+        candidates: Iterable<AkenClassPageCandidate>,
+    ) {
         require(akenBuildPlan?.isWiped() != false) {
             "AKEN ClassPage candidates must be registered before page-plan initialization"
         }
@@ -456,7 +491,32 @@ internal data class Vbc4BuildContext(
         }
 
         val snapshots = ArrayList<Pair<String, AkenClassPageCandidate>>(incoming.size)
+        var descriptorSources: List<AkenClassPageDescriptorSource>? = null
+        var sourcesTransferred = false
         try {
+            descriptorSources = internalName?.let { name ->
+                require(!akenClassPageDescriptorSources.containsKey(name)) {
+                    "AKEN ClassPage descriptor sources are already registered for $name"
+                }
+                val sources = incoming
+                    .map { candidate -> AkenClassPageDescriptorSource.fromCandidate(name, candidate) }
+                    .sortedBy { source -> source.pageIndex }
+                try {
+                    require(sources.map { source -> source.pageIndex } == sources.indices.toList()) {
+                        "AKEN ClassPage descriptor sources must use contiguous zero-based page indices"
+                    }
+                    require(
+                        sources.map { source -> source.identityPageKeyForBuild() }.toSet() ==
+                            incomingKeys.toSet(),
+                    ) {
+                        "AKEN ClassPage descriptor sources drift from registered page candidates"
+                    }
+                    sources
+                } catch (error: Throwable) {
+                    sources.forEach { source -> source.wipe() }
+                    throw error
+                }
+            }
             incoming.forEach { candidate ->
                 snapshots += candidate.identityPageKeyForBuild() to candidate.copyForBuild()
             }
@@ -465,6 +525,17 @@ internal data class Vbc4BuildContext(
                     "AKEN ClassPage candidate logical page identity is already registered"
                 }
             }
+            if (internalName != null) {
+                check(
+                    akenClassPageDescriptorSources.put(
+                        internalName,
+                        checkNotNull(descriptorSources),
+                    ) == null,
+                ) {
+                    "AKEN ClassPage descriptor sources are already registered for $internalName"
+                }
+                sourcesTransferred = true
+            }
         } catch (error: Throwable) {
             snapshots.forEach { (identityPageKey, candidate) ->
                 if (akenClassPageCandidates[identityPageKey] === candidate) {
@@ -472,7 +543,14 @@ internal data class Vbc4BuildContext(
                 }
                 candidate.wipe()
             }
+            if (internalName != null && akenClassPageDescriptorSources[internalName] === descriptorSources) {
+                akenClassPageDescriptorSources.remove(internalName)
+            }
             throw error
+        } finally {
+            if (!sourcesTransferred) {
+                descriptorSources?.forEach { source -> source.wipe() }
+            }
         }
     }
 
@@ -488,6 +566,35 @@ internal data class Vbc4BuildContext(
             return block(snapshots.toList())
         } finally {
             snapshots.forEach { it.wipe() }
+        }
+    }
+
+    /**
+     * Supplies only class-local logical page identities to the adjacent
+     * descriptor emitter. Copies are callback-scoped and wiped before this
+     * method returns; no Java runtime helper observes this build-only map.
+     */
+    fun <T> withAkenClassPageDescriptorSourcesForBuild(
+        block: (List<AkenClassPageDescriptorSource>) -> T,
+    ): T {
+        val snapshots = synchronized(this) {
+            check(akenClassPageDescriptorSources.isNotEmpty()) {
+                "AKEN ClassPage descriptor sources are not initialized"
+            }
+            akenClassPageDescriptorSources
+                .asSequence()
+                .flatMap { (_, sources) -> sources.asSequence() }
+                .sortedWith(
+                    compareBy<AkenClassPageDescriptorSource> { source -> source.internalName }
+                        .thenBy { source -> source.pageIndex },
+                )
+                .map { source -> source.copyForBuild() }
+                .toList()
+        }
+        try {
+            return block(snapshots.toList())
+        } finally {
+            snapshots.forEach { source -> source.wipe() }
         }
     }
 
@@ -568,6 +675,9 @@ internal data class Vbc4BuildContext(
 
     @Synchronized
     fun hasAkenClassPageCandidates(): Boolean = akenClassPageCandidates.isNotEmpty()
+
+    @Synchronized
+    fun hasAkenClassPageDescriptorSources(): Boolean = akenClassPageDescriptorSources.isNotEmpty()
 
     /**
      * Publishes the one build-only page layout produced by consuming the scoped
@@ -718,6 +828,8 @@ internal data class Vbc4BuildContext(
         akenStringPageCandidates.clear()
         akenClassPageCandidates.values.forEach { it.wipe() }
         akenClassPageCandidates.clear()
+        akenClassPageDescriptorSources.values.flatten().forEach { it.wipe() }
+        akenClassPageDescriptorSources.clear()
         akenBuildPlan?.wipe()
         akenBuildPlan = null
         akenVbc4FinalizationLayout?.wipe()

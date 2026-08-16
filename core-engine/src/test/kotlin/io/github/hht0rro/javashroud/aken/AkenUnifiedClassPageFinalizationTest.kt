@@ -2,6 +2,7 @@ package io.github.hht0rro.javashroud.aken
 
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenArtifactEntry
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenBuildPlan
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPageBinding
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHandle
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenPendingClassPage
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4FinalizationLayout
@@ -10,6 +11,7 @@ import java.security.SecureRandom
 import java.util.Arrays
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -96,6 +98,44 @@ class AkenUnifiedClassPageFinalizationTest {
             finalized.withPageZeroDispatchBindingsForBuild { bindings ->
                 assertEquals(1, bindings.size)
                 assertEquals(0x414B_454E_0000_3001L, bindings.single().entryToken)
+            }
+            var retainedClassBindings: List<AkenClassPageBinding> = emptyList()
+            finalized.withClassPageBindingsForBuild { bindings ->
+                assertEquals(1, bindings.size)
+                val binding = bindings.single()
+                retainedClassBindings = bindings.toList()
+                val identity = binding.copyLogicalIdentityForBuild()
+                val handle = binding.copyEncodedHandleForBuild()
+                val proof = binding.copyCallSiteProofForBuild()
+                try {
+                    assertEquals(0, binding.pageIndex)
+                    assertTrue(identity.isNotEmpty())
+                    assertTrue(
+                        binding.matchesForBuild(
+                            pageIndex = 0,
+                            logicalIdentity = identity,
+                            encodedHandle = handle,
+                            callSiteProof = proof,
+                        ),
+                    )
+                    handle[0] = (handle[0].toInt() xor 0x5A).toByte()
+                    assertFalse(
+                        binding.matchesForBuild(
+                            pageIndex = 0,
+                            logicalIdentity = identity,
+                            encodedHandle = handle,
+                            callSiteProof = proof,
+                        ),
+                    )
+                } finally {
+                    Arrays.fill(identity, 0)
+                    Arrays.fill(handle, 0)
+                    Arrays.fill(proof, 0)
+                }
+            }
+            assertTrue(retainedClassBindings.all { binding -> binding.isWiped })
+            assertFailsWith<IllegalStateException> {
+                retainedClassBindings.single().copyEncodedHandleForBuild()
             }
 
             val tamperedClassPage = artifactEntries(finalized) { name, bytes ->

@@ -23,7 +23,7 @@ internal class AkenClassPageDescriptor private constructor(
     private var wiped: Boolean = false
 
     init {
-        require(isValidInternalName(internalName)) { "AKEN ClassPage descriptor internal name is invalid" }
+        require(isValidAkenClassPageInternalName(internalName)) { "AKEN ClassPage descriptor internal name is invalid" }
         require(pagesValue.isNotEmpty() && pagesValue.size <= MAX_PAGE_COUNT) {
             "AKEN ClassPage descriptor page count is invalid"
         }
@@ -183,7 +183,7 @@ internal class AkenClassPageDescriptor private constructor(
             } finally {
                 Arrays.fill(nameBytes, 0)
             }
-            require(isValidInternalName(internalName)) { "AKEN ClassPage descriptor internal name is invalid" }
+            require(isValidAkenClassPageInternalName(internalName)) { "AKEN ClassPage descriptor internal name is invalid" }
             val pageCount = reader.readUnsignedShort("page count")
             require(pageCount in 1..MAX_PAGE_COUNT) { "AKEN ClassPage descriptor page count is invalid" }
             val pages = ArrayList<AkenClassPageDescriptorPage>(pageCount)
@@ -325,7 +325,7 @@ private fun descriptorRouteFromDigest(digest: ByteArray): String {
     return "$root/${token.substring(0, prefixLength)}/${token.substring(prefixLength)}$suffix"
 }
 
-private fun isValidInternalName(value: String): Boolean {
+internal fun isValidAkenClassPageInternalName(value: String): Boolean {
     if (value.isEmpty() || value.length > 4096 || value.startsWith('/') || value.endsWith('/')) return false
     return value.split('/').all { segment ->
         segment.isNotEmpty() &&

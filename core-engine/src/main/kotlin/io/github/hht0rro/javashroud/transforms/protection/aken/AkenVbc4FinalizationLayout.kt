@@ -434,6 +434,39 @@ internal class AkenVbc4FinalizationLayout private constructor(
     }
 
     /**
+     * Supplies finalized encrypted ClassPage bindings to the immediately
+     * adjacent class-local descriptor emitter. The projection contains only a
+     * page's logical identity, opaque handle, and call-site proof; it exposes
+     * no resource directory, plaintext, evaluator graph, or generic decoder.
+     */
+    internal fun <T> withClassPageBindingsForBuild(
+        block: (List<AkenClassPageBinding>) -> T,
+    ): T {
+        requireLive()
+        val materialization = materializationValue
+            ?: error("AKEN ClassPage binding projection requires a live materialization")
+        val bindings = ArrayList<AkenClassPageBinding>()
+        try {
+            materialization.pagesForBuild()
+                .asSequence()
+                .filter { page ->
+                    page.descriptorForBuild.resourceKind == AkenResourceKind.EncryptedClassPage
+                }
+                .forEach { page -> bindings += AkenClassPageBinding.fromMaterializedPage(page) }
+            bindings.sortWith(
+                compareBy<AkenClassPageBinding> { binding -> binding.identityPageKeyForBuild() }
+                    .thenBy { binding -> binding.pageIndex },
+            )
+            require(bindings.mapTo(linkedSetOf()) { binding -> binding.identityPageKeyForBuild() }.size == bindings.size) {
+                "AKEN ClassPage finalization contains duplicate logical page bindings"
+            }
+            return block(bindings.toList())
+        } finally {
+            bindings.forEach { binding -> binding.wipe() }
+        }
+    }
+
+    /**
      * Supplies one callback-scoped page-zero binding per virtualized method.
      * Typed non-VBC4 pages deliberately do not enter this dispatcher-facing
      * surface; a StringPage-only build therefore supplies an empty list.
