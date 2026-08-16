@@ -166,6 +166,10 @@ internal fun executeWithOrderedPasses(
                 artifact = artifactWithHelpers,
                 seed = vbc4BuildContext.nativeSeed,
             )
+            io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.reserveAkenStringPagePreSealRoutesIfNeeded(
+                artifact = artifactWithHelpers,
+                seed = vbc4BuildContext.nativeSeed,
+            )
             val artifactWithAkenPages = io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.materializeAkenVbc4PagesForNativeCompilation(
                 artifact = artifactWithHelpers,
                 seed = vbc4BuildContext.nativeSeed,
