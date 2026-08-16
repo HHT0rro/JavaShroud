@@ -4032,7 +4032,20 @@ static int js_register_all_natives(JNIEnv *env) {
         {js_native_name_full("nativeMapAkenNativeChunk"), "([BI[B)[B", (void*)jsw_a3},
     };
     if (!js_register_native_group(env, js_helper_owner("Jni", "Micro", "kernel", "Helper"), jni_microkernel_methods, (int)(sizeof(jni_microkernel_methods) / sizeof(jni_microkernel_methods[0])), 1)) return 0;
+    /*
+     * A typed-only AKEN native image must not resolve optional legacy helper
+     * classes during JNI_OnLoad.  Several of those helpers initialize by
+     * requesting the old boot-material loader; resolving them here would make
+     * a page-local route touch Boot KEK/JSBM state before it has any reason to
+     * do so.  Legacy-compatible images retain their existing eager optional
+     * registration and JS_AKEN_TYPED_ONLY_RUNTIME images rely on deferred
+     * registration only if a legacy boot flow explicitly installs material.
+     */
+#if defined(JS_AKEN_TYPED_ONLY_RUNTIME) && JS_AKEN_TYPED_ONLY_RUNTIME
+    return 1;
+#else
     return js_register_optional_natives(env);
+#endif
 }
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {

@@ -766,7 +766,8 @@ class AkenNativePageLocatorResolverNativeTest {
         val originalInclude = Files.readAllBytes(sourceInclude)
         val artifactCommitment = ByteArray(AkenArtifactCommitment.DIGEST_SIZE) { index -> (index * 19 + 23).toByte() }
         val logicalIdentity = "fixture:aken-real-jni-string-page".encodeToByteArray()
-        val plaintext = ByteArray(383) { index -> ((index * 37 + 29) and 0xFF).toByte() }
+        val plaintextText = "AKEN-v4-typed-StringPage-cache-wrapper-fixture".padEnd(383, 'x')
+        val plaintext = plaintextText.encodeToByteArray()
         val rawProof = ByteArray(73) { index -> ((index * 17 + 11) and 0xFF).toByte() }
         val pageResourcePath = "META-INF/.aken/string/real-jni-page.bin"
         val logicalBindingPath = "strings/fixture/real-jni-page"
@@ -874,6 +875,18 @@ class AkenNativePageLocatorResolverNativeTest {
             assertFalse(authenticated.output.contains("WARNING in native method"), authenticated.output)
             assertFalse(authenticated.output.contains("FATAL ERROR in native method"), authenticated.output)
             assertFalse(authenticated.output.contains("JNI DETECTED ERROR IN APPLICATION"), authenticated.output)
+
+            val cached = runAkenJniRuntimeFixture(
+                runtimeRoot = runtimeRoot,
+                extractDirectory = tempDir.resolve("extract-cached"),
+                expectedOutcome = "string:$plaintextText",
+                label = "jni-string-cache-wrapper",
+            )
+            assertEquals(0, cached.exitCode, "AKEN StringPage cache wrapper must decode through the real JNI route:\n${cached.output}")
+            assertTrue(cached.output.contains("AKEN real JNI string page fixture: PASS:cached"), cached.output)
+            assertFalse(cached.output.contains("WARNING in native method"), cached.output)
+            assertFalse(cached.output.contains("FATAL ERROR in native method"), cached.output)
+            assertFalse(cached.output.contains("JNI DETECTED ERROR IN APPLICATION"), cached.output)
 
             tamperedPayload = checkNotNull(encodedPayload).copyOf()
             val payloadTamperOffset = tamperedPayload.lastIndex / 2
@@ -1782,6 +1795,7 @@ class AkenNativePageLocatorResolverNativeTest {
                 "-DZSTDERRORLIB_VISIBLE=",
                 "-DXXH_PUBLIC_API=",
                 "-DJS_NATIVE_PROTECTION_NONE=1",
+                "-DJS_AKEN_TYPED_ONLY_RUNTIME=1",
                 "-DJS_AKEN_JNI_FIXTURE_DIAGNOSTICS=1",
                 "-o",
                 library.toString(),
@@ -2161,6 +2175,8 @@ class AkenNativePageLocatorResolverNativeTest {
         callSiteProof: ByteArray,
     ): String = """
         import io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper;
+        import io.github.hht0rro.javashroud.transforms.protection.StringEncryptionHelper;
+        import java.lang.reflect.Method;
         import java.util.Arrays;
 
         public final class $AKEN_JNI_FIXTURE_MAIN {
@@ -2177,6 +2193,19 @@ class AkenNativePageLocatorResolverNativeTest {
                 byte[] proof = decodeHex(PROOF);
                 try {
                     String expectedOutcome = args[0];
+                    ensureAkenNativeKernel();
+                    assertLegacyKernelUntried("AKEN native loader");
+                    if (expectedOutcome.startsWith("string:")) {
+                        String expected = expectedOutcome.substring("string:".length());
+                        String actual = StringEncryptionHelper.cachedDecodeAkenStringPage(handle, PAGE_INDEX, proof);
+                        if (!expected.equals(actual)) {
+                            System.err.println("unexpected AKEN cached string result: " + actual);
+                            System.exit(3);
+                        }
+                        assertLegacyKernelUntried("AKEN cached string page");
+                        System.out.println("AKEN real JNI string page fixture: PASS:cached");
+                        return;
+                    }
                     if (expectedOutcome.startsWith("result:")) {
                         byte[] opened = JniMicrokernelHelper.decodeAkenStringPage(handle, PAGE_INDEX, proof);
                         try {
@@ -2186,6 +2215,7 @@ class AkenNativePageLocatorResolverNativeTest {
                                 System.err.println("unexpected AKEN real JNI string result: " + actual);
                                 System.exit(3);
                             }
+                            assertLegacyKernelUntried("AKEN direct string page");
                             System.out.println("AKEN real JNI string page fixture: PASS:decoded");
                             return;
                         } finally {
@@ -2230,6 +2260,24 @@ class AkenNativePageLocatorResolverNativeTest {
                 return new String(chars);
             }
 
+            private static void ensureAkenNativeKernel() {
+                try {
+                    Method method = JniMicrokernelHelper.class.getDeclaredMethod("ensureAkenNativeKernel");
+                    method.setAccessible(true);
+                    method.invoke(null);
+                } catch (ReflectiveOperationException error) {
+                    throw new IllegalStateException("AKEN native loader is unavailable", error);
+                }
+            }
+
+            private static void assertLegacyKernelUntried(String phase) {
+                String status = JniMicrokernelHelper.getLoadStatus();
+                if (!"untried".equals(status)) {
+                    System.err.println(phase + " unexpectedly activated the legacy kernel: " + status);
+                    System.exit(7);
+                }
+            }
+
             private static byte[] decodeHex(String value) {
                 if ((value.length() & 1) != 0) throw new IllegalArgumentException("odd hex length");
                 byte[] out = new byte[value.length() / 2];
@@ -2262,15 +2310,19 @@ class AkenNativePageLocatorResolverNativeTest {
     }
 
     private fun jniHelperClasspathEntry(): Path {
-        val helper = Class.forName(
-            "io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper",
-            false,
-            javaClass.classLoader,
-        )
-        val location = checkNotNull(helper.protectionDomain.codeSource?.location) {
-            "JniMicrokernelHelper code source is unavailable"
+        val helperRelative = "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.class"
+        val helperClass = resolveSource("build/core-engine/classes/java/main/$helperRelative")
+        var classesRoot = helperClass
+        repeat(7) {
+            classesRoot = checkNotNull(classesRoot.parent) { "AKEN fixture helper classes root is unavailable" }
         }
-        return Path.of(location.toURI()).toAbsolutePath().normalize()
+        check(Files.isRegularFile(classesRoot.resolve(helperRelative))) {
+            "AKEN fixture must execute the current compiled JniMicrokernelHelper"
+        }
+        check(Files.isRegularFile(classesRoot.resolve("io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper.class"))) {
+            "AKEN fixture must execute the current compiled StringEncryptionHelper"
+        }
+        return classesRoot
     }
 
     private fun javaTool(name: String): Path {

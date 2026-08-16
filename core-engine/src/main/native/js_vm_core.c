@@ -7228,10 +7228,9 @@ jsn_k7(JNIEnv *env, jclass cls, jbyteArray material)
         js_runtime_resource_key_slot_ready[JS_RRK_ANCHOR_SLOT] = 1;
         js_runtime_resource_partition_count = partition_count;
         js_runtime_boot_material_state = 2;
-        /* JNI_OnLoad necessarily runs before this authenticated boot envelope
-         * is installed.  Retry the optional helper registrations now that the
-         * anchor slot is live, so keyed class/method bindings (notably the
-         * string-encryption helper) resolve to their final renamed members. */
+        /* JNI_OnLoad deliberately registers only the core bridge.  Register
+         * optional legacy helpers now that authenticated boot material and
+         * keyed class/method bindings are live. */
         if (!js_jni_register_deferred_natives(env)) {
             js_runtime_boot_material_clear();
             js_runtime_boot_material_state = -1;
