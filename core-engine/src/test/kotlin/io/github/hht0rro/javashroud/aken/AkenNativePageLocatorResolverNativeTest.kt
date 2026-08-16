@@ -7,9 +7,14 @@ import io.github.hht0rro.javashroud.transforms.protection.Vbc4EntryMetadata
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.VmBytecodeSerializer
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenArtifactCommitment
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenBuildPlan
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHandle
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHighValueLeafIdentity
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenNativePageLocatorCompileInput
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenNativePageEnvelope
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenPageMaterialization
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenPageMaterializationInput
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenPageMaterializer
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenResourceCodec
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenResourceKind
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRoutingMetadata
@@ -18,6 +23,7 @@ import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRuntimeEvalua
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRuntimeEvaluatorRole
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRuntimePageDescriptor
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenSealingProofMetadata
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenTypedPageEntryToken
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4FinalizationLayout
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4LogicalMethodIdentity
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4MethodCandidate
@@ -743,6 +749,261 @@ class AkenNativePageLocatorResolverNativeTest {
                 Arrays.fill(identity, 0)
                 Arrays.fill(rawProof, 0)
                 pendingPage?.wipe()
+                deleteTree(tempDir)
+            }
+        }
+    }
+
+    @Test
+    fun typed_string_page_decodes_through_real_jni_and_fails_closed_on_locator_envelope_proof_and_payload_tampering() {
+        val zig = findZig()
+        val platform = currentAkenHostPlatform()
+        assumeTrue(zig != null, "Zig is required to compile the real AKEN typed string-page fixture")
+        assumeTrue(platform != null, "The real AKEN typed string-page fixture supports release-gate host platforms only")
+
+        val sourceNativeDir = resolveSource("src/main/native/js_jni_runtime.c").parent
+        val sourceInclude = sourceNativeDir.resolve("js_aken_page_locator.inc")
+        val originalInclude = Files.readAllBytes(sourceInclude)
+        val artifactCommitment = ByteArray(AkenArtifactCommitment.DIGEST_SIZE) { index -> (index * 19 + 23).toByte() }
+        val logicalIdentity = "fixture:aken-real-jni-string-page".encodeToByteArray()
+        val plaintext = ByteArray(383) { index -> ((index * 37 + 29) and 0xFF).toByte() }
+        val rawProof = ByteArray(73) { index -> ((index * 17 + 11) and 0xFF).toByte() }
+        val pageResourcePath = "META-INF/.aken/string/real-jni-page.bin"
+        val logicalBindingPath = "strings/fixture/real-jni-page"
+        val tempDir = Files.createTempDirectory("javashroud-aken-real-jni-string-page-")
+        var plan: AkenBuildPlan? = null
+        var materialization: AkenPageMaterialization? = null
+        var compileInput: AkenNativePageLocatorCompileInput? = null
+        var compilerRecord: ByteArray? = null
+        var currentPage: ProductionCurrentPage? = null
+        var encodedHandle: ByteArray? = null
+        var descriptorHandle: AkenHandle? = null
+        var encodedPayload: ByteArray? = null
+        var tamperedPayload: ByteArray? = null
+        var invalidProof: ByteArray? = null
+        var nativeEnvelope: ByteArray? = null
+        var descriptorEncoding: ByteArray? = null
+        var routeEncoding: ByteArray? = null
+        var pageBindingDigest: ByteArray? = null
+        var tamperedEnvelope: ByteArray? = null
+        var tamperedEnvelopeRecord: ByteArray? = null
+        var tamperedRecord: ByteArray? = null
+        try {
+            val buildPlan = AkenBuildPlan.create(artifactCommitment, SecureRandom())
+            plan = buildPlan
+            val page = buildPlan.registerPage(
+                kind = AkenResourceKind.StringPage,
+                identity = logicalIdentity,
+                pageIndex = 3,
+                targetPageSize = 384,
+            )
+            val materializationInput = AkenPageMaterializationInput.create(
+                page = page,
+                plaintext = plaintext,
+                resourcePath = pageResourcePath,
+                resourceOffset = 0,
+                callSiteProof = rawProof,
+                logicalBindingPath = logicalBindingPath,
+            )
+            val generatedMaterialization = AkenPageMaterializer.materializeAndWipe(
+                plan = buildPlan,
+                inputs = listOf(materializationInput),
+            )
+            materialization = generatedMaterialization
+            plan = null
+
+            val generatedPage = generatedMaterialization.pagesForBuild().single()
+            val descriptor = generatedPage.descriptorForBuild
+            assertEquals(AkenResourceKind.StringPage, descriptor.resourceKind)
+            assertEquals(3, descriptor.pageIndex)
+            assertEquals(pageResourcePath, descriptor.route.resourcePath)
+            assertEquals(0, descriptor.route.resourceOffset)
+            encodedPayload = generatedPage.copyEncodedPayloadForBuild()
+            assertEquals(descriptor.route.storedLength, checkNotNull(encodedPayload).size)
+
+            compileInput = AkenNativePageLocatorCompileInput.fromTypedPage(
+                descriptor = descriptor,
+                rawCallSiteProof = rawProof,
+            )
+            compilerRecord = checkNotNull(compileInput).copyNativeLocatorRecordForCompiler()
+            nativeEnvelope = checkNotNull(compileInput).copyNativeEnvelopeForCompiler()
+            descriptorEncoding = checkNotNull(compileInput).copyResolvedDescriptorForCompiler()
+            routeEncoding = checkNotNull(compileInput).copyRouteEncodingForCompiler()
+            pageBindingDigest = checkNotNull(compileInput).copyPageBindingDigestForCompiler()
+            currentPage = parseProductionCurrentPage(checkNotNull(compilerRecord))
+            assertEquals(AkenResourceKind.StringPage, checkNotNull(currentPage).resourceKind)
+            assertEquals(descriptor.pageIndex, checkNotNull(currentPage).pageIndex)
+            descriptorHandle = descriptor.handle
+            encodedHandle = checkNotNull(descriptorHandle).encoded
+            assertEquals(
+                AkenTypedPageEntryToken.derive(
+                    resourceKind = AkenResourceKind.StringPage,
+                    pageIndex = descriptor.pageIndex,
+                    encodedHandle = checkNotNull(encodedHandle),
+                ),
+                checkNotNull(currentPage).entryToken,
+                "the generic compiler record must use the exact token derived by the native typed string bridge",
+            )
+
+            val include = renderInclude(listOf(checkNotNull(compilerRecord)))
+            val nativeLibrary = compileAkenJniLibrary(
+                zig = checkNotNull(zig),
+                root = tempDir.resolve("native-good"),
+                sourceNativeDir = sourceNativeDir,
+                include = include,
+                platform = checkNotNull(platform),
+            )
+            val runtimeRoot = prepareAkenStringJniRuntimeFixture(
+                root = tempDir.resolve("runtime-good"),
+                platform = platform,
+                nativeLibrary = nativeLibrary,
+                pageResourcePath = descriptor.route.resourcePath,
+                pageResourceBytes = checkNotNull(encodedPayload),
+                encodedHandle = checkNotNull(encodedHandle),
+                pageIndex = descriptor.pageIndex,
+                callSiteProof = rawProof,
+            )
+            val authenticated = runAkenJniRuntimeFixture(
+                runtimeRoot = runtimeRoot,
+                extractDirectory = tempDir.resolve("extract-good"),
+                expectedOutcome = "result:${hexLower(plaintext)}",
+                label = "jni-string-decoded",
+            )
+            assertEquals(0, authenticated.exitCode, "real JNI AKEN string page must decode:\n${authenticated.output}")
+            assertTrue(authenticated.output.contains("AKEN real JNI string page fixture: PASS:decoded"), authenticated.output)
+            assertFalse(authenticated.output.contains("WARNING in native method"), authenticated.output)
+            assertFalse(authenticated.output.contains("FATAL ERROR in native method"), authenticated.output)
+            assertFalse(authenticated.output.contains("JNI DETECTED ERROR IN APPLICATION"), authenticated.output)
+
+            tamperedPayload = checkNotNull(encodedPayload).copyOf()
+            val payloadTamperOffset = tamperedPayload.lastIndex / 2
+            tamperedPayload[payloadTamperOffset] = (tamperedPayload[payloadTamperOffset].toInt() xor 0x5A).toByte()
+            writeClasspathResource(runtimeRoot, descriptor.route.resourcePath, tamperedPayload)
+            val payloadFailure = runAkenJniRuntimeFixture(
+                runtimeRoot = runtimeRoot,
+                extractDirectory = tempDir.resolve("extract-payload-tampered"),
+                expectedOutcome = "error:AKEN string page authentication failed",
+                label = "jni-string-payload-tampered",
+            )
+            assertEquals(0, payloadFailure.exitCode, "tampered AKEN string ciphertext must fail closed:\n${payloadFailure.output}")
+            assertTrue(payloadFailure.output.contains("AKEN real JNI string page fixture: PASS:tampered"), payloadFailure.output)
+
+            invalidProof = rawProof.copyOf()
+            invalidProof[invalidProof.lastIndex] = (invalidProof[invalidProof.lastIndex].toInt() xor 0x35).toByte()
+            val proofRuntimeRoot = prepareAkenStringJniRuntimeFixture(
+                root = tempDir.resolve("runtime-proof-tampered"),
+                platform = platform,
+                nativeLibrary = nativeLibrary,
+                pageResourcePath = descriptor.route.resourcePath,
+                pageResourceBytes = checkNotNull(encodedPayload),
+                encodedHandle = checkNotNull(encodedHandle),
+                pageIndex = descriptor.pageIndex,
+                callSiteProof = invalidProof,
+            )
+            val proofFailure = runAkenJniRuntimeFixture(
+                runtimeRoot = proofRuntimeRoot,
+                extractDirectory = tempDir.resolve("extract-proof-tampered"),
+                expectedOutcome = "error:AKEN string page route is invalid",
+                label = "jni-string-proof-tampered",
+            )
+            assertEquals(0, proofFailure.exitCode, "tampered AKEN string proof must fail closed:\n${proofFailure.output}")
+            assertTrue(proofFailure.output.contains("AKEN real JNI string page fixture: PASS:tampered"), proofFailure.output)
+
+            tamperedEnvelope = checkNotNull(nativeEnvelope).copyOf()
+            tamperedEnvelope[tamperedEnvelope.lastIndex] = (tamperedEnvelope[tamperedEnvelope.lastIndex].toInt() xor 0x6B).toByte()
+            tamperedEnvelopeRecord = encodeCompilerRecord(
+                entryToken = checkNotNull(currentPage).entryToken,
+                resourceKind = AkenResourceKind.StringPage,
+                pageIndex = descriptor.pageIndex,
+                encodedHandle = checkNotNull(encodedHandle),
+                nativeEnvelope = tamperedEnvelope,
+                descriptor = checkNotNull(descriptorEncoding),
+                route = checkNotNull(routeEncoding),
+                vbc4StateBindingLayoutDigest = checkNotNull(pageBindingDigest),
+            )
+            val envelopeTamperedLibrary = compileAkenJniLibrary(
+                zig = checkNotNull(zig),
+                root = tempDir.resolve("native-envelope-tampered"),
+                sourceNativeDir = sourceNativeDir,
+                include = renderInclude(listOf(checkNotNull(tamperedEnvelopeRecord))),
+                platform = platform,
+            )
+            val envelopeRuntimeRoot = prepareAkenStringJniRuntimeFixture(
+                root = tempDir.resolve("runtime-envelope-tampered"),
+                platform = platform,
+                nativeLibrary = envelopeTamperedLibrary,
+                pageResourcePath = descriptor.route.resourcePath,
+                pageResourceBytes = checkNotNull(encodedPayload),
+                encodedHandle = checkNotNull(encodedHandle),
+                pageIndex = descriptor.pageIndex,
+                callSiteProof = rawProof,
+            )
+            val envelopeFailure = runAkenJniRuntimeFixture(
+                runtimeRoot = envelopeRuntimeRoot,
+                extractDirectory = tempDir.resolve("extract-envelope-tampered"),
+                expectedOutcome = "error:AKEN string page route is invalid",
+                label = "jni-string-envelope-tampered",
+            )
+            assertEquals(0, envelopeFailure.exitCode, "tampered AKEN string envelope must fail closed:\n${envelopeFailure.output}")
+            assertTrue(envelopeFailure.output.contains("AKEN real JNI string page fixture: PASS:tampered"), envelopeFailure.output)
+
+            tamperedRecord = checkNotNull(compilerRecord).copyOf()
+            tamperedRecord[tamperedRecord.lastIndex] = (tamperedRecord[tamperedRecord.lastIndex].toInt() xor 0x44).toByte()
+            val locatorTamperedLibrary = compileAkenJniLibrary(
+                zig = checkNotNull(zig),
+                root = tempDir.resolve("native-locator-tampered"),
+                sourceNativeDir = sourceNativeDir,
+                include = renderInclude(listOf(tamperedRecord)),
+                platform = platform,
+            )
+            val locatorRuntimeRoot = prepareAkenStringJniRuntimeFixture(
+                root = tempDir.resolve("runtime-locator-tampered"),
+                platform = platform,
+                nativeLibrary = locatorTamperedLibrary,
+                pageResourcePath = descriptor.route.resourcePath,
+                pageResourceBytes = checkNotNull(encodedPayload),
+                encodedHandle = checkNotNull(encodedHandle),
+                pageIndex = descriptor.pageIndex,
+                callSiteProof = rawProof,
+            )
+            val locatorFailure = runAkenJniRuntimeFixture(
+                runtimeRoot = locatorRuntimeRoot,
+                extractDirectory = tempDir.resolve("extract-locator-tampered"),
+                expectedOutcome = "error:AKEN string page route is unavailable",
+                label = "jni-string-locator-tampered",
+            )
+            assertEquals(0, locatorFailure.exitCode, "tampered AKEN string locator binding must fail closed:\n${locatorFailure.output}")
+            assertTrue(locatorFailure.output.contains("AKEN real JNI string page fixture: PASS:tampered"), locatorFailure.output)
+        } finally {
+            try {
+                assertContentEquals(
+                    originalInclude,
+                    Files.readAllBytes(sourceInclude),
+                    "the repository's default empty locator include must remain untouched",
+                )
+            } finally {
+                compilerRecord?.let { Arrays.fill(it, 0) }
+                currentPage?.wipe()
+                encodedHandle?.let { Arrays.fill(it, 0) }
+                encodedPayload?.let { Arrays.fill(it, 0) }
+                tamperedPayload?.let { Arrays.fill(it, 0) }
+                invalidProof?.let { Arrays.fill(it, 0) }
+                nativeEnvelope?.let { Arrays.fill(it, 0) }
+                descriptorEncoding?.let { Arrays.fill(it, 0) }
+                routeEncoding?.let { Arrays.fill(it, 0) }
+                pageBindingDigest?.let { Arrays.fill(it, 0) }
+                tamperedEnvelope?.let { Arrays.fill(it, 0) }
+                tamperedEnvelopeRecord?.let { Arrays.fill(it, 0) }
+                tamperedRecord?.let { Arrays.fill(it, 0) }
+                descriptorHandle?.wipe()
+                compileInput?.wipe()
+                materialization?.wipe()
+                plan?.wipe()
+                Arrays.fill(originalInclude, 0)
+                Arrays.fill(artifactCommitment, 0)
+                Arrays.fill(logicalIdentity, 0)
+                Arrays.fill(plaintext, 0)
+                Arrays.fill(rawProof, 0)
                 deleteTree(tempDir)
             }
         }
@@ -1600,6 +1861,84 @@ class AkenNativePageLocatorResolverNativeTest {
         }
     }
 
+    private fun prepareAkenStringJniRuntimeFixture(
+        root: Path,
+        platform: AkenHostPlatform,
+        nativeLibrary: Path,
+        pageResourcePath: String,
+        pageResourceBytes: ByteArray,
+        encodedHandle: ByteArray,
+        pageIndex: Int,
+        callSiteProof: ByteArray,
+    ): Path {
+        require(pageResourceBytes.isNotEmpty()) { "real AKEN JNI string page resource must not be empty" }
+        require(encodedHandle.size == AkenHandle.ENCODED_HANDLE_SIZE) { "real AKEN JNI string handle size is invalid" }
+        require(pageIndex >= 0) { "real AKEN JNI string page index is invalid" }
+        require(callSiteProof.isNotEmpty()) { "real AKEN JNI string call-site proof must not be empty" }
+
+        val runtimeRoot = Files.createDirectories(root.resolve("runtime-classes"))
+        val sourceDir = Files.createDirectories(root.resolve("runtime-source"))
+        val source = sourceDir.resolve("$AKEN_JNI_FIXTURE_MAIN.java")
+        Files.writeString(
+            source,
+            akenStringJniHarnessSource(
+                encodedHandle = encodedHandle,
+                pageIndex = pageIndex,
+                callSiteProof = callSiteProof,
+            ),
+            StandardCharsets.UTF_8,
+        )
+
+        val helperClasspath = jniHelperClasspathEntry()
+        val javac = javaTool("javac")
+        val compile = run(
+            command = listOf(
+                javac.toString(),
+                "-source",
+                "8",
+                "-target",
+                "8",
+                "-classpath",
+                helperClasspath.toString(),
+                "-d",
+                runtimeRoot.toString(),
+                source.toString(),
+            ),
+            directory = root,
+            label = "compile-string-jni-harness",
+            timeoutSeconds = 60L,
+        )
+        assertEquals(0, compile.exitCode, "real AKEN JNI string Java harness must compile:\n${compile.output}")
+
+        val nativeResourcePath = "META-INF/aken/runtime/aken-string-page${platform.fileSuffix}"
+        val nativeBytes = Files.readAllBytes(nativeLibrary)
+        try {
+            writeClasspathResource(runtimeRoot, nativeResourcePath, nativeBytes)
+            val locator = buildString {
+                append("AKEN_NATIVE_LOCATOR_V1")
+                append('|')
+                append(platform.platformId)
+                append('|')
+                append(nativeResourcePath)
+                append('|')
+                append(platform.fileSuffix)
+                append('|')
+                append(nativeBytes.size)
+                append('|')
+                append(sha256Hex(nativeBytes))
+            }.toByteArray(StandardCharsets.US_ASCII)
+            try {
+                writeClasspathResource(runtimeRoot, "META-INF/aken/native.locator", locator)
+            } finally {
+                Arrays.fill(locator, 0)
+            }
+        } finally {
+            Arrays.fill(nativeBytes, 0)
+        }
+        writeClasspathResource(runtimeRoot, pageResourcePath, pageResourceBytes)
+        return runtimeRoot
+    }
+
     private fun prepareAkenJniRuntimeFixture(
         root: Path,
         platform: AkenHostPlatform,
@@ -1800,6 +2139,95 @@ class AkenNativePageLocatorResolverNativeTest {
                 } finally {
                     Arrays.fill(material, (byte) 0);
                 }
+            }
+
+            private static byte[] decodeHex(String value) {
+                if ((value.length() & 1) != 0) throw new IllegalArgumentException("odd hex length");
+                byte[] out = new byte[value.length() / 2];
+                for (int index = 0; index < out.length; index++) {
+                    int high = Character.digit(value.charAt(index * 2), 16);
+                    int low = Character.digit(value.charAt(index * 2 + 1), 16);
+                    if (high < 0 || low < 0) throw new IllegalArgumentException("invalid hex");
+                    out[index] = (byte) ((high << 4) | low);
+                }
+                return out;
+            }
+        }
+    """.trimIndent()
+
+    private fun akenStringJniHarnessSource(
+        encodedHandle: ByteArray,
+        pageIndex: Int,
+        callSiteProof: ByteArray,
+    ): String = """
+        import io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper;
+        import java.util.Arrays;
+
+        public final class $AKEN_JNI_FIXTURE_MAIN {
+            private static final int PAGE_INDEX = $pageIndex;
+            private static final String HANDLE = "${hexLower(encodedHandle)}";
+            private static final String PROOF = "${hexLower(callSiteProof)}";
+
+            public static void main(String[] args) {
+                if (args.length != 1) {
+                    System.err.println("expected one outcome argument");
+                    System.exit(2);
+                }
+                byte[] handle = decodeHex(HANDLE);
+                byte[] proof = decodeHex(PROOF);
+                try {
+                    String expectedOutcome = args[0];
+                    if (expectedOutcome.startsWith("result:")) {
+                        byte[] opened = JniMicrokernelHelper.decodeAkenStringPage(handle, PAGE_INDEX, proof);
+                        try {
+                            String expected = expectedOutcome.substring("result:".length());
+                            String actual = hexLower(opened);
+                            if (!expected.equals(actual)) {
+                                System.err.println("unexpected AKEN real JNI string result: " + actual);
+                                System.exit(3);
+                            }
+                            System.out.println("AKEN real JNI string page fixture: PASS:decoded");
+                            return;
+                        } finally {
+                            Arrays.fill(opened, (byte) 0);
+                        }
+                    }
+                    if (!expectedOutcome.startsWith("error:")) {
+                        System.err.println("unsupported outcome: " + expectedOutcome);
+                        System.exit(4);
+                    }
+                    String expectedMessage = expectedOutcome.substring("error:".length());
+                    try {
+                        byte[] opened = JniMicrokernelHelper.decodeAkenStringPage(handle, PAGE_INDEX, proof);
+                        try {
+                            System.err.println("AKEN real JNI string-page route unexpectedly returned");
+                            System.exit(5);
+                        } finally {
+                            Arrays.fill(opened, (byte) 0);
+                        }
+                    } catch (SecurityException error) {
+                        if (!expectedMessage.equals(error.getMessage())) {
+                            System.err.println("unexpected AKEN real JNI string failure: " + error.getMessage());
+                            error.printStackTrace(System.err);
+                            System.exit(6);
+                        }
+                        System.out.println("AKEN real JNI string page fixture: PASS:tampered");
+                    }
+                } finally {
+                    Arrays.fill(handle, (byte) 0);
+                    Arrays.fill(proof, (byte) 0);
+                }
+            }
+
+            private static String hexLower(byte[] value) {
+                char[] chars = new char[value.length * 2];
+                char[] alphabet = "0123456789abcdef".toCharArray();
+                for (int index = 0; index < value.length; index++) {
+                    int current = value[index] & 0xFF;
+                    chars[index * 2] = alphabet[current >>> 4];
+                    chars[index * 2 + 1] = alphabet[current & 0x0F];
+                }
+                return new String(chars);
             }
 
             private static byte[] decodeHex(String value) {

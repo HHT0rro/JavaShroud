@@ -122,6 +122,8 @@ static int js_aken_bridge_request_is_valid(JNIEnv *env, jbyteArray encoded_handl
 
 static const unsigned char JS_AKEN_EVALUATOR_MASK_DOMAIN[] = "AKEN-v4-evaluator-state-mask-v1";
 static const unsigned char JS_AKEN_EVALUATOR_TAG_DOMAIN[] = "AKEN-v4-evaluator-state-tag-v1";
+static const unsigned char JS_AKEN_TYPED_PAGE_ENTRY_TOKEN_DOMAIN[] =
+    "AKEN-v4-typed-page-entry-token-v1";
 
 static void js_aken_evaluator_update_u32be(js_sha256_ctx *ctx, uint32_t value) {
     const unsigned char bytes[4] = {
@@ -3266,15 +3268,182 @@ cleanup:
     return execution_completed ? result : NULL;
 }
 
-static jbyteArray JNICALL jsw_a1(JNIEnv *env, jclass cls, jbyteArray encoded_handle, jint page_index, jbyteArray call_site_proof) {
-    (void)cls;
-    if (!js_vm_sensitive_path_guard(env, (const void*)jsw_a1, 0)) return NULL;
-    if (!js_protected_runtime_enter(env)) return NULL;
-    if (js_aken_bridge_request_is_valid(env, encoded_handle, page_index, call_site_proof)) {
-        js_aken_bridge_unavailable(env, "AKEN string page route is unavailable");
+/*
+ * String/class/chunk bridges do not expose a caller-selected entry token.  Their
+ * locator key is instead derived deterministically from the exact typed page
+ * identity: kind, page index, and already-bound opaque handle.  The derivation
+ * is public binding material, not a key, and it prevents these bridge APIs from
+ * becoming an entry-token oracle or a locator enumeration surface.
+ */
+static int js_aken_native_typed_page_entry_token(
+    uint8_t resource_kind,
+    jint page_index,
+    const unsigned char *encoded_handle,
+    size_t encoded_handle_len,
+    uint64_t *out_entry_token
+) {
+    js_sha256_ctx ctx;
+    unsigned char digest[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE] = {0};
+    uint64_t token = 0u;
+    int ok = 0;
+    if (!out_entry_token) goto cleanup;
+    *out_entry_token = 0u;
+    if (resource_kind == JS_AKEN_NATIVE_PAGE_RESOURCE_KIND_VBC4_METHOD ||
+        !js_aken_native_page_envelope_kind_is_valid(resource_kind) ||
+        page_index < 0 || !encoded_handle ||
+        encoded_handle_len != JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE) {
+        goto cleanup;
     }
-    (void)js_protected_runtime_leave(env);
-    return NULL;
+    memset(&ctx, 0, sizeof(ctx));
+    js_sha256_init(&ctx);
+    js_sha256_update(
+        &ctx,
+        JS_AKEN_TYPED_PAGE_ENTRY_TOKEN_DOMAIN,
+        (int)(sizeof(JS_AKEN_TYPED_PAGE_ENTRY_TOKEN_DOMAIN) - 1u));
+    js_sha256_update(&ctx, &resource_kind, 1);
+    js_aken_native_page_envelope_update_u32be(&ctx, (uint32_t)page_index);
+    js_sha256_update(&ctx, encoded_handle, (int)encoded_handle_len);
+    js_sha256_final(&ctx, digest);
+    for (size_t index = 0u; index < sizeof(token); ++index) {
+        token = (token << 8) | (uint64_t)digest[index];
+    }
+    *out_entry_token = token;
+    ok = 1;
+cleanup:
+    js_vbc4_wipe_volatile(&ctx, sizeof(ctx));
+    js_vbc4_wipe_volatile(digest, sizeof(digest));
+    if (!ok && out_entry_token) *out_entry_token = 0u;
+    return ok;
+}
+
+static jbyteArray JNICALL jsw_a1(JNIEnv *env, jclass cls, jbyteArray encoded_handle, jint page_index, jbyteArray call_site_proof) {
+    unsigned char native_handle[JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE] = {0};
+    unsigned char native_call_site_proof[JS_AKEN_NATIVE_PAGE_ENVELOPE_MAX_SIZE] = {0};
+    js_aken_native_page_request request;
+    js_aken_native_page_locator_record record;
+    js_aken_native_page_envelope envelope;
+    js_aken_native_page_resolved_descriptor resolved;
+    js_aken_native_page_descriptor_view descriptor_view;
+    js_aken_native_opened_page opened_page;
+    unsigned char *encoded_payload = NULL;
+    size_t encoded_payload_len = 0u;
+    jsize proof_length = 0;
+    int protected_runtime_entered = 0;
+    int completed = 0;
+    jbyteArray decoded = NULL;
+    memset(&request, 0, sizeof(request));
+    memset(&record, 0, sizeof(record));
+    memset(&envelope, 0, sizeof(envelope));
+    memset(&resolved, 0, sizeof(resolved));
+    memset(&descriptor_view, 0, sizeof(descriptor_view));
+    memset(&opened_page, 0, sizeof(opened_page));
+    if (!js_vm_sensitive_path_guard(env, (const void*)jsw_a1, 0)) goto cleanup;
+    if (!js_protected_runtime_enter(env)) goto cleanup;
+    protected_runtime_entered = 1;
+    if (!js_aken_bridge_request_shape_is_valid(env, encoded_handle, page_index, call_site_proof)) {
+        js_aken_bridge_unavailable(env, "AKEN string page route is invalid");
+        goto cleanup;
+    }
+    proof_length = (*env)->GetArrayLength(env, call_site_proof);
+    if ((*env)->ExceptionCheck(env) || proof_length <= 0 ||
+        (size_t)proof_length > sizeof(native_call_site_proof)) {
+        js_aken_bridge_unavailable(env, "AKEN string page route is invalid");
+        goto cleanup;
+    }
+    (*env)->GetByteArrayRegion(
+        env,
+        encoded_handle,
+        0,
+        (jsize)sizeof(native_handle),
+        (jbyte *)native_handle);
+    if ((*env)->ExceptionCheck(env)) goto cleanup;
+    (*env)->GetByteArrayRegion(
+        env,
+        call_site_proof,
+        0,
+        proof_length,
+        (jbyte *)native_call_site_proof);
+    if ((*env)->ExceptionCheck(env)) goto cleanup;
+    request.resource_kind = JS_AKEN_NATIVE_PAGE_RESOURCE_KIND_STRING_PAGE;
+    request.page_index = page_index;
+    request.encoded_handle = native_handle;
+    request.encoded_handle_len = sizeof(native_handle);
+    request.raw_call_site_proof = native_call_site_proof;
+    request.raw_call_site_proof_len = (size_t)proof_length;
+    if (!js_aken_native_typed_page_entry_token(
+            request.resource_kind,
+            request.page_index,
+            request.encoded_handle,
+            request.encoded_handle_len,
+            &request.entry_token) ||
+        !js_aken_native_page_locator_lookup(&request, &record)) {
+        js_aken_bridge_unavailable(env, "AKEN string page route is unavailable");
+        goto cleanup;
+    }
+    if (!js_aken_native_page_envelope_parse(
+            record.native_envelope,
+            record.native_envelope_len,
+            &request,
+            &envelope) ||
+        !js_aken_native_page_locator_resolve(&record, &envelope, &resolved) ||
+        !js_aken_native_page_descriptor_parse_current(
+            &request,
+            &envelope,
+            &resolved,
+            &descriptor_view)) {
+        js_aken_bridge_unavailable(env, "AKEN string page route is invalid");
+        goto cleanup;
+    }
+    if (descriptor_view.binding.kind_id != JS_AKEN_NATIVE_PAGE_RESOURCE_KIND_STRING_PAGE ||
+        descriptor_view.binding.page_index != page_index ||
+        !js_aken_native_page_load_current_route_slice(
+            env,
+            cls,
+            &descriptor_view,
+            &encoded_payload,
+            &encoded_payload_len) ||
+        !js_aken_native_page_open_current_view_payload(
+            &request,
+            &envelope,
+            &resolved,
+            &descriptor_view,
+            encoded_payload,
+            encoded_payload_len,
+            &opened_page)) {
+        js_aken_bridge_unavailable(env, "AKEN string page authentication failed");
+        goto cleanup;
+    }
+    if (!opened_page.bytes || opened_page.length == 0u || opened_page.length > (size_t)INT_MAX) {
+        js_aken_bridge_unavailable(env, "AKEN string page authentication failed");
+        goto cleanup;
+    }
+    decoded = (*env)->NewByteArray(env, (jsize)opened_page.length);
+    if (!decoded || (*env)->ExceptionCheck(env)) goto cleanup;
+    (*env)->SetByteArrayRegion(env, decoded, 0, (jsize)opened_page.length, (const jbyte *)opened_page.bytes);
+    if ((*env)->ExceptionCheck(env)) goto cleanup;
+    completed = 1;
+cleanup:
+    js_aken_native_opened_page_wipe(&opened_page);
+    if (encoded_payload) {
+        js_vbc4_wipe_volatile(encoded_payload, encoded_payload_len);
+        free(encoded_payload);
+    }
+    js_aken_native_page_descriptor_view_wipe(&descriptor_view);
+    js_vbc4_wipe_volatile(&resolved, sizeof(resolved));
+    js_aken_native_page_envelope_wipe(&envelope);
+    js_aken_native_page_locator_record_wipe(&record);
+    js_vbc4_wipe_volatile(&request, sizeof(request));
+    js_vbc4_wipe_volatile(native_handle, sizeof(native_handle));
+    js_vbc4_wipe_volatile(native_call_site_proof, sizeof(native_call_site_proof));
+    if (protected_runtime_entered && !js_protected_runtime_leave(env)) completed = 0;
+    if (!completed && decoded) {
+        (*env)->DeleteLocalRef(env, decoded);
+        decoded = NULL;
+    }
+    if (!completed && !(*env)->ExceptionCheck(env)) {
+        js_aken_bridge_unavailable(env, "AKEN string page decode failed closed");
+    }
+    return completed ? decoded : NULL;
 }
 
 static jbyteArray JNICALL jsw_a2(JNIEnv *env, jclass cls, jbyteArray encoded_handle, jint page_index, jbyteArray call_site_proof) {
