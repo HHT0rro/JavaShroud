@@ -9,10 +9,13 @@ import kotlin.test.assertTrue
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.tree.ClassNode
 
-/** W1/W4 gate: Java helper bytecode contains no generated, linearly recomposable key shares. */
+/**
+ * AKEN v4 gate: Java helper bytecode contains no generated, linearly
+ * recomposable key shares, and deployment no longer emits a boot-root producer.
+ */
 class RootKeyLiteralTest {
     @Test
-    fun helper_source_and_bytecode_have_no_share_injection_path() {
+    fun helper_source_and_bytecode_have_no_share_injection_or_legacy_boot_producer() {
         val helperBytes = checkNotNull(
             javaClass.classLoader.getResourceAsStream(
                 "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.class"
@@ -26,8 +29,14 @@ class RootKeyLiteralTest {
         val helper = Files.readString(resolveSource("src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
         assertFalse(deployment.contains("emitShareMethod"), "deployment must not emit byte-array share literals")
         assertFalse(deployment.contains("emitPartitionKeyDispatch"), "deployment must not emit Java key reconstruction code")
-        assertTrue(deployment.contains("BootMaterialEnvelope.encode"), "deployment must emit the encrypted boot material envelope")
-        assertTrue(helper.contains("nativeInstallBootMaterial") && helper.contains("nativeIsBootMaterialReady") && helper.contains("nativeAbortBootMaterial"), "helper must use the one-shot native boot ABI with explicit failure wiping")
+        assertFalse(deployment.contains("BootMaterialEnvelope"), "AKEN deployment must not emit a JSBM boot-material producer")
+        assertFalse(deployment.contains("BootKekSidecar"), "AKEN deployment must not emit a JSBK sidecar producer")
+        assertTrue(
+            helper.contains("nativeDecodeAkenStringPage") &&
+                helper.contains("nativeReadAkenClassPage") &&
+                helper.contains("nativeMapAkenNativeChunk"),
+            "helper must expose purpose-split AKEN page routes",
+        )
     }
 
     private fun resolveSource(relative: String): Path {

@@ -60,8 +60,6 @@ internal data class Vbc4BuildContext(
     private val akenStringPageCandidates = LinkedHashMap<String, AkenStringPageCandidate>()
     /** Build-only final StringPage routes reserved before page materialization. */
     private var akenStringPagePreSealRouteReservation: AkenStringPagePreSealRouteReservation? = null
-    private var bootSecretSnapshot: ByteArray? = null
-    private var bootSidecarBindingSnapshot: ByteArray? = null
 
     init {
         require(masterKey.size == VBC4_MASTER_KEY_SIZE) { "VBC4 master key must be 32 bytes" }
@@ -464,22 +462,6 @@ internal data class Vbc4BuildContext(
         }
     }
 
-    @Synchronized
-    fun copyBootSecretForBuild(): ByteArray {
-        val snapshot = bootSecretSnapshot ?: NativeKernelShellPacker.requireBootSecretForBuild().also {
-            bootSecretSnapshot = it
-        }
-        return snapshot.copyOf()
-    }
-
-    @Synchronized
-    fun copyBootSidecarBindingForBuild(): ByteArray {
-        val snapshot = bootSidecarBindingSnapshot ?: BootKekSidecar.requireArtifactBindingForBuild().also {
-            bootSidecarBindingSnapshot = it
-        }
-        return snapshot.copyOf()
-    }
-
     /**
      * Derive a build-local sub key from the per-build runtime resource root key
      * using HKDF-SHA256 (RFC 5869). The runtime resource key is the IKM, [label]
@@ -562,8 +544,6 @@ internal data class Vbc4BuildContext(
         // Candidate sources and pre-seal route reservations are intentionally
         // not copied across scopes; either copy could outlive the candidate
         // namespace and plaintext ownership it binds.
-        copy.bootSecretSnapshot = bootSecretSnapshot?.copyOf()
-        copy.bootSidecarBindingSnapshot = bootSidecarBindingSnapshot?.copyOf()
         // AKEN plan state is intentionally not copied: each scoped build gets
         // an independent page/evaluator graph and wipes it on scope exit.
     }
@@ -574,10 +554,6 @@ internal data class Vbc4BuildContext(
         java.util.Arrays.fill(jarLayoutDigest, 0)
         java.util.Arrays.fill(runtimeResourceKey, 0)
         runtimeKeyPartitions.wipe()
-        bootSecretSnapshot?.let { java.util.Arrays.fill(it, 0) }
-        bootSidecarBindingSnapshot?.let { java.util.Arrays.fill(it, 0) }
-        bootSecretSnapshot = null
-        bootSidecarBindingSnapshot = null
         runtimeVmCatalogPlan = null
         akenVbc4MethodCandidates.values.forEach { it.wipe() }
         akenVbc4MethodCandidates.clear()

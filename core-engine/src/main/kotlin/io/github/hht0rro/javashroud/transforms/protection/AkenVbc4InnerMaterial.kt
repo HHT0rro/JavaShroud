@@ -29,7 +29,7 @@ internal object AkenVbc4InnerMaterial {
     /**
      * Mirrors the native VBC4 build-key derivation with public compatibility
      * material, so VBC4 string constants and runtime session metadata do not
-     * require BootMaterialEnvelope state.
+     * depend on legacy boot-envelope state.
      */
     fun deriveVmBuildKey(): ByteArray {
         val cryptoDomainMaterial = copyCryptoDomainMaterial()

@@ -459,7 +459,7 @@ class Vbc4OnlyContractTest {
     }
 
     @Test
-    fun runtime_resource_codec_and_helper_do_not_retain_fixed_repository_key() {
+    fun runtime_resource_codec_and_helper_do_not_retain_fixed_repository_key_or_boot_envelope_producer() {
         val codecSource = Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/RuntimeResourceCodec.kt"))
         val helperSource = Files.readString(resolveSource("src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
         val deploymentSource = Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/EmbeddedHelperDeployment.kt"))
@@ -470,7 +470,9 @@ class Vbc4OnlyContractTest {
         assertFalse(helperSource.contains("runtimeResourceKey()"), "JniMicrokernelHelper must not assemble a globally-applicable runtime resource key")
         assertTrue(helperSource.contains("partitionResourceKey(") && helperSource.contains("Arrays.fill(resourceKey, (byte) 0)"), "JniMicrokernelHelper must assemble per-partition keys on demand and wipe temporary copies")
         assertFalse(deploymentSource.contains("injectRuntimeResourceKey"), "Helper deployment must not inject Java bytecode key domains")
-        assertTrue(deploymentSource.contains("BootMaterialEnvelope.encode"), "Helper deployment must carry partition keys only inside the authenticated boot envelope")
+        assertFalse(deploymentSource.contains("BootMaterialEnvelope"), "AKEN deployment must not emit a boot envelope producer")
+        assertFalse(deploymentSource.contains("BootKekSidecar"), "AKEN deployment must not emit a boot sidecar producer")
+        assertTrue(deploymentSource.contains("legacyBootResourcePaths"), "AKEN deployment must actively discard reintroduced legacy boot resources")
     }
     @Test
     fun production_sources_only_keep_current_vbc4_format_marker() {

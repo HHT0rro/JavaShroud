@@ -2405,7 +2405,7 @@ static uint32_t js_vbc4_rotl32(uint32_t value, int bits) { int sh = bits & 31; r
  * material after its per-page evaluator has authenticated and opened a page.
  * These are not a boot key, build root, DEK, or runtime secret; deriving them
  * from labels prevents the native artifact from carrying contiguous key-like
- * byte arrays and removes VBC4's dependency on BootMaterialEnvelope state.
+ * byte arrays and removes VBC4's dependency on legacy boot-envelope state.
  */
 static void js_aken_vbc4_copy_public_domain_material(
     const unsigned char *label,

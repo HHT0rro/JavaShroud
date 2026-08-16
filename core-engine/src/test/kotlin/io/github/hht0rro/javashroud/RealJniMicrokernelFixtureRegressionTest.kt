@@ -6,7 +6,6 @@ import io.github.hht0rro.javashroud.adapters.protocol.buildCommandRequest
 import io.github.hht0rro.javashroud.adapters.protocol.dispatchRequest
 import io.github.hht0rro.javashroud.kernel.EngineKernel
 import io.github.hht0rro.javashroud.model.config.RuleSpec
-import io.github.hht0rro.javashroud.transforms.protection.BootMaterialEnvelope
 import io.github.hht0rro.javashroud.transforms.protection.NativeKernelShellPacker
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
@@ -830,7 +829,7 @@ class RealJniMicrokernelFixtureRegressionTest {
 
     private fun decryptTestBootMaterial(jarPath: Path): ByteArray {
         val envelope = JarFile(jarPath.toFile(), false).use { jar ->
-            val entry = jar.getJarEntry(BootMaterialEnvelope.RESOURCE_PATH)
+            val entry = jar.getJarEntry("META-INF/.r/boot.dat")
                 ?: error("Missing encrypted boot material envelope")
             jar.getInputStream(entry).use { it.readBytes() }
         }
