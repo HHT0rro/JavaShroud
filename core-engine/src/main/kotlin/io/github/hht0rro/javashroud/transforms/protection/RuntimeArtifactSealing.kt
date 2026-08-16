@@ -255,8 +255,8 @@ object RuntimeArtifactSealing {
     }
 
     /**
-     * Materializes the build-only AKEN VBC4 and typed StringPage resources
-     * before native recompilation so the compiler can receive exact
+     * Materializes the build-only AKEN VBC4, typed StringPage, and encrypted
+     * ClassPage resources before native recompilation so the compiler can receive exact
      * current-page records. The returned artifact owns encrypted page-entry
      * bytes; the active build context retains only the adjacent finalization
      * layout.
