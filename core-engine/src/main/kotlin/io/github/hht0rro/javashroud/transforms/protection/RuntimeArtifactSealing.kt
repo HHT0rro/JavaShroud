@@ -131,6 +131,9 @@ object RuntimeArtifactSealing {
             context.akenStringPagePreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
                 routes.forEach { route -> add(route.futureResourcePath) }
             }
+            context.akenClassPagePreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
+                routes.forEach { route -> add(route.futureResourcePath) }
+            }
         }
         context.reserveAkenVbc4PreSealRoutes(
             occupiedEntryPaths = occupiedEntryPaths,
@@ -175,6 +178,9 @@ object RuntimeArtifactSealing {
             context.akenVbc4PreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
                 routes.forEach { route -> add(route.futureContainerPath) }
             }
+            context.akenClassPagePreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
+                routes.forEach { route -> add(route.futureResourcePath) }
+            }
         }
         context.reserveAkenStringPagePreSealRoutes(
             occupiedEntryPaths = occupiedEntryPaths,
@@ -189,6 +195,55 @@ object RuntimeArtifactSealing {
                 uniqueSealedResourceName(
                     seed = seed,
                     kind = "a4s",
+                    originalName = routeIdentity,
+                    index = ordinal,
+                    preferredName = preferred,
+                    reservedEntryNames = reservedEntryPaths,
+                )
+            },
+        )
+        return true
+    }
+
+
+
+    /**
+     * Reserves artifact-specific encrypted ClassPage resources before page
+     * materialization. Only the route-safe candidate identity and logical
+     * binding path reach this allocator; encrypted-class plaintext, handles,
+     * proofs, and evaluator material remain inside build-only owners.
+     */
+    internal fun reserveAkenClassPagePreSealRoutesIfNeeded(
+        artifact: BytecodeArtifact,
+        seed: Long,
+    ): Boolean {
+        val context = currentVbc4BuildContextOrNull() ?: return false
+        if (!context.hasAkenClassPageCandidates()) return false
+        if (context.akenClassPagePreSealRouteReservationOrNull() != null) return true
+
+        val occupiedEntryPaths = linkedSetOf<String>().apply {
+            artifact.jarEntries.forEach { entry -> add(entry.name) }
+            artifact.classArtifacts.forEach { classArtifact -> add(classArtifact.entryName) }
+            context.akenVbc4PreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
+                routes.forEach { route -> add(route.futureContainerPath) }
+            }
+            context.akenStringPagePreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
+                routes.forEach { route -> add(route.futureResourcePath) }
+            }
+        }
+        context.reserveAkenClassPagePreSealRoutes(
+            occupiedEntryPaths = occupiedEntryPaths,
+            allocator = io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPagePreSealRouteAllocator {
+                    candidate,
+                    ordinal,
+                    reservedEntryPaths,
+                ->
+                val routeIdentity =
+                    "aken-class-page|" + candidate.identityPageKey + "|" + candidate.logicalBindingPath
+                val preferred = sealedResourceName(seed, "a4c", routeIdentity, ordinal)
+                uniqueSealedResourceName(
+                    seed = seed,
+                    kind = "a4c",
                     originalName = routeIdentity,
                     index = ordinal,
                     preferredName = preferred,
@@ -264,6 +319,19 @@ object RuntimeArtifactSealing {
                         ?.hasEntryForBuild(route.futureResourcePath) == true
                     require(route.futureResourcePath !in reservedEntryNames || isPublishedStringPage) {
                         "AKEN StringPage pre-seal route collides with the sealing input namespace"
+                    }
+                    reservedEntryNames += route.futureResourcePath
+                }
+            }
+        activeContext
+            ?.akenClassPagePreSealRouteReservationOrNull()
+            ?.withRoutesForBuild { routes ->
+                routes.forEach { route ->
+                    val isPublishedClassPage = activeContext
+                        .akenVbc4FinalizationLayoutOrNull()
+                        ?.hasEntryForBuild(route.futureResourcePath) == true
+                    require(route.futureResourcePath !in reservedEntryNames || isPublishedClassPage) {
+                        "AKEN ClassPage pre-seal route collides with the sealing input namespace"
                     }
                     reservedEntryNames += route.futureResourcePath
                 }
