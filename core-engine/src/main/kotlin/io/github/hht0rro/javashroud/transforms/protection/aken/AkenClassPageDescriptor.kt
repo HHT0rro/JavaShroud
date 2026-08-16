@@ -50,12 +50,7 @@ internal class AkenClassPageDescriptor private constructor(
      */
     fun resourcePathForBuild(): String {
         requireLive()
-        val digest = descriptorDigest(DESCRIPTOR_ROUTE_DOMAIN, internalName)
-        return try {
-            descriptorRouteFromDigest(digest)
-        } finally {
-            Arrays.fill(digest, 0)
-        }
+        return resourcePathForInternalNameForBuild(internalName)
     }
 
     /**
@@ -168,6 +163,24 @@ internal class AkenClassPageDescriptor private constructor(
             } catch (error: Throwable) {
                 copies.forEach { it.wipe() }
                 throw error
+            }
+        }
+
+        /**
+         * Computes one deterministic class-local descriptor route without
+         * constructing a descriptor owner. Pre-seal route allocation uses this
+         * build-only helper to reserve the namespace before ClassPage payload
+         * paths are assigned.
+         */
+        fun resourcePathForInternalNameForBuild(internalName: String): String {
+            require(isValidAkenClassPageInternalName(internalName)) {
+                "AKEN ClassPage descriptor internal name is invalid"
+            }
+            val digest = descriptorDigest(DESCRIPTOR_ROUTE_DOMAIN, internalName)
+            return try {
+                descriptorRouteFromDigest(digest)
+            } finally {
+                Arrays.fill(digest, 0)
             }
         }
 

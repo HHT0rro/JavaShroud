@@ -116,6 +116,37 @@ object RuntimeArtifactSealing {
     }
 
     /**
+     * Reserves deterministic class-local descriptor routes in every pre-seal
+     * allocator namespace. The descriptor itself is emitted immediately before
+     * page materialization, but its route must already be unavailable to VBC4,
+     * StringPage, and ClassPage payload containers.
+     */
+    private fun reserveAkenClassPageDescriptorRoutesIfNeeded(
+        context: Vbc4BuildContext,
+        occupiedEntryPaths: MutableSet<String>,
+    ) {
+        if (!context.hasAkenClassPageDescriptorSources()) return
+        val internalNames = linkedSetOf<String>()
+        val descriptorPaths = linkedSetOf<String>()
+        context.withAkenClassPageDescriptorSourcesForBuild { sources ->
+            sources.forEach { source ->
+                internalNames += source.internalName
+                descriptorPaths +=
+                    io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPageDescriptor
+                        .resourcePathForInternalNameForBuild(source.internalName)
+            }
+        }
+        require(descriptorPaths.size == internalNames.size) {
+            "AKEN ClassPage descriptor routes collide across logical classes"
+        }
+        descriptorPaths.forEach { path ->
+            require(occupiedEntryPaths.add(path)) {
+                "AKEN ClassPage descriptor route collides with the pre-seal artifact namespace: $path"
+            }
+        }
+    }
+
+    /**
      * Reserves artifact-specific future VBC4 page-container names before native
      * recompilation. This stage deliberately emits no resource and receives only
      * scoped candidate references; page programs, handles, proofs, and evaluator
@@ -138,6 +169,7 @@ object RuntimeArtifactSealing {
             context.akenClassPagePreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
                 routes.forEach { route -> add(route.futureResourcePath) }
             }
+            reserveAkenClassPageDescriptorRoutesIfNeeded(context, this)
         }
         context.reserveAkenVbc4PreSealRoutes(
             occupiedEntryPaths = occupiedEntryPaths,
@@ -185,6 +217,7 @@ object RuntimeArtifactSealing {
             context.akenClassPagePreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
                 routes.forEach { route -> add(route.futureResourcePath) }
             }
+            reserveAkenClassPageDescriptorRoutesIfNeeded(context, this)
         }
         context.reserveAkenStringPagePreSealRoutes(
             occupiedEntryPaths = occupiedEntryPaths,
@@ -234,6 +267,7 @@ object RuntimeArtifactSealing {
             context.akenStringPagePreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
                 routes.forEach { route -> add(route.futureResourcePath) }
             }
+            reserveAkenClassPageDescriptorRoutesIfNeeded(context, this)
         }
         context.reserveAkenClassPagePreSealRoutes(
             occupiedEntryPaths = occupiedEntryPaths,

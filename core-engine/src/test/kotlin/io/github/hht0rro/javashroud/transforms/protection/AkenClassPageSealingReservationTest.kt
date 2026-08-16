@@ -2,13 +2,15 @@ package io.github.hht0rro.javashroud.transforms.protection
 
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.testAttachedArtifact
-import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHandle
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPageCandidate
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPageDescriptor
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHandle
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4LogicalMethodIdentity
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4MethodCandidate
 import java.util.Arrays
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -49,7 +51,10 @@ class AkenClassPageSealingReservationTest {
         try {
             withVbc4BuildContext(context) {
                 val scoped = requireVbc4BuildContext()
-                scoped.registerAkenClassPageCandidates(listOf(stringCandidate))
+                scoped.registerAkenClassPageCandidatesForClass(
+                    internalName = "fixture/SealingClass",
+                    candidates = listOf(stringCandidate),
+                )
                 scoped.registerAkenVbc4MethodCandidates(listOf(vbc4Candidate))
                 stringCandidate.wipe()
                 vbc4Candidate.wipe()
@@ -84,8 +89,11 @@ class AkenClassPageSealingReservationTest {
                 }
 
                 val allPaths = stringPaths + vbc4Paths
+                val descriptorPath =
+                    AkenClassPageDescriptor.resourcePathForInternalNameForBuild("fixture/SealingClass")
                 assertEquals(allPaths.size, allPaths.distinct().size)
                 assertFalse("META-INF/existing.bin" in allPaths)
+                assertFalse(descriptorPath in allPaths)
             }
         } finally {
             stringCandidate.wipe()
@@ -97,6 +105,63 @@ class AkenClassPageSealingReservationTest {
             Arrays.fill(stringHandle, 0)
             Arrays.fill(vbc4Identity, 0)
             Arrays.fill(vbc4Program, 0)
+        }
+    }
+
+    @Test
+    fun class_descriptor_route_collision_fails_before_page_route_allocation() {
+        val context = Vbc4BuildContext(
+            masterKey = ByteArray(32) { index -> (index * 5 + 1).toByte() },
+            nativeSeed = 0x414B_454E_0000_3102L,
+            jarLayoutDigest = ByteArray(32) { index -> (index * 7 + 3).toByte() },
+        )
+        val identity = ByteArray(32) { index -> (index * 11 + 5).toByte() }
+        val plaintext = "descriptor route collision".encodeToByteArray()
+        val proof = ByteArray(32) { index -> (index * 13 + 7).toByte() }
+        val handle = ByteArray(AkenHandle.ENCODED_HANDLE_SIZE) { index -> (index * 17 + 9).toByte() }
+        val internalName = "fixture/DescriptorRouteCollision"
+        val candidate = AkenClassPageCandidate.create(
+            logicalIdentity = identity,
+            plaintext = plaintext,
+            pageIndex = 0,
+            callSiteProof = proof,
+            encodedHandle = handle,
+            logicalBindingPath = "META-INF/.logical/class/descriptor-collision.bin",
+            targetPageSize = 512,
+        )
+        try {
+            withVbc4BuildContext(context) {
+                val scoped = requireVbc4BuildContext()
+                scoped.registerAkenClassPageCandidatesForClass(
+                    internalName = internalName,
+                    candidates = listOf(candidate),
+                )
+                candidate.wipe()
+                Arrays.fill(identity, 0)
+                Arrays.fill(plaintext, 0)
+                Arrays.fill(proof, 0)
+                Arrays.fill(handle, 0)
+
+                val descriptorPath =
+                    AkenClassPageDescriptor.resourcePathForInternalNameForBuild(internalName)
+                val artifact = testAttachedArtifact(
+                    classArtifacts = emptyList(),
+                    jarEntries = listOf(JarEntryData(descriptorPath, byteArrayOf(1, 2, 3))),
+                )
+                assertFailsWith<IllegalArgumentException> {
+                    RuntimeArtifactSealing.reserveAkenClassPagePreSealRoutesIfNeeded(
+                        artifact = artifact,
+                        seed = scoped.nativeSeed,
+                    )
+                }
+            }
+        } finally {
+            candidate.wipe()
+            context.wipe()
+            Arrays.fill(identity, 0)
+            Arrays.fill(plaintext, 0)
+            Arrays.fill(proof, 0)
+            Arrays.fill(handle, 0)
         }
     }
 }

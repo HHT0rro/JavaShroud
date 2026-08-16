@@ -3,11 +3,13 @@ package io.github.hht0rro.javashroud.transforms.protection
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.testAttachedArtifact
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenArtifactEntry
-import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHandle
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPageCandidate
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPageDescriptor
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHandle
 import java.util.Arrays
 import java.util.Random
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -24,6 +26,8 @@ class AkenClassPageProductionMaterializerTest {
         val plaintext = "production typed class materialization".encodeToByteArray()
         val proof = ByteArray(32) { index -> (index * 17 + 7).toByte() }
         val handle = ByteArray(AkenHandle.ENCODED_HANDLE_SIZE) { index -> (index * 19 + 9).toByte() }
+        val expectedProof = proof.copyOf()
+        val expectedHandle = handle.copyOf()
         val candidate = AkenClassPageCandidate.create(
             logicalIdentity = identity,
             plaintext = plaintext,
@@ -69,8 +73,35 @@ class AkenClassPageProductionMaterializerTest {
                     }
                 }.single()
 
+                val descriptorPath =
+                    AkenClassPageDescriptor.resourcePathForInternalNameForBuild(
+                        "fixture/ProductionMaterializer",
+                    )
                 assertTrue(output.jarEntries.any { entry -> entry.name == routePath })
-                assertEquals(input.jarEntries.size + 1, output.jarEntries.size)
+                assertTrue(output.jarEntries.any { entry -> entry.name == descriptorPath })
+                assertEquals(input.jarEntries.size + 2, output.jarEntries.size)
+
+                val descriptorBytes = output.jarEntries.single { entry -> entry.name == descriptorPath }.bytes.copyOf()
+                var descriptor: AkenClassPageDescriptor? = null
+                try {
+                    descriptor = AkenClassPageDescriptor.decodeForBuild(descriptorBytes)
+                    assertEquals("fixture/ProductionMaterializer", descriptor.internalName)
+                    descriptor.withPagesForBuild { pages ->
+                        assertEquals(1, pages.size)
+                        val descriptorHandle = pages.single().copyEncodedHandleForBuild()
+                        val descriptorProof = pages.single().copyCallSiteProofForBuild()
+                        try {
+                            assertContentEquals(expectedHandle, descriptorHandle)
+                            assertContentEquals(expectedProof, descriptorProof)
+                        } finally {
+                            Arrays.fill(descriptorHandle, 0)
+                            Arrays.fill(descriptorProof, 0)
+                        }
+                    }
+                } finally {
+                    descriptor?.wipe()
+                    Arrays.fill(descriptorBytes, 0)
+                }
 
                 val layout = scoped.requireAkenVbc4FinalizationLayout()
                 assertTrue(
@@ -99,6 +130,18 @@ class AkenClassPageProductionMaterializerTest {
                         assertTrue(sources.single().matchesBindingForBuild(bindings.single()))
                     }
                 }
+                val descriptorTamperedEntries = output.jarEntries.map { entry ->
+                    val bytes = entry.bytes.copyOf()
+                    try {
+                        if (entry.name == descriptorPath) {
+                            bytes[0] = (bytes[0].toInt() xor 0x4D).toByte()
+                        }
+                        AkenArtifactEntry(entry.name, bytes)
+                    } finally {
+                        Arrays.fill(bytes, 0)
+                    }
+                }
+                assertFalse(layout.verifyWriterEquivalentArtifactForBuild(descriptorTamperedEntries))
             }
         } finally {
             candidate.wipe()
@@ -107,6 +150,8 @@ class AkenClassPageProductionMaterializerTest {
             Arrays.fill(plaintext, 0)
             Arrays.fill(proof, 0)
             Arrays.fill(handle, 0)
+            Arrays.fill(expectedProof, 0)
+            Arrays.fill(expectedHandle, 0)
         }
     }
 }

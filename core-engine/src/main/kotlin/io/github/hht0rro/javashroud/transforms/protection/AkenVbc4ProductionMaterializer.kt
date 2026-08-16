@@ -4,12 +4,15 @@ import io.github.hht0rro.javashroud.artifact.resourceCount
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenArtifactEntry
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPageDescriptor
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPageDescriptorPage
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenPendingClassPage
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenPendingStringPage
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4FinalizationLayout
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4PendingPage
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4PendingPageBatch
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4PendingPagePlanner
+import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Arrays
 
@@ -51,7 +54,11 @@ internal object AkenVbc4ProductionMaterializer {
         } else {
             null
         }
-        val fixedEntries = fixedEntriesForArtifact(artifact)
+        val artifactWithClassDescriptors = materializeClassPageDescriptorsIfNeeded(
+            artifact = artifact,
+            context = context,
+        )
+        val fixedEntries = fixedEntriesForArtifact(artifactWithClassDescriptors)
         val batches = ArrayList<AkenVbc4PendingPageBatch>()
         val stringPages = ArrayList<AkenPendingStringPage>()
         val classPages = ArrayList<AkenPendingClassPage>()
@@ -139,7 +146,7 @@ internal object AkenVbc4ProductionMaterializer {
             }
 
             val finalized = checkNotNull(layout)
-            val existingNames = artifact.jarEntries.mapTo(HashSet()) { it.name }
+            val existingNames = artifactWithClassDescriptors.jarEntries.mapTo(HashSet()) { it.name }
             val pageEntries = ArrayList<JarEntryData>()
             finalized.entriesForBuild()
                 .filter { entry -> entry.name !in existingNames }
@@ -150,14 +157,23 @@ internal object AkenVbc4ProductionMaterializer {
             require(pageEntries.isNotEmpty()) {
                 "AKEN production materialization emitted no new page entries"
             }
-            pageEntriesTransferred = true
-            context.publishAkenVbc4FinalizationLayout(finalized)
-            return artifact.copy(
-                jarEntries = artifact.jarEntries + pageEntries,
-                analysisSummary = artifact.analysisSummary.copy(
-                    resourceCount = resourceCount(artifact.jarEntries + pageEntries, artifact.classArtifacts.size),
+            val output = artifactWithClassDescriptors.copy(
+                jarEntries = artifactWithClassDescriptors.jarEntries + pageEntries,
+                analysisSummary = artifactWithClassDescriptors.analysisSummary.copy(
+                    resourceCount = resourceCount(
+                        artifactWithClassDescriptors.jarEntries + pageEntries,
+                        artifactWithClassDescriptors.classArtifacts.size,
+                    ),
                 ),
             )
+            verifyClassPageDescriptorsForBuild(
+                artifact = output,
+                context = context,
+                layout = finalized,
+            )
+            pageEntriesTransferred = true
+            context.publishAkenVbc4FinalizationLayout(finalized)
+            return output
         } catch (error: Throwable) {
             layout?.wipe()
             throw error
@@ -227,6 +243,221 @@ internal object AkenVbc4ProductionMaterializer {
         return artifact.jarEntries.map { entry ->
             val bytes = classesByEntry[entry.name]?.bytes ?: entry.bytes
             AkenArtifactEntry(entry.name, bytes)
+        }
+    }
+
+    /**
+     * Emits deterministic per-class descriptor resources before the canonical
+     * AKEN commitment is reserved. These resources are class-local inputs to
+     * the typed runtime loader, not a central catalog: each contains only its
+     * own page handles and proofs.
+     */
+    private fun materializeClassPageDescriptorsIfNeeded(
+        artifact: BytecodeArtifact,
+        context: Vbc4BuildContext,
+    ): BytecodeArtifact {
+        if (!context.hasAkenClassPageDescriptorSources()) return artifact
+        val occupiedEntryPaths = linkedSetOf<String>().apply {
+            artifact.jarEntries.forEach { entry -> add(entry.name) }
+            artifact.classArtifacts.forEach { classArtifact -> add(classArtifact.entryName) }
+            context.akenVbc4PreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
+                routes.forEach { route -> add(route.futureContainerPath) }
+            }
+            context.akenStringPagePreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
+                routes.forEach { route -> add(route.futureResourcePath) }
+            }
+            context.akenClassPagePreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
+                routes.forEach { route -> add(route.futureResourcePath) }
+            }
+        }
+        val descriptorEntries = ArrayList<JarEntryData>()
+        var transferred = false
+        try {
+            context.withAkenClassPageCandidatesForBuild { candidates ->
+                val candidatesByPageKey =
+                    LinkedHashMap<String, io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPageCandidate>(
+                        candidates.size,
+                    )
+                candidates.forEach { candidate ->
+                    val pageKey = candidate.identityPageKeyForBuild()
+                    require(candidatesByPageKey.put(pageKey, candidate) == null) {
+                        "AKEN ClassPage descriptor emission found duplicate candidate identity"
+                    }
+                }
+                context.withAkenClassPageDescriptorSourcesForBuild { sources ->
+                    sources
+                        .groupBy { source -> source.internalName }
+                        .toSortedMap()
+                        .forEach { (internalName, classSources) ->
+                            val descriptorPath =
+                                AkenClassPageDescriptor.resourcePathForInternalNameForBuild(internalName)
+                            require(occupiedEntryPaths.add(descriptorPath)) {
+                                "AKEN ClassPage descriptor route collides with the materialization namespace: " +
+                                    descriptorPath
+                            }
+                            val descriptorPages = ArrayList<AkenClassPageDescriptorPage>(classSources.size)
+                            var descriptor: AkenClassPageDescriptor? = null
+                            try {
+                                classSources
+                                    .sortedBy { source -> source.pageIndex }
+                                    .forEach { source ->
+                                        val pageKey = source.identityPageKeyForBuild()
+                                        val candidate = candidatesByPageKey[pageKey]
+                                            ?: error(
+                                                "AKEN ClassPage descriptor source has no registered candidate for " +
+                                                    internalName,
+                                            )
+                                        require(candidate.pageIndex == source.pageIndex) {
+                                            "AKEN ClassPage descriptor source page index drifted from its candidate"
+                                        }
+                                        var handle: ByteArray? = null
+                                        var proof: ByteArray? = null
+                                        try {
+                                            handle = candidate.copyEncodedHandleForBuild()
+                                            proof = candidate.copyCallSiteProofForBuild()
+                                            descriptorPages += AkenClassPageDescriptorPage.create(
+                                                pageIndex = source.pageIndex,
+                                                encodedHandle = handle,
+                                                callSiteProof = proof,
+                                            )
+                                        } finally {
+                                            handle?.let { Arrays.fill(it, 0) }
+                                            proof?.let { Arrays.fill(it, 0) }
+                                        }
+                                    }
+                                descriptor = AkenClassPageDescriptor.create(
+                                    internalName = internalName,
+                                    pages = descriptorPages,
+                                )
+                                require(descriptor.resourcePathForBuild() == descriptorPath) {
+                                    "AKEN ClassPage descriptor route drifted from its deterministic binding"
+                                }
+                                descriptorEntries += JarEntryData(
+                                    name = descriptorPath,
+                                    bytes = descriptor.copyEncodedForBuild(),
+                                )
+                            } finally {
+                                descriptor?.wipe()
+                                descriptorPages.forEach { page -> page.wipe() }
+                            }
+                        }
+                }
+            }
+            require(descriptorEntries.isNotEmpty()) {
+                "AKEN ClassPage descriptor sources did not emit any descriptor resources"
+            }
+            transferred = true
+            return artifact.copy(
+                jarEntries = artifact.jarEntries + descriptorEntries,
+                analysisSummary = artifact.analysisSummary.copy(
+                    resourceCount = resourceCount(
+                        artifact.jarEntries + descriptorEntries,
+                        artifact.classArtifacts.size,
+                    ),
+                ),
+            )
+        } finally {
+            if (!transferred) {
+                descriptorEntries.forEach { entry -> Arrays.fill(entry.bytes, 0) }
+            }
+        }
+    }
+
+    /**
+     * Reconstructs every class-local descriptor from the output artifact and
+     * binds each record to one finalized ClassPage. This catches descriptor
+     * emission drift before native compilation consumes the layout.
+     */
+    private fun verifyClassPageDescriptorsForBuild(
+        artifact: BytecodeArtifact,
+        context: Vbc4BuildContext,
+        layout: AkenVbc4FinalizationLayout,
+    ) {
+        if (!context.hasAkenClassPageDescriptorSources()) return
+        val entriesByName = LinkedHashMap<String, JarEntryData>()
+        artifact.jarEntries.forEach { entry ->
+            require(entriesByName.put(entry.name, entry) == null) {
+                "AKEN ClassPage descriptor verification found duplicate artifact entries"
+            }
+        }
+        context.withAkenClassPageDescriptorSourcesForBuild { sources ->
+            layout.withClassPageBindingsForBuild { bindings ->
+                val bindingsByPageKey = bindings.associateBy { binding -> binding.identityPageKeyForBuild() }
+                require(bindingsByPageKey.size == bindings.size) {
+                    "AKEN ClassPage descriptor verification found duplicate final bindings"
+                }
+                val matchedSourceKeys = linkedSetOf<String>()
+                sources
+                    .groupBy { source -> source.internalName }
+                    .toSortedMap()
+                    .forEach { (internalName, classSources) ->
+                        val descriptorPath =
+                            AkenClassPageDescriptor.resourcePathForInternalNameForBuild(internalName)
+                        val entry = entriesByName[descriptorPath]
+                            ?: error("AKEN ClassPage descriptor resource is missing: " + descriptorPath)
+                        val encoded = entry.bytes.copyOf()
+                        var descriptor: AkenClassPageDescriptor? = null
+                        try {
+                            descriptor = AkenClassPageDescriptor.decodeForBuild(encoded)
+                            require(descriptor.internalName == internalName) {
+                                "AKEN ClassPage descriptor internal name drifted from its source"
+                            }
+                            descriptor.withPagesForBuild { descriptorPages ->
+                                val expectedSources = classSources.sortedBy { source -> source.pageIndex }
+                                require(descriptorPages.size == expectedSources.size) {
+                                    "AKEN ClassPage descriptor page count drifted from final bindings"
+                                }
+                                expectedSources.forEach { source ->
+                                    val pageKey = source.identityPageKeyForBuild()
+                                    val binding = bindingsByPageKey[pageKey]
+                                        ?: error(
+                                            "AKEN ClassPage descriptor source has no finalized binding for " +
+                                                internalName,
+                                        )
+                                    require(source.matchesBindingForBuild(binding)) {
+                                        "AKEN ClassPage descriptor source drifted from its finalized binding"
+                                    }
+                                    val descriptorPage = descriptorPages.singleOrNull { page ->
+                                        page.pageIndex == source.pageIndex
+                                    } ?: error(
+                                        "AKEN ClassPage descriptor is missing page " +
+                                            source.pageIndex +
+                                            " for " +
+                                            internalName,
+                                    )
+                                    var descriptorHandle: ByteArray? = null
+                                    var descriptorProof: ByteArray? = null
+                                    var bindingHandle: ByteArray? = null
+                                    var bindingProof: ByteArray? = null
+                                    try {
+                                        descriptorHandle = descriptorPage.copyEncodedHandleForBuild()
+                                        descriptorProof = descriptorPage.copyCallSiteProofForBuild()
+                                        bindingHandle = binding.copyEncodedHandleForBuild()
+                                        bindingProof = binding.copyCallSiteProofForBuild()
+                                        require(
+                                            MessageDigest.isEqual(descriptorHandle, bindingHandle) &&
+                                                MessageDigest.isEqual(descriptorProof, bindingProof),
+                                        ) {
+                                            "AKEN ClassPage descriptor page binding drifted from final materialization"
+                                        }
+                                    } finally {
+                                        descriptorHandle?.let { Arrays.fill(it, 0) }
+                                        descriptorProof?.let { Arrays.fill(it, 0) }
+                                        bindingHandle?.let { Arrays.fill(it, 0) }
+                                        bindingProof?.let { Arrays.fill(it, 0) }
+                                    }
+                                    matchedSourceKeys += pageKey
+                                }
+                            }
+                        } finally {
+                            descriptor?.wipe()
+                            Arrays.fill(encoded, 0)
+                        }
+                    }
+                require(matchedSourceKeys.size == sources.size) {
+                    "AKEN ClassPage descriptor verification did not match every class-local source"
+                }
+            }
         }
     }
 }
