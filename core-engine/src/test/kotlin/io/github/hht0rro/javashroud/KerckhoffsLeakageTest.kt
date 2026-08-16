@@ -4,8 +4,10 @@ import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.analysis.TargetSelector
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing
 import io.github.hht0rro.javashroud.transforms.protection.applyClassEncryptionLoader
 import io.github.hht0rro.javashroud.transforms.protection.deriveClassEncryptionKey
+import io.github.hht0rro.javashroud.transforms.protection.requireVbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import java.security.SecureRandom
 import java.util.Base64
@@ -37,66 +39,101 @@ class KerckhoffsLeakageTest {
     }
 
     @Test
-    fun encrypted_class_manifest_contains_no_reusable_symmetric_key() {
+    fun encrypted_class_pages_have_no_legacy_manifest_or_reusable_build_root() {
         val internalName = "leak/Target"
         val classBytes = buildSimpleClass(internalName)
         val artifact = testAttachedArtifact(
             classArtifacts = listOf(testClassArtifact(internalName = internalName, bytes = classBytes)),
         )
         val context = freshContext()
+        try {
+            withVbc4BuildContext(context) {
+                val transformed = applyClassEncryptionLoader(
+                    artifact = artifact,
+                    ruleMatches = listOf(ruleMatchFor(internalName)),
+                    params = mapOf("encryptionStrategy" to "aes-256", "keyMode" to "per-class"),
+                )
+                assertTrue(
+                    transformed.artifact.jarEntries.none { entry -> entry.name.startsWith("__jse/") },
+                    "AKEN transform must not emit the retired class manifest/resource namespace",
+                )
 
-        val result = withVbc4BuildContext(context) {
-            applyClassEncryptionLoader(
-                artifact = artifact,
-                ruleMatches = listOf(ruleMatchFor(internalName)),
-                params = mapOf("encryptionStrategy" to "aes-256", "keyMode" to "per-class"),
-            )
+                val scoped = requireVbc4BuildContext()
+                assertTrue(scoped.hasAkenClassPageDescriptorSources())
+                assertTrue(
+                    RuntimeArtifactSealing.reserveAkenClassPagePreSealRoutesIfNeeded(
+                        artifact = transformed.artifact,
+                        seed = scoped.nativeSeed,
+                    ),
+                )
+                val materialized = RuntimeArtifactSealing.materializeAkenVbc4PagesForNativeCompilation(
+                    artifact = transformed.artifact,
+                    seed = scoped.nativeSeed,
+                )
+                assertTrue(
+                    materialized.jarEntries.any { entry ->
+                        entry.name.startsWith("META-INF/.a4/") ||
+                            entry.name.startsWith("META-INF/.r4/") ||
+                            entry.name.startsWith("assets/.a4/") ||
+                            entry.name.startsWith("META-INF/.j4/")
+                    },
+                    "AKEN materialization must emit page-local resources",
+                )
+                assertFalse(
+                    materialized.jarEntries.any { entry -> entry.name.startsWith("__jse/") },
+                    "AKEN materialization must not recreate the legacy manifest/resource namespace",
+                )
+
+                val descriptorPath =
+                    io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPageDescriptor
+                        .resourcePathForInternalNameForBuild(internalName)
+                val descriptorEntry = materialized.jarEntries.singleOrNull { entry -> entry.name == descriptorPath }
+                assertNotNull(descriptorEntry, "One class-local descriptor must be emitted")
+                val descriptorBytes = descriptorEntry.bytes.copyOf()
+                var descriptor: io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPageDescriptor? = null
+                try {
+                    descriptor =
+                        io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPageDescriptor
+                            .decodeForBuild(descriptorBytes)
+                    assertEquals(internalName, descriptor.internalName)
+                    assertEquals(1, descriptor.pageCount)
+                } finally {
+                    descriptor?.wipe()
+                    java.util.Arrays.fill(descriptorBytes, 0)
+                }
+
+                val allArtifactBytes = materialized.jarEntries.map { entry -> entry.bytes } +
+                    materialized.classArtifacts.map { classArtifact -> classArtifact.bytes }
+                val rootCopy = scoped.masterKey.copyOf()
+                try {
+                    assertFalse(
+                        allArtifactBytes.any { bytes -> containsSubsequence(bytes, rootCopy) },
+                        "Build authority must not be copied into class/page artifact bytes",
+                    )
+                } finally {
+                    java.util.Arrays.fill(rootCopy, 0)
+                }
+
+                val layout = scoped.requireAkenVbc4FinalizationLayout()
+                assertTrue(
+                    layout.verifyWriterEquivalentArtifactForBuild(
+                        layout.entriesForBuild().map { entry ->
+                            val bytes = entry.copyBytesForBuild()
+                            try {
+                                io.github.hht0rro.javashroud.transforms.protection.aken.AkenArtifactEntry(
+                                    entry.name,
+                                    bytes,
+                                )
+                            } finally {
+                                java.util.Arrays.fill(bytes, 0)
+                            }
+                        },
+                    ),
+                )
+            }
+        } finally {
+            context.wipe()
         }
-
-        val manifest = result.artifact.jarEntries.firstOrNull { it.name == "__jse/index.tab" }
-        assertNotNull(manifest, "Encryption manifest must be present")
-        val resourceEntry = result.artifact.jarEntries.firstOrNull { it.name == "__jse/$internalName.enc" }
-        assertNotNull(resourceEntry, "Encrypted class resource must be present")
-
-        val lines = String(manifest.bytes, Charsets.UTF_8).lines().filter { it.isNotBlank() }
-        assertEquals(1, lines.size, "One manifest entry expected")
-        val cols = lines[0].split('\t')
-        val keyMetadata = cols[2]
-        val parts = keyMetadata.split(':')
-        assertEquals(6, parts.size, "Metadata must be v2:strategy:keyId:salt:nonce:aadHash (6 parts, no raw key)")
-        assertEquals("v2", parts[0])
-        assertEquals("aes-256", parts[1])
-
-        val keyId = Base64.getDecoder().decode(parts[2])
-        val salt = Base64.getDecoder().decode(parts[3])
-        val nonce = Base64.getDecoder().decode(parts[4])
-        val aadHash = Base64.getDecoder().decode(parts[5])
-        assertEquals(8, keyId.size, "keyId is an 8-byte non-secret id")
-        assertEquals(16, salt.size, "salt is 16 bytes")
-        assertEquals(12, nonce.size, "AES-GCM nonce is 12 bytes")
-        assertEquals(32, aadHash.size, "AAD hash is SHA-256")
-
-        // Re-derive the real AES key the same way the runtime would.
-        val derivedKey = deriveClassEncryptionKey(context, "aes-256", keyId, salt)
-        assertEquals(32, derivedKey.size)
-
-        // RED-LINE: none of the Base64 fields in the manifest may equal the real
-        // key, i.e. the key must not be extractable from the artifact alone.
-        val derivedB64 = Base64.getEncoder().encodeToString(derivedKey)
-        for (field in parts.drop(1)) {
-            assertTrue(field != derivedB64, "Manifest field must not equal the real AES key")
-        }
-        // The raw key bytes must not appear anywhere in the manifest bytes.
-        assertFalse(containsSubsequence(manifest.bytes, derivedKey), "Raw AES key bytes must not be present in manifest")
-
-        // Round-trip: the metadata + per-build root recompute the key and decrypt
-        // the resource back to valid class bytecode (0xCAFEBABE).
-        val aad = "javashroud:class-encryption:v2:$internalName:__jse/$internalName.enc:aes-256:per-class:sealed-runtime".toByteArray(Charsets.UTF_8)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(derivedKey, "AES"), GCMParameterSpec(128, nonce))
-        cipher.updateAAD(aad)
-        val decrypted = cipher.doFinal(resourceEntry.bytes)
-        assertEquals(0xCAFEBABE.toInt(), readInt(decrypted, 0), "Decrypted resource must be valid class bytecode")
     }
 
     private fun readInt(bytes: ByteArray, offset: Int): Int =

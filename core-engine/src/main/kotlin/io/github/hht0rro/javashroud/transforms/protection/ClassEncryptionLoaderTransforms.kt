@@ -3,12 +3,13 @@ package io.github.hht0rro.javashroud.transforms.protection
 import io.github.hht0rro.javashroud.analysis.eligibleClassNamesForAction
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
-import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.transforms.TransformResult
 import io.github.hht0rro.javashroud.transforms.reanalyzedClassArtifact
 import io.github.hht0rro.javashroud.transforms.unchangedTransformResult
 import io.github.hht0rro.javashroud.transforms.updatedArtifactTransformResult
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPageCandidate
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHandle
 import org.objectweb.asm.*
 import org.objectweb.asm.tree.ClassNode
 import org.objectweb.asm.tree.FieldInsnNode
@@ -24,17 +25,6 @@ import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
-/**
- * Class Encryption Loader transform.
- *
- * Encrypts selected .class bodies and stores them as JAR resource entries.
- * Replaces the original class with a stub that preserves the FULL class
- * structure (superclass, interfaces, fields, metadata) and delegates all
- * method calls to the real class loaded at runtime via a child ClassLoader.
- *
- * Uses visitor-based transform to preserve all metadata (InnerClasses,
- * SourceFile, etc.) automatically.
- */
 fun applyClassEncryptionLoader(
     artifact: BytecodeArtifact,
     ruleMatches: List<RuleMatch>,
@@ -51,92 +41,296 @@ fun applyClassEncryptionLoader(
         .toSet()
     val encryptedClassNames = pruneUnsafePackagePrivateLoaderSplits(artifact, encryptionCandidates)
 
+    // Retain the public configuration validation during the protocol
+    // transition. AKEN v4 owns actual page AEAD and does not derive a class
+    // root key from either setting.
     val strategy = (params["encryptionStrategy"] as? String) ?: "aes-128"
     val supportedStrategies = setOf("aes-128", "aes-256")
-    require(strategy in supportedStrategies) { "class-encryption-loader encryptionStrategy '$strategy' is not supported; supported values: ${supportedStrategies.joinToString("", "")}" }
+    require(strategy in supportedStrategies) {
+        "class-encryption-loader encryptionStrategy '" +
+            strategy +
+            "' is not supported; supported values: " +
+            supportedStrategies.joinToString(", ")
+    }
     val keyMode = (params["keyMode"] as? String) ?: "per-class"
     val supportedKeyModes = setOf("per-class", "global")
-    require(keyMode in supportedKeyModes) { "class-encryption-loader keyMode '$keyMode' is not supported; supported values: ${supportedKeyModes.joinToString("", "")}" }
+    require(keyMode in supportedKeyModes) {
+        "class-encryption-loader keyMode '" +
+            keyMode +
+            "' is not supported; supported values: " +
+            supportedKeyModes.joinToString(", ")
+    }
     val seed = (params["seed"] as? Int)?.toLong() ?: (params["seed"] as? Long)
-
-    val random = seed?.let { SecureRandom(it.toString().toByteArray()) } ?: SecureRandom()
-    // Per-build root key: every class AES key is HKDF-derived from this root at
-    // build time and recomputed (never stored) at runtime. No raw symmetric key
-    // is ever written into the artifact.
+    val random = seed?.let { configuredSeed ->
+        SecureRandom(configuredSeed.toString().toByteArray(Charsets.UTF_8))
+    } ?: SecureRandom()
     val buildContext = requireVbc4BuildContext()
-    val globalKeyId = if (keyMode == "global") generateKeyId(random) else null
-    val globalSalt = if (keyMode == "global") generateSalt(random) else null
-    val globalNonce = if (keyMode == "global") generateNonce(random) else null
-
     val nameGen = NameGenerator(random)
-    val newResources = mutableListOf<JarEntryData>()
-    // Central key manifest: maps every encrypted class to its resource path and
-    // key metadata. The runtime loader reads this so a single shared classloader
-    // can decrypt-and-define ANY encrypted class (including sibling/inner classes
-    // discovered through references), keeping them in one loader namespace.
-    val manifestLines = mutableListOf<String>()
+    val candidateBatches = LinkedHashMap<String, List<AkenClassPageCandidate>>()
     var classCount = 0
 
-    val updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
-        if (!encryptedClassNames.contains(classArtifact.summary.internalName)) {
-            return@map classArtifact
+    try {
+        val updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
+            if (!encryptedClassNames.contains(classArtifact.summary.internalName)) {
+                return@map classArtifact
+            }
+
+            val className = classArtifact.summary.internalName
+            val classCandidates = createAkenClassPageCandidates(
+                classInternalName = className,
+                classBytes = classArtifact.bytes,
+                random = random,
+            )
+            try {
+                check(candidateBatches.put(className, classCandidates) == null) {
+                    "AKEN ClassPage candidates were generated more than once for " + className
+                }
+            } catch (error: Throwable) {
+                classCandidates.forEach { candidate -> candidate.wipe() }
+                throw error
+            }
+            classCount++
+
+            // Interfaces enter the class-local descriptor map so a real class
+            // defined by the shared child loader can resolve them through the
+            // typed ClassPage bridge. They keep their original bytecode because
+            // an interface cannot be proxied by a delegating instance stub.
+            if (classArtifact.summary.accessFlags and Opcodes.ACC_INTERFACE != 0) {
+                return@map classArtifact
+            }
+
+            val stubBytes = generateClassStubVisitor(
+                classBytes = classArtifact.bytes,
+                binaryClassName = className.replace('/', '.'),
+                nameGen = nameGen,
+            )
+            reanalyzedClassArtifact(classArtifact, stubBytes)
         }
 
+        if (classCount == 0) return unchangedTransformResult(artifact)
 
-        val className = classArtifact.summary.internalName
-        val classKeyId = globalKeyId ?: generateKeyId(random)
-        val classSalt = globalSalt ?: generateSalt(random)
-        val classNonce = globalNonce ?: generateNonce(random)
-        val classKey = deriveClassEncryptionKey(buildContext, strategy, classKeyId, classSalt)
-        val resourcePath = "__jse/${className}.enc"
-        val aad = classEncryptionAad(className, resourcePath, strategy, keyMode)
+        candidateBatches
+            .toSortedMap()
+            .forEach { (internalName, candidates) ->
+                buildContext.registerAkenClassPageCandidatesForClass(
+                    internalName = internalName,
+                    candidates = candidates,
+                )
+            }
 
-        // Encrypt the original class bytes
-        val encryptedBytes = encryptBytes(classArtifact.bytes, strategy, classKey, classNonce, aad)
-        java.util.Arrays.fill(classKey, 0)
-        newResources.add(JarEntryData(name = resourcePath, bytes = encryptedBytes))
-
-        val keyMetadata = buildKeyMetadata(strategy, classKeyId, classSalt, classNonce, aad)
-        // internalName \t resourcePath \t keyMetadata
-        manifestLines.add("$className\t$resourcePath\t$keyMetadata")
-
-        classCount++
-
-        // Interfaces/annotations also enter the manifest so encrypted package siblings
-        // resolve them through the shared loader and keep package-private access valid.
-        if (classArtifact.summary.accessFlags and Opcodes.ACC_INTERFACE != 0) {
-            return@map classArtifact
-        }
-
-        // Generate stub using visitor pattern - preserves all metadata
-        val stubBytes = generateClassStubVisitor(
-            classBytes = classArtifact.bytes,
-            resourcePath = resourcePath,
-            keyMetadata = keyMetadata,
-            random = random,
-            nameGen = nameGen,
+        return updatedArtifactTransformResult(
+            artifact = artifact,
+            updatedClassArtifacts = updatedClassArtifacts,
+            transformedClassCount = classCount,
+            transformedMemberCount = classCount,
         )
-
-        reanalyzedClassArtifact(classArtifact, stubBytes)
+    } finally {
+        candidateBatches.values.flatten().forEach { candidate -> candidate.wipe() }
     }
-
-    if (classCount == 0) return unchangedTransformResult(artifact)
-
-    // Emit the central manifest as a JAR resource consumed by the runtime helper.
-    val manifestBytes = manifestLines.joinToString("\n").toByteArray(Charsets.UTF_8)
-    newResources.add(JarEntryData(name = "__jse/index.tab", bytes = manifestBytes))
-
-    val updatedArtifact = artifact.copy(
-        jarEntries = artifact.jarEntries + newResources,
-    )
-
-    return updatedArtifactTransformResult(
-        artifact = updatedArtifact,
-        updatedClassArtifacts = updatedClassArtifacts,
-        transformedClassCount = classCount,
-        transformedMemberCount = classCount,
-    )
 }
+
+
+private const val AKEN_CLASS_PAGE_BUILD_NONCE_SIZE = 32
+private val AKEN_CLASS_PAGE_TARGET_SIZES = intArrayOf(512, 1024, 1536, 2048)
+private val AKEN_CLASS_PAGE_IDENTITY_DOMAIN =
+    "AKEN-v4-class-page-identity-v1".toByteArray(Charsets.US_ASCII)
+private val AKEN_CLASS_PAGE_HANDLE_DOMAIN =
+    "AKEN-v4-class-page-handle-v1".toByteArray(Charsets.US_ASCII)
+private val AKEN_CLASS_PAGE_PROOF_DOMAIN =
+    "AKEN-v4-class-page-proof-v1".toByteArray(Charsets.US_ASCII)
+private val AKEN_CLASS_PAGE_PATH_DOMAIN =
+    "AKEN-v4-class-page-logical-path-v1".toByteArray(Charsets.US_ASCII)
+private val AKEN_CLASS_PAGE_PATH_ROOTS = arrayOf(
+    "META-INF/.logical/cp",
+    "META-INF/.r4/cp",
+    "assets/.logical/cp",
+)
+private val AKEN_CLASS_PAGE_PATH_SUFFIXES = arrayOf(".bin", ".dat", ".p")
+
+/**
+ * Partitions one original class definition into independently bound AKEN
+ * ClassPages. Every page receives its own identity, handle, proof, layout
+ * variant, and target size; no class-wide AES key, manifest record, or
+ * resource-path/key-metadata pair is produced.
+ */
+private fun createAkenClassPageCandidates(
+    classInternalName: String,
+    classBytes: ByteArray,
+    random: SecureRandom,
+): List<AkenClassPageCandidate> {
+    require(classBytes.isNotEmpty()) { "AKEN ClassPage source bytes must not be empty" }
+    val candidates = ArrayList<AkenClassPageCandidate>()
+    var offset = 0
+    var pageIndex = 0
+    try {
+        while (offset < classBytes.size) {
+            val targetPageSize = AKEN_CLASS_PAGE_TARGET_SIZES[random.nextInt(AKEN_CLASS_PAGE_TARGET_SIZES.size)]
+            val pageLength = minOf(targetPageSize, classBytes.size - offset)
+            val buildNonce = ByteArray(AKEN_CLASS_PAGE_BUILD_NONCE_SIZE).also(random::nextBytes)
+            var logicalIdentity: ByteArray? = null
+            var plaintext: ByteArray? = null
+            var encodedHandle: ByteArray? = null
+            var callSiteProof: ByteArray? = null
+            var candidate: AkenClassPageCandidate? = null
+            try {
+                logicalIdentity = deriveAkenClassPageIdentity(
+                    classInternalName = classInternalName,
+                    pageIndex = pageIndex,
+                    pageOffset = offset,
+                    pageLength = pageLength,
+                    buildNonce = buildNonce,
+                )
+                encodedHandle = deriveAkenClassPageHandle(logicalIdentity, buildNonce)
+                val logicalBindingPath = akenClassPageLogicalBindingPath(logicalIdentity, encodedHandle)
+                callSiteProof = deriveAkenClassPageCallSiteProof(
+                    logicalIdentity = logicalIdentity,
+                    encodedHandle = encodedHandle,
+                    pageIndex = pageIndex,
+                    logicalBindingPath = logicalBindingPath,
+                )
+                plaintext = classBytes.copyOfRange(offset, offset + pageLength)
+                candidate = AkenClassPageCandidate.create(
+                    logicalIdentity = logicalIdentity,
+                    plaintext = plaintext,
+                    pageIndex = pageIndex,
+                    callSiteProof = callSiteProof,
+                    encodedHandle = encodedHandle,
+                    logicalBindingPath = logicalBindingPath,
+                    targetPageSize = targetPageSize,
+                    random = random,
+                )
+                candidates += candidate
+                candidate = null
+                offset += pageLength
+                pageIndex++
+            } finally {
+                candidate?.wipe()
+                java.util.Arrays.fill(buildNonce, 0)
+                logicalIdentity?.let { value -> java.util.Arrays.fill(value, 0) }
+                plaintext?.let { value -> java.util.Arrays.fill(value, 0) }
+                encodedHandle?.let { value -> java.util.Arrays.fill(value, 0) }
+                callSiteProof?.let { value -> java.util.Arrays.fill(value, 0) }
+            }
+        }
+        return candidates
+    } catch (error: Throwable) {
+        candidates.forEach { candidate -> candidate.wipe() }
+        throw error
+    }
+}
+
+private fun deriveAkenClassPageIdentity(
+    classInternalName: String,
+    pageIndex: Int,
+    pageOffset: Int,
+    pageLength: Int,
+    buildNonce: ByteArray,
+): ByteArray = MessageDigest.getInstance("SHA-256").apply {
+    update(AKEN_CLASS_PAGE_IDENTITY_DOMAIN)
+    updateAkenClassPageString(classInternalName)
+    updateAkenClassPageInt(pageIndex)
+    updateAkenClassPageInt(pageOffset)
+    updateAkenClassPageInt(pageLength)
+    updateAkenClassPageBytes(buildNonce)
+}.digest()
+
+private fun deriveAkenClassPageHandle(
+    logicalIdentity: ByteArray,
+    buildNonce: ByteArray,
+): ByteArray {
+    val digest = digestAkenClassPageBinding(
+        AKEN_CLASS_PAGE_HANDLE_DOMAIN,
+        logicalIdentity,
+        buildNonce,
+    )
+    return try {
+        digest.copyOf(AkenHandle.ENCODED_HANDLE_SIZE)
+    } finally {
+        java.util.Arrays.fill(digest, 0)
+    }
+}
+
+private fun deriveAkenClassPageCallSiteProof(
+    logicalIdentity: ByteArray,
+    encodedHandle: ByteArray,
+    pageIndex: Int,
+    logicalBindingPath: String,
+): ByteArray {
+    val pageBytes = akenClassPageIntBytes(pageIndex)
+    val pathBytes = logicalBindingPath.toByteArray(Charsets.UTF_8)
+    return try {
+        digestAkenClassPageBinding(
+            AKEN_CLASS_PAGE_PROOF_DOMAIN,
+            logicalIdentity,
+            encodedHandle,
+            pageBytes,
+            pathBytes,
+        )
+    } finally {
+        java.util.Arrays.fill(pageBytes, 0)
+        java.util.Arrays.fill(pathBytes, 0)
+    }
+}
+
+private fun akenClassPageLogicalBindingPath(
+    logicalIdentity: ByteArray,
+    encodedHandle: ByteArray,
+): String {
+    val digest = digestAkenClassPageBinding(
+        AKEN_CLASS_PAGE_PATH_DOMAIN,
+        logicalIdentity,
+        encodedHandle,
+    )
+    return try {
+        val token = Base64.getUrlEncoder().withoutPadding().encodeToString(digest)
+        val root = AKEN_CLASS_PAGE_PATH_ROOTS[
+            (digest[0].toInt() and 0xFF) % AKEN_CLASS_PAGE_PATH_ROOTS.size
+        ]
+        val prefixLength = 2 + ((digest[1].toInt() and 0xFF) % 3)
+        val suffix = AKEN_CLASS_PAGE_PATH_SUFFIXES[
+            (digest[2].toInt() and 0xFF) % AKEN_CLASS_PAGE_PATH_SUFFIXES.size
+        ]
+        root + "/" + token.substring(0, prefixLength) + "/" + token.substring(prefixLength) + suffix
+    } finally {
+        java.util.Arrays.fill(digest, 0)
+    }
+}
+
+private fun digestAkenClassPageBinding(domain: ByteArray, vararg values: ByteArray): ByteArray =
+    MessageDigest.getInstance("SHA-256").apply {
+        update(domain)
+        values.forEach { value -> updateAkenClassPageBytes(value) }
+    }.digest()
+
+private fun MessageDigest.updateAkenClassPageString(value: String) {
+    val bytes = value.toByteArray(Charsets.UTF_8)
+    try {
+        updateAkenClassPageBytes(bytes)
+    } finally {
+        java.util.Arrays.fill(bytes, 0)
+    }
+}
+
+private fun MessageDigest.updateAkenClassPageBytes(value: ByteArray) {
+    updateAkenClassPageInt(value.size)
+    update(value)
+}
+
+private fun MessageDigest.updateAkenClassPageInt(value: Int) {
+    val bytes = akenClassPageIntBytes(value)
+    try {
+        update(bytes)
+    } finally {
+        java.util.Arrays.fill(bytes, 0)
+    }
+}
+
+private fun akenClassPageIntBytes(value: Int): ByteArray = byteArrayOf(
+    (value ushr 24).toByte(),
+    (value ushr 16).toByte(),
+    (value ushr 8).toByte(),
+    value.toByte(),
+)
 
 private fun isSafeClassEncryptionCandidate(classArtifact: ClassArtifact): Boolean {
     val node = ClassNode()
@@ -404,14 +598,13 @@ private const val HELPER_INTERNAL = "io/github/hht0rro/javashroud/transforms/pro
 
 /**
  * Generate a stub class using the visitor pattern: reads the original class,
- * adds loader fields, replaces method bodies with delegation code.
- * All metadata (InnerClasses, SourceFile, NestHost, etc.) is automatically preserved.
+ * adds one typed-loader class reference, and replaces method bodies with
+ * delegation code. All metadata (InnerClasses, SourceFile, NestHost, etc.) is
+ * automatically preserved.
  */
 private fun generateClassStubVisitor(
     classBytes: ByteArray,
-    resourcePath: String,
-    keyMetadata: String,
-    random: SecureRandom,
+    binaryClassName: String,
     nameGen: NameGenerator,
 ): ByteArray {
     val cr = ClassReader(classBytes)
@@ -421,209 +614,216 @@ private fun generateClassStubVisitor(
 
     val classRefField = nameGen.generateFieldName()
     val initFlagField = nameGen.generateFieldName()
-    val resourceFieldName = nameGen.generateFieldName()
-    val keyFieldName = nameGen.generateFieldName()
-
     var className = ""
-    var isInterface = false
 
     val cv = object : ClassVisitor(Opcodes.ASM9, cw) {
         override fun visit(
-            version: Int, access: Int, name: String, signature: String?,
-            superName: String?, interfaces: Array<String>?
+            version: Int,
+            access: Int,
+            name: String,
+            signature: String?,
+            superName: String?,
+            interfaces: Array<String>?,
         ) {
             className = name
-            isInterface = access and Opcodes.ACC_INTERFACE != 0
             super.visit(version, access, name, signature, superName, interfaces)
         }
 
         override fun visitField(
-            access: Int, name: String, descriptor: String, signature: String?, value: Any?
-        ): FieldVisitor? {
-            // Keep all original fields unchanged
-            return super.visitField(access, name, descriptor, signature, value)
-        }
+            access: Int,
+            name: String,
+            descriptor: String,
+            signature: String?,
+            value: Any?,
+        ): FieldVisitor? = super.visitField(access, name, descriptor, signature, value)
 
         override fun visitMethod(
-            access: Int, name: String, descriptor: String, signature: String?, exceptions: Array<String>?
+            access: Int,
+            name: String,
+            descriptor: String,
+            signature: String?,
+            exceptions: Array<String>?,
         ): MethodVisitor? {
-            // Pass through <clinit> - we'll generate our own
-            if (name == "<clinit>") {
-                // Skip original <clinit>, we add our own at the end
-                return null
-            }
+            // Skip the original class initializer; the replacement initializer
+            // obtains exactly this class through the strict typed ClassPage API.
+            if (name == "<clinit>") return null
 
-            // For <init>: pass through to super (preserves original constructor behavior)
+            // Preserve construction semantics in the visible stub.
             if (name == "<init>") {
                 return super.visitMethod(access, name, descriptor, signature, exceptions)
             }
 
-            // Skip abstract and native methods
             if (access and (Opcodes.ACC_ABSTRACT or Opcodes.ACC_NATIVE) != 0) {
                 return super.visitMethod(access, name, descriptor, signature, exceptions)
             }
 
-            // For regular methods: replace body with delegation
             val isStatic = access and Opcodes.ACC_STATIC != 0
             val argTypes = Type.getArgumentTypes(descriptor)
             val returnType = Type.getReturnType(descriptor)
-
             val mv = super.visitMethod(access, name, descriptor, signature, exceptions)
             return object : MethodVisitor(Opcodes.ASM9, mv) {
                 override fun visitCode() {
                     super.visitCode()
 
-                    // Build args array for invokeMethod: [classRef, name, desc, isStatic, this, arg0, ...]
                     val arraySize = 5 + argTypes.size
                     mv.visitIntInsn(Opcodes.BIPUSH, arraySize)
                     mv.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object")
 
-                    // index 0: classRef
                     mv.visitInsn(Opcodes.DUP)
                     mv.visitInsn(Opcodes.ICONST_0)
                     mv.visitFieldInsn(Opcodes.GETSTATIC, className, classRefField, "Ljava/lang/Class;")
                     mv.visitInsn(Opcodes.AASTORE)
 
-                    // index 1: method name
                     mv.visitInsn(Opcodes.DUP)
                     mv.visitInsn(Opcodes.ICONST_1)
                     mv.visitLdcInsn(name)
                     mv.visitInsn(Opcodes.AASTORE)
 
-                    // index 2: descriptor
                     mv.visitInsn(Opcodes.DUP)
                     mv.visitInsn(Opcodes.ICONST_2)
                     mv.visitLdcInsn(descriptor)
                     mv.visitInsn(Opcodes.AASTORE)
 
-                    // index 3: isStatic (boxed)
                     mv.visitInsn(Opcodes.DUP)
                     mv.visitInsn(Opcodes.ICONST_3)
                     mv.visitLdcInsn(if (isStatic) 1 else 0)
-                    mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false)
+                    mv.visitMethodInsn(
+                        Opcodes.INVOKESTATIC,
+                        "java/lang/Integer",
+                        "valueOf",
+                        "(I)Ljava/lang/Integer;",
+                        false,
+                    )
                     mv.visitInsn(Opcodes.AASTORE)
 
-                    // index 4: this or null
                     mv.visitInsn(Opcodes.DUP)
                     mv.visitInsn(Opcodes.ICONST_4)
                     if (isStatic) mv.visitInsn(Opcodes.ACONST_NULL) else mv.visitVarInsn(Opcodes.ALOAD, 0)
                     mv.visitInsn(Opcodes.AASTORE)
 
-                    // index 5+: arguments (boxed)
                     var slot = if (isStatic) 0 else 1
-                    for ((i, argType) in argTypes.withIndex()) {
+                    for ((index, argType) in argTypes.withIndex()) {
                         mv.visitInsn(Opcodes.DUP)
-                        mv.visitIntInsn(Opcodes.BIPUSH, 5 + i)
+                        mv.visitIntInsn(Opcodes.BIPUSH, 5 + index)
                         loadAndBoxArgument(mv, argType, slot)
                         mv.visitInsn(Opcodes.AASTORE)
                         slot += argType.size
                     }
 
-                    // Call ClassEncryptionLoaderHelper.invokeMethod(Object[])
                     mv.visitMethodInsn(
-                        Opcodes.INVOKESTATIC, HELPER_INTERNAL, "invokeMethod",
-                        "([Ljava/lang/Object;)Ljava/lang/Object;", false
+                        Opcodes.INVOKESTATIC,
+                        HELPER_INTERNAL,
+                        "invokeMethod",
+                        "([Ljava/lang/Object;)Ljava/lang/Object;",
+                        false,
                     )
-
-                    // Convert and return
                     generateReturnConversion(mv, returnType)
                 }
 
-                // Suppress all original instructions
                 override fun visitInsn(opcode: Int) { }
                 override fun visitIntInsn(opcode: Int, operand: Int) { }
                 override fun visitVarInsn(opcode: Int, operand: Int) { }
                 override fun visitTypeInsn(opcode: Int, type: String?) { }
                 override fun visitFieldInsn(opcode: Int, owner: String, name: String, descriptor: String) { }
-                override fun visitMethodInsn(opcode: Int, owner: String, name: String, descriptor: String, isInterface: Boolean) { }
+                override fun visitMethodInsn(
+                    opcode: Int,
+                    owner: String,
+                    name: String,
+                    descriptor: String,
+                    isInterface: Boolean,
+                ) { }
                 override fun visitInvokeDynamicInsn(name: String, descriptor: String, bsm: Handle, vararg bsmArgs: Any) { }
                 override fun visitJumpInsn(opcode: Int, label: Label?) { }
                 override fun visitLabel(label: Label?) { }
                 override fun visitLdcInsn(value: Any) { }
-                override fun visitIincInsn(`var`: Int, increment: Int) { }
+                override fun visitIincInsn(variable: Int, increment: Int) { }
                 override fun visitTableSwitchInsn(min: Int, max: Int, dflt: Label?, vararg labels: Label?) { }
                 override fun visitLookupSwitchInsn(dflt: Label?, keys: IntArray?, labels: Array<Label>?) { }
                 override fun visitMultiANewArrayInsn(descriptor: String?, numDimensions: Int) { }
                 override fun visitTryCatchBlock(start: Label?, end: Label?, handler: Label?, type: String?) { }
-                override fun visitLocalVariable(name: String, descriptor: String, signature: String?, start: Label?, end: Label?, index: Int) { }
-                override fun visitMaxs(maxStack: Int, maxLocals: Int) { super.visitMaxs(20, 20) }
+                override fun visitLocalVariable(
+                    name: String,
+                    descriptor: String,
+                    signature: String?,
+                    start: Label?,
+                    end: Label?,
+                    index: Int,
+                ) { }
+                override fun visitMaxs(maxStack: Int, maxLocals: Int) {
+                    super.visitMaxs(20, 20)
+                }
             }
         }
     }
 
     cr.accept(cv, ClassReader.SKIP_FRAMES)
-
-    // Now add the loader fields and <clinit> using a second pass
-    // This is necessary because we need to know the class name and can't add fields after visitEnd
-    // Instead, use a simpler approach: rewrite the bytes
-    return addLoaderFieldsAndInit(cw.toByteArray(), className, isInterface, classRefField, initFlagField, resourceFieldName, keyFieldName, resourcePath, keyMetadata)
+    return addLoaderFieldsAndInit(
+        classBytes = cw.toByteArray(),
+        className = className,
+        classRefField = classRefField,
+        initFlagField = initFlagField,
+        binaryClassName = binaryClassName,
+    )
 }
 
 /**
- * Second pass: add loader fields and <clinit> to the already-transformed class bytes.
+ * Second pass: add the typed ClassPage loader reference and replacement class
+ * initializer to the already-transformed class bytes.
  */
 private fun addLoaderFieldsAndInit(
     classBytes: ByteArray,
     className: String,
-    isInterface: Boolean,
     classRefField: String,
     initFlagField: String,
-    resourceFieldName: String,
-    keyFieldName: String,
-    resourcePath: String,
-    keyMetadata: String,
+    binaryClassName: String,
 ): ByteArray {
     val cr = ClassReader(classBytes)
     val cw = object : ClassWriter(cr, ClassWriter.COMPUTE_FRAMES) {
         override fun getCommonSuperClass(type1: String, type2: String): String = "java/lang/Object"
     }
 
-    val fieldAccess = if (isInterface) {
-        Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC or Opcodes.ACC_FINAL
-    } else {
-        Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC or Opcodes.ACC_FINAL
-    }
     val mutableFieldAccess = Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC
-
-    var clinitInjected = false
-
     val cv = object : ClassVisitor(Opcodes.ASM9, cw) {
-        override fun visitField(access: Int, name: String, descriptor: String, signature: String?, value: Any?): FieldVisitor? {
-            return super.visitField(access, name, descriptor, signature, value)
-        }
+        override fun visitField(
+            access: Int,
+            name: String,
+            descriptor: String,
+            signature: String?,
+            value: Any?,
+        ): FieldVisitor? = super.visitField(access, name, descriptor, signature, value)
 
-        override fun visitMethod(access: Int, name: String, descriptor: String, signature: String?, exceptions: Array<String>?): MethodVisitor? {
-            // Skip the original <clinit> if present
+        override fun visitMethod(
+            access: Int,
+            name: String,
+            descriptor: String,
+            signature: String?,
+            exceptions: Array<String>?,
+        ): MethodVisitor? {
             if (name == "<clinit>") return null
             return super.visitMethod(access, name, descriptor, signature, exceptions)
         }
 
         override fun visitEnd() {
-            // Add loader fields
-            super.visitField(fieldAccess, resourceFieldName, "Ljava/lang/String;", null, resourcePath).visitEnd()
-            super.visitField(fieldAccess, keyFieldName, "Ljava/lang/String;", null, keyMetadata).visitEnd()
             super.visitField(mutableFieldAccess, classRefField, "Ljava/lang/Class;", null, null).visitEnd()
             super.visitField(mutableFieldAccess, initFlagField, "Z", null, null).visitEnd()
 
-            // Add <clinit>
             val mv = super.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null)
             mv.visitCode()
 
-            // if (__init) return
             mv.visitFieldInsn(Opcodes.GETSTATIC, className, initFlagField, "Z")
             val alreadyInit = Label()
             mv.visitJumpInsn(Opcodes.IFNE, alreadyInit)
 
-            // __init = true
             mv.visitInsn(Opcodes.ICONST_1)
             mv.visitFieldInsn(Opcodes.PUTSTATIC, className, initFlagField, "Z")
 
-            // __rC = ClassEncryptionLoaderHelper.loadClass(resourcePath, keyMetadata)
-            mv.visitFieldInsn(Opcodes.GETSTATIC, className, resourceFieldName, "Ljava/lang/String;")
-            mv.visitFieldInsn(Opcodes.GETSTATIC, className, keyFieldName, "Ljava/lang/String;")
+            mv.visitLdcInsn(binaryClassName)
             mv.visitMethodInsn(
-                Opcodes.INVOKESTATIC, HELPER_INTERNAL, "loadClass",
-                "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/Class;", false
+                Opcodes.INVOKESTATIC,
+                HELPER_INTERNAL,
+                "loadAkenClass",
+                "(Ljava/lang/String;)Ljava/lang/Class;",
+                false,
             )
             mv.visitFieldInsn(Opcodes.PUTSTATIC, className, classRefField, "Ljava/lang/Class;")
 

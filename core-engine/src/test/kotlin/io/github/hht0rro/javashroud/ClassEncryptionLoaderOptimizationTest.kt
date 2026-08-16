@@ -11,6 +11,7 @@ import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.Opcodes
@@ -19,7 +20,7 @@ import org.objectweb.asm.tree.MethodInsnNode
 
 class ClassEncryptionLoaderOptimizationTest {
     @Test
-    fun class_encryption_loader_delegating_methods_do_not_reinvoke_load_class() {
+    fun class_encryption_loader_delegating_methods_do_not_reinvoke_typed_class_page_loader() {
         val internalName = "sample/LoaderTarget"
         val classBytes = buildLoaderTargetClass(internalName)
         val methods = listOf(
@@ -45,45 +46,73 @@ class ClassEncryptionLoaderOptimizationTest {
         ClassReader(transformed.bytes).accept(node, 0)
 
         val helperOwner = "io/github/hht0rro/javashroud/transforms/protection/ClassEncryptionLoaderHelper"
-        val loadClassCallsByMethod = node.methods.associate { method ->
+        val loadAkenClassCallsByMethod = node.methods.associate { method ->
             method.name to method.instructions.asSequence().filterIsInstance<MethodInsnNode>().count { insn ->
-                insn.opcode == Opcodes.INVOKESTATIC && insn.owner == helperOwner && insn.name == "loadClass"
+                insn.opcode == Opcodes.INVOKESTATIC && insn.owner == helperOwner && insn.name == "loadAkenClass"
             }
         }
 
-        assertEquals(1, loadClassCallsByMethod["<clinit>"], "generated <clinit> should perform the one loader bootstrap")
-        assertEquals(0, loadClassCallsByMethod["classify"], "delegating method should not repeat loadClass")
-        assertEquals(0, loadClassCallsByMethod["seasonName"], "delegating method should not repeat loadClass")
-        assertEquals(0, loadClassCallsByMethod["httpStatus"], "delegating method should not repeat loadClass")
+        assertEquals(1, loadAkenClassCallsByMethod["<clinit>"], "generated <clinit> should perform one typed ClassPage bootstrap")
+        assertEquals(0, loadAkenClassCallsByMethod["classify"], "delegating method should not repeat loadAkenClass")
+        assertEquals(0, loadAkenClassCallsByMethod["seasonName"], "delegating method should not repeat loadAkenClass")
+        assertEquals(0, loadAkenClassCallsByMethod["httpStatus"], "delegating method should not repeat loadAkenClass")
+        assertTrue(result.artifact.jarEntries.none { entry -> entry.name.startsWith("__jse/") })
     }
 
-    private fun buildPackagePrivateInterface(internalName: String): ByteArray {
-        val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
-        cw.visit(Opcodes.V17, Opcodes.ACC_ABSTRACT or Opcodes.ACC_INTERFACE, internalName, null, "java/lang/Object", null)
-        cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_ABSTRACT, "value", "()I", null, null).visitEnd()
-        cw.visitEnd()
-        return cw.toByteArray()
-    }
-
-    private fun buildInterfaceImplementation(internalName: String, interfaceName: String): ByteArray {
-        val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
-        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", arrayOf(interfaceName))
-        val init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
-        init.visitCode()
-        init.visitVarInsn(Opcodes.ALOAD, 0)
-        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
-        init.visitInsn(Opcodes.RETURN)
-        init.visitMaxs(1, 1)
-        init.visitEnd()
-        val value = cw.visitMethod(Opcodes.ACC_PUBLIC, "value", "()I", null, null)
-        value.visitCode()
-        value.visitIntInsn(Opcodes.BIPUSH, 7)
-        value.visitInsn(Opcodes.IRETURN)
-        value.visitMaxs(1, 1)
-        value.visitEnd()
-        cw.visitEnd()
-        return cw.toByteArray()
-    }
+    private fun buildPackagePrivateInterface(internalName: String): ByteArray {
+
+        val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
+
+        cw.visit(Opcodes.V17, Opcodes.ACC_ABSTRACT or Opcodes.ACC_INTERFACE, internalName, null, "java/lang/Object", null)
+
+        cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_ABSTRACT, "value", "()I", null, null).visitEnd()
+
+        cw.visitEnd()
+
+        return cw.toByteArray()
+
+    }
+
+
+
+    private fun buildInterfaceImplementation(internalName: String, interfaceName: String): ByteArray {
+
+        val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
+
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", arrayOf(interfaceName))
+
+        val init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
+
+        init.visitCode()
+
+        init.visitVarInsn(Opcodes.ALOAD, 0)
+
+        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+
+        init.visitInsn(Opcodes.RETURN)
+
+        init.visitMaxs(1, 1)
+
+        init.visitEnd()
+
+        val value = cw.visitMethod(Opcodes.ACC_PUBLIC, "value", "()I", null, null)
+
+        value.visitCode()
+
+        value.visitIntInsn(Opcodes.BIPUSH, 7)
+
+        value.visitInsn(Opcodes.IRETURN)
+
+        value.visitMaxs(1, 1)
+
+        value.visitEnd()
+
+        cw.visitEnd()
+
+        return cw.toByteArray()
+
+    }
+
     private fun buildLoaderTargetClass(internalName: String): ByteArray {
         val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
         cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", null)
