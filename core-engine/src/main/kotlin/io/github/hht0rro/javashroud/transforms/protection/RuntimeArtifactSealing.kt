@@ -200,10 +200,11 @@ object RuntimeArtifactSealing {
     }
 
     /**
-     * Materializes the build-only VBC4 page containers before native
-     * recompilation so the compiler can receive exact current-page records.
-     * The returned artifact owns the encrypted page entry bytes; the active
-     * build context retains only the adjacent finalization layout.
+     * Materializes the build-only AKEN VBC4 and typed StringPage resources
+     * before native recompilation so the compiler can receive exact
+     * current-page records. The returned artifact owns encrypted page-entry
+     * bytes; the active build context retains only the adjacent finalization
+     * layout.
      */
     internal fun materializeAkenVbc4PagesForNativeCompilation(
         artifact: BytecodeArtifact,
@@ -258,7 +259,10 @@ object RuntimeArtifactSealing {
             ?.akenStringPagePreSealRouteReservationOrNull()
             ?.withRoutesForBuild { routes ->
                 routes.forEach { route ->
-                    require(route.futureResourcePath !in reservedEntryNames) {
+                    val isPublishedStringPage = activeContext
+                        .akenVbc4FinalizationLayoutOrNull()
+                        ?.hasEntryForBuild(route.futureResourcePath) == true
+                    require(route.futureResourcePath !in reservedEntryNames || isPublishedStringPage) {
                         "AKEN StringPage pre-seal route collides with the sealing input namespace"
                     }
                     reservedEntryNames += route.futureResourcePath

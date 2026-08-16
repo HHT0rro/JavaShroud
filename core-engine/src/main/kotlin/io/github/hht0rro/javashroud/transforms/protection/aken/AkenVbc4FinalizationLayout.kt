@@ -367,17 +367,19 @@ internal class AkenVbc4DispatchBinding private constructor(
 }
 
 /**
- * Pre-seal VBC4 layout reservation plus current-page native compiler inputs.
+ * Pre-seal AKEN layout reservation plus current-page native compiler inputs.
  *
  * This is the deliberately narrow S1 bridge between page planning and the
- * later native recompilation stage. It owns final page bytes, descriptors, and
- * per-page native locator inputs only while the build is active. It is never
- * injected as a Java runtime catalog and offers no `find`, `list`, arbitrary
- * resource decode, DEK getter, root-key getter, or page plaintext getter.
+ * later native recompilation stage. It owns one full-payload materialization
+ * mesh across VBC4 and typed pages, final page bytes, and per-page native
+ * locator inputs only while the build is active. It is never injected as a
+ * Java runtime catalog and offers no `find`, `list`, arbitrary resource
+ * decode, DEK getter, root-key getter, or page plaintext getter.
  */
 internal class AkenVbc4FinalizationLayout private constructor(
     private val commitmentValue: AkenArtifactCommitment,
     private var finalEntriesValue: List<AkenVbc4FinalizationEntry>,
+    private var materializationValue: AkenPageMaterialization?,
     private var emissionsValue: AkenVbc4PageEmissionSet?,
     private var nativeInputsValue: List<AkenNativePageLocatorCompileInput>,
 ) : AutoCloseable {
@@ -386,6 +388,9 @@ internal class AkenVbc4FinalizationLayout private constructor(
 
     init {
         require(finalEntriesValue.isNotEmpty()) { "AKEN VBC4 finalization layout requires final entries" }
+        require(materializationValue?.isWiped == false) {
+            "AKEN VBC4 finalization layout requires a live unified page materialization"
+        }
         require(nativeInputsValue.isNotEmpty()) { "AKEN VBC4 finalization layout requires native page inputs" }
         require(finalEntriesValue.map { it.name }.distinct().size == finalEntriesValue.size) {
             "AKEN VBC4 finalization layout contains duplicate final entries"
@@ -430,14 +435,14 @@ internal class AkenVbc4FinalizationLayout private constructor(
 
     /**
      * Supplies one callback-scoped page-zero binding per virtualized method.
-     * No binding survives the callback and no non-zero page is exposed through
-     * this dispatcher-facing API.
+     * Typed non-VBC4 pages deliberately do not enter this dispatcher-facing
+     * surface; a StringPage-only build therefore supplies an empty list.
      */
     internal fun <T> withPageZeroDispatchBindingsForBuild(
         block: (List<AkenVbc4DispatchBinding>) -> T,
     ): T {
         requireLive()
-        val pages = checkNotNull(emissionsValue).pagesForBuild()
+        val pages = emissionsValue?.pagesForBuild().orEmpty()
         val expectedEntryTokens = pages.mapTo(linkedSetOf()) { page -> page.entryToken }
         val bindings = ArrayList<AkenVbc4DispatchBinding>(expectedEntryTokens.size)
         try {
@@ -457,45 +462,27 @@ internal class AkenVbc4FinalizationLayout private constructor(
 
     /**
      * Rechecks the exact writer-equivalent artifact after a caller has emitted
-     * the reserved bytes. The check covers canonical non-excluded bytes, root
-     * shards, each page route/payload, each full-payload Merkle proof, and the
-     * exact typed-native current-page binding. It remains build-only.
+     * the reserved bytes. The generic materialization owner validates the
+     * canonical artifact commitment, root shards, every page route/payload, and
+     * one full-payload Merkle mesh spanning VBC4 and typed pages. This layout
+     * adds the exact current-page native record binding for every page.
      */
     internal fun verifyWriterEquivalentArtifactForBuild(entries: Iterable<AkenArtifactEntry>): Boolean {
         if (wiped) return false
         val entriesByName = LinkedHashMap<String, AkenArtifactEntry>()
-        val pages = ArrayList<VerifiedPage>()
-        var artifactCommitment: ByteArray? = null
-        var mesh: AkenIntegrityMesh? = null
         try {
             for (entry in entries) {
                 if (entriesByName.put(entry.name, entry) != null) return false
             }
-            if (!commitmentValue.matchesWriterEquivalentEntriesForBuild(entriesByName.values)) return false
-            if (!commitmentValue.verifyRootShardsForBuild(entriesByName.values)) return false
-            artifactCommitment = commitmentValue.copyBytes()
-
-            val emittedPages = (emissionsValue ?: return false).pagesForBuild()
-            if (emittedPages.size != nativeInputsValue.size) return false
-            emittedPages.forEachIndexed { index, emission ->
-                pages += verifyAndCapturePage(
-                    emission = emission,
-                    nativeInput = nativeInputsValue[index],
-                    entriesByName = entriesByName,
-                    artifactCommitment = checkNotNull(artifactCommitment),
-                ) ?: return false
+            val materialization = materializationValue ?: return false
+            if (!materialization.verifyWriterEquivalentArtifactForBuild(commitmentValue, entriesByName.values)) {
+                return false
             }
-
-            val leaves = pages.map { page -> AkenIntegrityMesh.Leaf(page.leafEncoding, page.payload) }
-            mesh = AkenIntegrityMesh.build(leaves)
-            return pages.all { page -> proofMatches(page.descriptor.proof, page.leafEncoding, checkNotNull(mesh), artifactCommitment) }
+            return verifyNativeInputBindingsForBuild(materialization)
         } catch (_: IllegalArgumentException) {
             return false
         } catch (_: IllegalStateException) {
             return false
-        } finally {
-            pages.forEach { it.wipe() }
-            artifactCommitment?.let { Arrays.fill(it, 0) }
         }
     }
 
@@ -505,6 +492,8 @@ internal class AkenVbc4FinalizationLayout private constructor(
         if (wiped) return
         finalEntriesValue.forEach { it.wipe() }
         finalEntriesValue = emptyList()
+        materializationValue?.wipe()
+        materializationValue = null
         emissionsValue?.wipe()
         emissionsValue = null
         nativeInputsValue.forEach { it.wipe() }
@@ -607,6 +596,94 @@ internal class AkenVbc4FinalizationLayout private constructor(
         }
     }
 
+    /**
+     * The materialization owner authenticates payloads and the unified Merkle
+     * mesh. This second build-only pass checks that each materialized page has
+     * exactly one matching current-page native compiler record. VBC4 records
+     * retain their dispatcher entry token; typed pages derive their token from
+     * their own kind/page/handle tuple.
+     */
+    private fun verifyNativeInputBindingsForBuild(materialization: AkenPageMaterialization): Boolean {
+        val vbc4TokensByHandle = LinkedHashMap<String, Long>()
+        val matchedNativeInputs = BooleanArray(nativeInputsValue.size)
+        val pages = materialization.pagesForBuild()
+        try {
+            val vbc4Emissions = emissionsValue?.pagesForBuild().orEmpty()
+            for (emission in vbc4Emissions) {
+                var handle: AkenHandle? = null
+                var encodedHandle: ByteArray? = null
+                try {
+                    handle = emission.copyHandleForBuild()
+                    encodedHandle = handle.encoded
+                    val handleKey = handleBindingKey(encodedHandle)
+                    require(vbc4TokensByHandle.put(handleKey, emission.entryToken) == null) {
+                        "AKEN VBC4 finalization contains duplicate native handle bindings"
+                    }
+                } finally {
+                    encodedHandle?.let { Arrays.fill(it, 0) }
+                    handle?.wipe()
+                }
+            }
+
+            val vbc4PageCount = pages.count { page ->
+                page.descriptorForBuild.resourceKind == AkenResourceKind.Vbc4Method
+            }
+            if (vbc4TokensByHandle.size != vbc4PageCount || nativeInputsValue.size != pages.size) {
+                return false
+            }
+
+            for (page in pages) {
+                val descriptor = page.descriptorForBuild
+                var handle: AkenHandle? = null
+                var encodedHandle: ByteArray? = null
+                var rawProof: ByteArray? = null
+                try {
+                    handle = descriptor.handle
+                    encodedHandle = handle.encoded
+                    rawProof = descriptor.proof.callSiteProof
+                    val entryToken = when (descriptor.resourceKind) {
+                        AkenResourceKind.Vbc4Method ->
+                            vbc4TokensByHandle[handleBindingKey(encodedHandle)]
+                                ?: return false
+                        else -> AkenTypedPageEntryToken.derive(
+                            resourceKind = descriptor.resourceKind,
+                            pageIndex = descriptor.pageIndex,
+                            encodedHandle = encodedHandle,
+                        )
+                    }
+
+                    var matchedIndex = -1
+                    for (index in nativeInputsValue.indices) {
+                        if (
+                            !matchedNativeInputs[index] &&
+                            nativeInputsValue[index].matchesCurrentPageForBuild(
+                                entryToken = entryToken,
+                                encodedHandle = encodedHandle,
+                                pageIndex = descriptor.pageIndex,
+                                rawCallSiteProof = rawProof,
+                            )
+                        ) {
+                            if (matchedIndex >= 0) return false
+                            matchedIndex = index
+                        }
+                    }
+                    if (matchedIndex < 0) return false
+                    matchedNativeInputs[matchedIndex] = true
+                } finally {
+                    rawProof?.let { Arrays.fill(it, 0) }
+                    encodedHandle?.let { Arrays.fill(it, 0) }
+                    handle?.wipe()
+                }
+            }
+            return matchedNativeInputs.all { it }
+        } finally {
+            vbc4TokensByHandle.clear()
+        }
+    }
+
+    private fun handleBindingKey(encodedHandle: ByteArray): String =
+        Base64.getUrlEncoder().withoutPadding().encodeToString(encodedHandle)
+
     private fun requireLive() {
         check(!wiped) { "AKEN VBC4 finalization layout has been wiped" }
     }
@@ -627,8 +704,10 @@ internal class AkenVbc4FinalizationLayout private constructor(
 
     companion object {
         /**
-         * Materializes a complete pre-seal page layout using a plan already
-         * bound to [commitment] by the active VBC4 build context.
+         * Materializes one pre-seal AKEN page layout using a plan already bound
+         * to [commitment]. VBC4 and typed StringPage records enter the same
+         * page materializer, so their descriptors share one canonical artifact
+         * commitment and one full-payload Merkle mesh.
          *
          * The supplied plan and every pending candidate are consumed and wiped
          * on every outcome. The returned owner is the only object allowed to
@@ -640,36 +719,81 @@ internal class AkenVbc4FinalizationLayout private constructor(
             commitment: AkenArtifactCommitment,
             pendingPages: Iterable<AkenVbc4PendingPage>,
             fixedEntries: Iterable<AkenArtifactEntry>,
+            pendingStringPages: Iterable<AkenPendingStringPage> = emptyList(),
             rootShardRanges: Iterable<AkenRootShardRange> = emptyList(),
             vbc4StateBindingLayoutDigest: ByteArray,
         ): AkenVbc4FinalizationLayout {
             val pages = ArrayList<AkenVbc4PendingPage>()
+            val stringPages = ArrayList<AkenPendingStringPage>()
             val fixed = LinkedHashMap<String, ByteArray>()
             val pageBuffers = LinkedHashMap<String, ByteArray>()
             val expectedLengths = LinkedHashMap<String, Int>()
             val reservations = ArrayList<AkenCanonicalReservation>()
             val selfReferential = LinkedHashMap<String, MutableList<AkenCanonicalExclusionRange>>()
-            val pageDefinitions = LinkedHashMap<String, AkenVbc4PendingPage>()
-            val registeredPages = ArrayList<AkenBuildPlan.Page>()
-            val requests = ArrayList<AkenVbc4PageEmissionRequest>()
+            val vbc4PageDefinitions = LinkedHashMap<String, AkenVbc4PendingPage>()
+            val stringPageDefinitions = LinkedHashMap<String, AkenPendingStringPage>()
+            val vbc4Requests = ArrayList<AkenVbc4PageEmissionRequest>()
+            val materializationInputs = ArrayList<AkenPageMaterializationInput>()
+            val emittedVbc4Pages = ArrayList<AkenVbc4PageEmission>()
             val compilerInputs = ArrayList<AkenNativePageLocatorCompileInput>()
             val finalEntries = ArrayList<AkenVbc4FinalizationEntry>()
             val rootRanges = rootShardRanges.toList()
+            var materialization: AkenPageMaterialization? = null
             var emissions: AkenVbc4PageEmissionSet? = null
             var output: AkenVbc4FinalizationLayout? = null
             var planCommitment: ByteArray? = null
             var stateBindingLayoutDigest: ByteArray? = null
             var completed = false
+
+            fun finalizationPageKey(
+                resourceKind: AkenResourceKind,
+                logicalIdentity: ByteArray,
+                pageIndex: Int,
+            ): String = resourceKind.id.toString() + ":" + identityPageKey(logicalIdentity, pageIndex)
+
+            fun reservePhysicalRange(
+                definitionKey: String,
+                resourcePath: String,
+                resourceOffset: Int,
+                expectedLength: Int,
+                ownerLabel: String,
+            ) {
+                require(resourcePath !in fixed) {
+                    "AKEN " + ownerLabel + " path collides with a fixed final entry: " + resourcePath
+                }
+                val end = resourceOffset.toLong() + expectedLength.toLong()
+                require(end <= Int.MAX_VALUE.toLong()) {
+                    "AKEN " + ownerLabel + " reservation exceeds JVM array bounds"
+                }
+                val existing = pageBuffers[resourcePath]
+                if (existing == null || existing.size < end.toInt()) {
+                    val replacement = ByteArray(end.toInt())
+                    existing?.copyInto(replacement)
+                    existing?.let { Arrays.fill(it, 0) }
+                    pageBuffers[resourcePath] = replacement
+                }
+                expectedLengths[definitionKey] = expectedLength
+                selfReferential.getOrPut(resourcePath) { mutableListOf() } += AkenCanonicalExclusionRange(
+                    entryName = resourcePath,
+                    offset = resourceOffset,
+                    length = expectedLength,
+                    kind = AkenCanonicalExclusionKind.HighValuePayload,
+                )
+            }
+
             try {
                 require(vbc4StateBindingLayoutDigest.size == 32) {
                     "AKEN VBC4 state-binding layout digest must be 32 bytes"
                 }
                 stateBindingLayoutDigest = vbc4StateBindingLayoutDigest.copyOf()
                 for (page in pendingPages) pages += page
-                require(pages.isNotEmpty()) { "AKEN VBC4 finalization requires at least one pending page" }
+                for (page in pendingStringPages) stringPages += page
+                require(pages.isNotEmpty() || stringPages.isNotEmpty()) {
+                    "AKEN finalization requires at least one pending page"
+                }
                 for (entry in fixedEntries) {
                     require(fixed.put(entry.name, entry.copyBytesForCommitment()) == null) {
-                        "AKEN VBC4 finalization contains duplicate fixed entry: ${entry.name}"
+                        "AKEN finalization contains duplicate fixed entry: " + entry.name
                     }
                 }
 
@@ -677,36 +801,55 @@ internal class AkenVbc4FinalizationLayout private constructor(
                 val suppliedCommitment = commitment.copyBytes()
                 try {
                     require(MessageDigest.isEqual(planCommitment, suppliedCommitment)) {
-                        "AKEN VBC4 finalization plan is not bound to its reserved artifact commitment"
+                        "AKEN finalization plan is not bound to its reserved artifact commitment"
                     }
                 } finally {
                     Arrays.fill(suppliedCommitment, 0)
                 }
 
                 pages.forEach { page ->
-                    require(page.resourcePath !in fixed) {
-                        "AKEN VBC4 page path collides with a fixed final entry: ${page.resourcePath}"
+                    val identity = page.copyLogicalIdentityForBuild()
+                    try {
+                        val definitionKey = finalizationPageKey(
+                            resourceKind = AkenResourceKind.Vbc4Method,
+                            logicalIdentity = identity,
+                            pageIndex = page.pageIndex,
+                        )
+                        require(vbc4PageDefinitions.put(definitionKey, page) == null) {
+                            "AKEN VBC4 finalization contains duplicate logical identity/page index"
+                        }
+                        reservePhysicalRange(
+                            definitionKey = definitionKey,
+                            resourcePath = page.resourcePath,
+                            resourceOffset = page.resourceOffset,
+                            expectedLength = page.expectedStoredLength,
+                            ownerLabel = "VBC4 page",
+                        )
+                    } finally {
+                        Arrays.fill(identity, 0)
                     }
-                    require(pageDefinitions.put(page.identityPageKeyForBuild(), page) == null) {
-                        "AKEN VBC4 finalization contains duplicate logical identity/page index"
+                }
+                stringPages.forEach { page ->
+                    val identity = page.copyLogicalIdentityForBuild()
+                    try {
+                        val definitionKey = finalizationPageKey(
+                            resourceKind = AkenResourceKind.StringPage,
+                            logicalIdentity = identity,
+                            pageIndex = page.pageIndex,
+                        )
+                        require(stringPageDefinitions.put(definitionKey, page) == null) {
+                            "AKEN StringPage finalization contains duplicate logical identity/page index"
+                        }
+                        reservePhysicalRange(
+                            definitionKey = definitionKey,
+                            resourcePath = page.resourcePath,
+                            resourceOffset = page.resourceOffset,
+                            expectedLength = page.expectedStoredLength,
+                            ownerLabel = "StringPage",
+                        )
+                    } finally {
+                        Arrays.fill(identity, 0)
                     }
-                    val expectedLength = page.expectedStoredLength
-                    val end = page.resourceOffset.toLong() + expectedLength.toLong()
-                    require(end <= Int.MAX_VALUE.toLong()) { "AKEN VBC4 page reservation exceeds JVM array bounds" }
-                    val existing = pageBuffers[page.resourcePath]
-                    if (existing == null || existing.size < end.toInt()) {
-                        val replacement = ByteArray(end.toInt())
-                        existing?.copyInto(replacement)
-                        existing?.let { Arrays.fill(it, 0) }
-                        pageBuffers[page.resourcePath] = replacement
-                    }
-                    expectedLengths[page.identityPageKeyForBuild()] = expectedLength
-                    selfReferential.getOrPut(page.resourcePath) { mutableListOf() } += AkenCanonicalExclusionRange(
-                        entryName = page.resourcePath,
-                        offset = page.resourceOffset,
-                        length = expectedLength,
-                        kind = AkenCanonicalExclusionKind.HighValuePayload,
-                    )
                 }
 
                 validateNonOverlappingPageRanges(selfReferential)
@@ -731,7 +874,7 @@ internal class AkenVbc4FinalizationLayout private constructor(
                 val expectedBytes = commitment.copyBytes()
                 try {
                     require(MessageDigest.isEqual(reservedBytes, expectedBytes)) {
-                        "AKEN VBC4 finalization reservation does not reproduce the active artifact commitment"
+                        "AKEN finalization reservation does not reproduce the active artifact commitment"
                     }
                 } finally {
                     Arrays.fill(reservedBytes, 0)
@@ -750,65 +893,173 @@ internal class AkenVbc4FinalizationLayout private constructor(
                             targetPageSize = pending.targetPageSize,
                             encodedHandleOverride = encodedHandleOverride,
                         )
-                        registeredPages += registered
-                        requests += pending.toEmissionRequest(registered)
+                        vbc4Requests += pending.toEmissionRequest(registered)
                     } finally {
                         Arrays.fill(identity, 0)
                         encodedHandleOverride?.let { Arrays.fill(it, 0) }
                     }
                 }
-                emissions = AkenVbc4PageEmitter.emitAndWipe(plan, requests)
-                val outputPages = emissions.pagesForBuild()
-                require(outputPages.size == pages.size) { "AKEN VBC4 finalization emitted an unexpected page count" }
-                outputPages.forEach { emission ->
-                    val identity = emission.copyLogicalIdentityForBuild()
-                    val proof = emission.copyCallSiteProofForBuild()
-                    try {
-                        val key = identityPageKey(identity, emission.pageIndex)
-                        val pending = pageDefinitions[key]
-                            ?: error("AKEN VBC4 finalization emitted an unknown logical page")
-                        require(emission.entryToken == pending.entryToken) { "AKEN VBC4 finalization entry-token binding drifted" }
-                        val descriptorBytes = emission.copyDescriptorBytesForBuild()
-                        try {
-                            val descriptor = AkenRuntimePageDescriptor.decode(descriptorBytes)
-                            require(descriptor.targetPageSize == pending.targetPageSize) {
-                                "AKEN VBC4 finalization evaluator target size drifted from its block-cluster page"
+                stringPages.forEach { pending ->
+                    materializationInputs += pending.toMaterializationInput(plan)
+                }
+                vbc4Requests.forEach { request ->
+                    materializationInputs += request.toMaterializationInput()
+                }
+                require(materializationInputs.size == pages.size + stringPages.size) {
+                    "AKEN finalization did not create one materialization input per page"
+                }
+
+                materialization = AkenPageMaterializer.materializeAndWipe(plan, materializationInputs)
+                val outputPages = checkNotNull(materialization).pagesForBuild()
+                require(outputPages.size == pages.size + stringPages.size) {
+                    "AKEN finalization emitted an unexpected page count"
+                }
+
+                var materializedVbc4PageCount = 0
+                var materializedStringPageCount = 0
+                outputPages.forEach { materializedPage ->
+                    val descriptor = materializedPage.descriptorForBuild
+                    when (descriptor.resourceKind) {
+                        AkenResourceKind.Vbc4Method -> {
+                            materializedVbc4PageCount += 1
+                            val identity = descriptor.logicalIdentity
+                            var proof: ByteArray? = null
+                            try {
+                                val definitionKey = finalizationPageKey(
+                                    resourceKind = AkenResourceKind.Vbc4Method,
+                                    logicalIdentity = identity,
+                                    pageIndex = descriptor.pageIndex,
+                                )
+                                val pending = vbc4PageDefinitions[definitionKey]
+                                    ?: error("AKEN VBC4 finalization emitted an unknown logical page")
+                                val emission = AkenVbc4PageEmission.fromMaterialized(
+                                    page = materializedPage,
+                                    entryToken = pending.entryToken,
+                                )
+                                try {
+                                    require(emission.resourcePath == pending.resourcePath &&
+                                        emission.resourceOffset == pending.resourceOffset) {
+                                        "AKEN VBC4 finalization route drifted from its reservation"
+                                    }
+                                    require(emission.storedLength == expectedLengths.getValue(definitionKey)) {
+                                        "AKEN VBC4 finalization payload length drifted from its reservation"
+                                    }
+                                    val descriptorBytes = emission.copyDescriptorBytesForBuild()
+                                    try {
+                                        val emittedDescriptor = AkenRuntimePageDescriptor.decode(descriptorBytes)
+                                        require(emittedDescriptor.targetPageSize == pending.targetPageSize) {
+                                            "AKEN VBC4 finalization evaluator target size drifted from its block-cluster page"
+                                        }
+                                    } finally {
+                                        Arrays.fill(descriptorBytes, 0)
+                                    }
+                                    proof = emission.copyCallSiteProofForBuild()
+                                    val expectedProof = pending.copyCallSiteProofForBuild()
+                                    try {
+                                        require(MessageDigest.isEqual(proof, expectedProof)) {
+                                            "AKEN VBC4 finalization call-site proof drifted"
+                                        }
+                                    } finally {
+                                        Arrays.fill(expectedProof, 0)
+                                    }
+                                    val payload = emission.copyEncryptedPayloadForBuild()
+                                    try {
+                                        payload.copyInto(
+                                            destination = checkNotNull(pageBuffers[emission.resourcePath]),
+                                            destinationOffset = emission.resourceOffset,
+                                        )
+                                    } finally {
+                                        Arrays.fill(payload, 0)
+                                    }
+                                    compilerInputs += AkenNativePageLocatorCompileInput.fromVbc4Emission(
+                                        emission = emission,
+                                        vbc4StateBindingLayoutDigest = checkNotNull(stateBindingLayoutDigest),
+                                    )
+                                    emittedVbc4Pages += emission
+                                } catch (error: Throwable) {
+                                    emission.wipe()
+                                    throw error
+                                }
+                            } finally {
+                                proof?.let { Arrays.fill(it, 0) }
+                                Arrays.fill(identity, 0)
                             }
-                        } finally {
-                            Arrays.fill(descriptorBytes, 0)
                         }
-                        require(emission.resourcePath == pending.resourcePath && emission.resourceOffset == pending.resourceOffset) {
-                            "AKEN VBC4 finalization route drifted from its reservation"
-                        }
-                        require(emission.storedLength == expectedLengths.getValue(key)) {
-                            "AKEN VBC4 finalization payload length drifted from its reservation"
-                        }
-                        val expectedProof = pending.copyCallSiteProofForBuild()
-                        try {
-                            require(MessageDigest.isEqual(proof, expectedProof)) {
-                                "AKEN VBC4 finalization call-site proof drifted"
+
+                        AkenResourceKind.StringPage -> {
+                            materializedStringPageCount += 1
+                            val identity = descriptor.logicalIdentity
+                            var proof: ByteArray? = null
+                            try {
+                                val definitionKey = finalizationPageKey(
+                                    resourceKind = AkenResourceKind.StringPage,
+                                    logicalIdentity = identity,
+                                    pageIndex = descriptor.pageIndex,
+                                )
+                                val pending = stringPageDefinitions[definitionKey]
+                                    ?: error("AKEN StringPage finalization emitted an unknown logical page")
+                                val route = descriptor.route
+                                require(descriptor.targetPageSize == pending.targetPageSize) {
+                                    "AKEN StringPage evaluator target size drifted from its reserved page"
+                                }
+                                require(
+                                    route.resourcePath == pending.resourcePath &&
+                                        route.resourceOffset == pending.resourceOffset &&
+                                        route.storedLength == expectedLengths.getValue(definitionKey),
+                                ) {
+                                    "AKEN StringPage finalization route drifted from its reservation"
+                                }
+                                require(materializedPage.encodedLength == expectedLengths.getValue(definitionKey)) {
+                                    "AKEN StringPage finalization payload length drifted from its reservation"
+                                }
+                                proof = descriptor.proof.callSiteProof
+                                val expectedProof = pending.copyCallSiteProofForBuild()
+                                try {
+                                    require(MessageDigest.isEqual(proof, expectedProof)) {
+                                        "AKEN StringPage finalization call-site proof drifted"
+                                    }
+                                } finally {
+                                    Arrays.fill(expectedProof, 0)
+                                }
+                                val payload = materializedPage.copyEncodedPayloadForBuild()
+                                try {
+                                    payload.copyInto(
+                                        destination = checkNotNull(pageBuffers[route.resourcePath]),
+                                        destinationOffset = route.resourceOffset,
+                                    )
+                                } finally {
+                                    Arrays.fill(payload, 0)
+                                }
+                                compilerInputs += AkenNativePageLocatorCompileInput.fromTypedPage(
+                                    descriptor = descriptor,
+                                    rawCallSiteProof = proof,
+                                )
+                            } finally {
+                                proof?.let { Arrays.fill(it, 0) }
+                                Arrays.fill(identity, 0)
                             }
-                        } finally {
-                            Arrays.fill(expectedProof, 0)
                         }
-                        val payload = emission.copyEncryptedPayloadForBuild()
-                        try {
-                            val buffer = checkNotNull(pageBuffers[emission.resourcePath])
-                            payload.copyInto(buffer, destinationOffset = emission.resourceOffset)
-                        } finally {
-                            Arrays.fill(payload, 0)
-                        }
-                        compilerInputs += AkenNativePageLocatorCompileInput.fromVbc4Emission(
-                            emission = emission,
-                            vbc4StateBindingLayoutDigest = checkNotNull(stateBindingLayoutDigest),
-                        )
-                    } finally {
-                        Arrays.fill(identity, 0)
-                        Arrays.fill(proof, 0)
+
+                        else -> error("AKEN finalization received an unsupported typed page resource kind")
                     }
                 }
+                require(materializedVbc4PageCount == pages.size) {
+                    "AKEN finalization did not emit every VBC4 page"
+                }
+                require(materializedStringPageCount == stringPages.size) {
+                    "AKEN finalization did not emit every StringPage"
+                }
                 require(compilerInputs.size == outputPages.size) {
-                    "AKEN VBC4 finalization did not create one native input per page"
+                    "AKEN finalization did not create one native input per page"
+                }
+
+                if (emittedVbc4Pages.isNotEmpty()) {
+                    val meshRoot = checkNotNull(materialization).copyMeshRootForBuild()
+                    try {
+                        emissions = AkenVbc4PageEmissionSet.create(meshRoot, emittedVbc4Pages)
+                    } finally {
+                        Arrays.fill(meshRoot, 0)
+                    }
                 }
 
                 val finalBytes = LinkedHashMap<String, ByteArray>()
@@ -822,36 +1073,35 @@ internal class AkenVbc4FinalizationLayout private constructor(
                         Arrays.fill(bytes, 0)
                     }
                 }
+                val retainedMaterialization = checkNotNull(materialization)
                 output = AkenVbc4FinalizationLayout(
                     commitmentValue = commitment,
                     finalEntriesValue = finalEntries,
-                    emissionsValue = checkNotNull(emissions),
+                    materializationValue = retainedMaterialization,
+                    emissionsValue = emissions,
                     nativeInputsValue = compilerInputs,
                 )
+                materialization = null
                 require(output.verifyOwnedEntriesForBuild()) {
-                    "AKEN VBC4 finalization did not verify its own writer-equivalent artifact"
+                    "AKEN finalization did not verify its own writer-equivalent artifact"
                 }
                 completed = true
                 return output
             } finally {
-                // The page emitter owns/wipes the plan once materialization
-                // begins. Calling wipe again is idempotent and covers failures
-                // before that hand-off.
                 plan.wipe()
                 pages.forEach { it.wipe() }
-                requests.forEach { it.wipe() }
-                registeredPages.forEach { page ->
-                    // Their plan owner has already wiped the authoritative page;
-                    // no independent handle/DEK copy is retained here.
-                    runCatching { page.handle.wipe() }
-                }
+                stringPages.forEach { it.wipe() }
+                vbc4Requests.forEach { it.wipe() }
+                materializationInputs.forEach { it.wipe() }
                 fixed.values.forEach { Arrays.fill(it, 0) }
                 pageBuffers.values.forEach { Arrays.fill(it, 0) }
                 planCommitment?.let { Arrays.fill(it, 0) }
                 stateBindingLayoutDigest?.let { Arrays.fill(it, 0) }
                 if (!completed) {
                     output?.wipe()
+                    materialization?.wipe()
                     emissions?.wipe()
+                    emittedVbc4Pages.forEach { it.wipe() }
                     compilerInputs.forEach { it.wipe() }
                     finalEntries.forEach { it.wipe() }
                 }
@@ -859,55 +1109,113 @@ internal class AkenVbc4FinalizationLayout private constructor(
         }
 
         /**
-         * Computes the exact one-pass canonical commitment for a set of pending
-         * VBC4 pages without consuming their plaintext owners. Callers use the
-         * returned commitment to initialize [AkenBuildPlan], then hand the same
-         * candidates to [materializeAndWipe].
+         * Computes the exact one-pass canonical commitment for pending VBC4 and
+         * typed StringPage records without consuming their plaintext owners.
+         * Callers initialize one [AkenBuildPlan] from the resulting commitment
+         * and then hand the same candidates to [materializeAndWipe].
          */
         @JvmSynthetic
         fun reserve(
             pendingPages: Iterable<AkenVbc4PendingPage>,
             fixedEntries: Iterable<AkenArtifactEntry>,
+            pendingStringPages: Iterable<AkenPendingStringPage> = emptyList(),
             rootShardRanges: Iterable<AkenRootShardRange> = emptyList(),
         ): AkenArtifactCommitment {
             val pages = ArrayList<AkenVbc4PendingPage>()
+            val stringPages = ArrayList<AkenPendingStringPage>()
             val fixed = LinkedHashMap<String, ByteArray>()
             val pageBuffers = LinkedHashMap<String, ByteArray>()
             val selfReferential = LinkedHashMap<String, MutableList<AkenCanonicalExclusionRange>>()
             val definitions = HashSet<String>()
             val reservations = ArrayList<AkenCanonicalReservation>()
             val rootRanges = rootShardRanges.toList()
+
+            fun finalizationPageKey(
+                resourceKind: AkenResourceKind,
+                logicalIdentity: ByteArray,
+                pageIndex: Int,
+            ): String = resourceKind.id.toString() + ":" + identityPageKey(logicalIdentity, pageIndex)
+
+            fun reservePhysicalRange(
+                definitionKey: String,
+                resourcePath: String,
+                resourceOffset: Int,
+                expectedLength: Int,
+                ownerLabel: String,
+            ) {
+                require(resourcePath !in fixed) {
+                    "AKEN " + ownerLabel + " path collides with a fixed final entry: " + resourcePath
+                }
+                require(definitions.add(definitionKey)) {
+                    "AKEN " + ownerLabel + " finalization contains duplicate logical identity/page index"
+                }
+                val end = resourceOffset.toLong() + expectedLength.toLong()
+                require(end <= Int.MAX_VALUE.toLong()) {
+                    "AKEN " + ownerLabel + " reservation exceeds JVM array bounds"
+                }
+                val existing = pageBuffers[resourcePath]
+                if (existing == null || existing.size < end.toInt()) {
+                    val replacement = ByteArray(end.toInt())
+                    existing?.copyInto(replacement)
+                    existing?.let { Arrays.fill(it, 0) }
+                    pageBuffers[resourcePath] = replacement
+                }
+                selfReferential.getOrPut(resourcePath) { mutableListOf() } += AkenCanonicalExclusionRange(
+                    entryName = resourcePath,
+                    offset = resourceOffset,
+                    length = expectedLength,
+                    kind = AkenCanonicalExclusionKind.HighValuePayload,
+                )
+            }
+
             try {
                 for (page in pendingPages) pages += page
-                require(pages.isNotEmpty()) { "AKEN VBC4 finalization requires at least one pending page" }
+                for (page in pendingStringPages) stringPages += page
+                require(pages.isNotEmpty() || stringPages.isNotEmpty()) {
+                    "AKEN finalization requires at least one pending page"
+                }
                 for (entry in fixedEntries) {
                     require(fixed.put(entry.name, entry.copyBytesForCommitment()) == null) {
-                        "AKEN VBC4 finalization contains duplicate fixed entry: ${entry.name}"
+                        "AKEN finalization contains duplicate fixed entry: " + entry.name
                     }
                 }
                 pages.forEach { page ->
-                    require(page.resourcePath !in fixed) {
-                        "AKEN VBC4 page path collides with a fixed final entry: ${page.resourcePath}"
+                    val identity = page.copyLogicalIdentityForBuild()
+                    try {
+                        reservePhysicalRange(
+                            definitionKey = finalizationPageKey(
+                                resourceKind = AkenResourceKind.Vbc4Method,
+                                logicalIdentity = identity,
+                                pageIndex = page.pageIndex,
+                            ),
+                            resourcePath = page.resourcePath,
+                            resourceOffset = page.resourceOffset,
+                            expectedLength = page.expectedStoredLength,
+                            ownerLabel = "VBC4 page",
+                        )
+                    } finally {
+                        Arrays.fill(identity, 0)
                     }
-                    require(definitions.add(page.identityPageKeyForBuild())) {
-                        "AKEN VBC4 finalization contains duplicate logical identity/page index"
-                    }
-                    val end = page.resourceOffset.toLong() + page.expectedStoredLength.toLong()
-                    require(end <= Int.MAX_VALUE.toLong()) { "AKEN VBC4 page reservation exceeds JVM array bounds" }
-                    val existing = pageBuffers[page.resourcePath]
-                    if (existing == null || existing.size < end.toInt()) {
-                        val replacement = ByteArray(end.toInt())
-                        existing?.copyInto(replacement)
-                        existing?.let { Arrays.fill(it, 0) }
-                        pageBuffers[page.resourcePath] = replacement
-                    }
-                    selfReferential.getOrPut(page.resourcePath) { mutableListOf() } += AkenCanonicalExclusionRange(
-                        entryName = page.resourcePath,
-                        offset = page.resourceOffset,
-                        length = page.expectedStoredLength,
-                        kind = AkenCanonicalExclusionKind.HighValuePayload,
-                    )
                 }
+                stringPages.forEach { page ->
+                    val identity = page.copyLogicalIdentityForBuild()
+                    try {
+                        reservePhysicalRange(
+                            definitionKey = finalizationPageKey(
+                                resourceKind = AkenResourceKind.StringPage,
+                                logicalIdentity = identity,
+                                pageIndex = page.pageIndex,
+                            ),
+                            resourcePath = page.resourcePath,
+                            resourceOffset = page.resourceOffset,
+                            expectedLength = page.expectedStoredLength,
+                            ownerLabel = "StringPage",
+                        )
+                    } finally {
+                        Arrays.fill(identity, 0)
+                    }
+                }
+
                 validateNonOverlappingPageRanges(selfReferential)
                 val rootRangesByEntry = rootRanges.groupBy { it.entryName }
                 fixed.forEach { (name, bytes) ->
