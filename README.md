@@ -39,6 +39,32 @@ JavaShroud 是一套 Java 混淆与加固工具链：Kotlin 引擎做字节码�
 
 注册 pass 共 26 个，默认 pipeline 只含 `strip-compile-debug-info`。stable pass 默认启用；experimental pass 需在配置里显式打开，其中带 opt-in 标记的还要求 `allowOptInPasses = true`。完整清单、参数和启用边界见 [docs/TECHNICAL.md](docs/TECHNICAL.md)。
 
+## 控制流混淆
+
+JavaShroud 的控制流保护分成两类：`control-flow-obfuscation` 改写现有分支和异常处理器周围的结构；`control-flow-flattening` 在方法中加入额外的分派块和干扰结构。`reference-proxy`、`invoke-dynamic-indirection` 与 `condy-constant-indirection` 则改变调用或常量的解析路径，可按需要与前两者一起使用。
+
+`control-flow-obfuscation` 会在方法入口插入不透明谓词，并选择部分 `GOTO` 边包上一层等价分派。可选的谓词包括二次剩余、位运算恒等式和模运算；`mixed` 会在这些形式之间随机选择。跳转可改写为 `if-chain`、`lookupswitch` 或 `tableswitch-hybrid`。`density` 决定处理多少跳转，`frequency` 控制谓词插入频率，`seed` 用于复现同一组选择。
+
+这个 pass 还有两项结构改写：
+
+- `branchInjection` 把经过 frame 分析确认的空栈 `GOTO` 改成读取合成状态字段的条件边，提供 `light`、`normal`、`aggressive` 三档。
+- `handlerSplit` 将满足条件的同类型纯重抛 handler 拆成重叠保护区和 relay，提供 `light`、`heavy` 两档。
+
+`control-flow-flattening` 适合再加一层干扰。它按 `density` 选择处理位置，可使用 `arithmetic-nop`、`dead-branch`、`unreachable-method`、`field-noise` 四种分派块模式；handler 体可保持 `nop`，也可改为合成字段写入或合成方法调用。
+
+### 强度怎么选
+
+| 目标 | 建议组合 | 产物特点 |
+| --- | --- | --- |
+| 低干扰 | `control-flow-obfuscation`，`density = 3..5`，`if-chain` | 增加入口谓词和少量伪边，体积与调试影响较小。 |
+| 常规保护 | `density = 6..8`，`algebraicFamily = "mixed"`，配合 `control-flow-flattening` | 同一方法内会混入多种谓词和分派块，反编译结果更零散。 |
+| 高干扰 | `density = 9..10`，`tableswitch-hybrid` 或 `lookupswitch`，按兼容性开启 `branchInjection` / `handlerSplit` | 跳转图、异常表和局部分派结构变化更多；应重点测试异常路径、热点方法和启动时间。 |
+| 高价值逻辑 | 控制流 pass 加调用间接、字符串/常量保护；必要时使用 `method-virtualization` | 普通字节码层之外还会改变调用解析或转入 VMBC / NBVM 执行。 |
+
+这里的“强度”说的是静态阅读、CFG 还原和规则匹配的工作量，不是不可逆承诺。JVM 指令仍在产物中；恒等条件和死路径在足够时间下可以被化简。实际配置应从少量关键类开始，逐步扩大范围。
+
+变换不会为了覆盖率硬改每个方法。构造器、接口、abstract / native 方法，以及包含 monitor、switch、未初始化对象或复杂异常表的高风险形状会被跳过。修改完成后会重算 StackMap frame，并重新分析已修改的方法。发布前请至少执行 `java -Xverify:all`、应用启动和关键业务回归。
+
 ## 资源封装：JSRP
 
 JSRP 是项目内部的受保护资源封装格式（magic `JSRP`，当前版本 7）。VM 字节码、Native 库、manifest、bootstrap 索引统一经 `RuntimeResourceCodec` 封装：
@@ -66,23 +92,14 @@ flowchart LR
 
 执行入口由每产物的 entry token、opcode 方言、资源路径、layout digest 和 dispatcher profile（`DispatcherProfile`）共同约束。未被选中或不兼容的方法留在普通字节码混淆边界内。
 
-## Native 加壳保护
+## Native 加固
 
-用户侧统一叫 **Native 加固**，实现上是外壳-内核两层结构（`NativeKernelShellPacker`）：
+`NativeKernelShellPacker` 采用外壳-内核两层结构：
 
 - 外层 `js_kernel_<platform>` stub 由 Java 层 `System.load` 直接加载；完整 inner kernel 以认证编码 payload 封装在外壳内。
 - `JNI_OnLoad` 逐级校验 header、section digest、layout 与 dispatcher profile、payload binding、分块 tag 和 payload MAC；任何一级失败都拒绝执行，Java 层没有解包 fallback。
 - Native kernel 与 VMBC 资源、bootstrap 索引、资源路径和 manifest 绑定，同一份外壳不能跨产物直接替换或重放。
-- 配置项 `jni-microkernel-loader.nativePackingLevel` 分 `off` / `standard` / `max` / `max-hardening` 四档，`max` 为当前默认高强度档；`bootKeyDelivery` 默认 `external-file`，可显式改为 `embedded`。
-
-### Boot KEK 契约
-
-启用 `jni-microkernel-loader` 时，构建端与运行端必须拿到同一个 256-bit Boot KEK。产物始终包含 AES-GCM 加密的 `META-INF/.r/boot.dat`（`BootMaterialEnvelope`，内含 master key、JAR layout digest、分区密钥槽和各平台外壳绑定承诺）。默认 `bootKeyDelivery = "external-file"`，KEK 不进产物；显式选择 `bootKeyDelivery = "embedded"` 时，构建使用的 sidecar 字节会写入随机密封资源路径，直接 `java -jar` 不再要求旁置文件。
-
-- 环境变量 `JAVASHROUD_BOOT_SECRET_V1`：严格 64 个十六进制字符；
-- 环境变量 `JAVASHROUD_BOOT_SECRET_FILE_V1` 指向的文件：32 个原始字节或 64 个十六进制字符。
-
-运行时按 `JAVASHROUD_BOOT_SECRET_V1` → `JAVASHROUD_BOOT_SECRET_FILE_V1` → JAR 内嵌资源的顺序读取；显式环境变量存在但格式或认证无效时直接失败，不回退到内嵌值。缺 KEK、格式错误、认证失败都会 fail-closed。外壳绑定承诺只存在于加密 boot.dat 内，由 JVM 在 `JNI_OnLoad` 期间一次性交付，Native 库内不自带可整体替换的期望值。使用默认外部模式时，应通过密钥管理注入并定期轮换，不要把 KEK 写进配置文件、Native 库或源码仓库。
+- 配置项 `jni-microkernel-loader.nativePackingLevel` 保留 `off` / `standard` / `max` / `max-hardening` 四档，四档统一采用 AKEN v4 资源级 evaluator；档位只改变 native 外壳与载荷封装强度。安全承诺固定为 **artifact-only static cost hardening**：运行时必然具备可执行的解密语义，但不存在可直接提取或一次解封即可横向解开全部高价值资源的静态根 Key。
 
 ### 平台边界
 
@@ -92,7 +109,7 @@ flowchart LR
 | Linux x64 | 匿名内存 ELF64 loader，覆盖 `PT_LOAD` / `PT_DYNAMIC`、hash、symbol、RELA / PLT、initializer 与入口校验 |
 | macOS x64 / arm64 | 外层 stub 与 Mach-O metadata、rebase / bind、export trie、initializer 校验；未满足匿名执行映射条件时 fail-closed |
 
-外壳协议与 KEK 交付链见 [docs/TECHNICAL.md](docs/TECHNICAL.md)。
+外壳协议与平台实现边界见 [docs/TECHNICAL.md](docs/TECHNICAL.md)。
 
 ## 与 JNIC / Native 混淆的区别
 

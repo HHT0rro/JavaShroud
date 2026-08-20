@@ -39,6 +39,32 @@ The design is Kerckhoffs-oriented: protection strength comes from per-artifact k
 
 26 passes are registered; the default pipeline contains only `strip-compile-debug-info`. Stable passes are enabled by default. Experimental passes must be enabled explicitly in the config, and opt-in passes additionally require `allowOptInPasses = true`. The full list, parameters, and enablement boundaries are in [docs/TECHNICAL_EN.md](docs/TECHNICAL_EN.md).
 
+## Control-flow obfuscation
+
+JavaShroud has two control-flow passes. `control-flow-obfuscation` rewrites existing branch and exception-handler structure. `control-flow-flattening` adds dispatch blocks and noise inside a method. `reference-proxy`, `invoke-dynamic-indirection`, and `condy-constant-indirection` change call or constant-resolution paths and can be used alongside those passes when needed.
+
+`control-flow-obfuscation` inserts opaque predicates at method entry and wraps selected `GOTO` edges with equivalent dispatch. Predicate families include quadratic residues, bitwise identities, and modular arithmetic; `mixed` chooses among them. Jumps can use `if-chain`, `lookupswitch`, or `tableswitch-hybrid`. `density` controls how many jumps are considered, `frequency` controls predicate insertion, and `seed` reproduces the same selection.
+
+The pass also has two structural rewrites:
+
+- `branchInjection` replaces frame-verified empty-stack `GOTO` edges with conditional edges backed by a synthetic state field. Its levels are `light`, `normal`, and `aggressive`.
+- `handlerSplit` splits eligible same-type pure-rethrow handlers into overlapping protected ranges and a relay. Its levels are `light` and `heavy`.
+
+`control-flow-flattening` adds another layer. It uses `density` to select insertion points and supports `arithmetic-nop`, `dead-branch`, `unreachable-method`, and `field-noise` dispatch-block patterns. Handler bodies can remain `nop` or use synthetic field writes and synthetic method calls.
+
+### Choosing a level
+
+| Goal | Suggested combination | Output effect |
+| --- | --- | --- |
+| Low disruption | `control-flow-obfuscation`, `density = 3..5`, `if-chain` | Adds entry predicates and a small number of synthetic edges, with lower size and debugging impact. |
+| General protection | `density = 6..8`, `algebraicFamily = "mixed"`, plus `control-flow-flattening` | Mixes predicate and dispatch-block forms within a method, producing less direct decompiler output. |
+| High disruption | `density = 9..10`, `tableswitch-hybrid` or `lookupswitch`, with compatible `branchInjection` / `handlerSplit` | Changes more branch, exception-table, and local-dispatch structure; exception paths, hot methods, and startup time need focused testing. |
+| High-value logic | Control-flow passes plus call indirection and string / constant protection; use `method-virtualization` where required | Changes call resolution as well, or moves selected methods into VMBC / NBVM execution. |
+
+“Strength” here means the amount of work required for static reading, CFG recovery, and pattern matching. It is not an irreversibility claim. JVM instructions remain in the artifact, and invariant conditions or dead paths can be simplified with enough analysis time. Start with a small set of important classes and expand only after testing.
+
+The passes do not force coverage. Constructors, interfaces, abstract / native methods, and high-risk shapes involving monitors, switches, uninitialized objects, or complex exception tables are skipped. Changed methods have their StackMap frames recomputed and are analyzed again. Before release, run `java -Xverify:all`, start the application, and cover the business paths that matter.
+
 ## Resource Envelopes: JSRP
 
 JSRP is the project's protected resource envelope format (magic `JSRP`, current version 7). VM bytecode, Native libraries, manifests, and the bootstrap index are all sealed through `RuntimeResourceCodec`:
@@ -66,23 +92,14 @@ flowchart LR
 
 Execution entry is bound to per-artifact entry tokens, opcode dialects, resource paths, layout digests, and the dispatcher profile (`DispatcherProfile`). Methods that are not selected or not compatible stay within the ordinary bytecode-obfuscation boundary.
 
-## Native Packing
+## Native hardening
 
-The user-facing name is **Native hardening**; the implementation is a two-layer shell-kernel structure (`NativeKernelShellPacker`):
+`NativeKernelShellPacker` uses a two-layer shell-kernel structure:
 
 - The Java layer `System.load`s the outer `js_kernel_<platform>` stub directly; the complete inner kernel is sealed inside the shell as an authenticated, encoded payload.
 - `JNI_OnLoad` verifies the header, section digest, layout and dispatcher profile, payload binding, chunk tags, and payload MAC in sequence; any failure rejects execution, and there is no Java unpacking fallback.
 - The Native kernel is bound to VMBC resources, the bootstrap index, resource paths, and the manifest, so a shell cannot be transplanted or replayed across artifacts.
-- The `jni-microkernel-loader.nativePackingLevel` option has `off` / `standard` / `max` / `max-hardening` levels, with `max` as the current high-strength default; `bootKeyDelivery` defaults to `external-file` and can be set explicitly to `embedded`.
-
-### Boot KEK Contract
-
-With `jni-microkernel-loader` enabled, the build side and the runtime side must hold the same 256-bit Boot KEK. The artifact always contains the AES-GCM sealed `META-INF/.r/boot.dat` (`BootMaterialEnvelope`, carrying the master key, JAR layout digest, partition key slots, and per-platform shell binding commitments). The default `bootKeyDelivery = "external-file"` keeps the KEK outside the artifact; explicit `bootKeyDelivery = "embedded"` stores the build sidecar bytes under a randomized sealed resource path so direct `java -jar` startup no longer needs a sidecar file.
-
-- environment variable `JAVASHROUD_BOOT_SECRET_V1`: exactly 64 hexadecimal characters;
-- the file named by `JAVASHROUD_BOOT_SECRET_FILE_V1`: 32 raw bytes or 64 hexadecimal characters.
-
-Runtime lookup order is `JAVASHROUD_BOOT_SECRET_V1` → `JAVASHROUD_BOOT_SECRET_FILE_V1` → the embedded JAR resource. If an explicit environment variable is present but malformed or fails authentication, startup fails directly instead of falling back to the embedded value. A missing or malformed KEK and authentication failures all fail closed. Shell binding commitments exist only inside the encrypted boot.dat and are delivered once by the JVM during `JNI_OnLoad`; the Native library does not embed an expectation that could be swapped with the shell bundle. In the default external mode, inject and rotate the KEK through deployment secret management; do not place it in configuration files, Native libraries, or the source repository.
+- The `jni-microkernel-loader.nativePackingLevel` option keeps `off` / `standard` / `max` / `max-hardening`; all four levels use the AKEN v4 resource-level evaluator, and the level only changes Native shell and payload packing strength. The security wording is **artifact-only static cost hardening**: a self-contained runtime necessarily contains executable decryption semantics, but it has no directly extractable static root key that opens every high-value resource in one step.
 
 ### Platform Boundaries
 
@@ -92,7 +109,7 @@ Runtime lookup order is `JAVASHROUD_BOOT_SECRET_V1` → `JAVASHROUD_BOOT_SECRET_
 | Linux x64 | Anonymous-memory ELF64 loader with `PT_LOAD` / `PT_DYNAMIC`, hash, symbol, RELA / PLT, initializer, and entrypoint validation |
 | macOS x64 / arm64 | Outer stub plus Mach-O metadata, rebase / bind, export-trie, and initializer validation; unsupported anonymous execution mapping fails closed |
 
-The shell protocol and KEK delivery chain are documented in [docs/TECHNICAL_EN.md](docs/TECHNICAL_EN.md).
+The shell protocol and platform implementation boundaries are documented in [docs/TECHNICAL_EN.md](docs/TECHNICAL_EN.md).
 
 ## Compared With JNIC / Native Obfuscation
 
