@@ -1,0 +1,78 @@
+COMMAND
+E:\java\jdk-17\bin\javap.exe -c -p -s -classpath E:\XiangMu\JavaShroud-public\promo-video-v2\demo-artifacts\build\protected\demo-vmbc.jar demo.ProtectedOperation
+
+EXIT CODE
+0
+
+STDOUT
+Compiled from "ProtectedOperation.java"
+public final class demo.ProtectedOperation {
+  private demo.ProtectedOperation();
+    descriptor: ()V
+    Code:
+       0: aload_0
+       1: invokespecial #9                  // Method java/lang/Object."<init>":()V
+       4: return
+
+  public static long execute(int, int);
+    descriptor: (II)J
+    Code:
+       0: ldc           #12                 // int 632764657
+       2: istore_3
+       3: iload_3
+       4: ldc           #13                 // int -489691483
+       6: iadd
+       7: istore_3
+       8: iload_3
+       9: ldc           #14                 // int 1902637904
+      11: iadd
+      12: istore_3
+      13: iload_3
+      14: ldc           #15                 // int 951318960
+      16: iadd
+      17: istore_3
+      18: iload_3
+      19: pop
+      20: iload_3
+      21: ldc           #16                 // int -1671824160
+      23: iadd
+      24: istore_3
+      25: iload_3
+      26: pop
+      27: iload_3
+      28: ldc           #17                 // int -835912081
+      30: iadd
+      31: istore_3
+      32: iload_3
+      33: ldc           #18                 // int -417956030
+      35: iadd
+      36: istore_3
+      37: iload_3
+      38: pop
+      39: iload_3
+      40: ldc           #19                 // int 1938505627
+      42: iadd
+      43: istore_3
+      44: iload_3
+      45: pop
+      46: ldc2_w        #20                 // long -8241017477946140282l
+      49: bipush        2
+      51: anewarray     #4                  // class java/lang/Object
+      54: dup
+      55: bipush        0
+      57: iload_0
+      58: invokestatic  #27                 // Method java/lang/Integer.valueOf:(I)Ljava/lang/Integer;
+      61: aastore
+      62: dup
+      63: bipush        1
+      65: iload_1
+      66: invokestatic  #27                 // Method java/lang/Integer.valueOf:(I)Ljava/lang/Integer;
+      69: aastore
+      70: invokestatic  #33                 // Method "r/5e/C272167bed3ac41935790963c".m_5e59630b3382dfc6:(J[Ljava/lang/Object;)Ljava/lang/Object;
+      73: checkcast     #35                 // class java/lang/Long
+      76: invokevirtual #39                 // Method java/lang/Long.longValue:()J
+      79: lreturn
+}
+
+
+STDERR

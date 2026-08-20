@@ -1,0 +1,11 @@
+COMMAND
+E:\java\jdk-17\bin\java.exe -Xverify:all -jar E:\XiangMu\JavaShroud-public\promo-video-v2\local-evidence\artifact\demo-protected-final.jar --case approved
+
+EXIT CODE
+0
+
+STDOUT
+APPROVED · digest=82eca2cbf134f031
+
+
+STDERR

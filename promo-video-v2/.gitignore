@@ -1,0 +1,8 @@
+# Generated Java sample outputs and local evidence
+/demo-artifacts/build/
+/demo-artifacts/local-evidence/
+/demo-artifacts/generated-evidence/
+/renders/
+/node_modules/
+/.hyperframes/
+/npm-debug.log*

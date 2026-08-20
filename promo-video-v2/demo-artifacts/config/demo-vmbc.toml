@@ -1,0 +1,40 @@
+inputJarPath = "E:/XiangMu/JavaShroud-public/promo-video-v2/demo-artifacts/build/dist/demo-baseline.jar"
+outputJarPath = "E:/XiangMu/JavaShroud-public/promo-video-v2/demo-artifacts/build/protected/demo-vmbc.jar"
+allowOptInPasses = true
+allowIncomplete = false
+allowRedundantPasses = false
+
+[[passes]]
+id = "method-virtualization"
+enabled = true
+[passes.params]
+methodSelection = "safe"
+strictVirtualization = true
+maxInstructions = 99999
+maxBroadVirtualizedMethods = 99999
+
+[[passes]]
+id = "jni-microkernel-loader"
+enabled = true
+[passes.params]
+kernelComponents = "vm"
+targetPlatform = "windows-x64,linux-x64"
+nativeRecompilation = true
+nativePackingLevel = "max"
+
+[ruleSet]
+rules = []
+
+[[passSelections]]
+passId = "method-virtualization"
+mode = "selected-only"
+[[passSelections.rules]]
+target = "demo/ProtectedOperation#execute:(II)J"
+action = "obfuscate"
+
+[[passSelections]]
+passId = "jni-microkernel-loader"
+mode = "selected-only"
+[[passSelections.rules]]
+target = "demo/Main"
+action = "obfuscate"

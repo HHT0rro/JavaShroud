@@ -1,0 +1,29 @@
+'docker' is not recognized as an internal or external command,
+operable program or batch file.
+
+hyperframes doctor
+
+  ✓ Version          0.7.107 (latest)
+  ✓ Node.js          v24.15.0 (win32 x64)
+  ✓ CPU              20 cores · AMD Ryzen AI 9 H 365 w/ Radeon 880M @ 1996MHz
+  ✓ Memory           27.8 GB total · 7.5 GB available
+  ✓ Disk             99.8 GB free
+  ✓ Frames cache     C:\WINDOWS\TEMP\hyperframes-extract-cache-u · 3.1 GB free at C:\WINDOWS\TEMP · default
+  ✓ Archive extractor Built into Windows
+  ✓ Environment      non-TTY
+  ✗ whisper-cpp      Not found (optional — needed for transcription)
+                     Build with cmake: https://github.com/ggml-org/whisper.cpp#building
+  ✗ TTS (Kokoro)     Not installed (optional — local voice fallback)
+                     pip install kokoro-onnx soundfile
+  ✗ BGM (MusicGen)   Not installed (optional — local music fallback)
+                     pip install transformers torch soundfile numpy
+  ✓ FFmpeg           ffmpeg 8.1.1-full_build-www.gyan.dev at C:\Users\xbeng\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe
+  ✓ FFprobe          ffprobe 8.1.1-full_build-www.gyan.dev at C:\Users\xbeng\AppData\Local\Microsoft\WinGet\Links\ffprobe.exe
+  ✓ Chrome           cache: C:\Users\xbeng\.cache\hyperframes\chrome\chrome-headless-shell\win64-152.0.7928.2\chrome-headless-shell-win64\chrome-headless-shell.exe
+  ✗ Docker           Not found
+                     https://docs.docker.com/get-docker/
+  ✗ Docker running   Not running
+                     Start Docker Desktop or run: sudo systemctl start docker
+
+  ◇  Some checks failed — see hints above
+

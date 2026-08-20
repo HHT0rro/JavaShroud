@@ -1,0 +1,25 @@
+COMMAND
+E:\java\jdk-17\bin\javap.exe -c -p -s -classpath E:\XiangMu\JavaShroud-public\promo-video-v2\demo-artifacts\build\protected\demo-vmbc.jar demo.MessageVault
+
+EXIT CODE
+0
+
+STDOUT
+Compiled from "MessageVault.java"
+public final class demo.MessageVault {
+  private demo.MessageVault();
+    descriptor: ()V
+    Code:
+       0: aload_0
+       1: invokespecial #1                  // Method java/lang/Object."<init>":()V
+       4: return
+
+  public static java.lang.String protectedExportNotice();
+    descriptor: ()Ljava/lang/String;
+    Code:
+       0: ldc           #7                  // String PROTECTED_EXPORT::INTERNAL_APPROVAL_ONLY
+       2: areturn
+}
+
+
+STDERR

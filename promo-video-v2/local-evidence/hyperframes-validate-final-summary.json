@@ -1,0 +1,13 @@
+{
+  "ok": true,
+  "errors": [],
+  "warnings": [],
+  "contrastFailures": 0,
+  "contrastChecks": 114,
+  "_meta": {
+    "version": "0.7.107",
+    "latestVersion": "0.7.107",
+    "updateAvailable": false,
+    "deprecated": true
+  }
+}

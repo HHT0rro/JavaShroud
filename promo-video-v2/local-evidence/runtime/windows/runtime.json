@@ -1,0 +1,50 @@
+{
+  "artifactPath": "E:\\XiangMu\\JavaShroud-public\\promo-video-v2\\local-evidence\\artifact\\demo-protected-final.jar",
+  "artifactSha256": "2eee7edd9aa226dea0dc6489f092477892e2b364b43cb3bac143b1b6071bd305",
+  "artifactBytes": 3311838,
+  "java": "E:\\java\\jdk-17\\bin\\java.exe",
+  "cases": [
+    {
+      "case": "approved",
+      "command": [
+        "E:\\java\\jdk-17\\bin\\java.exe",
+        "-Xverify:all",
+        "-jar",
+        "E:\\XiangMu\\JavaShroud-public\\promo-video-v2\\local-evidence\\artifact\\demo-protected-final.jar",
+        "--case",
+        "approved"
+      ],
+      "returncode": 0,
+      "stdout": "APPROVED · digest=82eca2cbf134f031\n",
+      "stderr": ""
+    },
+    {
+      "case": "step-up",
+      "command": [
+        "E:\\java\\jdk-17\\bin\\java.exe",
+        "-Xverify:all",
+        "-jar",
+        "E:\\XiangMu\\JavaShroud-public\\promo-video-v2\\local-evidence\\artifact\\demo-protected-final.jar",
+        "--case",
+        "step-up"
+      ],
+      "returncode": 0,
+      "stdout": "STEP_UP · digest=aacf3fed42fa2067\n",
+      "stderr": ""
+    },
+    {
+      "case": "denied",
+      "command": [
+        "E:\\java\\jdk-17\\bin\\java.exe",
+        "-Xverify:all",
+        "-jar",
+        "E:\\XiangMu\\JavaShroud-public\\promo-video-v2\\local-evidence\\artifact\\demo-protected-final.jar",
+        "--case",
+        "denied"
+      ],
+      "returncode": 0,
+      "stdout": "DENIED · digest=adeb7274380e30fe\n",
+      "stderr": ""
+    }
+  ]
+}

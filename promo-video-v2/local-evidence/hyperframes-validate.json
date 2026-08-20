@@ -1,0 +1,1156 @@
+'hyperframes validate' is deprecated and will be removed in a future release. Use 'hyperframes check' instead.
+[hyperframes] browserGpuMode probe → hardware (WebGL renderer vendor="Google Inc. (AMD)" renderer="ANGLE (AMD, AMD Radeon(TM) 880M Graphics (0x0000150E) Direct3D11 vs_5_0 ps_5_0, D3D11)")
+{
+  "ok": true,
+  "errors": [],
+  "warnings": [],
+  "contrast": [
+    {
+      "time": 9,
+      "selector": "#brand-claim",
+      "text": "代码，换一种执行方式。",
+      "ratio": 18.73,
+      "wcagAA": true,
+      "large": true,
+      "fg": "rgb(244,247,245)",
+      "bg": "rgb(5,7,6)"
+    },
+    {
+      "time": 9,
+      "selector": "#brand-meta",
+      "text": "JavaShroud · OPEN SOURCE · GPL-3.0",
+      "ratio": 8.04,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(5,7,6)"
+    },
+    {
+      "time": 27,
+      "selector": "div.chapter",
+      "text": "01 · BUILD WITNESS",
+      "ratio": 15.86,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(5,7,6)"
+    },
+    {
+      "time": 27,
+      "selector": "h2.headline",
+      "text": "从可运行的 Java 样本开始。",
+      "ratio": 18.73,
+      "wcagAA": true,
+      "large": true,
+      "fg": "rgb(244,247,245)",
+      "bg": "rgb(5,7,6)"
+    },
+    {
+      "time": 27,
+      "selector": "div.wb-brand",
+      "text": "JAVASHROUD",
+      "ratio": 17.89,
+      "wcagAA": true,
+      "large": true,
+      "fg": "rgb(244,247,245)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "span",
+      "text": "SHROUD",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": true,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "label",
+      "text": "INPUT JAR",
+      "ratio": 7.34,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(16,21,18)"
+    },
+    {
+      "time": 27,
+      "selector": "#wb-input-name",
+      "text": "demo-baseline.jar",
+      "ratio": 17.11,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(244,247,245)",
+      "bg": "rgb(16,21,18)"
+    },
+    {
+      "time": 27,
+      "selector": "div.wb-step.active",
+      "text": "Input JAR",
+      "ratio": 17.89,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(244,247,245)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "div.wb-step.active",
+      "text": "Scan Jar",
+      "ratio": 17.89,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(244,247,245)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "div.wb-step.active",
+      "text": "Passes",
+      "ratio": 17.89,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(244,247,245)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "div.wb-step.active",
+      "text": "Rules",
+      "ratio": 17.89,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(244,247,245)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "div.wb-step.active",
+      "text": "TOML",
+      "ratio": 17.89,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(244,247,245)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "div.wb-step.active",
+      "text": "Engine Events",
+      "ratio": 17.89,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(244,247,245)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "div.wb-step.active",
+      "text": "Done",
+      "ratio": 17.89,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(244,247,245)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "div.wb-toolbar-title",
+      "text": "Protection Workbench",
+      "ratio": 17.89,
+      "wcagAA": true,
+      "large": true,
+      "fg": "rgb(244,247,245)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "#wb-engine-meta",
+      "text": "ENGINE 0.12 · VBC 4.55 · BUILD Java 21",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "div.pane-title",
+      "text": "Verified passes",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "div.pass-name",
+      "text": "VMBC Virtualization",
+      "ratio": 17.89,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(244,247,245)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "div.pass-target",
+      "text": "demo/ProtectedOperation#execute:(II)J",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "div.pass-state",
+      "text": "applied",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "div.pass-name",
+      "text": "Control Flow",
+      "ratio": 17.89,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(244,247,245)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "div.pass-target",
+      "text": "demo/AccessPolicy",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "div.pass-state",
+      "text": "applied-with-safe-edge-limit",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "div.pass-name",
+      "text": "String Protection",
+      "ratio": 17.89,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(244,247,245)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "div.pass-target",
+      "text": "demo/MessageVault",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "div.pass-state",
+      "text": "applied",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "div.pass-name",
+      "text": "JNI Microkernel",
+      "ratio": 17.89,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(244,247,245)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "div.pass-target",
+      "text": "demo/Main",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "div.pass-state",
+      "text": "applied-windows-linux",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "#toml-view",
+      "text": "[[passes]]\nid = \"method-virtualization\"\nmethodSele",
+      "ratio": 12.97,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(203,212,207)",
+      "bg": "rgb(9,12,10)"
+    },
+    {
+      "time": 27,
+      "selector": "div.pane-title",
+      "text": "Engine events",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "span.event-index",
+      "text": "01",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "span.event-text",
+      "text": "Loaded input JAR · Java 17 · 7 classes",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "span.event-index",
+      "text": "02",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "span.event-text",
+      "text": "string-encryption · selected demo/MessageVault",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "span.event-index",
+      "text": "03",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "span.event-text",
+      "text": "control-flow-obfuscation · selected demo/AccessPol",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "span.event-index",
+      "text": "04",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "span.event-text",
+      "text": "jni-microkernel-loader · Windows x64 + Linux x64",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "span.event-index",
+      "text": "05",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "span.event-text",
+      "text": "method-virtualization · ProtectedOperation.execute",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "span.event-index",
+      "text": "06",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "span.event-text",
+      "text": "Compiled JNI microkernel for windows-x64",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "span.event-index",
+      "text": "07",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "span.event-text",
+      "text": "Compiled JNI microkernel for linux-x64",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "span.event-index",
+      "text": "08",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "span.event-text",
+      "text": "Run completed · passes=4 · transformedClasses=3 · ",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "span.event-index",
+      "text": "09",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "span.event-text",
+      "text": "DONE · progress=100",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "#wb-evidence-strip",
+      "text": "JAVA 17 · CFR 0.152 · SHA 2eee7edd9aa2",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "strong.accent",
+      "text": "DONE",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 27,
+      "selector": "span",
+      "text": "选择要保护的高价值方法。",
+      "ratio": 8.04,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(5,7,6)"
+    },
+    {
+      "time": 27,
+      "selector": "span",
+      "text": "WORKFLOW VISUALIZATION · REAL ENGINE EVIDENCE",
+      "ratio": 8.04,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(5,7,6)"
+    },
+    {
+      "time": 63,
+      "selector": "div.chapter",
+      "text": "04 · CONTROL FLOW / STRINGS",
+      "ratio": 15.86,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(5,7,6)"
+    },
+    {
+      "time": 63,
+      "selector": "h2.headline",
+      "text": "真实字节码。真实检索结果。",
+      "ratio": 18.73,
+      "wcagAA": true,
+      "large": true,
+      "fg": "rgb(244,247,245)",
+      "bg": "rgb(5,7,6)"
+    },
+    {
+      "time": 63,
+      "selector": "strong",
+      "text": "AccessPolicy · javap -c -p",
+      "ratio": 17.89,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(244,247,245)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "span",
+      "text": "TABLESWITCH-HYBRID",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "b",
+      "text": "01",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "span",
+      "text": "7: ifne          11",
+      "ratio": 12.73,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(203,212,207)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "b",
+      "text": "02",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "span",
+      "text": "3: ifeq          7",
+      "ratio": 12.73,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(203,212,207)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "b",
+      "text": "03",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "span",
+      "text": "37: ifne          53",
+      "ratio": 12.73,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(203,212,207)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "b",
+      "text": "04",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "span",
+      "text": "64: lookupswitch  { // 3",
+      "ratio": 12.73,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(203,212,207)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "b",
+      "text": "05",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "span",
+      "text": "106: ifeq          171",
+      "ratio": 12.73,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(203,212,207)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "b",
+      "text": "06",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "span",
+      "text": "112: tableswitch   { // 0 to 2",
+      "ratio": 12.73,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(203,212,207)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "b",
+      "text": "07",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "span",
+      "text": "152: ifeq          171",
+      "ratio": 12.73,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(203,212,207)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "b",
+      "text": "08",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "span",
+      "text": "166: ifeq          171",
+      "ratio": 12.73,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(203,212,207)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "b",
+      "text": "09",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "span",
+      "text": "172: tableswitch   { // 0 to 2",
+      "ratio": 12.73,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(203,212,207)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "b",
+      "text": "10",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "span",
+      "text": "256: lookupswitch  { // 4",
+      "ratio": 12.73,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(203,212,207)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "b",
+      "text": "11",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "span",
+      "text": "307: ifeq          391",
+      "ratio": 12.73,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(203,212,207)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "strong",
+      "text": "MessageVault · literal scan",
+      "ratio": 17.89,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(244,247,245)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "span",
+      "text": "STRING PROTECTION",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "div.literal-label",
+      "text": "BASELINE DIRECT HITS",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "div.literal-value",
+      "text": "1 · demo/MessageVault.class",
+      "ratio": 17.89,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(244,247,245)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "#baseline-hit-count",
+      "text": "1",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "div.literal-label",
+      "text": "PROTECTED DIRECT HITS",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "div.literal-value",
+      "text": "0 · DIRECT LITERAL REMOVED",
+      "ratio": 17.89,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(244,247,245)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "#final-hit-count",
+      "text": "0",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "div.literal-label",
+      "text": "ACTUAL DECODER CALL",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 63,
+      "selector": "#decoder-code",
+      "text": "cachedDecodeString(byte[], int, int, long, long)\n ",
+      "ratio": 12.73,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(203,212,207)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 81,
+      "selector": "div.chapter",
+      "text": "06 · RUNTIME PROOF",
+      "ratio": 15.86,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(5,7,6)"
+    },
+    {
+      "time": 81,
+      "selector": "h2.headline",
+      "text": "Windows x64 · Linux x64 · Java 17。",
+      "ratio": 18.73,
+      "wcagAA": true,
+      "large": true,
+      "fg": "rgb(244,247,245)",
+      "bg": "rgb(5,7,6)"
+    },
+    {
+      "time": 81,
+      "selector": "#verify-win-label",
+      "text": "Windows x64 · Java 17",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 81,
+      "selector": "#verify-win-path",
+      "text": "E:\\java\\jdk-17\\bin\\java.exe",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 81,
+      "selector": "div.verify-command",
+      "text": "java -Xverify:all -jar demo-protected-final.jar --",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 81,
+      "selector": "span",
+      "text": "APPROVED · digest=82eca2cbf134f031",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 81,
+      "selector": "span",
+      "text": "EXIT 0",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 81,
+      "selector": "div.verify-command",
+      "text": "java -Xverify:all -jar demo-protected-final.jar --",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 81,
+      "selector": "span",
+      "text": "STEP_UP · digest=aacf3fed42fa2067",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 81,
+      "selector": "span",
+      "text": "EXIT 0",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 81,
+      "selector": "div.verify-command",
+      "text": "java -Xverify:all -jar demo-protected-final.jar --",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 81,
+      "selector": "span",
+      "text": "DENIED · digest=adeb7274380e30fe",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 81,
+      "selector": "span",
+      "text": "EXIT 0",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 81,
+      "selector": "#verify-linux-label",
+      "text": "Ubuntu 24.04 · Linux x64 · OpenJDK 17.0.19",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 81,
+      "selector": "#verify-linux-path",
+      "text": "/usr/lib/jvm/java-17-openjdk-amd64/bin/java",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 81,
+      "selector": "div.verify-command",
+      "text": "java -Xverify:all -jar demo-protected-final.jar --",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 81,
+      "selector": "span",
+      "text": "APPROVED · digest=82eca2cbf134f031",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 81,
+      "selector": "span",
+      "text": "EXIT 0",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 81,
+      "selector": "div.verify-command",
+      "text": "java -Xverify:all -jar demo-protected-final.jar --",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 81,
+      "selector": "span",
+      "text": "STEP_UP · digest=aacf3fed42fa2067",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 81,
+      "selector": "span",
+      "text": "EXIT 0",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 81,
+      "selector": "div.verify-command",
+      "text": "java -Xverify:all -jar demo-protected-final.jar --",
+      "ratio": 7.68,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(155,166,160)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 81,
+      "selector": "span",
+      "text": "DENIED · digest=adeb7274380e30fe",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    },
+    {
+      "time": 81,
+      "selector": "span",
+      "text": "EXIT 0",
+      "ratio": 15.15,
+      "wcagAA": true,
+      "large": false,
+      "fg": "rgb(140,255,63)",
+      "bg": "rgb(11,15,13)"
+    }
+  ],
+  "contrastFailures": 0,
+  "_meta": {
+    "version": "0.7.107",
+    "latestVersion": "0.7.107",
+    "updateAvailable": false,
+    "deprecated": true
+  }
+}

@@ -1,0 +1,135 @@
+COMMAND
+E:\java\jdk-17\bin\javap.exe -c -p -s -classpath E:\XiangMu\JavaShroud-public\promo-video-v2\demo-artifacts\build\dist\demo-baseline.jar demo.ProtectedOperation
+
+EXIT CODE
+0
+
+STDOUT
+Compiled from "ProtectedOperation.java"
+public final class demo.ProtectedOperation {
+  private demo.ProtectedOperation();
+    descriptor: ()V
+    Code:
+       0: aload_0
+       1: invokespecial #1                  // Method java/lang/Object."<init>":()V
+       4: return
+
+  public static long execute(int, int);
+    descriptor: (II)J
+    Code:
+       0: ldc2_w        #7                  // long -7046029254386353131l
+       3: lstore_2
+       4: iconst_3
+       5: iload_0
+       6: iadd
+       7: istore        4
+       9: iconst_0
+      10: istore        5
+      12: iload         5
+      14: iload         4
+      16: if_icmpge     57
+      19: lload_2
+      20: iload_1
+      21: iload         5
+      23: bipush        17
+      25: imul
+      26: iadd
+      27: i2l
+      28: iload         5
+      30: iconst_3
+      31: iand
+      32: bipush        8
+      34: imul
+      35: lshl
+      36: lxor
+      37: lstore_2
+      38: lload_2
+      39: ldc2_w        #9                  // long 1099511628211l
+      42: lmul
+      43: lstore_2
+      44: lload_2
+      45: lload_2
+      46: bipush        29
+      48: lushr
+      49: lxor
+      50: lstore_2
+      51: iinc          5, 1
+      54: goto          12
+      57: iload_0
+      58: tableswitch   { // 1 to 3
+
+                     1: 84
+
+                     2: 93
+
+                     3: 102
+               default: 111
+          }
+      84: lload_2
+      85: ldc2_w        #11                 // long 4706349925050762564l
+      88: lxor
+      89: lstore_2
+      90: goto          117
+      93: lload_2
+      94: ldc2_w        #13                 // long 6004500414690840576l
+      97: lxor
+      98: lstore_2
+      99: goto          117
+     102: lload_2
+     103: ldc2_w        #15                 // long 4919424244573798400l
+     106: lxor
+     107: lstore_2
+     108: goto          117
+     111: lload_2
+     112: ldc2_w        #17                 // long 6146933341117959680l
+     115: lxor
+     116: lstore_2
+     117: iload_1
+     118: bipush        70
+     120: if_icmplt     140
+     123: lload_2
+     124: bipush        11
+     126: lshl
+     127: lload_2
+     128: bipush        53
+     130: lushr
+     131: lor
+     132: ldc2_w        #19                 // long 221909485l
+     135: lxor
+     136: lstore_2
+     137: goto          176
+     140: iload_1
+     141: bipush        30
+     143: if_icmplt     163
+     146: lload_2
+     147: bipush        7
+     149: lshl
+     150: lload_2
+     151: bipush        57
+     153: lushr
+     154: lor
+     155: ldc2_w        #21                 // long 6191633l
+     158: lxor
+     159: lstore_2
+     160: goto          176
+     163: lload_2
+     164: iconst_3
+     165: lshl
+     166: lload_2
+     167: bipush        61
+     169: lushr
+     170: lor
+     171: ldc2_w        #23                 // long 168939093l
+     174: lxor
+     175: lstore_2
+     176: lload_2
+     177: iload_1
+     178: i2l
+     179: ldc2_w        #25                 // long 2654435761l
+     182: lmul
+     183: lxor
+     184: lreturn
+}
+
+
+STDERR

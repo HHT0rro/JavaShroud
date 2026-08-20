@@ -1,0 +1,36 @@
+'hyperframes inspect' is deprecated and will be removed in a future release. Use 'hyperframes check' instead.
+[hyperframes] browserGpuMode probe → hardware (WebGL renderer vendor="Google Inc. (AMD)" renderer="ANGLE (AMD, AMD Radeon(TM) 880M Graphics (0x0000150E) Direct3D11 vs_5_0 ps_5_0, D3D11)")
+{
+  "schemaVersion": 1,
+  "duration": 90,
+  "samples": [
+    1.5,
+    5.8,
+    12,
+    22,
+    34,
+    42,
+    50,
+    63,
+    72,
+    81,
+    87.5
+  ],
+  "tolerance": 2,
+  "strict": true,
+  "collapseStatic": true,
+  "ok": true,
+  "errorCount": 0,
+  "warningCount": 0,
+  "infoCount": 0,
+  "issueCount": 0,
+  "totalIssueCount": 0,
+  "truncated": false,
+  "issues": [],
+  "_meta": {
+    "version": "0.7.107",
+    "latestVersion": "0.7.107",
+    "updateAvailable": false,
+    "deprecated": true
+  }
+}
