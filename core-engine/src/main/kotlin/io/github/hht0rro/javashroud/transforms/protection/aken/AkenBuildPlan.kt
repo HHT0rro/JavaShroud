@@ -100,11 +100,13 @@ class AkenBuildPlan private constructor(
         nativeFragments: List<EvaluatorFragment>,
         terminal: EvaluatorFragment,
         fingerprint: ByteArray,
+        boundDecryptorCore: AkenBoundDecryptorCore,
     ) {
         private var javaFragmentsValue: List<EvaluatorFragment> = javaFragments.toList()
         private var nativeFragmentsValue: List<EvaluatorFragment> = nativeFragments.toList()
         private var terminalValue: EvaluatorFragment? = terminal
         private var fingerprintValue: ByteArray = fingerprint.copyOf()
+        private var boundDecryptorCoreValue: AkenBoundDecryptorCore? = boundDecryptorCore
 
         @Volatile
         private var wiped: Boolean = false
@@ -169,14 +171,32 @@ class AkenBuildPlan private constructor(
             return fingerprintValue.copyOf()
         }
 
+        /** Page-local nonce is owned by the bound terminal seed, never by Java runtime state. */
+        internal fun copyPageNonceForCodec(): ByteArray {
+            requireLive()
+            return (boundDecryptorCoreValue ?: error("AKEN bound decryptor core has been wiped")).copyPageNonceForCodec()
+        }
+
+        /** Finalize one typed native descriptor after route/proof materialization. */
+        internal fun boundPlanForRuntime(
+            route: AkenRoutingMetadata,
+            callSiteProof: ByteArray,
+        ): AkenBoundDecryptorPlan {
+            requireLive()
+            return (boundDecryptorCoreValue ?: error("AKEN bound decryptor core has been wiped"))
+                .finalizeForRuntime(route, callSiteProof)
+        }
+
         internal fun wipe() {
             if (wiped) return
             javaFragmentsValue.forEach { it.wipe() }
             nativeFragmentsValue.forEach { it.wipe() }
             terminalValue?.wipe()
+            boundDecryptorCoreValue?.wipe()
             javaFragmentsValue = emptyList()
             nativeFragmentsValue = emptyList()
             terminalValue = null
+            boundDecryptorCoreValue = null
             Arrays.fill(fingerprintValue, 0)
             fingerprintValue = ByteArray(0)
             wiped = true
@@ -268,10 +288,12 @@ class AkenBuildPlan private constructor(
 
         internal fun <T> withCodecContext(block: (PageCodecContext) -> T): T {
             requireLive()
+            val evaluator = evaluatorPlanValue ?: error("AKEN page evaluator has been wiped")
             val context = PageCodecContext(
                 identity = logicalIdentityValue.copyOf(),
-                fingerprint = (evaluatorPlanValue ?: error("AKEN page evaluator has been wiped")).copyFingerprintForBuild(),
+                fingerprint = evaluator.copyFingerprintForBuild(),
                 locator = (handleValue ?: error("AKEN page handle has been wiped")).copyLocatorTokenForBuild(),
+                pageNonce = evaluator.copyPageNonceForCodec(),
                 codecVariant = codecVariantValue,
                 layout = (layoutValue ?: error("AKEN page layout has been wiped")).copyForBuild(),
             )
@@ -344,6 +366,7 @@ class AkenBuildPlan private constructor(
         val identity: ByteArray,
         val fingerprint: ByteArray,
         val locator: ByteArray,
+        val pageNonce: ByteArray,
         val codecVariant: String,
         val layout: AkenPageLayout,
     ) : AutoCloseable {
@@ -351,6 +374,7 @@ class AkenBuildPlan private constructor(
             Arrays.fill(identity, 0)
             Arrays.fill(fingerprint, 0)
             Arrays.fill(locator, 0)
+            Arrays.fill(pageNonce, 0)
             layout.wipe()
         }
     }
@@ -434,7 +458,9 @@ class AkenBuildPlan private constructor(
         var artifactCommitmentShares: Array<ByteArray>? = null
         var encodedHandle: ByteArray? = null
         var locator: ByteArray? = null
+        var pageNonce: ByteArray? = null
         var fingerprint: ByteArray? = null
+        var boundDecryptorCore: AkenBoundDecryptorCore? = null
         var success = false
 
         try {
@@ -449,6 +475,7 @@ class AkenBuildPlan private constructor(
             encodedHandle = encodedHandleOverride?.copyOf()
                 ?: ByteArray(AkenHandle.ENCODED_HANDLE_SIZE).also(random::nextBytes)
             locator = ByteArray(AkenHandle.LOCATOR_TOKEN_SIZE).also(random::nextBytes)
+            pageNonce = ByteArray(AkenResourceCodec.NONCE_SIZE).also(random::nextBytes)
             dek = ByteArray(AkenEvaluatorState.STATE_WIDTH).also(random::nextBytes)
             evaluatorShares = AkenEvaluatorState.splitDek(checkNotNull(dek), random)
             artifactCommitmentShares = AkenEvaluatorState.splitArtifactCommitment(artifactCanonicalCommitment, random)
@@ -513,11 +540,27 @@ class AkenBuildPlan private constructor(
                 nativeFragments = nativeFragments,
                 terminal = terminal,
             )
+            boundDecryptorCore = AkenBoundDecryptorCore.compile(
+                dek = checkNotNull(dek),
+                resourceKind = kind,
+                logicalIdentity = identityCopy,
+                pageIndex = pageIndex,
+                targetPageSize = targetSize,
+                codecVariant = canonicalCodec,
+                layoutVariant = layout.variant,
+                encodedHandle = checkNotNull(encodedHandle),
+                locatorToken = checkNotNull(locator),
+                evaluatorFingerprint = checkNotNull(fingerprint),
+                artifactCanonicalCommitment = commitment,
+                pageNonce = checkNotNull(pageNonce),
+                random = random,
+            )
             evaluatorPlan = EvaluatorPlan(
                 javaFragments = javaFragments,
                 nativeFragments = nativeFragments,
                 terminal = terminal,
                 fingerprint = fingerprint,
+                boundDecryptorCore = checkNotNull(boundDecryptorCore),
             )
             handle = AkenHandle.create(
                 resourceKind = kind,
@@ -557,13 +600,14 @@ class AkenBuildPlan private constructor(
             Arrays.fill(identityCopy, 0)
             encodedHandle?.fill(0)
             locator?.fill(0)
+            pageNonce?.fill(0)
             fingerprint?.fill(0)
             evaluatorShares?.forEach { Arrays.fill(it, 0) }
             artifactCommitmentShares?.forEach { Arrays.fill(it, 0) }
             if (!success) {
                 dek?.fill(0)
                 page?.wipe() ?: run {
-                    evaluatorPlan?.wipe()
+                    evaluatorPlan?.wipe() ?: boundDecryptorCore?.wipe()
                     layout?.wipe()
                     handle?.wipe()
                 }
@@ -593,6 +637,7 @@ class AkenBuildPlan private constructor(
                         layout = context.layout,
                         locator = context.locator,
                         random = random,
+                        nonceOverride = context.pageNonce,
                     )
                 }
             }

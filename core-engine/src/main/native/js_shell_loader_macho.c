@@ -209,6 +209,10 @@ static int js_shell_macho_plan_segment(js_macho_image_plan *plan, const js_segme
         js_shell_loader_fail("mach-o segment file range is out of bounds");
         return 0;
     }
+    if ((seg->initprot & (JS_VM_PROT_WRITE | JS_VM_PROT_EXECUTE)) == (JS_VM_PROT_WRITE | JS_VM_PROT_EXECUTE)) {
+        js_shell_loader_fail("mach-o segment requests writable executable memory");
+        return 0;
+    }
 
     js_macho_segment_plan *entry = &plan->segments[plan->segment_count++];
     entry->vmaddr = seg->vmaddr;
@@ -772,6 +776,12 @@ static int js_shell_macho_prepare_loaded_image_plan(
         js_shell_loader_fail("mach-o loaded image native ABI table is outside anonymous mapping");
         return 0;
     }
+    planned_image->mapping_metadata.image_low = (uintptr_t)planned_image->image_base;
+    planned_image->mapping_metadata.image_high = (uintptr_t)planned_image->image_base + planned_image->image_size;
+    planned_image->mapping_metadata.code_low = (uintptr_t)planned_image->code_low;
+    planned_image->mapping_metadata.code_high = (uintptr_t)planned_image->code_low + planned_image->code_size;
+    planned_image->mapping_metadata.mapping_unit_count = plan->segment_count;
+    planned_image->mapping_metadata.version = JS_SHELL_MAPPING_METADATA_VERSION;
     return 1;
 }
 

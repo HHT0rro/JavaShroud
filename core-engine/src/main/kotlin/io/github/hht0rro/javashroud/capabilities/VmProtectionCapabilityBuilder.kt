@@ -14,6 +14,7 @@ private fun fixedVbc4Invariant(key: String, description: String): ParamSchema = 
 
 internal fun vmProtectionCapabilityBindings(): List<CapabilityBinding> = listOf(
     CapabilityBinding(
+        targeting = CLASS_AND_METHOD_TARGETING,
         id = "method-virtualization",
         name = "方法级虚拟化",
         description = "将选定方法 lowering 为 VBC4-only native bytecode VM 资源，并通过 JNI native dispatcher 执行；旧版 VM 资源 fail-closed。",

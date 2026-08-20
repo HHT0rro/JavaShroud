@@ -16,27 +16,25 @@ import javax.crypto.spec.SecretKeySpec
  * metadata.
  */
 object AkenResourceCodec {
-    const val FORMAT_VERSION: Int = 4
-    const val LOGICAL_HEADER_SIZE: Int = 202
+    const val LOGICAL_HEADER_SIZE: Int = 201
     const val GCM_TAG_SIZE: Int = 16
     const val NONCE_SIZE: Int = 12
 
-    const val OFFSET_VERSION: Int = 0
-    const val OFFSET_KIND: Int = 1
-    const val OFFSET_PAGE_INDEX: Int = 2
-    const val OFFSET_PLAINTEXT_LENGTH: Int = 6
-    const val OFFSET_NONCE: Int = 10
-    const val OFFSET_COMMITMENT: Int = 22
-    const val OFFSET_IDENTITY_HASH: Int = 54
-    const val OFFSET_EVALUATOR_FINGERPRINT: Int = 86
-    const val OFFSET_CODEC_HASH: Int = 118
-    const val OFFSET_LAYOUT_HASH: Int = 150
-    const val OFFSET_LOCATOR: Int = 182
-    const val OFFSET_CIPHERTEXT_LENGTH: Int = 198
+    const val OFFSET_KIND: Int = 0
+    const val OFFSET_PAGE_INDEX: Int = 1
+    const val OFFSET_PLAINTEXT_LENGTH: Int = 5
+    const val OFFSET_NONCE: Int = 9
+    const val OFFSET_COMMITMENT: Int = 21
+    const val OFFSET_IDENTITY_HASH: Int = 53
+    const val OFFSET_EVALUATOR_FINGERPRINT: Int = 85
+    const val OFFSET_CODEC_HASH: Int = 117
+    const val OFFSET_LAYOUT_HASH: Int = 149
+    const val OFFSET_LOCATOR: Int = 181
+    const val OFFSET_CIPHERTEXT_LENGTH: Int = 197
 
-    const val CANONICAL_CODEC_VARIANT: String = "aes-256-gcm-v4"
+    const val CANONICAL_CODEC_VARIANT: String = "aes-256-gcm"
 
-    private val AAD_DOMAIN = "AKEN-v4-page-aad".toByteArray(StandardCharsets.US_ASCII)
+    private val AAD_DOMAIN = "page-aad".toByteArray(StandardCharsets.US_ASCII)
 
     /**
      * Canonicalize the only supported page cipher. Rejecting unknown values
@@ -64,6 +62,8 @@ object AkenResourceCodec {
         layout: AkenPageLayout,
         locator: ByteArray,
         random: SecureRandom = SecureRandom(),
+        /** Build-selected page nonce for a bound native terminal; null keeps the legacy random path. */
+        nonceOverride: ByteArray? = null,
     ): ByteArray {
         require(dek.size == 32) { "AKEN DEK must be 32 bytes" }
         require(commitment.size == 32) { "AKEN artifact commitment must be 32 bytes" }
@@ -71,6 +71,7 @@ object AkenResourceCodec {
         require(pageIndex >= 0) { "AKEN page index must be non-negative" }
         require(fingerprint.size == 32) { "AKEN evaluator fingerprint must be 32 bytes" }
         require(locator.size == AkenHandle.LOCATOR_TOKEN_SIZE) { "AKEN locator token must be 16 bytes" }
+        nonceOverride?.let { require(it.size == NONCE_SIZE) { "AKEN bound page nonce must be 12 bytes" } }
         require(plain.size <= Int.MAX_VALUE - GCM_TAG_SIZE) { "AKEN plaintext is too large" }
 
         var nonce: ByteArray? = null
@@ -89,7 +90,7 @@ object AkenResourceCodec {
         try {
             val canonicalCodec = normalizeCodecVariant(codec)
             val layoutVariant = layout.variant
-            nonce = ByteArray(NONCE_SIZE).also(random::nextBytes)
+            nonce = nonceOverride?.copyOf() ?: ByteArray(NONCE_SIZE).also(random::nextBytes)
             header = ByteArray(LOGICAL_HEADER_SIZE)
             identityHash = sha256(identity)
             codecBytes = canonicalCodec.toByteArray(StandardCharsets.UTF_8)
@@ -97,7 +98,6 @@ object AkenResourceCodec {
             layoutBytes = layoutVariant.toByteArray(StandardCharsets.UTF_8)
             layoutHash = sha256(layoutBytes)
 
-            header[OFFSET_VERSION] = FORMAT_VERSION.toByte()
             header[OFFSET_KIND] = kind.id.toByte()
             writeInt(header, OFFSET_PAGE_INDEX, pageIndex)
             writeInt(header, OFFSET_PLAINTEXT_LENGTH, plain.size)
@@ -232,8 +232,7 @@ object AkenResourceCodec {
             layoutHash = sha256(layoutBytes)
 
             val headerMatches =
-                (header[OFFSET_VERSION].toInt() and 0xFF) == FORMAT_VERSION &&
-                    (header[OFFSET_KIND].toInt() and 0xFF) == kind.id &&
+                (header[OFFSET_KIND].toInt() and 0xFF) == kind.id &&
                     readInt(header, OFFSET_PAGE_INDEX) == pageIndex &&
                     constantTimeEquals(header, OFFSET_COMMITMENT, commitment) &&
                     constantTimeEquals(header, OFFSET_IDENTITY_HASH, identityHash) &&

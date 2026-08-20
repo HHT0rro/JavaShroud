@@ -33,7 +33,7 @@ JS_HIDDEN int js_parse_hex_u32_token(const char *text, uint32_t *out);
 JS_HIDDEN char* js_next_manifest_field(char **cursor);
 JS_PROTECTED int js_vm_register_preload_index_entries(const unsigned char *index_bytes, int index_len);
 JS_HIDDEN int js_vm_resource_alias_register(const char *original_path, const char *sealed_path);
-JS_HIDDEN const char* js_vm_resource_alias_resolve(const char *path);
+JS_HIDDEN int js_vm_resource_alias_resolve_copy(const char *path, char *out, size_t out_capacity);
 JS_HIDDEN int js_vm_call_gate_register(jlong entry_token, const char *resource_path);
 JS_HIDDEN int js_vm_call_gate_register_profile(jlong entry_token, const char *resource_path, uint32_t expected_profile);
 JS_HIDDEN const js_vm_call_gate_entry* js_vm_call_gate_lookup(jlong entry_token);
@@ -44,6 +44,10 @@ JS_HIDDEN void js_vm_call_gate_reset(void);
 JS_HIDDEN int js_vm_commitments_install(const unsigned char *bytes, int len);
 JS_HIDDEN int js_vm_commitment_matches(const char *path, const unsigned char *raw, int raw_len);
 JS_HIDDEN void js_vm_commitments_reset(void);
+JS_HIDDEN unsigned int js_vm_resource_session_generation_current(void);
+#if defined(JS_ZSTD_CONTEXT_TEST_HOOKS) && JS_ZSTD_CONTEXT_TEST_HOOKS
+JS_HIDDEN size_t js_vm_zstd_scratch_capacity_current_thread(void);
+#endif
 JS_HIDDEN js_vm_program* js_vm_prepare_resource_program_bound(JNIEnv *env, jclass resource_cls, jlong entry_token, jstring resourcePath, const char *binding_path_override);
 JS_HIDDEN js_vm_program* js_vm_prepare_resource_program(JNIEnv *env, jclass resource_cls, jlong entry_token, jstring resourcePath);
 /*
@@ -78,5 +82,12 @@ JS_HIDDEN int js_vm_ephemeral_cache_put(jlong entry_token, const char *resource_
 JS_HIDDEN void js_vm_ephemeral_cache_clear(JNIEnv *env);
 JS_HIDDEN void js_vm_cache_lock_init(void);
 JS_HIDDEN void js_vm_cache_lock_destroy(void);
+#if defined(JS_ZSTD_CONTEXT_TEST_HOOKS) && JS_ZSTD_CONTEXT_TEST_HOOKS
+/* Test-only observation of a malformed frame that wrote partial output before
+ * failing.  The hook exposes a boolean counter only; it never returns output
+ * bytes or decoder state. */
+JS_HIDDEN void js_vm_zstd_test_reset_partial_output_observation(void);
+JS_HIDDEN unsigned int js_vm_zstd_test_partial_output_wipe_observed(void);
+#endif
 
 #endif

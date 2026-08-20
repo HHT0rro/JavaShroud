@@ -8,6 +8,10 @@ import io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPageDesc
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPagePreSealRouteAllocator
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPagePreSealRouteReservation
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPageRouteCandidateRef
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenNativeChunkCandidate
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenNativeChunkPreSealRouteAllocator
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenNativeChunkPreSealRouteReservation
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenNativeChunkRouteCandidateRef
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenStringPageCandidate
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenStringPagePreSealRouteAllocator
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenStringPagePreSealRouteReservation
@@ -80,6 +84,14 @@ internal data class Vbc4BuildContext(
         LinkedHashMap<String, List<AkenClassPageDescriptorSource>>()
     /** Build-only final ClassPage routes reserved before page materialization. */
     private var akenClassPagePreSealRouteReservation: AkenClassPagePreSealRouteReservation? = null
+    /**
+     * Build-only native shell/handler chunk sources captured before sealing
+     * assigns final paths. They are never copied into a scoped runtime context
+     * and do not expose a native payload catalog.
+     */
+    private val akenNativeChunkCandidates = LinkedHashMap<String, AkenNativeChunkCandidate>()
+    /** Build-only final NativeChunk routes reserved before page materialization. */
+    private var akenNativeChunkPreSealRouteReservation: AkenNativeChunkPreSealRouteReservation? = null
 
     init {
         require(masterKey.size == VBC4_MASTER_KEY_SIZE) { "VBC4 master key must be 32 bytes" }
@@ -680,6 +692,150 @@ internal data class Vbc4BuildContext(
     fun hasAkenClassPageDescriptorSources(): Boolean = akenClassPageDescriptorSources.isNotEmpty()
 
     /**
+     * Atomically snapshots native shell/handler chunk sources for later
+     * pre-seal routing and materialization. The context retains private copies
+     * only; Java runtime helpers receive neither these plaintext chunks nor an
+     * enumerating native payload API.
+     */
+    @Synchronized
+    fun registerAkenNativeChunkCandidates(candidates: Iterable<AkenNativeChunkCandidate>) {
+        require(akenBuildPlan?.isWiped() != false) {
+            "AKEN NativeChunk candidates must be registered before page-plan initialization"
+        }
+        require(akenVbc4FinalizationLayout?.isWiped != false) {
+            "AKEN NativeChunk candidates cannot be registered after finalization layout publication"
+        }
+        val reservation = akenNativeChunkPreSealRouteReservation
+        require(reservation == null || reservation.isWiped) {
+            "AKEN NativeChunk candidates cannot be registered after pre-seal route reservation"
+        }
+        val incoming = candidates.toList()
+        require(incoming.isNotEmpty()) { "AKEN NativeChunk candidate batch must not be empty" }
+        require(incoming.none { it.isWiped }) { "cannot register a wiped AKEN NativeChunk candidate" }
+
+        val incomingKeys = incoming.map { it.identityPageKeyForBuild() }
+        require(incomingKeys.distinct().size == incomingKeys.size) {
+            "AKEN NativeChunk candidate batch contains duplicate logical page identities"
+        }
+        require(incomingKeys.none { it in akenNativeChunkCandidates }) {
+            "AKEN NativeChunk candidate logical page identity is already registered"
+        }
+
+        val snapshots = ArrayList<Pair<String, AkenNativeChunkCandidate>>(incoming.size)
+        try {
+            incoming.forEach { candidate ->
+                snapshots += candidate.identityPageKeyForBuild() to candidate.copyForBuild()
+            }
+            snapshots.forEach { (identityPageKey, candidate) ->
+                check(akenNativeChunkCandidates.put(identityPageKey, candidate) == null) {
+                    "AKEN NativeChunk candidate logical page identity is already registered"
+                }
+            }
+        } catch (error: Throwable) {
+            snapshots.forEach { (identityPageKey, candidate) ->
+                if (akenNativeChunkCandidates[identityPageKey] === candidate) {
+                    akenNativeChunkCandidates.remove(identityPageKey)
+                }
+                candidate.wipe()
+            }
+            throw error
+        }
+    }
+
+    /** Supplies deep, scoped NativeChunk copies to the later materializer. */
+    fun <T> withAkenNativeChunkCandidatesForBuild(block: (List<AkenNativeChunkCandidate>) -> T): T {
+        val snapshots = synchronized(this) {
+            check(akenNativeChunkCandidates.isNotEmpty()) { "AKEN NativeChunk candidates are not initialized" }
+            akenNativeChunkCandidates.values
+                .sortedBy { it.identityPageKeyForBuild() }
+                .map { it.copyForBuild() }
+        }
+        try {
+            return block(snapshots.toList())
+        } finally {
+            snapshots.forEach { it.wipe() }
+        }
+    }
+
+    /**
+     * Supplies sealing only the NativeChunk logical page identity and binding
+     * path. Chunk plaintext, handles, proofs, layout data, and evaluator inputs
+     * remain build-only.
+     */
+    fun <T> withAkenNativeChunkRouteCandidateRefsForBuild(
+        block: (List<AkenNativeChunkRouteCandidateRef>) -> T,
+    ): T {
+        val snapshots = synchronized(this) {
+            check(akenBuildPlan?.isWiped() != false) {
+                "AKEN NativeChunk route candidates must be projected before page-plan initialization"
+            }
+            check(akenVbc4FinalizationLayout?.isWiped != false) {
+                "AKEN NativeChunk route candidates cannot be projected after finalization layout publication"
+            }
+            check(akenNativeChunkCandidates.isNotEmpty()) { "AKEN NativeChunk candidates are not initialized" }
+            akenNativeChunkCandidates.values
+                .sortedBy { it.identityPageKeyForBuild() }
+                .map { candidate ->
+                    AkenNativeChunkRouteCandidateRef.create(
+                        identityPageKey = candidate.identityPageKeyForBuild(),
+                        logicalBindingPath = candidate.logicalBindingPath,
+                    )
+                }
+        }
+        try {
+            return block(snapshots.toList())
+        } finally {
+            snapshots.forEach { it.wipe() }
+        }
+    }
+
+    /**
+     * Reserves one final physical resource path per registered NativeChunk
+     * before the common AKEN page plan is initialized.
+     */
+    @Synchronized
+    fun reserveAkenNativeChunkPreSealRoutes(
+        occupiedEntryPaths: Set<String>,
+        allocator: AkenNativeChunkPreSealRouteAllocator,
+    ): AkenNativeChunkPreSealRouteReservation {
+        require(akenBuildPlan?.isWiped() != false) {
+            "AKEN NativeChunk pre-seal routes must be reserved before page-plan initialization"
+        }
+        require(akenVbc4FinalizationLayout?.isWiped != false) {
+            "AKEN NativeChunk pre-seal routes cannot be reserved after finalization layout publication"
+        }
+        check(akenNativeChunkCandidates.isNotEmpty()) {
+            "AKEN NativeChunk candidates are not initialized"
+        }
+        val existing = akenNativeChunkPreSealRouteReservation
+        require(existing == null || existing.isWiped) {
+            "AKEN NativeChunk pre-seal route reservation is already published"
+        }
+        val created = withAkenNativeChunkRouteCandidateRefsForBuild { refs ->
+            AkenNativeChunkPreSealRouteReservation.reserve(
+                candidateRefs = refs,
+                occupiedEntryPaths = occupiedEntryPaths,
+                allocator = allocator,
+            )
+        }
+        akenNativeChunkPreSealRouteReservation = created
+        return created
+    }
+
+    @Synchronized
+    fun akenNativeChunkPreSealRouteReservationOrNull(): AkenNativeChunkPreSealRouteReservation? =
+        akenNativeChunkPreSealRouteReservation?.takeUnless { it.isWiped }
+
+    @Synchronized
+    fun requireAkenNativeChunkPreSealRouteReservation(): AkenNativeChunkPreSealRouteReservation =
+        akenNativeChunkPreSealRouteReservation
+            ?.takeUnless { it.isWiped }
+            ?: error("AKEN NativeChunk pre-seal route reservation is not initialized")
+
+    @Synchronized
+    fun hasAkenNativeChunkCandidates(): Boolean = akenNativeChunkCandidates.isNotEmpty()
+
+    /**
      * Publishes the one build-only page layout produced by consuming the scoped
      * AKEN plan. A live plan and a finalized layout must never coexist: the
      * former contains build authority, while the latter contains only encrypted
@@ -751,12 +907,8 @@ internal data class Vbc4BuildContext(
         }
     }
 
-    /**
-     * AKEN v4 VBC4 inner-codec material is public compatibility data, not a
-     * build root. The enclosing per-page evaluator is the confidentiality and
-     * authenticity boundary for protected VBC4 pages.
-     */
-    fun deriveVmBuildKey(): ByteArray = AkenVbc4InnerMaterial.deriveVmBuildKey()
+    /** Build-local VBC4 inner key hierarchy; no public compatibility root is used. */
+    fun deriveVmBuildKey(): ByteArray = AkenVbc4InnerMaterial.deriveVmBuildKey(this)
 
     /** Stable per-method leaf; [methodIdentity] is the canonical call-gate binding. */
     fun deriveVmMethodKey(methodIdentity: ByteArray, methodNonce: ByteArray): ByteArray {
@@ -830,6 +982,8 @@ internal data class Vbc4BuildContext(
         akenClassPageCandidates.clear()
         akenClassPageDescriptorSources.values.flatten().forEach { it.wipe() }
         akenClassPageDescriptorSources.clear()
+        akenNativeChunkCandidates.values.forEach { it.wipe() }
+        akenNativeChunkCandidates.clear()
         akenBuildPlan?.wipe()
         akenBuildPlan = null
         akenVbc4FinalizationLayout?.wipe()
@@ -840,6 +994,8 @@ internal data class Vbc4BuildContext(
         akenStringPagePreSealRouteReservation = null
         akenClassPagePreSealRouteReservation?.wipe()
         akenClassPagePreSealRouteReservation = null
+        akenNativeChunkPreSealRouteReservation?.wipe()
+        akenNativeChunkPreSealRouteReservation = null
     }
 }
 

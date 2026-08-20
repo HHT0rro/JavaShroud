@@ -6,12 +6,17 @@ import io.github.hht0rro.javashroud.model.analysis.MemberSummary
 import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.analysis.TargetSelector
 import io.github.hht0rro.javashroud.model.config.RuleSet
+import io.github.hht0rro.javashroud.model.config.RuleSetScope
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 
 fun buildRuleMatches(ruleSet: RuleSet, classSummaries: List<ClassAnalysisSummary>): List<RuleMatch> =
-    ruleSet.rules.map { ruleSpec -> buildRuleMatch(ruleSpec, classSummaries) }
+    ruleSet.rules.map { ruleSpec -> buildRuleMatch(ruleSpec, classSummaries, ruleSet.scope) }
 
-internal fun buildRuleMatch(ruleSpec: RuleSpec, classSummaries: List<ClassAnalysisSummary>): RuleMatch {
+internal fun buildRuleMatch(
+    ruleSpec: RuleSpec,
+    classSummaries: List<ClassAnalysisSummary>,
+    ruleSetScope: RuleSetScope = RuleSetScope.GLOBAL,
+): RuleMatch {
     val selector = parseTargetSelector(ruleSpec.target)
     val matchedClasses = matchedClasses(classSummaries, selector.classPattern)
 
@@ -20,6 +25,7 @@ internal fun buildRuleMatch(ruleSpec: RuleSpec, classSummaries: List<ClassAnalys
         selector = selector,
         matchedClassNames = matchedClassNames(matchedClasses),
         matchedMembers = matchedMembers(matchedClasses, selector.memberPattern, selector.memberDescriptorPattern),
+        ruleSetScope = ruleSetScope,
     )
 }
 

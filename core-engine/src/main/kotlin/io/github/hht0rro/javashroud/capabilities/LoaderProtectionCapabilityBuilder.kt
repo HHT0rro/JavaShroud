@@ -12,6 +12,7 @@ internal fun loaderProtectionCapabilityBindings(): List<CapabilityBinding> = lis
 
     CapabilityBinding(
 
+        targeting = CLASS_TARGETING,
         id = "class-encryption-loader",
 
         name = "类加密装载器",
@@ -84,6 +85,7 @@ internal fun loaderProtectionCapabilityBindings(): List<CapabilityBinding> = lis
 
     CapabilityBinding(
 
+        targeting = CLASS_TARGETING,
         id = "method-body-delayed-decryption",
 
         name = "方法体延迟解密",

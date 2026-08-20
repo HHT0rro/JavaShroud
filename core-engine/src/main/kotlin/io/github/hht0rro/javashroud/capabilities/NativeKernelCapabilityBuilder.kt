@@ -4,6 +4,8 @@ package io.github.hht0rro.javashroud.capabilities
 
 import com.fasterxml.jackson.databind.node.JsonNodeFactory
 
+import io.github.hht0rro.javashroud.model.schema.ModuleDefinition
+import io.github.hht0rro.javashroud.model.schema.ModuleTargetingCapability
 import io.github.hht0rro.javashroud.model.schema.ParamSchema
 
 
@@ -31,6 +33,11 @@ private val jniMicrokernelAnchorPassIds = listOf(
 
 )
 
+private val nativeKernelClassTargeting = ModuleTargetingCapability(
+    supported = true,
+    targetKinds = listOf("class"),
+)
+
 
 
 /**
@@ -55,6 +62,7 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
 
     CapabilityBinding(
 
+        targeting = nativeKernelClassTargeting,
         id = "anti-instrumentation",
 
         name = "反插桩保护",
@@ -129,6 +137,7 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
 
     CapabilityBinding(
 
+        targeting = nativeKernelClassTargeting,
         id = "anti-dump-protection",
 
         name = "反内存转储",
@@ -175,6 +184,7 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
 
     CapabilityBinding(
 
+        targeting = nativeKernelClassTargeting,
         id = "jni-microkernel-loader",
 
         name = "JNI 微内核加载器",
@@ -294,23 +304,7 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
 
                 options = listOf("off", "standard", "max", "max-hardening"),
 
-                description = "Zig 编译后 native 加壳级别。off 保持原生动态库；standard 保留可加载前缀并追加认证 overlay；max 生成兼容的 stub shell；max-hardening 显式启用断代协议、构建级 profile 与完整 js_kernel 认证 payload，不与普通 max 隐式等价。",
-
-                hidden = false,
-
-            ),
-
-            ParamSchema(
-
-                key = "bootKeyDelivery",
-
-                type = "enum",
-
-                defaultValue = JsonNodeFactory.instance.textNode("external-file"),
-
-                options = listOf("external-file", "embedded"),
-
-                description = "Boot KEK 交付方式。external-file 保留独立 sidecar；embedded 将构建使用的 KEK 作为密封资源写入最终 JAR，使产物可直接启动。",
+                description = "Zig 编译后 native 加固档位。off 保持不加外壳的原生动态库；standard 保留可加载前缀并追加认证 overlay；max 生成兼容的 stub shell；max-hardening 使用更强的外壳与完整 js_kernel 认证 payload。四档统一采用 AKEN v4 资源级 evaluator，档位只改变 native 外壳与载荷封装强度。",
 
                 hidden = false,
 
@@ -338,4 +332,24 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
 
 
 
-fun buildNativeKernelCapabilityDefinitions() = capabilityDefinitions(nativeKernelCapabilityBindings())
+fun buildNativeKernelCapabilityDefinitions(): List<ModuleDefinition> =
+    nativeKernelCapabilityBindings().map { binding: CapabilityBinding ->
+        ModuleDefinition(
+            id = binding.id,
+            name = binding.name,
+            description = binding.description,
+            tagIds = binding.tagIds,
+            params = binding.params,
+            stability = binding.stability,
+            risk = binding.risk,
+            requiresRuntimeFlags = binding.requiresRuntimeFlags,
+            platformConstraints = binding.platformConstraints,
+            compatibilityNotes = binding.compatibilityNotes,
+            requiredPassIds = binding.requiredPassIds,
+            requiresAnyPassIds = binding.requiresAnyPassIds,
+            variantRequirements = binding.variantRequirements,
+            defaultEnabled = binding.defaultEnabled,
+            requiresOptIn = binding.requiresOptIn || binding.risk == "high",
+            targeting = binding.targeting,
+        )
+    }

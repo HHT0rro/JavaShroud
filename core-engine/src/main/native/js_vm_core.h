@@ -35,10 +35,40 @@ JS_HIDDEN int js_vm_value_is_wide(js_vm_value v);
 JS_HIDDEN int js_vm_method_is_instance(js_vm_program *p);
 JS_HIDDEN int js_vm_ldc_type_matches_owner_identity(const char *type_desc, js_vm_program *p);
 JS_HIDDEN int js_vm_copy_runtime_build_key(unsigned char out[32]);
+JS_HIDDEN int js_vm_copy_runtime_build_key_for_program(const js_vm_program *program, unsigned char out[32]);
+JS_HIDDEN int js_vbc4_install_scoped_layout_digest(const unsigned char digest[32]);
+JS_HIDDEN void js_vbc4_clear_scoped_layout_digest(void);
 JS_PROTECTED void js_hmac_sha256_with_key(const unsigned char *key, int key_len, const unsigned char **parts, const int *part_lens, int part_count, unsigned char out[32]);
 JS_HIDDEN extern volatile uint32_t js_vm_trace_poison_seed;
 JS_HIDDEN extern volatile int js_vm_last_validation_error;
 JS_HIDDEN extern volatile int js_vm_last_parse_stage;
+/* Bounded, de-identified parser context for diagnosing an authenticated
+ * artifact/layout mismatch. These values are structural counters only; they
+ * never contain frame bytes, keys, nonces, descriptors, or plaintext. */
+JS_HIDDEN extern volatile int js_vm_last_parse_detail;
+JS_HIDDEN extern volatile int js_vm_last_parse_block;
+JS_HIDDEN extern volatile int js_vm_last_parse_storage_block;
+JS_HIDDEN extern volatile int js_vm_last_parse_dispatch_block;
+JS_HIDDEN extern volatile int js_vm_last_parse_register;
+JS_HIDDEN extern volatile int js_vm_last_parse_pos;
+JS_HIDDEN extern volatile int js_vm_last_parse_frame_len;
+/* Set only for the final VBC4 frame-trailer validation. A value of -1 means
+ * the parser did not reach that structural check. */
+JS_HIDDEN extern volatile int js_vm_last_parse_trailer_remaining;
+JS_HIDDEN extern volatile int js_vm_last_parse_block_pos;
+JS_HIDDEN extern volatile int js_vm_last_parse_block_plain_len;
+JS_HIDDEN extern volatile int js_vm_last_parse_register_count;
+JS_HIDDEN extern volatile int js_vm_last_parse_register_insn_count;
+JS_HIDDEN extern volatile int js_vm_last_parse_stack_insn_count;
+JS_HIDDEN extern volatile int js_vm_last_parse_flags;
+/* De-identified constant-pool decode telemetry. These fields never carry
+ * keys, nonces, or plaintext; they only classify structural/auth failures. */
+JS_HIDDEN extern volatile int js_vm_last_cp_decode_stage;
+JS_HIDDEN extern volatile int js_vm_last_cp_decode_plain_len;
+JS_HIDDEN extern volatile int js_vm_last_cp_decode_stored_len;
+JS_HIDDEN extern volatile int js_vm_last_cp_decode_enc_len;
+JS_HIDDEN extern volatile int js_vm_last_cp_decode_stored_zstd;
+JS_HIDDEN extern volatile int js_vm_last_cp_decode_auth;
 JS_HIDDEN int js_vm_execute(JNIEnv *env, js_vm_program *p, jobjectArray args, char ret_desc, js_vm_value *ret);
 JS_HIDDEN int js_vm_execute_register(JNIEnv *env, js_vm_program *p, jobjectArray args, char ret_desc, js_vm_value *ret);
 JS_HIDDEN js_vm_object_result js_vm_execute_prepared_program(JNIEnv *env, js_vm_program *program, jobjectArray args);

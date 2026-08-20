@@ -1,11 +1,15 @@
 #include "js_shell_crypto.h"
+#include "js_crypto.h"
 
+#include <limits.h>
 #include <stdint.h>
 #include <string.h>
 
 void js_shell_secure_wipe(void *bytes, size_t size) {
-    volatile unsigned char *cursor = (volatile unsigned char *)bytes;
-    while (cursor && size--) *cursor++ = 0;
+    /* Use the shared volatile wipe primitive so shell-only sensitive scratch
+     * is covered by the same de-identified wipe accounting as native runtime
+     * page, VM, and resource paths.  A null/zero request remains a no-op. */
+    if (bytes && size) js_vbc4_wipe_volatile(bytes, size);
 }
 
 int js_shell_consttime_equal(const unsigned char *a, const unsigned char *b, size_t len) {
@@ -138,67 +142,8 @@ void js_shell_kdf(const unsigned char key[32], const char *domain, const unsigne
     js_shell_secure_wipe(material, sizeof(material));
 }
 
-static const unsigned char JS_SHELL_AES_SBOX[256] = {
-    0x63u,0x7cu,0x77u,0x7bu,0xf2u,0x6bu,0x6fu,0xc5u,0x30u,0x01u,0x67u,0x2bu,0xfeu,0xd7u,0xabu,0x76u,
-    0xcau,0x82u,0xc9u,0x7du,0xfau,0x59u,0x47u,0xf0u,0xadu,0xd4u,0xa2u,0xafu,0x9cu,0xa4u,0x72u,0xc0u,
-    0xb7u,0xfdu,0x93u,0x26u,0x36u,0x3fu,0xf7u,0xccu,0x34u,0xa5u,0xe5u,0xf1u,0x71u,0xd8u,0x31u,0x15u,
-    0x04u,0xc7u,0x23u,0xc3u,0x18u,0x96u,0x05u,0x9au,0x07u,0x12u,0x80u,0xe2u,0xebu,0x27u,0xb2u,0x75u,
-    0x09u,0x83u,0x2cu,0x1au,0x1bu,0x6eu,0x5au,0xa0u,0x52u,0x3bu,0xd6u,0xb3u,0x29u,0xe3u,0x2fu,0x84u,
-    0x53u,0xd1u,0x00u,0xedu,0x20u,0xfcu,0xb1u,0x5bu,0x6au,0xcbu,0xbeu,0x39u,0x4au,0x4cu,0x58u,0xcfu,
-    0xd0u,0xefu,0xaau,0xfbu,0x43u,0x4du,0x33u,0x85u,0x45u,0xf9u,0x02u,0x7fu,0x50u,0x3cu,0x9fu,0xa8u,
-    0x51u,0xa3u,0x40u,0x8fu,0x92u,0x9du,0x38u,0xf5u,0xbcu,0xb6u,0xdau,0x21u,0x10u,0xffu,0xf3u,0xd2u,
-    0xcdu,0x0cu,0x13u,0xecu,0x5fu,0x97u,0x44u,0x17u,0xc4u,0xa7u,0x7eu,0x3du,0x64u,0x5du,0x19u,0x73u,
-    0x60u,0x81u,0x4fu,0xdcu,0x22u,0x2au,0x90u,0x88u,0x46u,0xeeu,0xb8u,0x14u,0xdeu,0x5eu,0x0bu,0xdbu,
-    0xe0u,0x32u,0x3au,0x0au,0x49u,0x06u,0x24u,0x5cu,0xc2u,0xd3u,0xacu,0x62u,0x91u,0x95u,0xe4u,0x79u,
-    0xe7u,0xc8u,0x37u,0x6du,0x8du,0xd5u,0x4eu,0xa9u,0x6cu,0x56u,0xf4u,0xeau,0x65u,0x7au,0xaeu,0x08u,
-    0xbau,0x78u,0x25u,0x2eu,0x1cu,0xa6u,0xb4u,0xc6u,0xe8u,0xddu,0x74u,0x1fu,0x4bu,0xbdu,0x8bu,0x8au,
-    0x70u,0x3eu,0xb5u,0x66u,0x48u,0x03u,0xf6u,0x0eu,0x61u,0x35u,0x57u,0xb9u,0x86u,0xc1u,0x1du,0x9eu,
-    0xe1u,0xf8u,0x98u,0x11u,0x69u,0xd9u,0x8eu,0x94u,0x9bu,0x1eu,0x87u,0xe9u,0xceu,0x55u,0x28u,0xdfu,
-    0x8cu,0xa1u,0x89u,0x0du,0xbfu,0xe6u,0x42u,0x68u,0x41u,0x99u,0x2du,0x0fu,0xb0u,0x54u,0xbbu,0x16u
-};
-static const unsigned char JS_SHELL_AES_RCON[11] = {0x00u,0x01u,0x02u,0x04u,0x08u,0x10u,0x20u,0x40u,0x80u,0x1bu,0x36u};
-static unsigned char js_shell_aes_xtime(unsigned char x) { return (unsigned char)((x << 1) ^ ((x & 0x80u) ? 0x1bu : 0u)); }
-static void js_shell_aes_expand(const unsigned char key[16], unsigned char expanded[176]) {
-    int used = 16, rcon = 1;
-    unsigned char temp[4];
-    memcpy(expanded, key, 16u);
-    while (used < 176) {
-        memcpy(temp, expanded + used - 4, 4u);
-        if ((used & 15) == 0) {
-            unsigned char t = temp[0];
-            temp[0] = (unsigned char)(JS_SHELL_AES_SBOX[temp[1]] ^ JS_SHELL_AES_RCON[rcon++]); temp[1] = JS_SHELL_AES_SBOX[temp[2]]; temp[2] = JS_SHELL_AES_SBOX[temp[3]]; temp[3] = JS_SHELL_AES_SBOX[t];
-        }
-        for (int i = 0; i < 4; i++, used++) expanded[used] = (unsigned char)(expanded[used - 16] ^ temp[i]);
-    }
-    js_shell_secure_wipe(temp, sizeof(temp));
-}
-static void js_shell_aes_block(const unsigned char in[16], const unsigned char key[16], unsigned char out[16]) {
-    unsigned char state[16], expanded[176], t;
-    memcpy(state, in, 16u); js_shell_aes_expand(key, expanded);
-    for (int i = 0; i < 16; i++) state[i] ^= expanded[i];
-    for (int round = 1; round <= 10; round++) {
-        for (int i = 0; i < 16; i++) state[i] = JS_SHELL_AES_SBOX[state[i]];
-        t = state[1]; state[1]=state[5]; state[5]=state[9]; state[9]=state[13]; state[13]=t;
-        t=state[2]; state[2]=state[10]; state[10]=t; t=state[6]; state[6]=state[14]; state[14]=t;
-        t=state[15]; state[15]=state[11]; state[11]=state[7]; state[7]=state[3]; state[3]=t;
-        if (round != 10) for (int c=0;c<4;c++) {
-            int i=c*4;
-            unsigned char a=state[i],b=state[i+1],d=state[i+2],e=state[i+3],x=(unsigned char)(a^b^d^e);
-            state[i]=(unsigned char)(a^js_shell_aes_xtime((unsigned char)(a^b))^x); state[i+1]=(unsigned char)(b^js_shell_aes_xtime((unsigned char)(b^d))^x); state[i+2]=(unsigned char)(d^js_shell_aes_xtime((unsigned char)(d^e))^x); state[i+3]=(unsigned char)(e^js_shell_aes_xtime((unsigned char)(e^a))^x);
-        }
-        for (int i=0;i<16;i++) state[i] ^= expanded[round*16+i];
-    }
-    memcpy(out,state,16u); js_shell_secure_wipe(state,sizeof(state)); js_shell_secure_wipe(expanded,sizeof(expanded));
-}
-static void js_shell_ctr_inc(unsigned char counter[16]) { for (int i=15;i>=0;i--) if (++counter[i] != 0u) break; }
-
 void js_shell_aes128_ctr_xor(unsigned char *bytes, size_t size, const unsigned char key[16], const unsigned char iv[16]) {
-    unsigned char counter[16], block[16];
-    size_t offset = 0u, take;
-    if (!bytes || !key || !iv) return;
-    memcpy(counter, iv, 16u);
-    while(offset<size) { js_shell_aes_block(counter,key,block); take=size-offset<16u?size-offset:16u; for(size_t i=0;i<take;i++) bytes[offset+i]^=block[i]; offset+=take; js_shell_ctr_inc(counter); }
-    js_shell_secure_wipe(counter,sizeof(counter)); js_shell_secure_wipe(block,sizeof(block));
+    js_aes128_ctr_xor(bytes, size, key, iv);
 }
 
 static int js_shell_decode_chunk(unsigned char *bytes, size_t length, const unsigned char stream_key[32], const unsigned char nonce[16], const unsigned char binding_tag[32], unsigned int chunk_index, const unsigned char expected_tag[32]) {
@@ -208,7 +153,10 @@ static int js_shell_decode_chunk(unsigned char *bytes, size_t length, const unsi
     js_shell_kdf(stream_key, "javashroud-aken-v4-native-shell-chunk-hmac-v1", nonce, binding_tag, chunk_index, tag_key);
     js_shell_kdf(stream_key, "javashroud-aken-v4-native-shell-chunk-iv-v1", nonce, binding_tag, chunk_index, iv_material);
     js_shell_hmac_sha256(tag_key, sizeof(tag_key), bytes, length, actual);
+    js_runtime_metrics_note_auth_check();
+    js_runtime_metrics_note_tag_check();
     ok = js_shell_consttime_equal(actual, expected_tag, 32u);
+    if (!ok) js_runtime_metrics_note_auth_failure();
     if (ok) js_shell_aes128_ctr_xor(bytes, length, chunk_key, iv_material);
     js_shell_secure_wipe(chunk_key,sizeof(chunk_key)); js_shell_secure_wipe(tag_key,sizeof(tag_key)); js_shell_secure_wipe(actual,sizeof(actual)); js_shell_secure_wipe(iv_material,sizeof(iv_material));
     return ok;
@@ -216,9 +164,27 @@ static int js_shell_decode_chunk(unsigned char *bytes, size_t length, const unsi
 
 int js_shell_decode_payload_chunks(unsigned char *bytes, size_t size, const unsigned char stream_key[32], const unsigned char nonce[16], const unsigned char binding_tag[32], unsigned int chunk_size, const unsigned char *chunk_tags, size_t chunk_tags_size) {
     size_t chunk_count, offset, length;
-    if (!bytes || !stream_key || !nonce || !binding_tag || !chunk_tags || chunk_size == 0u) return 0;
+    /* Account for the real outer framing checks once per decode operation.
+     * Per-chunk tag/auth counters stay in js_shell_decode_chunk so a rejected
+     * payload still reports every tag actually verified before fail-closed
+     * wiping. */
+    js_runtime_metrics_note_structure_check();
+    js_runtime_metrics_note_length_check();
+    if (!bytes || !stream_key || !nonce || !binding_tag || !chunk_tags || chunk_size == 0u) {
+        if (bytes && size) js_shell_secure_wipe(bytes, size);
+        return 0;
+    }
     chunk_count = size == 0u ? 0u : 1u + (size - 1u) / (size_t)chunk_size;
-    if (chunk_count > SIZE_MAX / 32u || chunk_tags_size != chunk_count * 32u) return 0;
+    if (chunk_count > (size_t)UINT_MAX ||
+        chunk_count > SIZE_MAX / 32u ||
+        chunk_tags_size != chunk_count * 32u) {
+        /* No chunk has been authenticated yet, but the caller-provided
+         * ciphertext is still sensitive runtime material.  Wipe it on every
+         * framing/length rejection so malformed metadata cannot leave bytes
+         * resident for a later mapping or loader path. */
+        if (size) js_shell_secure_wipe(bytes, size);
+        return 0;
+    }
     for (size_t chunk_index=0u;chunk_index<chunk_count;chunk_index++) {
         offset=chunk_index*(size_t)chunk_size; length=size-offset;
         if(length>(size_t)chunk_size)length=(size_t)chunk_size;

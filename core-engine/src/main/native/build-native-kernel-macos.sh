@@ -15,6 +15,7 @@ SRC_VM_CORE="$SCRIPT_DIR/js_vm_core.c"
 SRC_VM_RESOURCE="$SCRIPT_DIR/js_vm_resource.c"
 SRC_VM_SYMBOL="$SCRIPT_DIR/js_vm_symbol.c"
 SRC_JNI_RUNTIME="$SCRIPT_DIR/js_jni_runtime.c"
+SRC_MACHINE_ID="$SCRIPT_DIR/js_machine_id.c"
 ZSTD_DIR="$SCRIPT_DIR/zstd"
 BUILD_DIR="$SCRIPT_DIR/build"
 JAVA_HOME_EFFECTIVE="${GRAALVM_HOME:-${JAVA_HOME:-$(/usr/libexec/java_home 2>/dev/null || true)}}"
@@ -54,7 +55,7 @@ clang -O2 -shared -dynamiclib -fwrapv "${CC_FLAGS[@]}" \
     -I"$JAVA_HOME_EFFECTIVE/include/darwin" \
     -I"$ZSTD_DIR" -I"$ZSTD_DIR/common" -I"$ZSTD_DIR/decompress" \
     -o "$BUILD_DIR/js_kernel_$TARGET.dylib" \
-    "$SRC1" "$SRC2" "$SRC_COMMON" "$SRC_CRYPTO" "$SRC_ANTIDEBUG" "$SRC_PROTECTED_SECTION" "$SRC_VM_CORE" "$SRC_VM_RESOURCE" "$SRC_VM_SYMBOL" "$SRC_JNI_RUNTIME" \
+    "$SRC1" "$SRC2" "$SRC_COMMON" "$SRC_CRYPTO" "$SRC_ANTIDEBUG" "$SRC_PROTECTED_SECTION" "$SRC_VM_CORE" "$SRC_VM_RESOURCE" "$SRC_VM_SYMBOL" "$SRC_JNI_RUNTIME" "$SRC_MACHINE_ID" \
     "$ZSTD_DIR/common/debug.c" "$ZSTD_DIR/common/entropy_common.c" "$ZSTD_DIR/common/error_private.c" \
     "$ZSTD_DIR/common/fse_decompress.c" "$ZSTD_DIR/common/xxhash.c" "$ZSTD_DIR/common/zstd_common.c" \
     "$ZSTD_DIR/decompress/huf_decompress.c" "$ZSTD_DIR/decompress/zstd_ddict.c" \

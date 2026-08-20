@@ -127,7 +127,6 @@ internal class AkenNativePageLocatorCompileInput private constructor(
     internal fun copyNativeLocatorRecordForCompiler(): ByteArray {
         requireLive()
         return ByteArrayOutputStream().use { out ->
-            out.write(COMPILER_RECORD_VERSION)
             writeLong(out, entryToken)
             out.write(resourceKind.id)
             writeInt(out, pageIndex)
@@ -284,7 +283,6 @@ internal class AkenNativePageLocatorCompileInput private constructor(
     }
 
     companion object {
-        private const val COMPILER_RECORD_VERSION = 2
         private const val MAX_ENVELOPE_BYTES = 4096
         private const val MAX_DESCRIPTOR_BYTES = 384 * 1024
         private const val MAX_ROUTE_BYTES = 128 * 1024
@@ -292,7 +290,7 @@ internal class AkenNativePageLocatorCompileInput private constructor(
         private const val RECORD_BINDING_SIZE = 32
         private const val PAGE_BINDING_DIGEST_SIZE = 32
         private val RECORD_BINDING_DOMAIN =
-            "AKEN-v4-native-page-locator-compile-input-v2".toByteArray(Charsets.US_ASCII)
+            "native-page-locator-compile-input".toByteArray(Charsets.US_ASCII)
 
         /**
          * Converts one independently materialized VBC4 page into native compile

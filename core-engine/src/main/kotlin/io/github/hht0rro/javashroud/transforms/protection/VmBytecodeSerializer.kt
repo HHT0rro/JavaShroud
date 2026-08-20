@@ -29,7 +29,6 @@ internal data class Vbc4EntryMetadata(
     private val dispatchProfileTag: Int = vbc4DispatchProfileTag(entryToken, resourcePath, methodLocalProfile, isStatic, nativeVmProfileId)
 
     fun encode(): String = listOf(
-        VBC4_METADATA_VERSION,
         entryToken.toULong().toString(16),
         returnDescriptor,
         methodLocalProfile.toUInt().toString(16),
@@ -43,14 +42,12 @@ internal data class Vbc4EntryMetadata(
     ).joinToString("|")
 }
 
-private const val VBC4_METADATA_VERSION = "vbc4-meta-v2"
 private const val VBC4_ARGUMENT_TAGS = "ZBCSIJFDL["
 private const val VBC4_RETURN_TAGS = "VZBCSIJFDL["
 private const val VBC4_CP_SEALED_STRING_TYPE = 0x06
-private const val VBC4_CP_SEALED_STRING_VERSION = 1
-private val VBC4_CP_STRING_KEY_DOMAIN = "javashroud-vbc4-cp-string-key-v1".toByteArray(Charsets.US_ASCII)
-private val VBC4_CP_STRING_IV_DOMAIN = "javashroud-vbc4-cp-string-iv-v1".toByteArray(Charsets.US_ASCII)
-private val VBC4_CP_STRING_TAG_DOMAIN = "javashroud-vbc4-cp-string-tag-v1".toByteArray(Charsets.US_ASCII)
+private val VBC4_CP_STRING_KEY_DOMAIN = "cp-string-key".toByteArray(Charsets.US_ASCII)
+private val VBC4_CP_STRING_IV_DOMAIN = "cp-string-iv".toByteArray(Charsets.US_ASCII)
+private val VBC4_CP_STRING_TAG_DOMAIN = "cp-string-tag".toByteArray(Charsets.US_ASCII)
 
 private fun isLowerHexDigit(value: Char): Boolean = value in '0'..'9' || value in 'a'..'f'
 
@@ -156,9 +153,8 @@ internal class VmBytecodeSerializer(
     private val serializationBuildContext: Vbc4BuildContext = buildContext
     private val structureEntropyDigest: ByteArray = structureEntropy.copyOf()
     private val effectiveBuildSeed: Int = deriveVbc4StructureSeed(buildContext, buildSeed, entryMetadata, structureEntropy)
-    private val vbc4PublicCryptoMaterial: ByteArray = AkenVbc4InnerMaterial.copyCryptoDomainMaterial()
-    private val vbc4PublicStateBindingDigest: ByteArray =
-        AkenVbc4InnerMaterial.copyStateBindingLayoutDigest()
+    private val vbc4MasterKey: ByteArray = AkenVbc4InnerMaterial.copyCryptoDomainMaterial(buildContext)
+    private val vbc4LayoutDigest: ByteArray = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(buildContext)
     private val opcodeDialectSalt: Int = vbc4OpcodeDialectSalt(effectiveBuildSeed, stateBinding, entryMetadata) xor readMacInt(structureEntropyDigest)
     private val structureSalt: Int = readMacInt(structureEntropyDigest)
     private var sensitiveMaterialCleared: Boolean = false
@@ -224,20 +220,20 @@ internal class VmBytecodeSerializer(
         ?: error("VBC4 production evidence requested before serialization completed")
 
     internal fun logicalProgramForTest(metadataCpIndex: Int = 0): VmLogicalProgram =
-        Vbc4CryptoScope.use(vbc4PublicCryptoMaterial, vbc4PublicStateBindingDigest) {
+        Vbc4CryptoScope.use(vbc4MasterKey, vbc4LayoutDigest) {
             lowerToLogicalProgram(metadataCpIndex)
         }
 
     fun serialize(): ByteArray {
         check(!sensitiveMaterialCleared) { "VBC4 serializer is one-shot" }
         return try {
-            Vbc4CryptoScope.use(vbc4PublicCryptoMaterial, vbc4PublicStateBindingDigest) {
+            Vbc4CryptoScope.use(vbc4MasterKey, vbc4LayoutDigest) {
                 serializeWithActiveKey()
             }
         } finally {
             try {
-                java.util.Arrays.fill(vbc4PublicCryptoMaterial, 0)
-                java.util.Arrays.fill(vbc4PublicStateBindingDigest, 0)
+                java.util.Arrays.fill(vbc4MasterKey, 0)
+                java.util.Arrays.fill(vbc4LayoutDigest, 0)
                 java.util.Arrays.fill(structureEntropyDigest, 0)
                 constantPool.forEach { entry ->
                     if (entry is SealedStringPoolEntry) java.util.Arrays.fill(entry.encoded, 0)
@@ -289,8 +285,7 @@ internal class VmBytecodeSerializer(
         val exceptionEncrypted = vbc4Crypt(exceptionStored, cryptoSeed, nonce, VBC4_SECTION_EXCEPTIONS, 0)
 
         val out = java.io.ByteArrayOutputStream()
-        out.write(byteArrayOf(0x56, 0x42, 0x43, 0x34))
-        writeU2(out, VBC4_VERSION)
+        out.write(byteArrayOf(0x56, 0x42, 0x43, 0x58))
         out.write(nonce)
         writeU4(out, vbc4KeyId(cryptoSeed, nonce))
         out.write(wrappedSeed)
@@ -299,7 +294,6 @@ internal class VmBytecodeSerializer(
         val storageBlocks = storageOrderedBlocks(logicalProgram.blocks)
         writeU4(out, constantPoolPlain.size)
         val cpSectionOut = java.io.ByteArrayOutputStream()
-        writeU2(cpSectionOut, VBC4_CP_SECTION_VERSION)
         writeU2(cpSectionOut, constantPool.size)
         for ((idx, encEntry) in cpEntryEncryptedBuffers.withIndex()) {
             writeU4(cpSectionOut, cpEntryPlainBuffers[idx].size)
@@ -1172,7 +1166,6 @@ internal class VmBytecodeSerializer(
         val out = java.io.ByteArrayOutputStream()
         writeU2(out, registerCount)
         writeU2(out, VBC4_NESTED_MAGIC)
-        writeU2(out, VBC4_NESTED_VERSION)
         writeU2(out, block.instructions.size)
         writeU4(out, profile)
         writeU4(out, dialect)
@@ -1346,8 +1339,7 @@ internal class VmBytecodeSerializer(
             cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
             ciphertext = cipher.doFinal(plain)
             tag = vbc4CpStringMac(buildKey, VBC4_CP_STRING_TAG_DOMAIN, nonce, ciphertext)
-            val out = java.io.ByteArrayOutputStream(1 + 16 + 2 + ciphertext.size + tag.size)
-            out.write(VBC4_CP_SEALED_STRING_VERSION)
+            val out = java.io.ByteArrayOutputStream(16 + 2 + ciphertext.size + tag.size)
             out.write(nonce)
             writeU2(out, ciphertext.size)
             out.write(ciphertext)
@@ -2145,8 +2137,7 @@ private val VM_BRANCH_OPCODES = setOf(
 
 // --- VBC4 format helpers ---
 
-private const val VBC4_VERSION = 4
-private const val VBC4_FLAG_ENCRYPTED_CP = 0x0001
+        private const val VBC4_FLAG_ENCRYPTED_CP = 0x0001
 private const val VBC4_FLAG_BLOCK_ENCRYPTED = 0x0002
 private const val VBC4_FLAG_MAC = 0x0004
 private const val VBC4_FLAG_STATE_BOUND = 0x0008
@@ -2163,7 +2154,6 @@ private const val VBC4_FLAG_POLYMORPHIC_CP = 0x2000
 private const val VBC4_FLAG_REGISTER_ROW_ENVELOPE = 0x4000
 private const val VBC4_FLAG_MIXED_OPERAND_ENVELOPE = 0x8000
 private const val VBC4_NESTED_MAGIC = 0x4E56
-private const val VBC4_NESTED_VERSION = 1
 private const val VBC4_NESTED_FIELD_COUNT = 6
 private const val VBC4_NESTED_MICROS_PER_ROW = VBC4_NESTED_FIELD_COUNT + 1
 private const val VBC4_NESTED_FIELD_OPCODE_BASE = 0x7000
@@ -2171,7 +2161,6 @@ private const val VBC4_NESTED_COMMIT_OPCODE_BASE = 0x6000
 private const val VBC4_NESTED_COMMIT_SLOT = 0x7F
 private const val VBC4_SECTION_CONSTANT_POOL = 1
 private const val VBC4_SECTION_CONSTANT_POOL_ENTRY = 9
-private const val VBC4_CP_SECTION_VERSION = 1
 private const val VBC4_SECTION_INSTRUCTIONS = 2
 private const val VBC4_SECTION_EXCEPTIONS = 3
 private const val VBC4_SECTION_PADDING = 8

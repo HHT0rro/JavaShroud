@@ -8,6 +8,7 @@ internal fun buildClassTreeNodePayload(node: ClassTreeNode): Map<String, Any> {
         "label" to node.label,
         "qualifiedName" to node.qualifiedName,
         "internalName" to node.internalName,
+        "selector" to node.selector,
         "kind" to node.kind,
         "children" to node.children.map(::buildClassTreeNodePayload),
     )

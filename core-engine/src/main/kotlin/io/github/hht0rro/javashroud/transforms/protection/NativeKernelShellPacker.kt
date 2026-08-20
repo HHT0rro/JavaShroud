@@ -10,10 +10,9 @@ import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 internal object NativeKernelShellPacker {
-    const val PACKER_VERSION: Int = 6
-    const val LOADER_MARKER: String = "JS_NATIVE_SHELL_LOADER_V1"
-    const val MAX_STUB_MARKER: String = "AKEN_NATIVE_SHELL_STUB_V4"
-    const val MAX_PAYLOAD_MARKER: String = "AKEN_NATIVE_SHELL_PAYLOAD_V4"
+    const val LOADER_MARKER: String = "JS_NATIVE_SHELL_LOADER"
+    const val MAX_STUB_MARKER: String = "AKEN_NATIVE_SHELL_STUB"
+    const val MAX_PAYLOAD_MARKER: String = "AKEN_NATIVE_SHELL_PAYLOAD"
     const val MAX_PAYLOAD_CHUNK_SIZE: Int = 2048
 
     private const val maxCompressionCodecNone = 0
@@ -172,7 +171,6 @@ internal object NativeKernelShellPacker {
             val originalDigest = sha256(bytes)
             val header = ByteArrayOutputStream().apply {
                 write(blockMagic)
-                writeIntLe(PACKER_VERSION)
                 writeIntLe(level.id)
                 writeString(platform)
                 writeString(outputName)
@@ -264,7 +262,6 @@ internal object NativeKernelShellPacker {
             val headerBytes = output(ByteArrayOutputStream().apply {
                 write(MAX_PAYLOAD_MARKER.toByteArray(Charsets.US_ASCII))
                 write(0)
-                writeIntLe(PACKER_VERSION)
                 writeIntLe(level.id)
                 writeIntLe(nonce.size)
                 write(nonce)
@@ -311,7 +308,7 @@ internal object NativeKernelShellPacker {
         var inner: ByteArray? = null
         return try {
             val actualCommitment = akenPayloadCommitment(bindingSalt, headerBytes, encodedPayload)
-            val commitmentValid = parsed.version == PACKER_VERSION && parsed.level.usesStubShell &&
+            val commitmentValid = parsed.level.usesStubShell &&
                 parsed.originalSize > 0 && parsed.storedPayloadSize > 0 && parsed.encodedPayloadSize == encodedPayload.size &&
                 parsed.compressionCodec in setOf(maxCompressionCodecNone, maxCompressionCodecZstd) && parsed.chunkSize > 0 &&
                 parsed.chunkCount == chunkCountFor(parsed.encodedPayloadSize, parsed.chunkSize) && parsed.chunkTags.size == parsed.chunkCount * 32 &&
@@ -335,7 +332,7 @@ internal object NativeKernelShellPacker {
             } ?: false
             MaxPayloadInspection(
                 present = true,
-                version = parsed.version,
+                version = 0,
                 platform = parsed.platform,
                 outputName = parsed.outputName,
                 innerFileType = parsed.innerFileType,
@@ -368,7 +365,6 @@ internal object NativeKernelShellPacker {
         appendLine("#define JS_SHELL_PAYLOAD_INC")
         appendLine("#define JS_NATIVE_MAX_STUB_MARKER \"$MAX_STUB_MARKER\"")
         appendLine("#define JS_NATIVE_MAX_PAYLOAD_MARKER \"$MAX_PAYLOAD_MARKER\"")
-        appendLine("#define JS_SHELL_PROTOCOL_VERSION $PACKER_VERSION")
         appendLine("#define JS_SHELL_PROTOCOL_LEVEL ${bundle.level.id}u")
         appendLine("#define JS_SHELL_AKEN_BINDING_LANE_COUNT ${akenBindingLaneCount}u")
         appendLine("#define JS_SHELL_AKEN_BINDING_LANE_SIZE ${akenBindingLaneSize}u")
@@ -397,14 +393,13 @@ internal object NativeKernelShellPacker {
         if (parsed == null) return ShellInspection(present = false)
         val key = deriveShellKey(seed, parsed.level, parsed.platform, parsed.outputName, keyMaterial)
         return try {
-            val macValid = parsed.version == PACKER_VERSION &&
-                parsed.level == Level.STANDARD &&
+            val macValid = parsed.level == Level.STANDARD &&
                 parsed.originalSize == parsed.originalBytes.size &&
                 sha256(parsed.originalBytes).contentEquals(parsed.originalDigest) &&
                 hmac(key, parsed.originalBytes + parsed.macCovered).contentEquals(parsed.mac)
             ShellInspection(
                 present = true,
-                version = parsed.version,
+                version = 0,
                 level = parsed.level,
                 platform = parsed.platform,
                 outputName = parsed.outputName,
@@ -477,7 +472,6 @@ internal object NativeKernelShellPacker {
             val reader = BlockReader(macCovered)
             val magic = reader.readBytes(blockMagic.size)
             if (!magic.contentEquals(blockMagic)) return null
-            val version = reader.readIntLe()
             val levelId = reader.readIntLe()
             val level = Level.entries.firstOrNull { it.id == levelId } ?: return null
             if (level != Level.STANDARD) return null
@@ -497,7 +491,7 @@ internal object NativeKernelShellPacker {
                 originalBytes = bytes.copyOfRange(0, blockOffset),
                 macCovered = macCovered,
                 mac = block.copyOfRange(block.size - hmacLength, block.size),
-                version = version,
+                version = 0,
                 level = level,
                 platform = platform,
                 outputName = outputName,
@@ -521,7 +515,6 @@ internal object NativeKernelShellPacker {
             if (bindingSalt.size != 32) return null
             val reader = BlockReader(headerBytes)
             if (reader.readCString() != MAX_PAYLOAD_MARKER) return null
-            val version = reader.readIntLe()
             val levelId = reader.readIntLe()
             val level = Level.entries.firstOrNull { it.id == levelId } ?: return null
             val nonce = output(reader.readBytes(reader.readIntLe()))
@@ -547,7 +540,7 @@ internal object NativeKernelShellPacker {
             if (!inner.exhausted()) return null
             val streamKey = output(shellKdf(bindingSalt, akenStreamDomain, nonce, bindingTag))
             ParsedMaxPayloadHeader(
-                version, level, platform, outputName, innerFileType, originalSize, storedSize, encodedSize,
+                0, level, platform, outputName, innerFileType, originalSize, storedSize, encodedSize,
                 codec, chunkSize, chunkCount, layout, dispatcher, nonce, digest, bindingTag, tags, streamKey,
             ).also { result = it }
         } catch (_: IllegalArgumentException) {

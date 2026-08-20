@@ -35,10 +35,13 @@ object EmbeddedHelperDeployment {
         "META-INF/.r/boot.dat",
         "META-INF/.r/kek.dat",
     )
-    private val runtimeResourceDecodeHelpers = listOf(
+    /**
+     * The AKEN v4 helper set deliberately omits legacy boot/resource decoder
+     * nested classes.  The outer helper is regenerated below with only the
+     * typed current-page surface and its relocation/lambda support closure.
+     */
+    private val akenRuntimeHelpers = listOf(
         "$PKG/JniMicrokernelHelper",
-        "$PKG/JniMicrokernelHelper${"$"}RuntimeResourceMetadata",
-        "$PKG/JniMicrokernelHelper${"$"}SealedNativeLibrary",
         "$PKG/JniMicrokernelHelper${"$"}AkenNativeLibrary",
         "$PKG/JniMicrokernelHelper${"$"}TypeParseResult",
         "$PKG/JniMicrokernelHelper${"$"}SamLambdaOptions",
@@ -57,12 +60,28 @@ object EmbeddedHelperDeployment {
         "$PKG/AkenClassPageRuntimeDescriptor${"$"}WipableByteAccumulator",
     )
 
+    /**
+     * Entries that are regenerated for an AKEN production closure. A
+     * pre-existing legacy helper must not short-circuit generation of the
+     * typed-only replacement or leak its nested metadata carrier into output.
+     */
+    private val akenProductionHelperEntryNames = (
+        akenRuntimeHelpers +
+            akenClassPageRuntimeHelpers +
+            listOf(
+                "$PKG/ClassEncryptionLoaderHelper",
+                "$PKG/ClassEncryptionLoaderHelper${"$"}SharedDecryptingClassLoader",
+                "$PKG/ClassEncryptionLoaderHelper${"$"}ParsedMetadata",
+                "$PKG/JniMicrokernelHelper${"$"}RuntimeResourceMetadata",
+                "$PKG/JniMicrokernelHelper${"$"}SealedNativeLibrary",
+            )
+        ).mapTo(linkedSetOf()) { "$it.class" }
+
     private val passToHelpers: Map<String, List<String>> = mapOf(
         "class-encryption-loader" to listOf(
             "$PKG/ClassEncryptionLoaderHelper",
-            "$PKG/ClassEncryptionLoaderHelper${"$"}ParsedMetadata",
             "$PKG/ClassEncryptionLoaderHelper${"$"}SharedDecryptingClassLoader",
-        ) + akenClassPageRuntimeHelpers + runtimeResourceDecodeHelpers,
+        ) + akenClassPageRuntimeHelpers + akenRuntimeHelpers,
         "string-encryption" to listOf(
             "$PKG/StringEncryptionHelper",
             "$PKG/StringEncryptionHelper${"$"}CachePolicy",
@@ -70,7 +89,7 @@ object EmbeddedHelperDeployment {
         "method-body-delayed-decryption" to listOf(
             "$PKG/MethodBodyDecryptionHelper",
             "$PKG/MethodBodyDecryptionHelper${"$"}ParsedMetadata",
-        ) + runtimeResourceDecodeHelpers,
+        ) + akenRuntimeHelpers,
         "callsite-rotation-protection" to listOf("$PKG/CallsiteRotationHelper"),
         "environment-bound-keys" to listOf("$PKG/EnvironmentBindingHelper"),
         "anti-symbolic-execution" to listOf("$PKG/AntiSymbolicExecutionHelper"),
@@ -80,13 +99,12 @@ object EmbeddedHelperDeployment {
         ),
         "anti-instrumentation" to listOf("$PKG/AntiInstrumentationHelper"),
         "anti-dump-protection" to listOf("$PKG/AntiDumpRuntimeHelper"),
-        "jni-microkernel-loader" to runtimeResourceDecodeHelpers,
+        "jni-microkernel-loader" to akenRuntimeHelpers,
         "method-virtualization" to emptyList(),
     )
     private val helperGenerators: Map<String, () -> ByteArray> by lazy {
         mapOf(
             "$PKG/ClassEncryptionLoaderHelper" to { loadClasspathHelperByName("ClassEncryptionLoaderHelper") },
-            "$PKG/ClassEncryptionLoaderHelper${"$"}ParsedMetadata" to { loadClasspathHelperByName("ClassEncryptionLoaderHelper${"$"}ParsedMetadata") },
             "$PKG/ClassEncryptionLoaderHelper${"$"}SharedDecryptingClassLoader" to { loadClasspathHelperByName("ClassEncryptionLoaderHelper${"$"}SharedDecryptingClassLoader") },
             "$PKG/AkenClassPageRuntimeDescriptor" to { loadClasspathHelperByName("AkenClassPageRuntimeDescriptor") },
             "$PKG/AkenClassPageRuntimeDescriptor${"$"}PageBinding" to { loadClasspathHelperByName("AkenClassPageRuntimeDescriptor${"$"}PageBinding") },
@@ -124,9 +142,14 @@ object EmbeddedHelperDeployment {
         artifact: BytecodeArtifact,
         executedPassIds: List<String>,
     ): BytecodeArtifact {
-        val existingEntries = artifact.jarEntries.map { it.name }.toSet()
-        val neededHelpers = sortedSetOf<String>()
         val resolvedPassIds = resolvePassIdsWithSchemaDependencies(executedPassIds)
+        val akenRuntimeDeployment = "jni-microkernel-loader" in resolvedPassIds
+        val existingEntries = artifact.jarEntries
+            .asSequence()
+            .filterNot { entry -> akenRuntimeDeployment && entry.name in akenProductionHelperEntryNames }
+            .map { entry -> entry.name }
+            .toSet()
+        val neededHelpers = sortedSetOf<String>()
         for (passId in resolvedPassIds) {
             passToHelpers[passId]?.let { neededHelpers.addAll(it) }
         }
@@ -137,7 +160,7 @@ object EmbeddedHelperDeployment {
             val entryName = "$helperInternalName.class"
             if (entryName in existingEntries) continue
             val classBytes = try {
-                loadHelperBytes(helperInternalName)
+                loadHelperBytes(helperInternalName, akenRuntimeDeployment)
             } catch (error: Exception) {
                 generationFailures.add("$entryName (${error::class.java.simpleName}: ${error.message ?: "unknown error"})")
                 continue
@@ -149,12 +172,21 @@ object EmbeddedHelperDeployment {
                 "Failed to embed runtime helpers for passes ${executedPassIds.sorted()}: ${generationFailures.joinToString("; ")}"
             )
         }
-        val retainedJarEntries = if ("jni-microkernel-loader" in resolvedPassIds) {
-            artifact.jarEntries.filterNot { entry -> entry.name in legacyBootResourcePaths }
+        val retainedJarEntries = if (akenRuntimeDeployment) {
+            artifact.jarEntries.filterNot { entry ->
+                entry.name in legacyBootResourcePaths || entry.name in akenProductionHelperEntryNames
+            }
         } else {
             artifact.jarEntries
         }
-        if (newEntries.isEmpty() && retainedJarEntries.size == artifact.jarEntries.size) return artifact
+        val retainedClassArtifacts = if (akenRuntimeDeployment) {
+            artifact.classArtifacts.filterNot { classArtifact -> classArtifact.entryName in akenProductionHelperEntryNames }
+        } else {
+            artifact.classArtifacts
+        }
+        if (newEntries.isEmpty() && retainedJarEntries.size == artifact.jarEntries.size && retainedClassArtifacts.size == artifact.classArtifacts.size) {
+            return artifact
+        }
         val injectedClassArtifacts = newEntries.filter { entry -> entry.name.endsWith(".class") }.map { entry: JarEntryData ->
             ClassArtifact(
                 entryName = entry.name,
@@ -163,7 +195,7 @@ object EmbeddedHelperDeployment {
             )
         }
         val updatedJarEntries = retainedJarEntries + newEntries
-        val updatedClassArtifacts = artifact.classArtifacts + injectedClassArtifacts
+        val updatedClassArtifacts = retainedClassArtifacts + injectedClassArtifacts
         val updatedClassSummaries = updatedClassArtifacts.map { classArtifact: ClassArtifact -> classArtifact.summary }
         return artifact.copy(
             jarEntries = updatedJarEntries,
@@ -193,10 +225,584 @@ object EmbeddedHelperDeployment {
         return resolvedPassIds
     }
 
-    private fun loadHelperBytes(helperInternalName: String): ByteArray {
+    private fun loadHelperBytes(helperInternalName: String, akenRuntimeDeployment: Boolean = false): ByteArray {
         val generator = helperGenerators[helperInternalName]
             ?: throw IllegalStateException("missing generator")
-        return generator()
+        val generated = generator()
+        return when {
+            akenRuntimeDeployment && helperInternalName == "$PKG/JniMicrokernelHelper" ->
+                emitAkenOnlyJniMicrokernelHelper(generated)
+            akenRuntimeDeployment && helperInternalName == "$PKG/ClassEncryptionLoaderHelper" ->
+                emitAkenOnlyClassEncryptionLoaderHelper(generated)
+            akenRuntimeDeployment && helperInternalName == "$PKG/ClassEncryptionLoaderHelper${"$"}SharedDecryptingClassLoader" ->
+                emitAkenOnlySharedDecryptingClassLoader(generated)
+            else -> generated
+        }
+    }
+
+    /**
+     * Copies the public/current-page closure of the source helper into a new
+     * class file, rather than shipping the source helper's legacy boot protocol
+     * methods and constant-pool entries in a new AKEN artifact.  The original
+     * helper remains in the build process for old-engine tests; new output gets
+     * this lean runtime implementation only.
+     */
+    private fun emitAkenOnlyJniMicrokernelHelper(source: ByteArray): ByteArray {
+        val owner = "$PKG/JniMicrokernelHelper"
+        val allowedNested = setOf(
+            "$owner${"$"}AkenNativeLibrary",
+            "$owner${"$"}TypeParseResult",
+            "$owner${"$"}SamLambdaOptions",
+            "$owner${"$"}SamInvocationHandler",
+        )
+        val allowedFields = setOf(
+            "LOAD_FAILED",
+            "LOAD_UNTRIED",
+            "LOAD_LOADING",
+            "LOAD_READY",
+            "loadState",
+            "loadMessage",
+            "akenLoadState",
+            "akenLoadMessage",
+            "diversifiedVmEnabled",
+            "vmSelfCheck",
+            "nativeSelfCheckFailed",
+            "sealedNativeBindingsPublished",
+            "AKEN_NATIVE_LOCATOR_RESOURCE",
+            "AKEN_NATIVE_BINDINGS_LOCATOR_RESOURCE",
+            "AKEN_NATIVE_RESOURCE_ROOT",
+            "AKEN_NATIVE_LOCATOR_RECORD",
+            "AKEN_NATIVE_BINDINGS_LOCATOR_RECORD",
+            "AKEN_NATIVE_LOCATOR_MAX_BYTES",
+            "AKEN_NATIVE_MAX_LIBRARY_BYTES",
+            "AKEN_NATIVE_SHA256_LENGTH",
+            "AKEN_NATIVE_BINDINGS_MAX_BYTES",
+            "LAMBDA_FLAG_SERIALIZABLE",
+            "LAMBDA_FLAG_MARKERS",
+            "LAMBDA_FLAG_BRIDGES",
+            "LAMBDA_SUPPORTED_FLAGS",
+            "SAM_LAMBDA_CACHE",
+            "SAM_BRIDGE_INTERFACE_CACHE",
+        )
+        val removedNames = setOf(
+            // AKEN keeps only the native loader handshake (nativeInit,
+            // nativeHeartbeat, and nativeInstallAkenSessionNonce) plus the
+            // typed page bridge below.  All generic verification, machine-
+            // fingerprint, key-taking, and legacy class/resource entrypoints
+            // are compatibility-only and must not enter a production helper.
+            "nativeVerify",
+            "nativeGetVersion",
+            "nativeGetBootToken",
+            "nativeInstallBootMaterial",
+            "nativeInstallBootEnvelope",
+            "nativeIsBootMaterialReady",
+            "nativeAbortBootMaterial",
+            "nativePreloadRuntimeResources",
+            "nativeDecodeRuntimeResource",
+            "nativeDecryptAes",
+            "nativeDeriveClassEncryptionKey",
+            "nativeDecryptClassBytes",
+            "nativeSealedBindingKey",
+            "nativeGetMachineFingerprint",
+            "nativeExecuteVmResource",
+            "nativeExecuteVmResourceByToken",
+            "nativeExecuteVmResourceVoid",
+            "nativeExecuteVmResourceInt",
+            "nativeExecuteVmResourceIntInt",
+            "nativeExecuteVmResourceIntVoid",
+            "executeVmResource",
+            "executeVmResourceVoid",
+            "executeVmResourceInt",
+            "executeVmResourceIntInt",
+            "executeVmResourceIntVoid",
+            "verifyNativeAbiAfterLoad",
+            "verifyBootTokenAfterLoad",
+            "computeExpectedBootToken",
+            "fnv1a32",
+            "preloadRuntimeResourcesIntoNative",
+            "hasVmCatalogResource",
+            "verifyVmPreloadIndexBeforeNative",
+            "verifiedVmCatalogPayload",
+            "openCatalogJar",
+            "readRequiredResource",
+            "vmPreloadEntryAuthTag",
+            "installBootMaterialIntoNative",
+            "readBoot" + "KekSidecarBinary",
+            "prepareJavaBootMaterialForLoad",
+            "loadBootSecret",
+            "decodeBootSecretBytes",
+            "unmaskBootSecret",
+            "deriveBootEnvMask",
+            "constantTimeStringEqual",
+            "bootSidecarBinding",
+            "isBoot" + "KekSidecar",
+            "decodeBoot" + "KekSidecar",
+            "decryptBootMaterial",
+            "validateAndPublishJavaBootMaterial",
+            "clearJavaBootMaterial",
+            "publishNativeShellBootSecret",
+            "clearNativeShellBootSecret",
+            "takeBootSecretForNativeShell",
+            "clearExpectedShellBindingCommitment",
+            "takeExpectedShellBindingCommitment",
+            "verifyShellBindingHandoffAfterLoad",
+            "shellBindingPlatformId",
+            "tryLoadBundledNative",
+            "tryLoadBundledNativeResource",
+            "ensureSealedNativeBindingsPublished",
+            "legacySealedNativeBindingsResource",
+            "sealedNativeIndexText",
+            "sealedBundledLibraryNames",
+            "decodeSealedNativeResource",
+            "decodeRuntimeResourceForNative",
+            "decodeRuntimeResourceEnvelope",
+            "runtimeResourcePartitionCount",
+            "anchorResourcePartition",
+            "partitionResourceKey",
+            "decodeRuntimeResourceEnvelope",
+            "decodeRuntimeResource",
+            "hasRuntimeResourceHeader",
+            "decodeRuntimeResourceCurrent",
+            "decompressEmbeddedZstd",
+            "readZstdFrameContentSize",
+            "runtimeResourceAesCtr",
+            "runtimeResourceAesCtrWithDomains",
+            "parseRuntimeResourceMetadata",
+            "aesXtime",
+            "aesSbox",
+            "aesExpandKey",
+            "aesMixColumn",
+            "aesEncryptBlock",
+            "aesCtrCrypt",
+            "hmacSha256",
+            "parsePositiveInt",
+            "lastIndexOf",
+            "hasPartitionedRuntimeResourceHeader",
+            "vmCatalogLeaf",
+            "vmCatalogMerkleRoot",
+            "vmCatalogRoot",
+            "compareUnsigned",
+            "sortVmCatalogDirectories",
+            "sortByteArrays",
+            "frame",
+            "longBytes",
+            "concat",
+            "intBytes",
+            "constantTimeEquals",
+            "readSealedResourceLe16",
+            "readSealedResourceLe32",
+            "readSealedResourceBe32",
+            "deriveClassEncryptionKey",
+            "decryptClassBytes",
+        )
+        fun dropMethod(name: String, descriptor: String): Boolean =
+            name in removedNames ||
+                (name == "publishSealedNativeBindings" && descriptor == "()V") ||
+                (name == "sealedNativeBindingText" && descriptor == "()Ljava/lang/String;")
+        fun replaceMethod(name: String, descriptor: String): Boolean =
+            (name == "loadKernel" && descriptor in setOf(
+                "(Ljava/lang/String;Ljava/lang/String;)V",
+                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+            )) ||
+                (name == "isKernelIntegrityReady" && descriptor == "()Z") ||
+                (name == "requireHealthyKernel" && descriptor == "()V")
+
+        val reader = ClassReader(source)
+        val writer = ClassWriter(0)
+        val visitor = object : ClassVisitor(Opcodes.ASM9, writer) {
+            override fun visitField(
+                access: Int,
+                name: String,
+                descriptor: String,
+                signature: String?,
+                value: Any?,
+            ): FieldVisitor? = if (name in allowedFields) {
+                super.visitField(access, name, descriptor, signature, value)
+            } else {
+                null
+            }
+
+            override fun visitNestMember(nestMember: String) {
+                if (nestMember in allowedNested) super.visitNestMember(nestMember)
+            }
+
+            override fun visitInnerClass(name: String, outerName: String?, innerName: String?, access: Int) {
+                if (name == owner || name in allowedNested) {
+                    super.visitInnerClass(name, outerName, innerName, access)
+                }
+            }
+
+            override fun visitMethod(
+                access: Int,
+                name: String,
+                descriptor: String,
+                signature: String?,
+                exceptions: Array<String>?,
+            ): MethodVisitor? {
+                if (name == "<clinit>" || dropMethod(name, descriptor) || replaceMethod(name, descriptor)) return null
+                return super.visitMethod(access, name, descriptor, signature, exceptions)
+            }
+
+            override fun visitEnd() {
+                emitAkenOnlyJniHelperClinit(writer, owner)
+                emitAkenOnlyJniHelperLoadMethods(writer, owner)
+                emitAkenOnlyJniHelperIntegrityMethods(writer, owner)
+                super.visitEnd()
+            }
+        }
+        reader.accept(visitor, 0)
+        return writer.toByteArray()
+    }
+
+    private fun emitAkenOnlyJniHelperClinit(writer: ClassWriter, owner: String) {
+        val mv = writer.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null)
+        mv.visitCode()
+        mv.visitTypeInsn(Opcodes.NEW, "java/util/concurrent/ConcurrentHashMap")
+        mv.visitInsn(Opcodes.DUP)
+        mv.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/util/concurrent/ConcurrentHashMap", "<init>", "()V", false)
+        mv.visitFieldInsn(Opcodes.PUTSTATIC, owner, "SAM_LAMBDA_CACHE", "Ljava/util/concurrent/ConcurrentMap;")
+        mv.visitTypeInsn(Opcodes.NEW, "java/util/concurrent/ConcurrentHashMap")
+        mv.visitInsn(Opcodes.DUP)
+        mv.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/util/concurrent/ConcurrentHashMap", "<init>", "()V", false)
+        mv.visitFieldInsn(Opcodes.PUTSTATIC, owner, "SAM_BRIDGE_INTERFACE_CACHE", "Ljava/util/concurrent/ConcurrentMap;")
+        mv.visitInsn(Opcodes.RETURN)
+        mv.visitMaxs(2, 0)
+        mv.visitEnd()
+    }
+
+    private fun emitAkenOnlyJniHelperLoadMethods(writer: ClassWriter, owner: String) {
+        writer.visitMethod(
+            Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC,
+            "loadKernel",
+            "(Ljava/lang/String;Ljava/lang/String;)V",
+            null,
+            null,
+        ).apply {
+            visitCode()
+            visitVarInsn(Opcodes.ALOAD, 0)
+            visitVarInsn(Opcodes.ALOAD, 1)
+            visitLdcInsn("vm-off")
+            visitMethodInsn(
+                Opcodes.INVOKESTATIC,
+                owner,
+                "loadKernel",
+                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+                false,
+            )
+            visitInsn(Opcodes.RETURN)
+            visitMaxs(3, 2)
+            visitEnd()
+        }
+        writer.visitMethod(
+            Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC or Opcodes.ACC_SYNCHRONIZED,
+            "loadKernel",
+            "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+            null,
+            null,
+        ).apply {
+            visitCode()
+            visitLdcInsn("vm-diverse")
+            visitVarInsn(Opcodes.ALOAD, 2)
+            visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", false)
+            visitFieldInsn(Opcodes.PUTSTATIC, owner, "diversifiedVmEnabled", "Z")
+            visitMethodInsn(Opcodes.INVOKESTATIC, owner, "ensureAkenNativeKernel", "()V", false)
+            visitInsn(Opcodes.RETURN)
+            visitMaxs(2, 3)
+            visitEnd()
+        }
+    }
+
+    private fun emitAkenOnlyJniHelperIntegrityMethods(writer: ClassWriter, owner: String) {
+        writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "isKernelIntegrityReady", "()Z", null, null).apply {
+            visitCode()
+            visitInsn(Opcodes.ICONST_1)
+            visitFieldInsn(Opcodes.GETSTATIC, owner, "nativeSelfCheckFailed", "Z")
+            visitInsn(Opcodes.IXOR)
+            visitMethodInsn(Opcodes.INVOKESTATIC, owner, "isNativeLoaded", "()Z", false)
+            visitInsn(Opcodes.IAND)
+            visitInsn(Opcodes.IRETURN)
+            visitMaxs(2, 0)
+            visitEnd()
+        }
+        writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "requireHealthyKernel", "()V", null, null).apply {
+            visitCode()
+            visitMethodInsn(Opcodes.INVOKESTATIC, owner, "ensureAkenNativeKernel", "()V", false)
+            visitInsn(Opcodes.RETURN)
+            visitMaxs(0, 0)
+            visitEnd()
+        }
+    }
+
+    /**
+     * Emits the class-encryption helper closure used by a new AKEN artifact.
+     *
+     * The source helper still contains the pre-AKEN manifest/resource decoder
+     * for old artifacts, but that surface must not be copied into a new JAR.
+     * Keeping the required methods and fields at the bytecode level also avoids
+     * accidentally retaining a constant-pool reference to ParsedMetadata or a
+     * generic key/resource entrypoint.
+     */
+    private fun emitAkenOnlyClassEncryptionLoaderHelper(source: ByteArray): ByteArray {
+        val owner = "$PKG/ClassEncryptionLoaderHelper"
+        val sharedLoader = "$owner${"$"}SharedDecryptingClassLoader"
+        val allowedFields = setOf("sharedLoader", "unsafe", "methodCache", "instanceCache")
+        val allowedMethods = setOf(
+            "<init>()V",
+            "loadAkenClass(Ljava/lang/String;)Ljava/lang/Class;",
+            "invokeMethod([Ljava/lang/Object;)Ljava/lang/Object;",
+            "createInstance(Ljava/lang/Class;)Ljava/lang/Object;",
+            "sharedLoader()L$sharedLoader;",
+            "parseParamTypes(Ljava/lang/ClassLoader;Ljava/lang/String;)[Ljava/lang/Class;",
+        )
+
+        val reader = ClassReader(source)
+        val writer = ClassWriter(ClassWriter.COMPUTE_FRAMES or ClassWriter.COMPUTE_MAXS)
+        val visitor = object : ClassVisitor(Opcodes.ASM9, writer) {
+            override fun visitField(
+                access: Int,
+                name: String,
+                descriptor: String,
+                signature: String?,
+                value: Any?,
+            ): FieldVisitor? = if (name in allowedFields) {
+                super.visitField(access, name, descriptor, signature, value)
+            } else {
+                null
+            }
+
+            override fun visitNestMember(nestMember: String) {
+                if (nestMember == sharedLoader) super.visitNestMember(nestMember)
+            }
+
+            override fun visitInnerClass(name: String, outerName: String?, innerName: String?, access: Int) {
+                if (name == owner || name == sharedLoader) {
+                    super.visitInnerClass(name, outerName, innerName, access)
+                }
+            }
+
+            override fun visitMethod(
+                access: Int,
+                name: String,
+                descriptor: String,
+                signature: String?,
+                exceptions: Array<String>?,
+            ): MethodVisitor? {
+                if (name == "<clinit>") return null
+                return if ("$name$descriptor" in allowedMethods) {
+                    super.visitMethod(access, name, descriptor, signature, exceptions)
+                } else {
+                    null
+                }
+            }
+
+            override fun visitEnd() {
+                emitAkenOnlyClassEncryptionHelperClinit(writer, owner)
+                super.visitEnd()
+            }
+        }
+        reader.accept(visitor, 0)
+        return writer.toByteArray()
+    }
+
+    private fun emitAkenOnlyClassEncryptionHelperClinit(writer: ClassWriter, owner: String) {
+        val mv = writer.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null)
+        val tryStart = Label()
+        val tryEnd = Label()
+        val catchLabel = Label()
+        val done = Label()
+        mv.visitTryCatchBlock(tryStart, tryEnd, catchLabel, "java/lang/Throwable")
+        mv.visitCode()
+
+        mv.visitTypeInsn(Opcodes.NEW, "java/util/concurrent/ConcurrentHashMap")
+        mv.visitInsn(Opcodes.DUP)
+        mv.visitMethodInsn(
+            Opcodes.INVOKESPECIAL,
+            "java/util/concurrent/ConcurrentHashMap",
+            "<init>",
+            "()V",
+            false,
+        )
+        mv.visitFieldInsn(
+            Opcodes.PUTSTATIC,
+            owner,
+            "methodCache",
+            "Ljava/util/concurrent/ConcurrentHashMap;",
+        )
+        mv.visitTypeInsn(Opcodes.NEW, "java/util/concurrent/ConcurrentHashMap")
+        mv.visitInsn(Opcodes.DUP)
+        mv.visitMethodInsn(
+            Opcodes.INVOKESPECIAL,
+            "java/util/concurrent/ConcurrentHashMap",
+            "<init>",
+            "()V",
+            false,
+        )
+        mv.visitFieldInsn(
+            Opcodes.PUTSTATIC,
+            owner,
+            "instanceCache",
+            "Ljava/util/concurrent/ConcurrentHashMap;",
+        )
+
+        mv.visitLabel(tryStart)
+        mv.visitLdcInsn(Type.getType("Lsun/misc/Unsafe;"))
+        mv.visitLdcInsn("theUnsafe")
+        mv.visitMethodInsn(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Class",
+            "getDeclaredField",
+            "(Ljava/lang/String;)Ljava/lang/reflect/Field;",
+            false,
+        )
+        mv.visitVarInsn(Opcodes.ASTORE, 0)
+        mv.visitVarInsn(Opcodes.ALOAD, 0)
+        mv.visitInsn(Opcodes.ICONST_1)
+        mv.visitMethodInsn(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/reflect/AccessibleObject",
+            "setAccessible",
+            "(Z)V",
+            false,
+        )
+        mv.visitVarInsn(Opcodes.ALOAD, 0)
+        mv.visitInsn(Opcodes.ACONST_NULL)
+        mv.visitMethodInsn(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/reflect/Field",
+            "get",
+            "(Ljava/lang/Object;)Ljava/lang/Object;",
+            false,
+        )
+        mv.visitTypeInsn(Opcodes.CHECKCAST, "sun/misc/Unsafe")
+        mv.visitFieldInsn(Opcodes.PUTSTATIC, owner, "unsafe", "Lsun/misc/Unsafe;")
+        mv.visitLabel(tryEnd)
+        mv.visitJumpInsn(Opcodes.GOTO, done)
+        mv.visitLabel(catchLabel)
+        mv.visitInsn(Opcodes.POP)
+        mv.visitInsn(Opcodes.ACONST_NULL)
+        mv.visitFieldInsn(Opcodes.PUTSTATIC, owner, "unsafe", "Lsun/misc/Unsafe;")
+        mv.visitLabel(done)
+        mv.visitInsn(Opcodes.RETURN)
+        mv.visitMaxs(3, 1)
+        mv.visitEnd()
+    }
+
+    /**
+     * Emits the shared loader without the legacy findClass/manifest path.  The
+     * only fallback is the normal parent ClassLoader; encrypted application
+     * classes must arrive through defineAkenClassIfPresent.
+     */
+    private fun emitAkenOnlySharedDecryptingClassLoader(source: ByteArray): ByteArray {
+        val owner = "$PKG/ClassEncryptionLoaderHelper${"$"}SharedDecryptingClassLoader"
+        val allowedMethods = setOf(
+            "<init>(Ljava/lang/ClassLoader;)V",
+            "loadAkenClass(Ljava/lang/String;)Ljava/lang/Class;",
+            "defineAkenClassIfPresent(Ljava/lang/String;)Ljava/lang/Class;",
+            "defineClassBytes(Ljava/lang/String;[B)Ljava/lang/Class;",
+        )
+        val typedLoadAccessorDescriptor = "(L$owner;Ljava/lang/String;)Ljava/lang/Class;"
+        val reader = ClassReader(source)
+        val writer = ClassWriter(ClassWriter.COMPUTE_FRAMES or ClassWriter.COMPUTE_MAXS)
+        val visitor = object : ClassVisitor(Opcodes.ASM9, writer) {
+            override fun visitMethod(
+                access: Int,
+                name: String,
+                descriptor: String,
+                signature: String?,
+                exceptions: Array<String>?,
+            ): MethodVisitor? {
+                if (name == "findClass") return null
+                if (name == "loadClass" && descriptor == "(Ljava/lang/String;Z)Ljava/lang/Class;") return null
+                val isTypedLoadAccessor =
+                    name.startsWith("access$") && descriptor == typedLoadAccessorDescriptor
+                return if ("$name$descriptor" in allowedMethods || isTypedLoadAccessor) {
+                    super.visitMethod(access, name, descriptor, signature, exceptions)
+                } else {
+                    null
+                }
+            }
+
+            override fun visitInnerClass(name: String, outerName: String?, innerName: String?, access: Int) {
+                if (name == owner || name == "$PKG/ClassEncryptionLoaderHelper") {
+                    super.visitInnerClass(name, outerName, innerName, access)
+                }
+            }
+
+            override fun visitEnd() {
+                emitAkenOnlySharedDecryptingClassLoaderLoadClass(writer, owner)
+                super.visitEnd()
+            }
+        }
+        reader.accept(visitor, 0)
+        return writer.toByteArray()
+    }
+
+    private fun emitAkenOnlySharedDecryptingClassLoaderLoadClass(writer: ClassWriter, owner: String) {
+        val mv = writer.visitMethod(
+            Opcodes.ACC_PROTECTED or Opcodes.ACC_SYNCHRONIZED,
+            "loadClass",
+            "(Ljava/lang/String;Z)Ljava/lang/Class;",
+            null,
+            arrayOf("java/lang/ClassNotFoundException"),
+        )
+        val loaded = Label()
+        val resolve = Label()
+        mv.visitCode()
+        mv.visitVarInsn(Opcodes.ALOAD, 0)
+        mv.visitVarInsn(Opcodes.ALOAD, 1)
+        mv.visitMethodInsn(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/ClassLoader",
+            "findLoadedClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            false,
+        )
+        mv.visitVarInsn(Opcodes.ASTORE, 3)
+        mv.visitVarInsn(Opcodes.ALOAD, 3)
+        mv.visitJumpInsn(Opcodes.IFNONNULL, loaded)
+
+        mv.visitVarInsn(Opcodes.ALOAD, 0)
+        mv.visitVarInsn(Opcodes.ALOAD, 1)
+        mv.visitMethodInsn(
+            Opcodes.INVOKESPECIAL,
+            owner,
+            "defineAkenClassIfPresent",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            false,
+        )
+        mv.visitVarInsn(Opcodes.ASTORE, 3)
+        mv.visitVarInsn(Opcodes.ALOAD, 3)
+        mv.visitJumpInsn(Opcodes.IFNONNULL, loaded)
+
+        mv.visitVarInsn(Opcodes.ALOAD, 0)
+        mv.visitVarInsn(Opcodes.ALOAD, 1)
+        mv.visitInsn(Opcodes.ICONST_0)
+        mv.visitMethodInsn(
+            Opcodes.INVOKESPECIAL,
+            "java/lang/ClassLoader",
+            "loadClass",
+            "(Ljava/lang/String;Z)Ljava/lang/Class;",
+            false,
+        )
+        mv.visitVarInsn(Opcodes.ASTORE, 3)
+
+        mv.visitLabel(loaded)
+        mv.visitVarInsn(Opcodes.ILOAD, 2)
+        mv.visitJumpInsn(Opcodes.IFEQ, resolve)
+        mv.visitVarInsn(Opcodes.ALOAD, 0)
+        mv.visitVarInsn(Opcodes.ALOAD, 3)
+        mv.visitMethodInsn(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/ClassLoader",
+            "resolveClass",
+            "(Ljava/lang/Class;)V",
+            false,
+        )
+        mv.visitLabel(resolve)
+        mv.visitVarInsn(Opcodes.ALOAD, 3)
+        mv.visitInsn(Opcodes.ARETURN)
+        mv.visitMaxs(3, 4)
+        mv.visitEnd()
     }
 
     private fun pushInt(mv: MethodVisitor, value: Int) {

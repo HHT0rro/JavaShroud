@@ -6,6 +6,11 @@
 
 typedef struct {
     int initialized;
+    uint32_t abi_generation;
+    uint32_t session_generation;
+    jobject loader_identity;
+    unsigned char class_binding[32];
+    unsigned int class_binding_ready;
     jclass object_class;
     jclass string_class;
     jclass class_loader_class;
@@ -41,6 +46,7 @@ typedef struct {
     jmethodID thread_current_thread;
     jmethodID thread_get_context_class_loader;
     jmethodID input_stream_read_all_bytes;
+    jmethodID input_stream_read;
     jmethodID input_stream_close;
     jmethodID string_builder_init;
     jmethodID string_builder_append_string;
@@ -96,6 +102,11 @@ typedef struct {
 JS_HIDDEN extern js_jni_cache_state js_jni_cache;
 JS_HIDDEN int js_jni_cache_init(JNIEnv *env);
 JS_HIDDEN void js_jni_cache_destroy(JNIEnv *env);
+JS_HIDDEN int js_jni_cache_validate(JNIEnv *env, jclass owner_class);
+/* Validates the reusable JDK ClassLoader member cache against the actual
+ * receiver loader.  A changed loader/session/ABI destroys and rebuilds the
+ * cache before the caller can use a stale jmethodID. */
+JS_HIDDEN int js_jni_cache_validate_loader(JNIEnv *env, jobject loader);
 /* Register helper natives whose final class/method names are keyed by the
  * runtime anchor.  JNI_OnLoad runs before the boot envelope installs that
  * anchor, so the boot-material installation path invokes this once the key
@@ -149,19 +160,10 @@ typedef struct {
 } js_aken_evaluator_fragment;
 
 /*
- * Reconstructs exactly one current-page 32-byte DEK from the complete AKEN-7
- * graph after validating all page bindings, fragment tags, and the canonical
- * artifact commitment reconstructed from the graph's dispersed shape shares.
- * The caller owns out_dek and must use it only in the terminal page-open scope
- * before wiping it with js_vbc4_wipe_volatile(). Any malformed or incomplete
- * graph returns 0 and clears out_dek.
+ * Legacy AKEN-7 fragment records remain an internal compatibility shape for
+ * existing artifacts and native fixtures. New typed artifacts use the opaque
+ * bound plan below and have no fragment/key-recovery ABI.
  */
-JS_HIDDEN int js_aken_evaluator_recover_dek(
-    const js_aken_evaluator_binding *binding,
-    const js_aken_evaluator_fragment *fragments,
-    size_t fragment_count,
-    unsigned char out_dek[JS_AKEN_EVALUATOR_STATE_WIDTH]
-);
 
 /*
  * Internal AKEN v4 current-page envelope contract.  The envelope is a
@@ -176,14 +178,13 @@ JS_HIDDEN int js_aken_evaluator_recover_dek(
  * verify_resolved_bindings() before a page-open path can use the record.
  */
 #define JS_AKEN_NATIVE_PAGE_ENVELOPE_MAX_SIZE 4096u
-#define JS_AKEN_NATIVE_PAGE_ENVELOPE_VERSION 1u
 #define JS_AKEN_NATIVE_PAGE_ENVELOPE_FORM_INLINE_DESCRIPTOR 1u
 #define JS_AKEN_NATIVE_PAGE_ENVELOPE_FORM_COMPACT_LOCATOR 2u
 #define JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE 24u
 #define JS_AKEN_NATIVE_PAGE_ENVELOPE_LOCATOR_SIZE 16u
 #define JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE 32u
 #define JS_AKEN_NATIVE_PAGE_ENVELOPE_FIXED_SIZE \
-    (1u + 1u + 8u + 1u + 4u + JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE + \
+    (1u + 8u + 1u + 4u + JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE + \
         JS_AKEN_NATIVE_PAGE_ENVELOPE_LOCATOR_SIZE + \
         (6u * JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE))
 #define JS_AKEN_NATIVE_PAGE_ENVELOPE_MAX_INLINE_DESCRIPTOR_SIZE \
@@ -196,7 +197,6 @@ JS_HIDDEN int js_aken_evaluator_recover_dek(
 #define JS_AKEN_NATIVE_PAGE_RESOURCE_KIND_NATIVE_CHUNK 4u
 
 /* Generated compiler-record limits; records themselves remain opaque. */
-#define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_VERSION 2u
 #define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_BINDING_SIZE JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE
 #define JS_AKEN_NATIVE_PAGE_LOCATOR_MAX_RECORD_COUNT 65535u
 #define JS_AKEN_NATIVE_PAGE_LOCATOR_MAX_RECORD_SIZE (512u * 1024u)
@@ -292,8 +292,16 @@ typedef struct {
 typedef struct {
     uint8_t parsed;
     js_aken_evaluator_binding binding;
+    /* Legacy v1 compatibility fields. New page-bound descriptors leave them empty. */
     js_aken_evaluator_fragment fragments[JS_AKEN_EVALUATOR_FRAGMENT_COUNT];
     uint32_t fragment_permutations[JS_AKEN_EVALUATOR_FRAGMENT_COUNT][JS_AKEN_EVALUATOR_STATE_WIDTH];
+    /* Opaque v2 descriptor owned by the current locator-bound page only. */
+    const unsigned char *bound_plan;
+    size_t bound_plan_len;
+    const unsigned char *route_encoding;
+    size_t route_encoding_len;
+    const unsigned char *call_site_proof;
+    size_t call_site_proof_len;
     /* Exact route/proof leaf encoding used only for the current mesh leaf. */
     const unsigned char *leaf_identity_encoding;
     size_t leaf_identity_encoding_len;
@@ -387,17 +395,12 @@ typedef struct {
 } js_aken_native_opened_page;
 
 /*
- * Low-level terminal codec primitive for one page slice that has already been
- * selected by a native current-page resolver.  The supplied request, parsed
- * envelope, resolved descriptor, evaluator binding, and AKEN-7 graph must all
- * describe that same page. Its payload parameter is native-private compiler
- * input: no JNI entry point exposes this signature, and the future
- * descriptor/route/proof parser is responsible for obtaining the exact route
- * slice before calling it. The function reconstructs the page-local DEK,
- * authenticates the AKEN AES-256-GCM frame and AAD bindings, transfers the
- * resulting plaintext into [out_page], then wipes every transient buffer and
- * the DEK. On failure it returns 0 and leaves [out_page] wiped.
+ * Low-level compatibility terminal for a legacy AKEN-7 descriptor. New typed
+ * artifacts use js_aken_native_page_open_bound_plan_payload() instead. Neither
+ * function is a JNI ABI or an arbitrary-resource decoder. Typed-only images do
+ * not compile the legacy terminal into their native closure.
  */
+#if !defined(JS_AKEN_TYPED_ONLY_RUNTIME) || !JS_AKEN_TYPED_ONLY_RUNTIME
 JS_HIDDEN int js_aken_native_page_open_bound_payload(
     const js_aken_native_page_request *request,
     const js_aken_native_page_envelope *envelope,
@@ -405,6 +408,24 @@ JS_HIDDEN int js_aken_native_page_open_bound_payload(
     const js_aken_evaluator_binding *binding,
     const js_aken_evaluator_fragment *fragments,
     size_t fragment_count,
+    const unsigned char *encoded_payload,
+    size_t encoded_payload_len,
+    js_aken_native_opened_page *out_page
+);
+#endif
+/* Page-bound v2 terminal: only the parser-selected opaque plan, route, proof,
+ * and encrypted slice may reach this native-private entry point. */
+JS_HIDDEN int js_aken_native_page_open_bound_plan_payload(
+    const js_aken_native_page_request *request,
+    const js_aken_native_page_envelope *envelope,
+    const js_aken_native_page_resolved_descriptor *resolved,
+    const js_aken_evaluator_binding *binding,
+    const unsigned char *bound_plan,
+    size_t bound_plan_len,
+    const unsigned char *route_encoding,
+    size_t route_encoding_len,
+    const unsigned char *call_site_proof,
+    size_t call_site_proof_len,
     const unsigned char *encoded_payload,
     size_t encoded_payload_len,
     js_aken_native_opened_page *out_page
@@ -421,7 +442,28 @@ JS_HIDDEN int js_aken_native_page_open_current_view_payload(
 );
 JS_HIDDEN void js_aken_native_opened_page_wipe(js_aken_native_opened_page *page);
 
-#define JS_NATIVE_ABI_TABLE_VERSION 10u
+#if defined(JS_AKEN_TYPED_ONLY_RUNTIME) && JS_AKEN_TYPED_ONLY_RUNTIME
+/*
+ * The max shell and its inner image are compiled together.  AKEN production
+ * output therefore uses a deliberately narrow table instead of retaining the
+ * legacy generic AES, key-derivation, boot-material, or arbitrary-resource
+ * entrypoints merely for the shell trampoline.  This table is not a public
+ * ABI: old artifacts retain their self-contained v11 layout below.
+ */
+#define JS_NATIVE_ABI_TABLE_VERSION 12u
+
+typedef struct js_native_abi_table {
+    unsigned int version;
+    jint (JNICALL *native_init)(JNIEnv *env, jclass cls, jstring platform);
+    jint (JNICALL *native_heartbeat)(JNIEnv *env, jclass cls);
+    jboolean (JNICALL *install_aken_session_nonce)(JNIEnv *env, jclass cls, jbyteArray startup_nonce);
+    jobject (JNICALL *execute_aken_vm_page)(JNIEnv *env, jclass cls, jlong entryToken, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof, jobjectArray args);
+    jbyteArray (JNICALL *decode_aken_string_page)(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof);
+    jbyteArray (JNICALL *read_aken_class_page)(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof);
+    void (JNICALL *consume_aken_native_chunk)(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof);
+} js_native_abi_table;
+#else
+#define JS_NATIVE_ABI_TABLE_VERSION 11u
 
 typedef struct js_native_abi_table {
     unsigned int version;
@@ -448,8 +490,9 @@ typedef struct js_native_abi_table {
     jobject (JNICALL *execute_aken_vm_page)(JNIEnv *env, jclass cls, jlong entryToken, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof, jobjectArray args);
     jbyteArray (JNICALL *decode_aken_string_page)(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof);
     jbyteArray (JNICALL *read_aken_class_page)(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof);
-    jbyteArray (JNICALL *map_aken_native_chunk)(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof);
+    void (JNICALL *consume_aken_native_chunk)(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof);
 } js_native_abi_table;
+#endif
 
 JS_EXPORT const js_native_abi_table *js_native_abi_table_v1(void);
 

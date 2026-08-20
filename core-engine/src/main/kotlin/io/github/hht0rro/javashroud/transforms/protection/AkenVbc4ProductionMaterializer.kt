@@ -7,6 +7,7 @@ import io.github.hht0rro.javashroud.transforms.protection.aken.AkenArtifactEntry
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPageDescriptor
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPageDescriptorPage
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenPendingClassPage
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenPendingNativeChunk
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenPendingStringPage
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4FinalizationLayout
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4PendingPage
@@ -18,7 +19,8 @@ import java.util.Arrays
 
 /**
  * Build-only production hand-off from registered VBC4, typed StringPage,
- * and encrypted ClassPage candidates to the native recompilation stage.
+ * encrypted ClassPage, and NativeChunk candidates to the native recompilation
+ * stage.
  *
  * The native compiler must receive page-local locator records before it emits a
  * JNI library. This owner therefore consumes the scoped candidate registry,
@@ -36,7 +38,10 @@ internal object AkenVbc4ProductionMaterializer {
         val hasVbc4Candidates = context.hasAkenVbc4MethodCandidates()
         val hasStringCandidates = context.hasAkenStringPageCandidates()
         val hasClassCandidates = context.hasAkenClassPageCandidates()
-        if (!hasVbc4Candidates && !hasStringCandidates && !hasClassCandidates) return artifact
+        val hasNativeChunkCandidates = context.hasAkenNativeChunkCandidates()
+        if (!hasVbc4Candidates && !hasStringCandidates && !hasClassCandidates && !hasNativeChunkCandidates) {
+            return artifact
+        }
         if (context.akenVbc4FinalizationLayoutOrNull() != null) return artifact
 
         val vbc4Reservation = if (hasVbc4Candidates) {
@@ -54,6 +59,11 @@ internal object AkenVbc4ProductionMaterializer {
         } else {
             null
         }
+        val nativeChunkReservation = if (hasNativeChunkCandidates) {
+            context.requireAkenNativeChunkPreSealRouteReservation()
+        } else {
+            null
+        }
         val artifactWithClassDescriptors = materializeClassPageDescriptorsIfNeeded(
             artifact = artifact,
             context = context,
@@ -62,6 +72,7 @@ internal object AkenVbc4ProductionMaterializer {
         val batches = ArrayList<AkenVbc4PendingPageBatch>()
         val stringPages = ArrayList<AkenPendingStringPage>()
         val classPages = ArrayList<AkenPendingClassPage>()
+        val nativeChunks = ArrayList<AkenPendingNativeChunk>()
         var layout: AkenVbc4FinalizationLayout? = null
         var pageEntriesTransferred = false
 
@@ -132,7 +143,31 @@ internal object AkenVbc4ProductionMaterializer {
                 }
             }
 
-            require(batches.isNotEmpty() || stringPages.isNotEmpty() || classPages.isNotEmpty()) {
+            if (hasNativeChunkCandidates) {
+                context.withAkenNativeChunkCandidatesForBuild { candidates ->
+                    checkNotNull(nativeChunkReservation).withRoutesForBuild { routes ->
+                        candidates
+                            .sortedBy { candidate -> candidate.identityPageKeyForBuild() }
+                            .forEach { candidate ->
+                                val identityPageKey = candidate.identityPageKeyForBuild()
+                                val route = routes.singleOrNull { candidateRoute ->
+                                    candidateRoute.identityPageKey == identityPageKey &&
+                                        candidateRoute.logicalBindingPath == candidate.logicalBindingPath
+                                } ?: error(
+                                    "AKEN NativeChunk pre-seal route is missing for candidate " + identityPageKey,
+                                )
+                                nativeChunks += candidate.toPendingPage(route)
+                            }
+                    }
+                }
+            }
+
+            require(
+                batches.isNotEmpty() ||
+                    stringPages.isNotEmpty() ||
+                    classPages.isNotEmpty() ||
+                    nativeChunks.isNotEmpty(),
+            ) {
                 "AKEN production materialization found no page candidates"
             }
             consumeBatchesAndMaterialize(
@@ -140,6 +175,7 @@ internal object AkenVbc4ProductionMaterializer {
                 batches = batches,
                 pendingStringPages = stringPages,
                 pendingClassPages = classPages,
+                pendingNativeChunks = nativeChunks,
                 fixedEntries = fixedEntries,
             ) { finalized ->
                 layout = finalized
@@ -181,6 +217,7 @@ internal object AkenVbc4ProductionMaterializer {
             batches.forEach { it.wipe() }
             stringPages.forEach { it.wipe() }
             classPages.forEach { it.wipe() }
+            nativeChunks.forEach { it.wipe() }
             if (!pageEntriesTransferred) {
                 layout?.wipe()
             }
@@ -192,6 +229,7 @@ internal object AkenVbc4ProductionMaterializer {
         batches: List<AkenVbc4PendingPageBatch>,
         pendingStringPages: List<AkenPendingStringPage>,
         pendingClassPages: List<AkenPendingClassPage>,
+        pendingNativeChunks: List<AkenPendingNativeChunk>,
         fixedEntries: List<AkenArtifactEntry>,
         publish: (AkenVbc4FinalizationLayout) -> Unit,
     ) {
@@ -201,6 +239,7 @@ internal object AkenVbc4ProductionMaterializer {
                     pendingPages = pages,
                     pendingStringPages = pendingStringPages,
                     pendingClassPages = pendingClassPages,
+                    pendingNativeChunks = pendingNativeChunks,
                     fixedEntries = fixedEntries,
                 )
                 val commitmentBytes = commitment.copyBytes()
@@ -209,7 +248,7 @@ internal object AkenVbc4ProductionMaterializer {
                 } finally {
                     Arrays.fill(commitmentBytes, 0)
                 }
-                val stateBindingLayoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest()
+                val stateBindingLayoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(context)
                 val finalized = try {
                     AkenVbc4FinalizationLayout.materializeAndWipe(
                         plan = plan,
@@ -217,6 +256,7 @@ internal object AkenVbc4ProductionMaterializer {
                         pendingPages = pages,
                         pendingStringPages = pendingStringPages,
                         pendingClassPages = pendingClassPages,
+                        pendingNativeChunks = pendingNativeChunks,
                         fixedEntries = fixedEntries,
                         vbc4StateBindingLayoutDigest = stateBindingLayoutDigest,
                     )
@@ -267,6 +307,9 @@ internal object AkenVbc4ProductionMaterializer {
                 routes.forEach { route -> add(route.futureResourcePath) }
             }
             context.akenClassPagePreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
+                routes.forEach { route -> add(route.futureResourcePath) }
+            }
+            context.akenNativeChunkPreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
                 routes.forEach { route -> add(route.futureResourcePath) }
             }
         }

@@ -1,9 +1,17 @@
 package io.github.hht0rro.javashroud.kernel
 
+import io.github.hht0rro.javashroud.analysis.buildRuleMatches
+import io.github.hht0rro.javashroud.analysis.effectiveRuleSetForPass
+import io.github.hht0rro.javashroud.analysis.eligibleClassNamesForAction
+import io.github.hht0rro.javashroud.analysis.eligibleMembersForAction
+import io.github.hht0rro.javashroud.capabilities.buildEngineSchemaPayload
+import io.github.hht0rro.javashroud.config.rejectRemovedAkenV4Parameters
 import io.github.hht0rro.javashroud.analysis.loadBytecodeArtifact
 import io.github.hht0rro.javashroud.artifact.writeBytecodeArtifact
+import io.github.hht0rro.javashroud.model.analysis.MemberKind
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
+import io.github.hht0rro.javashroud.model.config.PassSelectionMode
 import io.github.hht0rro.javashroud.model.config.PassSpec
 import io.github.hht0rro.javashroud.model.config.RuleSet
 import io.github.hht0rro.javashroud.model.config.RuleSpec
@@ -28,6 +36,7 @@ data class KernelPreparation(
 )
 
 fun prepareKernelRun(config: ObfuscationConfig, artifact: BytecodeArtifact): KernelPreparation {
+    validateSelectedOnlyPassSelectionsAgainstArtifact(config = config, artifact = artifact)
     val summary = artifact.analysisSummary
     return KernelPreparation(
         artifact = artifact,
@@ -36,12 +45,88 @@ fun prepareKernelRun(config: ObfuscationConfig, artifact: BytecodeArtifact): Ker
     )
 }
 
+/**
+ * Fail closed only when explicit exclusions empty an enabled independent range.
+ *
+ * A selected-only selection now starts from an all-targets-enabled baseline, so
+ * an empty rule list is valid and an unmatched exclusion is harmless. The input
+ * artifact is needed to distinguish a genuinely empty module capability from a
+ * user range that removed every target the pass could otherwise process.
+ */
+internal fun validateSelectedOnlyPassSelectionsAgainstArtifact(
+    config: ObfuscationConfig,
+    artifact: BytecodeArtifact,
+) {
+    val enabledPassIds = config.passes.asSequence()
+        .filter { it.enabled }
+        .map { it.id }
+        .toSet()
+    val modulesById = buildEngineSchemaPayload().modules.associateBy { it.id }
+    val classSummaries = artifact.analysisSummary.classSummaries
+
+    config.passSelections
+        .asSequence()
+        .filter { selection ->
+            selection.passId in enabledPassIds &&
+                selection.mode == PassSelectionMode.SELECTED_ONLY &&
+                selection.rules.any { it.action == "exclude" }
+        }
+        .forEach { selection ->
+            val module = modulesById[selection.passId] ?: return@forEach
+            val baselineConfig = config.copy(
+                passSelections = config.passSelections.map { candidate ->
+                    if (candidate.passId == selection.passId) candidate.copy(rules = emptyList()) else candidate
+                },
+            )
+            val baselineMatches = buildRuleMatches(
+                effectiveRuleSetForPass(config = baselineConfig, passId = selection.passId),
+                classSummaries,
+            )
+            val effectiveMatches = buildRuleMatches(
+                effectiveRuleSetForPass(config = config, passId = selection.passId),
+                classSummaries,
+            )
+            val baselineHasTargets = hasProcessableTargets(
+                artifact = artifact,
+                ruleMatches = baselineMatches,
+                passId = selection.passId,
+                targetKinds = module.targeting.targetKinds,
+            )
+            val effectiveHasTargets = hasProcessableTargets(
+                artifact = artifact,
+                ruleMatches = effectiveMatches,
+                passId = selection.passId,
+                targetKinds = module.targeting.targetKinds,
+            )
+            if (baselineHasTargets && !effectiveHasTargets) {
+                throw IllegalArgumentException(
+                    "Pass '${selection.passId}' independent scope excludes every processable class or method " +
+                        "in the loaded artifact.",
+                )
+            }
+        }
+}
+
+private fun hasProcessableTargets(
+    artifact: BytecodeArtifact,
+    ruleMatches: List<io.github.hht0rro.javashroud.model.analysis.RuleMatch>,
+    passId: String,
+    targetKinds: List<String>,
+): Boolean {
+    if ("class" in targetKinds && eligibleClassNamesForAction(artifact.classArtifacts, ruleMatches, passId).isNotEmpty()) {
+        return true
+    }
+    return "method" in targetKinds && eligibleMembersForAction(artifact.classArtifacts, ruleMatches, passId)
+        .any { member -> member.kind == MemberKind.METHOD }
+}
+
 internal fun executeKernelRun(
     config: ObfuscationConfig,
     configPath: Path,
     emit: (EngineEvent) -> Unit = {},
     vbc4BuildContextOverride: Vbc4BuildContext? = null,
 ): EngineRunResult {
+    rejectRemovedAkenV4Parameters(config.passes)
     val bootstrapEvents = buildBootstrapEvents(configPath)
     bootstrapEvents.forEach(emit)
     val preparation = prepareKernelRun(config = config, artifact = loadBytecodeArtifact(config))
@@ -171,6 +256,10 @@ internal fun executeWithOrderedPasses(
                 seed = vbc4BuildContext.nativeSeed,
             )
             io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.reserveAkenClassPagePreSealRoutesIfNeeded(
+                artifact = artifactWithHelpers,
+                seed = vbc4BuildContext.nativeSeed,
+            )
+            io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.reserveAkenNativeChunkPreSealRoutesIfNeeded(
                 artifact = artifactWithHelpers,
                 seed = vbc4BuildContext.nativeSeed,
             )

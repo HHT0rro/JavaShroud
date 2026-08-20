@@ -7,6 +7,7 @@ import org.objectweb.asm.ClassReader
 import org.objectweb.asm.Type
 import org.objectweb.asm.tree.ClassNode
 import org.objectweb.asm.tree.LdcInsnNode
+import org.objectweb.asm.tree.MethodInsnNode
 import org.objectweb.asm.tree.MethodNode
 import java.lang.reflect.Method
 import java.lang.reflect.Modifier
@@ -124,17 +125,36 @@ private fun parseClassNode(classBytes: ByteArray): ClassNode {
 
 private fun classNodeMethods(classBytes: ByteArray): List<MethodNode> = parseClassNode(classBytes).methods
 
-private fun reflectedMethodNameSignatures(artifact: BytecodeArtifact): HashSet<String> {
-    val stringConstants = stringConstants(artifact)
-    val blocked = HashSet<String>()
+internal fun reflectionLookupMethodNames(artifact: BytecodeArtifact): Set<String> {
+    val names = linkedSetOf<String>()
     for (classArtifact in artifact.classArtifacts) {
         for (method in classNodeMethods(classArtifact.bytes)) {
-            if (method.name in stringConstants) {
-                blocked.add(methodSignature(method.name, method.desc))
+            for (instruction in method.instructions) {
+                val call = instruction as? MethodInsnNode ?: continue
+                if (
+                    call.owner != "java/lang/Class" ||
+                    call.name !in setOf("getMethod", "getDeclaredMethod") ||
+                    !call.desc.startsWith("(Ljava/lang/String;")
+                ) {
+                    continue
+                }
+                reflectionLookupNameConstant(call)?.let(names::add)
             }
         }
     }
-    return blocked
+    return names
+}
+
+private fun reflectionLookupNameConstant(call: MethodInsnNode): String? {
+    var current = call.previous
+    var scanned = 0
+    while (current != null && scanned < 48) {
+        if (current.opcode >= 0) scanned++
+        val name = (current as? LdcInsnNode)?.cst as? String
+        if (name != null) return name
+        current = current.previous
+    }
+    return null
 }
 
 private fun stringConstants(artifact: BytecodeArtifact): Set<String> {

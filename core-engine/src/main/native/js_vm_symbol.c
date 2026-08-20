@@ -9,9 +9,9 @@
 
 static const unsigned char JS_VM_METHOD_IDENTITY_DOMAIN[] = "javashroud-vbc4-method-identity-v2";
 static const unsigned char JS_VM_OWNER_IDENTITY_DOMAIN[] = "javashroud-vbc4-owner-identity-v2";
-static const unsigned char JS_VM_CP_STRING_KEY_DOMAIN[] = "javashroud-vbc4-cp-string-key-v1";
-static const unsigned char JS_VM_CP_STRING_IV_DOMAIN[] = "javashroud-vbc4-cp-string-iv-v1";
-static const unsigned char JS_VM_CP_STRING_TAG_DOMAIN[] = "javashroud-vbc4-cp-string-tag-v1";
+static const unsigned char JS_VM_CP_STRING_KEY_DOMAIN[] = "cp-string-key";
+static const unsigned char JS_VM_CP_STRING_IV_DOMAIN[] = "cp-string-iv";
+static const unsigned char JS_VM_CP_STRING_TAG_DOMAIN[] = "cp-string-tag";
 
 static int js_vm_hex_identity(const char *hex, unsigned char out[32]) {
     if (!hex || strlen(hex) != 64u || !out) return 0;
@@ -67,10 +67,10 @@ static int js_vm_valid_argument_tags(const char *text, size_t *out_count) {
     return 1;
 }
 
-static int js_vm_keyed_identity(const unsigned char *domain, int domain_len, const unsigned char **parts, const int *lens, int part_count, unsigned char out[32]) {
+static int js_vm_keyed_identity(const js_vm_program *program, const unsigned char *domain, int domain_len, const unsigned char **parts, const int *lens, int part_count, unsigned char out[32]) {
     unsigned char build_key[32];
     if (!domain || domain_len <= 0 || !parts || !lens || part_count <= 0 || !out) return 0;
-    if (!js_vm_copy_runtime_build_key(build_key)) return 0;
+    if (!js_vm_copy_runtime_build_key_for_program(program, build_key)) return 0;
     const unsigned char separator = 0;
     const unsigned char *framed[8];
     int framed_lens[8];
@@ -85,18 +85,18 @@ static int js_vm_keyed_identity(const unsigned char *domain, int domain_len, con
     return 1;
 }
 
-JS_HIDDEN int js_vm_method_identity_for_ref(const js_vm_method_ref *ref, unsigned char out[32]) {
+JS_HIDDEN int js_vm_method_identity_for_ref(const js_vm_program *program, const js_vm_method_ref *ref, unsigned char out[32]) {
     if (!ref || !ref->owner || !ref->name || !ref->desc) return 0;
     const unsigned char *parts[3] = { (const unsigned char*)ref->owner, (const unsigned char*)ref->name, (const unsigned char*)ref->desc };
     int lens[3] = { (int)strlen(ref->owner), (int)strlen(ref->name), (int)strlen(ref->desc) };
-    return js_vm_keyed_identity(JS_VM_METHOD_IDENTITY_DOMAIN, (int)(sizeof(JS_VM_METHOD_IDENTITY_DOMAIN) - 1), parts, lens, 3, out);
+    return js_vm_keyed_identity(program, JS_VM_METHOD_IDENTITY_DOMAIN, (int)(sizeof(JS_VM_METHOD_IDENTITY_DOMAIN) - 1), parts, lens, 3, out);
 }
 
-JS_HIDDEN int js_vm_owner_identity_for_name(const char *owner, unsigned char out[32]) {
+JS_HIDDEN int js_vm_owner_identity_for_name(const js_vm_program *program, const char *owner, unsigned char out[32]) {
     if (!owner || !owner[0]) return 0;
     const unsigned char *parts[1] = { (const unsigned char*)owner };
     int lens[1] = { (int)strlen(owner) };
-    return js_vm_keyed_identity(JS_VM_OWNER_IDENTITY_DOMAIN, (int)(sizeof(JS_VM_OWNER_IDENTITY_DOMAIN) - 1), parts, lens, 1, out);
+    return js_vm_keyed_identity(program, JS_VM_OWNER_IDENTITY_DOMAIN, (int)(sizeof(JS_VM_OWNER_IDENTITY_DOMAIN) - 1), parts, lens, 1, out);
 }
 
 static int js_vm_valid_symbol_method_name(const char *name) {
@@ -169,6 +169,25 @@ static js_vm_program *js_vm_symbol_owner(js_vm_program *p) {
     return (p && p->symbol_cache_owner) ? p->symbol_cache_owner : p;
 }
 
+static uint32_t js_vm_symbol_generation(const js_vm_program *p) {
+    if (!p) return 0u;
+    uint32_t value = 2166136261u;
+    const unsigned char *entry = (const unsigned char *)&p->entry_token;
+    for (size_t i = 0u; i < sizeof(p->entry_token); ++i) value = (value ^ entry[i]) * 16777619u;
+    value = (value ^ p->dispatch_profile_tag) * 16777619u;
+    value = (value ^ p->native_vm_profile_id) * 16777619u;
+    for (size_t i = 0u; i < sizeof(p->session_tag); ++i) value = (value ^ p->session_tag[i]) * 16777619u;
+    return value != 0u ? value : 1u;
+}
+
+static int js_vm_symbol_cache_entry_matches(const js_vm_program *p, const js_vm_symbol_cache_entry *entry) {
+    js_runtime_metrics_note_jni_abi_check();
+    if (!p || !entry || entry->generation == 0u || entry->abi_version != 1u) return 0;
+    if (entry->generation != js_vm_symbol_generation(p)) return 0;
+    if (entry->loader_identity != (uintptr_t)js_vm_get_active_host_loader()) return 0;
+    return memcmp(entry->owner_identity, p->owner_identity, sizeof(entry->owner_identity)) == 0;
+}
+
 static int js_vm_symbol_cache_reserve(js_vm_program *owner) {
     if (owner->symbols) return 1;
     int capacity = owner->cp_count * 2 + 16;
@@ -184,7 +203,11 @@ JS_HIDDEN js_vm_symbol_cache_entry* js_vm_symbol_cache_lookup(js_vm_program *p, 
     js_vm_program *owner = js_vm_symbol_owner(p);
     if (!owner || !owner->symbols || owner->symbol_count <= 0) return NULL;
     for (int i = 0; i < owner->symbol_count; i++) {
-        if (owner->symbols[i].cp_idx == cp_idx && owner->symbols[i].kind == kind) return &owner->symbols[i];
+        if (owner->symbols[i].cp_idx == cp_idx && owner->symbols[i].kind == kind) {
+            if (!js_vm_symbol_cache_entry_matches(p, &owner->symbols[i])) continue;
+            js_runtime_metrics_note_jni_cache_hit();
+            return &owner->symbols[i];
+        }
     }
     return NULL;
 }
@@ -211,6 +234,10 @@ JS_HIDDEN js_vm_symbol_cache_entry* js_vm_class_cache_add(JNIEnv *env, js_vm_pro
     memset(slot, 0, sizeof(*slot));
     slot->cp_idx = cp_idx;
     slot->kind = kind;
+    slot->generation = js_vm_symbol_generation(p);
+    slot->loader_identity = (uintptr_t)js_vm_get_active_host_loader();
+    memcpy(slot->owner_identity, p->owner_identity, sizeof(slot->owner_identity));
+    slot->abi_version = 1u;
     slot->cls = (jclass)(*env)->NewGlobalRef(env, cls);
     if ((*env)->ExceptionCheck(env) || !slot->cls) {
         if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
@@ -243,6 +270,10 @@ JS_HIDDEN js_vm_symbol_cache_entry* js_vm_symbol_cache_add(JNIEnv *env, js_vm_pr
     memset(slot, 0, sizeof(*slot));
     slot->cp_idx = cp_idx;
     slot->kind = kind;
+    slot->generation = js_vm_symbol_generation(p);
+    slot->loader_identity = (uintptr_t)js_vm_get_active_host_loader();
+    memcpy(slot->owner_identity, p->owner_identity, sizeof(slot->owner_identity));
+    slot->abi_version = 1u;
     slot->cls = (jclass)(*env)->NewGlobalRef(env, cls);
     if ((*env)->ExceptionCheck(env) || !slot->cls) {
         if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
@@ -254,7 +285,7 @@ JS_HIDDEN js_vm_symbol_cache_entry* js_vm_symbol_cache_add(JNIEnv *env, js_vm_pr
     slot->fid = fid;
     slot->tag = tag;
     unsigned char ref_identity[32];
-    if (js_vm_method_identity_for_ref(ref, ref_identity)) {
+    if (js_vm_method_identity_for_ref(p, ref, ref_identity)) {
         memcpy(slot->method_identity, ref_identity, sizeof(slot->method_identity));
     }
     slot->ret_tag = ret_tag;
@@ -269,7 +300,7 @@ JS_HIDDEN js_vm_symbol_cache_entry* js_vm_symbol_cache_add(JNIEnv *env, js_vm_pr
     slot->is_class_loader_define_class = (unsigned char)(kind == 5 && strcmp(ref->name, "defineClass") == 0 && strcmp(ref->desc, "(Ljava/lang/String;[BII)Ljava/lang/Class;") == 0);
     slot->is_class_loader_load_class = (unsigned char)(kind == 5 && strcmp(ref->name, "loadClass") == 0 && strcmp(ref->desc, "(Ljava/lang/String;)Ljava/lang/Class;") == 0);
     if (kind == 4 || kind == 5) {
-        slot->is_self_call = (unsigned char)(js_vm_method_identity_for_ref(ref, ref_identity) &&
+        slot->is_self_call = (unsigned char)(js_vm_method_identity_for_ref(p, ref, ref_identity) &&
             memcmp(ref_identity, p->method_identity, sizeof(ref_identity)) == 0);
     } else slot->is_self_call = 0;
     js_vbc4_wipe_volatile(ref_identity, sizeof(ref_identity));
@@ -417,13 +448,25 @@ JS_HIDDEN void js_vm_clear_decoded_cp(js_vm_cp *cp) {
 }
 
 JS_HIDDEN int js_vm_decode_cp_entry(js_vm_program *p, int cp_idx, js_vm_cp *out) {
+    js_vm_last_cp_decode_stage = 1;
+    js_vm_last_cp_decode_plain_len = -1;
+    js_vm_last_cp_decode_stored_len = -1;
+    js_vm_last_cp_decode_enc_len = -1;
+    js_vm_last_cp_decode_stored_zstd = -1;
+    js_vm_last_cp_decode_auth = -1;
     if (!p || !out || cp_idx < 0 || cp_idx >= p->cp_count) return 0;
     memset(out, 0, sizeof(*out));
     js_vm_cp *cp = &p->cp[cp_idx];
+    js_vm_last_cp_decode_plain_len = cp->plain_len;
+    js_vm_last_cp_decode_stored_len = cp->stored_len;
+    js_vm_last_cp_decode_enc_len = cp->enc_len;
+    js_vm_last_cp_decode_stored_zstd = cp->stored_zstd ? 1 : 0;
+    js_vm_last_cp_decode_stage = 2;
     if (!cp->enc || cp->enc_len <= 0 || cp->stored_len <= 0 || cp->plain_len <= 0 || cp->stored_len > cp->enc_len) return 0;
     unsigned char *stored = (unsigned char*)malloc((size_t)cp->enc_len);
     if (!stored) return 0;
     memcpy(stored, cp->enc, (size_t)cp->enc_len);
+    js_vm_last_cp_decode_stage = 3;
     /* Use poisoned seed when anti-trace is active: produces garbage plaintext */
     int cp_decrypt_seed = js_vm_load_resident_build_seed(p) ^ (int)js_vm_trace_poison_seed;
     if (js_vm_trace_poison_seed) {
@@ -440,28 +483,30 @@ JS_HIDDEN int js_vm_decode_cp_entry(js_vm_program *p, int cp_idx, js_vm_cp *out)
     }
     js_vbc4_wipe_volatile(stored, (size_t)cp->enc_len);
     free(stored);
+    js_vm_last_cp_decode_stage = 4;
     if (!plain) return 0;
     int pos = 0;
     unsigned int type = 0;
     uint32_t u4 = 0;
     int ok = js_vm_read_u1(plain, cp->plain_len, &pos, &type);
+    js_vm_last_cp_decode_stage = 5;
     if (ok) {
         out->type = (int)type;
         if (out->type == JS_VM_CP_SEALED_STRING) {
-            unsigned int version = 0, slen = 0;
+            unsigned int slen = 0;
             unsigned char build_key[32] = {0}, key_material[32] = {0}, iv_material[32] = {0}, expected_tag[32] = {0};
             unsigned char key[16] = {0}, iv[16] = {0};
-            ok = js_vm_read_u1(plain, cp->plain_len, &pos, &version) && version == 1u && pos + 16 <= cp->plain_len;
-            const unsigned char *nonce = ok ? plain + pos : NULL;
-            if (ok) pos += 16;
-            if (ok) ok = js_vm_read_u2(plain, cp->plain_len, &pos, &slen);
+            int ok_string = pos + 16 <= cp->plain_len;
+            const unsigned char *nonce = ok_string ? plain + pos : NULL;
+            if (ok_string) pos += 16;
+            ok = ok_string && js_vm_read_u2(plain, cp->plain_len, &pos, &slen);
             if (ok) {
                 int remaining = cp->plain_len - pos;
                 ok = remaining >= 32 && slen == (unsigned int)(remaining - 32);
             }
             const unsigned char *ciphertext = ok ? plain + pos : NULL;
             const unsigned char *stored_tag = ok ? plain + pos + slen : NULL;
-            if (ok) ok = js_vm_copy_runtime_build_key(build_key);
+            if (ok) ok = js_vm_copy_runtime_build_key_for_program(p, build_key);
             if (ok) {
                 const unsigned char *key_parts[2] = { JS_VM_CP_STRING_KEY_DOMAIN, nonce };
                 const int key_lens[2] = { (int)(sizeof(JS_VM_CP_STRING_KEY_DOMAIN) - 1), 16 };
@@ -475,7 +520,9 @@ JS_HIDDEN int js_vm_decode_cp_entry(js_vm_program *p, int cp_idx, js_vm_cp *out)
                 unsigned char diff = 0;
                 for (int i = 0; i < 32; i++) diff |= (unsigned char)(expected_tag[i] ^ stored_tag[i]);
                 ok = diff == 0;
+                js_vm_last_cp_decode_auth = ok ? 1 : 0;
             }
+            js_vm_last_cp_decode_stage = 6;
             if (ok) {
                 memcpy(key, key_material, sizeof(key));
                 memcpy(iv, iv_material, sizeof(iv));
@@ -488,6 +535,7 @@ JS_HIDDEN int js_vm_decode_cp_entry(js_vm_program *p, int cp_idx, js_vm_cp *out)
                     out->type = JS_VM_CP_STRING;
                 }
             }
+            js_vm_last_cp_decode_stage = 7;
             js_vbc4_wipe_volatile(build_key, sizeof(build_key));
             js_vbc4_wipe_volatile(key_material, sizeof(key_material));
             js_vbc4_wipe_volatile(iv_material, sizeof(iv_material));
@@ -514,10 +562,12 @@ JS_HIDDEN int js_vm_decode_cp_entry(js_vm_program *p, int cp_idx, js_vm_cp *out)
         } else {
             ok = 0;
         }
+        if (out->type != JS_VM_CP_SEALED_STRING) js_vm_last_cp_decode_stage = 8;
     }
     js_vbc4_wipe_volatile(plain, (size_t)cp->plain_len);
     free(plain);
     if (!ok) js_vm_clear_decoded_cp(out);
+    if (ok) js_vm_last_cp_decode_stage = 9;
     return ok;
 }
 
@@ -574,31 +624,31 @@ JS_HIDDEN char js_vm_return_descriptor_from_meta(js_vm_program *p, jlong expecte
         *sep = 0;
         cursor = sep + 1;
     }
-    if (part_count == 11 && strcmp(parts[0], "vbc4-meta-v2") == 0) {
+    if (part_count == 10) {
         size_t argument_count_size = 0u;
-        ok = js_vm_parse_hex_u64_strict(parts[1], &token) &&
+        ok = js_vm_parse_hex_u64_strict(parts[0], &token) &&
             (jlong)token == expected_token &&
-            js_vm_valid_return_tag(parts[2]) &&
-            js_vm_parse_hex_u32_strict(parts[3], &method_local_profile) &&
-            js_vm_hex_identity(parts[4], method_identity) &&
-            js_vm_hex_identity(parts[5], owner_identity) &&
-            js_vm_valid_argument_tags(parts[6], &argument_count_size) &&
-            parts[7][0] != 0 &&
-            (strcmp(parts[8], "0") == 0 || strcmp(parts[8], "1") == 0) &&
-            js_vm_parse_hex_u32_strict(parts[9], &native_vm_profile_id) &&
-            js_vm_parse_hex_u32_strict(parts[10], &dispatch_profile_tag) &&
+            js_vm_valid_return_tag(parts[1]) &&
+            js_vm_parse_hex_u32_strict(parts[2], &method_local_profile) &&
+            js_vm_hex_identity(parts[3], method_identity) &&
+            js_vm_hex_identity(parts[4], owner_identity) &&
+            js_vm_valid_argument_tags(parts[5], &argument_count_size) &&
+            parts[6][0] != 0 &&
+            (strcmp(parts[7], "0") == 0 || strcmp(parts[7], "1") == 0) &&
+            js_vm_parse_hex_u32_strict(parts[8], &native_vm_profile_id) &&
+            js_vm_parse_hex_u32_strict(parts[9], &dispatch_profile_tag) &&
             dispatch_profile_tag != 0u;
         if (ok && (p->vbc4_flags & 0x1000u) != 0u) {
             ok = method_local_profile != 0u && p->nested_vm_profile != 0u && p->nested_vm_profile == method_local_profile;
         }
         if (ok) {
-            return_desc = parts[2][0];
-            is_static = (unsigned char)(parts[8][0] == '1');
+            return_desc = parts[1][0];
+            is_static = (unsigned char)(parts[7][0] == '1');
             argument_count = (int)argument_count_size;
             argument_tags = (char*)malloc(argument_count_size + 1u);
-            resource_path = js_strdup(parts[7]);
+            resource_path = js_strdup(parts[6]);
             ok = argument_tags != NULL && resource_path != NULL;
-            if (ok) memcpy(argument_tags, parts[6], argument_count_size + 1u);
+            if (ok) memcpy(argument_tags, parts[5], argument_count_size + 1u);
         }
         if (!ok) {
             if (argument_tags) { js_vbc4_wipe_volatile(argument_tags, argument_count_size + 1u); free(argument_tags); argument_tags = NULL; }

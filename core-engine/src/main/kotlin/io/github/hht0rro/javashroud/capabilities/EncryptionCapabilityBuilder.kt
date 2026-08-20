@@ -7,6 +7,7 @@ import io.github.hht0rro.javashroud.model.schema.VariantRequirement
 
 internal fun encryptionCapabilityBindings(): List<CapabilityBinding> = listOf(
     CapabilityBinding(
+        targeting = CLASS_TARGETING,
         id = "string-encryption",
         name = "String Encryption",
         description = "Replace string constants with native-backed or JVM-only resolver decoding and per-class caching. " +
@@ -72,6 +73,7 @@ internal fun encryptionCapabilityBindings(): List<CapabilityBinding> = listOf(
         ),
     ),
     CapabilityBinding(
+        targeting = CLASS_TARGETING,
         id = "field-string-encryption",
         name = "Field String Encryption",
         description = "Encrypt static final String field constant values with AES, injecting clinit decrypt stubs. Prevents string constants from appearing in the constant pool as plaintext. Fusion from jar-obfuscator.",

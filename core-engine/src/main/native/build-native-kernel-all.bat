@@ -16,6 +16,7 @@ set "SRC7=%SCRIPT_DIR%js_vm_core.c"
 set "SRC8=%SCRIPT_DIR%js_vm_resource.c"
 set "SRC9=%SCRIPT_DIR%js_vm_symbol.c"
 set "SRC10=%SCRIPT_DIR%js_jni_runtime.c"
+set "SRC11=%SCRIPT_DIR%js_machine_id.c"
 set "BUILD_DIR=%SCRIPT_DIR%build"
 set "CROSS_COMPILE_DIR=%SCRIPT_DIR%cross-compile"
 set "ZSTD_DIR=%SCRIPT_DIR%zstd"
@@ -59,19 +60,19 @@ if not exist "%BUILD_DIR%" mkdir "%BUILD_DIR%"
 >>"%MACOS_EXPORTS%" echo _JNI_OnUnload
 
 echo [1/4] Compiling modular native kernel for Windows x64...
-"%ZIG%" cc -O2 -target x86_64-windows-gnu -std=c11 -fPIC -shared -s -fvisibility=hidden -fwrapv -DZSTD_DISABLE_ASM=1 %ZSTD_HIDE% %JNI_INCLUDE% -o "%BUILD_DIR%\js_kernel_windows-x64.dll" "%SRC1%" "%SRC2%" "%SRC3%" "%SRC4%" "%SRC5%" "%SRC6%" "%SRC7%" "%SRC8%" "%SRC9%" "%SRC10%" %ZSTD_SRC%
+"%ZIG%" cc -O2 -target x86_64-windows-gnu -std=c11 -fPIC -shared -s -fvisibility=hidden -fwrapv -DZSTD_DISABLE_ASM=1 %ZSTD_HIDE% %JNI_INCLUDE% -o "%BUILD_DIR%\js_kernel_windows-x64.dll" "%SRC1%" "%SRC2%" "%SRC3%" "%SRC4%" "%SRC5%" "%SRC6%" "%SRC7%" "%SRC8%" "%SRC9%" "%SRC10%" "%SRC11%" %ZSTD_SRC%
 if errorlevel 1 (echo Windows build failed & exit /b 1)
 
 echo [2/4] Compiling modular native kernel for Linux x64...
-"%ZIG%" cc -O2 -target x86_64-linux-gnu -std=c11 -fPIC -shared -s -fvisibility=hidden -fwrapv -DZSTD_DISABLE_ASM=1 %ZSTD_HIDE% %JNI_INCLUDE% -o "%BUILD_DIR%\js_kernel_linux-x64.so" "%SRC1%" "%SRC2%" "%SRC3%" "%SRC4%" "%SRC5%" "%SRC6%" "%SRC7%" "%SRC8%" "%SRC9%" "%SRC10%" %ZSTD_SRC%
+"%ZIG%" cc -O2 -target x86_64-linux-gnu -std=c11 -fPIC -shared -s -fvisibility=hidden -fwrapv -DZSTD_DISABLE_ASM=1 %ZSTD_HIDE% %JNI_INCLUDE% -o "%BUILD_DIR%\js_kernel_linux-x64.so" "%SRC1%" "%SRC2%" "%SRC3%" "%SRC4%" "%SRC5%" "%SRC6%" "%SRC7%" "%SRC8%" "%SRC9%" "%SRC10%" "%SRC11%" %ZSTD_SRC%
 if errorlevel 1 (echo Linux build failed & exit /b 1)
 
 echo [3/4] Compiling modular native kernel for macOS x64...
-"%ZIG%" cc -O2 -target x86_64-macos-none -std=c11 -fPIC -shared -s -fvisibility=hidden -fwrapv -Wl,-exported_symbols_list,"%MACOS_EXPORTS%" -DZSTD_DISABLE_ASM=1 %ZSTD_HIDE% %JNI_INCLUDE% -o "%BUILD_DIR%\js_kernel_macos-x64.dylib" "%SRC1%" "%SRC2%" "%SRC3%" "%SRC4%" "%SRC5%" "%SRC6%" "%SRC7%" "%SRC8%" "%SRC9%" "%SRC10%" %ZSTD_SRC%
+"%ZIG%" cc -O2 -target x86_64-macos-none -std=c11 -fPIC -shared -s -fvisibility=hidden -fwrapv -Wl,-exported_symbols_list,"%MACOS_EXPORTS%" -DZSTD_DISABLE_ASM=1 %ZSTD_HIDE% %JNI_INCLUDE% -o "%BUILD_DIR%\js_kernel_macos-x64.dylib" "%SRC1%" "%SRC2%" "%SRC3%" "%SRC4%" "%SRC5%" "%SRC6%" "%SRC7%" "%SRC8%" "%SRC9%" "%SRC10%" "%SRC11%" %ZSTD_SRC%
 if errorlevel 1 (echo macOS x64 build failed & exit /b 1)
 
 echo [4/4] Compiling modular native kernel for macOS arm64...
-"%ZIG%" cc -O2 -target aarch64-macos-none -std=c11 -fPIC -shared -s -fvisibility=hidden -fwrapv -Wl,-exported_symbols_list,"%MACOS_EXPORTS%" -DZSTD_DISABLE_ASM=1 %ZSTD_HIDE% %JNI_INCLUDE% -o "%BUILD_DIR%\js_kernel_macos-arm64.dylib" "%SRC1%" "%SRC2%" "%SRC3%" "%SRC4%" "%SRC5%" "%SRC6%" "%SRC7%" "%SRC8%" "%SRC9%" "%SRC10%" %ZSTD_SRC%
+"%ZIG%" cc -O2 -target aarch64-macos-none -std=c11 -fPIC -shared -s -fvisibility=hidden -fwrapv -Wl,-exported_symbols_list,"%MACOS_EXPORTS%" -DZSTD_DISABLE_ASM=1 %ZSTD_HIDE% %JNI_INCLUDE% -o "%BUILD_DIR%\js_kernel_macos-arm64.dylib" "%SRC1%" "%SRC2%" "%SRC3%" "%SRC4%" "%SRC5%" "%SRC6%" "%SRC7%" "%SRC8%" "%SRC9%" "%SRC10%" "%SRC11%" %ZSTD_SRC%
 if errorlevel 1 (echo macOS arm64 build failed & exit /b 1)
 
 echo.

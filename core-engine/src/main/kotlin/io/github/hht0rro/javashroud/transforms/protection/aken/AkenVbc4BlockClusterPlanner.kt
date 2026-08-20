@@ -14,7 +14,7 @@ import java.util.Arrays
  * record.
  */
 internal object AkenVbc4BlockClusterPlanner {
-    private const val VBC4_VERSION = 4
+    private const val VBC4_CURRENT_MAGIC = "VBCX"
     private const val VBC4_NONCE_BYTES = 16
     private const val VBC4_WRAPPED_SEED_BYTES = 16
     private const val VBC4_BLOCK_INDEX_ENTRY_BYTES = 10
@@ -107,19 +107,28 @@ internal object AkenVbc4BlockClusterPlanner {
 
     private fun parseFrame(bytes: ByteArray): ParsedFrame {
         val cursor = Cursor(bytes)
-        require(cursor.readU1("magic[0]") == 'V'.code) { "AKEN VBC4 block planner expected VBC4 magic" }
-        require(cursor.readU1("magic[1]") == 'B'.code) { "AKEN VBC4 block planner expected VBC4 magic" }
-        require(cursor.readU1("magic[2]") == 'C'.code) { "AKEN VBC4 block planner expected VBC4 magic" }
-        require(cursor.readU1("magic[3]") == '4'.code) { "AKEN VBC4 block planner expected VBC4 magic" }
-        require(cursor.readU2("version") == VBC4_VERSION) { "AKEN VBC4 block planner expected VBC4 version $VBC4_VERSION" }
+        VBC4_CURRENT_MAGIC.forEachIndexed { index, expected ->
+            require(cursor.readU1("magic[$index]") == expected.code) {
+                "AKEN VBC4 block planner expected current VBCX magic"
+            }
+        }
+        // The current VBCX frame has no legacy version field between magic and nonce.
+        // Keep this grammar single-format so the planner cannot accept the retired
+        // VBC4 container shape.
         cursor.skip(VBC4_NONCE_BYTES, "nonce")
         cursor.readU4("key id")
         cursor.skip(VBC4_WRAPPED_SEED_BYTES, "wrapped seed")
         cursor.readU2("flags")
         val blockCount = cursor.readU2("block count")
         require(blockCount > 0) { "AKEN VBC4 block planner requires at least one block" }
-        cursor.readLength("constant-pool plain length")
+        val constantPoolPlainLength = cursor.readLength("constant-pool plain length")
+        require(constantPoolPlainLength > 0) {
+            "AKEN VBC4 block planner found an empty constant-pool section"
+        }
         val constantPoolEncryptedLength = cursor.readLength("constant-pool encrypted length")
+        require(constantPoolEncryptedLength > 0) {
+            "AKEN VBC4 block planner found an empty encrypted constant-pool section"
+        }
         cursor.skip(constantPoolEncryptedLength, "constant-pool encrypted bytes")
 
         val index = ArrayList<BlockIndexEntry>(blockCount)

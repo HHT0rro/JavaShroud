@@ -16,7 +16,7 @@ import java.util.Base64;
  * generic resource payload.  A decoded descriptor carries bindings for exactly
  * one class and is wiped after its pages are opened.</p>
  */
-final class AkenClassPageRuntimeDescriptor implements AutoCloseable {
+public final class AkenClassPageRuntimeDescriptor implements AutoCloseable {
 
     private static final int ENCODED_HANDLE_SIZE = 24;
     private static final int MAX_INTERNAL_NAME_BYTES = 4096;
@@ -71,7 +71,7 @@ final class AkenClassPageRuntimeDescriptor implements AutoCloseable {
      * shared child loader delegate an ordinary parent-loaded class.  Any present
      * but malformed, tampered, or unauthenticated descriptor fails closed.
      */
-    static byte[] openClassBytesIfPresent(String binaryName) {
+    public static byte[] openClassBytesIfPresent(String binaryName) {
         final String expectedInternalName;
         try {
             expectedInternalName = internalNameFromBinaryName(binaryName);

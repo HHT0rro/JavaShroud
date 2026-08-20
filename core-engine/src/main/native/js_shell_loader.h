@@ -3,6 +3,7 @@
 
 #include <jni.h>
 #include <stddef.h>
+#include <stdint.h>
 #include "js_jni_runtime.h"
 
 #ifdef _WIN32
@@ -11,11 +12,30 @@
   #define JS_SHELL_EXPORT __attribute__((visibility("default")))
 #endif
 
+/*
+ * This is public geometry of an already-authenticated, already-validated
+ * mapping.  It deliberately carries no payload bytes, keys, nonce material,
+ * routes, or artifact binding data.  The shell uses it to avoid re-deriving
+ * image/code bounds for every ABI-pointer check while retaining an immutable
+ * per-image record that can be checked against the canonical image fields.
+ */
+#define JS_SHELL_MAPPING_METADATA_VERSION 1u
+
+typedef struct js_shell_mapping_metadata {
+    uintptr_t image_low;
+    uintptr_t image_high;
+    uintptr_t code_low;
+    uintptr_t code_high;
+    unsigned int mapping_unit_count;
+    unsigned int version;
+} js_shell_mapping_metadata;
+
 typedef struct js_shell_loaded_image {
     void *image_base;
     size_t image_size;
     void *code_low;
     size_t code_size;
+    js_shell_mapping_metadata mapping_metadata;
     void *platform_data;
     jint (*jni_on_load)(JavaVM *vm, void *reserved);
     void (*jni_on_unload)(JavaVM *vm, void *reserved);

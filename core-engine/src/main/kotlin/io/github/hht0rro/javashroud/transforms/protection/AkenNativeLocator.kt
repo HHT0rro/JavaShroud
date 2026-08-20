@@ -11,8 +11,10 @@ import java.security.MessageDigest
  * contain a DEK, boot material, key slot, or a general resource directory.
  */
 internal const val AKEN_NATIVE_LOCATOR_LOGICAL_RESOURCE = "META-INF/aken/native.locator"
+internal const val AKEN_NATIVE_BINDINGS_LOCATOR_LOGICAL_RESOURCE = "META-INF/aken/native.bindings.locator"
 internal const val AKEN_NATIVE_RESOURCE_ROOT = "META-INF/"
 internal const val AKEN_NATIVE_LOCATOR_RECORD = "AKEN_NATIVE_LOCATOR_V1"
+internal const val AKEN_NATIVE_BINDINGS_LOCATOR_RECORD = "AKEN_NATIVE_BINDINGS_V1"
 
 internal data class AkenNativeLocatorEntry(
     val platform: String,
@@ -29,6 +31,20 @@ internal data class AkenNativeLocatorEntry(
         require(isAkenNativeLocatorResourcePath(resourcePath)) { "invalid AKEN native resource path" }
         require(storedLength > 0) { "AKEN native resource length must be positive" }
         require(sha256.size == AKEN_NATIVE_SHA256_SIZE) { "AKEN native resource SHA-256 must be 32 bytes" }
+    }
+
+    fun copyDigest(): ByteArray = sha256.copyOf()
+}
+
+internal data class AkenNativeBindingsLocatorEntry(
+    val resourcePath: String,
+    val storedLength: Int,
+    val sha256: ByteArray,
+) {
+    init {
+        require(isAkenNativeLocatorResourcePath(resourcePath)) { "invalid AKEN native bindings resource path" }
+        require(storedLength > 0) { "AKEN native bindings resource length must be positive" }
+        require(sha256.size == AKEN_NATIVE_SHA256_SIZE) { "AKEN native bindings SHA-256 must be 32 bytes" }
     }
 
     fun copyDigest(): ByteArray = sha256.copyOf()
@@ -52,13 +68,26 @@ internal object AkenNativeLocator {
         sha256 = sha256(storedBytes),
     )
 
-    fun encode(entries: Iterable<AkenNativeLocatorEntry>): ByteArray {
+    fun bindingsEntry(
+        resourcePath: String,
+        storedBytes: ByteArray,
+    ): AkenNativeBindingsLocatorEntry = AkenNativeBindingsLocatorEntry(
+        resourcePath = resourcePath,
+        storedLength = storedBytes.size,
+        sha256 = sha256(storedBytes),
+    )
+
+    fun encode(
+        entries: Iterable<AkenNativeLocatorEntry>,
+        bindingsEntry: AkenNativeBindingsLocatorEntry? = null,
+    ): ByteArray {
         val ordered = entries.toList().sortedBy { it.platform }
         require(ordered.isNotEmpty()) { "AKEN native locator requires at least one platform entry" }
         require(ordered.map { it.platform }.distinct().size == ordered.size) { "AKEN native locator contains duplicate platforms" }
         return buildString {
-            for ((index, entry) in ordered.withIndex()) {
-                if (index > 0) append('\n')
+            var rowIndex = 0
+            for (entry in ordered) {
+                if (rowIndex++ > 0) append('\n')
                 append(AKEN_NATIVE_LOCATOR_RECORD)
                 append('|')
                 append(entry.platform)
@@ -66,6 +95,16 @@ internal object AkenNativeLocator {
                 append(entry.resourcePath)
                 append('|')
                 append(entry.fileSuffix)
+                append('|')
+                append(entry.storedLength)
+                append('|')
+                append(entry.sha256.toHexLower())
+            }
+            bindingsEntry?.let { entry ->
+                if (rowIndex++ > 0) append('\n')
+                append(AKEN_NATIVE_BINDINGS_LOCATOR_RECORD)
+                append('|')
+                append(entry.resourcePath)
                 append('|')
                 append(entry.storedLength)
                 append('|')

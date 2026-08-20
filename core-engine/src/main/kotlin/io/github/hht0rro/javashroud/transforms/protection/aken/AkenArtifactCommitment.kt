@@ -604,7 +604,6 @@ class AkenHighValueLeafIdentity private constructor(
         get() = logicalIdentityValue.copyOf()
 
     fun encode(): ByteArray = ByteArrayOutputStream().use { out ->
-        out.write(IDENTITY_VERSION)
         out.write(resourceKind.id)
         writeInt(out, pageIndex)
         out.write(handleEncodingValue)
@@ -656,7 +655,6 @@ class AkenHighValueLeafIdentity private constructor(
     override fun toString(): String = "AkenHighValueLeafIdentity(kind=${resourceKind.logicalName}, page=$pageIndex)"
 
     companion object {
-        private const val IDENTITY_VERSION = 1
         private const val MAX_LOGICAL_IDENTITY_SIZE = 64 * 1024
 
         fun fromHandle(handle: AkenHandle, logicalIdentity: ByteArray): AkenHighValueLeafIdentity {
@@ -695,9 +693,6 @@ class AkenHighValueLeafIdentity private constructor(
 
         fun decode(encoded: ByteArray): AkenHighValueLeafIdentity {
             val reader = AkenMetadataReader(encoded)
-            require(reader.readUnsignedByte("AKEN leaf identity version") == IDENTITY_VERSION) {
-                "unsupported AKEN leaf identity version"
-            }
             val kind = AkenResourceKind.fromId(reader.readUnsignedByte("AKEN leaf resource kind"))
                 ?: throw IllegalArgumentException("unknown AKEN leaf resource kind")
             val page = reader.readInt("AKEN leaf page index")
@@ -768,7 +763,6 @@ class AkenSealingProofMetadata private constructor(
         get() = callSiteProofValue.copyOf()
 
     fun encode(): ByteArray = ByteArrayOutputStream().use { out ->
-        out.write(PROOF_VERSION)
         val identity = leafIdentity.encode()
         try {
             writeFramed(out, identity)
@@ -790,7 +784,6 @@ class AkenSealingProofMetadata private constructor(
     }
 
     companion object {
-        private const val PROOF_VERSION = 1
         private const val MAX_MERKLE_DEPTH = 64
         private const val MAX_CALL_SITE_PROOF_SIZE = 4096
         private const val MAX_VARIANT_SIZE = 256
@@ -812,7 +805,6 @@ class AkenSealingProofMetadata private constructor(
 
         fun decode(encoded: ByteArray): AkenSealingProofMetadata {
             val reader = AkenMetadataReader(encoded)
-            require(reader.readUnsignedByte("AKEN proof version") == PROOF_VERSION) { "unsupported AKEN proof version" }
             var identityBytes: ByteArray? = null
             var commitment: ByteArray? = null
             var root: ByteArray? = null
@@ -900,7 +892,6 @@ class AkenRoutingMetadata private constructor(
     fun matches(handle: AkenHandle): Boolean = leafIdentity.matches(handle)
 
     fun encode(): ByteArray = ByteArrayOutputStream().use { out ->
-        out.write(ROUTE_VERSION)
         val identity = leafIdentity.encode()
         try {
             writeFramed(out, identity)
@@ -917,7 +908,6 @@ class AkenRoutingMetadata private constructor(
     }
 
     companion object {
-        private const val ROUTE_VERSION = 2
         private const val MAX_RESOURCE_PATH_SIZE = 4096
         private const val MAX_VARIANT_SIZE = 256
 
@@ -937,7 +927,6 @@ class AkenRoutingMetadata private constructor(
 
         fun decode(encoded: ByteArray): AkenRoutingMetadata {
             val reader = AkenMetadataReader(encoded)
-            require(reader.readUnsignedByte("AKEN route version") == ROUTE_VERSION) { "unsupported AKEN route version" }
             val identityBytes = reader.readFramed(MAX_LEAF_IDENTITY_ENCODING_SIZE, "AKEN route identity", allowEmpty = false)
             return try {
                 val identity = AkenHighValueLeafIdentity.decode(identityBytes)

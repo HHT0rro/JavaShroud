@@ -5,6 +5,7 @@ import io.github.hht0rro.javashroud.model.schema.ParamSchema
 
 internal fun runtimeDefenseCapabilityBindings(): List<CapabilityBinding> = listOf(
     CapabilityBinding(
+        targeting = CLASS_TARGETING,
         id = "callsite-rotation-protection",
         name = "Callsite Rotation Protection",
         description = "Experimental medium-strength callsite perturbation: switch call targets at runtime with MutableCallSite, epoch, counter, thread-local, or random signals to raise static recovery cost. It is observable at runtime and is not a VM-level protection by itself.",
@@ -32,6 +33,7 @@ internal fun runtimeDefenseCapabilityBindings(): List<CapabilityBinding> = listO
         ),
     ),
     CapabilityBinding(
+        targeting = CLASS_TARGETING,
         id = "environment-bound-keys",
         name = "Environment Bound Keys",
         description = "Bind runtime key derivation to normalized hardware, JVM parameter, certificate fingerprint, or combined environment material through the sealed native KDF. Missing required material or binding mismatch is fail-closed.",
@@ -59,6 +61,7 @@ internal fun runtimeDefenseCapabilityBindings(): List<CapabilityBinding> = listO
         ),
     ),
     CapabilityBinding(
+        targeting = CLASS_TARGETING,
         id = "anti-symbolic-execution",
         name = "Anti Symbolic Execution",
         description = "Inject runtime-data-driven opaque predicates so symbolic execution tools cannot remove branches through constant constraint solving alone.",
@@ -86,6 +89,7 @@ internal fun runtimeDefenseCapabilityBindings(): List<CapabilityBinding> = listO
         ),
     ),
     CapabilityBinding(
+        targeting = CLASS_TARGETING,
         id = "exception-semantic-virtualization",
         name = "Exception Semantic Virtualization",
         description = "Experimental semantic transformation that converts selected normal control flow to exception-driven flow using custom exception types. It raises decompiler and debugging cost but is not a complete VM-level virtualization layer.",

@@ -3,6 +3,7 @@ package io.github.hht0rro.javashroud.analysis
 import io.github.hht0rro.javashroud.model.analysis.MatchedMember
 import io.github.hht0rro.javashroud.model.analysis.MemberKind
 import io.github.hht0rro.javashroud.model.analysis.RuleMatch
+import io.github.hht0rro.javashroud.model.config.RuleSetScope
 import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.tree.ClassNode
@@ -12,17 +13,41 @@ fun eligibleClassNamesForAction(classArtifacts: List<ClassArtifact>, ruleMatches
     if (explicitlyMatchedClassNames.isNotEmpty()) {
         return explicitlyMatchedClassNames
     }
-
     return fallbackEligibleClassNames(classArtifacts, excludedClassNames(ruleMatches))
 }
 
 fun eligibleMembersForAction(classArtifacts: List<ClassArtifact>, ruleMatches: List<RuleMatch>, action: String): List<MatchedMember> {
     val explicitlyMatchedMembers = matchedMembersForAction(ruleMatches, action)
-    if (explicitlyMatchedMembers.isNotEmpty()) {
-        return explicitlyMatchedMembers
+    if (ruleMatches.none { it.ruleSetScope == RuleSetScope.SELECTED_ONLY }) {
+        // Preserve the pre-pass-selection contract for global rules: explicit
+        // member actions take precedence over the broad fallback. Class-level
+        // action rules remain transform hints, not strict member white-lists.
+        return if (explicitlyMatchedMembers.isNotEmpty()) explicitlyMatchedMembers else fallbackEligibleMembers(classArtifacts, ruleMatches)
     }
 
-    return fallbackEligibleMembers(classArtifacts, ruleMatches)
+    // selected-only is an independent all-targets-enabled scope. Its local
+    // exclude rules narrow that scope, while a more-specific generic obfuscate
+    // rule restores one method underneath an excluded class. The restored method
+    // cannot be materialized through its excluded owner, so include it directly.
+    val classScopeNames = selectedOnlyClassNamesForAction(ruleMatches, action)
+    val classScopedMembers = materializeEligibleMembers(
+        classArtifacts = classArtifacts.filter { it.summary.internalName in classScopeNames },
+        excludedClassNames = excludedClassNames(ruleMatches),
+        excludedMembers = excludedMembers(ruleMatches),
+    )
+    val explicitlyRestoredMembers = explicitObfuscateMembers(ruleMatches)
+    return (classScopedMembers + explicitlyMatchedMembers + explicitlyRestoredMembers)
+        .distinctBy(::buildMatchedMemberIdentity)
+}
+
+private fun selectedOnlyClassNamesForAction(ruleMatches: List<RuleMatch>, action: String): Set<String> {
+    val classActionRules = actionRuleMatches(ruleMatches, action)
+        .filter { it.selector.memberPattern == null }
+    return resolveMatchedClassNames(
+        matchedRuleSet = classActionRules,
+        excludedClassNames = excludedClassNames(ruleMatches),
+        explicitlyObfuscatedMemberIdentities = explicitObfuscateMemberIdentities(ruleMatches),
+    )
 }
 
 /** Internal helper package prefix injected by EmbeddedHelperDeployment. */

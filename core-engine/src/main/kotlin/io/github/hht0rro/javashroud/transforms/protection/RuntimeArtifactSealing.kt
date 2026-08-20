@@ -32,7 +32,6 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import java.security.MessageDigest
 import java.util.Arrays
-import javax.crypto.Mac
 
 private const val LEGACY_SEALED_NATIVE_INDEX_RESOURCE = "META-INF/.r/0.dat"
 private const val LEGACY_SEALED_NATIVE_BINDINGS_RESOURCE = "META-INF/.r/bindings.dat"
@@ -41,11 +40,6 @@ private const val LEGACY_CLASS_ENCRYPTION_RESOURCE_ROOT = "__jse/"
 private const val LEGACY_CLASS_ENCRYPTION_MANIFEST_RESOURCE = "__jse/index.tab"
 private const val LEGACY_NATIVE_RESOURCE_ROOT = "META-INF/js-native/"
 private const val PROTECTION_HELPER_PACKAGE = "io/github/hht0rro/javashroud/transforms/protection"
-private val BOOTSTRAP_NATIVE_INDEX_MAGIC = byteArrayOf(0x4A, 0x53, 0x42, 0x49) // JSBI
-private const val BOOTSTRAP_NATIVE_INDEX_VERSION = 1
-private const val BOOTSTRAP_NATIVE_INDEX_HEADER_SIZE = 9
-private const val BOOTSTRAP_NATIVE_INDEX_MAC_LENGTH = 32
-
 private val AUTO_SEALED_HELPER_PASSES = setOf(
     "anti-dump-protection",
     "anti-instrumentation",
@@ -92,6 +86,17 @@ private val SEALED_RUNTIME_HELPERS = listOf(
 )
 
 /**
+ * Nested/helper classes that belong only to the retired generic resource and
+ * manifest path. They remain nameable for legacy sealing, but a typed-only
+ * AKEN artifact must neither relocate nor retain them.
+ */
+private val LEGACY_AKEN_HELPER_INTERNAL_NAMES = setOf(
+    "$PROTECTION_HELPER_PACKAGE/ClassEncryptionLoaderHelper${"$"}ParsedMetadata",
+    "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper${"$"}RuntimeResourceMetadata",
+    "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper${"$"}SealedNativeLibrary",
+)
+
+/**
  * Final output sealing for high-sensitivity runtime artifacts.
  *
  * This intentionally runs after helper/native injection, because regular pass
@@ -119,7 +124,7 @@ object RuntimeArtifactSealing {
      * Reserves deterministic class-local descriptor routes in every pre-seal
      * allocator namespace. The descriptor itself is emitted immediately before
      * page materialization, but its route must already be unavailable to VBC4,
-     * StringPage, and ClassPage payload containers.
+     * StringPage, ClassPage, and NativeChunk payload containers.
      */
     private fun reserveAkenClassPageDescriptorRoutesIfNeeded(
         context: Vbc4BuildContext,
@@ -169,6 +174,9 @@ object RuntimeArtifactSealing {
             context.akenClassPagePreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
                 routes.forEach { route -> add(route.futureResourcePath) }
             }
+            context.akenNativeChunkPreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
+                routes.forEach { route -> add(route.futureResourcePath) }
+            }
             reserveAkenClassPageDescriptorRoutesIfNeeded(context, this)
         }
         context.reserveAkenVbc4PreSealRoutes(
@@ -215,6 +223,9 @@ object RuntimeArtifactSealing {
                 routes.forEach { route -> add(route.futureContainerPath) }
             }
             context.akenClassPagePreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
+                routes.forEach { route -> add(route.futureResourcePath) }
+            }
+            context.akenNativeChunkPreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
                 routes.forEach { route -> add(route.futureResourcePath) }
             }
             reserveAkenClassPageDescriptorRoutesIfNeeded(context, this)
@@ -267,6 +278,9 @@ object RuntimeArtifactSealing {
             context.akenStringPagePreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
                 routes.forEach { route -> add(route.futureResourcePath) }
             }
+            context.akenNativeChunkPreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
+                routes.forEach { route -> add(route.futureResourcePath) }
+            }
             reserveAkenClassPageDescriptorRoutesIfNeeded(context, this)
         }
         context.reserveAkenClassPagePreSealRoutes(
@@ -293,9 +307,60 @@ object RuntimeArtifactSealing {
     }
 
     /**
-     * Materializes the build-only AKEN VBC4, typed StringPage, and encrypted
-     * ClassPage resources before native recompilation so the compiler can receive exact
-     * current-page records. The returned artifact owns encrypted page-entry
+     * Reserves artifact-specific native shell/handler chunk resources before
+     * page materialization. Only the route-safe candidate identity and logical
+     * binding path reach this allocator; chunk plaintext, handles, proofs, and
+     * evaluator material remain inside build-only owners.
+     */
+    internal fun reserveAkenNativeChunkPreSealRoutesIfNeeded(
+        artifact: BytecodeArtifact,
+        seed: Long,
+    ): Boolean {
+        val context = currentVbc4BuildContextOrNull() ?: return false
+        if (!context.hasAkenNativeChunkCandidates()) return false
+        if (context.akenNativeChunkPreSealRouteReservationOrNull() != null) return true
+
+        val occupiedEntryPaths = linkedSetOf<String>().apply {
+            artifact.jarEntries.forEach { entry -> add(entry.name) }
+            artifact.classArtifacts.forEach { classArtifact -> add(classArtifact.entryName) }
+            context.akenVbc4PreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
+                routes.forEach { route -> add(route.futureContainerPath) }
+            }
+            context.akenStringPagePreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
+                routes.forEach { route -> add(route.futureResourcePath) }
+            }
+            context.akenClassPagePreSealRouteReservationOrNull()?.withRoutesForBuild { routes ->
+                routes.forEach { route -> add(route.futureResourcePath) }
+            }
+            reserveAkenClassPageDescriptorRoutesIfNeeded(context, this)
+        }
+        context.reserveAkenNativeChunkPreSealRoutes(
+            occupiedEntryPaths = occupiedEntryPaths,
+            allocator = io.github.hht0rro.javashroud.transforms.protection.aken.AkenNativeChunkPreSealRouteAllocator {
+                    candidate,
+                    ordinal,
+                    reservedEntryPaths,
+                ->
+                val routeIdentity =
+                    "aken-native-chunk|" + candidate.identityPageKey + "|" + candidate.logicalBindingPath
+                val preferred = sealedResourceName(seed, "a4n", routeIdentity, ordinal)
+                uniqueSealedResourceName(
+                    seed = seed,
+                    kind = "a4n",
+                    originalName = routeIdentity,
+                    index = ordinal,
+                    preferredName = preferred,
+                    reservedEntryNames = reservedEntryPaths,
+                )
+            },
+        )
+        return true
+    }
+
+    /**
+     * Materializes the build-only AKEN VBC4, typed StringPage, encrypted
+     * ClassPage, and native shell/handler chunk resources before native
+     * recompilation so the compiler can receive exact current-page records. The returned artifact owns encrypted page-entry
      * bytes; the active build context retains only the adjacent finalization
      * layout.
      */
@@ -323,6 +388,7 @@ object RuntimeArtifactSealing {
             rewritesVmRuntime = config.enablesPass("method-virtualization"),
             envBindingMetadata = envBinding,
             maxHardening = maxHardening,
+            typedOnlyRuntime = config.enablesPass("jni-microkernel-loader"),
         )
     }
 
@@ -332,6 +398,7 @@ object RuntimeArtifactSealing {
         rewritesVmRuntime: Boolean = true,
         envBindingMetadata: EnvBindingMetadata? = null,
         maxHardening: Boolean = false,
+        typedOnlyRuntime: Boolean = false,
     ): BytecodeArtifact {
         val reservedEntryNames = artifact.jarEntries.map { it.name }.toMutableSet()
         val activeContext = currentVbc4BuildContextOrNull()
@@ -374,6 +441,19 @@ object RuntimeArtifactSealing {
                     reservedEntryNames += route.futureResourcePath
                 }
             }
+        activeContext
+            ?.akenNativeChunkPreSealRouteReservationOrNull()
+            ?.withRoutesForBuild { routes ->
+                routes.forEach { route ->
+                    val isPublishedNativeChunk = activeContext
+                        .akenVbc4FinalizationLayoutOrNull()
+                        ?.hasEntryForBuild(route.futureResourcePath) == true
+                    require(route.futureResourcePath !in reservedEntryNames || isPublishedNativeChunk) {
+                        "AKEN NativeChunk pre-seal route collides with the sealing input namespace"
+                    }
+                    reservedEntryNames += route.futureResourcePath
+                }
+            }
         val akenNativeLocatorResource = if (artifact.jarEntries.any { entry -> isAkenNativeKernelResource(entry.name) }) {
             uniqueSealedResourceName(
                 seed = seed,
@@ -387,6 +467,7 @@ object RuntimeArtifactSealing {
             null
         }
         var sealedNativeBindingsResource: String? = null
+        var akenNativeBindingsLocatorResource: String? = null
         val vmCatalogPlan = if (rewritesVmRuntime) requireVbc4BuildContext().runtimeVmCatalogPlanOrNull() else null
         val rewritesCurrentVmRuntime = vmCatalogPlan != null
         val vmCatalogResource = if (rewritesCurrentVmRuntime) {
@@ -410,8 +491,8 @@ object RuntimeArtifactSealing {
             reservedEntryNames = reservedEntryNames,
         )
         reservedEntryNames += sealedNativeIndexResource
-        val helperClassRenameMap = sealedRuntimeHelperRenameMap(artifact, seed)
-        val helperMemberRenamePlan = sealedJavaOnlyHelperMemberRenamePlan(seed, helperClassRenameMap)
+        val helperClassRenameMap = sealedRuntimeHelperRenameMap(artifact, seed, typedOnlyRuntime)
+        val helperMemberRenamePlan = sealedJavaOnlyHelperMemberRenamePlan(seed, helperClassRenameMap, typedOnlyRuntime)
         val resourceRenameMap = linkedMapOf<String, String>()
         val vmResourceRenameMap = linkedMapOf<String, String>()
         val currentVmResourceNames = if (vmCatalogPlan != null) currentVirtualMachineResourceNames(vmCatalogPlan, artifact.jarEntries) else emptySet()
@@ -441,6 +522,19 @@ object RuntimeArtifactSealing {
             val bindingResource = checkNotNull(sealedNativeBindingsResource)
             reservedEntryNames += bindingResource
             helperStringRewriteMap[LEGACY_SEALED_NATIVE_BINDINGS_RESOURCE] = bindingResource
+            if (akenNativeLocatorResource != null) {
+                akenNativeBindingsLocatorResource = uniqueSealedResourceName(
+                    seed = seed,
+                    kind = "q",
+                    originalName = "aken-native-bindings-locator",
+                    index = 0,
+                    preferredName = sealedResourceName(seed, "q", "aken-native-bindings-locator", 0),
+                    reservedEntryNames = reservedEntryNames,
+                )
+                val locatorPath = checkNotNull(akenNativeBindingsLocatorResource)
+                reservedEntryNames += locatorPath
+                helperStringRewriteMap[AKEN_NATIVE_BINDINGS_LOCATOR_LOGICAL_RESOURCE] = locatorPath
+            }
         }
         helperStringRewriteMap.putAll(sealedHelperStringRewriteMap(seed, helperClassRenameMap))
         val resourceStringRewriteMap = linkedMapOf(
@@ -504,6 +598,8 @@ object RuntimeArtifactSealing {
         val renamedJarEntries = artifact.jarEntries.mapIndexedNotNull { index, entry ->
             when {
                 entry.name in RETIRED_AKEN_V4_BOOT_RESOURCE_PATHS -> null
+                typedOnlyRuntime && isLegacyAkenHelperEntry(entry.name) -> null
+                typedOnlyRuntime && (isClassEncryptionResource(entry.name) || isClassEncryptionManifestResource(entry.name)) -> null
                 isDelayedMethodResource(entry.name) || isClassEncryptionResource(entry.name) -> {
                     val sealedName = resourceRenameMap.getValue(entry.name)
                     // Rewrite encrypted class bytecode to update helper references
@@ -519,7 +615,7 @@ object RuntimeArtifactSealing {
                 entry.name in currentVmResourceNames -> {
                     val sealedName = vmResourceRenameMap.getValue(entry.name)
                     val decoded = RuntimeResourceCodec.decode(entry.bytes)
-                        ?: error("current VM resource failed JSRP v7 verification: ${entry.name}")
+                        ?: error("current VM resource failed authentication: ${entry.name}")
                     val rewrittenBytes = RuntimeResourceCodec.encode(
                         bytes = decoded,
                         kind = RuntimeResourceKind.VmBytecode,
@@ -561,7 +657,9 @@ object RuntimeArtifactSealing {
             return artifact
         }
 
-        val rewrittenClassArtifacts = artifact.classArtifacts.map { classArtifact ->
+        val rewrittenClassArtifacts = artifact.classArtifacts
+            .filterNot { typedOnlyRuntime && isLegacyAkenHelperEntry(it.entryName) }
+            .map { classArtifact ->
             rewriteClassArtifact(
                 classArtifact = classArtifact,
                 seed = seed,
@@ -628,9 +726,21 @@ object RuntimeArtifactSealing {
                         storedBytes = nativeBytes,
                     )
                 }
+                val bindingsLocatorEntry = akenNativeBindingsLocatorResource?.let {
+                    val bindingPath = checkNotNull(sealedNativeBindingsResource) {
+                        "AKEN native bindings locator requires a final bindings resource"
+                    }
+                    val bindingBytes = checkNotNull(nativeBytesByPath[bindingPath]) {
+                        "AKEN native bindings locator target was not emitted: $bindingPath"
+                    }
+                    AkenNativeLocator.bindingsEntry(
+                        resourcePath = bindingPath,
+                        storedBytes = bindingBytes,
+                    )
+                }
                 runtimeEntries += JarEntryData(
                     name = locatorPath,
-                    bytes = AkenNativeLocator.encode(locatorEntries),
+                    bytes = AkenNativeLocator.encode(locatorEntries, bindingsLocatorEntry),
                 )
             }
             runtimeEntries
@@ -739,7 +849,11 @@ private fun renamedClassEntry(entry: JarEntryData, classRenameMap: Map<String, S
     return entry.copy(name = "$renamedInternalName.class")
 }
 
-private fun sealedRuntimeHelperRenameMap(artifact: BytecodeArtifact, seed: Long): Map<String, String> {
+private fun sealedRuntimeHelperRenameMap(
+    artifact: BytecodeArtifact,
+    seed: Long,
+    typedOnlyRuntime: Boolean = false,
+): Map<String, String> {
     val presentClassNames = artifact.classArtifacts.map { it.summary.internalName }.toSet()
     val reservedClassNames = artifact.jarEntries
         .asSequence()
@@ -748,6 +862,7 @@ private fun sealedRuntimeHelperRenameMap(artifact: BytecodeArtifact, seed: Long)
         .toMutableSet()
     val renameMap = linkedMapOf<String, String>()
     SEALED_RUNTIME_HELPERS.forEachIndexed { index, helperName ->
+        if (typedOnlyRuntime && helperName in LEGACY_AKEN_HELPER_INTERNAL_NAMES) return@forEachIndexed
         if (helperName in presentClassNames) {
             val outerName = helperName.substringBefore('$')
             val sealedOuterName = renameMap[outerName]
@@ -798,6 +913,7 @@ private fun currentRuntimeSealingSeed(): Long = requireVbc4BuildContext().native
 private fun sealedJavaOnlyHelperMemberRenamePlan(
     seed: Long,
     helperClassRenameMap: Map<String, String>,
+    typedOnlyRuntime: Boolean = false,
 ): SealedHelperMemberRenamePlan {
     val methodRenames = linkedMapOf<SealedMemberRef, String>()
     val fieldRenames = linkedMapOf<SealedMemberRef, String>()
@@ -805,6 +921,15 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     fun addMethod(owner: String, name: String, descriptor: String) {
         val sealedOwner = helperClassRenameMap[owner] ?: return
         if (name == "<init>" || name == "<clinit>") return
+        // VBC4 pages carry this helper call as an interpreted symbolic target. Keep
+        // the bridge name stable; sealing still relocates the helper owner and all
+        // ordinary Java references, while the native VM resolves this descriptor by
+        // its protocol name.
+        if (
+            owner == "$PROTECTION_HELPER_PACKAGE/StringEncryptionHelper" &&
+            name == "cachedDecodeAkenStringPage" &&
+            descriptor == "([BI[B)Ljava/lang/String;"
+        ) return
         if (
             owner == "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper" &&
             (name.startsWith("native") || name == "createSamLambda" ||
@@ -871,44 +996,44 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     addMethod(antiDumpRuntime, "scrambleChars", "([CLjava/lang/String;Ljava/lang/String;)[C")
     addMethod(antiDumpRuntime, "unscrambleChars", "([CLjava/lang/String;Ljava/lang/String;)[C")
 
+    // AKEN v4 binds only the typed current-page/native-loader surface.  Do
+    // not write legacy boot, generic resource decoder, or central VM dispatch
+    // names into a sealed binding map for a new artifact.
     val jniHelper = "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper"
     addMethod(jniHelper, "loadKernel", "(Ljava/lang/String;Ljava/lang/String;)V")
     addMethod(jniHelper, "loadKernel", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V")
-    addMethod(jniHelper, "executeVmResource", "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;")
-    addMethod(jniHelper, "executeVmResource", "(J[Ljava/lang/Object;)Ljava/lang/Object;")
-    addMethod(jniHelper, "executeVmResourceVoid", "(J)V")
-    addMethod(jniHelper, "executeVmResourceInt", "(J)I")
-    addMethod(jniHelper, "executeVmResourceIntInt", "(JI)I")
-    addMethod(jniHelper, "executeVmResourceIntVoid", "(JI)V")
     addMethod(jniHelper, "executeAkenVmPage", "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;")
+    addMethod(jniHelper, "decodeAkenStringPage", "([BI[B)[B")
+    addMethod(jniHelper, "readAkenClassPage", "([BI[B)[B")
+    addMethod(jniHelper, "consumeAkenNativeChunk", "([BI[B)V")
     addMethod(jniHelper, "nativeInit", "(Ljava/lang/String;)I")
-    addMethod(jniHelper, "nativeVerify", "([B[B)I")
     addMethod(jniHelper, "nativeHeartbeat", "()I")
-    addMethod(jniHelper, "nativeGetVersion", "()Ljava/lang/String;")
-    addMethod(jniHelper, "nativeGetBootToken", "()J")
-    addMethod(jniHelper, "nativeInstallBootMaterial", "([B)Z")
-    addMethod(jniHelper, "nativeInstallBootEnvelope", "([B[B)Z")
-    addMethod(jniHelper, "nativeIsBootMaterialReady", "()Z")
-    addMethod(jniHelper, "nativeAbortBootMaterial", "()V")
-    addMethod(jniHelper, "nativePreloadRuntimeResources", "([B[B[B)V")
-    addMethod(jniHelper, "nativeDecryptAes", "([B[B[B)[B")
-    addMethod(jniHelper, "nativeDecodeRuntimeResource", "([B)[B")
-    addMethod(jniHelper, "nativeExecuteVmResource", "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;")
-    addMethod(jniHelper, "nativeExecuteVmResourceByToken", "(J[Ljava/lang/Object;)Ljava/lang/Object;")
-    addMethod(jniHelper, "nativeExecuteVmResourceVoid", "(J)V")
-    addMethod(jniHelper, "nativeExecuteVmResourceInt", "(J)I")
-    addMethod(jniHelper, "nativeExecuteVmResourceIntInt", "(JI)I")
-    addMethod(jniHelper, "nativeExecuteVmResourceIntVoid", "(JI)V")
+    addMethod(jniHelper, "nativeInstallAkenSessionNonce", "([B)Z")
+    addMethod(jniHelper, "nativeExecuteAkenVmPage", "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;")
+    addMethod(jniHelper, "nativeDecodeAkenStringPage", "([BI[B)[B")
+    addMethod(jniHelper, "nativeReadAkenClassPage", "([BI[B)[B")
+    addMethod(jniHelper, "nativeConsumeAkenNativeChunk", "([BI[B)V")
+    if (!typedOnlyRuntime) {
+        // Compatibility-only member bindings for pre-AKEN artifacts.  They are
+        // intentionally absent from the production typed-only binding map.
+        addMethod(jniHelper, "nativeVerify", "([B[B)I")
+        addMethod(jniHelper, "nativeGetVersion", "()Ljava/lang/String;")
+        addMethod(jniHelper, "nativeDecryptAes", "([B[B[B)[B")
+        addMethod(jniHelper, "nativeDeriveClassEncryptionKey", "([B[BI)[B")
+        addMethod(jniHelper, "nativeDecryptClassBytes", "([B[B[B[B[BI)[B")
+        addMethod(jniHelper, "nativeSealedBindingKey", "([B)Ljava/lang/String;")
+    }
     addMethod(jniHelper, "createSamLambda", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;")
-    addMethod(jniHelper, "takeExpectedShellBindingCommitment", "()[B")
-    addMethod(jniHelper, "takeBootSecretForNativeShell", "()[B")
 
     val bootstrap = "$PROTECTION_HELPER_PACKAGE/BootstrapEncryptionHelper"
     addMethod(bootstrap, "decryptBytes", "(Ljava/lang/String;Ljava/lang/String;)[B")
     addMethod(bootstrap, "encryptedBootstrap", "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;")
 
     val classEncryption = "$PROTECTION_HELPER_PACKAGE/ClassEncryptionLoaderHelper"
-    addMethod(classEncryption, "initializeClass", "(Ljava/lang/String;Ljava/lang/String;)V")
+    if (!typedOnlyRuntime) {
+        // Compatibility-only manifest bootstrap for pre-AKEN artifacts.
+        addMethod(classEncryption, "initializeClass", "(Ljava/lang/String;Ljava/lang/String;)V")
+    }
     addMethod(classEncryption, "loadAkenClass", "(Ljava/lang/String;)Ljava/lang/Class;")
 
     val stringEncryption = "$PROTECTION_HELPER_PACKAGE/StringEncryptionHelper"
@@ -967,6 +1092,10 @@ private fun isClassEncryptionResource(entryName: String): Boolean =
 
 private fun isClassEncryptionManifestResource(entryName: String): Boolean =
     entryName == LEGACY_CLASS_ENCRYPTION_MANIFEST_RESOURCE
+
+private fun isLegacyAkenHelperEntry(entryName: String): Boolean =
+    entryName.endsWith(".class") &&
+        entryName.removeSuffix(".class") in LEGACY_AKEN_HELPER_INTERNAL_NAMES
 
 private fun isAkenNativeKernelResource(entryName: String): Boolean =
     entryName.startsWith(AKEN_NATIVE_RESOURCE_ROOT) &&
@@ -1079,28 +1208,17 @@ private fun sealedInnocuousExtension(digest: String): String {
     val idx = (digest.hashCode() and 0x7FFFFFFF) % SEALED_RESOURCE_EXTENSIONS.size
     return "." + SEALED_RESOURCE_EXTENSIONS[idx]
 }
+@Suppress("UNUSED_PARAMETER")
 private fun encodeSealedNativeIndex(
     specs: List<SealedNativeSpec>,
     seed: Long,
     maxHardening: Boolean,
 ): ByteArray {
-    val plain = specs
+    return specs
         .joinToString(separator = "\n", postfix = if (specs.isEmpty()) "" else "\n") { spec ->
             listOf(spec.platform, spec.resourceName, spec.loadSuffix).joinToString("|")
         }
-        .toByteArray(Charsets.UTF_8)
-    return if (maxHardening) {
-        RuntimeResourceCodec.encodeForAnchor(
-            bytes = plain,
-            kind = RuntimeResourceKind.NativeIndex,
-            seed = sealedDigest(seed, "hk", "native-index", 0).take(8).toLong(16).toInt(),
-            variantId = 2,
-            layerCount = 5,
-            compress = true,
-        )
-    } else {
-        encodeBootstrapNativeIndex(plain)
-    }
+        .toByteArray(Charsets.US_ASCII)
 }
 
 private fun encodeSealedNativeBindings(
@@ -1134,15 +1252,11 @@ private fun encodeSealedNativeBindings(
     return encodeSealedNativeBindingLines(lines, seed)
 }
 
-internal fun encodeSealedNativeBindingLines(lines: List<String>, seed: Long): ByteArray =
-    RuntimeResourceCodec.encodeForAnchor(
-        bytes = lines.joinToString(separator = "\n", postfix = "\n").toByteArray(Charsets.UTF_8),
-        kind = RuntimeResourceKind.NativeIndex,
-        seed = sealedDigest(seed, "bk", "native-bindings", 0).take(8).toLong(16).toInt(),
-        variantId = 1,
-        layerCount = 4,
-        compress = true,
-    )
+internal fun encodeSealedNativeBindingLines(lines: List<String>, seed: Long): ByteArray {
+    @Suppress("UNUSED_VARIABLE")
+    val buildDivergenceSeed = seed
+    return lines.joinToString(separator = "\n", postfix = "\n").toByteArray(Charsets.US_ASCII)
+}
 
 private fun parseMethodRenameBindings(jarEntries: List<JarEntryData>): Map<SealedMemberRef, String> {
     val entry = jarEntries.firstOrNull { it.name == METHOD_RENAME_BINDINGS_RESOURCE } ?: return emptyMap()
@@ -1283,50 +1397,22 @@ private fun pureSameOwnerForwarderTarget(
     return targetCall
 }
 
-private fun encodeBootstrapNativeIndex(plain: ByteArray): ByteArray {
-    val out = ByteArray(BOOTSTRAP_NATIVE_INDEX_HEADER_SIZE + plain.size + BOOTSTRAP_NATIVE_INDEX_MAC_LENGTH + 1)
-    System.arraycopy(BOOTSTRAP_NATIVE_INDEX_MAGIC, 0, out, 0, BOOTSTRAP_NATIVE_INDEX_MAGIC.size)
-    out[4] = BOOTSTRAP_NATIVE_INDEX_VERSION.toByte()
-    writeBootstrapLe32(out, 5, plain.size)
-    System.arraycopy(plain, 0, out, BOOTSTRAP_NATIVE_INDEX_HEADER_SIZE, plain.size)
-    val tag = hmacBootstrapNativeIndex(out, 0, BOOTSTRAP_NATIVE_INDEX_HEADER_SIZE + plain.size)
-    System.arraycopy(tag, 0, out, BOOTSTRAP_NATIVE_INDEX_HEADER_SIZE + plain.size, tag.size)
-    out[out.lastIndex] = BOOTSTRAP_NATIVE_INDEX_MAC_LENGTH.toByte()
-    return out
-}
-
-private fun hmacBootstrapNativeIndex(bytes: ByteArray, offset: Int, length: Int): ByteArray {
-    val mac = Mac.getInstance("HmacSHA256")
-    val key = requireVbc4BuildContext().runtimeKeyPartitions.copyAnchorKey()
-    return try {
-        mac.init(SecretKeySpec(key, "HmacSHA256"))
-        mac.update("jsbi-auth".toByteArray(Charsets.US_ASCII))
-        mac.update(bytes, offset, length)
-        mac.doFinal()
-    } finally {
-        Arrays.fill(key, 0)
-    }
-}
-
-private fun writeBootstrapLe32(out: ByteArray, offset: Int, value: Int) {
-    out[offset] = (value and 0xFF).toByte()
-    out[offset + 1] = ((value ushr 8) and 0xFF).toByte()
-    out[offset + 2] = ((value ushr 16) and 0xFF).toByte()
-    out[offset + 3] = ((value ushr 24) and 0xFF).toByte()
-}
-
 private fun sealedBindingKey(value: String): String {
-    // Keyed binding identity: HMAC-SHA256(anchorKey, "jsb1" || utf8(value)) truncated to 8 bytes.
-    // Without the per-build anchor key the identity cannot be recomputed from the artifact.
-    val key = requireVbc4BuildContext().runtimeKeyPartitions.copyAnchorKey()
+    /*
+     * AKEN v4 binding identity is public relocation material, not a secret.
+     * Keep the exact domain and UTF-8 byte sequence in parity with the Java
+     * runtime mirror and js_sealed_binding_key().
+     */
+    val encoded = ("AKEN-BINDING-V1|" + value).toByteArray(Charsets.UTF_8)
     return try {
-        val mac = Mac.getInstance("HmacSHA256")
-        mac.init(SecretKeySpec(key, "HmacSHA256"))
-        mac.update("jsb1".toByteArray(Charsets.US_ASCII))
-        val digest = mac.doFinal(value.toByteArray(Charsets.UTF_8))
-        digest.copyOfRange(0, 8).joinToString("") { "%02x".format(it) }
+        val digest = MessageDigest.getInstance("SHA-256").digest(encoded)
+        try {
+            digest.copyOfRange(0, 8).joinToString("") { "%02x".format(it) }
+        } finally {
+            Arrays.fill(digest, 0)
+        }
     } finally {
-        Arrays.fill(key, 0)
+        Arrays.fill(encoded, 0)
     }
 }
 
@@ -1339,7 +1425,7 @@ private fun currentVirtualMachineResourceNames(plan: RuntimeVmCatalogPlan, jarEn
         val manifestEntry = entriesByName[manifestName]
             ?: error("current VM index references missing resource: $manifestName")
         val decodedManifest = RuntimeResourceCodec.decode(manifestEntry.bytes)
-            ?: error("current VM resource failed JSRP v7 verification: $manifestName")
+            ?: error("current VM resource failed authentication: $manifestName")
         if (!decodedManifest.decodeToString().startsWith(requireVbc4BuildContext().vmManifestProtocol().prefix)) continue
         decodedManifest.decodeToString()
             .lineSequence()

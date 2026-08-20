@@ -66,7 +66,6 @@ class AkenRuntimeEvaluatorFragment private constructor(
         get() = tablePermutationValue.copyOf()
 
     fun encode(): ByteArray = ByteArrayOutputStream().use { out ->
-        out.write(FRAGMENT_VERSION)
         out.write(role.id)
         writeRuntimeInt(out, ordinal)
         writeRuntimeInt(out, family)
@@ -99,7 +98,6 @@ class AkenRuntimeEvaluatorFragment private constructor(
         "AkenRuntimeEvaluatorFragment(role=$role, ordinal=$ordinal, family=$family)"
 
     companion object {
-        private const val FRAGMENT_VERSION = 1
         private const val AKEN_FRAGMENT_COUNT = 7
         private const val AKEN_TRANSFORM_FAMILY_COUNT = 16
         private const val MAX_FRAGMENT_SHAPE_SIZE = 4096
@@ -128,9 +126,6 @@ class AkenRuntimeEvaluatorFragment private constructor(
                 "AKEN runtime fragment encoding length is invalid"
             }
             val reader = AkenRuntimeDescriptorReader(encoded)
-            require(reader.readUnsignedByte("AKEN runtime fragment version") == FRAGMENT_VERSION) {
-                "unsupported AKEN runtime fragment version"
-            }
             val role = AkenRuntimeEvaluatorRole.fromId(reader.readUnsignedByte("AKEN runtime fragment role"))
                 ?: throw IllegalArgumentException("unknown AKEN runtime fragment role")
             val ordinal = reader.readInt("AKEN runtime fragment ordinal")
@@ -179,70 +174,73 @@ class AkenRuntimeEvaluatorFragment private constructor(
 class AkenRuntimeEvaluatorPlan private constructor(
     javaFragments: List<AkenRuntimeEvaluatorFragment>,
     nativeFragments: List<AkenRuntimeEvaluatorFragment>,
-    terminal: AkenRuntimeEvaluatorFragment,
+    terminal: AkenRuntimeEvaluatorFragment?,
+    boundDecryptor: AkenBoundDecryptorPlan?,
     fingerprint: ByteArray,
 ) {
     private val javaFragmentsValue = javaFragments.toList()
     private val nativeFragmentsValue = nativeFragments.toList()
     private val terminalValue = terminal
+    private val boundDecryptorValue = boundDecryptor
     private val fingerprintValue = fingerprint.copyOf()
 
     init {
-        require(javaFragmentsValue.size == JAVA_FRAGMENT_COUNT) {
-            "AKEN runtime evaluator requires three Java fragments"
-        }
-        require(nativeFragmentsValue.size == NATIVE_FRAGMENT_COUNT) {
-            "AKEN runtime evaluator requires three native fragments"
-        }
-        require(javaFragmentsValue.all { it.role == AkenRuntimeEvaluatorRole.Java }) {
-            "AKEN runtime Java fragment role is invalid"
-        }
-        require(nativeFragmentsValue.all { it.role == AkenRuntimeEvaluatorRole.Native }) {
-            "AKEN runtime native fragment role is invalid"
-        }
-        require(terminalValue.role == AkenRuntimeEvaluatorRole.Terminal) {
-            "AKEN runtime terminal fragment role is invalid"
-        }
-        val ordinals = javaFragmentsValue.map { it.ordinal } +
-            nativeFragmentsValue.map { it.ordinal } + terminalValue.ordinal
-        require(ordinals.sorted() == (0 until AKEN_FRAGMENT_COUNT).toList()) {
-            "AKEN runtime evaluator must contain seven unique fragment ordinals"
-        }
-        require(javaFragmentsValue.all { it.ordinal in 0 until JAVA_FRAGMENT_COUNT }) {
-            "AKEN runtime Java fragment ordinal is invalid"
-        }
-        require(nativeFragmentsValue.all { it.ordinal in JAVA_FRAGMENT_COUNT until JAVA_FRAGMENT_COUNT + NATIVE_FRAGMENT_COUNT }) {
-            "AKEN runtime native fragment ordinal is invalid"
-        }
-        require(terminalValue.ordinal == AKEN_FRAGMENT_COUNT - 1) {
-            "AKEN runtime terminal fragment ordinal is invalid"
-        }
         require(fingerprintValue.size == AkenHandle.FINGERPRINT_SIZE) {
             "AKEN runtime evaluator fingerprint length is invalid"
         }
+        if (boundDecryptorValue != null) {
+            require(javaFragmentsValue.isEmpty() && nativeFragmentsValue.isEmpty() && terminalValue == null) {
+                "AKEN bound evaluator plan must not carry legacy fragments"
+            }
+        } else {
+            require(terminalValue != null) { "AKEN runtime legacy evaluator terminal is missing" }
+            validateLegacyTopology(javaFragmentsValue, nativeFragmentsValue, checkNotNull(terminalValue))
+        }
     }
 
+    /** True only for the legacy AKEN-7 descriptor encoding retained for old artifacts and fixtures. */
+    internal val isLegacyAken7: Boolean
+        get() = boundDecryptorValue == null
+
+    /**
+     * Compatibility view for legacy descriptors. New production descriptors
+     * intentionally expose no fragment topology at runtime.
+     */
     val javaFragments: List<AkenRuntimeEvaluatorFragment>
         get() = javaFragmentsValue.map { copyRuntimeFragment(it) }
 
+    /** Compatibility view for legacy descriptors only. */
     val nativeFragments: List<AkenRuntimeEvaluatorFragment>
         get() = nativeFragmentsValue.map { copyRuntimeFragment(it) }
 
+    /** Compatibility view for legacy descriptors only. */
     val terminal: AkenRuntimeEvaluatorFragment
-        get() = copyRuntimeFragment(terminalValue)
+        get() = terminalValue?.let(::copyRuntimeFragment)
+            ?: throw IllegalStateException("AKEN bound evaluator has no legacy terminal fragment")
 
     val fingerprint: ByteArray
         get() = fingerprintValue.copyOf()
 
-    fun encode(): ByteArray = ByteArrayOutputStream().use { out ->
-        out.write(PLAN_VERSION)
-        javaFragmentsValue.forEach { writeRuntimeFragment(out, it) }
-        nativeFragmentsValue.forEach { writeRuntimeFragment(out, it) }
-        writeRuntimeFragment(out, terminalValue)
-        out.write(fingerprintValue)
-        out.toByteArray().also {
-            require(it.size <= MAX_PLAN_ENCODING_SIZE) {
-                "AKEN runtime evaluator plan encoding is too large"
+    /** Copy only the current page's opaque native terminal descriptor. */
+    internal fun copyBoundDecryptorForNative(): ByteArray? =
+        boundDecryptorValue?.copyOpaqueForNative()
+
+    fun encode(): ByteArray {
+        val bound = checkNotNull(boundDecryptorValue) {
+            "current evaluator plan requires a bound decryptor"
+        }
+        return ByteArrayOutputStream().use { out ->
+            val opaque = bound.copyOpaqueForNative()
+            try {
+                writeRuntimeFramed(out, opaque)
+                out.write(fingerprintValue)
+            } finally {
+                Arrays.fill(opaque, 0)
+            }
+            out.toByteArray().also {
+                require(it.size <= MAX_PLAN_ENCODING_SIZE) {
+                    "runtime evaluator plan encoding is too large"
+                }
             }
         }
     }
@@ -252,17 +250,25 @@ class AkenRuntimeEvaluatorPlan private constructor(
             javaFragmentsValue == other.javaFragmentsValue &&
             nativeFragmentsValue == other.nativeFragmentsValue &&
             terminalValue == other.terminalValue &&
+            boundDecryptorValue == other.boundDecryptorValue &&
             Arrays.equals(fingerprintValue, other.fingerprintValue)
 
     override fun hashCode(): Int {
         var result = javaFragmentsValue.hashCode()
         result = 31 * result + nativeFragmentsValue.hashCode()
-        result = 31 * result + terminalValue.hashCode()
+        result = 31 * result + (terminalValue?.hashCode() ?: 0)
+        result = 31 * result + (boundDecryptorValue?.hashCode() ?: 0)
         return 31 * result + fingerprintValue.contentHashCode()
     }
 
-    override fun toString(): String = "AkenRuntimeEvaluatorPlan(aken7)"
+    override fun toString(): String =
+        if (boundDecryptorValue != null) "AkenRuntimeEvaluatorPlan(bound-page)" else "AkenRuntimeEvaluatorPlan(aken7-legacy)"
 
+    /**
+     * Legacy graph check retained only for old serialized descriptors. Bound
+     * descriptors require route/proof context and are checked by
+     * [matchesDescriptorBinding].
+     */
     internal fun matchesPageBinding(
         resourceKind: AkenResourceKind,
         logicalIdentity: ByteArray,
@@ -273,6 +279,7 @@ class AkenRuntimeEvaluatorPlan private constructor(
         handleEncoding: ByteArray,
         locatorToken: ByteArray,
     ): Boolean {
+        if (boundDecryptorValue != null) return false
         val expected = computeFingerprint(
             resourceKind,
             logicalIdentity,
@@ -284,7 +291,7 @@ class AkenRuntimeEvaluatorPlan private constructor(
             locatorToken,
             javaFragmentsValue,
             nativeFragmentsValue,
-            terminalValue,
+            checkNotNull(terminalValue),
         )
         return try {
             Arrays.equals(fingerprintValue, expected)
@@ -293,13 +300,61 @@ class AkenRuntimeEvaluatorPlan private constructor(
         }
     }
 
+    /** Verify the complete page binding that a bound descriptor commits to. */
+    internal fun matchesDescriptorBinding(
+        resourceKind: AkenResourceKind,
+        logicalIdentity: ByteArray,
+        pageIndex: Int,
+        targetPageSize: Int,
+        route: AkenRoutingMetadata,
+        proof: AkenSealingProofMetadata,
+        handleEncoding: ByteArray,
+        locatorToken: ByteArray,
+    ): Boolean {
+        val bound = boundDecryptorValue
+        if (bound == null) {
+            return matchesPageBinding(
+                resourceKind,
+                logicalIdentity,
+                pageIndex,
+                targetPageSize,
+                route.codecVariant,
+                route.layoutVariant,
+                handleEncoding,
+                locatorToken,
+            )
+        }
+        var artifactCommitment: ByteArray? = null
+        var callSiteProof: ByteArray? = null
+        try {
+            artifactCommitment = proof.artifactCanonicalCommitment
+            callSiteProof = proof.callSiteProof
+            return bound.matchesPageBinding(
+                resourceKind = resourceKind,
+                logicalIdentity = logicalIdentity,
+                pageIndex = pageIndex,
+                targetPageSize = targetPageSize,
+                codecVariant = route.codecVariant,
+                layoutVariant = route.layoutVariant,
+                handleEncoding = handleEncoding,
+                locatorToken = locatorToken,
+                evaluatorFingerprint = fingerprintValue,
+                artifactCanonicalCommitment = checkNotNull(artifactCommitment),
+                route = route,
+                callSiteProof = checkNotNull(callSiteProof),
+            )
+        } finally {
+            artifactCommitment?.let { Arrays.fill(it, 0) }
+            callSiteProof?.let { Arrays.fill(it, 0) }
+        }
+    }
+
     companion object {
-        private const val PLAN_VERSION = 1
         private const val JAVA_FRAGMENT_COUNT = 3
         private const val NATIVE_FRAGMENT_COUNT = 3
         private const val AKEN_FRAGMENT_COUNT = JAVA_FRAGMENT_COUNT + NATIVE_FRAGMENT_COUNT + 1
         private const val MAX_PLAN_ENCODING_SIZE = 128 * 1024
-        private val EVALUATOR_DOMAIN = "AKEN-v4-evaluator-graph".toByteArray(StandardCharsets.US_ASCII)
+        private val EVALUATOR_DOMAIN = "evaluator-graph".toByteArray(StandardCharsets.US_ASCII)
         private const val FRAGMENT_ROLE_JAVA: Byte = 1
         private const val FRAGMENT_ROLE_NATIVE: Byte = 2
         private const val FRAGMENT_ROLE_TERMINAL: Byte = 3
@@ -313,12 +368,25 @@ class AkenRuntimeEvaluatorPlan private constructor(
             javaFragments,
             nativeFragments,
             terminal,
+            null,
+            fingerprint,
+        )
+
+        /** New production representation: opaque page-bound native terminal only. */
+        internal fun createBound(
+            boundDecryptor: AkenBoundDecryptorPlan,
+            fingerprint: ByteArray,
+        ): AkenRuntimeEvaluatorPlan = AkenRuntimeEvaluatorPlan(
+            emptyList(),
+            emptyList(),
+            null,
+            boundDecryptor,
             fingerprint,
         )
 
         /**
-         * Exact build-plan fingerprint reconstruction over public current-page
-         * bindings. It validates the graph topology before hashing.
+         * Exact legacy graph fingerprint reconstruction used only for v1
+         * compatibility descriptors and build-time fixture parity.
          */
         fun computeFingerprint(
             resourceKind: AkenResourceKind,
@@ -346,7 +414,7 @@ class AkenRuntimeEvaluatorPlan private constructor(
             require(locatorToken.size == AkenHandle.LOCATOR_TOKEN_SIZE) {
                 "AKEN runtime locator token length is invalid"
             }
-            validateTopology(javaFragments, nativeFragments, terminal)
+            validateLegacyTopology(javaFragments, nativeFragments, terminal)
             val canonicalCodec = AkenResourceCodec.normalizeCodecVariant(codecVariant)
             require(canonicalCodec == codecVariant) { "AKEN runtime codec variant is not canonical" }
             val layout = AkenPageLayout.fromVariant(layoutVariant)
@@ -383,9 +451,10 @@ class AkenRuntimeEvaluatorPlan private constructor(
                 "AKEN runtime evaluator plan encoding length is invalid"
             }
             val reader = AkenRuntimeDescriptorReader(encoded)
-            require(reader.readUnsignedByte("AKEN runtime evaluator plan version") == PLAN_VERSION) {
-                "unsupported AKEN runtime evaluator plan version"
-            }
+            return decodeBound(reader)
+        }
+
+        private fun decodeLegacy(reader: AkenRuntimeDescriptorReader): AkenRuntimeEvaluatorPlan {
             val javaFragments = ArrayList<AkenRuntimeEvaluatorFragment>(JAVA_FRAGMENT_COUNT)
             val nativeFragments = ArrayList<AkenRuntimeEvaluatorFragment>(NATIVE_FRAGMENT_COUNT)
             var terminal: AkenRuntimeEvaluatorFragment? = null
@@ -406,17 +475,53 @@ class AkenRuntimeEvaluatorPlan private constructor(
             }
         }
 
-        private fun validateTopology(
+        private fun decodeBound(reader: AkenRuntimeDescriptorReader): AkenRuntimeEvaluatorPlan {
+            var opaque: ByteArray? = null
+            var fingerprint: ByteArray? = null
+            return try {
+                opaque = reader.readFramed(MAX_PLAN_ENCODING_SIZE - AkenHandle.FINGERPRINT_SIZE - 5, "AKEN bound evaluator", allowEmpty = false)
+                fingerprint = reader.readFixed(AkenHandle.FINGERPRINT_SIZE, "AKEN runtime evaluator fingerprint")
+                reader.requireFullyRead("AKEN runtime bound evaluator plan")
+                createBound(AkenBoundDecryptorPlan.fromOpaque(checkNotNull(opaque)), checkNotNull(fingerprint))
+            } finally {
+                opaque?.let { Arrays.fill(it, 0) }
+                fingerprint?.let { Arrays.fill(it, 0) }
+            }
+        }
+
+        private fun validateLegacyTopology(
             javaFragments: List<AkenRuntimeEvaluatorFragment>,
             nativeFragments: List<AkenRuntimeEvaluatorFragment>,
             terminal: AkenRuntimeEvaluatorFragment,
         ) {
-            AkenRuntimeEvaluatorPlan(
-                javaFragments,
-                nativeFragments,
-                terminal,
-                ByteArray(AkenHandle.FINGERPRINT_SIZE),
-            )
+            require(javaFragments.size == JAVA_FRAGMENT_COUNT) {
+                "AKEN runtime evaluator requires three Java fragments"
+            }
+            require(nativeFragments.size == NATIVE_FRAGMENT_COUNT) {
+                "AKEN runtime evaluator requires three native fragments"
+            }
+            require(javaFragments.all { it.role == AkenRuntimeEvaluatorRole.Java }) {
+                "AKEN runtime Java fragment role is invalid"
+            }
+            require(nativeFragments.all { it.role == AkenRuntimeEvaluatorRole.Native }) {
+                "AKEN runtime native fragment role is invalid"
+            }
+            require(terminal.role == AkenRuntimeEvaluatorRole.Terminal) {
+                "AKEN runtime terminal fragment role is invalid"
+            }
+            val ordinals = javaFragments.map { it.ordinal } + nativeFragments.map { it.ordinal } + terminal.ordinal
+            require(ordinals.sorted() == (0 until AKEN_FRAGMENT_COUNT).toList()) {
+                "AKEN runtime evaluator must contain seven unique fragment ordinals"
+            }
+            require(javaFragments.all { it.ordinal in 0 until JAVA_FRAGMENT_COUNT }) {
+                "AKEN runtime Java fragment ordinal is invalid"
+            }
+            require(nativeFragments.all { it.ordinal in JAVA_FRAGMENT_COUNT until JAVA_FRAGMENT_COUNT + NATIVE_FRAGMENT_COUNT }) {
+                "AKEN runtime native fragment ordinal is invalid"
+            }
+            require(terminal.ordinal == AKEN_FRAGMENT_COUNT - 1) {
+                "AKEN runtime terminal fragment ordinal is invalid"
+            }
         }
 
         private fun writeRuntimeFragment(out: ByteArrayOutputStream, fragment: AkenRuntimeEvaluatorFragment) {
@@ -532,7 +637,6 @@ class AkenRuntimePageDescriptor private constructor(
     fun matches(candidate: AkenHandle): Boolean = leafIdentityValue.matches(candidate)
 
     fun encode(): ByteArray = ByteArrayOutputStream().use { out ->
-        out.write(DESCRIPTOR_VERSION)
         val route = routeValue.encode()
         val proof = proofValue.encode()
         val evaluator = evaluatorPlanValue.encode()
@@ -557,7 +661,6 @@ class AkenRuntimePageDescriptor private constructor(
         "AkenRuntimePageDescriptor(kind=" + resourceKind.logicalName + ", page=" + pageIndex + ")"
 
     companion object {
-        private const val DESCRIPTOR_VERSION = 1
         private const val MAX_DESCRIPTOR_ENCODING_SIZE = 384 * 1024
         private const val MAX_ROUTE_ENCODING_SIZE = 128 * 1024
         private const val MAX_PROOF_ENCODING_SIZE = 160 * 1024
@@ -580,9 +683,6 @@ class AkenRuntimePageDescriptor private constructor(
                 "AKEN runtime page descriptor encoding length is invalid"
             }
             val reader = AkenRuntimeDescriptorReader(encoded)
-            require(reader.readUnsignedByte("AKEN runtime page descriptor version") == DESCRIPTOR_VERSION) {
-                "unsupported AKEN runtime page descriptor version"
-            }
             var routeBytes: ByteArray? = null
             var proofBytes: ByteArray? = null
             var evaluatorBytes: ByteArray? = null
@@ -648,15 +748,15 @@ class AkenRuntimePageDescriptor private constructor(
                     "AKEN runtime evaluator fingerprint does not match the page handle"
                 }
                 require(
-                    evaluatorPlan.matchesPageBinding(
-                        identity.resourceKind,
-                        checkNotNull(logicalIdentity),
-                        identity.pageIndex,
-                        targetPageSize,
-                        route.codecVariant,
-                        route.layoutVariant,
-                        checkNotNull(handleEncoding),
-                        checkNotNull(locatorToken),
+                    evaluatorPlan.matchesDescriptorBinding(
+                        resourceKind = identity.resourceKind,
+                        logicalIdentity = checkNotNull(logicalIdentity),
+                        pageIndex = identity.pageIndex,
+                        targetPageSize = targetPageSize,
+                        route = route,
+                        proof = proof,
+                        handleEncoding = checkNotNull(handleEncoding),
+                        locatorToken = checkNotNull(locatorToken),
                     ),
                 ) { "AKEN runtime evaluator graph binding is invalid" }
             } finally {

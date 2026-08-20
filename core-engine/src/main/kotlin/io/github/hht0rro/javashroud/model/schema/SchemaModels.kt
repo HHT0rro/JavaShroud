@@ -53,6 +53,16 @@ fun VariantRequirement.toJsonMap(): Map<String, Any> = buildMap {
     if (requiresAnyPassIds.isNotEmpty()) put("requiresAnyPassIds", requiresAnyPassIds)
 }
 
+data class ModuleTargetingCapability(
+    val supported: Boolean,
+    val targetKinds: List<String>,
+)
+
+fun ModuleTargetingCapability.toJsonMap(): Map<String, Any> = mapOf(
+    "supported" to supported,
+    "targetKinds" to targetKinds,
+)
+
 data class ModuleDefinition(
     val id: String,
     val name: String,
@@ -69,6 +79,7 @@ data class ModuleDefinition(
     val variantRequirements: List<VariantRequirement> = emptyList(),
     val defaultEnabled: Boolean = true,
     val requiresOptIn: Boolean = false,
+    val targeting: ModuleTargetingCapability,
 )
 
 fun ModuleDefinition.toJsonMap(): Map<String, Any> = buildMap {
@@ -87,6 +98,7 @@ fun ModuleDefinition.toJsonMap(): Map<String, Any> = buildMap {
     if (requiredPassIds.isNotEmpty()) put("requiredPassIds", requiredPassIds)
     if (requiresAnyPassIds.isNotEmpty()) put("requiresAnyPassIds", requiresAnyPassIds)
     if (variantRequirements.isNotEmpty()) put("variantRequirements", variantRequirements.map(VariantRequirement::toJsonMap))
+    put("targeting", targeting.toJsonMap())
 }
 
 fun ModuleDefinition.requiredPassIdsFor(params: Map<String, JsonNode>): List<String> =

@@ -1,6 +1,7 @@
 package io.github.hht0rro.javashroud.capabilities
 
 import io.github.hht0rro.javashroud.model.schema.ParamSchema
+import io.github.hht0rro.javashroud.model.schema.ModuleTargetingCapability
 import io.github.hht0rro.javashroud.model.schema.VariantRequirement
 
 private const val schemaVersion: String = "2"
@@ -23,6 +24,7 @@ internal data class CapabilityBinding(
     val variantRequirements: List<VariantRequirement> = emptyList(),
     val defaultEnabled: Boolean = true,
     val requiresOptIn: Boolean = false,
+    val targeting: ModuleTargetingCapability,
 )
 
 fun engineSchemaVersion(): String = schemaVersion

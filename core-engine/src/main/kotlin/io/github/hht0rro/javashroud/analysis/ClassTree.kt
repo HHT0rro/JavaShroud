@@ -22,6 +22,7 @@ internal fun buildPackageNode(packageName: String, classSummaries: List<ClassAna
         label = packageLabel,
         qualifiedName = if (packageName.isBlank()) "<default>" else packageName.replace('/', '.'),
         internalName = packageName,
+        selector = if (packageName.isBlank()) "*" else "$packageName/*",
         kind = "package",
         children = classSummaries.map(::buildClassNode),
     )
@@ -34,6 +35,7 @@ private fun buildClassNode(classSummary: ClassAnalysisSummary): ClassTreeNode {
         label = label,
         qualifiedName = classSummary.internalName.replace('/', '.'),
         internalName = classSummary.internalName,
+        selector = classSummary.internalName,
         kind = "class",
         children = buildMemberNodes(classSummary),
     )
@@ -57,6 +59,7 @@ private fun buildMemberNode(classSummary: ClassAnalysisSummary, memberSummary: M
         label = "${memberSummary.name} ${memberSummary.descriptor}",
         qualifiedName = "${classSummary.internalName.replace('/', '.')}#${memberSummary.name}${memberSummary.descriptor}",
         internalName = target,
+        selector = target,
         kind = memberKind,
         children = emptyList(),
     )

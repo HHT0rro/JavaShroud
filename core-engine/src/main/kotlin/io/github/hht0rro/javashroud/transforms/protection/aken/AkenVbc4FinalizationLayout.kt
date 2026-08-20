@@ -738,8 +738,8 @@ internal class AkenVbc4FinalizationLayout private constructor(
     companion object {
         /**
          * Materializes one pre-seal AKEN page layout using a plan already bound
-         * to [commitment]. VBC4, typed StringPage, and encrypted ClassPage
-         * records enter the same page materializer, so their descriptors share one canonical artifact
+         * to [commitment]. VBC4, typed StringPage, encrypted ClassPage, and
+         * NativeChunk records enter the same page materializer, so their descriptors share one canonical artifact
          * commitment and one full-payload Merkle mesh.
          *
          * The supplied plan and every pending candidate are consumed and wiped
@@ -754,12 +754,14 @@ internal class AkenVbc4FinalizationLayout private constructor(
             fixedEntries: Iterable<AkenArtifactEntry>,
             pendingStringPages: Iterable<AkenPendingStringPage> = emptyList(),
             pendingClassPages: Iterable<AkenPendingClassPage> = emptyList(),
+            pendingNativeChunks: Iterable<AkenPendingNativeChunk> = emptyList(),
             rootShardRanges: Iterable<AkenRootShardRange> = emptyList(),
             vbc4StateBindingLayoutDigest: ByteArray,
         ): AkenVbc4FinalizationLayout {
             val pages = ArrayList<AkenVbc4PendingPage>()
             val stringPages = ArrayList<AkenPendingStringPage>()
             val classPages = ArrayList<AkenPendingClassPage>()
+            val nativeChunks = ArrayList<AkenPendingNativeChunk>()
             val fixed = LinkedHashMap<String, ByteArray>()
             val pageBuffers = LinkedHashMap<String, ByteArray>()
             val expectedLengths = LinkedHashMap<String, Int>()
@@ -768,6 +770,7 @@ internal class AkenVbc4FinalizationLayout private constructor(
             val vbc4PageDefinitions = LinkedHashMap<String, AkenVbc4PendingPage>()
             val stringPageDefinitions = LinkedHashMap<String, AkenPendingStringPage>()
             val classPageDefinitions = LinkedHashMap<String, AkenPendingClassPage>()
+            val nativeChunkDefinitions = LinkedHashMap<String, AkenPendingNativeChunk>()
             val vbc4Requests = ArrayList<AkenVbc4PageEmissionRequest>()
             val materializationInputs = ArrayList<AkenPageMaterializationInput>()
             val emittedVbc4Pages = ArrayList<AkenVbc4PageEmission>()
@@ -825,7 +828,13 @@ internal class AkenVbc4FinalizationLayout private constructor(
                 for (page in pendingPages) pages += page
                 for (page in pendingStringPages) stringPages += page
                 for (page in pendingClassPages) classPages += page
-                require(pages.isNotEmpty() || stringPages.isNotEmpty() || classPages.isNotEmpty()) {
+                for (page in pendingNativeChunks) nativeChunks += page
+                require(
+                    pages.isNotEmpty() ||
+                        stringPages.isNotEmpty() ||
+                        classPages.isNotEmpty() ||
+                        nativeChunks.isNotEmpty(),
+                ) {
                     "AKEN finalization requires at least one pending page"
                 }
                 for (entry in fixedEntries) {
@@ -910,6 +919,28 @@ internal class AkenVbc4FinalizationLayout private constructor(
                         Arrays.fill(identity, 0)
                     }
                 }
+                nativeChunks.forEach { page ->
+                    val identity = page.copyLogicalIdentityForBuild()
+                    try {
+                        val definitionKey = finalizationPageKey(
+                            resourceKind = AkenResourceKind.NativeChunk,
+                            logicalIdentity = identity,
+                            pageIndex = page.pageIndex,
+                        )
+                        require(nativeChunkDefinitions.put(definitionKey, page) == null) {
+                            "AKEN NativeChunk finalization contains duplicate logical identity/page index"
+                        }
+                        reservePhysicalRange(
+                            definitionKey = definitionKey,
+                            resourcePath = page.resourcePath,
+                            resourceOffset = page.resourceOffset,
+                            expectedLength = page.expectedStoredLength,
+                            ownerLabel = "NativeChunk",
+                        )
+                    } finally {
+                        Arrays.fill(identity, 0)
+                    }
+                }
 
                 validateNonOverlappingPageRanges(selfReferential)
                 val rootRangesByEntry = rootRanges.groupBy { it.entryName }
@@ -964,22 +995,32 @@ internal class AkenVbc4FinalizationLayout private constructor(
                 classPages.forEach { pending ->
                     materializationInputs += pending.toMaterializationInput(plan)
                 }
+                nativeChunks.forEach { pending ->
+                    materializationInputs += pending.toMaterializationInput(plan)
+                }
                 vbc4Requests.forEach { request ->
                     materializationInputs += request.toMaterializationInput()
                 }
-                require(materializationInputs.size == pages.size + stringPages.size + classPages.size) {
+                require(
+                    materializationInputs.size ==
+                        pages.size + stringPages.size + classPages.size + nativeChunks.size,
+                ) {
                     "AKEN finalization did not create one materialization input per page"
                 }
 
                 materialization = AkenPageMaterializer.materializeAndWipe(plan, materializationInputs)
                 val outputPages = checkNotNull(materialization).pagesForBuild()
-                require(outputPages.size == pages.size + stringPages.size + classPages.size) {
+                require(
+                    outputPages.size ==
+                        pages.size + stringPages.size + classPages.size + nativeChunks.size,
+                ) {
                     "AKEN finalization emitted an unexpected page count"
                 }
 
                 var materializedVbc4PageCount = 0
                 var materializedStringPageCount = 0
                 var materializedClassPageCount = 0
+                var materializedNativeChunkCount = 0
                 outputPages.forEach { materializedPage ->
                     val descriptor = materializedPage.descriptorForBuild
                     when (descriptor.resourceKind) {
@@ -1157,6 +1198,60 @@ internal class AkenVbc4FinalizationLayout private constructor(
                             }
                         }
 
+                        AkenResourceKind.NativeChunk -> {
+                            materializedNativeChunkCount += 1
+                            val identity = descriptor.logicalIdentity
+                            var proof: ByteArray? = null
+                            try {
+                                val definitionKey = finalizationPageKey(
+                                    resourceKind = AkenResourceKind.NativeChunk,
+                                    logicalIdentity = identity,
+                                    pageIndex = descriptor.pageIndex,
+                                )
+                                val pending = nativeChunkDefinitions[definitionKey]
+                                    ?: error("AKEN NativeChunk finalization emitted an unknown logical page")
+                                val route = descriptor.route
+                                require(descriptor.targetPageSize == pending.targetPageSize) {
+                                    "AKEN NativeChunk evaluator target size drifted from its reserved page"
+                                }
+                                require(
+                                    route.resourcePath == pending.resourcePath &&
+                                        route.resourceOffset == pending.resourceOffset &&
+                                        route.storedLength == expectedLengths.getValue(definitionKey),
+                                ) {
+                                    "AKEN NativeChunk finalization route drifted from its reservation"
+                                }
+                                require(materializedPage.encodedLength == expectedLengths.getValue(definitionKey)) {
+                                    "AKEN NativeChunk finalization payload length drifted from its reservation"
+                                }
+                                proof = descriptor.proof.callSiteProof
+                                val expectedProof = pending.copyCallSiteProofForBuild()
+                                try {
+                                    require(MessageDigest.isEqual(proof, expectedProof)) {
+                                        "AKEN NativeChunk finalization call-site proof drifted"
+                                    }
+                                } finally {
+                                    Arrays.fill(expectedProof, 0)
+                                }
+                                val payload = materializedPage.copyEncodedPayloadForBuild()
+                                try {
+                                    payload.copyInto(
+                                        destination = checkNotNull(pageBuffers[route.resourcePath]),
+                                        destinationOffset = route.resourceOffset,
+                                    )
+                                } finally {
+                                    Arrays.fill(payload, 0)
+                                }
+                                compilerInputs += AkenNativePageLocatorCompileInput.fromTypedPage(
+                                    descriptor = descriptor,
+                                    rawCallSiteProof = proof,
+                                )
+                            } finally {
+                                proof?.let { Arrays.fill(it, 0) }
+                                Arrays.fill(identity, 0)
+                            }
+                        }
+
                         else -> error("AKEN finalization received an unsupported typed page resource kind")
                     }
                 }
@@ -1168,6 +1263,9 @@ internal class AkenVbc4FinalizationLayout private constructor(
                 }
                 require(materializedClassPageCount == classPages.size) {
                     "AKEN finalization did not emit every ClassPage"
+                }
+                require(materializedNativeChunkCount == nativeChunks.size) {
+                    "AKEN finalization did not emit every NativeChunk"
                 }
                 require(compilerInputs.size == outputPages.size) {
                     "AKEN finalization did not create one native input per page"
@@ -1212,6 +1310,7 @@ internal class AkenVbc4FinalizationLayout private constructor(
                 pages.forEach { it.wipe() }
                 stringPages.forEach { it.wipe() }
                 classPages.forEach { it.wipe() }
+                nativeChunks.forEach { it.wipe() }
                 vbc4Requests.forEach { it.wipe() }
                 materializationInputs.forEach { it.wipe() }
                 fixed.values.forEach { Arrays.fill(it, 0) }
@@ -1231,7 +1330,8 @@ internal class AkenVbc4FinalizationLayout private constructor(
 
         /**
          * Computes the exact one-pass canonical commitment for pending VBC4,
-         * typed StringPage, and encrypted ClassPage records without consuming their plaintext owners.
+         * typed StringPage, encrypted ClassPage, and NativeChunk records without
+         * consuming their plaintext owners.
          * Callers initialize one [AkenBuildPlan] from the resulting commitment
          * and then hand the same candidates to [materializeAndWipe].
          */
@@ -1241,11 +1341,13 @@ internal class AkenVbc4FinalizationLayout private constructor(
             fixedEntries: Iterable<AkenArtifactEntry>,
             pendingStringPages: Iterable<AkenPendingStringPage> = emptyList(),
             pendingClassPages: Iterable<AkenPendingClassPage> = emptyList(),
+            pendingNativeChunks: Iterable<AkenPendingNativeChunk> = emptyList(),
             rootShardRanges: Iterable<AkenRootShardRange> = emptyList(),
         ): AkenArtifactCommitment {
             val pages = ArrayList<AkenVbc4PendingPage>()
             val stringPages = ArrayList<AkenPendingStringPage>()
             val classPages = ArrayList<AkenPendingClassPage>()
+            val nativeChunks = ArrayList<AkenPendingNativeChunk>()
             val fixed = LinkedHashMap<String, ByteArray>()
             val pageBuffers = LinkedHashMap<String, ByteArray>()
             val selfReferential = LinkedHashMap<String, MutableList<AkenCanonicalExclusionRange>>()
@@ -1295,7 +1397,13 @@ internal class AkenVbc4FinalizationLayout private constructor(
                 for (page in pendingPages) pages += page
                 for (page in pendingStringPages) stringPages += page
                 for (page in pendingClassPages) classPages += page
-                require(pages.isNotEmpty() || stringPages.isNotEmpty() || classPages.isNotEmpty()) {
+                for (page in pendingNativeChunks) nativeChunks += page
+                require(
+                    pages.isNotEmpty() ||
+                        stringPages.isNotEmpty() ||
+                        classPages.isNotEmpty() ||
+                        nativeChunks.isNotEmpty(),
+                ) {
                     "AKEN finalization requires at least one pending page"
                 }
                 for (entry in fixedEntries) {
@@ -1352,6 +1460,24 @@ internal class AkenVbc4FinalizationLayout private constructor(
                             resourceOffset = page.resourceOffset,
                             expectedLength = page.expectedStoredLength,
                             ownerLabel = "ClassPage",
+                        )
+                    } finally {
+                        Arrays.fill(identity, 0)
+                    }
+                }
+                nativeChunks.forEach { page ->
+                    val identity = page.copyLogicalIdentityForBuild()
+                    try {
+                        reservePhysicalRange(
+                            definitionKey = finalizationPageKey(
+                                resourceKind = AkenResourceKind.NativeChunk,
+                                logicalIdentity = identity,
+                                pageIndex = page.pageIndex,
+                            ),
+                            resourcePath = page.resourcePath,
+                            resourceOffset = page.resourceOffset,
+                            expectedLength = page.expectedStoredLength,
+                            ownerLabel = "NativeChunk",
                         )
                     } finally {
                         Arrays.fill(identity, 0)

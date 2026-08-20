@@ -73,9 +73,13 @@ fun renameMethods(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, para
     }
 
     val entryPointMethodKeys = entryPointMethodKeys(workingArtifact).intersect(methodRenameMap.keys)
+    val reflectionLookupNames = reflectionLookupMethodNames(workingArtifact)
+    val reflectionBridgeMethodKeys = methodRenameMap.keys
+        .filter { key -> key.name in reflectionLookupNames }
+        .toSet()
     val bridgeMethodKeys = methodRenameMap.keys.filter { key ->
         methodSignature(key.name, key.descriptor) in externallyBoundSignatures
-    }.toSet() + entryPointMethodKeys
+    }.toSet() + entryPointMethodKeys + reflectionBridgeMethodKeys
     val nativeMethodKeys = nativeMethodKeys(workingArtifact).intersect(methodRenameMap.keys)
     val methodStringRewriteMap = methodReflectionStringRewriteMap(methodRenameMap)
     val updatedClassArtifacts = workingArtifact.classArtifacts.map { classArtifact ->

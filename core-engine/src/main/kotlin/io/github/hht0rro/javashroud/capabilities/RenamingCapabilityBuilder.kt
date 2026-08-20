@@ -83,6 +83,7 @@ private val methodRenamingParams = renamingParams + listOf(
 
 internal fun renamingCapabilityBindings(): List<CapabilityBinding> = listOf(
     CapabilityBinding(
+        targeting = CLASS_TARGETING,
         id = "rename-classes",
         name = "Rename Classes",
         description = "Rename matched classes and rewrite bytecode references with configurable dictionary styles, " +
@@ -95,6 +96,7 @@ internal fun renamingCapabilityBindings(): List<CapabilityBinding> = listOf(
         params = renamingParams,
     ),
     CapabilityBinding(
+        targeting = CLASS_TARGETING,
         id = "rename-packages",
         name = "Rename Packages",
         description = "Randomize package paths for matched classes with configurable depth preservation, " +
@@ -107,6 +109,7 @@ internal fun renamingCapabilityBindings(): List<CapabilityBinding> = listOf(
         params = packageRenamingParams,
     ),
     CapabilityBinding(
+        targeting = CLASS_AND_METHOD_TARGETING,
         id = "rename-methods",
         name = "Rename Methods",
         description = "Rename matched methods with configurable dictionary styles, seed-based deterministic naming, " +
@@ -119,6 +122,7 @@ internal fun renamingCapabilityBindings(): List<CapabilityBinding> = listOf(
         params = methodRenamingParams,
     ),
     CapabilityBinding(
+        targeting = CLASS_TARGETING,
         id = "rename-fields",
         name = "Rename Fields",
         description = "Rename matched fields with configurable dictionary styles and collision policies.",

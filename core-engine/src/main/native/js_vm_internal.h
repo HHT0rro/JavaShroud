@@ -62,10 +62,14 @@ typedef struct {
     unsigned char is_class_loader_define_class;
     unsigned char is_class_loader_load_class;
     unsigned char is_self_call;
+    uint32_t generation;
+    uintptr_t loader_identity;
+    unsigned char owner_identity[32];
+    unsigned char abi_version;
     unsigned char method_identity[32];
     char *type_name;
 } js_vm_symbol_cache_entry;
-typedef struct js_vm_program { js_vm_cp *cp; int cp_count; js_vm_insn *insns; int insn_count; int borrowed_insns; int borrowed_insn_operands; int cached_execution_ready; js_vm_reg_program reg_program; js_vm_exception *exceptions; int exception_count; int borrowed_exceptions; int cfg_exceptions_decoded; int max_stack; int max_locals; int mac_key; int build_seed; int key_mask; uint32_t resident_rotation_epoch; unsigned char nonce[16]; unsigned char session_leaf[32]; unsigned char session_tag[32]; int session_bound; int metadata_cp_index; uint32_t method_local_profile; uint32_t native_vm_profile_id; uint32_t dispatch_profile_tag; uint32_t vbc4_flags; uint32_t nested_vm_profile; jlong entry_token; char return_desc; unsigned char method_identity[32]; unsigned char owner_identity[32]; char *argument_tags; int argument_count; char *resource_path; unsigned char is_static; js_vm_symbol_cache_entry *symbols; int symbol_count; int symbol_capacity; struct js_vm_program *symbol_cache_owner; } js_vm_program;
+typedef struct js_vm_program { js_vm_cp *cp; int cp_count; js_vm_insn *insns; int insn_count; int borrowed_insns; int borrowed_insn_operands; int cached_execution_ready; js_vm_reg_program reg_program; js_vm_exception *exceptions; int exception_count; int borrowed_exceptions; int cfg_exceptions_decoded; int max_stack; int max_locals; int mac_key; int build_seed; int key_mask; uint32_t resident_rotation_epoch; unsigned char nonce[16]; unsigned char session_layout_digest[32]; int session_layout_digest_bound; unsigned char session_leaf[32]; unsigned char session_tag[32]; int session_bound; int metadata_cp_index; uint32_t method_local_profile; uint32_t native_vm_profile_id; uint32_t dispatch_profile_tag; uint32_t vbc4_flags; uint32_t nested_vm_profile; jlong entry_token; char return_desc; unsigned char method_identity[32]; unsigned char owner_identity[32]; char *argument_tags; int argument_count; char *resource_path; unsigned char is_static; js_vm_symbol_cache_entry *symbols; int symbol_count; int symbol_capacity; struct js_vm_program *symbol_cache_owner; } js_vm_program;
 typedef struct { jbyteArray bytes; jobject loader; } js_vm_loaded_resource;
 typedef struct js_vm_ephemeral_cache_entry {
     jlong entry_token;
@@ -74,6 +78,30 @@ typedef struct js_vm_ephemeral_cache_entry {
     struct js_vm_ephemeral_cache_entry *next;
 } js_vm_ephemeral_cache_entry;
 typedef struct { int type; jint i; jlong l; jfloat f; jdouble d; jobject o; int uninit_id; const char *uninit_type; } js_vm_value;
+
+/* Per-thread VM execution arena.  The arena owns only private, mutable
+ * execution buffers; resident artifact state (constant pool, symbols and
+ * operand storage) remains bound to the current program/session.  Frames are
+ * acquired from a bounded pool in js_vm_core.c and are never shared by two
+ * active executions. */
+typedef struct js_vm_execution_frame {
+    js_vm_insn *insns;
+    js_vm_value *locals;
+    js_vm_value *stack;
+    jint *operand_scratch;
+    size_t insn_capacity;
+    size_t locals_capacity;
+    size_t stack_capacity;
+    size_t operand_capacity;
+    unsigned int generation;
+    unsigned int depth;
+    unsigned int active;
+    unsigned int tls_owned;
+    unsigned int fallback_state_slot;
+    uintptr_t owner_thread;
+    const js_vm_program *owner_program;
+} js_vm_execution_frame;
+
 typedef struct { char *owner; char *name; char *desc; } js_vm_method_ref;
 typedef struct { int ok; jobject value; } js_vm_object_result;
 

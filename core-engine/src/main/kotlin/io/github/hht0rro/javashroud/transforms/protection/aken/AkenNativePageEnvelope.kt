@@ -302,7 +302,6 @@ internal class AkenNativePageEnvelope private constructor(
     fun encode(): ByteArray {
         requireLive()
         return ByteArrayOutputStream(encodedSize).use { out ->
-            out.write(ENVELOPE_VERSION)
             out.write(formValue.id)
             writeLong(out, entryToken)
             out.write(resourceKind.id)
@@ -426,12 +425,10 @@ internal class AkenNativePageEnvelope private constructor(
         /** Bounded native locator-record maximum; it matches the raw-proof ABI cap without sharing its transport role. */
         internal const val MAX_ENCODED_SIZE: Int = 4096
 
-        private const val ENVELOPE_VERSION: Int = 1
         private const val MAX_CALL_SITE_PROOF_SIZE: Int = 4096
         private const val BINDING_DIGEST_SIZE: Int = 32
         private const val FIXED_WIRE_SIZE: Int =
-            1 + // version
-                1 + // form
+            1 + // form
                 Long.SIZE_BYTES +
                 1 + // resource kind
                 Int.SIZE_BYTES +
@@ -444,10 +441,10 @@ internal class AkenNativePageEnvelope private constructor(
                 BINDING_DIGEST_SIZE + // route binding
                 BINDING_DIGEST_SIZE // complete envelope binding
 
-        private val DESCRIPTOR_BINDING_DOMAIN = "AKEN-v4-native-page-envelope-descriptor-v1".encodeToByteArray()
-        private val CALL_SITE_BINDING_DOMAIN = "AKEN-v4-native-page-envelope-call-site-v1".encodeToByteArray()
-        private val ROUTE_BINDING_DOMAIN = "AKEN-v4-native-page-envelope-route-v1".encodeToByteArray()
-        private val ENVELOPE_BINDING_DOMAIN = "AKEN-v4-native-page-envelope-v1".encodeToByteArray()
+        private val DESCRIPTOR_BINDING_DOMAIN = "page-envelope-descriptor".encodeToByteArray()
+        private val CALL_SITE_BINDING_DOMAIN = "page-envelope-call-site".encodeToByteArray()
+        private val ROUTE_BINDING_DOMAIN = "page-envelope-route".encodeToByteArray()
+        private val ENVELOPE_BINDING_DOMAIN = "page-envelope".encodeToByteArray()
 
         /**
          * Captures and validates exactly one descriptor/page request. The
@@ -527,9 +524,6 @@ internal class AkenNativePageEnvelope private constructor(
                 "AKEN native page envelope encoding length is invalid"
             }
             val reader = EnvelopeReader(encoded)
-            require(reader.readUnsignedByte("AKEN native page envelope version") == ENVELOPE_VERSION) {
-                "unsupported AKEN native page envelope version"
-            }
             val form = Form.fromId(reader.readUnsignedByte("AKEN native page envelope form"))
                 ?: throw IllegalArgumentException("unknown AKEN native page envelope form")
             val entryToken = reader.readLong("AKEN native page envelope entry token")

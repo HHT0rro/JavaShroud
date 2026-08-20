@@ -10,11 +10,16 @@
 #include "js_vm_core.h"
 #include "js_vm_symbol.h"
 #include "native_secrets.inc"
+#ifndef ZSTD_STATIC_LINKING_ONLY
+#define ZSTD_STATIC_LINKING_ONLY
+#endif
 #include "zstd.h"
 
 #include <limits.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
+#include <stdint.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -25,7 +30,33 @@
 
 #define JS_VM_CALL_GATE_SIZE 8192
 #define JS_VM_PRELOAD_WAIT_ATTEMPTS 10000
+/* Resource aliases and commitments are installed once per artifact/session.
+ * Keep the lookup tables bounded and power-of-two sized so the hot path uses
+ * open addressing instead of scanning the full registration arrays. */
+#define JS_VM_RESOURCE_INDEX_SIZE 16384u
 
+#if defined(JS_AKEN_TYPED_ONLY_RUNTIME) && JS_AKEN_TYPED_ONLY_RUNTIME
+/*
+ * New AKEN output no longer uses the legacy VBC4 sliced-manifest protocol.
+ * Keep the compatibility parser fail-closed without materializing its fixed
+ * magic in the native image: static artifact scans must not find a reusable
+ * `VBC4S|1|` protocol marker in an AKEN v4 direct kernel.
+ */
+static int js_aken_legacy_manifest_prefix_matches(const unsigned char *bytes, size_t length) {
+    return bytes != NULL && length >= 8u &&
+        bytes[0] == (unsigned char)'V' && bytes[1] == (unsigned char)'B' &&
+        bytes[2] == (unsigned char)'C' && bytes[3] == (unsigned char)'4' &&
+        bytes[4] == (unsigned char)'S' && bytes[5] == (unsigned char)'|' &&
+        bytes[6] == (unsigned char)'1' && bytes[7] == (unsigned char)'|';
+}
+
+static int js_aken_legacy_manifest_header_matches(const char *magic, const char *version) {
+    return magic != NULL && version != NULL &&
+        magic[0] == 'V' && magic[1] == 'B' && magic[2] == 'C' &&
+        magic[3] == '4' && magic[4] == 'S' && magic[5] == 0 &&
+        version[0] == '1' && version[1] == 0;
+}
+#else
 #ifndef JS_VBC4_MANIFEST_MAGIC
 #define JS_VBC4_MANIFEST_MAGIC "VBC4S"
 #endif
@@ -33,10 +64,12 @@
 #define JS_VBC4_MANIFEST_VERSION "1"
 #endif
 #define JS_VBC4_MANIFEST_PREFIX JS_VBC4_MANIFEST_MAGIC "|" JS_VBC4_MANIFEST_VERSION "|"
+#endif
 
 typedef struct {
     char original[JS_VM_CALL_GATE_KEY_LEN];
     char sealed[JS_VM_CALL_GATE_KEY_LEN];
+    uint32_t original_hash;
     int active;
 } js_vm_resource_alias_entry;
 
@@ -45,13 +78,18 @@ typedef struct {
     int raw_len;
     int partition_id;
     unsigned char digest[32];
+    uint32_t path_hash;
 } js_vm_resource_commitment;
 
 static js_vm_call_gate_entry js_vm_call_gate[JS_VM_CALL_GATE_SIZE];
 static js_vm_resource_alias_entry js_vm_resource_aliases[JS_VM_CALL_GATE_SIZE];
+/* Values are entry index + 1; zero is an empty slot. */
+static uint16_t js_vm_resource_alias_index[JS_VM_RESOURCE_INDEX_SIZE];
 static int js_vm_call_gate_count = 0;
 static js_vm_resource_commitment *js_vm_commitments = NULL;
 static int js_vm_commitment_count = 0;
+static uint16_t *js_vm_commitment_index = NULL;
+static size_t js_vm_commitment_index_capacity = 0;
 static js_vm_ephemeral_cache_entry *js_vm_ephemeral_cache = NULL;
 #ifdef _WIN32
 static CRITICAL_SECTION js_vm_cache_lock;
@@ -60,6 +98,102 @@ static volatile LONG js_vm_cache_lock_ready = 0;
 static pthread_mutex_t js_vm_cache_lock = PTHREAD_MUTEX_INITIALIZER;
 #endif
 JS_HIDDEN volatile int js_vm_preload_in_progress = 0;
+
+/* Incremented whenever the authenticated resource index/session is replaced
+ * or cleared.  It is public only as an opaque generation value so per-thread
+ * decompression/JNI caches can reject stale state without retaining secrets. */
+static _Atomic unsigned int js_vm_resource_session_generation = 1u;
+
+JS_HIDDEN unsigned int js_vm_resource_session_generation_current(void) {
+    unsigned int generation = atomic_load_explicit(&js_vm_resource_session_generation, memory_order_acquire);
+    return generation != 0u ? generation : 1u;
+}
+
+static void js_vm_resource_session_generation_bump(void) {
+    unsigned int current = atomic_load_explicit(&js_vm_resource_session_generation, memory_order_relaxed);
+    for (;;) {
+        unsigned int next = current + 1u;
+        if (next == 0u) next = 1u;
+        if (atomic_compare_exchange_weak_explicit(
+                &js_vm_resource_session_generation,
+                &current,
+                next,
+                memory_order_release,
+                memory_order_relaxed)) return;
+    }
+}
+
+static uint32_t js_vm_resource_hash(const char *text) {
+    uint32_t hash = 2166136261u;
+    if (!text) return hash;
+    for (const unsigned char *p = (const unsigned char *)text; *p; ++p) {
+        hash ^= (uint32_t)*p;
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+static int js_vm_resource_alias_lookup_locked(const char *path, uint32_t hash) {
+    if (!path || !path[0]) return -1;
+    const uint32_t mask = JS_VM_RESOURCE_INDEX_SIZE - 1u;
+    uint32_t slot = hash & mask;
+    for (uint32_t probe = 0; probe < JS_VM_RESOURCE_INDEX_SIZE; ++probe) {
+        uint16_t encoded = js_vm_resource_alias_index[slot];
+        if (encoded == 0u) return -1;
+        int index = (int)encoded - 1;
+        if (index >= 0 && index < JS_VM_CALL_GATE_SIZE) {
+            js_vm_resource_alias_entry *entry = &js_vm_resource_aliases[index];
+            if (entry->active && entry->original_hash == hash && strcmp(entry->original, path) == 0) return index;
+        }
+        slot = (slot + 1u) & mask;
+    }
+    return -1;
+}
+
+static int js_vm_resource_alias_insert_locked(int index) {
+    if (index < 0 || index >= JS_VM_CALL_GATE_SIZE || !js_vm_resource_aliases[index].active) return 0;
+    const uint32_t mask = JS_VM_RESOURCE_INDEX_SIZE - 1u;
+    uint32_t slot = js_vm_resource_aliases[index].original_hash & mask;
+    for (uint32_t probe = 0; probe < JS_VM_RESOURCE_INDEX_SIZE; ++probe) {
+        if (js_vm_resource_alias_index[slot] == 0u) {
+            js_vm_resource_alias_index[slot] = (uint16_t)(index + 1);
+            return 1;
+        }
+        slot = (slot + 1u) & mask;
+    }
+    return 0;
+}
+
+static int js_vm_commitment_lookup_locked(const char *path, uint32_t hash) {
+    if (!path || !path[0] || !js_vm_commitment_index || js_vm_commitment_index_capacity == 0u) return -1;
+    const size_t mask = js_vm_commitment_index_capacity - 1u;
+    size_t slot = (size_t)hash & mask;
+    for (size_t probe = 0; probe < js_vm_commitment_index_capacity; ++probe) {
+        uint16_t encoded = js_vm_commitment_index[slot];
+        if (encoded == 0u) return -1;
+        int index = (int)encoded - 1;
+        if (index >= 0 && index < js_vm_commitment_count) {
+            js_vm_resource_commitment *entry = &js_vm_commitments[index];
+            if (entry->path_hash == hash && strcmp(entry->path, path) == 0) return index;
+        }
+        slot = (slot + 1u) & mask;
+    }
+    return -1;
+}
+
+static int js_vm_commitment_insert_locked(int index) {
+    if (index < 0 || index >= js_vm_commitment_count || !js_vm_commitment_index || js_vm_commitment_index_capacity == 0u) return 0;
+    const size_t mask = js_vm_commitment_index_capacity - 1u;
+    size_t slot = (size_t)js_vm_commitments[index].path_hash & mask;
+    for (size_t probe = 0; probe < js_vm_commitment_index_capacity; ++probe) {
+        if (js_vm_commitment_index[slot] == 0u) {
+            js_vm_commitment_index[slot] = (uint16_t)(index + 1);
+            return 1;
+        }
+        slot = (slot + 1u) & mask;
+    }
+    return 0;
+}
 
 JS_HIDDEN char js_vm_last_prepare_stage[96] = {0};
 
@@ -77,8 +211,189 @@ static int js_vm_prepare_stage_has_prefix(const char *prefix) {
     return n > 0 && strncmp(js_vm_last_prepare_stage, prefix, n) == 0;
 }
 
+typedef struct {
+    ZSTD_DCtx *dctx;
+    /* Static decoder workspace.  It holds only the per-thread decoder state;
+     * decompressed plaintext is always written directly to caller-owned
+     * output and never retained in this cache. */
+    unsigned char *scratch;
+    size_t scratch_capacity;
+    unsigned int dctx_is_static;
+    unsigned int generation;
+} js_vm_zstd_context_state;
+
+/* The decoder workspace is never sized from artifact-controlled plaintext
+ * length.  `ZSTD_estimateDCtxSize()` is a fixed implementation bound for the
+ * one-shot decoder used here; the explicit cap makes a future zstd update
+ * fail closed instead of retaining unbounded per-thread state. */
+#define JS_VM_ZSTD_SCRATCH_MAX ((size_t)256u * 1024u)
+
+static void js_vm_zstd_context_release_buffers(js_vm_zstd_context_state *state) {
+    if (!state) return;
+    if (state->dctx) {
+        if (!state->dctx_is_static) (void)ZSTD_freeDCtx(state->dctx);
+        state->dctx = NULL;
+        state->dctx_is_static = 0u;
+    }
+    if (state->scratch) {
+        /* Wipe the complete capacity, not just the last decoded length.  This
+         * keeps failed/short decodes from leaving bytes in a retained buffer. */
+        js_vbc4_wipe_volatile(state->scratch, state->scratch_capacity);
+        free(state->scratch);
+        state->scratch = NULL;
+        state->scratch_capacity = 0u;
+    }
+}
+
+static int js_vm_zstd_context_prepare_dctx(js_vm_zstd_context_state *state) {
+    if (!state) return 0;
+    if (state->dctx && state->dctx_is_static && state->scratch && state->scratch_capacity != 0u) return 1;
+    js_vm_zstd_context_release_buffers(state);
+    size_t workspace_size = ZSTD_estimateDCtxSize();
+    if (workspace_size == 0u || workspace_size > JS_VM_ZSTD_SCRATCH_MAX) return 0;
+    state->scratch = (unsigned char *)malloc(workspace_size);
+    if (!state->scratch) return 0;
+    state->scratch_capacity = workspace_size;
+    state->dctx = ZSTD_initStaticDCtx(state->scratch, state->scratch_capacity);
+    if (!state->dctx) {
+        js_vm_zstd_context_release_buffers(state);
+        return 0;
+    }
+    state->dctx_is_static = 1u;
+    return 1;
+}
+
+#ifdef _WIN32
+static DWORD js_vm_zstd_fls_index = FLS_OUT_OF_INDEXES;
+static volatile LONG js_vm_zstd_fls_state = 0;
+
+static VOID CALLBACK js_vm_zstd_context_destructor(PVOID value) {
+    js_vm_zstd_context_state *state = (js_vm_zstd_context_state *)value;
+    if (!state) return;
+    js_vm_zstd_context_release_buffers(state);
+    js_vbc4_wipe_volatile(state, sizeof(*state));
+    free(state);
+}
+
+static int js_vm_zstd_context_key_init(void) {
+    LONG state = InterlockedCompareExchange(&js_vm_zstd_fls_state, 2, 0);
+    if (state == 0) {
+        DWORD index = FlsAlloc(js_vm_zstd_context_destructor);
+        if (index == FLS_OUT_OF_INDEXES) {
+            InterlockedExchange(&js_vm_zstd_fls_state, -1);
+            return 0;
+        }
+        js_vm_zstd_fls_index = index;
+        InterlockedExchange(&js_vm_zstd_fls_state, 1);
+    } else {
+        while (js_vm_zstd_fls_state == 2) SwitchToThread();
+    }
+    return js_vm_zstd_fls_state == 1 && js_vm_zstd_fls_index != FLS_OUT_OF_INDEXES;
+}
+
+static js_vm_zstd_context_state *js_vm_zstd_context_get(void) {
+    if (!js_vm_zstd_context_key_init()) return NULL;
+    js_vm_zstd_context_state *state = (js_vm_zstd_context_state *)FlsGetValue(js_vm_zstd_fls_index);
+    if (!state) {
+        state = (js_vm_zstd_context_state *)calloc(1, sizeof(*state));
+        if (!state || !FlsSetValue(js_vm_zstd_fls_index, state)) {
+            if (state) free(state);
+            return NULL;
+        }
+    }
+    return state;
+}
+#else
+static pthread_key_t js_vm_zstd_context_key;
+static pthread_once_t js_vm_zstd_context_key_once = PTHREAD_ONCE_INIT;
+static volatile int js_vm_zstd_context_key_ready = 0;
+
+static void js_vm_zstd_context_destructor(void *value) {
+    js_vm_zstd_context_state *state = (js_vm_zstd_context_state *)value;
+    if (!state) return;
+    js_vm_zstd_context_release_buffers(state);
+    js_vbc4_wipe_volatile(state, sizeof(*state));
+    free(state);
+}
+
+static void js_vm_zstd_context_key_init_once(void) {
+    if (pthread_key_create(&js_vm_zstd_context_key, js_vm_zstd_context_destructor) == 0) {
+        js_vm_zstd_context_key_ready = 1;
+    }
+}
+
+static js_vm_zstd_context_state *js_vm_zstd_context_get(void) {
+    (void)pthread_once(&js_vm_zstd_context_key_once, js_vm_zstd_context_key_init_once);
+    if (!js_vm_zstd_context_key_ready) return NULL;
+    js_vm_zstd_context_state *state = (js_vm_zstd_context_state *)pthread_getspecific(js_vm_zstd_context_key);
+    if (!state) {
+        state = (js_vm_zstd_context_state *)calloc(1, sizeof(*state));
+        if (!state || pthread_setspecific(js_vm_zstd_context_key, state) != 0) {
+            if (state) free(state);
+            return NULL;
+        }
+    }
+    return state;
+}
+#endif
+
+#if defined(JS_ZSTD_CONTEXT_TEST_HOOKS) && JS_ZSTD_CONTEXT_TEST_HOOKS
+JS_HIDDEN size_t js_vm_zstd_scratch_capacity_current_thread(void) {
+#ifdef _WIN32
+    if (js_vm_zstd_fls_state != 1 || js_vm_zstd_fls_index == FLS_OUT_OF_INDEXES) return 0u;
+    js_vm_zstd_context_state *state = (js_vm_zstd_context_state *)FlsGetValue(js_vm_zstd_fls_index);
+#else
+    if (!js_vm_zstd_context_key_ready) return 0u;
+    js_vm_zstd_context_state *state = (js_vm_zstd_context_state *)pthread_getspecific(js_vm_zstd_context_key);
+#endif
+    return state ? state->scratch_capacity : 0u;
+}
+
+static volatile unsigned int js_vm_zstd_test_partial_output_wipe_seen = 0u;
+
+JS_HIDDEN void js_vm_zstd_test_reset_partial_output_observation(void) {
+    js_vm_zstd_test_partial_output_wipe_seen = 0u;
+}
+
+static void js_vm_zstd_test_observe_failure_output(const unsigned char *plain, size_t plain_len) {
+    unsigned char diff = 0u;
+    if (!plain || plain_len == 0u) return;
+    for (size_t index = 0u; index < plain_len; ++index) diff |= plain[index];
+    if (diff != 0u) js_vm_zstd_test_partial_output_wipe_seen = 1u;
+}
+
+JS_HIDDEN unsigned int js_vm_zstd_test_partial_output_wipe_observed(void) {
+    return js_vm_zstd_test_partial_output_wipe_seen;
+}
+#endif
+
+static void js_vm_zstd_wipe_failed_output(unsigned char *plain, size_t plain_len) {
+#if defined(JS_ZSTD_CONTEXT_TEST_HOOKS) && JS_ZSTD_CONTEXT_TEST_HOOKS
+    js_vm_zstd_test_observe_failure_output(plain, plain_len);
+#endif
+    js_vbc4_wipe_volatile(plain, plain_len);
+}
+
+static void js_vm_zstd_context_reset_current_thread(void) {
+#ifdef _WIN32
+    if (js_vm_zstd_fls_state != 1 || js_vm_zstd_fls_index == FLS_OUT_OF_INDEXES) return;
+    js_vm_zstd_context_state *state = (js_vm_zstd_context_state *)FlsGetValue(js_vm_zstd_fls_index);
+    if (!state) return;
+    js_vm_zstd_context_release_buffers(state);
+    js_vbc4_wipe_volatile(state, sizeof(*state));
+#else
+    if (!js_vm_zstd_context_key_ready) return;
+    js_vm_zstd_context_state *state = (js_vm_zstd_context_state *)pthread_getspecific(js_vm_zstd_context_key);
+    if (!state) return;
+    js_vm_zstd_context_release_buffers(state);
+    js_vbc4_wipe_volatile(state, sizeof(*state));
+#endif
+}
+
 JS_HIDDEN unsigned char* js_vbc4_zstd_decompress_owned(const unsigned char *stored, uint32_t stored_len, uint32_t plain_len) {
+    js_runtime_metrics_note_structure_check();
     if (!stored || stored_len == 0) return NULL;
+    js_runtime_metrics_note_length_check();
     if (stored_len == plain_len) {
         unsigned char *plain_copy = (unsigned char*)malloc((size_t)plain_len);
         if (!plain_copy) return NULL;
@@ -87,10 +402,51 @@ JS_HIDDEN unsigned char* js_vbc4_zstd_decompress_owned(const unsigned char *stor
     }
     unsigned char *plain = plain_len == 0 ? (unsigned char*)calloc(1, 1) : (unsigned char*)malloc((size_t)plain_len);
     if (!plain) return NULL;
-    size_t written = ZSTD_decompress(plain, (size_t)plain_len, stored, (size_t)stored_len);
-    if (ZSTD_isError(written) || written != (size_t)plain_len) {
-        js_vbc4_wipe_volatile(plain, (size_t)plain_len);
+#if defined(JS_ZSTD_CONTEXT_TEST_HOOKS) && JS_ZSTD_CONTEXT_TEST_HOOKS
+    /* Make the test-only observation deterministic: bytes written before a
+     * malformed-frame failure become nonzero, while untouched output remains
+     * zero and is still wiped by the production cleanup path. */
+    memset(plain, 0, (size_t)plain_len);
+#endif
+    js_vm_zstd_context_state *state = js_vm_zstd_context_get();
+    if (!state) {
+        js_vm_zstd_wipe_failed_output(plain, (size_t)plain_len);
         free(plain);
+        return NULL;
+    }
+    unsigned int generation = js_vm_resource_session_generation_current();
+    int reused = state->dctx != NULL && state->dctx_is_static != 0u && state->generation == generation;
+    if (state->generation != generation) {
+        js_vm_zstd_context_release_buffers(state);
+        state->generation = generation;
+    }
+    if (!js_vm_zstd_context_prepare_dctx(state)) {
+        js_vm_zstd_wipe_failed_output(plain, (size_t)plain_len);
+        free(plain);
+        return NULL;
+    }
+    if (reused) js_runtime_metrics_note_decompress_context_reuse();
+    size_t reset_status = ZSTD_DCtx_reset(state->dctx, ZSTD_reset_session_only);
+    if (ZSTD_isError(reset_status)) {
+        js_vm_zstd_context_release_buffers(state);
+        js_vm_zstd_wipe_failed_output(plain, (size_t)plain_len);
+        free(plain);
+        return NULL;
+    }
+    size_t written = ZSTD_decompressDCtx(state->dctx, plain, (size_t)plain_len, stored, (size_t)stored_len);
+    if (ZSTD_isError(written) || written != (size_t)plain_len) {
+        js_vm_zstd_wipe_failed_output(plain, (size_t)plain_len);
+        free(plain);
+        return NULL;
+    }
+    /* A resource session may be invalidated while the decoder is running on
+     * another thread.  Do not return bytes produced by a context that was
+     * valid only for the superseded generation. */
+    if (js_vm_resource_session_generation_current() != generation) {
+        js_vm_zstd_wipe_failed_output(plain, (size_t)plain_len);
+        free(plain);
+        js_vm_zstd_context_release_buffers(state);
+        state->generation = js_vm_resource_session_generation_current();
         return NULL;
     }
     return plain;
@@ -138,30 +494,68 @@ JS_HIDDEN int js_vm_resource_alias_register(const char *original_path, const cha
     /* Reject instead of truncating: aliases are authenticated path bindings. */
     if (strlen(original_path) >= JS_VM_CALL_GATE_KEY_LEN || strlen(sealed_path) >= JS_VM_CALL_GATE_KEY_LEN) return 0;
     if (strcmp(original_path, sealed_path) == 0) return 1;
-    for (int i = 0; i < JS_VM_CALL_GATE_SIZE; i++) {
-        if (js_vm_resource_aliases[i].active && strcmp(js_vm_resource_aliases[i].original, original_path) == 0) {
-            return strcmp(js_vm_resource_aliases[i].sealed, sealed_path) == 0;
+    const uint32_t original_hash = js_vm_resource_hash(original_path);
+    js_vm_cache_lock_enter();
+    int existing_index = js_vm_resource_alias_lookup_locked(original_path, original_hash);
+    if (existing_index >= 0) {
+        int result = strcmp(js_vm_resource_aliases[existing_index].sealed, sealed_path) == 0;
+        js_vm_cache_lock_leave();
+        return result;
+    }
+    /* A sealed route is an authenticated binding, not a shared alias bucket.
+     * Reject a second original path targeting the same sealed route so the
+     * immutable index cannot contain ambiguous duplicate aliases. */
+    for (int i = 0; i < JS_VM_CALL_GATE_SIZE; ++i) {
+        if (js_vm_resource_aliases[i].active && strcmp(js_vm_resource_aliases[i].sealed, sealed_path) == 0) {
+            js_vm_cache_lock_leave();
+            return 0;
+        }
+        /* The immutable index is keyed by a 32-bit path hash and then checks
+         * the full path.  A hash collision is still an ambiguous authenticated
+         * binding at registration time, so reject it rather than allowing two
+         * aliases to share one hash bucket. */
+        if (js_vm_resource_aliases[i].active &&
+            js_vm_resource_aliases[i].original_hash == original_hash &&
+            strcmp(js_vm_resource_aliases[i].original, original_path) != 0) {
+            js_vm_cache_lock_leave();
+            return 0;
         }
     }
     for (int i = 0; i < JS_VM_CALL_GATE_SIZE; i++) {
         if (!js_vm_resource_aliases[i].active) {
             js_vm_resource_aliases[i].active = 1;
+            js_vm_resource_aliases[i].original_hash = original_hash;
             strncpy(js_vm_resource_aliases[i].original, original_path, JS_VM_CALL_GATE_KEY_LEN - 1);
             strncpy(js_vm_resource_aliases[i].sealed, sealed_path, JS_VM_CALL_GATE_KEY_LEN - 1);
             js_vm_resource_aliases[i].original[JS_VM_CALL_GATE_KEY_LEN - 1] = 0;
             js_vm_resource_aliases[i].sealed[JS_VM_CALL_GATE_KEY_LEN - 1] = 0;
-            return 1;
+            if (js_vm_resource_alias_insert_locked(i)) {
+                js_vm_cache_lock_leave();
+                return 1;
+            }
+            js_vbc4_wipe_volatile(&js_vm_resource_aliases[i], sizeof(js_vm_resource_aliases[i]));
+            js_vm_cache_lock_leave();
+            return 0;
         }
     }
+    js_vm_cache_lock_leave();
     return 0;
 }
 
-JS_HIDDEN const char* js_vm_resource_alias_resolve(const char *path) {
-    if (!path || !path[0]) return path;
-    for (int i = 0; i < JS_VM_CALL_GATE_SIZE; i++) {
-        if (js_vm_resource_aliases[i].active && strcmp(js_vm_resource_aliases[i].original, path) == 0) return js_vm_resource_aliases[i].sealed;
+JS_HIDDEN int js_vm_resource_alias_resolve_copy(const char *path, char *out, size_t out_capacity) {
+    if (!path || !path[0] || !out || out_capacity == 0u || strlen(path) >= out_capacity) return 0;
+    const uint32_t hash = js_vm_resource_hash(path);
+    js_vm_cache_lock_enter();
+    int index = js_vm_resource_alias_lookup_locked(path, hash);
+    const char *resolved = index >= 0 ? js_vm_resource_aliases[index].sealed : path;
+    size_t resolved_len = strlen(resolved);
+    int ok = resolved_len < out_capacity;
+    if (ok) {
+        memcpy(out, resolved, resolved_len + 1u);
+        if (index >= 0) js_runtime_metrics_note_resource_index_hit();
     }
-    return path;
+    js_vm_cache_lock_leave();
+    return ok;
 }
 
 static uint32_t js_vm_call_gate_hash_token(jlong token) {
@@ -272,11 +666,31 @@ JS_HIDDEN js_vm_program* js_vm_call_gate_wait_for_program(jlong entry_token, con
     return js_vm_ephemeral_cache_get(entry_token, resource_path);
 }
 
+static void js_vm_commitments_reset_unlocked(void) {
+    if (js_vm_commitments) {
+        js_vbc4_wipe_volatile(js_vm_commitments, (size_t)js_vm_commitment_count * sizeof(*js_vm_commitments));
+        free(js_vm_commitments);
+    }
+    js_vm_commitments = NULL;
+    js_vm_commitment_count = 0;
+    if (js_vm_commitment_index) {
+        js_vbc4_wipe_volatile(js_vm_commitment_index, js_vm_commitment_index_capacity * sizeof(*js_vm_commitment_index));
+        free(js_vm_commitment_index);
+    }
+    js_vm_commitment_index = NULL;
+    js_vm_commitment_index_capacity = 0u;
+    js_vm_zstd_context_reset_current_thread();
+    js_vm_resource_session_generation_bump();
+}
+
 JS_HIDDEN void js_vm_call_gate_reset(void) {
+    js_vm_cache_lock_enter();
     js_vbc4_wipe_volatile(js_vm_call_gate, sizeof(js_vm_call_gate));
     js_vbc4_wipe_volatile(js_vm_resource_aliases, sizeof(js_vm_resource_aliases));
+    js_vbc4_wipe_volatile(js_vm_resource_alias_index, sizeof(js_vm_resource_alias_index));
     js_vm_call_gate_count = 0;
-    js_vm_commitments_reset();
+    js_vm_commitments_reset_unlocked();
+    js_vm_cache_lock_leave();
 }
 
 static int js_hex_nibble(char c) {
@@ -298,19 +712,16 @@ static int js_hex_bytes_to_buffer(const char *hex, size_t hex_len, unsigned char
 }
 
 JS_HIDDEN void js_vm_commitments_reset(void) {
-    if (js_vm_commitments) {
-        js_vbc4_wipe_volatile(js_vm_commitments, (size_t)js_vm_commitment_count * sizeof(*js_vm_commitments));
-        free(js_vm_commitments);
-    }
-    js_vm_commitments = NULL;
-    js_vm_commitment_count = 0;
+    js_vm_cache_lock_enter();
+    js_vm_commitments_reset_unlocked();
+    js_vm_cache_lock_leave();
 }
 
 JS_HIDDEN int js_vm_commitments_install(const unsigned char *bytes, int len) {
     if (!bytes || len <= 0) return 0;
     int expected = 0;
     for (int i = 0; i < len; i++) if ((i == 0 || bytes[i - 1] == '\n') && i + 2 < len && bytes[i] == 'R' && bytes[i + 1] == '|') expected++;
-    if (expected <= 0 || expected >= JS_VM_CALL_GATE_SIZE) return 0;
+    if (expected <= 0 || expected >= JS_VM_CALL_GATE_SIZE || expected >= (int)JS_VM_RESOURCE_INDEX_SIZE) return 0;
     js_vm_resource_commitment *parsed = (js_vm_resource_commitment*)calloc((size_t)expected, sizeof(*parsed));
     if (!parsed) return 0;
     int parsed_count = 0;
@@ -356,9 +767,40 @@ JS_HIDDEN int js_vm_commitments_install(const unsigned char *bytes, int len) {
         line_start = i + 1;
     }
     if (parsed_count != expected) goto fail;
-    js_vm_commitments_reset();
+    size_t index_capacity = 1u;
+    while (index_capacity < (size_t)parsed_count * 2u && index_capacity < JS_VM_RESOURCE_INDEX_SIZE) index_capacity <<= 1u;
+    if (index_capacity < (size_t)parsed_count * 2u || index_capacity > JS_VM_RESOURCE_INDEX_SIZE) goto fail;
+    uint16_t *index = (uint16_t *)calloc(index_capacity, sizeof(*index));
+    if (!index) goto fail;
+    for (int i = 0; i < parsed_count; ++i) {
+        parsed[i].path_hash = js_vm_resource_hash(parsed[i].path);
+        for (int prior = 0; prior < i; ++prior) {
+            /* Do not retain two authenticated routes under one hash.  The
+             * lookup compares the full path, but accepting a duplicate hash
+             * would make the immutable commitment index ambiguous under a
+             * collision and violate fail-closed duplicate registration. */
+            if (parsed[i].path_hash == parsed[prior].path_hash &&
+                strcmp(parsed[i].path, parsed[prior].path) != 0) {
+                goto fail;
+            }
+        }
+    }
+    js_vm_cache_lock_enter();
+    js_vm_commitments_reset_unlocked();
     js_vm_commitments = parsed;
     js_vm_commitment_count = parsed_count;
+    js_vm_commitment_index = index;
+    js_vm_commitment_index_capacity = index_capacity;
+    int indexed = 1;
+    for (int i = 0; i < parsed_count; ++i) {
+        if (!js_vm_commitment_insert_locked(i)) { indexed = 0; break; }
+    }
+    if (!indexed) {
+        js_vm_commitments_reset_unlocked();
+        js_vm_cache_lock_leave();
+        return 0;
+    }
+    js_vm_cache_lock_leave();
     return 1;
 fail:
     js_vbc4_wipe_volatile(parsed, (size_t)expected * sizeof(*parsed));
@@ -367,21 +809,31 @@ fail:
 }
 
 JS_HIDDEN int js_vm_commitment_matches(const char *path, const unsigned char *raw, int raw_len) {
-    if (!path || !raw || raw_len <= 0 || !js_vm_commitments || js_vm_commitment_count <= 0) return 0;
-    for (int i = 0; i < js_vm_commitment_count; i++) {
-        js_vm_resource_commitment *entry = &js_vm_commitments[i];
-        if (strcmp(entry->path, path) != 0) continue;
-        if (entry->raw_len != raw_len || raw_len < 27 || raw[0] != 'J' || raw[1] != 'S' || raw[2] != 'R' || raw[3] != 'P' || raw[4] != 7) return 0;
-        int partition_id = (int)raw[25] | ((int)raw[26] << 8);
-        if (partition_id != entry->partition_id) return 0;
-        unsigned char digest[32];
-        js_runtime_sha256(raw, raw_len, digest);
-        unsigned char diff = 0;
-        for (int j = 0; j < 32; j++) diff |= (unsigned char)(digest[j] ^ entry->digest[j]);
-        js_vbc4_wipe_volatile(digest, sizeof(digest));
-        return diff == 0;
+    js_runtime_metrics_note_structure_check();
+    if (!path || !raw || raw_len <= 0) return 0;
+    js_vm_resource_commitment entry;
+    memset(&entry, 0, sizeof(entry));
+    const uint32_t hash = js_vm_resource_hash(path);
+    js_vm_cache_lock_enter();
+    int index = js_vm_commitment_lookup_locked(path, hash);
+    if (index >= 0) {
+        entry = js_vm_commitments[index];
+        js_runtime_metrics_note_resource_index_hit();
     }
-    return 0;
+    js_vm_cache_lock_leave();
+    if (index < 0) return 0;
+    js_runtime_metrics_note_length_check();
+    if (entry.raw_len != raw_len || raw_len < 27 || raw[0] != 'J' || raw[1] != 'S' || raw[2] != 'R' || raw[3] != 'P' || raw[4] != 7) return 0;
+    int partition_id = (int)raw[25] | ((int)raw[26] << 8);
+    if (partition_id != entry.partition_id) return 0;
+    unsigned char digest[32];
+    js_runtime_metrics_note_digest_check();
+    js_runtime_sha256(raw, raw_len, digest);
+    unsigned char diff = 0;
+    for (int j = 0; j < 32; j++) diff |= (unsigned char)(digest[j] ^ entry.digest[j]);
+    js_vbc4_wipe_volatile(digest, sizeof(digest));
+    js_vbc4_wipe_volatile(&entry, sizeof(entry));
+    return diff == 0;
 }
 
 JS_HIDDEN int js_hex32_to_bytes(const char *hex, unsigned char out[32]) {
@@ -439,13 +891,16 @@ JS_HIDDEN char* js_next_manifest_field(char **cursor) {
 }
 
 static void js_vm_resource_clear_exception(JNIEnv *env) {
-    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if (env && (*env)->ExceptionCheck(env)) {
+        js_runtime_metrics_note_exception();
+        (*env)->ExceptionClear(env);
+    }
 }
 
 JS_HIDDEN jobject js_vm_class_resource_as_stream(JNIEnv *env, jobject class_obj, jstring resource_path) {
-    if (!class_obj || !resource_path || !js_jni_cache.initialized) return NULL;
+    if (!class_obj || !resource_path || !js_jni_cache_validate(env, (jclass)class_obj)) return NULL;
     jobject loader = (*env)->CallNonvirtualObjectMethod(env, class_obj, js_jni_cache.class_class, js_jni_cache.class_get_class_loader);
-    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); return NULL; }
+    if ((*env)->ExceptionCheck(env)) { js_vm_resource_clear_exception(env); return NULL; }
     const char *raw_path = j2c(env, resource_path);
     if (!raw_path) { js_vm_resource_clear_exception(env); return NULL; }
     char *resolved = NULL;
@@ -454,7 +909,7 @@ JS_HIDDEN jobject js_vm_class_resource_as_stream(JNIEnv *env, jobject class_obj,
     } else {
         jstring class_name_j = (jstring)(*env)->CallNonvirtualObjectMethod(env, class_obj, js_jni_cache.class_class, js_jni_cache.class_get_name);
         if ((*env)->ExceptionCheck(env) || !class_name_j) {
-            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+            if ((*env)->ExceptionCheck(env)) js_vm_resource_clear_exception(env);
         } else {
             const char *class_name = j2c(env, class_name_j);
             if (class_name) {
@@ -485,36 +940,37 @@ JS_HIDDEN jobject js_vm_class_resource_as_stream(JNIEnv *env, jobject class_obj,
 }
 
 JS_HIDDEN jobject js_vm_resource_from_loader(JNIEnv *env, jobject loader, jstring resourcePath) {
-    if (!loader || !resourcePath) return NULL;
-    jclass loader_cls = (*env)->GetObjectClass(env, loader);
-    if (!loader_cls) { js_vm_resource_clear_exception(env); return NULL; }
-    jmethodID get_resource = (*env)->GetMethodID(env, loader_cls, "getResourceAsStream", "(Ljava/lang/String;)Ljava/io/InputStream;");
-    (*env)->DeleteLocalRef(env, loader_cls);
-    if (!get_resource) { js_vm_resource_clear_exception(env); return NULL; }
-    jobject stream = (*env)->CallObjectMethod(env, loader, get_resource, resourcePath);
-    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); return NULL; }
+    if (!env || !loader || !resourcePath ||
+        !js_jni_cache_validate_loader(env, loader) ||
+        !js_jni_cache.class_loader_get_resource_as_stream) return NULL;
+    jobject stream = (*env)->CallObjectMethod(env, loader, js_jni_cache.class_loader_get_resource_as_stream, resourcePath);
+    if ((*env)->ExceptionCheck(env)) { js_vm_resource_clear_exception(env); return NULL; }
     return stream;
 }
 
 JS_HIDDEN jobject js_vm_context_class_loader(JNIEnv *env) {
-    jclass thread_cls = js_jni_cache.initialized ? js_jni_cache.thread_class : (*env)->FindClass(env, "java/lang/Thread");
+    if (!env || !js_jni_cache_validate(env, NULL) ||
+        !js_jni_cache.thread_class || !js_jni_cache.thread_current_thread ||
+        !js_jni_cache.thread_get_context_class_loader) return NULL;
+    jclass thread_cls = js_jni_cache.thread_class;
     if (!thread_cls) { js_vm_resource_clear_exception(env); return NULL; }
-    jmethodID current_thread = js_jni_cache.initialized ? js_jni_cache.thread_current_thread : (*env)->GetStaticMethodID(env, thread_cls, "currentThread", "()Ljava/lang/Thread;");
+    jmethodID current_thread = js_jni_cache.thread_current_thread;
     if (!current_thread) { js_vm_resource_clear_exception(env); return NULL; }
     jobject thread = (*env)->CallStaticObjectMethod(env, thread_cls, current_thread);
     if ((*env)->ExceptionCheck(env) || !thread) { js_vm_resource_clear_exception(env); return NULL; }
-    jclass thread_obj_cls = (*env)->GetObjectClass(env, thread);
-    if (!thread_obj_cls) { js_vm_resource_clear_exception(env); return NULL; }
-    jmethodID get_context_loader = (*env)->GetMethodID(env, thread_obj_cls, "getContextClassLoader", "()Ljava/lang/ClassLoader;");
-    (*env)->DeleteLocalRef(env, thread_obj_cls);
-    if (!get_context_loader) { js_vm_resource_clear_exception(env); return NULL; }
-    jobject loader = (*env)->CallObjectMethod(env, thread, get_context_loader);
-    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); return NULL; }
+    jobject loader = (*env)->CallObjectMethod(env, thread, js_jni_cache.thread_get_context_class_loader);
+    (*env)->DeleteLocalRef(env, thread);
+    if ((*env)->ExceptionCheck(env)) { js_vm_resource_clear_exception(env); return NULL; }
+    if (loader && !js_jni_cache_validate_loader(env, loader)) {
+        (*env)->DeleteLocalRef(env, loader);
+        return NULL;
+    }
     return loader;
 }
 
 JS_HIDDEN jobject js_vm_helper_class_loader(JNIEnv *env, jclass helper_cls) {
     if (!helper_cls) return NULL;
+    (void)js_jni_cache_validate(env, helper_cls);
     jclass class_cls = js_jni_cache.initialized ? js_jni_cache.class_class : (*env)->FindClass(env, "java/lang/Class");
     if (!class_cls) { js_vm_resource_clear_exception(env); return NULL; }
     jmethodID get_class_loader = js_jni_cache.initialized ? js_jni_cache.class_get_class_loader : (*env)->GetMethodID(env, class_cls, "getClassLoader", "()Ljava/lang/ClassLoader;");
@@ -526,6 +982,7 @@ JS_HIDDEN jobject js_vm_helper_class_loader(JNIEnv *env, jclass helper_cls) {
 
 static jobject js_vm_resource_from_helper_class(JNIEnv *env, jclass helper_cls, jstring resourcePath) {
     if (!helper_cls || !resourcePath) return NULL;
+    (void)js_jni_cache_validate(env, helper_cls);
     const char *path = j2c(env, resourcePath);
     if (!path) { js_vm_resource_clear_exception(env); return NULL; }
     size_t len = strlen(path);
@@ -543,13 +1000,11 @@ static jobject js_vm_resource_from_helper_class(JNIEnv *env, jclass helper_cls, 
     jmethodID get_resource = js_jni_cache.initialized ? js_jni_cache.class_get_resource_as_stream : (*env)->GetMethodID(env, class_cls, "getResourceAsStream", "(Ljava/lang/String;)Ljava/io/InputStream;");
     if (!get_resource) { js_vm_resource_clear_exception(env); return NULL; }
     jobject stream = (*env)->CallObjectMethod(env, helper_cls, get_resource, absolute_path);
-    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); return NULL; }
+    if ((*env)->ExceptionCheck(env)) { js_vm_resource_clear_exception(env); return NULL; }
     return stream;
 }
 
-static jbyteArray js_vm_read_stream_bytes_legacy(JNIEnv *env, jobject stream, jclass stream_cls, jmethodID close_mid) {
-    jmethodID read_mid = (*env)->GetMethodID(env, stream_cls, "read", "([B)I");
-    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); read_mid = NULL; }
+static jbyteArray js_vm_read_stream_bytes_legacy(JNIEnv *env, jobject stream, jmethodID read_mid) {
     if (!read_mid) return NULL;
     size_t capacity = 8192;
     size_t used = 0;
@@ -568,7 +1023,7 @@ static jbyteArray js_vm_read_stream_bytes_legacy(JNIEnv *env, jobject stream, jc
         if (!temp) { free(buffer); js_vm_resource_clear_exception(env); return NULL; }
         jint got = (*env)->CallIntMethod(env, stream, read_mid, temp);
         if ((*env)->ExceptionCheck(env)) {
-            (*env)->ExceptionClear(env);
+            js_vm_resource_clear_exception(env);
             (*env)->DeleteLocalRef(env, temp);
             free(buffer);
             return NULL;
@@ -592,7 +1047,6 @@ static jbyteArray js_vm_read_stream_bytes_legacy(JNIEnv *env, jobject stream, jc
         (*env)->DeleteLocalRef(env, temp);
         if (got == 0) break;
     }
-    (void)close_mid;
     jbyteArray result = (*env)->NewByteArray(env, (jsize)used);
     if (!result) { free(buffer); js_vm_resource_clear_exception(env); return NULL; }
     if (used > 0) (*env)->SetByteArrayRegion(env, result, 0, (jsize)used, (const jbyte*)buffer);
@@ -601,27 +1055,22 @@ static jbyteArray js_vm_read_stream_bytes_legacy(JNIEnv *env, jobject stream, jc
 }
 
 static jbyteArray js_vm_read_stream_bytes(JNIEnv *env, jobject stream) {
-    if (!stream) return NULL;
-    jbyteArray bytes = NULL;
-    jclass stream_cls = (*env)->GetObjectClass(env, stream);
-    if (stream_cls) {
-        jmethodID read_all = (*env)->GetMethodID(env, stream_cls, "readAllBytes", "()[B");
-        if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); read_all = NULL; }
-        jmethodID close = (*env)->GetMethodID(env, stream_cls, "close", "()V");
-        if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); close = NULL; }
-        if (read_all) {
-            (*env)->DeleteLocalRef(env, stream_cls);
-            bytes = (jbyteArray)(*env)->CallObjectMethod(env, stream, read_all);
-            if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); bytes = NULL; }
-        } else {
-            bytes = js_vm_read_stream_bytes_legacy(env, stream, stream_cls, close);
-            (*env)->DeleteLocalRef(env, stream_cls);
-        }
-        if (close) (*env)->CallVoidMethod(env, stream, close);
-        js_vm_resource_clear_exception(env);
-    } else {
-        js_vm_resource_clear_exception(env);
+    if (!env || !stream || !js_jni_cache_validate(env, NULL) ||
+        !js_jni_cache.input_stream_class ||
+        !(*env)->IsInstanceOf(env, stream, js_jni_cache.input_stream_class)) {
+        if (env) js_vm_resource_clear_exception(env);
+        return NULL;
     }
+    if ((*env)->ExceptionCheck(env)) { js_vm_resource_clear_exception(env); return NULL; }
+    jbyteArray bytes = NULL;
+    if (js_jni_cache.input_stream_read_all_bytes) {
+        bytes = (jbyteArray)(*env)->CallObjectMethod(env, stream, js_jni_cache.input_stream_read_all_bytes);
+        if ((*env)->ExceptionCheck(env)) { js_vm_resource_clear_exception(env); bytes = NULL; }
+    } else {
+        bytes = js_vm_read_stream_bytes_legacy(env, stream, js_jni_cache.input_stream_read);
+    }
+    if (js_jni_cache.input_stream_close) (*env)->CallVoidMethod(env, stream, js_jni_cache.input_stream_close);
+    js_vm_resource_clear_exception(env);
     return bytes;
 }
 
@@ -634,22 +1083,35 @@ JS_HIDDEN js_vm_loaded_resource js_vm_load_resource_bytes_with_loader(JNIEnv *en
     int loader_is_borrowed = 0;
     if (!js_vm_preload_in_progress) {
         loader = js_vm_get_active_host_loader();
+        loader_is_borrowed = loader != NULL;
         stream = js_vm_resource_from_loader(env, loader, resourcePath);
-        loader_is_borrowed = stream != NULL;
     }
     if (!stream) {
+        if (loader && !loader_is_borrowed) (*env)->DeleteLocalRef(env, loader);
+        loader = NULL;
+        loader_is_borrowed = 0;
         loader = js_vm_context_class_loader(env);
         stream = js_vm_resource_from_loader(env, loader, resourcePath);
     }
     if (!stream) {
+        if (loader && !loader_is_borrowed) (*env)->DeleteLocalRef(env, loader);
+        loader = NULL;
+        loader_is_borrowed = 0;
         loader = js_vm_helper_class_loader(env, helper_cls);
         stream = js_vm_resource_from_loader(env, loader, resourcePath);
     }
     if (!stream) {
+        if (loader && !loader_is_borrowed) (*env)->DeleteLocalRef(env, loader);
         loader = NULL;
+        loader_is_borrowed = 0;
         stream = js_vm_resource_from_helper_class(env, helper_cls, resourcePath);
     }
     result.bytes = js_vm_read_stream_bytes(env, stream);
+    if (stream) (*env)->DeleteLocalRef(env, stream);
+    if (!result.bytes && loader && !loader_is_borrowed) {
+        (*env)->DeleteLocalRef(env, loader);
+        loader = NULL;
+    }
     /* The active dispatch loader belongs to its enclosing VM execution scope.
      * js_vm_loaded_resource exposes only locally acquired fallback loaders for
      * caller cleanup; returning the borrowed active loader lets a page slice
@@ -661,17 +1123,27 @@ JS_HIDDEN js_vm_loaded_resource js_vm_load_resource_bytes_with_loader(JNIEnv *en
 
 JS_HIDDEN jbyteArray js_vm_load_resource_bytes(JNIEnv *env, jclass helper_cls, jstring resourcePath) {
     js_vm_loaded_resource loaded = js_vm_load_resource_bytes_with_loader(env, helper_cls, resourcePath);
+    if (loaded.loader) (*env)->DeleteLocalRef(env, loaded.loader);
     return loaded.bytes;
 }
 
 JS_HIDDEN unsigned char* js_vm_decode_resource_path_owned(JNIEnv *env, jclass helper_cls, const char *path, int *out_len) {
     if (!path || !path[0] || !out_len) return NULL;
-    const char *load_path = js_vm_resource_alias_resolve(path);
+    char load_path[JS_VM_CALL_GATE_KEY_LEN] = {0};
+    if (!js_vm_resource_alias_resolve_copy(path, load_path, sizeof(load_path))) return NULL;
     jstring path_j = (*env)->NewStringUTF(env, load_path);
-    if (!path_j) { js_clear_pending_exception(env); return NULL; }
+    if (!path_j) {
+        js_clear_pending_exception(env);
+        js_vbc4_wipe_volatile(load_path, sizeof(load_path));
+        return NULL;
+    }
     js_vm_loaded_resource loaded = js_vm_load_resource_bytes_with_loader(env, helper_cls, path_j);
     (*env)->DeleteLocalRef(env, path_j);
-    if (!loaded.bytes) return NULL;
+    if (!loaded.bytes) {
+        if (loaded.loader) (*env)->DeleteLocalRef(env, loaded.loader);
+        js_vbc4_wipe_volatile(load_path, sizeof(load_path));
+        return NULL;
+    }
     int raw_len = (*env)->GetArrayLength(env, loaded.bytes);
     jbyte *raw_bytes = raw_len > 0 ? (*env)->GetByteArrayElements(env, loaded.bytes, NULL) : NULL;
     unsigned char *decoded = NULL;
@@ -682,6 +1154,9 @@ JS_HIDDEN unsigned char* js_vm_decode_resource_path_owned(JNIEnv *env, jclass he
         js_vbc4_wipe_volatile(raw_bytes, (size_t)raw_len);
         (*env)->ReleaseByteArrayElements(env, loaded.bytes, raw_bytes, JNI_ABORT);
     }
+    if (loaded.bytes) (*env)->DeleteLocalRef(env, loaded.bytes);
+    if (loaded.loader) (*env)->DeleteLocalRef(env, loaded.loader);
+    js_vbc4_wipe_volatile(load_path, sizeof(load_path));
     return decoded;
 }
 
@@ -789,9 +1264,15 @@ JS_PROTECTED static int js_manifest_order_token(const char *mesh, uint32_t ordin
 }
 
 JS_HIDDEN unsigned char* js_vm_reassemble_sliced_resource(JNIEnv *env, jclass helper_cls, unsigned char *decoded, int decoded_len, int *out_len) {
+#if defined(JS_AKEN_TYPED_ONLY_RUNTIME) && JS_AKEN_TYPED_ONLY_RUNTIME
+    const size_t manifest_prefix_len = 8u;
+    if (!decoded || decoded_len <= (int)manifest_prefix_len || !out_len ||
+        !js_aken_legacy_manifest_prefix_matches(decoded, (size_t)decoded_len)) return decoded;
+#else
     const size_t manifest_prefix_len = sizeof(JS_VBC4_MANIFEST_PREFIX) - 1u;
     if (!decoded || decoded_len <= (int)manifest_prefix_len || !out_len ||
         memcmp(decoded, JS_VBC4_MANIFEST_PREFIX, manifest_prefix_len) != 0) return decoded;
+#endif
     char *manifest = (char*)calloc((size_t)decoded_len + 1u, 1u);
     if (!manifest) { js_vm_set_prepare_stage("reassemble-manifest-alloc"); return NULL; }
     memcpy(manifest, decoded, (size_t)decoded_len);
@@ -815,8 +1296,12 @@ JS_HIDDEN unsigned char* js_vm_reassemble_sliced_resource(JNIEnv *env, jclass he
     uint32_t shard_count = 0;
     uint32_t manifest_ordinal = 0;
     uint32_t manifest_entry_count = 0;
+#if defined(JS_AKEN_TYPED_ONLY_RUNTIME) && JS_AKEN_TYPED_ONLY_RUNTIME
+    if (!js_aken_legacy_manifest_header_matches(magic, version) ||
+#else
     if (!magic || strcmp(magic, JS_VBC4_MANIFEST_MAGIC) != 0 ||
         !version || strcmp(version, JS_VBC4_MANIFEST_VERSION) != 0 ||
+#endif
         !js_parse_u32_token(total_text, &total_len) || !js_parse_u32_token(count_text, &shard_count) ||
         !mesh_text || strlen(mesh_text) != 64u || !js_parse_u32_token(ordinal_text, &manifest_ordinal) ||
         !js_parse_u32_token(entry_count_text, &manifest_entry_count) || manifest_entry_count == 0 ||
@@ -1024,22 +1509,29 @@ JS_HIDDEN js_vm_program* js_vm_prepare_resource_program_bound(JNIEnv *env, jclas
         rls(env, resourcePath, resource_path);
         return NULL;
     }
-    const char *load_resource_path = js_vm_resource_alias_resolve(resource_path);
+    char load_resource_path[JS_VM_CALL_GATE_KEY_LEN] = {0};
+    if (!js_vm_resource_alias_resolve_copy(resource_path, load_resource_path, sizeof(load_resource_path))) {
+        rls(env, resourcePath, resource_path);
+        return NULL;
+    }
+#define JS_VM_PREPARE_RESOURCE_RETURN(value) do { \
+        js_vbc4_wipe_volatile(load_resource_path, sizeof(load_resource_path)); \
+        rls(env, resourcePath, resource_path); \
+        return (value); \
+    } while (0)
     jstring loadResourcePath = resourcePath;
-    if (load_resource_path && resource_path && strcmp(load_resource_path, resource_path) != 0) {
+    if (strcmp(load_resource_path, resource_path) != 0) {
         loadResourcePath = (*env)->NewStringUTF(env, load_resource_path);
         if (!loadResourcePath) {
             js_vm_clear_exception(env);
-            rls(env, resourcePath, resource_path);
-            return NULL;
+            JS_VM_PREPARE_RESOURCE_RETURN(NULL);
         }
     }
     js_vm_loaded_resource loaded = js_vm_load_resource_bytes_with_loader(env, resource_cls, loadResourcePath);
     if (loadResourcePath != resourcePath) (*env)->DeleteLocalRef(env, loadResourcePath);
     if (!loaded.bytes) {
         js_vm_set_prepare_stage("resource-load");
-        rls(env, resourcePath, resource_path);
-        return NULL;
+        JS_VM_PREPARE_RESOURCE_RETURN(NULL);
     }
     int decoded_len = 0;
     unsigned char *decoded = NULL;
@@ -1052,23 +1544,28 @@ JS_HIDDEN js_vm_program* js_vm_prepare_resource_program_bound(JNIEnv *env, jclas
         js_vbc4_wipe_volatile(raw_bytes, (size_t)raw_len);
         (*env)->ReleaseByteArrayElements(env, loaded.bytes, raw_bytes, JNI_ABORT);
     }
+    if (loaded.bytes) {
+        (*env)->DeleteLocalRef(env, loaded.bytes);
+        loaded.bytes = NULL;
+    }
+    if (loaded.loader) {
+        (*env)->DeleteLocalRef(env, loaded.loader);
+        loaded.loader = NULL;
+    }
     if (!decoded) {
         js_vm_set_prepare_stage("decode");
-        rls(env, resourcePath, resource_path);
-        return NULL;
+        JS_VM_PREPARE_RESOURCE_RETURN(NULL);
     }
     decoded = js_vm_reassemble_sliced_resource(env, resource_cls, decoded, decoded_len, &decoded_len);
     if (!decoded) {
         if (!js_vm_prepare_stage_has_prefix("reassemble-")) js_vm_set_prepare_stage("reassemble");
-        rls(env, resourcePath, resource_path);
-        return NULL;
+        JS_VM_PREPARE_RESOURCE_RETURN(NULL);
     }
     js_vm_program *parsed_program = (js_vm_program*)calloc(1, sizeof(js_vm_program));
     if (!parsed_program) {
         js_vbc4_wipe_volatile(decoded, (size_t)decoded_len);
         free(decoded);
-        rls(env, resourcePath, resource_path);
-        return NULL;
+        JS_VM_PREPARE_RESOURCE_RETURN(NULL);
     }
     unsigned char binding_buf[1200];
     const char *binding_resource_path = binding_path_override && binding_path_override[0] ? binding_path_override : (resource_path ? resource_path : "");
@@ -1080,9 +1577,8 @@ JS_HIDDEN js_vm_program* js_vm_prepare_resource_program_bound(JNIEnv *env, jclas
         free(decoded);
         js_vm_free_program(env, parsed_program);
         free(parsed_program);
-        rls(env, resourcePath, resource_path);
         js_vm_fail_closed(env, NULL);
-        return NULL;
+        JS_VM_PREPARE_RESOURCE_RETURN(NULL);
     }
     int parsed = binding_len > 0 ? js_vm_parse_program(decoded, decoded_len, parsed_program, binding_buf, binding_len) : 0;
     js_vbc4_wipe_volatile(binding_buf, sizeof(binding_buf));
@@ -1095,30 +1591,29 @@ JS_HIDDEN js_vm_program* js_vm_prepare_resource_program_bound(JNIEnv *env, jclas
         js_vm_set_prepare_stage(parse_stage);
         js_vm_free_program(env, parsed_program);
         free(parsed_program);
-        rls(env, resourcePath, resource_path);
         js_vm_fail_closed(env, NULL);
-        return NULL;
+        JS_VM_PREPARE_RESOURCE_RETURN(NULL);
     }
     js_vm_call_gate_register(entry_token, resource_path);
     parsed_program->entry_token = entry_token;
     parsed_program->return_desc = js_vm_return_descriptor_from_meta(parsed_program, entry_token);
     if (!parsed_program->return_desc) {
         js_vm_set_prepare_stage("return-desc");
-        rls(env, resourcePath, resource_path);
         js_vm_free_program(env, parsed_program);
         free(parsed_program);
-        return NULL;
+        JS_VM_PREPARE_RESOURCE_RETURN(NULL);
     }
     /* Metadata parsing above installs the authenticated method identity and
      * profile. Bind the runtime leaf only after those immutable tag fields are
      * final, otherwise verification would correctly reject the later mutation. */
     if (!js_vm_bind_runtime_session(parsed_program, entry_token, resource_path)) {
         js_vm_set_prepare_stage("session-bind");
-        rls(env, resourcePath, resource_path);
         js_vm_free_program(env, parsed_program);
         free(parsed_program);
-        return NULL;
+        JS_VM_PREPARE_RESOURCE_RETURN(NULL);
     }
+    js_vbc4_wipe_volatile(load_resource_path, sizeof(load_resource_path));
+#undef JS_VM_PREPARE_RESOURCE_RETURN
     rls(env, resourcePath, resource_path);
     return parsed_program;
 }
@@ -1148,6 +1643,7 @@ JS_HIDDEN js_vm_program* js_vm_prepare_aken_complete_frame_program(
     int binding_len = 0;
     int ok = 0;
     memset(&validation, 0, sizeof(validation));
+    js_vm_set_prepare_stage("aken-input");
     if (!env || entry_token == 0 || !frame || frame_len == 0u || frame_len > (size_t)INT_MAX ||
         !logical_binding_path || logical_binding_path_len == 0u ||
         logical_binding_path_len > JS_VM_AKEN_LOGICAL_BINDING_PATH_MAX ||
@@ -1159,34 +1655,53 @@ JS_HIDDEN js_vm_program* js_vm_prepare_aken_complete_frame_program(
     binding_path = (char *)malloc(logical_binding_path_len + 1u);
     program = (js_vm_program *)calloc(1, sizeof(js_vm_program));
     if (!binding_path || !program) {
+        js_vm_set_prepare_stage("aken-alloc");
         goto cleanup;
     }
     memcpy(binding_path, logical_binding_path, logical_binding_path_len);
     binding_path[logical_binding_path_len] = '\0';
 
+    if (!js_vbc4_install_scoped_layout_digest(state_binding_layout_digest)) {
+        js_vm_set_prepare_stage("aken-layout-digest");
+        goto cleanup;
+    }
     binding_len = js_vm_build_state_binding_with_layout_digest(
         entry_token,
         binding_path,
         state_binding_layout_digest,
         binding_buf,
         (int)sizeof(binding_buf));
-    if (binding_len <= 0 || !js_vm_resource_integrity_clean() ||
-        !js_vm_parse_program(frame, (int)frame_len, program, binding_buf, binding_len)) {
+    if (binding_len <= 0) {
+        js_vm_set_prepare_stage("aken-state-binding");
+        goto cleanup;
+    }
+    if (!js_vm_resource_integrity_clean()) {
+        js_vm_set_prepare_stage("aken-integrity");
+        goto cleanup;
+    }
+    if (!js_vm_parse_program(frame, (int)frame_len, program, binding_buf, binding_len)) {
+        char parse_stage[32];
+        snprintf(parse_stage, sizeof(parse_stage), "aken-parse-%d", js_vm_last_parse_stage);
+        js_vm_set_prepare_stage(parse_stage);
         goto cleanup;
     }
     program->entry_token = entry_token;
     program->return_desc = js_vm_return_descriptor_from_meta(program, entry_token);
     if (!program->return_desc) {
+        js_vm_set_prepare_stage("aken-return-desc");
         goto cleanup;
     }
     if (!program->resource_path) {
+        js_vm_set_prepare_stage("aken-resource-path");
         goto cleanup;
     }
     if (strcmp(program->resource_path, binding_path) != 0) {
+        js_vm_set_prepare_stage("aken-resource-binding");
         goto cleanup;
     }
     if (!js_vm_build_execution_program_from_registers(program, &validation) ||
         !js_vm_adopt_validated_execution_program(program, &validation)) {
+        js_vm_set_prepare_stage("aken-execution-program");
         goto cleanup;
     }
     js_vm_clear_execution_program(&validation);
@@ -1199,11 +1714,14 @@ JS_HIDDEN js_vm_program* js_vm_prepare_aken_complete_frame_program(
      */
     (void)js_vm_install_startup_nonce(artifact_commitment, (int)artifact_commitment_len);
     if (!js_vm_bind_runtime_session(program, entry_token, binding_path)) {
+        js_vm_set_prepare_stage("aken-session-bind");
         goto cleanup;
     }
     ok = 1;
+    js_vm_set_prepare_stage("aken-ready");
 
 cleanup:
+    js_vbc4_clear_scoped_layout_digest();
     js_vbc4_wipe_volatile(binding_buf, sizeof(binding_buf));
     js_vm_clear_execution_program(&validation);
     if (binding_path) {

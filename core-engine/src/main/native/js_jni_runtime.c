@@ -9,19 +9,30 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
-
-#if defined(JS_AKEN_JNI_FIXTURE_DIAGNOSTICS)
+#include <stdatomic.h>
 #include <stdio.h>
 
+#if defined(JS_AKEN_JNI_FIXTURE_DIAGNOSTICS)
 static void js_aken_jni_fixture_onload_failure(const char *stage) {
     fputs("AKEN_JNI_ONLOAD_FAIL:", stderr);
     fputs(stage, stderr);
     fputc('\n', stderr);
     fflush(stderr);
 }
+static void js_aken_jni_fixture_frame_prepare_failure(void) {
+    fprintf(
+        stderr,
+        "AKEN_JNI_FRAME_PREPARE_FAIL:parse=%d validation=%d stage=%s\n",
+        js_vm_last_parse_stage,
+        js_vm_last_validation_error,
+        js_vm_last_prepare_stage);
+    fflush(stderr);
+}
 #define JS_AKEN_JNI_FIXTURE_ONLOAD_FAILURE(stage) js_aken_jni_fixture_onload_failure(stage)
+#define JS_AKEN_JNI_FIXTURE_FRAME_PREPARE_FAILURE() js_aken_jni_fixture_frame_prepare_failure()
 #else
 #define JS_AKEN_JNI_FIXTURE_ONLOAD_FAILURE(stage) ((void)0)
+#define JS_AKEN_JNI_FIXTURE_FRAME_PREPARE_FAILURE() ((void)0)
 #endif
 
 #define JS_SHELL_MANUAL_MAP_RESERVED ((void *)(uintptr_t)0x4A5353484D4D4150ULL)
@@ -29,6 +40,36 @@ static void js_aken_jni_fixture_onload_failure(const char *stage) {
 static volatile int js_jni_runtime_manual_mapped_shell = 0;
 
 JS_HIDDEN js_jni_cache_state js_jni_cache;
+
+/* Clear only an observed JNI exception and account for that event without
+ * retaining its payload.  Optional JDK capability probes and runtime lookup
+ * failures remain behaviorally identical; the counter makes the benchmark
+ * security gate see the actual cleared-exception path. */
+static void js_jni_clear_exception_if_pending(JNIEnv *env) {
+    if (env && (*env)->ExceptionCheck(env)) {
+        js_runtime_metrics_note_exception();
+        (*env)->ExceptionClear(env);
+    }
+}
+
+/* This is the sole documented optional-JDK capability probe: Java 8 lacks
+ * InputStream.readAllBytes.  Its expected NoSuchMethodError selects the
+ * separately validated InputStream.read compatibility path and is not a
+ * runtime exception-suppression event for security telemetry. */
+static void js_jni_clear_expected_capability_exception(JNIEnv *env) {
+    if (env && (*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+}
+
+#define JS_JNI_CACHE_ABI_GENERATION 1u
+static atomic_flag js_jni_cache_guard = ATOMIC_FLAG_INIT;
+
+static void js_jni_cache_guard_enter(void) {
+    while (atomic_flag_test_and_set_explicit(&js_jni_cache_guard, memory_order_acquire)) { }
+}
+
+static void js_jni_cache_guard_leave(void) {
+    atomic_flag_clear_explicit(&js_jni_cache_guard, memory_order_release);
+}
 
 extern jint JNICALL jsn_k0(JNIEnv* env, jclass clazz, jstring platform);
 extern jint JNICALL jsn_k1(JNIEnv* env, jclass clazz, jbyteArray data, jbyteArray expected_mac);
@@ -82,6 +123,9 @@ static int js_aken_bridge_request_shape_is_valid(
     jint page_index,
     jbyteArray call_site_proof
 ) {
+    js_runtime_metrics_note_jni_abi_check();
+    js_runtime_metrics_note_structure_check();
+    js_runtime_metrics_note_length_check();
     if (!env || !encoded_handle || !call_site_proof || page_index < 0 ||
         (*env)->GetArrayLength(env, encoded_handle) != (jsize)JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE ||
         (*env)->GetArrayLength(env, call_site_proof) <= 0 ||
@@ -101,11 +145,11 @@ static int js_aken_bridge_request_is_valid(JNIEnv *env, jbyteArray encoded_handl
 }
 
 /*
- * TODO(AKEN-v4): typed JNI currently receives only handle/page/proof/args.
- * Once the resource-specific locator produces a verified descriptor envelope,
- * pass its current-page binding and seven evaluator fragments to
- * js_aken_evaluator_recover_dek().  Do not feed arbitrary resource byte arrays
- * into this primitive and do not reintroduce a legacy generic decode fallback.
+ * AKEN-v4 typed JNI receives only a bound handle, page, proof, and (for VM
+ * pages) arguments.  The native locator resolves the current descriptor and
+ * passes its binding plus the page's opaque bound-decryptor plan to the typed
+ * terminal opener. Keep arbitrary resource byte arrays and legacy generic
+ * decode fallbacks out of this path.
  */
 #define JS_AKEN_EVALUATOR_SHAPE_VERSION 2u
 #define JS_AKEN_EVALUATOR_SALT_SIZE 16u
@@ -168,6 +212,7 @@ static int js_aken_evaluator_binding_is_valid(const js_aken_evaluator_binding *b
     return 1;
 }
 
+#if !defined(JS_AKEN_TYPED_ONLY_RUNTIME) || !JS_AKEN_TYPED_ONLY_RUNTIME
 static int js_aken_evaluator_fragment_is_valid(const js_aken_evaluator_fragment *fragment) {
     unsigned char seen[JS_AKEN_EVALUATOR_STATE_WIDTH] = {0};
     int ok = 0;
@@ -207,6 +252,7 @@ cleanup:
     js_vbc4_wipe_volatile(seen, sizeof(seen));
     return ok;
 }
+#endif
 
 static int js_aken_evaluator_update_binding(js_sha256_ctx *ctx, const js_aken_evaluator_binding *binding) {
     const unsigned char kind = binding ? binding->kind_id : 0u;
@@ -221,6 +267,7 @@ static int js_aken_evaluator_update_binding(js_sha256_ctx *ctx, const js_aken_ev
     return js_aken_evaluator_update_framed(ctx, binding->locator_token, binding->locator_token_len);
 }
 
+#if !defined(JS_AKEN_TYPED_ONLY_RUNTIME) || !JS_AKEN_TYPED_ONLY_RUNTIME
 static int js_aken_evaluator_mask_for(
     const js_aken_evaluator_binding *binding,
     const js_aken_evaluator_fragment *fragment,
@@ -280,6 +327,7 @@ cleanup:
     if (!ok) js_vbc4_wipe_volatile(out_tag, JS_AKEN_EVALUATOR_STATE_WIDTH);
     return ok;
 }
+#endif
 
 static int js_aken_evaluator_constant_time_equal(
     const unsigned char *expected,
@@ -294,6 +342,7 @@ static int js_aken_evaluator_constant_time_equal(
     return diff == 0u;
 }
 
+#if !defined(JS_AKEN_TYPED_ONLY_RUNTIME) || !JS_AKEN_TYPED_ONLY_RUNTIME
 static int js_aken_evaluator_tag_matches(
     const unsigned char expected[JS_AKEN_EVALUATOR_TAG_SIZE],
     const unsigned char actual[JS_AKEN_EVALUATOR_STATE_WIDTH]
@@ -380,7 +429,7 @@ cleanup:
     return ok;
 }
 
-JS_HIDDEN int js_aken_evaluator_recover_dek(
+static int js_aken_legacy_evaluator_materialize_compatibility(
     const js_aken_evaluator_binding *binding,
     const js_aken_evaluator_fragment *fragments,
     size_t fragment_count,
@@ -414,6 +463,460 @@ cleanup:
     if (!ok && out_dek) js_vbc4_wipe_volatile(out_dek, JS_AKEN_EVALUATOR_STATE_WIDTH);
     return ok;
 }
+#endif
+
+/*
+ * AKEN v5 opaque page-bound plan.  The descriptor never carries a generic
+ * decoder input or a returned key; the terminal below derives only eight
+ * scalar AES lanes after every page binding has been authenticated.
+ */
+#define JS_AKEN_BOUND_LANE_COUNT 8u
+#define JS_AKEN_BOUND_WORD_FAMILY_COUNT 8u
+#define JS_AKEN_BOUND_PAGE_NONCE_SIZE 12u
+#define JS_AKEN_BOUND_PLAN_NONCE_SIZE 16u
+#define JS_AKEN_BOUND_LANE_SALT_SIZE 16u
+#define JS_AKEN_BOUND_LANE_TAG_SIZE 16u
+#define JS_AKEN_BOUND_PLAN_TAG_SIZE 32u
+#define JS_AKEN_BOUND_MAX_TOKEN_SIZE 48u
+#define JS_AKEN_BOUND_MAX_PLAN_SIZE (128u * 1024u)
+
+static const unsigned char JS_AKEN_BOUND_STATIC_DOMAIN[] = "bound-page-static";
+static const unsigned char JS_AKEN_BOUND_FINAL_DOMAIN[] = "bound-page-final";
+static const unsigned char JS_AKEN_BOUND_LANE_MASK_DOMAIN[] = "bound-page-lane-mask";
+static const unsigned char JS_AKEN_BOUND_LANE_TAG_DOMAIN[] = "bound-page-lane-tag";
+static const unsigned char JS_AKEN_BOUND_PLAN_TAG_DOMAIN[] = "bound-page-plan-tag";
+
+static uint32_t js_aken_bound_read_u32be(const unsigned char *value) {
+    return ((uint32_t)value[0] << 24) | ((uint32_t)value[1] << 16) |
+        ((uint32_t)value[2] << 8) | (uint32_t)value[3];
+}
+
+static int js_aken_bound_read_u8(
+    const unsigned char *bytes,
+    size_t length,
+    size_t *offset,
+    unsigned char *out_value
+) {
+    if (!bytes || !offset || !out_value || *offset >= length) return 0;
+    *out_value = bytes[(*offset)++];
+    return 1;
+}
+
+static int js_aken_bound_read_u32(
+    const unsigned char *bytes,
+    size_t length,
+    size_t *offset,
+    uint32_t *out_value
+) {
+    if (!bytes || !offset || !out_value || *offset > length || length - *offset < 4u) return 0;
+    *out_value = js_aken_bound_read_u32be(bytes + *offset);
+    *offset += 4u;
+    return 1;
+}
+
+static int js_aken_bound_read_fixed(
+    const unsigned char *bytes,
+    size_t length,
+    size_t *offset,
+    size_t requested,
+    const unsigned char **out_value
+) {
+    if (!bytes || !offset || !out_value || *offset > length || requested > length - *offset) return 0;
+    *out_value = bytes + *offset;
+    *offset += requested;
+    return 1;
+}
+
+static int js_aken_bound_read_framed(
+    const unsigned char *bytes,
+    size_t length,
+    size_t *offset,
+    size_t maximum,
+    const unsigned char **out_value,
+    size_t *out_length
+) {
+    uint32_t framed_length = 0u;
+    if (!out_length || !js_aken_bound_read_u32(bytes, length, offset, &framed_length) ||
+        (size_t)framed_length > maximum || !js_aken_bound_read_fixed(
+            bytes, length, offset, (size_t)framed_length, out_value)) {
+        return 0;
+    }
+    *out_length = (size_t)framed_length;
+    return 1;
+}
+
+static uint32_t js_aken_bound_rotl32(uint32_t value, unsigned int shift) {
+    shift &= 31u;
+    return shift == 0u ? value : (value << shift) | (value >> (32u - shift));
+}
+
+static uint32_t js_aken_bound_rotr32(uint32_t value, unsigned int shift) {
+    shift &= 31u;
+    return shift == 0u ? value : (value >> shift) | (value << (32u - shift));
+}
+
+static uint32_t js_aken_bound_tweak(uint32_t mask, unsigned int family, unsigned int word_index) {
+    return js_aken_bound_rotl32(mask ^ (0x9E3779B9u * (word_index + 1u)), (word_index + family) & 31u);
+}
+
+static uint32_t js_aken_bound_inverse_word(
+    uint32_t encoded,
+    uint32_t mask,
+    unsigned int family,
+    unsigned int word_index
+) {
+    const unsigned int rotation = ((mask ^ (family * 0x045D9F3Bu) ^ word_index) & 31u) + 1u;
+    const uint32_t tweak = js_aken_bound_tweak(mask, family, word_index);
+    switch (family) {
+        case 0u: return encoded ^ mask;
+        case 1u: return js_aken_bound_rotr32(encoded, rotation) - mask;
+        case 2u: return js_aken_bound_rotl32(encoded - tweak, rotation) ^ mask;
+        case 3u: return js_aken_bound_rotr32(encoded ^ mask, rotation) - tweak;
+        case 4u: return js_aken_bound_rotl32(encoded ^ tweak, rotation) + mask;
+        case 5u: return (encoded - 0x7F4A7C15u) ^ js_aken_bound_rotl32(mask, word_index + 1u);
+        case 6u: return js_aken_bound_rotr32(encoded + mask, rotation) ^ tweak;
+        case 7u: return js_aken_bound_rotr32(encoded ^ tweak, rotation) - mask;
+        default: return 0u;
+    }
+}
+
+static int js_aken_bound_lane_store(
+    unsigned int word_index,
+    uint32_t value,
+    uint32_t *lane0,
+    uint32_t *lane1,
+    uint32_t *lane2,
+    uint32_t *lane3,
+    uint32_t *lane4,
+    uint32_t *lane5,
+    uint32_t *lane6,
+    uint32_t *lane7
+) {
+    if (!lane0 || !lane1 || !lane2 || !lane3 || !lane4 || !lane5 || !lane6 || !lane7 ||
+        word_index >= JS_AKEN_BOUND_LANE_COUNT) return 0;
+    switch (word_index) {
+        case 0u: *lane0 = value; return 1;
+        case 1u: *lane1 = value; return 1;
+        case 2u: *lane2 = value; return 1;
+        case 3u: *lane3 = value; return 1;
+        case 4u: *lane4 = value; return 1;
+        case 5u: *lane5 = value; return 1;
+        case 6u: *lane6 = value; return 1;
+        case 7u: *lane7 = value; return 1;
+        default: return 0;
+    }
+}
+
+static int js_aken_bound_static_digest(
+    const js_aken_evaluator_binding *binding,
+    const unsigned char page_nonce[JS_AKEN_BOUND_PAGE_NONCE_SIZE],
+    const unsigned char plan_nonce[JS_AKEN_BOUND_PLAN_NONCE_SIZE],
+    unsigned char dispatch_variant,
+    unsigned char out_digest[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE]
+) {
+    js_sha256_ctx ctx;
+    if (!binding || !page_nonce || !plan_nonce || !out_digest || !js_aken_evaluator_binding_is_valid(binding)) return 0;
+    js_sha256_init(&ctx);
+    js_sha256_update(&ctx, JS_AKEN_BOUND_STATIC_DOMAIN, (int)(sizeof(JS_AKEN_BOUND_STATIC_DOMAIN) - 1u));
+    js_sha256_update(&ctx, &dispatch_variant, 1);
+    js_sha256_update(&ctx, &binding->kind_id, 1);
+    if (!js_aken_evaluator_update_framed(&ctx, binding->logical_identity, binding->logical_identity_len)) goto fail;
+    js_aken_evaluator_update_u32be(&ctx, (uint32_t)binding->page_index);
+    js_aken_evaluator_update_u32be(&ctx, (uint32_t)binding->target_size);
+    if (!js_aken_evaluator_update_framed(&ctx, binding->codec_variant, binding->codec_variant_len) ||
+        !js_aken_evaluator_update_framed(&ctx, binding->layout_variant, binding->layout_variant_len) ||
+        !js_aken_evaluator_update_framed(&ctx, binding->encoded_handle, binding->encoded_handle_len) ||
+        !js_aken_evaluator_update_framed(&ctx, binding->locator_token, binding->locator_token_len)) goto fail;
+    js_sha256_update(&ctx, binding->evaluator_fingerprint, JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE);
+    js_sha256_update(&ctx, binding->artifact_commitment, JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE);
+    js_sha256_update(&ctx, page_nonce, JS_AKEN_BOUND_PAGE_NONCE_SIZE);
+    js_sha256_update(&ctx, plan_nonce, JS_AKEN_BOUND_PLAN_NONCE_SIZE);
+    js_sha256_final(&ctx, out_digest);
+    js_vbc4_wipe_volatile(&ctx, sizeof(ctx));
+    return 1;
+fail:
+    js_vbc4_wipe_volatile(&ctx, sizeof(ctx));
+    js_vbc4_wipe_volatile(out_digest, JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE);
+    return 0;
+}
+
+static int js_aken_bound_final_digest(
+    const unsigned char static_binding[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE],
+    const unsigned char *route_encoding,
+    size_t route_encoding_len,
+    const unsigned char *call_site_proof,
+    size_t call_site_proof_len,
+    unsigned char out_digest[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE]
+) {
+    js_sha256_ctx ctx;
+    if (!static_binding || !route_encoding || route_encoding_len == 0u || !call_site_proof ||
+        call_site_proof_len == 0u || !out_digest) return 0;
+    js_sha256_init(&ctx);
+    js_sha256_update(&ctx, JS_AKEN_BOUND_FINAL_DOMAIN, (int)(sizeof(JS_AKEN_BOUND_FINAL_DOMAIN) - 1u));
+    js_sha256_update(&ctx, static_binding, JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE);
+    if (!js_aken_evaluator_update_framed(&ctx, route_encoding, route_encoding_len) ||
+        !js_aken_evaluator_update_framed(&ctx, call_site_proof, call_site_proof_len)) {
+        js_vbc4_wipe_volatile(&ctx, sizeof(ctx));
+        js_vbc4_wipe_volatile(out_digest, JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE);
+        return 0;
+    }
+    js_sha256_final(&ctx, out_digest);
+    js_vbc4_wipe_volatile(&ctx, sizeof(ctx));
+    return 1;
+}
+
+static int js_aken_bound_lane_mask(
+    const unsigned char static_binding[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE],
+    unsigned int word_index,
+    unsigned int family,
+    const unsigned char *token,
+    size_t token_len,
+    const unsigned char salt[JS_AKEN_BOUND_LANE_SALT_SIZE],
+    uint32_t *out_mask
+) {
+    js_sha256_ctx ctx;
+    unsigned char digest[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE] = {0};
+    int ok = 0;
+    if (!static_binding || !token || token_len == 0u || !salt || !out_mask) goto cleanup;
+    js_sha256_init(&ctx);
+    js_sha256_update(&ctx, JS_AKEN_BOUND_LANE_MASK_DOMAIN, (int)(sizeof(JS_AKEN_BOUND_LANE_MASK_DOMAIN) - 1u));
+    js_sha256_update(&ctx, static_binding, JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE);
+    js_aken_evaluator_update_u32be(&ctx, word_index);
+    js_aken_evaluator_update_u32be(&ctx, family);
+    if (!js_aken_evaluator_update_framed(&ctx, token, token_len) ||
+        !js_aken_evaluator_update_framed(&ctx, salt, JS_AKEN_BOUND_LANE_SALT_SIZE)) goto cleanup;
+    js_sha256_final(&ctx, digest);
+    *out_mask = js_aken_bound_read_u32be(digest);
+    ok = 1;
+cleanup:
+    js_vbc4_wipe_volatile(&ctx, sizeof(ctx));
+    js_vbc4_wipe_volatile(digest, sizeof(digest));
+    return ok;
+}
+
+static int js_aken_bound_lane_tag_matches(
+    const unsigned char static_binding[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE],
+    unsigned int word_index,
+    unsigned int family,
+    const unsigned char *token,
+    size_t token_len,
+    const unsigned char salt[JS_AKEN_BOUND_LANE_SALT_SIZE],
+    uint32_t encoded_word,
+    const unsigned char expected_tag[JS_AKEN_BOUND_LANE_TAG_SIZE]
+) {
+    js_sha256_ctx ctx;
+    unsigned char full_tag[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE] = {0};
+    int ok = 0;
+    if (!static_binding || !token || token_len == 0u || !salt || !expected_tag) goto cleanup;
+    js_sha256_init(&ctx);
+    js_sha256_update(&ctx, JS_AKEN_BOUND_LANE_TAG_DOMAIN, (int)(sizeof(JS_AKEN_BOUND_LANE_TAG_DOMAIN) - 1u));
+    js_sha256_update(&ctx, static_binding, JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE);
+    js_aken_evaluator_update_u32be(&ctx, word_index);
+    js_aken_evaluator_update_u32be(&ctx, family);
+    if (!js_aken_evaluator_update_framed(&ctx, token, token_len) ||
+        !js_aken_evaluator_update_framed(&ctx, salt, JS_AKEN_BOUND_LANE_SALT_SIZE)) goto cleanup;
+    js_aken_evaluator_update_u32be(&ctx, encoded_word);
+    js_sha256_final(&ctx, full_tag);
+    ok = js_aken_evaluator_constant_time_equal(expected_tag, full_tag, JS_AKEN_BOUND_LANE_TAG_SIZE);
+cleanup:
+    js_vbc4_wipe_volatile(&ctx, sizeof(ctx));
+    js_vbc4_wipe_volatile(full_tag, sizeof(full_tag));
+    return ok;
+}
+
+static int js_aken_bound_plan_tag_matches(
+    const unsigned char *plan,
+    size_t tag_offset,
+    const unsigned char expected_tag[JS_AKEN_BOUND_PLAN_TAG_SIZE]
+) {
+    js_sha256_ctx ctx;
+    unsigned char actual_tag[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE] = {0};
+    int ok = 0;
+    if (!plan || !expected_tag || tag_offset == 0u || tag_offset > (size_t)INT_MAX) goto cleanup;
+    js_sha256_init(&ctx);
+    js_sha256_update(&ctx, JS_AKEN_BOUND_PLAN_TAG_DOMAIN, (int)(sizeof(JS_AKEN_BOUND_PLAN_TAG_DOMAIN) - 1u));
+    js_sha256_update(&ctx, plan, (int)tag_offset);
+    js_sha256_final(&ctx, actual_tag);
+    ok = js_aken_evaluator_constant_time_equal(expected_tag, actual_tag, JS_AKEN_BOUND_PLAN_TAG_SIZE);
+cleanup:
+    js_vbc4_wipe_volatile(&ctx, sizeof(ctx));
+    js_vbc4_wipe_volatile(actual_tag, sizeof(actual_tag));
+    return ok;
+}
+
+static int js_aken_bound_plan_validate_or_materialize(
+    const js_aken_evaluator_binding *binding,
+    const unsigned char *plan,
+    size_t plan_len,
+    const unsigned char *route_encoding,
+    size_t route_encoding_len,
+    const unsigned char *call_site_proof,
+    size_t call_site_proof_len,
+    const unsigned char expected_page_nonce[JS_AKEN_BOUND_PAGE_NONCE_SIZE],
+    uint32_t *out_lane0,
+    uint32_t *out_lane1,
+    uint32_t *out_lane2,
+    uint32_t *out_lane3,
+    uint32_t *out_lane4,
+    uint32_t *out_lane5,
+    uint32_t *out_lane6,
+    uint32_t *out_lane7
+) {
+    size_t offset = 0u;
+    unsigned char dispatch = 0u;
+    unsigned char lane_count = 0u;
+    const unsigned char *page_nonce = NULL;
+    const unsigned char *plan_nonce = NULL;
+    const unsigned char *stored_static = NULL;
+    const unsigned char *stored_final = NULL;
+    unsigned char actual_static[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE] = {0};
+    unsigned char actual_final[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE] = {0};
+    unsigned char seen[JS_AKEN_BOUND_LANE_COUNT] = {0};
+    const unsigned char *plan_tag = NULL;
+    size_t plan_tag_offset = 0u;
+    int ok = 0;
+    /* The bound plan is parsed and authenticated for every page.  Keep the
+     * metrics at its fixed validation phases, not at every bounded lane. */
+    js_runtime_metrics_note_structure_check();
+    js_runtime_metrics_note_length_check();
+    if (out_lane0) *out_lane0 = 0u;
+    if (out_lane1) *out_lane1 = 0u;
+    if (out_lane2) *out_lane2 = 0u;
+    if (out_lane3) *out_lane3 = 0u;
+    if (out_lane4) *out_lane4 = 0u;
+    if (out_lane5) *out_lane5 = 0u;
+    if (out_lane6) *out_lane6 = 0u;
+    if (out_lane7) *out_lane7 = 0u;
+    if (!binding || !plan || plan_len == 0u || plan_len > JS_AKEN_BOUND_MAX_PLAN_SIZE ||
+        !route_encoding || route_encoding_len == 0u || !call_site_proof || call_site_proof_len == 0u ||
+        !js_aken_evaluator_binding_is_valid(binding)) goto cleanup;
+    if (!js_aken_bound_read_u8(plan, plan_len, &offset, &dispatch) ||
+        !js_aken_bound_read_u8(plan, plan_len, &offset, &lane_count) || lane_count != JS_AKEN_BOUND_LANE_COUNT ||
+        !js_aken_bound_read_fixed(plan, plan_len, &offset, JS_AKEN_BOUND_PAGE_NONCE_SIZE, &page_nonce) ||
+        !js_aken_bound_read_fixed(plan, plan_len, &offset, JS_AKEN_BOUND_PLAN_NONCE_SIZE, &plan_nonce) ||
+        !js_aken_bound_read_fixed(plan, plan_len, &offset, JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE, &stored_static) ||
+        !js_aken_bound_read_fixed(plan, plan_len, &offset, JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE, &stored_final)) {
+        goto cleanup;
+    }
+    js_runtime_metrics_note_digest_check();
+    if (!js_aken_bound_static_digest(binding, page_nonce, plan_nonce, dispatch, actual_static)) goto cleanup;
+    js_runtime_metrics_note_auth_check();
+    if (!js_aken_evaluator_constant_time_equal(
+            stored_static,
+            actual_static,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE)) {
+        js_runtime_metrics_note_auth_failure();
+        goto cleanup;
+    }
+    js_runtime_metrics_note_digest_check();
+    if (!js_aken_bound_final_digest(
+            stored_static,
+            route_encoding,
+            route_encoding_len,
+            call_site_proof,
+            call_site_proof_len,
+            actual_final)) {
+        goto cleanup;
+    }
+    js_runtime_metrics_note_auth_check();
+    if (!js_aken_evaluator_constant_time_equal(
+            stored_final,
+            actual_final,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE)) {
+        js_runtime_metrics_note_auth_failure();
+        goto cleanup;
+    }
+    if (expected_page_nonce) {
+        js_runtime_metrics_note_auth_check();
+        if (!js_aken_evaluator_constant_time_equal(
+                expected_page_nonce,
+                page_nonce,
+                JS_AKEN_BOUND_PAGE_NONCE_SIZE)) {
+            js_runtime_metrics_note_auth_failure();
+            goto cleanup;
+        }
+    }
+    js_runtime_metrics_note_digest_check();
+    js_runtime_metrics_note_auth_check();
+    for (unsigned int lane_number = 0u; lane_number < JS_AKEN_BOUND_LANE_COUNT; lane_number++) {
+        unsigned char word_index = 0u;
+        unsigned char family = 0u;
+        const unsigned char *token = NULL;
+        const unsigned char *salt = NULL;
+        const unsigned char *tag = NULL;
+        size_t token_len = 0u;
+        uint32_t encoded_word = 0u;
+        uint32_t mask = 0u;
+        if (!js_aken_bound_read_u8(plan, plan_len, &offset, &word_index) || word_index >= JS_AKEN_BOUND_LANE_COUNT ||
+            !js_aken_bound_read_u8(plan, plan_len, &offset, &family) || family >= JS_AKEN_BOUND_WORD_FAMILY_COUNT ||
+            seen[word_index] || !js_aken_bound_read_framed(
+                plan, plan_len, &offset, JS_AKEN_BOUND_MAX_TOKEN_SIZE, &token, &token_len) || token_len < 17u ||
+            !js_aken_bound_read_fixed(plan, plan_len, &offset, JS_AKEN_BOUND_LANE_SALT_SIZE, &salt) ||
+            !js_aken_bound_read_u32(plan, plan_len, &offset, &encoded_word) ||
+            !js_aken_bound_read_fixed(plan, plan_len, &offset, JS_AKEN_BOUND_LANE_TAG_SIZE, &tag)) {
+            goto cleanup;
+        }
+        if (!js_aken_bound_lane_tag_matches(
+                stored_static,
+                word_index,
+                family,
+                token,
+                token_len,
+                salt,
+                encoded_word,
+                tag)) {
+            js_runtime_metrics_note_auth_failure();
+            goto cleanup;
+        }
+        seen[word_index] = 1u;
+        if (out_lane0 && out_lane1 && out_lane2 && out_lane3 && out_lane4 && out_lane5 && out_lane6 && out_lane7) {
+            if (!js_aken_bound_lane_mask(stored_static, word_index, family, token, token_len, salt, &mask) ||
+                !js_aken_bound_lane_store(
+                    word_index,
+                    js_aken_bound_inverse_word(encoded_word, mask, family, word_index),
+                    out_lane0,
+                    out_lane1,
+                    out_lane2,
+                    out_lane3,
+                    out_lane4,
+                    out_lane5,
+                    out_lane6,
+                    out_lane7)) {
+                goto cleanup;
+            }
+        }
+    }
+    for (unsigned int word_index = 0u; word_index < JS_AKEN_BOUND_LANE_COUNT; word_index++) {
+        if (!seen[word_index]) goto cleanup;
+    }
+    plan_tag_offset = offset;
+    if (!js_aken_bound_read_fixed(plan, plan_len, &offset, JS_AKEN_BOUND_PLAN_TAG_SIZE, &plan_tag) ||
+        offset != plan_len) {
+        goto cleanup;
+    }
+    js_runtime_metrics_note_digest_check();
+    js_runtime_metrics_note_auth_check();
+    if (!js_aken_bound_plan_tag_matches(plan, plan_tag_offset, plan_tag)) {
+        js_runtime_metrics_note_auth_failure();
+        goto cleanup;
+    }
+    ok = 1;
+cleanup:
+    js_vbc4_wipe_volatile(actual_static, sizeof(actual_static));
+    js_vbc4_wipe_volatile(actual_final, sizeof(actual_final));
+    js_vbc4_wipe_volatile(seen, sizeof(seen));
+    if (!ok) {
+        if (out_lane0) js_vbc4_wipe_volatile(out_lane0, sizeof(*out_lane0));
+        if (out_lane1) js_vbc4_wipe_volatile(out_lane1, sizeof(*out_lane1));
+        if (out_lane2) js_vbc4_wipe_volatile(out_lane2, sizeof(*out_lane2));
+        if (out_lane3) js_vbc4_wipe_volatile(out_lane3, sizeof(*out_lane3));
+        if (out_lane4) js_vbc4_wipe_volatile(out_lane4, sizeof(*out_lane4));
+        if (out_lane5) js_vbc4_wipe_volatile(out_lane5, sizeof(*out_lane5));
+        if (out_lane6) js_vbc4_wipe_volatile(out_lane6, sizeof(*out_lane6));
+        if (out_lane7) js_vbc4_wipe_volatile(out_lane7, sizeof(*out_lane7));
+    }
+    return ok;
+}
 
 /*
  * AKEN v4 current-page envelope parser.
@@ -424,10 +927,10 @@ cleanup:
  * accepted from that JNI parameter and no function below opens a resource,
  * derives a key, or exposes a generic decoder.
  */
-#define JS_AKEN_NATIVE_PAGE_ENVELOPE_DESCRIPTOR_BINDING_DOMAIN "AKEN-v4-native-page-envelope-descriptor-v1"
-#define JS_AKEN_NATIVE_PAGE_ENVELOPE_CALL_SITE_BINDING_DOMAIN "AKEN-v4-native-page-envelope-call-site-v1"
-#define JS_AKEN_NATIVE_PAGE_ENVELOPE_ROUTE_BINDING_DOMAIN "AKEN-v4-native-page-envelope-route-v1"
-#define JS_AKEN_NATIVE_PAGE_ENVELOPE_BINDING_DOMAIN "AKEN-v4-native-page-envelope-v1"
+#define JS_AKEN_NATIVE_PAGE_ENVELOPE_DESCRIPTOR_BINDING_DOMAIN "page-envelope-descriptor"
+#define JS_AKEN_NATIVE_PAGE_ENVELOPE_CALL_SITE_BINDING_DOMAIN "page-envelope-call-site"
+#define JS_AKEN_NATIVE_PAGE_ENVELOPE_ROUTE_BINDING_DOMAIN "page-envelope-route"
+#define JS_AKEN_NATIVE_PAGE_ENVELOPE_BINDING_DOMAIN "page-envelope"
 
 typedef struct {
     const unsigned char *bytes;
@@ -748,6 +1251,11 @@ JS_HIDDEN int js_aken_native_page_envelope_parse(
     uint32_t page_index = 0u;
     uint32_t inline_descriptor_len = 0u;
     int ok = 0;
+    /* This is the envelope's wire-format validation boundary.  Count one
+     * structural and one length check per invocation rather than per field so
+     * metrics remain useful on the page-open hot path. */
+    js_runtime_metrics_note_structure_check();
+    js_runtime_metrics_note_length_check();
     if (!out_envelope) goto cleanup;
     js_aken_native_page_envelope_wipe(out_envelope);
     if (!encoded_envelope || encoded_envelope_len < JS_AKEN_NATIVE_PAGE_ENVELOPE_FIXED_SIZE ||
@@ -757,9 +1265,7 @@ JS_HIDDEN int js_aken_native_page_envelope_parse(
     reader.bytes = encoded_envelope;
     reader.length = encoded_envelope_len;
     reader.offset = 0u;
-    if (!js_aken_native_page_envelope_reader_read_u8(&reader, &out_envelope->parsed) ||
-        out_envelope->parsed != JS_AKEN_NATIVE_PAGE_ENVELOPE_VERSION ||
-        !js_aken_native_page_envelope_reader_read_u8(&reader, &out_envelope->form) ||
+    if (!js_aken_native_page_envelope_reader_read_u8(&reader, &out_envelope->form) ||
         (out_envelope->form != JS_AKEN_NATIVE_PAGE_ENVELOPE_FORM_INLINE_DESCRIPTOR &&
             out_envelope->form != JS_AKEN_NATIVE_PAGE_ENVELOPE_FORM_COMPACT_LOCATOR) ||
         !js_aken_native_page_envelope_reader_read_u64be(&reader, &out_envelope->entry_token) ||
@@ -822,6 +1328,7 @@ JS_HIDDEN int js_aken_native_page_envelope_parse(
     }
 
     /* The encoded envelope and raw JNI proof are independently transported. */
+    js_runtime_metrics_note_auth_check();
     if (out_envelope->entry_token != request->entry_token ||
         out_envelope->resource_kind != request->resource_kind ||
         out_envelope->page_index != request->page_index ||
@@ -829,40 +1336,57 @@ JS_HIDDEN int js_aken_native_page_envelope_parse(
             out_envelope->encoded_handle,
             request->encoded_handle,
             JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE)) {
+        js_runtime_metrics_note_auth_failure();
         goto cleanup;
     }
+    js_runtime_metrics_note_digest_check();
     if (!js_aken_native_page_envelope_digest_one_framed(
             call_site_domain,
             sizeof(call_site_domain) - 1u,
             request->raw_call_site_proof,
             request->raw_call_site_proof_len,
             JS_AKEN_NATIVE_PAGE_ENVELOPE_MAX_SIZE,
-            expected_call_site_binding) ||
-        !js_aken_native_page_envelope_constant_time_equal(
+            expected_call_site_binding)) {
+        goto cleanup;
+    }
+    js_runtime_metrics_note_auth_check();
+    if (!js_aken_native_page_envelope_constant_time_equal(
             out_envelope->call_site_proof_binding,
             expected_call_site_binding,
             JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE)) {
+        js_runtime_metrics_note_auth_failure();
         goto cleanup;
     }
-    if (out_envelope->form == JS_AKEN_NATIVE_PAGE_ENVELOPE_FORM_INLINE_DESCRIPTOR &&
-        (!js_aken_native_page_envelope_digest_one_framed(
+    if (out_envelope->form == JS_AKEN_NATIVE_PAGE_ENVELOPE_FORM_INLINE_DESCRIPTOR) {
+        js_runtime_metrics_note_digest_check();
+        if (!js_aken_native_page_envelope_digest_one_framed(
             descriptor_domain,
             sizeof(descriptor_domain) - 1u,
             out_envelope->inline_descriptor,
             out_envelope->inline_descriptor_len,
             JS_AKEN_NATIVE_PAGE_DESCRIPTOR_MAX_SIZE,
-            expected_descriptor_binding) ||
-        !js_aken_native_page_envelope_constant_time_equal(
+            expected_descriptor_binding)) {
+            goto cleanup;
+        }
+        js_runtime_metrics_note_auth_check();
+        if (!js_aken_native_page_envelope_constant_time_equal(
             out_envelope->descriptor_binding,
             expected_descriptor_binding,
-            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE))) {
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE)) {
+            js_runtime_metrics_note_auth_failure();
+            goto cleanup;
+        }
+    }
+    js_runtime_metrics_note_digest_check();
+    if (!js_aken_native_page_envelope_digest_envelope(out_envelope, expected_envelope_binding)) {
         goto cleanup;
     }
-    if (!js_aken_native_page_envelope_digest_envelope(out_envelope, expected_envelope_binding) ||
-        !js_aken_native_page_envelope_constant_time_equal(
+    js_runtime_metrics_note_auth_check();
+    if (!js_aken_native_page_envelope_constant_time_equal(
             received_envelope_binding,
             expected_envelope_binding,
             JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE)) {
+        js_runtime_metrics_note_auth_failure();
         goto cleanup;
     }
     out_envelope->parsed = 1u;
@@ -887,10 +1411,13 @@ JS_HIDDEN int js_aken_native_page_envelope_verify_resolved_bindings(
     int inline_matches = 0;
     int identity_matches = 0;
     int ok = 0;
+    js_runtime_metrics_note_structure_check();
+    js_runtime_metrics_note_length_check();
     if (!js_aken_native_page_envelope_record_is_well_formed(envelope, 1) ||
         !js_aken_native_page_resolved_descriptor_is_well_formed(resolved)) {
         goto cleanup;
     }
+    js_runtime_metrics_note_digest_check();
     if (!js_aken_native_page_envelope_digest_one_framed(
             descriptor_domain,
             sizeof(descriptor_domain) - 1u,
@@ -929,6 +1456,7 @@ JS_HIDDEN int js_aken_native_page_envelope_verify_resolved_bindings(
                 envelope->inline_descriptor,
                 resolved->descriptor_encoding,
                 resolved->descriptor_encoding_len));
+    js_runtime_metrics_note_auth_check();
     if (!identity_matches || !inline_matches ||
         !js_aken_native_page_envelope_constant_time_equal(
             envelope->descriptor_binding,
@@ -938,6 +1466,7 @@ JS_HIDDEN int js_aken_native_page_envelope_verify_resolved_bindings(
             envelope->route_binding,
             expected_route_binding,
             JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE)) {
+        js_runtime_metrics_note_auth_failure();
         goto cleanup;
     }
     ok = 1;
@@ -954,7 +1483,7 @@ cleanup:
  * function here decodes a resource or creates a catalog surface.
  */
 #define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_BINDING_DOMAIN \
-    "AKEN-v4-native-page-locator-compile-input-v2"
+    "native-page-locator-compile-input"
 
 static int js_aken_native_page_locator_record_is_well_formed(
     const js_aken_native_page_locator_record *record,
@@ -1039,7 +1568,6 @@ static int js_aken_native_page_locator_record_parse(
     js_aken_native_page_envelope_reader reader = {0};
     unsigned char received_binding[JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_BINDING_SIZE] = {0};
     unsigned char expected_binding[JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_BINDING_SIZE] = {0};
-    uint8_t record_version = 0u;
     uint32_t page_index = 0u;
     uint32_t encoded_handle_len = 0u;
     uint32_t native_envelope_len = 0u;
@@ -1049,16 +1577,13 @@ static int js_aken_native_page_locator_record_parse(
     if (!out_record) goto cleanup;
     js_aken_native_page_locator_record_wipe(out_record);
     if (!encoded_record || encoded_record_len == 0u ||
-        encoded_record_len > JS_AKEN_NATIVE_PAGE_LOCATOR_MAX_RECORD_SIZE ||
-        JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_FORMAT_VERSION != JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_VERSION) {
+        encoded_record_len > JS_AKEN_NATIVE_PAGE_LOCATOR_MAX_RECORD_SIZE) {
         goto cleanup;
     }
     reader.bytes = encoded_record;
     reader.length = encoded_record_len;
     reader.offset = 0u;
-    if (!js_aken_native_page_envelope_reader_read_u8(&reader, &record_version) ||
-        record_version != JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_VERSION ||
-        !js_aken_native_page_envelope_reader_read_u64be(&reader, &out_record->entry_token) ||
+    if (!js_aken_native_page_envelope_reader_read_u64be(&reader, &out_record->entry_token) ||
         !js_aken_native_page_envelope_reader_read_u8(&reader, &out_record->resource_kind) ||
         !js_aken_native_page_envelope_kind_is_valid(out_record->resource_kind) ||
         !js_aken_native_page_envelope_reader_read_u32be(&reader, &page_index) ||
@@ -1107,12 +1632,21 @@ static int js_aken_native_page_locator_record_parse(
     out_record->route_encoding_len = (size_t)route_encoding_len;
     out_record->vbc4_state_binding_layout_digest_len =
         JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE;
-    if (!js_aken_native_page_locator_record_is_well_formed(out_record, 0) ||
-        !js_aken_native_page_locator_digest_record(out_record, expected_binding) ||
-        !js_aken_native_page_envelope_constant_time_equal(
+    js_runtime_metrics_note_structure_check();
+    js_runtime_metrics_note_length_check();
+    if (!js_aken_native_page_locator_record_is_well_formed(out_record, 0)) {
+        goto cleanup;
+    }
+    js_runtime_metrics_note_digest_check();
+    if (!js_aken_native_page_locator_digest_record(out_record, expected_binding)) {
+        goto cleanup;
+    }
+    js_runtime_metrics_note_auth_check();
+    if (!js_aken_native_page_envelope_constant_time_equal(
             received_binding,
             expected_binding,
             sizeof(received_binding))) {
+        js_runtime_metrics_note_auth_failure();
         goto cleanup;
     }
     out_record->parsed = 1u;
@@ -1138,12 +1672,16 @@ JS_HIDDEN int js_aken_native_page_locator_lookup(
     size_t match_count = 0u;
     size_t record_index;
     int ok = 0;
+    /* The compiled locator is a bounded immutable table.  Keep this metric at
+     * the outer lookup boundary so a large table does not turn telemetry into a
+     * per-record atomic hot-loop cost. */
+    js_runtime_metrics_note_structure_check();
+    js_runtime_metrics_note_length_check();
     if (!out_record) goto cleanup;
     js_aken_native_page_locator_record_wipe(out_record);
     if (!js_aken_native_page_request_is_valid(request) ||
         record_count == 0u || record_count > JS_AKEN_NATIVE_PAGE_LOCATOR_MAX_RECORD_COUNT ||
-        blob_size == 0u || blob_size > JS_AKEN_NATIVE_PAGE_LOCATOR_MAX_BLOB_SIZE ||
-        JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_FORMAT_VERSION != JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_VERSION) {
+        blob_size == 0u || blob_size > JS_AKEN_NATIVE_PAGE_LOCATOR_MAX_BLOB_SIZE) {
         goto cleanup;
     }
     for (record_index = 0u; record_index < record_count; ++record_index) {
@@ -1220,8 +1758,7 @@ static int js_aken_native_page_locator_collect_vbc4_method(
     js_vbc4_wipe_volatile(out_locator, sizeof(*out_locator));
     if (entry_token == 0u ||
         record_count == 0u || record_count > JS_AKEN_NATIVE_PAGE_LOCATOR_MAX_RECORD_COUNT ||
-        blob_size == 0u || blob_size > JS_AKEN_NATIVE_PAGE_LOCATOR_MAX_BLOB_SIZE ||
-        JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_FORMAT_VERSION != JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_VERSION) {
+        blob_size == 0u || blob_size > JS_AKEN_NATIVE_PAGE_LOCATOR_MAX_BLOB_SIZE) {
         goto cleanup;
     }
     records = (js_aken_native_page_locator_record *)calloc(record_count, sizeof(records[0]));
@@ -1276,6 +1813,8 @@ JS_HIDDEN int js_aken_native_page_locator_resolve(
 ) {
     int identity_matches = 0;
     int ok = 0;
+    js_runtime_metrics_note_structure_check();
+    js_runtime_metrics_note_length_check();
     if (!out_resolved) goto cleanup;
     js_vbc4_wipe_volatile(out_resolved, sizeof(*out_resolved));
     if (!js_aken_native_page_locator_record_is_well_formed(record, 1) ||
@@ -1289,7 +1828,11 @@ JS_HIDDEN int js_aken_native_page_locator_resolve(
             record->encoded_handle,
             envelope->encoded_handle,
             JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE);
-    if (!identity_matches) goto cleanup;
+    js_runtime_metrics_note_auth_check();
+    if (!identity_matches) {
+        js_runtime_metrics_note_auth_failure();
+        goto cleanup;
+    }
     out_resolved->resource_kind = record->resource_kind;
     out_resolved->page_index = record->page_index;
     out_resolved->encoded_handle = record->encoded_handle;
@@ -1316,7 +1859,6 @@ cleanup:
  * this gives the native terminal a single, non-enumerable route/proof/evaluator
  * view whose borrowed bytes remain scoped to the already matched locator row.
  */
-#define JS_AKEN_DESCRIPTOR_VERSION 1u
 #define JS_AKEN_DESCRIPTOR_MAX_SIZE (384u * 1024u)
 #define JS_AKEN_DESCRIPTOR_MAX_ROUTE_SIZE (128u * 1024u)
 #define JS_AKEN_DESCRIPTOR_MAX_PROOF_SIZE (160u * 1024u)
@@ -1326,13 +1868,9 @@ cleanup:
 #define JS_AKEN_DESCRIPTOR_MAX_VARIANT_SIZE 256u
 #define JS_AKEN_DESCRIPTOR_MAX_MERKLE_DEPTH 64u
 #define JS_AKEN_DESCRIPTOR_MAX_CALL_SITE_PROOF_SIZE 4096u
-#define JS_AKEN_DESCRIPTOR_EVALUATOR_PLAN_VERSION 1u
-#define JS_AKEN_DESCRIPTOR_FRAGMENT_VERSION 1u
-#define JS_AKEN_DESCRIPTOR_IDENTITY_VERSION 1u
-#define JS_AKEN_DESCRIPTOR_ROUTE_VERSION 2u
-#define JS_AKEN_DESCRIPTOR_PROOF_VERSION 1u
-
-static const unsigned char JS_AKEN_DESCRIPTOR_EVALUATOR_DOMAIN[] = "AKEN-v4-evaluator-graph";
+static const unsigned char JS_AKEN_DESCRIPTOR_EVALUATOR_DOMAIN[] = "AKEN-evaluator-graph";
+/* Must exactly match AkenIntegrityMesh.LEAF_DOMAIN for the one current
+ * protected-artifact format.  Do not accept an older leaf domain. */
 static const unsigned char JS_AKEN_DESCRIPTOR_INTEGRITY_LEAF_DOMAIN[] = "AKEN-v4-integrity-leaf";
 static const unsigned char JS_AKEN_DESCRIPTOR_INTEGRITY_NODE_DOMAIN[] = "AKEN-v4-integrity-node";
 
@@ -1476,7 +2014,6 @@ static int js_aken_native_descriptor_parse_identity(
     js_aken_native_descriptor_identity *out_identity
 ) {
     js_aken_native_descriptor_cursor cursor;
-    uint8_t version = 0u;
     uint8_t kind = 0u;
     uint32_t page = 0u;
     if (!out_identity) return 0;
@@ -1485,8 +2022,7 @@ static int js_aken_native_descriptor_parse_identity(
     cursor.bytes = encoded;
     cursor.length = encoded_len;
     cursor.offset = 0u;
-    if (!js_aken_native_descriptor_read_u8(&cursor, &version) || version != JS_AKEN_DESCRIPTOR_IDENTITY_VERSION ||
-        !js_aken_native_descriptor_read_u8(&cursor, &kind) || kind < 1u || kind > 4u ||
+    if (!js_aken_native_descriptor_read_u8(&cursor, &kind) || kind < 1u || kind > 4u ||
         !js_aken_native_descriptor_read_u32be(&cursor, &page) || page > (uint32_t)INT_MAX ||
         !js_aken_native_descriptor_read_fixed(&cursor, JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE, &out_identity->encoded_handle) ||
         !js_aken_native_descriptor_read_fixed(&cursor, JS_AKEN_NATIVE_PAGE_ENVELOPE_LOCATOR_SIZE, &out_identity->locator_token) ||
@@ -1606,7 +2142,6 @@ static int js_aken_native_descriptor_parse_route(
     js_aken_native_descriptor_route *out_route
 ) {
     js_aken_native_descriptor_cursor cursor;
-    uint8_t version = 0u;
     uint32_t offset = 0u;
     uint32_t length = 0u;
     const unsigned char *identity = NULL;
@@ -1617,8 +2152,7 @@ static int js_aken_native_descriptor_parse_route(
     cursor.bytes = encoded;
     cursor.length = encoded_len;
     cursor.offset = 0u;
-    if (!js_aken_native_descriptor_read_u8(&cursor, &version) || version != JS_AKEN_DESCRIPTOR_ROUTE_VERSION ||
-        !js_aken_native_descriptor_read_frame(&cursor, 96u * 1024u, 0, &identity, &identity_len) ||
+    if (!js_aken_native_descriptor_read_frame(&cursor, 96u * 1024u, 0, &identity, &identity_len) ||
         !js_aken_native_descriptor_parse_identity(identity, identity_len, &out_route->identity) ||
         !js_aken_native_descriptor_read_frame(
             &cursor,
@@ -1663,7 +2197,6 @@ static int js_aken_native_descriptor_parse_proof(
     js_aken_native_descriptor_proof *out_proof
 ) {
     js_aken_native_descriptor_cursor cursor;
-    uint8_t version = 0u;
     uint32_t sibling_count = 0u;
     const unsigned char *identity = NULL;
     size_t identity_len = 0u;
@@ -1673,8 +2206,7 @@ static int js_aken_native_descriptor_parse_proof(
     cursor.bytes = encoded;
     cursor.length = encoded_len;
     cursor.offset = 0u;
-    if (!js_aken_native_descriptor_read_u8(&cursor, &version) || version != JS_AKEN_DESCRIPTOR_PROOF_VERSION ||
-        !js_aken_native_descriptor_read_frame(&cursor, 96u * 1024u, 0, &identity, &identity_len) ||
+    if (!js_aken_native_descriptor_read_frame(&cursor, 96u * 1024u, 0, &identity, &identity_len) ||
         !js_aken_native_descriptor_parse_identity(identity, identity_len, &out_proof->identity) ||
         !js_aken_native_descriptor_read_fixed(&cursor, JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE, &out_proof->artifact_commitment) ||
         !js_aken_native_descriptor_read_fixed(&cursor, JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE, &out_proof->mesh_root) ||
@@ -1722,6 +2254,7 @@ static int js_aken_native_descriptor_parse_proof(
     return 1;
 }
 
+#if !defined(JS_AKEN_TYPED_ONLY_RUNTIME) || !JS_AKEN_TYPED_ONLY_RUNTIME
 static int js_aken_native_descriptor_parse_fragment(
     const unsigned char *encoded,
     size_t encoded_len,
@@ -1732,7 +2265,6 @@ static int js_aken_native_descriptor_parse_fragment(
     uint32_t permutations[JS_AKEN_EVALUATOR_STATE_WIDTH]
 ) {
     js_aken_native_descriptor_cursor cursor;
-    uint8_t version = 0u;
     uint8_t role = 0u;
     uint32_t ordinal = 0u;
     uint32_t family = 0u;
@@ -1745,8 +2277,7 @@ static int js_aken_native_descriptor_parse_fragment(
     cursor.bytes = encoded;
     cursor.length = encoded_len;
     cursor.offset = 0u;
-    if (!js_aken_native_descriptor_read_u8(&cursor, &version) || version != JS_AKEN_DESCRIPTOR_FRAGMENT_VERSION ||
-        !js_aken_native_descriptor_read_u8(&cursor, &role) || role != expected_role ||
+    if (!js_aken_native_descriptor_read_u8(&cursor, &role) || role != expected_role ||
         !js_aken_native_descriptor_read_u32be(&cursor, &ordinal) || ordinal > (uint32_t)INT_MAX ||
         (jint)ordinal < expected_ordinal_min || (jint)ordinal > expected_ordinal_max ||
         !js_aken_native_descriptor_read_u32be(&cursor, &family) || family >= 16u) {
@@ -1811,7 +2342,9 @@ static int js_aken_native_descriptor_update_fragment_group(
     }
     return 1;
 }
+#endif
 
+#if !defined(JS_AKEN_TYPED_ONLY_RUNTIME) || !JS_AKEN_TYPED_ONLY_RUNTIME
 static int js_aken_native_descriptor_fingerprint_matches(const js_aken_native_page_descriptor_view *view) {
     js_sha256_ctx ctx;
     unsigned char actual[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE] = {0};
@@ -1849,6 +2382,7 @@ cleanup:
     js_vbc4_wipe_volatile(actual, sizeof(actual));
     return ok;
 }
+#endif
 
 JS_HIDDEN void js_aken_native_page_descriptor_view_wipe(js_aken_native_page_descriptor_view *view) {
     if (!view) return;
@@ -1908,6 +2442,8 @@ JS_HIDDEN int js_aken_native_page_descriptor_verify_payload_mesh(
     unsigned char current[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE] = {0};
     unsigned char next[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE] = {0};
     int ok = 0;
+    js_runtime_metrics_note_structure_check();
+    js_runtime_metrics_note_length_check();
     if (!view || view->parsed != 1u || !js_aken_evaluator_binding_is_valid(&view->binding) ||
         !view->leaf_identity_encoding || view->leaf_identity_encoding_len == 0u ||
         !view->mesh_root || !view->leaf_digest ||
@@ -1915,16 +2451,23 @@ JS_HIDDEN int js_aken_native_page_descriptor_verify_payload_mesh(
         !encoded_payload || encoded_payload_len == 0u) {
         goto cleanup;
     }
+    /* One mesh check covers the leaf and all bounded Merkle nodes.  Recording
+     * the phase once avoids atomic instrumentation inside the sibling loop. */
+    js_runtime_metrics_note_digest_check();
     if (!js_aken_native_descriptor_integrity_leaf(
             view->leaf_identity_encoding,
             view->leaf_identity_encoding_len,
             encoded_payload,
             encoded_payload_len,
-            current) ||
-        !js_aken_native_page_envelope_constant_time_equal(
+            current)) {
+        goto cleanup;
+    }
+    js_runtime_metrics_note_auth_check();
+    if (!js_aken_native_page_envelope_constant_time_equal(
             current,
             view->leaf_digest,
             JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE)) {
+        js_runtime_metrics_note_auth_failure();
         goto cleanup;
     }
     for (size_t index = 0u; index < view->merkle_sibling_count; index++) {
@@ -1939,10 +2482,12 @@ JS_HIDDEN int js_aken_native_page_descriptor_verify_payload_mesh(
         memcpy(current, next, sizeof(current));
         js_vbc4_wipe_volatile(next, sizeof(next));
     }
+    js_runtime_metrics_note_auth_check();
     ok = js_aken_native_page_envelope_constant_time_equal(
         current,
         view->mesh_root,
         JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE);
+    if (!ok) js_runtime_metrics_note_auth_failure();
 cleanup:
     js_vbc4_wipe_volatile(current, sizeof(current));
     js_vbc4_wipe_volatile(next, sizeof(next));
@@ -1966,13 +2511,13 @@ JS_HIDDEN int js_aken_native_page_descriptor_parse_current(
     size_t route_len = 0u;
     size_t proof_len = 0u;
     size_t plan_len = 0u;
-    uint8_t version = 0u;
-    uint8_t plan_version = 0u;
     uint32_t target_size = 0u;
     size_t layout_prefix_len = 0u;
     size_t layout_suffix_len = 0u;
     int layout_header_after_body = 0;
     int ok = 0;
+    js_runtime_metrics_note_structure_check();
+    js_runtime_metrics_note_length_check();
     if (!out_view) goto cleanup;
     js_aken_native_page_descriptor_view_wipe(out_view);
     js_vbc4_wipe_volatile(&route, sizeof(route));
@@ -1988,14 +2533,30 @@ JS_HIDDEN int js_aken_native_page_descriptor_parse_current(
     descriptor_cursor.bytes = resolved->descriptor_encoding;
     descriptor_cursor.length = resolved->descriptor_encoding_len;
     descriptor_cursor.offset = 0u;
-    if (!js_aken_native_descriptor_read_u8(&descriptor_cursor, &version) || version != JS_AKEN_DESCRIPTOR_VERSION ||
-        !js_aken_native_descriptor_read_frame(
+    if (!js_aken_native_descriptor_read_frame(
             &descriptor_cursor,
             JS_AKEN_DESCRIPTOR_MAX_ROUTE_SIZE,
             0,
             &route_bytes,
-            &route_len) ||
-        !js_aken_native_descriptor_parse_route(route_bytes, route_len, &route) ||
+            &route_len)) {
+        goto cleanup;
+    }
+    /* The locator record commits the route separately.  Count the exact
+     * cross-source equality check as authentication rather than as parsing. */
+    js_runtime_metrics_note_auth_check();
+    if (route_len != resolved->route_encoding_len ||
+        /* The locator record commits a route frame independently from the
+         * descriptor.  AKEN-v4 requires the two current-format encodings to
+         * be byte-identical, so a record can never select a resource route
+         * different from the descriptor and its bound evaluator plan. */
+        !js_aken_native_page_envelope_constant_time_equal(
+            route_bytes,
+            resolved->route_encoding,
+            route_len)) {
+        js_runtime_metrics_note_auth_failure();
+        goto cleanup;
+    }
+    if (!js_aken_native_descriptor_parse_route(route_bytes, route_len, &route) ||
         !js_aken_native_descriptor_read_frame(
             &descriptor_cursor,
             JS_AKEN_DESCRIPTOR_MAX_PROOF_SIZE,
@@ -2014,6 +2575,7 @@ JS_HIDDEN int js_aken_native_page_descriptor_parse_current(
         !js_aken_native_descriptor_cursor_finished(&descriptor_cursor)) {
         goto cleanup;
     }
+    js_runtime_metrics_note_auth_check();
     if (!js_aken_native_descriptor_identity_equal(&route.identity, &proof.identity) ||
         route.identity_encoding_len != proof.identity_encoding_len ||
         !js_aken_native_page_envelope_constant_time_equal(
@@ -2028,8 +2590,8 @@ JS_HIDDEN int js_aken_native_page_descriptor_parse_current(
         !js_aken_native_page_open_ascii_equal(
             route.codec_variant,
             route.codec_variant_len,
-            (const unsigned char *)"aes-256-gcm-v4",
-            sizeof("aes-256-gcm-v4") - 1u) ||
+            (const unsigned char *)"aes-256-gcm",
+            sizeof("aes-256-gcm") - 1u) ||
         !js_aken_native_page_open_layout_parse(
             route.layout_variant,
             route.layout_variant_len,
@@ -2059,6 +2621,7 @@ JS_HIDDEN int js_aken_native_page_descriptor_parse_current(
             proof.artifact_commitment,
             resolved->artifact_commitment,
             JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE)) {
+        js_runtime_metrics_note_auth_failure();
         goto cleanup;
     }
     out_view->binding.kind_id = route.identity.resource_kind;
@@ -2080,34 +2643,13 @@ JS_HIDDEN int js_aken_native_page_descriptor_parse_current(
     plan_cursor.bytes = plan_bytes;
     plan_cursor.length = plan_len;
     plan_cursor.offset = 0u;
-    if (!js_aken_native_descriptor_read_u8(&plan_cursor, &plan_version) ||
-        plan_version != JS_AKEN_DESCRIPTOR_EVALUATOR_PLAN_VERSION) {
-        goto cleanup;
-    }
-    for (size_t index = 0u; index < JS_AKEN_EVALUATOR_FRAGMENT_COUNT; index++) {
-        const unsigned char *fragment_bytes = NULL;
-        size_t fragment_len = 0u;
-        uint8_t role = index < 3u ? 1u : (index < 6u ? 2u : 3u);
-        jint ordinal_min = index < 3u ? 0 : (index < 6u ? 3 : 6);
-        jint ordinal_max = index < 3u ? 2 : (index < 6u ? 5 : 6);
-        if (!js_aken_native_descriptor_read_frame(
-                &plan_cursor,
-                JS_AKEN_DESCRIPTOR_MAX_FRAGMENT_SIZE,
-                0,
-                &fragment_bytes,
-                &fragment_len) ||
-            !js_aken_native_descriptor_parse_fragment(
-                fragment_bytes,
-                fragment_len,
-                role,
-                ordinal_min,
-                ordinal_max,
-                &out_view->fragments[index],
-                out_view->fragment_permutations[index])) {
-            goto cleanup;
-        }
-    }
-    if (!js_aken_native_descriptor_read_fixed(
+    if (!js_aken_native_descriptor_read_frame(
+            &plan_cursor,
+            JS_AKEN_DESCRIPTOR_MAX_PLAN_SIZE,
+            0,
+            &out_view->bound_plan,
+            &out_view->bound_plan_len) ||
+        !js_aken_native_descriptor_read_fixed(
             &plan_cursor,
             JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE,
             &fingerprint) ||
@@ -2116,6 +2658,7 @@ JS_HIDDEN int js_aken_native_page_descriptor_parse_current(
     }
     out_view->binding.evaluator_fingerprint = fingerprint;
     out_view->binding.evaluator_fingerprint_len = JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE;
+    js_runtime_metrics_note_auth_check();
     if (!js_aken_native_page_envelope_constant_time_equal(
             fingerprint,
             route.identity.evaluator_fingerprint,
@@ -2127,10 +2670,34 @@ JS_HIDDEN int js_aken_native_page_descriptor_parse_current(
         !js_aken_native_page_envelope_constant_time_equal(
             fingerprint,
             resolved->evaluator_fingerprint,
-            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) ||
-        !js_aken_native_descriptor_fingerprint_matches(out_view)) {
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE)) {
+        js_runtime_metrics_note_auth_failure();
         goto cleanup;
     }
+    if (!out_view->bound_plan || out_view->bound_plan_len == 0u ||
+        !js_aken_bound_plan_validate_or_materialize(
+            &out_view->binding,
+            out_view->bound_plan,
+            out_view->bound_plan_len,
+            route_bytes,
+            route_len,
+            proof.call_site_proof,
+            proof.call_site_proof_len,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL)) {
+        goto cleanup;
+    }
+    out_view->route_encoding = route_bytes;
+    out_view->route_encoding_len = route_len;
+    out_view->call_site_proof = proof.call_site_proof;
+    out_view->call_site_proof_len = proof.call_site_proof_len;
     out_view->leaf_identity_encoding = route.identity_encoding;
     out_view->leaf_identity_encoding_len = route.identity_encoding_len;
     out_view->mesh_root = proof.mesh_root;
@@ -2172,7 +2739,6 @@ static int js_aken_native_page_locator_record_extract_call_site_proof(
     const unsigned char *proof_bytes = NULL;
     size_t route_len = 0u;
     size_t proof_len = 0u;
-    uint8_t version = 0u;
     int ok = 0;
     if (!out_proof || !out_proof_len) goto cleanup;
     *out_proof = NULL;
@@ -2187,8 +2753,7 @@ static int js_aken_native_page_locator_record_extract_call_site_proof(
     cursor.bytes = record->descriptor_encoding;
     cursor.length = record->descriptor_encoding_len;
     cursor.offset = 0u;
-    if (!js_aken_native_descriptor_read_u8(&cursor, &version) || version != JS_AKEN_DESCRIPTOR_VERSION ||
-        !js_aken_native_descriptor_read_frame(
+    if (!js_aken_native_descriptor_read_frame(
             &cursor,
             JS_AKEN_DESCRIPTOR_MAX_ROUTE_SIZE,
             0,
@@ -2281,26 +2846,26 @@ static int js_aken_native_vbc4_method_page_matches(
  * reconstructing a DEK, and it never publishes the DEK or accepts a JNI
  * generic-decode request.
  */
-#define JS_AKEN_NATIVE_PAGE_CODEC_VERSION 4u
-#define JS_AKEN_NATIVE_PAGE_HEADER_SIZE 202u
+#define JS_AKEN_NATIVE_PAGE_HEADER_SIZE 201u
 #define JS_AKEN_NATIVE_PAGE_GCM_TAG_SIZE 16u
 #define JS_AKEN_NATIVE_PAGE_NONCE_SIZE 12u
-#define JS_AKEN_NATIVE_PAGE_OFFSET_VERSION 0u
-#define JS_AKEN_NATIVE_PAGE_OFFSET_KIND 1u
-#define JS_AKEN_NATIVE_PAGE_OFFSET_PAGE_INDEX 2u
-#define JS_AKEN_NATIVE_PAGE_OFFSET_PLAINTEXT_LENGTH 6u
-#define JS_AKEN_NATIVE_PAGE_OFFSET_NONCE 10u
-#define JS_AKEN_NATIVE_PAGE_OFFSET_COMMITMENT 22u
-#define JS_AKEN_NATIVE_PAGE_OFFSET_IDENTITY_HASH 54u
-#define JS_AKEN_NATIVE_PAGE_OFFSET_EVALUATOR_FINGERPRINT 86u
-#define JS_AKEN_NATIVE_PAGE_OFFSET_CODEC_HASH 118u
-#define JS_AKEN_NATIVE_PAGE_OFFSET_LAYOUT_HASH 150u
-#define JS_AKEN_NATIVE_PAGE_OFFSET_LOCATOR 182u
-#define JS_AKEN_NATIVE_PAGE_OFFSET_CIPHERTEXT_LENGTH 198u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_KIND 0u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_PAGE_INDEX 1u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_PLAINTEXT_LENGTH 5u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_NONCE 9u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_COMMITMENT 21u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_IDENTITY_HASH 53u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_EVALUATOR_FINGERPRINT 85u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_CODEC_HASH 117u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_LAYOUT_HASH 149u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_LOCATOR 181u
+#define JS_AKEN_NATIVE_PAGE_OFFSET_CIPHERTEXT_LENGTH 197u
 #define JS_AKEN_NATIVE_PAGE_MAX_ENCODED_SIZE (16u * 1024u * 1024u)
 
-static const unsigned char JS_AKEN_NATIVE_PAGE_AAD_DOMAIN[] = "AKEN-v4-page-aad";
-static const unsigned char JS_AKEN_NATIVE_PAGE_CANONICAL_CODEC[] = "aes-256-gcm-v4";
+static const unsigned char JS_AKEN_NATIVE_PAGE_AAD_DOMAIN[] = "page-aad";
+static const unsigned char JS_AKEN_NATIVE_PAGE_CANONICAL_CODEC[] = "aes-256-gcm";
+/* Must exactly match AkenPageLayout.FORMAT_PREFIX.  There is one current
+ * artifact format, so accept only the canonical AKEN-v4 layout grammar. */
 static const unsigned char JS_AKEN_NATIVE_PAGE_LAYOUT_PREFIX[] = "aken4-frame1";
 
 static int js_aken_native_page_open_size_add(size_t *value, size_t addend) {
@@ -2571,6 +3136,9 @@ static int js_aken_native_page_open_bindings_match(
     const js_aken_native_page_resolved_descriptor *resolved,
     const js_aken_evaluator_binding *binding
 ) {
+    int matches = 0;
+    js_runtime_metrics_note_structure_check();
+    js_runtime_metrics_note_length_check();
     if (!js_aken_native_page_request_is_valid(request) ||
         !js_aken_native_page_envelope_record_is_well_formed(envelope, 1) ||
         !js_aken_native_page_resolved_descriptor_is_well_formed(resolved) ||
@@ -2578,7 +3146,7 @@ static int js_aken_native_page_open_bindings_match(
         !js_aken_native_page_envelope_verify_resolved_bindings(envelope, resolved)) {
         return 0;
     }
-    return binding->kind_id == request->resource_kind &&
+    matches = binding->kind_id == request->resource_kind &&
         binding->kind_id == envelope->resource_kind &&
         binding->kind_id == resolved->resource_kind &&
         binding->page_index == request->page_index &&
@@ -2620,6 +3188,9 @@ static int js_aken_native_page_open_bindings_match(
             binding->artifact_commitment,
             resolved->artifact_commitment,
             JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE);
+    js_runtime_metrics_note_auth_check();
+    if (!matches) js_runtime_metrics_note_auth_failure();
+    return matches;
 }
 
 JS_HIDDEN void js_aken_native_opened_page_wipe(js_aken_native_opened_page *page) {
@@ -2631,6 +3202,7 @@ JS_HIDDEN void js_aken_native_opened_page_wipe(js_aken_native_opened_page *page)
     js_vbc4_wipe_volatile(page, sizeof(*page));
 }
 
+#if !defined(JS_AKEN_TYPED_ONLY_RUNTIME) || !JS_AKEN_TYPED_ONLY_RUNTIME
 JS_HIDDEN int js_aken_native_page_open_bound_payload(
     const js_aken_native_page_request *request,
     const js_aken_native_page_envelope *envelope,
@@ -2723,8 +3295,7 @@ JS_HIDDEN int js_aken_native_page_open_bound_payload(
     suffix = encoded_payload + encoded_payload_len - suffix_len;
     body = encoded_payload + body_offset;
     nonce = header + JS_AKEN_NATIVE_PAGE_OFFSET_NONCE;
-    if ((header[JS_AKEN_NATIVE_PAGE_OFFSET_VERSION] & 0xFFu) != JS_AKEN_NATIVE_PAGE_CODEC_VERSION ||
-        header[JS_AKEN_NATIVE_PAGE_OFFSET_KIND] != binding->kind_id ||
+    if (header[JS_AKEN_NATIVE_PAGE_OFFSET_KIND] != binding->kind_id ||
         (jint)js_aken_native_page_open_read_u32be(header + JS_AKEN_NATIVE_PAGE_OFFSET_PAGE_INDEX) != binding->page_index ||
         !js_aken_native_page_open_sha256(binding->logical_identity, binding->logical_identity_len, identity_hash) ||
         !js_aken_native_page_open_sha256(
@@ -2767,7 +3338,7 @@ JS_HIDDEN int js_aken_native_page_open_bound_payload(
             suffix_len,
             &aad,
             &aad_len) ||
-        !js_aken_evaluator_recover_dek(binding, fragments, fragment_count, dek)) {
+        !js_aken_legacy_evaluator_materialize_compatibility(binding, fragments, fragment_count, dek)) {
         goto cleanup;
     }
     plain = (unsigned char *)malloc(declared_plain_len);
@@ -2800,6 +3371,224 @@ cleanup:
     js_vbc4_wipe_volatile(codec_hash, sizeof(codec_hash));
     js_vbc4_wipe_volatile(layout_hash, sizeof(layout_hash));
     js_vbc4_wipe_volatile(dek, sizeof(dek));
+    if (!ok && out_page) js_vbc4_wipe_volatile(out_page, sizeof(*out_page));
+    return ok;
+}
+#endif
+
+
+JS_HIDDEN int js_aken_native_page_open_bound_plan_payload(
+    const js_aken_native_page_request *request,
+    const js_aken_native_page_envelope *envelope,
+    const js_aken_native_page_resolved_descriptor *resolved,
+    const js_aken_evaluator_binding *binding,
+    const unsigned char *bound_plan,
+    size_t bound_plan_len,
+    const unsigned char *route_encoding,
+    size_t route_encoding_len,
+    const unsigned char *call_site_proof,
+    size_t call_site_proof_len,
+    const unsigned char *encoded_payload,
+    size_t encoded_payload_len,
+    js_aken_native_opened_page *out_page
+) {
+    const unsigned char *header = NULL;
+    const unsigned char *body = NULL;
+    const unsigned char *prefix = NULL;
+    const unsigned char *suffix = NULL;
+    const unsigned char *nonce = NULL;
+    size_t prefix_len = 0u;
+    size_t suffix_len = 0u;
+    size_t header_offset = 0u;
+    size_t body_offset = 0u;
+    size_t expected_total = 0u;
+    size_t declared_plain_len = 0u;
+    size_t declared_body_len = 0u;
+    int header_after_body = 0;
+    unsigned char identity_hash[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE] = {0};
+    unsigned char codec_hash[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE] = {0};
+    unsigned char layout_hash[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE] = {0};
+    uint32_t lane0 = 0u;
+    uint32_t lane1 = 0u;
+    uint32_t lane2 = 0u;
+    uint32_t lane3 = 0u;
+    uint32_t lane4 = 0u;
+    uint32_t lane5 = 0u;
+    uint32_t lane6 = 0u;
+    uint32_t lane7 = 0u;
+    unsigned char *aad = NULL;
+    size_t aad_len = 0u;
+    unsigned char *plain = NULL;
+    int ok = 0;
+    js_runtime_metrics_note_structure_check();
+    js_runtime_metrics_note_length_check();
+    if (!out_page) goto cleanup;
+    js_vbc4_wipe_volatile(out_page, sizeof(*out_page));
+    if (!bound_plan || bound_plan_len == 0u || !route_encoding || route_encoding_len == 0u ||
+        !call_site_proof || call_site_proof_len == 0u ||
+        !encoded_payload || encoded_payload_len == 0u || encoded_payload_len > JS_AKEN_NATIVE_PAGE_MAX_ENCODED_SIZE ||
+        !js_aken_native_page_open_bindings_match(request, envelope, resolved, binding) ||
+        !js_aken_native_page_open_ascii_equal(
+            binding->codec_variant,
+            binding->codec_variant_len,
+            JS_AKEN_NATIVE_PAGE_CANONICAL_CODEC,
+            sizeof(JS_AKEN_NATIVE_PAGE_CANONICAL_CODEC) - 1u) ||
+        !js_aken_native_page_open_layout_parse(
+            binding->layout_variant,
+            binding->layout_variant_len,
+            &prefix_len,
+            &suffix_len,
+            &header_after_body)) {
+        goto cleanup;
+    }
+    expected_total = prefix_len;
+    if (!js_aken_native_page_open_size_add(&expected_total, JS_AKEN_NATIVE_PAGE_HEADER_SIZE) ||
+        !js_aken_native_page_open_size_add(&expected_total, JS_AKEN_NATIVE_PAGE_GCM_TAG_SIZE) ||
+        !js_aken_native_page_open_size_add(&expected_total, suffix_len) ||
+        encoded_payload_len < expected_total) {
+        goto cleanup;
+    }
+    if (header_after_body) {
+        header_offset = encoded_payload_len - suffix_len - JS_AKEN_NATIVE_PAGE_HEADER_SIZE;
+        body_offset = prefix_len;
+    } else {
+        header_offset = prefix_len;
+        body_offset = prefix_len + JS_AKEN_NATIVE_PAGE_HEADER_SIZE;
+    }
+    if (header_offset > encoded_payload_len ||
+        JS_AKEN_NATIVE_PAGE_HEADER_SIZE > encoded_payload_len - header_offset ||
+        body_offset > encoded_payload_len) {
+        goto cleanup;
+    }
+    header = encoded_payload + header_offset;
+    declared_plain_len = (size_t)js_aken_native_page_open_read_u32be(
+        header + JS_AKEN_NATIVE_PAGE_OFFSET_PLAINTEXT_LENGTH);
+    declared_body_len = (size_t)js_aken_native_page_open_read_u32be(
+        header + JS_AKEN_NATIVE_PAGE_OFFSET_CIPHERTEXT_LENGTH);
+    if (declared_plain_len == 0u || declared_plain_len > JS_AKEN_NATIVE_PAGE_MAX_ENCODED_SIZE ||
+        declared_plain_len > SIZE_MAX - JS_AKEN_NATIVE_PAGE_GCM_TAG_SIZE ||
+        declared_body_len != declared_plain_len + JS_AKEN_NATIVE_PAGE_GCM_TAG_SIZE) {
+        goto cleanup;
+    }
+    expected_total = prefix_len;
+    if (!js_aken_native_page_open_size_add(&expected_total, JS_AKEN_NATIVE_PAGE_HEADER_SIZE) ||
+        !js_aken_native_page_open_size_add(&expected_total, declared_body_len) ||
+        !js_aken_native_page_open_size_add(&expected_total, suffix_len) ||
+        expected_total != encoded_payload_len ||
+        declared_body_len > encoded_payload_len - body_offset) {
+        goto cleanup;
+    }
+    if (header_after_body && header_offset != body_offset + declared_body_len) goto cleanup;
+    if (!header_after_body && header_offset + JS_AKEN_NATIVE_PAGE_HEADER_SIZE != body_offset) goto cleanup;
+    prefix = encoded_payload;
+    suffix = encoded_payload + encoded_payload_len - suffix_len;
+    body = encoded_payload + body_offset;
+    nonce = header + JS_AKEN_NATIVE_PAGE_OFFSET_NONCE;
+    if (header[JS_AKEN_NATIVE_PAGE_OFFSET_KIND] != binding->kind_id ||
+        (jint)js_aken_native_page_open_read_u32be(header + JS_AKEN_NATIVE_PAGE_OFFSET_PAGE_INDEX) != binding->page_index ||
+        !js_aken_native_page_open_sha256(binding->logical_identity, binding->logical_identity_len, identity_hash) ||
+        !js_aken_native_page_open_sha256(
+            JS_AKEN_NATIVE_PAGE_CANONICAL_CODEC,
+            sizeof(JS_AKEN_NATIVE_PAGE_CANONICAL_CODEC) - 1u,
+            codec_hash) ||
+        !js_aken_native_page_open_sha256(binding->layout_variant, binding->layout_variant_len, layout_hash) ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            header + JS_AKEN_NATIVE_PAGE_OFFSET_COMMITMENT,
+            binding->artifact_commitment,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            header + JS_AKEN_NATIVE_PAGE_OFFSET_IDENTITY_HASH,
+            identity_hash,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            header + JS_AKEN_NATIVE_PAGE_OFFSET_EVALUATOR_FINGERPRINT,
+            binding->evaluator_fingerprint,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            header + JS_AKEN_NATIVE_PAGE_OFFSET_CODEC_HASH,
+            codec_hash,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            header + JS_AKEN_NATIVE_PAGE_OFFSET_LAYOUT_HASH,
+            layout_hash,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE) ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            header + JS_AKEN_NATIVE_PAGE_OFFSET_LOCATOR,
+            binding->locator_token,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_LOCATOR_SIZE)) {
+        goto cleanup;
+    }
+    if (!js_aken_bound_plan_validate_or_materialize(
+            binding,
+            bound_plan,
+            bound_plan_len,
+            route_encoding,
+            route_encoding_len,
+            call_site_proof,
+            call_site_proof_len,
+            nonce,
+            &lane0,
+            &lane1,
+            &lane2,
+            &lane3,
+            &lane4,
+            &lane5,
+            &lane6,
+            &lane7) ||
+        !js_aken_native_page_open_build_aad(
+            binding,
+            header,
+            prefix,
+            prefix_len,
+            suffix,
+            suffix_len,
+            &aad,
+            &aad_len)) {
+        goto cleanup;
+    }
+    plain = (unsigned char *)malloc(declared_plain_len);
+    if (!plain ||
+        !js_aes_gcm_decrypt_lanes(
+            lane0,
+            lane1,
+            lane2,
+            lane3,
+            lane4,
+            lane5,
+            lane6,
+            lane7,
+            nonce,
+            aad,
+            aad_len,
+            body,
+            declared_body_len,
+            plain)) {
+        goto cleanup;
+    }
+    out_page->bytes = plain;
+    out_page->length = declared_plain_len;
+    plain = NULL;
+    ok = 1;
+cleanup:
+    if (plain) {
+        js_vbc4_wipe_volatile(plain, declared_plain_len);
+        free(plain);
+    }
+    if (aad) {
+        js_vbc4_wipe_volatile(aad, aad_len);
+        free(aad);
+    }
+    js_vbc4_wipe_volatile(identity_hash, sizeof(identity_hash));
+    js_vbc4_wipe_volatile(codec_hash, sizeof(codec_hash));
+    js_vbc4_wipe_volatile(layout_hash, sizeof(layout_hash));
+    js_vbc4_wipe_volatile(&lane0, sizeof(lane0));
+    js_vbc4_wipe_volatile(&lane1, sizeof(lane1));
+    js_vbc4_wipe_volatile(&lane2, sizeof(lane2));
+    js_vbc4_wipe_volatile(&lane3, sizeof(lane3));
+    js_vbc4_wipe_volatile(&lane4, sizeof(lane4));
+    js_vbc4_wipe_volatile(&lane5, sizeof(lane5));
+    js_vbc4_wipe_volatile(&lane6, sizeof(lane6));
+    js_vbc4_wipe_volatile(&lane7, sizeof(lane7));
     if (!ok && out_page) js_vbc4_wipe_volatile(out_page, sizeof(*out_page));
     return ok;
 }
@@ -2894,17 +3683,128 @@ JS_HIDDEN int js_aken_native_page_open_current_view_payload(
             view, encoded_payload, encoded_payload_len)) {
         return 0;
     }
-    ok = js_aken_native_page_open_bound_payload(
+    ok = js_aken_native_page_open_bound_plan_payload(
         request,
         envelope,
         resolved,
         &view->binding,
-        view->fragments,
-        JS_AKEN_EVALUATOR_FRAGMENT_COUNT,
+        view->bound_plan,
+        view->bound_plan_len,
+        view->route_encoding,
+        view->route_encoding_len,
+        view->call_site_proof,
+        view->call_site_proof_len,
         encoded_payload,
         encoded_payload_len,
         out_page);
     if (!ok) js_vbc4_wipe_volatile(out_page, sizeof(*out_page));
+    return ok;
+}
+
+enum {
+    JS_AKEN_NATIVE_PAGE_OPEN_FAILURE_ROUTE = 1,
+    JS_AKEN_NATIVE_PAGE_OPEN_FAILURE_AUTHENTICATION = 2,
+};
+
+/*
+ * Resolve and open exactly one current AKEN page.  The caller owns the
+ * request/locator record and supplies zero-initialized output objects; this
+ * helper owns no page catalog and never exposes evaluator state to Java.  A
+ * successful call leaves the parsed descriptor, resolved route, encoded page
+ * slice, and opened plaintext in the supplied outputs.  Every failure wipes
+ * all outputs so callers can fail closed without carrying partially verified
+ * state into a different resource route.
+ */
+static int js_aken_native_page_resolve_and_open_current(
+    JNIEnv *env,
+    jclass helper_cls,
+    const js_aken_native_page_request *request,
+    const js_aken_native_page_locator_record *record,
+    uint8_t expected_resource_kind,
+    jint expected_page_index,
+    js_aken_native_page_envelope *envelope,
+    js_aken_native_page_resolved_descriptor *resolved,
+    js_aken_native_page_descriptor_view *descriptor_view,
+    unsigned char **encoded_payload,
+    size_t *encoded_payload_len,
+    js_aken_native_opened_page *opened_page,
+    int *out_failure_stage
+) {
+    int ok = 0;
+    if (!envelope || !resolved || !descriptor_view || !encoded_payload ||
+        !encoded_payload_len || !opened_page || !out_failure_stage) {
+        return 0;
+    }
+    *out_failure_stage = JS_AKEN_NATIVE_PAGE_OPEN_FAILURE_ROUTE;
+    js_aken_native_page_envelope_wipe(envelope);
+    js_vbc4_wipe_volatile(resolved, sizeof(*resolved));
+    js_aken_native_page_descriptor_view_wipe(descriptor_view);
+    js_aken_native_opened_page_wipe(opened_page);
+    *encoded_payload = NULL;
+    *encoded_payload_len = 0u;
+    if (!env || !helper_cls || !request || !record ||
+        !js_aken_native_page_request_is_valid(request) ||
+        !js_aken_native_page_locator_record_is_well_formed(record, 1) ||
+        !js_aken_native_page_envelope_kind_is_valid(expected_resource_kind) ||
+        expected_page_index < 0 ||
+        request->resource_kind != expected_resource_kind ||
+        request->page_index != expected_page_index ||
+        record->entry_token != request->entry_token ||
+        record->resource_kind != expected_resource_kind ||
+        record->page_index != expected_page_index ||
+        !js_aken_native_page_envelope_constant_time_equal(
+            record->encoded_handle,
+            request->encoded_handle,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE)) {
+        goto cleanup;
+    }
+    if (!js_aken_native_page_envelope_parse(
+            record->native_envelope,
+            record->native_envelope_len,
+            request,
+            envelope) ||
+        !js_aken_native_page_locator_resolve(record, envelope, resolved) ||
+        !js_aken_native_page_descriptor_parse_current(
+            request,
+            envelope,
+            resolved,
+            descriptor_view) ||
+        descriptor_view->binding.kind_id != expected_resource_kind ||
+        descriptor_view->binding.page_index != expected_page_index) {
+        goto cleanup;
+    }
+    *out_failure_stage = JS_AKEN_NATIVE_PAGE_OPEN_FAILURE_AUTHENTICATION;
+    if (!js_aken_native_page_load_current_route_slice(
+            env,
+            helper_cls,
+            descriptor_view,
+            encoded_payload,
+            encoded_payload_len) ||
+        !js_aken_native_page_open_current_view_payload(
+            request,
+            envelope,
+            resolved,
+            descriptor_view,
+            *encoded_payload,
+            *encoded_payload_len,
+            opened_page)) {
+        goto cleanup;
+    }
+    ok = 1;
+    *out_failure_stage = 0;
+cleanup:
+    if (!ok) {
+        if (*encoded_payload) {
+            js_vbc4_wipe_volatile(*encoded_payload, *encoded_payload_len);
+            free(*encoded_payload);
+        }
+        *encoded_payload = NULL;
+        *encoded_payload_len = 0u;
+        js_aken_native_opened_page_wipe(opened_page);
+        js_aken_native_page_descriptor_view_wipe(descriptor_view);
+        js_vbc4_wipe_volatile(resolved, sizeof(*resolved));
+        js_aken_native_page_envelope_wipe(envelope);
+    }
     return ok;
 }
 
@@ -3037,6 +3937,7 @@ static jobject JNICALL jsw_a0(JNIEnv *env, jclass cls, jlong entry_token, jbyteA
     jsize proof_length = 0;
     int protected_runtime_entered = 0;
     int execution_completed = 0;
+    int current_page_failure_stage = JS_AKEN_NATIVE_PAGE_OPEN_FAILURE_ROUTE;
     jobject result = NULL;
     memset(&request, 0, sizeof(request));
     memset(&record, 0, sizeof(record));
@@ -3088,35 +3989,25 @@ static jobject JNICALL jsw_a0(JNIEnv *env, jclass cls, jlong entry_token, jbyteA
         js_aken_bridge_unavailable(env, "AKEN VM page route is unavailable");
         goto cleanup;
     }
-    if (!js_aken_native_page_envelope_parse(
-            record.native_envelope,
-            record.native_envelope_len,
-            &request,
-            &envelope) ||
-        !js_aken_native_page_locator_resolve(&record, &envelope, &resolved) ||
-        !js_aken_native_page_descriptor_parse_current(
-            &request,
-            &envelope,
-            &resolved,
-            &descriptor_view)) {
-        js_aken_bridge_unavailable(env, "AKEN VM page route is invalid");
-        goto cleanup;
-    }
-    if (!js_aken_native_page_load_current_route_slice(
+    if (!js_aken_native_page_resolve_and_open_current(
             env,
             cls,
-            &descriptor_view,
-            &encoded_payload,
-            &encoded_payload_len) ||
-        !js_aken_native_page_open_current_view_payload(
             &request,
+            &record,
+            JS_AKEN_NATIVE_PAGE_RESOURCE_KIND_VBC4_METHOD,
+            0,
             &envelope,
             &resolved,
             &descriptor_view,
-            encoded_payload,
-            encoded_payload_len,
-            &opened_page)) {
-        js_aken_bridge_unavailable(env, "AKEN VM page authentication failed");
+            &encoded_payload,
+            &encoded_payload_len,
+            &opened_page,
+            &current_page_failure_stage)) {
+        js_aken_bridge_unavailable(
+            env,
+            current_page_failure_stage == JS_AKEN_NATIVE_PAGE_OPEN_FAILURE_AUTHENTICATION
+                ? "AKEN VM page authentication failed"
+                : "AKEN VM page route is invalid");
         goto cleanup;
     }
     if (descriptor_view.binding.kind_id != JS_AKEN_NATIVE_PAGE_RESOURCE_KIND_VBC4_METHOD ||
@@ -3219,7 +4110,35 @@ static jobject JNICALL jsw_a0(JNIEnv *env, jclass cls, jlong entry_token, jbyteA
     assembled_frame = NULL;
     assembled_frame_len = 0u;
     if (!program) {
-        js_aken_bridge_unavailable(env, "AKEN VM page frame is invalid");
+        JS_AKEN_JNI_FIXTURE_FRAME_PREPARE_FAILURE();
+        /* Keep the production error fail-closed while retaining only
+         * de-identified preparation diagnostics.  The stage and numeric
+         * validation code carry no frame bytes, keys, nonces, descriptor
+         * material, or exception payload, and make an artifact-local frame
+         * preparation mismatch actionable without weakening any verifier. */
+        char reason[512];
+        snprintf(
+            reason,
+            sizeof(reason),
+            "AKEN VM page frame is invalid: parse=%d detail=%d validation=%d stage=%s block=%d storage=%d dispatch=%d reg=%d pos=%d frame_len=%d trailer_remaining=%d block_pos=%d block_len=%d reg_count=%d reg_insns=%d stack_insns=%d flags=%d",
+            js_vm_last_parse_stage,
+            js_vm_last_parse_detail,
+            js_vm_last_validation_error,
+            js_vm_last_prepare_stage[0] ? js_vm_last_prepare_stage : "unknown",
+            js_vm_last_parse_block,
+            js_vm_last_parse_storage_block,
+            js_vm_last_parse_dispatch_block,
+            js_vm_last_parse_register,
+            js_vm_last_parse_pos,
+            js_vm_last_parse_frame_len,
+            js_vm_last_parse_trailer_remaining,
+            js_vm_last_parse_block_pos,
+            js_vm_last_parse_block_plain_len,
+            js_vm_last_parse_register_count,
+            js_vm_last_parse_register_insn_count,
+            js_vm_last_parse_stack_insn_count,
+            js_vm_last_parse_flags);
+        js_aken_bridge_unavailable(env, reason);
         goto cleanup;
     }
     result = js_vm_execute_cached_program(env, cls, program, args);
@@ -3329,6 +4248,7 @@ static jbyteArray JNICALL jsw_a1(JNIEnv *env, jclass cls, jbyteArray encoded_han
     jsize proof_length = 0;
     int protected_runtime_entered = 0;
     int completed = 0;
+    int current_page_failure_stage = JS_AKEN_NATIVE_PAGE_OPEN_FAILURE_ROUTE;
     jbyteArray decoded = NULL;
     memset(&request, 0, sizeof(request));
     memset(&record, 0, sizeof(record));
@@ -3379,37 +4299,25 @@ static jbyteArray JNICALL jsw_a1(JNIEnv *env, jclass cls, jbyteArray encoded_han
         js_aken_bridge_unavailable(env, "AKEN string page route is unavailable");
         goto cleanup;
     }
-    if (!js_aken_native_page_envelope_parse(
-            record.native_envelope,
-            record.native_envelope_len,
-            &request,
-            &envelope) ||
-        !js_aken_native_page_locator_resolve(&record, &envelope, &resolved) ||
-        !js_aken_native_page_descriptor_parse_current(
-            &request,
-            &envelope,
-            &resolved,
-            &descriptor_view)) {
-        js_aken_bridge_unavailable(env, "AKEN string page route is invalid");
-        goto cleanup;
-    }
-    if (descriptor_view.binding.kind_id != JS_AKEN_NATIVE_PAGE_RESOURCE_KIND_STRING_PAGE ||
-        descriptor_view.binding.page_index != page_index ||
-        !js_aken_native_page_load_current_route_slice(
+    if (!js_aken_native_page_resolve_and_open_current(
             env,
             cls,
-            &descriptor_view,
-            &encoded_payload,
-            &encoded_payload_len) ||
-        !js_aken_native_page_open_current_view_payload(
             &request,
+            &record,
+            JS_AKEN_NATIVE_PAGE_RESOURCE_KIND_STRING_PAGE,
+            page_index,
             &envelope,
             &resolved,
             &descriptor_view,
-            encoded_payload,
-            encoded_payload_len,
-            &opened_page)) {
-        js_aken_bridge_unavailable(env, "AKEN string page authentication failed");
+            &encoded_payload,
+            &encoded_payload_len,
+            &opened_page,
+            &current_page_failure_stage)) {
+        js_aken_bridge_unavailable(
+            env,
+            current_page_failure_stage == JS_AKEN_NATIVE_PAGE_OPEN_FAILURE_AUTHENTICATION
+                ? "AKEN string page authentication failed"
+                : "AKEN string page route is invalid");
         goto cleanup;
     }
     if (!opened_page.bytes || opened_page.length == 0u || opened_page.length > (size_t)INT_MAX) {
@@ -3459,6 +4367,7 @@ static jbyteArray JNICALL jsw_a2(JNIEnv *env, jclass cls, jbyteArray encoded_han
     jsize proof_length = 0;
     int protected_runtime_entered = 0;
     int completed = 0;
+    int current_page_failure_stage = JS_AKEN_NATIVE_PAGE_OPEN_FAILURE_ROUTE;
     jbyteArray decoded = NULL;
     memset(&request, 0, sizeof(request));
     memset(&record, 0, sizeof(record));
@@ -3509,37 +4418,25 @@ static jbyteArray JNICALL jsw_a2(JNIEnv *env, jclass cls, jbyteArray encoded_han
         js_aken_bridge_unavailable(env, "AKEN class page route is unavailable");
         goto cleanup;
     }
-    if (!js_aken_native_page_envelope_parse(
-            record.native_envelope,
-            record.native_envelope_len,
-            &request,
-            &envelope) ||
-        !js_aken_native_page_locator_resolve(&record, &envelope, &resolved) ||
-        !js_aken_native_page_descriptor_parse_current(
-            &request,
-            &envelope,
-            &resolved,
-            &descriptor_view)) {
-        js_aken_bridge_unavailable(env, "AKEN class page route is invalid");
-        goto cleanup;
-    }
-    if (descriptor_view.binding.kind_id != JS_AKEN_NATIVE_PAGE_RESOURCE_KIND_ENCRYPTED_CLASS_PAGE ||
-        descriptor_view.binding.page_index != page_index ||
-        !js_aken_native_page_load_current_route_slice(
+    if (!js_aken_native_page_resolve_and_open_current(
             env,
             cls,
-            &descriptor_view,
-            &encoded_payload,
-            &encoded_payload_len) ||
-        !js_aken_native_page_open_current_view_payload(
             &request,
+            &record,
+            JS_AKEN_NATIVE_PAGE_RESOURCE_KIND_ENCRYPTED_CLASS_PAGE,
+            page_index,
             &envelope,
             &resolved,
             &descriptor_view,
-            encoded_payload,
-            encoded_payload_len,
-            &opened_page)) {
-        js_aken_bridge_unavailable(env, "AKEN class page authentication failed");
+            &encoded_payload,
+            &encoded_payload_len,
+            &opened_page,
+            &current_page_failure_stage)) {
+        js_aken_bridge_unavailable(
+            env,
+            current_page_failure_stage == JS_AKEN_NATIVE_PAGE_OPEN_FAILURE_AUTHENTICATION
+                ? "AKEN class page authentication failed"
+                : "AKEN class page route is invalid");
         goto cleanup;
     }
     if (!opened_page.bytes || opened_page.length == 0u || opened_page.length > (size_t)INT_MAX) {
@@ -3575,16 +4472,447 @@ cleanup:
     return completed ? decoded : NULL;
 }
 
-static jbyteArray JNICALL jsw_a3(JNIEnv *env, jclass cls, jbyteArray encoded_handle, jint page_index, jbyteArray call_site_proof) {
-    (void)cls;
-    if (!js_vm_sensitive_path_guard(env, (const void*)jsw_a3, 0)) return NULL;
-    if (!js_protected_runtime_enter(env)) return NULL;
-    if (js_aken_bridge_request_is_valid(env, encoded_handle, page_index, call_site_proof)) {
-        js_aken_bridge_unavailable(env, "AKEN native chunk route is unavailable");
+/*
+ * Native chunks terminate at a fixed native-only handler dispatcher.  The
+ * handler descriptor is authenticated page plaintext, not a key or catalog:
+ * it binds one action to the exact typed handle/proof route which opened it.
+ * No plaintext or handler output crosses the JNI boundary.
+ */
+#define JS_AKEN_NATIVE_CHUNK_HANDLER_DESCRIPTOR_SIZE 192u
+#define JS_AKEN_NATIVE_CHUNK_HANDLER_HEADER_SIZE 8u
+#define JS_AKEN_NATIVE_CHUNK_HANDLER_IDENTITY_SIZE 32u
+#define JS_AKEN_NATIVE_CHUNK_HANDLER_HANDLE_OFFSET 40u
+#define JS_AKEN_NATIVE_CHUNK_HANDLER_PROOF_OFFSET 64u
+#define JS_AKEN_NATIVE_CHUNK_HANDLER_NONCE_OFFSET 96u
+#define JS_AKEN_NATIVE_CHUNK_HANDLER_TERMINAL_BINDING_OFFSET 128u
+#define JS_AKEN_NATIVE_CHUNK_HANDLER_ACTION_TAG_OFFSET 160u
+
+static const unsigned char js_aken_native_chunk_handler_header[JS_AKEN_NATIVE_CHUNK_HANDLER_HEADER_SIZE] = {
+    0xA4u, 0x5Eu, 0x13u, 0xC7u, 0x01u, 0x41u, 0xD9u, 0x6Bu
+};
+static const unsigned char js_aken_native_chunk_handler_terminal_domain[] =
+    "AKEN-v4-native-handler-terminal-binding-v1";
+static const unsigned char js_aken_native_chunk_handler_action_domain[] =
+    "AKEN-v4-native-handler-action-tag-v1";
+static volatile uint32_t js_aken_native_loader_handler_attestation = UINT32_C(0x6C8E9F13);
+
+static int js_aken_native_chunk_bytes_equal(
+    const unsigned char *left,
+    const unsigned char *right,
+    size_t length
+) {
+    unsigned int different = 0u;
+    size_t index = 0u;
+    if ((!left || !right) && length != 0u) return 0;
+    for (index = 0u; index < length; ++index) {
+        different |= (unsigned int)(left[index] ^ right[index]);
     }
-    (void)js_protected_runtime_leave(env);
-    return NULL;
+    return different == 0u;
 }
+
+static int js_aken_native_chunk_digest_update_framed(
+    js_sha256_ctx *context,
+    const unsigned char *bytes,
+    size_t length
+) {
+    unsigned char encoded_length[4] = {0};
+    int updated = 0;
+    if (!context || (!bytes && length != 0u) || length > UINT32_MAX) goto cleanup;
+    encoded_length[0] = (unsigned char)((length >> 24) & 0xFFu);
+    encoded_length[1] = (unsigned char)((length >> 16) & 0xFFu);
+    encoded_length[2] = (unsigned char)((length >> 8) & 0xFFu);
+    encoded_length[3] = (unsigned char)(length & 0xFFu);
+    js_sha256_update(context, encoded_length, (int)sizeof(encoded_length));
+    if (length != 0u) js_sha256_update(context, bytes, (int)length);
+    updated = 1;
+cleanup:
+    js_vbc4_wipe_volatile(encoded_length, sizeof(encoded_length));
+    return updated;
+}
+
+static int js_aken_native_chunk_compute_terminal_binding(
+    const unsigned char *descriptor,
+    unsigned char out_binding[JS_AKEN_NATIVE_CHUNK_HANDLER_IDENTITY_SIZE]
+) {
+    js_sha256_ctx context;
+    int completed = 0;
+    memset(&context, 0, sizeof(context));
+    if (!descriptor || !out_binding) goto cleanup;
+    js_vbc4_wipe_volatile(out_binding, JS_AKEN_NATIVE_CHUNK_HANDLER_IDENTITY_SIZE);
+    js_sha256_init(&context);
+    if (!js_aken_native_chunk_digest_update_framed(
+            &context,
+            js_aken_native_chunk_handler_terminal_domain,
+            sizeof(js_aken_native_chunk_handler_terminal_domain) - 1u) ||
+        !js_aken_native_chunk_digest_update_framed(
+            &context,
+            descriptor,
+            JS_AKEN_NATIVE_CHUNK_HANDLER_HEADER_SIZE) ||
+        !js_aken_native_chunk_digest_update_framed(
+            &context,
+            descriptor + JS_AKEN_NATIVE_CHUNK_HANDLER_HEADER_SIZE,
+            JS_AKEN_NATIVE_CHUNK_HANDLER_IDENTITY_SIZE) ||
+        !js_aken_native_chunk_digest_update_framed(
+            &context,
+            descriptor + JS_AKEN_NATIVE_CHUNK_HANDLER_HANDLE_OFFSET,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE) ||
+        !js_aken_native_chunk_digest_update_framed(
+            &context,
+            descriptor + JS_AKEN_NATIVE_CHUNK_HANDLER_PROOF_OFFSET,
+            JS_AKEN_NATIVE_CHUNK_HANDLER_IDENTITY_SIZE) ||
+        !js_aken_native_chunk_digest_update_framed(
+            &context,
+            descriptor + JS_AKEN_NATIVE_CHUNK_HANDLER_NONCE_OFFSET,
+            JS_AKEN_NATIVE_CHUNK_HANDLER_IDENTITY_SIZE)) {
+        goto cleanup;
+    }
+    js_sha256_final(&context, out_binding);
+    completed = 1;
+cleanup:
+    js_vbc4_wipe_volatile(&context, sizeof(context));
+    if (!completed && out_binding) {
+        js_vbc4_wipe_volatile(out_binding, JS_AKEN_NATIVE_CHUNK_HANDLER_IDENTITY_SIZE);
+    }
+    return completed;
+}
+
+static int js_aken_native_chunk_dispatch_loader_handler(
+    const unsigned char *descriptor,
+    const unsigned char terminal_binding[JS_AKEN_NATIVE_CHUNK_HANDLER_IDENTITY_SIZE]
+) {
+    js_sha256_ctx context;
+    unsigned char expected_action_tag[JS_AKEN_NATIVE_CHUNK_HANDLER_IDENTITY_SIZE] = {0};
+    uint32_t mix = 0u;
+    uint32_t state = 0u;
+    size_t index = 0u;
+    int dispatched = 0;
+    memset(&context, 0, sizeof(context));
+    if (!descriptor || !terminal_binding) goto cleanup;
+    js_sha256_init(&context);
+    if (!js_aken_native_chunk_digest_update_framed(
+            &context,
+            js_aken_native_chunk_handler_action_domain,
+            sizeof(js_aken_native_chunk_handler_action_domain) - 1u) ||
+        !js_aken_native_chunk_digest_update_framed(
+            &context,
+            descriptor,
+            JS_AKEN_NATIVE_CHUNK_HANDLER_HEADER_SIZE) ||
+        !js_aken_native_chunk_digest_update_framed(
+            &context,
+            descriptor + JS_AKEN_NATIVE_CHUNK_HANDLER_HEADER_SIZE,
+            JS_AKEN_NATIVE_CHUNK_HANDLER_IDENTITY_SIZE) ||
+        !js_aken_native_chunk_digest_update_framed(
+            &context,
+            descriptor + JS_AKEN_NATIVE_CHUNK_HANDLER_HANDLE_OFFSET,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE) ||
+        !js_aken_native_chunk_digest_update_framed(
+            &context,
+            descriptor + JS_AKEN_NATIVE_CHUNK_HANDLER_PROOF_OFFSET,
+            JS_AKEN_NATIVE_CHUNK_HANDLER_IDENTITY_SIZE) ||
+        !js_aken_native_chunk_digest_update_framed(
+            &context,
+            descriptor + JS_AKEN_NATIVE_CHUNK_HANDLER_NONCE_OFFSET,
+            JS_AKEN_NATIVE_CHUNK_HANDLER_IDENTITY_SIZE) ||
+        !js_aken_native_chunk_digest_update_framed(
+            &context,
+            terminal_binding,
+            JS_AKEN_NATIVE_CHUNK_HANDLER_IDENTITY_SIZE)) {
+        goto cleanup;
+    }
+    js_sha256_final(&context, expected_action_tag);
+    if (!js_aken_native_chunk_bytes_equal(
+            expected_action_tag,
+            descriptor + JS_AKEN_NATIVE_CHUNK_HANDLER_ACTION_TAG_OFFSET,
+            JS_AKEN_NATIVE_CHUNK_HANDLER_IDENTITY_SIZE)) {
+        goto cleanup;
+    }
+
+    /*
+     * Fixed native-private action: evolve a process-local attestation value
+     * using the verified descriptor tag.  The state is never exported to Java
+     * and is not used as a key; it makes successful handler dispatch a real
+     * native side effect rather than a generic plaintext hash/consume loop.
+     */
+    for (index = 0u; index < sizeof(expected_action_tag); ++index) {
+        mix = (mix << 5) | (mix >> 27);
+        mix ^= ((uint32_t)expected_action_tag[index]) << ((index & 3u) * 8u);
+    }
+    state = js_aken_native_loader_handler_attestation;
+    state = ((state << 7) | (state >> 25)) ^ mix ^ UINT32_C(0xA41E6B39);
+    js_aken_native_loader_handler_attestation = state;
+    dispatched = 1;
+cleanup:
+    js_vbc4_wipe_volatile(&context, sizeof(context));
+    js_vbc4_wipe_volatile(expected_action_tag, sizeof(expected_action_tag));
+    js_vbc4_wipe_volatile(&mix, sizeof(mix));
+    js_vbc4_wipe_volatile(&state, sizeof(state));
+    return dispatched;
+}
+
+static int js_aken_native_chunk_consume_opened_page(
+    const js_aken_native_opened_page *opened_page,
+    const unsigned char *encoded_handle,
+    size_t encoded_handle_len,
+    const unsigned char *call_site_proof,
+    size_t call_site_proof_len
+) {
+    unsigned char terminal_binding[JS_AKEN_NATIVE_CHUNK_HANDLER_IDENTITY_SIZE] = {0};
+    int consumed = 0;
+    if (!opened_page || !opened_page->bytes ||
+        opened_page->length != JS_AKEN_NATIVE_CHUNK_HANDLER_DESCRIPTOR_SIZE ||
+        !encoded_handle || encoded_handle_len != JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE ||
+        !call_site_proof || call_site_proof_len != JS_AKEN_NATIVE_CHUNK_HANDLER_IDENTITY_SIZE ||
+        !js_aken_native_chunk_bytes_equal(
+            opened_page->bytes,
+            js_aken_native_chunk_handler_header,
+            JS_AKEN_NATIVE_CHUNK_HANDLER_HEADER_SIZE) ||
+        !js_aken_native_chunk_bytes_equal(
+            opened_page->bytes + JS_AKEN_NATIVE_CHUNK_HANDLER_HANDLE_OFFSET,
+            encoded_handle,
+            JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE) ||
+        !js_aken_native_chunk_bytes_equal(
+            opened_page->bytes + JS_AKEN_NATIVE_CHUNK_HANDLER_PROOF_OFFSET,
+            call_site_proof,
+            JS_AKEN_NATIVE_CHUNK_HANDLER_IDENTITY_SIZE) ||
+        !js_aken_native_chunk_compute_terminal_binding(opened_page->bytes, terminal_binding) ||
+        !js_aken_native_chunk_bytes_equal(
+            opened_page->bytes + JS_AKEN_NATIVE_CHUNK_HANDLER_TERMINAL_BINDING_OFFSET,
+            terminal_binding,
+            JS_AKEN_NATIVE_CHUNK_HANDLER_IDENTITY_SIZE) ||
+        !js_aken_native_chunk_dispatch_loader_handler(opened_page->bytes, terminal_binding)) {
+        goto cleanup;
+    }
+    consumed = 1;
+cleanup:
+    js_vbc4_wipe_volatile(terminal_binding, sizeof(terminal_binding));
+    return consumed;
+}
+
+static void JNICALL jsw_a3(JNIEnv *env, jclass cls, jbyteArray encoded_handle, jint page_index, jbyteArray call_site_proof) {
+    unsigned char native_handle[JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE] = {0};
+    unsigned char native_call_site_proof[JS_AKEN_NATIVE_PAGE_ENVELOPE_MAX_SIZE] = {0};
+    js_aken_native_page_request request;
+    js_aken_native_page_locator_record record;
+    js_aken_native_page_envelope envelope;
+    js_aken_native_page_resolved_descriptor resolved;
+    js_aken_native_page_descriptor_view descriptor_view;
+    js_aken_native_opened_page opened_page;
+    unsigned char *encoded_payload = NULL;
+    size_t encoded_payload_len = 0u;
+    jsize proof_length = 0;
+    int protected_runtime_entered = 0;
+    int completed = 0;
+    int current_page_failure_stage = JS_AKEN_NATIVE_PAGE_OPEN_FAILURE_ROUTE;
+    memset(&request, 0, sizeof(request));
+    memset(&record, 0, sizeof(record));
+    memset(&envelope, 0, sizeof(envelope));
+    memset(&resolved, 0, sizeof(resolved));
+    memset(&descriptor_view, 0, sizeof(descriptor_view));
+    memset(&opened_page, 0, sizeof(opened_page));
+    if (!js_vm_sensitive_path_guard(env, (const void*)jsw_a3, 0)) goto cleanup;
+    if (!js_protected_runtime_enter(env)) goto cleanup;
+    protected_runtime_entered = 1;
+    if (!js_aken_bridge_request_shape_is_valid(env, encoded_handle, page_index, call_site_proof)) {
+        js_aken_bridge_unavailable(env, "AKEN native chunk route is invalid");
+        goto cleanup;
+    }
+    proof_length = (*env)->GetArrayLength(env, call_site_proof);
+    if ((*env)->ExceptionCheck(env) || proof_length <= 0 ||
+        (size_t)proof_length > sizeof(native_call_site_proof)) {
+        js_aken_bridge_unavailable(env, "AKEN native chunk route is invalid");
+        goto cleanup;
+    }
+    (*env)->GetByteArrayRegion(
+        env,
+        encoded_handle,
+        0,
+        (jsize)sizeof(native_handle),
+        (jbyte *)native_handle);
+    if ((*env)->ExceptionCheck(env)) goto cleanup;
+    (*env)->GetByteArrayRegion(
+        env,
+        call_site_proof,
+        0,
+        proof_length,
+        (jbyte *)native_call_site_proof);
+    if ((*env)->ExceptionCheck(env)) goto cleanup;
+    request.resource_kind = JS_AKEN_NATIVE_PAGE_RESOURCE_KIND_NATIVE_CHUNK;
+    request.page_index = page_index;
+    request.encoded_handle = native_handle;
+    request.encoded_handle_len = sizeof(native_handle);
+    request.raw_call_site_proof = native_call_site_proof;
+    request.raw_call_site_proof_len = (size_t)proof_length;
+    if (!js_aken_native_typed_page_entry_token(
+            request.resource_kind,
+            request.page_index,
+            request.encoded_handle,
+            request.encoded_handle_len,
+            &request.entry_token) ||
+        !js_aken_native_page_locator_lookup(&request, &record)) {
+        js_aken_bridge_unavailable(env, "AKEN native chunk route is unavailable");
+        goto cleanup;
+    }
+    if (!js_aken_native_page_resolve_and_open_current(
+            env,
+            cls,
+            &request,
+            &record,
+            JS_AKEN_NATIVE_PAGE_RESOURCE_KIND_NATIVE_CHUNK,
+            page_index,
+            &envelope,
+            &resolved,
+            &descriptor_view,
+            &encoded_payload,
+            &encoded_payload_len,
+            &opened_page,
+            &current_page_failure_stage)) {
+        js_aken_bridge_unavailable(
+            env,
+            current_page_failure_stage == JS_AKEN_NATIVE_PAGE_OPEN_FAILURE_AUTHENTICATION
+                ? "AKEN native chunk authentication failed"
+                : "AKEN native chunk route is invalid");
+        goto cleanup;
+    }
+    if (!js_aken_native_chunk_consume_opened_page(
+            &opened_page,
+            native_handle,
+            sizeof(native_handle),
+            native_call_site_proof,
+            (size_t)proof_length)) {
+        js_aken_bridge_unavailable(env, "AKEN native chunk authentication failed");
+        goto cleanup;
+    }
+    completed = 1;
+cleanup:
+    js_aken_native_opened_page_wipe(&opened_page);
+    if (encoded_payload) {
+        js_vbc4_wipe_volatile(encoded_payload, encoded_payload_len);
+        free(encoded_payload);
+    }
+    js_aken_native_page_descriptor_view_wipe(&descriptor_view);
+    js_vbc4_wipe_volatile(&resolved, sizeof(resolved));
+    js_aken_native_page_envelope_wipe(&envelope);
+    js_aken_native_page_locator_record_wipe(&record);
+    js_vbc4_wipe_volatile(&request, sizeof(request));
+    js_vbc4_wipe_volatile(native_handle, sizeof(native_handle));
+    js_vbc4_wipe_volatile(native_call_site_proof, sizeof(native_call_site_proof));
+    if (protected_runtime_entered && !js_protected_runtime_leave(env)) completed = 0;
+    if (!completed && !(*env)->ExceptionCheck(env)) {
+        js_aken_bridge_unavailable(env, "AKEN native chunk route failed closed");
+    }
+}
+static jboolean JNICALL jsw_a4(JNIEnv *env, jclass cls, jbyteArray startup_nonce) {
+    (void)cls;
+    unsigned char nonce[32] = {0};
+    jboolean installed = JNI_FALSE;
+    int protected_runtime_entered = 0;
+    if (!js_vm_sensitive_path_guard(env, (const void*)jsw_a4, 0)) return JNI_FALSE;
+    if (!js_protected_runtime_enter(env)) return JNI_FALSE;
+    protected_runtime_entered = 1;
+    if (!startup_nonce || (*env)->GetArrayLength(env, startup_nonce) != (jsize)sizeof(nonce) ||
+        (*env)->ExceptionCheck(env)) {
+        goto cleanup;
+    }
+    (*env)->GetByteArrayRegion(env, startup_nonce, 0, (jsize)sizeof(nonce), (jbyte *)nonce);
+    if ((*env)->ExceptionCheck(env)) goto cleanup;
+    installed = js_vm_install_startup_nonce(nonce, (int)sizeof(nonce)) ? JNI_TRUE : JNI_FALSE;
+cleanup:
+    js_vbc4_wipe_volatile(nonce, sizeof(nonce));
+    if (protected_runtime_entered && !js_protected_runtime_leave(env)) installed = JNI_FALSE;
+    return installed;
+}
+
+#if defined(JS_AKEN_JNI_FIXTURE_DIAGNOSTICS) && JS_AKEN_JNI_FIXTURE_DIAGNOSTICS
+/*
+ * Return only the de-identified counter vector used by the attached-JVM
+ * benchmark fixture.  This method is registered exclusively by the fixture
+ * diagnostics build; it never exposes keys, nonces, plaintext, descriptors,
+ * paths, or exception payloads and it does not alter runtime/session state.
+ * Keep the order in lockstep with js_crypto_runtime_metrics and the generated
+ * benchmark harness's metric constants.
+ */
+static jlongArray JNICALL jsw_a5(JNIEnv *env, jclass cls) {
+    enum { JS_AKEN_FIXTURE_METRICS_COUNT = 26 };
+    js_crypto_runtime_metrics metrics;
+    jlong values[JS_AKEN_FIXTURE_METRICS_COUNT];
+    jlongArray result = NULL;
+    (void)cls;
+    memset(&metrics, 0, sizeof(metrics));
+    memset(values, 0, sizeof(values));
+    if (!env) goto cleanup;
+    js_crypto_runtime_metrics_snapshot(&metrics);
+    values[0] = (jlong)metrics.hardware_crypto_path;
+    values[1] = (jlong)metrics.software_crypto_path;
+    values[2] = (jlong)metrics.aes_block_count;
+    values[3] = (jlong)metrics.ghash_block_count;
+    values[4] = (jlong)metrics.vm_frame_reuse_count;
+    values[5] = (jlong)metrics.vm_heap_fallback_count;
+    values[6] = (jlong)metrics.resource_index_hit_count;
+    values[7] = (jlong)metrics.decompress_context_reuse_count;
+    values[8] = (jlong)metrics.jni_cache_hit_count;
+    values[9] = (jlong)metrics.auth_check_count;
+    values[10] = (jlong)metrics.auth_failure_count;
+    values[11] = (jlong)metrics.digest_check_count;
+    values[12] = (jlong)metrics.tag_check_count;
+    values[13] = (jlong)metrics.length_check_count;
+    values[14] = (jlong)metrics.structure_check_count;
+    values[15] = (jlong)metrics.jni_abi_check_count;
+    values[16] = (jlong)metrics.wipe_count;
+    values[17] = (jlong)metrics.wipe_failure_count;
+    values[18] = (jlong)metrics.plaintext_persistence_bytes;
+    values[19] = (jlong)metrics.fallback_count;
+    values[20] = (jlong)metrics.legacy_path_hits;
+    values[21] = (jlong)metrics.exception_count;
+    values[22] = (jlong)metrics.security_checks_skipped;
+    values[23] = (jlong)metrics.phase_p50;
+    values[24] = (jlong)metrics.phase_p95;
+    values[25] = (jlong)metrics.phase_max;
+    result = (*env)->NewLongArray(env, JS_AKEN_FIXTURE_METRICS_COUNT);
+    if (!result || (*env)->ExceptionCheck(env)) goto cleanup;
+    (*env)->SetLongArrayRegion(env, result, 0, JS_AKEN_FIXTURE_METRICS_COUNT, values);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->DeleteLocalRef(env, result);
+        result = NULL;
+    }
+cleanup:
+    /* These values are de-identified counters, not secret material; avoid
+     * feeding diagnostic bookkeeping back into the measured wipe counter. */
+    memset(&metrics, 0, sizeof(metrics));
+    memset(values, 0, sizeof(values));
+    return result;
+}
+
+/* Return only the effective, self-tested dispatch capabilities used by the
+ * attached-JVM benchmark fixture.  The force-software fixture intentionally
+ * reports both flags as zero because its compile-time dispatch contract
+ * excludes intrinsics; this lets the differential assert that the software
+ * lane is deliberate rather than an accidental capability miss. */
+static jlongArray JNICALL jsw_a6(JNIEnv *env, jclass cls) {
+    enum { JS_AKEN_FIXTURE_CRYPTO_CAPABILITIES_COUNT = 2 };
+    jlong values[JS_AKEN_FIXTURE_CRYPTO_CAPABILITIES_COUNT];
+    jlongArray result = NULL;
+    (void)cls;
+    memset(values, 0, sizeof(values));
+    if (!env) goto cleanup;
+    values[0] = js_aes_hardware_available() ? (jlong)1 : (jlong)0;
+    values[1] = js_ghash_hardware_available() ? (jlong)1 : (jlong)0;
+    result = (*env)->NewLongArray(env, JS_AKEN_FIXTURE_CRYPTO_CAPABILITIES_COUNT);
+    if (!result || (*env)->ExceptionCheck(env)) goto cleanup;
+    (*env)->SetLongArrayRegion(
+        env,
+        result,
+        0,
+        JS_AKEN_FIXTURE_CRYPTO_CAPABILITIES_COUNT,
+        values);
+    if ((*env)->ExceptionCheck(env)) {
+        (*env)->DeleteLocalRef(env, result);
+        result = NULL;
+    }
+cleanup:
+    memset(values, 0, sizeof(values));
+    return result;
+}
+#endif
 
 static void js_protected_runtime_failure(JNIEnv *env) {
     if (!env || (*env)->ExceptionCheck(env)) return;
@@ -3609,6 +4937,9 @@ static int js_protected_runtime_leave(JNIEnv *env) {
 static jint JNICALL jsw_k0(JNIEnv *env, jclass cls, jstring platform) {
     if (!js_protected_runtime_enter(env)) return JNI_ERR;
     jint result = jsn_k0(env, cls, platform);
+#if !defined(JS_AKEN_TYPED_ONLY_RUNTIME) || !JS_AKEN_TYPED_ONLY_RUNTIME
+    if (result >= 0 && !js_jni_register_deferred_natives(env)) result = JNI_ERR;
+#endif
     return js_protected_runtime_leave(env) ? result : JNI_ERR;
 }
 
@@ -3621,6 +4952,15 @@ static jint JNICALL jsw_k1(JNIEnv *env, jclass cls, jbyteArray data, jbyteArray 
 static jint JNICALL jsw_k3(JNIEnv *env, jclass cls) {
     if (!js_protected_runtime_enter(env)) return JNI_ERR;
     jint result = jsn_k3(env, cls);
+#if defined(JS_AKEN_TYPED_ONLY_RUNTIME) && JS_AKEN_TYPED_ONLY_RUNTIME
+    /*
+     * The Java loader invokes heartbeat only after it has changed its AKEN
+     * state to READY.  Completing optional registration here prevents
+     * nativeInit from recursively initializing a string/bootstrap helper while
+     * its typed page bridge is still loading.
+     */
+    if (result >= 0 && !js_jni_register_deferred_natives(env)) result = JNI_ERR;
+#endif
     return js_protected_runtime_leave(env) ? result : JNI_ERR;
 }
 
@@ -3798,6 +5138,15 @@ static jint JNICALL jsw_r26(JNIEnv *env, jclass cls, jlong entryToken, jint arg0
 
 static const js_native_abi_table js_native_abi_table_instance = {
     JS_NATIVE_ABI_TABLE_VERSION,
+#if defined(JS_AKEN_TYPED_ONLY_RUNTIME) && JS_AKEN_TYPED_ONLY_RUNTIME
+    jsw_k0,
+    jsw_k3,
+    jsw_a4,
+    jsw_a0,
+    jsw_a1,
+    jsw_a2,
+    jsw_a3,
+#else
     jsw_k0,
     jsw_k1,
     jsw_k3,
@@ -3822,6 +5171,7 @@ static const js_native_abi_table js_native_abi_table_instance = {
     jsw_a1,
     jsw_a2,
     jsw_a3,
+#endif
 };
 
 JS_EXPORT const js_native_abi_table *js_native_abi_table_v1(void) {
@@ -3831,21 +5181,85 @@ JS_EXPORT const js_native_abi_table *js_native_abi_table_v1(void) {
 static jclass js_jni_cache_global_class(JNIEnv *env, const char *name) {
     jclass local = (*env)->FindClass(env, name);
     if ((*env)->ExceptionCheck(env) || !local) {
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        if ((*env)->ExceptionCheck(env)) js_jni_clear_exception_if_pending(env);
         return NULL;
     }
     jclass global = (jclass)(*env)->NewGlobalRef(env, local);
     (*env)->DeleteLocalRef(env, local);
     if ((*env)->ExceptionCheck(env) || !global) {
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        if ((*env)->ExceptionCheck(env)) js_jni_clear_exception_if_pending(env);
         return NULL;
     }
     return global;
 }
 
 static int js_jni_cache_require_member(JNIEnv *env, const void *member) {
-    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if ((*env)->ExceptionCheck(env)) js_jni_clear_exception_if_pending(env);
     return member != NULL;
+}
+
+/* The JDK classes/method IDs cached below are reusable only while the
+ * authenticated runtime session and the Java ClassLoader receiver still
+ * match.  Keep the identity as a global reference, never as a raw jobject
+ * from an execution frame. */
+static int js_jni_cache_bind_loader_identity(JNIEnv *env, jobject loader, int require_loader) {
+    if (!env || !js_jni_cache.initialized || !js_jni_cache.class_loader_class) return 0;
+    if (require_loader && !loader) return 0;
+    if (loader && !(*env)->IsInstanceOf(env, loader, js_jni_cache.class_loader_class)) {
+        if ((*env)->ExceptionCheck(env)) js_jni_clear_exception_if_pending(env);
+        return 0;
+    }
+    if ((*env)->ExceptionCheck(env)) {
+        js_jni_clear_exception_if_pending(env);
+        return 0;
+    }
+
+    int matches = 1;
+    if (js_jni_cache.loader_identity) {
+        matches = (*env)->IsSameObject(env, js_jni_cache.loader_identity, loader);
+        if ((*env)->ExceptionCheck(env)) {
+            js_jni_clear_exception_if_pending(env);
+            return 0;
+        }
+    } else if (loader) {
+        jobject global_loader = (*env)->NewGlobalRef(env, loader);
+        if ((*env)->ExceptionCheck(env) || !global_loader) {
+            if ((*env)->ExceptionCheck(env)) js_jni_clear_exception_if_pending(env);
+            return 0;
+        }
+        js_jni_cache.loader_identity = global_loader;
+    }
+
+    unsigned char binding[32] = {0};
+    /* The loader object itself is held above; this digest records only the
+     * public bootstrap/managed domain and does not retain class names. */
+    static const unsigned char managed_loader_binding[] = "javashroud-jni-loader-binding-v1";
+    static const unsigned char bootstrap_binding[] = "javashroud-jni-bootstrap-binding-v1";
+    const unsigned char *binding_text = loader ? managed_loader_binding : bootstrap_binding;
+    int binding_len = (int)strlen((const char *)binding_text);
+    js_runtime_sha256(binding_text, binding_len, binding);
+    if (js_jni_cache.class_binding_ready) {
+        unsigned char diff = 0;
+        for (size_t i = 0; i < sizeof(binding); ++i) diff |= (unsigned char)(binding[i] ^ js_jni_cache.class_binding[i]);
+        if (diff != 0) matches = 0;
+    } else {
+        memcpy(js_jni_cache.class_binding, binding, sizeof(binding));
+        js_jni_cache.class_binding_ready = 1u;
+    }
+    js_vbc4_wipe_volatile(binding, sizeof(binding));
+    return matches;
+}
+
+static int js_jni_cache_bind_owner(JNIEnv *env, jclass owner_class) {
+    if (!env || !owner_class || !js_jni_cache.initialized || !js_jni_cache.class_get_class_loader || !js_jni_cache.class_get_name) return 0;
+    jobject loader = (*env)->CallObjectMethod(env, owner_class, js_jni_cache.class_get_class_loader);
+    if ((*env)->ExceptionCheck(env)) {
+        js_jni_clear_exception_if_pending(env);
+        return 0;
+    }
+    int matches = js_jni_cache_bind_loader_identity(env, loader, 0);
+    if (loader) (*env)->DeleteLocalRef(env, loader);
+    return matches;
 }
 
 JS_HIDDEN void js_jni_cache_destroy(JNIEnv *env) {
@@ -3853,6 +5267,9 @@ JS_HIDDEN void js_jni_cache_destroy(JNIEnv *env) {
         memset(&js_jni_cache, 0, sizeof(js_jni_cache));
         return;
     }
+#define JS_JNI_DELETE_META_GLOBAL(field) do { if (js_jni_cache.field) (*env)->DeleteGlobalRef(env, js_jni_cache.field); } while (0)
+    JS_JNI_DELETE_META_GLOBAL(loader_identity);
+#undef JS_JNI_DELETE_META_GLOBAL
 #define JS_JNI_DELETE_GLOBAL(field) do { if (js_jni_cache.field) (*env)->DeleteGlobalRef(env, js_jni_cache.field); } while (0)
     JS_JNI_DELETE_GLOBAL(object_class);
     JS_JNI_DELETE_GLOBAL(string_class);
@@ -3878,12 +5295,94 @@ JS_HIDDEN void js_jni_cache_destroy(JNIEnv *env) {
     JS_JNI_DELETE_GLOBAL(double_class);
     JS_JNI_DELETE_GLOBAL(void_class);
 #undef JS_JNI_DELETE_GLOBAL
+    js_vbc4_wipe_volatile(js_jni_cache.class_binding, sizeof(js_jni_cache.class_binding));
     memset(&js_jni_cache, 0, sizeof(js_jni_cache));
+}
+
+JS_HIDDEN int js_jni_cache_validate(JNIEnv *env, jclass owner_class) {
+    js_runtime_metrics_note_jni_abi_check();
+    if (!env) return 0;
+    js_jni_cache_guard_enter();
+    if (!js_jni_cache.initialized) {
+        /* A prior loader/owner mismatch intentionally wipes the cache.  The
+         * next authenticated caller must rebuild from current JNI metadata
+         * rather than inheriting an unavailable/stale cache or taking a
+         * fallback route. */
+        if (!js_jni_cache_init(env)) {
+            js_jni_cache_guard_leave();
+            return 0;
+        }
+        if (owner_class && !js_jni_cache_bind_owner(env, owner_class)) {
+            js_jni_cache_destroy(env);
+            js_jni_cache_guard_leave();
+            return 0;
+        }
+        js_jni_cache_guard_leave();
+        return 1;
+    }
+    unsigned int generation = js_vm_resource_session_generation_current();
+    int needs_rebuild = js_jni_cache.abi_generation != JS_JNI_CACHE_ABI_GENERATION ||
+        js_jni_cache.session_generation != generation;
+    if (!needs_rebuild && owner_class && !js_jni_cache_bind_owner(env, owner_class)) needs_rebuild = 1;
+    if (needs_rebuild) {
+        js_jni_cache_destroy(env);
+        if (!js_jni_cache_init(env)) {
+            js_jni_cache_guard_leave();
+            return 0;
+        }
+        if (owner_class && !js_jni_cache_bind_owner(env, owner_class)) {
+            js_jni_cache_destroy(env);
+            js_jni_cache_guard_leave();
+            return 0;
+        }
+    } else {
+        /* A rebuilt cache is valid for use but is not a hot-path cache hit. */
+        js_runtime_metrics_note_jni_cache_hit();
+    }
+    js_jni_cache_guard_leave();
+    return 1;
+}
+
+JS_HIDDEN int js_jni_cache_validate_loader(JNIEnv *env, jobject loader) {
+    js_runtime_metrics_note_jni_abi_check();
+    if (!env || !loader) return 0;
+    js_jni_cache_guard_enter();
+    if (!js_jni_cache.initialized) {
+        /* Mismatch cleanup leaves no cache behind.  Recover only by resolving
+         * the complete current cache and binding it to this exact loader; a
+         * failure remains fail-closed and leaves no stale global refs. */
+        if (!js_jni_cache_init(env) || !js_jni_cache_bind_loader_identity(env, loader, 1)) {
+            js_jni_cache_destroy(env);
+            js_jni_cache_guard_leave();
+            return 0;
+        }
+        js_jni_cache_guard_leave();
+        return 1;
+    }
+    unsigned int generation = js_vm_resource_session_generation_current();
+    int needs_rebuild = js_jni_cache.abi_generation != JS_JNI_CACHE_ABI_GENERATION ||
+        js_jni_cache.session_generation != generation;
+    if (!needs_rebuild && !js_jni_cache_bind_loader_identity(env, loader, 1)) needs_rebuild = 1;
+    if (needs_rebuild) {
+        js_jni_cache_destroy(env);
+        if (!js_jni_cache_init(env) || !js_jni_cache_bind_loader_identity(env, loader, 1)) {
+            js_jni_cache_destroy(env);
+            js_jni_cache_guard_leave();
+            return 0;
+        }
+    } else {
+        /* A rebuilt cache is valid for use but is not a hot-path cache hit. */
+        js_runtime_metrics_note_jni_cache_hit();
+    }
+    js_jni_cache_guard_leave();
+    return 1;
 }
 
 JS_HIDDEN int js_jni_cache_init(JNIEnv *env) {
     if (!env) return 0;
     memset(&js_jni_cache, 0, sizeof(js_jni_cache));
+    js_jni_cache.abi_generation = JS_JNI_CACHE_ABI_GENERATION;
+    js_jni_cache.session_generation = js_vm_resource_session_generation_current();
 #define JS_JNI_CLASS(field, name) do { js_jni_cache.field = js_jni_cache_global_class(env, name); if (!js_jni_cache.field) goto fail; } while (0)
 #define JS_JNI_METHOD(field, cls, name, sig) do { js_jni_cache.field = (*env)->GetMethodID(env, js_jni_cache.cls, name, sig); if (!js_jni_cache_require_member(env, js_jni_cache.field)) goto fail; } while (0)
 #define JS_JNI_STATIC_METHOD(field, cls, name, sig) do { js_jni_cache.field = (*env)->GetStaticMethodID(env, js_jni_cache.cls, name, sig); if (!js_jni_cache_require_member(env, js_jni_cache.field)) goto fail; } while (0)
@@ -3927,9 +5426,10 @@ JS_HIDDEN int js_jni_cache_init(JNIEnv *env) {
     /* readAllBytes is Java 9+; keep the runtime loadable on Java 8 by treating it as optional. */
     js_jni_cache.input_stream_read_all_bytes = (*env)->GetMethodID(env, js_jni_cache.input_stream_class, "readAllBytes", "()[B");
     if ((*env)->ExceptionCheck(env) || !js_jni_cache.input_stream_read_all_bytes) {
-        if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+        if ((*env)->ExceptionCheck(env)) js_jni_clear_expected_capability_exception(env);
         js_jni_cache.input_stream_read_all_bytes = NULL;
     }
+    JS_JNI_METHOD(input_stream_read, input_stream_class, "read", "([B)I");
     JS_JNI_METHOD(input_stream_close, input_stream_class, "close", "()V");
     JS_JNI_METHOD(string_builder_init, string_builder_class, "<init>", "()V");
     JS_JNI_METHOD(string_builder_append_string, string_builder_class, "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;");
@@ -3938,18 +5438,18 @@ JS_HIDDEN int js_jni_cache_init(JNIEnv *env) {
     {
         jclass local_stack_trace_element = (*env)->FindClass(env, "java/lang/StackTraceElement");
         if ((*env)->ExceptionCheck(env) || !local_stack_trace_element) {
-            if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+            if ((*env)->ExceptionCheck(env)) js_jni_clear_exception_if_pending(env);
         } else {
             js_jni_cache.stack_trace_element_class = (jclass)(*env)->NewGlobalRef(env, local_stack_trace_element);
             (*env)->DeleteLocalRef(env, local_stack_trace_element);
             if ((*env)->ExceptionCheck(env) || !js_jni_cache.stack_trace_element_class) {
-                if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+                if ((*env)->ExceptionCheck(env)) js_jni_clear_exception_if_pending(env);
                 js_jni_cache.stack_trace_element_class = NULL;
             } else {
                 js_jni_cache.throwable_set_stack_trace = (*env)->GetMethodID(env, js_jni_cache.throwable_class, "setStackTrace", "([Ljava/lang/StackTraceElement;)V");
-                if ((*env)->ExceptionCheck(env) || !js_jni_cache.throwable_set_stack_trace) { if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env); js_jni_cache.throwable_set_stack_trace = NULL; }
+                if ((*env)->ExceptionCheck(env) || !js_jni_cache.throwable_set_stack_trace) { if ((*env)->ExceptionCheck(env)) js_jni_clear_exception_if_pending(env); js_jni_cache.throwable_set_stack_trace = NULL; }
                 js_jni_cache.stack_trace_element_init = (*env)->GetMethodID(env, js_jni_cache.stack_trace_element_class, "<init>", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V");
-                if ((*env)->ExceptionCheck(env) || !js_jni_cache.stack_trace_element_init) { if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env); js_jni_cache.stack_trace_element_init = NULL; }
+                if ((*env)->ExceptionCheck(env) || !js_jni_cache.stack_trace_element_init) { if ((*env)->ExceptionCheck(env)) js_jni_clear_exception_if_pending(env); js_jni_cache.stack_trace_element_init = NULL; }
             }
         }
     }
@@ -4075,35 +5575,62 @@ static int js_register_native_group(JNIEnv *env, char *owner, JNINativeMethod *m
     return ok;
 }
 
+static int js_optional_natives_registered = 0;
+
+static int js_optional_registration_required(JNIEnv *env, const char *class_name) {
+    if (!env || !class_name) return 0;
+    jclass cls = js_vm_find_registration_class(env, class_name);
+    if (!cls) {
+        js_vm_clear_exception(env);
+        return 0;
+    }
+    (*env)->DeleteLocalRef(env, cls);
+    return 1;
+}
+
 static int js_register_optional_natives(JNIEnv *env) {
+    if (js_optional_natives_registered) return 1;
     JNINativeMethod anti_instrumentation_methods[] = {{js_native_name("Check", "Instr", "umentation"), "(Ljava/lang/String;Ljava/lang/String;)V", (void*)jsw_r0}};
-    if (!js_register_native_group(env, js_helper_owner("An", "tiInstr", "umentation", "Helper"), anti_instrumentation_methods, 1, 0)) return 0;
+    char *anti_instrumentation_owner = js_helper_owner("An", "tiInstr", "umentation", "Helper");
+    if (!js_register_native_group(env, anti_instrumentation_owner, anti_instrumentation_methods, 1,
+                                 js_optional_registration_required(env, anti_instrumentation_owner))) return 0;
 
     JNINativeMethod anti_jvmti_methods[] = {{js_native_name("Check", "JvmTi", "Agents"), "(Ljava/lang/String;Ljava/lang/String;)V", (void*)jsw_r1}};
-    if (!js_register_native_group(env, js_helper_owner("An", "tiJvm", "Ti", "Helper"), anti_jvmti_methods, 1, 0)) return 0;
+    char *anti_jvmti_owner = js_helper_owner("An", "tiJvm", "Ti", "Helper");
+    if (!js_register_native_group(env, anti_jvmti_owner, anti_jvmti_methods, 1,
+                                 js_optional_registration_required(env, anti_jvmti_owner))) return 0;
 
     JNINativeMethod anti_bytebuddy_methods[] = {{js_native_name("Check", "Byte", "Buddy"), "(Ljava/lang/String;)V", (void*)jsw_r2}};
-    if (!js_register_native_group(env, js_helper_owner("An", "tiByte", "Buddy", "Helper"), anti_bytebuddy_methods, 1, 0)) return 0;
+    char *anti_bytebuddy_owner = js_helper_owner("An", "tiByte", "Buddy", "Helper");
+    if (!js_register_native_group(env, anti_bytebuddy_owner, anti_bytebuddy_methods, 1,
+                                 js_optional_registration_required(env, anti_bytebuddy_owner))) return 0;
 
     JNINativeMethod anti_dump_runtime_methods[] = {
         {js_native_name("Init", "ialize", "Protection"), "(Ljava/lang/String;)V", (void*)jsw_r3},
         {js_native_name("Init", "ialize", "Protection"), "(Ljava/lang/String;Ljava/lang/Class;)V", (void*)jsw_r4},
     };
-    if (!js_register_native_group(env, js_helper_owner("An", "tiDump", "Runtime", "Helper"), anti_dump_runtime_methods, 2, 0)) return 0;
+    char *anti_dump_runtime_owner = js_helper_owner("An", "tiDump", "Runtime", "Helper");
+    if (!js_register_native_group(env, anti_dump_runtime_owner, anti_dump_runtime_methods, 2,
+                                 js_optional_registration_required(env, anti_dump_runtime_owner))) return 0;
 
     JNINativeMethod anti_dump_methods[] = {
         {js_native_name("Build", "String", ""), "([B)Ljava/lang/String;", (void*)jsw_r11},
         {js_native_name("Build", "StringFrom", "B64"), "(Ljava/lang/String;)Ljava/lang/String;", (void*)jsw_r12},
         {js_native_name("Decode", "String", ""), "(Ljava/lang/String;)Ljava/lang/String;", (void*)jsw_r13},
     };
-    if (!js_register_native_group(env, js_helper_owner("An", "tiDump", "", "Helper"), anti_dump_methods, 3, 0)) return 0;
+    char *anti_dump_owner = js_helper_owner("An", "tiDump", "", "Helper");
+    if (!js_register_native_group(env, anti_dump_owner, anti_dump_methods, 3,
+                                 js_optional_registration_required(env, anti_dump_owner))) return 0;
 
     JNINativeMethod environment_methods[] = {
         {js_native_name("Derive", "Key", ""), "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", (void*)jsw_r16},
         {js_native_name("Verify", "Environment", ""), "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V", (void*)jsw_r17},
         {js_native_name("Get", "Machine", "Fingerprint"), "()Ljava/lang/String;", (void*)jsw_r18},
     };
-    if (!js_register_native_group(env, js_helper_owner("Environment", "Binding", "", "Helper"), environment_methods, 3, 0)) return 0;
+    char *environment_owner = js_helper_owner("Environment", "Binding", "", "Helper");
+    if (!js_register_native_group(env, environment_owner, environment_methods, 3,
+                                 js_optional_registration_required(env, environment_owner))) return 0;
+    js_optional_natives_registered = 1;
     return 1;
 }
 
@@ -4113,6 +5640,27 @@ JS_HIDDEN int js_jni_register_deferred_natives(JNIEnv *env) {
 }
 
 static int js_register_all_natives(JNIEnv *env) {
+#if defined(JS_AKEN_TYPED_ONLY_RUNTIME) && JS_AKEN_TYPED_ONLY_RUNTIME
+    /*
+     * AKEN v4 output ships a lean helper class.  Register only its typed
+     * current-page/native-loader ABI so RegisterNatives never reintroduces a
+     * legacy BootMaterial or generic runtime-resource contract.
+     */
+    JNINativeMethod jni_microkernel_methods[] = {
+        {js_native_name("In", "it", ""), "(Ljava/lang/String;)I", (void*)jsw_k0},
+        {js_native_name("Heart", "beat", ""), "()I", (void*)jsw_k3},
+        {js_native_name_full("nativeInstallAkenSessionNonce"), "([B)Z", (void*)jsw_a4},
+        {js_native_name_full("nativeExecuteAkenVmPage"), "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;", (void*)jsw_a0},
+        {js_native_name_full("nativeDecodeAkenStringPage"), "([BI[B)[B", (void*)jsw_a1},
+        {js_native_name_full("nativeReadAkenClassPage"), "([BI[B)[B", (void*)jsw_a2},
+        {js_native_name_full("nativeConsumeAkenNativeChunk"), "([BI[B)V", (void*)jsw_a3},
+        {js_native_name_full("nativeInstallAkenSessionNonce"), "([B)Z", (void*)jsw_a4},
+#if defined(JS_AKEN_JNI_FIXTURE_DIAGNOSTICS) && JS_AKEN_JNI_FIXTURE_DIAGNOSTICS
+        {js_native_name_full("nativeRuntimeMetricsSnapshot"), "()[J", (void*)jsw_a5},
+        {js_native_name_full("nativeRuntimeCryptoCapabilities"), "()[J", (void*)jsw_a6},
+#endif
+    };
+#else
     JNINativeMethod jni_microkernel_methods[] = {
         {js_native_name("In", "it", ""), "(Ljava/lang/String;)I", (void*)jsw_k0},
         {js_native_name("Ver", "ify", ""), "([B[B)I", (void*)jsw_k1},
@@ -4137,8 +5685,14 @@ static int js_register_all_natives(JNIEnv *env) {
         {js_native_name_full("nativeExecuteAkenVmPage"), "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;", (void*)jsw_a0},
         {js_native_name_full("nativeDecodeAkenStringPage"), "([BI[B)[B", (void*)jsw_a1},
         {js_native_name_full("nativeReadAkenClassPage"), "([BI[B)[B", (void*)jsw_a2},
-        {js_native_name_full("nativeMapAkenNativeChunk"), "([BI[B)[B", (void*)jsw_a3},
+        {js_native_name_full("nativeConsumeAkenNativeChunk"), "([BI[B)V", (void*)jsw_a3},
+        {js_native_name_full("nativeInstallAkenSessionNonce"), "([B)Z", (void*)jsw_a4},
+#if defined(JS_AKEN_JNI_FIXTURE_DIAGNOSTICS) && JS_AKEN_JNI_FIXTURE_DIAGNOSTICS
+        {js_native_name_full("nativeRuntimeMetricsSnapshot"), "()[J", (void*)jsw_a5},
+        {js_native_name_full("nativeRuntimeCryptoCapabilities"), "()[J", (void*)jsw_a6},
+#endif
     };
+#endif
     if (!js_register_native_group(env, js_helper_owner("Jni", "Micro", "kernel", "Helper"), jni_microkernel_methods, (int)(sizeof(jni_microkernel_methods) / sizeof(jni_microkernel_methods[0])), 1)) return 0;
     /*
      * A typed-only AKEN native image must not resolve optional legacy helper

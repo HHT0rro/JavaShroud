@@ -272,12 +272,15 @@ if not defined %SHA_VAR% exit /b 1
 exit /b 0
 
 :resolve_engine_jar
-if exist "%ENGINE_JAR%" exit /b 0
 set "ENGINE_VERSIONED_JAR="
 for /f "delims=" %%J in ('dir /b /a-d /o-d "%ENGINE_LIBS_DIR%\obfuscator-engine-*.jar" 2^>nul') do (
   if not defined ENGINE_VERSIONED_JAR set "ENGINE_VERSIONED_JAR=%ENGINE_LIBS_DIR%\%%J"
 )
 if not defined ENGINE_VERSIONED_JAR (
+  if exist "%ENGINE_JAR%" (
+    echo Using existing engine jar alias: %ENGINE_JAR%
+    exit /b 0
+  )
   echo Engine jar build did not produce obfuscator-engine.jar or obfuscator-engine-*.jar under %ENGINE_LIBS_DIR%
   exit /b 1
 )

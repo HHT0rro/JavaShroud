@@ -30,6 +30,7 @@ SRC_VM_CORE="$SCRIPT_DIR/js_vm_core.c"
 SRC_VM_RESOURCE="$SCRIPT_DIR/js_vm_resource.c"
 SRC_VM_SYMBOL="$SCRIPT_DIR/js_vm_symbol.c"
 SRC_JNI_RUNTIME="$SCRIPT_DIR/js_jni_runtime.c"
+SRC_MACHINE_ID="$SCRIPT_DIR/js_machine_id.c"
 BUILD_DIR="$SCRIPT_DIR/build"
 CROSS_DIR="$SCRIPT_DIR/cross-compile"
 ZSTD_DIR="$SCRIPT_DIR/zstd"
@@ -87,7 +88,7 @@ build_one() {
         printf '_JNI_OnLoad\n_JNI_OnUnload\n' > "$export_list"
         export_flags=(-Wl,-exported_symbols_list,"$export_list")
     fi
-    "$ZIG_BIN" "${COMMON_FLAGS[@]}" -target "$zig_target" "${export_flags[@]}" -o "$BUILD_DIR/$out" "$SRC" "$SRC_HELPERS" "$SRC_COMMON" "$SRC_CRYPTO" "$SRC_ANTIDEBUG" "$SRC_PROTECTED_SECTION" "$SRC_VM_CORE" "$SRC_VM_RESOURCE" "$SRC_VM_SYMBOL" "$SRC_JNI_RUNTIME" \
+    "$ZIG_BIN" "${COMMON_FLAGS[@]}" -target "$zig_target" "${export_flags[@]}" -o "$BUILD_DIR/$out" "$SRC" "$SRC_HELPERS" "$SRC_COMMON" "$SRC_CRYPTO" "$SRC_ANTIDEBUG" "$SRC_PROTECTED_SECTION" "$SRC_VM_CORE" "$SRC_VM_RESOURCE" "$SRC_VM_SYMBOL" "$SRC_JNI_RUNTIME" "$SRC_MACHINE_ID" \
         "$ZSTD_DIR/common/debug.c" "$ZSTD_DIR/common/entropy_common.c" "$ZSTD_DIR/common/error_private.c" \
         "$ZSTD_DIR/common/fse_decompress.c" "$ZSTD_DIR/common/xxhash.c" "$ZSTD_DIR/common/zstd_common.c" \
         "$ZSTD_DIR/decompress/huf_decompress.c" "$ZSTD_DIR/decompress/zstd_ddict.c" \

@@ -2,6 +2,7 @@ package io.github.hht0rro.javashroud.passes
 
 import io.github.hht0rro.javashroud.analysis.buildRenamePlan
 import io.github.hht0rro.javashroud.analysis.buildRuleMatches
+import io.github.hht0rro.javashroud.analysis.effectiveRuleSetForPass
 import io.github.hht0rro.javashroud.analysis.matchesClassPattern
 import io.github.hht0rro.javashroud.analysis.parseTargetSelector
 import io.github.hht0rro.javashroud.artifact.classSummaryIndex
@@ -35,7 +36,8 @@ internal fun applyRegisteredPassWithMetrics(spec: PassSpec, executable: Executab
     }
 
     val artifact = context.artifact
-    val currentSummary = artifact.currentAnalysisSummary(context)
+    val effectiveRuleSet = effectiveRuleSetForPass(context.config, spec.id)
+    val currentSummary = artifact.currentAnalysisSummary(context, effectiveRuleSet)
     val ruleMatches = currentSummary.ruleMatches
     val passParams: Map<String, Any> = spec.params.mapValues { (_, v) ->
         when {
@@ -84,7 +86,17 @@ private fun remapConfigRulesAfterClassRename(
         }
         .toMap()
     if (classRenameMap.isEmpty()) return config
-    return config.copy(ruleSet = remapRuleSetClassTargets(config.ruleSet, before.analysisSummary.classSummaries.map { it.internalName }, classRenameMap))
+    val originalClassNames = before.analysisSummary.classSummaries.map { it.internalName }
+    return config.copy(
+        ruleSet = remapRuleSetClassTargets(config.ruleSet, originalClassNames, classRenameMap),
+        passSelections = config.passSelections.map { selection ->
+            if (selection.mode != io.github.hht0rro.javashroud.model.config.PassSelectionMode.SELECTED_ONLY) {
+                selection
+            } else {
+                selection.copy(rules = remapRuleSetClassTargets(RuleSet(selection.rules), originalClassNames, classRenameMap).rules)
+            }
+        },
+    )
 }
 
 private fun remapRuleSetClassTargets(ruleSet: RuleSet, originalClassNames: List<String>, classRenameMap: Map<String, String>): RuleSet {
@@ -105,9 +117,12 @@ private fun remapRuleClassTarget(rule: RuleSpec, originalClassNames: List<String
     return matchedRenames.map { renamedClassName -> rule.copy(target = renamedClassName + memberSuffix) }
 }
 
-private fun io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact.currentAnalysisSummary(context: PassContext): JarAnalysisSummary {
+private fun io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact.currentAnalysisSummary(
+    context: PassContext,
+    ruleSet: RuleSet = context.config.ruleSet,
+): JarAnalysisSummary {
     val currentClassSummaries = classArtifacts.map { it.summary }
-    val currentRuleMatches = buildRuleMatches(context.config.ruleSet, currentClassSummaries)
+    val currentRuleMatches = buildRuleMatches(ruleSet, currentClassSummaries)
     return analysisSummary.copy(
         classCount = currentClassSummaries.size,
         resourceCount = resourceCount(jarEntries, currentClassSummaries.size),

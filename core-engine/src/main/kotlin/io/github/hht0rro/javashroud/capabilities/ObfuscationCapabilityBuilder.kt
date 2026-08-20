@@ -6,6 +6,7 @@ import io.github.hht0rro.javashroud.model.schema.ParamSchema
 
 internal fun obfuscationCapabilityBindings(): List<CapabilityBinding> = listOf(
     CapabilityBinding(
+        targeting = CLASS_TARGETING,
         id = "integer-constant-obfuscation",
         name = "Integer Constant Obfuscation",
         description = "Replace integer constant loads with arithmetic equivalent expressions to break pattern matching.",
@@ -47,6 +48,7 @@ internal fun obfuscationCapabilityBindings(): List<CapabilityBinding> = listOf(
         ),
     ),
     CapabilityBinding(
+        targeting = CLASS_TARGETING,
         id = "static-init-perturbation",
         name = "Static Init Perturbation",
         description = "Move compile-time static field constants into runtime clinit initialization and inject noise assignments.",
@@ -58,6 +60,7 @@ internal fun obfuscationCapabilityBindings(): List<CapabilityBinding> = listOf(
         compatibilityNotes = LAYOUT_SENSITIVE_COMPATIBILITY_NOTE,
     ),
     CapabilityBinding(
+        targeting = CLASS_TARGETING,
         id = "anti-decompiler-structure",
         name = "Anti-Decompiler Structure",
         description = "Insert bogus exception handlers and dead code blocks that confuse decompilers without affecting runtime behavior.",
@@ -69,6 +72,7 @@ internal fun obfuscationCapabilityBindings(): List<CapabilityBinding> = listOf(
         compatibilityNotes = LAYOUT_SENSITIVE_COMPATIBILITY_NOTE,
     ),
     CapabilityBinding(
+        targeting = CLASS_TARGETING,
         id = "invoke-dynamic-indirection",
         name = "InvokeDynamic Indirection",
         description = "Replace INVOKESTATIC method calls with INVOKEDYNAMIC instructions backed by a per-class bootstrap lookup table.",
@@ -96,6 +100,7 @@ internal fun obfuscationCapabilityBindings(): List<CapabilityBinding> = listOf(
         ),
     ),
     CapabilityBinding(
+        targeting = CLASS_TARGETING,
         id = "control-flow-obfuscation",
         name = "Control Flow Obfuscation",
         description = "Restructure method control flow with parameterized opaque predicates, dispatch modes, " +
@@ -147,6 +152,7 @@ internal fun obfuscationCapabilityBindings(): List<CapabilityBinding> = listOf(
         ),
     ),
     CapabilityBinding(
+        targeting = CLASS_TARGETING,
         id = "reference-proxy",
         name = "Reference Proxy",
         description = "Create synthetic static forwarders that reroute direct INVOKESTATIC call sites through proxy methods.",
@@ -158,6 +164,7 @@ internal fun obfuscationCapabilityBindings(): List<CapabilityBinding> = listOf(
         compatibilityNotes = LAYOUT_SENSITIVE_COMPATIBILITY_NOTE,
     ),
     CapabilityBinding(
+        targeting = CLASS_TARGETING,
         id = "control-flow-flattening",
         name = "Control Flow Flattening",
         description = "Medium-strength control-flow perturbation that flattens selected method control flow using configurable density, handler complexity, and insertion patterns. It raises CFG recovery cost but is not a complete VM-level protection.",
@@ -196,6 +203,7 @@ internal fun obfuscationCapabilityBindings(): List<CapabilityBinding> = listOf(
     ),
     // --- Novel JVMS edge-behavior techniques ---
     CapabilityBinding(
+        targeting = CLASS_TARGETING,
         id = "condy-constant-indirection",
         name = "ConstantDynamic Constant Indirection",
         description = "Replace LDC string and integer constants with CONSTANT_Dynamic bootstrap resolution. Exploits JVMS 4.4.10 (CONSTANT_Dynamic_info) which most decompilers lack full support for.",

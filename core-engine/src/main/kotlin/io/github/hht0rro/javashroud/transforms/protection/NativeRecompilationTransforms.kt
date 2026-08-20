@@ -8,6 +8,9 @@ import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Random
+import java.util.concurrent.Callable
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
@@ -15,9 +18,22 @@ import javax.crypto.spec.SecretKeySpec
 
 object NativeRecompilationTransforms {
 
+    /*
+     * Compilation is isolated by output/cache identity rather than globally.
+     * The old process-wide monitor made independent target routes wait behind
+     * one another, while still providing no stronger correctness guarantee for
+     * distinct outputs.  Per-key locking retains single-writer semantics for
+     * an identical artifact and lets independent routes compile concurrently.
+     */
+    private val zigCompileLocks = ConcurrentHashMap<String, Any>()
     private val zigCompileLock = Any()
+    private val zigToolchainIdentityCache = ConcurrentHashMap<String, String>()
+    private const val DEFAULT_NATIVE_COMPILE_PARALLELISM = 4
 
-    private const val AKEN_NATIVE_PAGE_LOCATOR_RECORD_VERSION = 2
+    private const val NATIVE_CACHE_MAGIC = "JSNATIVE-CACHE2"
+    private const val NATIVE_CACHE_VERSION = 2
+    private const val NATIVE_CACHE_HEADER_SIZE = 16 + 4 + 32 + 8 + 32
+
     private const val AKEN_NATIVE_PAGE_LOCATOR_MAX_RECORD_COUNT = 65_535
     private const val AKEN_NATIVE_PAGE_LOCATOR_MAX_RECORD_BYTES = 512 * 1024
     private const val AKEN_NATIVE_PAGE_LOCATOR_MAX_BLOB_BYTES = 64 * 1024 * 1024
@@ -249,8 +265,8 @@ object NativeRecompilationTransforms {
                 protectedSectionKey = protectedSectionKey,
                 nativeProtectionLevel = nativeProtectionLevel,
                 nativePackingLevel = nativePackingLevel.configValue,
-                nativeShellPackerVersion = NativeKernelShellPacker.PACKER_VERSION,
-                nativeShellPayloadProfile = "${nativePackingLevel.configValue}-aken-v4-native-payload-public-binding-lanes-chunk-auth",
+                nativeShellPackerVersion = 0,
+                nativeShellPayloadProfile = "current-native-payload-public-binding-lanes-chunk-auth",
                 nativeShellLoaderProfile = route.shellLoaderProfile,
             )
             NativeCompileTask(
@@ -259,32 +275,26 @@ object NativeRecompilationTransforms {
                 outputName = route.outputName,
                 outputPath = outputPath,
                 cachePath = nativeArtifactCacheDirectory().resolve("$cacheKey-${route.outputName}"),
+                cacheKey = cacheKey,
                 nativeProtectionLevel = nativeProtectionLevel,
                 nativePackingLevel = nativePackingLevel.configValue,
             )
         }
-        // Zig's Windows cache has produced intermittent `file_open Unexpected`
-        // failures when multiple target compilations share it concurrently. Native
-        // builds are infrequent and correctness matters more than parallel startup.
-        val compiledResults = compileTasks.map { task ->
-            try {
-                Files.createDirectories(task.outputPath.parent)
-                // AKEN v4 emits a new CSPRNG binding salt, lane permutation, nonce, and
-                // payload layout for every MAX shell. The outer library therefore must be
-                // rebuilt rather than reused from a prior artifact cache entry.
-                val forceProductionCompile = nativePackingLevel.usesStubShell
-                task to compileOrLoadNativeArtifact(
-                    toolchain.zigPath,
-                    srcDir,
-                    workDir,
-                    task,
-                    cfgEvidenceExports,
-                    forceProductionCompile,
-                )
-            } catch (error: Exception) {
-                task to NativeArtifactBuildResult(false, error.message ?: error::class.java.simpleName, null, false)
-            }
-        }
+        /*
+         * The generated source snapshot is immutable after this point. Compile
+         * independent target routes in a bounded pool, preserving input order
+         * when collecting results. MAX shell materialization remains in the
+         * single-writer sealing loop below because its payload/include and
+         * binding commitment are artifact-local security state.
+         */
+        val compiledResults = compileNativeTasksBounded(
+            compileTasks = compileTasks,
+            zigPath = toolchain.zigPath,
+            srcDir = srcDir,
+            workDir = workDir,
+            cfgEvidenceExports = cfgEvidenceExports,
+            forceProductionCompile = nativePackingLevel.usesStubShell,
+        )
         for ((task, compileResult) in compiledResults) {
             if (compileResult.success && compileResult.bytes != null && compileResult.bytes.isNotEmpty()) {
                 if (cfgEvidenceExports) {
@@ -378,7 +388,9 @@ object NativeRecompilationTransforms {
                         )
                     }
                     if (!cfgEvidenceExports && !compileResult.fromCache && EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(rawBytes)) {
-                        writeNativeArtifactCache(task.cachePath, rawBytes)
+                        withNativeCompileLock(task.cachePath) {
+                            writeNativeArtifactCache(task.cachePath, rawBytes, task.cacheKey)
+                        }
                     }
                     // AKEN v4 does not hand a native shell commitment to boot.dat or a
                     // Java runtime callback. The shell validates its own public binding lanes
@@ -394,10 +406,14 @@ object NativeRecompilationTransforms {
                 }
             } else {
                 val diagnosticLines = compileResult.output.lineSequence().filter { it.isNotBlank() }.toList()
-                val diagnostic = when {
+                val actionableLines = diagnosticLines.filter(::isActionableZigCompilerError)
+                val selectedDiagnosticLines = when {
+                    actionableLines.isNotEmpty() ->
+                        (diagnosticLines.take(2) + actionableLines.take(8) + diagnosticLines.takeLast(3)).distinct()
                     diagnosticLines.size <= 8 -> diagnosticLines
                     else -> diagnosticLines.take(3) + "..." + diagnosticLines.takeLast(5)
-                }.joinToString(" | ").take(1_800)
+                }
+                val diagnostic = selectedDiagnosticLines.joinToString(" | ").take(1_800)
                 val suffix = if (diagnostic.isBlank()) "" else ": $diagnostic"
                 report(NativeToolchainProvisioner.ResolutionMessage("warn", "Failed to compile JNI microkernel for ${task.platform} with Zig ${toolchain.zigPath}$suffix", 94))
             }
@@ -443,6 +459,7 @@ object NativeRecompilationTransforms {
         val outputName: String,
         val outputPath: Path,
         val cachePath: Path,
+        val cacheKey: String,
         val nativeProtectionLevel: String,
         val nativePackingLevel: String,
     )
@@ -520,6 +537,66 @@ object NativeRecompilationTransforms {
         val fromCache: Boolean,
     )
 
+    private fun compileNativeTasksBounded(
+        compileTasks: List<NativeCompileTask>,
+        zigPath: Path,
+        srcDir: Path,
+        workDir: Path,
+        cfgEvidenceExports: Boolean,
+        forceProductionCompile: Boolean,
+    ): List<Pair<NativeCompileTask, NativeArtifactBuildResult>> {
+        if (compileTasks.isEmpty()) return emptyList()
+        val parallelism = minOf(compileTasks.size, nativeCompileParallelism())
+        fun compileOne(task: NativeCompileTask): Pair<NativeCompileTask, NativeArtifactBuildResult> {
+            return try {
+                Files.createDirectories(task.outputPath.parent)
+                task to compileOrLoadNativeArtifact(
+                    zigPath,
+                    srcDir,
+                    workDir,
+                    task,
+                    cfgEvidenceExports,
+                    forceProductionCompile,
+                )
+            } catch (error: Exception) {
+                task to NativeArtifactBuildResult(false, error.message ?: error::class.java.simpleName, null, false)
+            }
+        }
+        if (parallelism <= 1) return compileTasks.map(::compileOne)
+
+        val executor = Executors.newFixedThreadPool(parallelism) { runnable ->
+            Thread(runnable, "javashroud-native-compile").apply { isDaemon = true }
+        }
+        return try {
+            /* Future collection follows compileTasks order, so diagnostics and
+             * final artifact entry order remain deterministic despite parallel
+             * process completion. */
+            compileTasks.map { task -> executor.submit(Callable { compileOne(task) }) }.map { future ->
+                try {
+                    future.get()
+                } catch (error: Exception) {
+                    throw IllegalStateException("native compile worker failed", error)
+                }
+            }
+        } finally {
+            executor.shutdown()
+            try {
+                if (!executor.awaitTermination(1, TimeUnit.DAYS)) executor.shutdownNow()
+            } catch (error: InterruptedException) {
+                executor.shutdownNow()
+                Thread.currentThread().interrupt()
+                throw error
+            }
+        }
+    }
+
+    private fun nativeCompileParallelism(): Int {
+        val configured = System.getProperty("javashroud.native.compile.parallelism")
+            ?: System.getenv("JS_VBC4_NATIVE_COMPILE_PARALLELISM")
+        return configured?.trim()?.toIntOrNull()?.takeIf { it > 0 }?.coerceAtMost(16)
+            ?: minOf(DEFAULT_NATIVE_COMPILE_PARALLELISM, Runtime.getRuntime().availableProcessors().coerceAtLeast(1))
+    }
+
     private fun compileOrLoadNativeArtifact(
         zigPath: Path,
         srcDir: Path,
@@ -527,43 +604,94 @@ object NativeRecompilationTransforms {
         task: NativeCompileTask,
         cfgEvidenceExports: Boolean,
         forceProductionCompile: Boolean,
-    ): NativeArtifactBuildResult {
-        if (!cfgEvidenceExports && !forceProductionCompile) readNativeArtifactCache(task.cachePath)?.let { cachedBytes ->
-            return NativeArtifactBuildResult(true, "cache-hit", cachedBytes, true)
+    ): NativeArtifactBuildResult = withNativeCompileLock(task.cachePath) {
+        if (!cfgEvidenceExports && !forceProductionCompile) readNativeArtifactCache(task.cachePath, task.cacheKey)?.let { cachedBytes ->
+            return@withNativeCompileLock NativeArtifactBuildResult(true, "cache-hit", cachedBytes, true)
         }
         val compileResult = compileWithZig(zigPath, srcDir, task.zigTarget, task.outputPath, task.nativeProtectionLevel, cfgEvidenceExports)
         if (!compileResult.success || !Files.exists(task.outputPath) || Files.size(task.outputPath) <= 0) {
-            return NativeArtifactBuildResult(compileResult.success, compileResult.output, null, false)
+            return@withNativeCompileLock NativeArtifactBuildResult(compileResult.success, compileResult.output, null, false)
         }
-        return NativeArtifactBuildResult(true, compileResult.output, Files.readAllBytes(task.outputPath), false)
+        NativeArtifactBuildResult(true, compileResult.output, Files.readAllBytes(task.outputPath), false)
     }
 
-    private fun readNativeArtifactCache(cachePath: Path): ByteArray? {
+    private fun <T> withNativeCompileLock(cachePath: Path, block: () -> T): T {
+        val lockKey = cachePath.toAbsolutePath().normalize().toString()
+        val lock = zigCompileLocks.computeIfAbsent(lockKey) { Any() }
+        return synchronized(lock, block)
+    }
+
+    private fun readNativeArtifactCache(cachePath: Path, expectedCacheKey: String? = null): ByteArray? {
         if (!Files.isRegularFile(cachePath)) return null
         val bytes = try {
             Files.readAllBytes(cachePath)
         } catch (_: Exception) {
             return null
         }
-        if (EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(bytes)) return bytes
+        val valid = try {
+            if (bytes.size < NATIVE_CACHE_HEADER_SIZE) false
+            else {
+                val magic = bytes.copyOfRange(0, 16).toString(StandardCharsets.US_ASCII).trimEnd('\u0000')
+                val version = java.nio.ByteBuffer.wrap(bytes, 16, 4).int
+                val expectedKeyDigest = MessageDigest.getInstance("SHA-256").digest(
+                    (expectedCacheKey ?: cachePath.fileName.toString()).toByteArray(StandardCharsets.US_ASCII),
+                )
+                val storedKeyDigest = bytes.copyOfRange(20, 52)
+                val payloadLength = java.nio.ByteBuffer.wrap(bytes, 52, 8).long
+                val storedPayloadDigest = bytes.copyOfRange(60, 92)
+                val payloadStart = NATIVE_CACHE_HEADER_SIZE
+                val payloadEnd = payloadStart.toLong() + payloadLength
+                magic == NATIVE_CACHE_MAGIC &&
+                    version == NATIVE_CACHE_VERSION &&
+                    MessageDigest.isEqual(expectedKeyDigest, storedKeyDigest) &&
+                    payloadLength > 0L && payloadEnd == bytes.size.toLong() &&
+                    MessageDigest.isEqual(
+                        storedPayloadDigest,
+                        MessageDigest.getInstance("SHA-256").digest(bytes.copyOfRange(payloadStart, payloadEnd.toInt())),
+                    ) &&
+                    EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(bytes.copyOfRange(payloadStart, payloadEnd.toInt()))
+            }
+        } catch (_: Exception) {
+            false
+        }
+        if (valid) {
+            return bytes.copyOfRange(NATIVE_CACHE_HEADER_SIZE, bytes.size)
+        }
         try {
             Files.deleteIfExists(cachePath)
         } catch (_: Exception) {
-            // A locked invalid cache entry must not block recompilation.
+            // A locked invalid cache entry is ignored; authoritative source
+            // compilation still runs and never consumes the poisoned bytes.
         }
         return null
     }
 
-    private fun writeNativeArtifactCache(cachePath: Path, bytes: ByteArray) {
+    private fun writeNativeArtifactCache(cachePath: Path, bytes: ByteArray, cacheKey: String = cachePath.fileName.toString()) {
         try {
             Files.createDirectories(cachePath.parent)
+            val payloadDigest = MessageDigest.getInstance("SHA-256").digest(bytes)
+            val keyDigest = MessageDigest.getInstance("SHA-256").digest(cacheKey.toByteArray(StandardCharsets.US_ASCII))
+            val header = java.nio.ByteBuffer.allocate(NATIVE_CACHE_HEADER_SIZE)
+                .put(NATIVE_CACHE_MAGIC.toByteArray(StandardCharsets.US_ASCII).copyOf(16))
+                .putInt(NATIVE_CACHE_VERSION)
+                .put(keyDigest)
+                .putLong(bytes.size.toLong())
+                .put(payloadDigest)
+                .array()
+            val encoded = ByteArray(header.size + bytes.size)
+            header.copyInto(encoded, 0)
+            bytes.copyInto(encoded, header.size)
             val temp = Files.createTempFile(cachePath.parent, cachePath.fileName.toString(), ".tmp")
-            Files.write(temp, bytes)
+            Files.write(temp, encoded)
             try {
                 Files.move(temp, cachePath, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
             } catch (_: Exception) {
                 Files.move(temp, cachePath, StandardCopyOption.REPLACE_EXISTING)
             }
+            encoded.fill(0)
+            header.fill(0)
+            payloadDigest.fill(0)
+            keyDigest.fill(0)
         } catch (_: Exception) {
             // Cache writes are opportunistic; a failed write must not affect native output.
         }
@@ -603,7 +731,7 @@ object NativeRecompilationTransforms {
         protectedSectionKey: ByteArray,
         nativeProtectionLevel: String = "standard",
         nativePackingLevel: String = "max",
-        nativeShellPackerVersion: Int = NativeKernelShellPacker.PACKER_VERSION,
+        nativeShellPackerVersion: Int = 0,
         nativeShellPayloadProfile: String = "standard-overlay",
         nativeShellLoaderProfile: String = "direct-native-loader",
     ): String {
@@ -648,11 +776,14 @@ object NativeRecompilationTransforms {
         val path = toolchain.zigPath.toAbsolutePath().normalize()
         val size = runCatching { Files.size(path) }.getOrDefault(-1L)
         val mtime = runCatching { Files.getLastModifiedTime(path).toMillis() }.getOrDefault(-1L)
-        val version = runCatching {
-            val process = ProcessBuilder(path.toString(), "version").redirectErrorStream(true).start()
-            val output = process.inputStream.bufferedReader().readText().trim()
-            if (process.waitFor(2, TimeUnit.SECONDS) && process.exitValue() == 0) output else "unknown"
-        }.getOrDefault("unknown")
+        val identityKey = "${toolchain.source}|$path|$size|$mtime"
+        val version = zigToolchainIdentityCache.computeIfAbsent(identityKey) {
+            runCatching {
+                val process = ProcessBuilder(path.toString(), "version").redirectErrorStream(true).start()
+                val output = process.inputStream.bufferedReader().readText().trim()
+                if (process.waitFor(2, TimeUnit.SECONDS) && process.exitValue() == 0) output else "unknown"
+            }.getOrDefault("unknown")
+        }
         return "${toolchain.source}|$path|$size|$mtime|$version"
     }
 
@@ -690,7 +821,7 @@ object NativeRecompilationTransforms {
         val optLevel = nativeCompileOptLevel()
         val extraFlags = nativeCompileExtraFlags()
         val cmd = mutableListOf(
-            zigPath.toString(), "cc", "-target", zigTarget, optLevel, "-shared",
+            zigPath.toString(), "cc", "-target", zigTarget, optLevel, "-shared", "-std=c11",
             // The VM interpreter implements Java arithmetic, where signed integer
             // overflow wraps (two's complement). Zig's clang traps signed overflow as
             // UB at lower opt levels (panic: "signed integer overflow"), which aborts
@@ -702,6 +833,7 @@ object NativeRecompilationTransforms {
             "-DZSTDERRORLIB_VISIBLE=",
             "-DXXH_PUBLIC_API=",
             "-DJS_NATIVE_PROTECTION_${nativeProtectionLevel.uppercase()}=1",
+            "-DJS_AKEN_TYPED_ONLY_RUNTIME=1",
             "-o", outputPath.toString(),
             srcDir.resolve("js_kernel.c").toString(),
             srcDir.resolve("js_helpers.c").toString(),
@@ -760,16 +892,23 @@ object NativeRecompilationTransforms {
             else -> "js_shell_loader_elf.c"
         }
         val cmd = mutableListOf(
-            zigPath.toString(), "cc", "-target", zigTarget, optLevel, "-shared",
+            zigPath.toString(), "cc", "-target", zigTarget, optLevel, "-shared", "-std=c11",
             "-fwrapv",
             "-DZSTD_DISABLE_ASM=1",
             "-DZSTDLIB_VISIBLE=",
             "-DZSTDERRORLIB_VISIBLE=",
             "-DXXH_PUBLIC_API=",
             "-DJS_NATIVE_PROTECTION_${nativeProtectionLevel.uppercase()}=1",
+            "-DJS_AKEN_TYPED_ONLY_RUNTIME=1",
             "-o", outputPath.toString(),
             srcDir.resolve("js_shell_stub.c").toString(),
             srcDir.resolve("js_shell_crypto.c").toString(),
+            /* Shell payload decode shares the authoritative AES schedule and
+             * hardware/software dispatch with the runtime crypto module.  The
+             * stub is a separate link unit, so include js_crypto.c explicitly
+             * instead of relying on an unresolved symbol or a compatibility
+             * fallback. */
+            srcDir.resolve("js_crypto.c").toString(),
             srcDir.resolve(loaderSource).toString(),
             srcDir.resolve("zstd/common/debug.c").toString(),
             srcDir.resolve("zstd/common/entropy_common.c").toString(),
@@ -808,7 +947,10 @@ object NativeRecompilationTransforms {
         processBuilder: ProcessBuilder,
         expectedOutput: Path,
         timeoutMs: Long = zigCompileTimeoutMs(),
-    ): ZigCompileResult = synchronized(zigCompileLock) {
+    ): ZigCompileResult {
+        val lockKey = expectedOutput.toAbsolutePath().normalize().toString() + "|" + processBuilder.command().joinToString("\u0000")
+        val compileLock = zigCompileLocks.computeIfAbsent(lockKey) { Any() }
+        return synchronized(compileLock) {
         require(timeoutMs > 0L) { "Zig compile timeout must be positive" }
         var lastResult = ZigCompileResult(false, "Zig compilation did not start")
         val environment = processBuilder.environment()
@@ -869,6 +1011,7 @@ object NativeRecompilationTransforms {
             Thread.sleep(ZIG_RETRY_BASE_DELAY_MS * (attempt + 1L))
         }
         lastResult
+        }
     }
 
     private class ZigOutputDrain(
@@ -999,13 +1142,11 @@ object NativeRecompilationTransforms {
         vbc4BuildContext: Vbc4BuildContext,
         rng: Random,
     ): String {
-        val layout = vbc4BuildContext.akenVbc4FinalizationLayoutOrNull()
-        return if (layout == null) {
-            renderAkenNativePageLocatorInclude(emptyList(), rng)
-        } else {
-            layout.withNativeLocatorRecordsForBuild { records ->
-                renderAkenNativePageLocatorInclude(records, rng)
-            }
+        if (vbc4BuildContext.akenVbc4FinalizationLayoutOrNull() == null) {
+            return renderAkenNativePageLocatorInclude(emptyList(), rng)
+        }
+        return vbc4BuildContext.withAkenNativeLocatorRecordsForBuild { records ->
+            renderAkenNativePageLocatorInclude(records, rng)
         }
     }
 
@@ -1032,9 +1173,6 @@ object NativeRecompilationTransforms {
                 require(record.isNotEmpty() && record.size <= AKEN_NATIVE_PAGE_LOCATOR_MAX_RECORD_BYTES) {
                     "AKEN native page locator contains an invalid current-page record"
                 }
-                require((record[0].toInt() and 0xFF) == AKEN_NATIVE_PAGE_LOCATOR_RECORD_VERSION) {
-                    "AKEN native page locator compiler record version is unsupported"
-                }
                 require(totalLength <= AKEN_NATIVE_PAGE_LOCATOR_MAX_BLOB_BYTES - record.size) {
                     "AKEN native page locator compiler blob exceeds its bounded size"
                 }
@@ -1051,7 +1189,6 @@ object NativeRecompilationTransforms {
                 appendLine("#ifndef JS_AKEN_PAGE_LOCATOR_INC")
                 appendLine("#define JS_AKEN_PAGE_LOCATOR_INC")
                 appendLine("#include <stddef.h>")
-                appendLine("#define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_FORMAT_VERSION ${AKEN_NATIVE_PAGE_LOCATOR_RECORD_VERSION}u")
                 appendLine("#define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_COUNT ${ordered.size}u")
                 appendLine("#define JS_AKEN_NATIVE_PAGE_LOCATOR_BLOB_SIZE ${blob.size}u")
                 appendLine()
@@ -1354,30 +1491,52 @@ object NativeRecompilationTransforms {
         if (defaultStart < 0) return source
 
         val region = source.substring(regionStart, defaultStart)
-        val caseRegex = Regex("""(?s)\r?\n\s*JS_VM_CASE\(.*?\r?\n\s*JS_VM_BREAK;""")
-        val matches = caseRegex.findAll(region).toList()
-        if (matches.size < 8) return source
+        // A handler can contain an early JS_VM_BREAK inside a nested branch. Split
+        // only at physical top-level case headers. Consecutive header-only lines
+        // are aliases for one handler and must remain in the same block.
+        val physicalCaseHeaders = Regex("""(?m)^            JS_VM_CASE\(.*$""").findAll(region).toList()
+        if (physicalCaseHeaders.size < 8) return source
+        val aliasOnlyHeader = Regex("""^(?:JS_VM_CASE\([^)]*\)\s*)+$""")
+        val starts = physicalCaseHeaders.filterIndexed { index, match ->
+            if (index == 0) {
+                true
+            } else {
+                val previous = physicalCaseHeaders[index - 1]
+                val aliasesPrevious = aliasOnlyHeader.matches(previous.value.trim())
+                val onlyWhitespaceBetween = region.substring(previous.range.last + 1, match.range.first).isBlank()
+                !(aliasesPrevious && onlyWhitespaceBetween)
+            }
+        }
+        if (starts.size < 8) return source
 
-        val leading = region.substring(0, matches.first().range.first)
-        val trailing = region.substring(matches.last().range.last + 1)
-        if ((leading + trailing).any { !it.isWhitespace() }) return source
+        val leading = region.substring(0, starts.first().range.first)
+        if (leading.any { !it.isWhitespace() }) return source
+        val handlers = starts.mapIndexed { index, match ->
+            val end = starts.getOrNull(index + 1)?.range?.first ?: region.length
+            region.substring(match.range.first, end)
+        }
+        if (handlers.any { handler ->
+                !handler.contains("JS_VM_CASE(") || !handler.trimEnd().endsWith("JS_VM_BREAK;")
+            }) {
+            return source
+        }
 
-        val handlers = matches.mapIndexed { index, match ->
-            val relocated = addVmHandlerRelocation(match.value, index, rng)
+        val diversifiedHandlers = handlers.mapIndexed { index, handler ->
+            val relocated = addVmHandlerRelocation(handler, index, rng)
             addVmHandlerVariant(relocated, index, rng)
         }.toMutableList()
-        java.util.Collections.shuffle(handlers, rng)
-        val signature = handlers.joinToString(separator = ",") { handler -> firstVmCaseName(handler) }
-        val relocationSignature = handlers.joinToString(separator = ",") { handler -> firstVmRelocationEntry(handler) }
+        java.util.Collections.shuffle(diversifiedHandlers, rng)
+        val signature = diversifiedHandlers.joinToString(separator = ",") { handler -> firstVmCaseName(handler) }
+        val relocationSignature = diversifiedHandlers.joinToString(separator = ",") { handler -> firstVmRelocationEntry(handler) }
         val generatedRegion = buildString {
             append("\n        /* VBC4_INTERPRETER_CODEGEN handlers=")
-            append(handlers.size)
+            append(diversifiedHandlers.size)
             append(" order=")
             append(signature.hashCode().toUInt().toString(16))
             append(" relocation=")
             append(relocationSignature.hashCode().toUInt().toString(16))
             append(" */")
-            handlers.forEach { append(it) }
+            diversifiedHandlers.forEach { append(it) }
         }
         return source.substring(0, regionStart) + generatedRegion + source.substring(defaultStart)
     }
@@ -1385,7 +1544,25 @@ object NativeRecompilationTransforms {
 
     private fun addVmHandlerRelocation(block: String, index: Int, rng: Random): String {
         val firstCase = Regex("""(?m)^\s*JS_VM_CASE\([^\n]+""").find(block) ?: return block
-        val insertOffset = block.indexOf('\n', firstCase.range.last + 1).takeIf { it >= 0 } ?: return block
+        val firstLineEnd = block.indexOf('\n', firstCase.range.last + 1).takeIf { it >= 0 } ?: return block
+        val aliasOnlyHeader = Regex("""^(?:JS_VM_CASE\([^)]*\)\s*)+$""")
+        var insertOffset = firstLineEnd
+        var cursor = firstLineEnd + 1
+        /*
+         * A handler may start with several alias case headers.  Inserting a
+         * label between two JS_VM_CASE macros expands the label immediately
+         * before the macro's closing brace, which is rejected by Zig 0.16
+         * under -std=c11 as a C23-only label-at-end construct.  Place the
+         * relocation gate after the complete alias run instead.
+         */
+        while (cursor < block.length) {
+            val nextLineEnd = block.indexOf('\n', cursor).let { if (it >= 0) it else block.length }
+            val nextLine = block.substring(cursor, nextLineEnd).trim()
+            if (!aliasOnlyHeader.matches(nextLine)) break
+            insertOffset = nextLineEnd
+            cursor = if (nextLineEnd < block.length) nextLineEnd + 1 else nextLineEnd
+        }
+
         val token = rng.nextInt() or 1
         val tokenHex = token.toUInt().toString(16).uppercase()
         val entryLabel = "js_vm_handler_reloc_entry_${index}_${tokenHex}"
@@ -1393,7 +1570,7 @@ object NativeRecompilationTransforms {
         val keyName = "js_vm_handler_reloc_key_${index}_${tokenHex}"
         val shape = rng.nextInt(3)
         val relocationGate = buildString {
-            append("\n                /* VBC4_HANDLER_RELOCATION index=$index shape=$shape token=0x${tokenHex}u */\n")
+            append("\n                /* VBC4_HANDLER_RELOCATION index=${index} shape=${shape} token=0x${tokenHex}u */\n")
             append("                volatile uint32_t $keyName = (uint32_t)(js_vm_dispatch_salt_value ^ 0x${tokenHex}u ^ JS_VBC4_DISPATCH_MIX_C);\n")
             when (shape) {
                 0 -> {
@@ -1410,7 +1587,7 @@ object NativeRecompilationTransforms {
             }
             append("                $padLabel:\n")
             append("                $keyName ^= (uint32_t)(JS_VBC4_DISPATCH_MIX_A + JS_VBC4_DISPATCH_MIX_B);\n")
-            append("                $entryLabel:")
+            append("                $entryLabel: (void)0;\n")
         }
         return block.substring(0, insertOffset) + relocationGate + block.substring(insertOffset)
     }

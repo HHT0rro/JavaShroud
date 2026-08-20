@@ -4,6 +4,7 @@ import io.github.hht0rro.javashroud.model.schema.ModuleDefinition
 
 internal fun hidingCapabilityBindings(): List<CapabilityBinding> = listOf(
     CapabilityBinding(
+        targeting = CLASS_TARGETING,
         id = "member-hide",
         name = "Member Hide",
         description = "Mark fields and methods with the ACC_SYNTHETIC flag to hide them from IDEs and decompilers.",

@@ -727,7 +727,7 @@ private fun interproceduralVmSliceMesh(entries: List<VmPreloadEntry>): String {
 
 
 internal fun vmStateBinding(entryToken: Long, resourcePath: String): String {
-    val layoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest()
+    val layoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(requireVbc4BuildContext())
     return try {
         val layoutDigestHex = layoutDigest.toHexLower()
         "${entryToken.toULong().toString(16)}\u0000$resourcePath\u0000$VBC4_CLEAN_ENTRY_INTEGRITY_HEX\u0000$layoutDigestHex"

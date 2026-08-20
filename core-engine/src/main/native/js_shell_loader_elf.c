@@ -30,6 +30,13 @@ typedef struct js_shell_elf_dyn {
     uintptr_t hash;
     uintptr_t gnu_hash;
     uintptr_t strsz;
+    /* Symbol-table geometry is immutable for this authenticated image.  The
+     * first relocation/export operation fully validates the hash metadata and
+     * derives the count; later operations reuse that result without walking
+     * the same hash chains again.  This cache is stack-local to one load and
+     * never crosses an artifact, session, or thread. */
+    size_t symbol_count;
+    unsigned int symbol_count_valid;
 } js_shell_elf_dyn;
 
 static void js_shell_loader_fail(const char *reason) {
@@ -150,32 +157,72 @@ static int js_shell_gnu_hash_symbol_count(uintptr_t image, const js_shell_elf_dy
     return 1;
 }
 
-static int js_shell_symbol_count(uintptr_t image, const js_shell_elf_dyn *dyn, size_t *out_count) {
+static int js_shell_symbol_count(uintptr_t image, js_shell_elf_dyn *dyn, size_t *out_count) {
+    if (!dyn || !out_count) return 0;
+    if (dyn->symbol_count_valid) {
+        *out_count = dyn->symbol_count;
+        return 1;
+    }
     size_t count = 0;
     if (!js_shell_sysv_symbol_count(image, dyn, &count)) return 0;
     if (count) {
-        if (out_count) *out_count = count;
+        dyn->symbol_count = count;
+        dyn->symbol_count_valid = 1u;
+        *out_count = count;
         return 1;
     }
-    return js_shell_gnu_hash_symbol_count(image, dyn, out_count);
+    if (!js_shell_gnu_hash_symbol_count(image, dyn, &count)) return 0;
+    dyn->symbol_count = count;
+    dyn->symbol_count_valid = 1u;
+    *out_count = count;
+    return 1;
 }
 
-static void *js_shell_find_export(uintptr_t image, const js_shell_elf_dyn *dyn, const char *name) {
-    if (!dyn->symtab || !dyn->strtab || !name) return 0;
+/* Resolve the three loader entrypoints in one validated symbol-table pass.
+ * The symbol table and hash-derived count belong only to this load, so the
+ * resulting pointers are immediately consumed by the final executable-range
+ * checks and are never cached across artifacts or sessions. */
+static int js_shell_find_required_exports(
+    uintptr_t image,
+    js_shell_elf_dyn *dyn,
+    void **out_jni_on_load,
+    void **out_jni_on_unload,
+    void **out_native_abi_table
+) {
     size_t count = 0;
-    if (!js_shell_symbol_count(image, dyn, &count)) return 0;
-    if (!count || !js_shell_dyn_range_contains(dyn, (uintptr_t)dyn->symtab, count * sizeof(Elf64_Sym))) return 0;
+    if (out_jni_on_load) *out_jni_on_load = 0;
+    if (out_jni_on_unload) *out_jni_on_unload = 0;
+    if (out_native_abi_table) *out_native_abi_table = 0;
+    if (!dyn || !dyn->symtab || !dyn->strtab || !out_jni_on_load || !out_jni_on_unload || !out_native_abi_table ||
+        !js_shell_symbol_count(image, dyn, &count)) {
+        return 0;
+    }
+    if (!count) return 1;
+    if (count > SIZE_MAX / sizeof(Elf64_Sym)) {
+        js_shell_loader_fail("elf64 symbol table size overflows");
+        return 0;
+    }
+    if (!js_shell_dyn_range_contains(dyn, (uintptr_t)dyn->symtab, count * sizeof(Elf64_Sym))) return 0;
     for (size_t i = 0; i < count; i++) {
         const Elf64_Sym *sym = dyn->symtab + i;
         if (!js_shell_dyn_range_contains(dyn, (uintptr_t)sym, sizeof(*sym))) continue;
         if (!js_shell_dyn_string_contains(dyn, sym->st_name)) continue;
         if (sym->st_shndx == SHN_UNDEF || sym->st_value == 0) continue;
-        if (strcmp(dyn->strtab + sym->st_name, name) == 0) return (void *)(image + sym->st_value);
+        const char *name = dyn->strtab + sym->st_name;
+        void *address = (void *)(image + sym->st_value);
+        if (!*out_jni_on_load && strcmp(name, "JNI_OnLoad") == 0) {
+            *out_jni_on_load = address;
+        } else if (!*out_jni_on_unload && strcmp(name, "JNI_OnUnload") == 0) {
+            *out_jni_on_unload = address;
+        } else if (!*out_native_abi_table && strcmp(name, "js_native_abi_table_v1") == 0) {
+            *out_native_abi_table = address;
+        }
+        if (*out_jni_on_load && *out_native_abi_table && *out_jni_on_unload) break;
     }
-    return 0;
+    return 1;
 }
 
-static int js_shell_apply_rela(uintptr_t image, const js_shell_elf_dyn *dyn, const Elf64_Rela *rela, size_t count) {
+static int js_shell_apply_rela(uintptr_t image, js_shell_elf_dyn *dyn, const Elf64_Rela *rela, size_t count) {
     if (!rela || !count) return 1;
     if (!js_shell_dyn_range_contains(dyn, (uintptr_t)rela, count * sizeof(Elf64_Rela))) {
         js_shell_loader_fail("elf64 relocation table is outside the mapped image");
@@ -485,9 +532,22 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
         }
     }
 
-    out_image->jni_on_load = (jint (*)(JavaVM *, void *))js_shell_find_export(image, &dyn, "JNI_OnLoad");
-    out_image->jni_on_unload = (void (*)(JavaVM *, void *))js_shell_find_export(image, &dyn, "JNI_OnUnload");
-    out_image->native_abi_table_v1 = (const js_native_abi_table *(*)(void))js_shell_find_export(image, &dyn, "js_native_abi_table_v1");
+    void *resolved_jni_on_load = 0;
+    void *resolved_jni_on_unload = 0;
+    void *resolved_native_abi_table = 0;
+    if (!js_shell_find_required_exports(
+            image,
+            &dyn,
+            &resolved_jni_on_load,
+            &resolved_jni_on_unload,
+            &resolved_native_abi_table)) {
+        munmap(mapping, image_size);
+        js_shell_loader_fail("elf64 export symbol table could not be validated");
+        return 0;
+    }
+    out_image->jni_on_load = (jint (*)(JavaVM *, void *))resolved_jni_on_load;
+    out_image->jni_on_unload = (void (*)(JavaVM *, void *))resolved_jni_on_unload;
+    out_image->native_abi_table_v1 = (const js_native_abi_table *(*)(void))resolved_native_abi_table;
     if (!out_image->jni_on_load) {
         munmap(mapping, image_size);
         js_shell_loader_fail("elf64 payload does not export JNI_OnLoad");
@@ -509,6 +569,12 @@ int js_shell_load_inner_image(const js_shell_payload_view *payload, js_shell_loa
     out_image->image_size = image_size;
     out_image->code_low = (void *)exec_low;
     out_image->code_size = (size_t)(exec_high - exec_low);
+    out_image->mapping_metadata.image_low = (uintptr_t)mapping;
+    out_image->mapping_metadata.image_high = (uintptr_t)mapping + image_size;
+    out_image->mapping_metadata.code_low = exec_low;
+    out_image->mapping_metadata.code_high = exec_high;
+    out_image->mapping_metadata.mapping_unit_count = (unsigned int)eh->e_phnum;
+    out_image->mapping_metadata.version = JS_SHELL_MAPPING_METADATA_VERSION;
     g_js_shell_loader_failure = "elf64 anonymous memory loader completed";
     return 1;
 }

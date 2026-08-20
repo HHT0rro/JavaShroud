@@ -35,35 +35,18 @@ private fun handleInspectCommand(request: InspectCommandRequest, kernel: EngineK
 }
 
 private fun handleRunCommand(request: EngineRunRequest, kernel: EngineKernel): Unit {
-    val generated = installAutoBootSecretIfNeeded(request.config)
-    try {
-        generated?.let { generatedSecret ->
-            val message = if (generatedSecret.delivery == io.github.hht0rro.javashroud.transforms.protection.BootKekSidecar.DELIVERY_EMBEDDED) {
-                "No boot KEK provided; generated a random one that will be embedded in the output JAR."
-            } else {
-                val sidecar = requireNotNull(generatedSecret.sidecar)
-                "No boot KEK provided; generated a random one and saved to $sidecar. " +
-                    if (generatedSecret.artifactBinding != null) {
-                        "Set JAVASHROUD_BOOT_SECRET_FILE_V1 to that sidecar path at runtime."
-                    } else {
-                        "Set JAVASHROUD_BOOT_SECRET_V1 to the contents of that file at runtime."
-                    }
-            }
-            writeEvent(
-                EngineEvent(
-                    level = "warn",
-                    type = "warn",
-                    message = message,
-                    progress = null,
-                    outPath = null,
-                ),
-            )
-        }
-        kernel.run(request.config, request.configPath, ::writeEvent)
-        cleanupEmbeddedBootSecretSidecars(request.config)
-    } finally {
-        generated?.let(::wipeAutoBootSecret)
-    }
+    executeRunRequest(
+        request = request,
+        run = { config, configPath, emit -> kernel.run(config, configPath, emit) },
+    )
+}
+
+internal fun executeRunRequest(
+    request: EngineRunRequest,
+    run: (io.github.hht0rro.javashroud.model.config.ObfuscationConfig, java.nio.file.Path, (EngineEvent) -> Unit) -> Unit,
+    emit: (EngineEvent) -> Unit = ::writeEvent,
+): Unit {
+    run(request.config, request.configPath, emit)
 }
 
 private fun handleGarbageCollectCommand(request: GarbageCollectCommandRequest): Unit {

@@ -461,7 +461,7 @@ internal object AkenPageMaterializer {
                                 encodedPayload = payload,
                                 route = route,
                                 targetPageSize = page.targetSize,
-                                evaluatorPlan = runtimeEvaluatorPlanFor(page),
+                                evaluatorPlan = runtimeEvaluatorPlanFor(page, route, callSiteProof),
                                 codecVariant = page.codecVariant,
                                 layoutVariant = page.layoutVariant,
                                 callSiteProof = callSiteProof,
@@ -600,13 +600,13 @@ internal object AkenPageMaterializer {
                 "AKEN materialized evaluator fingerprint does not match the routed page"
             }
             require(
-                evaluatorPlan.matchesPageBinding(
+                evaluatorPlan.matchesDescriptorBinding(
                     resourceKind = route.resourceKind,
                     logicalIdentity = descriptorLogicalIdentity,
                     pageIndex = route.pageIndex,
                     targetPageSize = descriptor.targetPageSize,
-                    codecVariant = route.codecVariant,
-                    layoutVariant = route.layoutVariant,
+                    route = route,
+                    proof = descriptorProof,
                     handleEncoding = routeHandleEncoding,
                     locatorToken = routeLocatorToken,
                 ),
@@ -696,45 +696,24 @@ internal object AkenPageMaterializer {
         }
     }
 
-    private fun runtimeEvaluatorPlanFor(page: AkenBuildPlan.Page): AkenRuntimeEvaluatorPlan {
+    /**
+     * New production descriptors carry one opaque page-bound terminal.  The
+     * compatibility AKEN-7 fragment graph remains build-only and is never
+     * serialized into a newly materialized artifact.
+     */
+    private fun runtimeEvaluatorPlanFor(
+        page: AkenBuildPlan.Page,
+        route: AkenRoutingMetadata,
+        callSiteProof: ByteArray,
+    ): AkenRuntimeEvaluatorPlan {
         val evaluator = page.evaluatorPlan
         val fingerprint = evaluator.fingerprint
-        return try {
-            AkenRuntimeEvaluatorPlan.create(
-                javaFragments = evaluator.javaFragments.map { fragment ->
-                    runtimeFragment(AkenRuntimeEvaluatorRole.Java, fragment)
-                },
-                nativeFragments = evaluator.nativeFragments.map { fragment ->
-                    runtimeFragment(AkenRuntimeEvaluatorRole.Native, fragment)
-                },
-                terminal = runtimeFragment(AkenRuntimeEvaluatorRole.Terminal, evaluator.terminal),
-                fingerprint = fingerprint,
-            )
+        var boundPlan: AkenBoundDecryptorPlan? = null
+        try {
+            boundPlan = evaluator.boundPlanForRuntime(route, callSiteProof)
+            return AkenRuntimeEvaluatorPlan.createBound(checkNotNull(boundPlan), fingerprint)
         } finally {
             Arrays.fill(fingerprint, 0)
-        }
-    }
-
-    private fun runtimeFragment(
-        role: AkenRuntimeEvaluatorRole,
-        fragment: AkenBuildPlan.EvaluatorFragment,
-    ): AkenRuntimeEvaluatorFragment {
-        val shape = fragment.shape
-        val callToken = fragment.callToken
-        val tablePermutation = fragment.tablePermutation
-        return try {
-            AkenRuntimeEvaluatorFragment.create(
-                role = role,
-                ordinal = fragment.ordinal,
-                family = fragment.family,
-                shape = shape,
-                callToken = callToken,
-                tablePermutation = tablePermutation,
-            )
-        } finally {
-            Arrays.fill(shape, 0)
-            Arrays.fill(callToken, 0)
-            Arrays.fill(tablePermutation, 0)
         }
     }
 

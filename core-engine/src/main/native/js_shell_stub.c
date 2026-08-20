@@ -1,6 +1,7 @@
 #include "js_shell_stub.h"
 #include "js_shell_loader.h"
 #include "js_shell_crypto.h"
+#include "js_crypto.h"
 #include "js_shell_payload.inc"
 #include "zstd.h"
 
@@ -123,7 +124,10 @@ static int js_shell_verify_aken_payload_commitment(const unsigned char binding_s
     memcpy(material + sizeof(domain) - 1u, header_digest, sizeof(header_digest));
     memcpy(material + sizeof(domain) - 1u + sizeof(header_digest), payload_digest, sizeof(payload_digest));
     js_shell_hmac_sha256(binding_salt, 32u, material, sizeof(material), actual);
+    js_runtime_metrics_note_auth_check();
+    js_runtime_metrics_note_tag_check();
     ok = js_shell_consttime_equal(actual, js_shell_aken_payload_commitment, sizeof(actual));
+    if (!ok) js_runtime_metrics_note_auth_failure();
     js_shell_secure_wipe(header_digest, sizeof(header_digest));
     js_shell_secure_wipe(payload_digest, sizeof(payload_digest));
     js_shell_secure_wipe(actual, sizeof(actual));
@@ -140,9 +144,14 @@ static int js_shell_extract_aken_meta(
     const unsigned char binding_salt[32]) {
     size_t offset = 0u;
     size_t metadata_offset = 0u;
-    unsigned int version = 0u, level = 0u, nonce_size = 0u, metadata_size = 0u, chunk_tags_size = 0u;
+    unsigned int level = 0u, nonce_size = 0u, metadata_size = 0u, chunk_tags_size = 0u;
     const unsigned char *metadata = 0;
 
+    /* One outer parser invocation validates both authenticated public framing
+     * structure and all declared lengths.  Count those real checks once while
+     * leaving downstream commitment/tag/digest accounting unchanged. */
+    js_runtime_metrics_note_structure_check();
+    js_runtime_metrics_note_length_check();
     if (!meta || !stream_key || !binding_salt) return 0;
     memset(meta, 0, sizeof(*meta));
     memset(stream_key, 0, 32u);
@@ -153,10 +162,9 @@ static int js_shell_extract_aken_meta(
         memcmp(js_shell_payload_header, JS_NATIVE_MAX_PAYLOAD_MARKER, offset) != 0 ||
         g_js_shell_stub_marker[0] != 'A') goto fail;
     offset++;
-    if (!js_shell_read_u32_le(js_shell_payload_header, JS_SHELL_PAYLOAD_HEADER_SIZE, &offset, &version) ||
-        !js_shell_read_u32_le(js_shell_payload_header, JS_SHELL_PAYLOAD_HEADER_SIZE, &offset, &level) ||
+    if (!js_shell_read_u32_le(js_shell_payload_header, JS_SHELL_PAYLOAD_HEADER_SIZE, &offset, &level) ||
         !js_shell_read_u32_le(js_shell_payload_header, JS_SHELL_PAYLOAD_HEADER_SIZE, &offset, &nonce_size)) goto fail;
-    if (version != JS_SHELL_PROTOCOL_VERSION || level != JS_SHELL_PROTOCOL_LEVEL ||
+    if (level != JS_SHELL_PROTOCOL_LEVEL ||
         (level != 2u && level != 3u) || nonce_size != 16u || offset > JS_SHELL_PAYLOAD_HEADER_SIZE ||
         JS_SHELL_PAYLOAD_HEADER_SIZE - offset < 16u) goto fail;
     memcpy(meta->nonce, js_shell_payload_header + offset, 16u);
@@ -215,8 +223,7 @@ fail:
 
 static void js_shell_wipe_free(unsigned char *bytes, size_t size) {
     if (!bytes) return;
-    volatile unsigned char *p = (volatile unsigned char *)bytes;
-    while (size--) *p++ = 0;
+    js_shell_secure_wipe(bytes, size);
 #if defined(_WIN32)
     HeapFree(GetProcessHeap(), 0, bytes);
 #else
@@ -237,7 +244,10 @@ static int js_shell_verify_inner_digest(const unsigned char stream_key[32], cons
     js_shell_sha256_update(&ctx, domain, sizeof(domain)-1u); js_shell_sha256_update(&ctx, decoded, decoded_size); js_shell_sha256_final(&ctx, inner);
     for (size_t i=0;i<64u;i++) normalized[i]^=(unsigned char)(0x36u^0x5cu);
     js_shell_sha256_init(&ctx); js_shell_sha256_update(&ctx, normalized, sizeof(normalized)); js_shell_sha256_update(&ctx, inner, sizeof(inner)); js_shell_sha256_final(&ctx, actual);
+    js_runtime_metrics_note_auth_check();
+    js_runtime_metrics_note_digest_check();
     ok = js_shell_consttime_equal(actual, expected, sizeof(actual));
+    if (!ok) js_runtime_metrics_note_auth_failure();
     js_shell_secure_wipe(actual, sizeof(actual));
     js_shell_secure_wipe(normalized, sizeof(normalized));
     js_shell_secure_wipe(inner, sizeof(inner));
@@ -310,20 +320,47 @@ static JNIEnv *js_shell_current_env_for(const char *label, JNIEnv *incoming) {
     return incoming;
 }
 
-static int js_shell_range_contains(const void *base, size_t size, const void *ptr, size_t ptr_size) {
-    uintptr_t low = (uintptr_t)base;
+static int js_shell_range_contains_bounds(uintptr_t low, uintptr_t high, const void *ptr, size_t ptr_size) {
     uintptr_t addr = (uintptr_t)ptr;
-    if (!base || !ptr || size == 0u || ptr_size == 0u) return 0;
-    return addr >= low && addr <= low + size && ptr_size <= low + size - addr;
+    if (!ptr || ptr_size == 0u || high <= low || addr < low || addr > high) return 0;
+    return ptr_size <= (size_t)(high - addr);
+}
+
+/* The mapping metadata is set only after the platform loader has completed
+ * architecture, mapping, segment/section, relocation, import/export, and
+ * executable-bound validation.  Verify its relation to the canonical fields
+ * before using the cached bounds, so corruption or a stale image fails closed. */
+static int js_shell_mapping_metadata_matches_image(void) {
+    const js_shell_mapping_metadata *meta = &g_inner_image.mapping_metadata;
+    uintptr_t image_low = (uintptr_t)g_inner_image.image_base;
+    uintptr_t code_low = (uintptr_t)g_inner_image.code_low;
+    uintptr_t image_high;
+    uintptr_t code_high;
+
+    if (meta->version != JS_SHELL_MAPPING_METADATA_VERSION || meta->mapping_unit_count == 0u ||
+        !g_inner_image.image_base || g_inner_image.image_size == 0u ||
+        !g_inner_image.code_low || g_inner_image.code_size == 0u ||
+        g_inner_image.image_size > UINTPTR_MAX - image_low ||
+        g_inner_image.code_size > UINTPTR_MAX - code_low) {
+        return 0;
+    }
+    image_high = image_low + (uintptr_t)g_inner_image.image_size;
+    code_high = code_low + (uintptr_t)g_inner_image.code_size;
+    return meta->image_low == image_low && meta->image_high == image_high &&
+        meta->code_low == code_low && meta->code_high == code_high &&
+        meta->image_high > meta->image_low && meta->code_high > meta->code_low;
 }
 
 static int js_shell_inner_image_contains(const void *ptr, size_t size) {
-    return js_shell_range_contains(g_inner_image.image_base, g_inner_image.image_size, ptr, size);
+    const js_shell_mapping_metadata *meta = &g_inner_image.mapping_metadata;
+    if (meta->version != JS_SHELL_MAPPING_METADATA_VERSION) return 0;
+    return js_shell_range_contains_bounds(meta->image_low, meta->image_high, ptr, size);
 }
 
 static int js_shell_inner_code_contains(const void *ptr) {
-    if (!g_inner_image.code_low || g_inner_image.code_size == 0u) return 1;
-    return js_shell_range_contains(g_inner_image.code_low, g_inner_image.code_size, ptr, 1u);
+    const js_shell_mapping_metadata *meta = &g_inner_image.mapping_metadata;
+    if (meta->version != JS_SHELL_MAPPING_METADATA_VERSION) return 0;
+    return js_shell_range_contains_bounds(meta->code_low, meta->code_high, ptr, 1u);
 }
 
 static jclass js_shell_effective_helper_class(jclass fallback) {
@@ -335,6 +372,10 @@ static JNIEnv *js_shell_current_env(JNIEnv *incoming) {
 }
 
 static int js_shell_validate_inner_abi_table(const js_native_abi_table *abi) {
+    if (!js_shell_mapping_metadata_matches_image()) {
+        js_shell_debug_native_init_failure("inner validated mapping metadata does not match the loaded image");
+        return 0;
+    }
     if (!abi || !js_shell_inner_image_contains(abi, sizeof(*abi))) {
         js_shell_debug_native_init_failure("inner ABI table pointer is outside the mapped image");
         return 0;
@@ -343,6 +384,17 @@ static int js_shell_validate_inner_abi_table(const js_native_abi_table *abi) {
         js_shell_debug_native_init_failure("inner ABI table version mismatch");
         return 0;
     }
+#if defined(JS_AKEN_TYPED_ONLY_RUNTIME) && JS_AKEN_TYPED_ONLY_RUNTIME
+    const void *functions[] = {
+        (const void *)abi->native_init,
+        (const void *)abi->native_heartbeat,
+        (const void *)abi->install_aken_session_nonce,
+        (const void *)abi->execute_aken_vm_page,
+        (const void *)abi->decode_aken_string_page,
+        (const void *)abi->read_aken_class_page,
+        (const void *)abi->consume_aken_native_chunk,
+    };
+#else
     const void *functions[] = {
         (const void *)abi->native_init,
         (const void *)abi->native_verify,
@@ -367,8 +419,9 @@ static int js_shell_validate_inner_abi_table(const js_native_abi_table *abi) {
         (const void *)abi->execute_aken_vm_page,
         (const void *)abi->decode_aken_string_page,
         (const void *)abi->read_aken_class_page,
-        (const void *)abi->map_aken_native_chunk,
+        (const void *)abi->consume_aken_native_chunk,
     };
+#endif
     for (size_t i = 0; i < sizeof(functions) / sizeof(functions[0]); i++) {
         if (!functions[i] || !js_shell_inner_code_contains(functions[i])) {
             js_shell_debug_native_init_failure("inner ABI function pointer is outside executable image pages");
@@ -618,7 +671,8 @@ static jint JNICALL js_shell_native_init(JNIEnv *env, jclass cls, jstring platfo
     if (!call_env) return JNI_ERR;
     if (!g_inner_image.jni_on_load || !g_shell_vm || g_shell_failed) return JNI_ERR;
     if (!g_inner_onload_done) {
-        if (!js_shell_inner_code_contains((const void *)g_inner_image.jni_on_load)) {
+        if (!js_shell_mapping_metadata_matches_image() ||
+            !js_shell_inner_code_contains((const void *)g_inner_image.jni_on_load)) {
             js_shell_debug_native_init_failure("inner JNI_OnLoad is outside executable image pages");
             g_shell_failed = 1;
             return JNI_ERR;
@@ -649,12 +703,14 @@ static jint JNICALL js_shell_native_init(JNIEnv *env, jclass cls, jstring platfo
     return g_inner_abi && g_inner_abi->native_init ? g_inner_abi->native_init(call_env, js_shell_effective_helper_class(cls), platform) : JNI_ERR;
 }
 
+#if !defined(JS_AKEN_TYPED_ONLY_RUNTIME) || !JS_AKEN_TYPED_ONLY_RUNTIME
 static jint JNICALL js_shell_native_verify(JNIEnv *env, jclass cls, jbyteArray data, jbyteArray expected_mac) {
     JNIEnv *call_env = js_shell_current_env_for("native-verify", env);
     if (!call_env) return 0;
     if (!g_inner_abi || !g_inner_abi->native_verify) return 0;
     return g_inner_abi->native_verify(call_env, js_shell_effective_helper_class(cls), data, expected_mac);
 }
+#endif
 
 static jint JNICALL js_shell_native_heartbeat(JNIEnv *env, jclass cls) {
     JNIEnv *call_env = js_shell_current_env_for("native-heartbeat", env);
@@ -663,6 +719,18 @@ static jint JNICALL js_shell_native_heartbeat(JNIEnv *env, jclass cls) {
     return g_inner_abi->native_heartbeat(call_env, js_shell_effective_helper_class(cls));
 }
 
+#if defined(JS_AKEN_TYPED_ONLY_RUNTIME) && JS_AKEN_TYPED_ONLY_RUNTIME
+static jboolean JNICALL js_shell_install_aken_session_nonce(JNIEnv *env, jclass cls, jbyteArray startup_nonce) {
+    JNIEnv *call_env = js_shell_current_env_for("native-install-aken-session-nonce", env);
+    if (!call_env || !g_inner_abi || !g_inner_abi->install_aken_session_nonce) return JNI_FALSE;
+    return g_inner_abi->install_aken_session_nonce(
+        call_env,
+        js_shell_effective_helper_class(cls),
+        startup_nonce);
+}
+#endif
+
+#if !defined(JS_AKEN_TYPED_ONLY_RUNTIME) || !JS_AKEN_TYPED_ONLY_RUNTIME
 static jbyteArray JNICALL js_shell_native_decrypt_aes(JNIEnv *env, jclass cls, jbyteArray encrypted, jbyteArray keyArr, jbyteArray ivArr) {
     JNIEnv *call_env = js_shell_current_env_for("native-decrypt-aes", env);
     if (!call_env) return 0;
@@ -772,6 +840,7 @@ static jbyteArray JNICALL js_shell_native_decode_runtime_resource(JNIEnv *env, j
         js_shell_effective_helper_class(cls),
         encoded);
 }
+#endif
 
 static jobject JNICALL js_shell_execute_aken_vm_page(JNIEnv *env, jclass cls, jlong entryToken, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof, jobjectArray args) {
     JNIEnv *call_env = js_shell_current_env_for("execute-aken-vm-page", env);
@@ -791,12 +860,25 @@ static jbyteArray JNICALL js_shell_read_aken_class_page(JNIEnv *env, jclass cls,
     return g_inner_abi->read_aken_class_page(call_env, js_shell_effective_helper_class(cls), encodedHandle, pageIndex, callSiteProof);
 }
 
-static jbyteArray JNICALL js_shell_map_aken_native_chunk(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof) {
-    JNIEnv *call_env = js_shell_current_env_for("map-aken-native-chunk", env);
-    if (!call_env || !g_inner_abi || !g_inner_abi->map_aken_native_chunk) return 0;
-    return g_inner_abi->map_aken_native_chunk(call_env, js_shell_effective_helper_class(cls), encodedHandle, pageIndex, callSiteProof);
+static void js_shell_throw_aken_native_chunk_unavailable(JNIEnv *env) {
+    jclass exception_class = 0;
+    if (!env || (*env)->ExceptionCheck(env)) return;
+    exception_class = (*env)->FindClass(env, "java/lang/SecurityException");
+    if (!exception_class || (*env)->ExceptionCheck(env)) return;
+    (*env)->ThrowNew(env, exception_class, "AKEN native chunk route is unavailable");
+    (*env)->DeleteLocalRef(env, exception_class);
 }
 
+static void JNICALL js_shell_consume_aken_native_chunk(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof) {
+    JNIEnv *call_env = js_shell_current_env_for("consume-aken-native-chunk", env);
+    if (!call_env || !g_inner_abi || !g_inner_abi->consume_aken_native_chunk) {
+        js_shell_throw_aken_native_chunk_unavailable(env);
+        return;
+    }
+    g_inner_abi->consume_aken_native_chunk(call_env, js_shell_effective_helper_class(cls), encodedHandle, pageIndex, callSiteProof);
+}
+
+#if !defined(JS_AKEN_TYPED_ONLY_RUNTIME) || !JS_AKEN_TYPED_ONLY_RUNTIME
 static jobject JNICALL js_shell_execute_vm_resource(JNIEnv *env, jclass cls, jlong entryToken, jstring resourcePath, jobjectArray args) {
     JNIEnv *call_env = js_shell_current_env_for("execute-vm-resource", env);
     if (!call_env) return 0;
@@ -838,12 +920,14 @@ static void JNICALL js_shell_execute_vm_resource_int_void(JNIEnv *env, jclass cl
     if (!g_inner_abi || !g_inner_abi->execute_vm_resource_int_void) return;
     g_inner_abi->execute_vm_resource_int_void(call_env, js_shell_effective_helper_class(cls), entryToken, arg0);
 }
+#endif
 
 static int js_shell_register_outer_shim(JNIEnv *env) {
     char *owner = 0;
     char *original_owner = 0;
     char *mapped_init = 0, *mapped_verify = 0, *mapped_heartbeat = 0, *mapped_version = 0, *mapped_boot_token = 0;
     char *mapped_install_boot = 0, *mapped_install_boot_envelope = 0, *mapped_boot_ready = 0, *mapped_abort_boot = 0, *mapped_preload = 0, *mapped_decrypt_aes = 0, *mapped_class_key = 0, *mapped_class_decrypt = 0, *mapped_binding_key = 0, *mapped_decode_resource = 0;
+    char *mapped_install_aken_session_nonce = 0;
     char *mapped_exec = 0, *mapped_exec_token = 0, *mapped_void = 0, *mapped_int = 0, *mapped_int_int = 0, *mapped_int_void = 0;
     int ok;
     jclass helper_cls = js_shell_find_helper_class(env, &owner);
@@ -912,6 +996,37 @@ static int js_shell_register_outer_shim(JNIEnv *env) {
     mapped_int = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_int_name, "(J)I") : 0;
     mapped_int_int = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_int_int_name, "(JI)I") : 0;
     mapped_int_void = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_int_void_name, "(JI)V") : 0;
+    mapped_install_aken_session_nonce = original_owner
+        ? js_shell_lookup_bound_method(env, original_owner, "nativeInstallAkenSessionNonce", "([B)Z")
+        : 0;
+#if defined(JS_AKEN_TYPED_ONLY_RUNTIME) && JS_AKEN_TYPED_ONLY_RUNTIME
+    /* The lean AKEN helper exposes only the typed current-page closure. */
+    JNINativeMethod methods[7];
+    memset(methods, 0, sizeof(methods));
+    methods[0].name = (char *)((mapped_init && mapped_init[0]) ? mapped_init : native_init_name);
+    methods[0].signature = "(Ljava/lang/String;)I";
+    methods[0].fnPtr = (void *)js_shell_native_init;
+    methods[1].name = (char *)((mapped_heartbeat && mapped_heartbeat[0]) ? mapped_heartbeat : native_heartbeat_name);
+    methods[1].signature = "()I";
+    methods[1].fnPtr = (void *)js_shell_native_heartbeat;
+    methods[2].name = (char *)((mapped_install_aken_session_nonce && mapped_install_aken_session_nonce[0])
+        ? mapped_install_aken_session_nonce
+        : "nativeInstallAkenSessionNonce");
+    methods[2].signature = "([B)Z";
+    methods[2].fnPtr = (void *)js_shell_install_aken_session_nonce;
+    methods[3].name = "nativeExecuteAkenVmPage";
+    methods[3].signature = "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;";
+    methods[3].fnPtr = (void *)js_shell_execute_aken_vm_page;
+    methods[4].name = "nativeDecodeAkenStringPage";
+    methods[4].signature = "([BI[B)[B";
+    methods[4].fnPtr = (void *)js_shell_decode_aken_string_page;
+    methods[5].name = "nativeReadAkenClassPage";
+    methods[5].signature = "([BI[B)[B";
+    methods[5].fnPtr = (void *)js_shell_read_aken_class_page;
+    methods[6].name = "nativeConsumeAkenNativeChunk";
+    methods[6].signature = "([BI[B)V";
+    methods[6].fnPtr = (void *)js_shell_consume_aken_native_chunk;
+#else
     JNINativeMethod methods[25];
     memset(methods, 0, sizeof(methods));
     methods[0].name = (char *)((mapped_init && mapped_init[0]) ? mapped_init : native_init_name);
@@ -986,9 +1101,10 @@ static int js_shell_register_outer_shim(JNIEnv *env) {
     methods[23].name = "nativeReadAkenClassPage";
     methods[23].signature = "([BI[B)[B";
     methods[23].fnPtr = (void *)js_shell_read_aken_class_page;
-    methods[24].name = "nativeMapAkenNativeChunk";
-    methods[24].signature = "([BI[B)[B";
-    methods[24].fnPtr = (void *)js_shell_map_aken_native_chunk;
+    methods[24].name = "nativeConsumeAkenNativeChunk";
+    methods[24].signature = "([BI[B)V";
+    methods[24].fnPtr = (void *)js_shell_consume_aken_native_chunk;
+#endif
     ok = ((*env)->RegisterNatives(env, helper_cls, methods, (jint)(sizeof(methods) / sizeof(methods[0]))) == 0);
     if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); ok = 0; }
     if (ok && !g_shell_helper_class) {
@@ -1021,6 +1137,7 @@ static int js_shell_register_outer_shim(JNIEnv *env) {
     free(mapped_int);
     free(mapped_int_int);
     free(mapped_int_void);
+    free(mapped_install_aken_session_nonce);
     free(original_owner);
     free(owner);
     return ok;

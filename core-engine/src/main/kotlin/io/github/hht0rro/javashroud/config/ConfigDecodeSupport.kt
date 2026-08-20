@@ -18,6 +18,7 @@ fun decodeConfig(rootNode: JsonNode, configPath: Path): ObfuscationConfig {
         rootNode.has("rules") -> decodeTopLevelRules(rootNode.path("rules"), configPath)
         else -> RuleSet(emptyList())
     }
+    val passSelections = decodePassSelections(rootNode.path("passSelections"), configPath)
 
     val allowIncomplete = optionalNestedBoolean(scalarRoot, "allowIncomplete", configPath, scalarRootPath)
     val allowOptInPasses = optionalNestedBooleanOrDefault(
@@ -35,6 +36,7 @@ fun decodeConfig(rootNode: JsonNode, configPath: Path): ObfuscationConfig {
         outputJarPath = outputJarPath,
         passes = passes,
         ruleSet = ruleSet,
+        passSelections = passSelections,
         allowIncomplete = allowIncomplete,
         allowOptInPasses = allowOptInPasses,
         allowRedundantPasses = allowRedundantPasses,

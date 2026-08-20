@@ -76,11 +76,14 @@ public final class JniMicrokernelHelper {
     private static final String SEALED_NATIVE_INDEX_RESOURCE = "META-INF/.r/0.dat";
     private static final String SEALED_NATIVE_BINDINGS_RESOURCE = "META-INF/.r/bindings.dat";
     private static final String AKEN_NATIVE_LOCATOR_RESOURCE = "META-INF/aken/native.locator";
+    private static final String AKEN_NATIVE_BINDINGS_LOCATOR_RESOURCE = "META-INF/aken/native.bindings.locator";
     private static final String AKEN_NATIVE_RESOURCE_ROOT = "META-INF/";
     private static final String AKEN_NATIVE_LOCATOR_RECORD = "AKEN_NATIVE_LOCATOR_V1";
+    private static final String AKEN_NATIVE_BINDINGS_LOCATOR_RECORD = "AKEN_NATIVE_BINDINGS_V1";
     private static final int AKEN_NATIVE_LOCATOR_MAX_BYTES = 16 * 1024;
     private static final int AKEN_NATIVE_MAX_LIBRARY_BYTES = 256 * 1024 * 1024;
     private static final int AKEN_NATIVE_SHA256_LENGTH = 32;
+    private static final int AKEN_NATIVE_BINDINGS_MAX_BYTES = 4 * 1024 * 1024;
     private static final String BOOT_MATERIAL_RESOURCE = "META-INF/.r/boot.dat";
     private static final String EMBEDDED_BOOT_SECRET_RESOURCE = "META-INF/.r/kek.dat";
     private static final String BOOT_SECRET_ENV = "JAVASHROUD_BOOT_SECRET_V1";
@@ -94,8 +97,8 @@ public final class JniMicrokernelHelper {
     private static final byte[] BOOT_SIDECAR_KEY_DOMAIN = "JavaShroud/BootKekSidecar/v1/key".getBytes(StandardCharsets.US_ASCII);
     private static final String VM_CATALOG_RESOURCE = "META-INF/.r/vm.catalog";
     private static final int RUNTIME_RESOURCE_VERSION = 7;
+    private static final int RUNTIME_RESOURCE_HEADER_SIZE = 27;
     private static final int NATIVE_ANCHOR_KEY_SLOT = 16;
-    private static final int BOOTSTRAP_NATIVE_INDEX_VERSION = 1;
     private static final int ZSTD_MAGIC = 0xFD2FB528;
     private static final int LAMBDA_FLAG_SERIALIZABLE = 1;
     private static final int LAMBDA_FLAG_MARKERS = 2;
@@ -118,6 +121,7 @@ public final class JniMicrokernelHelper {
     static native boolean nativeIsBootMaterialReady();
     static native void nativeAbortBootMaterial();
     static native void nativePreloadRuntimeResources(byte[] preloadIndex, byte[] commitments, byte[] startupNonce);
+    static native boolean nativeInstallAkenSessionNonce(byte[] startupNonce);
     static native byte[] nativeDecodeRuntimeResource(byte[] encoded);
     public static native byte[] nativeDecryptAes(byte[] encrypted, byte[] key, byte[] iv);
     public static native byte[] nativeDeriveClassEncryptionKey(byte[] keyId, byte[] salt, int length);
@@ -133,7 +137,16 @@ public final class JniMicrokernelHelper {
     static native Object nativeExecuteAkenVmPage(long entryToken, byte[] encodedHandle, int pageIndex, byte[] callSiteProof, Object[] args);
     static native byte[] nativeDecodeAkenStringPage(byte[] encodedHandle, int pageIndex, byte[] callSiteProof);
     static native byte[] nativeReadAkenClassPage(byte[] encodedHandle, int pageIndex, byte[] callSiteProof);
-    static native byte[] nativeMapAkenNativeChunk(byte[] encodedHandle, int pageIndex, byte[] callSiteProof);
+    static native void nativeConsumeAkenNativeChunk(byte[] encodedHandle, int pageIndex, byte[] callSiteProof);
+    /* Fixture-only, de-identified runtime counters.  The production runtime
+     * never calls this method; the diagnostics build registers it only for
+     * attached-JVM benchmark evidence. */
+    static native long[] nativeRuntimeMetricsSnapshot();
+    /* Fixture-only effective crypto capability probe.  The result contains
+     * only two boolean flags: AES dispatch availability and GHASH/PCLMUL
+     * dispatch availability.  No CPU identity or sensitive runtime state is
+     * exposed. */
+    static native long[] nativeRuntimeCryptoCapabilities();
 
     public static Object executeAkenVmPage(long entryToken, byte[] encodedHandle, int pageIndex, byte[] callSiteProof, Object[] args) {
         requireAkenPageRequest(encodedHandle, pageIndex, callSiteProof, "VM");
@@ -161,10 +174,14 @@ public final class JniMicrokernelHelper {
         return requireAkenPageResult(nativeReadAkenClassPage(encodedHandle, pageIndex, callSiteProof), "class");
     }
 
-    public static byte[] mapAkenNativeChunk(byte[] encodedHandle, int pageIndex, byte[] callSiteProof) {
+    /**
+     * Opens and consumes exactly one authenticated native-private chunk inside
+     * the JNI kernel.  The decrypted chunk never crosses the JNI boundary.
+     */
+    public static void consumeAkenNativeChunk(byte[] encodedHandle, int pageIndex, byte[] callSiteProof) {
         requireAkenPageRequest(encodedHandle, pageIndex, callSiteProof, "native");
         ensureAkenNativeKernel();
-        return requireAkenPageResult(nativeMapAkenNativeChunk(encodedHandle, pageIndex, callSiteProof), "native");
+        nativeConsumeAkenNativeChunk(encodedHandle, pageIndex, callSiteProof);
     }
 
     private static void requireAkenPageRequest(byte[] encodedHandle, int pageIndex, byte[] callSiteProof, String purpose) {
@@ -203,9 +220,31 @@ public final class JniMicrokernelHelper {
                 return;
             }
             akenLoadState = LOAD_READY;
+            /*
+             * nativeInit deliberately defers optional helper registration while
+             * the loader is in LOAD_LOADING: resolving those classes can trigger
+             * an AKEN string bootstrap before its typed bridge is ready.  A
+             * heartbeat after READY completes that registration without a
+             * re-entrant page-open failure.
+             */
+            activateAkenDeferredNativeBindings();
+            nativeSelfCheckFailed = false;
+            runDiversifiedVmSelfExercise();
         } catch (Throwable error) {
             akenLoadMessage = debugNativeLoadMessage("aken:native-exception", error);
             akenLoadState = LOAD_FAILED;
+        }
+    }
+
+    private static void activateAkenDeferredNativeBindings() {
+        final int heartbeat;
+        try {
+            heartbeat = nativeHeartbeat();
+        } catch (UnsatisfiedLinkError error) {
+            throw new SecurityException("AKEN deferred native bindings are not registered", error);
+        }
+        if (heartbeat < 0) {
+            throw new SecurityException("AKEN deferred native bindings registration failed");
         }
     }
 
@@ -225,6 +264,10 @@ public final class JniMicrokernelHelper {
         byte[] actualDigest = null;
         File tempLib = null;
         String previousLoaderOwner = System.getProperty(sealedLoaderPropertyName());
+        String previousClassBindings = System.getProperty(sealedBindingPropertyName());
+        String previousMethodBindings = System.getProperty(sealedMethodBindingPropertyName());
+        String previousFieldBindings = System.getProperty(sealedFieldBindingPropertyName());
+        boolean previousBindingsPublished = sealedNativeBindingsPublished;
         boolean loaded = false;
         try (InputStream in = resourceStream(locator.resourcePath)) {
             if (in == null) {
@@ -251,15 +294,17 @@ public final class JniMicrokernelHelper {
                 tempLib.setReadable(true, true);
                 tempLib.setWritable(true, true);
                 tempLib.setExecutable(true, true);
-                // Keep only the owner binding needed by RegisterNatives; do not
-                // publish the legacy binding resource or any boot-derived state.
-                publishSealedNativeLoaderOwner();
+                // AKEN v4 relocation metadata is public binding material.  Publish
+                // only the active locator-selected binding route before System.load.
+                publishSealedNativeBindings(locator);
+                sealedNativeBindingsPublished = true;
                 System.load(tempLib.getAbsolutePath());
                 int initResult = initializeNativeKernel(platformSuffix);
                 if (initResult < 0) {
                     akenLoadMessage = "aken:native-init-failed:" + initResult;
                     return false;
                 }
+                installAkenSessionNonce();
                 if (!verifyAkenNativeAbiAfterLoad()) return false;
                 akenLoadMessage = "aken:native:bundled:" + platformSuffix + ":" + initResult;
                 loaded = true;
@@ -278,7 +323,13 @@ public final class JniMicrokernelHelper {
             if (actualDigest != null) Arrays.fill(actualDigest, (byte) 0);
             locator.clear();
             if (!loaded && tempLib != null) tempLib.delete();
-            if (!loaded) restoreLoaderProperty(previousLoaderOwner);
+            if (!loaded) {
+                sealedNativeBindingsPublished = previousBindingsPublished;
+                restoreLoaderProperty(previousLoaderOwner);
+                restoreProperty(sealedBindingPropertyName(), previousClassBindings);
+                restoreProperty(sealedMethodBindingPropertyName(), previousMethodBindings);
+                restoreProperty(sealedFieldBindingPropertyName(), previousFieldBindings);
+            }
         }
     }
 
@@ -302,7 +353,7 @@ public final class JniMicrokernelHelper {
                 // Registered typed route reached native code.
             }
             try {
-                nativeMapAkenNativeChunk(handle, 0, proof);
+                nativeConsumeAkenNativeChunk(handle, 0, proof);
             } catch (SecurityException expectedRouteFailure) {
                 // Registered typed route reached native code.
             }
@@ -331,6 +382,7 @@ public final class JniMicrokernelHelper {
      */
     private static AkenNativeLibrary readAkenNativeLocator(String expectedPlatform) {
         byte[] raw = null;
+        byte[] bindingSha256 = null;
         try (InputStream in = resourceStream(AKEN_NATIVE_LOCATOR_RESOURCE)) {
             if (in == null) throw new SecurityException("AKEN native locator is missing");
             raw = readAllBounded(in, AKEN_NATIVE_LOCATOR_MAX_BYTES);
@@ -339,6 +391,8 @@ public final class JniMicrokernelHelper {
             }
             String text = new String(raw, StandardCharsets.US_ASCII);
             AkenNativeLibrary selected = null;
+            String bindingResourcePath = null;
+            int bindingStoredLength = 0;
             String[] lines = text.split("\\n", -1);
             if (lines.length == 0 || (lines.length > 1 && lines[lines.length - 1].length() == 0)) {
                 throw new SecurityException("AKEN native locator has invalid line layout");
@@ -349,6 +403,20 @@ public final class JniMicrokernelHelper {
                     throw new SecurityException("AKEN native locator has an empty or CRLF record");
                 }
                 String[] fields = line.split("\\|", -1);
+                if (AKEN_NATIVE_BINDINGS_LOCATOR_RECORD.equals(fields[0])) {
+                    if (fields.length != 4 || bindingResourcePath != null ||
+                        !isAkenNativeResourcePath(fields[1])) {
+                        throw new SecurityException("AKEN native bindings locator record is malformed");
+                    }
+                    int storedLength = parseAkenNativeLength(fields[2]);
+                    if (storedLength > AKEN_NATIVE_BINDINGS_MAX_BYTES) {
+                        throw new SecurityException("AKEN native bindings locator length is invalid");
+                    }
+                    bindingResourcePath = fields[1];
+                    bindingStoredLength = storedLength;
+                    bindingSha256 = parseAkenNativeSha256(fields[3]);
+                    continue;
+                }
                 if (fields.length != 6 || !AKEN_NATIVE_LOCATOR_RECORD.equals(fields[0])) {
                     throw new SecurityException("AKEN native locator record is malformed");
                 }
@@ -375,6 +443,10 @@ public final class JniMicrokernelHelper {
                 }
             }
             if (selected == null) throw new SecurityException("AKEN native locator has no active platform route");
+            selected.bindingResourcePath = bindingResourcePath;
+            selected.bindingStoredLength = bindingStoredLength;
+            selected.bindingSha256 = bindingSha256;
+            bindingSha256 = null;
             return selected;
         } catch (SecurityException error) {
             throw error;
@@ -382,6 +454,7 @@ public final class JniMicrokernelHelper {
             throw new SecurityException("AKEN native locator is unreadable", error);
         } finally {
             if (raw != null) Arrays.fill(raw, (byte) 0);
+            if (bindingSha256 != null) Arrays.fill(bindingSha256, (byte) 0);
         }
     }
 
@@ -1157,7 +1230,7 @@ public final class JniMicrokernelHelper {
     }
 
     public static boolean isNativeLoaded() {
-        return loadState == LOAD_READY;
+        return loadState == LOAD_READY || akenLoadState == LOAD_READY;
     }
 
     /* ---- Kernel loading ---- */
@@ -1168,7 +1241,11 @@ public final class JniMicrokernelHelper {
 
     public static synchronized void loadKernel(String kernelComponents, String targetPlatform, String vmMode) {
         diversifiedVmEnabled = "vm-diverse".equals(vmMode);
-        if (loadState != LOAD_UNTRIED) return;
+        if (isNativeLoaded()) {
+            runDiversifiedVmSelfExercise();
+            return;
+        }
+        if (loadState == LOAD_LOADING || akenLoadState == LOAD_LOADING) return;
         loadState = LOAD_LOADING;
         try {
             String platformSuffix = detectPlatform();
@@ -1183,24 +1260,21 @@ public final class JniMicrokernelHelper {
                 loadState = LOAD_FAILED;
                 return;
             }
-            prepareJavaBootMaterialForLoad(platformSuffix);
-            // Prefer the bundled library so stale system-path copies cannot shadow the ABI we generated.
-            if (tryLoadBundledNative(platformSuffix, kernelComponents)) {
-                loadState = LOAD_READY;
+            loadAkenNativeKernel();
+            if (akenLoadState == LOAD_READY) {
+                /* AKEN readiness must not publish the legacy kernel state. */
+                loadState = LOAD_UNTRIED;
+                loadMessage = "";
                 runDiversifiedVmSelfExercise();
                 return;
             }
-            if (loadMessage == null || loadMessage.length() == 0) loadMessage = "bundled-native-unavailable";
-            clearJavaBootMaterial();
-            try {
-                nativeAbortBootMaterial();
-            } catch (Throwable ignored) {
-            }
+            loadMessage = akenLoadMessage == null || akenLoadMessage.length() == 0
+                ? "aken:bundled-native-unavailable"
+                : akenLoadMessage;
             loadState = LOAD_FAILED;
             runDiversifiedVmSelfExercise();
-        } catch (Exception e) {
-            clearJavaBootMaterial();
-            loadMessage = debugNativeLoadMessage("native-exception", e);
+        } catch (Throwable e) {
+            loadMessage = debugNativeLoadMessage("aken:native-exception", e);
             loadState = LOAD_FAILED;
         }
     }
@@ -1226,6 +1300,7 @@ public final class JniMicrokernelHelper {
      * This distinguishes a genuine integrity failure from early call sites that race helper initialization.
      */
     public static boolean isKernelIntegrityReady() {
+        if (akenLoadState == LOAD_READY) return !nativeSelfCheckFailed;
         return loadState == LOAD_READY && !nativeSelfCheckFailed && nativeIsBootMaterialReady();
     }
 
@@ -1241,7 +1316,7 @@ public final class JniMicrokernelHelper {
      */
     private static void runDiversifiedVmSelfExercise() {
         if (!diversifiedVmEnabled) return;
-        vmSelfCheck = loadState == LOAD_READY ? "native:vm-diverse:ok" : "native:vm-diverse:unavailable";
+        vmSelfCheck = isNativeLoaded() ? "native:vm-diverse:ok" : "native:vm-diverse:unavailable";
     }
 
     /**
@@ -1250,7 +1325,8 @@ public final class JniMicrokernelHelper {
      * Used by distributed call sites so patching a single check is insufficient.
      */
     public static void requireHealthyKernel() {
-        if (nativeSelfCheckFailed || loadState != LOAD_READY || !nativeIsBootMaterialReady() ||
+        boolean akenReady = akenLoadState == LOAD_READY;
+        if (nativeSelfCheckFailed || !isNativeLoaded() || (!akenReady && !nativeIsBootMaterialReady()) ||
             (vmSelfCheck != null && vmSelfCheck.contains("mismatch"))) {
             throw new SecurityException("Kernel integrity mismatch");
         }
@@ -1315,13 +1391,25 @@ public final class JniMicrokernelHelper {
     }
 
     private static String sealedBindingKey(String value) {
-        byte[] encoded = value.getBytes(StandardCharsets.UTF_8);
+        byte[] encoded = ("AKEN-BINDING-V1|" + value).getBytes(StandardCharsets.UTF_8);
         try {
-            String key = nativeSealedBindingKey(encoded);
-            if (!isHex(key, 16, 16)) throw new SecurityException("native binding lookup failed");
-            return key;
-        } catch (UnsatisfiedLinkError e) {
-            throw new SecurityException("native binding lookup unavailable", e);
+            byte[] digest;
+            try {
+                digest = MessageDigest.getInstance("SHA-256").digest(encoded);
+            } catch (NoSuchAlgorithmException e) {
+                throw new SecurityException("public binding digest unavailable", e);
+            }
+            try {
+                char[] hex = new char[16];
+                for (int i = 0; i < 8; i++) {
+                    int valueByte = digest[i] & 0xFF;
+                    hex[i * 2] = Character.forDigit((valueByte >>> 4) & 0xF, 16);
+                    hex[i * 2 + 1] = Character.forDigit(valueByte & 0xF, 16);
+                }
+                return new String(hex);
+            } finally {
+                Arrays.fill(digest, (byte) 0);
+            }
         } finally {
             Arrays.fill(encoded, (byte) 0);
         }
@@ -2304,6 +2392,17 @@ public final class JniMicrokernelHelper {
         return result == 2 ? nativeInit(platformSuffix) : result;
     }
 
+    private static void installAkenSessionNonce() {
+        byte[] startupNonce = createVmStartupNonce();
+        try {
+            if (!nativeInstallAkenSessionNonce(startupNonce)) {
+                throw new SecurityException("AKEN runtime session nonce installation failed");
+            }
+        } finally {
+            Arrays.fill(startupNonce, (byte) 0);
+        }
+    }
+
     private static File[] nativeExtractDirectories() {
         LinkedHashSet<String> paths = new LinkedHashSet<>();
         addNativeExtractDirectory(paths, System.getProperty("javashroud.native.extract.dir", ""));
@@ -2364,14 +2463,16 @@ public final class JniMicrokernelHelper {
     }
 
     private static void publishSealedNativeBindings() {
+        publishSealedNativeBindings(null);
+    }
+
+    private static void publishSealedNativeBindings(AkenNativeLibrary locator) {
+        if (locator == null) throw new SecurityException("AKEN native bindings require an active locator");
         try {
             publishSealedNativeLoaderOwner();
-            String bindingText = sealedNativeBindingText();
+            String bindingText = sealedNativeBindingText(locator);
             if (bindingText == null || bindingText.length() == 0) {
-                if (!SEALED_NATIVE_BINDINGS_RESOURCE.equals(legacySealedNativeBindingsResource())) {
-                    throw new SecurityException("sealed native bindings unavailable");
-                }
-                return;
+                throw new SecurityException("AKEN native bindings are unavailable");
             }
             StringBuilder bindings = new StringBuilder();
             StringBuilder methodBindings = new StringBuilder();
@@ -2379,27 +2480,35 @@ public final class JniMicrokernelHelper {
             String[] lines = bindingText.split("\n");
             for (String line : lines) {
                 String[] parts = line.trim().split("\\|", -1);
-                if (parts.length == 3 && "B".equals(parts[0])) {
+                if (parts.length != 3) {
+                    throw new SecurityException("AKEN native bindings record is malformed");
+                }
+                if ("B".equals(parts[0])) {
                     if (bindings.length() > 0) bindings.append('\n');
                     bindings.append(parts[1]).append('=').append(parts[2]);
-                } else if (parts.length == 3 && "M".equals(parts[0])) {
+                } else if ("M".equals(parts[0])) {
                     if (methodBindings.length() > 0) methodBindings.append('\n');
                     methodBindings.append(parts[1]).append('=').append(parts[2]);
-                } else if (parts.length == 3 && "F".equals(parts[0])) {
+                } else if ("F".equals(parts[0])) {
                     if (fieldBindings.length() > 0) fieldBindings.append('\n');
                     fieldBindings.append(parts[1]).append('=').append(parts[2]);
-                } else if (parts.length == 3 && "E".equals(parts[0])) {
-                    bootSecretEnvBindingEnabled = "true".equalsIgnoreCase(parts[1]);
-                    bootSecretExpectedFingerprints = parts[2].isEmpty() ? new String[0] : parts[2].split(",");
+                } else {
+                    throw new SecurityException("AKEN native bindings record type is invalid");
                 }
             }
-            if (bindings.length() > 0) System.setProperty(sealedBindingPropertyName(), mergeBindingProperties(System.getProperty(sealedBindingPropertyName()), bindings.toString()));
-            if (methodBindings.length() > 0) System.setProperty(sealedMethodBindingPropertyName(), mergeBindingProperties(System.getProperty(sealedMethodBindingPropertyName()), methodBindings.toString()));
-            if (fieldBindings.length() > 0) System.setProperty(sealedFieldBindingPropertyName(), mergeBindingProperties(System.getProperty(sealedFieldBindingPropertyName()), fieldBindings.toString()));
-        } catch (SecurityException e) {
-            throw e;
-        } catch (Throwable e) {
-            throw new SecurityException("sealed native bindings unavailable", e);
+            if (bindings.length() > 0) {
+                System.setProperty(sealedBindingPropertyName(), mergeBindingProperties(System.getProperty(sealedBindingPropertyName()), bindings.toString()));
+            }
+            if (methodBindings.length() > 0) {
+                System.setProperty(sealedMethodBindingPropertyName(), mergeBindingProperties(System.getProperty(sealedMethodBindingPropertyName()), methodBindings.toString()));
+            }
+            if (fieldBindings.length() > 0) {
+                System.setProperty(sealedFieldBindingPropertyName(), mergeBindingProperties(System.getProperty(sealedFieldBindingPropertyName()), fieldBindings.toString()));
+            }
+        } catch (SecurityException error) {
+            throw error;
+        } catch (Throwable error) {
+            throw new SecurityException("AKEN native bindings are unavailable", error);
         }
     }
 
@@ -2479,7 +2588,7 @@ public final class JniMicrokernelHelper {
             try {
                 decoded = hasRuntimeResourceHeader(raw)
                     ? decodeRuntimeResource(raw, true)
-                    : decodeBootstrapNativeIndex(raw);
+                    : isAscii(raw) ? raw.clone() : null;
                 return decoded == null ? null : new String(decoded, StandardCharsets.UTF_8);
             } finally {
                 Arrays.fill(raw, (byte) 0);
@@ -2491,12 +2600,46 @@ public final class JniMicrokernelHelper {
     }
 
     private static String sealedNativeBindingText() {
-        try (InputStream in = resourceStream(SEALED_NATIVE_BINDINGS_RESOURCE)) {
+        return sealedNativeBindingText(null);
+    }
+
+    private static String sealedNativeBindingText(AkenNativeLibrary locator) {
+        String resourcePath = locator == null ? SEALED_NATIVE_BINDINGS_RESOURCE : locator.bindingResourcePath;
+        if (resourcePath == null || !isAkenNativeResourcePath(resourcePath)) {
+            throw new SecurityException("AKEN native bindings resource path is unavailable");
+        }
+        try (InputStream in = resourceStream(resourcePath)) {
             if (in == null) return null;
-            byte[] decoded = decodeRuntimeResource(readAll(in), true);
-            return decoded == null ? null : new String(decoded, StandardCharsets.UTF_8);
-        } catch (Exception ignored) {
-            return null;
+            byte[] raw = readAllBounded(in, AKEN_NATIVE_BINDINGS_MAX_BYTES);
+            try {
+                if (locator != null) verifyAkenNativeBinding(locator, raw);
+                if (raw.length == 0 || hasAkenRejectedLegacyHeader(raw) || !isAscii(raw)) {
+                    throw new SecurityException("AKEN native bindings are not raw relocation metadata");
+                }
+                return new String(raw, StandardCharsets.UTF_8);
+            } finally {
+                Arrays.fill(raw, (byte) 0);
+            }
+        } catch (SecurityException error) {
+            throw error;
+        } catch (Exception error) {
+            throw new SecurityException("AKEN native bindings are unavailable", error);
+        }
+    }
+
+    private static void verifyAkenNativeBinding(AkenNativeLibrary locator, byte[] raw) {
+        if (locator.bindingResourcePath == null ||
+            !isAkenNativeResourcePath(locator.bindingResourcePath) ||
+            locator.bindingSha256 == null || raw.length != locator.bindingStoredLength) {
+            throw new SecurityException("AKEN native binding locator does not match the sealed resource");
+        }
+        byte[] actualDigest = sha256(raw);
+        try {
+            if (!MessageDigest.isEqual(locator.bindingSha256, actualDigest)) {
+                throw new SecurityException("AKEN native binding digest mismatch");
+            }
+        } finally {
+            Arrays.fill(actualDigest, (byte) 0);
         }
     }
 
@@ -2593,45 +2736,30 @@ public final class JniMicrokernelHelper {
             : decodeRuntimeResource(raw);
     }
 
-    private static byte[] decodeBootstrapNativeIndex(byte[] raw) {
-        if (raw == null || raw.length < 42) return null;
-        if ((raw[0] & 0xFF) != 0x4A || (raw[1] & 0xFF) != 0x53 || (raw[2] & 0xFF) != 0x42 || (raw[3] & 0xFF) != 0x49) return null;
-        if ((raw[4] & 0xFF) != BOOTSTRAP_NATIVE_INDEX_VERSION) return null;
-        int plainLength = readSealedResourceLe32(raw, 5);
-        if (plainLength < 0) return null;
-        int plainOffset = 9;
-        int tagOffset = plainOffset + plainLength;
-        if (tagOffset + 33 != raw.length || (raw[raw.length - 1] & 0xFF) != 32) return null;
-        byte[] expected = hmacSha256(concat("jsbi-auth".getBytes(StandardCharsets.US_ASCII), Arrays.copyOfRange(raw, 0, tagOffset)));
-        if (!constantTimeEquals(expected, raw, tagOffset)) return null;
-        return Arrays.copyOfRange(raw, plainOffset, tagOffset);
-    }
-
     private static byte[] decodeRuntimeResource(byte[] raw) {
         return decodeRuntimeResource(raw, true);
     }
 
     private static byte[] decodeRuntimeResource(byte[] raw, boolean allowCompressed) {
         if (!hasRuntimeResourceHeader(raw)) return null;
-        int version = raw[4] & 0xFF;
-        if (version == RUNTIME_RESOURCE_VERSION) return decodeRuntimeResourceCurrent(raw, allowCompressed);
-        return null;
+        return decodeRuntimeResourceCurrent(raw, allowCompressed);
     }
 
     private static boolean hasRuntimeResourceHeader(byte[] raw) {
         return raw != null && raw.length >= 5 &&
-            (raw[0] & 0xFF) == 0x4A && (raw[1] & 0xFF) == 0x53 && (raw[2] & 0xFF) == 0x52 && (raw[3] & 0xFF) == 0x50;
+            raw[0] == 0x4A && raw[1] == 0x53 && raw[2] == 0x52 && raw[3] == 0x50 &&
+            (raw[4] & 0xFF) == RUNTIME_RESOURCE_VERSION;
     }
 
     private static byte[] decodeRuntimeResourceCurrent(byte[] raw, boolean allowCompressed) {
-        if (raw.length < 156 || (raw[raw.length - 1] & 0xFF) != 32) return null;
+        if (raw.length < RUNTIME_RESOURCE_HEADER_SIZE + 96 + 32 + 1 || (raw[raw.length - 1] & 0xFF) != 32) return null;
         byte[] nonce = Arrays.copyOfRange(raw, 5, 21);
         int metadataLength = readSealedResourceLe16(raw, 21);
         int macLength = readSealedResourceLe16(raw, 23);
         int partitionId = readSealedResourceLe16(raw, 25);
         if (metadataLength != 96 || macLength != 32) return null;
         if (partitionId < 0 || partitionId > anchorResourcePartition()) return null;
-        int metadataOffset = 27;
+        int metadataOffset = RUNTIME_RESOURCE_HEADER_SIZE;
         int bodyOffset = metadataOffset + metadataLength;
         if (bodyOffset + 33 > raw.length) return null;
         int tagOffset = raw.length - 33;
@@ -2994,8 +3122,8 @@ public final class JniMicrokernelHelper {
     }
 
     private static boolean hasPartitionedRuntimeResourceHeader(byte[] raw, int partitionId) {
-        return raw != null && raw.length >= 27 && raw[0] == 'J' && raw[1] == 'S' && raw[2] == 'R' && raw[3] == 'P' &&
-            (raw[4] & 0xFF) == RUNTIME_RESOURCE_VERSION && readSealedResourceLe16(raw, 25) == partitionId;
+        return raw != null && raw.length >= RUNTIME_RESOURCE_HEADER_SIZE && hasRuntimeResourceHeader(raw) &&
+            readSealedResourceLe16(raw, 25) == partitionId;
     }
 
     private static byte[] vmCatalogLeaf(
@@ -3217,6 +3345,9 @@ public final class JniMicrokernelHelper {
         final String fileSuffix;
         final int storedLength;
         final byte[] sha256;
+        String bindingResourcePath;
+        int bindingStoredLength;
+        byte[] bindingSha256;
 
         AkenNativeLibrary(String resourcePath, String fileSuffix, int storedLength, byte[] sha256) {
             this.resourcePath = resourcePath;
@@ -3227,6 +3358,10 @@ public final class JniMicrokernelHelper {
 
         void clear() {
             Arrays.fill(sha256, (byte) 0);
+            if (bindingSha256 != null) Arrays.fill(bindingSha256, (byte) 0);
+            bindingResourcePath = null;
+            bindingStoredLength = 0;
+            bindingSha256 = null;
         }
     }
 
