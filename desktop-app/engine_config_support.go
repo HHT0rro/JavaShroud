@@ -11,6 +11,7 @@ import (
 )
 
 func prepareConfigFile(request ObfuscationRequest) (string, string, func(), error) {
+	request = normalizeObfuscationRequest(request)
 	if err := validateObfuscationRequest(request); err != nil {
 		return "", "", func() {}, fmt.Errorf("validate desktop request failed: %w", err)
 	}
@@ -34,6 +35,7 @@ func prepareConfigFile(request ObfuscationRequest) (string, string, func(), erro
 		OutputJarPath:         outputJarPath,
 		Passes:                clonePasses(request.Passes),
 		RuleSet:               RuleSet{Rules: cloneRules(request.Rules)},
+		PassSelections:        cloneSelectedOnlyPassSelections(request.PassSelections),
 		AllowOptInPasses:      request.AllowOptInPasses,
 		AllowRedundantPasses:  request.AllowRedundantPasses,
 		AllowAnnotationPasses: request.AllowAnnotationPasses,
@@ -64,7 +66,7 @@ func normalizeEngineConfigPath(inputPath string) (string, error) {
 func clonePasses(passSpecs []PassSpec) []PassSpec {
 	result := make([]PassSpec, 0, len(passSpecs))
 	for _, passSpec := range passSpecs {
-		result = append(result, PassSpec{ID: passSpec.ID, Enabled: passSpec.Enabled, Params: clonePassParams(passSpec.Params)})
+		result = append(result, PassSpec{ID: strings.TrimSpace(passSpec.ID), Enabled: passSpec.Enabled, Params: clonePassParams(passSpec.Params)})
 	}
 	return result
 }
@@ -80,8 +82,37 @@ func clonePassParams(params map[string]json.RawMessage) map[string]json.RawMessa
 func cloneRules(rules []RuleItem) []RuleItem {
 	result := make([]RuleItem, 0, len(rules))
 	for _, rule := range rules {
-		result = append(result, RuleItem{ID: rule.ID, Target: rule.Target, Action: rule.Action})
+		result = append(result, RuleItem{
+			ID:     rule.ID,
+			Target: strings.TrimSpace(rule.Target),
+			Action: strings.TrimSpace(rule.Action),
+		})
 	}
+	return result
+}
+
+func cloneSelectedOnlyPassSelections(passSelections []PassSelection) []PassSelection {
+	result := make([]PassSelection, 0, len(passSelections))
+	for _, passSelection := range passSelections {
+		if PassSelectionMode(strings.TrimSpace(string(passSelection.Mode))) != PassSelectionModeSelectedOnly {
+			continue
+		}
+		rules := cloneRules(passSelection.Rules)
+		sort.SliceStable(rules, func(left, right int) bool {
+			if rules[left].Target == rules[right].Target {
+				return rules[left].Action < rules[right].Action
+			}
+			return rules[left].Target < rules[right].Target
+		})
+		result = append(result, PassSelection{
+			PassID: strings.TrimSpace(passSelection.PassID),
+			Mode:   PassSelectionMode(strings.TrimSpace(string(passSelection.Mode))),
+			Rules:  rules,
+		})
+	}
+	sort.SliceStable(result, func(left, right int) bool {
+		return result[left].PassID < result[right].PassID
+	})
 	return result
 }
 
@@ -152,6 +183,26 @@ func formatEngineConfigToml(config EngineConfig) (string, error) {
 			builder.WriteString(formatTomlString(rule.Action))
 			builder.WriteString("\n\n")
 		}
+	}
+
+	for _, passSelection := range config.PassSelections {
+		builder.WriteString("\n[[passSelections]]\n")
+		builder.WriteString("passId = ")
+		builder.WriteString(formatTomlString(passSelection.PassID))
+		builder.WriteString("\n")
+		builder.WriteString("mode = ")
+		builder.WriteString(formatTomlString(string(passSelection.Mode)))
+		builder.WriteString("\n")
+		for _, rule := range passSelection.Rules {
+			builder.WriteString("\n[[passSelections.rules]]\n")
+			builder.WriteString("target = ")
+			builder.WriteString(formatTomlString(rule.Target))
+			builder.WriteString("\n")
+			builder.WriteString("action = ")
+			builder.WriteString(formatTomlString(rule.Action))
+			builder.WriteString("\n")
+		}
+		builder.WriteString("\n")
 	}
 
 	return builder.String(), nil

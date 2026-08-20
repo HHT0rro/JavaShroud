@@ -43,7 +43,7 @@ func getEngineCapabilitiesPayload() (string, error) {
 }
 
 func buildEngineCommandFailureError(contextName string, launchSpec EngineLaunchSpec, output []byte, err error) error {
-	return fmt.Errorf("%s command failed: mode=%s command=%s args=%v dir=%s output=%s: %w", contextName, launchSpec.Mode, launchSpec.CommandPath, launchSpec.CommandArgs, launchSpec.CommandDir, truncateString(string(output), 1200), err)
+	return fmt.Errorf("%s command failed: mode=%s command=%s args=%v dir=%s output=%s: %w", contextName, launchSpec.Mode, launchSpec.CommandPath, launchSpec.CommandArgs, launchSpec.CommandDir, summarizeEngineStderr(string(output), 1200), err)
 }
 
 func inspectJarClassesPayload(inputJarPath string) (string, error) {
@@ -69,7 +69,7 @@ func inspectJarClassesPayload(inputJarPath string) (string, error) {
 	applyHiddenProcessWindow(cmd)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("mode=%s command=%s args=%v dir=%s path=%s output=%s: %w", launchSpec.Mode, launchSpec.CommandPath, launchSpec.CommandArgs, launchSpec.CommandDir, absoluteInputPath, truncateString(string(output), 1200), err)
+		return "", fmt.Errorf("mode=%s command=%s args=%v dir=%s path=%s output=%s: %w", launchSpec.Mode, launchSpec.CommandPath, launchSpec.CommandArgs, launchSpec.CommandDir, absoluteInputPath, summarizeEngineStderr(string(output), 1200), err)
 	}
 
 	return string(output), nil

@@ -9,13 +9,14 @@ import (
 const engineEventName = "engine:event"
 
 type ObfuscationRequest struct {
-	InputJarPath          string     `json:"inputJarPath"`
-	OutputJarPath         string     `json:"outputJarPath"`
-	Passes                []PassSpec `json:"passes"`
-	Rules                 []RuleItem `json:"rules"`
-	AllowOptInPasses      bool       `json:"allowOptInPasses"`
-	AllowRedundantPasses  bool       `json:"allowRedundantPasses"`
-	AllowAnnotationPasses bool       `json:"allowAnnotationPasses"`
+	InputJarPath          string          `json:"inputJarPath"`
+	OutputJarPath         string          `json:"outputJarPath"`
+	Passes                []PassSpec      `json:"passes"`
+	Rules                 []RuleItem      `json:"rules"`
+	PassSelections        []PassSelection `json:"passSelections"`
+	AllowOptInPasses      bool            `json:"allowOptInPasses"`
+	AllowRedundantPasses  bool            `json:"allowRedundantPasses"`
+	AllowAnnotationPasses bool            `json:"allowAnnotationPasses"`
 }
 
 type PassSpec struct {
@@ -30,14 +31,28 @@ type RuleItem struct {
 	Action string `json:"action"`
 }
 
+type PassSelectionMode string
+
+const (
+	PassSelectionModeInheritGlobal PassSelectionMode = "inherit-global"
+	PassSelectionModeSelectedOnly  PassSelectionMode = "selected-only"
+)
+
+type PassSelection struct {
+	PassID string            `json:"passId"`
+	Mode   PassSelectionMode `json:"mode"`
+	Rules  []RuleItem        `json:"rules"`
+}
+
 type EngineConfig struct {
-	InputJarPath          string     `json:"inputJarPath"`
-	OutputJarPath         string     `json:"outputJarPath"`
-	Passes                []PassSpec `json:"passes"`
-	RuleSet               RuleSet    `json:"ruleSet"`
-	AllowOptInPasses      bool       `json:"allowOptInPasses"`
-	AllowRedundantPasses  bool       `json:"allowRedundantPasses"`
-	AllowAnnotationPasses bool       `json:"allowAnnotationPasses"`
+	InputJarPath          string          `json:"inputJarPath"`
+	OutputJarPath         string          `json:"outputJarPath"`
+	Passes                []PassSpec      `json:"passes"`
+	RuleSet               RuleSet         `json:"ruleSet"`
+	PassSelections        []PassSelection `json:"passSelections"`
+	AllowOptInPasses      bool            `json:"allowOptInPasses"`
+	AllowRedundantPasses  bool            `json:"allowRedundantPasses"`
+	AllowAnnotationPasses bool            `json:"allowAnnotationPasses"`
 }
 
 type RuleSet struct {

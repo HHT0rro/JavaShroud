@@ -28,6 +28,7 @@ const baseSchema = {
       stability: 'stable',
       compatibilityNotes: 'Use only the current VBC4 native VM target.',
       defaultEnabled: false,
+      targeting: { supported: true, targetKinds: ['class', 'method'] },
       params: [
         {
           key: 'mode',
@@ -73,6 +74,7 @@ const parsedSchema = parseEngineSchema(baseSchema)
 assert(parsedSchema.modules[0]?.params[0]?.defaultValue === 'safe', 'expected valid enum default to be preserved')
 assert(parsedSchema.modules[0]?.params[2]?.hidden === true, 'expected hidden param flag to be preserved')
 assert(parsedSchema.modules[0]?.compatibilityNotes === 'Use only the current VBC4 native VM target.', 'expected compatibility notes to be preserved')
+assert(parsedSchema.modules[0]?.targeting.targetKinds.includes('method') === true, 'expected targeting capability to be preserved')
 assert(buildPassItemsFromSchema(parsedSchema)[0]?.params.salt === 42, 'expected hidden param default to be preserved in pass params')
 assert(buildPassItemsFromSchema(parsedSchema)[0]?.compatibilityNotes === 'Use only the current VBC4 native VM target.', 'expected compatibility notes to be copied to pass items')
 assert(!buildPassItemsFromSchema(parsedSchema)[0]?.paramSchemas.some((paramSchema) => paramSchema.key === 'salt'), 'expected hidden params to be omitted from visible param schemas')
@@ -593,12 +595,32 @@ assert(hardCompatibilityPasses.filter((passItem) => passItem.enabled).length ===
 
 // 引擎实际输出的 TOML：为 null 的 options/defaultValue 被省略；number 参数无 options。
 // 经 parseTomlDocument -> parseEngineSchema 文本往返，确认不再误判 options 必须是字符串数组。
+const { targeting: _baseTargeting, ...moduleWithoutTargeting } = baseSchema.modules[0]
+expectParseError(
+  {
+    ...baseSchema,
+    modules: [moduleWithoutTargeting],
+  },
+  'modules[0].targeting 必须是对象',
+)
+
+expectParseError(
+  {
+    ...baseSchema,
+    modules: [{
+      ...baseSchema.modules[0],
+      targeting: null,
+    }],
+  },
+  'modules[0].targeting 必须是对象',
+)
+
 const tomlSchema = [
   "schemaVersion = '2'",
   "engineVersion = 'check-engine'",
   "vbcVersion = 'VBC4-dev'",
   "tags = [{id = 'runtime-defense', name = 'Runtime Defense', description = 'runtime defense', order = 80}]",
-  "modules = [{id = 'anti-symbolic-execution', name = 'Anti Symbolic', description = 'adds runtime traps', tagIds = ['runtime-defense'], params = [{key = 'seed', type = 'number', description = 'deterministic seed', hidden = false}], stability = 'experimental'}]",
+  "modules = [{id = 'anti-symbolic-execution', name = 'Anti Symbolic', description = 'adds runtime traps', tagIds = ['runtime-defense'], params = [{key = 'seed', type = 'number', description = 'deterministic seed', hidden = false}], stability = 'experimental', targeting = {supported = true, targetKinds = ['class']}}]",
   'compatibility = []',
   "defaultPipeline = ['anti-symbolic-execution']",
   'orderingConstraints = []',
@@ -629,5 +651,28 @@ const emptyStringSchema = {
 const emptyStringParsed = parseEngineSchema(emptyStringSchema)
 assert(emptyStringParsed.modules[0]?.params[0]?.options === null, 'expected empty-string options to parse as null')
 assert(emptyStringParsed.modules[0]?.params[0]?.defaultValue === null, 'expected empty-string defaultValue to parse as null')
+
+
+expectParseError(
+  {
+    ...baseSchema,
+    modules: [{
+      ...baseSchema.modules[0],
+      targeting: { supported: false, targetKinds: ['class'] },
+    }],
+  },
+  'targeting 不支持时 targetKinds 必须为空',
+)
+
+expectParseError(
+  {
+    ...baseSchema,
+    modules: [{
+      ...baseSchema.modules[0],
+      targeting: { supported: true, targetKinds: [] },
+    }],
+  },
+  'targeting 支持时 targetKinds 不能为空',
+)
 
 console.log('capability-parser checks passed')

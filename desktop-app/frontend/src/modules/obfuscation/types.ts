@@ -6,6 +6,15 @@ export type EngineEventLevel = 'info' | 'warn' | 'error' | 'success'
 
 export type RuleAction = 'obfuscate' | 'exclude'
 
+export type PassSelectionMode = 'inherit-global' | 'selected-only'
+
+export type TargetKind = 'class' | 'method'
+
+export interface TargetingCapability {
+  readonly supported: boolean
+  readonly targetKinds: readonly TargetKind[]
+}
+
 export interface ParamSchema {
   readonly key: string
   readonly type: 'boolean' | 'string' | 'enum' | 'number'
@@ -43,6 +52,7 @@ export interface ModuleDefinition {
   readonly variantRequirements?: readonly VariantRequirement[]
   readonly defaultEnabled?: boolean
   readonly requiresOptIn?: boolean
+  readonly targeting: TargetingCapability
   readonly params: readonly ParamSchema[]
 }
 
@@ -97,6 +107,7 @@ export interface PassItem {
   readonly requiredPassIds: readonly string[]
   readonly requiresAnyPassIds: readonly string[]
   readonly variantRequirements: readonly VariantRequirement[]
+  readonly targeting: TargetingCapability
   readonly dependencyAutoEnabled?: boolean
 }
 
@@ -117,11 +128,18 @@ export interface RulePatch {
   readonly action: RuleAction
 }
 
+export interface PassSelection {
+  readonly passId: string
+  readonly mode: PassSelectionMode
+  readonly rules: readonly RuleItem[]
+}
+
 export interface ObfuscationRequest {
   readonly inputJarPath: string
   readonly outputJarPath: string
   readonly passes: readonly PassSpec[]
   readonly rules: readonly RuleItem[]
+  readonly passSelections: readonly PassSelection[]
   readonly allowOptInPasses: boolean
   readonly allowRedundantPasses: boolean
   readonly allowAnnotationPasses?: boolean
@@ -139,11 +157,19 @@ export interface WorkbenchTomlRuleConfig {
   readonly action: string
 }
 
+export interface WorkbenchTomlPassSelectionConfig {
+  readonly passId: string
+  readonly mode: string
+  readonly rules: readonly WorkbenchTomlRuleConfig[]
+}
+
 export interface WorkbenchTomlConfig {
+  readonly version: number
   readonly inputJarPath: string
   readonly outputJarPath: string
   readonly passes: readonly WorkbenchTomlPassConfig[]
   readonly rules: readonly WorkbenchTomlRuleConfig[]
+  readonly passSelections: readonly WorkbenchTomlPassSelectionConfig[]
 }
 
 export interface ConfigImportWarning {
@@ -183,6 +209,8 @@ export interface ClassTreeNode {
   readonly label: string
   readonly qualifiedName: string
   readonly internalName: string
+  /** Engine-provided canonical selector. */
+  readonly selector: string
   readonly kind: 'package' | 'class' | 'field' | 'method'
   readonly children: readonly ClassTreeNode[]
 }
@@ -201,6 +229,8 @@ export interface RunState {
   readonly outputJarPath: string
   readonly passes: readonly PassItem[]
   readonly rules: readonly RuleItem[]
+  /** Only selected-only entries are stored; missing entries inherit the global rule baseline. */
+  readonly passSelections: readonly PassSelection[]
   readonly classTree: readonly ClassTreeNode[]
   readonly classCount: number
   readonly packageCount: number

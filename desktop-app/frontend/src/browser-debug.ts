@@ -53,6 +53,7 @@ const defaultSchema: EngineSchemaPayload = {
   tags: [
     { id: 'metadata', name: 'Metadata', description: 'Metadata cleanup and stripping.' },
     { id: 'obfuscation', name: 'Obfuscation', description: 'Name and bytecode transforms.' },
+    { id: 'vm-protection', name: 'VM Protection', description: 'Method-level virtual machine protection.' },
   ],
   modules: [
     {
@@ -61,6 +62,7 @@ const defaultSchema: EngineSchemaPayload = {
       description: 'Removes source and debug metadata.',
       tagIds: ['metadata'],
       stability: 'stable',
+      targeting: { supported: true, targetKinds: ['class'] },
       params: [],
     },
     {
@@ -69,6 +71,7 @@ const defaultSchema: EngineSchemaPayload = {
       description: 'Renames class symbols for debug preview.',
       tagIds: ['obfuscation'],
       stability: 'beta',
+      targeting: { supported: true, targetKinds: ['class'] },
       params: [
         {
           key: 'dictionary',
@@ -81,18 +84,29 @@ const defaultSchema: EngineSchemaPayload = {
       ],
     },
     {
-      id: 'junk-code',
-      name: 'Junk Code',
-      description: 'Injects preview-only junk blocks.',
-      tagIds: ['obfuscation'],
+      id: 'method-virtualization',
+      name: 'Method Virtualization',
+      description: 'Lowers selected methods into the VBC4 native bytecode VM path.',
+      tagIds: ['vm-protection'],
       stability: 'experimental',
+      risk: 'high',
+      requiresOptIn: true,
+      targeting: { supported: true, targetKinds: ['class', 'method'] },
       params: [
         {
-          key: 'intensity',
-          type: 'number',
-          defaultValue: 2,
+          key: 'methodSelection',
+          type: 'enum',
+          defaultValue: 'critical-plus',
+          options: ['safe', 'critical-auto', 'critical-plus', 'all-compatible'],
+          description: 'Selects compatible methods for virtualization under broad class rules.',
+          hidden: false,
+        },
+        {
+          key: 'strictVirtualization',
+          type: 'boolean',
+          defaultValue: true,
           options: null,
-          description: 'Preview intensity from 1 to 5.',
+          description: 'Fails closed when a selected method cannot be virtualized.',
           hidden: false,
         },
       ],
@@ -113,6 +127,7 @@ const defaultInspection: JarInspectionPayload = {
       label: 'com.example',
       qualifiedName: 'com.example',
       internalName: 'com/example',
+      selector: 'com/example/*',
       kind: 'package',
       children: [
         {
@@ -120,16 +135,47 @@ const defaultInspection: JarInspectionPayload = {
           label: 'MainApplication',
           qualifiedName: 'com.example.MainApplication',
           internalName: 'com/example/MainApplication',
+          selector: 'com/example/MainApplication',
           kind: 'class',
-          children: [],
+          children: [
+            {
+              id: 'method-main-run',
+              label: 'run()V',
+              qualifiedName: 'com.example.MainApplication#run:()V',
+              internalName: 'com/example/MainApplication#run:()V',
+              selector: 'com/example/MainApplication#run:()V',
+              kind: 'method',
+              children: [],
+            },
+          ],
         },
         {
           id: 'class-service',
           label: 'UserService',
           qualifiedName: 'com.example.UserService',
           internalName: 'com/example/UserService',
+          selector: 'com/example/UserService',
           kind: 'class',
-          children: [],
+          children: [
+            {
+              id: 'method-user-find-string',
+              label: 'find(Ljava/lang/String;)Ljava/lang/String;',
+              qualifiedName: 'com.example.UserService#find:(Ljava/lang/String;)Ljava/lang/String;',
+              internalName: 'com/example/UserService#find:(Ljava/lang/String;)Ljava/lang/String;',
+              selector: 'com/example/UserService#find:(Ljava/lang/String;)Ljava/lang/String;',
+              kind: 'method',
+              children: [],
+            },
+            {
+              id: 'method-user-find-int',
+              label: 'find(I)Ljava/lang/String;',
+              qualifiedName: 'com.example.UserService#find:(I)Ljava/lang/String;',
+              internalName: 'com/example/UserService#find:(I)Ljava/lang/String;',
+              selector: 'com/example/UserService#find:(I)Ljava/lang/String;',
+              kind: 'method',
+              children: [],
+            },
+          ],
         },
       ],
     },
@@ -138,6 +184,7 @@ const defaultInspection: JarInspectionPayload = {
       label: 'com.example.api',
       qualifiedName: 'com.example.api',
       internalName: 'com/example/api',
+      selector: 'com/example/api/*',
       kind: 'package',
       children: [
         {
@@ -145,6 +192,7 @@ const defaultInspection: JarInspectionPayload = {
           label: 'AuthController',
           qualifiedName: 'com.example.api.AuthController',
           internalName: 'com/example/api/AuthController',
+          selector: 'com/example/api/AuthController',
           kind: 'class',
           children: [],
         },
@@ -155,6 +203,7 @@ const defaultInspection: JarInspectionPayload = {
       label: 'com.example.model',
       qualifiedName: 'com.example.model',
       internalName: 'com/example/model',
+      selector: 'com/example/model/*',
       kind: 'package',
       children: [
         {
@@ -162,6 +211,7 @@ const defaultInspection: JarInspectionPayload = {
           label: 'UserRecord',
           qualifiedName: 'com.example.model.UserRecord',
           internalName: 'com/example/model/UserRecord',
+          selector: 'com/example/model/UserRecord',
           kind: 'class',
           children: [],
         },
@@ -170,6 +220,7 @@ const defaultInspection: JarInspectionPayload = {
           label: 'RoleRecord',
           qualifiedName: 'com.example.model.RoleRecord',
           internalName: 'com/example/model/RoleRecord',
+          selector: 'com/example/model/RoleRecord',
           kind: 'class',
           children: [],
         },

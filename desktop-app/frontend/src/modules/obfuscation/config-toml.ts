@@ -1,21 +1,27 @@
 import {
+  passSupportsTargeting,
+  replacePassSelections,
   replaceRules,
   setInputJarPath,
   setOutputJarPath,
   setPasses,
   visiblePassParams,
 } from './state.ts'
+import { parsePassSelectionTarget } from './pass-selection-targeting.ts'
 import type {
   ConfigImportResult,
   ConfigImportWarning,
   ParamSchema,
   PassItem,
   PassParamValue,
+  PassSelection,
+  PassSelectionMode,
   RuleAction,
   RuleItem,
   RunState,
   WorkbenchTomlConfig,
   WorkbenchTomlPassConfig,
+  WorkbenchTomlPassSelectionConfig,
   WorkbenchTomlRuleConfig,
 } from './types.ts'
 
@@ -24,14 +30,24 @@ interface MutableWorkbenchConfig {
   outputJarPath: string
   passes: WorkbenchTomlPassConfig[]
   rules: RawRuleItem[]
+  passSelections: MutablePassSelection[]
+  version: number
+}
+
+interface MutablePassSelection {
+  passId: string
+  mode: string
+  rules: RawRuleItem[]
 }
 
 type RawRuleItem = WorkbenchTomlRuleConfig
 
 type TomlScalar = string | number | boolean
 
+type TomlSection = 'none' | 'meta' | 'input' | 'pass' | 'passParams' | 'rule' | 'passSelection' | 'passSelectionRule'
+
 const formatName = 'javashroud-workbench'
-const formatVersion = 1
+const formatVersion = 3
 
 export const exportWorkbenchTomlConfig = (state: RunState): string => {
   const lines: string[] = [
@@ -59,11 +75,28 @@ export const exportWorkbenchTomlConfig = (state: RunState): string => {
     lines.push('')
   }
 
-  for (const rule of state.rules) {
+  for (const rule of sortRules(state.rules)) {
     lines.push('[[rules]]')
     lines.push(`target = ${formatString(rule.target)}`)
     lines.push(`action = ${formatString(rule.action)}`)
     lines.push('')
+  }
+
+  for (const selection of sortPassSelections(state.passSelections)) {
+    if (selection.mode !== 'selected-only') {
+      continue
+    }
+    lines.push('[[passSelections]]')
+    lines.push(`passId = ${formatString(selection.passId)}`)
+    lines.push(`mode = ${formatString(selection.mode)}`)
+    lines.push('')
+
+    for (const rule of sortRules(selection.rules)) {
+      lines.push('[[passSelections.rules]]')
+      lines.push(`target = ${formatString(rule.target)}`)
+      lines.push(`action = ${formatString(rule.action)}`)
+      lines.push('')
+    }
   }
 
   return `${lines.join('\n').trimEnd()}\n`
@@ -82,7 +115,11 @@ export const importWorkbenchTomlConfig = (state: RunState, rawToml: string): Con
   }
 
   nextState = setPasses(nextState, mergeImportedPasses(nextState.passes, parsedConfig.passes, warnings))
-  nextState = replaceRules(nextState, sanitizeImportedRules(parsedConfig.rules, warnings))
+  if (parsedConfig.version === 2 && parsedConfig.passSelections.some((selection): boolean => selection.mode === 'selected-only')) {
+    warnings.push({ message: '已将 v2 selected-only Pass 范围升级为独立范围（默认全混淆）。' })
+  }
+  nextState = replaceRules(nextState, sanitizeImportedRules(parsedConfig.rules, warnings, 'rules'))
+  nextState = replacePassSelections(nextState, sanitizeImportedPassSelections(parsedConfig.passSelections, nextState.passes, warnings))
 
   return {
     nextState,
@@ -97,10 +134,14 @@ export const parseWorkbenchTomlConfig = (rawToml: string): WorkbenchTomlConfig =
     outputJarPath: '',
     passes: [],
     rules: [],
+    passSelections: [],
+    version: 1,
   }
-  let section: 'none' | 'meta' | 'input' | 'pass' | 'passParams' | 'rule' = 'none'
+  let section: TomlSection = 'none'
   let currentPass: WorkbenchTomlPassConfig | null = null
   let currentRule: RawRuleItem | null = null
+  let currentPassSelection: MutablePassSelection | null = null
+  let currentPassSelectionRule: RawRuleItem | null = null
 
   rawToml.split(/\r?\n/).forEach((rawLine: string, index: number): void => {
     const lineNumber = index + 1
@@ -136,8 +177,33 @@ export const parseWorkbenchTomlConfig = (rawToml: string): WorkbenchTomlConfig =
       section = 'rule'
       return
     }
+    if (line === '[[passSelections]]') {
+      currentPassSelection = { passId: '', mode: 'inherit-global', rules: [] }
+      parsed.passSelections.push(currentPassSelection)
+      section = 'passSelection'
+      return
+    }
+    if (line === '[[passSelections.rules]]') {
+      if (currentPassSelection === null) {
+        throw new Error(`配置导入失败：第 ${lineNumber} 行 [[passSelections.rules]] 必须位于 [[passSelections]] 之后。`)
+      }
+      currentPassSelectionRule = {
+        id: `pass-selection-rule-${currentPassSelection.passId || parsed.passSelections.length - 1}-${currentPassSelection.rules.length}`,
+        target: '',
+        action: 'exclude',
+      }
+      currentPassSelection.rules.push(currentPassSelectionRule)
+      section = 'passSelectionRule'
+      return
+    }
 
     const assignment = parseAssignment(line, lineNumber)
+    if (section === 'meta') {
+      if (assignment.key === 'version') {
+        parsed.version = requireVersion(assignment.value, lineNumber)
+      }
+      return
+    }
     if (section === 'input') {
       if (assignment.key === 'inputJarPath') {
         parsed.inputJarPath = requireString(assignment.value, assignment.key, lineNumber)
@@ -146,7 +212,6 @@ export const parseWorkbenchTomlConfig = (rawToml: string): WorkbenchTomlConfig =
       }
       return
     }
-
     if (section === 'pass') {
       if (currentPass === null) {
         throw new Error(`配置导入失败：第 ${lineNumber} 行 pass 字段缺少 [[passes]]。`)
@@ -158,7 +223,6 @@ export const parseWorkbenchTomlConfig = (rawToml: string): WorkbenchTomlConfig =
       }
       return
     }
-
     if (section === 'passParams') {
       if (currentPass === null) {
         throw new Error(`配置导入失败：第 ${lineNumber} 行 pass 参数缺少 [[passes]]。`)
@@ -172,7 +236,6 @@ export const parseWorkbenchTomlConfig = (rawToml: string): WorkbenchTomlConfig =
       })
       return
     }
-
     if (section === 'rule') {
       if (currentRule === null) {
         throw new Error(`配置导入失败：第 ${lineNumber} 行 rule 字段缺少 [[rules]]。`)
@@ -182,14 +245,52 @@ export const parseWorkbenchTomlConfig = (rawToml: string): WorkbenchTomlConfig =
       } else if (assignment.key === 'action') {
         currentRule = replaceLastRule(parsed, { ...currentRule, action: requireString(assignment.value, 'action', lineNumber).trim() })
       }
+      return
+    }
+    if (section === 'passSelection') {
+      if (currentPassSelection === null) {
+        throw new Error(`配置导入失败：第 ${lineNumber} 行 pass selection 字段缺少 [[passSelections]]。`)
+      }
+      if (assignment.key === 'passId') {
+        currentPassSelection = replaceLastPassSelection(parsed, { ...currentPassSelection, passId: requireString(assignment.value, assignment.key, lineNumber).trim() })
+      } else if (assignment.key === 'mode') {
+        currentPassSelection = replaceLastPassSelection(parsed, { ...currentPassSelection, mode: requireString(assignment.value, assignment.key, lineNumber).trim() })
+      }
+      return
+    }
+    if (section === 'passSelectionRule') {
+      if (currentPassSelection === null || currentPassSelectionRule === null) {
+        throw new Error(`配置导入失败：第 ${lineNumber} 行 pass selection rule 字段缺少 [[passSelections.rules]]。`)
+      }
+      if (assignment.key === 'target') {
+        currentPassSelectionRule = replaceLastPassSelectionRule(currentPassSelection, {
+          ...currentPassSelectionRule,
+          target: requireString(assignment.value, assignment.key, lineNumber).trim(),
+        })
+      } else if (assignment.key === 'action') {
+        currentPassSelectionRule = replaceLastPassSelectionRule(currentPassSelection, {
+          ...currentPassSelectionRule,
+          action: requireString(assignment.value, assignment.key, lineNumber).trim(),
+        })
+      }
     }
   })
 
+  if (parsed.version > formatVersion) {
+    throw new Error(`配置导入失败：工作台配置版本不受支持，version=${parsed.version}，supported=${formatVersion}。`)
+  }
+
   return {
+    version: parsed.version,
     inputJarPath: parsed.inputJarPath,
     outputJarPath: parsed.outputJarPath,
-    passes: parsed.passes.filter((passConfig: WorkbenchTomlPassConfig): boolean => passConfig.id.trim().length > 0),
+    passes: parsed.passes.filter((passConfig): boolean => passConfig.id.trim().length > 0),
     rules: parsed.rules,
+    passSelections: parsed.passSelections.map((selection): WorkbenchTomlPassSelectionConfig => ({
+      passId: selection.passId,
+      mode: selection.mode,
+      rules: selection.rules,
+    })),
   }
 }
 
@@ -207,17 +308,16 @@ const mergeImportedPasses = (
   }
 
   for (const importedPass of importedPasses) {
-    if (!currentPasses.some((passItem: PassItem): boolean => passItem.id === importedPass.id)) {
+    if (!currentPasses.some((passItem): boolean => passItem.id === importedPass.id)) {
       warnings.push({ message: `已跳过当前引擎不支持的 pass：${importedPass.id}` })
     }
   }
 
-  return currentPasses.map((passItem: PassItem): PassItem => {
+  return currentPasses.map((passItem): PassItem => {
     const importedPass = importedById.get(passItem.id)
     if (importedPass === undefined) {
       return passItem
     }
-
     return {
       ...passItem,
       enabled: importedPass.enabled,
@@ -231,7 +331,7 @@ const mergeImportedParams = (
   importedParams: Readonly<Record<string, PassParamValue>>,
   warnings: ConfigImportWarning[],
 ): Readonly<Record<string, PassParamValue>> => {
-  const schemasByKey = new Map<string, ParamSchema>(passItem.paramSchemas.map((schema: ParamSchema): [string, ParamSchema] => [schema.key, schema]))
+  const schemasByKey = new Map<string, ParamSchema>(passItem.paramSchemas.map((schema): [string, ParamSchema] => [schema.key, schema]))
   const nextParams: Record<string, PassParamValue> = { ...passItem.params }
 
   for (const [key, value] of Object.entries(importedParams)) {
@@ -240,7 +340,6 @@ const mergeImportedParams = (
       warnings.push({ message: `已跳过 ${passItem.id} 的未知参数：${key}` })
       continue
     }
-
     const normalizedValue = coerceParamValue(schema, value)
     if (normalizedValue === undefined) {
       warnings.push({ message: `已跳过 ${passItem.id}.${key} 的非法值：${String(value)}` })
@@ -255,22 +354,89 @@ const mergeImportedParams = (
 const sanitizeImportedRules = (
   rules: readonly RawRuleItem[],
   warnings: ConfigImportWarning[],
-): readonly RuleItem[] => rules.flatMap((rule: RawRuleItem, index: number): RuleItem[] => {
-  if (rule.target.trim().length === 0) {
-    warnings.push({ message: `已跳过 target 为空的规则：rules[${index}]` })
-    return []
+  pathPrefix: string,
+): readonly RuleItem[] => {
+  const seenTargets = new Set<string>()
+  const sanitized: RuleItem[] = []
+  rules.forEach((rule, index): void => {
+    const target = rule.target.trim()
+    if (target.length === 0) {
+      warnings.push({ message: `已跳过 target 为空的规则：${pathPrefix}[${index}]` })
+      return
+    }
+    if (!isRuleAction(rule.action)) {
+      warnings.push({ message: `已跳过 action 非法的规则：${target}` })
+      return
+    }
+    if (seenTargets.has(target)) {
+      warnings.push({ message: `已跳过重复 target 的规则：${target}` })
+      return
+    }
+    seenTargets.add(target)
+    sanitized.push({
+      id: rule.id.trim().length > 0 ? rule.id : `${pathPrefix}-${index}`,
+      target,
+      action: rule.action,
+    })
+  })
+  return sanitized
+}
+
+const sanitizeImportedPassSelections = (
+  selections: readonly WorkbenchTomlPassSelectionConfig[],
+  currentPasses: readonly PassItem[],
+  warnings: ConfigImportWarning[],
+): readonly PassSelection[] => {
+  const seenPassIds = new Set<string>()
+  const sanitized: PassSelection[] = []
+  for (const [index, selection] of selections.entries()) {
+    const passId = selection.passId.trim()
+    if (passId.length === 0) {
+      warnings.push({ message: `已跳过 passId 为空的 Pass 范围：passSelections[${index}]` })
+      continue
+    }
+    if (seenPassIds.has(passId)) {
+      warnings.push({ message: `已跳过重复 Pass 范围：${passId}` })
+      continue
+    }
+    seenPassIds.add(passId)
+
+    const pass = currentPasses.find((candidate): boolean => candidate.id === passId)
+    if (pass === undefined) {
+      warnings.push({ message: `已跳过当前引擎不支持的 Pass 范围：${passId}` })
+      continue
+    }
+    if (!isPassSelectionMode(selection.mode)) {
+      warnings.push({ message: `已跳过 mode 非法的 Pass 范围：${passId}` })
+      continue
+    }
+    if (selection.mode === 'inherit-global') {
+      if (selection.rules.length > 0) {
+        warnings.push({ message: `已忽略 ${passId} 的继承模式局部规则。` })
+      }
+      continue
+    }
+    if (!passSupportsTargeting(pass)) {
+      warnings.push({ message: `已跳过不支持类/方法选择的 Pass 范围：${passId}` })
+      continue
+    }
+
+    const rules = sanitizeImportedRules(selection.rules, warnings, `passSelections[${index}].rules`).filter((rule): boolean => {
+      const parsedTarget = parsePassSelectionTarget(rule.target)
+      if (parsedTarget === null) {
+        warnings.push({ message: `已跳过 ${passId} 的非 canonical 类/方法范围：${rule.target}` })
+        return false
+      }
+      if (!pass.targeting.targetKinds.includes(parsedTarget.kind)) {
+        warnings.push({ message: `已跳过 ${passId} 不支持的 ${parsedTarget.kind} 范围：${rule.target}` })
+        return false
+      }
+      return true
+    })
+    sanitized.push({ passId, mode: 'selected-only', rules })
   }
-  if (!isRuleAction(rule.action)) {
-    warnings.push({ message: `已跳过 action 非法的规则：${rule.target}` })
-    return []
-  }
-  const action: RuleAction = rule.action
-  return [{
-    id: rule.id.trim().length > 0 ? rule.id : `rule-config-${index}`,
-    target: rule.target,
-    action,
-  }]
-})
+  return sanitized
+}
 
 const coerceParamValue = (schema: ParamSchema, value: PassParamValue): PassParamValue | undefined => {
   if (value === null) {
@@ -301,18 +467,26 @@ const replaceLastRule = (parsed: MutableWorkbenchConfig, rule: RawRuleItem): Raw
   return rule
 }
 
+const replaceLastPassSelection = (parsed: MutableWorkbenchConfig, selection: MutablePassSelection): MutablePassSelection => {
+  parsed.passSelections[parsed.passSelections.length - 1] = selection
+  return selection
+}
+
+const replaceLastPassSelectionRule = (selection: MutablePassSelection, rule: RawRuleItem): RawRuleItem => {
+  selection.rules[selection.rules.length - 1] = rule
+  return rule
+}
+
 const parseAssignment = (line: string, lineNumber: number): { readonly key: string; readonly value: TomlScalar } => {
   const separatorIndex = line.indexOf('=')
   if (separatorIndex <= 0) {
     throw new Error(`配置导入失败：第 ${lineNumber} 行不是有效的 key = value。`)
   }
-
   const key = line.slice(0, separatorIndex).trim()
   const rawValue = line.slice(separatorIndex + 1).trim()
   if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(key)) {
     throw new Error(`配置导入失败：第 ${lineNumber} 行 key 非法：${key}`)
   }
-
   return { key, value: parseTomlValue(rawValue, lineNumber) }
 }
 
@@ -378,7 +552,16 @@ const requireBoolean = (value: TomlScalar, key: string, lineNumber: number): boo
   return value
 }
 
+const requireVersion = (value: TomlScalar, lineNumber: number): number => {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+    throw new Error(`配置导入失败：第 ${lineNumber} 行 version 必须是正整数。`)
+  }
+  return value
+}
+
 const isRuleAction = (action: string): action is RuleAction => action === 'exclude' || action === 'obfuscate'
+
+const isPassSelectionMode = (mode: string): mode is PassSelectionMode => mode === 'inherit-global' || mode === 'selected-only'
 
 const normalizeScalarValue = (value: TomlScalar): PassParamValue => value
 
@@ -393,3 +576,9 @@ const formatTomlValue = (value: PassParamValue): string => {
 }
 
 const formatString = (value: string): string => JSON.stringify(value)
+
+const sortRules = (rules: readonly RuleItem[]): readonly RuleItem[] => [...rules].sort((left, right): number => (
+  left.target.localeCompare(right.target) || left.action.localeCompare(right.action)
+))
+
+const sortPassSelections = (passSelections: readonly PassSelection[]): readonly PassSelection[] => [...passSelections].sort((left, right): number => left.passId.localeCompare(right.passId))

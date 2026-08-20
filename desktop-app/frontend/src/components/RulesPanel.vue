@@ -98,12 +98,12 @@ const isRecord = (value: unknown): value is Record<string, unknown> => (
     <div class="panel-head">
       <div>
         <p class="eyebrow">Rule document</p>
-        <h2>排除规则 JSON</h2>
+        <h2>全局排除基线 JSON</h2>
       </div>
       <NTag size="small" round>{{ rules.length }} 条</NTag>
     </div>
 
-    <p class="panel-note">这里编辑的 JSON 与“类树”页选中的排除项同步；导入会替换当前排除规则。</p>
+    <p class="panel-note">这里仅编辑全局排除基线，与“类树”页的全局规则同步；导入不会覆盖任何 Pass 的独立范围。</p>
 
     <div class="rule-config-editor">
       <NInput v-model:value="configText" type="textarea" :autosize="{ minRows: 14, maxRows: 24 }" :disabled="isLocked()" placeholder='{ "rules": [{ "target": "com.example", "action": "exclude" }] }' />

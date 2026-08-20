@@ -9,6 +9,8 @@ import {
   replaceRules,
   setAutoScroll,
   setClassTreeRule,
+  setPassSelectionMode,
+  setPassSelectionRule,
   setInputJarPath,
   setOutputJarPath,
   setPassParam,
@@ -25,7 +27,7 @@ import {
   runWindowAction,
   startObfuscationRun,
 } from './frontend-controller'
-import type { ClassTreeNode, PassItem, PassParamValue, RuleAction, RuleItem, RunState } from './types'
+import type { ClassTreeNode, PassItem, PassParamValue, PassSelectionMode, RuleAction, RuleItem, RunState } from './types'
 import type { WailsBridge } from './wails-bridge'
 
 interface MessageApi {
@@ -180,6 +182,22 @@ export const createWorkbenchHandlers = (options: WorkbenchFacadeOptions) => ({
       options.state.value = setClassTreeRule(options.state.value, node, action)
     } catch (error) {
       options.state.value = applyBridgeError(options.state.value, error, '更新类树规则失败')
+    }
+  },
+
+  handlePassSelectionModeChanged: (passId: string, mode: PassSelectionMode): void => {
+    try {
+      options.state.value = setPassSelectionMode(options.state.value, passId, mode)
+    } catch (error) {
+      options.state.value = applyBridgeError(options.state.value, error, '更新 Pass 范围模式失败')
+    }
+  },
+
+  handlePassSelectionRuleChanged: (passId: string, node: ClassTreeNode, action: RuleAction): void => {
+    try {
+      options.state.value = setPassSelectionRule(options.state.value, passId, node, action)
+    } catch (error) {
+      options.state.value = applyBridgeError(options.state.value, error, '更新 Pass 范围规则失败')
     }
   },
 

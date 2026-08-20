@@ -1,5 +1,5 @@
 import { parseTomlDocument } from './toml-parser.ts'
-import type { EngineSchemaPayload, ModuleDefinition, ModuleTagDefinition, OrderingConstraint, ParamSchema, PassCompatibilityRule, VariantRequirement } from './types'
+import type { EngineSchemaPayload, ModuleDefinition, ModuleTagDefinition, OrderingConstraint, ParamSchema, PassCompatibilityRule, TargetKind, TargetingCapability, VariantRequirement } from './types'
 
 interface EngineSchemaShape {
   readonly schemaVersion?: unknown
@@ -33,7 +33,13 @@ interface ModuleDefinitionShape {
   readonly variantRequirements?: unknown
   readonly defaultEnabled?: unknown
   readonly requiresOptIn?: unknown
+  readonly targeting?: unknown
   readonly params?: unknown
+}
+
+interface TargetingCapabilityShape {
+  readonly supported?: unknown
+  readonly targetKinds?: unknown
 }
 
 interface ParamSchemaShape {
@@ -68,6 +74,7 @@ interface OrderingConstraintShape {
 const compatibilitySeverities = ['hard', 'soft'] as const
 const passRisks = ['low', 'medium', 'high'] as const
 const paramTypes = ['boolean', 'string', 'enum', 'number'] as const
+const targetKinds = ['class', 'method'] as const
 const supportedSchemaVersion = '2'
 
 export const parseEngineSchema = (rawSchema: unknown): EngineSchemaPayload => {
@@ -179,6 +186,7 @@ const parseModules = (modules: unknown, knownTagIds: ReadonlySet<string>, rawSch
       variantRequirements: parseVariantRequirements(shape.variantRequirements, index, rawSchema) ?? undefined,
       defaultEnabled: parseOptionalBoolean(shape.defaultEnabled, `modules[${index}].defaultEnabled`, rawSchema) ?? undefined,
       requiresOptIn: parseOptionalBoolean(shape.requiresOptIn, `modules[${index}].requiresOptIn`, rawSchema) ?? undefined,
+      targeting: parseRequiredTargeting(shape.targeting, index, rawSchema),
       params: parseParamSchemas(shape.params, index, rawSchema),
     }
   })
@@ -558,6 +566,34 @@ const parseOptionalStringArray = (value: unknown, fieldPath: string, rawSchema: 
   }
 
   throw new Error(`引擎 schema 解析失败：${fieldPath} 必须是字符串数组，payload=${JSON.stringify(rawSchema)}`)
+}
+
+const parseRequiredTargeting = (
+  value: unknown,
+  moduleIndex: number,
+  rawSchema: unknown,
+): TargetingCapability => {
+  if (!isRecord(value)) {
+    throw new Error(`引擎 schema 解析失败：modules[${moduleIndex}].targeting 必须是对象，payload=${JSON.stringify(rawSchema)}`)
+  }
+  const shape: TargetingCapabilityShape = value
+  if (typeof shape.supported !== 'boolean') {
+    throw new Error(`引擎 schema 解析失败：modules[${moduleIndex}].targeting.supported 必须是布尔值，payload=${JSON.stringify(rawSchema)}`)
+  }
+  if (!Array.isArray(shape.targetKinds) || !shape.targetKinds.every((kind: unknown): kind is TargetKind => typeof kind === 'string' && targetKinds.includes(kind as TargetKind))) {
+    throw new Error(`引擎 schema 解析失败：modules[${moduleIndex}].targeting.targetKinds 必须是 class/method 数组，payload=${JSON.stringify(rawSchema)}`)
+  }
+  const uniqueTargetKinds = [...new Set<TargetKind>(shape.targetKinds)]
+  if (uniqueTargetKinds.length !== shape.targetKinds.length) {
+    throw new Error(`引擎 schema 解析失败：modules[${moduleIndex}].targeting.targetKinds 重复，payload=${JSON.stringify(rawSchema)}`)
+  }
+  if (!shape.supported && uniqueTargetKinds.length > 0) {
+    throw new Error(`引擎 schema 解析失败：modules[${moduleIndex}].targeting 不支持时 targetKinds 必须为空，payload=${JSON.stringify(rawSchema)}`)
+  }
+  if (shape.supported && uniqueTargetKinds.length === 0) {
+    throw new Error(`引擎 schema 解析失败：modules[${moduleIndex}].targeting 支持时 targetKinds 不能为空，payload=${JSON.stringify(rawSchema)}`)
+  }
+  return { supported: shape.supported, targetKinds: uniqueTargetKinds }
 }
 
 const parseOptionalPassRisk = (value: unknown, moduleIndex: number, rawSchema: unknown): ModuleDefinition['risk'] | null => {

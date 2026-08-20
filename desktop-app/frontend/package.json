@@ -9,6 +9,9 @@
     "build": "vue-tsc -b && vite build",
     "check:capabilities": "node src/modules/obfuscation/capability-parser.check.ts",
     "check:events": "node src/modules/obfuscation/event-parser.check.ts",
+    "check:pass-selections": "node --import ./scripts/register-ts-loader.mjs src/modules/obfuscation/pass-selection-targeting.check.ts && node --import ./scripts/register-ts-loader.mjs src/modules/obfuscation/state-pass-selection.check.ts",
+    "check:class-tree-view": "node src/modules/obfuscation/class-tree-view.check.ts && node src/modules/obfuscation/pass-scope-tabs.check.ts",
+    "check:config": "node --import ./scripts/register-ts-loader.mjs src/modules/obfuscation/config-toml.check.ts",
     "preview": "vite preview",
     "sync:appicon": "python ../scripts/sync_app_icon.py"
   },

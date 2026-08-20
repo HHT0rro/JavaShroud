@@ -122,6 +122,8 @@ const handlePassToggled = handlers.handlePassToggled
 const handlePassParamChanged = handlers.handlePassParamChanged
 const handleAutoScrollChanged = handlers.handleAutoScrollChanged
 const handleNodeRuleChanged = handlers.handleNodeRuleChanged
+const handlePassSelectionModeChanged = handlers.handlePassSelectionModeChanged
+const handlePassSelectionRuleChanged = handlers.handlePassSelectionRuleChanged
 const handleClearLogs = handlers.handleClearLogs
 const handleStart = handlers.handleStart
 const handleCancel = handlers.handleCancel
@@ -288,11 +290,16 @@ onBeforeUnmount((): void => {
           <ClassTreePanel
             :nodes="state.classTree"
             :rules="state.rules"
+            :pass-selections="state.passSelections"
+            :passes="state.passes"
             :class-count="state.classCount"
             :inspecting="state.inspectingClasses"
+            :status="state.status"
             :display-language="displayLanguage"
             @inspect="inspectCurrentJar"
             @node-rule-changed="handleNodeRuleChanged"
+            @pass-selection-mode-changed="handlePassSelectionModeChanged"
+            @pass-selection-rule-changed="handlePassSelectionRuleChanged"
           />
         </section>
 

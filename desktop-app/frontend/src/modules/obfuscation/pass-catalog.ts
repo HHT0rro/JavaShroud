@@ -147,6 +147,7 @@ export const clonePassItem = (passItem: PassItem): PassItem => ({
     requiredPassIds: [...(requirement.requiredPassIds ?? [])],
     requiresAnyPassIds: [...(requirement.requiresAnyPassIds ?? [])],
   })),
+  targeting: { supported: passItem.targeting.supported, targetKinds: [...passItem.targeting.targetKinds] },
 })
 
 const createPassItem = (moduleDefinition: ModuleDefinition, defaultPipeline: readonly string[]): PassItem => ({
@@ -169,6 +170,10 @@ const createPassItem = (moduleDefinition: ModuleDefinition, defaultPipeline: rea
     requiredPassIds: [...(requirement.requiredPassIds ?? [])],
     requiresAnyPassIds: [...(requirement.requiresAnyPassIds ?? [])],
   })),
+  targeting: {
+    supported: moduleDefinition.targeting.supported,
+    targetKinds: [...moduleDefinition.targeting.targetKinds],
+  },
   dependencyAutoEnabled: false,
 })
 

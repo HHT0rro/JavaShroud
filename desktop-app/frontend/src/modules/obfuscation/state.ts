@@ -1,5 +1,6 @@
 import { applyPassDependencies, applyPassRequiresAnyConstraints, buildPassItemsFromSchema, clonePassItem, disablePassAndDependents, requiresAnyPassIdsFor } from './pass-catalog'
 import { hasEnabledSoftCompatibilityConflict, resolvePassCompatibility } from './pass-compatibility'
+import { parsePassSelectionTarget } from './pass-selection-targeting.ts'
 import type {
   ClassTreeNode,
   EngineEvent,
@@ -12,11 +13,14 @@ import type {
   PassCompatibilityRule,
   PassItem,
   PassParamValue,
+  PassSelection,
+  PassSelectionMode,
   PassSpec,
   RuleAction,
   RuleItem,
   RulePatch,
   RunState,
+  TargetingCapability,
 } from './types'
 
 
@@ -91,6 +95,7 @@ export const createInitialRunState = (): RunState => ({
   outputJarPath: '',
   passes: [],
   rules: [],
+  passSelections: [],
   classTree: [],
   classCount: 0,
   packageCount: 0,
@@ -251,18 +256,32 @@ export const markInspectingClasses = (state: RunState): RunState => ({
   errorMessage: null,
 })
 
-export const setJarInspection = (state: RunState, payload: JarInspectionPayload): RunState => ({
-  ...state,
-  classTree: payload.nodes,
-  classCount: payload.classCount,
-  packageCount: payload.packageCount,
-  inspectingClasses: false,
-  rules: syncRulesWithClassTree(state.rules, payload.nodes),
-  logs: appendLogLine(state.logs, {
-    level: 'info',
-    message: `已扫描类树：${payload.classCount} 个类、${payload.packageCount} 个包。`,
-  }),
-})
+export const setJarInspection = (state: RunState, payload: JarInspectionPayload): RunState => {
+  const rules = syncRulesWithClassTree(state.rules, payload.nodes)
+  const passSelections = syncPassSelectionsWithClassTree(state.passSelections, payload.nodes)
+  const removedGlobalRuleCount = state.rules.length - rules.length
+  const removedPassRuleCount = countPassSelectionRules(state.passSelections) - countPassSelectionRules(passSelections)
+  const removedPassRuleSummary = summarizeRemovedPassRules(state.passSelections, passSelections)
+  const pruneSegments: readonly string[] = [
+    removedGlobalRuleCount > 0 ? `已清理 ${removedGlobalRuleCount} 条全局规则` : '',
+    removedPassRuleSummary.length > 0 ? `Pass 范围：${removedPassRuleSummary}` : '',
+  ].filter((segment): segment is string => segment.length > 0)
+  const pruneSuffix = pruneSegments.length === 0 ? '' : `；${pruneSegments.join('；')}。`
+
+  return {
+    ...state,
+    classTree: payload.nodes,
+    classCount: payload.classCount,
+    packageCount: payload.packageCount,
+    inspectingClasses: false,
+    rules,
+    passSelections,
+    logs: appendLogLine(state.logs, {
+      level: removedGlobalRuleCount === 0 && removedPassRuleCount === 0 ? 'info' : 'warn',
+      message: `已扫描类树：${payload.classCount} 个类、${payload.packageCount} 个包${pruneSuffix}`,
+    }),
+  }
+}
 
 export const setInspectingClassesFailed = (state: RunState): RunState => ({
   ...state,
@@ -270,22 +289,124 @@ export const setInspectingClassesFailed = (state: RunState): RunState => ({
 })
 
 export const setClassTreeRule = (state: RunState, node: ClassTreeNode, action: RuleAction): RunState => {
-  const target: string = buildRuleTarget(node)
-  const existingRule: RuleItem | undefined = state.rules.find((rule: RuleItem): boolean => rule.target === target)
+  const target = buildRuleTarget(node)
+  const existingRule = state.rules.find((rule: RuleItem): boolean => rule.target === target)
 
   if (action === 'obfuscate') {
     if (existingRule?.action === 'exclude') {
-      return hasInheritedExcludeRule(state.rules, node) ? updateRule(state, existingRule.id, { target, action: 'obfuscate' }) : removeRule(state, existingRule.id)
+      return resolveInheritedRuleAction(state.rules, node) === 'exclude'
+        ? updateRule(state, existingRule.id, { target, action: 'obfuscate' })
+        : removeRule(state, existingRule.id)
     }
-    return existingRule === undefined && hasInheritedExcludeRule(state.rules, node) ? addRule(state, { target, action: 'obfuscate' }) : state
+    return existingRule === undefined && resolveInheritedRuleAction(state.rules, node) === 'exclude'
+      ? addRule(state, { target, action: 'obfuscate' })
+      : state
   }
 
-  if (existingRule !== undefined) {
-    return updateRule(state, existingRule.id, { target, action: 'exclude' })
-  }
-
-  return addRule(state, { target, action: 'exclude' })
+  return existingRule === undefined
+    ? addRule(state, { target, action: 'exclude' })
+    : updateRule(state, existingRule.id, { target, action: 'exclude' })
 }
+
+/** Missing entries intentionally inherit the live global rule baseline. */
+export const passSelectionModeFor = (
+  passSelections: readonly PassSelection[],
+  passId: string,
+): PassSelectionMode => passSelections.find((selection): boolean => selection.passId === passId)?.mode ?? 'inherit-global'
+
+export const passSelectionFor = (
+  passSelections: readonly PassSelection[],
+  passId: string,
+): PassSelection | undefined => passSelections.find((selection): boolean => selection.passId === passId)
+
+export const passSupportsTargeting = (pass: Pick<PassItem, 'targeting'>): boolean => pass.targeting.supported && pass.targeting.targetKinds.length > 0
+
+export const supportsNodeTargeting = (pass: Pick<PassItem, 'targeting'>, node: ClassTreeNode): boolean => (
+  (node.kind === 'class' || node.kind === 'method')
+  && pass.targeting.supported
+  && pass.targeting.targetKinds.includes(node.kind)
+)
+
+export const setPassSelectionMode = (
+  state: RunState,
+  passId: string,
+  mode: PassSelectionMode,
+): RunState => {
+  const pass = requirePassForSelection(state, passId)
+  if (!passSupportsTargeting(pass)) {
+    throw new Error(`Pass 不支持类/方法范围选择：${passId}`)
+  }
+
+  if (mode === 'inherit-global') {
+    return {
+      ...state,
+      passSelections: state.passSelections.filter((selection): boolean => selection.passId !== passId),
+    }
+  }
+
+  const existing = passSelectionFor(state.passSelections, passId)
+  if (existing?.mode === 'selected-only') {
+    return state
+  }
+
+  return {
+    ...state,
+    passSelections: [
+      ...state.passSelections.filter((selection): boolean => selection.passId !== passId),
+      { passId, mode: 'selected-only', rules: [] },
+    ],
+  }
+}
+
+export const setPassSelectionRule = (
+  state: RunState,
+  passId: string,
+  node: ClassTreeNode,
+  action: RuleAction,
+): RunState => {
+  const pass = requirePassForSelection(state, passId)
+  if (!supportsNodeTargeting(pass, node)) {
+    throw new Error(`Pass ${passId} 不支持选择 ${node.kind}：仅可选择 schema 声明的类或方法。`)
+  }
+
+  const selection = passSelectionFor(state.passSelections, passId)
+  if (selection?.mode !== 'selected-only') {
+    throw new Error(`Pass ${passId} 当前同步全局规则；请先切换为独立范围。`)
+  }
+
+  const target = buildRuleTarget(node)
+  const existingRule = selection.rules.find((rule): boolean => rule.target === target)
+  const inheritedAction = resolveInheritedRuleAction(selection.rules, node) ?? 'obfuscate'
+  let nextRules: readonly RuleItem[]
+
+  if (action === 'obfuscate') {
+    if (existingRule?.action === 'exclude') {
+      nextRules = inheritedAction === 'exclude'
+        ? selection.rules.map((rule): RuleItem => rule.id === existingRule.id ? { ...rule, target, action: 'obfuscate' } : rule)
+        : selection.rules.filter((rule): boolean => rule.id !== existingRule.id)
+    } else if (existingRule === undefined && inheritedAction === 'exclude') {
+      nextRules = [...selection.rules, createRule(`pass-rule-${passId}`, selection.rules.length, target, 'obfuscate')]
+    } else {
+      nextRules = selection.rules
+    }
+  } else {
+    nextRules = existingRule === undefined
+      ? [...selection.rules, createRule(`pass-rule-${passId}`, selection.rules.length, target, 'exclude')]
+      : selection.rules.map((rule): RuleItem => rule.id === existingRule.id ? { ...rule, target, action: 'exclude' } : rule)
+  }
+
+  return {
+    ...state,
+    passSelections: state.passSelections.map((candidate): PassSelection => (
+      candidate.passId === passId ? { ...candidate, rules: normalizeRuleItems(nextRules, `pass-rule-${passId}`) } : candidate
+    )),
+  }
+}
+
+export const replacePassSelections = (state: RunState, passSelections: readonly PassSelection[]): RunState => ({
+  ...state,
+  passSelections: normalizePassSelections(passSelections),
+})
 
 export const clearLogs = (state: RunState): RunState => ({
   ...state,
@@ -304,11 +425,7 @@ export const addRule = (state: RunState, patch: RulePatch): RunState => {
     return state
   }
 
-  const newRule: RuleItem = {
-    id: `rule-${Date.now()}-${state.rules.length}`,
-    target: trimmedTarget,
-    action: 'exclude',
-  }
+  const newRule: RuleItem = createRule('rule', state.rules.length, trimmedTarget, patch.action)
 
   return {
     ...state,
@@ -343,11 +460,7 @@ export const clearRules = (state: RunState): RunState => ({
 
 export const replaceRules = (state: RunState, rules: readonly RuleItem[]): RunState => ({
   ...state,
-  rules: rules.map((rule: RuleItem, index: number): RuleItem => ({
-    id: rule.id.trim().length > 0 ? rule.id : `rule-import-${Date.now()}-${index}`,
-    target: rule.target.trim(),
-    action: rule.action,
-  })).filter((rule: RuleItem): boolean => rule.target.length > 0 && isKnownRuleAction(rule.action)),
+  rules: normalizeRuleItems(rules, 'rule-import'),
 })
 
 const isKnownRuleAction = (action: string): action is RuleAction => action === 'exclude' || action === 'obfuscate'
@@ -470,11 +583,39 @@ export const buildObfuscationRequest = (state: RunState): ObfuscationRequest => 
     throw new Error(`无法启动混淆：${unsatisfiedPass.id} 需要同时启用至少一个运行时辅助模块。`)
   }
 
+  const passSelections = state.passSelections
+    .filter((selection): boolean => selection.mode === 'selected-only' && enabledPassIds.has(selection.passId))
+    .map((selection): PassSelection => {
+      const pass = state.passes.find((candidate): boolean => candidate.id === selection.passId)
+      if (pass === undefined || !passSupportsTargeting(pass)) {
+        throw new Error(`无法启动混淆：${selection.passId} 不支持类/方法范围选择。`)
+      }
+
+      const rules = normalizeRuleItems(selection.rules, `pass-rule-${selection.passId}`)
+
+      for (const rule of rules) {
+        const parsedTarget = parsePassSelectionTarget(rule.target)
+        if (parsedTarget === null) {
+          throw new Error(`无法启动混淆：${selection.passId} 包含非 canonical 类/方法的范围规则：${rule.target}`)
+        }
+        if (!pass.targeting.targetKinds.includes(parsedTarget.kind)) {
+          throw new Error(`无法启动混淆：${selection.passId} 不支持 ${parsedTarget.kind} 范围：${rule.target}`)
+        }
+      }
+
+      return {
+        passId: selection.passId,
+        mode: 'selected-only',
+        rules,
+      }
+    })
+
   return {
     inputJarPath: state.inputJar.inputJarPath,
     outputJarPath: state.outputJarPath,
     passes: enabledPasses,
-    rules: [...state.rules],
+    rules: normalizeRuleItems(state.rules, 'rule'),
+    passSelections,
     allowOptInPasses: state.passes.some((passItem: PassItem): boolean => passItem.enabled && passItem.requiresOptIn),
     allowRedundantPasses: hasEnabledSoftCompatibilityConflict(state.passes, state.schema?.compatibility ?? []),
   }
@@ -517,14 +658,10 @@ export const ruleActionTone = (action: RuleAction): 'success' | 'error' => {
   return 'error'
 }
 
-export const nodeRuleAction = (rules: readonly RuleItem[], node: ClassTreeNode): RuleAction => {
-  const target: string = buildRuleTarget(node)
-  const matchedRule: RuleItem | undefined = rules.find((rule: RuleItem): boolean => rule.target === target)
-  if (matchedRule !== undefined) {
-    return matchedRule.action
-  }
-  return hasInheritedExcludeRule(rules, node) ? 'exclude' : 'obfuscate'
-}
+export const nodeRuleAction = (rules: readonly RuleItem[], node: ClassTreeNode): RuleAction => resolveRuleAction(rules, node, 'obfuscate')
+
+/** selected-only is an independent range with an implicit all-obfuscate baseline. */
+export const nodePassSelectionAction = (rules: readonly RuleItem[], node: ClassTreeNode): RuleAction => resolveRuleAction(rules, node, 'obfuscate')
 
 const cloneEngineSchema = (schema: EngineSchemaPayload): EngineSchemaPayload => ({
   schemaVersion: schema.schemaVersion,
@@ -536,6 +673,7 @@ const cloneEngineSchema = (schema: EngineSchemaPayload): EngineSchemaPayload => 
     tagIds: [...moduleDefinition.tagIds],
     requiredPassIds: [...(moduleDefinition.requiredPassIds ?? [])],
     requiresAnyPassIds: [...(moduleDefinition.requiresAnyPassIds ?? [])],
+    targeting: cloneTargeting(moduleDefinition.targeting),
     variantRequirements: (moduleDefinition.variantRequirements ?? []).map((requirement) => ({
       ...requirement,
       requiredPassIds: [...(requirement.requiredPassIds ?? [])],
@@ -598,45 +736,153 @@ const deriveOutputJarPath = (inputJarPath: string): string => {
 }
 
 const buildRuleTarget = (node: ClassTreeNode): string => {
+  if (typeof node.selector === 'string' && node.selector.trim().length > 0) {
+    return node.selector
+  }
   if (node.kind === 'package') {
     return node.internalName.length === 0 ? '*' : `${node.internalName}/*`
   }
-
   return node.internalName
 }
 
 const syncRulesWithClassTree = (rules: readonly RuleItem[], nodes: readonly ClassTreeNode[]): readonly RuleItem[] => {
-  const validTargets: ReadonlySet<string> = new Set<string>(collectClassTreeTargets(nodes))
-  return rules.filter((rule: RuleItem): boolean => validTargets.has(rule.target))
+  const validTargets = new Set<string>(collectClassTreeTargets(nodes))
+  return normalizeRuleItems(rules.filter((rule): boolean => validTargets.has(rule.target)), 'rule')
 }
 
-const collectClassTreeTargets = (nodes: readonly ClassTreeNode[]): readonly string[] => {
-  const targets: string[] = []
+const syncPassSelectionsWithClassTree = (
+  passSelections: readonly PassSelection[],
+  nodes: readonly ClassTreeNode[],
+): readonly PassSelection[] => {
+  const validTargets = new Set<string>(collectClassTreeTargets(nodes, true))
+  return passSelections.map((selection): PassSelection => ({
+    ...selection,
+    rules: normalizeRuleItems(selection.rules.filter((rule): boolean => validTargets.has(rule.target)), `pass-rule-${selection.passId}`),
+  }))
+}
 
+const collectClassTreeTargets = (nodes: readonly ClassTreeNode[], classAndMethodOnly = false): readonly string[] => {
+  const targets: string[] = []
   const visitNode = (node: ClassTreeNode): void => {
-    targets.push(buildRuleTarget(node))
+    if (!classAndMethodOnly || node.kind === 'class' || node.kind === 'method') {
+      targets.push(buildRuleTarget(node))
+    }
     node.children.forEach(visitNode)
   }
-
   nodes.forEach(visitNode)
   return targets
 }
 
-const hasInheritedExcludeRule = (rules: readonly RuleItem[], node: ClassTreeNode): boolean => {
-  const target: string = buildRuleTarget(node)
-  return rules.some((rule: RuleItem): boolean => rule.action === 'exclude' && rule.target !== target && ruleMatchesNode(rule.target, node))
+const countPassSelectionRules = (passSelections: readonly PassSelection[]): number => passSelections.reduce(
+  (count, selection): number => count + selection.rules.length,
+  0,
+)
+
+const summarizeRemovedPassRules = (
+  before: readonly PassSelection[],
+  after: readonly PassSelection[],
+): string => {
+  const afterRuleCounts = new Map<string, number>(after.map((selection): [string, number] => [selection.passId, selection.rules.length]))
+  return before
+    .map((selection): readonly [string, number] => [selection.passId, Math.max(0, selection.rules.length - (afterRuleCounts.get(selection.passId) ?? 0))])
+    .filter(([, removedCount]): boolean => removedCount > 0)
+    .sort(([leftPassId], [rightPassId]): number => leftPassId.localeCompare(rightPassId))
+    .map(([passId, removedCount]): string => `${passId} -${removedCount}`)
+    .join('，')
 }
+
+const resolveRuleAction = (
+  rules: readonly RuleItem[],
+  node: ClassTreeNode,
+  defaultAction: RuleAction,
+): RuleAction => {
+  const target = buildRuleTarget(node)
+  const exact = rules.find((rule): boolean => rule.target === target)
+  if (exact !== undefined) {
+    return exact.action
+  }
+  return resolveInheritedRuleAction(rules, node) ?? defaultAction
+}
+
+const resolveInheritedRuleAction = (rules: readonly RuleItem[], node: ClassTreeNode): RuleAction | undefined => {
+  const target = buildRuleTarget(node)
+  let best: RuleItem | undefined
+  for (const rule of rules) {
+    if (rule.target === target || !ruleMatchesNode(rule.target, node)) {
+      continue
+    }
+    if (best === undefined || ruleSpecificity(rule.target) > ruleSpecificity(best.target)) {
+      best = rule
+    }
+  }
+  return best?.action
+}
+
+const ruleSpecificity = (target: string): number => target === '*' ? 0 : target.endsWith('/*') ? target.length - 2 : target.length + 1000
 
 const ruleMatchesNode = (ruleTarget: string, node: ClassTreeNode): boolean => {
   if (ruleTarget === '*') {
     return true
   }
+  const target = buildRuleTarget(node)
+  const classTarget = target.split('#', 1)[0] ?? target
   if (ruleTarget.endsWith('/*')) {
-    const packagePrefix: string = ruleTarget.slice(0, -1)
-    return node.internalName.startsWith(packagePrefix)
+    const packagePrefix = ruleTarget.slice(0, -1)
+    return classTarget.startsWith(packagePrefix)
   }
-  if (node.kind === 'field' || node.kind === 'method') {
-    return node.internalName.startsWith(`${ruleTarget}#`)
+  if (target.includes('#')) {
+    return target.startsWith(`${ruleTarget}#`)
   }
-  return node.internalName === ruleTarget
+  return target === ruleTarget
 }
+
+const normalizeRuleItems = (rules: readonly RuleItem[], idPrefix: string): readonly RuleItem[] => {
+  const byTarget = new Map<string, RuleItem>()
+  rules.forEach((rule, index): void => {
+    const target = rule.target.trim()
+    if (target.length === 0 || !isKnownRuleAction(rule.action)) {
+      return
+    }
+    byTarget.set(target, {
+      id: rule.id.trim().length > 0 ? rule.id : `${idPrefix}-${index}-${target}`,
+      target,
+      action: rule.action,
+    })
+  })
+  return [...byTarget.values()]
+}
+
+const normalizePassSelections = (passSelections: readonly PassSelection[]): readonly PassSelection[] => {
+  const byPassId = new Map<string, PassSelection>()
+  passSelections.forEach((selection): void => {
+    const passId = selection.passId.trim()
+    if (passId.length === 0 || selection.mode !== 'selected-only') {
+      return
+    }
+    byPassId.set(passId, {
+      passId,
+      mode: 'selected-only',
+      rules: normalizeRuleItems(selection.rules, `pass-rule-${passId}`),
+    })
+  })
+  return [...byPassId.values()]
+}
+
+const createRule = (prefix: string, index: number, target: string, action: RuleAction): RuleItem => ({
+  id: `${prefix}-${Date.now()}-${index}`,
+  target,
+  action,
+})
+
+const requirePassForSelection = (state: RunState, passId: string): PassItem => {
+  const pass = state.passes.find((candidate): boolean => candidate.id === passId)
+  if (pass === undefined) {
+    throw new Error(`未知 Pass：${passId}`)
+  }
+  return pass
+}
+
+const cloneTargeting = (targeting: TargetingCapability): TargetingCapability => ({
+  supported: targeting.supported,
+  targetKinds: [...targeting.targetKinds],
+})

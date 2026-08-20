@@ -13,6 +13,7 @@ interface ClassTreeNodeShape {
   readonly label?: unknown
   readonly qualifiedName?: unknown
   readonly internalName?: unknown
+  readonly selector?: unknown
   readonly kind?: unknown
   readonly children?: unknown
 }
@@ -65,6 +66,7 @@ const parseClassTreeNode = (value: unknown, fieldPath: string, rawPayload: unkno
     label: parseRequiredText(shape.label, `${fieldPath}.label`, rawPayload),
     qualifiedName: parseRequiredText(shape.qualifiedName, `${fieldPath}.qualifiedName`, rawPayload),
     internalName: parseOptionalText(shape.internalName, `${fieldPath}.internalName`, rawPayload),
+    selector: parseRequiredText(shape.selector, `${fieldPath}.selector`, rawPayload),
     kind,
     children: parseClassTreeNodes(shape.children, `${fieldPath}.children`, rawPayload),
   }

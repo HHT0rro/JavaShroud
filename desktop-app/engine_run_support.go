@@ -81,7 +81,7 @@ func runEngineProcess(runContext context.Context, launchSpec EngineLaunchSpec, c
 		callbacks.emitEvent(EngineEvent{
 			Level:   "error",
 			Type:    "error",
-			Message: fmt.Sprintf("engine process failed: mode=%s command=%s args=%v dir=%s exit=%v stderr=%s", launchSpec.Mode, launchSpec.CommandPath, launchSpec.CommandArgs, launchSpec.CommandDir, waitErr, truncateString(stderrBuffer.String(), 1200)),
+			Message: fmt.Sprintf("engine process failed: mode=%s command=%s args=%v dir=%s exit=%v stderr=%s", launchSpec.Mode, launchSpec.CommandPath, launchSpec.CommandArgs, launchSpec.CommandDir, waitErr, summarizeEngineStderr(stderrBuffer.String(), 1200)),
 		})
 		return
 	}
@@ -134,4 +134,30 @@ func consumeEngineStderr(reader io.Reader, stderrBuffer *strings.Builder, callba
 func configureEngineScanner(scanner *bufio.Scanner) {
 	const maxEngineLineSize = 1024 * 1024
 	scanner.Buffer(make([]byte, 0, 64*1024), maxEngineLineSize)
+}
+
+// summarizeEngineStderr preserves both the beginning of a failed engine's
+// output and, critically, its terminal compiler or exception diagnostic.
+// Native compilation can emit many benign transform warnings before it prints
+// the actionable error, so a simple prefix truncation hides the actual cause.
+func summarizeEngineStderr(stderr string, maxRunes int) string {
+	trimmed := strings.TrimSpace(stderr)
+	if trimmed == "" || maxRunes <= 0 {
+		return ""
+	}
+
+	runes := []rune(trimmed)
+	if len(runes) <= maxRunes {
+		return trimmed
+	}
+
+	const marker = "\n... <stderr truncated; final diagnostics retained> ...\n"
+	markerRunes := []rune(marker)
+	if maxRunes <= len(markerRunes)+2 {
+		return string(runes[len(runes)-maxRunes:])
+	}
+
+	headCount := (maxRunes - len(markerRunes)) / 3
+	tailCount := maxRunes - len(markerRunes) - headCount
+	return string(runes[:headCount]) + marker + string(runes[len(runes)-tailCount:])
 }

@@ -906,6 +906,162 @@ select,
   padding: var(--space-4) var(--space-5);
 }
 
+.tree-filter {
+  padding: 0 var(--space-5) var(--space-4);
+}
+
+.scope-section {
+  display: grid;
+  gap: var(--space-3);
+  border-top: 1px solid var(--line);
+  padding-top: var(--space-4);
+}
+
+.scope-section + .scope-section {
+  margin-top: var(--space-4);
+}
+
+.scope-section__head,
+.active-pass-editor__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 0 var(--space-5);
+}
+
+.scope-section--passes {
+  padding-bottom: var(--space-5);
+}
+
+.scope-empty {
+  margin: 0 var(--space-5);
+}
+
+.pass-scope-tabs {
+  display: flex;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-inline: contain;
+  padding: 0 var(--space-5) var(--space-1);
+  scrollbar-gutter: stable;
+  scroll-snap-type: inline proximity;
+}
+
+.pass-scope-tab {
+  display: grid;
+  flex: 0 0 clamp(188px, 24vw, 292px);
+  gap: 3px;
+  min-width: 188px;
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: inherit;
+  background: rgba(255, 255, 255, 0.025);
+  cursor: pointer;
+  scroll-snap-align: start;
+  text-align: left;
+}
+
+.pass-scope-tab[aria-selected='true'] {
+  border-color: var(--accent-line);
+  background: var(--accent-soft);
+}
+
+.pass-scope-tab:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.pass-scope-tab--unsupported {
+  opacity: 0.72;
+}
+
+.pass-scope-tab__title,
+.pass-scope-tab__id,
+.pass-scope-tab__mode,
+.pass-scope-tab__targeting,
+.pass-scope-tab__impact {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pass-scope-tab__title {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.pass-scope-tab__id,
+.pass-scope-tab__targeting,
+.pass-scope-tab__impact {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.pass-scope-tab__mode {
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.pass-scope-tab__mode--independent,
+.pass-scope-tab__impact {
+  color: var(--accent);
+}
+
+.active-pass-editor {
+  display: grid;
+  gap: var(--space-3);
+  margin: 0 var(--space-5);
+  padding: var(--space-4) 0 0;
+  border-top: 1px solid var(--line);
+}
+
+.active-pass-editor__head {
+  padding: 0;
+}
+
+.active-pass-editor__metrics {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.pass-scope-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.class-tree--pass-scope {
+  max-height: 520px;
+  overflow: auto;
+  padding: 0 1px var(--space-2);
+}
+
+.class-tree-virtual {
+  height: min(520px, 54dvh);
+  overflow: auto;
+  padding: 0 var(--space-5) var(--space-5);
+  scrollbar-gutter: stable;
+}
+
+.class-tree-virtual__row {
+  box-sizing: border-box;
+  height: 48px;
+  min-height: 48px;
+}
+
+.tree-row--unavailable {
+  opacity: 0.6;
+}
+
 .class-tree {
   padding: 0 var(--space-5) var(--space-5);
 }
