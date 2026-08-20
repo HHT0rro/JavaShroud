@@ -2,6 +2,7 @@ package io.github.hht0rro.javashroud.aken
 
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenArtifactCommitment
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenArtifactEntry
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenBoundDecryptorPlan
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenBuildPlan
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenCanonicalExclusionKind
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenCanonicalExclusionRange
@@ -11,6 +12,7 @@ import io.github.hht0rro.javashroud.transforms.protection.aken.AkenPageMateriali
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenPageMaterializer
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenResourceKind
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRuntimePageDescriptor
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRuntimeEvaluatorPlan
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenSealingProofMetadata
 import java.security.SecureRandom
 import java.util.Arrays
@@ -285,6 +287,32 @@ class AkenPageMaterializationTest {
                 Arrays.fill(payload, 0)
                 Arrays.fill(encodedDescriptor, 0)
                 Arrays.fill(tamperedPayload, 0)
+            }
+        } finally {
+            output.wipe()
+        }
+    }
+
+    @Test
+    fun production_materialization_uses_v2_opaque_bound_plan_without_legacy_fragment_surface() {
+        val output = onePageMaterialization(seed = 1_231)
+        try {
+            val descriptor = output.pagesForBuild().single().descriptorForBuild
+            val evaluator = descriptor.evaluatorPlan
+            assertFalse(evaluator.isLegacyAken7)
+            assertTrue(evaluator.javaFragments.isEmpty())
+            assertTrue(evaluator.nativeFragments.isEmpty())
+            assertFailsWith<IllegalStateException> { evaluator.terminal }
+
+            val encoded = evaluator.encode()
+            val tampered = encoded.copyOf()
+            try {
+                assertEquals(0, encoded[0].toInt() and 0xFF)
+                tampered[5] = (tampered[5].toInt() xor 0x01).toByte()
+                assertFailsWith<IllegalArgumentException> { AkenRuntimeEvaluatorPlan.decode(tampered) }
+            } finally {
+                Arrays.fill(encoded, 0)
+                Arrays.fill(tampered, 0)
             }
         } finally {
             output.wipe()

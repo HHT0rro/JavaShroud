@@ -5,6 +5,7 @@ import io.github.hht0rro.javashroud.adapters.protocol.EngineCommand
 import io.github.hht0rro.javashroud.adapters.protocol.buildCommandRequest
 import io.github.hht0rro.javashroud.adapters.protocol.dispatchRequest
 import io.github.hht0rro.javashroud.kernel.EngineKernel
+import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
@@ -69,6 +70,12 @@ class NestedVmExecutionTest {
             inputJar = inputJar,
             outputJar = outputJar,
             passIds = listOf("method-virtualization", "jni-microkernel-loader"),
+            rules = listOf(
+                RuleSpec(
+                    target = "e2e/NestedVmRoot#verifyLicense:()I",
+                    action = "method-virtualization",
+                ),
+            ),
             passParams = passParams.mapValues { (_, params) ->
                 params.mapValues { (_, value) -> objectMapper.valueToTree(value) }
             },
@@ -144,7 +151,8 @@ class NestedVmExecutionTest {
                                             descriptor == "(J)V" ||
                                             descriptor == "(J)I" ||
                                             descriptor == "(JI)I" ||
-                                            descriptor == "(JI)V")
+                                            descriptor == "(JI)V" ||
+                                            descriptor == "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;")
                                     ) {
                                         found = true
                                     }

@@ -56,7 +56,7 @@ class RuntimeArtifactSealingCollisionTest {
     }
 
     @Test
-    fun `sealed string helper keeps its CachePolicy nested runtime class`() {
+    fun `sealed string helper keeps its CachePolicy nested runtime class and stable VBC4 bridge`() {
         val outerName = "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper"
         val innerName = "$outerName${"$"}CachePolicy"
         val seed = 0x4A53524CL
@@ -94,13 +94,6 @@ class RuntimeArtifactSealingCollisionTest {
         val sealedOuterNode = ClassNode()
         org.objectweb.asm.ClassReader(sealedOuter.bytes).accept(sealedOuterNode, org.objectweb.asm.ClassReader.SKIP_FRAMES)
         val akenStringPageDescriptor = "([BI[B)Ljava/lang/String;"
-        val sealedAkenStringPageMethod = sealedRuntimeHelperMethodName(
-            outerName,
-            "cachedDecodeAkenStringPage",
-            akenStringPageDescriptor,
-            seed,
-        )
-
         assertFalse("$outerName.class" in sealedEntryNames)
         assertFalse("$innerName.class" in sealedEntryNames)
         assertTrue("$sealedOuterName.class" in sealedEntryNames)
@@ -110,14 +103,17 @@ class RuntimeArtifactSealingCollisionTest {
             "The sealed StringEncryptionHelper must retain a link to its sealed CachePolicy nested enum.",
         )
         assertTrue(
-            sealedOuterNode.methods.any { it.name == sealedAkenStringPageMethod && it.desc == akenStringPageDescriptor },
-            "The typed AKEN StringPage helper method must be sealed with the relocated helper.",
+            sealedOuterNode.methods.any { it.name == "cachedDecodeAkenStringPage" && it.desc == akenStringPageDescriptor },
+            "The relocated StringPage helper must retain its stable VBC4 interpreted bridge name.",
         )
         assertFalse(
-            sealedOuterNode.methods.any { it.name == "cachedDecodeAkenStringPage" && it.desc == akenStringPageDescriptor },
-            "The relocated StringPage helper must not retain its fixed production method name.",
+            sealedOuterNode.methods.any {
+                it.name == sealedRuntimeHelperMethodName(outerName, "cachedDecodeAkenStringPage", akenStringPageDescriptor, seed) &&
+                    it.desc == akenStringPageDescriptor
+            },
+            "The VBC4 StringPage bridge must not be renamed without rewriting serialized VM call targets.",
         )
-    }
+}
 
     @Test
     fun `sealed runtime helper names avoid existing jar entries during re-obfuscation`() {

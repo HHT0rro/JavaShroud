@@ -43,16 +43,19 @@ static int test_bound_payload_open(void) {
     js_aken_native_page_descriptor_view descriptor_view;
     js_aken_native_page_descriptor_view corrupt_descriptor_view;
     js_aken_evaluator_binding binding;
-    js_aken_evaluator_fragment corrupt_fragments[JS_AKEN_EVALUATOR_FRAGMENT_COUNT];
     js_aken_native_opened_page opened;
     unsigned char corrupt_proof[sizeof(TEST_RAW_CALL_SITE_PROOF)];
     unsigned char corrupt_fingerprint[sizeof(TEST_EVALUATOR_FINGERPRINT)];
     unsigned char corrupt_layout[sizeof(TEST_LAYOUT_VARIANT)];
-    unsigned char corrupt_shape[sizeof(TEST_FRAGMENT_0_SHAPE)];
+    unsigned char corrupt_commitment[sizeof(TEST_ARTIFACT_COMMITMENT)];
+    unsigned char corrupt_locator[sizeof(TEST_LOCATOR_TOKEN)];
     unsigned char corrupt_leaf_digest[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE];
     unsigned char corrupt_mesh_root[JS_AKEN_NATIVE_PAGE_ENVELOPE_DIGEST_SIZE];
     unsigned char *tampered_payload = NULL;
     unsigned char *corrupt_descriptor = NULL;
+    unsigned char *corrupt_bound_plan = NULL;
+    unsigned char *corrupt_route = NULL;
+    size_t corrupt_route_len = 0u;
     unsigned char *mutated_field = NULL;
     int ok = 0;
 
@@ -66,12 +69,12 @@ static int test_bound_payload_open(void) {
     memset(&descriptor_view, 0, sizeof(descriptor_view));
     memset(&corrupt_descriptor_view, 0, sizeof(corrupt_descriptor_view));
     memset(&binding, 0, sizeof(binding));
-    memset(corrupt_fragments, 0, sizeof(corrupt_fragments));
     memset(&opened, 0, sizeof(opened));
     memset(corrupt_proof, 0, sizeof(corrupt_proof));
     memset(corrupt_fingerprint, 0, sizeof(corrupt_fingerprint));
     memset(corrupt_layout, 0, sizeof(corrupt_layout));
-    memset(corrupt_shape, 0, sizeof(corrupt_shape));
+    memset(corrupt_commitment, 0, sizeof(corrupt_commitment));
+    memset(corrupt_locator, 0, sizeof(corrupt_locator));
     memset(corrupt_leaf_digest, 0, sizeof(corrupt_leaf_digest));
     memset(corrupt_mesh_root, 0, sizeof(corrupt_mesh_root));
 
@@ -109,8 +112,17 @@ static int test_bound_payload_open(void) {
         descriptor_view.binding.encoded_handle,
         TEST_ENCODED_HANDLE,
         sizeof(TEST_ENCODED_HANDLE)) == 0);
-    TEST_CHECK(descriptor_view.fragments[0].ordinal == TEST_EVALUATOR_FRAGMENTS[0].ordinal);
-    TEST_CHECK(descriptor_view.fragments[6].ordinal == TEST_EVALUATOR_FRAGMENTS[6].ordinal);
+    /* Current descriptors expose the authenticated v2 plan as an opaque
+     * bound_plan slice; the former evaluator_plan_version field was removed
+     * from the current ABI and must not be reconstructed in a fixture. */
+    TEST_CHECK(descriptor_view.bound_plan_len != 0u);
+    TEST_CHECK(descriptor_view.bound_plan != NULL);
+    TEST_CHECK(descriptor_view.bound_plan_len == sizeof(TEST_BOUND_PLAN));
+    TEST_CHECK(memcmp(descriptor_view.bound_plan, TEST_BOUND_PLAN, sizeof(TEST_BOUND_PLAN)) == 0);
+    TEST_CHECK(descriptor_view.route_encoding != NULL);
+    TEST_CHECK(descriptor_view.route_encoding_len != 0u);
+    TEST_CHECK(descriptor_view.call_site_proof != NULL);
+    TEST_CHECK(descriptor_view.call_site_proof_len == sizeof(TEST_RAW_CALL_SITE_PROOF));
     TEST_CHECK(descriptor_view.leaf_identity_encoding != NULL);
     TEST_CHECK(descriptor_view.leaf_identity_encoding_len != 0u);
     TEST_CHECK(descriptor_view.mesh_root != NULL);
@@ -251,13 +263,17 @@ static int test_bound_payload_open(void) {
     memcpy(corrupt_fingerprint, TEST_EVALUATOR_FINGERPRINT, sizeof(corrupt_fingerprint));
     corrupt_fingerprint[0] ^= 0x01u;
     binding.evaluator_fingerprint = corrupt_fingerprint;
-    TEST_CHECK(!js_aken_native_page_open_bound_payload(
+    TEST_CHECK(!js_aken_native_page_open_bound_plan_payload(
         &request,
         &envelope,
         &resolved,
         &binding,
-        descriptor_view.fragments,
-        JS_AKEN_EVALUATOR_FRAGMENT_COUNT,
+        descriptor_view.bound_plan,
+        descriptor_view.bound_plan_len,
+        descriptor_view.route_encoding,
+        descriptor_view.route_encoding_len,
+        descriptor_view.call_site_proof,
+        descriptor_view.call_site_proof_len,
         TEST_ENCODED_PAYLOAD,
         sizeof(TEST_ENCODED_PAYLOAD),
         &opened));
@@ -267,34 +283,121 @@ static int test_bound_payload_open(void) {
     memcpy(corrupt_layout, TEST_LAYOUT_VARIANT, sizeof(corrupt_layout));
     corrupt_layout[sizeof(corrupt_layout) - 1u] = (unsigned char)'B';
     binding.layout_variant = corrupt_layout;
-    TEST_CHECK(!js_aken_native_page_open_bound_payload(
+    TEST_CHECK(!js_aken_native_page_open_bound_plan_payload(
         &request,
         &envelope,
         &resolved,
         &binding,
-        descriptor_view.fragments,
-        JS_AKEN_EVALUATOR_FRAGMENT_COUNT,
+        descriptor_view.bound_plan,
+        descriptor_view.bound_plan_len,
+        descriptor_view.route_encoding,
+        descriptor_view.route_encoding_len,
+        descriptor_view.call_site_proof,
+        descriptor_view.call_site_proof_len,
         TEST_ENCODED_PAYLOAD,
         sizeof(TEST_ENCODED_PAYLOAD),
         &opened));
     TEST_CHECK(opened_page_is_empty(&opened));
     binding.layout_variant = TEST_LAYOUT_VARIANT;
 
-    memcpy(corrupt_fragments, descriptor_view.fragments, sizeof(corrupt_fragments));
-    memcpy(corrupt_shape, TEST_FRAGMENT_0_SHAPE, sizeof(corrupt_shape));
-    corrupt_shape[0] ^= 0x01u;
-    corrupt_fragments[0].shape = corrupt_shape;
-    TEST_CHECK(!js_aken_native_page_open_bound_payload(
+    corrupt_bound_plan = (unsigned char *)malloc(sizeof(TEST_BOUND_PLAN));
+    TEST_CHECK(corrupt_bound_plan != NULL);
+    memcpy(corrupt_bound_plan, TEST_BOUND_PLAN, sizeof(TEST_BOUND_PLAN));
+    corrupt_bound_plan[sizeof(TEST_BOUND_PLAN) - 1u] ^= 0x01u;
+    TEST_CHECK(!js_aken_native_page_open_bound_plan_payload(
         &request,
         &envelope,
         &resolved,
         &binding,
-        corrupt_fragments,
-        JS_AKEN_EVALUATOR_FRAGMENT_COUNT,
+        corrupt_bound_plan,
+        sizeof(TEST_BOUND_PLAN),
+        descriptor_view.route_encoding,
+        descriptor_view.route_encoding_len,
+        descriptor_view.call_site_proof,
+        descriptor_view.call_site_proof_len,
         TEST_ENCODED_PAYLOAD,
         sizeof(TEST_ENCODED_PAYLOAD),
         &opened));
     TEST_CHECK(opened_page_is_empty(&opened));
+
+    memcpy(corrupt_proof, TEST_RAW_CALL_SITE_PROOF, sizeof(corrupt_proof));
+    corrupt_proof[0] ^= 0x01u;
+    TEST_CHECK(!js_aken_native_page_open_bound_plan_payload(
+        &request,
+        &envelope,
+        &resolved,
+        &binding,
+        descriptor_view.bound_plan,
+        descriptor_view.bound_plan_len,
+        descriptor_view.route_encoding,
+        descriptor_view.route_encoding_len,
+        corrupt_proof,
+        sizeof(corrupt_proof),
+        TEST_ENCODED_PAYLOAD,
+        sizeof(TEST_ENCODED_PAYLOAD),
+        &opened));
+    TEST_CHECK(opened_page_is_empty(&opened));
+
+    corrupt_route_len = descriptor_view.route_encoding_len;
+    corrupt_route = (unsigned char *)malloc(corrupt_route_len);
+    TEST_CHECK(corrupt_route != NULL);
+    memcpy(corrupt_route, descriptor_view.route_encoding, corrupt_route_len);
+    corrupt_route[0] ^= 0x01u;
+    TEST_CHECK(!js_aken_native_page_open_bound_plan_payload(
+        &request,
+        &envelope,
+        &resolved,
+        &binding,
+        descriptor_view.bound_plan,
+        descriptor_view.bound_plan_len,
+        corrupt_route,
+        corrupt_route_len,
+        descriptor_view.call_site_proof,
+        descriptor_view.call_site_proof_len,
+        TEST_ENCODED_PAYLOAD,
+        sizeof(TEST_ENCODED_PAYLOAD),
+        &opened));
+    TEST_CHECK(opened_page_is_empty(&opened));
+
+    memcpy(corrupt_commitment, TEST_ARTIFACT_COMMITMENT, sizeof(corrupt_commitment));
+    corrupt_commitment[0] ^= 0x01u;
+    binding.artifact_commitment = corrupt_commitment;
+    TEST_CHECK(!js_aken_native_page_open_bound_plan_payload(
+        &request,
+        &envelope,
+        &resolved,
+        &binding,
+        descriptor_view.bound_plan,
+        descriptor_view.bound_plan_len,
+        descriptor_view.route_encoding,
+        descriptor_view.route_encoding_len,
+        descriptor_view.call_site_proof,
+        descriptor_view.call_site_proof_len,
+        TEST_ENCODED_PAYLOAD,
+        sizeof(TEST_ENCODED_PAYLOAD),
+        &opened));
+    TEST_CHECK(opened_page_is_empty(&opened));
+    binding.artifact_commitment = TEST_ARTIFACT_COMMITMENT;
+
+    memcpy(corrupt_locator, TEST_LOCATOR_TOKEN, sizeof(corrupt_locator));
+    corrupt_locator[0] ^= 0x01u;
+    binding.locator_token = corrupt_locator;
+    TEST_CHECK(!js_aken_native_page_open_bound_plan_payload(
+        &request,
+        &envelope,
+        &resolved,
+        &binding,
+        descriptor_view.bound_plan,
+        descriptor_view.bound_plan_len,
+        descriptor_view.route_encoding,
+        descriptor_view.route_encoding_len,
+        descriptor_view.call_site_proof,
+        descriptor_view.call_site_proof_len,
+        TEST_ENCODED_PAYLOAD,
+        sizeof(TEST_ENCODED_PAYLOAD),
+        &opened));
+    TEST_CHECK(opened_page_is_empty(&opened));
+    binding.locator_token = TEST_LOCATOR_TOKEN;
 
     ok = 1;
 cleanup:
@@ -307,13 +410,21 @@ cleanup:
         js_vbc4_wipe_volatile(corrupt_descriptor, resolved.descriptor_encoding_len);
         free(corrupt_descriptor);
     }
+    if (corrupt_bound_plan) {
+        js_vbc4_wipe_volatile(corrupt_bound_plan, sizeof(TEST_BOUND_PLAN));
+        free(corrupt_bound_plan);
+    }
+    if (corrupt_route) {
+        js_vbc4_wipe_volatile(corrupt_route, corrupt_route_len);
+        free(corrupt_route);
+    }
     js_vbc4_wipe_volatile(corrupt_proof, sizeof(corrupt_proof));
     js_vbc4_wipe_volatile(corrupt_fingerprint, sizeof(corrupt_fingerprint));
     js_vbc4_wipe_volatile(corrupt_layout, sizeof(corrupt_layout));
-    js_vbc4_wipe_volatile(corrupt_shape, sizeof(corrupt_shape));
+    js_vbc4_wipe_volatile(corrupt_commitment, sizeof(corrupt_commitment));
+    js_vbc4_wipe_volatile(corrupt_locator, sizeof(corrupt_locator));
     js_vbc4_wipe_volatile(corrupt_leaf_digest, sizeof(corrupt_leaf_digest));
     js_vbc4_wipe_volatile(corrupt_mesh_root, sizeof(corrupt_mesh_root));
-    js_vbc4_wipe_volatile(corrupt_fragments, sizeof(corrupt_fragments));
     js_aken_native_page_envelope_wipe(&corrupt_envelope);
     js_aken_native_page_descriptor_view_wipe(&corrupt_descriptor_view);
     js_aken_native_page_descriptor_view_wipe(&descriptor_view);

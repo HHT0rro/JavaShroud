@@ -26,9 +26,9 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * Fresh-JVM proof for the exact P0 class-decrypt chain:
- * encrypted stub <clinit> -> sealed ClassEncryptionLoaderHelper -> sealed
- * JniMicrokernelHelper.nativeDecryptClassBytes -> jsw_k14/jsn_k14 -> defineClass.
+ * Fresh-JVM proof for the page-bound class-open chain:
+ * encrypted stub <clinit> -> sealed ClassEncryptionLoaderHelper.loadAkenClass
+ * -> per-class descriptor -> typed native ClassPage open -> defineClass.
  */
 class NativeClassEncryptionRuntimeRegressionTest {
     private val objectMapper = ObjectMapper()
@@ -44,7 +44,7 @@ class NativeClassEncryptionRuntimeRegressionTest {
             ?.takeIf { it.isNotEmpty() }
             ?.let(Path::of)
         try {
-            val baseline = runJar(inputJar, verify = true, useBootSecret = false)
+            val baseline = runJar(inputJar, verify = true)
             assertTrue(!baseline.timedOut, "Baseline fixture must finish. Output: ${baseline.output.take(500)}")
             assertEquals(7, baseline.exitCode, "Baseline fixture must execute its encrypted-target candidate. Output: ${baseline.output.take(500)}")
             assertTrue(baseline.output.contains("CLASS_DECRYPT=ok"), "Baseline fixture must reach its business marker")
@@ -63,23 +63,21 @@ class NativeClassEncryptionRuntimeRegressionTest {
                 ),
             )
             val engineEvents = captureStdout {
-                withTestBootSecret {
-                    dispatchRequest(
-                        buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())),
-                        EngineKernel(),
-                    )
-                }
+                dispatchRequest(
+                    buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())),
+                    EngineKernel(),
+                )
             }
             assertTrue(engineEvents.lines().any { it.contains("type = \"done\"") }, "Engine must finish the combined class/native transform: $engineEvents")
             assertTrue(Files.exists(outputJar), "Combined transform must produce an output JAR")
             assertEncryptedTargetStub(outputJar)
 
-            val protectedRun = runJar(outputJar, verify = true, useBootSecret = true)
+            val protectedRun = runJar(outputJar, verify = true)
             assertTrue(!protectedRun.timedOut, "Protected JAR must finish under -Xverify:all. Output: ${protectedRun.output.take(800)}")
             assertEquals(7, protectedRun.exitCode, "Protected JAR must preserve target return behavior. Output: ${protectedRun.output.take(800)}")
             assertTrue(
                 protectedRun.output.contains("CLASS_DECRYPT=ok"),
-                "Protected JAR must load the encrypted target through the native class-decrypt bridge. Output: ${protectedRun.output.take(800)}",
+                "Protected JAR must open the encrypted target through the bound native ClassPage bridge. Output: ${protectedRun.output.take(800)}",
             )
             assertFalse(
                 protectedRun.output.contains("IllegalAccessError"),
@@ -184,8 +182,10 @@ class NativeClassEncryptionRuntimeRegressionTest {
             ?: error("Encrypted target stub must bootstrap its decrypting class loader")
         val calls = clinit.instructions.asSequence().filterIsInstance<MethodInsnNode>().toList()
         assertTrue(
-            calls.any { it.desc == "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/Class;" },
-            "Encrypted target stub must invoke the sealed two-string class-loader bridge. Calls: " +
+            calls.any {
+                it.desc == "(Ljava/lang/String;)Ljava/lang/Class;"
+            },
+            "Encrypted target stub must invoke the sealed typed class-page bridge. Calls: " +
                 calls.joinToString { "${it.owner}.${it.name}${it.desc}" },
         )
     }
@@ -201,12 +201,14 @@ class NativeClassEncryptionRuntimeRegressionTest {
         return null
     }
 
-    private fun runJar(jar: Path, verify: Boolean, useBootSecret: Boolean): ProcessResult {
+    private fun runJar(jar: Path, verify: Boolean): ProcessResult {
         val command = mutableListOf("java")
         if (verify) command += "-Xverify:all"
         command += listOf("-jar", jar.toAbsolutePath().toString())
         val builder = ProcessBuilder(command).redirectErrorStream(true)
-        if (useBootSecret) builder.withTestBootSecret()
+        builder.environment().apply {
+            keys.removeIf { key -> key.startsWith("JAVASHROUD_BOOT_SECRET") }
+        }
         val process = builder.start()
         val finished = process.waitFor(90, TimeUnit.SECONDS)
         if (!finished) process.destroyForcibly()

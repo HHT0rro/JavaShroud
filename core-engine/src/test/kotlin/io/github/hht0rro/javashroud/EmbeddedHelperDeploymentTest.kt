@@ -13,6 +13,9 @@ import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployme
 import io.github.hht0rro.javashroud.transforms.protection.NativeKernelShellPacker
 import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
+import org.objectweb.asm.ClassReader
+import org.objectweb.asm.ClassVisitor
+import org.objectweb.asm.Opcodes
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import java.nio.file.Files
@@ -30,7 +33,7 @@ class EmbeddedHelperDeploymentTest {
     private val objectMapper = ObjectMapper()
 
     @Test
-    fun jni_microkernel_loader_embeds_all_helper_inner_classes() {
+    fun jni_microkernel_loader_embeds_only_aken_runtime_helper_closure() {
         val updated = EmbeddedHelperDeployment.injectRequiredHelpers(
             artifact = emptyArtifact(),
             executedPassIds = listOf("jni-microkernel-loader"),
@@ -39,14 +42,123 @@ class EmbeddedHelperDeploymentTest {
 
         for (entryName in listOf(
             "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.class",
-            "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper${"$"}RuntimeResourceMetadata.class",
-            "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper${"$"}SealedNativeLibrary.class",
+            "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper${"$"}AkenNativeLibrary.class",
             "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper${"$"}TypeParseResult.class",
             "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper${"$"}SamLambdaOptions.class",
             "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper${"$"}SamInvocationHandler.class",
         )) {
-            assertTrue(entryName in entries, "JNI microkernel helper dependency must be embedded: $entryName")
+            assertTrue(entryName in entries, "AKEN JNI helper dependency must be embedded: $entryName")
         }
+        for (legacyEntry in listOf(
+            "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper${"$"}RuntimeResourceMetadata.class",
+            "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper${"$"}SealedNativeLibrary.class",
+        )) {
+            assertFalse(legacyEntry in entries, "AKEN deployment must not embed legacy runtime helper: $legacyEntry")
+        }
+    }
+
+@Test
+    fun jni_microkernel_loader_emits_aken_only_outer_helper_without_legacy_boot_surface() {
+        val updated = EmbeddedHelperDeployment.injectRequiredHelpers(
+            artifact = emptyArtifact(),
+            executedPassIds = listOf("jni-microkernel-loader"),
+        )
+        val helperBytes = updated.jarEntries
+            .first { it.name == "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.class" }
+            .bytes
+        val helperText = helperBytes.toString(Charsets.ISO_8859_1)
+
+        for (legacyMarker in listOf(
+            "kek.dat",
+            "JSBK1",
+            "JSBM",
+            "JAVASHROUD_BOOT_SECRET_",
+            "META-INF/.r/boot.dat",
+            "BootMaterialEnvelope",
+            "BootKekSidecar",
+            "nativeInstallBootMaterial",
+            "nativeInstallBootEnvelope",
+            "nativeDecodeRuntimeResource",
+            "decodeRuntimeResourceForNative",
+            "nativeExecuteVmResource",
+            "executeVmResource",
+        )) {
+            assertFalse(helperText.contains(legacyMarker), "AKEN outer helper must omit legacy marker: $legacyMarker")
+        }
+    }
+
+    @Test
+    fun jni_microkernel_loader_emits_only_typed_page_native_surface() {
+        val updated = EmbeddedHelperDeployment.injectRequiredHelpers(
+            artifact = emptyArtifact(),
+            executedPassIds = listOf("jni-microkernel-loader"),
+        )
+        val helperBytes = updated.jarEntries
+            .first { it.name == "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.class" }
+            .bytes
+        val methods = linkedSetOf<String>()
+
+        ClassReader(helperBytes).accept(object : ClassVisitor(Opcodes.ASM9) {
+            override fun visitMethod(
+                access: Int,
+                name: String,
+                descriptor: String,
+                signature: String?,
+                exceptions: Array<out String>?,
+            ): org.objectweb.asm.MethodVisitor? {
+                methods += "$name$descriptor"
+                return null
+            }
+        }, ClassReader.SKIP_CODE or ClassReader.SKIP_DEBUG or ClassReader.SKIP_FRAMES)
+
+        val requiredTypedMethods = setOf(
+            "nativeInit(Ljava/lang/String;)I",
+            "nativeHeartbeat()I",
+            "nativeInstallAkenSessionNonce([B)Z",
+            "nativeExecuteAkenVmPage(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;",
+            "nativeDecodeAkenStringPage([BI[B)[B",
+            "nativeReadAkenClassPage([BI[B)[B",
+            "nativeConsumeAkenNativeChunk([BI[B)V",
+            "executeAkenVmPage(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;",
+            "decodeAkenStringPage([BI[B)[B",
+            "readAkenClassPage([BI[B)[B",
+            "consumeAkenNativeChunk([BI[B)V",
+        )
+        assertTrue(
+            methods.containsAll(requiredTypedMethods),
+            "AKEN helper must retain the complete typed page ABI: ${requiredTypedMethods - methods}",
+        )
+
+        val forbiddenNativeOrGenericMethods = setOf(
+            "nativeVerify",
+            "nativeGetVersion",
+            "nativeGetBootToken",
+            "nativeInstallBootMaterial",
+            "nativeInstallBootEnvelope",
+            "nativeIsBootMaterialReady",
+            "nativeAbortBootMaterial",
+            "nativePreloadRuntimeResources",
+            "nativeDecodeRuntimeResource",
+            "nativeDecryptAes",
+            "nativeDeriveClassEncryptionKey",
+            "nativeDecryptClassBytes",
+            "nativeSealedBindingKey",
+            "nativeGetMachineFingerprint",
+            "nativeExecuteVmResource",
+            "nativeExecuteVmResourceByToken",
+            "nativeExecuteVmResourceVoid",
+            "nativeExecuteVmResourceInt",
+            "nativeExecuteVmResourceIntInt",
+            "nativeExecuteVmResourceIntVoid",
+            "decodeRuntimeResourceEnvelope",
+            "decodeRuntimeResourceForNative",
+            "deriveClassEncryptionKey",
+            "decryptClassBytes",
+            "reconstructKey",
+            "nativeReconstructKey",
+        )
+        val leakedMethods = methods.map { it.substringBefore('(') }.toSet().intersect(forbiddenNativeOrGenericMethods)
+        assertTrue(leakedMethods.isEmpty(), "AKEN helper must not emit generic or key-returning methods: $leakedMethods")
     }
 
 

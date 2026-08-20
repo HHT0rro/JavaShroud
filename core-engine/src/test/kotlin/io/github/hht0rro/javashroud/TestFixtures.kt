@@ -10,6 +10,7 @@ import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
 import io.github.hht0rro.javashroud.model.config.PassSpec
+import io.github.hht0rro.javashroud.model.config.PassSelectionSpec
 import io.github.hht0rro.javashroud.model.config.RuleSet
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.protection.NativeKernelShellPacker
@@ -46,6 +47,7 @@ internal fun testConfig(
     allowRedundantPasses: Boolean = false,
     allowAnnotationPasses: Boolean = false,
     ruleSet: RuleSet = RuleSet(rules = emptyList()),
+    passSelections: List<PassSelectionSpec> = emptyList(),
 ): ObfuscationConfig = ObfuscationConfig(
     inputJarPath = inputJarPath,
     outputJarPath = outputJarPath,
@@ -54,6 +56,7 @@ internal fun testConfig(
     allowRedundantPasses = allowRedundantPasses,
     allowAnnotationPasses = allowAnnotationPasses,
     ruleSet = ruleSet,
+    passSelections = passSelections,
 )
 
 internal fun testPassSpec(

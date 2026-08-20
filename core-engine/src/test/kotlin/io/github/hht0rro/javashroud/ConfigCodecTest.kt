@@ -9,6 +9,7 @@ import io.github.hht0rro.javashroud.config.ensureReadableFile
 import io.github.hht0rro.javashroud.config.parseConfig
 import io.github.hht0rro.javashroud.config.requiredRootText
 import io.github.hht0rro.javashroud.config.validateConfig
+import io.github.hht0rro.javashroud.model.config.PassSelectionMode
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -173,6 +174,60 @@ class ConfigCodecTest {
             assertEquals("obfuscate", config.ruleSet.rules[0].action)
             assertEquals("com/example/internal/*", config.ruleSet.rules[1].target)
             assertEquals("exclude", config.ruleSet.rules[1].action)
+            assertTrue(config.passSelections.isEmpty(), "v1 Workbench TOML must retain global-only behavior")
+        } finally {
+            tempDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun parseConfig_parses_engine_toml_passSelections_without_losing_method_descriptors() {
+        val tempDir = Files.createTempDirectory("javashroud-engine-pass-selection-config-codec")
+        val inputJar = tempDir.resolve("input.jar")
+        val outputJar = tempDir.resolve("output.jar")
+        val configPath = tempDir.resolve("engine.toml")
+        Files.writeString(inputJar, "fixture")
+        Files.writeString(configPath, """
+            inputJarPath = "${formatTomlPath(inputJar)}"
+            outputJarPath = "${formatTomlPath(outputJar)}"
+            allowOptInPasses = true
+
+            [[passes]]
+            id = "method-virtualization"
+            enabled = true
+
+            [ruleSet]
+            [[ruleSet.rules]]
+            target = "example/GlobalExcluded"
+            action = "exclude"
+
+            [[passSelections]]
+            passId = "method-virtualization"
+            mode = "selected-only"
+
+            [[passSelections.rules]]
+            target = "example/Target"
+            action = "obfuscate"
+
+            [[passSelections.rules]]
+            target = "example/Target#find:(Ljava/lang/String;)Ljava/lang/String;"
+            action = "exclude"
+        """.trimIndent())
+
+        try {
+            val config = parseConfig(configPath)
+
+            assertEquals("example/GlobalExcluded", config.ruleSet.rules.single().target)
+            val selection = config.passSelections.single()
+            assertEquals("method-virtualization", selection.passId)
+            assertEquals(PassSelectionMode.SELECTED_ONLY, selection.mode)
+            assertEquals(
+                listOf(
+                    "example/Target" to "obfuscate",
+                    "example/Target#find:(Ljava/lang/String;)Ljava/lang/String;" to "exclude",
+                ),
+                selection.rules.map { it.target to it.action },
+            )
         } finally {
             tempDir.toFile().deleteRecursively()
         }
@@ -371,6 +426,62 @@ class ConfigCodecTest {
             val validated = validateConfig(config, dummyPath)
 
             assertEquals(listOf("strip-compile-debug-info"), validated.passes.map { it.id })
+        } finally {
+            Files.deleteIfExists(inputJar)
+        }
+    }
+
+    @Test
+    fun validateConfig_rejects_unknown_pass_ids_before_execution() {
+        val inputJar = Files.createTempFile("javashroud-config-unknown-pass", ".jar")
+        try {
+            val error = assertFailsWith<IllegalArgumentException> {
+                validateConfig(
+                    testConfig(
+                        inputJarPath = inputJar.toString(),
+                        outputJarPath = inputJar.resolveSibling("out.jar").toString(),
+                        passes = listOf(
+                            testPassSpec(id = "missing-enabled"),
+                            testPassSpec(id = "missing-disabled", enabled = false),
+                        ),
+                    ),
+                    dummyPath,
+                )
+            }
+
+            assertTrue(error.message.orEmpty().contains("unknown pass IDs found: 'missing-disabled', 'missing-enabled'"))
+        } finally {
+            Files.deleteIfExists(inputJar)
+        }
+    }
+
+    @Test
+    fun validateConfig_rejects_removed_aken_v4_boot_key_delivery_with_migration_message() {
+        val inputJar = Files.createTempFile("javashroud-config-aken-v4-removed-param", ".jar")
+        try {
+            val error = assertFailsWith<IllegalArgumentException> {
+                validateConfig(
+                    testConfig(
+                        inputJarPath = inputJar.toString(),
+                        outputJarPath = inputJar.resolveSibling("out.jar").toString(),
+                        allowOptInPasses = true,
+                        passes = listOf(
+                            testPassSpec(
+                                id = "jni-microkernel-loader",
+                                params = mapOf(
+                                    "bootKeyDelivery" to com.fasterxml.jackson.databind.node.TextNode("embedded"),
+                                ),
+                            ),
+                        ),
+                    ),
+                    dummyPath,
+                )
+            }
+
+            assertEquals(
+                "jni-microkernel-loader bootKeyDelivery 已由 AKEN v4 移除；删除该配置项后重新构建。",
+                error.message,
+            )
         } finally {
             Files.deleteIfExists(inputJar)
         }

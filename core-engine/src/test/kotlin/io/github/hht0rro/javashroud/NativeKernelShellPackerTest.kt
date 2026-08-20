@@ -227,6 +227,47 @@ class NativeKernelShellPackerTest {
     }
 
     @Test
+    fun aken_v4_chunk_reorder_and_duplication_fail_closed_before_inner_decode() {
+        var state = 0x1357_9BDF
+        val multiChunkNative = ByteArray(7_000) {
+            state = state xor (state shl 13)
+            state = state xor (state ushr 17)
+            state = state xor (state shl 5)
+            state.toByte()
+        }
+        val bundle = maxBundle(bytes = multiChunkNative, seed = 53L)
+        assertTrue(bundle.chunkCount >= 2, "fixture must contain multiple authenticated chunks")
+
+        val chunks = (0 until bundle.chunkCount).map { index ->
+            val start = index * bundle.chunkSize
+            val end = minOf(start + bundle.chunkSize, bundle.encodedPayload.size)
+            bundle.encodedPayload.copyOfRange(start, end)
+        }
+        val reorderedPayload = chunks.asReversed().fold(ByteArray(0)) { acc, chunk -> acc + chunk }
+        assertEquals(bundle.encodedPayload.size, reorderedPayload.size)
+        assertEquals(
+            null,
+            NativeKernelShellPacker.decodeMaxPayloadForTest(bundle.copy(encodedPayload = reorderedPayload)),
+            "reordered chunks must fail the authenticated payload commitment",
+        )
+
+        val duplicatedPayload = bundle.encodedPayload.copyOf()
+        val firstChunkLength = minOf(bundle.chunkSize, duplicatedPayload.size)
+        val secondChunkOffset = bundle.chunkSize
+        val secondChunkLength = minOf(bundle.chunkSize, duplicatedPayload.size - secondChunkOffset)
+        System.arraycopy(duplicatedPayload, 0, duplicatedPayload, secondChunkOffset, secondChunkLength.coerceAtMost(firstChunkLength))
+        assertEquals(
+            null,
+            NativeKernelShellPacker.decodeMaxPayloadForTest(bundle.copy(encodedPayload = duplicatedPayload)),
+            "duplicated chunks must fail before inner image decode",
+        )
+        multiChunkNative.fill(0)
+        reorderedPayload.fill(0)
+        duplicatedPayload.fill(0)
+        chunks.forEach { it.fill(0) }
+    }
+
+    @Test
     fun repeated_aken_v4_payloads_diverge_while_each_build_remains_verifiable() {
         val first = maxBundle(seed = 17L)
         val second = maxBundle(seed = 17L)

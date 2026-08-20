@@ -54,7 +54,7 @@ class CatalogConfidentialityTest {
     }
 
     @Test
-    fun sealed_native_bootstrap_keeps_only_locator_rows_and_encrypts_bindings_separately() {
+    fun sealed_native_locator_keeps_locator_rows_separate_from_public_aken_bindings() {
         val context = Vbc4BuildContext(
             masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { (it * 13 + 7).toByte() },
             nativeSeed = 0x24681357L,
@@ -78,65 +78,47 @@ class CatalogConfidentialityTest {
         val sealed = withVbc4BuildContext(context) {
             RuntimeArtifactSealing.seal(artifact, context.nativeSeed, rewritesVmRuntime = false)
         }
-        val jsbiEntries = sealed.jarEntries.filter { it.bytes.startsWithAscii("JSBI") }
-        val jsbi = jsbiEntries.single { decodeJsbiPayload(it.bytes).decodeToString().contains("windows-x64|") }
-        val bootstrapPlain = decodeJsbiPayload(jsbi.bytes).decodeToString()
-        assertTrue(bootstrapPlain.lineSequence().filter { it.isNotBlank() }.all { it.split('|').size == 3 && it.first() != 'B' && it.first() != 'M' })
-        assertFalse(jsbi.bytes.containsAscii("B|"), "bootstrap locator must not expose class bindings")
-        assertFalse(jsbi.bytes.containsAscii("M|"), "bootstrap locator must not expose method bindings")
+        val nativeLocatorEntries = sealed.jarEntries.filter { entry ->
+            entry.bytes.decodeToString().lineSequence().any { line -> line.startsWith("windows-x64|") }
+        }
+        val nativeLocator = nativeLocatorEntries.single()
+        val locatorText = nativeLocator.bytes.decodeToString()
+        assertTrue(locatorText.lineSequence().filter { it.isNotBlank() }.all { it.split('|').size == 3 && it.first() != 'B' && it.first() != 'M' })
+        assertFalse(nativeLocator.bytes.startsWithAscii("JSBI"), "AKEN native locator must not use the retired JSBI envelope")
+        assertFalse(nativeLocator.bytes.startsWithAscii("JSRP"), "AKEN native locator must not use the retired JSRP envelope")
+        assertFalse(nativeLocator.bytes.containsAscii("B|"), "native locator must not expose class bindings")
+        assertFalse(nativeLocator.bytes.containsAscii("M|"), "native locator must not expose method bindings")
 
-        val decodedAnchorEntries = withVbc4BuildContext(context) {
-            sealed.jarEntries.mapNotNull { entry ->
-                RuntimeResourceCodec.decode(entry.bytes)?.let { plain -> entry to plain }
-            }
+        val bindingResources = sealed.jarEntries.filter { entry ->
+            entry.bytes.containsAscii("B|") || entry.bytes.containsAscii("M|")
         }
-        val bindingResources = decodedAnchorEntries.filter { (_, plain) ->
-            plain.containsAscii("B|") || plain.containsAscii("M|")
-        }
-        assertEquals(1, bindingResources.size, "one anchor-encrypted binding resource must be emitted")
-        assertFalse(sealed.jarEntries.any { it.name == "META-INF/.r/bindings.dat" }, "legacy plaintext binding path must not survive sealing")
-        val (bindingResource, bindingPlain) = bindingResources.single()
-        assertTrue(bindingPlain.containsAscii("B|"), "binding plaintext must contain class rows after decryption")
-        assertFalse(bindingResource.bytes.containsAscii("B|"), "binding ciphertext must not expose class rows")
-        assertFalse(bindingResource.bytes.containsAscii("M|"), "binding ciphertext must not expose method rows")
-        assertEquals(context.runtimeKeyPartitions.anchorSlotId, RuntimeResourceCodec.partitionId(bindingResource.bytes))
-        assertEquals(0, sealed.jarEntries.count { entry -> entry.bytes.containsAscii("B|") || entry.bytes.containsAscii("M|") })
+        assertEquals(1, bindingResources.size, "one raw AKEN relocation-binding resource must be emitted")
+        assertFalse(sealed.jarEntries.any { it.name == "META-INF/.r/bindings.dat" }, "legacy fixed binding path must not survive sealing")
+        val bindingResource = bindingResources.single()
+        assertTrue(bindingResource.bytes.containsAscii("B|"), "binding metadata must contain class relocation rows")
+        assertFalse(bindingResource.bytes.startsWithAscii("JSRP"), "AKEN relocation metadata must not depend on the retired root-key envelope")
+        assertFalse(bindingResource.bytes.startsWithAscii("JSBI"), "AKEN relocation metadata must stay independent of the bootstrap index")
+        assertEquals(null, withVbc4BuildContext(context) { RuntimeResourceCodec.decode(bindingResource.bytes) })
 
         val rewrittenHelper = sealed.classArtifacts.single().bytes
-        val bindingPath = bindingResource.name
-        assertTrue(classUtf8Constants(rewrittenHelper).contains(bindingPath), "rewritten helper must reference the separately sealed binding resource")
+        assertTrue(
+            classUtf8Constants(rewrittenHelper).contains(bindingResource.name),
+            "rewritten helper must reference the artifact-specific AKEN binding path",
+        )
     }
 
     @Test
-    fun sealed_native_binding_decoder_round_trips_and_rejects_tampering() {
-        val context = Vbc4BuildContext(
-            masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { (it * 19 + 3).toByte() },
-            nativeSeed = 0x33557799L,
-            jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { (it * 23 + 1).toByte() },
+    fun sealed_native_binding_rows_are_raw_public_relocation_metadata() {
+        val lines = listOf(
+            "B|0123456789abcdef|r/ab/C0123456789abcdef012345",
+            "M|fedcba9876543210|m_0123456789abcdef",
         )
-        withVbc4BuildContext(context) {
-            val encoded = encodeSealedNativeBindingLines(
-                listOf("B|0123456789abcdef|r/ab/C0123456789abcdef012345", "M|fedcba9876543210|m_0123456789abcdef"),
-                context.nativeSeed,
-            )
-            assertFalse(encoded.containsAscii("B|"))
-            assertFalse(encoded.containsAscii("M|"))
-
-            val decoded = RuntimeResourceCodec.decode(encoded) ?: error("binding envelope did not decode")
-            assertTrue(decoded.decodeToString().contains("B|0123456789abcdef|"))
-            assertTrue(decoded.decodeToString().contains("M|fedcba9876543210|"))
-
-            val tampered = encoded.copyOf().also { it[it.size / 2] = (it[it.size / 2].toInt() xor 0x40).toByte() }
-            assertEquals(null, RuntimeResourceCodec.decode(tampered), "binding envelope tampering must fail closed")
-        }
-    }
-
-    private fun decodeJsbiPayload(bytes: ByteArray): ByteArray {
-        val size = (bytes[5].toInt() and 0xFF) or
-            ((bytes[6].toInt() and 0xFF) shl 8) or
-            ((bytes[7].toInt() and 0xFF) shl 16) or
-            ((bytes[8].toInt() and 0xFF) shl 24)
-        return bytes.copyOfRange(9, 9 + size)
+        val encoded = encodeSealedNativeBindingLines(lines, 0x33557799L)
+        assertEquals(lines.joinToString(separator = "\n", postfix = "\n"), encoded.decodeToString())
+        assertTrue(encoded.containsAscii("B|"))
+        assertTrue(encoded.containsAscii("M|"))
+        assertFalse(encoded.startsWithAscii("JSRP"))
+        assertFalse(encoded.startsWithAscii("JSBI"))
     }
 
     private fun ByteArray.startsWithAscii(value: String): Boolean =

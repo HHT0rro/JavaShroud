@@ -2,6 +2,7 @@ package io.github.hht0rro.javashroud.aken
 
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenArtifactEntry
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenBuildPlan
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHandle
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRuntimePageDescriptor
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4FinalizationLayout
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4LogicalMethodIdentity
@@ -57,9 +58,9 @@ class AkenVbc4PendingPagePlannerTest {
             assertEquals(listOf(0, 2, 3), partitions.map { it.firstStorageBlockOrdinal })
             assertEquals(listOf(1, 2, 4), partitions.map { it.lastStorageBlockOrdinal })
             assertEquals(listOf(480, 600, 300), partitions.map { it.physicalBlockLength })
-            assertEquals(listOf(108, 0, 0), partitions.map { it.framePrefixLength })
+            assertEquals(listOf(106, 0, 0), partitions.map { it.framePrefixLength })
             assertEquals(listOf(0, 0, 49), partitions.map { it.frameSuffixLength })
-            assertEquals(listOf(588, 600, 349), partitions.map { it.plaintextLength })
+            assertEquals(listOf(586, 600, 349), partitions.map { it.plaintextLength })
             assertEquals(3, proofRequests)
 
             batch.consumePendingPagesForBuild { pages ->
@@ -342,14 +343,13 @@ class AkenVbc4PendingPagePlannerTest {
     ): ByteArray {
         require(blockIds.isNotEmpty() && blockIds.size == encryptedPayloadLengths.size)
         val out = ByteArrayOutputStream()
-        out.write("VBC4".encodeToByteArray())
-        writeU2(out, 4)
+        out.write("VBCX".encodeToByteArray())
         out.write(ByteArray(16))
         writeU4(out, 0xAABBCCDDL)
         out.write(ByteArray(16))
         writeU2(out, 0)
         writeU2(out, blockIds.size)
-        writeU4(out, 0)
+        writeU4(out, 4)
         writeU4(out, 4)
         out.write(byteArrayOf(1, 2, 3, 4))
         blockIds.forEachIndexed { ordinal, blockId ->
@@ -397,13 +397,12 @@ class AkenVbc4PendingPagePlannerTest {
         }
 
     private fun descriptorFromNativeLocatorRecord(record: ByteArray): AkenRuntimePageDescriptor {
-        require(record.size >= 1 + Long.SIZE_BYTES + 1 + Int.SIZE_BYTES + 64) {
-            "AKEN native locator record is too short for a v2 descriptor"
+        require(record.size >= Long.SIZE_BYTES + 1 + Int.SIZE_BYTES + Int.SIZE_BYTES + 64) {
+            "AKEN native locator record is too short for the current descriptor"
         }
-        require((record[0].toInt() and 0xFF) == 2) {
-            "unexpected AKEN native locator record version"
-        }
-        var cursor = 1 + Long.SIZE_BYTES + 1 + Int.SIZE_BYTES
+        // Current compiler records begin directly with the entry token; do not
+        // reintroduce the retired leading record-version byte.
+        var cursor = Long.SIZE_BYTES + 1 + Int.SIZE_BYTES
 
         fun readFrame(label: String): ByteArray {
             require(cursor + Int.SIZE_BYTES <= record.size) {
@@ -434,8 +433,11 @@ class AkenVbc4PendingPagePlannerTest {
             envelope = readFrame("envelope")
             descriptorBytes = readFrame("descriptor")
             route = readFrame("route")
+            require(handle.size == AkenHandle.ENCODED_HANDLE_SIZE && envelope.isNotEmpty() && descriptorBytes.isNotEmpty() && route.isNotEmpty()) {
+                "AKEN native locator current record frames are invalid"
+            }
             require(cursor + 64 == record.size) {
-                "AKEN native locator v2 tail length is invalid"
+                "AKEN native locator current record tail length is invalid"
             }
             stateBindingLayoutDigest = record.copyOfRange(cursor, cursor + 32)
             cursor += 32
@@ -444,7 +446,16 @@ class AkenVbc4PendingPagePlannerTest {
             require(cursor == record.size) {
                 "AKEN native locator record has trailing bytes"
             }
-            return AkenRuntimePageDescriptor.decode(checkNotNull(descriptorBytes))
+            val descriptor = AkenRuntimePageDescriptor.decode(checkNotNull(descriptorBytes))
+            val descriptorRoute = descriptor.route.encode()
+            try {
+                require(descriptorRoute.contentEquals(route)) {
+                    "AKEN native locator route must equal the descriptor's embedded current route"
+                }
+            } finally {
+                Arrays.fill(descriptorRoute, 0)
+            }
+            return descriptor
         } finally {
             handle?.let { Arrays.fill(it, 0) }
             envelope?.let { Arrays.fill(it, 0) }

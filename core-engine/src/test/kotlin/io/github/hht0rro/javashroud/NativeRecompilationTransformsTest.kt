@@ -36,6 +36,26 @@ class NativeRecompilationTransformsTest {
     }
 
     @Test
+    fun native_kernel_build_scripts_include_machine_id_source() {
+        val scripts = listOf(
+            "src/main/native/build-native-kernel.bat",
+            "src/main/native/build-native-kernel-all.bat",
+            "src/main/native/build-native-kernel-linux.sh",
+            "src/main/native/build-native-kernel-macos.sh",
+            "src/main/native/build-native-kernel-zig.sh",
+        )
+        scripts.forEach { relativePath ->
+            val source = java.nio.file.Files.readString(resolveSource(relativePath))
+            assertTrue(source.contains("js_machine_id.c"), "$relativePath must compile js_machine_id.c")
+        }
+
+        val recompilationSource = java.nio.file.Files.readString(
+            resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeRecompilationTransforms.kt"),
+        )
+        assertTrue(recompilationSource.contains("\"js_machine_id.c\""))
+    }
+
+    @Test
     fun native_recompilation_retries_known_zig_cache_failures() {
         val source = java.nio.file.Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeRecompilationTransforms.kt"))
         val compileBody = source.substringAfter("internal fun runZigCompileWithRetry").substringBefore("private fun isTransientZigFileOpenFailure")
@@ -502,12 +522,18 @@ class NativeRecompilationTransformsTest {
         assertTrue(resource.contains("CallNonvirtualObjectMethod(env, class_obj, js_jni_cache.class_class, js_jni_cache.class_get_class_loader"), "Manual mapped resource loading must avoid virtual Class.getClassLoader dispatch")
         assertTrue(resource.contains("CallNonvirtualObjectMethod(env, class_obj, js_jni_cache.class_class, js_jni_cache.class_get_name"), "Manual mapped resource loading must avoid virtual Class.getName dispatch")
         assertTrue(resource.contains("CallNonvirtualObjectMethod(env, class_obj, js_jni_cache.class_class, js_jni_cache.class_get_resource_as_stream"), "Manual mapped resource loading must avoid virtual Class.getResourceAsStream dispatch")
-        assertTrue(resource.contains("jclass loader_cls = (*env)->GetObjectClass(env, loader)"), "Manual mapped resource loading must resolve ClassLoader methods from the actual receiver class")
-        assertTrue(resource.contains("jclass thread_obj_cls = (*env)->GetObjectClass(env, thread)"), "Manual mapped context loader lookup must resolve Thread methods from the actual receiver class")
-        assertTrue(resource.contains("jclass stream_cls = (*env)->GetObjectClass(env, stream)"), "Manual mapped stream reads must resolve InputStream methods from the actual receiver class")
-        assertFalse(resource.contains("js_jni_cache.initialized ? js_jni_cache.class_loader_get_resource_as_stream"), "Manual mapped resource loading must not reuse cached ClassLoader virtual method IDs")
-        assertFalse(resource.contains("js_jni_cache.initialized ? js_jni_cache.thread_get_context_class_loader"), "Manual mapped resource loading must not reuse cached Thread virtual method IDs")
-        assertFalse(resource.contains("js_jni_cache.initialized ? js_jni_cache.input_stream_read_all_bytes"), "Manual mapped resource loading must not reuse cached InputStream virtual method IDs")
+        assertTrue(resource.contains("js_jni_cache_validate_loader(env, loader)"), "Resource loading must validate the actual ClassLoader receiver before a cached method ID is used")
+        assertTrue(resource.contains("js_jni_cache.class_loader_get_resource_as_stream"), "Repeated resource opens must reuse the validated ClassLoader.getResourceAsStream method ID")
+        assertTrue(resource.contains("js_jni_cache.thread_get_context_class_loader"), "Context-loader discovery must reuse the validated Thread.getContextClassLoader method ID")
+        assertTrue(resource.contains("js_jni_cache.input_stream_read_all_bytes"), "Repeated InputStream reads must reuse the validated readAllBytes method ID when available")
+        assertTrue(resource.contains("js_jni_cache.input_stream_read"), "The Java 8 InputStream fallback must reuse a validated read method ID")
+        assertTrue(resource.contains("if (stream) (*env)->DeleteLocalRef(env, stream);"), "Repeated resource opens must release each stream local reference after native consumption")
+        assertTrue(resource.contains("typedef struct {\n    ZSTD_DCtx *dctx;"), "Resource decompression must use an explicit per-thread Zstd context state")
+        assertTrue(resource.contains("js_vm_zstd_context_key_init") && resource.contains("pthread_key_create"), "POSIX resource decompression must bind Zstd context state to pthread TLS")
+        assertTrue(resource.contains("FlsAlloc(js_vm_zstd_context_destructor)"), "Windows resource decompression must bind Zstd context state to FLS")
+        assertTrue(resource.contains("state->generation == generation") && resource.contains("ZSTD_DCtx_reset(state->dctx, ZSTD_reset_session_only)"), "Zstd context reuse must be generation-bound and reset before each decode")
+        assertTrue(resource.contains("js_runtime_metrics_note_decompress_context_reuse()"), "Zstd context reuse must update the runtime metric")
+        assertTrue(resource.contains("js_vbc4_wipe_volatile(plain, (size_t)plain_len)"), "Zstd decode failures must wipe partial plaintext before release")
         assertTrue(resource.contains("if (!js_vm_preload_in_progress)"), "Preload resource loading must not consult the dispatch-frame active host loader")
         val preloadBody = core.substringAfter(
             "jsn_k9(JNIEnv *env, jclass cls, jbyteArray preload_index, jbyteArray commitments, jbyteArray startup_nonce)",
@@ -519,13 +545,17 @@ class NativeRecompilationTransformsTest {
             preloadReset >= 0 && catalogRegistration > preloadReset && lazyLoadEnable > catalogRegistration,
             "Native preload must reset prior state and keep lazy resource loading disabled until the authenticated VM catalog is registered",
         )
-        val normalizedCore = core.replace("\r\n", "\n")
-        assertTrue(
-            normalizedCore.contains("#elif defined(__GNUC__) || defined(__clang__)\n#define JS_THREAD_LOCAL"),
-            "Linux manual-mapped inner runtime must keep small VM runtime caches process-static instead of using ELF TLS",
-        )
-        assertFalse(core.contains("__thread static js_vm_program"), "Linux manual-mapped inner runtime must not require ELF TLS for active VM program state")
-        assertFalse(core.contains("__thread static jobject"), "Linux manual-mapped inner runtime must not require ELF TLS for active host loader state")
+        assertTrue(core.contains("typedef struct js_vm_thread_state"), "Manual-mapped inner runtime must define an OS-TLS/FLS-owned VM thread state")
+        assertTrue(core.contains("active_program_stack[JS_VM_ACTIVE_PROGRAM_STACK_CAPACITY]"), "VM thread state must keep nested active programs in a bounded per-thread stack")
+        assertTrue(core.contains("jobject active_host_loader"), "VM thread state must keep the active host loader per thread")
+        assertTrue(core.contains("js_vm_thread_state_destroy"), "VM thread state must provide a destructor that wipes thread-owned state")
+        assertTrue(core.contains("FlsAlloc") && core.contains("pthread_key_create"), "Manual-mapped inner runtime must support Windows FLS and POSIX pthread TLS")
+        assertTrue(core.contains("JS_VM_EXECUTION_FRAME_POOL_CAPACITY"), "VM runtime must retain a bounded fail-closed frame-pool fallback")
+        assertTrue(core.contains("static int js_secret_get(int id, char out[JS_SECRET_BUFFER_SIZE])"), "Native secret decoding must write into a caller-owned buffer")
+        assertTrue(core.contains("char class_name[JS_SECRET_BUFFER_SIZE]"), "Secret-backed class lookup must use a per-call stack buffer")
+        assertTrue(core.contains("js_vbc4_wipe_volatile(class_name, sizeof(class_name))"), "Secret-backed class lookup must wipe its per-call plaintext buffer immediately after JNI consumes it")
+        assertFalse(core.contains("js_secret_buf"), "Concurrent JNI/property lookups must not share one mutable plaintext secret buffer")
+        assertFalse(core.contains("FindClass(env, js_secret_get("), "JNI class lookups must not borrow plaintext from a shared secret-return API")
         assertFalse(core.contains("js_vm_method_from_object(env, obj, \"intValue\""), "Manual mapped primitive unboxing must not perform runtime GetMethodID for final boxed JDK classes")
         assertTrue(core.contains("GetIntField(env, obj, js_jni_cache.integer_value_field"), "Manual mapped primitive unboxing must read cached boxed value fields instead of invoking boxed methods")
         assertTrue(core.contains("js_vm_alloc_boxed_value"), "Manual mapped primitive boxing must allocate wrappers without invoking boxed valueOf methods")
@@ -587,7 +617,12 @@ class NativeRecompilationTransformsTest {
                 source.contains("pe64 header range is outside the mapped image"),
             "Windows max shell loader must validate optional header directory count and mapped header bounds before reading fixed data directories.",
         )
-        assertTrue(source.contains("VirtualAlloc") && source.contains("IMAGE_FIRST_SECTION"), "Windows max shell loader must allocate an image and map sections")
+        assertTrue(
+            source.contains("VirtualAlloc") &&
+                source.contains("IMAGE_SECTION_HEADER") &&
+                source.contains("pe64 section table is out of range"),
+            "Windows max shell loader must allocate an image and map validated PE sections",
+        )
         assertTrue(
             source.contains("IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_WRITE") &&
                 source.contains("pe64 section requests writable executable memory") &&
@@ -651,6 +686,12 @@ class NativeRecompilationTransformsTest {
         assertTrue(source.contains("js_macho_image_plan") && source.contains("js_shell_macho_plan_segment"), "macOS max shell loader must build an anonymous image layout plan from Mach-O segments")
         assertTrue(source.contains("JS_MACHO_PAGE_GRANULE") && source.contains("mapping_size") && source.contains("slide"), "macOS max shell loader must compute page-aligned mapping size and slide before execution support is enabled")
         assertTrue(source.contains("JS_VM_PROT_EXECUTE") && source.contains("text_low") && source.contains("text_high"), "macOS max shell loader must identify executable image bounds for future inner ABI pointer validation")
+        assertTrue(
+            source.contains("(seg->initprot & (JS_VM_PROT_WRITE | JS_VM_PROT_EXECUTE)) == (JS_VM_PROT_WRITE | JS_VM_PROT_EXECUTE)") &&
+                source.contains("mach-o segment requests writable executable memory") &&
+                source.contains("if (mprotect(") && source.contains("mach-o segment protection failed"),
+            "macOS manual mapper must reject writable-executable segments before final mprotect transitions.",
+        )
         assertTrue(source.contains("js_shell_macho_materialize_segments") && source.contains("mmap(0, (size_t)plan->mapping_size"), "macOS max shell loader must allocate an anonymous image mapping before execution support is enabled")
         assertTrue(source.contains("memcpy((unsigned char *)mapping + target_offset") && source.contains("mprotect("), "macOS max shell loader must copy segment file ranges and plan per-segment memory protections")
         assertTrue(source.contains("munmap(planned_mapping") && source.contains("segment materialization"), "macOS max shell loader must release the planned mapping while execution remains fail-closed")

@@ -1,6 +1,8 @@
 package io.github.hht0rro.javashroud
 
 import com.fasterxml.jackson.databind.node.JsonNodeFactory
+import io.github.hht0rro.javashroud.kernel.validateSelectedOnlyPassSelectionsAgainstArtifact
+import io.github.hht0rro.javashroud.kernel.EngineKernel
 import io.github.hht0rro.javashroud.kernel.PassExecutionResult
 import io.github.hht0rro.javashroud.kernel.buildArtifactSummaryMessage
 import io.github.hht0rro.javashroud.kernel.buildDoneEvent
@@ -11,16 +13,24 @@ import io.github.hht0rro.javashroud.kernel.buildRunSummaryEvent
 import io.github.hht0rro.javashroud.kernel.calculatePassTickProgress
 import io.github.hht0rro.javashroud.kernel.calculateProgress
 import io.github.hht0rro.javashroud.model.config.PassSpec
+import io.github.hht0rro.javashroud.model.config.PassSelectionMode
+import io.github.hht0rro.javashroud.model.config.PassSelectionSpec
+import io.github.hht0rro.javashroud.model.config.RuleSpec
+import io.github.hht0rro.javashroud.model.analysis.MemberKind
+import io.github.hht0rro.javashroud.model.analysis.MemberSummary
 import io.github.hht0rro.javashroud.model.passes.PassContext
 import io.github.hht0rro.javashroud.model.protocol.EngineEvent
 import io.github.hht0rro.javashroud.model.schema.ModuleDefinition
+import io.github.hht0rro.javashroud.model.schema.ModuleTargetingCapability
 import io.github.hht0rro.javashroud.model.transforms.TransformResult
 import io.github.hht0rro.javashroud.modules.ModuleTransform
 import io.github.hht0rro.javashroud.modules.ObfuscationModule
 import io.github.hht0rro.javashroud.passes.ExecutablePass
 import io.github.hht0rro.javashroud.passes.PassDescriptor
+import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 class KernelRunSupportTest {
@@ -165,6 +175,121 @@ class KernelRunSupportTest {
     }
 
     @Test
+    fun selectedOnlyPreflight_accepts_empty_independent_scope() {
+        val passId = "strip-compile-debug-info"
+        val config = testConfig(
+            passes = listOf(testPassSpec(id = passId)),
+            passSelections = listOf(
+                PassSelectionSpec(passId = passId, mode = PassSelectionMode.SELECTED_ONLY),
+            ),
+        )
+        val artifact = testAttachedArtifact(
+            config = config,
+            classArtifacts = listOf(testClassArtifact(internalName = "sample/Present")),
+        )
+
+        validateSelectedOnlyPassSelectionsAgainstArtifact(config, artifact)
+    }
+
+    @Test
+    fun selectedOnlyPreflight_ignores_nonMatching_exclusions() {
+        val passId = "strip-compile-debug-info"
+        val config = testConfig(
+            passes = listOf(testPassSpec(id = passId)),
+            passSelections = listOf(
+                PassSelectionSpec(
+                    passId = passId,
+                    mode = PassSelectionMode.SELECTED_ONLY,
+                    rules = listOf(RuleSpec(target = "sample/Missing", action = "exclude")),
+                ),
+            ),
+        )
+        val artifact = testAttachedArtifact(
+            config = config,
+            classArtifacts = listOf(testClassArtifact(internalName = "sample/Present")),
+        )
+
+        validateSelectedOnlyPassSelectionsAgainstArtifact(config, artifact)
+    }
+
+    @Test
+    fun selectedOnlyPreflight_rejects_when_exclusions_remove_every_processable_target() {
+        val passId = "strip-compile-debug-info"
+        val config = testConfig(
+            passes = listOf(testPassSpec(id = passId)),
+            passSelections = listOf(
+                PassSelectionSpec(
+                    passId = passId,
+                    mode = PassSelectionMode.SELECTED_ONLY,
+                    rules = listOf(RuleSpec(target = "sample/Present", action = "exclude")),
+                ),
+            ),
+        )
+        val artifact = testAttachedArtifact(
+            config = config,
+            classArtifacts = listOf(testClassArtifact(internalName = "sample/Present")),
+        )
+
+        val error = assertFailsWith<IllegalArgumentException> {
+            validateSelectedOnlyPassSelectionsAgainstArtifact(config, artifact)
+        }
+        assertTrue(error.message.orEmpty().contains(passId))
+        assertTrue(error.message.orEmpty().contains("independent scope excludes every processable class or method"))
+    }
+
+    @Test
+    fun selectedOnlyPreflight_allows_method_restore_inside_excluded_class() {
+        val passId = "method-virtualization"
+        val config = testConfig(
+            passes = listOf(testPassSpec(id = passId)),
+            passSelections = listOf(
+                PassSelectionSpec(
+                    passId = passId,
+                    mode = PassSelectionMode.SELECTED_ONLY,
+                    rules = listOf(
+                        RuleSpec(target = "sample/Target", action = "exclude"),
+                        RuleSpec(target = "sample/Target#present:()I", action = "obfuscate"),
+                    ),
+                ),
+            ),
+        )
+        val artifact = testAttachedArtifact(
+            config = config,
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = "sample/Target",
+                    methodSummaries = listOf(MemberSummary(MemberKind.METHOD, "present", "()I", 0)),
+                ),
+            ),
+        )
+
+        validateSelectedOnlyPassSelectionsAgainstArtifact(config, artifact)
+    }
+
+    @Test
+    fun selectedOnlyPreflight_ignores_disabled_and_inherited_pass_selections() {
+        val disabledPassId = "strip-compile-debug-info"
+        val inheritedPassId = "member-hide"
+        val config = testConfig(
+            passes = listOf(
+                testPassSpec(id = disabledPassId, enabled = false),
+                testPassSpec(id = inheritedPassId, enabled = true),
+            ),
+            passSelections = listOf(
+                PassSelectionSpec(
+                    passId = disabledPassId,
+                    mode = PassSelectionMode.SELECTED_ONLY,
+                    rules = listOf(RuleSpec(target = "sample/Missing", action = "obfuscate")),
+                ),
+                PassSelectionSpec(passId = inheritedPassId, mode = PassSelectionMode.INHERIT_GLOBAL),
+            ),
+        )
+        val artifact = emptyTestArtifact(config)
+
+        validateSelectedOnlyPassSelectionsAgainstArtifact(config, artifact)
+    }
+
+    @Test
     fun buildRunEvents_preserves_expected_event_order() {
         val runConfig = testConfig(inputJarPath = "in.jar", outputJarPath = "out.jar")
         val bootstrapEvent = EngineEvent(level = "info", type = "log", message = "boot", progress = 0, outPath = null)
@@ -190,6 +315,45 @@ class KernelRunSupportTest {
         assertEquals(listOf("boot", "summary", "phase", "pass", doneEvent.message), events.map { event: EngineEvent -> event.message })
     }
 
+    @Test
+    fun engineKernelRun_rejects_removed_aken_v4_boot_key_delivery_before_bootstrap_or_artifact_io() {
+        val tempDir = Files.createTempDirectory("javashroud-kernel-aken-v4-removed-param")
+        try {
+            val inputJar = tempDir.resolve("must-not-be-read.jar")
+            val outputJar = tempDir.resolve("must-not-be-written.jar")
+            val emittedEvents = mutableListOf<EngineEvent>()
+
+            val error = assertFailsWith<IllegalArgumentException> {
+                EngineKernel().run(
+                    config = testConfig(
+                        inputJarPath = inputJar.toString(),
+                        outputJarPath = outputJar.toString(),
+                        passes = listOf(
+                            testPassSpec(
+                                id = "jni-microkernel-loader",
+                                params = mapOf(
+                                    "bootKeyDelivery" to JsonNodeFactory.instance.textNode("embedded"),
+                                ),
+                            ),
+                        ),
+                    ),
+                    configPath = tempDir.resolve("config.toml"),
+                    emit = { event -> emittedEvents += event },
+                )
+            }
+
+            assertEquals(
+                "jni-microkernel-loader bootKeyDelivery 已由 AKEN v4 移除；删除该配置项后重新构建。",
+                error.message,
+            )
+            assertTrue(Files.notExists(inputJar), "The rejected configuration must not load its input artifact")
+            assertTrue(Files.notExists(outputJar), "The rejected configuration must not write an output artifact")
+            assertTrue(emittedEvents.isEmpty(), "The rejected configuration must fail before bootstrap events")
+        } finally {
+            tempDir.toFile().deleteRecursively()
+        }
+    }
+
     private fun testModuleDefinition(id: String): ModuleDefinition = ModuleDefinition(
         id = id,
         name = id,
@@ -197,5 +361,9 @@ class KernelRunSupportTest {
         tagIds = emptyList(),
         params = emptyList(),
         stability = "experimental",
+        targeting = ModuleTargetingCapability(
+            supported = true,
+            targetKinds = listOf("class"),
+        ),
     )
 }

@@ -49,11 +49,10 @@ class VmInterpreterExecutionTest {
 
         val bytes = serializer.serialize()
 
-        assertEquals("VBC4", bytes.copyOfRange(0, 4).toString(Charsets.US_ASCII))
-        assertEquals(4, readU2(bytes, 4), "VBC4 version must be 4")
+        assertEquals("VBCX", bytes.copyOfRange(0, 4).toString(Charsets.US_ASCII))
         assertFalse(bytes.containsInt32BigEndian(0x2468_1357), "Build seed must not be stored in plaintext")
-        assertEquals(16, bytes.copyOfRange(26, 42).size, "VBC4 header must carry a wrapped seed token")
-        val flags = readU2(bytes, 42)
+        assertEquals(16, bytes.copyOfRange(24, 40).size, "VBCX header must carry a wrapped seed token")
+        val flags = readU2(bytes, 40)
         assertTrue(flags and 0x0001 != 0, "Constant pool section must be encrypted")
         assertTrue(flags and 0x0002 != 0, "Instruction section must be block encrypted")
         assertTrue(flags and 0x0004 != 0, "Stream must contain MAC")
@@ -75,7 +74,7 @@ class VmInterpreterExecutionTest {
         serializer.visitEnd()
 
         val bytes = serializer.serialize()
-        val blockCount = readU2(bytes, 44)
+        val blockCount = readU2(bytes, 42)
         assertTrue(blockCount > 1, "Large methods must lower into multiple VM blocks, got $blockCount")
         assertTrue(blockCount <= 12, "Multi-block layout must respect the block ceiling, got $blockCount")
     }
@@ -113,7 +112,7 @@ class VmInterpreterExecutionTest {
             serializer.visitMaxs(8, 8)
             serializer.visitEnd()
             val bytes = serializer.serialize()
-            val blockCount = readU2(bytes, 44)
+            val blockCount = readU2(bytes, 42)
             return readBlockIndexEntries(bytes, blockCount).map { it.blockId }
         }
 
@@ -143,8 +142,8 @@ class VmInterpreterExecutionTest {
         serializer.visitEnd()
 
         val bytes = serializer.serialize()
-        val flags = readU2(bytes, 42)
-        val blockCount = readU2(bytes, 44)
+        val flags = readU2(bytes, 40)
+        val blockCount = readU2(bytes, 42)
         val entries = readBlockIndexEntries(bytes, blockCount)
 
         assertTrue(flags and 0x0800 != 0, "VBC4 must mark block-dispatch metadata as required")
@@ -178,7 +177,7 @@ class VmInterpreterExecutionTest {
             serializer.visitMaxs(8, 8)
             serializer.visitEnd()
             val bytes = serializer.serialize()
-            val blockCount = readU2(bytes, 44)
+            val blockCount = readU2(bytes, 42)
             val blockIds = readBlockIndexEntries(bytes, blockCount).map { it.blockId }
             return bytes to blockIds
         }
@@ -393,69 +392,6 @@ class VmInterpreterExecutionTest {
         }
     }
 
-    @Test
-    fun max_hardening_semantic_split_preserves_branch_switch_exception_nested_cross_method_and_continuation_semantics() {
-        if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) return
-        val passes = listOf("method-virtualization", "jni-microkernel-loader")
-        val inputJar = buildMaxHardeningSemanticSplitFixtureJar(Files.createTempFile("javashroud-vm-max-hardening-split", ".jar"))
-        var outputJar: Path? = null
-        var sidecar: Path? = null
-        try {
-            val baseline = runJavaProcessWithTimeout(
-                ProcessBuilder("java", "-jar", inputJar.toAbsolutePath().normalize().toString()),
-                timeoutSeconds = 20,
-            )
-            assertEquals(0, baseline.exitCode, "Baseline semantic-split fixture must exit cleanly. stdout=${baseline.output}")
-            val baselineOutput = normalizeLineEndings(baseline.output)
-            assertEquals("92\n102\n85\n211\n81", baselineOutput, "Baseline semantic-split fixture contract changed")
-
-            outputJar = runEngine(
-                inputJar = inputJar,
-                passIds = passes,
-                passParams = mapOf(
-                    "method-virtualization" to mapOf(
-                        "methodSelection" to "critical-plus",
-                        "strictVirtualization" to true,
-                        "maxInstructions" to 99999,
-                        "highValueMethods" to "nestedVerify,sparseLookup,priorityCheck,crossMethod",
-                        "highValueMethodDeny" to "main",
-                    ),
-                    "jni-microkernel-loader" to mapOf(
-                        "nativePackingLevel" to "max-hardening",
-                    ),
-                ),
-                outputTag = "max-hardening-semantic-split",
-            )
-            sidecar = outputJar.resolveSibling(outputJar.fileName.toString() + ".boot-kek.jsbk")
-            assertTrue(Files.isRegularFile(sidecar), "max-hardening build must emit a JSBK sidecar: $sidecar")
-            listOf("nestedVerify", "sparseLookup", "priorityCheck", "crossMethod").forEach { method ->
-                assertTrue(
-                    methodInvokesNativeVmDispatcher(outputJar, "e2e/SemanticSplitRoot", method, "(I)I"),
-                    "max-hardening semantic-split fixture must virtualize $method",
-                )
-            }
-
-            val hardenedProcess = ProcessBuilder(
-                "java",
-                "-Xverify:all",
-                "-jar",
-                outputJar.toAbsolutePath().normalize().toString(),
-            )
-            hardenedProcess.environment()[NativeKernelShellPacker.BOOT_SECRET_FILE_ENV] = sidecar.toAbsolutePath().normalize().toString()
-            hardenedProcess.environment().remove(NativeKernelShellPacker.BOOT_SECRET_ENV)
-            val hardened = runJavaProcessWithTimeout(hardenedProcess, timeoutSeconds = 90)
-            assertEquals(0, hardened.exitCode, "max-hardening semantic-split fixture must verify and run. stdout=${hardened.output}")
-            assertEquals(
-                baselineOutput,
-                normalizeLineEndings(hardened.output),
-                "Semantic split must preserve branch/switch, ordered exception handlers, nested VM calls, cross-method dispatch, and continuation operands",
-            )
-        } finally {
-            outputJar?.let(Files::deleteIfExists)
-            sidecar?.let(Files::deleteIfExists)
-            Files.deleteIfExists(inputJar)
-        }
-    }
 
     private fun buildRenamedMainBridgeFixtureJar(target: Path): Path = buildJavaSourceFixtureJar(
         target = target,
@@ -807,6 +743,79 @@ class VmInterpreterExecutionTest {
     }
 
     @Test
+    fun jni_vbc4_indy_string_bridge_survives_concurrent_sealed_helper_relocation() {
+        if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) return
+        val passes = listOf(
+            "string-encryption",
+            "invoke-dynamic-indirection",
+            "callsite-rotation-protection",
+            "method-virtualization",
+            "jni-microkernel-loader",
+        )
+        val inputJar = buildIndyStringBridgeConcurrencyFixtureJar(
+            Files.createTempFile("javashroud-vm-indy-string-bridge", ".jar"),
+        )
+        var outputJar: Path? = null
+        try {
+            val baseline = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-Xverify:all", "-jar", inputJar.toAbsolutePath().normalize().toString()),
+                timeoutSeconds = 30,
+            )
+            assertEquals(0, baseline.exitCode, "Baseline concurrent String bridge fixture must exit cleanly. stdout=${baseline.output}")
+            assertTrue(baseline.output.trim().startsWith("bridge:"), "Baseline concurrent String bridge fixture contract changed: ${baseline.output}")
+
+            outputJar = runEngine(
+                inputJar = inputJar,
+                passIds = passes,
+                passParams = mapOf(
+                    "string-encryption" to mapOf(
+                        "decoderBackend" to "native-kernel",
+                        "scope" to "all-strings",
+                        "strength" to "max",
+                        "lengthThreshold" to 1,
+                    ),
+                    "invoke-dynamic-indirection" to mapOf(
+                        "callSiteForm" to "bootstrap-table",
+                    ),
+                    "callsite-rotation-protection" to mapOf(
+                        "rotationStrategy" to "counter",
+                    ),
+                    "method-virtualization" to mapOf(
+                        "methodSelection" to "critical-plus",
+                        "highValueMethods" to "e2e/IndyStringBridgeRoot#bridge:(II)I",
+                        "highValueMethodDeny" to "main,lambda${'$'}main${'$'}0",
+                        "strictVirtualization" to true,
+                        "maxInstructions" to 99999,
+                    ),
+                    "jni-microkernel-loader" to mapOf(
+                        "nativePackingLevel" to "off",
+                    ),
+                ),
+            )
+            assertTrue(
+                methodInvokesNativeVmDispatcher(outputJar, "e2e/IndyStringBridgeRoot", "bridge", "(II)I"),
+                "The bridge method must execute through the native VBC4 dispatcher rather than only exercising the Java-side transformed output",
+            )
+            val result = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-Xverify:all", "-jar", outputJar.toAbsolutePath().normalize().toString()),
+                timeoutSeconds = 90,
+            )
+            assertEquals(0, result.exitCode, "Virtualized concurrent String bridge fixture must exit cleanly. stdout=${result.output}")
+            assertEquals(
+                baseline.output.trim(),
+                result.output.trim(),
+                "VBC4 invokedynamic string bridge must resolve the sealed helper on concurrent worker paths",
+            )
+            assertFalse(result.output.contains("NoSuchMethodError"), result.output)
+            assertFalse(result.output.contains("native VM execution failed"), result.output)
+            assertFalse(result.output.contains("indy kind="), result.output)
+        } finally {
+            outputJar?.let { Files.deleteIfExists(it) }
+            Files.deleteIfExists(inputJar)
+        }
+    }
+
+    @Test
     fun jni_native_only_profile_preserves_renamed_manifest_main_bridge() {
         if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) return
         val passes = listOf("rename-methods", "method-virtualization", "jni-microkernel-loader")
@@ -1089,8 +1098,8 @@ class VmInterpreterExecutionTest {
     private data class BlockIndexEntry(val blockId: Int, val entryToken: Int, val maskedNext: Int)
 
     private fun readBlockIndexEntries(bytes: ByteArray, blockCount: Int): List<BlockIndexEntry> {
-        val cpSectionSize = readU4(bytes, 50)
-        var offset = 54 + cpSectionSize
+        val cpSectionSize = readU4(bytes, 48)
+        var offset = 52 + cpSectionSize
         return (0 until blockCount).map {
             val entry = BlockIndexEntry(
                 blockId = readU2(bytes, offset),
@@ -1469,6 +1478,64 @@ class VmInterpreterExecutionTest {
 
                 public static void main(String[] args) throws Exception {
                     System.out.println(run());
+                }
+            }
+        """.trimIndent(),
+    )
+
+    private fun buildIndyStringBridgeConcurrencyFixtureJar(target: Path): Path = buildJavaSourceFixtureJar(
+        target = target,
+        mainClass = "e2e.IndyStringBridgeRoot",
+        sourceFile = "IndyStringBridgeRoot.java",
+        source = """
+            package e2e;
+
+            import java.util.concurrent.CountDownLatch;
+            import java.util.concurrent.atomic.AtomicInteger;
+
+            public final class IndyStringBridgeRoot {
+                private static int bridge(int worker, int iteration) {
+                    String token = "bridge-token:" + worker + ":" + iteration;
+                    return (token.length() * 31 + worker * 17) ^ (iteration * 13);
+                }
+
+                public static void main(String[] args) throws Exception {
+                    final int workers = 6;
+                    final int iterations = 160;
+                    CountDownLatch ready = new CountDownLatch(workers);
+                    CountDownLatch start = new CountDownLatch(1);
+                    CountDownLatch done = new CountDownLatch(workers);
+                    AtomicInteger total = new AtomicInteger();
+
+                    for (int worker = 0; worker < workers; worker++) {
+                        final int workerIndex = worker;
+                        Thread thread = new Thread(() -> {
+                            ready.countDown();
+                            try {
+                                start.await();
+                                int local = 0;
+                                for (int iteration = 0; iteration < iterations; iteration++) {
+                                    local += bridge(workerIndex, iteration);
+                                }
+                                total.addAndGet(local);
+                            } catch (InterruptedException interrupted) {
+                                Thread.currentThread().interrupt();
+                                throw new IllegalStateException("bridge worker interrupted", interrupted);
+                            } finally {
+                                done.countDown();
+                            }
+                        }, "bridge-" + worker);
+                        thread.start();
+                    }
+
+                    if (!ready.await(10L, java.util.concurrent.TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("bridge workers were not ready");
+                    }
+                    start.countDown();
+                    if (!done.await(20L, java.util.concurrent.TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("bridge workers did not complete");
+                    }
+                    System.out.println("bridge:" + total.get());
                 }
             }
         """.trimIndent(),

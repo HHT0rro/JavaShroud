@@ -75,6 +75,12 @@ class AkenVbc4BlockClusterPlannerTest {
             encodedPayloadLengths = listOf(100, 100),
         )
         val badMagic = valid.copyOf().also { it[0] = 'X'.code.toByte() }
+        val legacyVbc4Magic = valid.copyOf().also { it[3] = '4'.code.toByte() }
+        val emptyConstantPool = framedVbc4(
+            blockIds = listOf(10),
+            encodedPayloadLengths = listOf(100),
+            constantPoolPlainLength = 0L,
+        )
         val truncated = valid.copyOf(valid.size - 1)
         val invalidAuthenticationLengthMarker = valid.copyOf().also { it[it.lastIndex] = 31 }
         val trailingByte = valid.copyOf(valid.size + 1).also { it[it.lastIndex] = 1 }
@@ -116,6 +122,8 @@ class AkenVbc4BlockClusterPlannerTest {
         try {
             listOf(
                 badMagic,
+                legacyVbc4Magic,
+                emptyConstantPool,
                 truncated,
                 invalidAuthenticationLengthMarker,
                 trailingByte,
@@ -164,7 +172,7 @@ class AkenVbc4BlockClusterPlannerTest {
     private fun framedVbc4(
         blockIds: List<Int>,
         encodedPayloadLengths: List<Int>,
-        constantPoolPlainLength: Long = 0L,
+        constantPoolPlainLength: Long = 4L,
         plainPayloadLengths: List<Long> = encodedPayloadLengths.map { it.toLong() },
         storedPayloadLengths: List<Int> = encodedPayloadLengths,
         exceptionPlainLength: Long = 0L,
@@ -184,8 +192,7 @@ class AkenVbc4BlockClusterPlannerTest {
                 exceptionEncryptedLength >= 0,
         )
         val out = ByteArrayOutputStream()
-        out.write("VBC4".encodeToByteArray())
-        writeU2(out, 4)
+        out.write("VBCX".encodeToByteArray())
         out.write(ByteArray(16))
         writeU4(out, 0xAABBCCDDL)
         out.write(ByteArray(16))

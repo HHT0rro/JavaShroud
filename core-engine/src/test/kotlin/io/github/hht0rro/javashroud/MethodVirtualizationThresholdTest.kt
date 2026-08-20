@@ -1,5 +1,6 @@
 package io.github.hht0rro.javashroud
 
+import io.github.hht0rro.javashroud.analysis.buildRuleMatches
 import io.github.hht0rro.javashroud.model.analysis.ClassAnalysisSummary
 import io.github.hht0rro.javashroud.model.analysis.JarAnalysisSummary
 import io.github.hht0rro.javashroud.model.analysis.MatchedMember
@@ -11,6 +12,8 @@ import io.github.hht0rro.javashroud.model.analysis.TargetSelector
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
+import io.github.hht0rro.javashroud.model.config.RuleSet
+import io.github.hht0rro.javashroud.model.config.RuleSetScope
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.bytecode.applyCondyConstantIndirection
 import io.github.hht0rro.javashroud.bytecode.indirectMethodCalls
@@ -529,6 +532,71 @@ class MethodVirtualizationThresholdTest {
         )
 
         assertEquals(1, capped.transformedMemberCount, "Broad class rules should honor maxBroadVirtualizedMethods to keep full configurations testable")
+    }
+
+    @Test
+    fun selected_only_class_scope_honors_broad_method_cap_in_actual_transform() {
+        val artifact = artifactFor(
+            classBytes = selectionClassBytes(),
+            internalName = "example/VmSelection",
+            methodSummaries = selectionClassMethodSummaries(),
+        )
+        val selectedOnlyMatches = selectedOnlyRuleMatches(
+            artifact = artifact,
+            rules = listOf(RuleSpec("*", "method-virtualization")),
+        )
+
+        val result = applyMethodVirtualization(
+            artifact = artifact,
+            ruleMatches = selectedOnlyMatches,
+            params = mapOf(
+                "maxInstructions" to 100,
+                "seed" to 42,
+                "methodSelection" to "all-compatible",
+                "strictVirtualization" to true,
+                "maxBroadVirtualizedMethods" to 1,
+            ),
+        )
+
+        val classBytes = result.artifact.classArtifactIndex.getValue("example/VmSelection").bytes
+        assertEquals(1, result.transformedMemberCount, "selected-only class ranges must still honor maxBroadVirtualizedMethods")
+        assertTrue(methodCallsVmDispatcher(classBytes, "safeTiny", "()I"), "The first compatible class-scoped method should be virtualized within the cap")
+        assertTrue(!methodCallsVmDispatcher(classBytes, "criticalField", "()I"), "Class-scoped methods beyond the cap must remain direct")
+        assertTrue(!methodCallsVmDispatcher(classBytes, "compatibleLarge", "()I"), "Class-scoped methods beyond the cap must remain direct")
+    }
+
+    @Test
+    fun selected_only_independent_scope_excludes_local_method_without_global_rules() {
+        val artifact = artifactFor(
+            classBytes = selectionClassBytes(),
+            internalName = "example/VmSelection",
+            methodSummaries = selectionClassMethodSummaries(),
+        )
+        val selectedOnlyMatches = selectedOnlyRuleMatches(
+            artifact = artifact,
+            rules = listOf(
+                RuleSpec("*", "method-virtualization"),
+                RuleSpec("example/VmSelection#compatibleLarge:()I", "exclude"),
+            ),
+        )
+
+        val result = applyMethodVirtualization(
+            artifact = artifact,
+            ruleMatches = selectedOnlyMatches,
+            params = mapOf(
+                "maxInstructions" to 100,
+                "seed" to 42,
+                "methodSelection" to "all-compatible",
+                "strictVirtualization" to true,
+                "maxBroadVirtualizedMethods" to 0,
+            ),
+        )
+
+        val classBytes = result.artifact.classArtifactIndex.getValue("example/VmSelection").bytes
+        assertEquals(2, result.transformedMemberCount, "independent scope exclusions must remove only their exact local method")
+        assertTrue(methodCallsVmDispatcher(classBytes, "safeTiny", "()I"), "An unexcluded method must remain in the independent scope")
+        assertTrue(methodCallsVmDispatcher(classBytes, "criticalField", "()I"), "An unexcluded sibling must remain in the independent scope")
+        assertTrue(!methodCallsVmDispatcher(classBytes, "compatibleLarge", "()I"), "The explicitly excluded method must remain direct")
     }
 
     @Test
@@ -2255,6 +2323,20 @@ class MethodVirtualizationThresholdTest {
     private fun String.isVmResourceName(): Boolean = startsWith("META-INF/") && !endsWith(".class") && !endsWith("/") && length > "META-INF/".length + 10
 
     private fun JarEntryData.isVmResourceName(): Boolean = name.isVmResourceName()
+
+    private fun selectionClassMethodSummaries(): List<MemberSummary> = listOf(
+        MemberSummary(MemberKind.METHOD, "safeTiny", "()I", Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC),
+        MemberSummary(MemberKind.METHOD, "criticalField", "()I", Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC),
+        MemberSummary(MemberKind.METHOD, "compatibleLarge", "()I", Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC),
+    )
+
+    private fun selectedOnlyRuleMatches(
+        artifact: BytecodeArtifact,
+        rules: List<RuleSpec>,
+    ): List<RuleMatch> = buildRuleMatches(
+        ruleSet = RuleSet(rules = rules, scope = RuleSetScope.SELECTED_ONLY),
+        classSummaries = artifact.classArtifacts.map { it.summary },
+    )
 
     private fun ruleMatchesFor(internalName: String, action: String = "method-virtualization"): List<RuleMatch> = listOf(
         RuleMatch(

@@ -9,7 +9,7 @@ import io.github.hht0rro.javashroud.transforms.protection.VmBytecodeSerializer
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenArtifactCommitment
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenBuildPlan
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHandle
-import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHighValueLeafIdentity
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenNativeChunkHandlerDescriptor
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenNativePageLocatorCompileInput
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenNativePageEnvelope
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenPageMaterialization
@@ -17,12 +17,7 @@ import io.github.hht0rro.javashroud.transforms.protection.aken.AkenPageMateriali
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenPageMaterializer
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenResourceCodec
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenResourceKind
-import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRoutingMetadata
-import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRuntimeEvaluatorFragment
-import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRuntimeEvaluatorPlan
-import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRuntimeEvaluatorRole
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRuntimePageDescriptor
-import io.github.hht0rro.javashroud.transforms.protection.aken.AkenSealingProofMetadata
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenTypedPageEntryToken
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4FinalizationLayout
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4LogicalMethodIdentity
@@ -253,7 +248,7 @@ class AkenNativePageLocatorResolverNativeTest {
                 commitment = commitment,
                 pendingPages = listOf(page0, page1, page2),
                 fixedEntries = emptyList(),
-                vbc4StateBindingLayoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(),
+                vbc4StateBindingLayoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(context),
             )
             layout = finalized
             buildContext.publishAkenVbc4FinalizationLayout(finalized)
@@ -474,7 +469,7 @@ class AkenNativePageLocatorResolverNativeTest {
                 commitment = commitment,
                 pendingPages = listOf(page),
                 fixedEntries = emptyList(),
-                vbc4StateBindingLayoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(),
+                vbc4StateBindingLayoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(context),
             )
             layout = finalized
             buildContext.publishAkenVbc4FinalizationLayout(finalized)
@@ -582,7 +577,6 @@ class AkenNativePageLocatorResolverNativeTest {
         var generatedIncludeBytes: ByteArray? = null
         var tamperedEntryBytes: ByteArray? = null
         var plaintext: ByteArray? = null
-        var bootMaterial: ByteArray? = null
         try {
             val buildContext = akenVbc4ExecutorContext()
             context = buildContext
@@ -608,7 +602,6 @@ class AkenNativePageLocatorResolverNativeTest {
                 serializer.visitEnd()
                 serializer.serialize()
             }
-            bootMaterial = runtimeBootMaterial(buildContext)
             pendingPage = AkenVbc4PendingPage.create(
                 entryToken = entryToken,
                 logicalIdentity = identity,
@@ -636,7 +629,7 @@ class AkenNativePageLocatorResolverNativeTest {
                 commitment = commitment,
                 pendingPages = listOf(checkNotNull(pendingPage)),
                 fixedEntries = emptyList(),
-                vbc4StateBindingLayoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(),
+                vbc4StateBindingLayoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(context),
             )
             layout = finalized
             buildContext.publishAkenVbc4FinalizationLayout(finalized)
@@ -687,7 +680,6 @@ class AkenNativePageLocatorResolverNativeTest {
                 encodedHandle = selectedPage.encodedHandle,
                 pageIndex = selectedPage.pageIndex,
                 callSiteProof = rawProof,
-                bootMaterial = checkNotNull(bootMaterial),
             )
 
             val authenticated = runAkenJniRuntimeFixture(
@@ -704,6 +696,76 @@ class AkenNativePageLocatorResolverNativeTest {
             assertFalse(authenticated.output.contains("WARNING in native method"), authenticated.output)
             assertFalse(authenticated.output.contains("FATAL ERROR in native method"), authenticated.output)
             assertFalse(authenticated.output.contains("JNI DETECTED ERROR IN APPLICATION"), authenticated.output)
+            val benchmarkWarmup = System.getenv("JS_AKEN_PAGE_OPEN_BENCH_WARMUP")
+                ?.toIntOrNull()
+                ?.takeIf { it in 0..100_000 }
+                ?: 16
+            val benchmarkTimeoutSeconds = pageOpenBenchmarkTimeoutSeconds()
+
+            /* The benchmark executes the same production-bound page through
+             * the real JNI bridge after the one-shot semantic assertion above.
+             * Samples are configurable for the required 100/1,000/10,000/
+             * 100,000 profiles while the default test remains bounded. */
+            pageOpenBenchmarkProfiles().forEach { benchmarkSamples ->
+                val benchmark = runAkenJniRuntimeFixture(
+                    runtimeRoot = runtimeRoot,
+                    extractDirectory = tempDir.resolve("extract-benchmark-$benchmarkSamples"),
+                    expectedOutcome = "bench:$benchmarkSamples:$benchmarkWarmup",
+                    label = "jni-page-open-benchmark-$benchmarkSamples",
+                    timeoutSeconds = benchmarkTimeoutSeconds,
+                )
+                assertEquals(0, benchmark.exitCode, "production AKEN page-open benchmark must pass:\n${benchmark.output}")
+                val benchmarkLine = requireSingleAkenPhaseLine(
+                    result = benchmark,
+                    label = "production AKEN page-open benchmark",
+                )
+                /* The phase line contains only latency, counter deltas, and the
+                 * deterministic result digest.  Persist it in the JUnit XML so
+                 * a benchmark run remains auditable without exposing fixture
+                 * plaintext, handles, proofs, routes, or temp paths. */
+                /* Use the Java stdout stream explicitly so Gradle's JUnit
+                 * report captures one sanitized phase line for every profile
+                 * even when the fixture subprocess itself is long-running. */
+                System.out.println(benchmarkLine)
+                System.out.flush()
+                val benchmarkFields = benchmarkLine.split(' ')
+                    .mapNotNull { token ->
+                        val separator = token.indexOf('=')
+                        if (separator <= 0 || separator == token.lastIndex) null
+                        else token.substring(0, separator) to token.substring(separator + 1)
+                    }
+                    .toMap()
+                assertEquals("production", benchmarkFields["phase_mode"], benchmark.output)
+                assertEquals("pass", benchmarkFields["phase_status"], benchmark.output)
+                assertEquals(benchmarkSamples.toString(), benchmarkFields["samples"], benchmark.output)
+                assertEquals(benchmarkWarmup.toString(), benchmarkFields["warmup"], benchmark.output)
+                listOf("p50", "p95", "p99", "max").forEach { field ->
+                    assertTrue(benchmarkFields[field]?.toLongOrNull()?.let { it >= 0L } == true, benchmark.output)
+                }
+                listOf(
+                    "auth_check_count",
+                    "digest_check_count",
+                    "tag_check_count",
+                    "length_check_count",
+                    "structure_check_count",
+                    "jni_abi_check_count",
+                    "wipe_count",
+                ).forEach { field ->
+                    assertTrue(benchmarkFields[field]?.toLongOrNull()?.let { it > 0L } == true, benchmark.output)
+                }
+                listOf(
+                    "auth_failure_count",
+                    "wipe_failure_count",
+                    "plaintext_persistence_bytes",
+                    "fallback_count",
+                    "legacy_path_hits",
+                    "exception_count",
+                    "security_checks_skipped",
+                ).forEach { field ->
+                    assertEquals("0", benchmarkFields[field], benchmark.output)
+                }
+                assertTrue(benchmarkFields["output_digest"]?.matches(Regex("[0-9a-f]{16}")) == true, benchmark.output)
+            }
 
             tamperedEntryBytes = checkNotNull(entryBytes).copyOf()
             val tamperOffset = route.resourceOffset + (route.storedLength / 2)
@@ -741,7 +803,6 @@ class AkenNativePageLocatorResolverNativeTest {
                 entryBytes?.let { Arrays.fill(it, 0) }
                 generatedIncludeBytes?.let { Arrays.fill(it, 0) }
                 tamperedEntryBytes?.let { Arrays.fill(it, 0) }
-                bootMaterial?.let { Arrays.fill(it, 0) }
                 plaintext?.let { Arrays.fill(it, 0) }
                 layout?.wipe()
                 context?.wipe()
@@ -1278,6 +1339,280 @@ class AkenNativePageLocatorResolverNativeTest {
     }
 
     @Test
+    fun typed_native_chunk_is_consumed_natively_through_real_jni_and_fails_closed_on_locator_envelope_proof_and_payload_tampering() {
+        val zig = findZig()
+        val platform = currentAkenHostPlatform()
+        assumeTrue(zig != null, "Zig is required to compile the real AKEN typed native-chunk fixture")
+        assumeTrue(platform != null, "The real AKEN typed native-chunk fixture supports release-gate host platforms only")
+
+        val sourceNativeDir = resolveSource("src/main/native/js_jni_runtime.c").parent
+        val sourceInclude = sourceNativeDir.resolve("js_aken_page_locator.inc")
+        val originalInclude = Files.readAllBytes(sourceInclude)
+        val artifactCommitment = ByteArray(AkenArtifactCommitment.DIGEST_SIZE) { index -> (index * 37 + 29).toByte() }
+        val logicalIdentity = ByteArray(AkenNativeChunkHandlerDescriptor.IDENTITY_SIZE) { index -> (index * 41 + 5).toByte() }
+        val rawProof = ByteArray(AkenNativeChunkHandlerDescriptor.CALL_SITE_PROOF_SIZE) { index -> (index * 23 + 3).toByte() }
+        val preassignedHandle = ByteArray(AkenHandle.ENCODED_HANDLE_SIZE) { index -> (index * 29 + 7).toByte() }
+        val descriptorNonce = ByteArray(AkenNativeChunkHandlerDescriptor.NONCE_SIZE) { index -> (index * 17 + 11).toByte() }
+        val plaintext = AkenNativeChunkHandlerDescriptor.createLoaderAttestation(
+            logicalIdentity = logicalIdentity,
+            encodedHandle = preassignedHandle,
+            callSiteProof = rawProof,
+            nonce = descriptorNonce,
+        )
+        val pageResourcePath = "META-INF/.aken/native/real-jni-chunk.bin"
+        val logicalBindingPath = "native/fixture/real-jni-chunk"
+        val tempDir = Files.createTempDirectory("javashroud-aken-real-jni-native-chunk-")
+        var plan: AkenBuildPlan? = null
+        var materialization: AkenPageMaterialization? = null
+        var compileInput: AkenNativePageLocatorCompileInput? = null
+        var compilerRecord: ByteArray? = null
+        var currentPage: ProductionCurrentPage? = null
+        var encodedHandle: ByteArray? = null
+        var descriptorHandle: AkenHandle? = null
+        var encodedPayload: ByteArray? = null
+        var tamperedPayload: ByteArray? = null
+        var invalidProof: ByteArray? = null
+        var nativeEnvelope: ByteArray? = null
+        var descriptorEncoding: ByteArray? = null
+        var routeEncoding: ByteArray? = null
+        var pageBindingDigest: ByteArray? = null
+        var tamperedEnvelope: ByteArray? = null
+        var tamperedEnvelopeRecord: ByteArray? = null
+        var tamperedRecord: ByteArray? = null
+        try {
+            val buildPlan = AkenBuildPlan.create(artifactCommitment, SecureRandom())
+            plan = buildPlan
+            val page = buildPlan.registerPage(
+                kind = AkenResourceKind.NativeChunk,
+                identity = logicalIdentity,
+                pageIndex = 7,
+                targetPageSize = 1024,
+                encodedHandleOverride = preassignedHandle,
+            )
+            val materializationInput = AkenPageMaterializationInput.create(
+                page = page,
+                plaintext = plaintext,
+                resourcePath = pageResourcePath,
+                resourceOffset = 0,
+                callSiteProof = rawProof,
+                logicalBindingPath = logicalBindingPath,
+            )
+            val generatedMaterialization = AkenPageMaterializer.materializeAndWipe(
+                plan = buildPlan,
+                inputs = listOf(materializationInput),
+            )
+            materialization = generatedMaterialization
+            plan = null
+
+            val generatedPage = generatedMaterialization.pagesForBuild().single()
+            val descriptor = generatedPage.descriptorForBuild
+            assertEquals(AkenResourceKind.NativeChunk, descriptor.resourceKind)
+            assertEquals(7, descriptor.pageIndex)
+            assertEquals(pageResourcePath, descriptor.route.resourcePath)
+            assertEquals(0, descriptor.route.resourceOffset)
+            encodedPayload = generatedPage.copyEncodedPayloadForBuild()
+            assertEquals(descriptor.route.storedLength, checkNotNull(encodedPayload).size)
+
+            compileInput = AkenNativePageLocatorCompileInput.fromTypedPage(
+                descriptor = descriptor,
+                rawCallSiteProof = rawProof,
+            )
+            compilerRecord = checkNotNull(compileInput).copyNativeLocatorRecordForCompiler()
+            nativeEnvelope = checkNotNull(compileInput).copyNativeEnvelopeForCompiler()
+            descriptorEncoding = checkNotNull(compileInput).copyResolvedDescriptorForCompiler()
+            routeEncoding = checkNotNull(compileInput).copyRouteEncodingForCompiler()
+            pageBindingDigest = checkNotNull(compileInput).copyPageBindingDigestForCompiler()
+            currentPage = parseProductionCurrentPage(checkNotNull(compilerRecord))
+            assertEquals(AkenResourceKind.NativeChunk, checkNotNull(currentPage).resourceKind)
+            assertEquals(descriptor.pageIndex, checkNotNull(currentPage).pageIndex)
+            descriptorHandle = descriptor.handle
+            encodedHandle = checkNotNull(descriptorHandle).encoded
+            assertContentEquals(preassignedHandle, checkNotNull(encodedHandle))
+            assertTrue(
+                AkenNativeChunkHandlerDescriptor.isLoaderAttestationForBuild(
+                    encoded = plaintext,
+                    logicalIdentity = logicalIdentity,
+                    encodedHandle = checkNotNull(encodedHandle),
+                    callSiteProof = rawProof,
+                ),
+            )
+            assertEquals(
+                AkenTypedPageEntryToken.derive(
+                    resourceKind = AkenResourceKind.NativeChunk,
+                    pageIndex = descriptor.pageIndex,
+                    encodedHandle = checkNotNull(encodedHandle),
+                ),
+                checkNotNull(currentPage).entryToken,
+                "the generic compiler record must use the exact token derived by the native typed chunk bridge",
+            )
+
+            val include = renderInclude(listOf(checkNotNull(compilerRecord)))
+            val nativeLibrary = compileAkenJniLibrary(
+                zig = checkNotNull(zig),
+                root = tempDir.resolve("native-good"),
+                sourceNativeDir = sourceNativeDir,
+                include = include,
+                platform = checkNotNull(platform),
+            )
+            val runtimeRoot = prepareAkenNativeChunkJniRuntimeFixture(
+                root = tempDir.resolve("runtime-good"),
+                platform = platform,
+                nativeLibrary = nativeLibrary,
+                pageResourcePath = descriptor.route.resourcePath,
+                pageResourceBytes = checkNotNull(encodedPayload),
+                encodedHandle = checkNotNull(encodedHandle),
+                pageIndex = descriptor.pageIndex,
+                callSiteProof = rawProof,
+            )
+            val authenticated = runAkenJniRuntimeFixture(
+                runtimeRoot = runtimeRoot,
+                extractDirectory = tempDir.resolve("extract-good"),
+                expectedOutcome = "consume",
+                label = "jni-native-chunk-consumed",
+            )
+            assertEquals(0, authenticated.exitCode, "real JNI AKEN native chunk must consume:\n" + authenticated.output)
+            assertTrue(authenticated.output.contains("AKEN real JNI native chunk fixture: PASS:consumed"), authenticated.output)
+            assertFalse(authenticated.output.contains("WARNING in native method"), authenticated.output)
+            assertFalse(authenticated.output.contains("FATAL ERROR in native method"), authenticated.output)
+            assertFalse(authenticated.output.contains("JNI DETECTED ERROR IN APPLICATION"), authenticated.output)
+
+            tamperedPayload = checkNotNull(encodedPayload).copyOf()
+            val payloadTamperOffset = tamperedPayload.lastIndex / 2
+            tamperedPayload[payloadTamperOffset] = (tamperedPayload[payloadTamperOffset].toInt() xor 0x5A).toByte()
+            writeClasspathResource(runtimeRoot, descriptor.route.resourcePath, tamperedPayload)
+            val payloadFailure = runAkenJniRuntimeFixture(
+                runtimeRoot = runtimeRoot,
+                extractDirectory = tempDir.resolve("extract-payload-tampered"),
+                expectedOutcome = "error:AKEN native chunk authentication failed",
+                label = "jni-native-chunk-payload-tampered",
+            )
+            assertEquals(0, payloadFailure.exitCode, "tampered AKEN native chunk ciphertext must fail closed:\n" + payloadFailure.output)
+            assertTrue(payloadFailure.output.contains("AKEN real JNI native chunk fixture: PASS:tampered"), payloadFailure.output)
+
+            invalidProof = rawProof.copyOf()
+            invalidProof[invalidProof.lastIndex] = (invalidProof[invalidProof.lastIndex].toInt() xor 0x35).toByte()
+            val proofRuntimeRoot = prepareAkenNativeChunkJniRuntimeFixture(
+                root = tempDir.resolve("runtime-proof-tampered"),
+                platform = platform,
+                nativeLibrary = nativeLibrary,
+                pageResourcePath = descriptor.route.resourcePath,
+                pageResourceBytes = checkNotNull(encodedPayload),
+                encodedHandle = checkNotNull(encodedHandle),
+                pageIndex = descriptor.pageIndex,
+                callSiteProof = invalidProof,
+            )
+            val proofFailure = runAkenJniRuntimeFixture(
+                runtimeRoot = proofRuntimeRoot,
+                extractDirectory = tempDir.resolve("extract-proof-tampered"),
+                expectedOutcome = "error:AKEN native chunk route is invalid",
+                label = "jni-native-chunk-proof-tampered",
+            )
+            assertEquals(0, proofFailure.exitCode, "tampered AKEN native chunk proof must fail closed:\n" + proofFailure.output)
+            assertTrue(proofFailure.output.contains("AKEN real JNI native chunk fixture: PASS:tampered"), proofFailure.output)
+
+            tamperedEnvelope = checkNotNull(nativeEnvelope).copyOf()
+            tamperedEnvelope[tamperedEnvelope.lastIndex] = (tamperedEnvelope[tamperedEnvelope.lastIndex].toInt() xor 0x6B).toByte()
+            tamperedEnvelopeRecord = encodeCompilerRecord(
+                entryToken = checkNotNull(currentPage).entryToken,
+                resourceKind = AkenResourceKind.NativeChunk,
+                pageIndex = descriptor.pageIndex,
+                encodedHandle = checkNotNull(encodedHandle),
+                nativeEnvelope = tamperedEnvelope,
+                descriptor = checkNotNull(descriptorEncoding),
+                route = checkNotNull(routeEncoding),
+                vbc4StateBindingLayoutDigest = checkNotNull(pageBindingDigest),
+            )
+            val envelopeTamperedLibrary = compileAkenJniLibrary(
+                zig = checkNotNull(zig),
+                root = tempDir.resolve("native-envelope-tampered"),
+                sourceNativeDir = sourceNativeDir,
+                include = renderInclude(listOf(checkNotNull(tamperedEnvelopeRecord))),
+                platform = platform,
+            )
+            val envelopeRuntimeRoot = prepareAkenNativeChunkJniRuntimeFixture(
+                root = tempDir.resolve("runtime-envelope-tampered"),
+                platform = platform,
+                nativeLibrary = envelopeTamperedLibrary,
+                pageResourcePath = descriptor.route.resourcePath,
+                pageResourceBytes = checkNotNull(encodedPayload),
+                encodedHandle = checkNotNull(encodedHandle),
+                pageIndex = descriptor.pageIndex,
+                callSiteProof = rawProof,
+            )
+            val envelopeFailure = runAkenJniRuntimeFixture(
+                runtimeRoot = envelopeRuntimeRoot,
+                extractDirectory = tempDir.resolve("extract-envelope-tampered"),
+                expectedOutcome = "error:AKEN native chunk route is invalid",
+                label = "jni-native-chunk-envelope-tampered",
+            )
+            assertEquals(0, envelopeFailure.exitCode, "tampered AKEN native chunk envelope must fail closed:\n" + envelopeFailure.output)
+            assertTrue(envelopeFailure.output.contains("AKEN real JNI native chunk fixture: PASS:tampered"), envelopeFailure.output)
+
+            tamperedRecord = checkNotNull(compilerRecord).copyOf()
+            tamperedRecord[tamperedRecord.lastIndex] = (tamperedRecord[tamperedRecord.lastIndex].toInt() xor 0x44).toByte()
+            val locatorTamperedLibrary = compileAkenJniLibrary(
+                zig = checkNotNull(zig),
+                root = tempDir.resolve("native-locator-tampered"),
+                sourceNativeDir = sourceNativeDir,
+                include = renderInclude(listOf(tamperedRecord)),
+                platform = platform,
+            )
+            val locatorRuntimeRoot = prepareAkenNativeChunkJniRuntimeFixture(
+                root = tempDir.resolve("runtime-locator-tampered"),
+                platform = platform,
+                nativeLibrary = locatorTamperedLibrary,
+                pageResourcePath = descriptor.route.resourcePath,
+                pageResourceBytes = checkNotNull(encodedPayload),
+                encodedHandle = checkNotNull(encodedHandle),
+                pageIndex = descriptor.pageIndex,
+                callSiteProof = rawProof,
+            )
+            val locatorFailure = runAkenJniRuntimeFixture(
+                runtimeRoot = locatorRuntimeRoot,
+                extractDirectory = tempDir.resolve("extract-locator-tampered"),
+                expectedOutcome = "error:AKEN native chunk route is unavailable",
+                label = "jni-native-chunk-locator-tampered",
+            )
+            assertEquals(0, locatorFailure.exitCode, "tampered AKEN native chunk locator binding must fail closed:\n" + locatorFailure.output)
+            assertTrue(locatorFailure.output.contains("AKEN real JNI native chunk fixture: PASS:tampered"), locatorFailure.output)
+        } finally {
+            try {
+                assertContentEquals(
+                    originalInclude,
+                    Files.readAllBytes(sourceInclude),
+                    "the repository's default empty locator include must remain untouched",
+                )
+            } finally {
+                compilerRecord?.let { Arrays.fill(it, 0) }
+                currentPage?.wipe()
+                encodedHandle?.let { Arrays.fill(it, 0) }
+                encodedPayload?.let { Arrays.fill(it, 0) }
+                tamperedPayload?.let { Arrays.fill(it, 0) }
+                invalidProof?.let { Arrays.fill(it, 0) }
+                nativeEnvelope?.let { Arrays.fill(it, 0) }
+                descriptorEncoding?.let { Arrays.fill(it, 0) }
+                routeEncoding?.let { Arrays.fill(it, 0) }
+                pageBindingDigest?.let { Arrays.fill(it, 0) }
+                tamperedEnvelope?.let { Arrays.fill(it, 0) }
+                tamperedEnvelopeRecord?.let { Arrays.fill(it, 0) }
+                tamperedRecord?.let { Arrays.fill(it, 0) }
+                descriptorHandle?.wipe()
+                compileInput?.wipe()
+                materialization?.wipe()
+                plan?.wipe()
+                Arrays.fill(originalInclude, 0)
+                Arrays.fill(artifactCommitment, 0)
+                Arrays.fill(logicalIdentity, 0)
+                Arrays.fill(plaintext, 0)
+                Arrays.fill(rawProof, 0)
+                Arrays.fill(preassignedHandle, 0)
+                Arrays.fill(descriptorNonce, 0)
+                deleteTree(tempDir)
+            }
+        }
+    }
+
+    @Test
     fun production_multi_page_vbc4_assembles_executes_and_authenticates_through_real_jni() {
         val zig = findZig()
         val platform = currentAkenHostPlatform()
@@ -1301,7 +1636,6 @@ class AkenNativePageLocatorResolverNativeTest {
         var generatedIncludeBytes: ByteArray? = null
         var tamperedEntryBytes: ByteArray? = null
         var plaintext: ByteArray? = null
-        var bootMaterial: ByteArray? = null
         try {
             val buildContext = akenVbc4ExecutorContext()
             context = buildContext
@@ -1338,7 +1672,6 @@ class AkenNativePageLocatorResolverNativeTest {
                 serializer.visitEnd()
                 serializer.serialize()
             }
-            bootMaterial = runtimeBootMaterial(buildContext)
 
             val logicalMethod = AkenVbc4LogicalMethodIdentity.create(
                 dispatchClassToken = "fixture/AkenCurrentPage",
@@ -1391,7 +1724,7 @@ class AkenNativePageLocatorResolverNativeTest {
                         commitment = commitment,
                         pendingPages = pages,
                         fixedEntries = emptyList(),
-                        vbc4StateBindingLayoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(),
+                        vbc4StateBindingLayoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(context),
                     )
                     layout = finalized
                     buildContext.publishAkenVbc4FinalizationLayout(finalized)
@@ -1447,7 +1780,31 @@ class AkenNativePageLocatorResolverNativeTest {
                 encodedHandle = pageZero.encodedHandle,
                 pageIndex = pageZero.pageIndex,
                 callSiteProof = pageZeroProof,
-                bootMaterial = checkNotNull(bootMaterial),
+            )
+            /* Build a second copy of the same current-format artifact with
+             * the authoritative software crypto path forced at compile time.
+             * The generated locator include, page bytes, bindings and JNI
+             * harness are deliberately identical; only AES/GHASH dispatch is
+             * different.  This keeps the differential scoped to runtime
+             * implementation rather than protocol or artifact inputs. */
+            val softwareNativeLibrary = compileAkenJniLibrary(
+                zig = checkNotNull(zig),
+                root = tempDir,
+                sourceNativeDir = sourceNativeDir,
+                include = include,
+                platform = checkNotNull(platform),
+                forceSoftware = true,
+            )
+            val softwareRuntimeRoot = prepareAkenJniRuntimeFixture(
+                root = tempDir.resolve("software-runtime"),
+                platform = platform,
+                nativeLibrary = softwareNativeLibrary,
+                pageResourcePath = pageZeroRoute.resourcePath,
+                pageResourceBytes = checkNotNull(entryBytes),
+                entryToken = pageZero.entryToken,
+                encodedHandle = pageZero.encodedHandle,
+                pageIndex = pageZero.pageIndex,
+                callSiteProof = pageZeroProof,
             )
 
             val authenticated = runAkenJniRuntimeFixture(
@@ -1465,20 +1822,269 @@ class AkenNativePageLocatorResolverNativeTest {
             assertFalse(authenticated.output.contains("FATAL ERROR in native method"), authenticated.output)
             assertFalse(authenticated.output.contains("JNI DETECTED ERROR IN APPLICATION"), authenticated.output)
 
+            val softwareAuthenticated = runAkenJniRuntimeFixture(
+                runtimeRoot = softwareRuntimeRoot,
+                extractDirectory = tempDir.resolve("extract-software-good"),
+                expectedOutcome = "result:2",
+                label = "jni-multi-page-software-executed",
+            )
+            assertEquals(
+                0,
+                softwareAuthenticated.exitCode,
+                "real JNI authenticated multi-page VBC4 software-path method must execute:\n${softwareAuthenticated.output}",
+            )
+            assertTrue(
+                softwareAuthenticated.output.contains("AKEN real JNI current page fixture: PASS:executed"),
+                softwareAuthenticated.output,
+            )
+            assertFalse(softwareAuthenticated.output.contains("WARNING in native method"), softwareAuthenticated.output)
+            assertFalse(softwareAuthenticated.output.contains("FATAL ERROR in native method"), softwareAuthenticated.output)
+            assertFalse(softwareAuthenticated.output.contains("JNI DETECTED ERROR IN APPLICATION"), softwareAuthenticated.output)
+
+            /* Compare one bounded production page-open profile through both
+             * native libraries.  Larger 100/1,000/10,000/100,000 profiles
+             * remain controlled by the existing benchmark environment knobs;
+             * this differential always runs so the default regression lane
+             * proves identical output and security counters. */
+            val differentialSamples = System.getenv("JS_AKEN_PAGE_OPEN_DIFFERENTIAL_SAMPLES")
+                ?.toIntOrNull()
+                ?.takeIf { it in 100..100_000 }
+                ?: 100
+            val differentialWarmup = System.getenv("JS_AKEN_PAGE_OPEN_BENCH_WARMUP")
+                ?.toIntOrNull()
+                ?.takeIf { it in 0..100_000 }
+                ?: 16
+            val differentialTimeoutSeconds = pageOpenBenchmarkTimeoutSeconds()
+            emitAkenStage("differential-hardware", "start")
+            val differentialHardware = runAkenJniRuntimeFixture(
+                runtimeRoot = runtimeRoot,
+                extractDirectory = tempDir.resolve("extract-differential-hardware"),
+                expectedOutcome = "bench:$differentialSamples:$differentialWarmup",
+                label = "jni-multi-page-differential-hardware",
+                timeoutSeconds = differentialTimeoutSeconds,
+            )
+            emitAkenFixturePhase("differential-hardware", differentialHardware)
+            emitAkenStage("differential-software", "start")
+            val differentialSoftware = runAkenJniRuntimeFixture(
+                runtimeRoot = softwareRuntimeRoot,
+                extractDirectory = tempDir.resolve("extract-differential-software"),
+                expectedOutcome = "bench:$differentialSamples:$differentialWarmup",
+                label = "jni-multi-page-differential-software",
+                timeoutSeconds = differentialTimeoutSeconds,
+            )
+            emitAkenFixturePhase("differential-software", differentialSoftware)
+            emitAkenStage("differential", "pass")
+            assertEquals(0, differentialHardware.exitCode, differentialHardware.output)
+            assertEquals(0, differentialSoftware.exitCode, differentialSoftware.output)
+            fun differentialPhaseLine(result: ProcessResult, label: String): String =
+                requireSingleAkenPhaseLine(result, label)
+            fun differentialFields(line: String): Map<String, String> = line.split(' ')
+                .mapNotNull { token ->
+                    val separator = token.indexOf('=')
+                    if (separator <= 0 || separator == token.lastIndex) null
+                    else token.substring(0, separator) to token.substring(separator + 1)
+                }
+                .toMap()
+            val differentialHardwareLine = differentialPhaseLine(
+                differentialHardware,
+                "AKEN page-open hardware differential",
+            )
+            val differentialSoftwareLine = differentialPhaseLine(
+                differentialSoftware,
+                "AKEN page-open software differential",
+            )
+            val differentialHardwareFields = differentialFields(differentialHardwareLine)
+            val differentialSoftwareFields = differentialFields(differentialSoftwareLine)
+            assertEquals("production", differentialHardwareFields["phase_mode"], differentialHardwareLine)
+            assertEquals("production", differentialSoftwareFields["phase_mode"], differentialSoftwareLine)
+            assertEquals("pass", differentialHardwareFields["phase_status"], differentialHardwareLine)
+            assertEquals("pass", differentialSoftwareFields["phase_status"], differentialSoftwareLine)
+            assertEquals(differentialSamples.toString(), differentialHardwareFields["samples"], differentialHardwareLine)
+            assertEquals(differentialSamples.toString(), differentialSoftwareFields["samples"], differentialSoftwareLine)
+            assertEquals(
+                differentialHardwareFields["output_digest"],
+                differentialSoftwareFields["output_digest"],
+                "AKEN page-open hardware/software paths must produce the same output digest",
+            )
+            val differentialHardwarePath = differentialHardwareFields["hardware_crypto_path"]?.toLongOrNull()
+                ?: error("AKEN page-open hardware differential did not report hardware_crypto_path")
+            val differentialHardwareSoftwarePath = differentialHardwareFields["software_crypto_path"]?.toLongOrNull()
+                ?: error("AKEN page-open hardware differential did not report software_crypto_path")
+            val differentialHardwareAesCapability = differentialHardwareFields["cpu_hardware_aes"]?.toLongOrNull()
+                ?: error("AKEN page-open hardware differential did not report cpu_hardware_aes")
+            val differentialHardwareGhashCapability = differentialHardwareFields["cpu_hardware_ghash"]?.toLongOrNull()
+                ?: error("AKEN page-open hardware differential did not report cpu_hardware_ghash")
+            assertTrue(differentialHardwareAesCapability in 0L..1L, differentialHardwareLine)
+            assertTrue(differentialHardwareGhashCapability in 0L..1L, differentialHardwareLine)
+            /* The default build may legitimately select the software path on a
+             * CPU without AES-NI.  Whichever path is selected must be
+             * exclusive: a hardware-selected operation must not also be
+             * counted as software, and an unsupported CPU must still exercise
+             * the authoritative software implementation. */
+            assertTrue(
+                (differentialHardwarePath > 0L) xor (differentialHardwareSoftwarePath > 0L),
+                differentialHardwareLine,
+            )
+            if (differentialHardwareAesCapability == 1L) {
+                assertTrue(differentialHardwarePath > 0L, differentialHardwareLine)
+                assertEquals("0", differentialHardwareFields["software_crypto_path"], differentialHardwareLine)
+            } else {
+                assertTrue(differentialHardwareSoftwarePath > 0L, differentialHardwareLine)
+            }
+            if (differentialHardwarePath > 0L) {
+                assertEquals("0", differentialHardwareFields["software_crypto_path"], differentialHardwareLine)
+            }
+            assertEquals("0", differentialSoftwareFields["cpu_hardware_aes"], differentialSoftwareLine)
+            assertEquals("0", differentialSoftwareFields["cpu_hardware_ghash"], differentialSoftwareLine)
+            assertEquals("0", differentialSoftwareFields["hardware_crypto_path"], differentialSoftwareLine)
+            assertTrue(
+                differentialSoftwareFields["software_crypto_path"]?.toLongOrNull()?.let { it > 0L } == true,
+                differentialSoftwareLine,
+            )
+            listOf(
+                "aes_block_count",
+                "ghash_block_count",
+                "auth_check_count",
+                "digest_check_count",
+                "tag_check_count",
+                "length_check_count",
+                "structure_check_count",
+                "jni_abi_check_count",
+            ).forEach { field ->
+                assertEquals(
+                    differentialHardwareFields[field],
+                    differentialSoftwareFields[field],
+                    "AKEN page-open differential counter mismatch for $field",
+                )
+                assertTrue(
+                    differentialHardwareFields[field]?.toLongOrNull()?.let { it > 0L } == true,
+                    "AKEN page-open differential counter $field was not exercised",
+                )
+            }
+            listOf("wipe_count").forEach { field ->
+                /* Hardware intrinsics and the authoritative software path may
+                 * use different, still bounded scratch-wipe counts.  Both
+                 * paths must wipe, while the security gate below rejects any
+                 * wipe failure or plaintext persistence. */
+                assertTrue(
+                    differentialHardwareFields[field]?.toLongOrNull()?.let { it > 0L } == true,
+                    differentialHardwareLine,
+                )
+                assertTrue(
+                    differentialSoftwareFields[field]?.toLongOrNull()?.let { it > 0L } == true,
+                    differentialSoftwareLine,
+                )
+            }
+            listOf(
+                "auth_failure_count",
+                "wipe_failure_count",
+                "plaintext_persistence_bytes",
+                "fallback_count",
+                "legacy_path_hits",
+                "exception_count",
+                "security_checks_skipped",
+            ).forEach { field ->
+                assertEquals("0", differentialHardwareFields[field], differentialHardwareLine)
+                assertEquals("0", differentialSoftwareFields[field], differentialSoftwareLine)
+            }
+            println("phase=aken-page-open-differential phase_mode=production phase_status=pass samples=$differentialSamples " +
+                "cpu_hardware_aes=${differentialHardwareFields["cpu_hardware_aes"]} " +
+                "cpu_hardware_ghash=${differentialHardwareFields["cpu_hardware_ghash"]} " +
+                "hardware_crypto_path=${differentialHardwareFields["hardware_crypto_path"]} " +
+                "software_crypto_path=${differentialSoftwareFields["software_crypto_path"]} " +
+                "output_digest=${differentialHardwareFields["output_digest"]}")
+            println(differentialHardwareLine)
+            println(differentialSoftwareLine)
+            System.out.flush()
+
+            /* Exercise the same production-bound container through the full
+             * multi-page VBC4 route.  The page-zero VM entry reaches sibling
+             * pages through the generated locator include; the fixture harness
+             * reports only sanitized timing/counter data. */
+            val benchmarkWarmup = System.getenv("JS_AKEN_PAGE_OPEN_BENCH_WARMUP")
+                ?.toIntOrNull()
+                ?.takeIf { it in 0..100_000 }
+                ?: 16
+            val benchmarkTimeoutSeconds = pageOpenBenchmarkTimeoutSeconds()
+            pageOpenBenchmarkProfiles().forEach { benchmarkSamples ->
+                emitAkenStage("benchmark-$benchmarkSamples", "start")
+                val benchmark = runAkenJniRuntimeFixture(
+                    runtimeRoot = runtimeRoot,
+                    extractDirectory = tempDir.resolve("extract-multi-page-benchmark-$benchmarkSamples"),
+                    expectedOutcome = "bench:$benchmarkSamples:$benchmarkWarmup",
+                    label = "jni-multi-page-benchmark-$benchmarkSamples",
+                    timeoutSeconds = benchmarkTimeoutSeconds,
+                )
+                emitAkenFixturePhase("benchmark-$benchmarkSamples", benchmark)
+                assertEquals(0, benchmark.exitCode, "production AKEN multi-page benchmark must pass:\n${benchmark.output}")
+                val benchmarkLine = requireSingleAkenPhaseLine(
+                    result = benchmark,
+                    label = "production AKEN multi-page benchmark",
+                )
+                /* Keep JUnit evidence auditable while excluding handles,
+                 * proofs, routes, temp paths, plaintext, and full exceptions. */
+                System.out.println(benchmarkLine)
+                System.out.flush()
+                val benchmarkFields = benchmarkLine.split(' ')
+                    .mapNotNull { token ->
+                        val separator = token.indexOf('=')
+                        if (separator <= 0 || separator == token.lastIndex) null
+                        else token.substring(0, separator) to token.substring(separator + 1)
+                    }
+                    .toMap()
+                assertEquals("production", benchmarkFields["phase_mode"], benchmark.output)
+                assertEquals("pass", benchmarkFields["phase_status"], benchmark.output)
+                assertEquals(benchmarkSamples.toString(), benchmarkFields["samples"], benchmark.output)
+                assertEquals(benchmarkWarmup.toString(), benchmarkFields["warmup"], benchmark.output)
+                listOf("p50", "p95", "p99", "max").forEach { field ->
+                    assertTrue(benchmarkFields[field]?.toLongOrNull()?.let { it >= 0L } == true, benchmark.output)
+                }
+                listOf(
+                    "auth_check_count",
+                    "digest_check_count",
+                    "tag_check_count",
+                    "length_check_count",
+                    "structure_check_count",
+                    "jni_abi_check_count",
+                    "wipe_count",
+                ).forEach { field ->
+                    assertTrue(benchmarkFields[field]?.toLongOrNull()?.let { it > 0L } == true, benchmark.output)
+                }
+                listOf(
+                    "auth_failure_count",
+                    "wipe_failure_count",
+                    "plaintext_persistence_bytes",
+                    "fallback_count",
+                    "legacy_path_hits",
+                    "exception_count",
+                    "security_checks_skipped",
+                ).forEach { field ->
+                    assertEquals("0", benchmarkFields[field], benchmark.output)
+                }
+                assertTrue(benchmarkFields["output_digest"]?.matches(Regex("[0-9a-f]{16}")) == true, benchmark.output)
+            }
+
             val middlePage = sortedPages[sortedPages.size / 2]
             val middleRecord = records[parsedPages.indexOf(middlePage)]
             val middleDescriptor = decodeProductionCurrentPageDescriptor(middleRecord)
             val middleRoute = middleDescriptor.route
             assertEquals(logicalBindingPath, middleRoute.logicalBindingPath)
             assertEquals(containerPath, middleRoute.resourcePath)
-            tamperedEntryBytes = checkNotNull(entryBytes).copyOf()
+            emitAkenStage("final-tamper", "start")
+            val finalEntryBytes = requireNotNull(entryBytes) {
+                "AKEN multi-page final entry was unavailable before tamper phase"
+            }
+            tamperedEntryBytes = finalEntryBytes.copyOf()
+            val tamperedBytes = requireNotNull(tamperedEntryBytes) {
+                "AKEN multi-page tamper copy was unavailable"
+            }
             val tamperOffset = middleRoute.resourceOffset + (middleRoute.storedLength / 2)
-            require(tamperOffset in checkNotNull(tamperedEntryBytes).indices) {
+            require(tamperOffset in tamperedBytes.indices) {
                 "real JNI multi-page tamper offset is outside the current method container"
             }
-            checkNotNull(tamperedEntryBytes)[tamperOffset] =
-                (checkNotNull(tamperedEntryBytes)[tamperOffset].toInt() xor 0x5A).toByte()
-            writeClasspathResource(runtimeRoot, middleRoute.resourcePath, checkNotNull(tamperedEntryBytes))
+            tamperedBytes[tamperOffset] =
+                (tamperedBytes[tamperOffset].toInt() xor 0x5A).toByte()
+            writeClasspathResource(runtimeRoot, middleRoute.resourcePath, tamperedBytes)
 
             val tampered = runAkenJniRuntimeFixture(
                 runtimeRoot = runtimeRoot,
@@ -1486,6 +2092,7 @@ class AkenNativePageLocatorResolverNativeTest {
                 expectedOutcome = "error:AKEN VM page authentication failed",
                 label = "jni-multi-page-tampered",
             )
+            emitAkenFixturePhase("final-tamper", tampered)
             assertEquals(0, tampered.exitCode, "real JNI tampered sibling VBC4 page must fail closed:\n${tampered.output}")
             assertTrue(
                 tampered.output.contains("AKEN real JNI current page fixture: PASS:tampered"),
@@ -1495,9 +2102,11 @@ class AkenNativePageLocatorResolverNativeTest {
             assertFalse(tampered.output.contains("FATAL ERROR in native method"), tampered.output)
             assertFalse(tampered.output.contains("JNI DETECTED ERROR IN APPLICATION"), tampered.output)
 
+            emitAkenStage("final-tamper", "pass")
             buildContext.wipe()
             assertTrue(finalized.isWiped)
         } finally {
+            emitAkenStage("cleanup", "start")
             try {
                 assertContentEquals(
                     originalInclude,
@@ -1510,7 +2119,6 @@ class AkenNativePageLocatorResolverNativeTest {
                 entryBytes?.let { Arrays.fill(it, 0) }
                 generatedIncludeBytes?.let { Arrays.fill(it, 0) }
                 tamperedEntryBytes?.let { Arrays.fill(it, 0) }
-                bootMaterial?.let { Arrays.fill(it, 0) }
                 plaintext?.let { Arrays.fill(it, 0) }
                 layout?.wipe()
                 context?.wipe()
@@ -1518,6 +2126,7 @@ class AkenNativePageLocatorResolverNativeTest {
                 Arrays.fill(identity, 0)
                 Arrays.fill(pageZeroProof, 0)
                 deleteTree(tempDir)
+                emitAkenStage("cleanup", "pass")
             }
         }
     }
@@ -1543,7 +2152,7 @@ class AkenNativePageLocatorResolverNativeTest {
         var descriptorProof: ByteArray? = null
         var codecVariant: ByteArray? = null
         var layoutVariant: ByteArray? = null
-        val fragments = ArrayList<BoundPayloadFragmentFixture>()
+        var boundPlan: ByteArray? = null
         try {
             logicalIdentity = descriptor.logicalIdentity
             handle = descriptor.handle
@@ -1571,24 +2180,19 @@ class AkenNativePageLocatorResolverNativeTest {
             }
 
             val evaluatorPlan = descriptor.evaluatorPlan
-            val sourceFragments = evaluatorPlan.javaFragments + evaluatorPlan.nativeFragments + listOf(evaluatorPlan.terminal)
-            require(sourceFragments.size == 7) { "AKEN bound-payload fixture graph must contain seven fragments" }
-            sourceFragments.forEach { fragment ->
-                fragments += BoundPayloadFragmentFixture(
-                    ordinal = fragment.ordinal,
-                    family = fragment.family,
-                    shape = fragment.shape,
-                    callToken = fragment.callToken,
-                    tablePermutation = fragment.tablePermutation,
-                )
+            require(!evaluatorPlan.isLegacyAken7) {
+                "newly materialized AKEN native payload fixtures must use a bound decryptor plan"
             }
-            require(fragments.map { it.ordinal }.sorted() == (0 until 7).toList()) {
-                "AKEN bound-payload fixture graph ordinals are incomplete or duplicated"
+            boundPlan = requireNotNull(evaluatorPlan.copyBoundDecryptorForNative()) {
+                "AKEN bound-payload fixture is missing its opaque native plan"
+            }
+            require(checkNotNull(boundPlan).isNotEmpty()) {
+                "AKEN bound-payload fixture opaque native plan is empty"
             }
 
             val token = currentPage.entryToken.toULong().toString(16).uppercase().padStart(16, '0')
             return buildString {
-                appendLine("/* AUTO-GENERATED AKEN v4 native bound-payload fixture - DO NOT EDIT */")
+                appendLine("/* AUTO-GENERATED AKEN v5 bound-decryptor fixture - DO NOT EDIT */")
                 appendLine("#ifndef JS_AKEN_NATIVE_BOUND_PAYLOAD_FIXTURE_INC")
                 appendLine("#define JS_AKEN_NATIVE_BOUND_PAYLOAD_FIXTURE_INC")
                 appendLine("#include <stdint.h>")
@@ -1606,29 +2210,9 @@ class AkenNativePageLocatorResolverNativeTest {
                 appendBoundPayloadBytes("TEST_LOCATOR_TOKEN", checkNotNull(locatorToken))
                 appendBoundPayloadBytes("TEST_EVALUATOR_FINGERPRINT", checkNotNull(evaluatorFingerprint))
                 appendBoundPayloadBytes("TEST_ARTIFACT_COMMITMENT", checkNotNull(artifactCommitment))
+                appendBoundPayloadBytes("TEST_BOUND_PLAN", checkNotNull(boundPlan))
                 appendBoundPayloadBytes("TEST_ENCODED_PAYLOAD", encodedPayload)
                 appendBoundPayloadBytes("TEST_EXPECTED_PLAINTEXT", expectedPlaintext)
-                appendLine()
-                fragments.forEachIndexed { index, fragment ->
-                    appendBoundPayloadBytes("TEST_FRAGMENT_${index}_SHAPE", fragment.shape)
-                    appendBoundPayloadBytes("TEST_FRAGMENT_${index}_CALL_TOKEN", fragment.callToken)
-                    appendBoundPayloadInts("TEST_FRAGMENT_${index}_TABLE", fragment.tablePermutation)
-                    appendLine()
-                }
-                appendLine("static const js_aken_evaluator_fragment TEST_EVALUATOR_FRAGMENTS[JS_AKEN_EVALUATOR_FRAGMENT_COUNT] = {")
-                fragments.forEachIndexed { index, fragment ->
-                    appendLine("    {")
-                    appendLine("        .ordinal = ${fragment.ordinal},")
-                    appendLine("        .family = ${fragment.family},")
-                    appendLine("        .shape = TEST_FRAGMENT_${index}_SHAPE,")
-                    appendLine("        .shape_len = sizeof(TEST_FRAGMENT_${index}_SHAPE),")
-                    appendLine("        .call_token = TEST_FRAGMENT_${index}_CALL_TOKEN,")
-                    appendLine("        .call_token_len = sizeof(TEST_FRAGMENT_${index}_CALL_TOKEN),")
-                    appendLine("        .table_permutation = TEST_FRAGMENT_${index}_TABLE,")
-                    appendLine("        .table_permutation_len = sizeof(TEST_FRAGMENT_${index}_TABLE) / sizeof(TEST_FRAGMENT_${index}_TABLE[0]),")
-                    appendLine(if (index == fragments.lastIndex) "    }" else "    },")
-                }
-                appendLine("};")
                 appendLine("#endif")
             }
         } finally {
@@ -1640,7 +2224,7 @@ class AkenNativePageLocatorResolverNativeTest {
             descriptorProof?.let { Arrays.fill(it, 0) }
             codecVariant?.let { Arrays.fill(it, 0) }
             layoutVariant?.let { Arrays.fill(it, 0) }
-            fragments.forEach(BoundPayloadFragmentFixture::wipe)
+            boundPlan?.let { Arrays.fill(it, 0) }
             handle?.wipe()
         }
     }
@@ -1657,28 +2241,13 @@ class AkenNativePageLocatorResolverNativeTest {
         appendLine("};")
     }
 
-    private fun StringBuilder.appendBoundPayloadInts(name: String, value: IntArray) {
-        require(value.size == 32) { "AKEN native evaluator permutation must have width 32" }
-        append("static const uint32_t ").append(name).append('[').append(value.size).appendLine("] = {")
-        value.forEachIndexed { index, entry ->
-            if (index % 8 == 0) append("    ")
-            append(entry.toUInt()).append('u')
-            if (index != value.lastIndex) append(", ")
-            if (index % 8 == 7 || index == value.lastIndex) appendLine()
-        }
-        appendLine("};")
-    }
-
     private fun parseProductionCurrentPage(record: ByteArray): ProductionCurrentPage {
         require(record.size in 1..(512 * 1024)) {
             "production AKEN compiler record size is invalid"
         }
         val input = ByteBuffer.wrap(record).order(ByteOrder.BIG_ENDIAN)
-        require(input.remaining() >= 1 + Long.SIZE_BYTES + 1 + Int.SIZE_BYTES + Int.SIZE_BYTES) {
+        require(input.remaining() >= Long.SIZE_BYTES + 1 + Int.SIZE_BYTES + Int.SIZE_BYTES) {
             "production AKEN compiler record is truncated"
-        }
-        require((input.get().toInt() and 0xFF) == COMPILER_RECORD_VERSION) {
-            "production AKEN compiler record version is unsupported"
         }
         val entryToken = input.long
         val resourceKind = requireNotNull(AkenResourceKind.fromId(input.get().toInt() and 0xFF)) {
@@ -1763,11 +2332,8 @@ class AkenNativePageLocatorResolverNativeTest {
             "production AKEN compiler record size is invalid"
         }
         val input = ByteBuffer.wrap(record).order(ByteOrder.BIG_ENDIAN)
-        require(input.remaining() >= 1 + Long.SIZE_BYTES + 1 + Int.SIZE_BYTES + Int.SIZE_BYTES) {
+        require(input.remaining() >= Long.SIZE_BYTES + 1 + Int.SIZE_BYTES + Int.SIZE_BYTES) {
             "production AKEN compiler record is truncated"
-        }
-        require((input.get().toInt() and 0xFF) == COMPILER_RECORD_VERSION) {
-            "production AKEN compiler record version is unsupported"
         }
         input.long
         requireNotNull(AkenResourceKind.fromId(input.get().toInt() and 0xFF)) {
@@ -1945,20 +2511,6 @@ class AkenNativePageLocatorResolverNativeTest {
     }
 
 
-    private class BoundPayloadFragmentFixture(
-        val ordinal: Int,
-        val family: Int,
-        val shape: ByteArray,
-        val callToken: ByteArray,
-        val tablePermutation: IntArray,
-    ) {
-        fun wipe() {
-            Arrays.fill(shape, 0)
-            Arrays.fill(callToken, 0)
-            Arrays.fill(tablePermutation, 0)
-        }
-    }
-
     private class ProductionCurrentPage(
         val entryToken: Long,
         val resourceKind: AkenResourceKind,
@@ -1983,10 +2535,22 @@ class AkenNativePageLocatorResolverNativeTest {
         sourceNativeDir: Path,
         include: String,
         platform: AkenHostPlatform,
+        forceSoftware: Boolean = false,
     ): Path {
-        val scenarioDir = Files.createDirectories(root.resolve("jni-native"))
+        val scenarioDirName = if (forceSoftware) "jni-native-software" else "jni-native-hardware"
+        val scenarioDir = Files.createDirectories(root.resolve(scenarioDirName))
         val nativeDir = scenarioDir.resolve("native")
         copyTree(sourceNativeDir, nativeDir)
+        /* The Zig 0.16 MinGW sysroot shipped on the Windows fixture host has
+         * an immintrin.h reference to an optional AVX10 header that is absent.
+         * Keep the compile-only shim in this isolated copy; AES-NI/PCLMUL
+         * intrinsics used by the runtime remain available and no repository
+         * header or ABI is changed. */
+        Files.writeString(
+            nativeDir.resolve("avx10_2satcvtintrin.h"),
+            "#ifndef JS_FIXTURE_AVX10_2SATCVT_INTRIN_H\n#define JS_FIXTURE_AVX10_2SATCVT_INTRIN_H\n#endif\n",
+            StandardCharsets.US_ASCII,
+        )
         Files.writeString(nativeDir.resolve("js_aken_page_locator.inc"), include, StandardCharsets.UTF_8)
         if (platform.platformId.startsWith("macos-")) {
             Files.writeString(
@@ -2002,6 +2566,7 @@ class AkenNativePageLocatorResolverNativeTest {
             nativeDir = nativeDir,
             library = library,
             platform = platform,
+            forceSoftware = forceSoftware,
         )
         var compile = run(
             command = command,
@@ -2030,6 +2595,7 @@ class AkenNativePageLocatorResolverNativeTest {
         nativeDir: Path,
         library: Path,
         platform: AkenHostPlatform,
+        forceSoftware: Boolean = false,
     ): List<String> = buildList {
         addAll(
             listOf(
@@ -2056,6 +2622,7 @@ class AkenNativePageLocatorResolverNativeTest {
                 library.toString(),
             ),
         )
+        if (forceSoftware) add("-DJS_CRYPTO_FORCE_SOFTWARE=1")
         addAll(FULL_NATIVE_SOURCES.map { name -> nativeDir.resolve(name).toString() })
         addAll(
             listOf(
@@ -2099,36 +2666,6 @@ class AkenNativePageLocatorResolverNativeTest {
             operandAccessProfile = 0,
         ),
     )
-
-    /**
-     * Transitional test-only material for the still-legacy inner VBC4 parser.
-     * The production AKEN route, locator, evaluator and page opener never carry
-     * this array; the fixture installs it only inside its isolated child JVM.
-     */
-    private fun runtimeBootMaterial(context: Vbc4BuildContext): ByteArray {
-        val partitions = context.runtimeKeyPartitions
-        val material = ByteArray(4 + 64 + partitions.totalSlots * 32)
-        return try {
-            material[0] = 2
-            material[1] = partitions.resourcePartitionCount.toByte()
-            material[2] = partitions.totalSlots.toByte()
-            material[3] = 0
-            context.masterKey.copyInto(material, destinationOffset = 4)
-            context.jarLayoutDigest.copyInto(material, destinationOffset = 36)
-            for (slot in 0 until partitions.totalSlots) {
-                val key = partitions.copyKeyForSlot(slot)
-                try {
-                    key.copyInto(material, destinationOffset = 68 + slot * 32)
-                } finally {
-                    Arrays.fill(key, 0)
-                }
-            }
-            material
-        } catch (error: Throwable) {
-            Arrays.fill(material, 0)
-            throw error
-        }
-    }
 
     private fun prepareAkenClassJniRuntimeFixture(
         root: Path,
@@ -2180,30 +2717,72 @@ class AkenNativePageLocatorResolverNativeTest {
         assertEquals(0, compile.exitCode, "real AKEN JNI class Java harness must compile:\n${compile.output}")
 
         val nativeResourcePath = "META-INF/aken/runtime/aken-class-page${platform.fileSuffix}"
-        val nativeBytes = Files.readAllBytes(nativeLibrary)
-        try {
-            writeClasspathResource(runtimeRoot, nativeResourcePath, nativeBytes)
-            val locator = buildString {
-                append("AKEN_NATIVE_LOCATOR_V1")
-                append('|')
-                append(platform.platformId)
-                append('|')
-                append(nativeResourcePath)
-                append('|')
-                append(platform.fileSuffix)
-                append('|')
-                append(nativeBytes.size)
-                append('|')
-                append(sha256Hex(nativeBytes))
-            }.toByteArray(StandardCharsets.US_ASCII)
-            try {
-                writeClasspathResource(runtimeRoot, "META-INF/aken/native.locator", locator)
-            } finally {
-                Arrays.fill(locator, 0)
-            }
-        } finally {
-            Arrays.fill(nativeBytes, 0)
-        }
+        writeAkenNativeRuntimeResources(
+            runtimeRoot = runtimeRoot,
+            platform = platform,
+            nativeLibrary = nativeLibrary,
+            nativeResourcePath = nativeResourcePath,
+        )
+        writeClasspathResource(runtimeRoot, pageResourcePath, pageResourceBytes)
+        return runtimeRoot
+    }
+
+    private fun prepareAkenNativeChunkJniRuntimeFixture(
+        root: Path,
+        platform: AkenHostPlatform,
+        nativeLibrary: Path,
+        pageResourcePath: String,
+        pageResourceBytes: ByteArray,
+        encodedHandle: ByteArray,
+        pageIndex: Int,
+        callSiteProof: ByteArray,
+    ): Path {
+        require(pageResourceBytes.isNotEmpty()) { "real AKEN JNI native chunk resource must not be empty" }
+        require(encodedHandle.size == AkenHandle.ENCODED_HANDLE_SIZE) { "real AKEN JNI native chunk handle size is invalid" }
+        require(pageIndex >= 0) { "real AKEN JNI native chunk page index is invalid" }
+        require(callSiteProof.isNotEmpty()) { "real AKEN JNI native chunk call-site proof must not be empty" }
+
+        val runtimeRoot = Files.createDirectories(root.resolve("runtime-classes"))
+        val sourceDir = Files.createDirectories(root.resolve("runtime-source"))
+        val source = sourceDir.resolve(AKEN_JNI_FIXTURE_MAIN + ".java")
+        Files.writeString(
+            source,
+            akenNativeChunkJniHarnessSource(
+                encodedHandle = encodedHandle,
+                pageIndex = pageIndex,
+                callSiteProof = callSiteProof,
+            ),
+            StandardCharsets.UTF_8,
+        )
+
+        val helperClasspath = jniHelperClasspathEntry()
+        val javac = javaTool("javac")
+        val compile = run(
+            command = listOf(
+                javac.toString(),
+                "-source",
+                "8",
+                "-target",
+                "8",
+                "-classpath",
+                helperClasspath.toString(),
+                "-d",
+                runtimeRoot.toString(),
+                source.toString(),
+            ),
+            directory = root,
+            label = "compile-native-chunk-jni-harness",
+            timeoutSeconds = 60L,
+        )
+        assertEquals(0, compile.exitCode, "real AKEN JNI native chunk Java harness must compile:\n" + compile.output)
+
+        val nativeResourcePath = "META-INF/aken/runtime/aken-native-chunk" + platform.fileSuffix
+        writeAkenNativeRuntimeResources(
+            runtimeRoot = runtimeRoot,
+            platform = platform,
+            nativeLibrary = nativeLibrary,
+            nativeResourcePath = nativeResourcePath,
+        )
         writeClasspathResource(runtimeRoot, pageResourcePath, pageResourceBytes)
         return runtimeRoot
     }
@@ -2258,30 +2837,12 @@ class AkenNativePageLocatorResolverNativeTest {
         assertEquals(0, compile.exitCode, "real AKEN JNI string Java harness must compile:\n${compile.output}")
 
         val nativeResourcePath = "META-INF/aken/runtime/aken-string-page${platform.fileSuffix}"
-        val nativeBytes = Files.readAllBytes(nativeLibrary)
-        try {
-            writeClasspathResource(runtimeRoot, nativeResourcePath, nativeBytes)
-            val locator = buildString {
-                append("AKEN_NATIVE_LOCATOR_V1")
-                append('|')
-                append(platform.platformId)
-                append('|')
-                append(nativeResourcePath)
-                append('|')
-                append(platform.fileSuffix)
-                append('|')
-                append(nativeBytes.size)
-                append('|')
-                append(sha256Hex(nativeBytes))
-            }.toByteArray(StandardCharsets.US_ASCII)
-            try {
-                writeClasspathResource(runtimeRoot, "META-INF/aken/native.locator", locator)
-            } finally {
-                Arrays.fill(locator, 0)
-            }
-        } finally {
-            Arrays.fill(nativeBytes, 0)
-        }
+        writeAkenNativeRuntimeResources(
+            runtimeRoot = runtimeRoot,
+            platform = platform,
+            nativeLibrary = nativeLibrary,
+            nativeResourcePath = nativeResourcePath,
+        )
         writeClasspathResource(runtimeRoot, pageResourcePath, pageResourceBytes)
         return runtimeRoot
     }
@@ -2296,13 +2857,11 @@ class AkenNativePageLocatorResolverNativeTest {
         encodedHandle: ByteArray,
         pageIndex: Int,
         callSiteProof: ByteArray,
-        bootMaterial: ByteArray,
     ): Path {
         require(pageResourceBytes.isNotEmpty()) { "real AKEN JNI page resource must not be empty" }
         require(encodedHandle.size == AkenHandle.ENCODED_HANDLE_SIZE) { "real AKEN JNI handle size is invalid" }
         require(pageIndex >= 0) { "real AKEN JNI page index is invalid" }
         require(callSiteProof.isNotEmpty()) { "real AKEN JNI call-site proof must not be empty" }
-        require(bootMaterial.isNotEmpty()) { "real AKEN JNI transitional VBC4 boot material must not be empty" }
 
         val runtimeRoot = Files.createDirectories(root.resolve("runtime-classes"))
         val sourceDir = Files.createDirectories(root.resolve("runtime-source"))
@@ -2314,7 +2873,6 @@ class AkenNativePageLocatorResolverNativeTest {
                 encodedHandle = encodedHandle,
                 pageIndex = pageIndex,
                 callSiteProof = callSiteProof,
-                bootMaterial = bootMaterial,
             ),
             StandardCharsets.UTF_8,
         )
@@ -2341,32 +2899,109 @@ class AkenNativePageLocatorResolverNativeTest {
         assertEquals(0, compile.exitCode, "real AKEN JNI Java harness must compile:\n${compile.output}")
 
         val nativeResourcePath = "META-INF/aken/runtime/aken-current-page${platform.fileSuffix}"
+        writeAkenNativeRuntimeResources(
+            runtimeRoot = runtimeRoot,
+            platform = platform,
+            nativeLibrary = nativeLibrary,
+            nativeResourcePath = nativeResourcePath,
+        )
+        writeClasspathResource(runtimeRoot, pageResourcePath, pageResourceBytes)
+        return runtimeRoot
+    }
+
+    private fun writeAkenNativeRuntimeResources(
+        runtimeRoot: Path,
+        platform: AkenHostPlatform,
+        nativeLibrary: Path,
+        nativeResourcePath: String,
+    ) {
+        val nativeBindingsResourcePath = "META-INF/aken/runtime/aken-current-page.bindings"
         val nativeBytes = Files.readAllBytes(nativeLibrary)
         try {
             writeClasspathResource(runtimeRoot, nativeResourcePath, nativeBytes)
-            val locator = buildString {
-                append("AKEN_NATIVE_LOCATOR_V1")
-                append('|')
-                append(platform.platformId)
-                append('|')
-                append(nativeResourcePath)
-                append('|')
-                append(platform.fileSuffix)
-                append('|')
-                append(nativeBytes.size)
-                append('|')
-                append(sha256Hex(nativeBytes))
-            }.toByteArray(StandardCharsets.US_ASCII)
+            val nativeBindings = "B|fixture|fixture\n".toByteArray(StandardCharsets.US_ASCII)
             try {
-                writeClasspathResource(runtimeRoot, "META-INF/aken/native.locator", locator)
+                writeClasspathResource(runtimeRoot, nativeBindingsResourcePath, nativeBindings)
+                val locator = buildString {
+                    append("AKEN_NATIVE_LOCATOR_V1")
+                    append('|')
+                    append(platform.platformId)
+                    append('|')
+                    append(nativeResourcePath)
+                    append('|')
+                    append(platform.fileSuffix)
+                    append('|')
+                    append(nativeBytes.size)
+                    append('|')
+                    append(sha256Hex(nativeBytes))
+                    append('\n')
+                    append("AKEN_NATIVE_BINDINGS_V1")
+                    append('|')
+                    append(nativeBindingsResourcePath)
+                    append('|')
+                    append(nativeBindings.size)
+                    append('|')
+                    append(sha256Hex(nativeBindings))
+                }.toByteArray(StandardCharsets.US_ASCII)
+                try {
+                    writeClasspathResource(runtimeRoot, "META-INF/aken/native.locator", locator)
+                } finally {
+                    Arrays.fill(locator, 0)
+                }
             } finally {
-                Arrays.fill(locator, 0)
+                Arrays.fill(nativeBindings, 0)
             }
         } finally {
             Arrays.fill(nativeBytes, 0)
         }
-        writeClasspathResource(runtimeRoot, pageResourcePath, pageResourceBytes)
-        return runtimeRoot
+    }
+
+    /**
+     * Emit only fixed phase names, exit status, and the benchmark output digest.
+     * The child output itself can contain fixture-specific failure text, so it
+     * remains confined to the assertion message and is never copied into the
+     * persistent phase stream.
+     */
+    private fun emitAkenFixturePhase(stage: String, result: ProcessResult) {
+        require(stage.matches(Regex("[a-z0-9-]+")))
+        val digest = result.output.lineSequence()
+            .firstOrNull { it.startsWith("phase=aken-page-open ") }
+            ?.split(' ')
+            ?.firstOrNull { it.startsWith("output_digest=") }
+            ?.substringAfter('=')
+            ?.takeIf { it.matches(Regex("[0-9a-f]{16}")) }
+            ?: "absent"
+        println(
+            "phase=aken-jni-fixture stage=$stage " +
+                "status=${if (result.exitCode == 0) "pass" else "fail"} " +
+                "exit_code=${result.exitCode} output_digest=$digest",
+        )
+        System.out.flush()
+    }
+
+    /**
+     * Require exactly one sanitized page-open phase line without copying the
+     * child process output into a persistent assertion or JUnit report.  A
+     * timeout can otherwise leave an empty stream, while a duplicated line can
+     * silently select the wrong profile; both cases must remain fail-closed and
+     * must expose only bounded diagnostics.
+     */
+    private fun requireSingleAkenPhaseLine(result: ProcessResult, label: String): String {
+        val phaseLines = result.output.lineSequence()
+            .filter { it.startsWith("phase=aken-page-open ") }
+            .toList()
+        check(phaseLines.size == 1) {
+            "$label phase-line-count=${phaseLines.size} " +
+                "exit_code=${result.exitCode} output_chars=${result.output.length}"
+        }
+        return phaseLines.single()
+    }
+
+    private fun emitAkenStage(stage: String, status: String) {
+        require(stage.matches(Regex("[a-z0-9-]+")))
+        require(status.matches(Regex("[a-z0-9-]+")))
+        println("phase=aken-jni-fixture stage=$stage status=$status")
+        System.out.flush()
     }
 
     private fun runAkenJniRuntimeFixture(
@@ -2374,6 +3009,7 @@ class AkenNativePageLocatorResolverNativeTest {
         extractDirectory: Path,
         expectedOutcome: String,
         label: String,
+        timeoutSeconds: Long = 120L,
     ): ProcessResult {
         Files.createDirectories(extractDirectory)
         val isolatedHome = Files.createDirectories(extractDirectory.resolve("home"))
@@ -2397,7 +3033,7 @@ class AkenNativePageLocatorResolverNativeTest {
             ),
             directory = runtimeRoot.parent,
             label = label,
-            timeoutSeconds = 120L,
+            timeoutSeconds = timeoutSeconds,
         )
     }
 
@@ -2406,7 +3042,6 @@ class AkenNativePageLocatorResolverNativeTest {
         encodedHandle: ByteArray,
         pageIndex: Int,
         callSiteProof: ByteArray,
-        bootMaterial: ByteArray,
     ): String = """
         import io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper;
         import java.lang.reflect.Method;
@@ -2417,74 +3052,225 @@ class AkenNativePageLocatorResolverNativeTest {
             private static final int PAGE_INDEX = $pageIndex;
             private static final String HANDLE = "${hexLower(encodedHandle)}";
             private static final String PROOF = "${hexLower(callSiteProof)}";
-            private static final String BOOT_MATERIAL = "${hexLower(bootMaterial)}";
 
             public static void main(String[] args) throws Exception {
                 if (args.length != 1) {
                     System.err.println("expected one outcome argument");
                     System.exit(2);
                 }
-                installBootMaterial();
-                String expectedOutcome = args[0];
-                if (expectedOutcome.startsWith("result:")) {
-                    Object result = JniMicrokernelHelper.executeAkenVmPage(
-                        ENTRY_TOKEN,
-                        decodeHex(HANDLE),
-                        PAGE_INDEX,
-                        decodeHex(PROOF),
-                        new Object[0]
-                    );
-                    String expectedValue = expectedOutcome.substring("result:".length());
-                    if (!expectedValue.equals(String.valueOf(result))) {
-                        System.err.println("unexpected AKEN real JNI result: " + result);
-                        System.exit(3);
-                    }
-                    System.out.println("AKEN real JNI current page fixture: PASS:executed");
-                    return;
-                }
-                if (!expectedOutcome.startsWith("error:")) {
-                    System.err.println("unsupported outcome: " + expectedOutcome);
-                    System.exit(4);
-                }
-                String expectedMessage = expectedOutcome.substring("error:".length());
+                byte[] handle = decodeHex(HANDLE);
+                byte[] proof = decodeHex(PROOF);
                 try {
-                    JniMicrokernelHelper.executeAkenVmPage(
-                        ENTRY_TOKEN,
-                        decodeHex(HANDLE),
-                        PAGE_INDEX,
-                        decodeHex(PROOF),
-                        new Object[0]
-                    );
-                    System.err.println("AKEN real JNI current-page route unexpectedly returned");
-                    System.exit(5);
-                } catch (SecurityException error) {
-                    if (!expectedMessage.equals(error.getMessage())) {
-                        System.err.println("unexpected AKEN real JNI failure: " + error.getMessage());
-                        error.printStackTrace(System.err);
-                        System.exit(6);
+                    ensureAkenNativeKernel();
+                    assertLegacyKernelUntried("AKEN VBC4 page");
+                    String expectedOutcome = args[0];
+                    if (expectedOutcome.startsWith("bench:")) {
+                        runPageOpenBenchmark(expectedOutcome, handle, proof);
+                        assertLegacyKernelUntried("AKEN VBC4 page benchmark");
+                        return;
                     }
-                    System.out.println("AKEN real JNI current page fixture: PASS:tampered");
+                    if (expectedOutcome.startsWith("result:")) {
+                        Object result = JniMicrokernelHelper.executeAkenVmPage(
+                            ENTRY_TOKEN,
+                            handle,
+                            PAGE_INDEX,
+                            proof,
+                            new Object[0]
+                        );
+                        String expectedValue = expectedOutcome.substring("result:".length());
+                        if (!expectedValue.equals(String.valueOf(result))) {
+                            System.err.println("unexpected AKEN real JNI result: " + result);
+                            System.exit(3);
+                        }
+                        assertLegacyKernelUntried("AKEN VBC4 page execution");
+                        System.out.println("AKEN real JNI current page fixture: PASS:executed");
+                        return;
+                    }
+                    if (!expectedOutcome.startsWith("error:")) {
+                        System.err.println("unsupported outcome: " + expectedOutcome);
+                        System.exit(4);
+                    }
+                    String expectedMessage = expectedOutcome.substring("error:".length());
+                    try {
+                        JniMicrokernelHelper.executeAkenVmPage(
+                            ENTRY_TOKEN,
+                            handle,
+                            PAGE_INDEX,
+                            proof,
+                            new Object[0]
+                        );
+                        System.err.println("AKEN real JNI current-page route unexpectedly returned");
+                        System.exit(5);
+                    } catch (SecurityException error) {
+                        if (!expectedMessage.equals(error.getMessage())) {
+                            System.err.println("unexpected AKEN real JNI failure: " + error.getMessage());
+                            error.printStackTrace(System.err);
+                            System.exit(6);
+                        }
+                        assertLegacyKernelUntried("AKEN VBC4 page rejection");
+                        System.out.println("AKEN real JNI current page fixture: PASS:tampered");
+                    }
+                } finally {
+                    Arrays.fill(handle, (byte) 0);
+                    Arrays.fill(proof, (byte) 0);
                 }
             }
 
-            private static void installBootMaterial() throws Exception {
-                byte[] material = decodeHex(BOOT_MATERIAL);
-                try {
-                    Method ensureKernel = JniMicrokernelHelper.class.getDeclaredMethod("ensureAkenNativeKernel");
-                    ensureKernel.setAccessible(true);
-                    ensureKernel.invoke(null);
-
-                    Method method = JniMicrokernelHelper.class.getDeclaredMethod(
-                        "nativeInstallBootMaterial",
-                        byte[].class
+            private static void runPageOpenBenchmark(String specification, byte[] handle, byte[] proof) throws Exception {
+                String[] parts = specification.split(":", -1);
+                if (parts.length != 3) {
+                    throw new IllegalArgumentException("AKEN page benchmark specification is malformed");
+                }
+                int samples = parseBoundedPositive(parts[1], "samples");
+                int warmup = parseBoundedNonNegative(parts[2], "warmup");
+                Object[] arguments = new Object[0];
+                long[] timings = new long[samples];
+                long digest = 0x243f6a8885a308d3L;
+                for (int index = 0; index < warmup; index++) {
+                    Object result = JniMicrokernelHelper.executeAkenVmPage(
+                        ENTRY_TOKEN, handle, PAGE_INDEX, proof, arguments
                     );
-                    method.setAccessible(true);
-                    Object installed = method.invoke(null, (Object) material);
-                    if (!Boolean.TRUE.equals(installed)) {
-                        throw new IllegalStateException("transitional VBC4 boot material was rejected");
+                    if (!"2".equals(String.valueOf(result))) {
+                        throw new SecurityException("AKEN page benchmark warmup result mismatch");
                     }
-                } finally {
-                    Arrays.fill(material, (byte) 0);
+                }
+                long[] before = runtimeMetricsSnapshot();
+                for (int index = 0; index < samples; index++) {
+                    long started = System.nanoTime();
+                    Object result = JniMicrokernelHelper.executeAkenVmPage(
+                        ENTRY_TOKEN, handle, PAGE_INDEX, proof, arguments
+                    );
+                    timings[index] = System.nanoTime() - started;
+                    if (!"2".equals(String.valueOf(result))) {
+                        throw new SecurityException("AKEN page benchmark result mismatch");
+                    }
+                    digest = mixDigest(digest, ((long) index << 32) ^ 2L);
+                }
+                long[] after = runtimeMetricsSnapshot();
+                long[] delta = subtractMetrics(after, before);
+                long[] capabilities = runtimeCryptoCapabilities();
+                if ((capabilities[0] != 0L && capabilities[0] != 1L) ||
+                    (capabilities[1] != 0L && capabilities[1] != 1L)) {
+                    throw new SecurityException("AKEN page benchmark crypto capability flags are invalid");
+                }
+                if ((capabilities[0] == 1L && delta[0] <= 0L) ||
+                    (capabilities[0] == 0L && delta[1] <= 0L)) {
+                    throw new SecurityException("AKEN page benchmark crypto dispatch contradicts capability probe");
+                }
+                Arrays.sort(timings);
+                long p50 = percentile(timings, 50);
+                long p95 = percentile(timings, 95);
+                long p99 = percentile(timings, 99);
+                long max = timings[timings.length - 1];
+                if (delta[4] <= 0L || delta[8] <= 0L || delta[9] <= 0L || delta[11] <= 0L || delta[12] <= 0L ||
+                    delta[13] <= 0L || delta[14] <= 0L || delta[15] <= 0L ||
+                    delta[16] <= 0L || delta[10] != 0L || delta[17] != 0L ||
+                    delta[18] != 0L || delta[19] != 0L || delta[20] != 0L ||
+                    delta[21] != 0L || delta[22] != 0L) {
+                    throw new SecurityException("AKEN page benchmark runtime/security counters failed closed");
+                }
+                System.out.println(
+                    "phase=aken-page-open phase_mode=production phase_status=pass " +
+                    "timing_unit=ns samples=" + samples + " warmup=" + warmup + " " +
+                    "p50=" + p50 + " p95=" + p95 + " p99=" + p99 + " max=" + max + " " +
+                    "cpu_hardware_aes=" + capabilities[0] + " cpu_hardware_ghash=" + capabilities[1] + " " +
+                    "hardware_crypto_path=" + delta[0] + " software_crypto_path=" + delta[1] + " " +
+                    "aes_block_count=" + delta[2] + " ghash_block_count=" + delta[3] + " " +
+                    "vm_frame_reuse_count=" + delta[4] + " vm_heap_fallback_count=" + delta[5] + " " +
+                    "resource_index_hit_count=" + delta[6] + " decompress_context_reuse_count=" + delta[7] + " " +
+                    "jni_cache_hit_count=" + delta[8] + " auth_check_count=" + delta[9] + " " +
+                    "auth_failure_count=" + delta[10] + " digest_check_count=" + delta[11] + " " +
+                    "tag_check_count=" + delta[12] + " length_check_count=" + delta[13] + " " +
+                    "structure_check_count=" + delta[14] + " jni_abi_check_count=" + delta[15] + " " +
+                    "wipe_count=" + delta[16] + " wipe_failure_count=" + delta[17] + " " +
+                    "plaintext_persistence_bytes=" + delta[18] + " fallback_count=" + delta[19] + " " +
+                    "legacy_path_hits=" + delta[20] + " exception_count=" + delta[21] + " " +
+                    "security_checks_skipped=" + delta[22] + " output_digest=" +
+                    String.format(java.util.Locale.ROOT, "%016x", digest)
+                );
+            }
+
+            private static long[] runtimeMetricsSnapshot() throws Exception {
+                Method method = JniMicrokernelHelper.class.getDeclaredMethod("nativeRuntimeMetricsSnapshot");
+                method.setAccessible(true);
+                Object value = method.invoke(null);
+                if (!(value instanceof long[])) {
+                    throw new SecurityException("AKEN page benchmark metrics snapshot is unavailable");
+                }
+                return (long[]) value;
+            }
+
+            private static long[] runtimeCryptoCapabilities() throws Exception {
+                Method method = JniMicrokernelHelper.class.getDeclaredMethod("nativeRuntimeCryptoCapabilities");
+                method.setAccessible(true);
+                Object value = method.invoke(null);
+                if (!(value instanceof long[]) || ((long[]) value).length != 2) {
+                    throw new SecurityException("AKEN page benchmark crypto capability probe is unavailable");
+                }
+                return (long[]) value;
+            }
+
+            private static long[] subtractMetrics(long[] after, long[] before) {
+                if (after == null || before == null || after.length != 26 || before.length != 26) {
+                    throw new SecurityException("AKEN page benchmark metrics snapshot length is invalid");
+                }
+                long[] delta = new long[after.length];
+                for (int index = 0; index < delta.length; index++) {
+                    if (after[index] < before[index]) {
+                        throw new SecurityException("AKEN page benchmark metrics counter regressed");
+                    }
+                    delta[index] = after[index] - before[index];
+                }
+                return delta;
+            }
+
+            private static long mixDigest(long value, long input) {
+                value ^= input + 0x9e3779b97f4a7c15L + (value << 6) + (value >>> 2);
+                value ^= value >>> 30;
+                value *= 0xbf58476d1ce4e5b9L;
+                value ^= value >>> 27;
+                value *= 0x94d049bb133111ebL;
+                return value ^ (value >>> 31);
+            }
+
+            private static long percentile(long[] sorted, int percent) {
+                int index = (sorted.length * percent + 99) / 100 - 1;
+                if (index < 0) index = 0;
+                if (index >= sorted.length) index = sorted.length - 1;
+                return sorted[index];
+            }
+
+            private static int parseBoundedPositive(String value, String label) {
+                int parsed = parseBoundedNonNegative(value, label);
+                if (parsed <= 0) throw new IllegalArgumentException(label + " must be positive");
+                return parsed;
+            }
+
+            private static int parseBoundedNonNegative(String value, String label) {
+                try {
+                    int parsed = Integer.parseInt(value);
+                    if (parsed < 0 || parsed > 100000) throw new NumberFormatException();
+                    return parsed;
+                } catch (NumberFormatException error) {
+                    throw new IllegalArgumentException(label + " must be in 0..100000", error);
+                }
+            }
+
+            private static void ensureAkenNativeKernel() {
+                try {
+                    Method method = JniMicrokernelHelper.class.getDeclaredMethod("ensureAkenNativeKernel");
+                    method.setAccessible(true);
+                    method.invoke(null);
+                } catch (ReflectiveOperationException error) {
+                    throw new IllegalStateException("AKEN native loader is unavailable", error);
+                }
+            }
+
+            private static void assertLegacyKernelUntried(String phase) {
+                String status = JniMicrokernelHelper.getLoadStatus();
+                if (!"untried".equals(status)) {
+                    System.err.println(phase + " unexpectedly activated the legacy kernel: " + status);
+                    System.exit(7);
                 }
             }
 
@@ -2736,6 +3522,96 @@ class AkenNativePageLocatorResolverNativeTest {
         }
     """.trimIndent()
 
+    private fun akenNativeChunkJniHarnessSource(
+        encodedHandle: ByteArray,
+        pageIndex: Int,
+        callSiteProof: ByteArray,
+    ): String {
+        val handle = hexLower(encodedHandle)
+        val proof = hexLower(callSiteProof)
+        return """
+            import io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper;
+            import java.lang.reflect.Method;
+            import java.util.Arrays;
+
+            public final class $AKEN_JNI_FIXTURE_MAIN {
+                private static final int PAGE_INDEX = $pageIndex;
+                private static final String HANDLE = "$handle";
+                private static final String PROOF = "$proof";
+
+                public static void main(String[] args) {
+                    if (args.length != 1) {
+                        System.err.println("expected one outcome argument");
+                        System.exit(2);
+                    }
+                    byte[] handle = decodeHex(HANDLE);
+                    byte[] proof = decodeHex(PROOF);
+                    try {
+                        String expectedOutcome = args[0];
+                        ensureAkenNativeKernel();
+                        assertLegacyKernelUntried("AKEN native loader");
+                        if ("consume".equals(expectedOutcome)) {
+                            JniMicrokernelHelper.consumeAkenNativeChunk(handle, PAGE_INDEX, proof);
+                            assertLegacyKernelUntried("AKEN native chunk consumer");
+                            System.out.println("AKEN real JNI native chunk fixture: PASS:consumed");
+                            return;
+                        }
+                        if (!expectedOutcome.startsWith("error:")) {
+                            System.err.println("unsupported outcome: " + expectedOutcome);
+                            System.exit(4);
+                        }
+                        String expectedMessage = expectedOutcome.substring("error:".length());
+                        try {
+                            JniMicrokernelHelper.consumeAkenNativeChunk(handle, PAGE_INDEX, proof);
+                            System.err.println("AKEN real JNI native chunk route unexpectedly returned");
+                            System.exit(5);
+                        } catch (SecurityException error) {
+                            if (!expectedMessage.equals(error.getMessage())) {
+                                System.err.println("unexpected AKEN real JNI native chunk failure: " + error.getMessage());
+                                error.printStackTrace(System.err);
+                                System.exit(6);
+                            }
+                            System.out.println("AKEN real JNI native chunk fixture: PASS:tampered");
+                        }
+                    } finally {
+                        Arrays.fill(handle, (byte) 0);
+                        Arrays.fill(proof, (byte) 0);
+                    }
+                }
+
+                private static void ensureAkenNativeKernel() {
+                    try {
+                        Method method = JniMicrokernelHelper.class.getDeclaredMethod("ensureAkenNativeKernel");
+                        method.setAccessible(true);
+                        method.invoke(null);
+                    } catch (ReflectiveOperationException error) {
+                        throw new IllegalStateException("AKEN native loader is unavailable", error);
+                    }
+                }
+
+                private static void assertLegacyKernelUntried(String phase) {
+                    String status = JniMicrokernelHelper.getLoadStatus();
+                    if (!"untried".equals(status)) {
+                        System.err.println(phase + " unexpectedly activated the legacy kernel: " + status);
+                        System.exit(7);
+                    }
+                }
+
+                private static byte[] decodeHex(String value) {
+                    if ((value.length() & 1) != 0) throw new IllegalArgumentException("odd hex length");
+                    byte[] out = new byte[value.length() / 2];
+                    for (int index = 0; index < out.length; index++) {
+                        int high = Character.digit(value.charAt(index * 2), 16);
+                        int low = Character.digit(value.charAt(index * 2 + 1), 16);
+                        if (high < 0 || low < 0) throw new IllegalArgumentException("invalid hex");
+                        out[index] = (byte) ((high << 4) | low);
+                    }
+                    return out;
+                }
+            }
+        """.trimIndent()
+    }
+
     private fun writeClasspathResource(root: Path, resourcePath: String, bytes: ByteArray) {
         require(bytes.isNotEmpty()) { "classpath fixture resource must not be empty" }
         val segments = resourcePath.split('/')
@@ -2963,78 +3839,55 @@ class AkenNativePageLocatorResolverNativeTest {
         val codecVariant = AkenResourceCodec.CANONICAL_CODEC_VARIANT
         val layoutVariant = "aken4-frame1:fixture:12:8:head:AAAAAAAAAAA"
         val logicalIdentity = "fixture:native-locator:$seed".toByteArray(StandardCharsets.US_ASCII)
-        val locatorToken = ByteArray(AkenHandle.LOCATOR_TOKEN_SIZE) { index -> (seed * 3 + index * 11).toByte() }
+        val plaintext = ByteArray(128) { index -> (seed * 13 + index * 31 + 7).toByte() }
         val commitment = ByteArray(AkenArtifactCommitment.DIGEST_SIZE) { index -> (seed + index * 19).toByte() }
         val vbc4StateBindingLayoutDigest = ByteArray(AkenArtifactCommitment.DIGEST_SIZE) { index ->
             (seed * 17 + index * 29 + 11).toByte()
         }
-        val javaFragments = List(3) { ordinal -> runtimeFragment(AkenRuntimeEvaluatorRole.Java, ordinal, seed) }
-        val nativeFragments = List(3) { ordinal -> runtimeFragment(AkenRuntimeEvaluatorRole.Native, ordinal + 3, seed) }
-        val terminal = runtimeFragment(AkenRuntimeEvaluatorRole.Terminal, 6, seed)
-        var fingerprint: ByteArray? = null
-        var handle: AkenHandle? = null
+        var plan: AkenBuildPlan? = null
+        var materialization: AkenPageMaterialization? = null
+        var descriptorHandle: AkenHandle? = null
         var descriptorBytes: ByteArray? = null
         var routeBytes: ByteArray? = null
         var envelopeBytes: ByteArray? = null
         var envelope: AkenNativePageEnvelope? = null
         try {
-            fingerprint = AkenRuntimeEvaluatorPlan.computeFingerprint(
-                resourceKind = kind,
-                logicalIdentity = logicalIdentity,
+            val buildPlan = AkenBuildPlan.create(commitment, SecureRandom())
+            plan = buildPlan
+            val page = buildPlan.registerPage(
+                kind = kind,
+                identity = logicalIdentity,
                 pageIndex = pageIndex,
-                targetPageSize = targetPageSize,
                 codecVariant = codecVariant,
                 layoutVariant = layoutVariant,
-                handleEncoding = encodedHandle,
-                locatorToken = locatorToken,
-                javaFragments = javaFragments,
-                nativeFragments = nativeFragments,
-                terminal = terminal,
+                targetPageSize = targetPageSize,
+                encodedHandleOverride = encodedHandle,
             )
-            val evaluatorPlan = AkenRuntimeEvaluatorPlan.create(
-                javaFragments = javaFragments,
-                nativeFragments = nativeFragments,
-                terminal = terminal,
-                fingerprint = checkNotNull(fingerprint),
-            )
-            handle = AkenHandle.create(
-                resourceKind = kind,
-                pageIndex = pageIndex,
-                encoded = encodedHandle,
-                locatorToken = locatorToken,
-                evaluatorFingerprint = checkNotNull(fingerprint),
-            )
-            val route = AkenRoutingMetadata.fromHandle(
-                handle = checkNotNull(handle),
-                logicalIdentity = logicalIdentity,
+            val input = AkenPageMaterializationInput.create(
+                page = page,
+                plaintext = plaintext,
                 resourcePath = resourcePath,
                 resourceOffset = seed + 17,
-                storedLength = 511,
-                codecVariant = codecVariant,
-                layoutVariant = layoutVariant,
-            )
-            val proof = AkenSealingProofMetadata.create(
-                leafIdentity = AkenHighValueLeafIdentity.fromHandle(checkNotNull(handle), logicalIdentity),
-                artifactCommitment = commitment,
-                meshRoot = ByteArray(AkenArtifactCommitment.DIGEST_SIZE) { 0x31 },
-                leafDigest = ByteArray(AkenArtifactCommitment.DIGEST_SIZE) { 0x42 },
-                siblings = listOf(ByteArray(AkenArtifactCommitment.DIGEST_SIZE) { 0x53 }),
-                siblingIsLeft = listOf(true),
                 callSiteProof = rawProof,
-                codecVariant = codecVariant,
-                layoutVariant = layoutVariant,
+                logicalBindingPath = "fixture/native-locator/$seed",
             )
-            val descriptor = AkenRuntimePageDescriptor.create(
-                handle = checkNotNull(handle),
-                logicalIdentity = logicalIdentity,
-                route = route,
-                proof = proof,
-                targetPageSize = targetPageSize,
-                evaluatorPlan = evaluatorPlan,
+            val generated = AkenPageMaterializer.materializeAndWipe(
+                plan = buildPlan,
+                inputs = listOf(input),
             )
+            materialization = generated
+            plan = null
+
+            val descriptor = generated.pagesForBuild().single().descriptorForBuild
+            val handle = descriptor.handle
+            descriptorHandle = handle
+            val route = descriptor.route
+            require(handle.encoded.contentEquals(encodedHandle)) {
+                "materialized AKEN locator fixture did not retain its preassigned handle"
+            }
             envelope = AkenNativePageEnvelope.create(
                 entryToken = entryToken,
-                handle = checkNotNull(handle),
+                handle = handle,
                 descriptor = descriptor,
                 rawCallSiteProof = rawProof,
             )
@@ -3054,15 +3907,16 @@ class AkenNativePageLocatorResolverNativeTest {
             )
         } finally {
             Arrays.fill(logicalIdentity, 0)
-            Arrays.fill(locatorToken, 0)
+            Arrays.fill(plaintext, 0)
             Arrays.fill(commitment, 0)
             Arrays.fill(vbc4StateBindingLayoutDigest, 0)
-            fingerprint?.let { Arrays.fill(it, 0) }
             descriptorBytes?.let { Arrays.fill(it, 0) }
             routeBytes?.let { Arrays.fill(it, 0) }
             envelopeBytes?.let { Arrays.fill(it, 0) }
             envelope?.wipe()
-            handle?.wipe()
+            descriptorHandle?.wipe()
+            materialization?.wipe()
+            plan?.wipe()
         }
     }
 
@@ -3091,7 +3945,6 @@ class AkenNativePageLocatorResolverNativeTest {
         )
         try {
             return ByteArrayOutputStream().use { out ->
-                out.write(COMPILER_RECORD_VERSION)
                 writeLong(out, entryToken)
                 out.write(resourceKind.id)
                 writeInt(out, pageIndex)
@@ -3140,7 +3993,6 @@ class AkenNativePageLocatorResolverNativeTest {
                 appendLine("#ifndef JS_AKEN_PAGE_LOCATOR_INC")
                 appendLine("#define JS_AKEN_PAGE_LOCATOR_INC")
                 appendLine("#include <stddef.h>")
-                appendLine("#define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_FORMAT_VERSION 2u")
                 appendLine("#define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_COUNT ${records.size}u")
                 appendLine("#define JS_AKEN_NATIVE_PAGE_LOCATOR_BLOB_SIZE ${blob.size}u")
                 appendLine()
@@ -3191,27 +4043,6 @@ class AkenNativePageLocatorResolverNativeTest {
         appendLine("};")
     }
 
-    private fun runtimeFragment(role: AkenRuntimeEvaluatorRole, ordinal: Int, seed: Int): AkenRuntimeEvaluatorFragment {
-        val shape = ByteArray(65) { index -> (seed + role.id * 41 + ordinal * 17 + index).toByte() }
-        val callToken = ByteArray(32) { index -> (seed * 3 + role.id * 23 + ordinal * 13 + index).toByte() }
-        val tablePermutation = IntArray(32) { index -> (index + ordinal) and 31 }
-        try {
-            shape[0] = 1
-            return AkenRuntimeEvaluatorFragment.create(
-                role = role,
-                ordinal = ordinal,
-                family = (seed + ordinal * 5) and 0x0F,
-                shape = shape,
-                callToken = callToken,
-                tablePermutation = tablePermutation,
-            )
-        } finally {
-            Arrays.fill(shape, 0)
-            Arrays.fill(callToken, 0)
-            Arrays.fill(tablePermutation, 0)
-        }
-    }
-
     private fun run(
         command: List<String>,
         directory: Path,
@@ -3244,8 +4075,51 @@ class AkenNativePageLocatorResolverNativeTest {
         output.isBlank() ||
             output.contains("CacheCheckFailed") ||
             output.contains("file_open Unexpected") ||
+            output.contains(":1:1: error: Unexpected") ||
+            output.trim() == "Unexpected" ||
             output.contains("sub-compilation of mingw-w64") ||
+            (output.contains("avx10_2satcvtintrin.h") && output.contains("cannot open file")) ||
+            (output.contains("zig-x86_64-windows") && output.contains("no such file or directory")) ||
             (output.contains("unable to load '") && output.contains("': Unexpected"))
+
+    /**
+     * The normal regression run keeps one 100-sample production profile bounded.
+     * A dedicated performance machine sets [JS_AKEN_PAGE_OPEN_BENCH_MATRIX] to
+     * run the plan's complete 100/1,000/10,000/100,000 profile set using the
+     * same generated current-format artifact and attached-JVM page-open path.
+     */
+    private fun pageOpenBenchmarkProfiles(): List<Int> {
+        val matrix = System.getenv("JS_AKEN_PAGE_OPEN_BENCH_MATRIX")
+            ?.trim()
+            ?.lowercase()
+            ?.let { it == "1" || it == "true" || it == "yes" }
+            ?: false
+        if (matrix) return listOf(100, 1_000, 10_000, 100_000)
+        return listOf(
+            System.getenv("JS_AKEN_PAGE_OPEN_BENCH_SAMPLES")
+                ?.toIntOrNull()
+                ?.takeIf { it in 100..100_000 }
+            ?: 100,
+        )
+    }
+
+    private fun pageOpenBenchmarkTimeoutSeconds(): Long {
+        val matrix = System.getenv("JS_AKEN_PAGE_OPEN_BENCH_MATRIX")
+            ?.trim()
+            ?.lowercase()
+            ?.let { it == "1" || it == "true" || it == "yes" }
+            ?: false
+        val configured = System.getenv("JS_AKEN_PAGE_OPEN_BENCH_TIMEOUT_SECONDS")
+            ?.toLongOrNull()
+            ?.takeIf { it in 120L..86_400L }
+        /*
+         * A dedicated single-profile lane may set an explicit timeout without
+         * enabling the complete 100/1,000/10,000/100,000 matrix.  Honor that
+         * bounded value in either mode; otherwise keep normal regression runs
+         * at 120 seconds and the full matrix at a finite one-hour default.
+         */
+        return configured ?: if (matrix) 3_600L else 120L
+    }
 
     private fun findZig(): String? = listOfNotNull(System.getenv("JAVASHROUD_ZIG"), "zig").firstOrNull { candidate ->
         runCatching {
@@ -3347,9 +4221,8 @@ class AkenNativePageLocatorResolverNativeTest {
 
     private companion object {
         const val AKEN_JNI_FIXTURE_MAIN = "AkenCurrentPageJniFixtureMain"
-        const val COMPILER_RECORD_VERSION = 2
         val COMPILER_RECORD_BINDING_DOMAIN =
-            "AKEN-v4-native-page-locator-compile-input-v2".toByteArray(StandardCharsets.US_ASCII)
+            "native-page-locator-compile-input".toByteArray(StandardCharsets.US_ASCII)
         val FULL_NATIVE_SOURCES = listOf(
             "js_kernel.c",
             "js_helpers.c",

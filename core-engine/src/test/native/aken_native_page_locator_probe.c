@@ -33,6 +33,48 @@ static const unsigned char TEST_PROOF_A[] = {
     0x41u, 0x4Bu, 0x45u, 0x4Eu, 0x2Du, 0x50u, 0x52u, 0x4Fu, 0x4Fu, 0x46u, 0x2Du, 0x41u,
 };
 
+/*
+ * Rebind only the resolver-route commitment in a parsed envelope.  This
+ * fixture deliberately leaves its descriptor and inline descriptor unchanged:
+ * it models an otherwise authenticated locator record whose separately framed
+ * route differs from the descriptor-internal route.  The production parser
+ * must reject that cross-field mismatch before consuming the descriptor.
+ */
+static int test_rebind_route(
+    js_aken_native_page_envelope *envelope,
+    const unsigned char *route,
+    size_t route_len
+) {
+    static const unsigned char domain[] = "page-envelope-route";
+    js_sha256_ctx ctx = {0};
+    unsigned char length[4] = {0};
+    int ok = 0;
+    if (!envelope || !route || route_len == 0u || route_len > UINT32_MAX) goto cleanup;
+    length[0] = (unsigned char)(route_len >> 24);
+    length[1] = (unsigned char)(route_len >> 16);
+    length[2] = (unsigned char)(route_len >> 8);
+    length[3] = (unsigned char)route_len;
+    js_sha256_init(&ctx);
+    js_sha256_update(&ctx, domain, (int)(sizeof(domain) - 1u));
+    js_sha256_update(&ctx, length, (int)sizeof(length));
+    js_sha256_update(&ctx, route, (int)route_len);
+    length[0] = 0u;
+    length[1] = 0u;
+    length[2] = 0u;
+    length[3] = JS_AKEN_NATIVE_PAGE_ENVELOPE_LOCATOR_SIZE;
+    js_sha256_update(&ctx, length, (int)sizeof(length));
+    js_sha256_update(
+        &ctx,
+        envelope->locator_token,
+        JS_AKEN_NATIVE_PAGE_ENVELOPE_LOCATOR_SIZE);
+    js_sha256_final(&ctx, envelope->route_binding);
+    ok = 1;
+cleanup:
+    js_vbc4_wipe_volatile(&ctx, sizeof(ctx));
+    js_vbc4_wipe_volatile(length, sizeof(length));
+    return ok;
+}
+
 static void test_request_a(js_aken_native_page_request *request) {
     memset(request, 0, sizeof(*request));
     request->entry_token = UINT64_C(0x1122334455667788);
@@ -50,11 +92,19 @@ static int test_lookup_resolve_and_fail_closed(void) {
     js_aken_native_page_locator_record missing;
     js_aken_native_page_envelope envelope;
     js_aken_native_page_resolved_descriptor resolved;
+    js_aken_native_page_descriptor_view view;
+    js_crypto_runtime_metrics valid_metrics;
+    js_crypto_runtime_metrics tampered_metrics;
+    static const unsigned char divergent_route[] = {0x00u};
 
     memset(&record, 0, sizeof(record));
     memset(&missing, 0, sizeof(missing));
     memset(&envelope, 0, sizeof(envelope));
     memset(&resolved, 0, sizeof(resolved));
+    memset(&view, 0, sizeof(view));
+    memset(&valid_metrics, 0, sizeof(valid_metrics));
+    memset(&tampered_metrics, 0, sizeof(tampered_metrics));
+    js_crypto_runtime_metrics_reset();
     test_request_a(&request);
 
     /* All records are validated before this exact unique match is returned. */
@@ -78,6 +128,12 @@ static int test_lookup_resolve_and_fail_closed(void) {
     TEST_CHECK(resolved.descriptor_encoding_len == record.descriptor_encoding_len);
     TEST_CHECK(resolved.route_encoding == record.route_encoding);
     TEST_CHECK(resolved.route_encoding_len == record.route_encoding_len);
+    js_crypto_runtime_metrics_snapshot(&valid_metrics);
+    TEST_CHECK(valid_metrics.structure_check_count > 0u);
+    TEST_CHECK(valid_metrics.length_check_count > 0u);
+    TEST_CHECK(valid_metrics.digest_check_count > 0u);
+    TEST_CHECK(valid_metrics.auth_check_count > 0u);
+    TEST_CHECK(valid_metrics.auth_failure_count == 0u);
 
     /* Resolver checks the route binding and wipes an output that failed verification. */
     envelope.route_binding[0] ^= 0x01u;
@@ -91,6 +147,22 @@ static int test_lookup_resolve_and_fail_closed(void) {
         &request,
         &envelope));
     TEST_CHECK(js_aken_native_page_locator_resolve(&record, &envelope, &resolved));
+
+    /* The envelope/record pair can independently authenticate an alternate
+     * route commitment.  It must still not be allowed to differ from the
+     * descriptor's embedded route that is consumed by the bound plan. */
+    TEST_CHECK(test_rebind_route(&envelope, divergent_route, sizeof(divergent_route)));
+    resolved.route_encoding = divergent_route;
+    resolved.route_encoding_len = sizeof(divergent_route);
+    TEST_CHECK(js_aken_native_page_envelope_verify_resolved_bindings(&envelope, &resolved));
+    TEST_CHECK(!js_aken_native_page_descriptor_parse_current(&request, &envelope, &resolved, &view));
+    TEST_CHECK(view.parsed == 0u);
+    js_crypto_runtime_metrics_snapshot(&tampered_metrics);
+    TEST_CHECK(tampered_metrics.auth_check_count > valid_metrics.auth_check_count);
+    TEST_CHECK(tampered_metrics.auth_failure_count > valid_metrics.auth_failure_count);
+    js_aken_native_page_descriptor_view_wipe(&view);
+    resolved.route_encoding = record.route_encoding;
+    resolved.route_encoding_len = record.route_encoding_len;
 
     request.page_index++;
     TEST_CHECK(!js_aken_native_page_locator_lookup(&request, &missing));
@@ -106,6 +178,7 @@ static int test_lookup_resolve_and_fail_closed(void) {
     TEST_CHECK(missing.parsed == 0u);
 
     js_vbc4_wipe_volatile(&resolved, sizeof(resolved));
+    js_aken_native_page_descriptor_view_wipe(&view);
     js_aken_native_page_envelope_wipe(&envelope);
     js_aken_native_page_locator_record_wipe(&record);
     TEST_CHECK(record.parsed == 0u);

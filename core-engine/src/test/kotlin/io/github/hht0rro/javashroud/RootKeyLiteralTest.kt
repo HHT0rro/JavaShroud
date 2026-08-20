@@ -27,6 +27,8 @@ class RootKeyLiteralTest {
 
         val deployment = Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/EmbeddedHelperDeployment.kt"))
         val helper = Files.readString(resolveSource("src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
+        val coupling = Files.readString(resolveSource("src/main/java/io/github/hht0rro/javashroud/transforms/protection/CrossClassCouplingHelper.java"))
+        val crypto = Files.readString(resolveSource("src/main/native/js_crypto.c"))
         assertFalse(deployment.contains("emitShareMethod"), "deployment must not emit byte-array share literals")
         assertFalse(deployment.contains("emitPartitionKeyDispatch"), "deployment must not emit Java key reconstruction code")
         assertFalse(deployment.contains("BootMaterialEnvelope"), "AKEN deployment must not emit a JSBM boot-material producer")
@@ -34,9 +36,16 @@ class RootKeyLiteralTest {
         assertTrue(
             helper.contains("nativeDecodeAkenStringPage") &&
                 helper.contains("nativeReadAkenClassPage") &&
-                helper.contains("nativeMapAkenNativeChunk"),
+                helper.contains("nativeConsumeAkenNativeChunk"),
             "helper must expose purpose-split AKEN page routes",
         )
+        assertFalse(coupling.contains("reconstructKey"), "AKEN compatibility helper must not recover a page key")
+        assertFalse(coupling.contains("nativeReconstructKey"), "AKEN compatibility helper must not expose a key-returning native ABI")
+        assertFalse(coupling.contains("CopyOnWriteArrayList"), "AKEN compatibility helper must not retain a global fragment registry")
+        assertTrue(coupling.contains("requireBoundNative"), "AKEN compatibility helper must fail closed through the bound native route")
+        assertFalse(crypto.contains("js_aes256_expand_lanes"), "bound AES terminal must not materialize a full round-key array")
+        assertFalse(crypto.contains("js_aes256_key_lanes"), "bound AES terminal must not use an aggregate key-lane container")
+        assertTrue(crypto.contains("js_aes_gcm_decrypt_lanes"), "bound AES terminal must use the scalar-lane opener")
     }
 
     private fun resolveSource(relative: String): Path {

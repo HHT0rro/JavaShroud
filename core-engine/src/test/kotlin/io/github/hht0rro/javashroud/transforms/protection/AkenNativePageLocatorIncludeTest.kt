@@ -71,7 +71,7 @@ class AkenNativePageLocatorIncludeTest {
                 commitment = commitment,
                 pendingPages = listOf(page0, page1),
                 fixedEntries = emptyList(),
-                vbc4StateBindingLayoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(),
+                vbc4StateBindingLayoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(context),
             )
             context.publishAkenVbc4FinalizationLayout(layout)
             expectedRecords = context.withAkenNativeLocatorRecordsForBuild { records ->

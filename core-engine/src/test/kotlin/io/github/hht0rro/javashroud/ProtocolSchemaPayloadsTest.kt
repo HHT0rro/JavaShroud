@@ -5,6 +5,7 @@ import io.github.hht0rro.javashroud.adapters.protocol.buildEngineSchemaProtocolP
 import io.github.hht0rro.javashroud.adapters.protocol.serializeProtocolPayload
 import io.github.hht0rro.javashroud.model.schema.EngineSchemaPayload
 import io.github.hht0rro.javashroud.model.schema.ModuleDefinition
+import io.github.hht0rro.javashroud.model.schema.ModuleTargetingCapability
 import io.github.hht0rro.javashroud.model.schema.ModuleTagDefinition
 import io.github.hht0rro.javashroud.model.schema.ParamSchema
 import io.github.hht0rro.javashroud.model.schema.VariantRequirement
@@ -46,6 +47,10 @@ class ProtocolSchemaPayloadsTest {
                             ),
                         ),
                         stability = "beta",
+                        targeting = ModuleTargetingCapability(
+                            supported = true,
+                            targetKinds = listOf("class"),
+                        ),
                         requiredPassIds = listOf("jni-microkernel-loader"),
                         requiresAnyPassIds = listOf("class-encryption-loader", "method-virtualization"),
                         variantRequirements = listOf(
@@ -81,6 +86,9 @@ class ProtocolSchemaPayloadsTest {
         val modulePayload = modules.single() as Map<*, *>
         assertEquals("strip-compile-debug-info", modulePayload["id"])
         assertEquals("beta", modulePayload["stability"])
+        val targeting = modulePayload["targeting"] as Map<*, *>
+        assertEquals(true, targeting["supported"])
+        assertEquals(listOf("class"), targeting["targetKinds"])
         assertEquals(listOf("jni-microkernel-loader"), modulePayload["requiredPassIds"])
         assertEquals(listOf("class-encryption-loader", "method-virtualization"), modulePayload["requiresAnyPassIds"])
         val variantRequirements = modulePayload["variantRequirements"] as List<*>
@@ -136,6 +144,10 @@ class ProtocolSchemaPayloadsTest {
                             ),
                         ),
                         stability = "experimental",
+                        targeting = ModuleTargetingCapability(
+                            supported = true,
+                            targetKinds = listOf("class"),
+                        ),
                     ),
                 ),
             ),

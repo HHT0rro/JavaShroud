@@ -5,6 +5,7 @@ import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.transforms.protection.AKEN_NATIVE_LOCATOR_LOGICAL_RESOURCE
 import io.github.hht0rro.javashroud.transforms.protection.AKEN_NATIVE_LOCATOR_RECORD
+import io.github.hht0rro.javashroud.transforms.protection.AKEN_NATIVE_BINDINGS_LOCATOR_RECORD
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
@@ -45,6 +46,14 @@ class AkenNativeLocatorTest {
             assertEquals(nativeEntry.bytes.size, row.storedLength)
             assertEquals(sha256Hex(nativeEntry.bytes), row.sha256)
         }
+
+        val bindingRow = locatorEntry.bytes.decodeToString().lineSequence()
+            .single { it.startsWith("$AKEN_NATIVE_BINDINGS_LOCATOR_RECORD|") }
+            .split('|')
+        assertEquals(4, bindingRow.size)
+        val bindingEntry = sealed.jarEntries.single { it.name == bindingRow[1] }
+        assertEquals(bindingEntry.bytes.size, bindingRow[2].toInt())
+        assertEquals(sha256Hex(bindingEntry.bytes), bindingRow[3])
 
         assertTrue(
             sealed.classArtifacts.any { artifact -> artifact.bytes.containsAscii(locatorEntry.name) },
@@ -104,7 +113,9 @@ class AkenNativeLocatorTest {
         sealed.jarEntries.single { entry -> entry.bytes.startsWithAscii("$AKEN_NATIVE_LOCATOR_RECORD|") }
 
     private fun parseLocatorRows(bytes: ByteArray): Map<String, LocatorRow> {
-        val rows = bytes.decodeToString().lineSequence().map { line ->
+        val rows = bytes.decodeToString().lineSequence()
+            .filter { line -> line.startsWith("$AKEN_NATIVE_LOCATOR_RECORD|") }
+            .map { line ->
             val fields = line.split('|')
             assertEquals(6, fields.size, "AKEN native locator records must contain six fields")
             LocatorRow(

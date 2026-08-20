@@ -106,55 +106,6 @@ class AttackRegressionTest {
     }
 
     @Test
-    fun native_bootstrap_index_tampering_fails_closed() = withVbc4BuildContext(fixedContext(4, ByteArray(32))) {
-        val inputDir = Files.createTempDirectory("javashroud-native-pack-input")
-        val outputDir = Files.createTempDirectory("javashroud-native-pack-output")
-        val wrongTokenOutputDir = Files.createTempDirectory("javashroud-native-pack-wrong-token")
-        try {
-            Files.writeString(inputDir.resolve("js_kernel_linux-x64.so"), "bootstrap-index-regression")
-            val packed = NativeKernelPacker.pack(inputDir, outputDir, 0x5EEDL)
-            val helperResource = "/${JniMicrokernelHelper::class.java.name.replace('.', '/')}.class"
-            val helperBytes = checkNotNull(JniMicrokernelHelper::class.java.getResourceAsStream(helperResource)).use { it.readBytes() }
-            val helperClass = object : ClassLoader(javaClass.classLoader) {
-                fun define(): Class<*> = defineClass(JniMicrokernelHelper::class.java.name, helperBytes, 0, helperBytes.size)
-            }.define()
-            val installJavaMaterial = helperClass.getDeclaredMethod("validateAndPublishJavaBootMaterial", ByteArray::class.java)
-            installJavaMaterial.isAccessible = true
-            installJavaMaterial.invoke(null, bootMaterial(requireVbc4BuildContext()))
-            val decode = helperClass.getDeclaredMethod("decodeBootstrapNativeIndex", ByteArray::class.java)
-            decode.isAccessible = true
-
-            val decoded = decode.invoke(null, packed.indexBytes) as ByteArray?
-            assertTrue(decoded != null && decoded.isNotEmpty(), "valid bootstrap index must decode")
-
-            for (offset in listOf(0, 4, 5, 8, 9, packed.indexBytes.size - 33, packed.indexBytes.lastIndex)) {
-                val tampered = packed.indexBytes.copyOf()
-                tampered[offset] = (tampered[offset].toInt() xor 0x5A).toByte()
-                assertEquals(null, decode.invoke(null, tampered), "tampering offset $offset must fail closed")
-            }
-
-            val wrongLength = packed.indexBytes.copyOf()
-            wrongLength[5] = (wrongLength[5].toInt() xor 0x01).toByte()
-            assertEquals(null, decode.invoke(null, wrongLength), "length tamper must fail closed")
-
-            val wrongTokenIndex = withVbc4BuildContext(fixedContext(44, ByteArray(32) { index -> (index + 1).toByte() })) {
-                NativeKernelPacker.pack(inputDir, wrongTokenOutputDir, 0x5EEDL).indexBytes
-            }
-            assertEquals(null, decode.invoke(null, wrongTokenIndex), "wrong bootstrap runtime token must fail closed")
-        } finally {
-            Files.walk(wrongTokenOutputDir).use { stream ->
-                stream.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
-            }
-            Files.walk(outputDir).use { stream ->
-                stream.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
-            }
-            Files.walk(inputDir).use { stream ->
-                stream.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
-            }
-        }
-    }
-
-    @Test
     fun sliced_vm_resources_reject_tampered_manifest_missing_shard_and_shard_digest_mismatch() = withVbc4BuildContext(fixedContext(5)) {
         val encodedResources = attackVmResources()
         val decodedResources = encodedResources.mapNotNull { entry ->
@@ -225,25 +176,6 @@ class AttackRegressionTest {
         },
         params = mapOf("maxInstructions" to Int.MAX_VALUE, "seed" to 91),
     ).artifact.jarEntries.filter { entry -> entry.name.isVmResourceName() }
-
-    private fun bootMaterial(context: Vbc4BuildContext): ByteArray {
-        val partitions = context.runtimeKeyPartitions
-        val material = ByteArray(4 + 64 + partitions.totalSlots * 32)
-        material[0] = 2
-        material[1] = partitions.resourcePartitionCount.toByte()
-        material[2] = partitions.totalSlots.toByte()
-        context.masterKey.copyInto(material, destinationOffset = 4)
-        context.jarLayoutDigest.copyInto(material, destinationOffset = 36)
-        for (slot in 0 until partitions.totalSlots) {
-            val key = partitions.copyKeyForSlot(slot)
-            try {
-                key.copyInto(material, destinationOffset = 68 + slot * 32)
-            } finally {
-                Arrays.fill(key, 0)
-            }
-        }
-        return material
-    }
 
     private fun slicedManifestIsComplete(manifestBytes: ByteArray, resources: Map<String, ByteArray>): Boolean {
         val lines = manifestBytes.decodeToString().trim().lines()

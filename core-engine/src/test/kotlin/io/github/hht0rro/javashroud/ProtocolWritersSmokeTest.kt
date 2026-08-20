@@ -16,6 +16,7 @@ class ProtocolWritersSmokeTest {
             label = "foo_desc",
             qualifiedName = "sample.Foo#foo_desc",
             internalName = "sample/Foo#foo:desc",
+            selector = "sample/Foo#foo:()V",
             kind = "method",
             children = emptyList(),
         )
@@ -24,6 +25,7 @@ class ProtocolWritersSmokeTest {
             label = "Foo",
             qualifiedName = "sample.Foo",
             internalName = "sample/Foo",
+            selector = "sample/Foo",
             kind = "class",
             children = listOf(child),
         )
@@ -31,11 +33,13 @@ class ProtocolWritersSmokeTest {
         val payload = buildClassTreeNodePayload(root)
         assertEquals("class:sample/Foo", payload["id"])
         assertEquals("class", payload["kind"])
+        assertEquals("sample/Foo", payload["selector"])
         val children = payload["children"] as List<*>
         assertEquals(1, children.size)
         val childPayload = children.single() as Map<*, *>
         assertEquals("member:foo", childPayload["id"])
         assertEquals("method", childPayload["kind"])
+        assertEquals("sample/Foo#foo:()V", childPayload["selector"])
         assertTrue((childPayload["children"] as List<*>).isEmpty())
     }
 

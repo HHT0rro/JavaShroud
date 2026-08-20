@@ -157,6 +157,29 @@ class SchemaCapabilitiesTest {
     }
 
     @Test
+    fun all_schema_modules_declare_valid_targeting_capabilities() {
+        val validTargetKinds = setOf("class", "method")
+
+        for (module in buildEngineSchemaPayload().modules) {
+            val targeting = module.targeting
+            assertEquals(
+                targeting.supported,
+                targeting.targetKinds.isNotEmpty(),
+                "Module ${module.id} must explicitly declare whether it supports class/method targeting",
+            )
+            assertTrue(
+                targeting.targetKinds.all(validTargetKinds::contains),
+                "Module ${module.id} has unsupported target kinds ${targeting.targetKinds}",
+            )
+            assertEquals(
+                targeting.targetKinds.size,
+                targeting.targetKinds.distinct().size,
+                "Module ${module.id} must not duplicate targeting kinds",
+            )
+        }
+    }
+
+    @Test
     fun buildEngineSchemaPayload_has_correct_structure() {
         val payload = buildEngineSchemaPayload()
         assertEquals(engineSchemaVersion(), payload.schemaVersion)
@@ -407,8 +430,16 @@ class SchemaCapabilitiesTest {
         assertFalse(packingLevel.hidden, "nativePackingLevel should be visible")
         assertTrue(packingLevel.description.contains("standard") && packingLevel.description.contains("overlay"), "nativePackingLevel schema must describe standard as overlay compatibility")
         assertTrue(packingLevel.description.contains("max") && packingLevel.description.contains("stub shell"), "nativePackingLevel schema must describe max as the stub shell mode")
-        assertTrue(packingLevel.description.contains("max-hardening") && packingLevel.description.contains("断代协议"), "nativePackingLevel schema must describe the explicit hardening profile")
-        assertTrue(packingLevel.description.contains("完整 js_kernel"), "nativePackingLevel schema must state that max protects the complete js_kernel")
+        assertTrue(packingLevel.description.contains("max-hardening") && packingLevel.description.contains("更强的外壳"), "nativePackingLevel schema must describe the strongest shell profile")
+        assertTrue(
+            packingLevel.description.contains("完整 js_kernel"),
+            "nativePackingLevel schema must state that the strongest shell profile protects the complete js_kernel",
+        )
+        assertTrue(
+            packingLevel.description.contains("AKEN v4") && packingLevel.description.contains("四档统一"),
+            "all nativePackingLevel values must use the same AKEN v4 resource-level evaluator architecture",
+        )
+        assertTrue(jniModule.params.none { it.key == "bootKeyDelivery" }, "AKEN v4 must remove the legacy bootKeyDelivery parameter")
 
         assertTrue(
             jniModule.params.none { it.key == "codeSectionEncryption" },

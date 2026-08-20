@@ -991,8 +991,17 @@ class NativeHelperHardeningTest {
         assertTrue(nativeSource.contains("if (!nonce || nonce_len != 32 || js_vm_startup_nonce_ready) return 0;"))
         assertTrue(nativeSource.contains("if (!nonzero) return 0;"), "All-zero startup nonces must fail closed")
         assertTrue(nativeSource.contains("js_vm_bind_runtime_session(parsed_program, entry_token, resource_path)"))
-        assertTrue(nativeSource.contains("if (!p || !js_vm_verify_runtime_session(p)) return 0;"))
-        assertTrue(nativeSource.contains("javashroud-vbc4-vm-build-key-v1") && nativeSource.contains("javashroud-vbc4-vm-method-key-v1") && nativeSource.contains("javashroud-vbc4-vm-session-key-v1"))
+        val executeBody = nativeFunctionBody(
+            nativeSource,
+            "js_vm_execute_register_with_preset_locals(JNIEnv *env, js_vm_program *p, jobjectArray args, const js_vm_value *preset_locals, int preset_count, char ret_desc, js_vm_value *ret)",
+        )
+        val sessionVerify = executeBody.indexOf("js_vm_verify_runtime_session(p)")
+        val frameAcquire = executeBody.indexOf("js_vm_execution_frame_acquire(p)")
+        assertTrue(
+            sessionVerify >= 0 && frameAcquire > sessionVerify,
+            "Runtime session must be verified before acquiring or executing a VM frame",
+        )
+        assertTrue(nativeSource.contains("javashroud-vbc4-vm-build-key-v2") && nativeSource.contains("javashroud-vbc4-vm-method-key-v1") && nativeSource.contains("javashroud-vbc4-vm-session-key-v1"))
         assertTrue(buildSource.contains("VBC4_VM_BUILD_KEY_DOMAIN") && buildSource.contains("VBC4_VM_METHOD_KEY_DOMAIN") && buildSource.contains("VBC4_VM_SESSION_KEY_DOMAIN"))
         val storedMacBody = nativeFunctionBody(nativeSource, "js_vbc4_hmac_sha256_with_nonce(")
         assertFalse(storedMacBody.contains("js_vm_startup_nonce"), "Persisted VBC4 MAC verification must stay independent of the runtime session")
@@ -1220,7 +1229,8 @@ class NativeHelperHardeningTest {
             "Native VM must own current AES-CTR/HMAC/zstd runtime-resource unsealing with per-partition key slots after the helper installs the per-build key domains.",
         )
         assertTrue(
-            helperSource.contains("version == RUNTIME_RESOURCE_VERSION") &&
+            helperSource.contains("hasRuntimeResourceHeader(byte[] raw)") &&
+                helperSource.contains("(raw[4] & 0xFF) == RUNTIME_RESOURCE_VERSION") &&
                 helperSource.contains("partitionResourceKey(partitionId)") &&
                 helperSource.contains("runtimeResourcePartitionCount()") &&
                 helperSource.contains("decodeRuntimeResourceCurrent(raw, allowCompressed)") &&
@@ -1662,14 +1672,23 @@ class NativeHelperHardeningTest {
         }, ClassReader.SKIP_FRAMES)
 
         val loadKernelCalls = callsByMethod.getValue("loadKernel(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V")
-        val bundledIndex = loadKernelCalls.indexOfFirst { it.second == "tryLoadBundledNative" }
-        assertTrue(bundledIndex >= 0, "loadKernel must attempt bundled native loading")
-        assertFalse(loadKernelCalls.any { it.second == "tryLoadNative" }, "bundled verification failure must fail closed without a system library fallback")
-
-        val abiCalls = callsByMethod.getValue("verifyNativeAbiAfterLoad()Z")
         assertTrue(
-            abiCalls.any { it.first == "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper" && it.second == "nativeExecuteVmResource" },
-            "Native load must verify nativeExecuteVmResource is linked before marking the kernel loaded. Calls=$abiCalls",
+            loadKernelCalls.any { it.second == "loadAkenNativeKernel" },
+            "loadKernel must enter the authenticated AKEN native loader",
+        )
+        val akenLoadCalls = callsByMethod.getValue("loadAkenNativeKernel()V")
+        val bundledIndex = akenLoadCalls.indexOfFirst { it.second == "tryLoadAkenBundledNative" }
+        assertTrue(bundledIndex >= 0, "AKEN native loader must attempt bundled native loading")
+        assertFalse(
+            (loadKernelCalls + akenLoadCalls).any { it.second == "tryLoadNative" },
+            "bundled verification failure must fail closed without a system library fallback",
+        )
+
+        val abiCalls = callsByMethod.getValue("verifyAkenNativeAbiAfterLoad()Z")
+        assertTrue(
+            abiCalls.any { it.first == "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper" && it.second == "nativeExecuteAkenVmPage" } &&
+                abiCalls.any { it.first == "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper" && it.second == "nativeConsumeAkenNativeChunk" },
+            "AKEN native load must verify the typed page ABI before marking the kernel loaded. Calls=$abiCalls",
         )
     }
 
@@ -1762,7 +1781,12 @@ class NativeHelperHardeningTest {
         val executeRegisterBody = nativeFunctionBody(nativeSource, "js_vm_execute_register_with_preset_locals(JNIEnv *env, js_vm_program *p, jobjectArray args, const js_vm_value *preset_locals, int preset_count, char ret_desc, js_vm_value *ret)")
 
         assertTrue(executeRegisterBody.contains("js_vm_program execution;"), "Each invocation must allocate its own execution header.")
-        assertTrue(executeRegisterBody.contains("malloc((size_t)p->insn_count * sizeof(js_vm_insn))") && executeRegisterBody.contains("memcpy(execution.insns, p->insns"), "Each invocation must flat-copy the mutable resident instruction array.")
+        assertTrue(
+            executeRegisterBody.contains("js_vm_execution_frame_reserve_insns(frame, (size_t)p->insn_count)") &&
+                executeRegisterBody.contains("memcpy(frame->insns, p->insns, (size_t)p->insn_count * sizeof(js_vm_insn))") &&
+                executeRegisterBody.contains("execution.insns = frame->insns"),
+            "Each invocation must flat-copy mutable resident instructions into its private reusable frame arena.",
+        )
         assertTrue(executeRegisterBody.contains("execution.borrowed_insn_operands = 1"), "Immutable operand arrays may be borrowed to avoid a deep clone.")
         assertTrue(executeRegisterBody.contains("execution.symbol_cache_owner = p->symbol_cache_owner ? p->symbol_cache_owner : p"), "Resolved symbols must remain owned by the persistent program cache.")
         assertTrue(executeRegisterBody.contains("js_vm_execute_with_preset_locals(env, &execution"), "The interpreter must run against the per-invocation copy.")

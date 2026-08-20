@@ -167,14 +167,13 @@ class AkenVbc4ProductionMaterializerTest {
 
     private fun framedVbc4(blockLength: Int): ByteArray {
         val out = ByteArrayOutputStream()
-        out.write("VBC4".encodeToByteArray())
-        writeU2(out, 4)
+        out.write("VBCX".encodeToByteArray())
         out.write(ByteArray(16))
         writeU4(out, 0xAABBCCDDL)
         out.write(ByteArray(16))
         writeU2(out, 0)
         writeU2(out, 1)
-        writeU4(out, 0)
+        writeU4(out, 4)
         writeU4(out, 4)
         out.write(byteArrayOf(1, 2, 3, 4))
         writeU2(out, 7)

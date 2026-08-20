@@ -113,6 +113,109 @@ class NativeDivergenceVerificationTest {
         )
     }
 
+    @Test
+    fun nativeInterpreterCodegen_preserves_handler_tail_after_nested_break() {
+        val source = """
+            #define JS_VM_DISPATCH(insn) if (0)
+            #define JS_VM_CASE(x) } if (1) {
+            #define JS_VM_BREAK do { break; } while (0)
+                    JS_VM_DISPATCH(insn) {
+                        JS_VM_CASE(JS_VM_SPECIAL)
+                            if (guard) { ok = 0; JS_VM_BREAK; }
+                            js_vm_preserve_after_nested_break();
+                            JS_VM_BREAK;
+                        JS_VM_CASE(JS_VM_A)
+                            js_vm_preserve_a();
+                            JS_VM_BREAK;
+                        JS_VM_CASE(JS_VM_B)
+                            js_vm_preserve_b();
+                            JS_VM_BREAK;
+                        JS_VM_CASE(JS_VM_C)
+                            js_vm_preserve_c();
+                            JS_VM_BREAK;
+                        JS_VM_CASE(JS_VM_D)
+                            js_vm_preserve_d();
+                            JS_VM_BREAK;
+                        JS_VM_CASE(JS_VM_E)
+                            js_vm_preserve_e();
+                            JS_VM_BREAK;
+                        JS_VM_CASE(JS_VM_F)
+                            js_vm_preserve_f();
+                            JS_VM_BREAK;
+                        JS_VM_CASE(JS_VM_G)
+                            js_vm_preserve_g();
+                            JS_VM_BREAK;
+                        JS_VM_DEFAULT
+                    }
+        """.trimIndent()
+
+        val output = NativeRecompilationTransforms.applyNativeInterpreterCodegen(source, java.util.Random(17L))
+
+        assertTrue(output.contains("js_vm_preserve_after_nested_break();"), "A nested early break must not truncate its handler tail")
+        assertTrue(output.contains("if (guard) { ok = 0; JS_VM_BREAK; }"), "The nested break branch itself must remain intact")
+        assertTrue(output.contains("js_vm_preserve_a();") && output.contains("js_vm_preserve_g();"), "Every top-level handler must survive reordering")
+        assertTrue(output.lines().size >= source.lines().size, "Codegen must not discard source lines after nested breaks")
+    }
+
+
+    @Test
+    fun nativeInterpreterCodegen_places_relocation_after_alias_case_headers() {
+        val source = """
+            #define JS_VM_DISPATCH(insn) if (0)
+            #define JS_VM_CASE(x) } if (1) {
+            #define JS_VM_BREAK do { break; } while (0)
+            #define JS_VM_DEFAULT } if (0) {
+                    JS_VM_DISPATCH(insn) {
+                        JS_VM_CASE(JS_VM_INVOKESTATIC)
+                        JS_VM_CASE(JS_VM_INVOKEVIRTUAL)
+                        JS_VM_CASE(JS_VM_INVOKESPECIAL)
+                        JS_VM_CASE(JS_VM_INVOKEINTERFACE)
+                            js_vm_alias_group_body();
+                            JS_VM_BREAK;
+                        JS_VM_CASE(JS_VM_A)
+                            js_vm_a();
+                            JS_VM_BREAK;
+                        JS_VM_CASE(JS_VM_B)
+                            js_vm_b();
+                            JS_VM_BREAK;
+                        JS_VM_CASE(JS_VM_C)
+                            js_vm_c();
+                            JS_VM_BREAK;
+                        JS_VM_CASE(JS_VM_D)
+                            js_vm_d();
+                            JS_VM_BREAK;
+                        JS_VM_CASE(JS_VM_E)
+                            js_vm_e();
+                            JS_VM_BREAK;
+                        JS_VM_CASE(JS_VM_F)
+                            js_vm_f();
+                            JS_VM_BREAK;
+                        JS_VM_CASE(JS_VM_G)
+                            js_vm_g();
+                            JS_VM_BREAK;
+                        JS_VM_DEFAULT
+                    }
+        """.trimIndent()
+
+        val output = NativeRecompilationTransforms.applyNativeInterpreterCodegen(source, java.util.Random(29L))
+        val aliasRunThenGate = Regex(
+            """JS_VM_CASE\(JS_VM_INVOKESTATIC\)\s*
+\s*JS_VM_CASE\(JS_VM_INVOKEVIRTUAL\)\s*
+\s*JS_VM_CASE\(JS_VM_INVOKESPECIAL\)\s*
+\s*JS_VM_CASE\(JS_VM_INVOKEINTERFACE\)\s*
+\s*/\* VBC4_HANDLER_RELOCATION""",
+        )
+
+        assertTrue(
+            aliasRunThenGate.containsMatchIn(output),
+            "Relocation labels must be emitted after every alias case header to remain valid C11 under Zig",
+        )
+        assertTrue(
+            output.contains("js_vm_alias_group_body();"),
+            "Alias-group handler body must remain reachable after relocation insertion",
+        )
+    }
+
 }
 
 private const val NATIVE_INTERPRETER_CODEGEN_SOURCE = "src/main/native/js_vm_core.c"

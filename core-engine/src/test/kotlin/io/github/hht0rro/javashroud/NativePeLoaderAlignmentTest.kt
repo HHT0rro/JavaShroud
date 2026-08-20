@@ -15,10 +15,10 @@ class NativePeLoaderAlignmentTest {
 
         assertTrue(loader.contains("IMAGE_DOS_HEADER dos;"))
         assertTrue(loader.contains("memcpy(&dos, bytes, sizeof(dos));"))
-        assertTrue(loader.contains("js_shell_pe_headers headers;"))
-        assertTrue(loader.contains("memcpy(&headers.nt, bytes + dos.e_lfanew, sizeof(headers.nt));"))
-        assertTrue(loader.contains("headers.sections,"))
-        assertTrue(loader.contains("const IMAGE_NT_HEADERS64 *nt_src = &headers.nt;"))
+        assertTrue(loader.contains("js_shell_pe_image_plan plan;"))
+        assertTrue(loader.contains("js_shell_build_image_plan(bytes, size, &dos, &plan)"))
+        assertTrue(loader.contains("memcpy(image, bytes, (size_t)plan.header_copy_size);"))
+        assertTrue(loader.contains("const IMAGE_NT_HEADERS64 *nt = &plan.nt;"))
         assertFalse(loader.contains("(const IMAGE_DOS_HEADER *)bytes"))
         assertFalse(loader.contains("(const IMAGE_NT_HEADERS64 *)(bytes +"))
     }
@@ -33,6 +33,20 @@ class NativePeLoaderAlignmentTest {
         assertTrue(source.contains("memcpy(&desc, desc_bytes, sizeof(desc));"))
         assertTrue(source.contains("memcpy(&tls, tls_bytes, sizeof(tls));"))
         assertTrue(source.contains("memcpy(&exports, export_bytes, sizeof(exports));"))
+    }
+
+    @Test
+    fun loaders_reuse_only_validated_mapping_and_export_metadata_within_one_load() {
+        val peSource = Files.readString(resolveSource("src/main/native/js_shell_loader_pe.c"))
+        val elfSource = Files.readString(resolveSource("src/main/native/js_shell_loader_elf.c"))
+        val stubSource = Files.readString(resolveSource("src/main/native/js_shell_stub.c"))
+
+        assertTrue(peSource.contains("js_shell_pe_import_module_cache_entry"))
+        assertTrue(peSource.contains("js_shell_resolve_required_exports"))
+        assertTrue(elfSource.contains("js_shell_find_required_exports"))
+        assertTrue(elfSource.contains("symbol_count_valid"))
+        assertTrue(stubSource.contains("js_shell_mapping_metadata_matches_image"))
+        assertTrue(stubSource.contains("JS_SHELL_MAPPING_METADATA_VERSION"))
     }
 
     private fun resolveSource(relativePath: String): Path {
