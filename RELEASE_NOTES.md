@@ -34,7 +34,6 @@
 ## Desktop workbench 与发布集成
 - 升级桌面端能力/规则/目标选择、配置解析、class tree 虚拟列表和 pass selection 状态管理，改善大型项目的可视化与配置反馈。
 - 收紧 embedded engine release integration、Native 构建/打包和证据清单绑定，发布物按最终 artifact 条目记录脱敏哈希与验证结果。
-- 新增 `promo-video-v2` 产品演示、示例 artifact 与跨平台运行证据包，便于复现实例、检查构建结果和展示 Native/VM 运行链路。
 
 ## 验收边界
 - 本版本的 benchmark 报告同时标注 phase-level 证据与 coverage 状态；尚未被真实 accepted artifact 矩阵覆盖的路径不会被标记为完整计划验收通过。

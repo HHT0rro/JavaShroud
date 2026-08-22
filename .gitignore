@@ -55,11 +55,17 @@ tmp-smoke-public-release/
 # Local agent and index state
 .gradle-codex/
 .serena/
+.mimosa/
+.reasonix/
+.zcode/
 scripts/__pycache__/
 .codegraph/
 .cursor/
 plan/
 promo-video/
+promo-video-v2/
+docs/
+scripts/
 verification/
 
 # Local design reference scratchpads
@@ -85,3 +91,5 @@ PowerShell 7.6.2/
 test-fixtures/
 tools/
 local-release/
+a.out
+nul

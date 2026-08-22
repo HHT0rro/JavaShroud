@@ -1,2 +1,0 @@
-'hyperframes inspect' is deprecated and will be removed in a future release. Use 'hyperframes check' instead.
-[hyperframes] browserGpuMode probe → hardware (WebGL renderer vendor="Google Inc. (AMD)" renderer="ANGLE (AMD, AMD Radeon(TM) 880M Graphics (0x0000150E) Direct3D11 vs_5_0 ps_5_0, D3D11)")

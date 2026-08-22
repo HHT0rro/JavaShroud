@@ -37,7 +37,7 @@ JavaShroud 是一套 Java 混淆与加固工具链：Kotlin 引擎做字节码�
 | Native 加壳 | `jni-microkernel-loader`：认证外壳 + inner kernel 封装 + 平台 loader |
 | 桌面工作流 | Wails + Vue 界面、配置编辑、引擎任务管理 |
 
-注册 pass 共 26 个，默认 pipeline 只含 `strip-compile-debug-info`。stable pass 默认启用；experimental pass 需在配置里显式打开，其中带 opt-in 标记的还要求 `allowOptInPasses = true`。完整清单、参数和启用边界见 [docs/TECHNICAL.md](docs/TECHNICAL.md)。
+注册 pass 共 26 个，默认 pipeline 只含 `strip-compile-debug-info`。stable pass 默认启用；experimental pass 需在配置里显式打开，其中带 opt-in 标记的还要求 `allowOptInPasses = true`。
 
 ## 控制流混淆
 
@@ -73,7 +73,7 @@ JSRP 是项目内部的受保护资源封装格式（magic `JSRP`，当前版本
 - 密钥来自构建期 CSPRNG 生成的分区密钥表（`RuntimeKeyPartitions`），按资源分区选取；header、metadata、body 任何一处改动都会让 tag 校验失败。
 - body 默认先经 zstd 压缩（`Vbc4ZstdCodec`）；metadata 记录原文与压缩后的 SHA-256，解码时逐级核对长度与哈希。
 
-协议字段与解码流程见 [docs/TECHNICAL.md](docs/TECHNICAL.md)。
+协议字段与解码流程见 `RuntimeResourceCodec`。
 
 ## VMBC / NBVM 执行链
 
@@ -109,7 +109,7 @@ flowchart LR
 | Linux x64 | 匿名内存 ELF64 loader，覆盖 `PT_LOAD` / `PT_DYNAMIC`、hash、symbol、RELA / PLT、initializer 与入口校验 |
 | macOS x64 / arm64 | 外层 stub 与 Mach-O metadata、rebase / bind、export trie、initializer 校验；未满足匿名执行映射条件时 fail-closed |
 
-外壳协议与平台实现边界见 [docs/TECHNICAL.md](docs/TECHNICAL.md)。
+外壳协议与平台实现边界见 Native loader 源码。
 
 ## 与 JNIC / Native 混淆的区别
 
@@ -167,8 +167,6 @@ target = "class com.example.api.**"
 action = "exclude"
 ```
 
-配置字段、规则语法和启用 VMBC / Native 加壳的完整示例见 [docs/TECHNICAL.md](docs/TECHNICAL.md)。
-
 桌面端开发：
 
 ```powershell
@@ -194,8 +192,6 @@ Windows 完整发布入口：
 core-engine/          Kotlin / Java 引擎、VMBC 与 Native runtime
 desktop-app/          Go / Wails 桌面宿主与 Vue 前端
 annotations/          JavaShroud 注解模块
-docs/                 技术深挖文档（TECHNICAL.md / TECHNICAL_EN.md）
-scripts/              验证与辅助脚本
 assets/               README 与发布资源
 build-release.bat     Windows 发布入口
 ```

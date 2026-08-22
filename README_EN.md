@@ -37,7 +37,7 @@ The design is Kerckhoffs-oriented: protection strength comes from per-artifact k
 | Native packing | `jni-microkernel-loader`: authenticated shell + inner-kernel packing + platform loaders |
 | Desktop workflow | Wails + Vue UI, configuration editing, engine task management |
 
-26 passes are registered; the default pipeline contains only `strip-compile-debug-info`. Stable passes are enabled by default. Experimental passes must be enabled explicitly in the config, and opt-in passes additionally require `allowOptInPasses = true`. The full list, parameters, and enablement boundaries are in [docs/TECHNICAL_EN.md](docs/TECHNICAL_EN.md).
+26 passes are registered; the default pipeline contains only `strip-compile-debug-info`. Stable passes are enabled by default. Experimental passes must be enabled explicitly in the config, and opt-in passes additionally require `allowOptInPasses = true`.
 
 ## Control-flow obfuscation
 
@@ -73,7 +73,7 @@ JSRP is the project's protected resource envelope format (magic `JSRP`, current 
 - Keys come from a build-time CSPRNG-generated partition table (`RuntimeKeyPartitions`) and are selected per resource partition; any change to header, metadata, or body fails tag verification.
 - The body is zstd-compressed by default (`Vbc4ZstdCodec`); metadata records the SHA-256 of both plaintext and compressed bytes, and decode re-checks lengths and hashes at each step.
 
-Field layout and the decode flow are documented in [docs/TECHNICAL_EN.md](docs/TECHNICAL_EN.md).
+Field layout and the decode flow are in `RuntimeResourceCodec`.
 
 ## VMBC / NBVM Execution Path
 
@@ -109,7 +109,7 @@ Execution entry is bound to per-artifact entry tokens, opcode dialects, resource
 | Linux x64 | Anonymous-memory ELF64 loader with `PT_LOAD` / `PT_DYNAMIC`, hash, symbol, RELA / PLT, initializer, and entrypoint validation |
 | macOS x64 / arm64 | Outer stub plus Mach-O metadata, rebase / bind, export-trie, and initializer validation; unsupported anonymous execution mapping fails closed |
 
-The shell protocol and platform implementation boundaries are documented in [docs/TECHNICAL_EN.md](docs/TECHNICAL_EN.md).
+The shell protocol and platform implementation boundaries are in the Native loader sources.
 
 ## Compared With JNIC / Native Obfuscation
 
@@ -167,8 +167,6 @@ target = "class com.example.api.**"
 action = "exclude"
 ```
 
-Config fields, rule syntax, and a complete example enabling VMBC and Native packing are in [docs/TECHNICAL_EN.md](docs/TECHNICAL_EN.md).
-
 Desktop development:
 
 ```powershell
@@ -194,8 +192,6 @@ The release script builds the core engine, the GraalVM native engine, frontend a
 core-engine/          Kotlin / Java engine, VMBC, and Native runtime
 desktop-app/          Go / Wails desktop host and Vue frontend
 annotations/          JavaShroud annotation module
-docs/                 Deep-dive documentation (TECHNICAL.md / TECHNICAL_EN.md)
-scripts/              Verification and utility scripts
 assets/               README and release assets
 build-release.bat     Windows release entrypoint
 ```

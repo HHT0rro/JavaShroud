@@ -1,7 +1,0 @@
-{
-  "needle": "PROTECTED_EXPORT::INTERNAL_APPROVAL_ONLY",
-  "baselineEntryHits": [
-    "demo/MessageVault.class"
-  ],
-  "finalEntryHits": []
-}
