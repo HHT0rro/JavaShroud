@@ -41,9 +41,9 @@ jobs:
           } elseif ('${{ github.ref }}'.StartsWith('refs/tags/')) {
             $tag = '${{ github.ref_name }}'
           } else {
-            $rootBuild = Get-Content -LiteralPath 'build.gradle.kts' -Raw
-            if ($rootBuild -notmatch 'val\s+javaShroudVersion\s*=\s*"([^"]+)"') {
-              throw 'Unable to resolve javaShroudVersion from build.gradle.kts.'
+            $versionSource = Get-Content -LiteralPath 'core-engine/src/main/kotlin/io/github/hht0rro/javashroud/capabilities/CapabilityTypes.kt' -Raw
+            if ($versionSource -notmatch 'const val JS_VERSION:\s*String\s*=\s*"([^"]+)"') {
+              throw 'Unable to resolve JS_VERSION from CapabilityTypes.kt.'
             }
             $tag = "v$($Matches[1])"
           }

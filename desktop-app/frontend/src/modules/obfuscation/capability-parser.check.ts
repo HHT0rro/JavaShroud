@@ -11,7 +11,6 @@ const assert = (condition: boolean, message: string): void => {
 const baseSchema = {
   schemaVersion: '2',
   engineVersion: 'check-engine',
-  vbcVersion: 'VBC4-dev',
   tags: [
     {
       id: 'obfuscation',
@@ -618,7 +617,6 @@ expectParseError(
 const tomlSchema = [
   "schemaVersion = '2'",
   "engineVersion = 'check-engine'",
-  "vbcVersion = 'VBC4-dev'",
   "tags = [{id = 'runtime-defense', name = 'Runtime Defense', description = 'runtime defense', order = 80}]",
   "modules = [{id = 'anti-symbolic-execution', name = 'Anti Symbolic', description = 'adds runtime traps', tagIds = ['runtime-defense'], params = [{key = 'seed', type = 'number', description = 'deterministic seed', hidden = false}], stability = 'experimental', targeting = {supported = true, targetKinds = ['class']}}]",
   'compatibility = []',

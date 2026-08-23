@@ -76,8 +76,7 @@ const canImportConfig = computed((): boolean => state.value.status !== 'running'
 const maximiseIcon = computed((): Component => (isWindowMaximised.value ? Minimize2 : Maximize2))
 const currentLanguageLabel = computed((): string => languageToggleLabel(displayLanguage.value))
 const languageTooltipLabel = computed((): string => `${t('switchTo', displayLanguage.value)} ${nextLanguageLabel(displayLanguage.value)}`)
-const engineVersionLabel = computed((): string => state.value.schema?.engineVersion ?? 'loading')
-const vbcVersionLabel = computed((): string => state.value.schema?.vbcVersion ?? 'loading')
+const jsVersionLabel = computed((): string => state.value.schema?.engineVersion ?? 'loading')
 const windowActions = computed((): readonly WindowActionItem[] => [
   { id: 'minimise', label: t('minimize', displayLanguage.value), icon: Minus },
   { id: 'toggle-maximise', label: isWindowMaximised.value ? t('restore', displayLanguage.value) : t('maximize', displayLanguage.value), icon: maximiseIcon.value },
@@ -167,14 +166,10 @@ onBeforeUnmount((): void => {
           <div class="brand-copy">
             <span class="brand-name">JavaShroud</span>
             <span class="brand-tagline">{{ displayLanguage === 'zh' ? '字节码混淆工作台' : 'Bytecode obfuscation workbench' }}</span>
-            <span class="version-pills" aria-label="JavaShroud and VBC versions">
-              <span class="version-pill" :title="`JavaShroud ${engineVersionLabel}`" :aria-label="`JavaShroud ${engineVersionLabel}`">
+            <span class="version-pills" aria-label="JavaShroud version">
+              <span class="version-pill" :title="`JavaShroud ${jsVersionLabel}`" :aria-label="`JavaShroud ${jsVersionLabel}`">
                 <span class="version-pill-key">JS</span>
-                <span class="version-pill-value">{{ engineVersionLabel }}</span>
-              </span>
-              <span class="version-pill" :title="`VBC ${vbcVersionLabel}`" :aria-label="`VBC ${vbcVersionLabel}`">
-                <span class="version-pill-key">VBC</span>
-                <span class="version-pill-value">{{ vbcVersionLabel }}</span>
+                <span class="version-pill-value">{{ jsVersionLabel }}</span>
               </span>
             </span>
           </div>

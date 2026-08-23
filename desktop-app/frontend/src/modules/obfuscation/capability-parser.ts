@@ -4,7 +4,6 @@ import type { EngineSchemaPayload, ModuleDefinition, ModuleTagDefinition, Orderi
 interface EngineSchemaShape {
   readonly schemaVersion?: unknown
   readonly engineVersion?: unknown
-  readonly vbcVersion?: unknown
   readonly tags?: unknown
   readonly modules?: unknown
   readonly compatibility?: unknown
@@ -97,7 +96,6 @@ export const parseEngineSchema = (rawSchema: unknown): EngineSchemaPayload => {
   return {
     schemaVersion,
     engineVersion: parseRequiredText(shape.engineVersion, 'engineVersion', rawSchema),
-    vbcVersion: parseRequiredText(shape.vbcVersion, 'vbcVersion', rawSchema),
     tags,
     modules,
     compatibility: parseCompatibilityRules(shape.compatibility, moduleIds, rawSchema),

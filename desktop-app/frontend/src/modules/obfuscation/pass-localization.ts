@@ -342,8 +342,8 @@ const passCopies: Readonly<Record<string, LocalizedPassCopy>> = {
     description: text('把方法语义转换为 VBC4 指令和 native VM 执行，默认自动识别 VM 兼容关键方法以减少回退裸露面。', 'Converts method semantics into VBC4 instructions executed by a native VM, defaulting to critical VM-compatible method selection to reduce fallback exposure.'),
     params: {
       methodSelection: text('方法选择策略：控制类规则如何自动选择 VM 兼容方法；显式方法规则仍优先。', 'Method selection strategy: controls how class rules auto-select VM-compatible methods. Explicit method rules still take precedence.'),
-      strictVirtualization: text('严格虚拟化：在广义类规则下强制纳入所有 VM 兼容且未跳过的方法，减少明文实现保留。', 'Strict virtualization: includes every VM-compatible, non-skipped method under broad class rules to reduce plaintext implementation fallback.'),
-      maxInstructions: text('最大指令数：超过该阈值的方法保持原样；默认值足够高，避免显式命中的大型方法被意外跳过。', 'Maximum instruction count: methods above this threshold stay unchanged. The default is high enough to avoid unexpectedly skipping explicitly selected large methods.'),
+      maxInstructions: text('最大指令数：超过该阈值的方法保持原样；默认值 00 表示不限制。', 'Maximum instruction count: methods above this threshold stay unchanged; the default 00 means unlimited.'),
+      maxBroadVirtualizedMethods: text('广义规则最大方法数：限制广义类规则自动虚拟化的方法数量；默认值 00 表示不限制。', 'Maximum broad-rule methods: limits methods virtualized by broad class rules; the default 00 means unlimited.'),
       vbc4StateBoundEncoding: text('VBC4 固定默认：state-bound encoding 始终开启，并作为隐藏的 fail-closed 不变量。', 'VBC4 fixed default: state-bound encoding is always on and remains a hidden fail-closed invariant.'),
       vbc4HandlerMorphing: text('VBC4 固定默认：handler morphing 始终开启，并作为隐藏的 fail-closed 不变量。', 'VBC4 fixed default: handler morphing is always on and remains a hidden fail-closed invariant.'),
       vbc4StrengthMax: text('VBC4 固定默认：强度固定为 max，不暴露低强度或兼容 profile。', 'VBC4 fixed default: strength is locked to max, with no low-strength or compatibility profile exposed.'),

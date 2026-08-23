@@ -79,7 +79,6 @@ export interface PlanningDiagnostic {
 export interface EngineSchemaPayload {
   readonly schemaVersion: string
   readonly engineVersion: string
-  readonly vbcVersion: string
   readonly tags: readonly ModuleTagDefinition[]
   readonly modules: readonly ModuleDefinition[]
   readonly compatibility: readonly PassCompatibilityRule[]

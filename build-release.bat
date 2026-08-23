@@ -7,14 +7,6 @@ set "DESKTOP_DIR=%CORE_DIR%\desktop-app"
 set "FRONTEND_DIR=%DESKTOP_DIR%\frontend"
 set "DESKTOP_EMBEDDED_DIR=%DESKTOP_DIR%\embedded"
 set "BUILD_ROOT=%CORE_DIR%\build"
-if /I not "%BUILD_ROOT%"=="%CORE_DIR%\build" (
-  echo Refusing to delete unexpected build directory: %BUILD_ROOT%
-  exit /b 1
-)
-if exist "%BUILD_ROOT%" (
-  echo Removing build directory: %BUILD_ROOT%
-  rmdir /s /q "%BUILD_ROOT%" || exit /b 1
-)
 set "DESKTOP_BUILD_DIR=%BUILD_ROOT%\desktop-app"
 set "DESKTOP_BIN_DIR=%DESKTOP_BUILD_DIR%\bin"
 set "DESKTOP_ENGINE_DIR=%DESKTOP_BIN_DIR%\engine"

@@ -17,8 +17,12 @@ val dex2jarVersion = "2.4.28"
 val cafed00dVersion = "2.1.4"
 val jlinkerVersion = "1.0.7"
 val aircompressorVersion = "0.27"
-val javaShroudVersion = "0.12"
-val javaShroudVbcVersion = "4.55"
+val jsVersionSource = file("core-engine/src/main/kotlin/io/github/hht0rro/javashroud/capabilities/CapabilityTypes.kt")
+val javaShroudVersion = Regex("const val JS_VERSION: String = \"([^\"]+)\"")
+    .find(jsVersionSource.readText())
+    ?.groupValues
+    ?.get(1)
+    ?: error("JS_VERSION is missing from ${jsVersionSource.path}")
 
 allprojects {
     version = javaShroudVersion
@@ -44,7 +48,6 @@ allprojects {
         set("jlinkerVersion", jlinkerVersion)
         set("aircompressorVersion", aircompressorVersion)
         set("javaShroudVersion", javaShroudVersion)
-        set("javaShroudVbcVersion", javaShroudVbcVersion)
     }
 }
 

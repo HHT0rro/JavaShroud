@@ -10,7 +10,6 @@ const { buildPassItemsFromSchema, disablePassAndDependents } = await import('./p
 const schema = parseEngineSchema({
   schemaVersion: '2',
   engineVersion: 'check-engine',
-  vbcVersion: 'VBC4-dev',
   tags: [
     { id: 'native-kernel', name: 'Native', description: 'Native kernel' },
     { id: 'runtime-defense', name: 'Runtime', description: 'Runtime defense' },

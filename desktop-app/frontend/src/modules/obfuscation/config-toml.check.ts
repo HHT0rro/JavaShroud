@@ -11,7 +11,6 @@ const assert = (condition: boolean, message: string): void => {
 const schema: EngineSchemaPayload = {
   schemaVersion: '2',
   engineVersion: 'check-engine',
-  vbcVersion: 'VBC4-dev',
   tags: [
     { id: 'obfuscation', name: 'Obfuscation', description: 'Obfuscation passes' },
   ],

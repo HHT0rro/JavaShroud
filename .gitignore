@@ -93,3 +93,4 @@ tools/
 local-release/
 a.out
 nul
+.mimosa/

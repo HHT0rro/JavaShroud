@@ -49,7 +49,6 @@ let debugConfigToml = ''
 const defaultSchema: EngineSchemaPayload = {
   schemaVersion: '2',
   engineVersion: 'browser-mock-dev',
-  vbcVersion: 'VBC4-dev',
   tags: [
     { id: 'metadata', name: 'Metadata', description: 'Metadata cleanup and stripping.' },
     { id: 'obfuscation', name: 'Obfuscation', description: 'Name and bytecode transforms.' },
@@ -102,11 +101,19 @@ const defaultSchema: EngineSchemaPayload = {
           hidden: false,
         },
         {
-          key: 'strictVirtualization',
-          type: 'boolean',
-          defaultValue: true,
+          key: 'maxInstructions',
+          type: 'number',
+          defaultValue: 0,
           options: null,
-          description: 'Fails closed when a selected method cannot be virtualized.',
+          description: 'Maximum bytecode instructions per virtualized method; 0 means unlimited.',
+          hidden: false,
+        },
+        {
+          key: 'maxBroadVirtualizedMethods',
+          type: 'number',
+          defaultValue: 0,
+          options: null,
+          description: 'Maximum methods selected by broad class rules; 0 means unlimited.',
           hidden: false,
         },
       ],

@@ -12,6 +12,12 @@ Protocol changes must update every serializer, parser, Native bridge, generated 
 
 These rules apply to the JavaShroud protected artifact and Native runtime formats. They do not remove Java classfile compatibility requirements, Gradle/plugin versions, desktop application versions, or release metadata unless a task explicitly requests those changes.
 
+## Tracked Tree
+
+Git tracks the product source only: `core-engine/`, `desktop-app/`, `annotations/`, Gradle/CI, and top-level license/README files.
+
+Do not add or restore `docs/`, `promo-video/`, `promo-video-v2/`, root `scripts/`, `plan/`, `tools/`, or `local-release/`. Those stay local and are gitignored. Do not reintroduce promo evidence jars, audio, or helper scripts into the public tree.
+
 ## Working Tree
 
 Preserve unrelated user changes. Do not use `git reset`, `git clean`, destructive checkout, or broad rewrites that overwrite unrelated files.

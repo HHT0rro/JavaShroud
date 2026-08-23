@@ -666,7 +666,6 @@ export const nodePassSelectionAction = (rules: readonly RuleItem[], node: ClassT
 const cloneEngineSchema = (schema: EngineSchemaPayload): EngineSchemaPayload => ({
   schemaVersion: schema.schemaVersion,
   engineVersion: schema.engineVersion,
-  vbcVersion: schema.vbcVersion,
   tags: schema.tags.map((tag) => ({ ...tag })),
   modules: schema.modules.map((moduleDefinition) => ({
     ...moduleDefinition,

@@ -75,7 +75,6 @@ const findNode = (nodes: readonly ClassTreeNode[], id: string): ClassTreeNode =>
 const schema: EngineSchemaPayload = {
   schemaVersion: '2',
   engineVersion: 'state-check',
-  vbcVersion: 'VBC4-state-check',
   tags: [{ id: 'obfuscation', name: 'Obfuscation', description: 'checks' }],
   modules: [],
   compatibility: [],

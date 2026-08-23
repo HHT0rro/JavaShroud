@@ -1,3 +1,34 @@
+# JavaShroud v0.21.0-dev
+
+> 开发版更新（2026-08-23）。本版本只支持 current-format artifact、协议与 Native ABI；旧格式、旧协议、旧 Native ABI 和预构建 Native 回退均不再保留。
+
+## Current-format runtime
+
+- 统一 JavaShroud 版本来源，移除独立 VBC 版本字段及旧 schema 输出。
+- 强化 AKEN v4 Native locator、page descriptor、route、digest、commitment 和 generation 校验。
+- 缺失 Native DLL、Native digest mismatch、page tamper、结构截断和跨 session/artifact replay 均保持 fail-closed。
+- 保留完整 page authentication；AKEN cache-hit 不跳过当前 page 的认证流程。
+- 不恢复 legacy artifact、旧协议、旧 Native ABI、prebuilt Native 或 Java fallback。
+
+## VM performance and lifecycle
+
+- execution frame 使用线程隔离状态，保留有界 frame pool、generation binding 和统一 wipe/归还路径。
+- 优化 active execution copy 到 persistent prepared program 的安全复用路径。
+- 保持 nested/recursive dispatch depth 上限，超限继续走 fail-closed/受控回退路径。
+- 优化重复 VM dispatch、resource index、JNI cache、zstd context 和 Native loader 热路径。
+- 修复字段反射字符串按字段 owner 限定改写，避免同名字段跨类污染。
+
+## Security and regression coverage
+
+- 增加 Native parser、AKEN page auth、VM frame、runtime metrics、tamper、protocol label 和 protected artifact 回归测试。
+- 增加 missing DLL、digest mismatch、page tamper、partial-output wipe、generation mismatch 和 verifier 相关验证。
+- 敏感材料仍不进入持久化 cache：key、DEK、nonce、page plaintext 和 descriptor secret 均不缓存。
+
+## Desktop workbench and release integration
+
+- 更新 capability schema、pass selection、配置解析、版本展示和桌面端状态管理。
+- 收紧 release workflow、Native 构建绑定和最终 artifact 校验。
+
 # JavaShroud v0.20.0-dev
 
 > 开发版更新（2026-08-21）。本版本只支持当前受保护 artifact、协议与 Native ABI；旧格式、旧协议、旧 Native ABI 和预构建 Native 回退均不再保留。
