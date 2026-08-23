@@ -4,6 +4,8 @@
 
 ## Current-format runtime
 
+- AKEN-R1 production Native is Rust-only and supports exactly Windows x64 (`x86_64-pc-windows-gnu`) and Linux x64 (`x86_64-unknown-linux-gnu.2.17`).
+- Retired C/Zig build entrypoints, macOS host/target, Mach-O, `.dylib`, and old Native resource paths fail closed; no legacy C ABI or prebuilt Native fallback is retained.
 - 统一 JavaShroud 版本来源，移除独立 VBC 版本字段及旧 schema 输出。
 - 强化 AKEN v4 Native locator、page descriptor、route、digest、commitment 和 generation 校验。
 - 缺失 Native DLL、Native digest mismatch、page tamper、结构截断和跨 session/artifact replay 均保持 fail-closed。
@@ -86,10 +88,10 @@
 - 修复 Native VM 的 `MONITORENTER` / `MONITOREXIT` 真实 JNI 同步语义（含 NPE / IllegalMonitorStateException）。
 - VM 核心增强：按方法身份定位激活程序、运行时会话校验、`ldc` 类型与所属类身份匹配校验。
 
-## 多平台 Native
-- `targetPlatform` 支持 `"all"` 与多平台集合，单次构建产出 Windows x64、Linux x64、macOS x64、macOS ARM64 四份原生库（Zig 交叉编译）。
-- 新增 macOS Mach-O 外壳链（导出符号白名单 + fail-closed 校验）与 Linux 专用链接脚本。
-- 构建证据报告支持 schema v2 `natives[]`，按最终 JAR 条目 SHA-256 逐项绑定四平台产物；单 PE 场景保持 schema v1 兼容输出。
+## 历史 Native 路径（已在 AKEN-R1 退役）
+- 旧版本曾通过 Zig 交叉编译 Windows x64、Linux x64、macOS x64 和 macOS ARM64 Native 库。
+- 旧 macOS Mach-O 外壳、Linux 专用 C 链接脚本及多平台 Native 资源布局均不属于 AKEN-R1；当前构建对这些路径 fail-closed。
+- 历史构建证据中的 `natives[]` 记录不代表当前格式兼容性；AKEN-R1 只接受当前 Rust 资源与 ABI。
 
 ## 兼容性与正确性
 - Lambda 配方保真度提升，覆盖更多 MethodHandle 调用类型、构造器引用、接口调用及 checked exception。

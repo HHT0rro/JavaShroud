@@ -34,7 +34,7 @@ The design is Kerckhoffs-oriented: protection strength comes from per-artifact k
 | Method virtualization | `method-virtualization`: JVM bytecode lowering to VBC4, executed by the NBVM |
 | Resource and class encryption | JSRP resource envelopes, `class-encryption-loader`, `method-body-delayed-decryption` |
 | Runtime defenses | `anti-instrumentation`, `anti-dump-protection`, `environment-bound-keys`, `callsite-rotation-protection`, `anti-symbolic-execution`, `exception-semantic-virtualization` |
-| Native packing | `jni-microkernel-loader`: authenticated shell + inner-kernel packing + platform loaders |
+| Native runtime | `jni-microkernel-loader`: AKEN-R1 Rust runtime, authenticated resources, and platform binding |
 | Desktop workflow | Wails + Vue UI, configuration editing, engine task management |
 
 26 passes are registered; the default pipeline contains only `strip-compile-debug-info`. Stable passes are enabled by default. Experimental passes must be enabled explicitly in the config, and opt-in passes additionally require `allowOptInPasses = true`.
@@ -94,22 +94,21 @@ Execution entry is bound to per-artifact entry tokens, opcode dialects, resource
 
 ## Native hardening
 
-`NativeKernelShellPacker` uses a two-layer shell-kernel structure:
+AKEN-R1 uses the Rust-only runtime boundary and the final authenticated resource locator:
 
-- The Java layer `System.load`s the outer `js_kernel_<platform>` stub directly; the complete inner kernel is sealed inside the shell as an authenticated, encoded payload.
-- `JNI_OnLoad` verifies the header, section digest, layout and dispatcher profile, payload binding, chunk tags, and payload MAC in sequence; any failure rejects execution, and there is no Java unpacking fallback.
-- The Native kernel is bound to VMBC resources, the bootstrap index, resource paths, and the manifest, so a shell cannot be transplanted or replayed across artifacts.
-- The `jni-microkernel-loader.nativePackingLevel` option keeps `off` / `standard` / `max` / `max-hardening`; all four levels use the AKEN v4 resource-level evaluator, and the level only changes Native shell and payload packing strength. The security wording is **artifact-only static cost hardening**: a self-contained runtime necessarily contains executable decryption semantics, but it has no directly extractable static root key that opens every high-value resource in one step.
+- Production resources are selected only for Windows x64 and Linux x64, then bound to the final artifact digest and current runtime format.
+- Resource, platform, length, image, and binding failures reject loading; Java does not fall back to an old C shell or system-path library.
+- The former `NativeKernelShellPacker` C shell, Mach-O loader, Zig entrypoints, and `.dylib` outputs are retired and remain fail-closed only for stale source fixtures.
 
 ### Platform Boundaries
 
-| Platform | Current packing boundary |
+| Platform | AKEN-R1 Native boundary |
 | --- | --- |
-| Windows x64 | PE64 in-memory mapping with section, relocation, import / export, TLS, `DllMain`, `JNI_OnLoad`, and ABI-table validation |
-| Linux x64 | Anonymous-memory ELF64 loader with `PT_LOAD` / `PT_DYNAMIC`, hash, symbol, RELA / PLT, initializer, and entrypoint validation |
-| macOS x64 / arm64 | Outer stub plus Mach-O metadata, rebase / bind, export-trie, and initializer validation; unsupported anonymous execution mapping fails closed |
+| Windows x64 | Rust runtime; the only cargo target is `x86_64-pc-windows-gnu`, with a `.dll` resource; the old PE/C loader is not a production path |
+| Linux x64 | Rust runtime; the only cargo target is `x86_64-unknown-linux-gnu.2.17`, with a `.so` resource; the old ELF/C loader is not a production path |
+| Other platforms | macOS, Mach-O, and `.dylib` selection, build, resource, and load paths fail closed |
 
-The shell protocol and platform implementation boundaries are in the Native loader sources.
+AKEN-R1 no longer compiles, packages, or runs the retired C/Zig Native runtime. Retired build/cache/temp entrypoints remain only as fail-closed quarantine shims.
 
 ## Compared With JNIC / Native Obfuscation
 
@@ -126,8 +125,8 @@ The two approaches are not mutually exclusive; in JavaShroud the Native layer is
 
 - The JavaShroud engine itself builds and runs on JDK 21+.
 - Renaming, metadata cleanup, and most basic passes can process Java 8 classfiles without raising the classfile version.
-- `ConstantDynamic` features require Java 11+; VMBC, the Native loader, and most runtime defense passes target Java 11+ runtimes.
-- Native packing depends on the target platform, JNI, and the local build toolchain; release acceptance should use the actual packaged artifact.
+- `ConstantDynamic` features require Java 11+; VMBC, the Rust Native runtime, and most runtime defense passes target Java 11+ runtimes.
+- The Native runtime accepts only the declared AKEN-R1 Windows/Linux x64 targets; release acceptance should use the final artifact digest, locator, and runtime result.
 
 ## Quick Start
 

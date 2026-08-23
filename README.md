@@ -34,7 +34,7 @@ JavaShroud 是一套 Java 混淆与加固工具链：Kotlin 引擎做字节码�
 | 方法虚拟化 | `method-virtualization`：JVM bytecode lowering 为 VBC4，由 NBVM 执行 |
 | 资源与类加密 | JSRP 资源封装、`class-encryption-loader`、`method-body-delayed-decryption` |
 | 运行时防护 | `anti-instrumentation`、`anti-dump-protection`、`environment-bound-keys`、`callsite-rotation-protection`、`anti-symbolic-execution`、`exception-semantic-virtualization` |
-| Native 加壳 | `jni-microkernel-loader`：认证外壳 + inner kernel 封装 + 平台 loader |
+| Native runtime | `jni-microkernel-loader`：AKEN-R1 Rust runtime、认证资源与平台绑定 |
 | 桌面工作流 | Wails + Vue 界面、配置编辑、引擎任务管理 |
 
 注册 pass 共 26 个，默认 pipeline 只含 `strip-compile-debug-info`。stable pass 默认启用；experimental pass 需在配置里显式打开，其中带 opt-in 标记的还要求 `allowOptInPasses = true`。
@@ -94,22 +94,21 @@ flowchart LR
 
 ## Native 加固
 
-`NativeKernelShellPacker` 采用外壳-内核两层结构：
+AKEN-R1 使用 Rust-only runtime 边界与最终认证 Native locator：
 
-- 外层 `js_kernel_<platform>` stub 由 Java 层 `System.load` 直接加载；完整 inner kernel 以认证编码 payload 封装在外壳内。
-- `JNI_OnLoad` 逐级校验 header、section digest、layout 与 dispatcher profile、payload binding、分块 tag 和 payload MAC；任何一级失败都拒绝执行，Java 层没有解包 fallback。
-- Native kernel 与 VMBC 资源、bootstrap 索引、资源路径和 manifest 绑定，同一份外壳不能跨产物直接替换或重放。
-- 配置项 `jni-microkernel-loader.nativePackingLevel` 保留 `off` / `standard` / `max` / `max-hardening` 四档，四档统一采用 AKEN v4 资源级 evaluator；档位只改变 native 外壳与载荷封装强度。安全承诺固定为 **artifact-only static cost hardening**：运行时必然具备可执行的解密语义，但不存在可直接提取或一次解封即可横向解开全部高价值资源的静态根 Key。
+- 生产资源只为 Windows x64 与 Linux x64 选择，并绑定最终 artifact digest 与当前 runtime 格式。
+- 资源、平台、长度、镜像和 binding 任一校验失败都会拒绝加载；Java 不回退到旧 C shell 或系统路径库。
+- 旧 `NativeKernelShellPacker` C 外壳、Mach-O loader、Zig 入口和 `.dylib` 输出均已退役，只为 stale source fixture 保留 fail-closed 封存。
 
 ### 平台边界
 
-| 平台 | 当前加壳边界 |
+| 平台 | AKEN-R1 当前 Native 边界 |
 | --- | --- |
-| Windows x64 | PE64 内存映射，覆盖 section、relocation、import / export、TLS、`DllMain`、`JNI_OnLoad` 与 ABI table 校验 |
-| Linux x64 | 匿名内存 ELF64 loader，覆盖 `PT_LOAD` / `PT_DYNAMIC`、hash、symbol、RELA / PLT、initializer 与入口校验 |
-| macOS x64 / arm64 | 外层 stub 与 Mach-O metadata、rebase / bind、export trie、initializer 校验；未满足匿名执行映射条件时 fail-closed |
+| Windows x64 | Rust runtime，唯一 cargo target 为 `x86_64-pc-windows-gnu`，资源后缀为 `.dll`；PE/旧 C loader 不再是生产路径 |
+| Linux x64 | Rust runtime，唯一 cargo target 为 `x86_64-unknown-linux-gnu.2.17`，资源后缀为 `.so`；ELF/旧 C loader 不再是生产路径 |
+| 其他平台 | 包括 macOS、Mach-O 与 `.dylib`：平台识别、构建、资源选择和加载均 fail-closed |
 
-外壳协议与平台实现边界见 Native loader 源码。
+AKEN-R1 不再编译、打包或运行旧 C/Zig Native runtime；旧 build/cache/temp 入口只保留 fail-closed 封存脚本。
 
 ## 与 JNIC / Native 混淆的区别
 
@@ -126,8 +125,8 @@ flowchart LR
 
 - JavaShroud 引擎本身用 JDK 21+ 构建和运行。
 - 重命名、metadata 清理和多数基础 pass 可处理 Java 8 classfile，不会主动抬升 classfile 版本。
-- `ConstantDynamic` 相关能力要求 Java 11+；VMBC、Native loader 与多数运行时防护面向 Java 11+ 目标运行时。
-- Native 加壳依赖目标平台、JNI 和本机构建链；正式交付前以实际产物的运行结果为准。
+- `ConstantDynamic` 相关能力要求 Java 11+；VMBC、Rust Native runtime 与多数运行时防护面向 Java 11+ 目标运行时。
+- Native runtime 只接受 AKEN-R1 声明的 Windows/Linux x64 target；正式交付前以实际产物的 digest、locator 和运行结果为准。
 
 ## 快速开始
 
