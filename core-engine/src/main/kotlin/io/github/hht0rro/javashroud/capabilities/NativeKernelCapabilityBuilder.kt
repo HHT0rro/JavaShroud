@@ -201,9 +201,9 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
 
         requiresRuntimeFlags = emptyList(),
 
-        platformConstraints = listOf("Windows x64", "Linux x64", "macOS x64/arm64"),
+        platformConstraints = listOf("Windows x64", "Linux x64"),
 
-        compatibilityNotes = "需要平台特定 native 库。混淆时优先使用 JAVASHROUD_ZIG 或系统 PATH 中的 Zig；缺工具链时自动下载到用户目录 .javashroud/zig/0.13.0（Windows 形如 C:\\Users\\<用户名>\\.javashroud\\zig\\0.13.0）后重编译 native 微内核；失败则终止本次混淆，不使用预编译 native 回退路径。只能与类加密、方法虚拟化或其他需要运行时 helper 的 pass 一起启用，不能单独启用.",
+        compatibilityNotes = "仅支持锁定 Rust 1.78.0 工具链。Windows x64 使用 x86_64-pc-windows-gnu；Linux x64 使用 x86_64-unknown-linux-gnu.2.17。工具链缺失、版本不符或编译失败时立即终止，不使用预编译或系统路径回退。只能与类加密、方法虚拟化或其他需要运行时 helper 的 pass 一起启用，不能单独启用。",
 
         requiresAnyPassIds = jniMicrokernelAnchorPassIds,
 
@@ -267,9 +267,7 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
 
                 options = null,
 
-                description = "混淆时编译：开启后优先使用 JAVASHROUD_ZIG 或系统 PATH 中的 Zig；缺失时自动下载到用户目录 .javashroud/zig/0.13.0（Windows 形如 C:\\Users\\<用户名>\\.javashroud\\zig\\0.13.0），" +
-
-                    "再从内置 C 源码重编译 native 微内核；该选项必须开启，工具链获取失败或编译失败时终止本次混淆，不使用预编译 native 回退路径。",
+                description = "混淆时从内置 AKEN-R1 Rust workspace 构建锁定目标；该选项必须开启，工具链或编译验证失败时终止，不使用旧产物回退。",
 
                 hidden = false,
 
@@ -285,9 +283,7 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
 
                 options = listOf("standard", "aggressive"),
 
-                description = "native 反逆向保护级别。standard 包含反调试、源码多样化重编译与反反汇编 guard；" +
-
-                    "aggressive 额外启用反虚拟机检测、完整性自校验和反脱壳保护。",
+                description = "Rust runtime 反逆向保护级别。standard 启用基础运行时完整性防护；aggressive 增强运行时检查与产物自校验。",
 
                 hidden = true,
 
@@ -304,7 +300,7 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
 
                 options = listOf("off", "standard", "max", "max-hardening"),
 
-                description = "Zig 编译后 native 加固档位。off 保持不加外壳的原生动态库；standard 保留可加载前缀并追加认证 overlay；max 生成兼容的 stub shell；max-hardening 使用更强的外壳与完整 js_kernel 认证 payload。四档统一采用 AKEN v4 资源级 evaluator，档位只改变 native 外壳与载荷封装强度。",
+                description = "AKEN-R1 Rust cdylib 加固策略。off、standard、max、max-hardening 仅作为 Rust 构建身份与内部强化级别；所有值都直接输出到 META-INF/jsrt，不改变 R1 ABI、资源根或平台边界。",
 
                 hidden = false,
 

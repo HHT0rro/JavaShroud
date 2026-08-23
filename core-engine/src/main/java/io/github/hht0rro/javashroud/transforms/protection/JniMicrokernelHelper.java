@@ -1,7 +1,6 @@
 package io.github.hht0rro.javashroud.transforms.protection;
 
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.ByteArrayOutputStream;
@@ -21,12 +20,8 @@ import java.lang.invoke.MethodType;
 import java.lang.invoke.LambdaMetafactory;
 import java.util.LinkedHashSet;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Set;
-import java.util.jar.JarEntry;
-import java.util.jar.JarFile;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.concurrent.ConcurrentHashMap;
@@ -34,9 +29,6 @@ import java.util.concurrent.ConcurrentMap;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
-import javax.crypto.Cipher;
-import javax.crypto.spec.GCMParameterSpec;
-import javax.crypto.spec.SecretKeySpec;
 
 /**
  * Runtime helper for JNI microkernel loader.
@@ -54,28 +46,14 @@ public final class JniMicrokernelHelper {
     private static final int LOAD_READY = 2;
     private static volatile int loadState = LOAD_UNTRIED;
     private static volatile String loadMessage = "";
-    /* AKEN readiness is deliberately independent from the legacy boot-material loader. */
     private static volatile int akenLoadState = LOAD_UNTRIED;
     private static volatile String akenLoadMessage = "";
-    private static volatile boolean diversifiedVmEnabled = false;
+    private static volatile boolean diversifiedVmEnabled;
     private static volatile String vmSelfCheck = "";
-    private static volatile long nativeBootToken = 0L;
-    private static volatile boolean nativeSelfCheckFailed = false;
-    private static volatile boolean sealedNativeBindingsPublished = false;
-    private static volatile boolean bootSecretEnvBindingEnabled = false;
-    private static volatile String[] bootSecretExpectedFingerprints = new String[0];
-    private static volatile byte[][] runtimeResourceKeys;
-    private static volatile int runtimeResourcePartitionCount;
-    private static volatile int anchorResourcePartition = -1;
-    private static volatile byte[] expectedShellBindingCommitment;
-    private static volatile Thread expectedShellBindingThread;
-    private static volatile int shellBindingHandoffState;
-    private static volatile byte[] nativeShellBootSecret;
-    private static volatile Thread nativeShellBootSecretThread;
-    private static final String SEALED_NATIVE_INDEX_RESOURCE = "META-INF/.r/0.dat";
-    private static final String SEALED_NATIVE_BINDINGS_RESOURCE = "META-INF/.r/bindings.dat";
-    private static final String AKEN_NATIVE_LOCATOR_RESOURCE = "META-INF/aken/native.locator";
-    private static final String AKEN_NATIVE_BINDINGS_LOCATOR_RESOURCE = "META-INF/aken/native.bindings.locator";
+    private static volatile boolean nativeSelfCheckFailed;
+    private static volatile boolean sealedNativeBindingsPublished;
+    private static final String AKEN_NATIVE_LOCATOR_RESOURCE = "META-INF/jsrt/native.locator";
+    private static final String AKEN_NATIVE_BINDINGS_LOCATOR_RESOURCE = "META-INF/jsrt/native.bindings.locator";
     private static final String AKEN_NATIVE_RESOURCE_ROOT = "META-INF/";
     private static final int AKEN_NATIVE_LOCATOR_MAGIC_0 = 0xD7;
     private static final int AKEN_NATIVE_LOCATOR_MAGIC_1 = 0xA4;
@@ -89,7 +67,7 @@ public final class JniMicrokernelHelper {
     private static final int AKEN_NATIVE_LOCATOR_HEADER_BYTES = 8;
     private static final int AKEN_NATIVE_LOCATOR_COMMITMENT_BYTES = 32;
     private static final int AKEN_NATIVE_LOCATOR_RECORD_FIXED_BYTES = 40;
-    private static final int AKEN_NATIVE_LOCATOR_MAX_RECORDS = 5;
+    private static final int AKEN_NATIVE_LOCATOR_MAX_RECORDS = 3;
     private static final int AKEN_NATIVE_LOCATOR_MAX_ROUTE_BYTES = 2048;
     private static final int AKEN_NATIVE_LOCATOR_KIND_LIBRARY = 1;
     private static final int AKEN_NATIVE_LOCATOR_KIND_BINDINGS = 2;
@@ -97,22 +75,6 @@ public final class JniMicrokernelHelper {
     private static final int AKEN_NATIVE_MAX_LIBRARY_BYTES = 256 * 1024 * 1024;
     private static final int AKEN_NATIVE_SHA256_LENGTH = 32;
     private static final int AKEN_NATIVE_BINDINGS_MAX_BYTES = 4 * 1024 * 1024;
-    private static final String BOOT_MATERIAL_RESOURCE = "META-INF/.r/boot.dat";
-    private static final String EMBEDDED_BOOT_SECRET_RESOURCE = "META-INF/.r/kek.dat";
-    private static final String BOOT_SECRET_ENV = "JAVASHROUD_BOOT_SECRET_V1";
-    private static final String BOOT_SECRET_FILE_ENV = "JAVASHROUD_BOOT_SECRET_FILE_V1";
-    private static final int BOOT_MATERIAL_VERSION = 2;
-    private static final int HARDENED_BOOT_MATERIAL_VERSION = 3;
-    private static final int SHELL_BINDING_COMMITMENT_SIZE = 32;
-    private static final byte[] BOOT_MATERIAL_AAD = "javashroud-boot-material-v2".getBytes(StandardCharsets.US_ASCII);
-    private static final byte[] HARDENED_BOOT_MATERIAL_AAD = "javashroud-boot-material-v3".getBytes(StandardCharsets.US_ASCII);
-    private static final byte[] BOOT_SIDECAR_TEXT_PREFIX = "JSBK1.".getBytes(StandardCharsets.US_ASCII);
-    private static final byte[] BOOT_SIDECAR_KEY_DOMAIN = "JavaShroud/BootKekSidecar/v1/key".getBytes(StandardCharsets.US_ASCII);
-    private static final String VM_CATALOG_RESOURCE = "META-INF/.r/vm.catalog";
-    private static final int RUNTIME_RESOURCE_VERSION = 8;
-    private static final int RUNTIME_RESOURCE_HEADER_SIZE = 27;
-    private static final int NATIVE_ANCHOR_KEY_SLOT = 16;
-    private static final int ZSTD_MAGIC = 0xFD2FB528;
     private static final int LAMBDA_FLAG_SERIALIZABLE = 1;
     private static final int LAMBDA_FLAG_MARKERS = 2;
     private static final int LAMBDA_FLAG_BRIDGES = 4;
@@ -122,44 +84,17 @@ public final class JniMicrokernelHelper {
 
     private JniMicrokernelHelper() { }
 
-    /* ---- JNI native methods (implemented in js_kernel.c) ---- */
+    /* ---- JNI R1 methods (implemented by the bundled Rust runtime) ---- */
 
     static native int nativeInit(String platform);
-    static native int nativeVerify(byte[] data, byte[] expectedMac);
     static native int nativeHeartbeat();
-    static native String nativeGetVersion();
-    static native long nativeGetBootToken();
-    static native boolean nativeInstallBootMaterial(byte[] material);
-    static native boolean nativeInstallBootEnvelope(byte[] envelope, byte[] sidecar);
-    static native boolean nativeIsBootMaterialReady();
-    static native void nativeAbortBootMaterial();
-    static native void nativePreloadRuntimeResources(byte[] preloadIndex, byte[] commitments, byte[] startupNonce);
     static native boolean nativeInstallAkenSessionNonce(byte[] startupNonce);
-    static native byte[] nativeDecodeRuntimeResource(byte[] encoded);
-    public static native byte[] nativeDecryptAes(byte[] encrypted, byte[] key, byte[] iv);
-    public static native byte[] nativeDeriveClassEncryptionKey(byte[] keyId, byte[] salt, int length);
-    static native byte[] nativeDecryptClassBytes(byte[] keyId, byte[] salt, byte[] nonce, byte[] ciphertext, byte[] aad, int keyLength);
-    static native String nativeSealedBindingKey(byte[] value);
-    public static native String nativeGetMachineFingerprint();
-
-    /* ---- AKEN v4 typed page bridge ----
-     * These declarations intentionally accept only a page-local handle, page index,
-     * and call-site proof.  They never accept caller-supplied ciphertext, key bytes,
-     * locator metadata, or a generic resource buffer.
-     */
     static native Object nativeExecuteAkenVmPage(long entryToken, byte[] encodedHandle, int pageIndex, byte[] callSiteProof, Object[] args);
     static native String nativeOpenAkenString(byte[] encodedHandle, int pageIndex, byte[] callSiteProof);
     static native byte[] nativeReadAkenClassPage(byte[] encodedHandle, int pageIndex, byte[] callSiteProof);
     static native void nativeConsumeAkenNativeChunk(byte[] encodedHandle, int pageIndex, byte[] callSiteProof);
-    /* Fixture-only, de-identified runtime counters.  The production runtime
-     * never calls this method; the diagnostics build registers it only for
-     * attached-JVM benchmark evidence. */
-    static native long[] nativeRuntimeMetricsSnapshot();
-    /* Fixture-only effective crypto capability probe.  The result contains
-     * only two boolean flags: AES dispatch availability and GHASH/PCLMUL
-     * dispatch availability.  No CPU identity or sensitive runtime state is
-     * exposed. */
-    static native long[] nativeRuntimeCryptoCapabilities();
+
+    /* ---- AKEN R1 typed page bridge ---- */
 
     public static Object executeAkenVmPage(long entryToken, byte[] encodedHandle, int pageIndex, byte[] callSiteProof, Object[] args) {
         requireAkenPageRequest(encodedHandle, pageIndex, callSiteProof, "VM");
@@ -212,22 +147,18 @@ public final class JniMicrokernelHelper {
         }
     }
 
-    /**
-     * Load only the AKEN-specific raw JNI artifact.  This path intentionally
-     * does not read boot material, publish legacy sealed bindings, install a
-     * boot envelope, or preload the old VM catalog.
-     */
+    /** Load only the authenticated AKEN-R1 Rust JNI artifact. */
     private static synchronized void loadAkenNativeKernel() {
         if (akenLoadState != LOAD_UNTRIED) return;
         akenLoadState = LOAD_LOADING;
         try {
-            String platformSuffix = detectPlatform();
-            if (platformSuffix == null) {
+            String platformTarget = detectPlatform();
+            if (platformTarget == null) {
                 akenLoadMessage = "aken:native-unavailable";
                 akenLoadState = LOAD_FAILED;
                 return;
             }
-            if (!tryLoadAkenBundledNative(platformSuffix)) {
+            if (!tryLoadAkenBundledNative(platformTarget)) {
                 if (akenLoadMessage == null || akenLoadMessage.length() == 0) {
                     akenLoadMessage = "aken:bundled-native-unavailable";
                 }
@@ -235,14 +166,6 @@ public final class JniMicrokernelHelper {
                 return;
             }
             akenLoadState = LOAD_READY;
-            /*
-             * nativeInit deliberately defers optional helper registration while
-             * the loader is in LOAD_LOADING: resolving those classes can trigger
-             * an AKEN string bootstrap before its typed bridge is ready.  A
-             * heartbeat after READY completes that registration without a
-             * re-entrant page-open failure.
-             */
-            activateAkenDeferredNativeBindings();
             nativeSelfCheckFailed = false;
             runDiversifiedVmSelfExercise();
         } catch (Throwable error) {
@@ -251,30 +174,18 @@ public final class JniMicrokernelHelper {
         }
     }
 
-    private static void activateAkenDeferredNativeBindings() {
-        final int heartbeat;
-        try {
-            heartbeat = nativeHeartbeat();
-        } catch (UnsatisfiedLinkError error) {
-            throw new SecurityException("AKEN deferred native bindings are not registered", error);
-        }
-        if (heartbeat < 0) {
-            throw new SecurityException("AKEN deferred native bindings registration failed");
-        }
-    }
-
-    private static boolean tryLoadAkenBundledNative(String platformSuffix) {
+    private static boolean tryLoadAkenBundledNative(String platformTarget) {
         AkenNativeLibrary locator;
         try {
-            locator = readAkenNativeLocator(platformSuffix);
+            locator = readAkenNativeLocator(platformTarget);
         } catch (SecurityException error) {
-            akenLoadMessage = "aken:native-locator-invalid:" + platformSuffix;
+            akenLoadMessage = "aken:native-locator-invalid:" + platformTarget;
             return false;
         }
-        return tryLoadAkenBundledNativeResource(platformSuffix, locator);
+        return tryLoadAkenBundledNativeResource(platformTarget, locator);
     }
 
-    private static boolean tryLoadAkenBundledNativeResource(String platformSuffix, AkenNativeLibrary locator) {
+    private static boolean tryLoadAkenBundledNativeResource(String platformTarget, AkenNativeLibrary locator) {
         byte[] nativeBytes = null;
         byte[] actualDigest = null;
         File tempLib = null;
@@ -286,17 +197,23 @@ public final class JniMicrokernelHelper {
         boolean loaded = false;
         try (InputStream in = resourceStream(locator.resourcePath)) {
             if (in == null) {
-                akenLoadMessage = "aken:native-resource-missing:" + platformSuffix;
+                akenLoadMessage = "aken:native-resource-missing:" + platformTarget;
                 return false;
             }
             nativeBytes = readAllBounded(in, locator.storedLength);
             if (nativeBytes.length != locator.storedLength || hasAkenRejectedLegacyHeader(nativeBytes)) {
-                akenLoadMessage = "aken:native-resource-invalid:" + platformSuffix;
+                akenLoadMessage = "aken:native-resource-invalid:" + platformTarget;
                 return false;
             }
+            validateR1NativeImage(platformTarget, nativeBytes);
             actualDigest = sha256(nativeBytes);
             if (!MessageDigest.isEqual(locator.sha256, actualDigest)) {
-                akenLoadMessage = "aken:native-resource-digest-mismatch:" + platformSuffix;
+                akenLoadMessage = "aken:native-resource-digest-mismatch:" + platformTarget;
+                return false;
+            }
+            String bindingText = sealedNativeBindingText(locator);
+            if (bindingText == null || bindingText.length() == 0) {
+                akenLoadMessage = "aken:native-bindings-invalid:" + platformTarget;
                 return false;
             }
             for (File extractDirectory : nativeExtractDirectories()) {
@@ -309,23 +226,21 @@ public final class JniMicrokernelHelper {
                 tempLib.setReadable(true, true);
                 tempLib.setWritable(true, true);
                 tempLib.setExecutable(true, true);
-                // AKEN v4 relocation metadata is public binding material.  Publish
-                // only the active locator-selected binding route before System.load.
-                publishSealedNativeBindings(locator);
+                publishSealedNativeBindings(bindingText);
                 sealedNativeBindingsPublished = true;
                 System.load(tempLib.getAbsolutePath());
-                int initResult = initializeNativeKernel(platformSuffix);
+                int initResult = initializeNativeKernel(platformTarget);
                 if (initResult < 0) {
                     akenLoadMessage = "aken:native-init-failed:" + initResult;
                     return false;
                 }
                 installAkenSessionNonce();
                 if (!verifyAkenNativeAbiAfterLoad()) return false;
-                akenLoadMessage = "aken:native:bundled:" + platformSuffix + ":" + initResult;
+                akenLoadMessage = "aken:native:bundled:" + platformTarget + ":" + initResult;
                 loaded = true;
                 return true;
             }
-            akenLoadMessage = "aken:native-extract-unavailable:" + platformSuffix;
+            akenLoadMessage = "aken:native-extract-unavailable:" + platformTarget;
             return false;
         } catch (UnsatisfiedLinkError error) {
             akenLoadMessage = debugNativeLoadMessage("aken:native-load-error", error);
@@ -352,6 +267,10 @@ public final class JniMicrokernelHelper {
         byte[] handle = new byte[24];
         byte[] proof = new byte[] { 1 };
         try {
+            if (nativeHeartbeat() < 0) {
+                akenLoadMessage = "aken:abi-failed:nativeHeartbeat";
+                return false;
+            }
             try {
                 nativeExecuteAkenVmPage(0L, handle, 0, proof, null);
             } catch (SecurityException expectedRouteFailure) {
@@ -385,16 +304,124 @@ public final class JniMicrokernelHelper {
         }
     }
 
+    private static void validateR1NativeImage(String platformTarget, byte[] bytes) {
+        if (bytes == null || bytes.length < 64 || hasAkenRejectedLegacyHeader(bytes)) {
+            throw new SecurityException("AKEN-R1 native image is invalid");
+        }
+        if ("x86_64-pc-windows-gnu".equals(platformTarget)) {
+            if (bytes[0] != 'M' || bytes[1] != 'Z') {
+                throw new SecurityException("AKEN-R1 Windows image is not PE");
+            }
+            int peOffset = readLittleEndianInt(bytes, 0x3C);
+            if (peOffset < 0 || peOffset > bytes.length - 24 || bytes[peOffset] != 'P' ||
+                bytes[peOffset + 1] != 'E' || bytes[peOffset + 2] != 0 || bytes[peOffset + 3] != 0 ||
+                readLittleEndianShort(bytes, peOffset + 4) != 0x8664) {
+                throw new SecurityException("AKEN-R1 Windows image architecture is invalid");
+            }
+            int sectionCount = readLittleEndianShort(bytes, peOffset + 6);
+            int optionalHeaderSize = readLittleEndianShort(bytes, peOffset + 20);
+            int characteristics = readLittleEndianShort(bytes, peOffset + 22);
+            int optionalHeaderOffset = peOffset + 24;
+            if (sectionCount < 1 || sectionCount > 96 || optionalHeaderSize < 112 ||
+                optionalHeaderOffset > bytes.length - optionalHeaderSize ||
+                readLittleEndianShort(bytes, optionalHeaderOffset) != 0x20B ||
+                (characteristics & 0x2000) == 0) {
+                throw new SecurityException("AKEN-R1 Windows image is not an AMD64 DLL");
+            }
+            long sectionTableEnd = (long) optionalHeaderOffset + optionalHeaderSize + (long) sectionCount * 40L;
+            if (sectionTableEnd > bytes.length) {
+                throw new SecurityException("AKEN-R1 Windows image section table is invalid");
+            }
+        } else if ("x86_64-unknown-linux-gnu.2.17".equals(platformTarget)) {
+            if (bytes[0] != 0x7F || bytes[1] != 'E' || bytes[2] != 'L' || bytes[3] != 'F' ||
+                bytes[4] != 2 || bytes[5] != 1 || bytes[6] != 1 ||
+                readLittleEndianShort(bytes, 16) != 3 || readLittleEndianShort(bytes, 18) != 62 ||
+                readLittleEndianInt(bytes, 20) != 1) {
+                throw new SecurityException("AKEN-R1 Linux image is not an AMD64 ELF shared object");
+            }
+            long programHeaderOffset = readLittleEndianLong(bytes, 32);
+            int elfHeaderSize = readLittleEndianShort(bytes, 52);
+            int programHeaderEntrySize = readLittleEndianShort(bytes, 54);
+            int programHeaderCount = readLittleEndianShort(bytes, 56);
+            long programHeaderBytes = (long) programHeaderEntrySize * programHeaderCount;
+            if (programHeaderOffset < 0L || elfHeaderSize < 64 || programHeaderEntrySize < 56 ||
+                programHeaderCount < 1 || programHeaderCount > 1024 ||
+                programHeaderOffset > bytes.length || programHeaderBytes > bytes.length - programHeaderOffset) {
+                throw new SecurityException("AKEN-R1 Linux image program headers are invalid");
+            }
+        } else {
+            throw new SecurityException("AKEN-R1 target is unsupported");
+        }
+        String[] requiredMarkers = new String[] {
+            "JNI_OnLoad",
+            "JNI_OnUnload",
+            "jsrt_r1_runtime_binding_digest",
+            "jsrt_r1_open_frame",
+            "nativeInit",
+            "nativeHeartbeat",
+            "nativeInstallAkenSessionNonce",
+            "nativeExecuteAkenVmPage",
+            "nativeOpenAkenString",
+            "nativeReadAkenClassPage",
+            "nativeConsumeAkenNativeChunk",
+        };
+        for (String marker : requiredMarkers) {
+            if (!containsAscii(bytes, marker)) {
+                throw new SecurityException("AKEN-R1 native image is missing binding " + marker);
+            }
+        }
+    }
+
+    private static boolean containsAscii(byte[] bytes, String value) {
+        byte[] needle = value.getBytes(StandardCharsets.US_ASCII);
+        if (needle.length == 0 || bytes.length < needle.length) return false;
+        for (int start = 0; start <= bytes.length - needle.length; start++) {
+            boolean match = true;
+            for (int index = 0; index < needle.length; index++) {
+                if (bytes[start + index] != needle[index]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) return true;
+        }
+        return false;
+    }
+
+    private static int readLittleEndianShort(byte[] bytes, int offset) {
+        if (offset < 0 || offset > bytes.length - 2) return -1;
+        return (bytes[offset] & 0xFF) | ((bytes[offset + 1] & 0xFF) << 8);
+    }
+
+    private static int readLittleEndianInt(byte[] bytes, int offset) {
+        if (offset < 0 || offset > bytes.length - 4) return -1;
+        return (bytes[offset] & 0xFF) |
+            ((bytes[offset + 1] & 0xFF) << 8) |
+            ((bytes[offset + 2] & 0xFF) << 16) |
+            ((bytes[offset + 3] & 0xFF) << 24);
+    }
+
+    private static long readLittleEndianLong(byte[] bytes, int offset) {
+        if (offset < 0 || offset > bytes.length - 8) return -1L;
+        long value = 0L;
+        for (int index = 0; index < 8; index++) {
+            value |= (long) (bytes[offset + index] & 0xFF) << (index * 8);
+        }
+        return value;
+    }
+
     private static byte[] requireAkenPageResult(byte[] result, String purpose) {
         if (result == null) throw new SecurityException("AKEN " + purpose + " page access failed closed");
         return result;
     }
 
-    /**
-     * Resolve exactly one raw AKEN native artifact for the active platform.
-     * This parser intentionally has no compatibility branch for JSBI, JSRP,
-     * boot envelopes, bindings, or a general resource catalog.
-     */
+    private static byte[] readAkenNativeLocatorBytes() throws Exception {
+        try (InputStream in = resourceStream(AKEN_NATIVE_LOCATOR_RESOURCE)) {
+            return in == null ? null : readAllBounded(in, AKEN_NATIVE_LOCATOR_MAX_BYTES);
+        }
+    }
+
+    /** Resolve and authenticate one binary AKEN-R1 locator for the active target. */
     private static AkenNativeLibrary readAkenNativeLocator(String expectedPlatform) {
         byte[] raw = null;
         byte[] expectedCommitment = null;
@@ -402,9 +429,9 @@ public final class JniMicrokernelHelper {
         byte[] bindingSha256 = null;
         AkenNativeLibrary selected = null;
         boolean completed = false;
-        try (InputStream in = resourceStream(AKEN_NATIVE_LOCATOR_RESOURCE)) {
-            if (in == null) throw new SecurityException("AKEN native locator is missing");
-            raw = readAllBounded(in, AKEN_NATIVE_LOCATOR_MAX_BYTES);
+        try {
+            raw = readAkenNativeLocatorBytes();
+            if (raw == null) throw new SecurityException("AKEN native locator is missing");
             if (raw.length < AKEN_NATIVE_LOCATOR_HEADER_BYTES + AKEN_NATIVE_LOCATOR_COMMITMENT_BYTES ||
                 hasAkenRejectedLegacyHeader(raw) || !hasAkenLocatorMagic(raw) ||
                 (raw[4] & 0xFF) != AKEN_NATIVE_LOCATOR_VERSION || (raw[5] & 0xFF) != 0) {
@@ -469,7 +496,7 @@ public final class JniMicrokernelHelper {
                     }
 
                     if (kind == AKEN_NATIVE_LOCATOR_KIND_LIBRARY) {
-                        if (bindingSeen || platformId <= lastPlatformId || platformId > 4 ||
+                        if (bindingSeen || platformId <= lastPlatformId || platformId > 2 ||
                             storedLength > AKEN_NATIVE_MAX_LIBRARY_BYTES) {
                             throw new SecurityException("AKEN native locator platform record is invalid");
                         }
@@ -506,6 +533,9 @@ public final class JniMicrokernelHelper {
             }
             if (offset != payloadLength) throw new SecurityException("AKEN native locator has trailing bytes");
             if (selected == null) throw new SecurityException("AKEN native locator has no active platform route");
+            if (!bindingSeen || bindingResourcePath == null || bindingSha256 == null) {
+                throw new SecurityException("AKEN native locator has no final binding route");
+            }
             selected.bindingResourcePath = bindingResourcePath;
             selected.bindingStoredLength = bindingStoredLength;
             selected.bindingSha256 = bindingSha256;
@@ -534,17 +564,14 @@ public final class JniMicrokernelHelper {
     }
 
     private static int akenNativePlatformId(String platform) {
-        if ("windows-x64".equals(platform)) return 1;
-        if ("linux-x64".equals(platform)) return 2;
-        if ("macos-x64".equals(platform)) return 3;
-        if ("macos-arm64".equals(platform)) return 4;
+        if ("x86_64-pc-windows-gnu".equals(platform)) return 1;
+        if ("x86_64-unknown-linux-gnu.2.17".equals(platform)) return 2;
         return 0;
     }
 
     private static String akenNativeSuffix(int platformId) {
         if (platformId == 1) return ".dll";
         if (platformId == 2) return ".so";
-        if (platformId == 3 || platformId == 4) return ".dylib";
         return null;
     }
 
@@ -555,10 +582,21 @@ public final class JniMicrokernelHelper {
             resourcePath.indexOf('\r') >= 0 || resourcePath.indexOf('\n') >= 0) {
             return false;
         }
+        String normalizedPath = resourcePath.toLowerCase(Locale.ROOT);
+        if (normalizedPath.startsWith("meta-inf/.r/") ||
+            normalizedPath.startsWith("meta-inf/js-native/") || normalizedPath.startsWith("meta-inf/native-src/") ||
+            (normalizedPath.startsWith("meta-inf/jsrt/") &&
+                !normalizedPath.startsWith("meta-inf/jsrt/windows-x64/") &&
+                !normalizedPath.startsWith("meta-inf/jsrt/linux-x64/")) ||
+            !hasCurrentR1ResourceSuffix(normalizedPath)) {
+            return false;
+        }
         String tail = resourcePath.substring(AKEN_NATIVE_RESOURCE_ROOT.length());
         String[] segments = tail.split("/", -1);
+        if (segments.length == 0 || isRetiredR1PathSegment(segments[0])) return false;
         for (String segment : segments) {
-            if (segment.length() == 0 || ".".equals(segment) || "..".equals(segment)) return false;
+            if (segment.length() == 0 || ".".equals(segment) || "..".equals(segment) ||
+                isRetiredR1PathSegment(segment)) return false;
             for (int index = 0; index < segment.length(); index++) {
                 char character = segment.charAt(index);
                 if (!((character >= 'a' && character <= 'z') ||
@@ -570,6 +608,26 @@ public final class JniMicrokernelHelper {
             }
         }
         return true;
+    }
+
+    private static boolean isRetiredR1PathSegment(String segment) {
+        String lower = segment.toLowerCase(Locale.ROOT);
+        return lower.equals("aken") || lower.equals(".aken") || lower.equals(".r") ||
+            lower.equals("js-native") || lower.equals("native-src") ||
+            lower.contains(new String(new char[] {'m', 'a', 'c', 'o', 's'})) ||
+            lower.contains(new String(new char[] {'d', 'a', 'r', 'w', 'i', 'n'})) ||
+            lower.contains(new String(new char[] {'m', 'a', 'c', 'h', 'o'})) ||
+            lower.contains(new String(new char[] {'m', 'a', 'c', 'h', '-', 'o'})) ||
+            lower.startsWith(new String(new char[] {'j', 's', '_', 'k', 'e', 'r', 'n', 'e', 'l', '_'})) ||
+            lower.startsWith(new String(new char[] {'z', 'i', 'g'}));
+    }
+
+    private static boolean hasCurrentR1ResourceSuffix(String normalizedPath) {
+        return normalizedPath.endsWith(".dll") || normalizedPath.endsWith(".so") ||
+            normalizedPath.endsWith(".properties") || normalizedPath.endsWith(".xml") ||
+            normalizedPath.endsWith(".json") || normalizedPath.endsWith(".yml") ||
+            normalizedPath.endsWith(".cfg") || normalizedPath.endsWith(".conf") ||
+            normalizedPath.endsWith(".ini") || normalizedPath.endsWith(".txt");
     }
 
     private static int readAkenLocatorU16(byte[] bytes, int offset, int limit) {
@@ -685,74 +743,29 @@ public final class JniMicrokernelHelper {
             (bytes[3] & 0xFF) == fourth;
     }
 
-    public static native Object nativeExecuteVmResource(long entryToken, String resourcePath, Object[] args);
-    public static native Object nativeExecuteVmResourceByToken(long entryToken, Object[] args);
+    /* Retained Java entrypoints fail closed; R1 exposes no generic resource ABI. */
     public static Object executeVmResource(long entryToken, String resourcePath, Object[] args) {
-        if (loadState == LOAD_UNTRIED) {
-            loadKernel("vm", "auto", "vm-diverse");
-        }
-        if (isNativeLoaded()) {
-            ensureSealedNativeBindingsPublished();
-            return nativeExecuteVmResource(entryToken, resourcePath, args);
-        }
-        throw new SecurityException("method-virtualization requires a bundled sealed JNI VM kernel; native kernel not loaded (" + loadMessage + ")");
-    }
-    public static Object executeVmResource(long entryToken, Object[] args) {
-        if (loadState == LOAD_UNTRIED) {
-            loadKernel("vm", "auto", "vm-diverse");
-        }
-        if (isNativeLoaded()) {
-            ensureSealedNativeBindingsPublished();
-            return nativeExecuteVmResourceByToken(entryToken, args);
-        }
-        throw new SecurityException("method-virtualization requires a bundled sealed JNI VM kernel; native kernel not loaded (" + loadMessage + ")");
+        throw new SecurityException("generic VM resource execution is not part of the R1 runtime");
     }
 
-    public static native void nativeExecuteVmResourceVoid(long entryToken);
-    public static native int nativeExecuteVmResourceInt(long entryToken);
-    public static native int nativeExecuteVmResourceIntInt(long entryToken, int arg0);
-    public static native void nativeExecuteVmResourceIntVoid(long entryToken, int arg0);
+    public static Object executeVmResource(long entryToken, Object[] args) {
+        throw new SecurityException("generic VM resource execution is not part of the R1 runtime");
+    }
+
     public static void executeVmResourceVoid(long entryToken) {
-        if (loadState == LOAD_UNTRIED) {
-            loadKernel("vm", "auto", "vm-diverse");
-        }
-        if (isNativeLoaded()) {
-            ensureSealedNativeBindingsPublished();
-            nativeExecuteVmResourceVoid(entryToken);
-            return;
-        }
-        throw new SecurityException("method-virtualization requires a bundled sealed JNI VM kernel; native kernel not loaded (" + loadMessage + ")");
+        throw new SecurityException("generic VM resource execution is not part of the R1 runtime");
     }
+
     public static int executeVmResourceInt(long entryToken) {
-        if (loadState == LOAD_UNTRIED) {
-            loadKernel("vm", "auto", "vm-diverse");
-        }
-        if (isNativeLoaded()) {
-            ensureSealedNativeBindingsPublished();
-            return nativeExecuteVmResourceInt(entryToken);
-        }
-        throw new SecurityException("method-virtualization requires a bundled sealed JNI VM kernel; native kernel not loaded (" + loadMessage + ")");
+        throw new SecurityException("generic VM resource execution is not part of the R1 runtime");
     }
+
     public static int executeVmResourceIntInt(long entryToken, int arg0) {
-        if (loadState == LOAD_UNTRIED) {
-            loadKernel("vm", "auto", "vm-diverse");
-        }
-        if (isNativeLoaded()) {
-            ensureSealedNativeBindingsPublished();
-            return nativeExecuteVmResourceIntInt(entryToken, arg0);
-        }
-        throw new SecurityException("method-virtualization requires a bundled sealed JNI VM kernel; native kernel not loaded (" + loadMessage + ")");
+        throw new SecurityException("generic VM resource execution is not part of the R1 runtime");
     }
+
     public static void executeVmResourceIntVoid(long entryToken, int arg0) {
-        if (loadState == LOAD_UNTRIED) {
-            loadKernel("vm", "auto", "vm-diverse");
-        }
-        if (isNativeLoaded()) {
-            ensureSealedNativeBindingsPublished();
-            nativeExecuteVmResourceIntVoid(entryToken, arg0);
-            return;
-        }
-        throw new SecurityException("method-virtualization requires a bundled sealed JNI VM kernel; native kernel not loaded (" + loadMessage + ")");
+        throw new SecurityException("generic VM resource execution is not part of the R1 runtime");
     }
 
     public static Runnable createRunnableLambda(String owner, String name, String descriptor, int implTag, Object[] captured) {
@@ -1381,21 +1394,20 @@ public final class JniMicrokernelHelper {
         if (loadState == LOAD_LOADING || akenLoadState == LOAD_LOADING) return;
         loadState = LOAD_LOADING;
         try {
-            String platformSuffix = detectPlatform();
-            if (platformSuffix == null) {
+            String platformTarget = detectPlatform();
+            if (platformTarget == null) {
                 loadMessage = "native-unavailable";
                 loadState = LOAD_FAILED;
                 runDiversifiedVmSelfExercise();
                 return;
             }
-            if (!targetPlatformAllowsCurrent(targetPlatform, platformSuffix)) {
-                loadMessage = "native-platform-not-requested:" + platformSuffix;
+            if (!targetPlatformAllowsCurrent(targetPlatform, platformTarget)) {
+                loadMessage = "native-platform-not-requested:" + platformTarget;
                 loadState = LOAD_FAILED;
                 return;
             }
             loadAkenNativeKernel();
             if (akenLoadState == LOAD_READY) {
-                /* AKEN readiness must not publish the legacy kernel state. */
                 loadState = LOAD_UNTRIED;
                 loadMessage = "";
                 runDiversifiedVmSelfExercise();
@@ -1412,13 +1424,18 @@ public final class JniMicrokernelHelper {
         }
     }
 
-    private static boolean targetPlatformAllowsCurrent(String targetPlatform, String platformSuffix) {
-        if (targetPlatform == null || platformSuffix == null) return false;
+    private static boolean targetPlatformAllowsCurrent(String targetPlatform, String platformTarget) {
+        if (targetPlatform == null || platformTarget == null) return false;
         String requested = targetPlatform.trim();
-        if ("auto".equals(requested) || "all".equals(requested)) return true;
+        if ("auto".equalsIgnoreCase(requested) || "all".equalsIgnoreCase(requested)) return true;
         String[] platforms = requested.split(",", -1);
         for (String platform : platforms) {
-            if (platformSuffix.equals(platform.trim())) return true;
+            String candidate = platform.trim();
+            if (platformTarget.equals(candidate) ||
+                ("windows-x64".equalsIgnoreCase(candidate) && "x86_64-pc-windows-gnu".equals(platformTarget)) ||
+                ("linux-x64".equalsIgnoreCase(candidate) && "x86_64-unknown-linux-gnu.2.17".equals(platformTarget))) {
+                return true;
+            }
         }
         return false;
     }
@@ -1428,13 +1445,9 @@ public final class JniMicrokernelHelper {
         return diversifiedVmEnabled;
     }
 
-    /**
-     * True once the native kernel finished loading and did not fail ABI or boot-token self-checks.
-     * This distinguishes a genuine integrity failure from early call sites that race helper initialization.
-     */
+    /** True once the authenticated R1 image and all seven JNI entries are ready. */
     public static boolean isKernelIntegrityReady() {
-        if (akenLoadState == LOAD_READY) return !nativeSelfCheckFailed;
-        return loadState == LOAD_READY && !nativeSelfCheckFailed && nativeIsBootMaterialReady();
+        return akenLoadState == LOAD_READY && !nativeSelfCheckFailed;
     }
 
     /** Status string for the diversified-VM load-time self-exercise. */
@@ -1452,75 +1465,17 @@ public final class JniMicrokernelHelper {
         vmSelfCheck = isNativeLoaded() ? "native:vm-diverse:ok" : "native:vm-diverse:unavailable";
     }
 
-    /**
-     * Multi-point kernel integrity gate.
-     * Requires native kernel loaded AND no self-check or boot token failures.
-     * Used by distributed call sites so patching a single check is insufficient.
-     */
+    /** Require a ready authenticated R1 runtime. */
     public static void requireHealthyKernel() {
-        boolean akenReady = akenLoadState == LOAD_READY;
-        if (nativeSelfCheckFailed || !isNativeLoaded() || (!akenReady && !nativeIsBootMaterialReady()) ||
-            (vmSelfCheck != null && vmSelfCheck.contains("mismatch"))) {
+        if (!isKernelIntegrityReady() || (vmSelfCheck != null && vmSelfCheck.contains("mismatch"))) {
             throw new SecurityException("Kernel integrity mismatch");
         }
     }
 
-    /**
-     * Verify the native kernel boot token after loading.
-     * If native library was replaced (e.g. Frida Interceptor.replace),
-     * the token will not match and all subsequent critical calls are blocked.
-     */
-    private static boolean verifyNativeAbiAfterLoad() {
-        try {
-            nativeExecuteVmResource(0L, null, null);
-            return true;
-        } catch (UnsatisfiedLinkError e) {
-            loadMessage = "native:abi-missing:nativeExecuteVmResource";
-            return false;
-        } catch (Throwable ignored) {
-            return true;
-        }
-    }
-
-    private static void verifyBootTokenAfterLoad(String platformSuffix) {
-        try {
-            long expected = computeExpectedBootToken(platformSuffix);
-            long actual = nativeGetBootToken();
-            nativeBootToken = actual;
-            if (actual != expected) {
-                nativeSelfCheckFailed = true;
-                loadMessage = "native:integrity-mismatch";
-            }
-        } catch (UnsatisfiedLinkError e) {
-            nativeSelfCheckFailed = true;
-            loadMessage = "native:abi-missing:nativeGetBootToken";
-        } catch (Throwable t) {
-            nativeSelfCheckFailed = true;
-            loadMessage = "native:integrity-check-failed";
-        }
-    }
-
-    private static long computeExpectedBootToken(String platformSuffix) {
-        if (platformSuffix == null) platformSuffix = "";
-        long token = 0xCBF29CE484222325L;
-        token ^= 0xCC4A1511L; // FNV1a(decoded native key), mirrored from js_kernel.c
-        token *= 0x100000001B3L;
-        token ^= 1L; // g_initialized after nativeInit succeeds
-        token *= 0x100000001B3L;
-        token ^= fnv1a32(platformSuffix);
-        token *= 0x100000001B3L;
-        token ^= 1L; // g_key_valid after native key self-check succeeds
-        token *= 0x100000001B3L;
-        return token;
-    }
-
-    private static long fnv1a32(String value) {
-        long hash = 0x811C9DC5L;
-        for (int i = 0; i < value.length(); i++) {
-            hash ^= value.charAt(i) & 0xFFL;
-            hash = (hash * 0x01000193L) & 0xFFFFFFFFL;
-        }
-        return hash;
+    private static byte[] createVmStartupNonce() {
+        byte[] nonce = new byte[32];
+        new SecureRandom().nextBytes(nonce);
+        return nonce;
     }
 
     private static String sealedBindingKey(String value) {
@@ -1548,866 +1503,25 @@ public final class JniMicrokernelHelper {
         }
     }
 
-    private static void preloadRuntimeResourcesIntoNative() {
-        // Class-encryption-only artifacts still require the native boot/decrypt
-        // bridge but intentionally have no VM catalog.  Do not make loader-only
-        // startup fail closed on a catalog that is not part of this artifact;
-        // VM-producing artifacts continue through the authenticated catalog path.
-        if (!hasVmCatalogResource()) return;
-        byte[][] catalog = null;
-        byte[] startupNonce = createVmStartupNonce();
-        try {
-            catalog = verifiedVmCatalogPayload();
-            nativePreloadRuntimeResources(catalog[0], catalog[1], startupNonce);
-        } catch (SecurityException e) {
-            throw e;
-        } catch (Throwable e) {
-            throw new SecurityException("VM preload failed", e);
-        } finally {
-            if (catalog != null) {
-                Arrays.fill(catalog[0], (byte) 0);
-                Arrays.fill(catalog[1], (byte) 0);
-            }
-            Arrays.fill(startupNonce, (byte) 0);
-        }
-    }
-
-    private static boolean hasVmCatalogResource() {
-        JarFile catalogJar = openCatalogJar();
-        if (catalogJar != null) {
-            try {
-                JarEntry entry = catalogJar.getJarEntry(VM_CATALOG_RESOURCE);
-                return entry != null && !entry.isDirectory();
-            } catch (Exception ignored) {
-                return false;
-            } finally {
-                try {
-                    catalogJar.close();
-                } catch (Exception ignored) {
-                }
-            }
-        }
-        try (InputStream in = resourceStream(VM_CATALOG_RESOURCE)) {
-            return in != null;
-        } catch (Exception ignored) {
-            return false;
-        }
-    }
-
-    private static byte[] createVmStartupNonce() {
-        byte[] nonce = new byte[32];
-        vmStartupSecureRandom().nextBytes(nonce);
-        return nonce;
-    }
-
-    private static SecureRandom vmStartupSecureRandom() {
-        if (File.separatorChar == '\\') {
-            try {
-                return SecureRandom.getInstance("Windows-PRNG");
-            } catch (NoSuchAlgorithmException ignored) {
-                // Retain the portable JCA provider path on non-standard Windows runtimes.
-            }
-        }
-        return new SecureRandom();
-    }
-
-    private static void verifyVmPreloadIndexBeforeNative(String index, Set<String> committedPaths) {
-        if (index == null || index.length() == 0) throw new SecurityException("missing VM preload index");
-        Set<String> tokens = new HashSet<>();
-        String[] lines = index.split("\n");
-        for (String rawLine : lines) {
-            String line = rawLine.trim();
-            if (line.length() == 0 || line.startsWith("A|")) continue;
-            String[] parts = line.split("\\|", -1);
-            if (parts.length < 7 || !isHex(parts[0], 1, 16) || !isHex(parts[4], 64, 64) ||
-                !isHex(parts[5], 1, 8) || !isHex(parts[6], 16, 16)) {
-                throw new SecurityException("malformed VM preload entry");
-            }
-            if (!tokens.add(parts[0]) || !committedPaths.contains(parts[1]) || !committedPaths.contains(parts[2])) {
-                throw new SecurityException("invalid VM preload catalog reference");
-            }
-            String actual = vmPreloadEntryAuthTag(parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]);
-            if (!constantTimeAsciiEquals(actual, parts[6])) {
-                throw new SecurityException("invalid VM preload profile auth");
-            }
-        }
-        if (tokens.isEmpty()) throw new SecurityException("empty VM preload index");
-    }
-
-    private static byte[][] verifiedVmCatalogPayload() throws Exception {
-        JarFile catalogJar = openCatalogJar();
-        try {
-        byte[] rootEnvelope = readRequiredResource(VM_CATALOG_RESOURCE, catalogJar);
-        byte[] rootRaw = decodeRuntimeResource(rootEnvelope, true);
-        if (rootRaw == null) throw new SecurityException("invalid VM catalog root envelope");
-        int tagMarker = lastIndexOf(rootRaw, new byte[] {'\n', 'H', '|'});
-        if (tagMarker < 0) throw new SecurityException("malformed VM catalog root");
-        byte[] rootBody = Arrays.copyOfRange(rootRaw, 0, tagMarker + 1);
-        String rootText = new String(rootRaw, StandardCharsets.UTF_8);
-        String rootTagText = rootText.substring(tagMarker + 3).trim();
-        if (!isHex(rootTagText, 64, 64)) throw new SecurityException("malformed VM catalog root tag");
-        byte[] anchorKey = partitionResourceKey(anchorResourcePartition());
-        try {
-            byte[] expectedTag = hmacSha256(anchorKey, concat(
-                "jsc1-root-auth-v1".getBytes(StandardCharsets.US_ASCII),
-                rootBody
-            ));
-            if (!MessageDigest.isEqual(expectedTag, hexToBytes(rootTagText))) {
-                throw new SecurityException("invalid VM catalog root tag");
-            }
-        } finally {
-            Arrays.fill(anchorKey, (byte) 0);
-        }
-
-        String[] rootLines = new String(rootBody, StandardCharsets.UTF_8).split("\n");
-        if (rootLines.length < 2) throw new SecurityException("empty VM catalog root");
-        String[] header = rootLines[0].split("\\|", -1);
-        if (header.length != 6 || !"JSC1".equals(header[0]) || !isHex(header[1], 32, 32) ||
-            !isDecimal(header[2]) || !isDecimal(header[3]) || !isDecimal(header[4]) || !isHex(header[5], 64, 64)) {
-            throw new SecurityException("malformed VM catalog header");
-        }
-        byte[] catalogId = hexToBytes(header[1]);
-        int partitionCount = parsePositiveInt(header[2], "partition count");
-        int expectedMethodCount = parsePositiveInt(header[3], "method count");
-        int expectedResourceCount = parsePositiveInt(header[4], "resource count");
-        if (partitionCount != runtimeResourcePartitionCount()) throw new SecurityException("VM catalog partition mismatch");
-        byte[] expectedCatalogRoot = hexToBytes(header[5]);
-
-        List<String[]> directories = new ArrayList<>();
-        for (int i = 1; i < rootLines.length; i++) {
-            String line = rootLines[i].trim();
-            if (line.length() == 0) continue;
-            String[] parts = line.split("\\|", -1);
-            if (parts.length != 8 || !"D".equals(parts[0])) throw new SecurityException("malformed VM catalog directory");
-            directories.add(parts);
-        }
-        if (directories.size() != partitionCount) throw new SecurityException("incomplete VM catalog directories");
-        sortVmCatalogDirectories(directories);
-
-        StringBuilder preloadIndex = new StringBuilder();
-        StringBuilder commitments = new StringBuilder();
-        Set<String> committedPaths = new HashSet<>();
-        List<byte[]> partitionRoots = new ArrayList<>();
-        int totalMethods = 0;
-        int totalResources = 0;
-        for (int directoryOrdinal = 0; directoryOrdinal < directories.size(); directoryOrdinal++) {
-            String[] descriptor = directories.get(directoryOrdinal);
-            int partitionId = parsePositiveInt(descriptor[1], "partition id");
-            if (partitionId != directoryOrdinal || !isHex(descriptor[4], 64, 64) || !isHex(descriptor[7], 64, 64)) {
-                throw new SecurityException("invalid VM catalog directory ordering");
-            }
-            String directoryPath = descriptor[2];
-            int directoryLength = parsePositiveInt(descriptor[3], "directory length");
-            int directoryMethodCount = parsePositiveInt(descriptor[5], "directory method count");
-            int directoryResourceCount = parsePositiveInt(descriptor[6], "directory resource count");
-            byte[] descriptorRoot = hexToBytes(descriptor[7]);
-            byte[] directoryRaw = readRequiredResource(directoryPath, catalogJar);
-            if (directoryRaw.length != directoryLength || !MessageDigest.isEqual(sha256(directoryRaw), hexToBytes(descriptor[4]))) {
-                throw new SecurityException("invalid VM catalog directory ciphertext");
-            }
-            if (!hasPartitionedRuntimeResourceHeader(directoryRaw, partitionId)) {
-                throw new SecurityException("VM catalog directory partition mismatch");
-            }
-            byte[] directoryPlain = decodeRuntimeResource(directoryRaw, true);
-            if (directoryPlain == null) throw new SecurityException("invalid VM catalog directory envelope");
-            String[] directoryLines = new String(directoryPlain, StandardCharsets.UTF_8).split("\n");
-            if (directoryLines.length == 0) throw new SecurityException("empty VM catalog directory");
-            String[] directoryHeader = directoryLines[0].split("\\|", -1);
-            if (directoryHeader.length != 6 || !"JSD1".equals(directoryHeader[0]) ||
-                !header[1].equals(directoryHeader[1]) || partitionId != parsePositiveInt(directoryHeader[2], "directory partition") ||
-                directoryMethodCount != parsePositiveInt(directoryHeader[3], "directory method count") ||
-                directoryResourceCount != parsePositiveInt(directoryHeader[4], "directory resource count") ||
-                !descriptor[7].equals(directoryHeader[5])) {
-                throw new SecurityException("invalid VM catalog directory header");
-            }
-            List<byte[]> leaves = new ArrayList<>();
-            int actualMethodCount = 0;
-            int actualResourceCount = 0;
-            for (int lineIndex = 1; lineIndex < directoryLines.length; lineIndex++) {
-                String line = directoryLines[lineIndex];
-                if (line.length() == 0) continue;
-                if (line.length() >= 2 && line.charAt(0) == 'M' && line.charAt(1) == '|') {
-                    preloadIndex.append(line.substring(2)).append('\n');
-                    actualMethodCount++;
-                    continue;
-                }
-                String[] resource = line.split("\\|", -1);
-                if (resource.length != 5 || !"R".equals(resource[0]) || !isDecimal(resource[3]) || !isHex(resource[4], 64, 64)) {
-                    throw new SecurityException("malformed VM catalog resource");
-                }
-                String logicalPath = resource[1];
-                String storagePath = resource[2];
-                int rawLength = parsePositiveInt(resource[3], "resource length");
-                byte[] rawDigest = hexToBytes(resource[4]);
-                if (!committedPaths.add(storagePath)) throw new SecurityException("duplicate VM catalog resource");
-                byte[] raw = readRequiredResource(storagePath, catalogJar);
-                if (raw.length != rawLength || !MessageDigest.isEqual(sha256(raw), rawDigest) ||
-                    !hasPartitionedRuntimeResourceHeader(raw, partitionId)) {
-                    throw new SecurityException("invalid VM catalog resource ciphertext");
-                }
-                leaves.add(vmCatalogLeaf(catalogId, partitionId, logicalPath, storagePath, rawLength, rawDigest));
-                commitments.append("R|").append(storagePath).append('|').append(rawLength).append('|')
-                    .append(resource[4]).append('|').append(partitionId).append('\n');
-                actualResourceCount++;
-            }
-            if (actualMethodCount != directoryMethodCount || actualResourceCount != directoryResourceCount) {
-                throw new SecurityException("VM catalog directory count mismatch");
-            }
-            byte[] actualRoot = vmCatalogMerkleRoot(leaves, catalogId, partitionId);
-            if (!MessageDigest.isEqual(actualRoot, descriptorRoot)) throw new SecurityException("VM catalog partition root mismatch");
-            partitionRoots.add(actualRoot);
-            totalMethods += actualMethodCount;
-            totalResources += actualResourceCount;
-        }
-        if (totalMethods != expectedMethodCount || totalResources != expectedResourceCount) {
-            throw new SecurityException("VM catalog count mismatch");
-        }
-        if (!MessageDigest.isEqual(vmCatalogRoot(catalogId, partitionRoots), expectedCatalogRoot)) {
-            throw new SecurityException("VM catalog root mismatch");
-        }
-        verifyVmPreloadIndexBeforeNative(preloadIndex.toString(), committedPaths);
-        return new byte[][] {
-            preloadIndex.toString().getBytes(StandardCharsets.UTF_8),
-            commitments.toString().getBytes(StandardCharsets.UTF_8),
-        };
-        } finally {
-            if (catalogJar != null) catalogJar.close();
-        }
-    }
-
-    private static JarFile openCatalogJar() {
-        try {
-            java.security.CodeSource source = JniMicrokernelHelper.class.getProtectionDomain().getCodeSource();
-            if (source == null || source.getLocation() == null || !"file".equalsIgnoreCase(source.getLocation().getProtocol())) return null;
-            File file = new File(source.getLocation().toURI());
-            return file.isFile() ? new JarFile(file, false) : null;
-        } catch (Exception ignored) {
-            return null;
-        }
-    }
-
-    private static byte[] readRequiredResource(String resourcePath, JarFile catalogJar) throws Exception {
-        if (catalogJar != null) {
-            JarEntry entry = catalogJar.getJarEntry(resourcePath);
-            if (entry == null || entry.isDirectory()) throw new SecurityException("missing VM catalog resource");
-            try (InputStream in = catalogJar.getInputStream(entry)) {
-                return readAll(in);
-            }
-        }
-        try (InputStream in = resourceStream(resourcePath)) {
-            if (in == null) throw new SecurityException("missing VM catalog resource");
-            return readAll(in);
-        }
-    }
-
-    private static String vmPreloadEntryAuthTag(String tokenHex, String resourcePath, String manifestPath, String shardCount, String mesh, String profile) {
-        byte[] digest = sha256(concat(
-            "jsc1-method-auth-v1".getBytes(StandardCharsets.US_ASCII), new byte[] { 0 },
-            tokenHex.getBytes(StandardCharsets.US_ASCII), new byte[] { 0 },
-            resourcePath.getBytes(StandardCharsets.UTF_8), new byte[] { 0 },
-            manifestPath.getBytes(StandardCharsets.UTF_8), new byte[] { 0 },
-            shardCount.getBytes(StandardCharsets.US_ASCII), new byte[] { 0 },
-            mesh.getBytes(StandardCharsets.US_ASCII), new byte[] { 0 },
-            profile.getBytes(StandardCharsets.US_ASCII)
-        ));
-        return hexLower(Arrays.copyOf(digest, 8));
-    }
-
-    private static boolean isHex(String text, int minLength, int maxLength) {
-        if (text == null || text.length() < minLength || text.length() > maxLength) return false;
-        for (int i = 0; i < text.length(); i++) if (Character.digit(text.charAt(i), 16) < 0) return false;
-        return true;
-    }
-
-    private static boolean constantTimeAsciiEquals(String expected, String actual) {
-        if (expected == null || actual == null || expected.length() != actual.length()) return false;
-        int diff = 0;
-        for (int i = 0; i < expected.length(); i++) diff |= expected.charAt(i) ^ actual.charAt(i);
-        return diff == 0;
-    }
-
-    private static String hexLower(byte[] bytes) {
-        char[] out = new char[bytes.length * 2];
-        char[] hex = "0123456789abcdef".toCharArray();
-        for (int i = 0; i < bytes.length; i++) {
-            int value = bytes[i] & 0xFF;
-            out[i * 2] = hex[value >>> 4];
-            out[i * 2 + 1] = hex[value & 0x0F];
-        }
-        return new String(out);
-    }
-
-    private static void installBootMaterialIntoNative(String platformSuffix) throws Exception {
-        byte[] envelope;
-        try (InputStream in = resourceStream(BOOT_MATERIAL_RESOURCE)) {
-            if (in == null) throw new SecurityException("missing encrypted boot material envelope");
-            envelope = readAll(in);
-        }
-        int envelopeVersion = envelope.length > 4 ? envelope[4] & 0xFF : -1;
-        if (envelopeVersion == HARDENED_BOOT_MATERIAL_VERSION) {
-            byte[] sidecar = null;
-            try {
-                if (runtimeResourceKeys == null) {
-                    throw new SecurityException("hardened Java boot material was not prepared for native load");
-                }
-                sidecar = readBootKekSidecarBinary();
-                if (!nativeInstallBootEnvelope(envelope, sidecar) || !nativeIsBootMaterialReady()) {
-                    throw new SecurityException("native boot envelope installation failed");
-                }
-                clearExpectedShellBindingCommitment();
-            } catch (Throwable error) {
-                clearJavaBootMaterial();
-                try {
-                    nativeAbortBootMaterial();
-                } catch (Throwable ignored) {
-                }
-                throw error;
-            } finally {
-                if (sidecar != null) Arrays.fill(sidecar, (byte) 0);
-                Arrays.fill(envelope, (byte) 0);
-            }
-            return;
-        }
-
-        clearJavaBootMaterial();
-        byte[] bootSecret = null;
-        byte[] material = null;
-        boolean published = false;
-        try {
-            bootSecret = loadBootSecret(envelope);
-            publishNativeShellBootSecret(bootSecret);
-            material = decryptBootMaterial(envelope, bootSecret);
-            validateAndPublishJavaBootMaterial(material, platformSuffix);
-            published = true;
-            if (!nativeInstallBootMaterial(material) || !nativeIsBootMaterialReady()) {
-                throw new SecurityException("native boot material installation failed");
-            }
-            clearExpectedShellBindingCommitment();
-            Arrays.fill(material, 4, 68, (byte) 0);
-        } catch (Throwable error) {
-            if (published) {
-                clearJavaBootMaterial();
-                try {
-                    nativeAbortBootMaterial();
-                } catch (Throwable ignored) {
-                }
-            }
-            throw error;
-        } finally {
-            if (bootSecret != null) Arrays.fill(bootSecret, (byte) 0);
-            if (material != null) Arrays.fill(material, (byte) 0);
-            Arrays.fill(envelope, (byte) 0);
-        }
-    }
-
-    private static byte[] readBootKekSidecarBinary() throws Exception {
-        String explicitEnvironmentSecret = System.getenv(BOOT_SECRET_ENV);
-        if (explicitEnvironmentSecret != null) {
-            throw new SecurityException("hardened boot material requires JAVASHROUD_BOOT_SECRET_FILE_V1 or the embedded Boot KEK sidecar");
-        }
-        String fileName = System.getenv(BOOT_SECRET_FILE_ENV);
-        byte[] bytes;
-        if (fileName != null) {
-            if (fileName.length() == 0) throw new SecurityException("Boot KEK sidecar file path is empty");
-            try (InputStream in = new FileInputStream(fileName)) {
-                bytes = readAll(in);
-            }
-        } else {
-            try (InputStream in = resourceStream(EMBEDDED_BOOT_SECRET_RESOURCE)) {
-                if (in == null) throw new SecurityException("Boot KEK sidecar is missing");
-                bytes = readAll(in);
-            }
-        }
-        byte[] encoded = null;
-        byte[] binary = null;
-        boolean accepted = false;
-        try {
-            boolean text = bytes.length >= BOOT_SIDECAR_TEXT_PREFIX.length;
-            for (int index = 0; text && index < BOOT_SIDECAR_TEXT_PREFIX.length; index++) {
-                text = bytes[index] == BOOT_SIDECAR_TEXT_PREFIX[index];
-            }
-            if (text) {
-                encoded = Arrays.copyOfRange(bytes, BOOT_SIDECAR_TEXT_PREFIX.length, bytes.length);
-                if (encoded.length == 0) throw new SecurityException("empty Boot KEK sidecar");
-                try {
-                    binary = Base64.getUrlDecoder().decode(encoded);
-                } catch (IllegalArgumentException error) {
-                    throw new SecurityException("Boot KEK sidecar encoding is invalid", error);
-                }
-            } else {
-                binary = bytes.clone();
-            }
-            if (binary.length != 118 || !isBootKekSidecar(binary)) {
-                throw new SecurityException("unsupported Boot KEK sidecar");
-            }
-            accepted = true;
-            return binary;
-        } finally {
-            Arrays.fill(bytes, (byte) 0);
-            if (encoded != null) Arrays.fill(encoded, (byte) 0);
-            if (!accepted && binary != null) Arrays.fill(binary, (byte) 0);
-        }
-    }
-
-    private static void prepareJavaBootMaterialForLoad(String platformSuffix) throws Exception {
-        clearJavaBootMaterial();
-        byte[] envelope;
-        try (InputStream in = resourceStream(BOOT_MATERIAL_RESOURCE)) {
-            if (in == null) throw new SecurityException("missing encrypted boot material envelope");
-            envelope = readAll(in);
-        }
-        byte[] bootSecret = null;
-        byte[] material = null;
-        boolean published = false;
-        try {
-            bootSecret = loadBootSecret(envelope);
-            // JNI_OnLoad decrypts the max shell before Java can invoke any native method.
-            // Keep the validated KEK available for the fixed Java bridge until System.load returns.
-            publishNativeShellBootSecret(bootSecret);
-            material = decryptBootMaterial(envelope, bootSecret);
-            validateAndPublishJavaBootMaterial(material, platformSuffix);
-            published = true;
-        } finally {
-            if (!published) clearJavaBootMaterial();
-            if (bootSecret != null) Arrays.fill(bootSecret, (byte) 0);
-            if (material != null) Arrays.fill(material, (byte) 0);
-            Arrays.fill(envelope, (byte) 0);
-        }
-    }
-
-    private static byte[] loadBootSecret(byte[] bootEnvelope) throws Exception {
-        String encoded = System.getenv(BOOT_SECRET_ENV);
-        byte[] decoded;
-        byte[] sidecarBinding = bootSidecarBinding(bootEnvelope);
-        try {
-            if (encoded != null) {
-                if (sidecarBinding != null) throw new SecurityException("hardened boot material requires a sealed Boot KEK sidecar file");
-                if (encoded.length() != 64) throw new SecurityException("boot KEK must be 64 hexadecimal characters");
-                try {
-                    decoded = hexToBytes(encoded);
-                } catch (IllegalArgumentException error) {
-                    throw new SecurityException("boot KEK must be hexadecimal", error);
-                }
-                if (decoded.length != 32) throw new SecurityException("boot KEK must be 32 bytes");
-            } else {
-                String fileName = System.getenv(BOOT_SECRET_FILE_ENV);
-                byte[] bytes;
-                if (fileName != null) {
-                    if (fileName.length() == 0) throw new SecurityException("boot KEK sidecar file path is empty");
-                    try (InputStream in = new FileInputStream(fileName)) {
-                        bytes = readAll(in);
-                    }
-                } else {
-                    try (InputStream in = resourceStream(EMBEDDED_BOOT_SECRET_RESOURCE)) {
-                        if (in == null) throw new SecurityException("boot KEK is missing");
-                        bytes = readAll(in);
-                    }
-                }
-                try {
-                    decoded = decodeBootSecretBytes(bytes, sidecarBinding);
-                } catch (IllegalArgumentException error) {
-                    throw new SecurityException("boot KEK sidecar or hexadecimal file is invalid", error);
-                } finally {
-                    Arrays.fill(bytes, (byte) 0);
-                }
-            }
-        } finally {
-            if (sidecarBinding != null) Arrays.fill(sidecarBinding, (byte) 0);
-        }
-        if (bootSecretEnvBindingEnabled) {
-            try {
-                decoded = unmaskBootSecret(decoded);
-            } catch (SecurityException error) {
-                Arrays.fill(decoded, (byte) 0);
-                throw error;
-            }
-        }
-        return decoded;
-    }
-
-    private static byte[] decodeBootSecretBytes(byte[] bytes, byte[] sidecarBinding) throws Exception {
-        if (isBootKekSidecar(bytes)) {
-            if (sidecarBinding == null) throw new SecurityException("sealed Boot KEK sidecar requires a hardened boot envelope");
-            return decodeBootKekSidecar(bytes, sidecarBinding);
-        }
-        if (bytes.length == 32) {
-            if (sidecarBinding != null) throw new SecurityException("hardened boot material rejects raw Boot KEK files");
-            return bytes.clone();
-        }
-        if (sidecarBinding != null) throw new SecurityException("hardened boot material rejects hexadecimal Boot KEK files");
-        if (bytes.length != 64) throw new SecurityException("boot KEK file must contain 32 raw bytes or 64 hexadecimal characters");
-        return hexToBytes(bytes);
-    }
-
-    private static byte[] unmaskBootSecret(byte[] maskedKek) throws Exception {
-        if (maskedKek == null || maskedKek.length != 32) {
-            throw new SecurityException("masked boot KEK must be 32 bytes");
-        }
-        String fingerprint = nativeGetMachineFingerprint();
-        if (fingerprint == null || fingerprint.length() == 0) {
-            throw new SecurityException("boot KEK environment binding requires a machine fingerprint");
-        }
-        String[] expected = bootSecretExpectedFingerprints;
-        boolean matched = false;
-        for (String candidate : expected) {
-            if (candidate != null && constantTimeStringEqual(fingerprint, candidate.trim())) {
-                matched = true;
-                break;
-            }
-        }
-        if (!matched) {
-            throw new SecurityException("boot KEK environment binding mismatch");
-        }
-        byte[] fingerprintBytes = fingerprint.getBytes(StandardCharsets.UTF_8);
-        byte[] mask = deriveBootEnvMask(fingerprintBytes);
-        Arrays.fill(fingerprintBytes, (byte) 0);
-        byte[] kek = new byte[32];
-        for (int i = 0; i < 32; i++) {
-            kek[i] = (byte) (maskedKek[i] ^ mask[i]);
-        }
-        Arrays.fill(mask, (byte) 0);
-        return kek;
-    }
-
-    private static byte[] deriveBootEnvMask(byte[] fingerprintBytes) throws Exception {
-        javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
-        byte[] key = new byte[32];
-        Arrays.fill(key, (byte) 0);
-        try {
-            mac.init(new javax.crypto.spec.SecretKeySpec(key, "HmacSHA256"));
-            mac.update("javashroud-boot-env-mask-v1".getBytes(StandardCharsets.US_ASCII));
-            byte[] digest = mac.doFinal(fingerprintBytes);
-            byte[] mask = Arrays.copyOf(digest, 32);
-            Arrays.fill(digest, (byte) 0);
-            return mask;
-        } finally {
-            Arrays.fill(key, (byte) 0);
-        }
-    }
-
-    private static boolean constantTimeStringEqual(String a, String b) {
-        if (a == null || b == null) return a == b;
-        byte[] aBytes = a.getBytes(StandardCharsets.UTF_8);
-        byte[] bBytes = b.getBytes(StandardCharsets.UTF_8);
-        boolean equal;
-        try {
-            if (aBytes.length != bBytes.length) return false;
-            int diff = 0;
-            for (int i = 0; i < aBytes.length; i++) {
-                diff |= (aBytes[i] ^ bBytes[i]) & 0xFF;
-            }
-            equal = diff == 0;
-        } finally {
-            Arrays.fill(aBytes, (byte) 0);
-            Arrays.fill(bBytes, (byte) 0);
-        }
-        return equal;
-    }
-
-    private static byte[] bootSidecarBinding(byte[] envelope) {
-        if (envelope == null || envelope.length < 4 + 2 + 32 + 1 + 12 + 4 + 16) return null;
-        if ((envelope[0] & 0xFF) != 0x4A || (envelope[1] & 0xFF) != 0x53 ||
-            (envelope[2] & 0xFF) != 0x42 || (envelope[3] & 0xFF) != 0x4D ||
-            (envelope[4] & 0xFF) != HARDENED_BOOT_MATERIAL_VERSION || (envelope[5] & 0xFF) != 32) return null;
-        return Arrays.copyOfRange(envelope, 6, 38);
-    }
-
-    private static boolean isBootKekSidecar(byte[] bytes) {
-        if (bytes == null) return false;
-        if (bytes.length >= BOOT_SIDECAR_TEXT_PREFIX.length) {
-            boolean text = true;
-            for (int index = 0; index < BOOT_SIDECAR_TEXT_PREFIX.length; index++) {
-                text &= bytes[index] == BOOT_SIDECAR_TEXT_PREFIX[index];
-            }
-            if (text) return true;
-        }
-        return bytes.length >= 4 && (bytes[0] & 0xFF) == 0x4A && (bytes[1] & 0xFF) == 0x53 &&
-            (bytes[2] & 0xFF) == 0x42 && (bytes[3] & 0xFF) == 0x4B;
-    }
-
-    private static byte[] decodeBootKekSidecar(byte[] bytes, byte[] expectedBinding) throws Exception {
-        byte[] binary = null;
-        byte[] encoded = null;
-        byte[] header = null;
-        byte[] binding = null;
-        byte[] salt = null;
-        byte[] nonce = null;
-        byte[] keyMaterial = null;
-        byte[] wrappingKey = null;
-        byte[] aad = null;
-        byte[] plaintext = null;
-        boolean accepted = false;
-        try {
-            boolean text = bytes.length >= BOOT_SIDECAR_TEXT_PREFIX.length;
-            for (int index = 0; text && index < BOOT_SIDECAR_TEXT_PREFIX.length; index++) {
-                text = bytes[index] == BOOT_SIDECAR_TEXT_PREFIX[index];
-            }
-            if (text) {
-                encoded = Arrays.copyOfRange(bytes, BOOT_SIDECAR_TEXT_PREFIX.length, bytes.length);
-                if (encoded.length == 0) throw new SecurityException("empty Boot KEK sidecar");
-                binary = Base64.getUrlDecoder().decode(encoded);
-            } else {
-                binary = bytes.clone();
-            }
-            if (binary.length != 118 || (binary[0] & 0xFF) != 0x4A || (binary[1] & 0xFF) != 0x53 ||
-                (binary[2] & 0xFF) != 0x42 || (binary[3] & 0xFF) != 0x4B ||
-                (binary[4] & 0xFF) != 1 || (binary[5] & 0xFF) != 0 ||
-                (binary[6] & 0xFF) != 16 || (binary[7] & 0xFF) != 12 ||
-                readSealedResourceLe16(binary, 8) != 48) {
-                throw new SecurityException("unsupported Boot KEK sidecar");
-            }
-            header = Arrays.copyOfRange(binary, 0, 10);
-            binding = Arrays.copyOfRange(binary, 10, 42);
-            if (expectedBinding == null || expectedBinding.length != 32 || !MessageDigest.isEqual(binding, expectedBinding)) {
-                throw new SecurityException("Boot KEK sidecar artifact binding mismatch");
-            }
-            salt = Arrays.copyOfRange(binary, 42, 58);
-            nonce = Arrays.copyOfRange(binary, 58, 70);
-            keyMaterial = concat(BOOT_SIDECAR_KEY_DOMAIN, salt);
-            javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(expectedBinding, "HmacSHA256"));
-            wrappingKey = mac.doFinal(keyMaterial);
-            aad = concat(header, binding, salt, nonce);
-            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(wrappingKey, "AES"), new GCMParameterSpec(128, nonce));
-            cipher.updateAAD(aad);
-            plaintext = cipher.doFinal(binary, 70, 48);
-            if (plaintext.length != 32) throw new SecurityException("Boot KEK sidecar plaintext length mismatch");
-            accepted = true;
-            return plaintext;
-        } catch (IllegalArgumentException error) {
-            throw new SecurityException("Boot KEK sidecar encoding is invalid", error);
-        } finally {
-            if (binary != null) Arrays.fill(binary, (byte) 0);
-            if (encoded != null) Arrays.fill(encoded, (byte) 0);
-            if (header != null) Arrays.fill(header, (byte) 0);
-            if (binding != null) Arrays.fill(binding, (byte) 0);
-            if (salt != null) Arrays.fill(salt, (byte) 0);
-            if (nonce != null) Arrays.fill(nonce, (byte) 0);
-            if (keyMaterial != null) Arrays.fill(keyMaterial, (byte) 0);
-            if (wrappingKey != null) Arrays.fill(wrappingKey, (byte) 0);
-            if (aad != null) Arrays.fill(aad, (byte) 0);
-            if (!accepted && plaintext != null) Arrays.fill(plaintext, (byte) 0);
-        }
-    }
-
-    private static byte[] decryptBootMaterial(byte[] envelope, byte[] bootSecret) throws Exception {
-        if (envelope == null || envelope.length < 4 + 2 + 12 + 4 + 16 || bootSecret.length != 32) {
-            throw new SecurityException("malformed boot material envelope");
-        }
-        int version = envelope[4] & 0xFF;
-        if ((envelope[0] & 0xFF) != 0x4A || (envelope[1] & 0xFF) != 0x53 ||
-            (envelope[2] & 0xFF) != 0x42 || (envelope[3] & 0xFF) != 0x4D ||
-            (version != BOOT_MATERIAL_VERSION && version != HARDENED_BOOT_MATERIAL_VERSION)) {
-            throw new SecurityException("unsupported boot material envelope");
-        }
-        byte[] sidecarBinding = null;
-        int nonceLengthOffset = 5;
-        if (version == HARDENED_BOOT_MATERIAL_VERSION) {
-            int bindingLength = envelope[5] & 0xFF;
-            if (bindingLength != 32 || 6 + bindingLength >= envelope.length) {
-                throw new SecurityException("malformed hardened boot binding");
-            }
-            sidecarBinding = Arrays.copyOfRange(envelope, 6, 6 + bindingLength);
-            nonceLengthOffset = 6 + bindingLength;
-        }
-        int nonceLength = envelope[nonceLengthOffset] & 0xFF;
-        int nonceOffset = nonceLengthOffset + 1;
-        if (nonceLength != 12 || nonceOffset + nonceLength + 4 > envelope.length) throw new SecurityException("malformed boot material nonce");
-        int sealedLengthOffset = nonceOffset + nonceLength;
-        int sealedLength = readSealedResourceLe32(envelope, sealedLengthOffset);
-        int sealedOffset = sealedLengthOffset + 4;
-        if (sealedLength < 16 || sealedOffset + sealedLength != envelope.length) throw new SecurityException("malformed boot material payload");
-        byte[] nonce = Arrays.copyOfRange(envelope, nonceOffset, nonceOffset + nonceLength);
-        try {
-            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(bootSecret, "AES"), new GCMParameterSpec(128, nonce));
-            if (version == HARDENED_BOOT_MATERIAL_VERSION) {
-                cipher.updateAAD(HARDENED_BOOT_MATERIAL_AAD);
-                cipher.updateAAD(sidecarBinding);
-            } else {
-                cipher.updateAAD(BOOT_MATERIAL_AAD);
-            }
-            return cipher.doFinal(envelope, sealedOffset, sealedLength);
-        } catch (Exception error) {
-            throw new SecurityException("boot material envelope authentication failed", error);
-        } finally {
-            Arrays.fill(nonce, (byte) 0);
-            if (sidecarBinding != null) Arrays.fill(sidecarBinding, (byte) 0);
-        }
-    }
-
-    private static void validateAndPublishJavaBootMaterial(byte[] material) {
-        validateAndPublishJavaBootMaterial(material, detectPlatform());
-    }
-
-    private static synchronized void validateAndPublishJavaBootMaterial(byte[] material, String platformSuffix) {
-        if (runtimeResourceKeys != null || expectedShellBindingCommitment != null) {
-            throw new SecurityException("boot material is already installed");
-        }
-        int materialVersion = material == null || material.length == 0 ? -1 : material[0] & 0xFF;
-        if (material == null || material.length < 4 + 64 + 64 ||
-            (materialVersion != BOOT_MATERIAL_VERSION && materialVersion != HARDENED_BOOT_MATERIAL_VERSION)) {
-            throw new SecurityException("malformed boot material");
-        }
-        int partitionCount = material[1] & 0xFF;
-        int slotCount = material[2] & 0xFF;
-        int bindingCount = material[3] & 0xFF;
-        int expectedLength = 4 + 64 + slotCount * 32 + bindingCount * (1 + SHELL_BINDING_COMMITMENT_SIZE);
-        if (partitionCount < 1 || partitionCount > NATIVE_ANCHOR_KEY_SLOT || slotCount != partitionCount + 1 ||
-            bindingCount > 4 || material.length != expectedLength) {
-            throw new SecurityException("invalid boot material key slots");
-        }
-        byte[][] keys = new byte[slotCount][];
-        byte[] selectedBinding = null;
-        boolean published = false;
-        int offset = 4 + 64;
-        try {
-            for (int slot = 0; slot < slotCount; slot++) {
-                keys[slot] = Arrays.copyOfRange(material, offset, offset + 32);
-                offset += 32;
-            }
-            boolean[] seenPlatforms = new boolean[5];
-            int currentPlatformId = shellBindingPlatformId(platformSuffix);
-            for (int binding = 0; binding < bindingCount; binding++) {
-                int platformId = material[offset++] & 0xFF;
-                if (platformId < 1 || platformId > 4 || seenPlatforms[platformId]) {
-                    throw new SecurityException("invalid native shell binding platform");
-                }
-                seenPlatforms[platformId] = true;
-                byte[] commitment = Arrays.copyOfRange(material, offset, offset + SHELL_BINDING_COMMITMENT_SIZE);
-                offset += SHELL_BINDING_COMMITMENT_SIZE;
-                int nonzero = 0;
-                for (byte value : commitment) nonzero |= value & 0xFF;
-                if (nonzero == 0) {
-                    Arrays.fill(commitment, (byte) 0);
-                    throw new SecurityException("invalid native shell binding commitment");
-                }
-                if (platformId == currentPlatformId) {
-                    selectedBinding = commitment;
-                } else {
-                    Arrays.fill(commitment, (byte) 0);
-                }
-            }
-            if (bindingCount > 0 && selectedBinding == null) {
-                throw new SecurityException("missing native shell binding for current platform");
-            }
-            runtimeResourcePartitionCount = partitionCount;
-            anchorResourcePartition = partitionCount;
-            runtimeResourceKeys = keys;
-            expectedShellBindingCommitment = selectedBinding;
-            expectedShellBindingThread = selectedBinding == null ? null : Thread.currentThread();
-            shellBindingHandoffState = selectedBinding == null ? 0 : 1;
-            published = true;
-        } finally {
-            if (!published) {
-                for (byte[] key : keys) if (key != null) Arrays.fill(key, (byte) 0);
-                if (selectedBinding != null) Arrays.fill(selectedBinding, (byte) 0);
-            }
-        }
-    }
-
-    private static synchronized void clearJavaBootMaterial() {
-        byte[][] keys = runtimeResourceKeys;
-        byte[] shellBinding = expectedShellBindingCommitment;
-        runtimeResourceKeys = null;
-        runtimeResourcePartitionCount = 0;
-        anchorResourcePartition = -1;
-        expectedShellBindingCommitment = null;
-        expectedShellBindingThread = null;
-        shellBindingHandoffState = 0;
-        if (keys != null) for (byte[] key : keys) if (key != null) Arrays.fill(key, (byte) 0);
-        if (shellBinding != null) Arrays.fill(shellBinding, (byte) 0);
-        clearNativeShellBootSecret();
-    }
-
-    private static synchronized void publishNativeShellBootSecret(byte[] bootSecret) {
-        clearNativeShellBootSecret();
-        if (bootSecret == null || bootSecret.length != 32) {
-            throw new SecurityException("native shell boot secret must be 32 bytes");
-        }
-        nativeShellBootSecret = Arrays.copyOf(bootSecret, bootSecret.length);
-        nativeShellBootSecretThread = Thread.currentThread();
-    }
-
-    private static synchronized void clearNativeShellBootSecret() {
-        byte[] secret = nativeShellBootSecret;
-        nativeShellBootSecret = null;
-        nativeShellBootSecretThread = null;
-        if (secret != null) Arrays.fill(secret, (byte) 0);
-    }
-
-    /* Fixed JNI_OnLoad bridge. The max shell uses this only when no external
-     * Boot KEK environment variable/file was supplied. */
-    private static synchronized byte[] takeBootSecretForNativeShell() {
-        if (nativeShellBootSecret == null || nativeShellBootSecretThread != Thread.currentThread()) return null;
-        byte[] secret = nativeShellBootSecret;
-        nativeShellBootSecret = null;
-        nativeShellBootSecretThread = null;
-        byte[] result = Arrays.copyOf(secret, secret.length);
-        Arrays.fill(secret, (byte) 0);
-        return result;
-    }
-
-    private static synchronized void clearExpectedShellBindingCommitment() {
-        byte[] shellBinding = expectedShellBindingCommitment;
-        expectedShellBindingCommitment = null;
-        expectedShellBindingThread = null;
-        shellBindingHandoffState = 0;
-        if (shellBinding != null) Arrays.fill(shellBinding, (byte) 0);
-    }
-
-    /* Fixed JNI_OnLoad bridge. Runtime sealing must keep this name and descriptor stable. */
-    private static synchronized byte[] takeExpectedShellBindingCommitment() {
-        if (shellBindingHandoffState != 1 || expectedShellBindingThread != Thread.currentThread()) return null;
-        byte[] shellBinding = expectedShellBindingCommitment;
-        expectedShellBindingCommitment = null;
-        if (shellBinding == null) return null;
-        byte[] result = Arrays.copyOf(shellBinding, shellBinding.length);
-        Arrays.fill(shellBinding, (byte) 0);
-        shellBindingHandoffState = 2;
-        return result;
-    }
-
-    private static synchronized void verifyShellBindingHandoffAfterLoad() {
-        if (shellBindingHandoffState == 0) return;
-        if (shellBindingHandoffState != 2 || expectedShellBindingCommitment != null ||
-            expectedShellBindingThread != Thread.currentThread()) {
-            throw new SecurityException("native shell did not consume the boot binding commitment");
-        }
-        expectedShellBindingThread = null;
-        shellBindingHandoffState = 0;
-    }
-
-    private static int shellBindingPlatformId(String platform) {
-        if ("windows-x64".equals(platform)) return 1;
-        if ("linux-x64".equals(platform)) return 2;
-        if ("macos-x64".equals(platform)) return 3;
-        if ("macos-arm64".equals(platform)) return 4;
-        return 0;
-    }
-
-    /* ---- Platform detection ---- */
-
+    /* ---- Locked R1 host targets ---- */
     private static String detectPlatform() {
         return detectPlatform(System.getProperty("os.name", ""), System.getProperty("os.arch", ""));
     }
 
     private static String detectPlatform(String osName, String osArch) {
-        String normalizedOs = osName == null ? "" : osName.trim().toLowerCase(Locale.ROOT);
-        String normalizedArch = osArch == null ? "" : osArch.trim().toLowerCase(Locale.ROOT);
-        boolean x64 = "amd64".equals(normalizedArch) || "x86_64".equals(normalizedArch) || "x64".equals(normalizedArch);
-        boolean arm64 = "aarch64".equals(normalizedArch) || "arm64".equals(normalizedArch);
-        boolean windows = "windows".equals(normalizedOs) || normalizedOs.startsWith("windows ");
-        boolean linux = "linux".equals(normalizedOs) || normalizedOs.startsWith("linux ");
-        boolean macos = "macos".equals(normalizedOs) || "mac os x".equals(normalizedOs) || normalizedOs.startsWith("mac os ");
-        if (windows) return x64 ? "windows-x64" : null;
-        if (linux) return x64 ? "linux-x64" : null;
-        if (macos && x64) return "macos-x64";
-        if (macos && arm64) return "macos-arm64";
+        String normalizedOs = osName == null ? "" : osName.trim();
+        String normalizedArch = osArch == null ? "" : osArch.trim();
+        boolean x64 = "amd64".equalsIgnoreCase(normalizedArch) ||
+            "x86_64".equalsIgnoreCase(normalizedArch) || "x64".equalsIgnoreCase(normalizedArch);
+        if (!x64) return null;
+        if (normalizedOs.equalsIgnoreCase("Windows") || normalizedOs.regionMatches(true, 0, "Windows ", 0, 8)) {
+            return "x86_64-pc-windows-gnu";
+        }
+        if (normalizedOs.equalsIgnoreCase("Linux") || normalizedOs.regionMatches(true, 0, "Linux ", 0, 6)) {
+            return "x86_64-unknown-linux-gnu.2.17";
+        }
         return null;
     }
-
 
     private static String debugNativeLoadMessage(String prefix, Throwable e) {
         if (!Boolean.getBoolean("javashroud.debugNativeLoad")) return "native-unavailable";
@@ -2418,111 +1532,8 @@ public final class JniMicrokernelHelper {
         return detail;
     }
 
-    private static boolean tryLoadBundledNative(String platformSuffix, String components) {
-        SealedNativeLibrary[] sealedLibraries = sealedBundledLibraryNames(platformSuffix);
-        for (SealedNativeLibrary sealedLibrary : sealedLibraries) {
-            if (tryLoadBundledNativeResource(platformSuffix, sealedLibrary.resourcePath, sealedLibrary.fileSuffix)) return true;
-        }
-        return false;
-    }
-
-    private static boolean tryLoadBundledNativeResource(String platformSuffix, String resourcePath, String suffix) {
-        byte[] nativeBytes;
-        try (InputStream in = resourceStream(resourcePath)) {
-            if (in == null) return false;
-            nativeBytes = decodeSealedNativeResource(readAll(in));
-        } catch (Exception e) {
-            loadMessage = debugNativeLoadMessage("native-resource-error:" + resourcePath, e);
-            return false;
-        }
-        if (nativeBytes == null || nativeBytes.length == 0) return false;
-        try {
-            for (File extractDirectory : nativeExtractDirectories()) {
-                if (tryLoadBundledNativeFromDirectory(platformSuffix, resourcePath, suffix, nativeBytes, extractDirectory)) return true;
-            }
-            return false;
-        } finally {
-            Arrays.fill(nativeBytes, (byte) 0);
-        }
-    }
-
-    private static boolean tryLoadBundledNativeFromDirectory(String platformSuffix, String resourcePath, String suffix, byte[] nativeBytes, File extractDirectory) {
-        File tempLib = null;
-        String previousLoaderOwner = System.getProperty(sealedLoaderPropertyName());
-        String previousClassBindings = System.getProperty(sealedBindingPropertyName());
-        String previousMethodBindings = System.getProperty(sealedMethodBindingPropertyName());
-        String previousFieldBindings = System.getProperty(sealedFieldBindingPropertyName());
-        boolean previousBootSecretEnvBindingEnabled = bootSecretEnvBindingEnabled;
-        String[] previousBootSecretExpectedFingerprints = bootSecretExpectedFingerprints == null
-            ? new String[0]
-            : bootSecretExpectedFingerprints.clone();
-        boolean ok = false;
-        try {
-            if (!ensureNativeExtractDirectory(extractDirectory)) return false;
-            /* File.createTempFile has a one-time multi-second init path on
-             * Java 8 (Windows); build the unique name directly instead. */
-            tempLib = createUniqueTempFile(nativeTempPrefix(resourcePath), suffix, extractDirectory);
-            tempLib.deleteOnExit();
-            try (FileOutputStream out = new FileOutputStream(tempLib)) {
-                out.write(nativeBytes);
-            }
-            tempLib.setReadable(true, true);
-            tempLib.setWritable(true, true);
-            tempLib.setExecutable(true, true);
-            prepareJavaBootMaterialForLoad(platformSuffix);
-            publishSealedNativeBindings();
-            sealedNativeBindingsPublished = true;
-            System.load(tempLib.getAbsolutePath());
-            verifyShellBindingHandoffAfterLoad();
-            loadMessage = "native:bundled:" + platformSuffix + ":" + initializeNativeKernel(platformSuffix);
-            installBootMaterialIntoNative(platformSuffix);
-            try {
-                preloadRuntimeResourcesIntoNative();
-                if (verifyNativeAbiAfterLoad()) {
-                    verifyBootTokenAfterLoad(platformSuffix);
-                    ok = !nativeSelfCheckFailed;
-                }
-                return ok;
-            } finally {
-                clearJavaBootMaterial();
-                if (!ok) {
-                    sealedNativeBindingsPublished = false;
-                }
-            }
-        } catch (UnsatisfiedLinkError e) {
-            loadMessage = debugNativeLoadMessage("native:bundled-load-error", e);
-            if (tempLib != null) tempLib.delete();
-            return false;
-        } catch (Exception e) {
-            loadMessage = "native:bundled-init-error:" + e.getClass().getName() + ":" + String.valueOf(e.getMessage());
-            if (tempLib != null) tempLib.delete();
-            return false;
-        } finally {
-            if (!ok) {
-                clearJavaBootMaterial();
-                try {
-                    nativeAbortBootMaterial();
-                } catch (Throwable ignored) {
-                }
-                sealedNativeBindingsPublished = false;
-                bootSecretEnvBindingEnabled = previousBootSecretEnvBindingEnabled;
-                String[] currentBootSecretExpectedFingerprints = bootSecretExpectedFingerprints;
-                bootSecretExpectedFingerprints = previousBootSecretExpectedFingerprints;
-                if (currentBootSecretExpectedFingerprints != null &&
-                    currentBootSecretExpectedFingerprints != previousBootSecretExpectedFingerprints) {
-                    Arrays.fill(currentBootSecretExpectedFingerprints, null);
-                }
-                restoreLoaderProperty(previousLoaderOwner);
-                restoreProperty(sealedBindingPropertyName(), previousClassBindings);
-                restoreProperty(sealedMethodBindingPropertyName(), previousMethodBindings);
-                restoreProperty(sealedFieldBindingPropertyName(), previousFieldBindings);
-            }
-        }
-    }
-
-    private static int initializeNativeKernel(String platformSuffix) {
-        int result = nativeInit(platformSuffix);
-        return result == 2 ? nativeInit(platformSuffix) : result;
+    private static int initializeNativeKernel(String platformTarget) {
+        return nativeInit(platformTarget);
     }
 
     private static void installAkenSessionNonce() {
@@ -2595,18 +1606,12 @@ public final class JniMicrokernelHelper {
         return loader == null ? null : loader.getResourceAsStream(resourcePath);
     }
 
-    private static void publishSealedNativeBindings() {
-        publishSealedNativeBindings(null);
-    }
-
-    private static void publishSealedNativeBindings(AkenNativeLibrary locator) {
-        if (locator == null) throw new SecurityException("AKEN native bindings require an active locator");
+    private static void publishSealedNativeBindings(String bindingText) {
+        if (bindingText == null || bindingText.length() == 0) {
+            throw new SecurityException("AKEN native bindings are unavailable");
+        }
         try {
             publishSealedNativeLoaderOwner();
-            String bindingText = sealedNativeBindingText(locator);
-            if (bindingText == null || bindingText.length() == 0) {
-                throw new SecurityException("AKEN native bindings are unavailable");
-            }
             StringBuilder bindings = new StringBuilder();
             StringBuilder methodBindings = new StringBuilder();
             StringBuilder fieldBindings = new StringBuilder();
@@ -2647,12 +1652,6 @@ public final class JniMicrokernelHelper {
 
     private static void publishSealedNativeLoaderOwner() {
         System.setProperty(sealedLoaderPropertyName(), JniMicrokernelHelper.class.getName().replace('.', '/'));
-    }
-
-    private static void ensureSealedNativeBindingsPublished() {
-        if (sealedNativeBindingsPublished) return;
-        publishSealedNativeBindings();
-        sealedNativeBindingsPublished = true;
     }
 
     private static void restoreLoaderProperty(String previous) {
@@ -2709,35 +1708,8 @@ public final class JniMicrokernelHelper {
         return new String(new char[]{'j', '.', 'f'});
     }
 
-    private static String legacySealedNativeBindingsResource() {
-        return new String(new char[]{'M','E','T','A','-','I','N','F','/','.','r','/','b','i','n','d','i','n','g','s','.','d','a','t'});
-    }
-
-    private static String sealedNativeIndexText() {
-        try (InputStream in = resourceStream(SEALED_NATIVE_INDEX_RESOURCE)) {
-            if (in == null) return null;
-            byte[] raw = readAll(in);
-            byte[] decoded = null;
-            try {
-                decoded = hasRuntimeResourceHeader(raw)
-                    ? decodeRuntimeResource(raw, true)
-                    : isAscii(raw) ? raw.clone() : null;
-                return decoded == null ? null : new String(decoded, StandardCharsets.UTF_8);
-            } finally {
-                Arrays.fill(raw, (byte) 0);
-                if (decoded != null) Arrays.fill(decoded, (byte) 0);
-            }
-        } catch (Exception ignored) {
-            return null;
-        }
-    }
-
-    private static String sealedNativeBindingText() {
-        return sealedNativeBindingText(null);
-    }
-
     private static String sealedNativeBindingText(AkenNativeLibrary locator) {
-        String resourcePath = locator == null ? SEALED_NATIVE_BINDINGS_RESOURCE : locator.bindingResourcePath;
+        String resourcePath = locator == null ? null : locator.bindingResourcePath;
         if (resourcePath == null || !isAkenNativeResourcePath(resourcePath)) {
             throw new SecurityException("AKEN native bindings resource path is unavailable");
         }
@@ -2776,645 +1748,28 @@ public final class JniMicrokernelHelper {
         }
     }
 
-    private static SealedNativeLibrary[] sealedBundledLibraryNames(String platformSuffix) {
-        try {
-            String index = sealedNativeIndexText();
-            if (index == null || index.length() == 0) return new SealedNativeLibrary[0];
-            LinkedHashSet<SealedNativeLibrary> libraries = new LinkedHashSet<>();
-            String[] lines = index.split("\n");
-            for (String line : lines) {
-                String[] parts = line.trim().split("\\|", -1);
-                if (parts.length != 3 || !platformSuffix.equals(parts[0])) continue;
-                libraries.add(new SealedNativeLibrary(parts[1], parts[2]));
-            }
-            return libraries.toArray(new SealedNativeLibrary[0]);
-        } catch (Exception ignored) {
-            return new SealedNativeLibrary[0];
-        }
-    }
-
-    private static byte[] decodeSealedNativeResource(byte[] raw) {
-        if (raw == null || raw.length == 0 || hasRuntimeResourceHeader(raw)) return null;
-        return raw;
-    }
-
-    private static byte[] hexToBytes(String hex) {
-        if ((hex.length() & 1) != 0) throw new IllegalArgumentException("odd hex");
-        byte[] out = new byte[hex.length() / 2];
-        for (int index = 0; index < out.length; index++) {
-            int hi = Character.digit(hex.charAt(index * 2), 16);
-            int lo = Character.digit(hex.charAt(index * 2 + 1), 16);
-            if (hi < 0 || lo < 0) {
-                Arrays.fill(out, (byte) 0);
-                throw new IllegalArgumentException("bad hex");
-            }
-            out[index] = (byte) ((hi << 4) | lo);
-        }
-        return out;
-    }
-
-    private static byte[] hexToBytes(byte[] hex) {
-        if ((hex.length & 1) != 0) throw new IllegalArgumentException("odd hex");
-        byte[] out = new byte[hex.length / 2];
-        for (int index = 0; index < out.length; index++) {
-            int hi = Character.digit((char) (hex[index * 2] & 0xFF), 16);
-            int lo = Character.digit((char) (hex[index * 2 + 1] & 0xFF), 16);
-            if (hi < 0 || lo < 0) {
-                Arrays.fill(out, (byte) 0);
-                throw new IllegalArgumentException("bad hex");
-            }
-            out[index] = (byte) ((hi << 4) | lo);
-        }
-        return out;
-    }
-
     public static byte[] decodeRuntimeResourceForNative(byte[] raw) {
-        byte[] decoded;
-        if (loadState == LOAD_READY && nativeIsBootMaterialReady()) {
-            try {
-                decoded = nativeDecodeRuntimeResource(raw);
-            } catch (LinkageError ignored) {
-                decoded = null;
-            }
-            // Keep manifest discovery self-contained when an older shell or a
-            // platform build does not expose the optional native resource
-            // decoder. The same authenticated partition keys and hashes are
-            // checked by the local decoder; a tampered envelope still fails
-            // closed rather than being accepted.
-            if (decoded == null) decoded = decodeRuntimeResource(raw);
-        } else {
-            decoded = decodeRuntimeResource(raw);
-        }
-        if (decoded == null) throw new IllegalArgumentException("unsupported runtime resource envelope");
-        return decoded;
-    }
-
-    private static int runtimeResourcePartitionCount() {
-        return runtimeResourcePartitionCount;
-    }
-
-    private static int anchorResourcePartition() {
-        return anchorResourcePartition;
-    }
-
-    private static byte[] partitionResourceKey(int partitionId) {
-        byte[][] keys = runtimeResourceKeys;
-        if (keys == null || partitionId < 0 || partitionId >= keys.length) throw new SecurityException("runtime key slot unavailable");
-        return keys[partitionId].clone();
+        throw new SecurityException("generic runtime-resource decoding is not part of the R1 runtime");
     }
 
     public static byte[] decodeRuntimeResourceEnvelope(byte[] raw) {
-        return loadState == LOAD_READY && nativeIsBootMaterialReady()
-            ? nativeDecodeRuntimeResource(raw)
-            : decodeRuntimeResource(raw);
+        throw new SecurityException("generic runtime-resource decoding is not part of the R1 runtime");
     }
 
-    private static byte[] decodeRuntimeResource(byte[] raw) {
-        return decodeRuntimeResource(raw, true);
-    }
-
-    private static byte[] decodeRuntimeResource(byte[] raw, boolean allowCompressed) {
-        if (!hasRuntimeResourceHeader(raw)) return null;
-        return decodeRuntimeResourceCurrent(raw, allowCompressed);
-    }
-
-    private static boolean hasRuntimeResourceHeader(byte[] raw) {
-        return raw != null && raw.length >= 5 &&
-            raw[0] == 0x4A && raw[1] == 0x53 && raw[2] == 0x52 && raw[3] == 0x50 &&
-            (raw[4] & 0xFF) == RUNTIME_RESOURCE_VERSION;
-    }
-
-    private static byte[] decodeRuntimeResourceCurrent(byte[] raw, boolean allowCompressed) {
-        if (raw.length < RUNTIME_RESOURCE_HEADER_SIZE + 96 + 32) return null;
-        byte[] nonce = Arrays.copyOfRange(raw, 5, 21);
-        int metadataLength = readSealedResourceLe16(raw, 21);
-        int macLength = readSealedResourceLe16(raw, 23);
-        int partitionId = readSealedResourceLe16(raw, 25);
-        if (metadataLength != 96 || macLength != 32) return null;
-        if (partitionId < 0 || partitionId > anchorResourcePartition()) return null;
-        int metadataOffset = RUNTIME_RESOURCE_HEADER_SIZE;
-        int bodyOffset = metadataOffset + metadataLength;
-        if (bodyOffset + 32 > raw.length) return null;
-        int tagOffset = raw.length - 32;
-        byte[] resourceKey = partitionResourceKey(partitionId);
-        try {
-            byte[] expected = hmacSha256(resourceKey, concat("jsrp-auth-v3".getBytes(StandardCharsets.US_ASCII), nonce, Arrays.copyOfRange(raw, 0, tagOffset)));
-            if (!constantTimeEquals(expected, raw, tagOffset)) return null;
-            byte[] metadata = runtimeResourceAesCtrWithDomains(
-                resourceKey,
-                Arrays.copyOfRange(raw, metadataOffset, bodyOffset),
-                nonce,
-                intBytes(0),
-                intBytes(0),
-                intBytes(0)
-            );
-            RuntimeResourceMetadata parsed = parseRuntimeResourceMetadata(metadata);
-            if (parsed == null) return null;
-            if (parsed.partitionId != partitionId) return null;
-            if (parsed.kindId < 1 || parsed.kindId > 4) return null;
-            if (parsed.layerCount < 1 || parsed.layerCount > 7 || parsed.variantId > 127) return null;
-            if (parsed.plainLength < 0 || parsed.storedLength < 0 || parsed.bodyLength < 0) return null;
-            if (bodyOffset + parsed.bodyLength != tagOffset) return null;
-            byte[] body = Arrays.copyOfRange(raw, bodyOffset, tagOffset);
-            byte[] stored = runtimeResourceAesCtr(resourceKey, body, nonce, parsed.kindId, parsed.variantId, parsed.layerCount);
-            if (stored.length != parsed.storedLength) return null;
-            if (!Arrays.equals(sha256(stored), parsed.storedHash)) return null;
-            byte[] plain = parsed.compressed ? (allowCompressed ? decompressEmbeddedZstd(stored, parsed.plainLength) : null) : stored;
-            if (plain == null || plain.length != parsed.plainLength) return null;
-            return Arrays.equals(sha256(plain), parsed.plainHash) ? plain : null;
-        } finally {
-            Arrays.fill(resourceKey, (byte) 0);
-        }
-    }
-
-    private static byte[] decompressEmbeddedZstd(byte[] bytes, int expectedLength) {
-        if (expectedLength < 0 || bytes == null || bytes.length < 7) return null;
-        int offset = 0;
-        if (readSealedResourceLe32(bytes, offset) != ZSTD_MAGIC) return null;
-        offset += 4;
-        int descriptor = bytes[offset++] & 0xFF;
-        if ((descriptor & 0x08) != 0 || (descriptor & 0x03) != 0) return null;
-        int frameContentSizeFlag = descriptor >>> 6;
-        boolean singleSegment = (descriptor & 0x20) != 0;
-        boolean checksum = (descriptor & 0x04) != 0;
-        if (!singleSegment) {
-            if (offset >= bytes.length) return null;
-            offset++;
-        }
-        int contentSizeLength;
-        if (frameContentSizeFlag == 0) contentSizeLength = singleSegment ? 1 : 0;
-        else if (frameContentSizeFlag == 1) contentSizeLength = 2;
-        else if (frameContentSizeFlag == 2) contentSizeLength = 4;
-        else contentSizeLength = 8;
-        long declaredLength = readZstdFrameContentSize(bytes, offset, contentSizeLength);
-        if (declaredLength != expectedLength) return null;
-        offset += contentSizeLength;
-        ByteArrayOutputStream out = new ByteArrayOutputStream(expectedLength);
-        boolean sawLast = false;
-        while (!sawLast) {
-            if (offset + 3 > bytes.length) return null;
-            int header = (bytes[offset] & 0xFF) | ((bytes[offset + 1] & 0xFF) << 8) | ((bytes[offset + 2] & 0xFF) << 16);
-            offset += 3;
-            sawLast = (header & 1) != 0;
-            int blockType = (header >>> 1) & 0x03;
-            int blockSize = header >>> 3;
-            if (blockType == 0) {
-                if (offset + blockSize > bytes.length) return null;
-                out.write(bytes, offset, blockSize);
-                offset += blockSize;
-            } else if (blockType == 1) {
-                if (offset >= bytes.length) return null;
-                for (int i = 0; i < blockSize; i++) out.write(bytes[offset] & 0xFF);
-                offset++;
-            } else {
-                return null;
-            }
-            if (out.size() > expectedLength) return null;
-        }
-        if (checksum) {
-            if (offset + 4 > bytes.length) return null;
-            offset += 4;
-        }
-        if (offset != bytes.length || out.size() != expectedLength) return null;
-        return out.toByteArray();
-    }
-
-    private static long readZstdFrameContentSize(byte[] bytes, int offset, int length) {
-        if (length < 0 || length > 8 || offset < 0 || offset + length > bytes.length) return -1L;
-        long value = 0L;
-        for (int i = 0; i < length; i++) value |= (long)(bytes[offset + i] & 0xFF) << (8 * i);
-        return length == 2 ? value + 256L : value;
-    }
-
-    private static byte[] runtimeResourceAesCtr(byte[] resourceKey, byte[] bytes, byte[] nonce, int kindId, int variantId, int layerCount) {
-        return runtimeResourceAesCtrWithDomains(resourceKey, bytes, nonce, intBytes(kindId), intBytes(variantId), intBytes(layerCount));
-    }
-
-    private static byte[] runtimeResourceAesCtrWithDomains(byte[] resourceKey, byte[] bytes, byte[] nonce, byte[] kindBytes, byte[] variantBytes, byte[] layerBytes) {
-        try {
-            byte[] key = Arrays.copyOfRange(hmacSha256(resourceKey, concat(
-                "jsrp-aes-key".getBytes(StandardCharsets.US_ASCII),
-                nonce,
-                kindBytes,
-                variantBytes,
-                layerBytes
-            )), 0, 16);
-            byte[] iv = Arrays.copyOfRange(hmacSha256(resourceKey, concat(
-                "jsrp-aes-iv".getBytes(StandardCharsets.US_ASCII),
-                nonce,
-                kindBytes,
-                variantBytes,
-                layerBytes
-            )), 0, 16);
-            return aesCtrCrypt(key, iv, bytes);
-        } catch (Exception ignored) {
-            return new byte[0];
-        }
-    }
-
-    private static RuntimeResourceMetadata parseRuntimeResourceMetadata(byte[] bytes) {
-        if (bytes == null || bytes.length != 96) return null;
-        if (bytes[0] != 0x4D || bytes[1] != 0x32 || bytes[2] != 1) return null;
-        int flags = bytes[6] & 0xFF;
-        if ((flags & 0xFE) != 0) return null;
-        int expected = readSealedResourceBe32(sha256(Arrays.copyOfRange(bytes, 0, 92)), 0);
-        if (readSealedResourceLe32(bytes, 92) != expected) return null;
-        RuntimeResourceMetadata parsed = new RuntimeResourceMetadata();
-        parsed.kindId = bytes[3] & 0xFF;
-        parsed.layerCount = bytes[4] & 0xFF;
-        parsed.variantId = bytes[5] & 0xFF;
-        parsed.compressed = (flags & 1) != 0;
-        parsed.plainLength = readSealedResourceLe32(bytes, 8);
-        parsed.storedLength = readSealedResourceLe32(bytes, 12);
-        parsed.bodyLength = readSealedResourceLe32(bytes, 16);
-        parsed.partitionId = bytes[7] & 0xFF;
-        parsed.keyId = readSealedResourceLe32(bytes, 20);
-        parsed.seed = readSealedResourceLe32(bytes, 24);
-        parsed.plainHash = Arrays.copyOfRange(bytes, 28, 60);
-        parsed.storedHash = Arrays.copyOfRange(bytes, 60, 92);
-        return parsed;
-    }
-
-
-    /* Pure-Java AES-128 block cipher (encrypt direction only) plus CTR mode.
-     * Byte layout follows FIPS-197: state column c holds bytes in[4c..4c+3]. */
-    private static final int[] AES_RCON = { 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1B, 0x36 };
-    private static byte[] aesSboxTable;
-
-    private static int aesXtime(int x) {
-        return ((x << 1) ^ ((x & 0x80) != 0 ? 0x1B : 0)) & 0xFF;
-    }
-
-    private static byte[] aesSbox() {
-        if (aesSboxTable != null) return aesSboxTable;
-        byte[] sbox = new byte[256];
-        int[] log = new int[256];
-        int[] exp = new int[255];
-        int x = 1;
-        for (int i = 0; i < 255; i++) {
-            exp[i] = x;
-            log[x] = i;
-            x = (x << 1) ^ x ^ ((x & 0x80) != 0 ? 0x1B : 0);
-            x &= 0xFF;
-        }
-        sbox[0] = 0x63;
-        for (int i = 1; i < 256; i++) {
-            int inv = exp[(255 - log[i]) % 255];
-            int s = inv;
-            s ^= ((inv << 1) | (inv >>> 7)) & 0xFF;
-            s ^= ((inv << 2) | (inv >>> 6)) & 0xFF;
-            s ^= ((inv << 3) | (inv >>> 5)) & 0xFF;
-            s ^= ((inv << 4) | (inv >>> 4)) & 0xFF;
-            sbox[i] = (byte) (s ^ 0x63);
-        }
-        aesSboxTable = sbox;
-        return sbox;
-    }
-
-    private static int[] aesExpandKey(byte[] key, byte[] sbox) {
-        int[] rk = new int[44];
-        for (int i = 0; i < 4; i++) {
-            rk[i] = ((key[4 * i] & 0xFF) << 24) | ((key[4 * i + 1] & 0xFF) << 16)
-                    | ((key[4 * i + 2] & 0xFF) << 8) | (key[4 * i + 3] & 0xFF);
-        }
-        for (int i = 4; i < 44; i++) {
-            int t = rk[i - 1];
-            if (i % 4 == 0) {
-                int rot = (t << 8) | (t >>> 24);
-                t = ((sbox[(rot >>> 24) & 0xFF] & 0xFF) << 24) | ((sbox[(rot >>> 16) & 0xFF] & 0xFF) << 16)
-                        | ((sbox[(rot >>> 8) & 0xFF] & 0xFF) << 8) | (sbox[rot & 0xFF] & 0xFF);
-                t ^= AES_RCON[i / 4 - 1] << 24;
-            }
-            rk[i] = rk[i - 4] ^ t;
-        }
-        return rk;
-    }
-
-    private static int aesMixColumn(int b0, int b1, int b2, int b3, int row) {
-        switch (row) {
-            case 0: return aesXtime(b0) ^ (aesXtime(b1) ^ b1) ^ b2 ^ b3;
-            case 1: return b0 ^ aesXtime(b1) ^ (aesXtime(b2) ^ b2) ^ b3;
-            case 2: return b0 ^ b1 ^ aesXtime(b2) ^ (aesXtime(b3) ^ b3);
-            default: return (aesXtime(b0) ^ b0) ^ b1 ^ b2 ^ aesXtime(b3);
-        }
-    }
-
-    private static void aesEncryptBlock(int[] rk, byte[] sbox, byte[] in, int inOff, byte[] out, int outOff) {
-        int[] s = new int[4];
-        for (int c = 0; c < 4; c++) {
-            s[c] = ((in[inOff + 4 * c] & 0xFF) << 24) | ((in[inOff + 4 * c + 1] & 0xFF) << 16)
-                    | ((in[inOff + 4 * c + 2] & 0xFF) << 8) | (in[inOff + 4 * c + 3] & 0xFF);
-            s[c] ^= rk[c];
-        }
-        for (int round = 1; round < 10; round++) {
-            int[] t = new int[4];
-            for (int c = 0; c < 4; c++) {
-                int b0 = sbox[(s[c] >>> 24) & 0xFF] & 0xFF;
-                int b1 = sbox[(s[(c + 1) & 3] >>> 16) & 0xFF] & 0xFF;
-                int b2 = sbox[(s[(c + 2) & 3] >>> 8) & 0xFF] & 0xFF;
-                int b3 = sbox[s[(c + 3) & 3] & 0xFF] & 0xFF;
-                t[c] = (aesMixColumn(b0, b1, b2, b3, 0) << 24) | (aesMixColumn(b0, b1, b2, b3, 1) << 16)
-                        | (aesMixColumn(b0, b1, b2, b3, 2) << 8) | aesMixColumn(b0, b1, b2, b3, 3);
-            }
-            for (int c = 0; c < 4; c++) s[c] = t[c] ^ rk[round * 4 + c];
-        }
-        for (int c = 0; c < 4; c++) {
-            int b0 = sbox[(s[c] >>> 24) & 0xFF] & 0xFF;
-            int b1 = sbox[(s[(c + 1) & 3] >>> 16) & 0xFF] & 0xFF;
-            int b2 = sbox[(s[(c + 2) & 3] >>> 8) & 0xFF] & 0xFF;
-            int b3 = sbox[s[(c + 3) & 3] & 0xFF] & 0xFF;
-            int v = ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) ^ rk[40 + c];
-            out[outOff + 4 * c] = (byte) (v >>> 24);
-            out[outOff + 4 * c + 1] = (byte) (v >>> 16);
-            out[outOff + 4 * c + 2] = (byte) (v >>> 8);
-            out[outOff + 4 * c + 3] = (byte) v;
-        }
-    }
-
-    private static byte[] aesCtrCrypt(byte[] key, byte[] iv, byte[] data) {
-        byte[] sbox = aesSbox();
-        int[] rk = aesExpandKey(key, sbox);
-        byte[] counter = iv.clone();
-        byte[] stream = new byte[16];
-        byte[] out = new byte[data.length];
-        int offset = 0;
-        while (offset < data.length) {
-            aesEncryptBlock(rk, sbox, counter, 0, stream, 0);
-            int take = Math.min(16, data.length - offset);
-            for (int i = 0; i < take; i++) out[offset + i] = (byte) (data[offset + i] ^ stream[i]);
-            offset += take;
-            for (int i = 15; i >= 0; i--) {
-                counter[i] = (byte) (counter[i] + 1);
-                if (counter[i] != 0) break;
-            }
-        }
-        Arrays.fill(stream, (byte) 0);
-        return out;
-    }
-
-    private static byte[] hmacSha256(byte[] data) {
-        byte[] key = partitionResourceKey(anchorResourcePartition());
-        try {
-            return hmacSha256(key, data);
-        } finally {
-            Arrays.fill(key, (byte) 0);
-        }
-    }
-
-    private static byte[] hmacSha256(byte[] key, byte[] data) {
-        try {
-            /* javax.crypto provider jars trigger JarVerifier.getSystemEntropy
-             * (network adapter enumeration) on first use under Java 8, which
-             * stalls startup badly on hosts with many virtual adapters. HMAC
-             * over java.security.MessageDigest stays on the boot-class SUN
-             * provider and avoids that path entirely. */
-            byte[] k = key.length > 64 ? sha256(key) : key;
-            byte[] ipad = new byte[64];
-            byte[] opad = new byte[64];
-            for (int i = 0; i < 64; i++) {
-                byte b = i < k.length ? k[i] : 0;
-                ipad[i] = (byte) (b ^ 0x36);
-                opad[i] = (byte) (b ^ 0x5c);
-            }
-            return sha256(concat(opad, sha256(concat(ipad, data))));
-        } catch (Exception ignored) {
-            return new byte[32];
-        }
-    }
-
-    /**
-     * Derive a per-build class-encryption AES key from the resident per-build
-     * runtime resource root key. The derivation (HKDF-SHA256, RFC 5869) runs
-     * entirely inside the sealed native kernel, so neither the derivation logic
-     * nor the root key ever exists in distributable Java bytecode. Fail-closed:
-     * without the native kernel the derivation is rejected.
-     */
     public static byte[] deriveClassEncryptionKey(byte[] keyId, byte[] salt, int length) {
-        if (!isNativeLoaded()) {
-            loadKernel("loader", "auto", "vm-diverse");
-        }
-        if (!isNativeLoaded()) {
-            throw new SecurityException("class-encryption key derivation requires the sealed native kernel (" + loadMessage + ")");
-        }
-        return nativeDeriveClassEncryptionKey(keyId, salt, length);
+        throw new SecurityException("class-encryption key derivation is not part of the R1 Java helper");
     }
 
     public static byte[] decryptClassBytes(byte[] keyId, byte[] salt, byte[] nonce, byte[] ciphertext, byte[] aad, int keyLength) {
-        if (keyId == null || salt == null || nonce == null || ciphertext == null || aad == null) {
-            throw new SecurityException("encrypted class metadata is incomplete");
-        }
-        if (nonce.length != 12 || ciphertext.length < 16 || (keyLength != 16 && keyLength != 32)) {
-            throw new SecurityException("encrypted class metadata is invalid");
-        }
-        if (!isNativeLoaded()) loadKernel("loader", "auto", "vm-diverse");
-        if (!isNativeLoaded()) {
-            throw new SecurityException("class-encryption decryption requires the sealed native kernel (" + loadMessage + ")");
-        }
-        try {
-            byte[] result = nativeDecryptClassBytes(keyId, salt, nonce, ciphertext, aad, keyLength);
-            if (result == null) throw new SecurityException("native class decryption returned no plaintext");
-            return result;
-        } catch (UnsatisfiedLinkError error) {
-            throw new SecurityException("class-encryption native decoder is not registered for the sealed helper", error);
-        }
-    }
-
-    private static boolean isDecimal(String value) {
-        if (value == null || value.length() == 0 || value.length() > 10) return false;
-        for (int i = 0; i < value.length(); i++) {
-            char c = value.charAt(i);
-            if (c < '0' || c > '9') return false;
-        }
-        return true;
-    }
-
-    private static int parsePositiveInt(String value, String label) {
-        if (!isDecimal(value)) throw new SecurityException("invalid VM catalog " + label);
-        try {
-            int parsed = Integer.parseInt(value);
-            if (parsed < 0) throw new SecurityException("invalid VM catalog " + label);
-            return parsed;
-        } catch (NumberFormatException e) {
-            throw new SecurityException("invalid VM catalog " + label, e);
-        }
-    }
-
-    private static int lastIndexOf(byte[] data, byte[] needle) {
-        if (data == null || needle == null || needle.length == 0 || needle.length > data.length) return -1;
-        for (int offset = data.length - needle.length; offset >= 0; offset--) {
-            boolean match = true;
-            for (int index = 0; index < needle.length; index++) {
-                if (data[offset + index] != needle[index]) {
-                    match = false;
-                    break;
-                }
-            }
-            if (match) return offset;
-        }
-        return -1;
-    }
-
-    private static boolean hasPartitionedRuntimeResourceHeader(byte[] raw, int partitionId) {
-        return raw != null && raw.length >= RUNTIME_RESOURCE_HEADER_SIZE && hasRuntimeResourceHeader(raw) &&
-            readSealedResourceLe16(raw, 25) == partitionId;
-    }
-
-    private static byte[] vmCatalogLeaf(
-        byte[] catalogId,
-        int partitionId,
-        String logicalPath,
-        String storagePath,
-        int rawLength,
-        byte[] rawDigest
-    ) {
-        return sha256(concat(
-            "JSL1".getBytes(StandardCharsets.US_ASCII),
-            catalogId,
-            intBytes(partitionId),
-            frame(logicalPath),
-            frame(storagePath),
-            longBytes(rawLength),
-            rawDigest
-        ));
-    }
-
-    private static byte[] vmCatalogMerkleRoot(List<byte[]> leaves, byte[] catalogId, int partitionId) {
-        if (leaves.isEmpty()) {
-            return sha256(concat("JSP1".getBytes(StandardCharsets.US_ASCII), catalogId, intBytes(partitionId)));
-        }
-        List<byte[]> level = new ArrayList<>(leaves);
-        sortByteArrays(level);
-        while (level.size() > 1) {
-            List<byte[]> next = new ArrayList<>((level.size() + 1) / 2);
-            for (int index = 0; index < level.size(); index += 2) {
-                byte[] left = level.get(index);
-                byte[] right = index + 1 < level.size() ? level.get(index + 1) : left;
-                next.add(sha256(concat("JSP1".getBytes(StandardCharsets.US_ASCII), left, right)));
-            }
-            level = next;
-        }
-        return level.get(0);
-    }
-
-    private static byte[] vmCatalogRoot(byte[] catalogId, List<byte[]> partitionRoots) {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        byte[] domain = "JSC1-root".getBytes(StandardCharsets.US_ASCII);
-        out.write(domain, 0, domain.length);
-        out.write(catalogId, 0, catalogId.length);
-        for (int partitionId = 0; partitionId < partitionRoots.size(); partitionId++) {
-            byte[] id = intBytes(partitionId);
-            byte[] root = partitionRoots.get(partitionId);
-            out.write(id, 0, id.length);
-            out.write(root, 0, root.length);
-        }
-        return sha256(out.toByteArray());
-    }
-
-    private static int compareUnsigned(byte[] left, byte[] right) {
-        int length = Math.min(left.length, right.length);
-        for (int index = 0; index < length; index++) {
-            int comparison = Integer.compare(left[index] & 0xFF, right[index] & 0xFF);
-            if (comparison != 0) return comparison;
-        }
-        return Integer.compare(left.length, right.length);
-    }
-
-    private static void sortVmCatalogDirectories(List<String[]> directories) {
-        for (int index = 1; index < directories.size(); index++) {
-            String[] value = directories.get(index);
-            int valuePartition = parsePositiveInt(value[1], "partition id");
-            int cursor = index - 1;
-            while (cursor >= 0 && parsePositiveInt(directories.get(cursor)[1], "partition id") > valuePartition) {
-                directories.set(cursor + 1, directories.get(cursor));
-                cursor--;
-            }
-            directories.set(cursor + 1, value);
-        }
-    }
-
-    private static void sortByteArrays(List<byte[]> values) {
-        for (int index = 1; index < values.size(); index++) {
-            byte[] value = values.get(index);
-            int cursor = index - 1;
-            while (cursor >= 0 && compareUnsigned(values.get(cursor), value) > 0) {
-                values.set(cursor + 1, values.get(cursor));
-                cursor--;
-            }
-            values.set(cursor + 1, value);
-        }
-    }
-
-    private static byte[] frame(String value) {
-        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
-        return concat(intBytes(bytes.length), bytes);
-    }
-
-    private static byte[] longBytes(long value) {
-        return new byte[] {
-            (byte) (value >>> 56),
-            (byte) (value >>> 48),
-            (byte) (value >>> 40),
-            (byte) (value >>> 32),
-            (byte) (value >>> 24),
-            (byte) (value >>> 16),
-            (byte) (value >>> 8),
-            (byte) value,
-        };
-    }
-
-    private static byte[] concat(byte[]... parts) {
-        int length = 0;
-        for (byte[] part : parts) length += part.length;
-        byte[] out = new byte[length];
-        int offset = 0;
-        for (byte[] part : parts) {
-            System.arraycopy(part, 0, out, offset, part.length);
-            offset += part.length;
-        }
-        return out;
-    }
-
-    private static byte[] intBytes(int value) {
-        return new byte[] {
-            (byte) (value >>> 24),
-            (byte) (value >>> 16),
-            (byte) (value >>> 8),
-            (byte) value,
-        };
-    }
-
-    private static boolean constantTimeEquals(byte[] expected, byte[] actual, int actualOffset) {
-        if (actualOffset < 0 || actualOffset + expected.length > actual.length) return false;
-        int diff = 0;
-        for (int i = 0; i < expected.length; i++) diff |= (expected[i] ^ actual[actualOffset + i]) & 0xFF;
-        return diff == 0;
+        throw new SecurityException("class-encryption decryption is not part of the R1 Java helper");
     }
 
     private static byte[] sha256(byte[] data) {
         try {
             return MessageDigest.getInstance("SHA-256").digest(data);
-        } catch (Exception ignored) {
-            return new byte[32];
+        } catch (NoSuchAlgorithmException error) {
+            throw new SecurityException("SHA-256 is unavailable", error);
         }
-    }
-
-    private static int readSealedResourceLe16(byte[] data, int offset) {
-        return (data[offset] & 0xFF) |
-            ((data[offset + 1] & 0xFF) << 8);
-    }
-
-    private static int readSealedResourceLe32(byte[] data, int offset) {
-        return (data[offset] & 0xFF) |
-            ((data[offset + 1] & 0xFF) << 8) |
-            ((data[offset + 2] & 0xFF) << 16) |
-            ((data[offset + 3] & 0xFF) << 24);
-    }
-
-    private static int readSealedResourceBe32(byte[] data, int offset) {
-        return ((data[offset] & 0xFF) << 24) |
-            ((data[offset + 1] & 0xFF) << 16) |
-            ((data[offset + 2] & 0xFF) << 8) |
-            (data[offset + 3] & 0xFF);
     }
 
     private static File createUniqueTempFile(String prefix, String suffix, File dir) throws java.io.IOException {
@@ -3445,34 +1800,6 @@ public final class JniMicrokernelHelper {
         }
     }
 
-    private static byte[] readAll(InputStream in) throws Exception {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        byte[] buf = new byte[1024];
-        int n;
-        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
-        return out.toByteArray();
-    }
-
-    private static final class SealedNativeLibrary {
-        final String resourcePath;
-        final String fileSuffix;
-
-        SealedNativeLibrary(String resourcePath, String fileSuffix) {
-            this.resourcePath = resourcePath;
-            this.fileSuffix = fileSuffix;
-        }
-
-        public boolean equals(Object other) {
-            if (!(other instanceof SealedNativeLibrary)) return false;
-            SealedNativeLibrary that = (SealedNativeLibrary) other;
-            return resourcePath.equals(that.resourcePath) && fileSuffix.equals(that.fileSuffix);
-        }
-
-        public int hashCode() {
-            return resourcePath.hashCode() * 31 + fileSuffix.hashCode();
-        }
-    }
-
     private static final class AkenNativeLibrary {
         final String resourcePath;
         final String fileSuffix;
@@ -3496,21 +1823,6 @@ public final class JniMicrokernelHelper {
             bindingStoredLength = 0;
             bindingSha256 = null;
         }
-    }
-
-    private static final class RuntimeResourceMetadata {
-        int partitionId;
-        int kindId;
-        int layerCount;
-        int variantId;
-        boolean compressed;
-        int plainLength;
-        int storedLength;
-        int bodyLength;
-        int keyId;
-        int seed;
-        byte[] plainHash;
-        byte[] storedHash;
     }
 
 }

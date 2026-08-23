@@ -38,7 +38,8 @@ private const val LEGACY_SEALED_NATIVE_BINDINGS_RESOURCE = "META-INF/.r/bindings
 private const val LEGACY_DELAYED_METHOD_RESOURCE_ROOT = "__jmd/"
 private const val LEGACY_CLASS_ENCRYPTION_RESOURCE_ROOT = "__jse/"
 private const val LEGACY_CLASS_ENCRYPTION_MANIFEST_RESOURCE = "__jse/index.tab"
-private const val LEGACY_NATIVE_RESOURCE_ROOT = "META-INF/js-native/"
+private const val AKEN_NATIVE_MAX_LIBRARY_BYTES = 256 * 1024 * 1024
+private const val AKEN_NATIVE_BINDINGS_MAX_BYTES = 4 * 1024 * 1024
 private const val PROTECTION_HELPER_PACKAGE = "io/github/hht0rro/javashroud/transforms/protection"
 private val AUTO_SEALED_HELPER_PASSES = setOf(
     "anti-dump-protection",
@@ -399,6 +400,7 @@ object RuntimeArtifactSealing {
         maxHardening: Boolean = false,
         typedOnlyRuntime: Boolean = false,
     ): BytecodeArtifact {
+        validateAkenR1NativeInputs(artifact.jarEntries)
         val reservedEntryNames = artifact.jarEntries.map { it.name }.toMutableSet()
         val activeContext = currentVbc4BuildContextOrNull()
         activeContext
@@ -453,7 +455,7 @@ object RuntimeArtifactSealing {
                     reservedEntryNames += route.futureResourcePath
                 }
             }
-        val akenNativeLocatorResource = if (artifact.jarEntries.any { entry -> isAkenNativeKernelResource(entry.name) }) {
+        val akenNativeLocatorResource = if (artifact.jarEntries.any { entry -> isR1NativeKernelResource(entry.name) }) {
             uniqueSealedResourceName(
                 seed = seed,
                 kind = "a",
@@ -567,7 +569,7 @@ object RuntimeArtifactSealing {
                     reservedEntryNames += sealedName
                     resourceRenameMap[entry.name] = sealedName
                 }
-                isNativeKernelResource(entry.name) -> {
+                isR1NativeKernelResource(entry.name) -> {
                     val nativeSpec = nativeSpecFor(entry.name)
                     val sealedName = uniqueSealedNativeResourceName(
                         seed = seed,
@@ -626,11 +628,15 @@ object RuntimeArtifactSealing {
                     )
                     entry.copy(name = sealedName, bytes = rewrittenBytes)
                 }
-                isNativeKernelResource(entry.name) -> {
+                isR1NativeKernelResource(entry.name) -> {
                     val nativeSpec = nativeSpecFor(entry.name)
                     val sealedName = sealedNativeResourceRenameMap.getValue(entry.name)
                     sealedNativeSpecs += nativeSpec.copy(resourceName = sealedName)
-                    entry.copy(name = sealedName, bytes = RuntimeResourceCodec.decode(entry.bytes) ?: entry.bytes)
+                    val decoded = RuntimeResourceCodec.decode(entry.bytes)
+                    require(decoded != null || entry.bytes.isRawR1NativeImage()) {
+                        "AKEN-R1 native resource wrapper failed authentication: ${entry.name}"
+                    }
+                    entry.copy(name = sealedName, bytes = decoded ?: entry.bytes)
                 }
                 isClassEncryptionManifestResource(entry.name) -> {
                     val sealedName = resourceRenameMap.getValue(entry.name)
@@ -713,10 +719,17 @@ object RuntimeArtifactSealing {
             }
             if (sealedNativeSpecs.isNotEmpty()) {
                 val locatorPath = checkNotNull(akenNativeLocatorResource)
+                val nativeEntryCounts = runtimeEntries.groupingBy(JarEntryData::name).eachCount()
                 val nativeBytesByPath = runtimeEntries.associate { entry -> entry.name to entry.bytes }
                 val locatorEntries = sealedNativeSpecs.map { spec ->
+                    require(nativeEntryCounts[spec.resourceName] == 1) {
+                        "AKEN-R1 final native target must be emitted exactly once: ${spec.resourceName}"
+                    }
                     val nativeBytes = checkNotNull(nativeBytesByPath[spec.resourceName]) {
                         "AKEN native locator target was not emitted: ${spec.resourceName}"
+                    }
+                    require(nativeBytes.isNotEmpty() && nativeBytes.size <= AKEN_NATIVE_MAX_LIBRARY_BYTES) {
+                        "AKEN-R1 final native artifact length is invalid: ${spec.resourceName}"
                     }
                     AkenNativeLocator.entry(
                         platform = spec.platform,
@@ -729,18 +742,56 @@ object RuntimeArtifactSealing {
                     val bindingPath = checkNotNull(sealedNativeBindingsResource) {
                         "AKEN native bindings locator requires a final bindings resource"
                     }
+                    require(nativeEntryCounts[bindingPath] == 1) {
+                        "AKEN-R1 final native bindings target must be emitted exactly once: $bindingPath"
+                    }
                     val bindingBytes = checkNotNull(nativeBytesByPath[bindingPath]) {
                         "AKEN native bindings locator target was not emitted: $bindingPath"
+                    }
+                    require(bindingBytes.isNotEmpty() && bindingBytes.size <= AKEN_NATIVE_BINDINGS_MAX_BYTES) {
+                        "AKEN-R1 final native bindings length is invalid: $bindingPath"
                     }
                     AkenNativeLocator.bindingsEntry(
                         resourcePath = bindingPath,
                         storedBytes = bindingBytes,
                     )
                 }
-                runtimeEntries += JarEntryData(
-                    name = locatorPath,
-                    bytes = AkenNativeLocator.encode(locatorEntries, bindingsLocatorEntry),
+                val finalNativeBindingDigest = AkenNativeLocator.finalNativeBindingDigest(
+                    entries = locatorEntries,
+                    bindingsEntry = bindingsLocatorEntry,
                 )
+                val finalArtifactBindingDigest = try {
+                    AkenNativeLocator.finalNativeBindingDigestFromArtifact(
+                        artifactEntries = runtimeEntries,
+                        locatorEntries = locatorEntries,
+                        bindingsEntry = bindingsLocatorEntry,
+                    )
+                } finally {
+                    val digestBytes = finalNativeBindingDigest.asBytes()
+                    Arrays.fill(digestBytes, 0)
+                }
+                val expectedDigestBytes = finalNativeBindingDigest.asBytes()
+                val actualDigestBytes = finalArtifactBindingDigest.asBytes()
+                try {
+                    require(MessageDigest.isEqual(expectedDigestBytes, actualDigestBytes)) {
+                        "AKEN-R1 final native binding changed during sealing"
+                    }
+                } finally {
+                    Arrays.fill(expectedDigestBytes, 0)
+                    Arrays.fill(actualDigestBytes, 0)
+                    finalArtifactBindingDigest.asBytes().fill(0)
+                }
+                val locatorBytes = try {
+                    AkenNativeLocator.encode(
+                        entries = locatorEntries,
+                        bindingsEntry = bindingsLocatorEntry,
+                        expectedFinalBindingDigest = finalNativeBindingDigest,
+                    )
+                } finally {
+                    val digestBytes = finalNativeBindingDigest.asBytes()
+                    Arrays.fill(digestBytes, 0)
+                }
+                runtimeEntries += JarEntryData(name = locatorPath, bytes = locatorBytes)
             }
             runtimeEntries
         }
@@ -1089,6 +1140,25 @@ private fun sealedHelperMethodStringRewriteMap(helperMemberRenamePlan: SealedHel
     return rewriteMap
 }
 
+private fun validateAkenR1NativeInputs(entries: Iterable<JarEntryData>) {
+    entries.forEach { entry ->
+        when {
+            isR1NativeKernelResource(entry.name) -> {
+                val spec = nativeSpecFor(entry.name)
+                require(entry.bytes.isNotEmpty() && entry.bytes.size <= AKEN_NATIVE_MAX_LIBRARY_BYTES) {
+                    "AKEN-R1 native input length is invalid: ${entry.name}"
+                }
+                require(spec.platform == "windows-x64" || spec.platform == "linux-x64") {
+                    "AKEN-R1 native input platform is unsupported: ${spec.platform}"
+                }
+            }
+            isRetiredNativeKernelResource(entry.name) -> {
+                error("AKEN-R1 rejects retired C/Zig/Mach-O native resource: ${entry.name}")
+            }
+        }
+    }
+}
+
 private fun isDelayedMethodResource(entryName: String): Boolean =
     entryName.startsWith(LEGACY_DELAYED_METHOD_RESOURCE_ROOT) && entryName.endsWith(".enc")
 
@@ -1102,28 +1172,36 @@ private fun isLegacyAkenHelperEntry(entryName: String): Boolean =
     entryName.endsWith(".class") &&
         entryName.removeSuffix(".class") in LEGACY_AKEN_HELPER_INTERNAL_NAMES
 
-private fun isAkenNativeKernelResource(entryName: String): Boolean =
-    entryName.startsWith(AKEN_NATIVE_RESOURCE_ROOT) &&
-        (entryName.endsWith(".dll") || entryName.endsWith(".so") || entryName.endsWith(".dylib"))
+private fun isR1NativeKernelResource(entryName: String): Boolean =
+    NativeRecompilationRoute.canonicalPlatformOrder.any { platform ->
+        NativeRecompilationRoute.forPlatform(platform).preSealResourcePath == entryName
+    }
 
-private fun isNativeKernelResource(entryName: String): Boolean =
-    entryName.startsWith(LEGACY_NATIVE_RESOURCE_ROOT) &&
-        (entryName.endsWith(".dll") || entryName.endsWith(".so") || entryName.endsWith(".dylib"))
+private fun isRetiredNativeKernelResource(entryName: String): Boolean {
+    val lowerName = entryName.lowercase()
+    if (!lowerName.startsWith("meta-inf/")) return false
+    val dynamicSuffix = lowerName.endsWith(".dll") || lowerName.endsWith(".so") || lowerName.endsWith(".dylib")
+    return dynamicSuffix && !isR1NativeKernelResource(entryName)
+}
 
 private fun nativeSpecFor(entryName: String): SealedNativeSpec {
-    val fileName = entryName.substringAfterLast('/')
-    val loadSuffix = when {
-        fileName.endsWith(".dll") -> ".dll"
-        fileName.endsWith(".dylib") -> ".dylib"
-        else -> ".so"
-    }
-    val platform = fileName
-        .removePrefix("js_kernel_")
-        .removeSuffix(".dll")
-        .removeSuffix(".so")
-        .removeSuffix(".dylib")
-    return SealedNativeSpec(platform = platform, resourceName = entryName, loadSuffix = loadSuffix)
+    val route = NativeRecompilationRoute.canonicalPlatformOrder
+        .map(NativeRecompilationRoute::forPlatform)
+        .singleOrNull { it.preSealResourcePath == entryName }
+        ?: error("AKEN-R1 rejects unsupported native resource: $entryName")
+    return SealedNativeSpec(
+        platform = route.platform,
+        resourceName = entryName,
+        loadSuffix = route.loadSuffix,
+    )
 }
+
+private fun ByteArray.isRawR1NativeImage(): Boolean =
+    size >= 4 && (
+        (this[0] == 'M'.code.toByte() && this[1] == 'Z'.code.toByte()) ||
+            (this[0] == 0x7F.toByte() && this[1] == 'E'.code.toByte() &&
+                this[2] == 'L'.code.toByte() && this[3] == 'F'.code.toByte())
+        )
 
 private fun sealedNativeIndexResourceName(seed: Long): String =
     sealedResourceName(seed, "i", "native-index", 0)
@@ -1580,7 +1658,7 @@ private fun isPriorSealedRuntimeClassNode(classNode: ClassNode): Boolean {
                 is org.objectweb.asm.tree.LdcInsnNode -> {
                     val value = instruction.cst as? String ?: continue
                     if (value in setOf("loader", "decrypt", "vm", "guards", "all")) hasKernelComponentString = true
-                    if (value in setOf("auto", "windows-x64", "linux-x64", "macos-x64", "macos-arm64")) hasKernelPlatformString = true
+                    if (value in setOf("auto", "windows-x64", "linux-x64")) hasKernelPlatformString = true
                     if (value in setOf("vm-diverse", "vm-off")) hasKernelVmModeString = true
                 }
                 is MethodInsnNode -> {

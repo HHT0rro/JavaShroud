@@ -829,31 +829,30 @@ object EmbeddedHelperDeployment {
     }
     // --- Native Library Bundling ---
 
-    private val NATIVE_RESOURCE_ROOT = "META-INF/js-native"
-    private val REQUIRED_SEALED_NATIVE_ABI_MARKERS = listOf(
+    private const val NATIVE_RESOURCE_ROOT = "META-INF/jsrt"
+    private val REQUIRED_R1_NATIVE_ABI_EXPORTS = listOf(
         "JNI_OnLoad",
-        "j.l",
-        "j.b",
-        "j.m",
-        "Resource",
-        "entryToken",
-        "RegisterNatives",
-        "Runtime",
-        "Resources",
-        "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;",
+        "JNI_OnUnload",
+        "jsrt_r1_runtime_binding_digest",
+        "jsrt_r1_open_frame",
     )
 
     private val REJECTED_LEGACY_NATIVE_ABI_MARKERS = listOf(
         "Java_io_github_hht0rro_javashroud_transforms_protection_",
-        "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper",
-        "nativeInit",
         "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;",
         "nativeCheckInstrumentation",
         "nativeCheckJvmTiAgents",
         "nativeCheckByteBuddy",
         "nativeInstall" + "RuntimeResourceKey",
+        "nativeInstallBootMaterial",
+        "nativeInstallBootEnvelope",
+        "nativeDecodeRuntimeResource",
         "nativePreloadRuntimeResources",
         "nativeExecuteVmResource",
+        "js_native_abi_table_v1",
+        "jsn_k13",
+        "js_shell_",
+        "js_kernel_",
     )
     internal fun bundleNativeLibrariesIfAvailable(
         artifact: BytecodeArtifact,
@@ -872,15 +871,21 @@ object EmbeddedHelperDeployment {
             val existingEntries = retainedJarEntries.map { it.name }.toSet()
             val newEntries = mutableListOf<JarEntryData>()
             for (rn in recompiledNatives) {
-                val entryName = "$NATIVE_RESOURCE_ROOT/${rn.libName}"
+                val route = NativeRecompilationRoute.forPlatform(rn.platform)
+                require(rn.libName == route.outputName) {
+                    "AKEN-R1 Rust runtime name is not canonical for ${rn.platform}: ${rn.libName}"
+                }
+                val entryName = route.preSealResourcePath
                 if (entryName in existingEntries) continue
                 if (!nativeLibraryContainsRequiredJniVmAbi(rn.bytes)) {
-                    throw IllegalStateException("Zig-compiled JNI microkernel for ${rn.platform} does not contain the required sealed JNI ABI")
+                    throw IllegalStateException(
+                        "AKEN-R1 Rust JNI runtime for ${rn.platform} does not contain the required jsrt_r1 ABI exports",
+                    )
                 }
                 newEntries.add(JarEntryData(name = entryName, bytes = rn.bytes))
             }
             if (newEntries.isEmpty()) {
-                throw IllegalStateException("Zig compilation produced no loadable JNI microkernel libraries")
+                throw IllegalStateException("AKEN-R1 Rust compilation produced no loadable JNI runtime libraries")
             }
             val updatedJarEntries = retainedJarEntries + newEntries
             artifact.copy(
@@ -897,48 +902,34 @@ object EmbeddedHelperDeployment {
     internal fun nativeLibraryContainsRequiredJniVmAbi(bytes: ByteArray): Boolean =
         bytes.isNotEmpty() &&
             REJECTED_LEGACY_NATIVE_ABI_MARKERS.none { marker -> bytes.containsAscii(marker) } &&
-            (
-                REQUIRED_SEALED_NATIVE_ABI_MARKERS.all { marker -> bytes.containsAscii(marker) } ||
-                    nativeLibraryContainsMaxShellStubAbi(bytes)
-            )
+            REQUIRED_R1_NATIVE_ABI_EXPORTS.all { export -> bytes.containsAscii(export) }
 
-    internal fun nativeLibraryContainsMaxShellStubAbi(bytes: ByteArray): Boolean =
-        bytes.containsAscii("JNI_OnLoad") &&
-            bytes.containsAscii(NativeKernelShellPacker.MAX_STUB_MARKER) &&
-            bytes.containsAscii(NativeKernelShellPacker.MAX_PAYLOAD_MARKER)
-
+    /**
+     * This is a build-time preflight, not a Java fallback gate. Host validation
+     * happens inside RustToolchainProvisioner before executable discovery or any
+     * compiler/version probe, so macOS and non-x86 hosts fail closed first.
+     */
     internal fun hasLoadableNativeKernel(): Boolean {
-        /*
-         * This is a build-time preflight, not a Java fallback gate: source text
-         * alone does not prove that a current native artifact can be emitted.
-         * Require the current platform and a local Zig toolchain without
-         * triggering network download. The generated artifact still performs
-         * full native compilation, ABI/sealing validation, and runtime loading.
-         */
-        return hasBundledNativeSources() &&
-            NativeToolchainProvisioner.detectPlatform(
-                System.getProperty("os.name"),
-                System.getProperty("os.arch"),
-            ) != null &&
-            NativeToolchainProvisioner.probeWithoutDownload() != null
+        val resolution = runCatching {
+            RustToolchainProvisioner.resolve(
+                osName = System.getProperty("os.name"),
+                osArch = System.getProperty("os.arch"),
+            )
+        }.getOrNull() ?: return false
+        return resolution.toolchain != null
     }
 
-    private fun hasBundledNativeSources(): Boolean = listOf(
-        "js_kernel.c",
-        "js_helpers.c",
-        "js_native_common.c",
-        "js_machine_id.c",
-        "native_secrets.inc",
-        "zstd/zstd.h",
-        "zstd/zstd_errors.h",
-        "zstd/decompress/zstd_decompress.c",
-        "cross-compile/jni.h",
-        "cross-compile/jni_md_linux.h",
-    ).all { name -> loadClasspathResource("META-INF/native-src/$name") != null }
-
-    private fun isNativeKernelResource(entryName: String): Boolean =
-        entryName.startsWith("$NATIVE_RESOURCE_ROOT/js_kernel_") &&
-            (entryName.endsWith(".dll") || entryName.endsWith(".so") || entryName.endsWith(".dylib"))
+    private fun isNativeKernelResource(entryName: String): Boolean {
+        val lowerEntryName = entryName.lowercase()
+        if (!lowerEntryName.startsWith("meta-inf/")) return false
+        val lowerFileName = lowerEntryName.substringAfterLast('/')
+        val dynamicSuffix = lowerFileName.endsWith(".dll") ||
+            lowerFileName.endsWith(".so") ||
+            lowerFileName.endsWith(".dylib")
+        return (lowerEntryName.startsWith("${NATIVE_RESOURCE_ROOT.lowercase()}/") ||
+            lowerEntryName.startsWith("meta-inf/js-native/")) && dynamicSuffix ||
+            lowerFileName.startsWith("js_kernel_") && dynamicSuffix
+    }
 
     private fun ByteArray.containsAscii(value: String): Boolean {
         val needle = value.toByteArray(Charsets.US_ASCII)
@@ -958,29 +949,34 @@ object EmbeddedHelperDeployment {
     }
 
     /**
-     * Compile native microkernels from bundled C source. This path is intentionally
-     * fail-closed: jni-microkernel-loader no longer falls back to prebuilt native binaries.
+     * Compile the current Rust JNI runtime. The request has already rejected
+     * retired platforms, and NativeRecompilationTransforms owns the isolated
+     * Cargo workspace and locked toolchain invocation.
      */
     private fun compileNativeLibrariesOrThrow(
         config: io.github.hht0rro.javashroud.model.config.ObfuscationConfig?,
         emit: (EngineEvent) -> Unit = {},
     ): List<NativeRecompilationTransforms.RecompiledNative> {
         if (config == null) {
-            throw IllegalStateException("jni-microkernel-loader requires an obfuscation config for Zig compilation")
+            throw IllegalStateException("jni-microkernel-loader requires an obfuscation config for AKEN-R1 Rust compilation")
         }
         val loaderPass = config.passes.find { it.id == "jni-microkernel-loader" && it.enabled }
             ?: throw IllegalStateException("jni-microkernel-loader pass config is missing")
-        val recompileEnabled = (loaderPass.params["nativeRecompilation"] as? com.fasterxml.jackson.databind.node.BooleanNode)?.booleanValue() ?: true
+        val recompileEnabled = (loaderPass.params["nativeRecompilation"] as? com.fasterxml.jackson.databind.node.BooleanNode)
+            ?.booleanValue() ?: true
         if (!recompileEnabled) {
-            throw IllegalStateException("jni-microkernel-loader requires 混淆时编译; nativeRecompilation=false is no longer supported")
+            throw IllegalStateException("jni-microkernel-loader requires native recompilation; nativeRecompilation=false is no longer supported")
         }
 
-        val targetPlatformParam = (loaderPass.params["targetPlatform"] as? com.fasterxml.jackson.databind.node.TextNode)?.textValue() ?: "auto"
-        val nativeProtectionLevel = (loaderPass.params["nativeProtectionLevel"] as? com.fasterxml.jackson.databind.node.TextNode)?.textValue() ?: "standard"
-        val nativePackingLevel = (loaderPass.params["nativePackingLevel"] as? com.fasterxml.jackson.databind.node.TextNode)?.textValue() ?: "max"
+        val targetPlatformParam = (loaderPass.params["targetPlatform"] as? com.fasterxml.jackson.databind.node.TextNode)
+            ?.textValue() ?: "auto"
+        val nativeProtectionLevel = (loaderPass.params["nativeProtectionLevel"] as? com.fasterxml.jackson.databind.node.TextNode)
+            ?.textValue() ?: "standard"
+        val nativePackingLevel = (loaderPass.params["nativePackingLevel"] as? com.fasterxml.jackson.databind.node.TextNode)
+            ?.textValue() ?: "max"
         val request = NativeRecompilationRequest.forTargets(
             nativeProtectionLevel = nativeProtectionLevel,
-            nativePackingLevel = NativeKernelShellPacker.Level.parse(nativePackingLevel),
+            nativePackingLevel = AkenR1PackingLevel.parse(nativePackingLevel),
             targetPlatforms = resolveNativeCompileTargetPlatforms(targetPlatformParam),
         )
 
@@ -994,10 +990,17 @@ object EmbeddedHelperDeployment {
                 seed = seed,
                 classLoader = classLoader,
                 request = request,
-                onMessage = { message -> emitNativeRecompilationMessage(emit, message) },
+                onMessage = { message ->
+                    emitNativeRecompilationMessage(
+                        emit = emit,
+                        level = message.level,
+                        text = message.message,
+                        progress = message.progress,
+                    )
+                },
             )
             if (diagnostics.results.isEmpty()) {
-                throw IllegalStateException("Zig toolchain is unavailable or native compilation produced no loadable libraries")
+                throw IllegalStateException("AKEN-R1 Rust toolchain is unavailable or produced no loadable libraries")
             }
             return requireCompleteNativeCompileTargets(
                 request.routes.map(NativeRecompilationRoute::platform),
@@ -1014,31 +1017,30 @@ object EmbeddedHelperDeployment {
         osName: String = System.getProperty("os.name"),
         osArch: String = System.getProperty("os.arch"),
     ): List<String> {
+        val host = try {
+            RustToolchainProvisioner.hostPlatform(osName, osArch)
+        } catch (error: RustToolchainProvisioner.RustToolchainException) {
+            throw IllegalArgumentException("AKEN-R1 Rust target host is unsupported: $osName/$osArch", error)
+        }
         val trimmed = targetPlatformParam.trim()
-        if (trimmed == "auto") {
-            val detected = NativeToolchainProvisioner.detectPlatform(osName, osArch)
-                ?: throw IllegalArgumentException("target platform is unsupported: auto ($osName/$osArch)")
-            val normalized = detected
-                .replace("-x86_64", "-x64")
-                .replace("-aarch64", "-arm64")
-            if (normalized !in NativeRecompilationTransforms.ZIG_TARGETS) {
-                throw IllegalArgumentException("target platform is unsupported: auto ($detected)")
-            }
-            return listOf(normalized)
+        if (trimmed.equals("auto", ignoreCase = true)) {
+            return listOf(
+                when (host) {
+                    RustToolchainProvisioner.HostPlatform.WINDOWS_X64 -> RustToolchainProvisioner.RUNTIME_TARGET_WINDOWS
+                    RustToolchainProvisioner.HostPlatform.LINUX_X64 -> RustToolchainProvisioner.RUNTIME_TARGET_LINUX
+                },
+            )
         }
-        if (trimmed == "all") {
-            return NativeRecompilationTransforms.ZIG_TARGETS.keys.toList()
+        if (trimmed.equals("all", ignoreCase = true)) {
+            return NativeRecompilationRoute.canonicalPlatformOrder
         }
-        val platforms = if (',' in trimmed) {
-            trimmed.split(',').map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        val requested = if (',' in trimmed) {
+            trimmed.split(',').map(String::trim).filter(String::isNotEmpty)
         } else {
             listOf(trimmed)
         }
-        val unsupported = platforms.filter { it !in NativeRecompilationTransforms.ZIG_TARGETS }
-        if (unsupported.isNotEmpty()) {
-            throw IllegalArgumentException("target platform is unsupported: $targetPlatformParam")
-        }
-        return platforms
+        require(requested.isNotEmpty()) { "AKEN-R1 Rust target platform is empty" }
+        return requested.map(NativeRecompilationRoute::normalizePlatform).distinct()
     }
 
     internal fun requireCompleteNativeCompileTargets(
@@ -1053,29 +1055,39 @@ object EmbeddedHelperDeployment {
         if (missing.isNotEmpty() || unexpected.isNotEmpty() || duplicates.isNotEmpty()) {
             throw IllegalStateException(
                 buildString {
-                    append("Zig compilation did not produce exactly the requested target platforms")
+                    append("AKEN-R1 Rust compilation did not produce exactly the requested target platforms")
                     if (missing.isNotEmpty()) append("; missing=${missing.joinToString(",")}")
                     if (unexpected.isNotEmpty()) append("; unexpected=${unexpected.joinToString(",")}")
                     if (duplicates.isNotEmpty()) append("; duplicate=${duplicates.joinToString(",")}")
                 },
             )
         }
-        return requested.map { platform -> resultsByPlatform.getValue(platform).single() }
+        val ordered = requested.map { platform -> resultsByPlatform.getValue(platform).single() }
+        val nonCanonicalNames = ordered.filter { result ->
+            result.libName != NativeRecompilationRoute.forPlatform(result.platform).outputName
+        }
+        require(nonCanonicalNames.isEmpty()) {
+            "AKEN-R1 Rust compilation produced non-canonical runtime names: " +
+                nonCanonicalNames.joinToString { "${it.platform}=${it.libName}" }
+        }
+        return ordered
     }
 
     private fun emitNativeRecompilationMessage(
         emit: (EngineEvent) -> Unit,
-        message: NativeToolchainProvisioner.ResolutionMessage,
+        level: String,
+        text: String,
+        progress: Int?,
     ) {
-        val level = if (message.level == "warn") "warn" else "info"
+        val normalizedLevel = if (level == "warn") "warn" else "info"
         emit(
             EngineEvent(
-                level = level,
-                type = if (level == "warn") "warn" else "log",
-                message = message.message,
-                progress = message.progress,
+                level = normalizedLevel,
+                type = if (normalizedLevel == "warn") "warn" else "log",
+                message = text,
+                progress = progress,
                 outPath = null,
-            )
+            ),
         )
     }
 
@@ -1084,19 +1096,13 @@ object EmbeddedHelperDeployment {
             EngineEvent(
                 level = "error",
                 type = "error",
-                message = "JNI microkernel Zig compilation failed ($reason). No prebuilt native fallback is available.",
+                message = "AKEN-R1 Rust JNI runtime compilation failed ($reason). No legacy native fallback is available.",
                 progress = 94,
                 outPath = null,
             )
         )
     }
 
-    private fun loadClasspathResource(resourcePath: String): ByteArray? {
-        val loader = EmbeddedHelperDeployment::class.java.classLoader
-        loader?.getResourceAsStream(resourcePath)?.use { stream -> return stream.readBytes() }
-        EmbeddedHelperDeployment::class.java.getResourceAsStream("/$resourcePath")?.use { stream -> return stream.readBytes() }
-        return null
-    }
 
     // --- ASM Generators (all use COMPUTE_MAXS only) ---
 

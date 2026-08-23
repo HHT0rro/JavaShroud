@@ -1,3 +1,7 @@
+import java.io.RandomAccessFile
+import org.gradle.api.GradleException
+import org.gradle.api.tasks.Sync
+import org.gradle.language.jvm.tasks.ProcessResources
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.dsl.KotlinVersion
 
@@ -22,6 +26,56 @@ val cafed00dVersion = rootProject.extra["cafed00dVersion"] as String
 val jlinkerVersion = rootProject.extra["jlinkerVersion"] as String
 val aircompressorVersion = rootProject.extra["aircompressorVersion"] as String
 val javaShroudVersion = rootProject.extra["javaShroudVersion"] as String
+
+private data class RustRuntimeTarget(
+    val platform: String,
+    val cargoTarget: String,
+)
+
+private fun hostRustRuntimePlatform(osName: String, osArch: String): String {
+    val normalizedOs = osName.lowercase()
+    val normalizedArch = osArch.lowercase()
+    if (normalizedArch !in setOf("amd64", "x86_64")) {
+        throw GradleException(
+            "AKEN-R1 Rust native runtime is supported only on x86_64 hosts; host architecture '$osArch' is unsupported",
+        )
+    }
+    return when {
+        normalizedOs.startsWith("windows") -> "windows-x64"
+        normalizedOs.startsWith("linux") -> "linux-x64"
+        else -> throw GradleException(
+            "AKEN-R1 Rust native runtime is supported only on Windows x64 and Linux x64; host '$osName' is unsupported",
+        )
+    }
+}
+
+private fun resolveRustRuntimeTarget(value: String): RustRuntimeTarget = when (value.lowercase()) {
+    "windows-x64", "x86_64-pc-windows-gnu" -> RustRuntimeTarget("windows-x64", "x86_64-pc-windows-gnu")
+    "linux-x64", "x86_64-unknown-linux-gnu.2.17" -> RustRuntimeTarget("linux-x64", "x86_64-unknown-linux-gnu.2.17")
+    else -> throw GradleException(
+        "AKEN-R1 Rust native runtime target '$value' is unsupported; macOS, Mach-O, and .dylib targets are rejected",
+    )
+}
+
+private val rustRuntimeTarget: RustRuntimeTarget = providers.gradleProperty("javashroud.rust.platform").orNull
+    ?.let(::resolveRustRuntimeTarget)
+    ?: resolveRustRuntimeTarget(
+        hostRustRuntimePlatform(System.getProperty("os.name"), System.getProperty("os.arch")),
+    )
+val rustLibraryName = providers.gradleProperty("javashroud.rust.library").orElse("jsrt_ffi").get()
+require(rustLibraryName.isNotEmpty() && rustLibraryName.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '_' }) {
+    "javashroud.rust.library must contain only ASCII letters, digits, and underscores"
+}
+val rustLibraryFileName = if (rustRuntimeTarget.platform == "windows-x64") {
+    "$rustLibraryName.dll"
+} else {
+    "lib$rustLibraryName.so"
+}
+val rustWorkspaceDir = layout.projectDirectory.dir("src/main/rust")
+val rustCargoManifest = rustWorkspaceDir.file("Cargo.toml")
+val rustReleaseDir = rustWorkspaceDir.dir("target/${rustRuntimeTarget.cargoTarget}/release")
+val rustLibraryArtifact = rustReleaseDir.file(rustLibraryFileName)
+val rustNativeResourceOutput = layout.buildDirectory.dir("generated/rust-native-resources")
 
 kotlin {
     jvmToolchain(21)
@@ -96,19 +150,97 @@ tasks.named<JavaExec>("run") {
     outputs.upToDateWhen { false }
 }
 
-tasks.processResources {
-    from(file("src/main/native")) {
-        include("js_kernel.c", "js_helpers.c", "js_native_common.c", "js_native_common.h", "js_crypto.c", "js_crypto.h", "js_antidebug.c", "js_antidebug.h", "js_protected_section.c", "js_protected_section.h", "js_protected_section_linux.ld", "js_vm_core.c", "js_vm_core.h", "js_vm_resource.c", "js_vm_resource.h", "js_vm_symbol.c", "js_vm_symbol.h", "js_vm_internal.h", "js_jni_runtime.c", "js_jni_runtime.h", "js_machine_id.c", "js_machine_id.h", "native_secrets.inc", "js_aken_page_locator.inc", "js_shell_stub.c", "js_shell_stub.h", "js_shell_crypto.c", "js_shell_crypto.h", "js_shell_loader.h", "js_shell_loader_pe.c", "js_shell_loader_elf.c", "js_shell_loader_macho.c")
-        into("META-INF/native-src")
+val buildRustNativeRuntime = tasks.register<Exec>("buildRustNativeRuntime") {
+    group = "build"
+    description = "Builds the AKEN-R1 Rust native runtime for the selected Windows or Linux target."
+    val workspace = rustWorkspaceDir.asFile
+    val cargoManifest = rustCargoManifest.asFile
+    val artifact = rustLibraryArtifact.asFile
+    val targetPlatform = rustRuntimeTarget.platform
+    val cargoTarget = rustRuntimeTarget.cargoTarget
+    workingDir = workspace
+    inputs.files(fileTree(workspace) { exclude("target/**") })
+    outputs.file(artifact)
+    doFirst {
+        if (!cargoManifest.isFile) {
+            throw GradleException("AKEN-R1 Rust workspace is missing: $cargoManifest")
+        }
     }
-    from(file("src/main/native/zstd")) {
-        include("**/*")
-        into("META-INF/native-src/zstd")
+    if (targetPlatform == "linux-x64") {
+        commandLine("cargo", "zigbuild", "--locked", "--workspace", "--release", "--target", cargoTarget)
+    } else {
+        commandLine("cargo", "build", "--locked", "--workspace", "--release", "--target", cargoTarget)
     }
-    from(file("src/main/native/cross-compile")) {
-        include("jni.h", "jni_md_linux.h")
-        into("META-INF/native-src/cross-compile")
+}
+
+val packageRustNativeRuntime = tasks.register<Sync>("packageRustNativeRuntime") {
+    group = "build"
+    description = "Packages exactly one authenticated AKEN-R1 Rust native runtime resource."
+    val artifact = rustLibraryArtifact.asFile
+    val targetPlatform = rustRuntimeTarget.platform
+    val releaseDirectory = rustReleaseDir.asFile
+    dependsOn(buildRustNativeRuntime)
+    into(rustNativeResourceOutput)
+    from(artifact) {
+        into("META-INF/jsrt/$targetPlatform")
     }
+    doFirst {
+        if (!artifact.isFile || artifact.length() == 0L) {
+            throw GradleException("AKEN-R1 Rust runtime artifact is missing or empty: $artifact")
+        }
+        if (artifact.extension.equals("dylib", ignoreCase = true) || artifact.name.contains(".dylib", ignoreCase = true)) {
+            throw GradleException("AKEN-R1 rejects Mach-O/.dylib runtime artifacts: $artifact")
+        }
+        val header = artifact.inputStream().use { it.readNBytes(20) }
+        val validImage = when (targetPlatform) {
+            "windows-x64" -> RandomAccessFile(artifact, "r").use { input ->
+                val fileLength = input.length()
+                if (fileLength < 0x40) {
+                    false
+                } else {
+                    val dosHeader = ByteArray(0x40)
+                    input.readFully(dosHeader)
+                    if (dosHeader[0] != 'M'.code.toByte() || dosHeader[1] != 'Z'.code.toByte()) {
+                        false
+                    } else {
+                        val peOffset = (dosHeader[0x3c].toLong() and 0xFFL) or
+                            ((dosHeader[0x3d].toLong() and 0xFFL) shl 8) or
+                            ((dosHeader[0x3e].toLong() and 0xFFL) shl 16) or
+                            ((dosHeader[0x3f].toLong() and 0xFFL) shl 24)
+                        if (peOffset > fileLength - 26) {
+                            false
+                        } else {
+                            input.seek(peOffset)
+                            val peHeader = ByteArray(26)
+                            input.readFully(peHeader)
+                            val machine = (peHeader[4].toInt() and 0xFF) or ((peHeader[5].toInt() and 0xFF) shl 8)
+                            val optionalMagic = (peHeader[24].toInt() and 0xFF) or ((peHeader[25].toInt() and 0xFF) shl 8)
+                            peHeader.copyOfRange(0, 4).contentEquals(byteArrayOf('P'.code.toByte(), 'E'.code.toByte(), 0, 0)) &&
+                                machine == 0x8664 && optionalMagic == 0x20B
+                        }
+                    }
+                }
+            }
+            "linux-x64" -> header.size >= 20 &&
+                header.copyOfRange(0, 4).contentEquals(byteArrayOf(0x7f, 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte())) &&
+                header[4].toInt() == 2 && header[5].toInt() == 1 &&
+                header[18].toInt() == 0x3e && header[19].toInt() == 0
+            else -> false
+        }
+        if (!validImage) {
+            throw GradleException("AKEN-R1 Rust runtime artifact has an invalid $targetPlatform image header: $artifact")
+        }
+        val machOArtifacts = releaseDirectory.listFiles().orEmpty()
+            .filter { it.extension.equals("dylib", ignoreCase = true) }
+        if (machOArtifacts.isNotEmpty()) {
+            throw GradleException("AKEN-R1 release directory contains rejected Mach-O artifacts: ${machOArtifacts.joinToString()}")
+        }
+    }
+}
+
+tasks.named<ProcessResources>("processResources") {
+    dependsOn(packageRustNativeRuntime)
+    from(packageRustNativeRuntime)
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
 
@@ -143,34 +275,7 @@ tasks.jar {
         rename("(.*)\\.class", "$1.bin")
         into("META-INF/javashroud-helpers")
     }
-    // Bundle native C source files for runtime recompilation during obfuscation.
-    // These are used by NativeRecompilationTransforms to generate per-output
-    // diversified native libraries when a zig toolchain is available.
-    from(file("src/main/native")) {
-        include("js_kernel.c", "js_helpers.c", "js_native_common.c", "js_native_common.h", "js_crypto.c", "js_crypto.h", "js_antidebug.c", "js_antidebug.h", "js_protected_section.c", "js_protected_section.h", "js_protected_section_linux.ld", "js_vm_core.c", "js_vm_core.h", "js_vm_resource.c", "js_vm_resource.h", "js_vm_symbol.c", "js_vm_symbol.h", "js_vm_internal.h", "js_jni_runtime.c", "js_jni_runtime.h", "js_machine_id.c", "js_machine_id.h", "native_secrets.inc", "js_aken_page_locator.inc", "js_shell_stub.c", "js_shell_stub.h", "js_shell_crypto.c", "js_shell_crypto.h", "js_shell_loader.h", "js_shell_loader_pe.c", "js_shell_loader_elf.c", "js_shell_loader_macho.c")
-        into("META-INF/native-src")
-    }
-    from(file("src/main/native/zstd")) {
-        include("**/*")
-        into("META-INF/native-src/zstd")
-    }
-    from(file("src/main/native/cross-compile")) {
-        include("jni.h", "jni_md_linux.h")
-        into("META-INF/native-src/cross-compile")
-    }
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-}
-
-
-tasks.register<Exec>("buildNativeKernel") {
-    group = "build"
-    description = "Compiles the JavaShroud native microkernel (js_kernel) for the current platform."
-    workingDir = file("src/main/native")
-    if (org.gradle.internal.os.OperatingSystem.current().isWindows) {
-        commandLine("cmd", "/c", "build-native-kernel.bat")
-    } else {
-        commandLine("bash", "build-native-kernel-linux.sh")
-    }
 }
 
 tasks.register<Exec>("buildNativeEngine") {
@@ -198,7 +303,6 @@ graalvmNative {
                     "-H:IncludeResources=META-INF/javashroud-helpers/.*\\.bin",
                     "-H:IncludeResources=io/github/hht0rro/javashroud/transforms/protection/.*\\.class",
                     "-H:IncludeResources=META-INF/.*",
-                    "-H:IncludeResources=META-INF/native-src/.*",
                 ),
             )
         }
