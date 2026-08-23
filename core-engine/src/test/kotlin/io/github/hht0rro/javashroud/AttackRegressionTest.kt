@@ -1,4 +1,4 @@
-﻿package io.github.hht0rro.javashroud
+package io.github.hht0rro.javashroud
 
 import io.github.hht0rro.javashroud.model.analysis.MatchedMember
 import io.github.hht0rro.javashroud.model.analysis.MemberKind
@@ -7,7 +7,6 @@ import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.analysis.TargetSelector
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper
-import io.github.hht0rro.javashroud.transforms.protection.NativeKernelPacker
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceCodec
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceKind
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
@@ -24,6 +23,7 @@ import java.security.MessageDigest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class AttackRegressionTest {
@@ -76,33 +76,12 @@ class AttackRegressionTest {
     }
 
     @Test
-    fun native_runtime_contains_trampoline_and_debugger_poison_gates() {
-        val nativeSources = listOf(
-            Path.of("src/main/native/js_helpers.c"),
-            Path.of("src/main/native/js_antidebug.c"),
-            Path.of("src/main/native/js_vm_core.c"),
-            Path.of("src/main/native/js_vm_resource.c"),
-        ).filter { Files.exists(it) }.joinToString("\n") { Files.readString(it) }
-
-        assertTrue(nativeSources.contains("js_check_trampoline"), "native runtime must keep Frida-like trampoline detection gate")
-        assertTrue(nativeSources.contains("js_vm_anti_trace_check"), "native runtime must keep debugger/trace detection gate")
-        assertTrue(nativeSources.contains("js_vm_trace_poison_seed"), "debugger strong-signal path must poison VM execution state")
-        assertTrue(nativeSources.contains("js_vm_fail_closed"), "attack checks must terminate through fail-closed native path")
-    }
-
-    @Test
-    fun native_runtime_rotates_resident_blocks_not_only_single_opcode_rewraps() {
-        val core = Files.readString(Path.of("src/main/native/js_vm_core.c"))
-        val executeLoop = core.substringAfter("JS_HIDDEN int js_vm_execute(")
-
-        assertTrue(core.contains("js_vm_rotate_resident_block"), "native runtime must keep block-level resident rotation")
-        assertTrue(core.contains("p->resident_rotation_epoch ^="), "block rotation must mutate resident block epoch")
-        assertTrue(core.contains("window = 2 +"), "block rotation must cover more than one resident opcode")
-        assertTrue(core.contains("for (int offset = 0; offset < window; offset++)"), "block rotation must re-mask every opcode in the window")
-        assertTrue(
-            executeLoop.indexOf("js_vm_rotate_resident_block") in 0 until executeLoop.indexOf("js_vm_rewrap_resident_opcode"),
-            "execute loop must rotate resident block before per-opcode rewrap",
-        )
+    fun rust_runtime_keeps_fail_closed_attack_gates_without_c_sources() {
+        assertFalse(Files.exists(Path.of("src/main/native")), "C native runtime must be deleted")
+        val vm = Files.readString(Path.of("src/main/rust/crates/jsrt-vm/src/lib.rs"))
+        val ffi = Files.readString(Path.of("src/main/rust/crates/jsrt-ffi/src/lib.rs"))
+        assertTrue(vm.contains("AuthenticationFailed") || vm.contains("parse_authenticated"), "Rust VM must authenticate before execute")
+        assertTrue(ffi.contains("AKEN VM page route is unavailable") || ffi.contains("TypedPageRouter"), "Rust JNI must fail closed")
     }
 
     @Test

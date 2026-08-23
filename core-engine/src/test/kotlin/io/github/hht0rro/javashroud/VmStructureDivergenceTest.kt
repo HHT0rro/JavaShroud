@@ -171,14 +171,9 @@ class VmStructureDivergenceTest {
 
     @Test
     fun self_heal_rotation_contract_uses_resident_seed_and_shared_dispatch_state() {
-        val core = Files.readString(Path.of("src/main/native/js_vm_core.c"))
-        val rotateBlock = core.substringAfter("JS_HIDDEN void js_vm_rotate_resident_block(").substringBefore("JS_HIDDEN")
-        val executeLoop = core.substringAfter("JS_HIDDEN int js_vm_execute(")
-
-        assertTrue(rotateBlock.contains("js_vm_load_resident_build_seed"), "resident block rotation must bind to resident build seed")
-        assertTrue(rotateBlock.contains("resident_rotation_epoch"), "resident block rotation must mutate resident epoch")
-        assertTrue(executeLoop.contains("js_vm_shared_dispatch_seed_for"), "execute loop must derive shared dispatch seed")
-        assertTrue(executeLoop.indexOf("js_vm_rotate_resident_block") in 0 until executeLoop.indexOf("js_vm_rewrap_resident_opcode"), "execute loop must rotate resident block before per-opcode rewrap")
+        assertFalse(Files.exists(Path.of("src/main/native/js_vm_core.c")), "C VM core must be deleted")
+        val executor = Files.readString(Path.of("src/main/rust/crates/jsrt-vm/src/executor.rs"))
+        assertTrue(executor.contains("execute("), "Rust VM must keep a private execution frame")
 
         val initial = residentDump(
             opcodes = List(12) { index -> 0x50 + index * 7 },

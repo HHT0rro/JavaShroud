@@ -39,7 +39,7 @@ class W8MultiPlatformContractTest {
     @Test
     fun compile_target_parser_supports_all_and_normalized_comma_lists() {
         assertEquals(
-            NativeRecompilationTransforms.ZIG_TARGETS.keys.toList(),
+            NativeRecompilationTransforms.RUST_TARGETS.keys.toList(),
             EmbeddedHelperDeployment.resolveNativeCompileTargetPlatforms("all"),
         )
         assertEquals(
@@ -53,8 +53,8 @@ class W8MultiPlatformContractTest {
 
     @Test
     fun explicit_compile_targets_require_one_result_per_requested_platform() {
-        val windows = recompiledNative("windows-x64", "js_kernel_windows-x64.dll")
-        val linux = recompiledNative("linux-x64", "js_kernel_linux-x64.so")
+        val windows = recompiledNative("windows-x64", "jsrt_ffi.dll")
+        val linux = recompiledNative("linux-x64", "libjsrt_ffi.so")
 
         assertEquals(
             listOf(windows, linux),
@@ -98,8 +98,8 @@ class W8MultiPlatformContractTest {
         val windows = byteArrayOf('M'.code.toByte(), 'Z'.code.toByte(), 1)
         val linux = byteArrayOf(0x7F.toByte(), 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte(), 2)
         val observations = listOf(
-            nativeObservation("windows-x64", "js_kernel_windows-x64.dll", windows),
-            nativeObservation("linux-x64", "js_kernel_linux-x64.so", linux),
+            nativeObservation("windows-x64", "jsrt_ffi.dll", windows),
+            nativeObservation("linux-x64", "libjsrt_ffi.so", linux),
         )
         val entries = listOf(
             JarEntryData("META-INF/hidden/linux.bin", linux),
@@ -118,7 +118,7 @@ class W8MultiPlatformContractTest {
         }
         assertFailsWith<IllegalStateException> {
             CandidateProductionBuildEvidence.matchFinalNatives(
-                observations = listOf(nativeObservation("windows-x64", "js_kernel_windows-x64.dll", linux)),
+                observations = listOf(nativeObservation("windows-x64", "jsrt_ffi.dll", linux)),
                 entries = listOf(JarEntryData("META-INF/hidden/windows.bin", windows)),
             )
         }

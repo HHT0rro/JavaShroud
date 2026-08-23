@@ -19,7 +19,6 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import java.util.Arrays
-import java.util.Random
 
 class AkenNativeChunkLoaderProductionRegistrationTest {
     @Test
@@ -107,11 +106,6 @@ class AkenNativeChunkLoaderProductionRegistrationTest {
                     assertEquals(1, records.size, "native compiler input must contain exactly the bootstrap handler record")
                     assertTrue(records.single().isNotEmpty())
                 }
-                val nativeLocatorInclude = NativeRecompilationTransforms.generateAkenNativePageLocatorInclude(
-                    vbc4BuildContext = scoped,
-                    rng = Random(0x4E43_484BL),
-                )
-                assertTrue(nativeLocatorInclude.contains("#define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_COUNT 1u"))
             }
         } finally {
             emittedHandle?.let { Arrays.fill(it, 0) }

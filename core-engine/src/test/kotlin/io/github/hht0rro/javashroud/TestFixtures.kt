@@ -13,31 +13,14 @@ import io.github.hht0rro.javashroud.model.config.PassSpec
 import io.github.hht0rro.javashroud.model.config.PassSelectionSpec
 import io.github.hht0rro.javashroud.model.config.RuleSet
 import io.github.hht0rro.javashroud.model.config.RuleSpec
-import io.github.hht0rro.javashroud.transforms.protection.NativeKernelShellPacker
 import java.nio.file.Files
 import java.nio.file.Path
 
-internal val TEST_BOOT_SECRET: ByteArray = ByteArray(32) { index -> (index * 13 + 7).toByte() }
-internal val TEST_BOOT_SECRET_HEX: String = TEST_BOOT_SECRET.joinToString("") { byte -> "%02x".format(byte.toInt() and 0xFF) }
+/** Retained call-site adapter: AKEN-R1 does not install process boot material. */
+internal inline fun <T> withTestBootSecret(block: () -> T): T = block()
 
-internal inline fun <T> withTestBootSecret(block: () -> T): T {
-    val previous = NativeKernelShellPacker.buildBootSecretProvider
-    NativeKernelShellPacker.buildBootSecretProvider = { TEST_BOOT_SECRET.copyOf() }
-    return try {
-        block()
-    } finally {
-        NativeKernelShellPacker.buildBootSecretProvider = previous
-    }
-}
-
-internal fun ProcessBuilder.withTestBootSecret(): ProcessBuilder = apply {
-    val processEnvironment = environment()
-    if (processEnvironment.containsKey(NativeKernelShellPacker.BOOT_SECRET_FILE_ENV)) {
-        processEnvironment.remove(NativeKernelShellPacker.BOOT_SECRET_ENV)
-    } else {
-        processEnvironment[NativeKernelShellPacker.BOOT_SECRET_ENV] = TEST_BOOT_SECRET_HEX
-    }
-}
+/** Retained call-site adapter: AKEN-R1 starts child JVMs without shell secrets. */
+internal fun ProcessBuilder.withTestBootSecret(): ProcessBuilder = this
 
 internal fun testConfig(
     inputJarPath: String = "C:/tmp/input.jar",

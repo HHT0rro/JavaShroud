@@ -13,24 +13,22 @@ class JniMicrokernelPlatformDetectionTest {
     ).apply { isAccessible = true }
 
     @Test
-    fun `platform detection accepts only explicit supported aliases`() {
+    fun `platform detection returns only locked R1 target triples`() {
         for (arch in listOf("amd64", "x86_64", "x64")) {
-            assertEquals("windows-x64", detect("Windows 11", arch))
-            assertEquals("linux-x64", detect("Linux", arch))
-            assertEquals("macos-x64", detect("Mac OS X", arch))
-        }
-        for (arch in listOf("aarch64", "arm64")) {
-            assertEquals("macos-arm64", detect("macOS", arch))
+            assertEquals("x86_64-pc-windows-gnu", detect("Windows 11", arch))
+            assertEquals("x86_64-unknown-linux-gnu.2.17", detect("Linux", arch))
         }
     }
 
     @Test
-    fun `platform detection rejects misleading os and architecture names`() {
+    fun `platform detection rejects every other os and architecture`() {
         assertNull(detect("Windows 11", "aarch64"))
         assertNull(detect("Windows 11", "ia64"))
         assertNull(detect("Linux", "arm64"))
         assertNull(detect("Darwin", "amd64"))
-        assertNull(detect("Mac OS X", "riscv64"))
+        assertNull(detect("Mac OS X", "x86_64"))
+        assertNull(detect("macOS", "arm64"))
+        assertNull(detect("FreeBSD", "amd64"))
     }
 
     private fun detect(osName: String, osArch: String): String? =

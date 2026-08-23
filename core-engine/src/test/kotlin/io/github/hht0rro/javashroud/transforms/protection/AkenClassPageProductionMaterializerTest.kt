@@ -7,7 +7,6 @@ import io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPageCand
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenClassPageDescriptor
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHandle
 import java.util.Arrays
-import java.util.Random
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -113,12 +112,6 @@ class AkenClassPageProductionMaterializerTest {
                     assertEquals(1, records.size)
                     assertTrue(records.single().isNotEmpty())
                 }
-                val nativeLocatorInclude = NativeRecompilationTransforms.generateAkenNativePageLocatorInclude(
-                    vbc4BuildContext = scoped,
-                    rng = Random(0xA4EEL),
-                )
-                assertTrue(nativeLocatorInclude.contains("#define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_COUNT 1u"))
-                assertFalse(nativeLocatorInclude.contains("production typed class materialization"))
                 layout.withPageZeroDispatchBindingsForBuild { bindings ->
                     assertTrue(bindings.isEmpty())
                 }

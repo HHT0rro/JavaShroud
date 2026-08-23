@@ -71,7 +71,7 @@ class CatalogConfidentialityTest {
             classArtifacts = listOf(helperArtifact),
             jarEntries = listOf(
                 JarEntryData(helperArtifact.entryName, helperArtifact.bytes),
-                JarEntryData("META-INF/js-native/js_kernel_windows-x64.dll", "native".toByteArray()),
+                JarEntryData("META-INF/jsrt/windows-x64/jsrt_ffi.dll", byteArrayOf('M'.code.toByte(), 'Z'.code.toByte(), 1, 2, 3)),
             ),
         )
 
@@ -79,11 +79,11 @@ class CatalogConfidentialityTest {
             RuntimeArtifactSealing.seal(artifact, context.nativeSeed, rewritesVmRuntime = false)
         }
         val nativeLocatorEntries = sealed.jarEntries.filter { entry ->
-            entry.bytes.decodeToString().lineSequence().any { line -> line.startsWith("windows-x64|") }
+            entry.bytes.size >= 4 && entry.bytes.copyOfRange(0, 4).contentEquals(byteArrayOf(0xD7.toByte(), 0xA4.toByte(), 0x91.toByte(), 0xE3.toByte()))
         }
         val nativeLocator = nativeLocatorEntries.single()
-        val locatorText = nativeLocator.bytes.decodeToString()
-        assertTrue(locatorText.lineSequence().filter { it.isNotBlank() }.all { it.split('|').size == 3 && it.first() != 'B' && it.first() != 'M' })
+        assertFalse(nativeLocator.bytes.containsAscii("META-INF/"), "AKEN native locator routes must remain masked")
+        assertFalse(nativeLocator.bytes.containsAscii("windows-x64"), "AKEN native locator must not expose platform text")
         assertFalse(nativeLocator.bytes.startsWithAscii("JSBI"), "AKEN native locator must not use the retired JSBI envelope")
         assertFalse(nativeLocator.bytes.startsWithAscii("JSRP"), "AKEN native locator must not use the retired JSRP envelope")
         assertFalse(nativeLocator.bytes.containsAscii("B|"), "native locator must not expose class bindings")
@@ -139,7 +139,7 @@ class CatalogConfidentialityTest {
             classArtifacts = listOf(helperArtifact),
             jarEntries = listOf(
                 JarEntryData(helperArtifact.entryName, helperArtifact.bytes),
-                JarEntryData("META-INF/js-native/js_kernel_windows-x64.dll", "native".toByteArray()),
+                JarEntryData("META-INF/jsrt/windows-x64/jsrt_ffi.dll", byteArrayOf('M'.code.toByte(), 'Z'.code.toByte(), 1, 2, 3)),
             ),
         )
         val sealed = withVbc4BuildContext(context) {

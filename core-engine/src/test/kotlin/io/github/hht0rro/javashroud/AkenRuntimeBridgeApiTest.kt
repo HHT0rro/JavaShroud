@@ -1,10 +1,13 @@
 package io.github.hht0rro.javashroud
 
+import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Modifier
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -13,6 +16,9 @@ class AkenRuntimeBridgeApiTest {
     fun typed_aken_bridge_exposes_only_page_bound_native_requests() {
         val helper = Class.forName("io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper")
         val expected = mapOf(
+            "nativeInit" to arrayOf(String::class.java),
+            "nativeHeartbeat" to emptyArray(),
+            "nativeInstallAkenSessionNonce" to arrayOf(ByteArray::class.java),
             "nativeExecuteAkenVmPage" to arrayOf(
                 Long::class.javaPrimitiveType!!,
                 ByteArray::class.java,
@@ -27,9 +33,14 @@ class AkenRuntimeBridgeApiTest {
 
         expected.forEach { (name, parameters) ->
             val method = helper.getDeclaredMethod(name, *parameters)
-            assertTrue(Modifier.isNative(method.modifiers), "$name must remain a native page-bound entry")
+            assertTrue(Modifier.isNative(method.modifiers), "$name must remain a native R1 entry")
             assertTrue(Modifier.isStatic(method.modifiers), "$name must remain static for generated call sites")
         }
+        assertEquals(
+            expected.keys.toSet(),
+            helper.declaredMethods.filter { Modifier.isNative(it.modifiers) }.mapTo(linkedSetOf()) { it.name }.toSet(),
+            "The source helper must declare exactly the seven R1 JNI registrations",
+        )
 
         val stringParameters = arrayOf(ByteArray::class.java, Int::class.javaPrimitiveType!!, ByteArray::class.java)
         val nativeStringTerminal = helper.getDeclaredMethod("nativeOpenAkenString", *stringParameters)
@@ -71,18 +82,28 @@ class AkenRuntimeBridgeApiTest {
         assertTrue(readinessStart >= 0 && readinessEnd > readinessStart, "AKEN readiness block must remain locatable")
         val readiness = source.substring(readinessStart, readinessEnd)
 
-        assertTrue(source.contains("AKEN_NATIVE_LOCATOR_RESOURCE = \"META-INF/aken/native.locator\""), "AKEN readiness must resolve its per-build raw locator")
-        assertTrue(source.contains("AKEN_NATIVE_RESOURCE_ROOT = \"META-INF/\""), "AKEN locator routes must remain constrained to the native resource root")
-        assertTrue(readiness.contains("readAkenNativeLocator"), "AKEN readiness must load the raw locator before native extraction")
-        assertTrue(readiness.contains("publishSealedNativeBindings"), "AKEN readiness must publish public relocation metadata before native registration")
-        assertTrue(readiness.contains("System.load("), "AKEN readiness must still load the bundled native artifact")
-        assertTrue(readiness.contains("initializeNativeKernel("), "AKEN readiness must still initialize the native ABI")
-        assertTrue(readiness.contains("installAkenSessionNonce()"), "AKEN readiness must install a per-JVM runtime session nonce")
-        assertTrue(readiness.contains("verifyAkenNativeAbiAfterLoad"), "AKEN readiness must prove the typed JNI ABI is registered")
-        assertTrue(readiness.contains("nativeExecuteAkenVmPage"), "AKEN ABI probe must reach the VM page route")
-        assertTrue(readiness.contains("nativeOpenAkenString"), "AKEN ABI probe must reach the String-returning page route")
-        assertTrue(readiness.contains("nativeReadAkenClassPage"), "AKEN ABI probe must reach the class page route")
-        assertTrue(readiness.contains("nativeConsumeAkenNativeChunk"), "AKEN ABI probe must reach the native-chunk route")
+        assertTrue(source.contains("AKEN_NATIVE_LOCATOR_RESOURCE = \"META-INF/jsrt/native.locator\""), "R1 readiness must use the Rust runtime locator root")
+        assertTrue(source.contains("AKEN_NATIVE_BINDINGS_LOCATOR_RESOURCE = \"META-INF/jsrt/native.bindings.locator\""), "R1 readiness must use the Rust runtime bindings locator root")
+        assertFalse(source.contains("META-INF/aken/native.locator"), "R1 readiness must not retain the retired logical locator path")
+        assertFalse(source.contains("META-INF/aken/native.bindings.locator"), "R1 readiness must not retain the retired logical bindings path")
+        assertTrue(source.contains("AKEN_NATIVE_RESOURCE_ROOT = \"META-INF/\""), "R1 locator routes must remain constrained to the final resource root")
+        assertTrue(readiness.contains("readAkenNativeLocator"), "R1 readiness must authenticate the binary locator before extraction")
+        assertTrue(readiness.contains("validateR1NativeImage"), "R1 readiness must validate the selected PE or ELF image and exports")
+        assertTrue(readiness.contains("publishSealedNativeBindings"), "R1 readiness must publish final relocation metadata before native registration")
+        assertTrue(readiness.contains("System.load("), "R1 readiness must load only the authenticated bundled artifact")
+        assertTrue(readiness.contains("initializeNativeKernel("), "R1 readiness must prove nativeInit registration")
+        assertTrue(readiness.contains("installAkenSessionNonce()"), "R1 readiness must prove the session-nonce registration")
+        assertTrue(readiness.contains("verifyAkenNativeAbiAfterLoad"), "R1 readiness must prove the remaining five JNI registrations")
+        assertTrue(readiness.contains("nativeHeartbeat"), "R1 ABI probe must reach the heartbeat route")
+        assertTrue(readiness.contains("nativeExecuteAkenVmPage"), "R1 ABI probe must reach the VM page route")
+        assertTrue(readiness.contains("nativeOpenAkenString"), "R1 ABI probe must reach the String-returning page route")
+        assertTrue(readiness.contains("nativeReadAkenClassPage"), "R1 ABI probe must reach the class page route")
+        assertTrue(readiness.contains("nativeConsumeAkenNativeChunk"), "R1 ABI probe must reach the native-chunk route")
+
+        val lowerSource = source.lowercase()
+        for (retiredPlatformMarker in listOf("meta-inf/aken/", "macos", "darwin", "mach-o", ".dylib")) {
+            assertFalse(lowerSource.contains(retiredPlatformMarker), "R1 helper source retained retired platform material: $retiredPlatformMarker")
+        }
 
         for (legacy in listOf(
             "prepareJavaBootMaterialForLoad",
@@ -115,7 +136,7 @@ class AkenRuntimeBridgeApiTest {
     fun aken_native_locator_is_binary_v2_per_platform_and_rejects_legacy_envelopes() {
         val helperSource = Files.readString(workspacePath("core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
         val parserStart = helperSource.indexOf("private static AkenNativeLibrary readAkenNativeLocator")
-        val parserEnd = helperSource.indexOf("public static native Object nativeExecuteVmResource", parserStart)
+        val parserEnd = helperSource.indexOf("private static boolean hasAkenLocatorMagic", parserStart)
         assertTrue(parserStart >= 0 && parserEnd > parserStart, "AKEN locator parser must remain locatable")
         val parser = helperSource.substring(parserStart, parserEnd)
 
@@ -145,7 +166,12 @@ class AkenRuntimeBridgeApiTest {
         assertFalse(parser.contains("decodeRuntimeResource"), "raw locator parser must not decode JSRP")
 
         val sealingSource = Files.readString(workspacePath("core-engine/src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/RuntimeArtifactSealing.kt"))
+        val locatorSource = Files.readString(workspacePath("core-engine/src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/AkenNativeLocator.kt"))
         assertTrue(sealingSource.contains("AKEN_NATIVE_LOCATOR_LOGICAL_RESOURCE"), "sealing must rewrite the logical locator path")
+        assertTrue(locatorSource.contains("AKEN_NATIVE_LOCATOR_LOGICAL_RESOURCE = \"META-INF/jsrt/native.locator\""), "the logical locator must use the R1 jsrt root")
+        assertTrue(locatorSource.contains("AKEN_NATIVE_BINDINGS_LOCATOR_LOGICAL_RESOURCE = \"META-INF/jsrt/native.bindings.locator\""), "the bindings locator must use the R1 jsrt root")
+        assertFalse(locatorSource.contains("META-INF/aken/native.locator"), "the serializer must not retain the retired logical locator path")
+        assertFalse(locatorSource.contains("META-INF/aken/native.bindings.locator"), "the serializer must not retain the retired logical bindings path")
         assertTrue(sealingSource.contains("AkenNativeLocator.entry("), "sealing must create one locator row per final native resource")
         assertTrue(sealingSource.contains("storedBytes = nativeBytes"), "locator digest and length must derive from final sealed native bytes")
         assertTrue(sealingSource.contains("suffix = nativeSpec.loadSuffix"), "final sealed native route must retain the loader suffix")
@@ -154,55 +180,201 @@ class AkenRuntimeBridgeApiTest {
 
     @Test
     fun typed_aken_bridge_native_registration_is_purpose_split_and_fail_closed() {
-        val source = Files.readString(workspacePath("core-engine/src/main/native/js_jni_runtime.c"))
-        for (name in listOf(
-            "JS_OBFUSCATED_LEN_JNI_NATIVE_EXECUTE_AKEN_VM_PAGE",
-            "JS_OBFUSCATED_LEN_JNI_NATIVE_OPEN_AKEN_STRING",
-            "JS_OBFUSCATED_LEN_JNI_NATIVE_READ_AKEN_CLASS_PAGE",
-            "JS_OBFUSCATED_LEN_JNI_NATIVE_CONSUME_AKEN_NATIVE_CHUNK",
+        val ffi = Files.readString(workspacePath("core-engine/src/main/rust/crates/jsrt-ffi/src/lib.rs"))
+        val relocation = Files.readString(workspacePath("core-engine/src/main/rust/crates/jsrt-ffi/src/relocation.rs"))
+        for (marker in listOf(
+            "nativeExecuteAkenVmPage",
+            "nativeOpenAkenString",
+            "nativeReadAkenClassPage",
+            "nativeConsumeAkenNativeChunk",
+            "\"([BI[B)Ljava/lang/String;\"",
+            "\"([BI[B)V\"",
         )) {
-            assertTrue(source.contains(name), "JNI registration must use obfuscated binding material $name")
+            assertTrue(relocation.contains(marker) || ffi.contains(marker), "R1 JNI registration must keep typed route $marker")
         }
-        assertTrue(
-            source.contains("js_native_name_obfuscated(js_obfuscated_JNI_NATIVE_OPEN_AKEN_STRING") &&
-                source.contains("\"([BI[B)Ljava/lang/String;\", (void*)jsw_a1"),
-            "string registration must return java.lang.String instead of a plaintext byte array",
-        )
-        assertFalse(source.contains("native" + "DecodeAkenStringPage"), "retired whole-page String byte[] registration must be absent")
-        assertTrue(
-            source.contains("js_native_name_obfuscated(js_obfuscated_JNI_NATIVE_CONSUME_AKEN_NATIVE_CHUNK") &&
-                source.contains("\"([BI[B)V\", (void*)jsw_a3"),
-            "native chunk registration must use a void JNI descriptor",
-        )
-        assertTrue(source.contains("js_aken_native_chunk_consume_opened_page"), "native chunk plaintext must terminate in a native-only consumer")
-        assertFalse(source.contains("nativeMapAkenNativeChunk"), "obsolete byte[] native chunk registration must be absent")
-        assertTrue(source.contains("AKEN VM page route is unavailable"), "unwired VM route must fail closed")
-        assertTrue(source.contains("AKEN string page route is unavailable"), "unwired string route must fail closed")
-        assertTrue(source.contains("AKEN class page route is unavailable"), "unwired class route must fail closed")
-        assertTrue(source.contains("AKEN native chunk route is unavailable"), "unwired native route must fail closed")
+        assertTrue(relocation.contains("AKEN-BINDING-V1|"), "JNI_OnLoad must recover renamed helpers from published binding keys")
+        assertTrue(ffi.contains("j.l\\0") || ffi.contains("b\"j.l\\0\""), "JNI_OnLoad must read the published loader owner")
+        assertTrue(ffi.contains("j.m\\0") || ffi.contains("b\"j.m\\0\""), "JNI_OnLoad must read published method bindings")
+        assertTrue(ffi.contains("resolve_registration_plan"), "JNI_OnLoad must restore renamed helper names before RegisterNatives")
+        assertFalse(ffi.contains("nativeDecodeAkenStringPage"), "retired whole-page String byte[] registration must be absent")
+        assertFalse(ffi.contains("nativeMapAkenNativeChunk"), "obsolete byte[] native chunk registration must be absent")
+        assertTrue(ffi.contains("AKEN VM page route is unavailable"), "unwired VM route must fail closed")
+        assertTrue(ffi.contains("AKEN typed page route is unavailable"), "unwired string/class/native routes must fail closed")
+        assertFalse(ffi.contains("jsn_k13"), "R1 JNI must not call the legacy generic runtime decoder")
+        assertFalse(ffi.contains("js_runtime_resource_decode_owned"), "R1 JNI must not call the legacy resource decode core")
+        assertFalse(ffi.contains("nativeInstallBoot"), "R1 JNI must not install legacy boot material")
 
-        val bridgeStart = source.indexOf("static void js_aken_bridge_unavailable")
-        val bridgeEnd = source.indexOf("static void js_protected_runtime_failure", bridgeStart)
-        assertTrue(bridgeStart >= 0 && bridgeEnd > bridgeStart, "AKEN bridge block must remain locatable")
-        val bridge = source.substring(bridgeStart, bridgeEnd)
-        assertFalse(bridge.contains("jsn_k13"), "AKEN bridge must not call the legacy generic runtime decoder")
-        assertFalse(bridge.contains("js_runtime_resource_decode_owned"), "AKEN bridge must not call the legacy resource decode core")
-        assertFalse(bridge.contains("nativeInstallBoot"), "AKEN bridge must not install legacy boot material")
+        val owner = "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper"
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest("AKEN-BINDING-V1|$owner".toByteArray(StandardCharsets.UTF_8))
+        val key = digest.copyOfRange(0, 8).joinToString("") { byte -> "%02x".format(byte) }
+        assertEquals("3a7c2b4b146de48d", key)
+        assertTrue(relocation.contains(key), "Rust relocation key must match the Kotlin binding domain")
+    }
 
-        val nativeInitStart = source.indexOf("static jint JNICALL jsw_k0")
-        val nativeInitEnd = source.indexOf("static jint JNICALL jsw_k1", nativeInitStart)
-        assertTrue(nativeInitStart >= 0 && nativeInitEnd > nativeInitStart, "nativeInit wrapper must remain locatable")
-        val nativeInit = source.substring(nativeInitStart, nativeInitEnd)
-        assertTrue(
-            nativeInit.contains("js_jni_register_deferred_natives"),
-            "AKEN nativeInit must register sealed optional helpers after raw relocation bindings are published",
+    @Test
+    fun r1_image_validator_accepts_only_complete_amd64_cdylibs() {
+        validateR1Image("x86_64-pc-windows-gnu", peR1Image())
+        validateR1Image("x86_64-unknown-linux-gnu.2.17", elfR1Image())
+
+        val missingRegistration = assertFailsWith<SecurityException> {
+            validateR1Image("x86_64-pc-windows-gnu", peR1Image(R1_BINDING_MARKERS.dropLast(1)))
+        }
+        assertTrue(missingRegistration.message.orEmpty().contains("nativeConsumeAkenNativeChunk"))
+
+        val executableImage = peR1Image().also { putLe16(it, PE_OFFSET + 22, 0x0022) }
+        assertFailsWith<SecurityException> {
+            validateR1Image("x86_64-pc-windows-gnu", executableImage)
+        }
+        assertFailsWith<SecurityException> {
+            validateR1Image("x86_64-unknown-linux-gnu", elfR1Image())
+        }
+        assertFailsWith<SecurityException> {
+            validateR1Image("x86_64-unknown-linux-gnu.2.17", peR1Image())
+        }
+    }
+
+    @Test
+    fun r1_resource_validator_rejects_retired_and_non_current_routes() {
+        assertTrue(isR1ResourcePath("META-INF/jsrt/windows-x64/jsrt_ffi.dll"))
+        assertTrue(isR1ResourcePath("META-INF/jsrt/linux-x64/libjsrt_ffi.so"))
+        assertTrue(isR1ResourcePath("META-INF/ab/0123456789abcdef/cd/final.txt"))
+
+        assertFalse(isR1ResourcePath("META-INF/jsrt/other-x64/runtime.dll"))
+        assertFalse(isR1ResourcePath("META-INF/jsrt/linux-x64/runtime.dylib"))
+        assertFalse(isR1ResourcePath("META-INF/macos/runtime.dll"))
+        assertFalse(isR1ResourcePath("META-INF/macho/runtime.dll"))
+        assertFalse(isR1ResourcePath("META-INF/zig/runtime.dll"))
+        assertFalse(isR1ResourcePath("META-INF/js_kernel_old.dll"))
+        assertFalse(isR1ResourcePath("META-INF/aken/runtime.dll"))
+        assertFalse(isR1ResourcePath("META-INF/.aken/runtime.dll"))
+        assertFalse(isR1ResourcePath("META-INF/js-native/runtime.dll"))
+        assertFalse(isR1ResourcePath("META-INF/native-src/runtime.so"))
+        assertFalse(isR1ResourcePath("META-INF/.r/runtime.dll"))
+        assertFalse(isR1ResourcePath("META-INF/jsrt/windows-x64/../runtime.dll"))
+    }
+
+    @Test
+    fun retained_java_compatibility_entrypoints_fail_closed_without_a_native_fallback() {
+        assertFailsWith<SecurityException> {
+            io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper.executeVmResource(
+                1L,
+                "META-INF/jsrt/vm.bin",
+                emptyArray(),
+            )
+        }
+        assertFailsWith<SecurityException> {
+            io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper.decodeRuntimeResourceForNative(byteArrayOf(1))
+        }
+        assertFailsWith<SecurityException> {
+            io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper.deriveClassEncryptionKey(
+                byteArrayOf(1),
+                byteArrayOf(2),
+                32,
+            )
+        }
+        assertFailsWith<SecurityException> {
+            io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper.decryptClassBytes(
+                byteArrayOf(1),
+                byteArrayOf(2),
+                ByteArray(12),
+                ByteArray(16),
+                byteArrayOf(3),
+                32,
+            )
+        }
+    }
+
+    private fun validateR1Image(target: String, bytes: ByteArray) {
+        try {
+            VALIDATE_R1_IMAGE.invoke(null, target, bytes)
+        } catch (error: InvocationTargetException) {
+            throw error.targetException
+        }
+    }
+
+    private fun isR1ResourcePath(path: String): Boolean =
+        IS_R1_RESOURCE_PATH.invoke(null, path) as Boolean
+
+    private fun peR1Image(markers: List<String> = R1_BINDING_MARKERS): ByteArray =
+        ByteArray(FIXTURE_IMAGE_SIZE).also { bytes ->
+            bytes[0] = 'M'.code.toByte()
+            bytes[1] = 'Z'.code.toByte()
+            putLe32(bytes, 0x3C, PE_OFFSET)
+            "PE\u0000\u0000".toByteArray(StandardCharsets.ISO_8859_1).copyInto(bytes, PE_OFFSET)
+            putLe16(bytes, PE_OFFSET + 4, 0x8664)
+            putLe16(bytes, PE_OFFSET + 6, 1)
+            putLe16(bytes, PE_OFFSET + 20, 0xF0)
+            putLe16(bytes, PE_OFFSET + 22, 0x2022)
+            putLe16(bytes, PE_OFFSET + 24, 0x20B)
+            writeMarkers(bytes, 0x300, markers)
+        }
+
+    private fun elfR1Image(markers: List<String> = R1_BINDING_MARKERS): ByteArray =
+        ByteArray(FIXTURE_IMAGE_SIZE).also { bytes ->
+            bytes[0] = 0x7F
+            bytes[1] = 'E'.code.toByte()
+            bytes[2] = 'L'.code.toByte()
+            bytes[3] = 'F'.code.toByte()
+            bytes[4] = 2
+            bytes[5] = 1
+            bytes[6] = 1
+            putLe16(bytes, 16, 3)
+            putLe16(bytes, 18, 62)
+            putLe32(bytes, 20, 1)
+            putLe64(bytes, 32, 64)
+            putLe16(bytes, 52, 64)
+            putLe16(bytes, 54, 56)
+            putLe16(bytes, 56, 1)
+            writeMarkers(bytes, 0x100, markers)
+        }
+
+    private fun writeMarkers(bytes: ByteArray, offset: Int, markers: List<String>) {
+        markers.joinToString("\u0000", postfix = "\u0000")
+            .toByteArray(StandardCharsets.US_ASCII)
+            .copyInto(bytes, offset)
+    }
+
+    private fun putLe16(bytes: ByteArray, offset: Int, value: Int) {
+        bytes[offset] = value.toByte()
+        bytes[offset + 1] = (value ushr 8).toByte()
+    }
+
+    private fun putLe32(bytes: ByteArray, offset: Int, value: Int) {
+        repeat(4) { index -> bytes[offset + index] = (value ushr (index * 8)).toByte() }
+    }
+
+    private fun putLe64(bytes: ByteArray, offset: Int, value: Long) {
+        repeat(8) { index -> bytes[offset + index] = (value ushr (index * 8)).toByte() }
+    }
+
+    private companion object {
+        const val PE_OFFSET = 0x80
+        const val FIXTURE_IMAGE_SIZE = 2048
+
+        val R1_BINDING_MARKERS = listOf(
+            "JNI_OnLoad",
+            "JNI_OnUnload",
+            "jsrt_r1_runtime_binding_digest",
+            "jsrt_r1_open_frame",
+            "nativeInit",
+            "nativeHeartbeat",
+            "nativeInstallAkenSessionNonce",
+            "nativeExecuteAkenVmPage",
+            "nativeOpenAkenString",
+            "nativeReadAkenClassPage",
+            "nativeConsumeAkenNativeChunk",
         )
-        assertTrue(source.contains("static int js_optional_natives_registered = 0"), "deferred optional registration must be idempotent")
-        assertTrue(
-            source.contains("js_obfuscated_JNI_NATIVE_INSTALL_AKEN_SESSION_NONCE") &&
-                source.contains("JS_OBFUSCATED_LEN_JNI_NATIVE_INSTALL_AKEN_SESSION_NONCE"),
-            "AKEN bridge must expose the per-JVM session nonce entrypoint through obfuscated binding material",
-        )
+
+        val VALIDATE_R1_IMAGE =
+            Class.forName("io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper")
+                .getDeclaredMethod("validateR1NativeImage", String::class.java, ByteArray::class.java)
+                .apply { isAccessible = true }
+
+        val IS_R1_RESOURCE_PATH =
+            Class.forName("io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper")
+                .getDeclaredMethod("isAkenNativeResourcePath", String::class.java)
+                .apply { isAccessible = true }
     }
 
     private fun workspacePath(relative: String): Path {

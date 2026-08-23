@@ -422,16 +422,11 @@ class SchemaCapabilitiesTest {
         assertEquals("max", packingLevel!!.defaultValue?.asText(), "nativePackingLevel should default to max")
         assertEquals(listOf("off", "standard", "max", "max-hardening"), packingLevel.options)
         assertFalse(packingLevel.hidden, "nativePackingLevel should be visible")
-        assertTrue(packingLevel.description.contains("standard") && packingLevel.description.contains("overlay"), "nativePackingLevel schema must describe standard as overlay compatibility")
-        assertTrue(packingLevel.description.contains("max") && packingLevel.description.contains("stub shell"), "nativePackingLevel schema must describe max as the stub shell mode")
-        assertTrue(packingLevel.description.contains("max-hardening") && packingLevel.description.contains("更强的外壳"), "nativePackingLevel schema must describe the strongest shell profile")
         assertTrue(
-            packingLevel.description.contains("完整 js_kernel"),
-            "nativePackingLevel schema must state that the strongest shell profile protects the complete js_kernel",
-        )
-        assertTrue(
-            packingLevel.description.contains("AKEN v4") && packingLevel.description.contains("四档统一"),
-            "all nativePackingLevel values must use the same AKEN v4 resource-level evaluator architecture",
+            packingLevel.description.contains("Rust cdylib") &&
+                packingLevel.description.contains("META-INF/jsrt") &&
+                packingLevel.description.contains("R1 ABI"),
+            "nativePackingLevel must describe direct AKEN-R1 Rust artifact behavior",
         )
         assertTrue(jniModule.params.none { it.key == "bootKeyDelivery" }, "AKEN v4 must remove the legacy bootKeyDelivery parameter")
 

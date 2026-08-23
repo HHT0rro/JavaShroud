@@ -1,6 +1,5 @@
 package io.github.hht0rro.javashroud
 
-import io.github.hht0rro.javashroud.transforms.protection.NativeKernelPacker
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceCodec
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceKind
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
@@ -12,6 +11,7 @@ import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
@@ -203,40 +203,16 @@ class RuntimeResourceCodecTest {
     }
 
     @Test
-    fun native_kernel_packer_outputs_stable_neutral_resources_without_plain_kernel_name() {
-        val inputDir = Files.createTempDirectory("javashroud-native-pack-in")
-        val outputDir = Files.createTempDirectory("javashroud-native-pack-out")
-        val secondOutputDir = Files.createTempDirectory("javashroud-native-pack-out-second")
-        val thirdOutputDir = Files.createTempDirectory("javashroud-native-pack-out-third")
-        try {
-            Files.write(inputDir.resolve("js_kernel_linux-x64.so"), "fake-native-JNI_OnLoad-j.l-j.b-j.m".toByteArray(Charsets.UTF_8))
-
-            val sharedContext = fixedRuntimeCodecContext()
-            val first = withVbc4BuildContext(sharedContext) { NativeKernelPacker.pack(inputDir, outputDir, seed = 42) }
-            val second = withVbc4BuildContext(sharedContext) { NativeKernelPacker.pack(inputDir, secondOutputDir, seed = 42) }
-            val third = withVbc4BuildContext(fixedRuntimeCodecContext()) { NativeKernelPacker.pack(inputDir, thirdOutputDir, seed = 99) }
-
-            assertEquals(1, first.resources.size, "one native resource should be packed")
-            assertEquals(first.indexBytes.toList(), second.indexBytes.toList(), "bootstrap native packer index remains deterministic for Java-readable loading metadata")
-            assertEquals(first.resources.single().bytes.toList(), second.resources.single().bytes.toList(), "same seed should produce stable resource bytes")
-            assertNotEquals(first.indexBytes.toList(), third.indexBytes.toList(), "different seed should diversify bootstrap index bytes")
-            assertNotEquals(first.resources.single().path, third.resources.single().path, "different seed should diversify neutral resource paths")
-
-            val resource = first.resources.single()
-            assertTrue(resource.path.startsWith("META-INF/"), "packed resource must live under META-INF")
-            assertTrue(resource.path.endsWith(".bin"), "packed native resource must use neutral .bin suffix")
-            assertTrue(!resource.path.contains("js_kernel"), "packed resource path must not expose js_kernel")
-            assertTrue(resource.path.contains('\u00A0'), "packed native resource path should include NBSP camouflage")
-            assertTrue(!String(first.indexBytes, Charsets.ISO_8859_1).contains("js_kernel"), "packed index must not expose js_kernel")
-            assertEquals(null, withVbc4BuildContext(fixedRuntimeCodecContext()) { RuntimeResourceCodec.decode(resource.bytes) }, "bootstrap native library must remain directly loadable, not zstd-JSRP wrapped")
-            assertContentEquals("fake-native-JNI_OnLoad-j.l-j.b-j.m".toByteArray(Charsets.UTF_8), resource.bytes, "bootstrap native library bytes must be written raw under a neutral resource path")
-            assertTrue(first.indexBytes.startsWithAscii("JSBI"), "bootstrap native index must use the Java-readable JSBI envelope")
-        } finally {
-            inputDir.toFile().deleteRecursively()
-            outputDir.toFile().deleteRecursively()
-            secondOutputDir.toFile().deleteRecursively()
-            thirdOutputDir.toFile().deleteRecursively()
+    fun retired_native_kernel_packer_has_no_production_api() {
+        val relative = "core-engine/src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeKernelPacker.kt"
+        var current = java.nio.file.Path.of("").toAbsolutePath()
+        while (!Files.isDirectory(current.resolve("core-engine")) && current.parent != null) {
+            current = current.parent
         }
+        assertFalse(
+            Files.exists(current.resolve(relative)),
+            "the retired Kotlin native packer must not remain as a production source",
+        )
     }
 
     private fun fixedRuntimeCodecContext(): Vbc4BuildContext = Vbc4BuildContext(

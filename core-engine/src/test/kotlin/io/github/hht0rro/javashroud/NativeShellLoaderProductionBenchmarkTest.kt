@@ -1,286 +1,391 @@
 package io.github.hht0rro.javashroud
 
-import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
-import java.util.Comparator
-import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
-import org.junit.jupiter.api.Assumptions.assumeTrue
 
-/**
- * Production-bound shell loader fixture.
- *
- * The probe receives a compiled current native image through the same
- * platform loader entrypoint used by the shell.  The shell stub is responsible
- * for authenticating the decoded payload before calling this API; this fixture
- * therefore focuses on the validated loader/mapping lifecycle and explicitly
- * checks that a tampered image is rejected by the loader itself.
- */
 class NativeShellLoaderProductionBenchmarkTest {
     @Test
-    fun native_shell_loader_maps_authenticated_inner_image_and_rejects_tampering() {
-        val zig = findZig()
-        val platform = platform()
-        assumeTrue(zig != null, "Zig is required to compile the shell loader fixture")
-        assumeTrue(platform != null, "The shell loader fixture supports Windows and Linux")
-        val hostPlatform = platform ?: error("shell loader platform assumption did not hold")
+    fun r1_rust_runtime_contracts_are_bounded_authenticated_and_wiped() {
+        val rustRoot = rustRoot()
+        val workspace = Files.readString(rustRoot.resolve("Cargo.toml"))
+        val crypto = Files.readString(rustRoot.resolve("crates/jsrt-crypto/src/lib.rs"))
+        val cryptoManifest = Files.readString(rustRoot.resolve("crates/jsrt-crypto/Cargo.toml"))
+        val resource = Files.readString(rustRoot.resolve("crates/jsrt-resource/src/lib.rs"))
+        val resourceManifest = Files.readString(rustRoot.resolve("crates/jsrt-resource/Cargo.toml"))
+        val vm = Files.readString(rustRoot.resolve("crates/jsrt-vm/src/lib.rs"))
+        val vmExecutor = Files.readString(rustRoot.resolve("crates/jsrt-vm/src/executor.rs"))
+        val vmZstd = Files.readString(rustRoot.resolve("crates/jsrt-vm/src/zstd.rs"))
+        val vmManifest = Files.readString(rustRoot.resolve("crates/jsrt-vm/Cargo.toml"))
+        val page = Files.readString(rustRoot.resolve("crates/jsrt-page/src/lib.rs"))
+        val pageManifest = Files.readString(rustRoot.resolve("crates/jsrt-page/Cargo.toml"))
+        val runtime = Files.readString(rustRoot.resolve("crates/jsrt-runtime/src/lib.rs"))
+        val lifecycle = Files.readString(rustRoot.resolve("crates/jsrt-runtime/src/lifecycle.rs"))
+        val runtimeManifest = Files.readString(rustRoot.resolve("crates/jsrt-runtime/Cargo.toml"))
 
-        val root = Files.createTempDirectory("javashroud-shell-loader-production-")
-        try {
-            val nativeDir = resolveSource("src/main/native").toAbsolutePath().normalize()
-            val fixtureSource = resolveSource("src/test/native/shell_loader_fixture_image.c")
-            val probeSource = resolveSource("src/test/native/shell_loader_production_benchmark_probe.c")
-            val image = root.resolve("inner-fixture${platform.fileSuffix}")
-            val probe = root.resolve("shell-loader-probe${platform.executableSuffix}")
-
-            val imageCompile = runWithTransientZigRetry(
-                command = compileImageCommand(
-                    zig = checkNotNull(zig),
-                    nativeDir = nativeDir,
-                    fixtureSource = fixtureSource,
-                    image = image,
-                    platform = hostPlatform,
-                ),
-                directory = root,
-                label = "compile-inner-image",
-            )
-            assertEquals(0, imageCompile.exitCode, "inner loader image must compile:\n${imageCompile.output}")
-            assertTrue(Files.isRegularFile(image) && Files.size(image) > 0L, "inner loader image is missing")
-
-            val probeCompile = runWithTransientZigRetry(
-                command = compileProbeCommand(
-                    zig = checkNotNull(zig),
-                    nativeDir = nativeDir,
-                    probeSource = probeSource,
-                    probe = probe,
-                    platform = hostPlatform,
-                ),
-                directory = root,
-                label = "compile-loader-probe",
-            )
-            assertEquals(0, probeCompile.exitCode, "shell loader probe must compile:\n${probeCompile.output}")
-            assertTrue(Files.isRegularFile(probe) && Files.size(probe) > 0L, "shell loader probe is missing")
-
-            val samples = System.getenv("JS_SHELL_LOADER_BENCH_SAMPLES")
-                ?.toIntOrNull()
-                ?.takeIf { it in 100..100_000 }
-                ?: 100
-            val warmup = System.getenv("JS_SHELL_LOADER_BENCH_WARMUP")
-                ?.toIntOrNull()
-                ?.takeIf { it in 0..100_000 }
-                ?: 16
-            val timeoutSeconds = System.getenv("JS_SHELL_LOADER_BENCH_TIMEOUT_SECONDS")
-                ?.toLongOrNull()
-                ?.takeIf { it in 120L..86_400L }
-                ?: 300L
-            val run = run(
-                command = listOf(probe.toString(), image.toString(), samples.toString(), warmup.toString()),
-                directory = root,
-                label = "run-loader-probe",
-                timeoutSeconds = timeoutSeconds,
-            )
-            assertEquals(0, run.exitCode, "shell loader production probe must pass:\n${run.output}")
-            val line = run.output.lineSequence()
-                .singleOrNull { it.startsWith("phase=shell-loader ") }
-                ?: error("shell loader probe did not emit a sanitized phase line:\n${run.output}")
-            val fields = line.split(' ')
-                .mapNotNull { token ->
-                    val separator = token.indexOf('=')
-                    if (separator <= 0 || separator == token.lastIndex) null
-                    else token.substring(0, separator) to token.substring(separator + 1)
-                }
-                .toMap()
-            assertEquals("production", fields["phase_mode"], line)
-            assertEquals("pass", fields["phase_status"], line)
-            assertEquals("preverified", fields["auth_boundary"], line)
-            assertEquals(samples.toString(), fields["samples"], line)
-            assertEquals(warmup.toString(), fields["warmup"], line)
-            listOf("p50", "p95", "p99", "max").forEach { field ->
-                assertTrue(fields[field]?.toLongOrNull()?.let { it >= 0L } == true, line)
-            }
-            assertEquals(samples.toString(), fields["load_count"], line)
-            assertEquals(samples.toString(), fields["unload_count"], line)
-            assertTrue(fields["mapping_unit_count"]?.toLongOrNull()?.let { it > 0L } == true, line)
-            assertEquals("1", fields["tamper_rejection_count"], line)
-            assertEquals("0", fields["failure_count"], line)
-            assertEquals("1", fields["length_check_count"], line)
-            assertEquals("1", fields["structure_check_count"], line)
-            assertEquals("1", fields["jni_abi_check_count"], line)
-            assertEquals("0", fields["wipe_failure_count"], line)
-            assertEquals("0", fields["plaintext_persistence_bytes"], line)
-            assertEquals("0", fields["fallback_count"], line)
-            assertEquals("0", fields["legacy_path_hits"], line)
-            assertEquals("0", fields["security_checks_skipped"], line)
-            assertTrue(fields["output_digest"]?.matches(Regex("[0-9a-f]{16}")) == true, line)
-            println(line)
-        } finally {
-            deleteTree(root)
-        }
-    }
-
-    private fun compileImageCommand(
-        zig: String,
-        nativeDir: Path,
-        fixtureSource: Path,
-        image: Path,
-        platform: LoaderPlatform,
-    ): List<String> = buildList {
-        addAll(
-            listOf(
-                zig,
-                "cc",
-                "-target",
-                platform.zigTarget,
-                "-std=c11",
-                "-O2",
-                "-shared",
-                "-fvisibility=hidden",
-                "-DJS_NATIVE_PROTECTION_NONE=1",
-                "-DJS_AKEN_TYPED_ONLY_RUNTIME=1",
-                "-I", nativeDir.toString(),
-                "-I", nativeDir.resolve("cross-compile").toString(),
-                "-I", javaInclude().toString(),
-                "-I", javaPlatformInclude().toString(),
-                "-o", image.toString(),
-                fixtureSource.toString(),
-            ),
+        val expectedMembers = listOf(
+            "crates/jsrt-ffi",
+            "crates/jsrt-runtime",
+            "crates/jsrt-crypto",
+            "crates/jsrt-page",
+            "crates/jsrt-resource",
+            "crates/jsrt-vm",
+            "crates/jsrt-shell",
         )
-        if (platform == LoaderPlatform.LINUX_X64) add("-fPIC")
-    }
+        val members = workspace.substringAfter("members = [").substringBefore("]")
+            .lineSequence()
+            .map(String::trim)
+            .filter { it.startsWith("\"") }
+            .map { it.removeSuffix(",").removeSurrounding("\"") }
+            .toList()
+        assertEquals(expectedMembers, members, "Cargo workspace members must be the current R1 set")
+        assertContains(workspace, "runtime_abi = \"jsrt_ffi\"", "R1 workspace metadata")
+        assertContains(workspace, "unsafe_code = \"deny\"", "R1 workspace lint policy")
 
-    private fun compileProbeCommand(
-        zig: String,
-        nativeDir: Path,
-        probeSource: Path,
-        probe: Path,
-        platform: LoaderPlatform,
-    ): List<String> = buildList {
-        addAll(
-            listOf(
-                zig,
-                "cc",
-                "-target",
-                platform.zigTarget,
-                "-std=c11",
-                "-O2",
-                "-fwrapv",
-                "-DJS_NATIVE_PROTECTION_NONE=1",
-                "-DJS_AKEN_TYPED_ONLY_RUNTIME=1",
-                "-I", nativeDir.toString(),
-                "-I", nativeDir.resolve("cross-compile").toString(),
-                "-I", javaInclude().toString(),
-                "-I", javaPlatformInclude().toString(),
-                "-o", probe.toString(),
-                probeSource.toString(),
-                nativeDir.resolve(platform.loaderSource).toString(),
-            ),
+        assertContains(cryptoManifest, "name = \"jsrt-crypto\"", "jsrt-crypto manifest")
+        assertContains(crypto, "#![forbid(unsafe_code)]", "jsrt-crypto")
+        for (marker in listOf(
+            "pub fn aes256_gcm_encrypt(",
+            "pub fn aes256_gcm_decrypt(",
+            "fn validate_gcm_inputs(",
+            "aad_len > MAX_PAYLOAD_SIZE",
+            "payload_len > MAX_PAYLOAD_SIZE",
+            "fn ensure_software_backend(",
+            "software_available()",
+            "hardware_aes: false",
+            "hardware_ghash: false",
+            "impl Drop for WipedVec",
+            "expected_tag.fill(0);",
+        )) {
+            assertContains(crypto, marker, "software-only crypto R1 contract")
+        }
+        assertRustTests(
+            crypto,
+            "authentication_tag_is_framed_and_constant_time",
+            "aes256_gcm_matches_nist_vector_and_round_trips",
+            "aes256_gcm_empty_vector_and_authentication_failures",
+            "ghash_and_capability_gate_match_known_answers",
+            "public_helpers_enforce_the_kotlin_r1_bounds",
         )
-        if (platform == LoaderPlatform.WINDOWS_X64) add("-ladvapi32")
-        else addAll(listOf("-ldl", "-pthread"))
-    }
 
-    private fun runWithTransientZigRetry(command: List<String>, directory: Path, label: String): ProcessResult {
-        var result = run(command, directory, "$label-0", directory.resolve("zig-cache-0"), 300L)
-        for (attempt in 1..10) {
-            if (result.exitCode == 0 || !isTransientZigFailure(result.output)) break
-            result = run(command, directory, "$label-$attempt", directory.resolve("zig-cache-$attempt"), 300L)
+        assertContains(resourceManifest, "name = \"jsrt-resource\"", "jsrt-resource manifest")
+        assertContains(resourceManifest, "unsafe_code = \"forbid\"", "jsrt-resource lint policy")
+        assertContains(resource, "#![forbid(unsafe_code)]", "jsrt-resource")
+        for (marker in listOf(
+            "pub const MAX_DIRECTORY_ENTRIES",
+            "pub const MAX_DIRECTORY_SIZE",
+            "pub const MAX_RESOURCE_SIZE",
+            "pub const MAX_FRAME_SIZE",
+            "pub const MAX_ZSTD_WINDOW_SIZE",
+            "pub fn decode_resource(",
+            "pub fn decode_zstd_frame(",
+            "if encoded.len() > MAX_FRAME_SIZE",
+            "expected_length > self.max_plaintext_size",
+            "constant_time_equals",
+            "pub fn reset_and_wipe(",
+            "self.window.fill(0);",
+            "generation",
+            "lease_count",
+        )) {
+            assertContains(resource, marker, "resource bounds/authentication/lifecycle contract")
         }
-        return result
-    }
+        val resourceDecode = resource.substringAfter("fn decode_resource_inner(")
+        assertOrdered(
+            resourceDecode,
+            "let view = parse_frame(encoded)?;",
+            "let expected_tag = authenticate(",
+            "resource authentication must precede body handling",
+        )
+        assertOrdered(
+            resourceDecode,
+            "let expected_tag = authenticate(",
+            "context.decode_zstd(",
+            "resource authentication must precede decompression",
+        )
+        assertRustTests(
+            resource,
+            "directory_is_r1_only_sorted_and_binary_searchable",
+            "directory_authentication_rejects_reordering_and_tampering",
+            "raw_and_rle_zstd_frames_are_bounded_and_wiped",
+            "compressed_zstd_block_decodes_without_c_or_sys_dependencies",
+            "malformed_trailing_and_window_frames_fail_closed",
+            "authenticated_frame_checks_generation_before_decompression_and_wipes_context",
+            "generation_leases_retire_and_unload_with_bounded_wait",
+            "generation_lease_can_be_released_from_another_thread",
+        )
 
-    private fun run(
-        command: List<String>,
-        directory: Path,
-        label: String,
-        zigCache: Path? = null,
-        timeoutSeconds: Long,
-    ): ProcessResult {
-        val outputFile = directory.resolve("$label.log")
-        val builder = ProcessBuilder(command)
-            .directory(directory.toFile())
-            .redirectErrorStream(true)
-            .redirectOutput(outputFile.toFile())
-        zigCache?.let { cache ->
-            builder.environment()["ZIG_GLOBAL_CACHE_DIR"] = cache.resolve("global").toString()
-            builder.environment()["ZIG_LOCAL_CACHE_DIR"] = cache.resolve("local").toString()
+        assertContains(vmManifest, "name = \"jsrt-vm\"", "jsrt-vm manifest")
+        assertContains(vmManifest, "unsafe_code = \"forbid\"", "jsrt-vm lint policy")
+        assertContains(vm, "#![forbid(unsafe_code)]", "jsrt-vm")
+        for (marker in listOf(
+            "pub const VBC4_MAX_FRAME_SIZE",
+            "pub const VBC4_MAX_SECTION_SIZE",
+            "pub const VBC4_MAX_INSTRUCTIONS",
+            "pub struct ParserLimits",
+            "parser limit exceeds the R1 bound",
+            "if frame.len() > self.limits.max_frame_size",
+            "fn parse_authenticated(",
+            "AuthenticationFailed",
+            "impl Drop for VmKeyMaterial",
+            "session_wipe.fill(0);",
+        )) {
+            assertContains(vm, marker, "VM parser bounds/authentication contract")
         }
-        val process = builder.start()
-        val completed = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
-        if (!completed) process.destroyForcibly().waitFor(10L, TimeUnit.SECONDS)
-        val output = Files.readString(outputFile, StandardCharsets.UTF_8)
-        return if (completed) {
-            ProcessResult(process.exitValue(), output)
-        } else {
-            ProcessResult(124, "process timed out after ${timeoutSeconds}s: ${command.joinToString(" ")}\n$output")
+        val vmAuthenticated = vm.substringAfter("fn parse_authenticated(")
+        assertOrdered(
+            vmAuthenticated,
+            "let expected_mac =",
+            "if !ct_eq",
+            "VM parsing must verify its MAC before accepting sections",
+        )
+        assertOrdered(
+            vmAuthenticated,
+            "if !ct_eq",
+            "self.parse_sections(",
+            "VM parsing must authenticate before parsing sections",
+        )
+        for (marker in listOf(
+            "const BLOCK_RAW: u32 = 0;",
+            "const BLOCK_RLE: u32 = 1;",
+            "expected_length > maximum_length",
+            "if output.len() > expected_length",
+            "ZstdError::TrailingBytes",
+            "ZstdError::OutputTooLarge",
+            "impl Drop for WipedVec",
+            "self.0.fill(0);",
+        )) {
+            assertContains(vmZstd, marker, "VM decompressor bounds/wipe contract")
+        }
+        assertRustTests(vmZstd, "raw_and_rle_frames_are_bounded", "malformed_or_trailing_frames_fail")
+        assertRustTests(
+            vmExecutor,
+            "wrapping_integer_arithmetic_and_branches_execute",
+            "call_uses_safe_host_trait_and_exception_handler",
+            "divide_by_zero_is_caught_by_bounded_handler",
+            "frame_state_is_wiped_after_failure",
+        )
+
+        assertContains(pageManifest, "name = \"jsrt-page\"", "jsrt-page manifest")
+        assertContains(pageManifest, "unsafe_code = \"forbid\"", "jsrt-page lint policy")
+        assertContains(page, "#![forbid(unsafe_code)]", "jsrt-page")
+        for (marker in listOf(
+            "pub const MAX_PAYLOAD_SIZE",
+            "pub const MAX_PAGE_FRAME_SIZE",
+            "pub const MAX_PAGE_KEY_SIZE",
+            "pub fn encode_r1_frame(",
+            "pub fn open_r1_frame(",
+            "pub fn authenticate(&mut self",
+            "self.encoded.fill(0);",
+            "self.dek.fill(0);",
+            "fn wipe_buffers(",
+            "pub fn wipe(&mut self)",
+        )) {
+            assertContains(page, marker, "page bounds/lease/wipe contract")
+        }
+        assertRustTests(
+            page,
+            "page_round_trip_has_exact_header_offsets_and_strict_bounds",
+            "page_header_and_locator_tamper_fail_before_plaintext",
+            "descriptor_route_proof_and_evaluator_are_exact_and_bounded",
+            "envelope_authenticates_inline_and_compact_forms",
+            "locator_binding_is_route_and_descriptor_bound",
+            "page_keys_sort_and_reject_duplicates",
+            "lease_only_exposes_authenticated_payload_and_transitions_once",
+        )
+
+        assertContains(runtimeManifest, "name = \"jsrt-runtime\"", "jsrt-runtime manifest")
+        assertContains(runtime, "#![forbid(unsafe_code)]", "jsrt-runtime")
+        assertContains(runtime, "authenticate-before-parse", "runtime authentication boundary")
+        assertContains(runtime, "pub fn authenticate_frame(", "runtime authentication entrypoint")
+        assertContains(runtime, "RuntimeEnvelope::open(&self.binding, frame)", "runtime authenticated envelope")
+        assertRustTests(runtime, "runtime_requires_supported_target_and_authenticates_before_opening")
+
+        for (marker in listOf(
+            "pub const MAX_CACHE_ENTRIES",
+            "pub const MAX_CACHE_VALUE_SIZE",
+            "pub const MAX_SENSITIVE_ARENA_SIZE",
+            "pub const MAX_VM_FRAMES",
+            "pub const MAX_DECODER_WORKSPACE_SIZE",
+            "pub struct FixedCache",
+            "CacheFull",
+            "CacheValueTooLarge",
+            "pub fn clear_and_wipe(",
+            "pub fn reset_and_wipe(",
+            "pub fn acquire(self: &Arc<Self>)",
+            "pub fn begin_retirement(",
+            "pub fn wait_for_unload(",
+            "pub fn is_wiped(",
+            "resources.wipe_and_clear();",
+            "impl Drop for SensitiveArena",
+            "impl Drop for VmFrameArena",
+            "impl Drop for DecoderContext",
+        )) {
+            assertContains(lifecycle, marker, "cache/generation/lease/wipe lifecycle contract")
+        }
+        assertRustTests(
+            lifecycle,
+            "artifact_index_is_sorted_and_uses_binary_search",
+            "arenas_wipe_after_success_and_failure_paths",
+            "retirement_wait_is_bounded_and_final_release_wipes_generation",
+            "replayed_generation_ids_are_rejected_after_retirement",
+            "multiple_threads_hold_retiring_leases_until_their_work_finishes",
+            "invalid_generation_limits_fail_before_runtime_activation",
+        )
+    }
+
+    @Test
+    fun native_shell_loader_r1_contract_rejects_unsafe_pe_elf_and_legacy_formats() {
+        val rustRoot = rustRoot()
+        val shellManifest = Files.readString(rustRoot.resolve("crates/jsrt-shell/Cargo.toml"))
+        val shell = Files.readString(rustRoot.resolve("crates/jsrt-shell/src/lib.rs"))
+        val payload = Files.readString(rustRoot.resolve("crates/jsrt-shell/src/payload.rs"))
+        val pe = Files.readString(rustRoot.resolve("crates/jsrt-shell/src/pe.rs"))
+        val elf = Files.readString(rustRoot.resolve("crates/jsrt-shell/src/elf.rs"))
+        val loaderManifest = Files.readString(rustRoot.resolve("crates/jsrt-shell/Cargo.toml"))
+        val loader = Files.readString(rustRoot.resolve("crates/jsrt-shell/src/loader.rs"))
+        val runtimeShell = Files.readString(rustRoot.resolve("crates/jsrt-runtime/src/shell.rs"))
+        val platform = Files.readString(rustRoot.resolve("crates/jsrt-shell/src/platform.rs"))
+
+        assertContains(shellManifest, "name = \"jsrt-shell\"", "jsrt-shell manifest")
+        assertContains(shellManifest, "unsafe_code = \"deny\"", "jsrt-shell lint policy")
+        assertContains(shell, "#![forbid(unsafe_code)]", "jsrt-shell")
+        for (marker in listOf(
+            "pub const MAX_ARTIFACT_SIZE",
+            "pub const MAX_SECTIONS",
+            "pub const MAX_SEGMENTS",
+            "pub const R1_REQUIRED_EXPORTS",
+            "Pe64Image::parse(bytes)?",
+            "Elf64Image::parse(bytes)?",
+            "plan.require_r1_exports()?",
+            "EmptyArtifact",
+            "TargetFormatMismatch",
+            "MissingRequiredExport",
+        )) {
+            assertContains(shell, marker, "safe shell format contract")
+        }
+        assertRustTests(shell, "target_names_are_strict_and_empty_images_fail")
+
+        for (marker in listOf(
+            "const PE_MACHINE_AMD64",
+            "const PE32_PLUS_MAGIC",
+            "const MAX_DIRECTORY_SIZE",
+            "if section_count == 0 || section_count > MAX_SECTIONS",
+            "checked_range(",
+            "ParseError::WriteExecute",
+            "PE has no executable section",
+            "fn parse(bytes: &[u8]) -> Result<Self, ParseError>",
+        )) {
+            assertContains(pe, marker, "PE parser bounds/rejection contract")
+        }
+        for (marker in listOf(
+            "const ELF_CLASS64",
+            "const EM_X86_64",
+            "const MAX_DYNAMIC_STRING_BYTES",
+            "const MAX_NEEDED_LIBRARIES",
+            "program_count > MAX_SEGMENTS",
+            "checked_file_range(",
+            "ParseError::WriteExecute",
+            "ELF PT_DYNAMIC missing",
+            "ELF load or executable segment missing",
+            "fn parse(bytes: &[u8]) -> Result<Self, ParseError>",
+        )) {
+            assertContains(elf, marker, "ELF parser bounds/rejection contract")
+        }
+
+        assertContains(loaderManifest, "name = \"jsrt-shell\"", "jsrt-shell manifest")
+        assertContains(loader, "pub fn validate_artifact(", "jsrt-shell loader")
+        for (marker in listOf(
+            "pub fn detect_format(",
+            "fn is_x64_elf_shared(",
+            "fn is_x64_pe(",
+            "if !format.is_supported()",
+            "UnsupportedFormat",
+            "TargetFormatMismatch",
+            "reject_legacy_or_macos_name(name)?",
+            "impl Drop for LoadedArtifact",
+            "self.bytes.fill(0);",
+            "MachO",
+        )) {
+            assertContains(loader, marker, "jsrt-shell loader format rejection contract")
+        }
+        assertRustTests(
+            loader,
+            "only_current_target_images_are_retained",
+            "macho_dylib_and_legacy_paths_are_rejected",
+        )
+
+        assertContains(runtimeShell, "ShellArtifact::validate", "jsrt-runtime shell validation")
+        assertContains(runtimeShell, "jsrt_shell::validate_artifact", "jsrt-runtime shell loader boundary")
+        assertContains(runtimeShell, "ShellBinding::from_artifact", "jsrt-runtime shell binding")
+        assertRustTests(
+            runtimeShell,
+            "shell_binding_is_derived_only_after_image_validation",
+            "shell_rejects_retired_platform_and_legacy_names",
+        )
+        assertRustTests(
+            platform,
+            "only_the_two_r1_targets_are_accepted",
+            "retired_artifact_names_fail_closed",
+        )
+
+        val payloadOpen = payload.substringAfter("pub fn open_with<")
+        assertOrdered(
+            payloadOpen,
+            "let authenticated = RuntimeEnvelope::open",
+            "PayloadManifest::decode",
+            "shell payload authentication must precede manifest parsing",
+        )
+        assertOrdered(
+            payloadOpen,
+            "PayloadManifest::decode",
+            "decompressor.decompress",
+            "shell payload parsing must precede decompression only after authentication",
+        )
+        for (marker in listOf(
+            "pub const R1_PAYLOAD_MAGIC",
+            "pub const MAX_PAYLOAD_BYTES",
+            "pub fn open_with<D: PayloadDecompressor>(",
+            "PayloadDigestMismatch",
+            "pub fn wipe(&mut self)",
+            "self.plaintext.wipe();",
+        )) {
+            assertContains(payload, marker, "shell payload bounds/authentication/wipe contract")
         }
     }
 
-    private fun findZig(): String? = listOfNotNull(System.getenv("JAVASHROUD_ZIG"), "zig")
-        .firstOrNull { candidate ->
-            runCatching {
-                val process = ProcessBuilder(candidate, "version").redirectErrorStream(true).start()
-                process.inputStream.bufferedReader().use { it.readText() }
-                process.waitFor(10L, TimeUnit.SECONDS) && process.exitValue() == 0
-            }.getOrDefault(false)
+    private fun assertContains(source: String, marker: String, contract: String) {
+        assertTrue(source.contains(marker), "$contract must contain `$marker`")
+    }
+
+    private fun assertOrdered(source: String, first: String, second: String, contract: String) {
+        val firstIndex = source.indexOf(first)
+        val secondIndex = source.indexOf(second)
+        assertTrue(
+            firstIndex >= 0 && secondIndex > firstIndex,
+            "$contract: expected `$first` before `$second`",
+        )
+    }
+
+    private fun assertRustTests(source: String, vararg names: String) {
+        for (name in names) {
+            val test = Regex("""(?m)^\s*#\[test\]\s*fn\s+${Regex.escape(name)}\s*\(""")
+            assertTrue(test.containsMatchIn(source), "Rust #[test] contract is missing: $name")
         }
-
-    private fun isTransientZigFailure(output: String): Boolean =
-        output.isBlank() ||
-            output.contains("CacheCheckFailed") ||
-            output.contains("file_open Unexpected") ||
-            output.contains("sub-compilation of mingw-w64") ||
-            output.contains("unable to update cache: Unexpected") ||
-            output.contains("error: Unexpected")
-
-    private fun platform(): LoaderPlatform? = when {
-        System.getProperty("os.name", "").lowercase().contains("win") -> LoaderPlatform.WINDOWS_X64
-        System.getProperty("os.name", "").lowercase().contains("linux") -> LoaderPlatform.LINUX_X64
-        else -> null
     }
 
-    private fun javaInclude(): Path {
-        val configured = System.getenv("JAVA_HOME")?.takeIf { it.isNotBlank() }
-        val javaHome = Path.of(configured ?: System.getProperty("java.home"))
-        val direct = javaHome.resolve("include")
-        return if (Files.isDirectory(direct)) direct else javaHome.parent.resolve("include")
-    }
-
-    private fun javaPlatformInclude(): Path = javaInclude().resolve(
-        if (platform() == LoaderPlatform.WINDOWS_X64) "win32" else "linux",
-    )
-
-    private fun resolveSource(relative: String): Path {
-        var current = Path.of("").toAbsolutePath()
+    private fun rustRoot(): Path {
+        var current = Path.of("").toAbsolutePath().normalize()
         while (true) {
-            val direct = current.resolve(relative)
-            if (Files.exists(direct)) return direct
-            val nested = current.resolve("core-engine").resolve(relative)
-            if (Files.exists(nested)) return nested
-            current = current.parent ?: error("Unable to locate $relative")
-        }
-    }
-
-    private fun deleteTree(root: Path) {
-        if (!Files.exists(root)) return
-        Files.walk(root).use { paths ->
-            paths.sorted(Comparator.reverseOrder()).forEach { path ->
-                runCatching { Files.deleteIfExists(path) }
+            for (candidate in listOf(
+                current.resolve("core-engine/src/main/rust"),
+                current.resolve("src/main/rust"),
+            )) {
+                if (Files.isRegularFile(candidate.resolve("Cargo.toml"))) return candidate
             }
+            current = current.parent ?: break
         }
+        error("Unable to locate core-engine/src/main/rust")
     }
-
-    private enum class LoaderPlatform(
-        val zigTarget: String,
-        val fileSuffix: String,
-        val executableSuffix: String,
-        val loaderSource: String,
-    ) {
-        WINDOWS_X64("x86_64-windows-gnu", ".dll", ".exe", "js_shell_loader_pe.c"),
-        LINUX_X64("x86_64-linux-gnu", ".so", "", "js_shell_loader_elf.c"),
-    }
-
-    private data class ProcessResult(val exitCode: Int, val output: String)
 }

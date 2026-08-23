@@ -6,7 +6,6 @@ import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4LogicalMe
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4MethodCandidate
 import java.io.ByteArrayOutputStream
 import java.util.Arrays
-import java.util.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -65,12 +64,6 @@ class AkenVbc4ProductionMaterializerTest {
                     Arrays.fill(pageBytes, 0)
                 }
 
-                val include = NativeRecompilationTransforms.generateAkenNativePageLocatorInclude(
-                    scoped,
-                    Random(0xA4E1),
-                )
-                assertTrue(include.contains("#define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_COUNT 1u"))
-                assertFalse(include.contains(plaintext.decodeToString()))
             }
         } finally {
             candidate.wipe()
@@ -146,13 +139,6 @@ class AkenVbc4ProductionMaterializerTest {
                     "materialization must publish every page container selected from the scoped route snapshot",
                 )
 
-                val include = NativeRecompilationTransforms.generateAkenNativePageLocatorInclude(
-                    scoped,
-                    Random(0xA4E2),
-                )
-                assertTrue(include.contains("#define JS_AKEN_NATIVE_PAGE_LOCATOR_RECORD_COUNT 2u"))
-                assertFalse(include.contains(primaryProgram.decodeToString()))
-                assertFalse(include.contains(secondaryProgram.decodeToString()))
             }
         } finally {
             primary.wipe()

@@ -3,7 +3,9 @@ package io.github.hht0rro.javashroud
 import io.github.hht0rro.javashroud.analysis.analyzeClassBytes
 import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
+import io.github.hht0rro.javashroud.transforms.protection.AKEN_NATIVE_BINDINGS_LOCATOR_LOGICAL_RESOURCE
 import io.github.hht0rro.javashroud.transforms.protection.AKEN_NATIVE_LOCATOR_LOGICAL_RESOURCE
+import io.github.hht0rro.javashroud.transforms.protection.AkenNativeLocator
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
@@ -14,7 +16,9 @@ import java.security.MessageDigest
 import java.util.Arrays
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 class AkenNativeLocatorTest {
@@ -33,17 +37,17 @@ class AkenNativeLocatorTest {
         assertFalse(locatorEntry.bytes.containsAscii("META-INF/"), "binary locator routes must not remain plain ASCII")
         assertFalse(locatorEntry.bytes.containsAscii("windows-x64"), "binary locator must not expose platform text")
         assertFalse(locatorEntry.name == AKEN_NATIVE_LOCATOR_LOGICAL_RESOURCE)
-        assertFalse(locatorEntry.name.startsWith("META-INF/js-native/"))
+        assertFalse(locatorEntry.name.startsWith("META-INF/jsrt/"))
 
         val parsed = parseLocator(locatorEntry.bytes)
         assertEquals(setOf("windows-x64", "linux-x64"), parsed.libraries.keys)
-        assertFalse(sealed.jarEntries.any { it.name.startsWith("META-INF/js-native/") })
+        assertFalse(sealed.jarEntries.any { it.name.startsWith("META-INF/jsrt/") })
 
         for ((platform, row) in parsed.libraries) {
             val suffix = checkNotNull(row.fileSuffix)
             assertEquals(expectedSuffix(platform), suffix)
             assertTrue(row.resourcePath.startsWith("META-INF/"))
-            assertFalse(row.resourcePath.startsWith("META-INF/js-native/"))
+            assertFalse(row.resourcePath.startsWith("META-INF/jsrt/"))
             assertTrue(row.resourcePath.endsWith(suffix))
 
             val nativeEntry = sealed.jarEntries.single { it.name == row.resourcePath }
@@ -69,6 +73,10 @@ class AkenNativeLocatorTest {
         assertFalse(
             sealed.classArtifacts.any { artifact -> artifact.bytes.containsAscii(AKEN_NATIVE_LOCATOR_LOGICAL_RESOURCE) },
             "The logical locator path must not survive helper sealing",
+        )
+        assertFalse(
+            sealed.classArtifacts.any { artifact -> artifact.bytes.containsAscii(AKEN_NATIVE_BINDINGS_LOCATOR_LOGICAL_RESOURCE) },
+            "The logical bindings locator path must not survive helper sealing",
         )
     }
 
@@ -104,7 +112,70 @@ class AkenNativeLocatorTest {
         assertFalse(baselineLocator.contentEquals(changedLocator))
     }
 
-    private fun sealFixture(windowsBytes: ByteArray, linuxBytes: ByteArray) = withVbc4BuildContext(
+    @Test
+    fun locator_accepts_only_locked_r1_platforms_and_binds_final_rows() {
+        val windows = AkenNativeLocator.entry(
+            platform = "windows-x64",
+            resourcePath = "META-INF/final.dll",
+            fileSuffix = ".dll",
+            storedBytes = byteArrayOf(1, 2, 3),
+        )
+        val linux = AkenNativeLocator.entry(
+            platform = "linux-x64",
+            resourcePath = "META-INF/final.so",
+            fileSuffix = ".so",
+            storedBytes = byteArrayOf(4, 5, 6),
+        )
+        val baselineDigest = AkenNativeLocator.finalNativeBindingDigest(listOf(windows, linux))
+        val changedDigest = AkenNativeLocator.finalNativeBindingDigest(
+            listOf(
+                windows,
+                AkenNativeLocator.entry(
+                    platform = "linux-x64",
+                    resourcePath = "META-INF/final.so",
+                    fileSuffix = ".so",
+                    storedBytes = byteArrayOf(4, 5, 7),
+                ),
+            ),
+        )
+        assertNotEquals(baselineDigest, changedDigest)
+
+        assertFailsWith<IllegalArgumentException> {
+            AkenNativeLocator.entry("macos-x64", "META-INF/final.dylib", ".dylib", byteArrayOf(1))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            AkenNativeLocator.entry("windows-x64", "META-INF/final.so", ".so", byteArrayOf(1))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            AkenNativeLocator.entry("linux-x64", "META-INF/final.dylib", ".so", byteArrayOf(1))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            AkenNativeLocator.entry("windows-x64", "META-INF/aken/final.dll", ".dll", byteArrayOf(1))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            AkenNativeLocator.entry("windows-x64", "META-INF/.aken/final.dll", ".dll", byteArrayOf(1))
+        }
+    }
+
+    @Test
+    fun sealing_rejects_macos_native_entries_before_rewriting() {
+        assertFailsWith<IllegalStateException> {
+            sealFixture(
+                windowsBytes = byteArrayOf(1),
+                linuxBytes = byteArrayOf(2),
+                additionalNativeEntry = JarEntryData(
+                    "META-INF/js-native/js_kernel_macos-x64.dylib",
+                    byteArrayOf(3),
+                ),
+            )
+        }
+    }
+
+    private fun sealFixture(
+        windowsBytes: ByteArray,
+        linuxBytes: ByteArray,
+        additionalNativeEntry: JarEntryData? = null,
+    ) = withVbc4BuildContext(
         Vbc4BuildContext(
             masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { (it * 29 + 7).toByte() },
             nativeSeed = 0x5A17C0DEL,
@@ -122,9 +193,9 @@ class AkenNativeLocatorTest {
             classArtifacts = listOf(helperArtifact),
             jarEntries = listOf(
                 JarEntryData(helperArtifact.entryName, helperArtifact.bytes),
-                JarEntryData("META-INF/js-native/js_kernel_windows-x64.dll", windowsBytes),
-                JarEntryData("META-INF/js-native/js_kernel_linux-x64.so", linuxBytes),
-            ),
+                JarEntryData("META-INF/jsrt/windows-x64/jsrt_ffi.dll", windowsBytes),
+                JarEntryData("META-INF/jsrt/linux-x64/libjsrt_ffi.so", linuxBytes),
+            ) + listOfNotNull(additionalNativeEntry),
         )
         RuntimeArtifactSealing.seal(artifact, seed = 0x5A17C0DEL, rewritesVmRuntime = false)
     }
@@ -221,7 +292,6 @@ class AkenNativeLocatorTest {
     private fun expectedSuffix(platform: String): String = when (platform) {
         "windows-x64" -> ".dll"
         "linux-x64" -> ".so"
-        "macos-x64", "macos-arm64" -> ".dylib"
         else -> error("unexpected locator platform: $platform")
     }
 
@@ -302,9 +372,7 @@ class AkenNativeLocatorTest {
     private fun platformForId(platformId: Int): String = when (platformId) {
         1 -> "windows-x64"
         2 -> "linux-x64"
-        3 -> "macos-x64"
-        4 -> "macos-arm64"
-        else -> error("unexpected AKEN locator platform id: $platformId")
+        else -> error("unexpected AKEN-R1 locator platform id: $platformId")
     }
 
     private companion object {
@@ -316,7 +384,7 @@ class AkenNativeLocatorTest {
         const val COMMITMENT_BYTES = 32
         const val RECORD_FIXED_BYTES = 40
         const val SHA256_BYTES = 32
-        const val MAX_RECORDS = 5
+        const val MAX_RECORDS = 3
         const val MAX_ROUTE_BYTES = 2048
         const val KIND_LIBRARY = 1
         const val KIND_BINDINGS = 2

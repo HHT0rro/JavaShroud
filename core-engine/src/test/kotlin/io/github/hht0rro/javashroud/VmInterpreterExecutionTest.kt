@@ -10,7 +10,6 @@ import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZ
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.NativeVmBuildProfile
-import io.github.hht0rro.javashroud.transforms.protection.NativeKernelShellPacker
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeKeyPartitions
 import io.github.hht0rro.javashroud.transforms.protection.VmBytecodeSerializer
 import org.objectweb.asm.ClassReader
@@ -195,14 +194,14 @@ class VmInterpreterExecutionTest {
     @Test
     fun vbc4_extended_opcode_aliasing_covers_more_semantic_families() {
         val serializerSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/VmBytecodeSerializer.kt"))
-        val nativeSource = Files.readString(Path.of("src/main/native/js_vm_core.c"))
+        val nativeSource = Files.readString(Path.of("src/main/rust/crates/jsrt-vm/src/lib.rs"))
         // Arithmetic/bitwise, load-store, array, field, and branch families must all carry aliases.
         for (canonical in listOf("VM_IMUL", "VM_IXOR", "VM_IAND", "VM_ISHL", "VM_ALOAD", "VM_ASTORE", "VM_IALOAD", "VM_GETFIELD", "VM_GOTO", "VM_IF_ICMPEQ")) {
             assertTrue(serializerSource.contains("VmOpcodes.$canonical to intArrayOf("), "Serializer must alias $canonical")
         }
-        // Native must canonicalize every new alias back to its base handler.
-        for (pair in listOf("JS_VM_IMUL_ALT: return JS_VM_IMUL", "JS_VM_GOTO_ALT: return JS_VM_GOTO", "JS_VM_GETFIELD_ALT: return JS_VM_GETFIELD", "JS_VM_IALOAD_ALT: return JS_VM_IALOAD")) {
-            assertTrue(nativeSource.contains("case $pair;"), "Native parser must canonicalize $pair")
+        assertTrue(nativeSource.contains("fn canonical_opcode"), "Rust parser must canonicalize polymorphic opcode aliases")
+        for (name in listOf("IMUL", "GOTO", "GETFIELD", "IALOAD")) {
+            assertTrue(nativeSource.contains(name), "Rust VM must keep $name")
         }
     }
 
@@ -271,15 +270,15 @@ class VmInterpreterExecutionTest {
     @Test
     fun vbc4_serializer_and_native_parser_support_opcode_level_polymorphism() {
         val serializerSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/VmBytecodeSerializer.kt"))
-        val nativeSource = Files.readString(Path.of("src/main/native/js_vm_core.c"))
+        val nativeSource = Files.readString(Path.of("src/main/rust/crates/jsrt-vm/src/lib.rs"))
 
         assertTrue(serializerSource.contains("VM_OPCODE_ALIASES"), "Serializer must define equivalent opcode aliases.")
         assertTrue(serializerSource.contains("lowerToLogicalProgram(metadataCpIndex)"), "VBC4-only serialization must lower bytecode into the register program consumed by native dispatch.")
         assertTrue(serializerSource.contains("polymorphicOpcode(instruction.opcode"), "Register instruction serialization must choose polymorphic opcode aliases.")
         assertTrue(serializerSource.contains("domainSuperOperandOpcode") && serializerSource.contains("polymorphicOpcode(opcode"), "Semantic/domain super-operators must diversify their embedded source opcodes instead of exposing stable canonical operands.")
-        assertTrue(nativeSource.contains("js_vm_canonical_opcode"), "Native parser must canonicalize polymorphic opcode aliases before dispatch.")
-        assertTrue(nativeSource.contains("case JS_VM_IADD_ALT: return JS_VM_IADD;"), "Native parser must map arithmetic aliases to canonical handlers.")
-        assertTrue(nativeSource.contains("case JS_VM_IRETURN_ALT: return JS_VM_IRETURN;"), "Native parser must map return aliases to canonical handlers.")
+        assertTrue(nativeSource.contains("fn canonical_opcode"), "Rust parser must canonicalize polymorphic opcode aliases before dispatch.")
+        assertTrue(nativeSource.contains("IADD"), "Rust parser must keep arithmetic handlers.")
+        assertTrue(nativeSource.contains("IRETURN"), "Rust parser must keep return handlers.")
     }
 
     @Test

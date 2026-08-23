@@ -10,7 +10,6 @@ import io.github.hht0rro.javashroud.model.analysis.RenamePlan
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
-import io.github.hht0rro.javashroud.transforms.protection.NativeKernelShellPacker
 import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import org.objectweb.asm.ClassReader
@@ -97,6 +96,7 @@ class EmbeddedHelperDeploymentTest {
             .first { it.name == "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.class" }
             .bytes
         val methods = linkedSetOf<String>()
+        val nativeMethods = linkedSetOf<String>()
 
         ClassReader(helperBytes).accept(object : ClassVisitor(Opcodes.ASM9) {
             override fun visitMethod(
@@ -106,10 +106,23 @@ class EmbeddedHelperDeploymentTest {
                 signature: String?,
                 exceptions: Array<out String>?,
             ): org.objectweb.asm.MethodVisitor? {
-                methods += "$name$descriptor"
+                val method = "$name$descriptor"
+                methods += method
+                if (access and Opcodes.ACC_NATIVE != 0) nativeMethods += method
                 return null
             }
         }, ClassReader.SKIP_CODE or ClassReader.SKIP_DEBUG or ClassReader.SKIP_FRAMES)
+
+        val requiredNativeMethods = linkedSetOf(
+            "nativeInit(Ljava/lang/String;)I",
+            "nativeHeartbeat()I",
+            "nativeInstallAkenSessionNonce([B)Z",
+            "nativeExecuteAkenVmPage(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;",
+            "nativeOpenAkenString([BI[B)Ljava/lang/String;",
+            "nativeReadAkenClassPage([BI[B)[B",
+            "nativeConsumeAkenNativeChunk([BI[B)V",
+        )
+        assertEquals(requiredNativeMethods, nativeMethods, "Emitted helper must expose exactly seven R1 native registrations")
 
         val requiredTypedMethods = setOf(
             "nativeInit(Ljava/lang/String;)I",
@@ -163,62 +176,60 @@ class EmbeddedHelperDeploymentTest {
 
 
     @Test
-    fun overlay_marker_alone_does_not_satisfy_max_stub_abi_probe() {
-        val shellPackedBytes = "loadable-native-prefix-${NativeKernelShellPacker.LOADER_MARKER}".toByteArray(Charsets.US_ASCII)
+    fun incomplete_r1_exports_do_not_satisfy_the_native_abi_probe() {
+        val incomplete = "JNI_OnLoad-JNI_OnUnload-jsrt_r1_runtime_binding_digest".toByteArray(Charsets.US_ASCII)
 
         assertFalse(
-            EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(shellPackedBytes),
-            "standard overlay marker alone must not be accepted as max stub shell evidence.",
+            EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(incomplete),
+            "R1 artifacts must expose the complete typed jsrt_r1 export set.",
         )
     }
 
     @Test
-    fun max_stub_markers_and_jni_onload_satisfy_jni_vm_abi_probe() {
-        val maxStubBytes = "native-prefix-JNI_OnLoad-${NativeKernelShellPacker.MAX_STUB_MARKER}-${NativeKernelShellPacker.MAX_PAYLOAD_MARKER}".toByteArray(Charsets.US_ASCII)
+    fun r1_exports_and_jni_lifecycle_satisfy_the_native_abi_probe() {
+        val r1Bytes = listOf(
+            "JNI_OnLoad",
+            "JNI_OnUnload",
+            "jsrt_r1_runtime_binding_digest",
+            "jsrt_r1_open_frame",
+        ).joinToString("-").toByteArray(Charsets.US_ASCII)
 
         assertTrue(
-            EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(maxStubBytes),
-            "max stub artifacts must carry JNI_OnLoad plus stub and payload markers.",
+            EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(r1Bytes),
+            "Rust R1 artifacts must carry the typed jsrt_r1 exports and JNI lifecycle.",
+        )
+        assertFalse(
+            EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(
+                (r1Bytes.decodeToString() + "-nativeExecuteVmResource").toByteArray(Charsets.US_ASCII),
+            ),
+            "legacy generic native routes must remain rejected.",
         )
     }
 
     @Test
-    fun jni_microkernel_helper_loads_outer_stub_without_java_max_payload_decoder() {
+    fun jni_microkernel_helper_validates_r1_images_before_system_load() {
         val helperSource = Files.readString(resolveWorkspacePath("core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
 
-        assertTrue(helperSource.contains("System.load(tempLib.getAbsolutePath())"), "Bundled native loading must still delegate to the extracted outer stub library.")
-        assertFalse(helperSource.contains("System.loadLibrary("), "A bundled verification failure must not fall back to a stale system-path library.")
-        assertTrue(helperSource.contains("decodeSealedNativeResource"), "Java may only decode the sealed outer native resource before System.load.")
-
-        for (forbiddenToken in listOf(
-            NativeKernelShellPacker.MAX_STUB_MARKER,
-            NativeKernelShellPacker.MAX_PAYLOAD_MARKER,
-            "js_shell_payload",
-            "js_shell_stream_key",
-            "js_shell_payload_mac",
-            "js_shell_payload.inc",
-            "NativeKernelShellPacker",
-            "buildMaxPayloadBundle",
-            "renderMaxPayloadHeader",
-        )) {
-            assertFalse(
-                helperSource.contains(forbiddenToken),
-                "JniMicrokernelHelper must not parse, decrypt, or fallback-load max shell payload material in Java: $forbiddenToken",
-            )
-        }
+        assertTrue(helperSource.contains("validateR1NativeImage(platformTarget, nativeBytes)"), "R1 images must be validated before extraction.")
+        assertTrue(helperSource.contains("System.load(tempLib.getAbsolutePath())"), "Bundled native loading must use the authenticated extracted R1 image.")
+        assertFalse(helperSource.contains("System.loadLibrary("), "A bundled verification failure must not fall back to a system-path library.")
+        assertFalse(helperSource.contains("decodeSealedNativeResource"), "R1 Java must not decode a retired native wrapper.")
+        assertFalse(helperSource.contains("nativeExecuteVmResource"), "R1 Java must not retain the generic native VM route.")
+        assertFalse(helperSource.contains("nativeInstallBootMaterial"), "R1 Java must not retain boot-material JNI calls.")
     }
 
     @Test
-    fun jni_microkernel_helper_parses_boot_kek_without_trimmed_text_copies() {
+    fun jni_microkernel_helper_retains_only_fail_closed_java_compatibility_wrappers() {
         val helperSource = Files.readString(resolveWorkspacePath("core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
-        val bootSecretStart = helperSource.indexOf("private static byte[] loadBootSecret(byte[] bootEnvelope)")
-        val bootSecretEnd = helperSource.indexOf("private static byte[] decryptBootMaterial", bootSecretStart)
-        assertTrue(bootSecretStart >= 0 && bootSecretEnd > bootSecretStart, "Boot KEK loader must remain locatable.")
-        val bootSecretLoader = helperSource.substring(bootSecretStart, bootSecretEnd)
 
-        assertFalse(bootSecretLoader.contains("encoded.trim()"), "Runtime boot KEK parsing must match the strict native environment contract.")
-        assertFalse(bootSecretLoader.contains("new String(bytes, StandardCharsets.US_ASCII)"), "Boot KEK files must be decoded directly from the wipeable byte buffer.")
-        assertTrue(bootSecretLoader.contains("return hexToBytes(bytes);"), "Runtime boot KEK files must use direct byte-array hex decoding.")
+        assertTrue(helperSource.contains("public static byte[] deriveClassEncryptionKey"))
+        assertTrue(helperSource.contains("class-encryption key derivation is not part of the R1 Java helper"))
+        assertTrue(helperSource.contains("public static byte[] decryptClassBytes"))
+        assertTrue(helperSource.contains("class-encryption decryption is not part of the R1 Java helper"))
+        assertFalse(helperSource.contains("nativeDeriveClassEncryptionKey"))
+        assertFalse(helperSource.contains("nativeDecryptClassBytes"))
+        assertFalse(helperSource.contains("loadBootSecret"))
+        assertFalse(helperSource.contains("decryptBootMaterial"))
     }
 
     @Test
@@ -235,11 +246,11 @@ class EmbeddedHelperDeploymentTest {
 
         assertTrue(
             bundleSource.contains(retainedFilter),
-            "Native bundling must remove pre-existing js_kernel resources before adding max outer stubs.",
+            "Native bundling must remove pre-existing native resources before adding R1 Rust runtimes.",
         )
         assertTrue(
             bundleSource.contains(rejectedNativeEntries) && bundleSource.contains(legacyBootCleanup),
-            "Native bundling must remove pre-existing kernels and legacy boot resources before packaging recompiled outputs.",
+            "Native bundling must remove pre-existing native and legacy boot resources before packaging Rust outputs.",
         )
         for (legacyProducer in listOf("BootMaterialEnvelope", "BootKekSidecar", "bootKeyDelivery", "embeddedBootKekBytes")) {
             assertFalse(
@@ -249,11 +260,11 @@ class EmbeddedHelperDeploymentTest {
         }
         assertTrue(
             bundleSource.contains(appendRecompiled),
-            "Native bundling must package only retained non-kernel resources plus freshly recompiled native outputs.",
+            "Native bundling must package only retained non-runtime resources plus freshly compiled Rust outputs.",
         )
         assertTrue(
             bundleSource.indexOf(retainedFilter) < bundleSource.indexOf(appendRecompiled),
-            "Existing native kernel resources must be filtered before the final JAR entry list is assembled.",
+            "Existing native resources must be filtered before the final JAR entry list is assembled.",
         )
     }
 

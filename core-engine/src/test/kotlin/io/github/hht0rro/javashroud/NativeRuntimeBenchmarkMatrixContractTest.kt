@@ -1,328 +1,164 @@
 package io.github.hht0rro.javashroud
 
-import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.StandardCopyOption
-import java.util.Comparator
-import java.util.concurrent.TimeUnit
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
-import org.junit.jupiter.api.Assumptions.assumeTrue
 
-/**
- * Bounded executable contract coverage for the full native runtime benchmark
- * catalogue.
- *
- * The production CLI intentionally exposes the costly 100/1000/10000/100000
- * matrix. This test verifies those exact profiles and percentile ranks in the
- * native probe, while executing a one-sample, non-measured-warmup report in
- * both capability-gated and forced-software builds. It does not represent a
- * throughput claim and cannot close the production coverage/security gate.
- */
 class NativeRuntimeBenchmarkMatrixContractTest {
     @Test
-    fun bounded_matrix_contract_preserves_profiles_report_fields_and_crypto_path_parity() {
-        val zig = findZig()
-        assumeTrue(zig != null, "Zig is required to compile the native benchmark matrix contract probe")
-        assumeTrue(isWindows() || isLinux(), "the native benchmark matrix contract probe supports Windows and Linux")
+    fun rust_r1_benchmark_contract_is_bounded_authenticated_software_only_and_workspace_locked() {
+        val rustRoot = rustRoot()
+        val workspace = Files.readString(rustRoot.resolve("Cargo.toml"))
+        val cryptoManifest = Files.readString(rustRoot.resolve("crates/jsrt-crypto/Cargo.toml"))
+        val crypto = Files.readString(rustRoot.resolve("crates/jsrt-crypto/src/lib.rs")) +
+            Files.readString(rustRoot.resolve("crates/jsrt-crypto/src/types.rs"))
+        val protocol = Files.readString(rustRoot.resolve("crates/jsrt-page/src/frame.rs"))
+        val vmManifest = Files.readString(rustRoot.resolve("crates/jsrt-vm/Cargo.toml"))
+        val vm = Files.readString(rustRoot.resolve("crates/jsrt-vm/src/lib.rs"))
+        val zstd = Files.readString(rustRoot.resolve("crates/jsrt-vm/src/zstd.rs"))
+        val executor = Files.readString(rustRoot.resolve("crates/jsrt-vm/src/executor.rs"))
 
-        val sourceNativeDir = resolveSource("src/main/native")
-        val benchmarkSource = resolveSource("src/test/native/native_runtime_benchmark.c")
-        val probeSource = resolveSource("src/test/native/runtime_benchmark_matrix_contract_probe.c")
-        val root = Files.createTempDirectory("javashroud-native-benchmark-matrix-contract-")
-        try {
-            val nativeDir = root.resolve("native")
-            copyTree(sourceNativeDir, nativeDir)
-            /* Zig 0.16's MinGW sysroot may omit this optional AVX10 header.
-             * The benchmark only relies on capability-gated AES/PCLMUL paths;
-             * keep the shim isolated to this copied test fixture. */
-            Files.writeString(
-                nativeDir.resolve("avx10_2satcvtintrin.h"),
-                "#ifndef JS_FIXTURE_AVX10_2SATCVT_INTRIN_H\n#define JS_FIXTURE_AVX10_2SATCVT_INTRIN_H\n#endif\n",
-                StandardCharsets.US_ASCII,
-            )
-            val benchmark = nativeDir.resolve("native_runtime_benchmark.c")
-            val probe = nativeDir.resolve("runtime_benchmark_matrix_contract_probe.c")
-            Files.copy(benchmarkSource, benchmark, StandardCopyOption.REPLACE_EXISTING)
-            Files.copy(probeSource, probe, StandardCopyOption.REPLACE_EXISTING)
-
-            val hardwareExecutable = root.resolve(executableName("benchmark_matrix_hardware"))
-            val softwareExecutable = root.resolve(executableName("benchmark_matrix_software"))
-            val hardwareCompile = runWithTransientZigRetry(
-                compileCommand(checkNotNull(zig), nativeDir, probe, hardwareExecutable, forceSoftware = false),
-                root,
-                "compile-hardware",
-            )
-            assertEquals(0, hardwareCompile.exitCode, "hardware benchmark matrix contract probe must compile:\n${hardwareCompile.output}")
-            val softwareCompile = runWithTransientZigRetry(
-                compileCommand(checkNotNull(zig), nativeDir, probe, softwareExecutable, forceSoftware = true),
-                root,
-                "compile-software",
-            )
-            assertEquals(0, softwareCompile.exitCode, "software benchmark matrix contract probe must compile:\n${softwareCompile.output}")
-
-            val hardwareRun = run(
-                listOf(hardwareExecutable.toString()),
-                root,
-                "run-hardware",
-                timeoutSeconds = 300L,
-            )
-            val softwareRun = run(
-                listOf(softwareExecutable.toString()),
-                root,
-                "run-software",
-                timeoutSeconds = 300L,
-            )
-            assertTrue(hardwareRun.completed, "hardware benchmark matrix contract probe timed out:\n${hardwareRun.output}")
-            assertTrue(softwareRun.completed, "software benchmark matrix contract probe timed out:\n${softwareRun.output}")
-            assertEquals(0, hardwareRun.exitCode, "hardware benchmark matrix contract probe failed:\n${hardwareRun.output}")
-            assertEquals(0, softwareRun.exitCode, "software benchmark matrix contract probe failed:\n${softwareRun.output}")
-
-            val hardware = contractFields(hardwareRun.output)
-            val software = contractFields(softwareRun.output)
-            assertContract(hardware, "hardware", hardwareRun.output)
-            assertContract(software, "software", softwareRun.output)
-            assertEquals("0", software["hardware_aes"], "forced-software probe exposed AES hardware capability:\n${softwareRun.output}")
-            assertEquals("0", software["hardware_ghash"], "forced-software probe exposed GHASH hardware capability:\n${softwareRun.output}")
-            assertEquals("0", software["hardware_crypto_path"], "forced-software probe selected a hardware crypto path:\n${softwareRun.output}")
-            assertTrue(
-                (software["software_crypto_path"]?.toLongOrNull() ?: 0L) > 0L,
-                "forced-software probe did not report its software crypto path:\n${softwareRun.output}",
-            )
-
-            val hardwareAes = hardware["hardware_aes"]?.toIntOrNull() ?: error("missing hardware AES capability")
-            val hardwarePath = hardware["hardware_crypto_path"]?.toLongOrNull() ?: error("missing hardware path counter")
-            if (hardwareAes != 0) {
-                assertTrue(hardwarePath > 0L, "AES capability was reported without hardware crypto dispatch:\n${hardwareRun.output}")
-            } else {
-                assertEquals(0L, hardwarePath, "hardware crypto dispatch occurred without AES capability:\n${hardwareRun.output}")
-            }
-            assertEquals(
-                hardware["output_digest"],
-                software["output_digest"],
-                "hardware/software benchmark matrix aggregate output digest mismatch",
-            )
-            for (phase in COMPARABLE_PHASES) {
-                assertEquals(
-                    phaseFields(hardwareRun.output, phase)["output_digest"],
-                    phaseFields(softwareRun.output, phase)["output_digest"],
-                    "$phase hardware/software output digest mismatch",
-                )
-            }
-
-            println(
-                "native-benchmark-matrix-contract profiles=${hardware["profiles"]} warmup=${hardware["warmup"]} " +
-                    "hardware_aes=$hardwareAes hardware_path=$hardwarePath " +
-                    "software_path=${software["software_crypto_path"]} output_digest=${hardware["output_digest"]}",
-            )
-        } finally {
-            deleteTree(root)
+        assertEquals(
+            listOf(
+                "crates/jsrt-ffi",
+                "crates/jsrt-runtime",
+                "crates/jsrt-crypto",
+                "crates/jsrt-page",
+                "crates/jsrt-resource",
+                "crates/jsrt-vm",
+                "crates/jsrt-shell",
+            ),
+            workspaceMembers(workspace),
+            "current R1 workspace members",
+        )
+        for (marker in listOf(
+            "[workspace.metadata.aken-r1]",
+            "runtime_abi = \"jsrt_ffi\"",
+            "runtime_resource_root = \"META-INF/jsrt\"",
+            "rust_toolchain = \"1.78.0\"",
+            "windows_target = \"x86_64-pc-windows-gnu\"",
+            "linux_glibc_floor = \"2.17\"",
+            "unsafe_code = \"deny\"",
+        )) {
+            assertContains(workspace, marker, "R1 workspace")
         }
+
+        assertContains(cryptoManifest, "name = \"jsrt-crypto\"", "jsrt-crypto manifest")
+        assertContains(vmManifest, "name = \"jsrt-vm\"", "jsrt-vm manifest")
+        assertContains(vmManifest, "unsafe_code = \"forbid\"", "jsrt-vm manifest")
+        assertNoUnsafe(crypto, "jsrt-crypto")
+        assertNoUnsafe(vm, "jsrt-vm")
+
+        for (testName in listOf(
+            "authentication_tag_is_framed_and_constant_time",
+            "ghash_and_capability_gate_match_known_answers",
+            "public_helpers_enforce_the_kotlin_r1_bounds",
+        )) {
+            assertRustTest(crypto, testName)
+        }
+        for (testName in listOf(
+            "cursor_and_writer_are_explicit_and_bounds_checked",
+            "authenticated_round_trip_happens_after_digest_check",
+            "malformed_payload_is_not_returned_before_authentication",
+        )) {
+            assertRustTest(protocol, testName)
+        }
+        for (testName in listOf(
+            "raw_and_rle_frames_are_bounded",
+            "malformed_or_trailing_frames_fail",
+            "frame_state_is_wiped_after_failure",
+        )) {
+            val source = if (testName.startsWith("frame_state")) executor else zstd
+            assertRustTest(source, testName)
+        }
+
+        for (marker in listOf(
+            "pub const MAX_PAYLOAD_SIZE",
+            "pub fn aes256_gcm_encrypt(",
+            "pub fn aes256_gcm_decrypt(",
+            "fn validate_gcm_lengths(",
+            "MAX_GCM_BLOCKS",
+            "fn ensure_software_backend(",
+            "software_available()",
+            "hardware_aes: false",
+            "hardware_ghash: false",
+        )) {
+            assertContains(crypto, marker, "software-only R1 crypto policy")
+        }
+        val decrypt = crypto.substringAfter("pub fn aes256_gcm_decrypt(")
+        assertOrder(decrypt, "let authenticated =", "let mut plaintext", "GCM authentication before decryption")
+
+        for (marker in listOf(
+            "pub const VBC4_MAX_FRAME_SIZE",
+            "pub const VBC4_MAX_SECTION_SIZE",
+            "pub struct ParserLimits",
+            "parser limit exceeds the R1 bound",
+            "if frame.len() > self.limits.max_frame_size",
+            "let expected_mac =",
+            "vbc4_hmac_fields(",
+            "if !ct_eq(&expected_mac",
+            "let result = self.parse_sections(",
+            "zstd::decompress(",
+            "WipedBytes",
+        )) {
+            assertContains(vm, marker, "R1 VM benchmark contract")
+        }
+        assertOrder(
+            vm.substringAfter("fn parse_authenticated("),
+            "if !ct_eq(&expected_mac",
+            "let result = self.parse_sections(",
+            "VM authentication before section parse/decompression",
+        )
+        assertContains(executor, "frame.wipe();", "R1 VM execution wipe contract")
     }
 
-    private fun assertContract(fields: Map<String, String>, mode: String, output: String) {
-        assertEquals("pass", fields["status"], "$mode contract probe did not pass:\n$output")
-        assertEquals("100,1000,10000,100000", fields["profiles"], "$mode profile catalogue drifted:\n$output")
-        assertEquals("3", fields["warmup"], "$mode probe did not use the bounded non-measured warmup:\n$output")
-        assertEquals("1", fields["measured_samples"], "$mode probe did not use the bounded measured profile:\n$output")
-        assertEquals("17", fields["phase_count"], "$mode probe did not validate every available phase:\n$output")
-        assertEquals("3", fields["unsupported_phase_count"], "$mode probe did not preserve explicit unsupported production adapters:\n$output")
+    private fun workspaceMembers(manifest: String): List<String> {
+        val block = Regex("(?s)members\\s*=\\s*\\[(.*?)\\]")
+            .find(manifest)
+            ?.groupValues
+            ?.get(1)
+            ?: error("current R1 workspace members are missing")
+        return Regex("(?m)^\\s*\"([^\"]+)\"\\s*,?\\s*$")
+            .findAll(block)
+            .map { it.groupValues[1] }
+            .toList()
+    }
+
+    private fun assertContains(source: String, marker: String, contract: String) {
+        assertTrue(source.contains(marker), "$contract must contain `$marker`")
+    }
+
+    private fun assertNoUnsafe(source: String, contract: String) {
+        assertContains(source, "#![forbid(unsafe_code)]", contract)
+        assertTrue(!Regex("\\bunsafe\\s*\\{").containsMatchIn(source), "$contract must not contain unsafe blocks")
+    }
+
+    private fun assertRustTest(source: String, testName: String) {
         assertTrue(
-            fields["output_digest"]?.matches(Regex("[0-9a-f]{16}")) == true,
-            "$mode contract probe did not emit a de-identified aggregate output digest:\n$output",
+            Regex("(?m)^\\s*#\\[test\\]\\s*fn\\s+${Regex.escape(testName)}\\s*\\(").containsMatchIn(source),
+            "Rust #[test] contract is missing: $testName",
         )
-        listOf("hardware_aes", "hardware_ghash").forEach { field ->
-            assertTrue(
-                fields[field]?.toIntOrNull()?.let { it == 0 || it == 1 } == true,
-                "$mode contract probe emitted an invalid $field value:\n$output",
-            )
-        }
-        listOf("hardware_crypto_path", "software_crypto_path").forEach { field ->
-            assertTrue(
-                fields[field]?.toLongOrNull()?.let { it >= 0L } == true,
-                "$mode contract probe omitted $field:\n$output",
-            )
-        }
     }
 
-    private fun contractFields(output: String): Map<String, String> {
-        val prefix = "matrix_contract "
-        val lines = output.lineSequence().filter { it.startsWith(prefix) }.toList()
-        assertEquals(1, lines.size, "expected exactly one benchmark matrix contract line:\n$output")
-        return tokenFields(lines.single())
+    private fun assertOrder(source: String, first: String, second: String, contract: String) {
+        val firstIndex = source.indexOf(first)
+        val secondIndex = source.indexOf(second)
+        assertTrue(firstIndex >= 0 && secondIndex > firstIndex, "$contract must keep `$first` before `$second`")
     }
 
-    private fun phaseFields(output: String, phase: String): Map<String, String> {
-        val prefix = "phase=$phase "
-        val lines = output.lineSequence().filter { it.startsWith(prefix) }.toList()
-        assertEquals(1, lines.size, "expected exactly one $phase phase report:\n$output")
-        return tokenFields(lines.single())
-    }
-
-    private fun tokenFields(line: String): Map<String, String> = line
-        .split(' ')
-        .mapNotNull { token ->
-            val separator = token.indexOf('=')
-            if (separator <= 0 || separator == token.lastIndex) null else token.substring(0, separator) to token.substring(separator + 1)
-        }
-        .toMap()
-
-    private fun compileCommand(
-        zig: String,
-        nativeDir: Path,
-        probe: Path,
-        executable: Path,
-        forceSoftware: Boolean,
-    ): List<String> = buildList {
-        addAll(
-            listOf(
-                zig,
-                "cc",
-                "-std=c11",
-                "-O2",
-                "-fwrapv",
-                "-DJS_NATIVE_PROTECTION_NONE=1",
-                "-DJS_AKEN_TYPED_ONLY_RUNTIME=1",
-            ),
-        )
-        if (forceSoftware) add("-DJS_CRYPTO_FORCE_SOFTWARE=1")
-        addAll(
-            listOf(
-                "-I", nativeDir.toString(),
-                "-I", nativeDir.resolve("cross-compile").toString(),
-                "-I", nativeDir.resolve("zstd").toString(),
-                "-I", nativeDir.resolve("zstd/common").toString(),
-                "-I", nativeDir.resolve("zstd/decompress").toString(),
-                nativeDir.resolve("js_crypto.c").toString(),
-                nativeDir.resolve("js_shell_crypto.c").toString(),
-                probe.toString(),
-                "-o", executable.toString(),
-            ),
-        )
-        when {
-            isWindows() -> add("-ladvapi32")
-            isLinux() -> {
-                add("-pthread")
-                add("-Wl,-T,${nativeDir.resolve("js_protected_section_linux.ld")}")
-                add("-ldl")
-            }
-        }
-    }
-
-    private fun runWithTransientZigRetry(command: List<String>, directory: Path, label: String): ProcessResult {
-        var result = run(command, directory, "$label-0", timeoutSeconds = 300L, zigCache = directory.resolve("zig-cache-0"))
-        for (attempt in 1..5) {
-            if (result.completed && result.exitCode == 0 || !isTransientZigFailure(result.output)) break
-            result = run(
-                command,
-                directory,
-                "$label-$attempt",
-                timeoutSeconds = 300L,
-                zigCache = directory.resolve("zig-cache-$attempt"),
-            )
-        }
-        return result
-    }
-
-    private fun run(
-        command: List<String>,
-        directory: Path,
-        label: String,
-        timeoutSeconds: Long,
-        zigCache: Path? = null,
-    ): ProcessResult {
-        val outputFile = directory.resolve("$label.log")
-        val builder = ProcessBuilder(command)
-            .directory(directory.toFile())
-            .redirectErrorStream(true)
-            .redirectOutput(outputFile.toFile())
-        zigCache?.let { cache ->
-            builder.environment()["ZIG_GLOBAL_CACHE_DIR"] = cache.resolve("global").toString()
-            builder.environment()["ZIG_LOCAL_CACHE_DIR"] = cache.resolve("local").toString()
-        }
-        val process = builder.start()
-        val completed = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
-        if (!completed) process.destroyForcibly().waitFor(10L, TimeUnit.SECONDS)
-        val output = Files.readString(outputFile, StandardCharsets.UTF_8)
-        return ProcessResult(if (completed) process.exitValue() else 124, output, completed)
-    }
-
-    private fun copyTree(source: Path, target: Path) {
-        Files.walk(source).use { paths ->
-            paths.forEach { path ->
-                val destination = target.resolve(source.relativize(path).toString())
-                if (Files.isDirectory(path)) {
-                    Files.createDirectories(destination)
-                } else {
-                    Files.createDirectories(destination.parent)
-                    Files.copy(path, destination, StandardCopyOption.REPLACE_EXISTING)
-                }
-            }
-        }
-    }
-
-    private fun deleteTree(root: Path) {
-        if (!Files.exists(root)) return
-        Files.walk(root).use { paths ->
-            paths.sorted(Comparator.reverseOrder()).forEach { path -> Files.deleteIfExists(path) }
-        }
-    }
-
-    private fun findZig(): String? = listOfNotNull(System.getenv("JAVASHROUD_ZIG"), "zig").firstOrNull { candidate ->
-        runCatching {
-            val process = ProcessBuilder(candidate, "version").redirectErrorStream(true).start()
-            process.inputStream.bufferedReader().use { it.readText() }
-            process.waitFor(10L, TimeUnit.SECONDS) && process.exitValue() == 0
-        }.getOrDefault(false)
-    }
-
-    private fun resolveSource(relative: String): Path {
+    private fun rustRoot(): Path {
         var current = Path.of("").toAbsolutePath().normalize()
         while (true) {
-            val direct = current.resolve(relative)
-            if (Files.isRegularFile(direct) || Files.isDirectory(direct)) return direct
-            current = current.parent ?: error("unable to resolve source path: $relative")
+            for (candidate in listOf(
+                current.resolve("core-engine/src/main/rust"),
+                current.resolve("src/main/rust"),
+            )) {
+                if (Files.isRegularFile(candidate.resolve("Cargo.toml"))) return candidate
+            }
+            current = current.parent ?: break
         }
-    }
-
-    private fun isWindows(): Boolean = System.getProperty("os.name", "").lowercase().contains("win")
-
-    private fun isLinux(): Boolean = System.getProperty("os.name", "").lowercase().contains("linux")
-
-    private fun executableName(stem: String): String = if (isWindows()) "$stem.exe" else stem
-
-    private fun isTransientZigFailure(output: String): Boolean =
-        output.isBlank() ||
-            output.contains("CacheCheckFailed") ||
-            output.contains("file_open Unexpected") ||
-            output.contains("sub-compilation of mingw-w64") ||
-            output.contains("unable to update cache: Unexpected") ||
-            output.contains("error: Unexpected") ||
-            (output.contains("unable to load '") && output.contains("': Unexpected"))
-
-    private data class ProcessResult(val exitCode: Int, val output: String, val completed: Boolean)
-
-    private companion object {
-        val COMPARABLE_PHASES = listOf(
-            "aes-gcm-128-kat",
-            "aes-gcm-256-kat",
-            "ghash-aad-authenticated-page-4k",
-            "ghash-aad-authenticated-page-64k",
-            "ghash-aad-authenticated-page-1m",
-            "aes-ctr-128-4k",
-            "aes-ctr-256-4k",
-            "aes-ctr-128-64k",
-            "aes-ctr-256-64k",
-            "aes-ctr-128-1m",
-            "aes-ctr-256-1m",
-            "shell-payload-decode-4k",
-            "shell-payload-decode-64k",
-            "shell-payload-decode-1m",
-            "resource-alias-lookup",
-            "resource-commitment-lookup",
-            "jni-method-class-lookup",
-        )
+        error("Unable to locate core-engine/src/main/rust")
     }
 }

@@ -396,11 +396,12 @@ class MethodVirtualizationThresholdTest {
         assertTrue(methodCallsVmDispatcher(transformed, "value", "()I"), "Condy-bearing method should be replaced by the native VM dispatcher")
         assertTrue(result.artifact.jarEntries.any { it.isVmResourceName() }, "Condy-bearing virtualization should emit a VBC4 resource")
         val projectDir = Path.of(System.getProperty("user.dir"))
-        val sourceRoot = if (Files.exists(projectDir.resolve("src/main/native/js_vm_core.c"))) projectDir else projectDir.resolve("core-engine")
+        val sourceRoot = if (Files.exists(projectDir.resolve("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/VmBytecodeSerializer.kt"))) projectDir else projectDir.resolve("core-engine")
         val serializerSource = Files.readString(sourceRoot.resolve("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/VmBytecodeSerializer.kt"))
-        val nativeSource = Files.readString(sourceRoot.resolve("src/main/native/js_vm_core.c"))
+        val nativeSource = Files.readString(sourceRoot.resolve("src/main/rust/crates/jsrt-vm/src/lib.rs"))
+        val executorSource = Files.readString(sourceRoot.resolve("src/main/rust/crates/jsrt-vm/src/executor.rs"))
         assertTrue(serializerSource.contains("VM_LDC_CONDY"), "Serializer must keep a dedicated guarded ConstantDynamic LDC opcode")
-        assertTrue(nativeSource.contains("JS_VM_LDC_CONDY") && nativeSource.contains("js_vm_cp_condy_value"), "Native VM must execute guarded ConstantDynamic LDC values")
+        assertTrue(nativeSource.contains("LDC_CONDY") && executorSource.contains("LDC_CONDY"), "Rust VM must execute guarded ConstantDynamic LDC values")
     }
 
     @Test
