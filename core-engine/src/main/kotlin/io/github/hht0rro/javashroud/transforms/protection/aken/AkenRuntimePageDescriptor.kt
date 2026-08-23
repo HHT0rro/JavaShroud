@@ -354,7 +354,14 @@ class AkenRuntimeEvaluatorPlan private constructor(
         private const val NATIVE_FRAGMENT_COUNT = 3
         private const val AKEN_FRAGMENT_COUNT = JAVA_FRAGMENT_COUNT + NATIVE_FRAGMENT_COUNT + 1
         private const val MAX_PLAN_ENCODING_SIZE = 128 * 1024
-        private val EVALUATOR_DOMAIN = "evaluator-graph".toByteArray(StandardCharsets.US_ASCII)
+        /**
+         * Keep the descriptor-side legacy graph fingerprint domain identical to
+         * the build planner.  A descriptor must bind the exact evaluator graph
+         * that created its page; accepting a different domain would make the
+         * page handle and runtime descriptor disagree while still looking
+         * structurally valid.
+         */
+        private val EVALUATOR_DOMAIN = "AKEN-v4-evaluator-graph".toByteArray(StandardCharsets.US_ASCII)
         private const val FRAGMENT_ROLE_JAVA: Byte = 1
         private const val FRAGMENT_ROLE_NATIVE: Byte = 2
         private const val FRAGMENT_ROLE_TERMINAL: Byte = 3

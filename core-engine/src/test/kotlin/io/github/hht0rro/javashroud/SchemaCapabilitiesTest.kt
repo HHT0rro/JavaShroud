@@ -19,11 +19,6 @@ class SchemaCapabilitiesTest {
     }
 
     @Test
-    fun vbcVersion_returns_non_blank() {
-        assertTrue(vbcVersion().isNotBlank())
-    }
-
-    @Test
     fun buildCapabilityTagDefinitions_contains_all_tags() {
         val tags = buildCapabilityTagDefinitions()
         val tagIds = tags.map { it.id }
@@ -184,7 +179,6 @@ class SchemaCapabilitiesTest {
         val payload = buildEngineSchemaPayload()
         assertEquals(engineSchemaVersion(), payload.schemaVersion)
         assertEquals(engineVersion(), payload.engineVersion)
-        assertEquals(vbcVersion(), payload.vbcVersion)
         assertTrue(payload.tags.size >= 11, "Expected protection category tags")
         assertEquals(
             buildMetadataCapabilityDefinitions().size +
@@ -453,14 +447,13 @@ class SchemaCapabilitiesTest {
         val paramKeys = module.params.map { it.key }
 
         assertEquals(
-            listOf("seed", "methodSelection", "strictVirtualization", "maxInstructions", "maxBroadVirtualizedMethods", "highValueMethods", "highValueMethodDeny", "vbc4StateBoundEncoding", "vbc4HandlerMorphing", "vbc4StrengthMax", "vbc4InterpreterDiversity", "vbc4HashedJniSymbols", "vbc4ExecutableRegisterIr", "vbc4SuperOperators", "vbc4IntegrityKeyBinding", "vbc4EphemeralRootMaterial"),
+            listOf("seed", "methodSelection", "maxInstructions", "maxBroadVirtualizedMethods", "highValueMethods", "highValueMethodDeny", "vbc4StateBoundEncoding", "vbc4HandlerMorphing", "vbc4StrengthMax", "vbc4InterpreterDiversity", "vbc4HashedJniSymbols", "vbc4ExecutableRegisterIr", "vbc4SuperOperators", "vbc4IntegrityKeyBinding", "vbc4EphemeralRootMaterial"),
             paramKeys,
             "method-virtualization must expose only VBC4 controls plus hidden high-value selectors and fixed high-strength defaults",
         )
         assertEquals("critical-plus", module.params.single { it.key == "methodSelection" }.defaultValue?.asText(), "VM should default to critical-plus auto-selection")
-        assertEquals(true, module.params.single { it.key == "strictVirtualization" }.defaultValue?.asBoolean(), "VM should default to strict virtualization")
-        assertEquals(99999, module.params.single { it.key == "maxInstructions" }.defaultValue?.asInt(), "VM default instruction threshold must stay at full-strength coverage")
-        assertEquals(99999, module.params.single { it.key == "maxBroadVirtualizedMethods" }.defaultValue?.asInt(), "Broad class rules should default to maximum coverage")
+        assertEquals(0, module.params.single { it.key == "maxInstructions" }.defaultValue?.asInt(), "VM instruction threshold should default to unlimited")
+        assertEquals(0, module.params.single { it.key == "maxBroadVirtualizedMethods" }.defaultValue?.asInt(), "Broad class method count should default to unlimited")
         assertTrue(module.params.filter { it.key in setOf("highValueMethods", "highValueMethodDeny") }.all { it.hidden && it.type == "string" }, "High-value selector allow/deny lists must stay hidden string controls")
         assertTrue(module.params.filter { it.key.startsWith("vbc4") }.all { it.hidden && it.defaultValue?.asBoolean() == true }, "VBC4 high-strength invariants must be hidden fixed defaults")
         assertFalse(paramKeys.any { it in setOf("vmStrength", "fusionLevel", "stateBoundEncoding", "handlerMorphing", "vmDialect", "vmDiversityLevel") }, "Legacy/low-strength VM controls must not be exposed")

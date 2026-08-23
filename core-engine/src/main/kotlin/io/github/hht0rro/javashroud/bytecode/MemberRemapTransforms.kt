@@ -71,7 +71,7 @@ fun remapMethods(
 fun remapFields(
     classBytes: ByteArray,
     fieldRenameMap: Map<MemberKey, MemberRename>,
-    stringRewriteMap: Map<String, String> = emptyMap(),
+    stringRewriteMap: Map<String, Map<String, String>> = emptyMap(),
 ): ByteArray = try {
     val classReader = ClassReader(classBytes)
     val classWriter = ClassWriter(classReader, 0)
@@ -183,7 +183,7 @@ private fun rewriteAnnotationValue(value: Any?, renameMap: Map<String, Map<Strin
 
 private fun rewriteReflectionNameStrings(
     classBytes: ByteArray,
-    fieldStringRewriteMap: Map<String, String> = emptyMap(),
+    fieldStringRewriteMap: Map<String, Map<String, String>> = emptyMap(),
     methodStringRewriteMap: Map<String, Map<String, String>> = emptyMap(),
 ): ByteArray {
     if (fieldStringRewriteMap.isEmpty() && methodStringRewriteMap.isEmpty()) return classBytes
@@ -217,12 +217,25 @@ private fun rewriteReflectionNameStrings(
 
 private fun fieldReflectionRewriteMap(
     call: MethodInsnNode,
-    fieldStringRewriteMap: Map<String, String>,
+    fieldStringRewriteMap: Map<String, Map<String, String>>,
 ): Map<String, String> = when {
     fieldStringRewriteMap.isNotEmpty() &&
         (call.name == "getField" || call.name == "getDeclaredField") &&
-        call.desc == "(Ljava/lang/String;)Ljava/lang/reflect/Field;" -> fieldStringRewriteMap
+        call.desc == "(Ljava/lang/String;)Ljava/lang/reflect/Field;" ->
+        reflectionTargetOwner(call)?.let(fieldStringRewriteMap::get).orEmpty()
     else -> emptyMap()
+}
+
+private fun reflectionTargetOwner(call: MethodInsnNode): String? {
+    var current = call.previous
+    var scanned = 0
+    while (current != null && scanned < 48) {
+        if (current.opcode >= 0) scanned++
+        val type = (current as? LdcInsnNode)?.cst as? Type
+        if (type != null && type.sort == Type.OBJECT) return type.internalName
+        current = current.previous
+    }
+    return null
 }
 
 private fun methodReflectionRewriteMap(

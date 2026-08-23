@@ -25,7 +25,7 @@ class RuntimeResourcePartitionTest {
             layerCount = 4,
         )
 
-        assertEquals(7, encoded[4].toInt() and 0xFF, "partitioned build must emit the partitioned envelope version")
+        assertEquals(8, encoded[4].toInt() and 0xFF, "partitioned build must emit the current JSRP v8 envelope version")
         assertEquals(96, readLe16(encoded, 21), "partitioned header keeps encrypted metadata length")
         assertEquals(32, readLe16(encoded, 23), "partitioned header keeps MAC length")
         val partitionId = readLe16(encoded, 25)

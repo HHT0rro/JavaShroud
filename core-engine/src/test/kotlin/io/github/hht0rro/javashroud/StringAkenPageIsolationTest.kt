@@ -30,7 +30,7 @@ class StringAkenPageIsolationTest {
                     val handles = candidates.map { candidate -> candidate.copyEncodedHandleForBuild() }
                     val proofs = candidates.map { candidate -> candidate.copyCallSiteProofForBuild() }
                     try {
-                        assertTrue(candidates.all { candidate -> candidate.pageIndex == 0 })
+                        assertTrue(candidates.all { candidate -> candidate.pageIndex > 0 })
                         assertTrue(identities.all { identity -> identity.size == 32 })
                         assertFalse(identities[0].contentEquals(identities[1]))
                         assertFalse(handles[0].contentEquals(handles[1]))

@@ -22,7 +22,30 @@ private val reflectionSurfaceMethodNames = setOf(
     "getConstructor",
 )
 
-internal fun reflectionSurfaceSensitiveClassNames(artifact: BytecodeArtifact): Set<String> {
+private val reflectionEnumerationMethodNames = setOf(
+    "getDeclaredMethods",
+    "getMethods",
+    "getDeclaredFields",
+    "getFields",
+)
+
+internal fun reflectionSurfaceSensitiveClassNames(artifact: BytecodeArtifact): Set<String> =
+    reflectionSensitiveClassNames(artifact, reflectionSurfaceMethodNames)
+
+internal fun reflectionEnumerationSensitiveClassNames(artifact: BytecodeArtifact): Set<String> =
+    reflectionSensitiveClassNames(artifact, reflectionEnumerationMethodNames)
+
+internal fun excludeReflectionSurfaceSensitiveClasses(
+    artifact: BytecodeArtifact,
+    matchedClassNames: Set<String>,
+): Set<String> {
+    if (matchedClassNames.isEmpty()) return matchedClassNames
+    val sensitiveClassNames = reflectionSurfaceSensitiveClassNames(artifact)
+    if (sensitiveClassNames.isEmpty()) return matchedClassNames
+    return matchedClassNames - sensitiveClassNames
+}
+
+private fun reflectionSensitiveClassNames(artifact: BytecodeArtifact, methodNames: Set<String>): Set<String> {
     val knownClassNames = artifact.classArtifactIndex.keys
     if (knownClassNames.isEmpty()) return emptySet()
 
@@ -44,7 +67,7 @@ internal fun reflectionSurfaceSensitiveClassNames(artifact: BytecodeArtifact): S
                 if (instruction is LdcInsnNode) {
                     classLiteralInternalName(instruction.cst)?.let { classLiterals += it }
                 }
-                if (instruction is MethodInsnNode && isReflectionSurfaceCall(instruction)) {
+                if (instruction is MethodInsnNode && isReflectionCall(instruction, methodNames)) {
                     usesReflectionSurfaceApi = true
                 }
             }
@@ -57,16 +80,6 @@ internal fun reflectionSurfaceSensitiveClassNames(artifact: BytecodeArtifact): S
     return sensitiveClassNames
 }
 
-internal fun excludeReflectionSurfaceSensitiveClasses(
-    artifact: BytecodeArtifact,
-    matchedClassNames: Set<String>,
-): Set<String> {
-    if (matchedClassNames.isEmpty()) return matchedClassNames
-    val sensitiveClassNames = reflectionSurfaceSensitiveClassNames(artifact)
-    if (sensitiveClassNames.isEmpty()) return matchedClassNames
-    return matchedClassNames - sensitiveClassNames
-}
-
 private fun classLiteralInternalName(value: Any?): String? {
     val type = value as? Type ?: return null
     return when (type.sort) {
@@ -76,5 +89,5 @@ private fun classLiteralInternalName(value: Any?): String? {
     }
 }
 
-private fun isReflectionSurfaceCall(instruction: MethodInsnNode): Boolean =
-    instruction.owner == "java/lang/Class" && instruction.name in reflectionSurfaceMethodNames
+private fun isReflectionCall(instruction: MethodInsnNode, methodNames: Set<String>): Boolean =
+    instruction.owner == "java/lang/Class" && instruction.name in methodNames

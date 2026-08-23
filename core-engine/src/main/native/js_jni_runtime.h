@@ -450,7 +450,7 @@ JS_HIDDEN void js_aken_native_opened_page_wipe(js_aken_native_opened_page *page)
  * entrypoints merely for the shell trampoline.  This table is not a public
  * ABI: old artifacts retain their self-contained v11 layout below.
  */
-#define JS_NATIVE_ABI_TABLE_VERSION 12u
+#define JS_NATIVE_ABI_TABLE_VERSION 13u
 
 typedef struct js_native_abi_table {
     unsigned int version;
@@ -458,12 +458,12 @@ typedef struct js_native_abi_table {
     jint (JNICALL *native_heartbeat)(JNIEnv *env, jclass cls);
     jboolean (JNICALL *install_aken_session_nonce)(JNIEnv *env, jclass cls, jbyteArray startup_nonce);
     jobject (JNICALL *execute_aken_vm_page)(JNIEnv *env, jclass cls, jlong entryToken, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof, jobjectArray args);
-    jbyteArray (JNICALL *decode_aken_string_page)(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof);
+    jstring (JNICALL *open_aken_string)(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof);
     jbyteArray (JNICALL *read_aken_class_page)(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof);
     void (JNICALL *consume_aken_native_chunk)(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof);
 } js_native_abi_table;
 #else
-#define JS_NATIVE_ABI_TABLE_VERSION 11u
+#define JS_NATIVE_ABI_TABLE_VERSION 12u
 
 typedef struct js_native_abi_table {
     unsigned int version;
@@ -488,7 +488,7 @@ typedef struct js_native_abi_table {
     jint (JNICALL *execute_vm_resource_int_int)(JNIEnv *env, jclass cls, jlong entryToken, jint arg0);
     void (JNICALL *execute_vm_resource_int_void)(JNIEnv *env, jclass cls, jlong entryToken, jint arg0);
     jobject (JNICALL *execute_aken_vm_page)(JNIEnv *env, jclass cls, jlong entryToken, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof, jobjectArray args);
-    jbyteArray (JNICALL *decode_aken_string_page)(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof);
+    jstring (JNICALL *open_aken_string)(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof);
     jbyteArray (JNICALL *read_aken_class_page)(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof);
     void (JNICALL *consume_aken_native_chunk)(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof);
 } js_native_abi_table;

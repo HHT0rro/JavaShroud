@@ -20,7 +20,7 @@ class AkenRuntimeBridgeApiTest {
                 ByteArray::class.java,
                 Array<Any>::class.java,
             ),
-            "nativeDecodeAkenStringPage" to arrayOf(ByteArray::class.java, Int::class.javaPrimitiveType!!, ByteArray::class.java),
+            "nativeOpenAkenString" to arrayOf(ByteArray::class.java, Int::class.javaPrimitiveType!!, ByteArray::class.java),
             "nativeReadAkenClassPage" to arrayOf(ByteArray::class.java, Int::class.javaPrimitiveType!!, ByteArray::class.java),
             "nativeConsumeAkenNativeChunk" to arrayOf(ByteArray::class.java, Int::class.javaPrimitiveType!!, ByteArray::class.java),
         )
@@ -30,6 +30,14 @@ class AkenRuntimeBridgeApiTest {
             assertTrue(Modifier.isNative(method.modifiers), "$name must remain a native page-bound entry")
             assertTrue(Modifier.isStatic(method.modifiers), "$name must remain static for generated call sites")
         }
+
+        val stringParameters = arrayOf(ByteArray::class.java, Int::class.javaPrimitiveType!!, ByteArray::class.java)
+        val nativeStringTerminal = helper.getDeclaredMethod("nativeOpenAkenString", *stringParameters)
+        val stringTerminal = helper.getDeclaredMethod("openAkenString", *stringParameters)
+        assertEquals(String::class.java, nativeStringTerminal.returnType)
+        assertEquals(String::class.java, stringTerminal.returnType)
+        assertFalse(Modifier.isPublic(nativeStringTerminal.modifiers), "native String terminal must remain package-private")
+        assertFalse(Modifier.isPublic(stringTerminal.modifiers), "validated String terminal must remain package-private")
 
         val nativeChunkConsumer = helper.getDeclaredMethod(
             "nativeConsumeAkenNativeChunk",
@@ -72,7 +80,7 @@ class AkenRuntimeBridgeApiTest {
         assertTrue(readiness.contains("installAkenSessionNonce()"), "AKEN readiness must install a per-JVM runtime session nonce")
         assertTrue(readiness.contains("verifyAkenNativeAbiAfterLoad"), "AKEN readiness must prove the typed JNI ABI is registered")
         assertTrue(readiness.contains("nativeExecuteAkenVmPage"), "AKEN ABI probe must reach the VM page route")
-        assertTrue(readiness.contains("nativeDecodeAkenStringPage"), "AKEN ABI probe must reach the string page route")
+        assertTrue(readiness.contains("nativeOpenAkenString"), "AKEN ABI probe must reach the String-returning page route")
         assertTrue(readiness.contains("nativeReadAkenClassPage"), "AKEN ABI probe must reach the class page route")
         assertTrue(readiness.contains("nativeConsumeAkenNativeChunk"), "AKEN ABI probe must reach the native-chunk route")
 
@@ -104,24 +112,34 @@ class AkenRuntimeBridgeApiTest {
     }
 
     @Test
-    fun aken_native_locator_is_raw_per_platform_and_rejects_legacy_envelopes() {
+    fun aken_native_locator_is_binary_v2_per_platform_and_rejects_legacy_envelopes() {
         val helperSource = Files.readString(workspacePath("core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
         val parserStart = helperSource.indexOf("private static AkenNativeLibrary readAkenNativeLocator")
         val parserEnd = helperSource.indexOf("public static native Object nativeExecuteVmResource", parserStart)
         assertTrue(parserStart >= 0 && parserEnd > parserStart, "AKEN locator parser must remain locatable")
         val parser = helperSource.substring(parserStart, parserEnd)
 
-        assertTrue(parser.contains("AKEN_NATIVE_LOCATOR_RECORD"), "locator parser must require its independent record tag")
-        assertTrue(parser.contains("isAkenNativePlatform"), "locator parser must validate supported platforms")
-        assertTrue(parser.contains("isAkenNativeResourcePath"), "locator parser must validate resource path grammar")
-        assertTrue(parser.contains("isAkenNativeSuffix"), "locator parser must bind platform to native suffix")
-        assertTrue(parser.contains("parseAkenNativeLength"), "locator parser must validate exact stored length")
-        assertTrue(parser.contains("parseAkenNativeSha256"), "locator parser must validate SHA-256 text")
+        assertTrue(parser.contains("hasAkenLocatorMagic"), "locator parser must require the binary D7 A4 91 E3 magic")
+        assertTrue(parser.contains("AKEN_NATIVE_LOCATOR_VERSION"), "locator parser must enforce the current binary version")
+        assertTrue(parser.contains("AKEN_NATIVE_LOCATOR_COMMITMENT_BYTES"), "locator parser must reserve a terminal commitment")
+        assertTrue(parser.contains("readAkenLocatorU16"), "locator parser must decode bounded big-endian record counts and routes")
+        assertTrue(parser.contains("readAkenLocatorPositiveU32"), "locator parser must validate positive u32 stored lengths")
+        assertTrue(parser.contains("unmaskAkenNativeLocatorRoute"), "locator parser must unmask and validate binary routes")
+        assertTrue(parser.contains("isAkenNativeRouteBytes"), "locator parser must validate route bytes before ASCII decoding")
+        assertTrue(parser.contains("akenNativeLocatorCommitment"), "locator parser must authenticate the exact binary payload")
+        assertTrue(parser.contains("MessageDigest.isEqual"), "locator commitment must use constant-time comparison")
+        assertTrue(parser.contains("seenRoutes"), "locator parser must reject duplicate routes")
+        assertTrue(parser.contains("bindingSeen"), "locator parser must reject duplicate or non-terminal bindings")
         assertTrue(parser.contains("hasAkenRejectedLegacyHeader"), "locator parser must reject legacy protocol headers")
-        assertTrue(parser.contains("hasAkenHeader(bytes, 'J', 'S', 'B', 'I')"), "locator parser must reject legacy JSBI")
-        assertTrue(parser.contains("hasAkenHeader(bytes, 'J', 'S', 'R', 'P')"), "locator parser must reject legacy JSRP")
-        assertTrue(parser.contains("hasAkenHeader(bytes, 'J', 'S', 'B', 'M')"), "locator parser must reject legacy boot material")
-        assertTrue(parser.contains("hasAkenHeader(bytes, 'J', 'S', 'B', 'K')"), "locator parser must reject legacy sidecar material")
+        assertTrue(helperSource.contains("AKEN_NATIVE_LOCATOR_MAGIC_0 = 0xD7"), "locator magic must remain non-ASCII")
+        assertTrue(helperSource.contains("AKEN_NATIVE_LOCATOR_MAGIC_1 = 0xA4"), "locator magic must remain non-ASCII")
+        assertTrue(helperSource.contains("AKEN_NATIVE_LOCATOR_MAGIC_2 = 0x91"), "locator magic must remain non-ASCII")
+        assertTrue(helperSource.contains("AKEN_NATIVE_LOCATOR_MAGIC_3 = 0xE3"), "locator magic must remain non-ASCII")
+        assertTrue(helperSource.contains("AKEN_NATIVE_LOCATOR_ROUTE_MASK_DOMAIN"), "route masking domain must remain explicit and versioned")
+        assertFalse(parser.contains("\"AKEN_NATIVE_LOCATOR_RECORD\""), "binary locator parser must not retain textual record tags")
+        assertFalse(parser.contains("\"AKEN_NATIVE_BINDINGS_LOCATOR_RECORD\""), "binary locator parser must not retain textual binding tags")
+        assertFalse(parser.contains("parseAkenNativeLength"), "binary locator parser must not parse decimal text lengths")
+        assertFalse(parser.contains("parseAkenNativeSha256"), "binary locator parser must not parse hexadecimal text digests")
         assertFalse(parser.contains("sealedNativeIndexText"), "raw locator parser must not traverse legacy JSBI")
         assertFalse(parser.contains("sealedNativeBindingText"), "raw locator parser must not load legacy bindings")
         assertFalse(parser.contains("decodeRuntimeResource"), "raw locator parser must not decode JSRP")
@@ -138,15 +156,22 @@ class AkenRuntimeBridgeApiTest {
     fun typed_aken_bridge_native_registration_is_purpose_split_and_fail_closed() {
         val source = Files.readString(workspacePath("core-engine/src/main/native/js_jni_runtime.c"))
         for (name in listOf(
-            "nativeExecuteAkenVmPage",
-            "nativeDecodeAkenStringPage",
-            "nativeReadAkenClassPage",
-            "nativeConsumeAkenNativeChunk",
+            "JS_OBFUSCATED_LEN_JNI_NATIVE_EXECUTE_AKEN_VM_PAGE",
+            "JS_OBFUSCATED_LEN_JNI_NATIVE_OPEN_AKEN_STRING",
+            "JS_OBFUSCATED_LEN_JNI_NATIVE_READ_AKEN_CLASS_PAGE",
+            "JS_OBFUSCATED_LEN_JNI_NATIVE_CONSUME_AKEN_NATIVE_CHUNK",
         )) {
-            assertTrue(source.contains(name), "JNI registration must include $name")
+            assertTrue(source.contains(name), "JNI registration must use obfuscated binding material $name")
         }
         assertTrue(
-            source.contains("""{js_native_name_full("nativeConsumeAkenNativeChunk"), "([BI[B)V", (void*)jsw_a3}"""),
+            source.contains("js_native_name_obfuscated(js_obfuscated_JNI_NATIVE_OPEN_AKEN_STRING") &&
+                source.contains("\"([BI[B)Ljava/lang/String;\", (void*)jsw_a1"),
+            "string registration must return java.lang.String instead of a plaintext byte array",
+        )
+        assertFalse(source.contains("native" + "DecodeAkenStringPage"), "retired whole-page String byte[] registration must be absent")
+        assertTrue(
+            source.contains("js_native_name_obfuscated(js_obfuscated_JNI_NATIVE_CONSUME_AKEN_NATIVE_CHUNK") &&
+                source.contains("\"([BI[B)V\", (void*)jsw_a3"),
             "native chunk registration must use a void JNI descriptor",
         )
         assertTrue(source.contains("js_aken_native_chunk_consume_opened_page"), "native chunk plaintext must terminate in a native-only consumer")
@@ -173,7 +198,11 @@ class AkenRuntimeBridgeApiTest {
             "AKEN nativeInit must register sealed optional helpers after raw relocation bindings are published",
         )
         assertTrue(source.contains("static int js_optional_natives_registered = 0"), "deferred optional registration must be idempotent")
-        assertTrue(source.contains("nativeInstallAkenSessionNonce"), "AKEN bridge must expose the per-JVM session nonce entrypoint")
+        assertTrue(
+            source.contains("js_obfuscated_JNI_NATIVE_INSTALL_AKEN_SESSION_NONCE") &&
+                source.contains("JS_OBFUSCATED_LEN_JNI_NATIVE_INSTALL_AKEN_SESSION_NONCE"),
+            "AKEN bridge must expose the per-JVM session nonce entrypoint through obfuscated binding material",
+        )
     }
 
     private fun workspacePath(relative: String): Path {

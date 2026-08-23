@@ -34,6 +34,8 @@ class NativeRuntimeCryptoKatTest {
             val hardwareExecutable = root.resolve(if (isWindows()) "crypto_kat_hardware.exe" else "crypto_kat_hardware")
             val softwareExecutable = root.resolve(if (isWindows()) "crypto_kat_software.exe" else "crypto_kat_software")
             val disabledExecutable = root.resolve(if (isWindows()) "crypto_kat_capability_disabled.exe" else "crypto_kat_capability_disabled")
+            val unsupportedCpuExecutable = root.resolve(if (isWindows()) "crypto_kat_unsupported_cpu.exe" else "crypto_kat_unsupported_cpu")
+            val selfTestFailureExecutable = root.resolve(if (isWindows()) "crypto_kat_self_test_failure.exe" else "crypto_kat_self_test_failure")
 
             val hardwareCompile = runWithTransientZigRetry(
                 command = compileCommand(checkNotNull(zig), nativeDir, probe, hardwareExecutable, forceSoftware = false),
@@ -84,15 +86,65 @@ class NativeRuntimeCryptoKatTest {
             )
             assertEquals(0, disabledRun.exitCode, "capability-disabled crypto probe must pass:\n${disabledRun.output}")
 
+            val unsupportedCpuCompile = runWithTransientZigRetry(
+                command = compileCommand(
+                    checkNotNull(zig),
+                    nativeDir,
+                    probe,
+                    unsupportedCpuExecutable,
+                    forceSoftware = false,
+                    forceUnsupportedCpu = true,
+                ),
+                directory = root,
+                label = "compile-unsupported-cpu",
+            )
+            assertEquals(0, unsupportedCpuCompile.exitCode, "unsupported-CPU crypto probe must compile:\n${unsupportedCpuCompile.output}")
+            val unsupportedCpuRun = run(
+                command = listOf(unsupportedCpuExecutable.toString()),
+                directory = root,
+                label = "run-unsupported-cpu",
+                timeoutSeconds = 180L,
+            )
+            assertEquals(0, unsupportedCpuRun.exitCode, "unsupported-CPU crypto probe must pass:\n${unsupportedCpuRun.output}")
+
+            val selfTestFailureCompile = runWithTransientZigRetry(
+                command = compileCommand(
+                    checkNotNull(zig),
+                    nativeDir,
+                    probe,
+                    selfTestFailureExecutable,
+                    forceSoftware = false,
+                    forceSelfTestFailure = true,
+                ),
+                directory = root,
+                label = "compile-self-test-failure",
+            )
+            assertEquals(0, selfTestFailureCompile.exitCode, "self-test-failure crypto probe must compile:\n${selfTestFailureCompile.output}")
+            val selfTestFailureRun = run(
+                command = listOf(selfTestFailureExecutable.toString()),
+                directory = root,
+                label = "run-self-test-failure",
+                timeoutSeconds = 180L,
+            )
+            assertEquals(0, selfTestFailureRun.exitCode, "self-test-failure crypto probe must pass:\n${selfTestFailureRun.output}")
+
             val hardwareLine = phaseLine(hardwareRun.output)
             val softwareLine = phaseLine(softwareRun.output)
             val disabledLine = phaseLine(disabledRun.output)
+            val unsupportedCpuLine = phaseLine(unsupportedCpuRun.output)
+            val selfTestFailureLine = phaseLine(selfTestFailureRun.output)
             assertTrue(hardwareLine.contains("status=pass"), "hardware probe did not report pass:\n$hardwareLine")
             assertTrue(softwareLine.contains("status=pass"), "software probe did not report pass:\n$softwareLine")
             assertTrue(softwareLine.contains("software_crypto_path="), "software path counter missing:\n$softwareLine")
             assertEquals("0", field(disabledLine, "hardware_available"), "capability-disabled build selected hardware AES")
             assertEquals("0", field(disabledLine, "ghash_hardware_available"), "capability-disabled build selected hardware GHASH")
             assertTrue(field(disabledLine, "software_crypto_path").toLong() > 0L, "capability-disabled build did not use software crypto")
+            assertEquals("0", field(unsupportedCpuLine, "hardware_available"), "unsupported-CPU model selected hardware AES")
+            assertEquals("0", field(unsupportedCpuLine, "ghash_hardware_available"), "unsupported-CPU model selected hardware GHASH")
+            assertTrue(field(unsupportedCpuLine, "software_crypto_path").toLong() > 0L, "unsupported-CPU model did not use software crypto")
+            assertEquals("0", field(selfTestFailureLine, "hardware_available"), "self-test failure selected hardware AES")
+            assertEquals("0", field(selfTestFailureLine, "ghash_hardware_available"), "self-test failure selected hardware GHASH")
+            assertTrue(field(selfTestFailureLine, "software_crypto_path").toLong() > 0L, "self-test failure did not use software crypto")
             assertEquals(
                 field(hardwareLine, "output_digest"),
                 field(softwareLine, "output_digest"),
@@ -103,7 +155,17 @@ class NativeRuntimeCryptoKatTest {
                 field(disabledLine, "output_digest"),
                 "capability-disabled and software crypto paths must produce the same digest",
             )
-            for (line in listOf(hardwareLine, softwareLine, disabledLine)) {
+            assertEquals(
+                field(softwareLine, "output_digest"),
+                field(unsupportedCpuLine, "output_digest"),
+                "unsupported-CPU and software crypto paths must produce the same digest",
+            )
+            assertEquals(
+                field(softwareLine, "output_digest"),
+                field(selfTestFailureLine, "output_digest"),
+                "self-test failure and software crypto paths must produce the same digest",
+            )
+            for (line in listOf(hardwareLine, softwareLine, disabledLine, unsupportedCpuLine, selfTestFailureLine)) {
                 assertTrue(field(line, "auth_failure_count").toLong() >= 4L, "rejection cases were not exercised:\n$line")
                 assertTrue(field(line, "aes_block_count").toLong() > 0L, "AES blocks were not counted:\n$line")
                 assertTrue(field(line, "ghash_block_count").toLong() > 0L, "GHASH blocks were not counted:\n$line")
@@ -116,6 +178,8 @@ class NativeRuntimeCryptoKatTest {
             println("crypto-kat differential hardware $hardwareLine")
             println("crypto-kat differential software $softwareLine")
             println("crypto-kat differential capability-disabled $disabledLine")
+            println("crypto-kat differential unsupported-cpu $unsupportedCpuLine")
+            println("crypto-kat differential self-test-failure $selfTestFailureLine")
         } finally {
             deleteTree(root)
         }
@@ -137,6 +201,8 @@ class NativeRuntimeCryptoKatTest {
         executable: Path,
         forceSoftware: Boolean,
         disableHardware: Boolean = false,
+        forceUnsupportedCpu: Boolean = false,
+        forceSelfTestFailure: Boolean = false,
     ): List<String> = buildList {
         addAll(
             listOf(
@@ -155,6 +221,8 @@ class NativeRuntimeCryptoKatTest {
         )
         if (forceSoftware) add("-DJS_CRYPTO_FORCE_SOFTWARE=1")
         if (disableHardware) add("-DJS_CRYPTO_DISABLE_HARDWARE=1")
+        if (forceUnsupportedCpu) add("-DJS_CRYPTO_FORCE_UNSUPPORTED_CPU=1")
+        if (forceSelfTestFailure) add("-DJS_CRYPTO_FORCE_HW_SELF_TEST_FAILURE=1")
         /* The crypto KAT only exercises js_crypto.c.  Keep this lane's source
          * set minimal so a transient Zig cache/parser failure in unrelated VM,
          * loader, or anti-debug translation units cannot invalidate the crypto

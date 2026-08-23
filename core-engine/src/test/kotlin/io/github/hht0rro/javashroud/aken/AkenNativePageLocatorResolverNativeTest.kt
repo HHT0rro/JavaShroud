@@ -928,7 +928,7 @@ class AkenNativePageLocatorResolverNativeTest {
             val authenticated = runAkenJniRuntimeFixture(
                 runtimeRoot = runtimeRoot,
                 extractDirectory = tempDir.resolve("extract-good"),
-                expectedOutcome = "result:${hexLower(plaintext)}",
+                expectedOutcome = "result:$plaintextText",
                 label = "jni-string-decoded",
             )
             assertEquals(0, authenticated.exitCode, "real JNI AKEN string page must decode:\n${authenticated.output}")
@@ -937,17 +937,17 @@ class AkenNativePageLocatorResolverNativeTest {
             assertFalse(authenticated.output.contains("FATAL ERROR in native method"), authenticated.output)
             assertFalse(authenticated.output.contains("JNI DETECTED ERROR IN APPLICATION"), authenticated.output)
 
-            val cached = runAkenJniRuntimeFixture(
+            val repeatedOpen = runAkenJniRuntimeFixture(
                 runtimeRoot = runtimeRoot,
-                extractDirectory = tempDir.resolve("extract-cached"),
+                extractDirectory = tempDir.resolve("extract-repeated-open"),
                 expectedOutcome = "string:$plaintextText",
-                label = "jni-string-cache-wrapper",
+                label = "jni-string-terminal-repeated-open",
             )
-            assertEquals(0, cached.exitCode, "AKEN StringPage cache wrapper must decode through the real JNI route:\n${cached.output}")
-            assertTrue(cached.output.contains("AKEN real JNI string page fixture: PASS:cached"), cached.output)
-            assertFalse(cached.output.contains("WARNING in native method"), cached.output)
-            assertFalse(cached.output.contains("FATAL ERROR in native method"), cached.output)
-            assertFalse(cached.output.contains("JNI DETECTED ERROR IN APPLICATION"), cached.output)
+            assertEquals(0, repeatedOpen.exitCode, "AKEN String terminal must reopen through the authenticated JNI route:\n${repeatedOpen.output}")
+            assertTrue(repeatedOpen.output.contains("AKEN real JNI string page fixture: PASS:reopened"), repeatedOpen.output)
+            assertFalse(repeatedOpen.output.contains("WARNING in native method"), repeatedOpen.output)
+            assertFalse(repeatedOpen.output.contains("FATAL ERROR in native method"), repeatedOpen.output)
+            assertFalse(repeatedOpen.output.contains("JNI DETECTED ERROR IN APPLICATION"), repeatedOpen.output)
 
             tamperedPayload = checkNotNull(encodedPayload).copyOf()
             val payloadTamperOffset = tamperedPayload.lastIndex / 2
@@ -2919,33 +2919,19 @@ class AkenNativePageLocatorResolverNativeTest {
         val nativeBytes = Files.readAllBytes(nativeLibrary)
         try {
             writeClasspathResource(runtimeRoot, nativeResourcePath, nativeBytes)
-            val nativeBindings = "B|fixture|fixture\n".toByteArray(StandardCharsets.US_ASCII)
-            try {
-                writeClasspathResource(runtimeRoot, nativeBindingsResourcePath, nativeBindings)
-                val locator = buildString {
-                    append("AKEN_NATIVE_LOCATOR_V1")
-                    append('|')
-                    append(platform.platformId)
-                    append('|')
-                    append(nativeResourcePath)
-                    append('|')
-                    append(platform.fileSuffix)
-                    append('|')
-                    append(nativeBytes.size)
-                    append('|')
-                    append(sha256Hex(nativeBytes))
-                    append('\n')
-                    append("AKEN_NATIVE_BINDINGS_V1")
-                    append('|')
-                    append(nativeBindingsResourcePath)
-                    append('|')
-                    append(nativeBindings.size)
-                    append('|')
-                    append(sha256Hex(nativeBindings))
-                }.toByteArray(StandardCharsets.US_ASCII)
+                val nativeBindings = "B|fixture|fixture\n".toByteArray(StandardCharsets.US_ASCII)
                 try {
-                    writeClasspathResource(runtimeRoot, "META-INF/aken/native.locator", locator)
-                } finally {
+                    writeClasspathResource(runtimeRoot, nativeBindingsResourcePath, nativeBindings)
+                    val locator = encodeAkenNativeLocator(
+                        platform = platform.platformId,
+                        nativeResourcePath = nativeResourcePath,
+                        nativeBytes = nativeBytes,
+                        nativeBindingsResourcePath = nativeBindingsResourcePath,
+                        nativeBindings = nativeBindings,
+                    )
+                    try {
+                        writeClasspathResource(runtimeRoot, "META-INF/aken/native.locator", locator)
+                    } finally {
                     Arrays.fill(locator, 0)
                 }
             } finally {
@@ -2954,6 +2940,117 @@ class AkenNativePageLocatorResolverNativeTest {
         } finally {
             Arrays.fill(nativeBytes, 0)
         }
+    }
+
+    /**
+     * Build the current AKEN native locator fixture without going through the
+     * production serializer.  This keeps the native resolver test differential:
+     * the C/Java parser must accept the exact v2 binary contract independently.
+     */
+    private fun encodeAkenNativeLocator(
+        platform: String,
+        nativeResourcePath: String,
+        nativeBytes: ByteArray,
+        nativeBindingsResourcePath: String,
+        nativeBindings: ByteArray,
+    ): ByteArray {
+        val payload = ByteArrayOutputStream()
+        payload.write(AKEN_NATIVE_LOCATOR_MAGIC)
+        payload.write(AKEN_NATIVE_LOCATOR_VERSION)
+        payload.write(0)
+        writeU16(payload, 2)
+        writeAkenNativeLocatorRecord(
+            out = payload,
+            kind = AKEN_NATIVE_LOCATOR_KIND_LIBRARY,
+            platformId = akenNativePlatformId(platform),
+            resourcePath = nativeResourcePath,
+            storedBytes = nativeBytes,
+        )
+        writeAkenNativeLocatorRecord(
+            out = payload,
+            kind = AKEN_NATIVE_LOCATOR_KIND_BINDINGS,
+            platformId = 0,
+            resourcePath = nativeBindingsResourcePath,
+            storedBytes = nativeBindings,
+        )
+        val payloadBytes = payload.toByteArray()
+        val commitment = MessageDigest.getInstance("SHA-256").apply {
+            update(AKEN_NATIVE_LOCATOR_COMMITMENT_DOMAIN)
+            update(payloadBytes)
+        }.digest()
+        return try {
+            ByteArray(payloadBytes.size + commitment.size).also { encoded ->
+                payloadBytes.copyInto(encoded)
+                commitment.copyInto(encoded, payloadBytes.size)
+            }
+        } finally {
+            Arrays.fill(payloadBytes, 0)
+            Arrays.fill(commitment, 0)
+        }
+    }
+
+    private fun writeAkenNativeLocatorRecord(
+        out: ByteArrayOutputStream,
+        kind: Int,
+        platformId: Int,
+        resourcePath: String,
+        storedBytes: ByteArray,
+    ) {
+        val route = resourcePath.toByteArray(StandardCharsets.US_ASCII)
+        val digest = MessageDigest.getInstance("SHA-256").digest(storedBytes)
+        val maskedRoute = maskAkenNativeLocatorRoute(route, kind, platformId, storedBytes.size, digest)
+        try {
+            out.write(kind)
+            out.write(platformId)
+            writeU16(out, route.size)
+            writeInt(out, storedBytes.size)
+            out.write(digest)
+            out.write(maskedRoute)
+        } finally {
+            Arrays.fill(route, 0)
+            Arrays.fill(digest, 0)
+            Arrays.fill(maskedRoute, 0)
+        }
+    }
+
+    private fun maskAkenNativeLocatorRoute(
+        route: ByteArray,
+        kind: Int,
+        platformId: Int,
+        storedLength: Int,
+        digest: ByteArray,
+    ): ByteArray {
+        val masked = route.copyOf()
+        var offset = 0
+        var blockIndex = 0
+        while (offset < masked.size) {
+            val block = MessageDigest.getInstance("SHA-256").apply {
+                update(AKEN_NATIVE_LOCATOR_ROUTE_MASK_DOMAIN)
+                update(kind.toByte())
+                update(platformId.toByte())
+                updateInt(this, storedLength)
+                update(digest)
+                updateInt(this, blockIndex++)
+            }.digest()
+            try {
+                val count = minOf(block.size, masked.size - offset)
+                repeat(count) { index ->
+                    masked[offset + index] = (masked[offset + index].toInt() xor block[index].toInt()).toByte()
+                }
+                offset += count
+            } finally {
+                Arrays.fill(block, 0)
+            }
+        }
+        return masked
+    }
+
+    private fun akenNativePlatformId(platform: String): Int = when (platform) {
+        "windows-x64" -> 1
+        "linux-x64" -> 2
+        "macos-x64" -> 3
+        "macos-arm64" -> 4
+        else -> error("unsupported AKEN native fixture platform: $platform")
     }
 
     /**
@@ -3316,30 +3413,26 @@ class AkenNativePageLocatorResolverNativeTest {
                     assertLegacyKernelUntried("AKEN native loader");
                     if (expectedOutcome.startsWith("string:")) {
                         String expected = expectedOutcome.substring("string:".length());
-                        String actual = StringEncryptionHelper.cachedDecodeAkenStringPage(handle, PAGE_INDEX, proof);
-                        if (!expected.equals(actual)) {
-                            System.err.println("unexpected AKEN cached string result: " + actual);
+                        String first = invokeStringTerminal(handle, PAGE_INDEX, proof);
+                        String second = invokeStringTerminal(handle, PAGE_INDEX, proof);
+                        if (!expected.equals(first) || !expected.equals(second)) {
+                            System.err.println("unexpected AKEN repeated string result: " + first + " / " + second);
                             System.exit(3);
                         }
-                        assertLegacyKernelUntried("AKEN cached string page");
-                        System.out.println("AKEN real JNI string page fixture: PASS:cached");
+                        assertLegacyKernelUntried("AKEN repeated string page open");
+                        System.out.println("AKEN real JNI string page fixture: PASS:reopened");
                         return;
                     }
                     if (expectedOutcome.startsWith("result:")) {
-                        byte[] opened = JniMicrokernelHelper.decodeAkenStringPage(handle, PAGE_INDEX, proof);
-                        try {
-                            String expected = expectedOutcome.substring("result:".length());
-                            String actual = hexLower(opened);
-                            if (!expected.equals(actual)) {
-                                System.err.println("unexpected AKEN real JNI string result: " + actual);
-                                System.exit(3);
-                            }
-                            assertLegacyKernelUntried("AKEN direct string page");
-                            System.out.println("AKEN real JNI string page fixture: PASS:decoded");
-                            return;
-                        } finally {
-                            Arrays.fill(opened, (byte) 0);
+                        String expected = expectedOutcome.substring("result:".length());
+                        String actual = invokeStringTerminal(handle, PAGE_INDEX, proof);
+                        if (!expected.equals(actual)) {
+                            System.err.println("unexpected AKEN real JNI string result: " + actual);
+                            System.exit(3);
                         }
+                        assertLegacyKernelUntried("AKEN String terminal");
+                        System.out.println("AKEN real JNI string page fixture: PASS:decoded");
+                        return;
                     }
                     if (!expectedOutcome.startsWith("error:")) {
                         System.err.println("unsupported outcome: " + expectedOutcome);
@@ -3347,13 +3440,9 @@ class AkenNativePageLocatorResolverNativeTest {
                     }
                     String expectedMessage = expectedOutcome.substring("error:".length());
                     try {
-                        byte[] opened = JniMicrokernelHelper.decodeAkenStringPage(handle, PAGE_INDEX, proof);
-                        try {
-                            System.err.println("AKEN real JNI string-page route unexpectedly returned");
-                            System.exit(5);
-                        } finally {
-                            Arrays.fill(opened, (byte) 0);
-                        }
+                        invokeStringTerminal(handle, PAGE_INDEX, proof);
+                        System.err.println("AKEN real JNI string-page route unexpectedly returned");
+                        System.exit(5);
                     } catch (SecurityException error) {
                         if (!expectedMessage.equals(error.getMessage())) {
                             System.err.println("unexpected AKEN real JNI string failure: " + error.getMessage());
@@ -3368,15 +3457,20 @@ class AkenNativePageLocatorResolverNativeTest {
                 }
             }
 
-            private static String hexLower(byte[] value) {
-                char[] chars = new char[value.length * 2];
-                char[] alphabet = "0123456789abcdef".toCharArray();
-                for (int index = 0; index < value.length; index++) {
-                    int current = value[index] & 0xFF;
-                    chars[index * 2] = alphabet[current >>> 4];
-                    chars[index * 2 + 1] = alphabet[current & 0x0F];
+            private static String invokeStringTerminal(byte[] handle, int pageIndex, byte[] proof) {
+                try {
+                    Method method = StringEncryptionHelper.class.getDeclaredMethod(
+                        "invokeAkenStringTerminal", byte[].class, int.class, byte[].class);
+                    method.setAccessible(true);
+                    return (String) method.invoke(null, handle, pageIndex, proof);
+                } catch (java.lang.reflect.InvocationTargetException error) {
+                    Throwable cause = error.getCause();
+                    if (cause instanceof RuntimeException) throw (RuntimeException) cause;
+                    if (cause instanceof Error) throw (Error) cause;
+                    throw new IllegalStateException("AKEN String terminal invocation failed", cause);
+                } catch (ReflectiveOperationException error) {
+                    throw new IllegalStateException("AKEN String terminal is unavailable", error);
                 }
-                return new String(chars);
             }
 
             private static void ensureAkenNativeKernel() {
@@ -4184,6 +4278,12 @@ class AkenNativePageLocatorResolverNativeTest {
         out.write(value and 0xFF)
     }
 
+    private fun writeU16(out: ByteArrayOutputStream, value: Int) {
+        require(value in 0..0xFFFF) { "AKEN locator u16 fixture value is invalid" }
+        out.write((value ushr 8) and 0xFF)
+        out.write(value and 0xFF)
+    }
+
     private fun writeLong(out: ByteArrayOutputStream, value: Long) {
         for (shift in 56 downTo 0 step 8) out.write((value ushr shift).toInt() and 0xFF)
     }
@@ -4221,6 +4321,14 @@ class AkenNativePageLocatorResolverNativeTest {
 
     private companion object {
         const val AKEN_JNI_FIXTURE_MAIN = "AkenCurrentPageJniFixtureMain"
+        const val AKEN_NATIVE_LOCATOR_VERSION = 2
+        const val AKEN_NATIVE_LOCATOR_KIND_LIBRARY = 1
+        const val AKEN_NATIVE_LOCATOR_KIND_BINDINGS = 2
+        val AKEN_NATIVE_LOCATOR_MAGIC = byteArrayOf(0xD7.toByte(), 0xA4.toByte(), 0x91.toByte(), 0xE3.toByte())
+        val AKEN_NATIVE_LOCATOR_COMMITMENT_DOMAIN =
+            "javashroud-aken-native-locator-commitment-v2".toByteArray(StandardCharsets.US_ASCII)
+        val AKEN_NATIVE_LOCATOR_ROUTE_MASK_DOMAIN =
+            "javashroud-aken-native-locator-route-mask-v2".toByteArray(StandardCharsets.US_ASCII)
         val COMPILER_RECORD_BINDING_DOMAIN =
             "native-page-locator-compile-input".toByteArray(StandardCharsets.US_ASCII)
         val FULL_NATIVE_SOURCES = listOf(

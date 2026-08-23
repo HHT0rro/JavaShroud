@@ -343,7 +343,7 @@ class AkenVbc4PendingPagePlannerTest {
     ): ByteArray {
         require(blockIds.isNotEmpty() && blockIds.size == encryptedPayloadLengths.size)
         val out = ByteArrayOutputStream()
-        out.write("VBCX".encodeToByteArray())
+        out.write("VBC4".encodeToByteArray())
         out.write(ByteArray(16))
         writeU4(out, 0xAABBCCDDL)
         out.write(ByteArray(16))
@@ -369,7 +369,6 @@ class AkenVbc4PendingPagePlannerTest {
         writeU4(out, 0)
         writeU4(out, 0)
         out.write(ByteArray(32))
-        out.write(32)
         return out.toByteArray()
     }
 

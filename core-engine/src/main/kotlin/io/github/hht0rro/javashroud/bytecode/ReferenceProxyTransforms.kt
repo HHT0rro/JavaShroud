@@ -32,6 +32,7 @@ fun createReferenceProxies(classBytes: ByteArray): ByteArray {
                 if (insn.name == "<clinit>" || insn.name == "<init>") continue
                 if (insn.owner == classNode.name) continue
                 if (isPlatformInvocationOwner(insn.owner)) continue
+                if (insn.owner.startsWith("io/github/hht0rro/javashroud/transforms/protection/")) continue
                 val target = CallTarget(insn.owner, insn.name, insn.desc, insn.itf)
                 targets.add(target)
                 callSites.add(Pair(method, insn))

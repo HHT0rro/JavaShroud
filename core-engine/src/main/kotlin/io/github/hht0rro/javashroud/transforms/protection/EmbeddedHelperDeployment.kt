@@ -82,10 +82,7 @@ object EmbeddedHelperDeployment {
             "$PKG/ClassEncryptionLoaderHelper",
             "$PKG/ClassEncryptionLoaderHelper${"$"}SharedDecryptingClassLoader",
         ) + akenClassPageRuntimeHelpers + akenRuntimeHelpers,
-        "string-encryption" to listOf(
-            "$PKG/StringEncryptionHelper",
-            "$PKG/StringEncryptionHelper${"$"}CachePolicy",
-        ),
+        "string-encryption" to listOf("$PKG/StringEncryptionHelper"),
         "method-body-delayed-decryption" to listOf(
             "$PKG/MethodBodyDecryptionHelper",
             "$PKG/MethodBodyDecryptionHelper${"$"}ParsedMetadata",
@@ -113,7 +110,6 @@ object EmbeddedHelperDeployment {
             "$PKG/MethodBodyDecryptionHelper" to { loadClasspathHelperByName("MethodBodyDecryptionHelper") },
             "$PKG/MethodBodyDecryptionHelper${"$"}ParsedMetadata" to { loadClasspathHelperByName("MethodBodyDecryptionHelper${"$"}ParsedMetadata") },
             "$PKG/StringEncryptionHelper" to { loadClasspathHelperByName("StringEncryptionHelper") },
-            "$PKG/StringEncryptionHelper${"$"}CachePolicy" to { loadClasspathHelperByName("StringEncryptionHelper${"$"}CachePolicy") },
             "$PKG/BootstrapEncryptionHelper" to { loadClasspathHelperByName("BootstrapEncryptionHelper") },
             "$PKG/CallsiteRotationHelper" to ::generateCallsiteRotationHelper,
             "$PKG/EnvironmentBindingHelper" to { loadClasspathHelperByName("EnvironmentBindingHelper") },
@@ -271,8 +267,20 @@ object EmbeddedHelperDeployment {
             "AKEN_NATIVE_LOCATOR_RESOURCE",
             "AKEN_NATIVE_BINDINGS_LOCATOR_RESOURCE",
             "AKEN_NATIVE_RESOURCE_ROOT",
-            "AKEN_NATIVE_LOCATOR_RECORD",
-            "AKEN_NATIVE_BINDINGS_LOCATOR_RECORD",
+            "AKEN_NATIVE_LOCATOR_MAGIC_0",
+            "AKEN_NATIVE_LOCATOR_MAGIC_1",
+            "AKEN_NATIVE_LOCATOR_MAGIC_2",
+            "AKEN_NATIVE_LOCATOR_MAGIC_3",
+            "AKEN_NATIVE_LOCATOR_COMMITMENT_DOMAIN",
+            "AKEN_NATIVE_LOCATOR_ROUTE_MASK_DOMAIN",
+            "AKEN_NATIVE_LOCATOR_VERSION",
+            "AKEN_NATIVE_LOCATOR_HEADER_BYTES",
+            "AKEN_NATIVE_LOCATOR_COMMITMENT_BYTES",
+            "AKEN_NATIVE_LOCATOR_RECORD_FIXED_BYTES",
+            "AKEN_NATIVE_LOCATOR_MAX_RECORDS",
+            "AKEN_NATIVE_LOCATOR_MAX_ROUTE_BYTES",
+            "AKEN_NATIVE_LOCATOR_KIND_LIBRARY",
+            "AKEN_NATIVE_LOCATOR_KIND_BINDINGS",
             "AKEN_NATIVE_LOCATOR_MAX_BYTES",
             "AKEN_NATIVE_MAX_LIBRARY_BYTES",
             "AKEN_NATIVE_SHA256_LENGTH",
@@ -899,7 +907,21 @@ object EmbeddedHelperDeployment {
             bytes.containsAscii(NativeKernelShellPacker.MAX_STUB_MARKER) &&
             bytes.containsAscii(NativeKernelShellPacker.MAX_PAYLOAD_MARKER)
 
-    internal fun hasLoadableNativeKernel(): Boolean = hasBundledNativeSources()
+    internal fun hasLoadableNativeKernel(): Boolean {
+        /*
+         * This is a build-time preflight, not a Java fallback gate: source text
+         * alone does not prove that a current native artifact can be emitted.
+         * Require the current platform and a local Zig toolchain without
+         * triggering network download. The generated artifact still performs
+         * full native compilation, ABI/sealing validation, and runtime loading.
+         */
+        return hasBundledNativeSources() &&
+            NativeToolchainProvisioner.detectPlatform(
+                System.getProperty("os.name"),
+                System.getProperty("os.arch"),
+            ) != null &&
+            NativeToolchainProvisioner.probeWithoutDownload() != null
+    }
 
     private fun hasBundledNativeSources(): Boolean = listOf(
         "js_kernel.c",

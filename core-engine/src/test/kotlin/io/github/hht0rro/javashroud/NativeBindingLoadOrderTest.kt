@@ -3,6 +3,7 @@ package io.github.hht0rro.javashroud
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class NativeBindingLoadOrderTest {
@@ -42,9 +43,12 @@ class NativeBindingLoadOrderTest {
         )
 
         val shellSource = Files.readString(Path.of("src/main/native/js_shell_stub.c"))
-        assertTrue(shellSource.contains("nativeDecodeAkenStringPage"))
-        assertTrue(shellSource.contains("js_shell_decode_aken_string_page"))
-        assertTrue(shellSource.contains("nativeReadAkenClassPage"))
+        assertTrue(shellSource.contains("js_obfuscated_JNI_NATIVE_OPEN_AKEN_STRING"))
+        assertTrue(shellSource.contains("js_shell_open_aken_string"))
+        assertTrue(shellSource.contains("([BI[B)Ljava/lang/String;"))
+        assertTrue(shellSource.contains("js_obfuscated_JNI_NATIVE_READ_AKEN_CLASS_PAGE"))
+        assertFalse(shellSource.contains("\"nativeOpenAkenString\""))
+        assertFalse(shellSource.contains("\"nativeReadAkenClassPage\""))
     }
 
     @Test
@@ -52,22 +56,22 @@ class NativeBindingLoadOrderTest {
         val source = Files.readString(
             Path.of("src/main/java/io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper.java"),
         )
-        assertTrue(source.contains("JniMicrokernelHelper.decodeAkenStringPage(encodedHandle, pageIndex, callSiteProof)"))
-        assertTrue(source.indexOf("requireAkenStringPageRequest") < source.indexOf("decodeAkenStringPage(encodedHandle, pageIndex, callSiteProof)"))
-        assertTrue(source.contains("AKEN string page native decoder is not registered for the sealed helper"))
+        assertTrue(source.contains("JniMicrokernelHelper.openAkenString(encodedHandle, pageIndex, callSiteProof)"))
+        assertTrue(source.indexOf("requireAkenStringPageRequest") < source.indexOf("openAkenString(encodedHandle, pageIndex, callSiteProof)"))
+        assertTrue(source.contains("AKEN string page native terminal is not registered for the sealed helper"))
         assertTrue(!source.contains("nativeDecodeString(payload"))
         assertTrue(!source.contains("JniMicrokernelHelper.loadKernel"))
 
         val kernelSource = Files.readString(
             Path.of("src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"),
         )
-        val bridgeStart = kernelSource.indexOf("public static byte[] decodeAkenStringPage")
+        val bridgeStart = kernelSource.indexOf("static String openAkenString")
         val bridgeEnd = kernelSource.indexOf("public static byte[] readAkenClassPage", bridgeStart)
         assertTrue(bridgeStart >= 0 && bridgeEnd > bridgeStart)
         val bridge = kernelSource.substring(bridgeStart, bridgeEnd)
         assertTrue(bridge.indexOf("requireAkenPageRequest") < bridge.indexOf("ensureAkenNativeKernel()"))
-        assertTrue(bridge.indexOf("ensureAkenNativeKernel()") < bridge.indexOf("nativeDecodeAkenStringPage"))
-        assertTrue(kernelSource.contains("no Java fallback"), "AKEN page access must fail closed without a Java decoder fallback.")
+        assertTrue(bridge.indexOf("ensureAkenNativeKernel()") < bridge.indexOf("nativeOpenAkenString"))
+        assertTrue(kernelSource.contains("requires the sealed native kernel ("), "AKEN page access must fail closed without a decoder fallback.")
         assertTrue(source.contains("catch (UnsatisfiedLinkError error)"))
     }
 
@@ -120,5 +124,56 @@ class NativeBindingLoadOrderTest {
 
         val runtimeHeader = Files.readString(Path.of("src/main/native/js_vm_core.h"))
         assertTrue(runtimeHeader.contains("js_lookup_bound_field"))
+    }
+
+
+    @Test
+    fun max_shell_uses_current_sha256_binding_identity_for_renamed_jni_methods() {
+        val shellSource = Files.readString(Path.of("src/main/native/js_shell_stub.c"))
+        val keyStart = shellSource.indexOf("static int js_shell_sealed_method_binding_key")
+        val lookupStart = shellSource.indexOf("static char *js_shell_lookup_bound_method", keyStart)
+        val lookupEnd = shellSource.indexOf("static int js_shell_register_outer_shim", lookupStart)
+        assertTrue(keyStart >= 0 && lookupStart > keyStart && lookupEnd > lookupStart)
+
+        val keyBody = shellSource.substring(keyStart, lookupStart)
+        val lookupBody = shellSource.substring(lookupStart, lookupEnd)
+        assertTrue(
+            keyBody.contains("AKEN-BINDING-V1|") &&
+                keyBody.contains("js_shell_sha256_init") &&
+                keyBody.contains("js_shell_sha256_update") &&
+                keyBody.contains("js_shell_sha256_final"),
+            "Outer max shell must derive the same current SHA-256 relocation identity as Java and the inner kernel",
+        )
+        assertTrue(
+            lookupBody.contains("js_shell_sealed_method_binding_key(owner, name, sig, key)"),
+            "Outer max shell must bind renamed JNI methods through the current relocation identity",
+        )
+        assertFalse(
+            shellSource.contains("js_shell_fnv1a64"),
+            "The current shell must not retain the obsolete FNV method-binding lane",
+        )
+    }
+
+    @Test
+    fun relocated_open_aken_string_bridge_is_promoted_only_at_sealing_boundary() {
+        val helperSource = Files.readString(
+            Path.of("src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"),
+        )
+        val sourceStart = helperSource.indexOf("static String openAkenString")
+        assertTrue(sourceStart >= 0, "Source bridge must remain a narrow package-private terminal")
+
+        val sealingSource = Files.readString(
+            Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/RuntimeArtifactSealing.kt"),
+        )
+        assertTrue(
+            sealingSource.contains("openStringDescriptor") &&
+                sealingSource.contains("sealedOpenStringName") &&
+                sealingSource.contains("Opcodes.ACC_PUBLIC"),
+            "Sealing must promote only the relocated typed String terminal for cross-package call-site linkage",
+        )
+        assertTrue(
+            sealingSource.contains("method.access and (Opcodes.ACC_PRIVATE or Opcodes.ACC_PROTECTED).inv()"),
+            "Sealing must clear private/protected visibility before promoting the relocated bridge",
+        )
     }
 }

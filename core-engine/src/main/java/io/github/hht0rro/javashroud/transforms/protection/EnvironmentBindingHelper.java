@@ -9,21 +9,21 @@ public final class EnvironmentBindingHelper {
 
     public static String deriveKey(String bindingSource, String salt, String expectedFingerprint) {
         if (!JniMicrokernelHelper.isNativeLoaded()) {
-            throw new SecurityException("environment-bound key derivation requires the sealed native kernel; no Java fallback");
+            throw new SecurityException("environment-bound key derivation requires the sealed native kernel");
         }
         return nativeDeriveKey(bindingSource, salt, expectedFingerprint);
     }
 
     public static void verifyEnvironment(String expectedToken, String bindingSource, String salt, String expectedFingerprint) {
         if (!JniMicrokernelHelper.isNativeLoaded()) {
-            throw new SecurityException("environment binding verification requires the sealed native kernel; no Java fallback");
+            throw new SecurityException("environment binding verification requires the sealed native kernel");
         }
         nativeVerifyEnvironment(expectedToken, bindingSource, salt, expectedFingerprint);
     }
 
     public static String getMachineFingerprint() {
         if (!JniMicrokernelHelper.isNativeLoaded()) {
-            throw new SecurityException("machine fingerprint requires the sealed native kernel; no Java fallback");
+            throw new SecurityException("machine fingerprint requires the sealed native kernel");
         }
         return nativeGetMachineFingerprint();
     }

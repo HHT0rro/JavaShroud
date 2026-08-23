@@ -23,7 +23,7 @@ import kotlin.test.assertTrue
 class StringEncryptionSmokeTest {
 
     @Test
-    fun encryptClassStrings_replaces_ldc_strings_with_native_cached_callsite() {
+    fun encryptClassStrings_replaces_ldc_strings_with_native_aken_callsite() {
         val classBytes = buildTestClassWithStrings("Hello", "World")
         val context = defaultVbc4BuildContext()
         try {
@@ -36,7 +36,7 @@ class StringEncryptionSmokeTest {
                         val handles = candidates.map { it.copyEncodedHandleForBuild() }
                         val proofs = candidates.map { it.copyCallSiteProofForBuild() }
                         try {
-                            assertTrue(candidates.all { it.pageIndex == 0 })
+                            assertTrue(candidates.all { it.pageIndex > 0 })
                             assertTrue(identities.all { it.size == 32 })
                             assertFalse(identities[0].contentEquals(identities[1]), "StringPage identities must be page-local")
                             assertTrue(handles.all { it.size == 24 })
@@ -66,6 +66,8 @@ class StringEncryptionSmokeTest {
             val reader = ClassReader(encrypted)
             var foundSyntheticStringArray = false
             var akenHelperInvokeCount = 0
+            var akenHelperInvokeDynamicCount = 0
+            val bootstrapNames = setOf("q0", "m7", "x3", "v8")
             var foundLegacyHelperInvoke = false
             var foundOriginalLiteral = false
             reader.accept(object : ClassVisitor(Opcodes.ASM9) {
@@ -84,18 +86,42 @@ class StringEncryptionSmokeTest {
 
                         override fun visitMethodInsn(opcode: Int, owner: String, name: String, descriptor: String, isInterface: Boolean) {
                             if (opcode != Opcodes.INVOKESTATIC || owner != "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper") return
-                            if (name == "cachedDecodeAkenStringPage" && descriptor == "([BI[B)Ljava/lang/String;") {
+                            if (name == "invokeAkenStringTerminal" && descriptor == "([BI[B)Ljava/lang/String;") {
                                 akenHelperInvokeCount++
                             }
                             if (name == "cachedDecodeString" || descriptor == "([BIIJJ)Ljava/lang/String;") {
                                 foundLegacyHelperInvoke = true
                             }
                         }
+
+                        override fun visitInvokeDynamicInsn(
+                            name: String,
+                            descriptor: String,
+                            bootstrapMethodHandle: org.objectweb.asm.Handle,
+                            vararg bootstrapMethodArguments: Any,
+                        ) {
+                            if (
+                                descriptor == "([BI[B)Ljava/lang/String;" &&
+                                bootstrapMethodHandle.owner == "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper" &&
+                                bootstrapMethodHandle.desc ==
+                                    "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;" +
+                                        "Ljava/lang/invoke/MethodHandle;)Ljava/lang/invoke/CallSite;"
+                            ) {
+                                assertTrue(bootstrapNames.contains(bootstrapMethodHandle.name))
+                                assertEquals(1, bootstrapMethodArguments.size)
+                                assertTrue(bootstrapMethodArguments[0] is org.objectweb.asm.Handle)
+                                val target = bootstrapMethodArguments[0] as org.objectweb.asm.Handle
+                                assertEquals("invokeAkenStringTerminal", target.name)
+                                assertEquals("([BI[B)Ljava/lang/String;", target.desc)
+                                akenHelperInvokeDynamicCount++
+                            }
+                        }
                     }
                 }
             }, 0)
             assertFalse(foundSyntheticStringArray, "String encryption must not add reflection-visible fields to business classes")
-            assertEquals(2, akenHelperInvokeCount, "Each literal should invoke the typed AKEN StringPage helper")
+            assertEquals(1, akenHelperInvokeCount, "One literal should use the direct typed AKEN StringPage helper")
+            assertEquals(1, akenHelperInvokeDynamicCount, "One literal should use the indy typed AKEN StringPage helper")
             assertFalse(foundLegacyHelperInvoke, "Production call sites must not use the legacy inline string payload decoder")
             assertFalse(foundOriginalLiteral, "Original literals should be removed from LDC sites")
         } finally {

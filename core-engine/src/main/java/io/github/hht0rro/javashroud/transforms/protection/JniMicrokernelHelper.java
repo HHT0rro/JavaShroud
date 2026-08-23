@@ -44,8 +44,7 @@ import javax.crypto.spec.SecretKeySpec;
  *
  * Attempts to load a bundled native kernel from the JAR resources.
  * In pure VBC4-only mode this helper is strictly fail-closed:
- * native bootstrap and load logic remain, but there is no Java fallback
- * and native ABI failures reject execution.
+ * native bootstrap and load logic remain, and native ABI failures reject execution.
  */
 public final class JniMicrokernelHelper {
 
@@ -78,8 +77,22 @@ public final class JniMicrokernelHelper {
     private static final String AKEN_NATIVE_LOCATOR_RESOURCE = "META-INF/aken/native.locator";
     private static final String AKEN_NATIVE_BINDINGS_LOCATOR_RESOURCE = "META-INF/aken/native.bindings.locator";
     private static final String AKEN_NATIVE_RESOURCE_ROOT = "META-INF/";
-    private static final String AKEN_NATIVE_LOCATOR_RECORD = "AKEN_NATIVE_LOCATOR_V1";
-    private static final String AKEN_NATIVE_BINDINGS_LOCATOR_RECORD = "AKEN_NATIVE_BINDINGS_V1";
+    private static final int AKEN_NATIVE_LOCATOR_MAGIC_0 = 0xD7;
+    private static final int AKEN_NATIVE_LOCATOR_MAGIC_1 = 0xA4;
+    private static final int AKEN_NATIVE_LOCATOR_MAGIC_2 = 0x91;
+    private static final int AKEN_NATIVE_LOCATOR_MAGIC_3 = 0xE3;
+    private static final String AKEN_NATIVE_LOCATOR_COMMITMENT_DOMAIN =
+        "javashroud-aken-native-locator-commitment-v2";
+    private static final String AKEN_NATIVE_LOCATOR_ROUTE_MASK_DOMAIN =
+        "javashroud-aken-native-locator-route-mask-v2";
+    private static final int AKEN_NATIVE_LOCATOR_VERSION = 2;
+    private static final int AKEN_NATIVE_LOCATOR_HEADER_BYTES = 8;
+    private static final int AKEN_NATIVE_LOCATOR_COMMITMENT_BYTES = 32;
+    private static final int AKEN_NATIVE_LOCATOR_RECORD_FIXED_BYTES = 40;
+    private static final int AKEN_NATIVE_LOCATOR_MAX_RECORDS = 5;
+    private static final int AKEN_NATIVE_LOCATOR_MAX_ROUTE_BYTES = 2048;
+    private static final int AKEN_NATIVE_LOCATOR_KIND_LIBRARY = 1;
+    private static final int AKEN_NATIVE_LOCATOR_KIND_BINDINGS = 2;
     private static final int AKEN_NATIVE_LOCATOR_MAX_BYTES = 16 * 1024;
     private static final int AKEN_NATIVE_MAX_LIBRARY_BYTES = 256 * 1024 * 1024;
     private static final int AKEN_NATIVE_SHA256_LENGTH = 32;
@@ -96,7 +109,7 @@ public final class JniMicrokernelHelper {
     private static final byte[] BOOT_SIDECAR_TEXT_PREFIX = "JSBK1.".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] BOOT_SIDECAR_KEY_DOMAIN = "JavaShroud/BootKekSidecar/v1/key".getBytes(StandardCharsets.US_ASCII);
     private static final String VM_CATALOG_RESOURCE = "META-INF/.r/vm.catalog";
-    private static final int RUNTIME_RESOURCE_VERSION = 7;
+    private static final int RUNTIME_RESOURCE_VERSION = 8;
     private static final int RUNTIME_RESOURCE_HEADER_SIZE = 27;
     private static final int NATIVE_ANCHOR_KEY_SLOT = 16;
     private static final int ZSTD_MAGIC = 0xFD2FB528;
@@ -135,7 +148,7 @@ public final class JniMicrokernelHelper {
      * locator metadata, or a generic resource buffer.
      */
     static native Object nativeExecuteAkenVmPage(long entryToken, byte[] encodedHandle, int pageIndex, byte[] callSiteProof, Object[] args);
-    static native byte[] nativeDecodeAkenStringPage(byte[] encodedHandle, int pageIndex, byte[] callSiteProof);
+    static native String nativeOpenAkenString(byte[] encodedHandle, int pageIndex, byte[] callSiteProof);
     static native byte[] nativeReadAkenClassPage(byte[] encodedHandle, int pageIndex, byte[] callSiteProof);
     static native void nativeConsumeAkenNativeChunk(byte[] encodedHandle, int pageIndex, byte[] callSiteProof);
     /* Fixture-only, de-identified runtime counters.  The production runtime
@@ -162,10 +175,12 @@ public final class JniMicrokernelHelper {
         }
     }
 
-    public static byte[] decodeAkenStringPage(byte[] encodedHandle, int pageIndex, byte[] callSiteProof) {
+    static String openAkenString(byte[] encodedHandle, int pageIndex, byte[] callSiteProof) {
         requireAkenPageRequest(encodedHandle, pageIndex, callSiteProof, "string");
         ensureAkenNativeKernel();
-        return requireAkenPageResult(nativeDecodeAkenStringPage(encodedHandle, pageIndex, callSiteProof), "string");
+        String result = nativeOpenAkenString(encodedHandle, pageIndex, callSiteProof);
+        if (result == null) throw new SecurityException("AKEN string page access failed closed");
+        return result;
     }
 
     public static byte[] readAkenClassPage(byte[] encodedHandle, int pageIndex, byte[] callSiteProof) {
@@ -193,7 +208,7 @@ public final class JniMicrokernelHelper {
     private static void ensureAkenNativeKernel() {
         if (akenLoadState == LOAD_UNTRIED) loadAkenNativeKernel();
         if (akenLoadState != LOAD_READY) {
-            throw new SecurityException("AKEN page access requires the sealed native kernel; no Java fallback (" + akenLoadMessage + ")");
+            throw new SecurityException("AKEN page access requires the sealed native kernel (" + akenLoadMessage + ")");
         }
     }
 
@@ -343,7 +358,7 @@ public final class JniMicrokernelHelper {
                 // The current native bridge is intentionally fail-closed until page routing lands.
             }
             try {
-                nativeDecodeAkenStringPage(handle, 0, proof);
+                nativeOpenAkenString(handle, 0, proof);
             } catch (SecurityException expectedRouteFailure) {
                 // Registered typed route reached native code.
             }
@@ -382,71 +397,120 @@ public final class JniMicrokernelHelper {
      */
     private static AkenNativeLibrary readAkenNativeLocator(String expectedPlatform) {
         byte[] raw = null;
+        byte[] expectedCommitment = null;
+        byte[] storedCommitment = null;
         byte[] bindingSha256 = null;
+        AkenNativeLibrary selected = null;
+        boolean completed = false;
         try (InputStream in = resourceStream(AKEN_NATIVE_LOCATOR_RESOURCE)) {
             if (in == null) throw new SecurityException("AKEN native locator is missing");
             raw = readAllBounded(in, AKEN_NATIVE_LOCATOR_MAX_BYTES);
-            if (raw.length == 0 || hasAkenRejectedLegacyHeader(raw) || !isAscii(raw)) {
-                throw new SecurityException("AKEN native locator is not raw metadata");
+            if (raw.length < AKEN_NATIVE_LOCATOR_HEADER_BYTES + AKEN_NATIVE_LOCATOR_COMMITMENT_BYTES ||
+                hasAkenRejectedLegacyHeader(raw) || !hasAkenLocatorMagic(raw) ||
+                (raw[4] & 0xFF) != AKEN_NATIVE_LOCATOR_VERSION || (raw[5] & 0xFF) != 0) {
+                throw new SecurityException("AKEN native locator binary header is invalid");
             }
-            String text = new String(raw, StandardCharsets.US_ASCII);
-            AkenNativeLibrary selected = null;
+            int payloadLength = raw.length - AKEN_NATIVE_LOCATOR_COMMITMENT_BYTES;
+            expectedCommitment = akenNativeLocatorCommitment(raw, payloadLength);
+            storedCommitment = Arrays.copyOfRange(raw, payloadLength, raw.length);
+            if (!MessageDigest.isEqual(expectedCommitment, storedCommitment)) {
+                throw new SecurityException("AKEN native locator commitment is invalid");
+            }
+            int recordCount = readAkenLocatorU16(raw, 6, payloadLength);
+            if (recordCount < 1 || recordCount > AKEN_NATIVE_LOCATOR_MAX_RECORDS) {
+                throw new SecurityException("AKEN native locator record count is invalid");
+            }
+
+            int expectedPlatformId = akenNativePlatformId(expectedPlatform);
+            if (expectedPlatformId == 0) {
+                throw new SecurityException("AKEN native locator requested platform is invalid");
+            }
+            int offset = AKEN_NATIVE_LOCATOR_HEADER_BYTES;
+            int lastPlatformId = 0;
+            boolean bindingSeen = false;
             String bindingResourcePath = null;
             int bindingStoredLength = 0;
-            String[] lines = text.split("\\n", -1);
-            if (lines.length == 0 || (lines.length > 1 && lines[lines.length - 1].length() == 0)) {
-                throw new SecurityException("AKEN native locator has invalid line layout");
+            LinkedHashSet<String> seenRoutes = new LinkedHashSet<>();
+            for (int recordIndex = 0; recordIndex < recordCount; recordIndex++) {
+                if (offset < 0 || offset > payloadLength - AKEN_NATIVE_LOCATOR_RECORD_FIXED_BYTES) {
+                    throw new SecurityException("AKEN native locator record is truncated");
+                }
+                int kind = raw[offset++] & 0xFF;
+                int platformId = raw[offset++] & 0xFF;
+                int routeLength = readAkenLocatorU16(raw, offset, payloadLength);
+                offset += 2;
+                int storedLength = readAkenLocatorPositiveU32(raw, offset, payloadLength);
+                offset += 4;
+                if (routeLength < 1 || routeLength > AKEN_NATIVE_LOCATOR_MAX_ROUTE_BYTES ||
+                    offset > payloadLength - AKEN_NATIVE_SHA256_LENGTH ||
+                    routeLength > payloadLength - offset - AKEN_NATIVE_SHA256_LENGTH) {
+                    throw new SecurityException("AKEN native locator route length is invalid");
+                }
+                byte[] digest = Arrays.copyOfRange(raw, offset, offset + AKEN_NATIVE_SHA256_LENGTH);
+                offset += AKEN_NATIVE_SHA256_LENGTH;
+                byte[] maskedRoute = Arrays.copyOfRange(raw, offset, offset + routeLength);
+                offset += routeLength;
+                byte[] routeBytes = null;
+                boolean digestTransferred = false;
+                try {
+                    routeBytes = unmaskAkenNativeLocatorRoute(
+                        maskedRoute,
+                        kind,
+                        platformId,
+                        storedLength,
+                        digest
+                    );
+                    if (!isAkenNativeRouteBytes(routeBytes)) {
+                        throw new SecurityException("AKEN native locator route encoding is invalid");
+                    }
+                    String resourcePath = new String(routeBytes, StandardCharsets.US_ASCII);
+                    if (!isAkenNativeResourcePath(resourcePath) || !seenRoutes.add(resourcePath)) {
+                        throw new SecurityException("AKEN native locator route is invalid or duplicated");
+                    }
+
+                    if (kind == AKEN_NATIVE_LOCATOR_KIND_LIBRARY) {
+                        if (bindingSeen || platformId <= lastPlatformId || platformId > 4 ||
+                            storedLength > AKEN_NATIVE_MAX_LIBRARY_BYTES) {
+                            throw new SecurityException("AKEN native locator platform record is invalid");
+                        }
+                        lastPlatformId = platformId;
+                        String fileSuffix = akenNativeSuffix(platformId);
+                        if (fileSuffix == null || !resourcePath.endsWith(fileSuffix)) {
+                            throw new SecurityException("AKEN native locator suffix binding is invalid");
+                        }
+                        if (platformId == expectedPlatformId) {
+                            if (selected != null) {
+                                throw new SecurityException("AKEN native locator has duplicate active platform");
+                            }
+                            selected = new AkenNativeLibrary(resourcePath, fileSuffix, storedLength, digest);
+                            digestTransferred = true;
+                        }
+                    } else if (kind == AKEN_NATIVE_LOCATOR_KIND_BINDINGS) {
+                        if (platformId != 0 || bindingSeen || recordIndex != recordCount - 1 ||
+                            storedLength > AKEN_NATIVE_BINDINGS_MAX_BYTES) {
+                            throw new SecurityException("AKEN native bindings locator record is invalid");
+                        }
+                        bindingSeen = true;
+                        bindingResourcePath = resourcePath;
+                        bindingStoredLength = storedLength;
+                        bindingSha256 = digest;
+                        digestTransferred = true;
+                    } else {
+                        throw new SecurityException("AKEN native locator record kind is invalid");
+                    }
+                } finally {
+                    Arrays.fill(maskedRoute, (byte) 0);
+                    if (routeBytes != null) Arrays.fill(routeBytes, (byte) 0);
+                    if (!digestTransferred) Arrays.fill(digest, (byte) 0);
+                }
             }
-            LinkedHashSet<String> seenPlatforms = new LinkedHashSet<>();
-            for (String line : lines) {
-                if (line.length() == 0 || line.indexOf('\r') >= 0) {
-                    throw new SecurityException("AKEN native locator has an empty or CRLF record");
-                }
-                String[] fields = line.split("\\|", -1);
-                if (AKEN_NATIVE_BINDINGS_LOCATOR_RECORD.equals(fields[0])) {
-                    if (fields.length != 4 || bindingResourcePath != null ||
-                        !isAkenNativeResourcePath(fields[1])) {
-                        throw new SecurityException("AKEN native bindings locator record is malformed");
-                    }
-                    int storedLength = parseAkenNativeLength(fields[2]);
-                    if (storedLength > AKEN_NATIVE_BINDINGS_MAX_BYTES) {
-                        throw new SecurityException("AKEN native bindings locator length is invalid");
-                    }
-                    bindingResourcePath = fields[1];
-                    bindingStoredLength = storedLength;
-                    bindingSha256 = parseAkenNativeSha256(fields[3]);
-                    continue;
-                }
-                if (fields.length != 6 || !AKEN_NATIVE_LOCATOR_RECORD.equals(fields[0])) {
-                    throw new SecurityException("AKEN native locator record is malformed");
-                }
-                String platform = fields[1];
-                String resourcePath = fields[2];
-                String fileSuffix = fields[3];
-                if (!isAkenNativePlatform(platform) || !seenPlatforms.add(platform)) {
-                    throw new SecurityException("AKEN native locator platform is invalid or duplicated");
-                }
-                if (!isAkenNativeResourcePath(resourcePath) || !isAkenNativeSuffix(platform, fileSuffix) ||
-                    !resourcePath.endsWith(fileSuffix)) {
-                    throw new SecurityException("AKEN native locator route is invalid");
-                }
-                int storedLength = parseAkenNativeLength(fields[4]);
-                byte[] digest = parseAkenNativeSha256(fields[5]);
-                if (platform.equals(expectedPlatform)) {
-                    if (selected != null) {
-                        Arrays.fill(digest, (byte) 0);
-                        throw new SecurityException("AKEN native locator has duplicate active platform");
-                    }
-                    selected = new AkenNativeLibrary(resourcePath, fileSuffix, storedLength, digest);
-                } else {
-                    Arrays.fill(digest, (byte) 0);
-                }
-            }
+            if (offset != payloadLength) throw new SecurityException("AKEN native locator has trailing bytes");
             if (selected == null) throw new SecurityException("AKEN native locator has no active platform route");
             selected.bindingResourcePath = bindingResourcePath;
             selected.bindingStoredLength = bindingStoredLength;
             selected.bindingSha256 = bindingSha256;
             bindingSha256 = null;
+            completed = true;
             return selected;
         } catch (SecurityException error) {
             throw error;
@@ -454,21 +518,34 @@ public final class JniMicrokernelHelper {
             throw new SecurityException("AKEN native locator is unreadable", error);
         } finally {
             if (raw != null) Arrays.fill(raw, (byte) 0);
+            if (expectedCommitment != null) Arrays.fill(expectedCommitment, (byte) 0);
+            if (storedCommitment != null) Arrays.fill(storedCommitment, (byte) 0);
             if (bindingSha256 != null) Arrays.fill(bindingSha256, (byte) 0);
+            if (!completed && selected != null) selected.clear();
         }
     }
 
-    private static boolean isAkenNativePlatform(String platform) {
-        return "windows-x64".equals(platform) ||
-            "linux-x64".equals(platform) ||
-            "macos-x64".equals(platform) ||
-            "macos-arm64".equals(platform);
+    private static boolean hasAkenLocatorMagic(byte[] bytes) {
+        return bytes != null && bytes.length >= 4 &&
+            (bytes[0] & 0xFF) == AKEN_NATIVE_LOCATOR_MAGIC_0 &&
+            (bytes[1] & 0xFF) == AKEN_NATIVE_LOCATOR_MAGIC_1 &&
+            (bytes[2] & 0xFF) == AKEN_NATIVE_LOCATOR_MAGIC_2 &&
+            (bytes[3] & 0xFF) == AKEN_NATIVE_LOCATOR_MAGIC_3;
     }
 
-    private static boolean isAkenNativeSuffix(String platform, String suffix) {
-        return ("windows-x64".equals(platform) && ".dll".equals(suffix)) ||
-            ("linux-x64".equals(platform) && ".so".equals(suffix)) ||
-            (("macos-x64".equals(platform) || "macos-arm64".equals(platform)) && ".dylib".equals(suffix));
+    private static int akenNativePlatformId(String platform) {
+        if ("windows-x64".equals(platform)) return 1;
+        if ("linux-x64".equals(platform)) return 2;
+        if ("macos-x64".equals(platform)) return 3;
+        if ("macos-arm64".equals(platform)) return 4;
+        return 0;
+    }
+
+    private static String akenNativeSuffix(int platformId) {
+        if (platformId == 1) return ".dll";
+        if (platformId == 2) return ".so";
+        if (platformId == 3 || platformId == 4) return ".dylib";
+        return null;
     }
 
     private static boolean isAkenNativeResourcePath(String resourcePath) {
@@ -495,41 +572,97 @@ public final class JniMicrokernelHelper {
         return true;
     }
 
-    private static int parseAkenNativeLength(String value) {
-        if (!isDecimal(value)) throw new SecurityException("AKEN native locator length is invalid");
+    private static int readAkenLocatorU16(byte[] bytes, int offset, int limit) {
+        if (bytes == null || offset < 0 || limit < 0 || offset > limit - 2 || limit > bytes.length) {
+            throw new SecurityException("AKEN native locator u16 is truncated");
+        }
+        return ((bytes[offset] & 0xFF) << 8) | (bytes[offset + 1] & 0xFF);
+    }
+
+    private static int readAkenLocatorPositiveU32(byte[] bytes, int offset, int limit) {
+        if (bytes == null || offset < 0 || limit < 0 || offset > limit - 4 || limit > bytes.length) {
+            throw new SecurityException("AKEN native locator u32 is truncated");
+        }
+        long value = ((long) (bytes[offset] & 0xFF) << 24) |
+            ((long) (bytes[offset + 1] & 0xFF) << 16) |
+            ((long) (bytes[offset + 2] & 0xFF) << 8) |
+            (long) (bytes[offset + 3] & 0xFF);
+        if (value <= 0L || value > Integer.MAX_VALUE) {
+            throw new SecurityException("AKEN native locator length is invalid");
+        }
+        return (int) value;
+    }
+
+    private static byte[] akenNativeLocatorCommitment(byte[] payload, int payloadLength) {
+        byte[] domain = null;
         try {
-            int parsed = Integer.parseInt(value);
-            if (parsed <= 0 || parsed > AKEN_NATIVE_MAX_LIBRARY_BYTES) {
-                throw new SecurityException("AKEN native locator length is invalid");
-            }
-            return parsed;
-        } catch (NumberFormatException error) {
-            throw new SecurityException("AKEN native locator length is invalid", error);
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            domain = AKEN_NATIVE_LOCATOR_COMMITMENT_DOMAIN.getBytes(StandardCharsets.US_ASCII);
+            digest.update(domain);
+            digest.update(payload, 0, payloadLength);
+            return digest.digest();
+        } catch (Exception error) {
+            throw new SecurityException("AKEN native locator commitment is unavailable", error);
+        } finally {
+            if (domain != null) Arrays.fill(domain, (byte) 0);
         }
     }
 
-    private static byte[] parseAkenNativeSha256(String value) {
-        if (value == null || value.length() != AKEN_NATIVE_SHA256_LENGTH * 2) {
-            throw new SecurityException("AKEN native locator SHA-256 is invalid");
-        }
-        byte[] digest = new byte[AKEN_NATIVE_SHA256_LENGTH];
-        for (int index = 0; index < digest.length; index++) {
-            char hi = value.charAt(index * 2);
-            char lo = value.charAt(index * 2 + 1);
-            if (hi < '0' || hi > 'f' || lo < '0' || lo > 'f' ||
-                (hi > '9' && hi < 'a') || (lo > '9' && lo < 'a')) {
-                Arrays.fill(digest, (byte) 0);
-                throw new SecurityException("AKEN native locator SHA-256 is invalid");
+    private static byte[] unmaskAkenNativeLocatorRoute(
+        byte[] masked,
+        int kind,
+        int platformId,
+        int storedLength,
+        byte[] digestBytes
+    ) {
+        byte[] route = masked.clone();
+        int offset = 0;
+        int blockIndex = 0;
+        byte[] domain = null;
+        try {
+            domain = AKEN_NATIVE_LOCATOR_ROUTE_MASK_DOMAIN.getBytes(StandardCharsets.US_ASCII);
+            while (offset < route.length) {
+                MessageDigest digest = MessageDigest.getInstance("SHA-256");
+                digest.update(domain);
+                digest.update((byte) kind);
+                digest.update((byte) platformId);
+                updateAkenLocatorInt(digest, storedLength);
+                digest.update(digestBytes);
+                updateAkenLocatorInt(digest, blockIndex++);
+                byte[] block = digest.digest();
+                try {
+                    int count = Math.min(block.length, route.length - offset);
+                    for (int index = 0; index < count; index++) {
+                        route[offset + index] = (byte) (route[offset + index] ^ block[index]);
+                    }
+                    offset += count;
+                } finally {
+                    Arrays.fill(block, (byte) 0);
+                }
             }
-            int high = Character.digit(hi, 16);
-            int low = Character.digit(lo, 16);
-            if (high < 0 || low < 0) {
-                Arrays.fill(digest, (byte) 0);
-                throw new SecurityException("AKEN native locator SHA-256 is invalid");
-            }
-            digest[index] = (byte) ((high << 4) | low);
+            return route;
+        } catch (Exception error) {
+            Arrays.fill(route, (byte) 0);
+            throw new SecurityException("AKEN native locator route mask is unavailable", error);
+        } finally {
+            if (domain != null) Arrays.fill(domain, (byte) 0);
         }
-        return digest;
+    }
+
+    private static void updateAkenLocatorInt(MessageDigest digest, int value) {
+        digest.update((byte) (value >>> 24));
+        digest.update((byte) (value >>> 16));
+        digest.update((byte) (value >>> 8));
+        digest.update((byte) value);
+    }
+
+    private static boolean isAkenNativeRouteBytes(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) return false;
+        for (byte value : bytes) {
+            int unsigned = value & 0xFF;
+            if (unsigned == 0 || unsigned > 0x7F) return false;
+        }
+        return true;
     }
 
     private static boolean isAscii(byte[] bytes) {
@@ -2706,8 +2839,8 @@ public final class JniMicrokernelHelper {
             // Keep manifest discovery self-contained when an older shell or a
             // platform build does not expose the optional native resource
             // decoder. The same authenticated partition keys and hashes are
-            // checked by the Java fallback; a tampered envelope still fails
-            // closed rather than being accepted by the fallback.
+            // checked by the local decoder; a tampered envelope still fails
+            // closed rather than being accepted.
             if (decoded == null) decoded = decodeRuntimeResource(raw);
         } else {
             decoded = decodeRuntimeResource(raw);
@@ -2752,7 +2885,7 @@ public final class JniMicrokernelHelper {
     }
 
     private static byte[] decodeRuntimeResourceCurrent(byte[] raw, boolean allowCompressed) {
-        if (raw.length < RUNTIME_RESOURCE_HEADER_SIZE + 96 + 32 + 1 || (raw[raw.length - 1] & 0xFF) != 32) return null;
+        if (raw.length < RUNTIME_RESOURCE_HEADER_SIZE + 96 + 32) return null;
         byte[] nonce = Arrays.copyOfRange(raw, 5, 21);
         int metadataLength = readSealedResourceLe16(raw, 21);
         int macLength = readSealedResourceLe16(raw, 23);
@@ -2761,8 +2894,8 @@ public final class JniMicrokernelHelper {
         if (partitionId < 0 || partitionId > anchorResourcePartition()) return null;
         int metadataOffset = RUNTIME_RESOURCE_HEADER_SIZE;
         int bodyOffset = metadataOffset + metadataLength;
-        if (bodyOffset + 33 > raw.length) return null;
-        int tagOffset = raw.length - 33;
+        if (bodyOffset + 32 > raw.length) return null;
+        int tagOffset = raw.length - 32;
         byte[] resourceKey = partitionResourceKey(partitionId);
         try {
             byte[] expected = hmacSha256(resourceKey, concat("jsrp-auth-v3".getBytes(StandardCharsets.US_ASCII), nonce, Arrays.copyOfRange(raw, 0, tagOffset)));
@@ -3054,14 +3187,14 @@ public final class JniMicrokernelHelper {
      * runtime resource root key. The derivation (HKDF-SHA256, RFC 5869) runs
      * entirely inside the sealed native kernel, so neither the derivation logic
      * nor the root key ever exists in distributable Java bytecode. Fail-closed:
-     * without the native kernel there is no Java fallback.
+     * without the native kernel the derivation is rejected.
      */
     public static byte[] deriveClassEncryptionKey(byte[] keyId, byte[] salt, int length) {
         if (!isNativeLoaded()) {
             loadKernel("loader", "auto", "vm-diverse");
         }
         if (!isNativeLoaded()) {
-            throw new SecurityException("class-encryption key derivation requires the sealed native kernel; no Java fallback (" + loadMessage + ")");
+            throw new SecurityException("class-encryption key derivation requires the sealed native kernel (" + loadMessage + ")");
         }
         return nativeDeriveClassEncryptionKey(keyId, salt, length);
     }
@@ -3075,7 +3208,7 @@ public final class JniMicrokernelHelper {
         }
         if (!isNativeLoaded()) loadKernel("loader", "auto", "vm-diverse");
         if (!isNativeLoaded()) {
-            throw new SecurityException("class-encryption decryption requires the sealed native kernel; no Java fallback (" + loadMessage + ")");
+            throw new SecurityException("class-encryption decryption requires the sealed native kernel (" + loadMessage + ")");
         }
         try {
             byte[] result = nativeDecryptClassBytes(keyId, salt, nonce, ciphertext, aad, keyLength);

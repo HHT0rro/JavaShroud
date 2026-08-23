@@ -3,7 +3,6 @@ package io.github.hht0rro.javashroud.maintenance
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Comparator
-import kotlin.io.path.name
 
 object RuntimeGarbageCollector {
     private const val USER_CACHE_DIR_NAME = ".javashroud"
@@ -91,7 +90,7 @@ object RuntimeGarbageCollector {
         return try {
             Files.walk(workingDirectory, 4).use { stream ->
                 stream
-                    .filter { path -> Files.isDirectory(path) && path.name == WORKSPACE_NATIVE_DIR_NAME }
+                    .filter { path -> Files.isDirectory(path) && path.fileName?.toString() == WORKSPACE_NATIVE_DIR_NAME }
                     .map { it.toAbsolutePath().normalize() }
                     .sorted()
                     .toList()
@@ -145,6 +144,6 @@ object RuntimeGarbageCollector {
         val userNativeCache = userHome.resolve(WORKSPACE_NATIVE_DIR_NAME).toAbsolutePath().normalize()
         if (normalized == userCache) return true
         if (normalized == userNativeCache) return true
-        return normalized.startsWith(workingDirectory) && normalized.name == WORKSPACE_NATIVE_DIR_NAME
+        return normalized.startsWith(workingDirectory) && normalized.fileName?.toString() == WORKSPACE_NATIVE_DIR_NAME
     }
 }

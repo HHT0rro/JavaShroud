@@ -145,7 +145,11 @@ class MethodBodyDelayedDecryptionSafetyTest {
         val helperSource = Files.readString(sourcePath("src/main/java/io/github/hht0rro/javashroud/transforms/protection/MethodBodyDecryptionHelper.java"))
         assertFalse("AES/CBC/PKCS5Padding" in helperSource, "Method body helper must not keep CBC decrypt fallback")
         assertFalse("Base64.getDecoder().decode(keyBase64)" in helperSource, "Method body helper must not decode raw keyBase64")
-        assertTrue("AES/GCM/NoPadding" in helperSource, "Method body helper must use AES-GCM")
+        assertFalse("javax.crypto.Cipher" in helperSource, "Method body helper must not retain a Java crypto decrypt path")
+        assertTrue("JniMicrokernelHelper.decryptClassBytes" in helperSource, "Method body helper must use the sealed native AES-GCM path")
+        assertFalse("METHOD_CACHE" in helperSource, "Method body helper must not retain decrypted Method objects across calls")
+        assertFalse("INSTANCE_CACHE" in helperSource, "Method body helper must not retain decrypted wrapper instances across calls")
+        assertTrue("Arrays.fill(classBytes" in helperSource, "Decrypted wrapper bytes must be wiped after hidden-class definition")
     }
 
     private fun buildStaticTarget(internalName: String): ByteArray {

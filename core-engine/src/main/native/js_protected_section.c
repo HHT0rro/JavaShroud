@@ -4,7 +4,9 @@
 
 #include "js_protected_section.h"
 #include "js_crypto.h"
+#define JS_PROTECTED_SECTION_IMPLEMENTATION 1
 #include "native_secrets.inc"
+#undef JS_PROTECTED_SECTION_IMPLEMENTATION
 
 #include <limits.h>
 #include <stdint.h>
@@ -67,15 +69,109 @@ static void js_protected_unlock(void) {
 #endif
 }
 
+/*
+ * The build-specific protected-section key program is data, not generated
+ * executable code.  Production material lives in the dedicated read-only,
+ * non-executable .jskd section and is read through volatile objects so the
+ * optimizer cannot fold the per-build lane layout back into ordinary .text.
+ */
+static int js_protected_copy_scoped_key(unsigned char out[32]) {
+#ifndef JS_PROTECTED_SECTION_KEY_PARTITIONS_GENERATED
+    if (out) js_vbc4_wipe_volatile(out, 32u);
+    return 0;
+#else
+    unsigned char seen[6] = { 0u, 0u, 0u, 0u, 0u, 0u };
+    unsigned int version;
+    unsigned int lane_count;
+    unsigned int rotate_right;
+    unsigned int profile_mask;
+    if (!out) return 0;
+    version = (unsigned int)js_protected_key_program_header[0];
+    lane_count = (unsigned int)js_protected_key_program_header[1];
+    rotate_right = (unsigned int)js_protected_key_program_header[2];
+    profile_mask = (unsigned int)js_protected_key_program_header[3];
+    if (version != 1u || lane_count < 3u || lane_count > 6u || rotate_right == 0u || rotate_right >= 8u) {
+        goto failure;
+    }
+    for (unsigned int execution_index = 0u; execution_index < lane_count; execution_index++) {
+        unsigned int lane = (unsigned int)js_protected_key_lane_order[execution_index];
+        unsigned int width;
+        unsigned int stride;
+        unsigned int index_offset;
+        unsigned int data_begin;
+        unsigned int data_end;
+        if (lane >= lane_count || seen[lane]) goto failure;
+        seen[lane] = 1u;
+        width = (unsigned int)js_protected_key_lane_widths[lane];
+        stride = (unsigned int)js_protected_key_lane_strides[lane];
+        index_offset = (unsigned int)js_protected_key_lane_index_offsets[lane];
+        data_begin = (unsigned int)js_protected_key_lane_data_offsets[lane];
+        data_end = (unsigned int)js_protected_key_lane_data_offsets[lane + 1u];
+        if (width == 0u || stride == 0u || stride >= width || index_offset >= width ||
+                data_end < data_begin || data_end - data_begin != width ||
+                data_end > (unsigned int)sizeof(js_protected_key_lane_data)) {
+            goto failure;
+        }
+    }
+    for (unsigned int key_index = 0u; key_index < 32u; key_index++) {
+        unsigned int value =
+            (unsigned int)js_protected_key_lane_mask[(key_index * 7u + 3u) & 31u] ^ profile_mask;
+        for (unsigned int execution_index = 0u; execution_index < lane_count; execution_index++) {
+            unsigned int lane = (unsigned int)js_protected_key_lane_order[execution_index];
+            unsigned int width = (unsigned int)js_protected_key_lane_widths[lane];
+            unsigned int stored_index =
+                (key_index * (unsigned int)js_protected_key_lane_strides[lane] +
+                    (unsigned int)js_protected_key_lane_index_offsets[lane]) % width;
+            unsigned int data_index =
+                (unsigned int)js_protected_key_lane_data_offsets[lane] + stored_index;
+            value ^= (unsigned int)js_protected_key_lane_data[data_index];
+        }
+        out[key_index] = (unsigned char)((value >> rotate_right) | (value << (8u - rotate_right)));
+    }
+    js_vbc4_wipe_volatile(seen, sizeof(seen));
+    return 1;
+
+failure:
+    js_vbc4_wipe_volatile(seen, sizeof(seen));
+    js_vbc4_wipe_volatile(out, 32u);
+    return 0;
+#endif
+}
+
+static int js_protected_plaintext_binding_matches(const unsigned char *buf, unsigned int len) {
+#ifndef JS_PROTECTED_SECTION_KEY_PARTITIONS_GENERATED
+    (void)buf;
+    (void)len;
+    return 0;
+#else
+    static const unsigned char expected_magic[8] = {
+        0xD7u, 0x4Bu, 0x91u, 0x2Eu, 0xC3u, 0x58u, 0xA6u, 0x7Du
+    };
+    unsigned char digest[32];
+    unsigned int diff = 0u;
+    js_sha256_ctx ctx;
+    if (!buf || len == 0u || len > (unsigned int)INT_MAX) return 0;
+    for (unsigned int i = 0u; i < sizeof(expected_magic); i++) {
+        diff |= (unsigned int)(js_protected_key_plaintext_binding[i] ^ expected_magic[i]);
+    }
+    if (diff != 0u) return 0;
+    js_sha256_init(&ctx);
+    js_sha256_update(&ctx, buf, (int)len);
+    js_sha256_final(&ctx, digest);
+    js_vbc4_wipe_volatile(&ctx, sizeof(ctx));
+    diff = 0u;
+    for (unsigned int i = 0u; i < sizeof(digest); i++) {
+        diff |= (unsigned int)(digest[i] ^ js_protected_key_plaintext_binding[sizeof(expected_magic) + i]);
+    }
+    js_vbc4_wipe_volatile(digest, sizeof(digest));
+    return diff == 0u;
+#endif
+}
+
 static int js_protected_section_xor(unsigned char *buf, unsigned int len) {
     unsigned char key[32];
     if (!buf || len == 0u) return 0;
-#ifndef JS_PROTECTED_SECTION_KEY_PARTITIONS_GENERATED
-    js_vbc4_wipe_volatile(key, sizeof(key));
-    return 0;
-#else
-    JS_PROTECTED_COPY_SCOPED_KEY(key);
-#endif
+    if (!JS_PROTECTED_COPY_SCOPED_KEY(key)) return 0;
     unsigned int produced = 0;
     unsigned int counter = 0;
     while (produced < len) {
@@ -394,6 +490,12 @@ static int js_protected_open_locked(void) {
         return 0;
     }
     if (!js_protected_section_xor(js_protected_runtime_region.code, js_protected_runtime_region.code_len)) {
+        js_protected_mark_broken_locked();
+        return 0;
+    }
+    if (!js_protected_plaintext_binding_matches(js_protected_runtime_region.code, js_protected_runtime_region.code_len)) {
+        (void)js_protected_section_xor(js_protected_runtime_region.code, js_protected_runtime_region.code_len);
+        js_protected_flush();
         js_protected_mark_broken_locked();
         return 0;
     }

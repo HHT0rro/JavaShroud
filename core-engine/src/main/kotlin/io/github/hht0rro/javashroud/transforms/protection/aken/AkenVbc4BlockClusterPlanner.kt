@@ -14,13 +14,12 @@ import java.util.Arrays
  * record.
  */
 internal object AkenVbc4BlockClusterPlanner {
-    private const val VBC4_CURRENT_MAGIC = "VBCX"
+    private const val VBC4_CURRENT_MAGIC = "VBC4"
     private const val VBC4_NONCE_BYTES = 16
     private const val VBC4_WRAPPED_SEED_BYTES = 16
     private const val VBC4_BLOCK_INDEX_ENTRY_BYTES = 10
     private const val VBC4_BLOCK_FRAME_HEADER_BYTES = 12
     private const val VBC4_AUTH_TAG_BYTES = 32
-    private const val VBC4_AUTH_TAG_LENGTH_MARKER = 32
 
     private val supportedTargetSizes = setOf(512, 768, 1024, 1536, 2048)
 
@@ -109,12 +108,12 @@ internal object AkenVbc4BlockClusterPlanner {
         val cursor = Cursor(bytes)
         VBC4_CURRENT_MAGIC.forEachIndexed { index, expected ->
             require(cursor.readU1("magic[$index]") == expected.code) {
-                "AKEN VBC4 block planner expected current VBCX magic"
+                "AKEN VBC4 block planner expected current VBC4 magic"
             }
         }
-        // The current VBCX frame has no legacy version field between magic and nonce.
-        // Keep this grammar single-format so the planner cannot accept the retired
-        // VBC4 container shape.
+        // The current VBC4 frame has no version field between magic and nonce.
+        // Keep this grammar single-format so the planner cannot accept retired
+        // container layouts.
         cursor.skip(VBC4_NONCE_BYTES, "nonce")
         cursor.readU4("key id")
         cursor.skip(VBC4_WRAPPED_SEED_BYTES, "wrapped seed")
@@ -174,9 +173,6 @@ internal object AkenVbc4BlockClusterPlanner {
         val paddingLength = cursor.readLength("padding length")
         cursor.skip(paddingLength, "padding bytes")
         cursor.skip(VBC4_AUTH_TAG_BYTES, "authentication tag")
-        require(cursor.readU1("authentication tag length") == VBC4_AUTH_TAG_LENGTH_MARKER) {
-            "AKEN VBC4 block planner found an invalid authentication-tag length marker"
-        }
         require(cursor.remaining == 0) { "AKEN VBC4 block planner found trailing frame bytes" }
         return ParsedFrame(
             blockRegionStart = blockRegionStart,

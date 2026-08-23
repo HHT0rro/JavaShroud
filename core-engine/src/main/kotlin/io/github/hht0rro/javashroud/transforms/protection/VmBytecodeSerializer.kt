@@ -45,9 +45,10 @@ internal data class Vbc4EntryMetadata(
 private const val VBC4_ARGUMENT_TAGS = "ZBCSIJFDL["
 private const val VBC4_RETURN_TAGS = "VZBCSIJFDL["
 private const val VBC4_CP_SEALED_STRING_TYPE = 0x06
-private val VBC4_CP_STRING_KEY_DOMAIN = "cp-string-key".toByteArray(Charsets.US_ASCII)
-private val VBC4_CP_STRING_IV_DOMAIN = "cp-string-iv".toByteArray(Charsets.US_ASCII)
-private val VBC4_CP_STRING_TAG_DOMAIN = "cp-string-tag".toByteArray(Charsets.US_ASCII)
+private const val VBC4_CURRENT_MAGIC = "VBC4"
+private val VBC4_CP_STRING_KEY_DOMAIN = "javashroud-vbc4-cp-string-key-v2".toByteArray(Charsets.US_ASCII)
+private val VBC4_CP_STRING_IV_DOMAIN = "javashroud-vbc4-cp-string-iv-v2".toByteArray(Charsets.US_ASCII)
+private val VBC4_CP_STRING_TAG_DOMAIN = "javashroud-vbc4-cp-string-tag-v2".toByteArray(Charsets.US_ASCII)
 
 private fun isLowerHexDigit(value: Char): Boolean = value in '0'..'9' || value in 'a'..'f'
 
@@ -285,7 +286,7 @@ internal class VmBytecodeSerializer(
         val exceptionEncrypted = vbc4Crypt(exceptionStored, cryptoSeed, nonce, VBC4_SECTION_EXCEPTIONS, 0)
 
         val out = java.io.ByteArrayOutputStream()
-        out.write(byteArrayOf(0x56, 0x42, 0x43, 0x58))
+        out.write(VBC4_CURRENT_MAGIC.toByteArray(Charsets.US_ASCII))
         out.write(nonce)
         writeU4(out, vbc4KeyId(cryptoSeed, nonce))
         out.write(wrappedSeed)
@@ -336,7 +337,6 @@ internal class VmBytecodeSerializer(
         out.write(padBytes)
         val payload = out.toByteArray()
         out.write(vbc4Hmac(payload, cryptoSeed, nonce))
-        out.write(32)
         val serializedVbc4 = out.toByteArray()
         finalProductionEvidence = productionEvidenceFor(logicalProgram, serializedVbc4)
         return serializedVbc4

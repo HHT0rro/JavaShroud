@@ -1,6 +1,7 @@
 package io.github.hht0rro.javashroud.bytecode
 
 import org.objectweb.asm.ClassReader
+import org.objectweb.asm.Handle
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.Type
 import org.objectweb.asm.tree.FieldInsnNode
@@ -33,9 +34,28 @@ data class StringEncryptionConfig(
 
 private const val STRING_HELPER_OWNER = "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper"
 private const val STRING_HELPER_AKEN_DECODE_DESC = "([BI[B)Ljava/lang/String;"
+private const val STRING_HELPER_AKEN_BSM_DESC =
+    "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;" +
+        "Ljava/lang/invoke/MethodHandle;)Ljava/lang/invoke/CallSite;"
+private val STRING_HELPER_AKEN_BSM_NAMES = arrayOf("q0", "m7", "x3", "v8")
 private const val SHROUD_ENCRYPT_DESC = "Lio/github/hht0rro/javashroud/bytecode/ShroudEncrypt;"
-private const val AKEN_STRING_PAGE_INDEX = 0
 private const val AKEN_STRING_PAGE_NONCE_SIZE = 16
+
+private enum class AkenIntPushShape {
+    Canonical,
+    Bipush,
+    Sipush,
+    Ldc,
+}
+
+private data class AkenStringCallsiteShape(
+    val handleLengthPush: AkenIntPushShape,
+    val proofLengthPush: AkenIntPushShape,
+    val pageIndexPush: AkenIntPushShape,
+    val reverseStores: Boolean,
+    val useInvokeDynamic: Boolean,
+    val bootstrapSlot: Int,
+)
 
 private val AKEN_STRING_PAGE_IDENTITY_DOMAIN =
     "AKEN-v4-string-page-logical-identity-v1".toByteArray(Charsets.US_ASCII)
@@ -45,6 +65,10 @@ private val AKEN_STRING_PAGE_PROOF_DOMAIN =
     "AKEN-v4-string-page-call-site-proof-v1".toByteArray(Charsets.US_ASCII)
 private val AKEN_STRING_PAGE_PATH_DOMAIN =
     "AKEN-v4-string-page-logical-path-v1".toByteArray(Charsets.US_ASCII)
+private val AKEN_STRING_PAGE_INDEX_DOMAIN =
+    "AKEN-v4-string-page-index-v2".toByteArray(Charsets.US_ASCII)
+private val AKEN_STRING_PAGE_TEMPLATE_DOMAIN =
+    "AKEN-v4-string-page-callsite-template-v2".toByteArray(Charsets.US_ASCII)
 private val AKEN_STRING_PAGE_PATH_ROOTS = arrayOf(
     "META-INF/.a4/s",
     "META-INF/.r4/p",
@@ -54,7 +78,7 @@ private val AKEN_STRING_PAGE_PATH_ROOTS = arrayOf(
 private val AKEN_STRING_PAGE_PATH_SUFFIXES = arrayOf(".bin", ".dat", ".p", ".r")
 
 /**
- * Replaces string LDC constants with native-backed cached decode callsites.
+ * Replaces string LDC constants with native-backed authenticated decode callsites.
  */
 fun encryptClassStrings(
     classBytes: ByteArray,
@@ -98,27 +122,34 @@ fun encryptClassStrings(
                         buildNonce = buildNonce,
                     )
                     encodedHandle = deriveAkenStringPageHandle(logicalIdentity, buildNonce)
+                    val pageIndex = deriveAkenStringPageIndex(logicalIdentity, buildNonce)
                     val logicalBindingPath = akenStringPageLogicalBindingPath(logicalIdentity, encodedHandle)
                     callSiteProof = deriveAkenStringPageCallSiteProof(
                         logicalIdentity = logicalIdentity,
                         encodedHandle = encodedHandle,
-                        pageIndex = AKEN_STRING_PAGE_INDEX,
+                        pageIndex = pageIndex,
                         logicalBindingPath = logicalBindingPath,
                     )
                     plaintext = value.toByteArray(Charsets.UTF_8)
                     candidate = AkenStringPageCandidate.create(
                         logicalIdentity = logicalIdentity,
                         plaintext = plaintext,
-                        pageIndex = AKEN_STRING_PAGE_INDEX,
+                        pageIndex = pageIndex,
                         callSiteProof = callSiteProof,
                         encodedHandle = encodedHandle,
                         logicalBindingPath = logicalBindingPath,
                         random = candidateRandom,
                     )
+                    val callsiteShape = selectAkenStringCallsiteShape(
+                        logicalIdentity = logicalIdentity,
+                        classLiteralOrdinal = encryptedCount,
+                        methodLiteralOrdinal = methodLiteralOrdinal,
+                    )
                     val decodeCallsite = buildAkenStringPageDecodeCallsite(
                         encodedHandle = encodedHandle,
-                        pageIndex = AKEN_STRING_PAGE_INDEX,
+                        pageIndex = pageIndex,
                         callSiteProof = callSiteProof,
+                        shape = callsiteShape,
                     )
                     instructions.insert(insn, decodeCallsite)
                     instructions.remove(insn)
@@ -139,7 +170,11 @@ fun encryptClassStrings(
 
         if (encryptedCount == 0) return classBytes
 
-        val writer = computeFramesWriter(reader)
+        // Do not seed the writer from the source reader: ASM's reader-backed
+        // constant-pool copy can retain now-unreferenced plaintext LDC entries.
+        // Building a fresh pool ensures protected literals are absent from the
+        // emitted class bytes, not merely absent from the instruction stream.
+        val writer = computeFramesWriter()
         classNode.accept(writer)
         val transformed = writer.toByteArray()
         requireVbc4BuildContext().registerAkenStringPageCandidates(candidates)
@@ -253,25 +288,54 @@ private fun buildAkenStringPageDecodeCallsite(
     encodedHandle: ByteArray,
     pageIndex: Int,
     callSiteProof: ByteArray,
+    shape: AkenStringCallsiteShape,
 ): InsnList = InsnList().apply {
-    addByteArray(encodedHandle)
-    addInt(pageIndex)
-    addByteArray(callSiteProof)
-    add(
-        MethodInsnNode(
-            Opcodes.INVOKESTATIC,
-            STRING_HELPER_OWNER,
-            "cachedDecodeAkenStringPage",
-            STRING_HELPER_AKEN_DECODE_DESC,
-            false,
-        ),
-    )
+    addByteArray(encodedHandle, shape.handleLengthPush, shape.reverseStores)
+    addInt(pageIndex, shape.pageIndexPush)
+    addByteArray(callSiteProof, shape.proofLengthPush, !shape.reverseStores)
+    if (shape.useInvokeDynamic) {
+        add(
+            InvokeDynamicInsnNode(
+                "a${shape.bootstrapSlot}",
+                STRING_HELPER_AKEN_DECODE_DESC,
+                Handle(
+                    Opcodes.H_INVOKESTATIC,
+                    STRING_HELPER_OWNER,
+                    STRING_HELPER_AKEN_BSM_NAMES[shape.bootstrapSlot],
+                    STRING_HELPER_AKEN_BSM_DESC,
+                    false,
+                ),
+                Handle(
+                    Opcodes.H_INVOKESTATIC,
+                    STRING_HELPER_OWNER,
+                    "invokeAkenStringTerminal",
+                    STRING_HELPER_AKEN_DECODE_DESC,
+                    false,
+                ),
+            ),
+        )
+    } else {
+        add(
+            MethodInsnNode(
+                Opcodes.INVOKESTATIC,
+                STRING_HELPER_OWNER,
+                "invokeAkenStringTerminal",
+                STRING_HELPER_AKEN_DECODE_DESC,
+                false,
+            ),
+        )
+    }
 }
 
-private fun InsnList.addByteArray(bytes: ByteArray) {
-    addInt(bytes.size)
+private fun InsnList.addByteArray(
+    bytes: ByteArray,
+    lengthPush: AkenIntPushShape = AkenIntPushShape.Canonical,
+    reverseStores: Boolean = false,
+) {
+    addInt(bytes.size, lengthPush)
     add(IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_BYTE))
-    for (index in bytes.indices) {
+    val indices = if (reverseStores) bytes.indices.reversed() else bytes.indices
+    for (index in indices) {
         add(InsnNode(Opcodes.DUP))
         addInt(index)
         addInt(bytes[index].toInt())
@@ -279,18 +343,80 @@ private fun InsnList.addByteArray(bytes: ByteArray) {
     }
 }
 
-private fun InsnList.addInt(value: Int) {
-    when (value) {
-        -1 -> add(InsnNode(Opcodes.ICONST_M1))
-        0 -> add(InsnNode(Opcodes.ICONST_0))
-        1 -> add(InsnNode(Opcodes.ICONST_1))
-        2 -> add(InsnNode(Opcodes.ICONST_2))
-        3 -> add(InsnNode(Opcodes.ICONST_3))
-        4 -> add(InsnNode(Opcodes.ICONST_4))
-        5 -> add(InsnNode(Opcodes.ICONST_5))
-        in Byte.MIN_VALUE..Byte.MAX_VALUE -> add(IntInsnNode(Opcodes.BIPUSH, value))
-        in Short.MIN_VALUE..Short.MAX_VALUE -> add(IntInsnNode(Opcodes.SIPUSH, value))
-        else -> add(LdcInsnNode(value))
+private fun InsnList.addInt(value: Int, shape: AkenIntPushShape = AkenIntPushShape.Canonical) {
+    when (shape) {
+        AkenIntPushShape.Canonical -> when (value) {
+            -1 -> add(InsnNode(Opcodes.ICONST_M1))
+            0 -> add(InsnNode(Opcodes.ICONST_0))
+            1 -> add(InsnNode(Opcodes.ICONST_1))
+            2 -> add(InsnNode(Opcodes.ICONST_2))
+            3 -> add(InsnNode(Opcodes.ICONST_3))
+            4 -> add(InsnNode(Opcodes.ICONST_4))
+            5 -> add(InsnNode(Opcodes.ICONST_5))
+            in Byte.MIN_VALUE..Byte.MAX_VALUE -> add(IntInsnNode(Opcodes.BIPUSH, value))
+            in Short.MIN_VALUE..Short.MAX_VALUE -> add(IntInsnNode(Opcodes.SIPUSH, value))
+            else -> add(LdcInsnNode(value))
+        }
+        AkenIntPushShape.Bipush -> {
+            require(value in Byte.MIN_VALUE..Byte.MAX_VALUE) { "AKEN callsite BIPUSH value is out of range" }
+            add(IntInsnNode(Opcodes.BIPUSH, value))
+        }
+        AkenIntPushShape.Sipush -> {
+            require(value in Short.MIN_VALUE..Short.MAX_VALUE) { "AKEN callsite SIPUSH value is out of range" }
+            add(IntInsnNode(Opcodes.SIPUSH, value))
+        }
+        AkenIntPushShape.Ldc -> add(LdcInsnNode(value))
+    }
+}
+
+private fun deriveAkenStringPageIndex(
+    logicalIdentity: ByteArray,
+    buildNonce: ByteArray,
+): Int {
+    val digest = digestAkenBinding(AKEN_STRING_PAGE_INDEX_DOMAIN, logicalIdentity, buildNonce)
+    return try {
+        // Typed StringPages are not dispatcher page-zero bindings. Keep the
+        // index bounded and non-zero while still binding it into the proof,
+        // descriptor, evaluator graph, and native request.
+        val mixed = ((digest[0].toInt() and 0xFF) shl 8) or (digest[1].toInt() and 0xFF)
+        1 + (mixed and 0x1F)
+    } finally {
+        Arrays.fill(digest, 0)
+    }
+}
+
+private fun selectAkenStringCallsiteShape(
+    logicalIdentity: ByteArray,
+    classLiteralOrdinal: Int,
+    methodLiteralOrdinal: Int,
+): AkenStringCallsiteShape {
+    val digest = digestAkenBinding(
+        AKEN_STRING_PAGE_TEMPLATE_DOMAIN,
+        logicalIdentity,
+        intBytes(classLiteralOrdinal),
+        intBytes(methodLiteralOrdinal),
+    )
+    return try {
+        val first = digest[0].toInt() and 0xFF
+        val second = digest[1].toInt() and 0xFF
+        fun pushShape(bits: Int): AkenIntPushShape = when (bits and 0x03) {
+            0 -> AkenIntPushShape.Canonical
+            1 -> AkenIntPushShape.Bipush
+            2 -> AkenIntPushShape.Sipush
+            else -> AkenIntPushShape.Ldc
+        }
+        AkenStringCallsiteShape(
+            handleLengthPush = pushShape(first),
+            proofLengthPush = pushShape(first ushr 2),
+            pageIndexPush = pushShape(first ushr 4),
+            reverseStores = (second and 0x01) != 0,
+            // Alternate direct and indy terminals while the shape digest
+            // randomizes the surrounding encodings and bootstrap alias.
+            useInvokeDynamic = (classLiteralOrdinal and 1) != 0,
+            bootstrapSlot = (second ushr 1) and (STRING_HELPER_AKEN_BSM_NAMES.lastIndex),
+        )
+    } finally {
+        Arrays.fill(digest, 0)
     }
 }
 

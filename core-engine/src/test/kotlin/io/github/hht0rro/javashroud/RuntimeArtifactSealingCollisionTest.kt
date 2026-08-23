@@ -56,64 +56,54 @@ class RuntimeArtifactSealingCollisionTest {
     }
 
     @Test
-    fun `sealed string helper keeps its CachePolicy nested runtime class and stable VBC4 bridge`() {
+    fun `sealed string helper removes CachePolicy and renames the String terminal`() {
         val outerName = "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper"
-        val innerName = "$outerName${"$"}CachePolicy"
         val seed = 0x4A53524CL
         val outerBytes = loadClassBytes("$outerName.class")
-        val innerBytes = loadClassBytes("$innerName.class")
         val outerArtifact = ClassArtifact(
             entryName = "$outerName.class",
             summary = analyzeClassBytes(outerBytes),
             bytes = outerBytes,
         )
-        val innerArtifact = ClassArtifact(
-            entryName = "$innerName.class",
-            summary = analyzeClassBytes(innerBytes),
-            bytes = innerBytes,
-        )
 
         val sealed = withVbc4BuildContext(defaultVbc4BuildContext()) {
             RuntimeArtifactSealing.seal(
                 artifact = testAttachedArtifact(
-                    classArtifacts = listOf(outerArtifact, innerArtifact),
-                    jarEntries = listOf(
-                        JarEntryData(outerArtifact.entryName, outerArtifact.bytes),
-                        JarEntryData(innerArtifact.entryName, innerArtifact.bytes),
-                    ),
+                    classArtifacts = listOf(outerArtifact),
+                    jarEntries = listOf(JarEntryData(outerArtifact.entryName, outerArtifact.bytes)),
                 ),
                 seed = seed,
             )
         }
         val sealedOuterName = sealedRuntimeHelperInternalName(outerName, seed)
         val sealedOuter = sealed.classArtifacts.single { it.summary.internalName == sealedOuterName }
-        val sealedInner = sealed.classArtifacts.single {
-            it.summary.internalName.startsWith("$sealedOuterName${"$"}I")
-        }
         val sealedEntryNames = sealed.jarEntries.map { it.name }.toSet()
         val sealedOuterNode = ClassNode()
         org.objectweb.asm.ClassReader(sealedOuter.bytes).accept(sealedOuterNode, org.objectweb.asm.ClassReader.SKIP_FRAMES)
         val akenStringPageDescriptor = "([BI[B)Ljava/lang/String;"
-        assertFalse("$outerName.class" in sealedEntryNames)
-        assertFalse("$innerName.class" in sealedEntryNames)
-        assertTrue("$sealedOuterName.class" in sealedEntryNames)
-        assertTrue("${sealedInner.summary.internalName}.class" in sealedEntryNames)
-        assertTrue(
-            sealedOuterNode.innerClasses.any { it.name == sealedInner.summary.internalName },
-            "The sealed StringEncryptionHelper must retain a link to its sealed CachePolicy nested enum.",
+        val sealedTerminalName = sealedRuntimeHelperMethodName(
+            outerName,
+            "invokeAkenStringTerminal",
+            akenStringPageDescriptor,
+            seed,
         )
-        assertTrue(
-            sealedOuterNode.methods.any { it.name == "cachedDecodeAkenStringPage" && it.desc == akenStringPageDescriptor },
-            "The relocated StringPage helper must retain its stable VBC4 interpreted bridge name.",
+        assertFalse("$outerName.class" in sealedEntryNames)
+        assertTrue("$sealedOuterName.class" in sealedEntryNames)
+        assertFalse(
+            sealed.classArtifacts.any { it.summary.internalName.contains("CachePolicy") } ||
+                sealedEntryNames.any { it.contains("CachePolicy") } ||
+                sealedOuterNode.innerClasses.any { it.name.contains("CachePolicy") },
+            "The removed plaintext cache policy must not survive runtime sealing.",
         )
         assertFalse(
-            sealedOuterNode.methods.any {
-                it.name == sealedRuntimeHelperMethodName(outerName, "cachedDecodeAkenStringPage", akenStringPageDescriptor, seed) &&
-                    it.desc == akenStringPageDescriptor
-            },
-            "The VBC4 StringPage bridge must not be renamed without rewriting serialized VM call targets.",
+            sealedOuterNode.methods.any { it.name == "invokeAkenStringTerminal" && it.desc == akenStringPageDescriptor },
+            "The public String terminal name must be sealed with the runtime helper.",
         )
-}
+        assertTrue(
+            sealedOuterNode.methods.any { it.name == sealedTerminalName && it.desc == akenStringPageDescriptor },
+            "The relocated String terminal must use its deterministic sealed method name.",
+        )
+    }
 
     @Test
     fun `sealed runtime helper names avoid existing jar entries during re-obfuscation`() {
@@ -194,6 +184,70 @@ class RuntimeArtifactSealingCollisionTest {
         }
         assertTrue(committedStoragePaths.isNotEmpty(), "The catalog must commit the resealed VM resource")
         assertTrue(committedStoragePaths.all { it in sealedEntries.keys }, "Every catalog commitment must resolve to a final JAR entry")
+    }
+
+    @Test
+    fun `final VM artifact keeps register IR and opcode labels out of Java-readable resources`() {
+        val originalVmResource = "META-INF/.r/vm-confidentiality.bin"
+        val context = fixedContext()
+        val forbiddenTokens = listOf(
+            "VM_IMUL",
+            "JS_VM_IMUL",
+            "VBC4_REG_META",
+            "VM_OPCODE_ALIASES",
+            "registerCount",
+            "srcA",
+            "srcB",
+            "operand",
+            "tryExecuteForwarderFallback",
+        )
+        val logicalVbc4 =
+            "VBC4|IR|${forbiddenTokens.joinToString("|")}".toByteArray(Charsets.US_ASCII)
+        assertTrue(
+            forbiddenTokens.all { logicalVbc4.containsAscii(it) },
+            "The confidentiality fixture must contain every protected IR/opcode marker before sealing",
+        )
+
+        val sealed = withVbc4BuildContext(context) {
+            val encoded = RuntimeResourceCodec.encode(
+                bytes = logicalVbc4,
+                kind = RuntimeResourceKind.VmBytecode,
+                seed = 0x1234,
+                variantId = 1,
+                layerCount = 4,
+                compress = false,
+                partitionIdentity = "vm-confidentiality".toByteArray(Charsets.US_ASCII),
+            )
+            val artifact = testAttachedArtifact(
+                classArtifacts = emptyList(),
+                jarEntries = listOf(
+                    JarEntryData(originalVmResource, encoded),
+                    JarEntryData("META-INF/.r/0.dat", "current-native-index".toByteArray(Charsets.UTF_8)),
+                ),
+            )
+            requireVbc4BuildContext().publishRuntimeVmCatalogPlan(currentVmCatalogPlan(originalVmResource))
+            RuntimeArtifactSealing.seal(artifact, 0x4A53524CL, rewritesVmRuntime = true)
+        }
+
+        val decodedVbc4 = withVbc4BuildContext(context) {
+            sealed.jarEntries.mapNotNull { entry ->
+                RuntimeResourceCodec.decode(entry.bytes)?.takeIf { it.startsWithAscii("VBC4") }
+            }
+        }
+        assertTrue(decodedVbc4.isNotEmpty(), "The final artifact must retain an authenticated VBC4 payload")
+
+        val javaReadableResources = sealed.jarEntries.filterNot { it.name.endsWith(".class") }
+        assertTrue(javaReadableResources.isNotEmpty(), "The final artifact must expose sealed runtime resources for scanning")
+        assertTrue(
+            javaReadableResources.none { it.bytes.startsWithAscii("VBC4") },
+            "VBC4 must not be stored as a Java-readable raw resource envelope",
+        )
+        forbiddenTokens.forEach { token ->
+            assertTrue(
+                javaReadableResources.none { it.bytes.containsAscii(token) },
+                "Final Java-readable resources must not expose plaintext IR/opcode marker '$token'",
+            )
+        }
     }
 
     @Test
@@ -300,6 +354,17 @@ class RuntimeArtifactSealingCollisionTest {
 
     private fun bindingValue(text: String, key: String): String? =
         text.lines().firstOrNull { it.startsWith("$key=") }?.substringAfter('=')
+
+    private fun ByteArray.startsWithAscii(value: String): Boolean =
+        size >= value.length && value.indices.all { index -> this[index] == value[index].code.toByte() }
+
+    private fun ByteArray.containsAscii(value: String): Boolean {
+        val needle = value.toByteArray(Charsets.US_ASCII)
+        if (needle.isEmpty() || size < needle.size) return false
+        return (0..size - needle.size).any { offset ->
+            needle.indices.all { index -> this[offset + index] == needle[index] }
+        }
+    }
 
     private fun artifactWithCurrentVmRuntime(resourcePath: String) = testAttachedArtifact(
         classArtifacts = emptyList(),

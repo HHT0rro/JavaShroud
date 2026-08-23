@@ -5,8 +5,7 @@ import io.github.hht0rro.javashroud.model.schema.ModuleTargetingCapability
 import io.github.hht0rro.javashroud.model.schema.VariantRequirement
 
 private const val schemaVersion: String = "2"
-private const val engineVersion: String = "0.12"
-private const val vbcVersion: String = "4.55"
+const val JS_VERSION: String = "0.12"
 
 internal data class CapabilityBinding(
     val id: String,
@@ -29,6 +28,4 @@ internal data class CapabilityBinding(
 
 fun engineSchemaVersion(): String = schemaVersion
 
-fun engineVersion(): String = engineVersion
-
-fun vbcVersion(): String = vbcVersion
+fun engineVersion(): String = JS_VERSION

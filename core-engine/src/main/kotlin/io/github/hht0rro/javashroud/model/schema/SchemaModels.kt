@@ -147,7 +147,6 @@ fun OrderingConstraint.toJsonMap(): Map<String, Any> = mapOf(
 data class EngineSchemaPayload(
     val schemaVersion: String,
     val engineVersion: String,
-    val vbcVersion: String,
     val tags: List<ModuleTagDefinition>,
     val modules: List<ModuleDefinition>,
     val compatibility: List<PassCompatibilityRule> = emptyList(),

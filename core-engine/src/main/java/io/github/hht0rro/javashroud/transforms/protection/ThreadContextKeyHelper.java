@@ -10,14 +10,14 @@ public final class ThreadContextKeyHelper {
     public static void initializeContextKeys(String source) {
         contextSource = source == null ? "thread-hash" : source;
         if (!JniMicrokernelHelper.isNativeLoaded()) {
-            throw new SecurityException("thread context key init requires the sealed native kernel; no Java fallback");
+            throw new SecurityException("thread context key init requires the sealed native kernel");
         }
         nativeInitializeContextKeys(contextSource);
     }
 
     public static byte[] getContextKey() {
         if (!JniMicrokernelHelper.isNativeLoaded()) {
-            throw new SecurityException("thread context key requires the sealed native kernel; no Java fallback");
+            throw new SecurityException("thread context key requires the sealed native kernel");
         }
         return nativeGetContextKey();
     }

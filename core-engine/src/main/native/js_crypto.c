@@ -32,6 +32,11 @@
 #define JS_AES_HW_DISPATCH 0
 #endif
 
+/* Test-only self-test-failure builds keep the intrinsic code present but
+ * force the immutable dispatch table to retain its software target.  This
+ * models a CPU/intrinsic self-test failure without adding a production
+ * fallback or changing the artifact protocol. */
+
 /*
  * Runtime counters are touched from crypto, VM, resource, JNI, and loader
  * threads, while AES capability selection is a once-only cross-thread state
@@ -577,7 +582,13 @@ static void js_aes_schedule_encrypt_block_sw(
 
 #if JS_AES_HW_DISPATCH && !defined(JS_CRYPTO_FORCE_SOFTWARE)
 static int js_aes_runtime_has_aes(void) {
-#if defined(_MSC_VER)
+#if defined(JS_CRYPTO_FORCE_UNSUPPORTED_CPU)
+    /* Test-only capability override: keep the intrinsic backend compiled so
+     * the runtime detection branch is exercised, but model a CPU that lacks
+     * both required instruction sets.  Production builds never define this
+     * macro and continue to use CPUID plus the intrinsic self-tests. */
+    return 0;
+#elif defined(_MSC_VER)
     int registers[4];
     __cpuidex(registers, 1, 0);
     return (registers[2] & (1 << 25)) != 0;
@@ -591,7 +602,11 @@ static int js_aes_runtime_has_aes(void) {
 }
 
 static int js_aes_runtime_has_pclmul(void) {
-#if defined(_MSC_VER)
+#if defined(JS_CRYPTO_FORCE_UNSUPPORTED_CPU)
+    /* See js_aes_runtime_has_aes(): this is a validation-only unsupported-CPU
+     * model, not a production fallback or protocol change. */
+    return 0;
+#elif defined(_MSC_VER)
     int registers[4];
     __cpuidex(registers, 1, 0);
     return (registers[2] & (1 << 1)) != 0;
@@ -825,6 +840,7 @@ static void js_aes_dispatch_init(void) {
             &expected,
             1)) {
 #if JS_AES_HW_DISPATCH && !defined(JS_CRYPTO_FORCE_SOFTWARE)
+#if !defined(JS_CRYPTO_FORCE_HW_SELF_TEST_FAILURE)
         if (js_aes_runtime_has_pclmul() && js_aes_ghash_hw_self_test()) {
             js_aes_dispatch_pclmul = 1;
         }
@@ -832,6 +848,7 @@ static void js_aes_dispatch_init(void) {
             js_aes_dispatch = js_aes_schedule_encrypt_block_hw;
             js_aes_dispatch_hardware = 1;
         }
+#endif
 #endif
         js_runtime_atomic_int_store_release(&js_aes_dispatch_state, 2);
         return;
@@ -1190,7 +1207,7 @@ JS_HIDDEN int js_aes_gcm_decrypt_lanes(
     if (aad_len > (size_t)(UINT64_MAX / 8u) || ciphertext_len > (size_t)(UINT64_MAX / 8u)) goto cleanup;
     if ((uint64_t)(ciphertext_len / 16u) + (ciphertext_len % 16u != 0u ? 1u : 0u) > (uint64_t)UINT32_MAX - 1u) goto cleanup;
     if (plain_out && ciphertext_len != 0u) wipe_len = ciphertext_len;
-    if (!nonce || (!aad && aad_len != 0u) || (!plain_out && ciphertext_len != 0u)) goto cleanup;
+    if (!nonce || (!aad && aad_len != 0u)) goto cleanup;
 
     memcpy(j0, nonce, 12u);
     j0[15] = 1u;
@@ -1220,7 +1237,9 @@ JS_HIDDEN int js_aes_gcm_decrypt_lanes(
     }
 
     memcpy(counter, j0, sizeof(counter));
-    js_aes_gcm_crypt_payload(&schedule, counter, ciphertext_and_tag, ciphertext_len, plain_out);
+    if (plain_out && ciphertext_len != 0u) {
+        js_aes_gcm_crypt_payload(&schedule, counter, ciphertext_and_tag, ciphertext_len, plain_out);
+    }
 
 cleanup:
     if (!ok && plain_out && wipe_len != 0u) js_vbc4_wipe_volatile(plain_out, wipe_len);
@@ -1272,8 +1291,7 @@ JS_HIDDEN int js_aes_gcm_decrypt(
     if (aad_len > (size_t)(UINT64_MAX / 8u) || ciphertext_len > (size_t)(UINT64_MAX / 8u)) goto cleanup;
     if ((uint64_t)(ciphertext_len / 16u) + (ciphertext_len % 16u != 0u ? 1u : 0u) > (uint64_t)UINT32_MAX - 1u) goto cleanup;
     if (plain_out && ciphertext_len != 0u) wipe_len = ciphertext_len;
-    if (!key || (key_len != 16u && key_len != 32u) || !nonce || (!aad && aad_len != 0u) ||
-        (!plain_out && ciphertext_len != 0u)) goto cleanup;
+    if (!key || (key_len != 16u && key_len != 32u) || !nonce || (!aad && aad_len != 0u)) goto cleanup;
 
     memcpy(j0, nonce, 12u);
     j0[15] = 1u;
@@ -1294,7 +1312,9 @@ JS_HIDDEN int js_aes_gcm_decrypt(
     }
 
     memcpy(counter, j0, sizeof(counter));
-    js_aes_gcm_crypt_payload(&schedule, counter, ciphertext_and_tag, ciphertext_len, plain_out);
+    if (plain_out && ciphertext_len != 0u) {
+        js_aes_gcm_crypt_payload(&schedule, counter, ciphertext_and_tag, ciphertext_len, plain_out);
+    }
 
 cleanup:
     if (!ok && plain_out && wipe_len != 0u) js_vbc4_wipe_volatile(plain_out, wipe_len);

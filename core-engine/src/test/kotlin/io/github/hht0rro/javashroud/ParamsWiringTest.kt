@@ -36,6 +36,8 @@ class ParamsWiringTest {
 
         val methodVirtualization = assertNotNull(registry["method-virtualization"])
         assertTrue(methodVirtualization.definition.params.any { it.key == "methodSelection" })
-        assertTrue(methodVirtualization.definition.params.any { it.key == "strictVirtualization" })
+        assertTrue(methodVirtualization.definition.params.none { it.key == "strictVirtualization" })
+        assertEquals(0, methodVirtualization.definition.params.single { it.key == "maxInstructions" }.defaultValue?.asInt())
+        assertEquals(0, methodVirtualization.definition.params.single { it.key == "maxBroadVirtualizedMethods" }.defaultValue?.asInt())
     }
 }

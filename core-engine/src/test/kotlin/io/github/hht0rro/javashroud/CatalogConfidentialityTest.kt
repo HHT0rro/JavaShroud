@@ -121,6 +121,47 @@ class CatalogConfidentialityTest {
         assertFalse(encoded.startsWithAscii("JSBI"))
     }
 
+    @Test
+    fun environment_bound_keys_do_not_inject_e_rows_into_relocation_bindings() {
+        val context = Vbc4BuildContext(
+            masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { (it * 13 + 7).toByte() },
+            nativeSeed = 0x24681357L,
+            jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { (it * 17 + 9).toByte() },
+        )
+        val helperName = "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper"
+        val helperBytes = checkNotNull(javaClass.classLoader.getResourceAsStream("$helperName.class")).use { it.readBytes() }
+        val helperArtifact = ClassArtifact(
+            entryName = "$helperName.class",
+            summary = analyzeClassBytes(helperBytes),
+            bytes = helperBytes,
+        )
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(helperArtifact),
+            jarEntries = listOf(
+                JarEntryData(helperArtifact.entryName, helperArtifact.bytes),
+                JarEntryData("META-INF/js-native/js_kernel_windows-x64.dll", "native".toByteArray()),
+            ),
+        )
+        val sealed = withVbc4BuildContext(context) {
+            RuntimeArtifactSealing.seal(
+                artifact,
+                context.nativeSeed,
+                rewritesVmRuntime = false,
+                envBindingMetadata = RuntimeArtifactSealing.EnvBindingMetadata(
+                    bindBootSecret = false,
+                    expectedFingerprint = null,
+                ),
+            )
+        }
+        val bindingResource = sealed.jarEntries.single { entry ->
+            entry.bytes.containsAscii("B|") || entry.bytes.containsAscii("M|")
+        }
+        assertFalse(bindingResource.bytes.containsAscii("E|"), "relocation bindings must stay B/M/F only")
+        bindingResource.bytes.decodeToString().lineSequence().filter { it.isNotBlank() }.forEach { line ->
+            assertTrue(line.startsWith("B|") || line.startsWith("M|") || line.startsWith("F|"), line)
+        }
+    }
+
     private fun ByteArray.startsWithAscii(value: String): Boolean =
         size >= value.length && value.indices.all { index -> this[index] == value[index].code.toByte() }
 

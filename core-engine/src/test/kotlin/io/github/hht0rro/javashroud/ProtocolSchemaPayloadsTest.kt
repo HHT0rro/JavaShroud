@@ -21,7 +21,6 @@ class ProtocolSchemaPayloadsTest {
             EngineSchemaPayload(
                 schemaVersion = "schema-v2",
                 engineVersion = "1.0.0",
-                vbcVersion = "VBC4-test",
                 tags = listOf(
                     ModuleTagDefinition(
                         id = "metadata",
@@ -74,7 +73,6 @@ class ProtocolSchemaPayloadsTest {
 
         assertEquals("schema-v2", payload["schemaVersion"])
         assertEquals("1.0.0", payload["engineVersion"])
-        assertEquals("VBC4-test", payload["vbcVersion"])
 
         val tags = payload["tags"] as List<*>
         assertEquals(1, tags.size)
@@ -119,7 +117,6 @@ class ProtocolSchemaPayloadsTest {
             EngineSchemaPayload(
                 schemaVersion = "schema-v2",
                 engineVersion = "1.0.0",
-                vbcVersion = "VBC4-test",
                 tags = listOf(
                     ModuleTagDefinition(
                         id = "runtime-defense",

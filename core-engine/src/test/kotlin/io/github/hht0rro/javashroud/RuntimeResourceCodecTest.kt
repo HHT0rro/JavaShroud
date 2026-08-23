@@ -39,7 +39,7 @@ class RuntimeResourceCodecTest {
         )
 
         assertTrue(!encoded.startsWithAscii("VBC4"), "encoded resource must not expose raw VBC4 magic before sealing")
-        assertEquals(7, encoded[4].toInt() and 0xFF, "runtime resources must use only the partitioned JSRP v7 envelope")
+        assertEquals(8, encoded[4].toInt() and 0xFF, "runtime resources must use only the partitioned JSRP v8 envelope")
         assertEquals(96, readLe16ForTest(encoded, 21), "public v3 header must expose only encrypted metadata length")
         assertEquals(32, readLe16ForTest(encoded, 23), "public v3 header must expose only MAC length")
         assertContentEquals(plain, RuntimeResourceCodec.decode(encoded), "encoded payload must round-trip")
@@ -47,6 +47,39 @@ class RuntimeResourceCodecTest {
         encoded[encoded.lastIndex] = (encoded.last().toInt() xor 0x55).toByte()
         assertEquals(null, RuntimeResourceCodec.decode(encoded), "tampered payload must fail MAC/hash validation")
     }
+
+    @Test
+    fun runtime_resource_codec_v8_ends_at_authenticated_mac_without_length_marker() =
+        withVbc4BuildContext(fixedRuntimeCodecContext()) {
+            val plain = ByteArray(73) { index -> (index * 17 + 5).toByte() }
+            val encoded = RuntimeResourceCodec.encode(
+                bytes = plain,
+                kind = RuntimeResourceKind.VmBytecode,
+                seed = 0x1357_2468,
+                variantId = 3,
+                layerCount = 2,
+                compress = false,
+            )
+
+            assertEquals(8, encoded[4].toInt() and 0xFF)
+            assertEquals(27 + 96 + plain.size + 32, encoded.size)
+
+            val retiredMarker = encoded.copyOf(encoded.size + 1).also {
+                it[it.lastIndex] = 32
+            }
+            assertEquals(
+                null,
+                RuntimeResourceCodec.decode(retiredMarker),
+                "JSRP v8 must reject the retired trailing MAC-length marker",
+            )
+
+            val retiredV7 = retiredMarker.copyOf().also { it[4] = 7 }
+            assertEquals(
+                null,
+                RuntimeResourceCodec.decode(retiredV7),
+                "JSRP v7 must not be accepted through a compatibility branch",
+            )
+        }
 
     @Test
     fun runtime_resource_codec_same_inputs_emit_different_authenticated_envelopes() = withVbc4BuildContext(fixedRuntimeCodecContext()) {
@@ -109,7 +142,7 @@ class RuntimeResourceCodecTest {
             layerCount = 4,
         )
 
-        for (offset in listOf(5, 21, 25, 121, encoded.size - 33)) {
+        for (offset in listOf(5, 21, 25, 121, encoded.size - 32)) {
             val tampered = encoded.copyOf()
             tampered[offset] = (tampered[offset].toInt() xor 0x21).toByte()
             assertEquals(null, RuntimeResourceCodec.decode(tampered), "tampering offset $offset must fail closed")

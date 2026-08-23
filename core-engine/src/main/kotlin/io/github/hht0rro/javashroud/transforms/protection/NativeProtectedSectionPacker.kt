@@ -22,8 +22,18 @@ import java.security.MessageDigest
  */
 internal object NativeProtectedSectionPacker {
     private const val SECTION_NAME = ".jsx"
+    private const val KEY_DATA_SECTION_NAME = ".jskd"
     private val SEAL_MAGIC = byteArrayOf(0x4A, 0x53, 0x58, 0x53, 0x45, 0x41, 0x4C, 0x31) // "JSXSEAL1"
+    private val KEY_DATA_BINDING_MAGIC = byteArrayOf(
+        0xD7.toByte(), 0x4B, 0x91.toByte(), 0x2E, 0xC3.toByte(), 0x58, 0xA6.toByte(), 0x7D,
+    )
+    private const val KEY_DATA_BINDING_DIGEST_SIZE = 32
     private const val PE_SIGNATURE = 0x00004550 // "PE\0\0" little-endian as int via LE read
+    private const val PE_SCN_CNT_CODE = 0x00000020
+    private const val PE_SCN_CNT_INITIALIZED_DATA = 0x00000040
+    private const val PE_SCN_MEM_EXECUTE = 0x20000000
+    private const val PE_SCN_MEM_READ = 0x40000000
+    private const val PE_SCN_MEM_WRITE = 0x80000000.toInt()
     private const val PT_LOAD = 1
     private const val PF_EXECUTE = 0x1
     private const val PF_WRITE = 0x2
@@ -50,7 +60,7 @@ internal object NativeProtectedSectionPacker {
                 sealed
             } else if (failClosed && isPackerResponsibleFormat(bytes)) {
                 throw NativeProtectedSectionSealException(
-                    "native protected section (.jsx) is missing or unsealable in a PE/ELF kernel that requires protection",
+                    "native protected sections (.jsx/.jskd) are missing or unsealable in a PE/ELF kernel that requires protection",
                 )
             } else {
                 bytes
@@ -66,7 +76,9 @@ internal object NativeProtectedSectionPacker {
         }
     }
 
-    /** The packer seals only PE and ELF64 .jsx sections. Mach-O kernels carry no
+    /** The packer seals PE and ELF64 .jsx sections only after proving the
+     * companion .jskd key-program section is unique, read-only, non-executable,
+     * page-isolated, and free of loader relocations. Mach-O kernels carry no
      * .jsx section by design, so they are never treated as a fail-closed gap. */
     private fun isPackerResponsibleFormat(bytes: ByteArray): Boolean = when {
         bytes.size < 0x40 -> false
@@ -97,8 +109,10 @@ internal object NativeProtectedSectionPacker {
         val sectionAlignment = readLe32(bytes, optOff + 32).toLong() and 0xFFFFFFFFL
         if (!isPowerOfTwo(sectionAlignment) || sectionAlignment < MIN_RUNTIME_PAGE_SIZE) return null
 
-        var jsxVaddr = -1; var jsxVsize = 0; var jsxRawPtr = -1; var jsxRawSize = 0
-        val allocSections = mutableListOf<Pair<Long, Long>>()
+        var jsxVaddr = -1; var jsxVsize = 0; var jsxRawPtr = -1; var jsxRawSize = 0; var jsxCount = 0
+        var keyDataVaddr = -1; var keyDataVsize = 0; var keyDataRawPtr = -1; var keyDataRawSize = 0
+        var keyDataCharacteristics = 0; var keyDataCount = 0
+        val allocSections = mutableListOf<Triple<String, Long, Long>>()
         for (i in 0 until numSections) {
             val o = secTableOff + i * 40
             if (o + 40 > bytes.size) return null
@@ -106,25 +120,50 @@ internal object NativeProtectedSectionPacker {
             val virtualSize = readLe32(bytes, o + 8).toLong() and 0xFFFFFFFFL
             val virtualAddress = readLe32(bytes, o + 12).toLong() and 0xFFFFFFFFL
             val rawSize = readLe32(bytes, o + 16).toLong() and 0xFFFFFFFFL
-            if (name != SECTION_NAME) {
-                val span = maxOf(virtualSize, rawSize)
-                if (span > 0L) allocSections += virtualAddress to span
-            }
+            val span = maxOf(virtualSize, rawSize)
+            if (span > 0L) allocSections += Triple(name, virtualAddress, span)
             if (name == SECTION_NAME) {
+                jsxCount++
                 jsxVsize = readLe32(bytes, o + 8)
                 jsxVaddr = readLe32(bytes, o + 12)
                 jsxRawSize = readLe32(bytes, o + 16)
                 jsxRawPtr = readLe32(bytes, o + 20)
             }
+            if (name == KEY_DATA_SECTION_NAME) {
+                keyDataCount++
+                keyDataVsize = readLe32(bytes, o + 8)
+                keyDataVaddr = readLe32(bytes, o + 12)
+                keyDataRawSize = readLe32(bytes, o + 16)
+                keyDataRawPtr = readLe32(bytes, o + 20)
+                keyDataCharacteristics = readLe32(bytes, o + 36)
+            }
         }
-        if (jsxVaddr < 0 || jsxRawPtr < 0) return null
+        if (jsxCount != 1 || keyDataCount != 1 || jsxVaddr < 0 || jsxRawPtr < 0 || keyDataVaddr < 0 || keyDataRawPtr < 0) return null
         val encLen = minOf(jsxVsize, jsxRawSize)
         if (encLen <= 0 || jsxRawPtr + encLen > bytes.size) return null
         val jsxStart = jsxVaddr.toLong() and 0xFFFFFFFFL
         val jsxEnd = checkedEnd(jsxStart, encLen.toLong()) ?: return null
         val protectedPageEnd = alignUp(checkedEnd(jsxStart, maxOf(jsxVsize, jsxRawSize).toLong()) ?: return null, sectionAlignment) ?: return null
         if (jsxStart % sectionAlignment != 0L || jsxEnd > protectedPageEnd) return null
-        if (allocSections.any { (start, size) -> rangesOverlap(jsxStart, protectedPageEnd, start, checkedEnd(start, size) ?: return null) }) return null
+        if (allocSections.any { (name, start, size) ->
+                name != SECTION_NAME && rangesOverlap(jsxStart, protectedPageEnd, start, checkedEnd(start, size) ?: return null)
+            }) return null
+
+        val keyDataLen = minOf(keyDataVsize, keyDataRawSize)
+        if (keyDataLen <= 0 || keyDataRawPtr + keyDataLen > bytes.size) return null
+        if (keyDataCharacteristics and PE_SCN_MEM_READ == 0 ||
+            keyDataCharacteristics and (PE_SCN_MEM_WRITE or PE_SCN_MEM_EXECUTE or PE_SCN_CNT_CODE) != 0 ||
+            keyDataCharacteristics and PE_SCN_CNT_INITIALIZED_DATA == 0
+        ) return null
+        val keyDataStart = keyDataVaddr.toLong() and 0xFFFFFFFFL
+        val keyDataPageEnd = alignUp(
+            checkedEnd(keyDataStart, maxOf(keyDataVsize, keyDataRawSize).toLong()) ?: return null,
+            sectionAlignment,
+        ) ?: return null
+        if (keyDataStart % sectionAlignment != 0L) return null
+        if (allocSections.any { (name, start, size) ->
+                name != KEY_DATA_SECTION_NAME && rangesOverlap(keyDataStart, keyDataPageEnd, start, checkedEnd(start, size) ?: return null)
+            }) return null
 
         val dirCount = readLe32(bytes, optOff + (if (is64) 108 else 92))
         if (dirCount > 5) {
@@ -132,13 +171,16 @@ internal object NativeProtectedSectionPacker {
             val relocRva = readLe32(bytes, ddOff + 5 * 8)
             val relocSize = readLe32(bytes, ddOff + 5 * 8 + 4)
             if (relocRva != 0 && relocSize != 0) {
-                if (relocOverlapsPeSection(bytes, secTableOff, numSections, relocRva, relocSize, jsxVaddr, jsxVsize)) {
+                if (relocOverlapsPeSection(bytes, secTableOff, numSections, relocRva, relocSize, jsxVaddr, jsxVsize) ||
+                    relocOverlapsPeSection(bytes, secTableOff, numSections, relocRva, relocSize, keyDataVaddr, keyDataVsize)
+                ) {
                     return null
                 }
             }
         }
 
         val out = bytes.copyOf()
+        if (!writePlaintextBinding(out, keyDataRawPtr, keyDataLen, bytes, jsxRawPtr, encLen)) return null
         val markerOff = findSealMarkerInPeWritableData(out, secTableOff, numSections) ?: return null
         val stateOff = markerOff + 8
         if (stateOff + 12 > out.size) return null
@@ -175,7 +217,8 @@ internal object NativeProtectedSectionPacker {
 
     private fun trySealElf64(bytes: ByteArray, key: ByteArray): ByteArray? {
         val sections = readElf64Sections(bytes) ?: return null
-        val jsx = sections.firstOrNull { it.name == SECTION_NAME } ?: return null
+        val jsx = sections.filter { it.name == SECTION_NAME }.singleOrNull() ?: return null
+        val keyData = sections.filter { it.name == KEY_DATA_SECTION_NAME }.singleOrNull() ?: return null
         val shfWrite = 0x1L
         val shfAlloc = 0x2L
         val shfExecInstr = 0x4L
@@ -185,8 +228,13 @@ internal object NativeProtectedSectionPacker {
         if (jsx.offset + jsx.size > bytes.size) return null
         if (!elfProtectedPagesAreIsolated(bytes, sections, jsx, shfAlloc)) return null
         if (elfRelocationOverlapsSection(bytes, sections, jsx)) return null
+        if (keyData.type == shtNoBits || keyData.size <= 0 || keyData.offset + keyData.size > bytes.size) return null
+        if ((keyData.flags and shfAlloc) == 0L || (keyData.flags and (shfWrite or shfExecInstr)) != 0L) return null
+        if (!elfReadOnlyKeyDataPagesAreIsolated(bytes, sections, keyData, shfAlloc)) return null
+        if (elfRelocationOverlapsSection(bytes, sections, keyData)) return null
 
         val out = bytes.copyOf()
+        if (!writePlaintextBinding(out, keyData.offset, keyData.size, bytes, jsx.offset, jsx.size)) return null
         val markerOff = findSealMarkerInElfWritableData(out, sections, shfWrite, shtNoBits) ?: return null
         val stateOff = markerOff + 8
         if (stateOff + 12 > out.size) return null
@@ -303,6 +351,35 @@ internal object NativeProtectedSectionPacker {
         }
     }
 
+    private fun elfReadOnlyKeyDataPagesAreIsolated(
+        bytes: ByteArray,
+        sections: List<ElfSection>,
+        keyData: ElfSection,
+        shfAlloc: Long,
+    ): Boolean {
+        val programHeaders = readElf64ProgramHeaders(bytes) ?: return false
+        val load = programHeaders.filter { header ->
+            header.type == PT_LOAD &&
+                header.virtualAddress <= keyData.address &&
+                checkedEnd(header.virtualAddress, header.memorySize)?.let { end ->
+                    checkedEnd(keyData.address, keyData.size.toLong())?.let { keyDataEnd -> keyDataEnd <= end }
+                } == true
+        }.singleOrNull() ?: return false
+        if (load.flags and PF_READ == 0 || load.flags and (PF_WRITE or PF_EXECUTE) != 0) return false
+        val pageSize = load.alignment
+        if (!isPowerOfTwo(pageSize) || pageSize < MIN_RUNTIME_PAGE_SIZE) return false
+        val keyDataStart = keyData.address
+        val keyDataEnd = checkedEnd(keyDataStart, keyData.size.toLong()) ?: return false
+        if (keyDataStart % pageSize != 0L || keyDataEnd % pageSize != 0L) return false
+        if (keyData.offset.toLong() % pageSize != keyDataStart % pageSize) return false
+        if (load.offset % pageSize != load.virtualAddress % pageSize) return false
+        return sections.none { section ->
+            if (section.index == keyData.index || section.size <= 0 || section.flags and shfAlloc == 0L) return@none false
+            val sectionEnd = checkedEnd(section.address, section.size.toLong()) ?: return false
+            rangesOverlap(keyDataStart, keyDataEnd, section.address, sectionEnd)
+        }
+    }
+
     private fun elfRelocationOverlapsSection(bytes: ByteArray, sections: List<ElfSection>, target: ElfSection): Boolean {
         val shtRela = 4
         val shtRel = 9
@@ -388,6 +465,38 @@ internal object NativeProtectedSectionPacker {
 
     private fun rangesOverlap(firstStart: Long, firstEnd: Long, secondStart: Long, secondEnd: Long): Boolean =
         firstStart < secondEnd && secondStart < firstEnd
+
+    private fun writePlaintextBinding(
+        out: ByteArray,
+        keyDataOffset: Int,
+        keyDataLength: Int,
+        plaintext: ByteArray,
+        plaintextOffset: Int,
+        plaintextLength: Int,
+    ): Boolean {
+        if (keyDataOffset < 0 || keyDataLength <= 0 || plaintextOffset < 0 || plaintextLength <= 0) return false
+        val keyDataEnd = checkedEnd(keyDataOffset.toLong(), keyDataLength.toLong()) ?: return false
+        val plaintextEnd = checkedEnd(plaintextOffset.toLong(), plaintextLength.toLong()) ?: return false
+        if (keyDataEnd > out.size || plaintextEnd > plaintext.size) return false
+        val bindingOffset = indexOfRange(out, KEY_DATA_BINDING_MAGIC, keyDataOffset, keyDataEnd.toInt()) ?: return false
+        if (indexOfRange(out, KEY_DATA_BINDING_MAGIC, bindingOffset + 1, keyDataEnd.toInt()) != null) return false
+        val digestOffset = bindingOffset + KEY_DATA_BINDING_MAGIC.size
+        val digestEnd = digestOffset + KEY_DATA_BINDING_DIGEST_SIZE
+        if (digestEnd > keyDataEnd) return false
+        for (index in digestOffset until digestEnd) {
+            if (out[index] != 0.toByte()) return false
+        }
+        val digest = MessageDigest.getInstance("SHA-256").run {
+            update(plaintext, plaintextOffset, plaintextLength)
+            digest()
+        }
+        return try {
+            digest.copyInto(out, destinationOffset = digestOffset)
+            true
+        } finally {
+            digest.fill(0)
+        }
+    }
 
     /** Keystream block i = SHA-256(KEY || le32(i)); identical to the C decrypt path. */
     private fun xorKeystream(buf: ByteArray, offset: Int, length: Int, key: ByteArray) {

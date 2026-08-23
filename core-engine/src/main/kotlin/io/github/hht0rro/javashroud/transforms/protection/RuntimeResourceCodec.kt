@@ -17,7 +17,7 @@ enum class RuntimeResourceKind(val id: Int) {
 
 object RuntimeResourceCodec {
     private val magic = byteArrayOf(0x4A, 0x53, 0x52, 0x50) // JSRP
-    private const val version = 7
+    private const val version = 8
     private const val headerSize = 27
     private const val metadataSize = 96
     private const val macLength = 32
@@ -143,7 +143,7 @@ object RuntimeResourceCodec {
             )
             val metadataCipher = aesCtrCrypt(metadataPlain, nonce, key, intBytes(0), intBytes(0), intBytes(0))
             val body = aesCtrCrypt(storedBytes, nonce, key, kindBytes, variantBytes, layerBytes)
-            val out = ByteArray(headerSize + metadataCipher.size + body.size + macLength + 1)
+            val out = ByteArray(headerSize + metadataCipher.size + body.size + macLength)
             System.arraycopy(magic, 0, out, 0, magic.size)
             out[4] = version.toByte()
             System.arraycopy(nonce, 0, out, 5, nonce.size)
@@ -155,7 +155,6 @@ object RuntimeResourceCodec {
             val tagOffset = headerSize + metadataCipher.size + body.size
             val tag = hmacSha256WithKey(key, out, 0, tagOffset, partitionedAuthDomain, nonce)
             System.arraycopy(tag, 0, out, tagOffset, tag.size)
-            out[out.lastIndex] = macLength.toByte()
             out
         } finally {
             Arrays.fill(key, 0)
@@ -164,8 +163,7 @@ object RuntimeResourceCodec {
 
     internal fun decodePartitioned(bytes: ByteArray, partitions: RuntimeKeyPartitions): ByteArray? {
         if (!hasCurrentHeader(bytes)) return null
-        if (bytes.size < headerSize + metadataSize + macLength + 1) return null
-        if ((bytes.last().toInt() and 0xFF) != macLength) return null
+        if (bytes.size < headerSize + metadataSize + macLength) return null
         val nonce = bytes.copyOfRange(5, 21)
         val metadataLength = readLe16(bytes, 21)
         val declaredMacLength = readLe16(bytes, 23)
@@ -174,10 +172,10 @@ object RuntimeResourceCodec {
         if (partitionId > partitions.anchorSlotId) return null
         val metadataOffset = headerSize
         val bodyOffset = metadataOffset + metadataLength
-        if (bodyOffset + macLength + 1 > bytes.size) return null
+        if (bodyOffset + macLength > bytes.size) return null
         val key = partitions.copyKeyForSlot(partitionId)
         return try {
-            val tagOffset = bytes.size - macLength - 1
+            val tagOffset = bytes.size - macLength
             val expectedTag = hmacSha256WithKey(key, bytes, 0, tagOffset, partitionedAuthDomain, nonce)
             if (!constantTimeEquals(expectedTag, bytes, tagOffset)) return null
             val metadataCipher = bytes.copyOfRange(metadataOffset, bodyOffset)

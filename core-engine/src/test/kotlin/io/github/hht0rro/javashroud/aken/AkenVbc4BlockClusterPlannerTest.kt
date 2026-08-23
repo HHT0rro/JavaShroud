@@ -75,14 +75,14 @@ class AkenVbc4BlockClusterPlannerTest {
             encodedPayloadLengths = listOf(100, 100),
         )
         val badMagic = valid.copyOf().also { it[0] = 'X'.code.toByte() }
-        val legacyVbc4Magic = valid.copyOf().also { it[3] = '4'.code.toByte() }
+        val retiredVbcxMagic = valid.copyOf().also { it[3] = 'X'.code.toByte() }
         val emptyConstantPool = framedVbc4(
             blockIds = listOf(10),
             encodedPayloadLengths = listOf(100),
             constantPoolPlainLength = 0L,
         )
         val truncated = valid.copyOf(valid.size - 1)
-        val invalidAuthenticationLengthMarker = valid.copyOf().also { it[it.lastIndex] = 31 }
+        val retiredAuthenticationLengthMarker = valid.copyOf(valid.size + 1).also { it[it.lastIndex] = 32 }
         val trailingByte = valid.copyOf(valid.size + 1).also { it[it.lastIndex] = 1 }
         val duplicateBlockId = framedVbc4(
             blockIds = listOf(3, 3),
@@ -122,10 +122,10 @@ class AkenVbc4BlockClusterPlannerTest {
         try {
             listOf(
                 badMagic,
-                legacyVbc4Magic,
+                retiredVbcxMagic,
                 emptyConstantPool,
                 truncated,
-                invalidAuthenticationLengthMarker,
+                retiredAuthenticationLengthMarker,
                 trailingByte,
                 duplicateBlockId,
                 overlongConstantPoolPlainLength,
@@ -192,7 +192,7 @@ class AkenVbc4BlockClusterPlannerTest {
                 exceptionEncryptedLength >= 0,
         )
         val out = ByteArrayOutputStream()
-        out.write("VBCX".encodeToByteArray())
+        out.write("VBC4".encodeToByteArray())
         out.write(ByteArray(16))
         writeU4(out, 0xAABBCCDDL)
         out.write(ByteArray(16))
@@ -222,7 +222,6 @@ class AkenVbc4BlockClusterPlannerTest {
         out.write(ByteArray(exceptionEncryptedLength))
         writeU4(out, 0)
         out.write(ByteArray(32))
-        out.write(32)
         return out.toByteArray()
     }
 

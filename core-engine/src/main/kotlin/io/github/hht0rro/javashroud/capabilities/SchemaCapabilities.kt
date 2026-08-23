@@ -8,7 +8,6 @@ import io.github.hht0rro.javashroud.model.schema.ModuleDefinition
 fun buildEngineSchemaPayload(): EngineSchemaPayload = EngineSchemaPayload(
     schemaVersion = engineSchemaVersion(),
     engineVersion = engineVersion(),
-    vbcVersion = vbcVersion(),
     tags = sortedCapabilityTagDefinitions(),
     modules = buildSchemaModuleDefinitions(),
     compatibility = buildPassCompatibilityRules(),

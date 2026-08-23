@@ -116,11 +116,11 @@ class EmbeddedHelperDeploymentTest {
             "nativeHeartbeat()I",
             "nativeInstallAkenSessionNonce([B)Z",
             "nativeExecuteAkenVmPage(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;",
-            "nativeDecodeAkenStringPage([BI[B)[B",
+            "nativeOpenAkenString([BI[B)Ljava/lang/String;",
             "nativeReadAkenClassPage([BI[B)[B",
             "nativeConsumeAkenNativeChunk([BI[B)V",
             "executeAkenVmPage(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;",
-            "decodeAkenStringPage([BI[B)[B",
+            "openAkenString([BI[B)Ljava/lang/String;",
             "readAkenClassPage([BI[B)[B",
             "consumeAkenNativeChunk([BI[B)V",
         )
@@ -307,7 +307,7 @@ class EmbeddedHelperDeploymentTest {
     }
 
     @Test
-    fun string_encryption_embeds_native_decode_helper() {
+    fun string_encryption_embeds_native_string_terminal_without_plaintext_cache_helper() {
         val updated = withVbc4BuildContext(defaultVbc4BuildContext()) {
             EmbeddedHelperDeployment.injectRequiredHelpers(
                 artifact = emptyArtifact(),
@@ -320,9 +320,9 @@ class EmbeddedHelperDeploymentTest {
             "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper.class" in entries,
             "string-encryption must embed its native decode helper.",
         )
-        assertTrue(
-            "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper${"$"}CachePolicy.class" in entries,
-            "string-encryption must embed StringEncryptionHelper${"$"}CachePolicy because the helper links to this nested enum at runtime.",
+        assertFalse(
+            entries.any { it.startsWith("io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper${"$"}CachePolicy") },
+            "string-encryption must not embed a plaintext cache-policy helper class.",
         )
     }
     @Test

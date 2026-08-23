@@ -1,5 +1,11 @@
 SECTIONS
 {
+  .jskd ALIGN(CONSTANT(MAXPAGESIZE)) :
+  {
+    KEEP(*(.jskd))
+    . = ALIGN(CONSTANT(MAXPAGESIZE));
+  }
+
   .jsx ALIGN(CONSTANT(MAXPAGESIZE)) :
   {
     KEEP(*(.jsx))

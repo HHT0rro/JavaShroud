@@ -94,3 +94,21 @@ JS_HIDDEN char* js_native_name_full(const char *name) {
     if (!name) return NULL;
     return js_join_parts(name, NULL);
 }
+
+JS_HIDDEN char* js_native_name_obfuscated(const unsigned char *encoded, size_t length, unsigned int mask) {
+    if (!encoded || length == 0u || length > 4096u || (mask & ~0xFFu) != 0u) return NULL;
+    char *name = (char*)calloc(length + 1u, 1u);
+    if (!name) return NULL;
+    for (size_t index = 0u; index < length; index++) {
+        unsigned char decoded = (unsigned char)(encoded[index] ^ (unsigned char)mask);
+        if (decoded == 0u) {
+            volatile unsigned char *wipe = (volatile unsigned char*)name;
+            for (size_t i = 0u; i <= length; i++) wipe[i] = 0u;
+            free(name);
+            return NULL;
+        }
+        name[index] = (char)decoded;
+    }
+    name[length] = '\0';
+    return name;
+}

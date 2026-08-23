@@ -251,7 +251,7 @@ static int js_init_prepared_program(js_vm_program *program) {
         0xe8, 0xcb, 0xae, 0x91, 0x74, 0x57, 0x3a, 0x1d
     };
     const jlong entry_token = (jlong)INT64_C(0x13579BDF2468ACE1);
-    const char *resource_path = "META-INF/.fixture/vm-prepared.vbcx";
+    const char *resource_path = "META-INF/.fixture/vm-prepared.vbc4";
     if (!program) return 0;
     memset(program, 0, sizeof(*program));
     if (!js_vm_install_startup_nonce(startup_nonce, (int)sizeof(startup_nonce))) { fprintf(stderr, "prep=install-nonce\n"); return 0; }
@@ -303,9 +303,9 @@ static int js_init_prepared_program(js_vm_program *program) {
  * production decoder rather than populate cp.s with an unauthenticated raw
  * string, because current artifacts reject seed-only plaintext constants. */
 static int js_init_sealed_catch_constant(js_vm_program *program, const char *value) {
-    static const unsigned char key_domain[] = "cp-string-key";
-    static const unsigned char iv_domain[] = "cp-string-iv";
-    static const unsigned char tag_domain[] = "cp-string-tag";
+    static const unsigned char key_domain[] = "javashroud-vbc4-cp-string-key-v2";
+    static const unsigned char iv_domain[] = "javashroud-vbc4-cp-string-iv-v2";
+    static const unsigned char tag_domain[] = "javashroud-vbc4-cp-string-tag-v2";
     const unsigned char sealed_nonce[16] = {
         0x53, 0x45, 0x41, 0x4c, 0x45, 0x44, 0x2d, 0x43,
         0x50, 0x2d, 0x46, 0x49, 0x58, 0x54, 0x55, 0x52
@@ -425,7 +425,7 @@ static int js_init_exception_program(js_vm_program *program) {
         0xf9, 0xdc, 0xbf, 0xa2, 0x85, 0x68, 0x4b, 0x2e
     };
     const jlong entry_token = (jlong)INT64_C(0x2468ACE013579BDF);
-    const char *resource_path = "META-INF/.fixture/vm-exception.vbcx";
+    const char *resource_path = "META-INF/.fixture/vm-exception.vbc4";
     const char *catch_type = "java/lang/ArithmeticException";
     if (!program) return 0;
     memset(program, 0, sizeof(*program));
@@ -505,7 +505,9 @@ static int js_init_static_invoke_cp0_program(js_vm_program *program) {
     };
     js_vm_cp *cp = NULL;
     int ok = 0;
+    int scoped_layout_digest_installed = 0;
     if (!program || !js_vbc4_install_scoped_layout_digest(layout_digest)) return 0;
+    scoped_layout_digest_installed = 1;
     if (!js_init_exception_program(program) || !program->cp || program->cp_count != 1) goto cleanup;
     cp = &program->cp[0];
     if (cp->s) {
@@ -533,7 +535,7 @@ cleanup:
     /* Reproduce the production AKEN lifetime: the authenticated layout scope
      * exists only while parsing/binding, while CP resolution is deferred until
      * execution after the scope has been wiped. */
-    js_vbc4_clear_scoped_layout_digest();
+    if (scoped_layout_digest_installed) js_vbc4_clear_scoped_layout_digest();
     return ok;
 }
 
@@ -739,6 +741,102 @@ cleanup:
     return ok;
 }
 
+static int js_vm_failure_test_bytes_zero(const void *bytes, size_t length) {
+    const unsigned char *cursor = (const unsigned char *)bytes;
+    if (!cursor) return length == 0u;
+    for (size_t i = 0u; i < length; i++) {
+        if (cursor[i] != 0u) return 0;
+    }
+    return 1;
+}
+
+static int js_vm_failure_test_frame_clean(const js_vm_execution_frame *frame) {
+    if (!frame) return 0;
+    if (frame->active || frame->tls_owned || frame->owner_thread != 0u ||
+        frame->owner_program != NULL || frame->generation != 0u || frame->depth != 0u) return 0;
+    if (frame->insns && !js_vm_failure_test_bytes_zero(frame->insns, frame->insn_capacity * sizeof(*frame->insns))) return 0;
+    if (frame->locals && !js_vm_failure_test_bytes_zero(frame->locals, frame->locals_capacity * sizeof(*frame->locals))) return 0;
+    if (frame->stack && !js_vm_failure_test_bytes_zero(frame->stack, frame->stack_capacity * sizeof(*frame->stack))) return 0;
+    if (frame->operand_scratch && !js_vm_failure_test_bytes_zero(frame->operand_scratch, frame->operand_capacity * sizeof(*frame->operand_scratch))) return 0;
+    if ((frame->insns || frame->locals || frame->stack || frame->operand_scratch) &&
+        frame->fallback_state_slot != JS_VM_FALLBACK_STATE_NONE) return 0;
+    return 1;
+}
+
+static int js_vm_failure_test_state_clean(void) {
+    if (js_vm_active_program_current() != NULL) return 0;
+    js_vm_thread_state *thread_state = js_vm_thread_state_peek();
+    if (thread_state) {
+        if (thread_state->frame_depth != 0u || thread_state->active_program_depth != 0) return 0;
+        for (unsigned int i = 0u; i < JS_VM_EXECUTION_FRAME_MAX_DEPTH; i++) {
+            if (!js_vm_failure_test_frame_clean(&thread_state->frames[i])) return 0;
+        }
+        return 1;
+    }
+    int clean = 1;
+    js_vm_execution_frame_lock_enter();
+    js_vm_fallback_thread_state *fallback_state = js_vm_fallback_thread_state_find_locked(NULL);
+    if (fallback_state && (fallback_state->active_frame_count != 0u || fallback_state->active_program_depth != 0)) clean = 0;
+    for (size_t i = 0u; i < JS_VM_EXECUTION_FRAME_POOL_CAPACITY; i++) {
+        if (!js_vm_failure_test_frame_clean(&js_vm_execution_frame_pool[i])) clean = 0;
+    }
+    js_vm_execution_frame_lock_leave();
+    return clean;
+}
+
+static int js_vm_failure_test_valid_execution(JNIEnv *env, js_vm_program *program, jint expected) {
+    jint output = 0;
+    if (!env || !program || !js_vm_execute_prepared_program_int_int(env, program, 0, &output)) return 0;
+    if ((*env)->ExceptionCheck(env) || output != expected) return 0;
+    return js_vm_failure_test_state_clean();
+}
+
+static int js_vm_failure_recovery_probe(JNIEnv *env, js_vm_program *program,
+                                        int *session_invalidation_ok,
+                                        int *generation_mismatch_ok,
+                                        int *post_push_cancel_ok,
+                                        int *post_failure_recovery_ok,
+                                        int *active_program_cleanup_ok,
+                                        int *frame_cleanup_ok) {
+    unsigned char saved_session_tag[32];
+    int cleanup_ok = 1;
+    int recovery_ok = 1;
+    jint failed_output = 0;
+    if (!env || !program || !session_invalidation_ok || !generation_mismatch_ok ||
+        !post_push_cancel_ok || !post_failure_recovery_ok || !active_program_cleanup_ok ||
+        !frame_cleanup_ok) return 0;
+    memcpy(saved_session_tag, program->session_tag, sizeof(saved_session_tag));
+
+    program->session_tag[0] ^= 0x01u;
+    *session_invalidation_ok =
+        !js_vm_execute_prepared_program_int_int(env, program, 0, &failed_output) &&
+        !(*env)->ExceptionCheck(env) && js_vm_failure_test_state_clean();
+    cleanup_ok = *session_invalidation_ok;
+    memcpy(program->session_tag, saved_session_tag, sizeof(saved_session_tag));
+    recovery_ok = js_vm_failure_test_valid_execution(env, program, 41);
+
+    js_vm_execution_test_set_fault(JS_VM_EXECUTION_TEST_FAULT_FRAME_GENERATION_MISMATCH);
+    *generation_mismatch_ok =
+        !js_vm_execute_prepared_program_int_int(env, program, 0, &failed_output) &&
+        !(*env)->ExceptionCheck(env) && js_vm_failure_test_state_clean();
+    cleanup_ok = cleanup_ok && *generation_mismatch_ok;
+    recovery_ok = recovery_ok && js_vm_failure_test_valid_execution(env, program, 41);
+
+    js_vm_execution_test_set_fault(JS_VM_EXECUTION_TEST_FAULT_CANCEL_AFTER_ACTIVE_PUSH);
+    *post_push_cancel_ok =
+        !js_vm_execute_prepared_program_int_int(env, program, 0, &failed_output) &&
+        !(*env)->ExceptionCheck(env) && js_vm_failure_test_state_clean();
+    cleanup_ok = cleanup_ok && *post_push_cancel_ok;
+    recovery_ok = recovery_ok && js_vm_failure_test_valid_execution(env, program, 41);
+
+    *post_failure_recovery_ok = recovery_ok;
+    *active_program_cleanup_ok = cleanup_ok && js_vm_active_program_current() == NULL;
+    *frame_cleanup_ok = cleanup_ok && js_vm_failure_test_state_clean();
+    js_vbc4_wipe_volatile(saved_session_tag, sizeof(saved_session_tag));
+    return *session_invalidation_ok && *generation_mismatch_ok && *post_push_cancel_ok &&
+        *post_failure_recovery_ok && *active_program_cleanup_ok && *frame_cleanup_ok;
+}
+
 static int js_run_probe(const char *jvm_path, unsigned int samples, unsigned int warmup) {
     js_jvm_module module = NULL;
     js_jni_create_vm_fn create_vm;
@@ -770,6 +868,12 @@ static int js_run_probe(const char *jvm_path, unsigned int samples, unsigned int
     int invoke_static_cp0_tamper_nonce_ok = 0;
     int invoke_static_cp0_tamper_length_ok = 0;
     int invoke_static_cp0_tamper_type_ok = 0;
+    int session_invalidation_ok = 0;
+    int generation_mismatch_ok = 0;
+    int post_push_cancel_ok = 0;
+    int post_failure_recovery_ok = 0;
+    int active_program_cleanup_ok = 0;
+    int frame_cleanup_ok = 0;
     uint64_t thread_output_digest = UINT64_C(0x6a09e667f3bcc909);
     jint exception_output = 0;
     jint invoke_static_cp0_result = 0;
@@ -860,6 +964,10 @@ static int js_run_probe(const char *jvm_path, unsigned int samples, unsigned int
         invoke_static_cp0_tamper_type_ok = 1;
         js_clear_prepared_program(env, &tampered_program);
     }
+    stage = "failure-recovery";
+    if (!js_vm_failure_recovery_probe(env, &program, &session_invalidation_ok, &generation_mismatch_ok,
+                                      &post_push_cancel_ok, &post_failure_recovery_ok,
+                                      &active_program_cleanup_ok, &frame_cleanup_ok)) goto cleanup;
     stage = "nested-frames";
     if (!js_nested_frame_lifecycle(&program)) goto cleanup;
     stage = "nested-prepared-execution";
@@ -910,6 +1018,8 @@ static int js_run_probe(const char *jvm_path, unsigned int samples, unsigned int
         "invoke_static_cp0_tamper_cipher=%s invoke_static_cp0_tamper_tag=%s "
         "invoke_static_cp0_tamper_nonce=%s invoke_static_cp0_tamper_length=%s "
         "invoke_static_cp0_tamper_type=%s "
+        "session_invalidation=%s generation_mismatch=%s post_push_cancel=%s "
+        "post_failure_recovery=%s active_program_cleanup=%s frame_cleanup=%s "
         "nested_frame_depth=%u nested_execution=pass recursive_execution=pass exception_execution=pass exception_catch=typed exception_result=%d "
         "threaded_execution=pass thread_count=%u "
         "thread_iterations=%u thread_output_digest=%016llx thread_frame_reuse_count=%llu "
@@ -929,6 +1039,12 @@ static int js_run_probe(const char *jvm_path, unsigned int samples, unsigned int
         invoke_static_cp0_tamper_nonce_ok ? "fail-closed" : "failed",
         invoke_static_cp0_tamper_length_ok ? "fail-closed" : "failed",
         invoke_static_cp0_tamper_type_ok ? "fail-closed" : "failed",
+        session_invalidation_ok ? "fail-closed" : "failed",
+        generation_mismatch_ok ? "fail-closed" : "failed",
+        post_push_cancel_ok ? "fail-closed" : "failed",
+        post_failure_recovery_ok ? "pass" : "failed",
+        active_program_cleanup_ok ? "pass" : "failed",
+        frame_cleanup_ok ? "pass" : "failed",
         (unsigned int)JS_VM_EXECUTION_FRAME_MAX_DEPTH, (int)exception_output, (unsigned int)JS_VM_THREAD_PROBE_COUNT,
         (unsigned int)JS_VM_THREAD_PROBE_ITERATIONS, (unsigned long long)thread_output_digest,
         (unsigned long long)thread_metrics.vm_frame_reuse_count,

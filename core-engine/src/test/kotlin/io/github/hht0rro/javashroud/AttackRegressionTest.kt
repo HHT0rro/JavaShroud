@@ -38,7 +38,7 @@ class AttackRegressionTest {
                 layerCount = 2,
             )
 
-            val offsets = listOf(5, 6, 7, 8, 24, 28, 32, 40, encoded.size - 33, encoded.lastIndex)
+            val offsets = listOf(5, 6, 7, 8, 24, 28, 32, 40, encoded.size - 32, encoded.lastIndex)
             for (offset in offsets) {
                 val tampered = encoded.copyOf()
                 tampered[offset] = (tampered[offset].toInt() xor 0x5A).toByte()

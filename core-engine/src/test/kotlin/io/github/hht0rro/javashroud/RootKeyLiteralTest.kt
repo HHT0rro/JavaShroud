@@ -34,7 +34,7 @@ class RootKeyLiteralTest {
         assertFalse(deployment.contains("BootMaterialEnvelope"), "AKEN deployment must not emit a JSBM boot-material producer")
         assertFalse(deployment.contains("BootKekSidecar"), "AKEN deployment must not emit a JSBK sidecar producer")
         assertTrue(
-            helper.contains("nativeDecodeAkenStringPage") &&
+            helper.contains("nativeOpenAkenString") &&
                 helper.contains("nativeReadAkenClassPage") &&
                 helper.contains("nativeConsumeAkenNativeChunk"),
             "helper must expose purpose-split AKEN page routes",

@@ -275,21 +275,38 @@ class NativeRecompilationTransformsTest {
         )
         val completeKeyLiteral = protectedKey.joinToString(", ") { byte -> "0x%02Xu".format(byte.toInt() and 0xFF) }
         assertFalse(secrets.contains("JS_PROTECTED_SECTION_KEY[32]") || secrets.contains(completeKeyLiteral), "Generated native source must not expose the complete key as one literal")
-        assertTrue(secrets.contains("JS_PROTECTED_KEY_LANE_COUNT") && secrets.contains("JS_PROTECTED_COPY_SCOPED_KEY"), "Generated native source must expose only a scoped variable-lane reconstruction program")
-        assertTrue(secrets.contains("_js_ps_lane_order") && secrets.contains("_js_ps_v >>"), "Protected-section reconstruction must bind a build-specific lane permutation and nonlinear byte rotation")
+        assertTrue(
+            secrets.contains("JS_PROTECTED_COPY_SCOPED_KEY") &&
+                secrets.contains("js_protected_key_program_header") &&
+                secrets.contains("js_protected_key_lane_data"),
+            "Generated native source must expose only a scoped data-driven lane program",
+        )
+        assertTrue(
+            secrets.contains("#pragma section(\".jskd\", read)") &&
+                secrets.contains("section(\".jskd\")") &&
+                secrets.contains("static const volatile") &&
+                secrets.contains("js_protected_key_plaintext_binding[40]"),
+            "Protected-section lane material must stay in a dedicated non-executable data section",
+        )
+        assertFalse(
+            secrets.contains("_js_ps_lane_order") || secrets.contains("_js_ps_v >>") ||
+                secrets.contains("if (_js_ps_lane =="),
+            "Build-specific protected-section reconstruction instructions must not be generated into ordinary .text",
+        )
     }
 
     @Test
-    fun independent_protected_section_builds_emit_structurally_divergent_reconstruction_programs() {
+    fun independent_protected_section_builds_emit_structurally_divergent_data_programs() {
         val key = ByteArray(32) { index -> (index * 13 + 5).toByte() }
         fun secrets(seed: Long) = NativeRecompilationTransforms.generateDiversifiedSecrets(seed, java.util.Random(seed), defaultVbc4BuildContext(), key)
         val first = secrets(101L)
         val second = secrets(202L)
-        val firstProgram = first.substringAfter("#define JS_PROTECTED_SECTION_KEY_PARTITIONS_GENERATED").substringBefore("#endif")
-        val secondProgram = second.substringAfter("#define JS_PROTECTED_SECTION_KEY_PARTITIONS_GENERATED").substringBefore("#endif")
+        val firstProgram = first.substringAfter("js_protected_key_program_header").substringBefore("#undef JS_PROTECTED_KEY_DATA")
+        val secondProgram = second.substringAfter("js_protected_key_program_header").substringBefore("#undef JS_PROTECTED_KEY_DATA")
 
         assertNotEquals(firstProgram, secondProgram, "independent builds must vary protected-section lane count, permutation, index layout, masks, and rotation")
         assertFalse(first.contains("js_protected_section_key(") || second.contains("js_protected_section_key("), "generated source must not restore the legacy fixed key getter")
+        assertFalse(first.contains("if (_js_ps_lane ==") || second.contains("if (_js_ps_lane =="), "per-build lane dispatch must remain data, not generated executable branches")
     }
 
     @Test
@@ -427,9 +444,13 @@ class NativeRecompilationTransformsTest {
         val linkerScript = java.nio.file.Files.readString(resolveSource("src/main/native/js_protected_section_linux.ld"))
 
         assertTrue(compileBody.contains("zigTarget.contains(\"linux\")"), "Linux linker-script use must stay target-specific")
-        assertTrue(compileBody.contains("-Wl,-T,") && compileBody.contains("js_protected_section_linux.ld"), "Linux inner link must load the .jsx linker script")
-        assertTrue(linkerScript.contains("INSERT BEFORE .text"), ".jsx must be isolated before ordinary text")
-        assertTrue(linkerScript.contains("ALIGN(CONSTANT(MAXPAGESIZE))"), ".jsx start and end must be padded to linker page granularity")
+        assertTrue(compileBody.contains("-Wl,-T,") && compileBody.contains("js_protected_section_linux.ld"), "Linux inner link must load the protected-section linker script")
+        assertTrue(linkerScript.contains(".jsx") && linkerScript.contains(".jskd"), "Linux inner link must isolate protected code and key-program data")
+        assertTrue(linkerScript.contains("INSERT BEFORE .text"), ".jsx/.jskd must be isolated before ordinary text")
+        assertTrue(
+            Regex("ALIGN\\(CONSTANT\\(MAXPAGESIZE\\)\\)").findAll(linkerScript).count() >= 4,
+            ".jsx and .jskd starts and ends must be padded to linker page granularity",
+        )
     }
 
     @Test
@@ -775,7 +796,185 @@ class NativeRecompilationTransformsTest {
         val classKeyBody = source.substringAfter("public static byte[] deriveClassEncryptionKey").substringBefore("private static byte[] concat")
 
         assertTrue(statusBody.contains("loadMessage == null || loadMessage.length() == 0"), "failed native load attempts must report loadMessage instead of collapsing to untried")
-        assertTrue(classKeyBody.contains("no Java fallback ("), "class-encryption fail-closed errors must include native load status for real-JAR diagnostics")
+        assertTrue(classKeyBody.contains("requires the sealed native kernel ("), "class-encryption fail-closed errors must include native load status for real-JAR diagnostics")
+    }
+
+    @Test
+    fun windows_inner_native_emits_bound_read_only_non_executable_jskd() {
+        val diagnostics = withVbc4BuildContext(defaultVbc4BuildContext()) {
+            NativeRecompilationTransforms.recompileWithDiagnostics(
+                seed = 626262L,
+                classLoader = NativeRecompilationTransforms::class.java.classLoader,
+                targetPlatforms = listOf("windows-x64"),
+                nativeProtectionLevel = "standard",
+                nativePackingLevel = "off",
+            )
+        }
+        val result = diagnostics.results.singleOrNull()
+        assertTrue(
+            result != null,
+            "windows-x64 inner recompilation should succeed; messages=${diagnostics.messages.joinToString { it.message }}",
+        )
+        val bytes = result!!.bytes
+        assertNull(result.shellBindingCommitment, "off recompilation must expose the sealed inner kernel directly")
+        assertTrue(bytes.size >= 0x40 && bytes[0] == 'M'.code.toByte() && bytes[1] == 'Z'.code.toByte())
+
+        fun readU16(offset: Int): Int =
+            (bytes[offset].toInt() and 0xFF) or ((bytes[offset + 1].toInt() and 0xFF) shl 8)
+
+        data class PeSection(val name: String, val virtualAddress: Int, val rawSize: Int, val rawOffset: Int, val characteristics: Int)
+
+        val peOffset = readInt32Le(bytes, 0x3C)
+        assertTrue(peOffset > 0 && peOffset + 24 <= bytes.size)
+        assertEquals(0x00004550u, readUInt32Le(bytes, peOffset), "inner kernel must remain a valid PE image")
+        val coff = peOffset + 4
+        val sectionCount = readU16(coff + 2)
+        val optionalSize = readU16(coff + 16)
+        val optionalOffset = coff + 20
+        val sectionAlignment = readUInt32Le(bytes, optionalOffset + 32).toLong()
+        val sectionTable = optionalOffset + optionalSize
+        val sections = (0 until sectionCount).map { index ->
+            val offset = sectionTable + index * 40
+            assertTrue(offset + 40 <= bytes.size)
+            PeSection(
+                name = String(bytes, offset, 8, Charsets.US_ASCII).trimEnd('\u0000'),
+                virtualAddress = readInt32Le(bytes, offset + 12),
+                rawSize = readInt32Le(bytes, offset + 16),
+                rawOffset = readInt32Le(bytes, offset + 20),
+                characteristics = readInt32Le(bytes, offset + 36),
+            )
+        }
+        val keyData = sections.filter { it.name == ".jskd" }.single()
+        val protectedCode = sections.filter { it.name == ".jsx" }.single()
+        assertTrue(sectionAlignment >= 0x1000L && keyData.virtualAddress.toLong() % sectionAlignment == 0L)
+        assertTrue(keyData.characteristics and 0x40000000 != 0, ".jskd must be readable")
+        assertEquals(0, keyData.characteristics and 0xA0000020.toInt(), ".jskd must be non-writable, non-executable, and non-code")
+        assertTrue(keyData.rawSize > 0 && keyData.rawOffset >= 0 && keyData.rawOffset + keyData.rawSize <= bytes.size)
+        assertTrue(protectedCode.characteristics and 0x20000000 != 0, ".jsx must remain an executable code section")
+
+        val bindingMagic = byteArrayOf(
+            0xD7.toByte(), 0x4B, 0x91.toByte(), 0x2E,
+            0xC3.toByte(), 0x58, 0xA6.toByte(), 0x7D,
+        )
+        val keyDataBytes = bytes.copyOfRange(keyData.rawOffset, keyData.rawOffset + keyData.rawSize)
+        val bindingOffset = keyDataBytes.indexOfSlice(bindingMagic)
+        assertTrue(bindingOffset >= 0 && bindingOffset + 40 <= keyDataBytes.size, ".jskd must contain one post-link plaintext binding")
+        assertFalse(
+            keyDataBytes.copyOfRange(bindingOffset + bindingMagic.size, bindingOffset + 40).all { it == 0.toByte() },
+            "The packer must replace the zero placeholder with the SHA-256 of plaintext .jsx before sealing",
+        )
+        sections.filter { it.name == ".text" }.forEach { textSection ->
+            if (textSection.rawSize > 0 && textSection.rawOffset >= 0 && textSection.rawOffset + textSection.rawSize <= bytes.size) {
+                assertEquals(
+                    -1,
+                    bytes.copyOfRange(textSection.rawOffset, textSection.rawOffset + textSection.rawSize).indexOfSlice(bindingMagic),
+                    "The .jskd binding record must not be emitted into ordinary executable .text",
+                )
+            }
+        }
+    }
+
+    @Test
+    fun linux_inner_native_emits_page_isolated_read_only_non_executable_jskd() {
+        val diagnostics = withVbc4BuildContext(defaultVbc4BuildContext()) {
+            NativeRecompilationTransforms.recompileWithDiagnostics(
+                seed = 636363L,
+                classLoader = NativeRecompilationTransforms::class.java.classLoader,
+                targetPlatforms = listOf("linux-x64"),
+                nativeProtectionLevel = "standard",
+                nativePackingLevel = "off",
+            )
+        }
+        val result = diagnostics.results.singleOrNull()
+        assertTrue(
+            result != null,
+            "linux-x64 inner recompilation should succeed; messages=${diagnostics.messages.joinToString { it.message }}",
+        )
+        val bytes = result!!.bytes
+        assertNull(result.shellBindingCommitment, "off recompilation must expose the sealed inner kernel directly")
+        assertTrue(
+            bytes.size >= 64 && bytes[0] == 0x7F.toByte() && bytes[1] == 'E'.code.toByte() &&
+                bytes[2] == 'L'.code.toByte() && bytes[3] == 'F'.code.toByte() && bytes[4] == 2.toByte() && bytes[5] == 1.toByte(),
+            "inner kernel must remain a little-endian ELF64 image",
+        )
+
+        fun readU16(offset: Int): Int =
+            (bytes[offset].toInt() and 0xFF) or ((bytes[offset + 1].toInt() and 0xFF) shl 8)
+
+        data class ElfSection(val index: Int, val name: String, val flags: Long, val address: Long, val offset: Int, val size: Int)
+
+        val sectionHeaderOffset = readUInt64Le(bytes, 0x28).toLong()
+        val sectionHeaderSize = readU16(0x3A)
+        val sectionCount = readU16(0x3C)
+        val stringSectionIndex = readU16(0x3E)
+        assertTrue(sectionHeaderOffset > 0 && sectionHeaderSize >= 64 && stringSectionIndex in 0 until sectionCount)
+        val stringHeader = sectionHeaderOffset.toInt() + stringSectionIndex * sectionHeaderSize
+        val stringOffset = readUInt64Le(bytes, stringHeader + 24).toLong().toInt()
+        val stringSize = readUInt64Le(bytes, stringHeader + 32).toLong().toInt()
+        assertTrue(stringOffset >= 0 && stringSize > 0 && stringOffset + stringSize <= bytes.size)
+
+        fun sectionName(nameOffset: Int): String {
+            assertTrue(nameOffset in 0 until stringSize)
+            var end = stringOffset + nameOffset
+            val limit = stringOffset + stringSize
+            while (end < limit && bytes[end] != 0.toByte()) end++
+            assertTrue(end < limit)
+            return String(bytes, stringOffset + nameOffset, end - stringOffset - nameOffset, Charsets.US_ASCII)
+        }
+
+        val sections = (0 until sectionCount).map { index ->
+            val offset = sectionHeaderOffset.toInt() + index * sectionHeaderSize
+            assertTrue(offset + 64 <= bytes.size)
+            ElfSection(
+                index = index,
+                name = sectionName(readUInt32Le(bytes, offset).toInt()),
+                flags = readUInt64Le(bytes, offset + 8).toLong(),
+                address = readUInt64Le(bytes, offset + 16).toLong(),
+                offset = readUInt64Le(bytes, offset + 24).toLong().toInt(),
+                size = readUInt64Le(bytes, offset + 32).toLong().toInt(),
+            )
+        }
+        val keyData = sections.filter { it.name == ".jskd" }.single()
+        val protectedCode = sections.filter { it.name == ".jsx" }.single()
+        assertTrue(keyData.flags and 0x2L != 0L, ".jskd must remain allocated")
+        assertEquals(0L, keyData.flags and 0x5L, ".jskd must be neither writable nor executable")
+        assertTrue(protectedCode.flags and 0x4L != 0L, ".jsx must remain an executable section")
+        assertTrue(keyData.offset >= 0 && keyData.size > 0 && keyData.offset + keyData.size <= bytes.size)
+
+        val programHeaderOffset = readUInt64Le(bytes, 0x20).toLong().toInt()
+        val programHeaderSize = readU16(0x36)
+        val programHeaderCount = readU16(0x38)
+        val keyDataEnd = keyData.address + keyData.size.toLong()
+        val containingLoads = (0 until programHeaderCount).mapNotNull { index ->
+            val offset = programHeaderOffset + index * programHeaderSize
+            if (offset + 56 > bytes.size || readUInt32Le(bytes, offset) != 1u) return@mapNotNull null
+            val flags = readUInt32Le(bytes, offset + 4).toInt()
+            val virtualAddress = readUInt64Le(bytes, offset + 16).toLong()
+            val memorySize = readUInt64Le(bytes, offset + 40).toLong()
+            val alignment = readUInt64Le(bytes, offset + 48).toLong()
+            if (virtualAddress <= keyData.address && keyDataEnd <= virtualAddress + memorySize) Triple(flags, virtualAddress, alignment) else null
+        }
+        val keyDataLoad = containingLoads.single()
+        assertEquals(0x4, keyDataLoad.first, ".jskd must live in an R-only PT_LOAD")
+        assertTrue(keyDataLoad.third >= 0x1000L && keyData.address % keyDataLoad.third == 0L)
+        assertEquals(0L, keyDataEnd % keyDataLoad.third, ".jskd must end at a load-page boundary")
+
+        val bindingMagic = byteArrayOf(
+            0xD7.toByte(), 0x4B, 0x91.toByte(), 0x2E,
+            0xC3.toByte(), 0x58, 0xA6.toByte(), 0x7D,
+        )
+        val keyDataBytes = bytes.copyOfRange(keyData.offset, keyData.offset + keyData.size)
+        val bindingOffset = keyDataBytes.indexOfSlice(bindingMagic)
+        assertTrue(bindingOffset >= 0 && bindingOffset + 40 <= keyDataBytes.size)
+        assertFalse(
+            keyDataBytes.copyOfRange(bindingOffset + bindingMagic.size, bindingOffset + 40).all { it == 0.toByte() },
+            "The Linux packer must commit the plaintext .jsx digest into .jskd before sealing",
+        )
+        sections.filter { it.name == ".text" }.forEach { textSection ->
+            if (textSection.offset >= 0 && textSection.size > 0 && textSection.offset + textSection.size <= bytes.size) {
+                assertEquals(-1, bytes.copyOfRange(textSection.offset, textSection.offset + textSection.size).indexOfSlice(bindingMagic))
+            }
+        }
     }
 
     @Test

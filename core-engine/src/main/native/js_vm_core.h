@@ -69,6 +69,33 @@ JS_HIDDEN extern volatile int js_vm_last_cp_decode_stored_len;
 JS_HIDDEN extern volatile int js_vm_last_cp_decode_enc_len;
 JS_HIDDEN extern volatile int js_vm_last_cp_decode_stored_zstd;
 JS_HIDDEN extern volatile int js_vm_last_cp_decode_auth;
+/* De-identified metadata validation telemetry used only to distinguish an
+ * authenticated frame from a metadata/entry-token mismatch.  No metadata
+ * bytes, descriptor text, keys, nonces, or plaintext are retained. */
+JS_HIDDEN extern volatile int js_vm_last_metadata_cp_index;
+JS_HIDDEN extern volatile int js_vm_last_metadata_cp_count;
+JS_HIDDEN extern volatile int js_vm_last_metadata_decode_ok;
+JS_HIDDEN extern volatile int js_vm_last_metadata_cp_type;
+JS_HIDDEN extern volatile int js_vm_last_metadata_part_count;
+JS_HIDDEN extern volatile int js_vm_last_metadata_token_match;
+JS_HIDDEN extern volatile int js_vm_last_metadata_profile_valid;
+JS_HIDDEN extern volatile int js_vm_last_metadata_storage_valid;
+/* De-identified VBC4 row-envelope mismatch telemetry. */
+JS_HIDDEN extern volatile int js_vm_last_row_dialect_block;
+JS_HIDDEN extern volatile int js_vm_last_row_dialect_count;
+JS_HIDDEN extern volatile int js_vm_last_row_dialect_observed;
+JS_HIDDEN extern volatile int js_vm_last_row_dialect_expected;
+/* De-identified VBC4 exception-section telemetry.  These values expose only
+ * structural progress (count/index/field count/offset) and a token-match
+ * boolean; no token, seed, nonce, row bytes, or plaintext is retained. */
+JS_HIDDEN extern volatile int js_vm_last_exception_count;
+JS_HIDDEN extern volatile int js_vm_last_exception_index;
+JS_HIDDEN extern volatile int js_vm_last_exception_fields_read;
+JS_HIDDEN extern volatile int js_vm_last_exception_pos;
+JS_HIDDEN extern volatile int js_vm_last_exception_token_match;
+JS_HIDDEN extern volatile int js_vm_last_exception_plain_len;
+JS_HIDDEN extern volatile int js_vm_last_exception_stored_len;
+JS_HIDDEN extern volatile int js_vm_last_exception_encoded_len;
 JS_HIDDEN int js_vm_execute(JNIEnv *env, js_vm_program *p, jobjectArray args, char ret_desc, js_vm_value *ret);
 JS_HIDDEN int js_vm_execute_register(JNIEnv *env, js_vm_program *p, jobjectArray args, char ret_desc, js_vm_value *ret);
 JS_HIDDEN js_vm_object_result js_vm_execute_prepared_program(JNIEnv *env, js_vm_program *program, jobjectArray args);

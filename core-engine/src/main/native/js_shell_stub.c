@@ -1,6 +1,7 @@
 #include "js_shell_stub.h"
 #include "js_shell_loader.h"
 #include "js_shell_crypto.h"
+#include "native_secrets.inc"
 #include "js_crypto.h"
 #include "js_shell_payload.inc"
 #include "zstd.h"
@@ -52,6 +53,41 @@ static int js_shell_verify_inner_digest(const unsigned char stream_key[32], cons
 static int js_shell_reconstruct_aken_binding_salt(unsigned char out[32]);
 static int js_shell_verify_aken_payload_commitment(const unsigned char binding_salt[32]);
 static int js_shell_extract_aken_meta(js_shell_payload_meta *meta, unsigned char stream_key[32], const unsigned char binding_salt[32]);
+
+/*
+ * Keep the shell shim self-contained: focused shell probes intentionally link
+ * only js_shell_stub.c/js_shell_crypto.c/js_crypto.c, while the full loader
+ * also links js_native_common.c.  Decoding the short-lived fallback JNI names
+ * locally avoids introducing an optional external symbol into that probe.  The
+ * returned copy is wiped by js_shell_register_outer_shim on every exit path.
+ */
+static char *js_shell_name_obfuscated(
+    const unsigned char *encoded,
+    size_t length,
+    unsigned int mask
+) {
+    char *decoded;
+    if (!encoded || length == 0u || length > 4096u || (mask & ~0xFFu) != 0u) return NULL;
+    decoded = (char *)calloc(length + 1u, 1u);
+    if (!decoded) return NULL;
+    for (size_t index = 0u; index < length; index++) {
+        unsigned char value = (unsigned char)(encoded[index] ^ (unsigned char)mask);
+        if (value == 0u) {
+            js_shell_secure_wipe(decoded, length + 1u);
+            free(decoded);
+            return NULL;
+        }
+        decoded[index] = (char)value;
+    }
+    decoded[length] = '\0';
+    return decoded;
+}
+
+static void js_shell_wipe_free_name(char *name) {
+    if (!name) return;
+    js_shell_secure_wipe(name, strlen(name) + 1u);
+    free(name);
+}
 
 static unsigned int js_shell_read_u32_le(const unsigned char *bytes, size_t size, size_t *offset, unsigned int *out) {
     size_t at;
@@ -390,7 +426,7 @@ static int js_shell_validate_inner_abi_table(const js_native_abi_table *abi) {
         (const void *)abi->native_heartbeat,
         (const void *)abi->install_aken_session_nonce,
         (const void *)abi->execute_aken_vm_page,
-        (const void *)abi->decode_aken_string_page,
+        (const void *)abi->open_aken_string,
         (const void *)abi->read_aken_class_page,
         (const void *)abi->consume_aken_native_chunk,
     };
@@ -417,7 +453,7 @@ static int js_shell_validate_inner_abi_table(const js_native_abi_table *abi) {
         (const void *)abi->execute_vm_resource_int_int,
         (const void *)abi->execute_vm_resource_int_void,
         (const void *)abi->execute_aken_vm_page,
-        (const void *)abi->decode_aken_string_page,
+        (const void *)abi->open_aken_string,
         (const void *)abi->read_aken_class_page,
         (const void *)abi->consume_aken_native_chunk,
     };
@@ -431,13 +467,39 @@ static int js_shell_validate_inner_abi_table(const js_native_abi_table *abi) {
     return 1;
 }
 
-static unsigned long long js_shell_fnv1a64(const char *value, unsigned long long hash) {
-    if (!value) return hash;
-    for (const unsigned char *p = (const unsigned char *)value; *p; ++p) {
-        hash ^= (unsigned long long)(*p);
-        hash *= 0x100000001b3ULL;
+/* Public AKEN v4 relocation identity. Keep this byte-for-byte identical to
+ * RuntimeArtifactSealing.sealedBindingKey(), the Java runtime mirror, and the
+ * inner-kernel js_sealed_binding_key(). The binding key is public lookup
+ * material, not a secret; using one current digest scheme avoids a legacy
+ * FNV compatibility lane while still keeping full owner/name/descriptor text
+ * out of the published binding table. */
+static int js_shell_sealed_method_binding_key(
+    const char *owner,
+    const char *name,
+    const char *sig,
+    char out_hex[17]
+) {
+    static const unsigned char domain[] = "AKEN-BINDING-V1|";
+    static const unsigned char separator = '#';
+    static const char hex[] = "0123456789abcdef";
+    js_shell_sha256_ctx ctx;
+    unsigned char digest[32];
+    if (!owner || !owner[0] || !name || !name[0] || !sig || !sig[0] || !out_hex) return 0;
+    js_shell_sha256_init(&ctx);
+    js_shell_sha256_update(&ctx, domain, sizeof(domain) - 1u);
+    js_shell_sha256_update(&ctx, (const unsigned char *)owner, strlen(owner));
+    js_shell_sha256_update(&ctx, &separator, 1u);
+    js_shell_sha256_update(&ctx, (const unsigned char *)name, strlen(name));
+    js_shell_sha256_update(&ctx, &separator, 1u);
+    js_shell_sha256_update(&ctx, (const unsigned char *)sig, strlen(sig));
+    js_shell_sha256_final(&ctx, digest);
+    for (size_t i = 0u; i < 8u; i++) {
+        out_hex[i * 2u] = hex[(digest[i] >> 4) & 0x0Fu];
+        out_hex[i * 2u + 1u] = hex[digest[i] & 0x0Fu];
     }
-    return hash;
+    out_hex[16] = 0;
+    js_shell_secure_wipe(digest, sizeof(digest));
+    return 1;
 }
 
 static char *js_shell_strdup(const char *value) {
@@ -617,14 +679,8 @@ static char *js_shell_system_property(JNIEnv *env, const char *name) {
 
 static char *js_shell_lookup_bound_method(JNIEnv *env, const char *owner, const char *name, const char *sig) {
     if (!env || !owner || !name || !sig) return 0;
-    unsigned long long hash = 0xcbf29ce484222325ULL;
-    hash = js_shell_fnv1a64(owner, hash);
-    hash ^= (unsigned long long)'#'; hash *= 0x100000001b3ULL;
-    hash = js_shell_fnv1a64(name, hash);
-    hash ^= (unsigned long long)'#'; hash *= 0x100000001b3ULL;
-    hash = js_shell_fnv1a64(sig, hash);
     char key[17];
-    snprintf(key, sizeof(key), "%016llx", hash);
+    if (!js_shell_sealed_method_binding_key(owner, name, sig, key)) return 0;
     char *bindings = js_shell_system_property(env, "j.m");
     if (!bindings) return 0;
     size_t key_len = strlen(key);
@@ -848,10 +904,10 @@ static jobject JNICALL js_shell_execute_aken_vm_page(JNIEnv *env, jclass cls, jl
     return g_inner_abi->execute_aken_vm_page(call_env, js_shell_effective_helper_class(cls), entryToken, encodedHandle, pageIndex, callSiteProof, args);
 }
 
-static jbyteArray JNICALL js_shell_decode_aken_string_page(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof) {
-    JNIEnv *call_env = js_shell_current_env_for("decode-aken-string-page", env);
-    if (!call_env || !g_inner_abi || !g_inner_abi->decode_aken_string_page) return 0;
-    return g_inner_abi->decode_aken_string_page(call_env, js_shell_effective_helper_class(cls), encodedHandle, pageIndex, callSiteProof);
+static jstring JNICALL js_shell_open_aken_string(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof) {
+    JNIEnv *call_env = js_shell_current_env_for("open-aken-string", env);
+    if (!call_env || !g_inner_abi || !g_inner_abi->open_aken_string) return 0;
+    return g_inner_abi->open_aken_string(call_env, js_shell_effective_helper_class(cls), encodedHandle, pageIndex, callSiteProof);
 }
 
 static jbyteArray JNICALL js_shell_read_aken_class_page(JNIEnv *env, jclass cls, jbyteArray encodedHandle, jint pageIndex, jbyteArray callSiteProof) {
@@ -928,10 +984,15 @@ static int js_shell_register_outer_shim(JNIEnv *env) {
     char *mapped_init = 0, *mapped_verify = 0, *mapped_heartbeat = 0, *mapped_version = 0, *mapped_boot_token = 0;
     char *mapped_install_boot = 0, *mapped_install_boot_envelope = 0, *mapped_boot_ready = 0, *mapped_abort_boot = 0, *mapped_preload = 0, *mapped_decrypt_aes = 0, *mapped_class_key = 0, *mapped_class_decrypt = 0, *mapped_binding_key = 0, *mapped_decode_resource = 0;
     char *mapped_install_aken_session_nonce = 0;
+    char *mapped_execute_aken_vm_page = 0, *mapped_open_aken_string = 0;
+    char *mapped_read_aken_class_page = 0, *mapped_consume_aken_native_chunk = 0;
+    char *fallback_install_aken_session_nonce = 0;
+    char *fallback_execute_aken_vm_page = 0, *fallback_open_aken_string = 0;
+    char *fallback_read_aken_class_page = 0, *fallback_consume_aken_native_chunk = 0;
     char *mapped_exec = 0, *mapped_exec_token = 0, *mapped_void = 0, *mapped_int = 0, *mapped_int_int = 0, *mapped_int_void = 0;
-    int ok;
+    int ok = 0;
     jclass helper_cls = js_shell_find_helper_class(env, &owner);
-    if (!helper_cls || !owner) return 0;
+    if (!helper_cls || !owner) goto cleanup;
     char native_init_name[11];
     char native_verify_name[13];
     char native_heartbeat_name[16];
@@ -974,6 +1035,33 @@ static int js_shell_register_outer_shim(JNIEnv *env) {
     js_shell_native_execute_int_name(native_int_name);
     js_shell_native_execute_int_int_name(native_int_int_name);
     js_shell_native_execute_int_void_name(native_int_void_name);
+    fallback_install_aken_session_nonce = js_shell_name_obfuscated(
+        js_obfuscated_JNI_NATIVE_INSTALL_AKEN_SESSION_NONCE,
+        JS_OBFUSCATED_LEN_JNI_NATIVE_INSTALL_AKEN_SESSION_NONCE,
+        JS_OBFUSCATED_MASK_JNI_NATIVE_INSTALL_AKEN_SESSION_NONCE);
+    fallback_execute_aken_vm_page = js_shell_name_obfuscated(
+        js_obfuscated_JNI_NATIVE_EXECUTE_AKEN_VM_PAGE,
+        JS_OBFUSCATED_LEN_JNI_NATIVE_EXECUTE_AKEN_VM_PAGE,
+        JS_OBFUSCATED_MASK_JNI_NATIVE_EXECUTE_AKEN_VM_PAGE);
+    fallback_open_aken_string = js_shell_name_obfuscated(
+        js_obfuscated_JNI_NATIVE_OPEN_AKEN_STRING,
+        JS_OBFUSCATED_LEN_JNI_NATIVE_OPEN_AKEN_STRING,
+        JS_OBFUSCATED_MASK_JNI_NATIVE_OPEN_AKEN_STRING);
+    fallback_read_aken_class_page = js_shell_name_obfuscated(
+        js_obfuscated_JNI_NATIVE_READ_AKEN_CLASS_PAGE,
+        JS_OBFUSCATED_LEN_JNI_NATIVE_READ_AKEN_CLASS_PAGE,
+        JS_OBFUSCATED_MASK_JNI_NATIVE_READ_AKEN_CLASS_PAGE);
+    fallback_consume_aken_native_chunk = js_shell_name_obfuscated(
+        js_obfuscated_JNI_NATIVE_CONSUME_AKEN_NATIVE_CHUNK,
+        JS_OBFUSCATED_LEN_JNI_NATIVE_CONSUME_AKEN_NATIVE_CHUNK,
+        JS_OBFUSCATED_MASK_JNI_NATIVE_CONSUME_AKEN_NATIVE_CHUNK);
+    if (!fallback_install_aken_session_nonce ||
+        !fallback_execute_aken_vm_page ||
+        !fallback_open_aken_string ||
+        !fallback_read_aken_class_page ||
+        !fallback_consume_aken_native_chunk) {
+        goto cleanup;
+    }
     original_owner = js_shell_default_helper_owner();
     mapped_init = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_init_name, "(Ljava/lang/String;)I") : 0;
     mapped_verify = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_verify_name, "([B[B)I") : 0;
@@ -997,7 +1085,19 @@ static int js_shell_register_outer_shim(JNIEnv *env) {
     mapped_int_int = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_int_int_name, "(JI)I") : 0;
     mapped_int_void = original_owner ? js_shell_lookup_bound_method(env, original_owner, native_int_void_name, "(JI)V") : 0;
     mapped_install_aken_session_nonce = original_owner
-        ? js_shell_lookup_bound_method(env, original_owner, "nativeInstallAkenSessionNonce", "([B)Z")
+        ? js_shell_lookup_bound_method(env, original_owner, fallback_install_aken_session_nonce, "([B)Z")
+        : 0;
+    mapped_execute_aken_vm_page = original_owner
+        ? js_shell_lookup_bound_method(env, original_owner, fallback_execute_aken_vm_page, "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;")
+        : 0;
+    mapped_open_aken_string = original_owner
+        ? js_shell_lookup_bound_method(env, original_owner, fallback_open_aken_string, "([BI[B)Ljava/lang/String;")
+        : 0;
+    mapped_read_aken_class_page = original_owner
+        ? js_shell_lookup_bound_method(env, original_owner, fallback_read_aken_class_page, "([BI[B)[B")
+        : 0;
+    mapped_consume_aken_native_chunk = original_owner
+        ? js_shell_lookup_bound_method(env, original_owner, fallback_consume_aken_native_chunk, "([BI[B)V")
         : 0;
 #if defined(JS_AKEN_TYPED_ONLY_RUNTIME) && JS_AKEN_TYPED_ONLY_RUNTIME
     /* The lean AKEN helper exposes only the typed current-page closure. */
@@ -1011,19 +1111,27 @@ static int js_shell_register_outer_shim(JNIEnv *env) {
     methods[1].fnPtr = (void *)js_shell_native_heartbeat;
     methods[2].name = (char *)((mapped_install_aken_session_nonce && mapped_install_aken_session_nonce[0])
         ? mapped_install_aken_session_nonce
-        : "nativeInstallAkenSessionNonce");
+        : fallback_install_aken_session_nonce);
     methods[2].signature = "([B)Z";
     methods[2].fnPtr = (void *)js_shell_install_aken_session_nonce;
-    methods[3].name = "nativeExecuteAkenVmPage";
+    methods[3].name = (char *)((mapped_execute_aken_vm_page && mapped_execute_aken_vm_page[0])
+        ? mapped_execute_aken_vm_page
+        : fallback_execute_aken_vm_page);
     methods[3].signature = "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;";
     methods[3].fnPtr = (void *)js_shell_execute_aken_vm_page;
-    methods[4].name = "nativeDecodeAkenStringPage";
-    methods[4].signature = "([BI[B)[B";
-    methods[4].fnPtr = (void *)js_shell_decode_aken_string_page;
-    methods[5].name = "nativeReadAkenClassPage";
+    methods[4].name = (char *)((mapped_open_aken_string && mapped_open_aken_string[0])
+        ? mapped_open_aken_string
+        : fallback_open_aken_string);
+    methods[4].signature = "([BI[B)Ljava/lang/String;";
+    methods[4].fnPtr = (void *)js_shell_open_aken_string;
+    methods[5].name = (char *)((mapped_read_aken_class_page && mapped_read_aken_class_page[0])
+        ? mapped_read_aken_class_page
+        : fallback_read_aken_class_page);
     methods[5].signature = "([BI[B)[B";
     methods[5].fnPtr = (void *)js_shell_read_aken_class_page;
-    methods[6].name = "nativeConsumeAkenNativeChunk";
+    methods[6].name = (char *)((mapped_consume_aken_native_chunk && mapped_consume_aken_native_chunk[0])
+        ? mapped_consume_aken_native_chunk
+        : fallback_consume_aken_native_chunk);
     methods[6].signature = "([BI[B)V";
     methods[6].fnPtr = (void *)js_shell_consume_aken_native_chunk;
 #else
@@ -1092,16 +1200,24 @@ static int js_shell_register_outer_shim(JNIEnv *env) {
     methods[20].name = (char *)((mapped_binding_key && mapped_binding_key[0]) ? mapped_binding_key : native_binding_key_name);
     methods[20].signature = "([B)Ljava/lang/String;";
     methods[20].fnPtr = (void *)js_shell_native_sealed_binding_key;
-    methods[21].name = "nativeExecuteAkenVmPage";
+    methods[21].name = (char *)((mapped_execute_aken_vm_page && mapped_execute_aken_vm_page[0])
+        ? mapped_execute_aken_vm_page
+        : fallback_execute_aken_vm_page);
     methods[21].signature = "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;";
     methods[21].fnPtr = (void *)js_shell_execute_aken_vm_page;
-    methods[22].name = "nativeDecodeAkenStringPage";
-    methods[22].signature = "([BI[B)[B";
-    methods[22].fnPtr = (void *)js_shell_decode_aken_string_page;
-    methods[23].name = "nativeReadAkenClassPage";
+    methods[22].name = (char *)((mapped_open_aken_string && mapped_open_aken_string[0])
+        ? mapped_open_aken_string
+        : fallback_open_aken_string);
+    methods[22].signature = "([BI[B)Ljava/lang/String;";
+    methods[22].fnPtr = (void *)js_shell_open_aken_string;
+    methods[23].name = (char *)((mapped_read_aken_class_page && mapped_read_aken_class_page[0])
+        ? mapped_read_aken_class_page
+        : fallback_read_aken_class_page);
     methods[23].signature = "([BI[B)[B";
     methods[23].fnPtr = (void *)js_shell_read_aken_class_page;
-    methods[24].name = "nativeConsumeAkenNativeChunk";
+    methods[24].name = (char *)((mapped_consume_aken_native_chunk && mapped_consume_aken_native_chunk[0])
+        ? mapped_consume_aken_native_chunk
+        : fallback_consume_aken_native_chunk);
     methods[24].signature = "([BI[B)V";
     methods[24].fnPtr = (void *)js_shell_consume_aken_native_chunk;
 #endif
@@ -1116,30 +1232,40 @@ static int js_shell_register_outer_shim(JNIEnv *env) {
             g_shell_helper_class = global_helper;
         }
     }
-    free(mapped_init);
-    free(mapped_verify);
-    free(mapped_heartbeat);
-    free(mapped_version);
-    free(mapped_boot_token);
-    free(mapped_install_boot);
-    free(mapped_install_boot_envelope);
-    free(mapped_boot_ready);
-    free(mapped_abort_boot);
-    free(mapped_preload);
-    free(mapped_decrypt_aes);
-    free(mapped_class_key);
-    free(mapped_class_decrypt);
-    free(mapped_binding_key);
-    free(mapped_decode_resource);
-    free(mapped_exec);
-    free(mapped_exec_token);
-    free(mapped_void);
-    free(mapped_int);
-    free(mapped_int_int);
-    free(mapped_int_void);
-    free(mapped_install_aken_session_nonce);
-    free(original_owner);
-    free(owner);
+cleanup:
+    js_shell_wipe_free_name(mapped_init);
+    js_shell_wipe_free_name(mapped_verify);
+    js_shell_wipe_free_name(mapped_heartbeat);
+    js_shell_wipe_free_name(mapped_version);
+    js_shell_wipe_free_name(mapped_boot_token);
+    js_shell_wipe_free_name(mapped_install_boot);
+    js_shell_wipe_free_name(mapped_install_boot_envelope);
+    js_shell_wipe_free_name(mapped_boot_ready);
+    js_shell_wipe_free_name(mapped_abort_boot);
+    js_shell_wipe_free_name(mapped_preload);
+    js_shell_wipe_free_name(mapped_decrypt_aes);
+    js_shell_wipe_free_name(mapped_class_key);
+    js_shell_wipe_free_name(mapped_class_decrypt);
+    js_shell_wipe_free_name(mapped_binding_key);
+    js_shell_wipe_free_name(mapped_decode_resource);
+    js_shell_wipe_free_name(mapped_exec);
+    js_shell_wipe_free_name(mapped_exec_token);
+    js_shell_wipe_free_name(mapped_void);
+    js_shell_wipe_free_name(mapped_int);
+    js_shell_wipe_free_name(mapped_int_int);
+    js_shell_wipe_free_name(mapped_int_void);
+    js_shell_wipe_free_name(mapped_install_aken_session_nonce);
+    js_shell_wipe_free_name(mapped_execute_aken_vm_page);
+    js_shell_wipe_free_name(mapped_open_aken_string);
+    js_shell_wipe_free_name(mapped_read_aken_class_page);
+    js_shell_wipe_free_name(mapped_consume_aken_native_chunk);
+    js_shell_wipe_free_name(fallback_install_aken_session_nonce);
+    js_shell_wipe_free_name(fallback_execute_aken_vm_page);
+    js_shell_wipe_free_name(fallback_open_aken_string);
+    js_shell_wipe_free_name(fallback_read_aken_class_page);
+    js_shell_wipe_free_name(fallback_consume_aken_native_chunk);
+    js_shell_wipe_free_name(original_owner);
+    js_shell_wipe_free_name(owner);
     return ok;
 }
 

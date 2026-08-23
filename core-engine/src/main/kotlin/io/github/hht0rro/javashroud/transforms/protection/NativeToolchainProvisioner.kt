@@ -91,6 +91,27 @@ object NativeToolchainProvisioner {
         return ResolutionResult(downloaded, messages)
     }
 
+
+    /**
+     * Probe the local native-build prerequisite without downloading or compiling.
+     * Production pass gating uses this to avoid treating bundled C source text as
+     * evidence that a runnable native artifact can be emitted. The actual output
+     * still passes through Zig compilation, ABI validation, sealing, and runtime
+     * load checks.
+     */
+    internal fun probeWithoutDownload(
+        environment: Map<String, String> = System.getenv(),
+        pathEnv: String? = System.getenv("PATH"),
+    ): ZigToolchain? {
+        environment[ZIG_ENV_VAR]?.takeIf { it.isNotBlank() }?.let { envPath ->
+            val path = Path.of(envPath)
+            if (isUsableZigBinary(path)) return ZigToolchain(path, "env")
+        }
+        resolveFromPath(pathEnv)?.let { return ZigToolchain(it, "path") }
+        findCachedZigBinary(cacheDirectory())?.let { return ZigToolchain(it, "cache") }
+        return null
+    }
+
     private fun resolveFromPath(pathEnv: String?): Path? {
         if (pathEnv.isNullOrBlank()) return null
         for (dir in pathEnv.split(File.pathSeparator)) {

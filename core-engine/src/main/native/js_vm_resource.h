@@ -80,6 +80,46 @@ JS_HIDDEN js_vm_program* js_vm_ephemeral_cache_get(jlong entry_token, const char
 JS_HIDDEN js_vm_program* js_vm_ephemeral_cache_find_by_identity(const unsigned char method_identity[32]);
 JS_HIDDEN int js_vm_ephemeral_cache_put(jlong entry_token, const char *resource_path, js_vm_program *program);
 JS_HIDDEN void js_vm_ephemeral_cache_clear(JNIEnv *env);
+/* AKEN page execution cache. Full locator/descriptor/payload authentication
+ * remains the caller's responsibility on every request; these APIs only reuse
+ * the already-authenticated parsed/prepared program after all current pages
+ * have been opened and wiped. */
+JS_HIDDEN js_vm_program* js_vm_aken_prepared_cache_acquire(
+    JNIEnv *env,
+    jclass helper_cls,
+    jlong entry_token,
+    jint page_index,
+    uint32_t page_count,
+    const unsigned char *encoded_handle,
+    size_t encoded_handle_len,
+    const unsigned char *call_site_proof,
+    size_t call_site_proof_len,
+    const unsigned char *artifact_commitment,
+    size_t artifact_commitment_len,
+    const unsigned char *layout_digest,
+    size_t layout_digest_len,
+    const char *logical_binding_path,
+    js_vm_aken_cache_entry **out_lease
+);
+JS_HIDDEN int js_vm_aken_prepared_cache_publish(
+    JNIEnv *env,
+    jclass helper_cls,
+    jlong entry_token,
+    jint page_index,
+    uint32_t page_count,
+    const unsigned char *encoded_handle,
+    size_t encoded_handle_len,
+    const unsigned char *call_site_proof,
+    size_t call_site_proof_len,
+    const unsigned char *artifact_commitment,
+    size_t artifact_commitment_len,
+    const unsigned char *layout_digest,
+    size_t layout_digest_len,
+    const char *logical_binding_path,
+    js_vm_program *program,
+    js_vm_aken_cache_entry **out_lease
+);
+JS_HIDDEN void js_vm_aken_prepared_cache_release(JNIEnv *env, js_vm_aken_cache_entry *lease);
 JS_HIDDEN void js_vm_cache_lock_init(void);
 JS_HIDDEN void js_vm_cache_lock_destroy(void);
 #if defined(JS_ZSTD_CONTEXT_TEST_HOOKS) && JS_ZSTD_CONTEXT_TEST_HOOKS

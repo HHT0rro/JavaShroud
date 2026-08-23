@@ -103,6 +103,56 @@ class NativeProtectedSectionPackerTest {
         }
     }
 
+    @Test
+    fun fails_closed_when_pe_jskd_is_missing_duplicated_or_has_no_binding() {
+        val jsx = ByteArray(0x80) { (it * 9 + 1).toByte() }
+        val cases = listOf(
+            MinimalPe.build(jsx, includeKeyData = false),
+            MinimalPe.build(jsx, duplicateKeyData = true),
+            MinimalPe.build(jsx, includeKeyBinding = false),
+        )
+        cases.forEach { pe ->
+            assertFailsWith<NativeProtectedSectionPacker.NativeProtectedSectionSealException> {
+                NativeProtectedSectionPacker.sealIfPossible(pe.bytes, ByteArray(32), failClosed = true)
+            }
+        }
+    }
+
+    @Test
+    fun fails_closed_when_pe_jskd_is_writable_executable_or_relocated() {
+        val jsx = ByteArray(0x80) { (it * 5 + 7).toByte() }
+        val cases = listOf(
+            MinimalPe.build(jsx, keyDataCharacteristics = 0xC0000040.toInt()),
+            MinimalPe.build(jsx, keyDataCharacteristics = 0x60000040),
+            MinimalPe.build(jsx, includeRelocationOverlap = true, relocationTargetsKeyData = true),
+        )
+        cases.forEach { pe ->
+            assertFailsWith<NativeProtectedSectionPacker.NativeProtectedSectionSealException> {
+                NativeProtectedSectionPacker.sealIfPossible(pe.bytes, ByteArray(32), failClosed = true)
+            }
+        }
+    }
+
+    @Test
+    fun fails_closed_when_elf_jskd_is_missing_duplicated_executable_writable_or_relocated() {
+        val jsx = ByteArray(0x1000) { (it * 3 + 11).toByte() }
+        val cases = listOf(
+            MinimalElf64.build(jsx, includeKeyData = false),
+            MinimalElf64.build(jsx, duplicateKeyData = true),
+            MinimalElf64.build(jsx, keyDataSectionFlags = 0x6),
+            MinimalElf64.build(jsx, keyDataSectionFlags = 0x3),
+            MinimalElf64.build(jsx, keyDataLoadFlags = 0x5),
+            MinimalElf64.build(jsx, keyDataLoadFlags = 0x6),
+            MinimalElf64.build(jsx, includeKeyBinding = false),
+            MinimalElf64.build(jsx, includeRelocationOverlap = true, relocationTargetsKeyData = true),
+        )
+        cases.forEach { elf ->
+            assertFailsWith<NativeProtectedSectionPacker.NativeProtectedSectionSealException> {
+                NativeProtectedSectionPacker.sealIfPossible(elf.bytes, ByteArray(32), failClosed = true)
+            }
+        }
+    }
+
     private fun xorKeystream(buf: ByteArray, key: ByteArray) {
         var produced = 0
         var counter = 0
@@ -149,13 +199,26 @@ class NativeProtectedSectionPackerTest {
             includeJsx: Boolean = true,
             includeRelocationOverlap: Boolean = false,
             jsxRvaOverride: Int? = null,
+            includeKeyData: Boolean = true,
+            keyDataCharacteristics: Int = 0x40000040,
+            includeKeyBinding: Boolean = true,
+            duplicateKeyData: Boolean = false,
+            relocationTargetsKeyData: Boolean = false,
         ): Result {
+            require(!relocationTargetsKeyData || includeKeyData) {
+                "key-data relocation fixture requires .jskd"
+            }
             val fileAlign = 0x200
             val sectionAlign = 0x1000
             val dosSize = 0x40
             val ntOff = dosSize
             val sizeOfOptionalHeader = 240
-            val numSections = (if (includeJsx) 2 else 1) + if (includeRelocationOverlap) 1 else 0
+            val numSections =
+                1 +
+                    (if (includeJsx) 1 else 0) +
+                    (if (includeKeyData) 1 else 0) +
+                    (if (duplicateKeyData) 1 else 0) +
+                    (if (includeRelocationOverlap) 1 else 0)
             val secTableOff = ntOff + 24 + sizeOfOptionalHeader
             val headersEnd = secTableOff + numSections * 40
             val firstRawPtr = align(headersEnd, fileAlign)
@@ -163,19 +226,33 @@ class NativeProtectedSectionPackerTest {
             val dataBody = ByteArray(0x40)
             val markerInData = 0x10
             System.arraycopy(sealMagic, 0, dataBody, markerInData, 8)
+            val keyDataBody = ByteArray(0x40)
+            if (includeKeyBinding) {
+                val bindingMagic = byteArrayOf(
+                    0xD7.toByte(), 0x4B, 0x91.toByte(), 0x2E,
+                    0xC3.toByte(), 0x58, 0xA6.toByte(), 0x7D,
+                )
+                System.arraycopy(bindingMagic, 0, keyDataBody, 0, bindingMagic.size)
+            }
 
             val dataRawPtr = firstRawPtr
             val dataRawSize = align(dataBody.size, fileAlign)
             val jsxRawPtr = dataRawPtr + dataRawSize
             val jsxRawSize = if (includeJsx) align(jsxBody.size, fileAlign) else 0
-            val relocRawPtr = jsxRawPtr + jsxRawSize
+            val keyDataRawPtr = jsxRawPtr + jsxRawSize
+            val keyDataRawSize = if (includeKeyData) align(keyDataBody.size, fileAlign) else 0
+            val duplicateKeyDataRawPtr = keyDataRawPtr + keyDataRawSize
+            val duplicateKeyDataRawSize = if (duplicateKeyData) align(keyDataBody.size, fileAlign) else 0
+            val relocRawPtr = duplicateKeyDataRawPtr + duplicateKeyDataRawSize
             val relocRawSize = if (includeRelocationOverlap) align(0x10, fileAlign) else 0
             val total = relocRawPtr + relocRawSize
             val buf = ByteArray(total)
 
-            buf[0] = 'M'.code.toByte(); buf[1] = 'Z'.code.toByte()
+            buf[0] = 'M'.code.toByte()
+            buf[1] = 'Z'.code.toByte()
             writeLe32(buf, 0x3C, ntOff)
-            buf[ntOff] = 'P'.code.toByte(); buf[ntOff + 1] = 'E'.code.toByte()
+            buf[ntOff] = 'P'.code.toByte()
+            buf[ntOff + 1] = 'E'.code.toByte()
             val coff = ntOff + 4
             writeLe16(buf, coff + 0, 0x8664)
             writeLe16(buf, coff + 2, numSections)
@@ -187,42 +264,70 @@ class NativeProtectedSectionPackerTest {
             writeLe32(buf, opt + 32, sectionAlign)
             writeLe32(buf, opt + 108, 16)
 
-            var rva = sectionAlign
-            putName(buf, secTableOff, ".data")
-            writeLe32(buf, secTableOff + 8, dataBody.size)
-            writeLe32(buf, secTableOff + 12, rva)
-            writeLe32(buf, secTableOff + 16, dataRawSize)
-            writeLe32(buf, secTableOff + 20, dataRawPtr)
-            writeLe32(buf, secTableOff + 36, 0xC0000040.toInt())
+            var sectionIndex = 0
+            var nextRva = sectionAlign
+            var sectionOff = secTableOff + sectionIndex++ * 40
+            putName(buf, sectionOff, ".data")
+            writeLe32(buf, sectionOff + 8, dataBody.size)
+            writeLe32(buf, sectionOff + 12, nextRva)
+            writeLe32(buf, sectionOff + 16, dataRawSize)
+            writeLe32(buf, sectionOff + 20, dataRawPtr)
+            writeLe32(buf, sectionOff + 36, 0xC0000040.toInt())
             System.arraycopy(dataBody, 0, buf, dataRawPtr, dataBody.size)
             val markerStateOffset = dataRawPtr + markerInData + 8
+            nextRva += align(dataBody.size, sectionAlign)
 
             var jsxRva = 0
             if (includeJsx) {
-                rva += align(dataBody.size, sectionAlign)
-                jsxRva = jsxRvaOverride ?: rva
-                val o = secTableOff + 40
-                putName(buf, o, ".jsx")
-                writeLe32(buf, o + 8, jsxBody.size)
-                writeLe32(buf, o + 12, jsxRva)
-                writeLe32(buf, o + 16, jsxRawSize)
-                writeLe32(buf, o + 20, jsxRawPtr)
-                writeLe32(buf, o + 36, 0x60000020)
+                jsxRva = jsxRvaOverride ?: nextRva
+                sectionOff = secTableOff + sectionIndex++ * 40
+                putName(buf, sectionOff, ".jsx")
+                writeLe32(buf, sectionOff + 8, jsxBody.size)
+                writeLe32(buf, sectionOff + 12, jsxRva)
+                writeLe32(buf, sectionOff + 16, jsxRawSize)
+                writeLe32(buf, sectionOff + 20, jsxRawPtr)
+                writeLe32(buf, sectionOff + 36, 0x60000020)
                 System.arraycopy(jsxBody, 0, buf, jsxRawPtr, jsxBody.size)
+                nextRva = align(maxOf(nextRva, jsxRva + maxOf(jsxBody.size, jsxRawSize)), sectionAlign)
+            }
+
+            var keyDataRva = 0
+            if (includeKeyData) {
+                keyDataRva = nextRva
+                sectionOff = secTableOff + sectionIndex++ * 40
+                putName(buf, sectionOff, ".jskd")
+                writeLe32(buf, sectionOff + 8, keyDataBody.size)
+                writeLe32(buf, sectionOff + 12, keyDataRva)
+                writeLe32(buf, sectionOff + 16, keyDataRawSize)
+                writeLe32(buf, sectionOff + 20, keyDataRawPtr)
+                writeLe32(buf, sectionOff + 36, keyDataCharacteristics)
+                System.arraycopy(keyDataBody, 0, buf, keyDataRawPtr, keyDataBody.size)
+                nextRva += align(keyDataBody.size, sectionAlign)
+            }
+            if (duplicateKeyData) {
+                sectionOff = secTableOff + sectionIndex++ * 40
+                putName(buf, sectionOff, ".jskd")
+                writeLe32(buf, sectionOff + 8, keyDataBody.size)
+                writeLe32(buf, sectionOff + 12, nextRva)
+                writeLe32(buf, sectionOff + 16, duplicateKeyDataRawSize)
+                writeLe32(buf, sectionOff + 20, duplicateKeyDataRawPtr)
+                writeLe32(buf, sectionOff + 36, 0x40000040)
+                System.arraycopy(keyDataBody, 0, buf, duplicateKeyDataRawPtr, keyDataBody.size)
+                nextRva += align(keyDataBody.size, sectionAlign)
             }
             if (includeRelocationOverlap) {
-                rva += if (includeJsx) align(jsxBody.size, sectionAlign) else align(dataBody.size, sectionAlign)
-                val relocRva = rva
-                val relocSectionOff = secTableOff + (numSections - 1) * 40
-                putName(buf, relocSectionOff, ".reloc")
-                writeLe32(buf, relocSectionOff + 8, 0x10)
-                writeLe32(buf, relocSectionOff + 12, relocRva)
-                writeLe32(buf, relocSectionOff + 16, relocRawSize)
-                writeLe32(buf, relocSectionOff + 20, relocRawPtr)
-                writeLe32(buf, relocSectionOff + 36, 0x42000040)
+                val relocRva = nextRva
+                sectionOff = secTableOff + sectionIndex * 40
+                putName(buf, sectionOff, ".reloc")
+                writeLe32(buf, sectionOff + 8, 0x10)
+                writeLe32(buf, sectionOff + 12, relocRva)
+                writeLe32(buf, sectionOff + 16, relocRawSize)
+                writeLe32(buf, sectionOff + 20, relocRawPtr)
+                writeLe32(buf, sectionOff + 36, 0x42000040)
                 writeLe32(buf, opt + 112 + 5 * 8, relocRva)
                 writeLe32(buf, opt + 112 + 5 * 8 + 4, 0x0A)
-                writeLe32(buf, relocRawPtr, jsxRva)
+                val targetRva = if (relocationTargetsKeyData) keyDataRva else jsxRva
+                writeLe32(buf, relocRawPtr, targetRva)
                 writeLe32(buf, relocRawPtr + 4, 0x0A)
                 writeLe16(buf, relocRawPtr + 8, 0xA004)
             }
@@ -245,26 +350,63 @@ class NativeProtectedSectionPackerTest {
             jsxBody: ByteArray,
             includeRelocationOverlap: Boolean = false,
             includeOverlappingText: Boolean = false,
+            includeKeyData: Boolean = true,
+            keyDataSectionFlags: Long = 0x2,
+            keyDataLoadFlags: Int = 0x4,
+            includeKeyBinding: Boolean = true,
+            duplicateKeyData: Boolean = false,
+            relocationTargetsKeyData: Boolean = false,
         ): Result {
+            require(!relocationTargetsKeyData || includeKeyData) {
+                "key-data relocation fixture requires .jskd"
+            }
             val dataBody = ByteArray(0x40)
             val markerInData = 0x10
             System.arraycopy(sealMagic, 0, dataBody, markerInData, 8)
+            val keyDataBody = ByteArray(0x1000)
+            if (includeKeyBinding) {
+                val bindingMagic = byteArrayOf(
+                    0xD7.toByte(), 0x4B, 0x91.toByte(), 0x2E,
+                    0xC3.toByte(), 0x58, 0xA6.toByte(), 0x7D,
+                )
+                System.arraycopy(bindingMagic, 0, keyDataBody, 0, bindingMagic.size)
+            }
             val programHeaderOff = 0x40
             val programHeaderSize = 56
+            val programHeaderCount = 1 + (if (includeKeyData) 1 else 0) + (if (duplicateKeyData) 1 else 0)
             val dataOff = 0x1000
             val jsxOff = 0x2000
-            val relaOff = align(jsxOff + jsxBody.size, 0x100)
+            val keyDataOff = 0x3000
+            val duplicateKeyDataOff = 0x4000
+            val payloadEnd = when {
+                duplicateKeyData -> duplicateKeyDataOff + keyDataBody.size
+                includeKeyData -> keyDataOff + keyDataBody.size
+                else -> jsxOff + jsxBody.size
+            }
+            val relaOff = align(payloadEnd, 0x100)
             val shstr = buildStringTable()
             val shstrOff = align(relaOff + if (includeRelocationOverlap) 24 else 0, 0x100)
             val shOff = align(shstrOff + shstr.bytes.size, 0x100)
-            val sectionCount = 4 + (if (includeRelocationOverlap) 1 else 0) + (if (includeOverlappingText) 1 else 0)
+            val sectionCount =
+                4 +
+                    (if (includeKeyData) 1 else 0) +
+                    (if (duplicateKeyData) 1 else 0) +
+                    (if (includeRelocationOverlap) 1 else 0) +
+                    (if (includeOverlappingText) 1 else 0)
             val total = shOff + sectionCount * 64
             val buf = ByteArray(total)
-            val dataAddress = 0x3000L
+            val dataAddress = 0x8000L
             val jsxAddress = 0x1000L
+            val keyDataAddress = 0x5000L
+            val duplicateKeyDataAddress = 0x6000L
 
-            buf[0] = 0x7F; buf[1] = 'E'.code.toByte(); buf[2] = 'L'.code.toByte(); buf[3] = 'F'.code.toByte()
-            buf[4] = 2; buf[5] = 1; buf[6] = 1
+            buf[0] = 0x7F
+            buf[1] = 'E'.code.toByte()
+            buf[2] = 'L'.code.toByte()
+            buf[3] = 'F'.code.toByte()
+            buf[4] = 2
+            buf[5] = 1
+            buf[6] = 1
             writeLe16(buf, 0x10, 3)
             writeLe16(buf, 0x12, 62)
             writeLe32(buf, 0x14, 1)
@@ -272,37 +414,101 @@ class NativeProtectedSectionPackerTest {
             writeLe64(buf, 0x28, shOff.toLong())
             writeLe16(buf, 0x34, 64)
             writeLe16(buf, 0x36, programHeaderSize)
-            writeLe16(buf, 0x38, 1)
+            writeLe16(buf, 0x38, programHeaderCount)
             writeLe16(buf, 0x3A, 64)
             writeLe16(buf, 0x3C, sectionCount)
             writeLe16(buf, 0x3E, sectionCount - 1)
 
             System.arraycopy(dataBody, 0, buf, dataOff, dataBody.size)
             System.arraycopy(jsxBody, 0, buf, jsxOff, jsxBody.size)
+            var programHeaderIndex = 0
             writeProgramHeader(
                 buf = buf,
-                off = programHeaderOff,
+                off = programHeaderOff + programHeaderIndex++ * programHeaderSize,
                 flags = 0x5,
                 rawOffset = jsxOff,
                 address = jsxAddress,
                 size = jsxBody.size,
                 alignment = 0x1000,
             )
+            if (includeKeyData) {
+                System.arraycopy(keyDataBody, 0, buf, keyDataOff, keyDataBody.size)
+                writeProgramHeader(
+                    buf = buf,
+                    off = programHeaderOff + programHeaderIndex++ * programHeaderSize,
+                    flags = keyDataLoadFlags,
+                    rawOffset = keyDataOff,
+                    address = keyDataAddress,
+                    size = keyDataBody.size,
+                    alignment = 0x1000,
+                )
+            }
+            if (duplicateKeyData) {
+                System.arraycopy(keyDataBody, 0, buf, duplicateKeyDataOff, keyDataBody.size)
+                writeProgramHeader(
+                    buf = buf,
+                    off = programHeaderOff + programHeaderIndex * programHeaderSize,
+                    flags = 0x4,
+                    rawOffset = duplicateKeyDataOff,
+                    address = duplicateKeyDataAddress,
+                    size = keyDataBody.size,
+                    alignment = 0x1000,
+                )
+            }
             if (includeRelocationOverlap) {
-                writeLe64(buf, relaOff, jsxAddress + 4)
+                val targetAddress = if (relocationTargetsKeyData) keyDataAddress else jsxAddress
+                writeLe64(buf, relaOff, targetAddress + 4)
                 writeLe64(buf, relaOff + 8, 0)
                 writeLe64(buf, relaOff + 16, 0)
             }
             System.arraycopy(shstr.bytes, 0, buf, shstrOff, shstr.bytes.size)
 
-            writeSection(buf, shOff + 64, shstr.dataName, 1, 0x3, dataAddress, dataOff, dataBody.size)
-            writeSection(buf, shOff + 128, shstr.jsxName, 1, 0x6, jsxAddress, jsxOff, jsxBody.size)
-            var nextSection = 3
+            var nextSection = 1
+            writeSection(buf, shOff + nextSection++ * 64, shstr.dataName, 1, 0x3, dataAddress, dataOff, dataBody.size)
+            writeSection(buf, shOff + nextSection++ * 64, shstr.jsxName, 1, 0x6, jsxAddress, jsxOff, jsxBody.size)
+            var keyDataSectionIndex = -1
+            if (includeKeyData) {
+                keyDataSectionIndex = nextSection
+                writeSection(
+                    buf,
+                    shOff + nextSection++ * 64,
+                    shstr.keyDataName,
+                    1,
+                    keyDataSectionFlags,
+                    keyDataAddress,
+                    keyDataOff,
+                    keyDataBody.size,
+                )
+            }
+            if (duplicateKeyData) {
+                writeSection(
+                    buf,
+                    shOff + nextSection++ * 64,
+                    shstr.keyDataName,
+                    1,
+                    0x2,
+                    duplicateKeyDataAddress,
+                    duplicateKeyDataOff,
+                    keyDataBody.size,
+                )
+            }
             if (includeOverlappingText) {
                 writeSection(buf, shOff + nextSection++ * 64, shstr.textName, 1, 0x6, jsxAddress + 0x800, jsxOff + 0x800, 0x20)
             }
             if (includeRelocationOverlap) {
-                writeSection(buf, shOff + nextSection++ * 64, shstr.relaName, 4, 0x0, 0, relaOff, 24, info = 2, entrySize = 24)
+                val targetIndex = if (relocationTargetsKeyData) keyDataSectionIndex else 2
+                writeSection(
+                    buf,
+                    shOff + nextSection++ * 64,
+                    shstr.relaName,
+                    4,
+                    0x0,
+                    0,
+                    relaOff,
+                    24,
+                    info = targetIndex,
+                    entrySize = 24,
+                )
             }
             writeSection(buf, shOff + nextSection * 64, shstr.shstrName, 3, 0x0, 0, shstrOff, shstr.bytes.size)
             return Result(buf, jsxOff, jsxAddress, dataOff + markerInData + 8)
@@ -312,6 +518,7 @@ class NativeProtectedSectionPackerTest {
             val bytes: ByteArray,
             val dataName: Int,
             val jsxName: Int,
+            val keyDataName: Int,
             val textName: Int,
             val relaName: Int,
             val shstrName: Int,
@@ -327,10 +534,11 @@ class NativeProtectedSectionPackerTest {
             }
             val dataName = add(".data")
             val jsxName = add(".jsx")
+            val keyDataName = add(".jskd")
             val textName = add(".text")
             val relaName = add(".rela.jsx")
             val shstrName = add(".shstrtab")
-            return StringTable(names.toByteArray(), dataName, jsxName, textName, relaName, shstrName)
+            return StringTable(names.toByteArray(), dataName, jsxName, keyDataName, textName, relaName, shstrName)
         }
     }
 

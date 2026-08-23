@@ -81,7 +81,8 @@ JS_HIDDEN void js_runtime_metrics_note_exception(void);
  * Eight scalar AES-256 key lanes used only by the AKEN page-bound terminal.
  * This is deliberately not a byte-array or aggregate-key ABI.  The lanes are
  * passed as independent scalar arguments and are only available inside one
- * verified page-open scope.
+ * verified page-open scope. A NULL plain_out performs authentication only and
+ * never materializes page plaintext.
  */
 JS_HIDDEN int js_aes_gcm_decrypt_lanes(
     uint32_t lane0,
@@ -100,8 +101,9 @@ JS_HIDDEN int js_aes_gcm_decrypt_lanes(
     unsigned char *plain_out
 );
 
-/* Authenticated AES-GCM decrypt for 96-bit nonces and a 128-bit tag. The
- * plaintext buffer is wiped when authentication fails. key_len is 16 or 32. */
+/* Authenticated AES-GCM decrypt for 96-bit nonces and a 128-bit tag. A NULL
+ * plain_out performs authentication only; otherwise the plaintext buffer is
+ * wiped when authentication fails. key_len is 16 or 32. */
 JS_HIDDEN int js_aes_gcm_decrypt(
     const unsigned char *key,
     size_t key_len,

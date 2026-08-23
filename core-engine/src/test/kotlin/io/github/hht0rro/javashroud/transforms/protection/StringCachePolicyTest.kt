@@ -1,156 +1,147 @@
 package io.github.hht0rro.javashroud.transforms.protection
 
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.function.Supplier
-import kotlin.test.AfterTest
-import kotlin.test.BeforeTest
+import java.lang.ref.Reference
+import java.lang.reflect.Modifier
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
-import kotlin.test.assertNotEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+import java.lang.invoke.MethodHandles
+import java.lang.invoke.MethodType
 
 class StringCachePolicyTest {
-    private var originalPolicy: String? = null
+    @Test
+    fun string_helper_retains_no_plaintext_cache_fields_or_methods() {
+        val helper = StringEncryptionHelper::class.java
 
-    @BeforeTest
-    fun setUp() {
-        originalPolicy = System.getProperty(STRING_CACHE_PROPERTY)
-        System.clearProperty(STRING_CACHE_PROPERTY)
-        StringEncryptionHelper.resetCacheForTesting()
-    }
-
-    @AfterTest
-    fun tearDown() {
-        if (originalPolicy == null) {
-            System.clearProperty(STRING_CACHE_PROPERTY)
-        } else {
-            System.setProperty(STRING_CACHE_PROPERTY, originalPolicy)
+        helper.declaredFields.forEach { field ->
+            assertFalse(field.name.contains("cache", ignoreCase = true), "String helper must not retain cache field ${field.name}")
+            assertFalse(java.util.Map::class.java.isAssignableFrom(field.type), "String helper must not retain map-backed plaintext state")
+            assertFalse(java.util.concurrent.ConcurrentMap::class.java.isAssignableFrom(field.type), "String helper must not retain concurrent plaintext state")
+            assertFalse(Reference::class.java.isAssignableFrom(field.type), "String helper must not retain soft/weak plaintext references")
+            assertFalse(
+                Modifier.isStatic(field.modifiers) && field.type == String::class.java,
+                "String helper must not retain static String cache or policy state",
+            )
         }
-        StringEncryptionHelper.resetCacheForTesting()
+        assertFalse(
+            helper.declaredMethods.any { it.name.contains("cache", ignoreCase = true) },
+            "String helper must not expose cache-control or cached decode methods",
+        )
     }
 
     @Test
-    fun default_policy_is_soft() {
-        assertEquals("soft", StringEncryptionHelper.cachePolicyForTesting())
-    }
+    fun string_helper_bytecode_contains_no_retired_cache_contract() {
+        val resource = "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper.class"
+        val classBytes = checkNotNull(StringEncryptionHelper::class.java.classLoader.getResourceAsStream(resource)) {
+            "StringEncryptionHelper.class must be available on the test classpath"
+        }.use { it.readBytes() }
+        val classText = String(classBytes, Charsets.ISO_8859_1)
 
-    @Test
-    fun off_redecodes_without_retaining_entries() {
-        setPolicy("off")
-        val calls = AtomicInteger()
-
-        repeat(2) {
-            StringEncryptionHelper.cacheForTesting("opaque-off", decoder(calls))
-        }
-
-        assertEquals(2, calls.get(), "off must invoke the decoder for every request")
-        assertEquals(0, StringEncryptionHelper.softCacheEntryCountForTesting())
-        assertEquals(0, StringEncryptionHelper.strongCacheEntryCountForTesting())
-    }
-
-    @Test
-    fun soft_reuses_only_soft_reference_entries() {
-        setPolicy("soft")
-        val calls = AtomicInteger()
-
-        repeat(2) {
-            StringEncryptionHelper.cacheForTesting("opaque-soft", decoder(calls))
-        }
-
-        assertEquals(1, calls.get(), "an uncleared soft reference should prevent a second decode")
-        assertEquals(1, StringEncryptionHelper.softCacheEntryCountForTesting())
-        assertEquals(0, StringEncryptionHelper.strongCacheEntryCountForTesting())
-    }
-
-    @Test
-    fun strong_reuses_strong_entries_only_when_explicitly_selected() {
-        setPolicy("strong")
-        val calls = AtomicInteger()
-
-        repeat(2) {
-            StringEncryptionHelper.cacheForTesting("opaque-strong", decoder(calls))
-        }
-
-        assertEquals(1, calls.get())
-        assertEquals(0, StringEncryptionHelper.softCacheEntryCountForTesting())
-        assertEquals(1, StringEncryptionHelper.strongCacheEntryCountForTesting())
-    }
-
-    @Test
-    fun invalid_policy_fails_closed() {
-        System.setProperty(STRING_CACHE_PROPERTY, "invalid-policy")
-
-        assertFailsWith<SecurityException> {
-            StringEncryptionHelper.cachePolicyForTesting()
+        listOf(
+            "javashroud." + "stringCache",
+            "SOFT_" + "CACHE",
+            "STRONG_" + "CACHE",
+            "CachePolicy",
+            "cached" + "DecodeAkenStringPage",
+            "decode" + "AkenStringPage",
+            "cacheForTesting",
+            "resetCacheForTesting",
+        ).forEach { retired ->
+            assertFalse(retired in classText, "String helper bytecode must not retain retired cache marker $retired")
         }
     }
 
     @Test
-    fun aken_page_cache_key_binds_handle_page_and_raw_proof_without_aliasing() {
-        val handle = ByteArray(24) { index -> (index * 11 + 7).toByte() }
-        val proof = byteArrayOf(0, ':'.code.toByte(), 0, 0x7F, 0xFF.toByte(), ':'.code.toByte())
-        val sameHandle = handle.copyOf()
-        val sameProof = proof.copyOf()
-        val changedHandle = handle.copyOf().also { it[it.lastIndex] = (it.last().toInt() xor 0x3C).toByte() }
-        val changedProof = proof.copyOf().also { it[it.lastIndex] = (it.last().toInt() xor 0x55).toByte() }
-        try {
-            val baseline = akenStringPageCacheKey(handle, 0x0102_0304, proof)
-
-            assertEquals(baseline, akenStringPageCacheKey(sameHandle, 0x0102_0304, sameProof))
-            assertNotEquals(baseline, akenStringPageCacheKey(changedHandle, 0x0102_0304, proof))
-            assertNotEquals(baseline, akenStringPageCacheKey(handle, 0x0102_0305, proof))
-            assertNotEquals(baseline, akenStringPageCacheKey(handle, 0x0102_0304, changedProof))
-        } finally {
-            handle.fill(0)
-            proof.fill(0)
-            sameHandle.fill(0)
-            sameProof.fill(0)
-            changedHandle.fill(0)
-            changedProof.fill(0)
-        }
-    }
-
-    @Test
-    fun malformed_aken_page_request_fails_closed_before_cache_or_native_dispatch() {
-        setPolicy("strong")
-
-        assertFailsWith<SecurityException> {
-            StringEncryptionHelper.cachedDecodeAkenStringPage(ByteArray(23), 0, byteArrayOf(1))
-        }
-        assertFailsWith<SecurityException> {
-            StringEncryptionHelper.cachedDecodeAkenStringPage(ByteArray(24), -1, byteArrayOf(1))
-        }
-        assertFailsWith<SecurityException> {
-            StringEncryptionHelper.cachedDecodeAkenStringPage(ByteArray(24), 0, ByteArray(0))
-        }
-
-        assertEquals(0, StringEncryptionHelper.softCacheEntryCountForTesting())
-        assertEquals(0, StringEncryptionHelper.strongCacheEntryCountForTesting())
-    }
-
-    private fun setPolicy(policy: String) {
-        System.setProperty(STRING_CACHE_PROPERTY, policy)
-        StringEncryptionHelper.resetCacheForTesting()
-    }
-
-    private fun decoder(calls: AtomicInteger): Supplier<String> = Supplier {
-        calls.incrementAndGet()
-        String(charArrayOf('v', 'a', 'l', 'u', 'e'))
-    }
-
-    private fun akenStringPageCacheKey(handle: ByteArray, pageIndex: Int, proof: ByteArray): String {
+    fun string_terminal_is_not_a_public_repeatable_decoder_api() {
+        val helper = StringEncryptionHelper::class.java
         val primitiveInt = requireNotNull(Int::class.javaPrimitiveType)
-        val method = StringEncryptionHelper::class.java.getDeclaredMethod(
-            "akenStringPageCacheKey",
+        val terminal = helper.getDeclaredMethod(
+            "invokeAkenStringTerminal",
             ByteArray::class.java,
             primitiveInt,
             ByteArray::class.java,
         )
-        method.isAccessible = true
-        return method.invoke(null, handle, pageIndex, proof) as String
+
+        assertEquals(String::class.java, terminal.returnType)
+        assertFalse(Modifier.isPublic(terminal.modifiers), "Unsealed helper must not expose a public repeatable page decoder")
+        assertTrue(Modifier.isStatic(terminal.modifiers))
+        assertEquals(
+            emptyList(),
+            helper.declaredMethods
+                .filter {
+                    Modifier.isPublic(it.modifiers) &&
+                        Modifier.isStatic(it.modifiers) &&
+                        it.returnType == String::class.java
+                }
+                .map { it.name }
+                .sorted(),
+            "String helper must not expose a public String-returning page terminal",
+        )
+    }
+
+    @Test
+    fun malformed_aken_page_request_fails_closed_before_native_dispatch() {
+        assertFailsWith<SecurityException> {
+            StringEncryptionHelper.invokeAkenStringTerminal(ByteArray(23), 0, byteArrayOf(1))
+        }
+        assertFailsWith<SecurityException> {
+            StringEncryptionHelper.invokeAkenStringTerminal(ByteArray(24), -1, byteArrayOf(1))
+        }
+        assertFailsWith<SecurityException> {
+            StringEncryptionHelper.invokeAkenStringTerminal(ByteArray(24), 0, ByteArray(0))
+        }
+        assertFailsWith<SecurityException> {
+            StringEncryptionHelper.invokeAkenStringTerminal(ByteArray(24), 0, ByteArray(4097))
+        }
+    }
+
+    @Test
+    fun string_bootstrap_rejects_foreign_same_signature_targets() {
+        val type = MethodType.methodType(String::class.java, ByteArray::class.java, Int::class.javaPrimitiveType, ByteArray::class.java)
+        val foreign = MethodHandles.lookup().findStatic(
+            StringCachePolicyTest::class.java,
+            "foreignStringTarget",
+            type,
+        )
+        listOf(
+            StringEncryptionHelper::q0,
+            StringEncryptionHelper::m7,
+            StringEncryptionHelper::x3,
+            StringEncryptionHelper::v8,
+        ).forEach { bootstrap ->
+            assertFailsWith<SecurityException> {
+                bootstrap.invoke(
+                    MethodHandles.lookup(),
+                    "a0",
+                    type,
+                    foreign,
+                )
+            }
+        }
+    }
+
+    @Test
+    fun string_bootstrap_accepts_only_the_current_terminal_handle() {
+        val type = MethodType.methodType(String::class.java, ByteArray::class.java, Int::class.javaPrimitiveType, ByteArray::class.java)
+        val terminal = MethodHandles.privateLookupIn(
+            StringEncryptionHelper::class.java,
+            MethodHandles.lookup(),
+        ).findStatic(
+            StringEncryptionHelper::class.java,
+            "invokeAkenStringTerminal",
+            type,
+        )
+        val callSite = StringEncryptionHelper.q0(MethodHandles.lookup(), "a0", type, terminal)
+        val actualTarget = callSite.javaClass.getMethod("getTarget").invoke(callSite) as java.lang.invoke.MethodHandle
+        val actualType = java.lang.invoke.MethodHandle::class.java.getMethod("type").invoke(actualTarget) as MethodType
+        assertEquals(type, actualType)
     }
 
     private companion object {
-        const val STRING_CACHE_PROPERTY = "javashroud.stringCache"
+        @JvmStatic
+        private fun foreignStringTarget(handle: ByteArray, pageIndex: Int, proof: ByteArray): String =
+            "foreign-$pageIndex-${handle.size}-${proof.size}"
     }
 }

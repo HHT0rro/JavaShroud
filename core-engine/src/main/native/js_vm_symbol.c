@@ -9,9 +9,9 @@
 
 static const unsigned char JS_VM_METHOD_IDENTITY_DOMAIN[] = "javashroud-vbc4-method-identity-v2";
 static const unsigned char JS_VM_OWNER_IDENTITY_DOMAIN[] = "javashroud-vbc4-owner-identity-v2";
-static const unsigned char JS_VM_CP_STRING_KEY_DOMAIN[] = "cp-string-key";
-static const unsigned char JS_VM_CP_STRING_IV_DOMAIN[] = "cp-string-iv";
-static const unsigned char JS_VM_CP_STRING_TAG_DOMAIN[] = "cp-string-tag";
+static const unsigned char JS_VM_CP_STRING_KEY_DOMAIN[] = "javashroud-vbc4-cp-string-key-v2";
+static const unsigned char JS_VM_CP_STRING_IV_DOMAIN[] = "javashroud-vbc4-cp-string-iv-v2";
+static const unsigned char JS_VM_CP_STRING_TAG_DOMAIN[] = "javashroud-vbc4-cp-string-tag-v2";
 
 static int js_vm_hex_identity(const char *hex, unsigned char out[32]) {
     if (!hex || strlen(hex) != 64u || !out) return 0;
@@ -180,11 +180,20 @@ static uint32_t js_vm_symbol_generation(const js_vm_program *p) {
     return value != 0u ? value : 1u;
 }
 
+static uintptr_t js_vm_symbol_loader_identity(void) {
+    /* The active host loader is rebound from a fresh JNI local each
+     * execute_cached_program call.  Pointer equality of that local is not a
+     * loader identity.  Session generation already invalidates JNI/resource
+     * caches across artifact/session replacement; reuse it here so a
+     * persistent program table can hit across nested VM entries. */
+    return (uintptr_t)js_vm_resource_session_generation_current();
+}
+
 static int js_vm_symbol_cache_entry_matches(const js_vm_program *p, const js_vm_symbol_cache_entry *entry) {
     js_runtime_metrics_note_jni_abi_check();
     if (!p || !entry || entry->generation == 0u || entry->abi_version != 1u) return 0;
     if (entry->generation != js_vm_symbol_generation(p)) return 0;
-    if (entry->loader_identity != (uintptr_t)js_vm_get_active_host_loader()) return 0;
+    if (entry->loader_identity != js_vm_symbol_loader_identity()) return 0;
     return memcmp(entry->owner_identity, p->owner_identity, sizeof(entry->owner_identity)) == 0;
 }
 
@@ -235,7 +244,7 @@ JS_HIDDEN js_vm_symbol_cache_entry* js_vm_class_cache_add(JNIEnv *env, js_vm_pro
     slot->cp_idx = cp_idx;
     slot->kind = kind;
     slot->generation = js_vm_symbol_generation(p);
-    slot->loader_identity = (uintptr_t)js_vm_get_active_host_loader();
+    slot->loader_identity = js_vm_symbol_loader_identity();
     memcpy(slot->owner_identity, p->owner_identity, sizeof(slot->owner_identity));
     slot->abi_version = 1u;
     slot->cls = (jclass)(*env)->NewGlobalRef(env, cls);
@@ -271,7 +280,7 @@ JS_HIDDEN js_vm_symbol_cache_entry* js_vm_symbol_cache_add(JNIEnv *env, js_vm_pr
     slot->cp_idx = cp_idx;
     slot->kind = kind;
     slot->generation = js_vm_symbol_generation(p);
-    slot->loader_identity = (uintptr_t)js_vm_get_active_host_loader();
+    slot->loader_identity = js_vm_symbol_loader_identity();
     memcpy(slot->owner_identity, p->owner_identity, sizeof(slot->owner_identity));
     slot->abi_version = 1u;
     slot->cls = (jclass)(*env)->NewGlobalRef(env, cls);
@@ -582,12 +591,24 @@ JS_HIDDEN char* js_vm_cp_string_owned(js_vm_program *p, int cp_idx) {
 }
 
 JS_HIDDEN char js_vm_return_descriptor_from_meta(js_vm_program *p, jlong expected_token) {
+    js_vm_last_metadata_cp_index = -1;
+    js_vm_last_metadata_cp_count = p ? p->cp_count : 0;
+    js_vm_last_metadata_decode_ok = 0;
+    js_vm_last_metadata_cp_type = -1;
+    js_vm_last_metadata_part_count = 0;
+    js_vm_last_metadata_token_match = 0;
+    js_vm_last_metadata_profile_valid = 0;
+    js_vm_last_metadata_storage_valid = 0;
     if (!p || p->cp_count <= 0) return 0;
     int metadata_cp_index = p->metadata_cp_index;
+    js_vm_last_metadata_cp_index = metadata_cp_index;
     if (metadata_cp_index < 0 || metadata_cp_index >= p->cp_count) return 0;
     js_vm_cp meta;
     memset(&meta, 0, sizeof(meta));
-    if (!js_vm_decode_cp_entry(p, metadata_cp_index, &meta) || meta.type != JS_VM_CP_STRING || !meta.s) {
+    int metadata_decode_ok = js_vm_decode_cp_entry(p, metadata_cp_index, &meta);
+    js_vm_last_metadata_decode_ok = metadata_decode_ok;
+    js_vm_last_metadata_cp_type = metadata_decode_ok ? meta.type : -1;
+    if (!metadata_decode_ok || meta.type != JS_VM_CP_STRING || !meta.s) {
         js_vm_clear_decoded_cp(&meta);
         return 0;
     }
@@ -624,10 +645,13 @@ JS_HIDDEN char js_vm_return_descriptor_from_meta(js_vm_program *p, jlong expecte
         *sep = 0;
         cursor = sep + 1;
     }
+    js_vm_last_metadata_part_count = part_count;
     if (part_count == 10) {
         size_t argument_count_size = 0u;
-        ok = js_vm_parse_hex_u64_strict(parts[0], &token) &&
-            (jlong)token == expected_token &&
+        int token_ok = js_vm_parse_hex_u64_strict(parts[0], &token) &&
+            (jlong)token == expected_token;
+        js_vm_last_metadata_token_match = token_ok ? 1 : 0;
+        ok = token_ok &&
             js_vm_valid_return_tag(parts[1]) &&
             js_vm_parse_hex_u32_strict(parts[2], &method_local_profile) &&
             js_vm_hex_identity(parts[3], method_identity) &&
@@ -638,9 +662,12 @@ JS_HIDDEN char js_vm_return_descriptor_from_meta(js_vm_program *p, jlong expecte
             js_vm_parse_hex_u32_strict(parts[8], &native_vm_profile_id) &&
             js_vm_parse_hex_u32_strict(parts[9], &dispatch_profile_tag) &&
             dispatch_profile_tag != 0u;
-        if (ok && (p->vbc4_flags & 0x1000u) != 0u) {
-            ok = method_local_profile != 0u && p->nested_vm_profile != 0u && p->nested_vm_profile == method_local_profile;
+        int profile_ok = 1;
+        if ((p->vbc4_flags & 0x1000u) != 0u) {
+            profile_ok = method_local_profile != 0u && p->nested_vm_profile != 0u && p->nested_vm_profile == method_local_profile;
+            ok = ok && profile_ok;
         }
+        js_vm_last_metadata_profile_valid = profile_ok ? 1 : 0;
         if (ok) {
             return_desc = parts[1][0];
             is_static = (unsigned char)(parts[7][0] == '1');
@@ -648,6 +675,7 @@ JS_HIDDEN char js_vm_return_descriptor_from_meta(js_vm_program *p, jlong expecte
             argument_tags = (char*)malloc(argument_count_size + 1u);
             resource_path = js_strdup(parts[6]);
             ok = argument_tags != NULL && resource_path != NULL;
+            js_vm_last_metadata_storage_valid = ok ? 1 : 0;
             if (ok) memcpy(argument_tags, parts[5], argument_count_size + 1u);
         }
         if (!ok) {

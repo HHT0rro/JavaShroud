@@ -1,6 +1,7 @@
 package io.github.hht0rro.javashroud.aken
 
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenArtifactCommitment
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenBoundDecryptorPlan
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenBuildPlan
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHighValueLeafIdentity
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenResourceKind
@@ -45,9 +46,13 @@ class AkenRuntimePageDescriptorTest {
                 assertEquals(descriptor.route.logicalBindingPath, decoded.route.logicalBindingPath)
                 assertContentEquals(descriptor.proof.callSiteProof, decoded.proof.callSiteProof)
                 assertContentEquals(descriptor.evaluatorPlan.fingerprint, decoded.evaluatorPlan.fingerprint)
-                assertEquals(3, decoded.evaluatorPlan.javaFragments.size)
-                assertEquals(3, decoded.evaluatorPlan.nativeFragments.size)
-                assertEquals(AkenRuntimeEvaluatorRole.Terminal, decoded.evaluatorPlan.terminal.role)
+                assertTrue(!decoded.evaluatorPlan.isLegacyAken7)
+                val boundOpaque = decoded.evaluatorPlan.copyBoundDecryptorForNative()
+                try {
+                    assertTrue(boundOpaque != null && boundOpaque.isNotEmpty())
+                } finally {
+                    boundOpaque?.fill(0)
+                }
                 assertTrue(decoded.matches(page.handle))
                 assertTrue(decoded.matches(decoded.handle))
             } finally {
@@ -76,22 +81,27 @@ class AkenRuntimePageDescriptorTest {
 
             val identityCopy = descriptor.logicalIdentity
             val expectedIdentity = identityCopy.copyOf()
-            val shapeCopy = descriptor.evaluatorPlan.javaFragments.first().shape
-            val expectedShape = shapeCopy.copyOf()
+            val opaqueCopy = checkNotNull(descriptor.evaluatorPlan.copyBoundDecryptorForNative())
+            val expectedOpaque = opaqueCopy.copyOf()
             val handleCopy = descriptor.route.handleEncoding
             val expectedHandle = handleCopy.copyOf()
             try {
                 identityCopy.fill(0x31.toByte())
-                shapeCopy.fill(0x32.toByte())
+                opaqueCopy.fill(0x32.toByte())
                 handleCopy.fill(0x33.toByte())
                 assertContentEquals(expectedIdentity, descriptor.logicalIdentity)
-                assertContentEquals(expectedShape, descriptor.evaluatorPlan.javaFragments.first().shape)
+                val currentOpaque = checkNotNull(descriptor.evaluatorPlan.copyBoundDecryptorForNative())
+                try {
+                    assertContentEquals(expectedOpaque, currentOpaque)
+                } finally {
+                    currentOpaque.fill(0)
+                }
                 assertContentEquals(expectedHandle, descriptor.route.handleEncoding)
             } finally {
                 identityCopy.fill(0)
                 expectedIdentity.fill(0)
-                shapeCopy.fill(0)
-                expectedShape.fill(0)
+                opaqueCopy.fill(0)
+                expectedOpaque.fill(0)
                 handleCopy.fill(0)
                 expectedHandle.fill(0)
             }
@@ -112,18 +122,17 @@ class AkenRuntimePageDescriptorTest {
                     route = mismatchedRoute,
                     proof = proofFor(plan, page),
                     targetPageSize = page.targetSize,
-                    evaluatorPlan = runtimePlanFor(page),
+                    evaluatorPlan = descriptor.evaluatorPlan,
                 )
             }
 
-            val graph = runtimePlanFor(page)
+            val graph = descriptor.evaluatorPlan
             val badFingerprint = graph.fingerprint
+            val boundOpaque = checkNotNull(graph.copyBoundDecryptorForNative())
             try {
                 badFingerprint[0] = (badFingerprint[0].toInt() xor 0x5A).toByte()
-                val mismatchedGraph = AkenRuntimeEvaluatorPlan.create(
-                    graph.javaFragments,
-                    graph.nativeFragments,
-                    graph.terminal,
+                val mismatchedGraph = AkenRuntimeEvaluatorPlan.createBound(
+                    AkenBoundDecryptorPlan.fromOpaque(boundOpaque),
                     badFingerprint,
                 )
                 assertFailsWith<IllegalArgumentException> {
@@ -137,6 +146,7 @@ class AkenRuntimePageDescriptorTest {
                     )
                 }
             } finally {
+                boundOpaque.fill(0)
                 badFingerprint.fill(0)
             }
         } finally {
@@ -181,7 +191,7 @@ class AkenRuntimePageDescriptorTest {
                 callToken = byteArrayOf(2),
                 tablePermutation = intArrayOf(0),
             )
-            val graph = runtimePlanFor(page)
+            val graph = legacyRuntimePlanFor(page)
             assertFailsWith<IllegalArgumentException> {
                 AkenRuntimeEvaluatorPlan.create(
                     javaFragments = listOf(invalidJava) + graph.javaFragments.drop(1),
@@ -195,15 +205,18 @@ class AkenRuntimePageDescriptorTest {
         }
     }
 
-    private fun descriptorFor(plan: AkenBuildPlan, page: AkenBuildPlan.Page): AkenRuntimePageDescriptor =
-        AkenRuntimePageDescriptor.create(
+    private fun descriptorFor(plan: AkenBuildPlan, page: AkenBuildPlan.Page): AkenRuntimePageDescriptor {
+        val route = routeFor(page)
+        val proof = proofFor(plan, page)
+        return AkenRuntimePageDescriptor.create(
             handle = page.handle,
             logicalIdentity = page.logicalIdentity,
-            route = routeFor(page),
-            proof = proofFor(plan, page),
+            route = route,
+            proof = proof,
             targetPageSize = page.targetSize,
-            evaluatorPlan = runtimePlanFor(page),
+            evaluatorPlan = runtimePlanFor(page, route, proof),
         )
+    }
 
     private fun routeFor(page: AkenBuildPlan.Page): AkenRoutingMetadata = AkenRoutingMetadata.fromHandle(
         handle = page.handle,
@@ -231,7 +244,25 @@ class AkenRuntimePageDescriptorTest {
         )
     }
 
-    private fun runtimePlanFor(page: AkenBuildPlan.Page): AkenRuntimeEvaluatorPlan {
+    private fun runtimePlanFor(
+        page: AkenBuildPlan.Page,
+        route: AkenRoutingMetadata,
+        proof: AkenSealingProofMetadata,
+    ): AkenRuntimeEvaluatorPlan {
+        val callSiteProof = proof.callSiteProof
+        val fingerprint = page.evaluatorPlan.fingerprint
+        return try {
+            AkenRuntimeEvaluatorPlan.createBound(
+                page.evaluatorPlan.boundPlanForRuntime(route, callSiteProof),
+                fingerprint,
+            )
+        } finally {
+            callSiteProof.fill(0)
+            fingerprint.fill(0)
+        }
+    }
+
+    private fun legacyRuntimePlanFor(page: AkenBuildPlan.Page): AkenRuntimeEvaluatorPlan {
         val graph = page.evaluatorPlan
         val fingerprint = graph.fingerprint
         return try {

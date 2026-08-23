@@ -37,7 +37,7 @@ static int probe_build_artifact_fixture(bench_production_resource_fixture *fixtu
     fixture->raw[1] = 'S';
     fixture->raw[2] = 'R';
     fixture->raw[3] = 'P';
-    fixture->raw[4] = 7u;
+    fixture->raw[4] = 8u;
     fixture->raw[25] = (unsigned char)fixture->partition_id;
     fixture->raw[26] = (unsigned char)(fixture->partition_id >> 8u);
     js_runtime_sha256(fixture->raw, (int)fixture->raw_len, digest);

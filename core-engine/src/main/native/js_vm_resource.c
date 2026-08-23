@@ -30,6 +30,7 @@
 
 #define JS_VM_CALL_GATE_SIZE 8192
 #define JS_VM_PRELOAD_WAIT_ATTEMPTS 10000
+#define JS_VM_AKEN_PREPARED_CACHE_CAPACITY 128u
 /* Resource aliases and commitments are installed once per artifact/session.
  * Keep the lookup tables bounded and power-of-two sized so the hot path uses
  * open addressing instead of scanning the full registration arrays. */
@@ -91,6 +92,9 @@ static int js_vm_commitment_count = 0;
 static uint16_t *js_vm_commitment_index = NULL;
 static size_t js_vm_commitment_index_capacity = 0;
 static js_vm_ephemeral_cache_entry *js_vm_ephemeral_cache = NULL;
+static js_vm_aken_cache_entry *js_vm_aken_prepared_cache = NULL;
+static size_t js_vm_aken_prepared_cache_count = 0u;
+static int js_vm_aken_prepared_cache_has_active(void);
 #ifdef _WIN32
 static CRITICAL_SECTION js_vm_cache_lock;
 static volatile LONG js_vm_cache_lock_ready = 0;
@@ -483,10 +487,302 @@ JS_HIDDEN void js_vm_cache_lock_init(void) {
 JS_HIDDEN void js_vm_cache_lock_destroy(void) {
 #ifdef _WIN32
     if (js_vm_cache_lock_ready) {
+        /* JNI_OnUnload normally arrives after native callers quiesce.  If an
+         * active AKEN lease is still draining, keep the lock alive so its
+         * release path cannot touch a deleted CRITICAL_SECTION. */
+        if (js_vm_aken_prepared_cache_has_active()) return;
         DeleteCriticalSection(&js_vm_cache_lock);
         js_vm_cache_lock_ready = 0;
     }
 #endif
+}
+
+/*
+ * AKEN prepared-program cache
+ * ----------------------------
+ *
+ * The JNI page bridge authenticates the locator, descriptor, route, every
+ * sibling page, and the payload before calling these helpers.  Consequently a
+ * cache hit only removes the second parse/prepare pass; it never replaces a
+ * page-open or authentication step.  Keys are public binding digests rather
+ * than raw handles/proofs, and the entry owns no page bytes, nonce, or key
+ * material.  A single active lease is intentional: resident opcode state is
+ * mutable during execution, so concurrent callers must prepare an independent
+ * program instead of sharing a mutable resident image.
+ */
+static int js_vm_aken_cache_digest(
+    const unsigned char *bytes,
+    size_t length,
+    unsigned char out[32]
+) {
+    if (!out) return 0;
+    memset(out, 0, 32u);
+    if (!bytes || length == 0u || length > (size_t)INT_MAX) return 0;
+    js_runtime_sha256(bytes, (int)length, out);
+    return 1;
+}
+
+static jobject js_vm_aken_cache_loader(JNIEnv *env, jclass helper_cls) {
+    if (!env || !helper_cls) return NULL;
+    /* js_vm_helper_class_loader returns a local reference and clears lookup
+     * failures.  A NULL result is the legitimate bootstrap-loader identity. */
+    return js_vm_helper_class_loader(env, helper_cls);
+}
+
+static int js_vm_aken_cache_loader_matches(JNIEnv *env, const js_vm_aken_cache_entry *entry, jobject loader) {
+    if (!entry || !env) return 0;
+    if (entry->loader_global) {
+        return loader != NULL && (*env)->IsSameObject(env, entry->loader_global, loader) == JNI_TRUE;
+    }
+    return loader == NULL;
+}
+
+static void js_vm_aken_cache_entry_destroy(JNIEnv *env, js_vm_aken_cache_entry *entry) {
+    if (!entry) return;
+    if (env && entry->loader_global) {
+        (*env)->DeleteGlobalRef(env, entry->loader_global);
+        entry->loader_global = NULL;
+    }
+    if (entry->program) {
+        js_vm_free_program(env, entry->program);
+        free(entry->program);
+        entry->program = NULL;
+    }
+    js_vbc4_wipe_volatile(entry, sizeof(*entry));
+    free(entry);
+}
+
+static void js_vm_aken_cache_unlink_locked(js_vm_aken_cache_entry *entry) {
+    js_vm_aken_cache_entry **cursor = &js_vm_aken_prepared_cache;
+    while (*cursor) {
+        if (*cursor == entry) {
+            *cursor = entry->next;
+            entry->next = NULL;
+            if (js_vm_aken_prepared_cache_count > 0u) js_vm_aken_prepared_cache_count--;
+            return;
+        }
+        cursor = &(*cursor)->next;
+    }
+}
+
+JS_HIDDEN js_vm_program* js_vm_aken_prepared_cache_acquire(
+    JNIEnv *env,
+    jclass helper_cls,
+    jlong entry_token,
+    jint page_index,
+    uint32_t page_count,
+    const unsigned char *encoded_handle,
+    size_t encoded_handle_len,
+    const unsigned char *call_site_proof,
+    size_t call_site_proof_len,
+    const unsigned char *artifact_commitment,
+    size_t artifact_commitment_len,
+    const unsigned char *layout_digest,
+    size_t layout_digest_len,
+    const char *logical_binding_path,
+    js_vm_aken_cache_entry **out_lease
+) {
+    unsigned char handle_digest[32] = {0};
+    unsigned char proof_digest[32] = {0};
+    unsigned char stale_to_free = 0u;
+    js_vm_aken_cache_entry *found = NULL;
+    js_vm_aken_cache_entry *stale = NULL;
+    jobject loader = NULL;
+    if (out_lease) *out_lease = NULL;
+    if (!env || !helper_cls || !out_lease || entry_token == 0 || page_index < 0 || page_count == 0u ||
+        !encoded_handle || encoded_handle_len != JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE ||
+        !call_site_proof || call_site_proof_len == 0u || call_site_proof_len > JS_AKEN_NATIVE_PAGE_ENVELOPE_MAX_SIZE ||
+        !artifact_commitment || artifact_commitment_len != 32u || !layout_digest || layout_digest_len != 32u ||
+        !logical_binding_path || !logical_binding_path[0] ||
+        !js_vm_aken_cache_digest(encoded_handle, encoded_handle_len, handle_digest) ||
+        !js_vm_aken_cache_digest(call_site_proof, call_site_proof_len, proof_digest)) {
+        goto cleanup;
+    }
+    loader = js_vm_aken_cache_loader(env, helper_cls);
+    js_vm_cache_lock_enter();
+    for (js_vm_aken_cache_entry *entry = js_vm_aken_prepared_cache; entry; entry = entry->next) {
+        if (entry->retired || entry->active_users != 0u) continue;
+        if (entry->entry_token != entry_token || entry->page_index != page_index || entry->page_count != page_count ||
+            entry->session_generation != js_vm_resource_session_generation_current() ||
+            memcmp(entry->encoded_handle_digest, handle_digest, 32u) != 0 ||
+            memcmp(entry->call_site_proof_digest, proof_digest, 32u) != 0 ||
+            memcmp(entry->artifact_commitment, artifact_commitment, 32u) != 0 ||
+            memcmp(entry->layout_digest, layout_digest, 32u) != 0) continue;
+        if (!js_vm_aken_cache_loader_matches(env, entry, loader) ||
+            !entry->program || !entry->program->resource_path ||
+            strcmp(entry->program->resource_path, logical_binding_path) != 0 ||
+            entry->program->entry_token != entry_token || !entry->program->session_layout_digest_bound ||
+            memcmp(entry->program->session_layout_digest, layout_digest, 32u) != 0 ||
+            !js_vm_verify_runtime_session(entry->program)) {
+            stale = entry;
+            break;
+        }
+        entry->active_users = 1u;
+        found = entry;
+        break;
+    }
+    if (stale) {
+        js_vm_aken_cache_unlink_locked(stale);
+        stale_to_free = 1u;
+    }
+    js_vm_cache_lock_leave();
+    if (stale_to_free) js_vm_aken_cache_entry_destroy(env, stale);
+    if (found) *out_lease = found;
+cleanup:
+    if (loader) (*env)->DeleteLocalRef(env, loader);
+    js_vbc4_wipe_volatile(handle_digest, sizeof(handle_digest));
+    js_vbc4_wipe_volatile(proof_digest, sizeof(proof_digest));
+    return found ? found->program : NULL;
+}
+
+JS_HIDDEN int js_vm_aken_prepared_cache_publish(
+    JNIEnv *env,
+    jclass helper_cls,
+    jlong entry_token,
+    jint page_index,
+    uint32_t page_count,
+    const unsigned char *encoded_handle,
+    size_t encoded_handle_len,
+    const unsigned char *call_site_proof,
+    size_t call_site_proof_len,
+    const unsigned char *artifact_commitment,
+    size_t artifact_commitment_len,
+    const unsigned char *layout_digest,
+    size_t layout_digest_len,
+    const char *logical_binding_path,
+    js_vm_program *program,
+    js_vm_aken_cache_entry **out_lease
+) {
+    unsigned char handle_digest[32] = {0};
+    unsigned char proof_digest[32] = {0};
+    js_vm_aken_cache_entry *entry = NULL;
+    js_vm_aken_cache_entry *evicted = NULL;
+    jobject loader = NULL;
+    jobject loader_global = NULL;
+    int inserted = 0;
+    if (out_lease) *out_lease = NULL;
+    if (!env || !helper_cls || !out_lease || !program || entry_token == 0 || page_index < 0 || page_count == 0u ||
+        !encoded_handle || encoded_handle_len != JS_AKEN_NATIVE_PAGE_ENVELOPE_HANDLE_SIZE ||
+        !call_site_proof || call_site_proof_len == 0u || call_site_proof_len > JS_AKEN_NATIVE_PAGE_ENVELOPE_MAX_SIZE ||
+        !artifact_commitment || artifact_commitment_len != 32u || !layout_digest || layout_digest_len != 32u ||
+        !logical_binding_path || !logical_binding_path[0] || !program->session_bound ||
+        program->entry_token != entry_token || !program->resource_path || strcmp(program->resource_path, logical_binding_path) != 0 ||
+        !program->session_layout_digest_bound || memcmp(program->session_layout_digest, layout_digest, 32u) != 0 ||
+        !js_vm_verify_runtime_session(program) ||
+        !js_vm_aken_cache_digest(encoded_handle, encoded_handle_len, handle_digest) ||
+        !js_vm_aken_cache_digest(call_site_proof, call_site_proof_len, proof_digest)) goto cleanup;
+    loader = js_vm_aken_cache_loader(env, helper_cls);
+    if (loader) {
+        loader_global = (*env)->NewGlobalRef(env, loader);
+        if (!loader_global) goto cleanup;
+    }
+    js_vm_cache_lock_enter();
+    /* A concurrent producer may have won the race. Keep the caller-owned
+     * program in that case; it remains a one-shot, authenticated execution. */
+    for (js_vm_aken_cache_entry *existing = js_vm_aken_prepared_cache; existing; existing = existing->next) {
+        if (!existing->retired && existing->entry_token == entry_token && existing->page_index == page_index &&
+            existing->page_count == page_count && existing->session_generation == js_vm_resource_session_generation_current() &&
+            memcmp(existing->encoded_handle_digest, handle_digest, 32u) == 0 &&
+            memcmp(existing->call_site_proof_digest, proof_digest, 32u) == 0 &&
+            memcmp(existing->artifact_commitment, artifact_commitment, 32u) == 0 &&
+            memcmp(existing->layout_digest, layout_digest, 32u) == 0) {
+            js_vm_cache_lock_leave();
+            goto cleanup;
+        }
+    }
+    if (js_vm_aken_prepared_cache_count >= JS_VM_AKEN_PREPARED_CACHE_CAPACITY) {
+        for (js_vm_aken_cache_entry *candidate = js_vm_aken_prepared_cache; candidate; candidate = candidate->next) {
+            if (!candidate->retired && candidate->active_users == 0u) { evicted = candidate; break; }
+        }
+        if (evicted) js_vm_aken_cache_unlink_locked(evicted);
+        else {
+            js_vm_cache_lock_leave();
+            goto cleanup;
+        }
+    }
+    entry = (js_vm_aken_cache_entry *)calloc(1, sizeof(*entry));
+    if (!entry) {
+        js_vm_cache_lock_leave();
+        if (evicted) js_vm_aken_cache_entry_destroy(env, evicted);
+        evicted = NULL;
+        goto cleanup;
+    }
+    entry->entry_token = entry_token;
+    entry->page_index = page_index;
+    entry->page_count = page_count;
+    memcpy(entry->encoded_handle_digest, handle_digest, 32u);
+    memcpy(entry->call_site_proof_digest, proof_digest, 32u);
+    memcpy(entry->artifact_commitment, artifact_commitment, 32u);
+    memcpy(entry->layout_digest, layout_digest, 32u);
+    entry->session_generation = js_vm_resource_session_generation_current();
+    entry->loader_global = loader_global;
+    loader_global = NULL;
+    entry->program = program;
+    entry->active_users = 1u;
+    entry->next = js_vm_aken_prepared_cache;
+    js_vm_aken_prepared_cache = entry;
+    js_vm_aken_prepared_cache_count++;
+    *out_lease = entry;
+    inserted = 1;
+    js_vm_cache_lock_leave();
+    if (evicted) js_vm_aken_cache_entry_destroy(env, evicted);
+cleanup:
+    if (loader_global && env) (*env)->DeleteGlobalRef(env, loader_global);
+    if (loader) (*env)->DeleteLocalRef(env, loader);
+    js_vbc4_wipe_volatile(handle_digest, sizeof(handle_digest));
+    js_vbc4_wipe_volatile(proof_digest, sizeof(proof_digest));
+    return inserted;
+}
+
+JS_HIDDEN void js_vm_aken_prepared_cache_release(JNIEnv *env, js_vm_aken_cache_entry *lease) {
+    int destroy = 0;
+    if (!lease) return;
+    js_vm_cache_lock_enter();
+    if (lease->active_users > 0u) lease->active_users--;
+    if (lease->retired && lease->active_users == 0u) {
+        js_vm_aken_cache_unlink_locked(lease);
+        destroy = 1;
+    }
+    js_vm_cache_lock_leave();
+    if (destroy) js_vm_aken_cache_entry_destroy(env, lease);
+}
+
+static void js_vm_aken_prepared_cache_clear(JNIEnv *env) {
+    js_vm_aken_cache_entry *to_free = NULL;
+    js_vm_cache_lock_enter();
+    js_vm_aken_cache_entry **cursor = &js_vm_aken_prepared_cache;
+    while (*cursor) {
+        js_vm_aken_cache_entry *entry = *cursor;
+        if (entry->active_users != 0u) {
+            entry->retired = 1u;
+            cursor = &entry->next;
+            continue;
+        }
+        *cursor = entry->next;
+        entry->next = to_free;
+        to_free = entry;
+        if (js_vm_aken_prepared_cache_count > 0u) js_vm_aken_prepared_cache_count--;
+    }
+    js_vm_cache_lock_leave();
+    while (to_free) {
+        js_vm_aken_cache_entry *next = to_free->next;
+        to_free->next = NULL;
+        js_vm_aken_cache_entry_destroy(env, to_free);
+        to_free = next;
+    }
+}
+
+static int js_vm_aken_prepared_cache_has_active(void) {
+    int active = 0;
+    js_vm_cache_lock_enter();
+    for (js_vm_aken_cache_entry *entry = js_vm_aken_prepared_cache; entry; entry = entry->next) {
+        if (entry->active_users != 0u) {
+            active = 1;
+            break;
+        }
+    }
+    js_vm_cache_lock_leave();
+    return active;
 }
 
 JS_HIDDEN int js_vm_resource_alias_register(const char *original_path, const char *sealed_path) {
@@ -823,7 +1119,7 @@ JS_HIDDEN int js_vm_commitment_matches(const char *path, const unsigned char *ra
     js_vm_cache_lock_leave();
     if (index < 0) return 0;
     js_runtime_metrics_note_length_check();
-    if (entry.raw_len != raw_len || raw_len < 27 || raw[0] != 'J' || raw[1] != 'S' || raw[2] != 'R' || raw[3] != 'P' || raw[4] != 7) return 0;
+    if (entry.raw_len != raw_len || raw_len < 27 || raw[0] != 'J' || raw[1] != 'S' || raw[2] != 'R' || raw[3] != 'P' || raw[4] != 8) return 0;
     int partition_id = (int)raw[25] | ((int)raw[26] << 8);
     if (partition_id != entry.partition_id) return 0;
     unsigned char digest[32];
@@ -1642,6 +1938,7 @@ JS_HIDDEN js_vm_program* js_vm_prepare_aken_complete_frame_program(
     unsigned char binding_buf[1200] = {0};
     int binding_len = 0;
     int ok = 0;
+    int scoped_layout_digest_installed = 0;
     memset(&validation, 0, sizeof(validation));
     js_vm_set_prepare_stage("aken-input");
     if (!env || entry_token == 0 || !frame || frame_len == 0u || frame_len > (size_t)INT_MAX ||
@@ -1665,6 +1962,7 @@ JS_HIDDEN js_vm_program* js_vm_prepare_aken_complete_frame_program(
         js_vm_set_prepare_stage("aken-layout-digest");
         goto cleanup;
     }
+    scoped_layout_digest_installed = 1;
     binding_len = js_vm_build_state_binding_with_layout_digest(
         entry_token,
         binding_path,
@@ -1721,7 +2019,7 @@ JS_HIDDEN js_vm_program* js_vm_prepare_aken_complete_frame_program(
     js_vm_set_prepare_stage("aken-ready");
 
 cleanup:
-    js_vbc4_clear_scoped_layout_digest();
+    if (scoped_layout_digest_installed) js_vbc4_clear_scoped_layout_digest();
     js_vbc4_wipe_volatile(binding_buf, sizeof(binding_buf));
     js_vm_clear_execution_program(&validation);
     if (binding_path) {
@@ -1936,7 +2234,7 @@ JS_HIDDEN jint js_vm_execute_resource_int_int_by_token(JNIEnv *env, jclass resou
 JS_HIDDEN js_vm_program* js_vm_find_preloaded_program_by_identity(const unsigned char method_identity[32]) {
     if (!method_identity) return NULL;
     js_vm_program *active = js_vm_active_program_find_by_identity(method_identity);
-    if (active) return active;
+    if (active && active->cached_execution_ready) return active;
     return js_vm_ephemeral_cache_find_by_identity(method_identity);
 }
 
@@ -1960,7 +2258,8 @@ JS_HIDDEN js_vm_program* js_vm_ephemeral_cache_find_by_identity(const unsigned c
     js_vm_program *found = NULL;
     for (js_vm_ephemeral_cache_entry *entry = js_vm_ephemeral_cache; entry; entry = entry->next) {
         js_vm_program *program = entry->program;
-        if (program && memcmp(program->method_identity, method_identity, 32) == 0) { found = program; break; }
+        if (program && program->cached_execution_ready &&
+            memcmp(program->method_identity, method_identity, 32) == 0) { found = program; break; }
     }
     js_vm_cache_lock_leave();
     return found;
@@ -1995,6 +2294,10 @@ JS_HIDDEN int js_vm_ephemeral_cache_put(jlong entry_token, const char *resource_
 }
 
 JS_HIDDEN void js_vm_ephemeral_cache_clear(JNIEnv *env) {
+    /* Session/preload teardown also retires the authenticated AKEN prepared
+     * cache. Active leases remain linked until their caller releases them, so
+     * unload/reset cannot free a program still executing on another thread. */
+    js_vm_aken_prepared_cache_clear(env);
     js_vm_cache_lock_enter();
     js_vm_ephemeral_cache_entry *entry = js_vm_ephemeral_cache;
     js_vm_ephemeral_cache = NULL;

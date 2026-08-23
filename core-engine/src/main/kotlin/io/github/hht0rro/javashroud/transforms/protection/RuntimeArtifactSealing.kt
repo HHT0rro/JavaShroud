@@ -64,7 +64,6 @@ private val SEALED_RUNTIME_HELPERS = listOf(
     "$PROTECTION_HELPER_PACKAGE/MethodBodyDecryptionHelper",
     "$PROTECTION_HELPER_PACKAGE/MethodBodyDecryptionHelper${"$"}ParsedMetadata",
     "$PROTECTION_HELPER_PACKAGE/StringEncryptionHelper",
-    "$PROTECTION_HELPER_PACKAGE/StringEncryptionHelper${"$"}CachePolicy",
     "$PROTECTION_HELPER_PACKAGE/BootstrapEncryptionHelper",
     "$PROTECTION_HELPER_PACKAGE/EnvironmentBindingHelper",
     "$PROTECTION_HELPER_PACKAGE/AntiDumpHelper",
@@ -921,18 +920,18 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     fun addMethod(owner: String, name: String, descriptor: String) {
         val sealedOwner = helperClassRenameMap[owner] ?: return
         if (name == "<init>" || name == "<clinit>") return
-        // VBC4 pages carry this helper call as an interpreted symbolic target. Keep
-        // the bridge name stable; sealing still relocates the helper owner and all
-        // ordinary Java references, while the native VM resolves this descriptor by
-        // its protocol name.
-        if (
-            owner == "$PROTECTION_HELPER_PACKAGE/StringEncryptionHelper" &&
-            name == "cachedDecodeAkenStringPage" &&
-            descriptor == "([BI[B)Ljava/lang/String;"
-        ) return
+        val renamableAkenNativeMethods = setOf(
+            "nativeInit",
+            "nativeHeartbeat",
+            "nativeInstallAkenSessionNonce",
+            "nativeExecuteAkenVmPage",
+            "nativeOpenAkenString",
+            "nativeReadAkenClassPage",
+            "nativeConsumeAkenNativeChunk",
+        )
         if (
             owner == "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper" &&
-            (name.startsWith("native") || name == "createSamLambda" ||
+            ((name.startsWith("native") && name !in renamableAkenNativeMethods) || name == "createSamLambda" ||
                 name == "takeExpectedShellBindingCommitment" || name == "takeBootSecretForNativeShell")
         ) return
         val sealedMethodName = sealedMemberName(seed, owner, name, descriptor, "m")
@@ -1003,14 +1002,14 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     addMethod(jniHelper, "loadKernel", "(Ljava/lang/String;Ljava/lang/String;)V")
     addMethod(jniHelper, "loadKernel", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V")
     addMethod(jniHelper, "executeAkenVmPage", "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;")
-    addMethod(jniHelper, "decodeAkenStringPage", "([BI[B)[B")
+    addMethod(jniHelper, "openAkenString", "([BI[B)Ljava/lang/String;")
     addMethod(jniHelper, "readAkenClassPage", "([BI[B)[B")
     addMethod(jniHelper, "consumeAkenNativeChunk", "([BI[B)V")
     addMethod(jniHelper, "nativeInit", "(Ljava/lang/String;)I")
     addMethod(jniHelper, "nativeHeartbeat", "()I")
     addMethod(jniHelper, "nativeInstallAkenSessionNonce", "([B)Z")
     addMethod(jniHelper, "nativeExecuteAkenVmPage", "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;")
-    addMethod(jniHelper, "nativeDecodeAkenStringPage", "([BI[B)[B")
+    addMethod(jniHelper, "nativeOpenAkenString", "([BI[B)Ljava/lang/String;")
     addMethod(jniHelper, "nativeReadAkenClassPage", "([BI[B)[B")
     addMethod(jniHelper, "nativeConsumeAkenNativeChunk", "([BI[B)V")
     if (!typedOnlyRuntime) {
@@ -1037,7 +1036,13 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     addMethod(classEncryption, "loadAkenClass", "(Ljava/lang/String;)Ljava/lang/Class;")
 
     val stringEncryption = "$PROTECTION_HELPER_PACKAGE/StringEncryptionHelper"
-    addMethod(stringEncryption, "cachedDecodeAkenStringPage", "([BI[B)Ljava/lang/String;")
+    addMethod(stringEncryption, "invokeAkenStringTerminal", "([BI[B)Ljava/lang/String;")
+    val stringBootstrapDescriptor =
+        "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;" +
+            "Ljava/lang/invoke/MethodHandle;)Ljava/lang/invoke/CallSite;"
+    listOf("q0", "m7", "x3", "v8").forEach { bootstrapName ->
+        addMethod(stringEncryption, bootstrapName, stringBootstrapDescriptor)
+    }
 
     val methodBody = "$PROTECTION_HELPER_PACKAGE/MethodBodyDecryptionHelper"
     addMethod(methodBody, "invokeEncrypted", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Class;Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;")
@@ -1246,9 +1251,10 @@ private fun encodeSealedNativeBindings(
         .map { (ref, renamedName) -> listOf("F", sealedBindingKey("${ref.owner}#${ref.name}#${ref.descriptor}"), renamedName).joinToString("|") }
     lines += applicationFieldBindings
         .map { (ref, renamedName) -> listOf("F", sealedBindingKey("${ref.owner}#${ref.name}#${ref.descriptor}"), renamedName).joinToString("|") }
-    if (envBindingMetadata != null) {
-        lines += listOf("E", envBindingMetadata.bindBootSecret.toString(), envBindingMetadata.expectedFingerprint ?: "").joinToString("|")
-    }
+    // Environment binding is enforced by EnvironmentBindingHelper clinit checks.
+    // The AKEN relocation table is B/M/F only; an E| row makes runtime load fail closed.
+    @Suppress("UNUSED_PARAMETER")
+    val unusedEnvBindingMetadata = envBindingMetadata
     return encodeSealedNativeBindingLines(lines, seed)
 }
 
@@ -1651,6 +1657,65 @@ private fun remapHelperReferences(
                     method.name = replacement
                     helperMemberModified = true
                 }
+            }
+            /*
+             * openAkenString is intentionally package-private in the source
+             * helper so the unsealed Java closure has no broad public page API.
+             * After AKEN relocation, however, StringEncryptionHelper and the
+             * application call site live in different sealed packages.  Keep
+             * the typed terminal narrow, but promote only this relocated bridge
+             * to public so the authenticated call site remains linkable.  The
+             * native method itself stays package-private and is still reached
+             * only through the validated terminal.
+             */
+            val openStringDescriptor = "([BI[B)Ljava/lang/String;"
+            val originalJniOwner = "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper"
+            val sealedJniOwner = helperClassRenameMap[originalJniOwner]
+            val sealedOpenStringName = helperMemberRenamePlan.methodName(
+                originalJniOwner,
+                "openAkenString",
+                openStringDescriptor,
+            )
+            if (classNode.name == sealedJniOwner && sealedOpenStringName != null) {
+                classNode.methods
+                    .filter { it.name == sealedOpenStringName && it.desc == openStringDescriptor }
+                    .forEach { method ->
+                        val publicAccess =
+                            (method.access and (Opcodes.ACC_PRIVATE or Opcodes.ACC_PROTECTED).inv()) or Opcodes.ACC_PUBLIC
+                        if (method.access != publicAccess) {
+                            method.access = publicAccess
+                            helperMemberModified = true
+                        }
+                    }
+            }
+            /*
+             * The StringPage terminal follows the same boundary rule.  Its
+             * source declaration is package-private so the unsealed helper
+             * does not expose a stable, repeatable whole-page decoder.  Once
+             * helpers are relocated into their artifact-specific sealed
+             * package, promote only the build-renamed terminal required by
+             * generated application call sites.  No cache or generic decoder
+             * API is reintroduced by this linkage adjustment.
+             */
+            val stringTerminalDescriptor = "([BI[B)Ljava/lang/String;"
+            val originalStringOwner = "$PROTECTION_HELPER_PACKAGE/StringEncryptionHelper"
+            val sealedStringOwner = helperClassRenameMap[originalStringOwner]
+            val sealedStringTerminalName = helperMemberRenamePlan.methodName(
+                originalStringOwner,
+                "invokeAkenStringTerminal",
+                stringTerminalDescriptor,
+            )
+            if (classNode.name == sealedStringOwner && sealedStringTerminalName != null) {
+                classNode.methods
+                    .filter { it.name == sealedStringTerminalName && it.desc == stringTerminalDescriptor }
+                    .forEach { method ->
+                        val publicAccess =
+                            (method.access and (Opcodes.ACC_PRIVATE or Opcodes.ACC_PROTECTED).inv()) or Opcodes.ACC_PUBLIC
+                        if (method.access != publicAccess) {
+                            method.access = publicAccess
+                            helperMemberModified = true
+                        }
+                    }
             }
             if (helperMemberModified) {
                 val helperWriter = ClassWriter(0)

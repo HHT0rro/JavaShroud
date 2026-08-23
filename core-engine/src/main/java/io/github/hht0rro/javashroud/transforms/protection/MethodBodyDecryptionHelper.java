@@ -6,16 +6,11 @@ import java.lang.invoke.MethodHandles;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.Base64;
-import java.util.concurrent.ConcurrentHashMap;
 import java.security.MessageDigest;
-import javax.crypto.Cipher;
-import javax.crypto.spec.GCMParameterSpec;
-import javax.crypto.spec.SecretKeySpec;
+import java.util.Arrays;
 
 public final class MethodBodyDecryptionHelper {
     static { JniMicrokernelHelper.loadKernel("loader", "auto", "vm-diverse"); }
-    private static final ConcurrentHashMap<String, Method> METHOD_CACHE = new ConcurrentHashMap<>();
-    private static final ConcurrentHashMap<String, Object> INSTANCE_CACHE = new ConcurrentHashMap<>();
 
     private MethodBodyDecryptionHelper() { }
     public static Object invokeEncrypted(String resourcePath, String metadata, String strategy, int isStatic, Class<?> ownerClass, Object thisRef, Object[] args) throws Exception {
@@ -24,22 +19,11 @@ public final class MethodBodyDecryptionHelper {
 
     public static Object invokeEncrypted(String resourcePath, String metadata, String strategy, String mode, int isStatic, Class<?> ownerClass, Object thisRef, Object[] args) throws Exception {
         String effectiveMode = mode == null ? "lazy-decrypt" : mode;
-        Method method;
-        try {
-            method = "hidden-class-redirect".equals(effectiveMode)
-                ? defineAndFindMethod(resourcePath, metadata, strategy, effectiveMode, ownerClass)
-                : METHOD_CACHE.computeIfAbsent(resourcePath + "|" + metadata + "|" + strategy + "|" + ownerClass.getName(), key -> {
-                try {
-                    return defineAndFindMethod(resourcePath, metadata, strategy, effectiveMode, ownerClass);
-                } catch (Exception e) {
-                    throw new IllegalStateException(e);
-                }
-            });
-        } catch (IllegalStateException e) {
-            Throwable cause = e.getCause();
-            if (cause instanceof Exception) throw (Exception) cause;
-            throw e;
-        }
+        // A decrypted method and its hidden class are per-invocation state.
+        // Do not retain Method/class/instance objects in a global cache: that
+        // would keep authenticated method material live across calls and
+        // across artifact/session generations.
+        Method method = defineAndFindMethod(resourcePath, metadata, strategy, effectiveMode, ownerClass);
         Object[] actualArgs = actualArgs(method, isStatic, method.getDeclaringClass(), thisRef, args);
         try {
             return method.invoke(null, actualArgs);
@@ -49,21 +33,30 @@ public final class MethodBodyDecryptionHelper {
     }
 
     private static Method defineAndFindMethod(String resourcePath, String metadataText, String requestedStrategy, String mode, Class<?> ownerClass) throws Exception {
-        byte[] encrypted = readResource(resourcePath);
-        ParsedMetadata metadata = parseMetadata(ownerClass, resourcePath, metadataText, requestedStrategy, mode);
-        byte[] key = JniMicrokernelHelper.deriveClassEncryptionKey(metadata.keyId, metadata.salt, metadata.keyLength);
+        byte[] encrypted = null;
+        ParsedMetadata metadata = null;
+        byte[] key = null;
+        byte[] classBytes = null;
         try {
-            byte[] classBytes = decryptBytes(encrypted, key, metadata);
+            encrypted = readResource(resourcePath);
+            metadata = parseMetadata(ownerClass, resourcePath, metadataText, requestedStrategy, mode);
+            key = JniMicrokernelHelper.deriveClassEncryptionKey(metadata.keyId, metadata.salt, metadata.keyLength);
+            classBytes = JniMicrokernelHelper.decryptClassBytes(
+                metadata.keyId,
+                metadata.salt,
+                metadata.nonce,
+                encrypted,
+                metadata.aad,
+                metadata.keyLength
+            );
             Class<?> wrapperClass = defineClass(ownerClass, classBytes);
             return findEntryMethod(wrapperClass);
         } finally {
-            java.util.Arrays.fill(key, (byte) 0);
+            if (key != null) Arrays.fill(key, (byte) 0);
+            if (encrypted != null) Arrays.fill(encrypted, (byte) 0);
+            if (classBytes != null) Arrays.fill(classBytes, (byte) 0);
+            if (metadata != null) metadata.wipe();
         }
-    }
-
-    public static byte[] decryptBytes(byte[] encrypted, byte[] key, String strategy) throws Exception {
-        if (encrypted == null || key == null || key.length == 0) return encrypted;
-        throw new SecurityException("method-body-delayed-decryption requires v2 AES-GCM metadata");
     }
 
     private static byte[] readResource(String resourcePath) throws Exception {
@@ -120,19 +113,6 @@ public final class MethodBodyDecryptionHelper {
         throw (T) throwable;
     }
 
-    private static Object instanceFor(Class<?> wrapperClass, Object thisRef) throws Exception {
-        String cacheKey = wrapperClass.getName();
-        Object cached = INSTANCE_CACHE.get(cacheKey);
-        if (cached != null) return cached;
-        try {
-            Object created = wrapperClass.getDeclaredConstructor().newInstance();
-            INSTANCE_CACHE.put(cacheKey, created);
-            return created;
-        } catch (NoSuchMethodException ignored) {
-            return thisRef;
-        }
-    }
-
     private static ParsedMetadata parseMetadata(Class<?> ownerClass, String resourcePath, String metadata, String requestedStrategy, String mode) throws Exception {
         String[] parts = metadata == null ? null : metadata.split(":", -1);
         if (parts == null || parts.length != 6 || !"v2".equals(parts[0])) {
@@ -152,13 +132,6 @@ public final class MethodBodyDecryptionHelper {
             throw new SecurityException("Encrypted method metadata AAD mismatch");
         }
         return new ParsedMetadata(strategy, keyId, salt, nonce, aad, "aes-256".equals(strategy) ? 32 : 16);
-    }
-
-    private static byte[] decryptBytes(byte[] encrypted, byte[] key, ParsedMetadata metadata) throws Exception {
-        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-        cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, metadata.nonce));
-        cipher.updateAAD(metadata.aad);
-        return cipher.doFinal(encrypted);
     }
 
     private static byte[] aad(String strategy, String mode) {
@@ -187,6 +160,13 @@ public final class MethodBodyDecryptionHelper {
             this.nonce = nonce;
             this.aad = aad;
             this.keyLength = keyLength;
+        }
+
+        void wipe() {
+            Arrays.fill(keyId, (byte) 0);
+            Arrays.fill(salt, (byte) 0);
+            Arrays.fill(nonce, (byte) 0);
+            Arrays.fill(aad, (byte) 0);
         }
     }
 }

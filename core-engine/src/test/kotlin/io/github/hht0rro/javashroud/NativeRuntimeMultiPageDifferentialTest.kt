@@ -45,6 +45,7 @@ class NativeRuntimeMultiPageDifferentialTest {
             Files.copy(benchmarkSource, benchmark, StandardCopyOption.REPLACE_EXISTING)
             val hardwareExecutable = root.resolve(executableName("multi_page_hardware"))
             val softwareExecutable = root.resolve(executableName("multi_page_software"))
+            val unsupportedCpuExecutable = root.resolve(executableName("multi_page_unsupported_cpu"))
 
             val hardwareCompile = runWithTransientZigRetry(
                 compileCommand(
@@ -72,27 +73,97 @@ class NativeRuntimeMultiPageDifferentialTest {
             )
             assertEquals(0, softwareCompile.exitCode, "software multi-page benchmark must compile:\n${softwareCompile.output}")
 
+            val unsupportedCpuCompile = runWithTransientZigRetry(
+                compileCommand(
+                    zig = checkNotNull(zig),
+                    nativeDir = nativeDir,
+                    benchmark = benchmark,
+                    executable = unsupportedCpuExecutable,
+                    forceSoftware = false,
+                    forceUnsupportedCpu = true,
+                ),
+                root,
+                "compile-unsupported-cpu",
+            )
+            assertEquals(0, unsupportedCpuCompile.exitCode, "unsupported-CPU multi-page benchmark must compile:\n${unsupportedCpuCompile.output}")
+
             /* A single measured sample keeps this differential gate bounded
              * while still traversing every 4 KiB/64 KiB/1 MiB page.  The
              * benchmark itself remains available for the full 100..100000
              * sample matrix. */
+            /* First obtain a same-profile software reference without a baseline.
+             * The expected security-blocked result is intentional: it proves
+             * that an unbound differential run cannot be accepted.  The
+             * aggregate digest is then bound into a fixed, non-derived
+             * security floor for all three profiles below. */
+            val softwareReferenceRun = run(
+                listOf(softwareExecutable.toString(), "1", "0"),
+                root,
+                "run-software-reference",
+                timeoutSeconds = 300L,
+            )
+            assertTrue(softwareReferenceRun.completed, "software reference benchmark timed out:\n${softwareReferenceRun.output}")
+            assertEquals(1, softwareReferenceRun.exitCode, "software reference must remain unaccepted without a baseline:\n${softwareReferenceRun.output}")
+            val referenceSecurity = reportFields(softwareReferenceRun.output, "security_gate ", "software reference")
+            assertEquals("security-blocked", referenceSecurity["status"], "software reference without a baseline must be blocked")
+            assertEquals("baseline-missing", referenceSecurity["reason"], "software reference must identify the missing baseline")
+            val softwareReferenceMetrics = metricsFields(softwareReferenceRun.output, "software reference")
+            val softwareReferenceDigest = softwareReferenceMetrics["output_digest"]
+                ?: error("software reference benchmark did not emit aggregate output digest:\n${softwareReferenceRun.output}")
+            assertTrue(softwareReferenceDigest.matches(Regex("[0-9a-f]{16}")), "software reference digest is malformed: $softwareReferenceDigest")
+            val baselineFile = root.resolve("multi-page-security-baseline.txt")
+            Files.writeString(
+                baselineFile,
+                """
+                    # Fixed fixture floor; never derive security minima from the candidate run.
+                    auth_check_count=8
+                    digest_check_count=0
+                    tag_check_count=8
+                    length_check_count=13
+                    structure_check_count=8
+                    jni_abi_check_count=0
+                    wipe_count=14
+                    differential_output_digest=$softwareReferenceDigest
+                """.trimIndent() + "\n",
+                StandardCharsets.US_ASCII,
+            )
             val hardwareRun = run(
-                listOf(hardwareExecutable.toString(), "1", "0"),
+                listOf(
+                    hardwareExecutable.toString(), "1", "0",
+                    "--baseline", baselineFile.toString(),
+                    "--differential-output-digest", softwareReferenceDigest,
+                ),
                 root,
                 "run-hardware",
                 timeoutSeconds = 300L,
             )
             val softwareRun = run(
-                listOf(softwareExecutable.toString(), "1", "0"),
+                listOf(
+                    softwareExecutable.toString(), "1", "0",
+                    "--baseline", baselineFile.toString(),
+                    "--differential-output-digest", softwareReferenceDigest,
+                ),
                 root,
                 "run-software",
                 timeoutSeconds = 300L,
             )
-            assertTrue(hardwareRun.completed, "hardware multi-page benchmark timed out:\n${hardwareRun.output}")
-            assertTrue(softwareRun.completed, "software multi-page benchmark timed out:\n${softwareRun.output}")
+            val unsupportedCpuRun = run(
+                listOf(
+                    unsupportedCpuExecutable.toString(), "1", "0",
+                    "--baseline", baselineFile.toString(),
+                    "--differential-output-digest", softwareReferenceDigest,
+                ),
+                root,
+                "run-unsupported-cpu",
+                timeoutSeconds = 300L,
+            )
+            assertRuntimeGate(hardwareRun, "hardware", softwareReferenceDigest)
+            assertRuntimeGate(softwareRun, "software", softwareReferenceDigest)
+            assertRuntimeGate(unsupportedCpuRun, "unsupported-CPU", softwareReferenceDigest)
 
             val hardwareCapability = capabilityFields(hardwareRun.output)
             val softwareCapability = capabilityFields(softwareRun.output)
+            val unsupportedCpuCapability = capabilityFields(unsupportedCpuRun.output)
             val gcmKatNames = listOf(
                 "aes-gcm-128-kat",
                 "aes-gcm-256-kat",
@@ -119,22 +190,33 @@ class NativeRuntimeMultiPageDifferentialTest {
             for (phaseName in differentialPhaseNames) {
                 val hardware = phaseFields(hardwareRun.output, phaseName)
                 val software = phaseFields(softwareRun.output, phaseName)
+                val unsupportedCpu = phaseFields(unsupportedCpuRun.output, phaseName)
                 assertPhase(hardware, phaseName, hardwareRun.output)
                 assertPhase(software, phaseName, softwareRun.output)
+                assertPhase(unsupportedCpu, phaseName, unsupportedCpuRun.output)
                 assertEquals(
                     hardware["output_digest"],
                     software["output_digest"],
                     "$phaseName hardware/software output digest mismatch",
                 )
+                assertEquals(
+                    software["output_digest"],
+                    unsupportedCpu["output_digest"],
+                    "$phaseName software/unsupported-CPU output digest mismatch",
+                )
                 assertSecureCounters(hardware, phaseName, hardwareRun.output)
                 assertSecureCounters(software, phaseName, softwareRun.output)
+                assertSecureCounters(unsupportedCpu, phaseName, unsupportedCpuRun.output)
                 assertProtocolCounterParity(hardware, software, phaseName)
+                assertProtocolCounterParity(software, unsupportedCpu, phaseName)
             }
 
             val hardwareAes = hardwareCapability["hardware_aes"]?.toIntOrNull() ?: 0
             val hardwareGhash = hardwareCapability["hardware_ghash"]?.toIntOrNull() ?: 0
             assertEquals("0", softwareCapability["hardware_aes"], "forced-software benchmark reported AES hardware capability")
             assertEquals("0", softwareCapability["hardware_ghash"], "forced-software benchmark reported GHASH hardware capability")
+            assertEquals("0", unsupportedCpuCapability["hardware_aes"], "unsupported-CPU model reported AES hardware capability")
+            assertEquals("0", unsupportedCpuCapability["hardware_ghash"], "unsupported-CPU model reported GHASH hardware capability")
             assertEquals(
                 "capability-only",
                 hardwareCapability["active_ghash_path"],
@@ -146,6 +228,9 @@ class NativeRuntimeMultiPageDifferentialTest {
                 .sum()
             val softwareCtrPath = ctrPageNames
                 .map { phaseFields(softwareRun.output, it)["software_crypto_path"]?.toLongOrNull() ?: 0L }
+                .sum()
+            val unsupportedCpuCtrPath = ctrPageNames
+                .map { phaseFields(unsupportedCpuRun.output, it)["software_crypto_path"]?.toLongOrNull() ?: 0L }
                 .sum()
             /* `hardware_crypto_path` counts AES schedule dispatch. GHASH's
              * backend is reported separately by the capability line, so use
@@ -159,12 +244,21 @@ class NativeRuntimeMultiPageDifferentialTest {
                 .map { phaseFields(softwareRun.output, it)["ghash_block_count"]?.toLongOrNull() ?: 0L }
                 .sum()
             assertTrue(softwareCtrPath > 0L, "forced-software benchmark did not use software AES-CTR")
+            assertTrue(unsupportedCpuCtrPath > 0L, "unsupported-CPU benchmark did not use software AES-CTR")
             assertTrue(hardwareGhashBlocks > 0L, "hardware profile did not process GCM GHASH blocks")
             assertTrue(softwareGhashBlocks > 0L, "software profile did not process GCM GHASH blocks")
             assertEquals(
                 hardwareGhashBlocks,
                 softwareGhashBlocks,
                 "hardware/software GCM phases must process the same GHASH block count",
+            )
+            val unsupportedCpuGhashBlocks = (gcmKatNames + ghashPageNames)
+                .map { phaseFields(unsupportedCpuRun.output, it)["ghash_block_count"]?.toLongOrNull() ?: 0L }
+                .sum()
+            assertEquals(
+                softwareGhashBlocks,
+                unsupportedCpuGhashBlocks,
+                "software/unsupported-CPU GCM phases must process the same GHASH block count",
             )
             if (hardwareAes != 0) {
                 assertTrue(hardwareCtrPath > 0L, "hardware AES capability was reported but no AES-CTR phase was used")
@@ -175,6 +269,7 @@ class NativeRuntimeMultiPageDifferentialTest {
             println(
                 "multi-page-differential capability_hardware_aes=$hardwareAes capability_hardware_ghash=$hardwareGhash " +
                     "hardware_ctr_schedule_count=$hardwareCtrPath software_ctr_schedule_count=$softwareCtrPath " +
+                    "unsupported_cpu_software_ctr_schedule_count=$unsupportedCpuCtrPath " +
                     "gcm_ghash_blocks=$hardwareGhashBlocks phase_count=${differentialPhaseNames.size}",
             )
         } finally {
@@ -255,6 +350,64 @@ class NativeRuntimeMultiPageDifferentialTest {
         }
     }
 
+    private fun assertRuntimeGate(result: ProcessResult, label: String, expectedDigest: String) {
+        assertTrue(result.completed, "$label multi-page benchmark timed out:\n" + result.output)
+        /* The standalone fixture intentionally reports coverage-incomplete for
+         * the live-JNI VM phases, so its process status is non-zero even when
+         * the security gate passes.  Check both signals instead of treating a
+         * completed process as success. */
+        assertEquals(1, result.exitCode, "$label benchmark must signal coverage-incomplete:\n" + result.output)
+        val metrics = metricsFields(result.output, label)
+        assertEquals(expectedDigest, metrics["output_digest"], "$label aggregate output digest mismatch")
+
+        val baseline = reportFields(result.output, "baseline_security ", label)
+        assertEquals("valid", baseline["status"], "$label baseline security record must be valid")
+        assertEquals("1", baseline["supplied"], "$label baseline security record was not supplied")
+        assertEquals("match", baseline["differential_status"], "$label differential baseline did not match")
+        assertEquals("met", baseline["baseline_floor_status"], "$label security baseline floor was not met")
+
+        val coverage = reportFields(result.output, "coverage_gate ", label)
+        assertEquals("coverage-incomplete", coverage["status"], "$label standalone coverage must remain explicit")
+
+        val security = reportFields(result.output, "security_gate ", label)
+        assertEquals("pass", security["status"], "$label security gate must pass")
+        assertEquals("pass", security["reason"], "$label security gate reason must be pass")
+        listOf(
+            "auth_failure_count",
+            "exception_count",
+            "fallback_count",
+            "legacy_path_hits",
+            "wipe_failure_count",
+            "plaintext_persistence_bytes",
+            "security_checks_skipped",
+        ).forEach { field ->
+            assertEquals("0", security[field], "$label security gate must keep $field at zero")
+        }
+
+        val candidate = reportFields(result.output, "benchmark_gate_candidate ", label)
+        assertEquals("coverage-incomplete", candidate["status"], "$label benchmark candidate status must expose incomplete coverage")
+        assertEquals("match", candidate["differential_status"], "$label benchmark candidate differential status must match")
+        val benchmarkResult = reportFields(result.output, "benchmark_result ", label)
+        assertEquals("coverage-incomplete", benchmarkResult["status"], "$label benchmark result must expose incomplete coverage")
+    }
+
+    private fun metricsFields(output: String, label: String): Map<String, String> =
+        reportFields(output, "metrics ", label)
+
+    private fun reportFields(output: String, prefix: String, label: String): Map<String, String> {
+        val matches = output.lineSequence().filter { it.startsWith(prefix) }.toList()
+        assertEquals(1, matches.size, "$label did not emit exactly one $prefix line:\n$output")
+        return matches.single()
+            .removePrefix(prefix)
+            .split(' ')
+            .mapNotNull { token ->
+                val separator = token.indexOf('=')
+                if (separator <= 0 || separator == token.lastIndex) null
+                else token.substring(0, separator) to token.substring(separator + 1)
+            }
+            .toMap()
+    }
+
     private fun phaseFields(output: String, name: String): Map<String, String> {
         val prefix = "phase=$name "
         val matches = output.lineSequence().filter { it.startsWith(prefix) }.toList()
@@ -288,6 +441,7 @@ class NativeRuntimeMultiPageDifferentialTest {
         benchmark: Path,
         executable: Path,
         forceSoftware: Boolean,
+        forceUnsupportedCpu: Boolean = false,
     ): List<String> = buildList {
         addAll(
             listOf(
@@ -302,6 +456,7 @@ class NativeRuntimeMultiPageDifferentialTest {
             ),
         )
         if (forceSoftware) add("-DJS_CRYPTO_FORCE_SOFTWARE=1")
+        if (forceUnsupportedCpu) add("-DJS_CRYPTO_FORCE_UNSUPPORTED_CPU=1")
         addAll(
             listOf(
                 "-I", nativeDir.toString(),

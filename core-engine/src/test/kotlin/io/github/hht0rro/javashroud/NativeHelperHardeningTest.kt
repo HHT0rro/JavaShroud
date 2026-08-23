@@ -34,21 +34,24 @@ class NativeHelperHardeningTest {
     @Test
     fun string_encryption_helper_uses_typed_aken_page_route_and_fail_closed_java_layer() {
         val nativeSource = nativeRuntimeSources()
+        val jniRuntimeSource = Files.readString(sourcePath("src/main/native/js_jni_runtime.c")).replace("\r\n", "\n")
         val helperSource = Files.readString(sourcePath("src/main/java/io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper.java"))
 
         assertTrue(
-            nativeSource.contains("nativeDecodeAkenStringPage") &&
-                nativeSource.contains("([BI[B)[B") &&
-                nativeSource.contains("jsw_a1"),
-            "String pages must be registered through the typed AKEN native route.",
+            nativeSource.contains("js_obfuscated_JNI_NATIVE_OPEN_AKEN_STRING") &&
+                nativeSource.contains("JS_OBFUSCATED_LEN_JNI_NATIVE_OPEN_AKEN_STRING") &&
+                nativeSource.contains("JS_OBFUSCATED_MASK_JNI_NATIVE_OPEN_AKEN_STRING") &&
+                nativeSource.contains("\"([BI[B)Ljava/lang/String;\", (void*)jsw_a1"),
+            "String pages must be registered through the masked typed AKEN native route.",
         )
         assertFalse(
             nativeSource.contains("Java_io_github_hht0rro_javashroud_transforms_protection_StringEncryptionHelper"),
             "StringEncryptionHelper must not expose a traditional Java_* JNI export symbol.",
         )
-        assertTrue(helperSource.contains("public static String cachedDecodeAkenStringPage(byte[] encodedHandle, int pageIndex, byte[] callSiteProof)"))
-        assertTrue(helperSource.contains("JniMicrokernelHelper.decodeAkenStringPage(encodedHandle, pageIndex, callSiteProof)"), "String pages must delegate only to the typed AKEN bridge.")
-        assertTrue(helperSource.contains("Arrays.fill(opened, (byte) 0)"), "The native page buffer must be wiped after UTF-8 materialization.")
+        assertTrue(helperSource.contains("static String invokeAkenStringTerminal(byte[] encodedHandle, int pageIndex, byte[] callSiteProof)"))
+        assertFalse(helperSource.contains("public static String invokeAkenStringTerminal"), "Unsealed helper must not publish a stable whole-page decoder API")
+        assertTrue(helperSource.contains("JniMicrokernelHelper.openAkenString(encodedHandle, pageIndex, callSiteProof)"), "String pages must delegate only to the package-private typed AKEN bridge.")
+        assertFalse(helperSource.contains("byte[] opened"), "String helper must not receive a plaintext page byte array.")
         assertFalse(helperSource.contains("nativeDecodeString(byte[]"), "The legacy inline native string declaration must be removed.")
         assertFalse(helperSource.contains("cachedDecodeString"), "The legacy inline cached string API must be removed.")
         assertFalse(helperSource.contains("ensureLegacyNativeStringDecoder"), "The legacy native loader path must be removed from the string helper.")
@@ -59,8 +62,17 @@ class NativeHelperHardeningTest {
         assertFalse(nativeSource.contains("javashroud-string-class-v1"), "The legacy class-scoped string domain must be removed.")
         assertFalse(nativeSource.contains("js-string-aes-key"), "The legacy string AES key label must be removed.")
         assertFalse(nativeSource.contains("js-string-aes-iv"), "The legacy string AES IV label must be removed.")
-        assertTrue(helperSource.contains("ConcurrentHashMap"), "Repeated string materialization must be cached outside target classes to avoid hot-path native decrypt loops.")
+        assertFalse(helperSource.contains("ConcurrentHashMap"), "String helper must not retain a strong plaintext cache.")
+        assertFalse(helperSource.contains("SoftReference"), "String helper must not retain a soft plaintext cache.")
+        assertFalse(helperSource.contains("CachePolicy"), "String helper must not expose a plaintext cache policy.")
+        assertFalse(helperSource.contains("javashroud." + "stringCache"), "String helper must not accept a plaintext-cache system property.")
         assertFalse(helperSource.contains("Base64"), "String helper must not retain legacy Base64 payload handling.")
+        val stringWrapper = nativeFunctionBody(jniRuntimeSource, "static jstring JNICALL jsw_a1")
+        val utf8Converter = nativeFunctionBody(jniRuntimeSource, "static jstring js_aken_new_string_from_utf8")
+        assertTrue(stringWrapper.contains("js_aken_new_string_from_utf8"), "Native StringPage wrapper must materialize the JVM String inside JNI.")
+        assertFalse(stringWrapper.contains("NewByteArray"), "Native StringPage wrapper must not return a plaintext byte array to Java.")
+        assertTrue(utf8Converter.contains("NewString"), "JNI must construct the authenticated String from validated UTF-16 units.")
+        assertTrue(utf8Converter.contains("js_vbc4_wipe_volatile(utf16"), "JNI UTF-16 scratch must be wiped after String construction.")
     }
     @Test
     fun protection_helper_native_declarations_are_registered_without_exporting_traditional_jni_symbols() {
@@ -105,6 +117,94 @@ class NativeHelperHardeningTest {
         assertTrue(
             !Files.readString(Path.of("src/main/native/build-native-kernel-macos.sh")).contains("_Java_io_github"),
             "macOS native export script must not expose traditional Java_io_github JNI symbols.",
+        )
+    }
+
+    @Test
+    fun shell_shim_decodes_typed_aken_jni_names_before_lookup_and_wipes_them_on_every_exit() {
+        val shellSource = Files.readString(sourcePath("src/main/native/js_shell_stub.c")).replace("\r\n", "\n")
+        val registerBody = nativeFunctionBody(shellSource, "static int js_shell_register_outer_shim")
+        val wipeBody = nativeFunctionBody(shellSource, "static void js_shell_wipe_free_name")
+        val typedNames = listOf(
+            Triple(
+                "nativeInstallAkenSessionNonce",
+                "JNI_NATIVE_INSTALL_AKEN_SESSION_NONCE",
+                "fallback_install_aken_session_nonce",
+            ),
+            Triple(
+                "nativeExecuteAkenVmPage",
+                "JNI_NATIVE_EXECUTE_AKEN_VM_PAGE",
+                "fallback_execute_aken_vm_page",
+            ),
+            Triple(
+                "nativeOpenAkenString",
+                "JNI_NATIVE_OPEN_AKEN_STRING",
+                "fallback_open_aken_string",
+            ),
+            Triple(
+                "nativeReadAkenClassPage",
+                "JNI_NATIVE_READ_AKEN_CLASS_PAGE",
+                "fallback_read_aken_class_page",
+            ),
+            Triple(
+                "nativeConsumeAkenNativeChunk",
+                "JNI_NATIVE_CONSUME_AKEN_NATIVE_CHUNK",
+                "fallback_consume_aken_native_chunk",
+            ),
+        )
+
+        for ((plainName, generatedName, decodedName) in typedNames) {
+            assertFalse(
+                shellSource.contains(plainName),
+                "Shell source must not retain typed JNI plaintext name '$plainName'.",
+            )
+            assertTrue(
+                shellSource.contains("js_obfuscated_$generatedName") &&
+                    shellSource.contains("JS_OBFUSCATED_LEN_$generatedName") &&
+                    shellSource.contains("JS_OBFUSCATED_MASK_$generatedName"),
+                "Typed JNI name '$generatedName' must still come from the generated masked table.",
+            )
+            val decodeAt = registerBody.indexOf("$decodedName = js_shell_name_obfuscated(")
+            val lookupAt = registerBody.indexOf(
+                "js_shell_lookup_bound_method(env, original_owner, $decodedName,",
+            )
+            val registrationAt = registerBody.indexOf(": $decodedName);", startIndex = lookupAt)
+            assertTrue(
+                decodeAt >= 0 && lookupAt > decodeAt && registrationAt > lookupAt,
+                "Typed JNI name '$generatedName' must be decoded before lookup and reused by RegisterNatives.",
+            )
+            assertTrue(
+                registerBody.contains("js_shell_wipe_free_name($decodedName);") &&
+                    registerBody.contains("js_shell_wipe_free_name(${decodedName.replace("fallback_", "mapped_")});"),
+                "Decoded and sealed typed JNI names for '$generatedName' must be wiped on cleanup.",
+            )
+        }
+
+        assertTrue(registerBody.contains("int ok = 0;"), "Shell registration must default to fail-closed.")
+        assertTrue(
+            registerBody.contains("if (!helper_cls || !owner) goto cleanup;"),
+            "Helper lookup failure must use the shared cleanup path.",
+        )
+        assertTrue(
+            registerBody.contains("!fallback_install_aken_session_nonce ||") &&
+                registerBody.contains("!fallback_consume_aken_native_chunk) {\n        goto cleanup;"),
+            "Any typed JNI name decode failure must fail closed before RegisterNatives.",
+        )
+        assertTrue(
+            wipeBody.contains("js_shell_secure_wipe(name, strlen(name) + 1u);") && wipeBody.contains("free(name);"),
+            "Dynamic helper/JNI names must be wiped including their terminator before release.",
+        )
+        assertTrue(
+            registerBody.contains("js_shell_wipe_free_name(original_owner);") &&
+                registerBody.contains("js_shell_wipe_free_name(owner);") &&
+                !registerBody.contains("free(mapped_") &&
+                !registerBody.contains("free(original_owner)") &&
+                !registerBody.contains("free(owner)"),
+            "Mapped names and helper owners must not bypass secure cleanup.",
+        )
+        assertTrue(
+            registerBody.contains("JNINativeMethod methods[7]") && registerBody.contains("JNINativeMethod methods[25]"),
+            "Typed-only and full current ABI registration cardinalities must remain unchanged.",
         )
     }
 
@@ -921,8 +1021,12 @@ class NativeHelperHardeningTest {
         assertFalse(helperSource.contains("nativePreloadVmResource"), "Java helper must not expose per-resource VM preload bridging.")
         assertTrue(
             nativeSource.contains("#define JS_VM_NESTED_DISPATCH_MAX_DEPTH 1") &&
-                nativeSource.contains("js_vm_nested_dispatch_depth >= JS_VM_NESTED_DISPATCH_MAX_DEPTH"),
-            "Native-to-native VM nesting must be bounded so recursive virtualized methods fall back to JVM-managed dispatch.",
+                nativeSource.contains("js_vm_nested_dispatch_depth >= depth_limit") &&
+                nativeSource.contains("int depth_limit = same_method ? 128 : JS_VM_NESTED_DISPATCH_MAX_DEPTH;") &&
+                nativeSource.contains("js_vm_execute_prepared_program_int_void") &&
+                nativeSource.contains("program->symbol_cache_owner && program->symbol_cache_owner->cached_execution_ready") &&
+                nativeSource.contains("#define JS_VM_EXECUTION_FRAME_MAX_DEPTH 128u"),
+            "Cross-method native nesting stays at 1; same-method (I)V hops reuse the prepared program up to 128 frames.",
         )
         assertTrue(
             nativeSource.contains("execution.symbols = p->symbols;") &&
@@ -1164,6 +1268,15 @@ class NativeHelperHardeningTest {
         val nativeSource = nativeRuntimeSources()
 
         listOf(
+            "JS_PROTECTED static void js_vbc4_copy_master_key_with_layout_digest",
+            "JS_PROTECTED static void js_vbc4_hmac_with_scoped_master_key",
+            "JS_PROTECTED static int js_vbc4_hmac_sha256_with_nonce",
+            "JS_PROTECTED static void js_vbc4_hmac_sha256_parts",
+            "JS_PROTECTED static int js_vbc4_unwrap_seed",
+            "JS_PROTECTED static uint32_t js_vbc4_key_id",
+            "JS_PROTECTED static void js_vbc4_aes_material",
+            "JS_PROTECTED void js_vbc4_decrypt_block",
+            "JS_PROTECTED void js_vbc4_decrypt_block_with_material",
             "JS_PROTECTED static void js_rrk_xor_assemble",
             "JS_PROTECTED static jint js_vm_canonical_opcode",
             "JS_PROTECTED static uint32_t js_vm_reg_fold_step",
@@ -1179,6 +1292,16 @@ class NativeHelperHardeningTest {
                 nativeSource.contains("section(JS_PROTECTED_SECTION_NAME)") &&
                 nativeSource.contains("#define JS_PROTECTED_SECTION_NAME \".jsx\""),
             "Native protected-section macro must still emit the .jsx code section on supported PE/ELF targets.",
+        )
+        val bindingCheck = nativeSource.indexOf(
+            "js_protected_plaintext_binding_matches(js_protected_runtime_region.code, js_protected_runtime_region.code_len)",
+        )
+        val executeTransition = nativeSource.indexOf("if (!js_protected_set_execute())", bindingCheck)
+        assertTrue(
+            nativeSource.contains("js_protected_key_plaintext_binding") &&
+                nativeSource.contains("js_protected_plaintext_binding_matches") &&
+                bindingCheck >= 0 && executeTransition > bindingCheck,
+            "The post-link .jskd binding digest must be verified after decrypt and before .jsx becomes executable.",
         )
     }
 
@@ -1221,9 +1344,13 @@ class NativeHelperHardeningTest {
             nativeSource.contains("js_runtime_resource_decode_owned") &&
                 nativeSource.contains("js_runtime_resource_decode_current_owned") &&
                 nativeSource.contains("jsrp-auth-v3") &&
-                nativeSource.contains("raw[4] == 7") &&
+                nativeSource.contains("raw[4] == 8") &&
                 nativeSource.contains("js_runtime_hmac_sha256") &&
                 nativeSource.contains("js_runtime_resource_key_slot_ready[key_slot]") &&
+                !nativeSource.contains("raw[raw_len - 1] != 32") &&
+                !nativeSource.contains("raw_len - 33") &&
+                !helperSource.contains("(raw[raw.length - 1] & 0xFF) != 32") &&
+                !helperSource.contains("raw.length - 33") &&
                 !nativeSource.contains("js_vm_decode_resource_layer") &&
                 !nativeSource.contains("js_vm_resource_hmac"),
             "Native VM must own current AES-CTR/HMAC/zstd runtime-resource unsealing with per-partition key slots after the helper installs the per-build key domains.",
@@ -1513,6 +1640,134 @@ class NativeHelperHardeningTest {
         assertTrue(
             nativeSource.contains("js_vbc4_wipe_volatile(binding_buf, sizeof(binding_buf))"),
             "Runtime binding material must be wiped after parsing.",
+        )
+    }
+
+    @Test
+    fun scoped_vbc4_layout_digest_is_thread_owned_and_never_process_global() {
+        val nativeSource = nativeRuntimeSources()
+        val threadStateStart = nativeSource.indexOf("typedef struct js_vm_thread_state {")
+        val threadStateEnd = nativeSource.indexOf("} js_vm_thread_state;", threadStateStart)
+        assertTrue(threadStateStart >= 0 && threadStateEnd > threadStateStart)
+        val threadState = nativeSource.substring(threadStateStart, threadStateEnd)
+        assertTrue(
+            threadState.contains("scoped_layout_digests[JS_VM_SCOPED_LAYOUT_DIGEST_MAX_DEPTH][32]") &&
+                threadState.contains("scoped_layout_digest_depth"),
+            "Scoped VBC4 layout material must use a bounded per-thread digest stack rather than a single mutable slot.",
+        )
+        assertFalse(nativeSource.contains("static JS_THREAD_LOCAL unsigned char js_vbc4_scoped_layout_digest[32]"))
+        assertFalse(nativeSource.contains("static JS_THREAD_LOCAL volatile int js_vbc4_scoped_layout_digest_ready"))
+        assertTrue(nativeSource.contains("js_vbc4_scoped_layout_digest_copy"))
+        assertTrue(nativeSource.contains("js_vm_fallback_thread_state_prepare_locked"))
+        assertTrue(nativeSource.contains("js_vbc4_wipe_volatile(state->scoped_layout_digests"))
+        assertTrue(nativeSource.contains("js_vbc4_scoped_layout_digest_is_ready()"))
+    }
+
+    @Test
+    fun native_aken_locator_uses_bounded_immutable_index_without_plaintext_or_key_cache() {
+        val nativeSource = nativeRuntimeSources()
+        val indexStart = nativeSource.indexOf("typedef struct {\n    uint64_t entry_token;")
+        val indexEnd = nativeSource.indexOf(
+            "} js_aken_native_page_locator_index_entry;",
+            indexStart,
+        )
+        assertTrue(indexStart >= 0 && indexEnd > indexStart, "AKEN locator index structure must be present")
+        val indexBody = nativeSource.substring(indexStart, indexEnd)
+        assertTrue(indexBody.contains("offset") && indexBody.contains("length"))
+        assertTrue(indexBody.contains("encoded_handle"))
+        listOf(
+            "native_envelope",
+            "descriptor_encoding",
+            "route_encoding",
+            "nonce",
+            "key",
+            "plaintext",
+        ).forEach { forbidden ->
+            assertFalse(indexBody.contains(forbidden), "Locator index must not retain $forbidden material")
+        }
+        assertTrue(nativeSource.contains("js_aken_native_page_locator_index_ensure()"))
+        assertTrue(nativeSource.contains("js_aken_native_page_locator_index_clear()"))
+        assertTrue(nativeSource.contains("js_runtime_metrics_note_resource_index_hit()"))
+        assertTrue(nativeSource.contains("js_aken_native_page_locator_record_parse("))
+        assertTrue(nativeSource.contains("js_aken_native_page_locator_index_lower_bound("))
+        assertTrue(nativeSource.contains("js_aken_native_page_locator_index_qsort_cmp"))
+        val lookupBody = nativeFunctionBody(nativeSource, "JS_HIDDEN int js_aken_native_page_locator_lookup(")
+        assertTrue(
+            lookupBody.contains("js_aken_native_page_locator_index_lower_bound(") &&
+                lookupBody.contains("js_aken_native_page_locator_record_parse("),
+            "Locator lookup must re-parse the selected record after a token-range index hit",
+        )
+        val collectBody = nativeFunctionBody(
+            nativeSource,
+            "static int js_aken_native_page_locator_collect_vbc4_method(",
+        )
+        assertTrue(
+            collectBody.contains("js_aken_native_page_locator_index_lower_bound(") &&
+                collectBody.contains("calloc(matched_count, sizeof(records[0]))") &&
+                collectBody.contains("previous->resource_kind == JS_AKEN_NATIVE_PAGE_RESOURCE_KIND_VBC4_METHOD"),
+            "VBC4 method collection must allocate only the selected token page chain",
+        )
+        assertFalse(
+            collectBody.contains("calloc(\n        js_aken_native_page_locator_index_count,"),
+            "VBC4 method collection must not allocate the full locator table on every cache-hit",
+        )
+        assertTrue(nativeSource.contains("js_aken_native_page_locator_vbc4_page_count("))
+        val unloadStart = nativeSource.indexOf("JNI_OnUnload")
+        assertTrue(
+            unloadStart >= 0 && nativeSource.indexOf("js_aken_native_page_locator_index_clear()", unloadStart) >= 0,
+            "Locator index must be wiped during native unload",
+        )
+    }
+
+    @Test
+    fun native_aken_prepared_cache_is_binding_bound_and_does_not_store_page_material() {
+        val nativeSource = nativeRuntimeSources()
+        val cacheStart = nativeSource.indexOf("typedef struct js_vm_aken_cache_entry {")
+        val cacheEnd = nativeSource.indexOf("} js_vm_aken_cache_entry;", cacheStart)
+        assertTrue(cacheStart >= 0 && cacheEnd > cacheStart, "AKEN prepared cache entry must be present")
+        val cacheBody = nativeSource.substring(cacheStart, cacheEnd)
+        listOf(
+            "encoded_handle_digest",
+            "call_site_proof_digest",
+            "artifact_commitment",
+            "layout_digest",
+            "session_generation",
+            "loader_global",
+            "active_users",
+            "retired",
+        ).forEach { required ->
+            assertTrue(cacheBody.contains(required), "AKEN prepared cache must retain $required binding state")
+        }
+        listOf(
+            "encoded_payload",
+            "plaintext",
+            "nonce",
+            "DEK",
+            "key",
+            "frame",
+        ).forEach { forbidden ->
+            assertFalse(cacheBody.contains(forbidden), "AKEN prepared cache entry must not retain $forbidden")
+        }
+        assertTrue(nativeSource.contains("js_vm_resource_session_generation_current()"))
+        assertTrue(nativeSource.contains("js_vm_aken_cache_loader_matches"))
+        assertTrue(nativeSource.contains("js_vm_verify_runtime_session(entry->program)"))
+        assertTrue(nativeSource.contains("entry->active_users = 1u"))
+        val bridgeStart = nativeSource.indexOf("static jobject JNICALL jsw_a0(")
+        val prepareStart = nativeSource.indexOf("js_vm_prepare_aken_complete_frame_program(", bridgeStart)
+        val cacheAcquireAt = nativeSource.indexOf("js_vm_aken_prepared_cache_acquire(", bridgeStart)
+        assertTrue(
+            bridgeStart >= 0 && cacheAcquireAt > bridgeStart && prepareStart > cacheAcquireAt,
+            "AKEN bridge must authenticate pages before cache acquire and only prepare on cache miss",
+        )
+        assertTrue(nativeSource.contains("js_vm_aken_prepared_cache_clear(env)"))
+        val symbolIdentity = nativeFunctionBody(nativeSource, "static uintptr_t js_vm_symbol_loader_identity(void)")
+        assertTrue(
+            symbolIdentity.contains("js_vm_resource_session_generation_current()"),
+            "Persistent VM symbol cache must bind loader identity to session generation, not a fresh JNI local pointer",
+        )
+        assertFalse(
+            symbolIdentity.contains("js_vm_get_active_host_loader()"),
+            "Persistent VM symbol cache must not treat a rebound JNI local as loader identity",
         )
     }
 
@@ -1883,6 +2138,57 @@ class NativeHelperHardeningTest {
             assertFalse(signature.contains("jstring resourcePath"), "Hot token-only VM ABI must not receive a Java resource-path string.")
         }
     }
+
+    @Test
+    fun native_vm_prepared_cache_hit_reauthenticates_without_page_plaintext_output() {
+        val nativeSource = nativeRuntimeSources()
+        val authCurrent = nativeFunctionBody(
+            nativeSource,
+            "static int js_aken_native_page_auth_current_view_payload(",
+        )
+        val authSibling = nativeFunctionBody(
+            nativeSource,
+            "static int js_aken_native_page_auth_vbc4_method_sibling(",
+        )
+        val dispatch = nativeFunctionBody(
+            nativeSource,
+            "static jobject JNICALL jsw_a0(",
+        )
+        val hitStart = dispatch.indexOf("if (program && prepared_cache_lease)")
+        val hitEnd = dispatch.indexOf("result = js_vm_execute_cached_program", hitStart)
+        assertTrue(hitStart >= 0 && hitEnd > hitStart, "Prepared-program cache hit branch must remain explicit.")
+        val hitBody = dispatch.substring(hitStart, hitEnd)
+
+        assertTrue(
+            authCurrent.contains("js_aken_native_page_open_current_view_payload") &&
+                authCurrent.contains("encoded_payload_len,\n        NULL)"),
+            "Current-page cache-hit authentication must route through an explicit NULL-output terminal.",
+        )
+        assertFalse(authCurrent.contains("malloc("), "Auth-only current-page terminal must not allocate plaintext.")
+        assertFalse(authCurrent.contains("unsigned char *plain"), "Auth-only current-page terminal must not own plaintext storage.")
+        assertTrue(
+            authSibling.contains("js_aken_native_page_open_vbc4_method_sibling") &&
+                authSibling.contains("NULL,\n        out_stored_length"),
+            "Sibling cache-hit authentication must force a NULL opened-page output.",
+        )
+        assertTrue(hitBody.contains("js_aken_native_page_auth_current_view_payload"))
+        assertFalse(hitBody.contains("js_aken_native_page_open_current_view_payload"), "Cache-hit branch must not bypass the auth-only terminal.")
+        assertFalse(hitBody.contains("js_aken_native_page_open_vbc4_method_sibling"), "Cache-hit branch must not request sibling plaintext.")
+        assertTrue(dispatch.contains("js_aken_native_page_locator_vbc4_page_count("))
+        assertTrue(
+            dispatch.contains("if (vbc4_page_count == 1u)") &&
+                dispatch.indexOf("js_vm_aken_prepared_cache_acquire(") <
+                dispatch.indexOf("js_aken_native_page_locator_collect_vbc4_method("),
+            "Single-page cache acquire must use the index-only page count before assembling the sibling locator",
+        )
+        assertTrue(dispatch.contains("js_aken_native_page_auth_vbc4_method_sibling"))
+        assertTrue(
+            nativeSource.contains("js_aes_gcm_decrypt_lanes") &&
+                nativeSource.contains("plain_out && ciphertext_len != 0u"),
+            "The shared GCM terminal must retain its authenticated plain_out=NULL path.",
+        )
+    }
+
     private fun sourcePath(relative: String): Path {
         val direct = Path.of(relative)
         if (Files.exists(direct)) return direct

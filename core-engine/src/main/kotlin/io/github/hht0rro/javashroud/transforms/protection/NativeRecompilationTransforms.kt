@@ -1270,14 +1270,14 @@ object NativeRecompilationTransforms {
         sb.appendLine("static const unsigned char JS_SECRET_AES_KEY[16] = { ${cBytes(secretKey)} };")
         sb.appendLine("static const unsigned char JS_SECRET_AES_IV[16] = { ${cBytes(secretIv)} };")
         sb.appendLine()
-        appendEncryptedStrings(sb, secretKey, secretIv)
+        appendEncryptedStrings(sb, secretKey, secretIv, rng)
         appendVbc4BuildProfile(sb, vbc4BuildContext, rng)
         appendProtectedSectionKey(sb, protectedSectionKey, rng)
         sb.appendLine("#endif")
         return sb.toString()
     }
 
-    private fun appendEncryptedStrings(sb: StringBuilder, key: ByteArray, iv: ByteArray) {
+    private fun appendEncryptedStrings(sb: StringBuilder, key: ByteArray, iv: ByteArray, rng: Random) {
         val secrets = listOf(
             "SECURITY_EXCEPTION_CLASS" to "java/lang/SecurityException",
             "MANAGEMENT_FACTORY_CLASS" to "java/lang/management/ManagementFactory",
@@ -1329,6 +1329,25 @@ object NativeRecompilationTransforms {
             sb.appendLine("#define JS_SECRET_INDEX_${name} $index")
         }
         sb.appendLine()
+        val nativeNames = listOf(
+            "JNI_MICROKERNEL_OWNER" to "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper",
+            "JNI_NATIVE_INSTALL_AKEN_SESSION_NONCE" to "nativeInstallAkenSessionNonce",
+            "JNI_NATIVE_EXECUTE_AKEN_VM_PAGE" to "nativeExecuteAkenVmPage",
+            "JNI_NATIVE_OPEN_AKEN_STRING" to "nativeOpenAkenString",
+            "JNI_NATIVE_READ_AKEN_CLASS_PAGE" to "nativeReadAkenClassPage",
+            "JNI_NATIVE_CONSUME_AKEN_NATIVE_CHUNK" to "nativeConsumeAkenNativeChunk",
+        )
+        for ((name, plainText) in nativeNames) {
+            val mask = rng.nextInt(1, 256)
+            val plainBytes = plainText.toByteArray(StandardCharsets.UTF_8)
+            val masked = plainBytes.map { (it.toInt() xor mask).toByte() }.toByteArray()
+            sb.append("static const unsigned char js_obfuscated_${name}[] = { ")
+            sb.append(HexEncodingSupport.toCByteArrayLiteral(masked))
+            sb.appendLine(" };")
+            sb.appendLine("#define JS_OBFUSCATED_LEN_${name} ${plainBytes.size}")
+            sb.appendLine("#define JS_OBFUSCATED_MASK_${name} 0x${mask.toString(16)}u")
+        }
+        sb.appendLine()
         sb.appendLine("#define JS_SECRET_DECRYPT(id, buf) do { \\")
         sb.appendLine("    js_secret_aes_ctr_decode(js_secret_##id, JS_SECRET_LEN_##id, JS_SECRET_INDEX_##id, (buf)); \\")
         sb.appendLine("    (buf)[JS_SECRET_LEN_##id] = 0; \\")
@@ -1353,6 +1372,8 @@ object NativeRecompilationTransforms {
         val rotateRight = 1 + rng.nextInt(7)
         val profileMask = rng.nextInt(256)
         val storedShares = Array(shareCount) { lane -> ByteArray(laneWidths[lane]).also(rng::nextBytes) }
+        val laneDataOffsets = IntArray(shareCount + 1)
+        val laneData = ByteArray(laneWidths.sum())
         try {
             rng.nextBytes(laneMask)
             val controlledLane = laneOrder.last()
@@ -1380,30 +1401,43 @@ object NativeRecompilationTransforms {
             } finally {
                 java.util.Arrays.fill(reconstructed, 0)
             }
+
+            var laneDataOffset = 0
+            storedShares.forEachIndexed { lane, share ->
+                laneDataOffsets[lane] = laneDataOffset
+                share.copyInto(laneData, destinationOffset = laneDataOffset)
+                laneDataOffset += share.size
+            }
+            laneDataOffsets[shareCount] = laneDataOffset
+
             sb.appendLine()
             sb.appendLine("#define JS_PROTECTED_SECTION_KEY_PARTITIONS_GENERATED 1")
-            storedShares.forEachIndexed { lane, share ->
-                sb.appendLine("static const unsigned char js_protected_key_lane_$lane[${share.size}] = { ${cBytes(share)} };")
-            }
-            sb.appendLine("static const unsigned char js_protected_key_lane_mask[32] = { ${cBytes(laneMask)} };")
-            sb.appendLine("#define JS_PROTECTED_KEY_LANE_COUNT $shareCount")
-            sb.appendLine("#define JS_PROTECTED_COPY_SCOPED_KEY(out) do { \\")
-            sb.appendLine("    static const unsigned char _js_ps_lane_order[$shareCount] = { ${laneOrder.joinToString(", ") { "${it}u" }} }; \\")
-            sb.appendLine("    for (int _js_ps_i = 0; _js_ps_i < 32; _js_ps_i++) { \\")
-            sb.appendLine("        unsigned char _js_ps_v = (unsigned char)(js_protected_key_lane_mask[(_js_ps_i * 7 + 3) & 31] ^ 0x${"%02X".format(profileMask)}u); \\")
-            sb.appendLine("        for (int _js_ps_s = 0; _js_ps_s < $shareCount; _js_ps_s++) { \\")
-            sb.appendLine("            int _js_ps_lane = _js_ps_lane_order[_js_ps_s]; \\")
-            storedShares.indices.forEach { lane ->
-                val prefix = if (lane == 0) "if" else "else if"
-                sb.appendLine("            $prefix (_js_ps_lane == $lane) _js_ps_v = (unsigned char)(_js_ps_v ^ js_protected_key_lane_$lane[(_js_ps_i * ${indexStrides[lane]} + ${indexOffsets[lane]}) % ${laneWidths[lane]}]); \\")
-            }
-            sb.appendLine("        } \\")
-            sb.appendLine("        (out)[_js_ps_i] = (unsigned char)((_js_ps_v >> $rotateRight) | (_js_ps_v << ${8 - rotateRight})); \\")
-            sb.appendLine("    } \\")
-            sb.appendLine("} while (0)")
+            sb.appendLine("#define JS_PROTECTED_COPY_SCOPED_KEY(out) js_protected_copy_scoped_key((out))")
+            sb.appendLine("#if defined(JS_PROTECTED_SECTION_IMPLEMENTATION)")
+            sb.appendLine("#if defined(_MSC_VER)")
+            sb.appendLine("#pragma section(\".jskd\", read)")
+            sb.appendLine("#define JS_PROTECTED_KEY_DATA __declspec(allocate(\".jskd\"))")
+            sb.appendLine("#elif defined(__GNUC__) || defined(__clang__)")
+            sb.appendLine("#define JS_PROTECTED_KEY_DATA __attribute__((section(\".jskd\"), used, aligned(16)))")
+            sb.appendLine("#else")
+            sb.appendLine("#define JS_PROTECTED_KEY_DATA")
+            sb.appendLine("#endif")
+            sb.appendLine("JS_PROTECTED_KEY_DATA static const volatile unsigned char js_protected_key_plaintext_binding[40] = { 0xD7u, 0x4Bu, 0x91u, 0x2Eu, 0xC3u, 0x58u, 0xA6u, 0x7Du, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u };")
+            sb.appendLine("JS_PROTECTED_KEY_DATA static const volatile unsigned char js_protected_key_program_header[4] = { 1u, ${shareCount}u, ${rotateRight}u, 0x${"%02X".format(profileMask)}u };")
+            sb.appendLine("JS_PROTECTED_KEY_DATA static const volatile unsigned char js_protected_key_lane_order[$shareCount] = { ${laneOrder.joinToString(", ") { "${it}u" }} };")
+            sb.appendLine("JS_PROTECTED_KEY_DATA static const volatile unsigned short js_protected_key_lane_widths[$shareCount] = { ${laneWidths.joinToString(", ") { "${it}u" }} };")
+            sb.appendLine("JS_PROTECTED_KEY_DATA static const volatile unsigned short js_protected_key_lane_strides[$shareCount] = { ${indexStrides.joinToString(", ") { "${it}u" }} };")
+            sb.appendLine("JS_PROTECTED_KEY_DATA static const volatile unsigned short js_protected_key_lane_index_offsets[$shareCount] = { ${indexOffsets.joinToString(", ") { "${it}u" }} };")
+            sb.appendLine("JS_PROTECTED_KEY_DATA static const volatile unsigned short js_protected_key_lane_data_offsets[${shareCount + 1}] = { ${laneDataOffsets.joinToString(", ") { "${it}u" }} };")
+            sb.appendLine("JS_PROTECTED_KEY_DATA static const volatile unsigned char js_protected_key_lane_mask[32] = { ${cBytes(laneMask)} };")
+            sb.appendLine("JS_PROTECTED_KEY_DATA static const volatile unsigned char js_protected_key_lane_data[${laneData.size}] = { ${cBytes(laneData)} };")
+            sb.appendLine("#undef JS_PROTECTED_KEY_DATA")
+            sb.appendLine("#endif")
         } finally {
             storedShares.forEach { java.util.Arrays.fill(it, 0) }
             java.util.Arrays.fill(laneMask, 0)
+            java.util.Arrays.fill(laneDataOffsets, 0)
+            java.util.Arrays.fill(laneData, 0)
         }
     }
 

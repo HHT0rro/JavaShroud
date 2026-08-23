@@ -16,6 +16,7 @@ import io.github.hht0rro.javashroud.naming.buildMethodRenameMap
 import io.github.hht0rro.javashroud.naming.buildRenameConfig
 import io.github.hht0rro.javashroud.naming.canRenameMethod
 import io.github.hht0rro.javashroud.transforms.reanalyzedClassArtifact
+import io.github.hht0rro.javashroud.transforms.reflectionEnumerationSensitiveClassNames
 import io.github.hht0rro.javashroud.transforms.unchangedTransformResult
 import io.github.hht0rro.javashroud.transforms.updatedArtifactTransformResult
 import org.objectweb.asm.ClassReader
@@ -26,10 +27,12 @@ fun renameMethods(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, para
     val originalMatchedMembers = eligibleMembersForAction(artifact.classArtifacts, ruleMatches, "rename-methods")
         .filter { it.kind == MemberKind.METHOD }
     val initialRuntimeBoundClassNames = priorRuntimeBoundClassNames(artifact)
+    val reflectionEnumeratedClassNames = reflectionEnumerationSensitiveClassNames(artifact)
     val initialProtectedSignatures = externallyBoundMethodSignatures(artifact) + inArtifactOverrideMethodSignatures(artifact)
     val parameterCandidates = originalMatchedMembers
         .filterNot { isResolverMemberName(it.name) }
         .filter { it.owner !in initialRuntimeBoundClassNames }
+        .filter { it.owner !in reflectionEnumeratedClassNames }
         .filter { canRenameMethod(it.name) }
         .filter { artifact.classArtifactIndex[it.owner]?.summary?.accessFlags?.and(org.objectweb.asm.Opcodes.ACC_ENUM) == 0 }
         .filter { methodSignature(it.name, it.descriptor) !in initialProtectedSignatures }
@@ -46,6 +49,7 @@ fun renameMethods(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, para
         }
         .filterNot { isResolverMemberName(it.name) }
         .filter { it.owner !in runtimeBoundClassNames }
+        .filter { it.owner !in reflectionEnumeratedClassNames }
         .filter { canRenameMethod(it.name) }
         .filter { workingArtifact.classArtifactIndex[it.owner]?.summary?.accessFlags?.and(org.objectweb.asm.Opcodes.ACC_ENUM) == 0 }
         .filter { methodSignature(it.name, it.descriptor) !in protectedSignatures }
@@ -121,7 +125,9 @@ fun renameFields(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, param
         return unchangedTransformResult(artifact)
     }
 
-    val fieldStringRewriteMap = fieldRenameMap.values.associate { it.originalName to it.renamedName }
+    val fieldStringRewriteMap = fieldRenameMap.values
+        .groupBy { it.owner }
+        .mapValues { (_, renames) -> renames.associate { it.originalName to it.renamedName } }
     val updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
         reanalyzedClassArtifact(classArtifact, remapFields(classArtifact.bytes, fieldRenameMap, fieldStringRewriteMap))
     }

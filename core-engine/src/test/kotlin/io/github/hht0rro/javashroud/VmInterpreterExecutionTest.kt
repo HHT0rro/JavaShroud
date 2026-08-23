@@ -49,15 +49,15 @@ class VmInterpreterExecutionTest {
 
         val bytes = serializer.serialize()
 
-        assertEquals("VBCX", bytes.copyOfRange(0, 4).toString(Charsets.US_ASCII))
+        assertEquals("VBC4", bytes.copyOfRange(0, 4).toString(Charsets.US_ASCII))
         assertFalse(bytes.containsInt32BigEndian(0x2468_1357), "Build seed must not be stored in plaintext")
-        assertEquals(16, bytes.copyOfRange(24, 40).size, "VBCX header must carry a wrapped seed token")
+        assertEquals(16, bytes.copyOfRange(24, 40).size, "VBC4 header must carry a wrapped seed token")
         val flags = readU2(bytes, 40)
         assertTrue(flags and 0x0001 != 0, "Constant pool section must be encrypted")
         assertTrue(flags and 0x0002 != 0, "Instruction section must be block encrypted")
         assertTrue(flags and 0x0004 != 0, "Stream must contain MAC")
         assertTrue(flags and 0x0020 != 0, "Stream must carry authenticated encryption metadata")
-        assertTrue(bytes.last().toInt() and 0xFF == 32, "MAC length tag must be 32")
+        assertEquals(32, bytes.copyOfRange(bytes.size - 32, bytes.size).size, "VBC4 frame ends in the fixed-size HMAC without a trailing length marker")
     }
 
     @Test
@@ -246,14 +246,12 @@ class VmInterpreterExecutionTest {
 
         // Different seeds should produce different binary output for the same program
         assertFalse(bytesA.contentEquals(bytesB), "Different build seeds must produce different VBC4 encodings")
-        // MAC tag at EOF should differ too
-        assertEquals(32, bytesA.last().toInt() and 0xFF)
-        assertEquals(32, bytesB.last().toInt() and 0xFF)
+        // The complete 32-byte MAC tag at EOF should differ too.
         assertFalse(
-            bytesA.copyOfRange(bytesA.size - 33, bytesA.size - 1).contentEquals(
-                bytesB.copyOfRange(bytesB.size - 33, bytesB.size - 1)
+            bytesA.copyOfRange(bytesA.size - 32, bytesA.size).contentEquals(
+                bytesB.copyOfRange(bytesB.size - 32, bytesB.size)
             ),
-            "Different build seeds must produce different MAC tags"
+            "Different build seeds must produce different 32-byte MAC tags"
         )
     }
 

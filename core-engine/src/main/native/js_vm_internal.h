@@ -77,6 +77,35 @@ typedef struct js_vm_ephemeral_cache_entry {
     js_vm_program *program;
     struct js_vm_ephemeral_cache_entry *next;
 } js_vm_ephemeral_cache_entry;
+
+/*
+ * One authenticated AKEN method frame prepared for repeated execution.  This
+ * cache deliberately keeps only the parsed/prepared VM program plus public
+ * binding digests.  It never owns the page frame, a DEK/key, a page nonce, or
+ * any encoded payload bytes.  The loader global reference is the cache's
+ * concrete class-loader binding; it is released when the entry is retired.
+ *
+ * active_users is bounded to one.  Resident opcode state is mutable during an
+ * execution, so a second concurrent caller must miss the cache and prepare an
+ * independent program instead of sharing that state.  retired entries remain
+ * linked until their active lease is released, preventing clear/unload from
+ * creating a use-after-free window.
+ */
+typedef struct js_vm_aken_cache_entry {
+    jlong entry_token;
+    jint page_index;
+    uint32_t page_count;
+    unsigned char encoded_handle_digest[32];
+    unsigned char call_site_proof_digest[32];
+    unsigned char artifact_commitment[32];
+    unsigned char layout_digest[32];
+    unsigned int session_generation;
+    jobject loader_global;
+    js_vm_program *program;
+    unsigned int active_users;
+    unsigned int retired;
+    struct js_vm_aken_cache_entry *next;
+} js_vm_aken_cache_entry;
 typedef struct { int type; jint i; jlong l; jfloat f; jdouble d; jobject o; int uninit_id; const char *uninit_type; } js_vm_value;
 
 /* Per-thread VM execution arena.  The arena owns only private, mutable

@@ -22,7 +22,6 @@ val cafed00dVersion = rootProject.extra["cafed00dVersion"] as String
 val jlinkerVersion = rootProject.extra["jlinkerVersion"] as String
 val aircompressorVersion = rootProject.extra["aircompressorVersion"] as String
 val javaShroudVersion = rootProject.extra["javaShroudVersion"] as String
-val javaShroudVbcVersion = rootProject.extra["javaShroudVbcVersion"] as String
 
 kotlin {
     jvmToolchain(21)
@@ -119,7 +118,6 @@ tasks.jar {
         attributes["Main-Class"] = application.mainClass.get()
         attributes["Implementation-Title"] = "JavaShroud Core Engine"
         attributes["Implementation-Version"] = javaShroudVersion
-        attributes["JavaShroud-VBC-Version"] = javaShroudVbcVersion
     }
     from(configurations.runtimeClasspath.get().map { if (it.isDirectory) it else zipTree(it) })
     from(layout.buildDirectory.dir("classes/kotlin/main"))

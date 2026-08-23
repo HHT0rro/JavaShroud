@@ -727,12 +727,12 @@ private fun interproceduralVmSliceMesh(entries: List<VmPreloadEntry>): String {
 
 
 internal fun vmStateBinding(entryToken: Long, resourcePath: String): String {
-    val layoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(requireVbc4BuildContext())
+    val jarLayoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(requireVbc4BuildContext())
     return try {
-        val layoutDigestHex = layoutDigest.toHexLower()
+        val layoutDigestHex = jarLayoutDigest.toHexLower()
         "${entryToken.toULong().toString(16)}\u0000$resourcePath\u0000$VBC4_CLEAN_ENTRY_INTEGRITY_HEX\u0000$layoutDigestHex"
     } finally {
-        java.util.Arrays.fill(layoutDigest, 0)
+        java.util.Arrays.fill(jarLayoutDigest, 0)
     }
 }
 
@@ -1229,7 +1229,7 @@ private fun parseMaxBroadVirtualizedMethods(value: Any?): Int = when (value) {
     is Int -> value
     is Long -> value.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
     is Number -> value.toLong().coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-    else -> 99999
+    else -> 0
 }.coerceAtLeast(0)
 
 private fun parseMethodSelectorPatterns(value: Any?): List<MethodSelectorPattern> {
@@ -1295,7 +1295,7 @@ private fun parseMaxInstructions(value: Any?): Int {
     is Int -> value
     is Long -> value.coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
     is Number -> value.toLong().coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-    else -> 99999
+    else -> 0
     }
     return if (parsed == 0) Int.MAX_VALUE else parsed.coerceAtLeast(1)
 }

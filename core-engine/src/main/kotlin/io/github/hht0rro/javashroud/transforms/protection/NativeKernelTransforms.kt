@@ -13,7 +13,6 @@ import io.github.hht0rro.javashroud.transforms.protection.aken.AkenNativeChunkHa
 import org.objectweb.asm.*
 import org.objectweb.asm.tree.ClassNode
 import org.objectweb.asm.tree.FieldInsnNode
-import org.objectweb.asm.tree.InvokeDynamicInsnNode
 import org.objectweb.asm.tree.InsnList
 import org.objectweb.asm.tree.MethodInsnNode
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
@@ -169,8 +168,7 @@ private fun isJniLoaderTimingSensitiveClass(classBytes: ByteArray): Boolean {
         ClassReader(classBytes).accept(classNode, ClassReader.SKIP_DEBUG)
         classNode.methods.any { method ->
             method.instructions?.any { instruction ->
-                instruction is InvokeDynamicInsnNode ||
-                    (instruction is MethodInsnNode && isJniLoaderTimingSensitiveCall(instruction))
+                instruction is MethodInsnNode && isJniLoaderTimingSensitiveCall(instruction)
             } == true
         }
     } catch (_: Exception) {
@@ -255,7 +253,9 @@ internal fun hasPriorSealedRuntimeDependency(classNode: ClassNode): Boolean = cl
 private fun isPriorSealedRuntimeDependencyCall(call: MethodInsnNode): Boolean {
     if (!call.owner.startsWith("r/")) return false
     if (!hasPriorSealedRuntimeNameShape(call.owner)) return false
-    if (call.name.startsWith("m_")) return true
+    // Sealed helper methods are renamed to m_*. That is not proof the JNI
+    // loader already wired loadKernel — callsite rotation / string helpers
+    // also land as m_* and must still receive a bootstrap native load.
     return call.name in setOf(
         "isNativeLoaded",
         "loadKernel",
@@ -298,7 +298,7 @@ private fun isJavaShroudVmDispatchCall(call: MethodInsnNode): Boolean {
             "executeVmResourceIntVoid",
         )
     ) return true
-    return call.owner.startsWith("r/") && call.name.startsWith("m_")
+    return false
 }
 
 private fun isRuntimeGuardProbeHotPath(owner: String, method: org.objectweb.asm.tree.MethodNode): Boolean {

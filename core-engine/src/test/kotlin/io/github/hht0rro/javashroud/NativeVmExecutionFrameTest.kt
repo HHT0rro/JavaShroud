@@ -13,7 +13,7 @@ import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class NativeVmExecutionFrameTest {
     @Test
-    fun native_execution_frame_arena_covers_tls_fls_and_forced_bounded_pool() {
+    fun native_execution_frame_arena_covers_tls_fls_and_init_failure_bounded_pool() {
         val zig = findZig()
         assumeTrue(zig != null, "Zig is required to compile the native VM execution-frame probe")
 
@@ -21,15 +21,16 @@ class NativeVmExecutionFrameTest {
         val probeSource = resolveSource("src/test/native/vm_execution_frame_probe.c")
         val root = Files.createTempDirectory("javashroud-vm-execution-frame-")
         try {
-            listOf(false, true).forEach { forcePool ->
-                val label = if (forcePool) "fallback" else "tls-fls"
-                val scenario = Files.createDirectories(root.resolve(label))
-                val nativeDir = scenario.resolve("native")
-                copyTree(sourceNativeDir, nativeDir)
-                val probe = nativeDir.resolve("vm_execution_frame_probe.c")
-                Files.copy(probeSource, probe, StandardCopyOption.REPLACE_EXISTING)
-                val executable = scenario.resolve(
-                    if (isWindows()) "vm_execution_frame_probe.exe" else "vm_execution_frame_probe",
+            val nativeDir = root.resolve("native")
+            copyTree(sourceNativeDir, nativeDir)
+            val probe = nativeDir.resolve("vm_execution_frame_probe.c")
+            Files.copy(probeSource, probe, StandardCopyOption.REPLACE_EXISTING)
+            listOf(
+                "tls-fls" to false,
+                "tls-init-failure" to true,
+            ).forEach { (label, forceTlsFlsInitFailure) ->
+                val executable = root.resolve(
+                    if (isWindows()) "vm_execution_frame_probe_$label.exe" else "vm_execution_frame_probe_$label",
                 )
                 val compile = runWithTransientZigRetry(
                     command = compileCommand(
@@ -37,16 +38,16 @@ class NativeVmExecutionFrameTest {
                         nativeDir = nativeDir,
                         probe = probe,
                         executable = executable,
-                        forcePool = forcePool,
+                        forceTlsFlsInitFailure = forceTlsFlsInitFailure,
                     ),
-                    directory = scenario,
+                    directory = root,
                     label = "compile-$label",
                 )
                 assertEquals(0, compile.exitCode, "$label execution-frame probe must compile:\n${compile.output}")
 
                 val execution = run(
                     command = listOf(executable.toString()),
-                    directory = scenario,
+                    directory = root,
                     label = "run-$label",
                     timeoutSeconds = 120L,
                 )
@@ -55,6 +56,20 @@ class NativeVmExecutionFrameTest {
                     execution.output.contains("VM execution frame probe: PASS mode=$label"),
                     "native probe did not report the expected $label path:\n${execution.output}",
                 )
+                listOf(
+                    "allocation_failure=fail-closed",
+                    "depth_overflow=fail-closed",
+                    "layout_digest_isolation=pass",
+                    "layout_digest_nested_restore=pass",
+                    "layout_digest_overflow=fail-closed",
+                    "cleanup=pass",
+                ).forEach { field ->
+                    assertTrue(
+                        execution.output.contains(field),
+                        "native probe omitted $field for $label:\n${execution.output}",
+                    )
+                }
+                println("vm-execution-frame ${execution.output.trim()}")
             }
         } finally {
             deleteTree(root)
@@ -66,7 +81,7 @@ class NativeVmExecutionFrameTest {
         nativeDir: Path,
         probe: Path,
         executable: Path,
-        forcePool: Boolean,
+        forceTlsFlsInitFailure: Boolean,
     ): List<String> = buildList {
         addAll(
             listOf(
@@ -85,7 +100,8 @@ class NativeVmExecutionFrameTest {
                 "-DXXH_PUBLIC_API=",
                 "-DJS_NATIVE_PROTECTION_NONE=1",
                 "-DJS_VM_EXECUTION_FRAME_TEST=1",
-                "-DJS_VM_FORCE_FRAME_POOL=${if (forcePool) 1 else 0}",
+                "-DJS_VM_FORCE_FRAME_POOL=0",
+                "-DJS_VM_FORCE_TLS_FLS_INIT_FAILURE=${if (forceTlsFlsInitFailure) 1 else 0}",
                 "-o",
                 executable.toString(),
             ),

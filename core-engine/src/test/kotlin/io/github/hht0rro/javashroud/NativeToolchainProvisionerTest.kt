@@ -7,6 +7,7 @@ import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class NativeToolchainProvisionerTest {
@@ -151,6 +152,31 @@ class NativeToolchainProvisionerTest {
 
             assertEquals("cache", result.toolchain?.source)
             assertEquals(cachedZig, result.toolchain?.zigPath)
+        }
+    }
+
+
+    @Test
+    fun probeWithoutDownload_does_not_treat_missing_toolchain_as_loadable() {
+        withTempUserHome {
+            val result = NativeToolchainProvisioner.probeWithoutDownload(
+                environment = emptyMap(),
+                pathEnv = null,
+            )
+            assertNull(result, "A source-only workspace must not claim native loadability without Zig")
+        }
+    }
+
+    @Test
+    fun probeWithoutDownload_returns_current_path_toolchain_without_network_access() {
+        withTempUserHome { home ->
+            val pathZig = createExecutableZig(home.resolve("path-zig"))
+            val result = NativeToolchainProvisioner.probeWithoutDownload(
+                environment = emptyMap(),
+                pathEnv = pathZig.parent.toString(),
+            )
+            assertEquals("path", result?.source)
+            assertEquals(pathZig, result?.zigPath)
         }
     }
 

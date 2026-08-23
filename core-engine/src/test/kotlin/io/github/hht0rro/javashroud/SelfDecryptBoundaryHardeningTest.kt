@@ -61,9 +61,12 @@ class SelfDecryptBoundaryHardeningTest {
         val akenWrapper = functionBody(jniRuntime, "jsw_a1")
         assertTrue("js_vm_sensitive_path_guard(env, (const void*)jsw_a1, 0)" in akenWrapper)
         assertTrue("js_aken_native_page_open_current_view_payload" in akenWrapper)
+        assertTrue("js_aken_new_string_from_utf8" in akenWrapper)
+        assertFalse("NewByteArray" in akenWrapper, "The StringPage wrapper must not expose plaintext byte arrays to Java.")
+        assertTrue("NewString" in functionBody(jniRuntime, "js_aken_new_string_from_utf8"))
         assertFalse("jsn_r21" in vmCore, "The legacy inline string page entry must not remain in the native VM core.")
         assertFalse("jsw_r21" in jniRuntime, "The legacy inline string wrapper must not remain in the JNI runtime.")
-        assertTrue("nativeDecodeAkenStringPage" in jniRuntime, "The typed AKEN string page registration must remain present.")
+        assertTrue("nativeOpenAkenString" in jniRuntime, "The typed AKEN String-returning registration must remain present.")
         assertTrue(
             "id_len > 4096 - salt_len" in functionBody(vmCore, "jsn_k10"),
             "legacy class-key derivation must bound the pair without signed jsize addition",
