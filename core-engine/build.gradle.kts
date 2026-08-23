@@ -156,7 +156,6 @@ val buildRustNativeRuntime = tasks.register<Exec>("buildRustNativeRuntime") {
     val workspace = rustWorkspaceDir.asFile
     val cargoManifest = rustCargoManifest.asFile
     val artifact = rustLibraryArtifact.asFile
-    val targetPlatform = rustRuntimeTarget.platform
     val cargoTarget = rustRuntimeTarget.cargoTarget
     workingDir = workspace
     inputs.files(fileTree(workspace) { exclude("target/**") })
@@ -166,11 +165,7 @@ val buildRustNativeRuntime = tasks.register<Exec>("buildRustNativeRuntime") {
             throw GradleException("AKEN-R1 Rust workspace is missing: $cargoManifest")
         }
     }
-    if (targetPlatform == "linux-x64") {
-        commandLine("cargo", "zigbuild", "--locked", "--workspace", "--release", "--target", cargoTarget)
-    } else {
-        commandLine("cargo", "build", "--locked", "--workspace", "--release", "--target", cargoTarget)
-    }
+    commandLine("cargo", "zigbuild", "--locked", "--workspace", "--release", "--target", cargoTarget)
 }
 
 val packageRustNativeRuntime = tasks.register<Sync>("packageRustNativeRuntime") {

@@ -8,6 +8,8 @@
 //! complete value and rejects truncation, unsupported values, concatenation,
 //! reordering, and trailing bytes.
 
+mod bound;
+pub use bound::wrap_bound_page_dek;
 mod directory;
 mod frame;
 pub use directory::{
@@ -19,7 +21,7 @@ pub use frame::{
     AUTH_TAG_SIZE, MAX_FRAME_SIZE,
 };
 
-use jsrt_crypto::{Binding, BindingError};
+use jsrt_crypto::{hmac_sha256_bytes, Binding, BindingError};
 use std::fmt;
 use std::ops::Range;
 
@@ -38,6 +40,11 @@ pub const MAX_LOGICAL_IDENTITY_SIZE: usize = 64 * 1024;
 pub const MAX_LEAF_IDENTITY_ENCODING_SIZE: usize = 96 * 1024;
 pub const MAX_RESOURCE_PATH_SIZE: usize = 4096;
 pub const MAX_VARIANT_SIZE: usize = 256;
+const EVALUATOR_DEK_MAGIC: &[u8] = b"AKEN-R1/Eval7/v1";
+const EVALUATOR_SHARE_COUNT: usize = 7;
+const EVALUATOR_SHARE_TAG_SIZE: usize = 8;
+const EVALUATOR_SHARE_DOMAIN: &[u8] = b"JavaShroud/AKEN-R1/EvaluatorShare/v1";
+const EVALUATOR_SHARE_TAG_DOMAIN: &[u8] = b"JavaShroud/AKEN-R1/EvaluatorShareTag/v1";
 pub const MAX_MERKLE_DEPTH: usize = 64;
 pub const MAX_ROUTE_ENCODING_SIZE: usize = 128 * 1024;
 pub const MAX_PROOF_ENCODING_SIZE: usize = 160 * 1024;
@@ -3098,6 +3105,75 @@ impl EvaluatorPlan {
         self.fingerprint
     }
 
+    pub fn wrap_page_dek(dek: &[u8], fingerprint: &[u8]) -> Result<Vec<u8>, PageError> {
+        if dek.len() != DIGEST_SIZE {
+            return Err(PageError::InvalidLength {
+                field: "evaluator page key",
+                expected: DIGEST_SIZE,
+                actual: dek.len(),
+            });
+        }
+        let fingerprint = copy_fixed::<DIGEST_SIZE>(fingerprint, "evaluator fingerprint")?;
+        let mut shares = [[0u8; DIGEST_SIZE]; EVALUATOR_SHARE_COUNT];
+        let mut terminal = [0u8; DIGEST_SIZE];
+        terminal.copy_from_slice(dek);
+        for (index, share) in shares
+            .iter_mut()
+            .enumerate()
+            .take(EVALUATOR_SHARE_COUNT - 1)
+        {
+            *share =
+                hmac_sha256_bytes(&fingerprint, &[EVALUATOR_SHARE_DOMAIN, dek, &[index as u8]]);
+            for (left, right) in terminal.iter_mut().zip(share.iter()) {
+                *left ^= right;
+            }
+        }
+        shares[EVALUATOR_SHARE_COUNT - 1] = terminal;
+        let mut opaque =
+            Vec::with_capacity(EVALUATOR_DEK_MAGIC.len() + EVALUATOR_SHARE_COUNT * DIGEST_SIZE);
+        opaque.extend_from_slice(EVALUATOR_DEK_MAGIC);
+        for share in &shares {
+            opaque.extend_from_slice(share);
+        }
+        let tag = hmac_sha256_bytes(&fingerprint, &[EVALUATOR_SHARE_TAG_DOMAIN, &opaque]);
+        opaque.extend_from_slice(&tag[..EVALUATOR_SHARE_TAG_SIZE]);
+        terminal.fill(0);
+        for share in &mut shares {
+            share.fill(0);
+        }
+        Ok(opaque)
+    }
+
+    pub fn recover_page_dek(&self) -> Result<[u8; DIGEST_SIZE], PageError> {
+        let share_bytes = EVALUATOR_SHARE_COUNT * DIGEST_SIZE;
+        let expected = EVALUATOR_DEK_MAGIC.len() + share_bytes + EVALUATOR_SHARE_TAG_SIZE;
+        if self.opaque.starts_with(EVALUATOR_DEK_MAGIC) {
+            if self.opaque.len() != expected {
+                return Err(PageError::InvalidInput("evaluator page key is missing"));
+            }
+        } else {
+            return crate::bound::recover_bound_page_dek(&self.opaque);
+        }
+        let tagged = &self.opaque[..EVALUATOR_DEK_MAGIC.len() + share_bytes];
+        let expected_tag =
+            hmac_sha256_bytes(&self.fingerprint, &[EVALUATOR_SHARE_TAG_DOMAIN, tagged]);
+        if !constant_time_eq(
+            &self.opaque[EVALUATOR_DEK_MAGIC.len() + share_bytes..],
+            &expected_tag[..EVALUATOR_SHARE_TAG_SIZE],
+        ) {
+            return Err(PageError::AuthenticationFailed);
+        }
+        let mut dek = [0u8; DIGEST_SIZE];
+        let shares =
+            &self.opaque[EVALUATOR_DEK_MAGIC.len()..EVALUATOR_DEK_MAGIC.len() + share_bytes];
+        for chunk in shares.chunks_exact(DIGEST_SIZE) {
+            for (left, right) in dek.iter_mut().zip(chunk.iter()) {
+                *left ^= right;
+            }
+        }
+        Ok(dek)
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         let mut writer = Writer::new(MAX_EVALUATOR_PLAN_ENCODING_SIZE);
         writer
@@ -4974,6 +5050,63 @@ mod tests {
         let tail = reordered[proof_start + 4 + proof_len..].to_vec();
         let reordered = [proof, route, tail].concat();
         assert!(PageDescriptor::decode(&reordered).is_err());
+    }
+
+    #[test]
+    fn evaluator_seven_shares_reconstruct_and_reject_tampering() {
+        let dek = [0x40u8; 32];
+        let fingerprint = [0x22u8; 32];
+        let opaque = EvaluatorPlan::wrap_page_dek(&dek, &fingerprint).expect("wrap");
+        assert_eq!(
+            opaque.len(),
+            EVALUATOR_DEK_MAGIC.len()
+                + EVALUATOR_SHARE_COUNT * DIGEST_SIZE
+                + EVALUATOR_SHARE_TAG_SIZE
+        );
+        let plan = EvaluatorPlan::new(&opaque, &fingerprint).expect("plan");
+        assert_eq!(plan.recover_page_dek().expect("recover"), dek);
+        let mut hex = String::with_capacity(opaque.len() * 2);
+        for byte in &opaque {
+            use std::fmt::Write;
+            let _ = write!(hex, "{byte:02x}");
+        }
+        assert_eq!(
+            hex,
+            "414b454e2d52312f4576616c372f76318700d86cb091f115e5ced14cfe8ba752227aa801fb6da5bd069a8aade06887f445c89a03b10690dbe06e1bdfd47873249ce42cee4484d4dcb82843ab320f17a9ba13fc6a7d30ba21ce03a11b4e2d0d8e8c7cbe1297483a5edd9cfd0da1d7044d09ee4bbe22162ecf6f38a15dfa262f3b8f03a8461d58ec7a9b618775ae54da4e8b9663fd46521913efd1bbe2bb2b364a690ec76f8426fdcc7548b5f9affb1ab311225c576e1a772b1174ecca83a7ef624854ff1c81fdab99a6218dea7a313000abc18a5136b9db581a7eddbde6346fabdcfbea887062b1506b66cb2d486e24adb26a117abce7bd8b"
+        );
+        let mut tampered = opaque;
+        tampered[EVALUATOR_DEK_MAGIC.len() + 4] ^= 1;
+        let tampered = EvaluatorPlan::new(&tampered, &fingerprint).expect("tampered plan");
+        assert_eq!(
+            tampered.recover_page_dek(),
+            Err(PageError::AuthenticationFailed)
+        );
+    }
+
+    #[test]
+    fn kotlin_bound_plan_golden_reconstructs_in_rust() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../test/resources/aken-r1-sidecar");
+        let opaque = std::fs::read(root.join("bound-golden.bin")).expect("bound golden");
+        let expected = std::fs::read(root.join("bound-golden.dek")).expect("bound dek");
+        let recovered = crate::bound::recover_bound_page_dek(&opaque).expect("recover");
+        assert_eq!(recovered.as_slice(), expected.as_slice());
+    }
+
+    #[test]
+    fn bound_decryptor_eight_lanes_reconstruct_the_page_key() {
+        let dek = [0x40u8; 32];
+        let static_binding = [0x22u8; 32];
+        let opaque = crate::bound::wrap_bound_page_dek(&dek, &static_binding).expect("bound");
+        let plan = EvaluatorPlan::new(&opaque, &static_binding).expect("plan");
+        assert_eq!(plan.recover_page_dek().expect("recover"), dek);
+        let mut tampered = opaque;
+        tampered[40] ^= 1;
+        let tampered = EvaluatorPlan::new(&tampered, &static_binding).expect("tampered plan");
+        assert_eq!(
+            tampered.recover_page_dek(),
+            Err(PageError::AuthenticationFailed)
+        );
     }
 
     #[test]

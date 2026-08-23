@@ -468,12 +468,10 @@ object RustToolchainProvisioner {
             report("warn", error.message.orEmpty())
             return ResolutionResult(null, messages)
         }
-        val rustc = findExecutable(RUSTC_ENV, "rustc", environment, pathEnv, host)
-        val cargo = findExecutable(CARGO_ENV, "cargo", environment, pathEnv, host)
-        if (rustc == null || cargo == null) {
-            report("warn", "AKEN-R1 Rust toolchain is incomplete: rustc and cargo are both required")
-            return ResolutionResult(null, messages)
-        }
+        val explicitRustc = environment[RUSTC_ENV]?.trim()?.takeIf(String::isNotEmpty) != null
+        val explicitCargo = environment[CARGO_ENV]?.trim()?.takeIf(String::isNotEmpty) != null
+        var rustc = findExecutable(RUSTC_ENV, "rustc", environment, pathEnv, host)
+        var cargo = findExecutable(CARGO_ENV, "cargo", environment, pathEnv, host)
 
         fun verifyVersion(path: Path, command: String, validator: (String) -> Boolean): Boolean {
             val result = try {
@@ -490,11 +488,27 @@ object RustToolchainProvisioner {
             return true
         }
 
-        if (!verifyVersion(rustc, "rustc", ::validateRustcVersion) ||
-            !verifyVersion(cargo, "cargo", ::validateCargoVersion)
-        ) {
+        fun isLockedPair(): Boolean = rustc != null && cargo != null &&
+            verifyVersion(checkNotNull(rustc), "rustc", ::validateRustcVersion) &&
+            verifyVersion(checkNotNull(cargo), "cargo", ::validateCargoVersion)
+
+        if (!isLockedPair() && !explicitRustc && !explicitCargo) {
+            val installed = findInstalledLockedToolchain(host)
+            if (installed != null) {
+                rustc = installed.first
+                cargo = installed.second
+                if (isLockedPair()) {
+                    report("info", "Using installed locked Rust $LOCKED_CHANNEL on ${host.name.lowercase(Locale.ROOT)}")
+                    return ResolutionResult(RustToolchain(rustc!!, cargo!!, host), messages)
+                }
+            }
+        }
+
+        if (rustc == null || cargo == null) {
+            report("warn", "AKEN-R1 Rust toolchain is incomplete: rustc and cargo are both required")
             return ResolutionResult(null, messages)
         }
+        if (!isLockedPair()) return ResolutionResult(null, messages)
         report("info", "Using locked Rust $LOCKED_CHANNEL on ${host.name.lowercase(Locale.ROOT)}")
         return ResolutionResult(RustToolchain(rustc, cargo, host), messages)
     }
@@ -980,6 +994,20 @@ object RustToolchainProvisioner {
     private fun commandOutput(result: CommandResult): String = listOf(result.stdout, result.stderr)
         .filter(String::isNotBlank)
         .joinToString("\n")
+
+    private fun findInstalledLockedToolchain(host: HostPlatform): Pair<Path, Path>? {
+        val suffix = if (host == HostPlatform.WINDOWS_X64) ".exe" else ""
+        val root = Paths.get(System.getProperty("user.home"))
+            .resolve(".rustup")
+            .resolve("toolchains")
+        val candidates = Files.list(root).use { stream -> stream.toList() }
+        val toolchain = candidates.firstOrNull { path ->
+            path.fileName.toString().startsWith("$LOCKED_CHANNEL-")
+        } ?: return null
+        val rustc = toolchain.resolve("bin").resolve("rustc$suffix")
+        val cargo = toolchain.resolve("bin").resolve("cargo$suffix")
+        return if (isUsableExecutable(rustc, host) && isUsableExecutable(cargo, host)) rustc to cargo else null
+    }
 
     private fun findExecutable(
         environmentVariable: String,

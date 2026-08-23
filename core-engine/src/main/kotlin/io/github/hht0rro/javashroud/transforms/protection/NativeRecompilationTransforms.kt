@@ -263,6 +263,7 @@ object NativeRecompilationTransforms {
             }
             val compiled = compileNativeTasksBounded(
                 compileTasks = tasks,
+                rustcPath = toolchain.rustcPath,
                 cargoPath = toolchain.cargoPath,
                 rustWorkspace = rustWorkspace,
                 cfgEvidenceExports = cfgEvidenceExports,
@@ -324,6 +325,7 @@ object NativeRecompilationTransforms {
 
     private fun compileNativeTasksBounded(
         compileTasks: List<NativeCompileTask>,
+        rustcPath: Path,
         cargoPath: Path,
         rustWorkspace: Path,
         cfgEvidenceExports: Boolean,
@@ -336,6 +338,7 @@ object NativeRecompilationTransforms {
                 copyRustWorkspace(rustWorkspace, task.workspace)
                 writeSpecializationModule(task)
                 task to compileOrLoadRustArtifact(
+                    rustcPath = rustcPath,
                     cargoPath = cargoPath,
                     rustWorkspace = task.workspace,
                     task = task,
@@ -378,6 +381,7 @@ object NativeRecompilationTransforms {
     }
 
     private fun compileOrLoadRustArtifact(
+        rustcPath: Path,
         cargoPath: Path,
         rustWorkspace: Path,
         task: NativeCompileTask,
@@ -390,6 +394,7 @@ object NativeRecompilationTransforms {
         }
         val specializationHex = HexEncodingSupport.toHexLower(task.specializationDigest)
         val compileResult = runRustCompile(
+            rustcPath = rustcPath,
             cargoPath = cargoPath,
             workspace = rustWorkspace,
             targetDir = task.targetDir,
@@ -712,6 +717,7 @@ object NativeRecompilationTransforms {
     }.digest()
 
     private fun runRustCompile(
+        rustcPath: Path,
         cargoPath: Path,
         workspace: Path,
         targetDir: Path,
@@ -743,6 +749,7 @@ object NativeRecompilationTransforms {
         processBuilder.environment().apply {
             put("CARGO_NET_OFFLINE", "true")
             put("CARGO_TERM_COLOR", "never")
+            put("RUSTC", rustcPath.toAbsolutePath().normalize().toString())
             put("CARGO_TARGET_DIR", targetDir.toString())
             put("RUSTFLAGS", "-C metadata=jsr1_${specializationHex.take(16)}")
             if (cfgEvidenceExports) put("JSRT_R1_CFG_EVIDENCE", "1") else remove("JSRT_R1_CFG_EVIDENCE")

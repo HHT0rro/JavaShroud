@@ -221,6 +221,22 @@ internal class AkenBoundDecryptorPlan private constructor(opaque: ByteArray) {
 
     internal fun copyOpaqueForNative(): ByteArray = opaqueValue.copyOf()
 
+    /** Build/sealing check only. Reconstructs the page key after locator authentication. */
+    internal fun recoverPageKeyForBuildVerification(): ByteArray {
+        val parsed = parse(opaqueValue)
+        return try {
+            val dek = ByteArray(DIGEST_SIZE)
+            parsed.lanes.forEach { lane ->
+                val mask = laneMask(parsed.staticBinding, lane.wordIndex, lane.family, lane.token, lane.salt)
+                val word = decodeWord(lane.encodedWord, mask, lane.family, lane.wordIndex)
+                writeWord(dek, lane.wordIndex * Int.SIZE_BYTES, word)
+            }
+            dek
+        } finally {
+            parsed.wipe()
+        }
+    }
+
     internal fun matchesPageBinding(
         resourceKind: AkenResourceKind,
         logicalIdentity: ByteArray,
@@ -541,6 +557,22 @@ internal class AkenBoundDecryptorPlan private constructor(opaque: ByteArray) {
             }
         }
 
+        internal fun decodeWord(encoded: Int, mask: Int, family: Int, wordIndex: Int): Int {
+            val rotation = ((mask xor (family * 0x45D9F3B) xor wordIndex) and 31) + 1
+            val tweak = Integer.rotateLeft(mask xor (0x9E3779B9.toInt() * (wordIndex + 1)), (wordIndex + family) and 31)
+            return when (family) {
+                0 -> encoded xor mask
+                1 -> Integer.rotateRight(encoded, rotation) - mask
+                2 -> Integer.rotateLeft(encoded - tweak, rotation) xor mask
+                3 -> Integer.rotateRight(encoded xor mask, rotation) - tweak
+                4 -> Integer.rotateLeft(encoded xor tweak, rotation) + mask
+                5 -> (encoded - 0x7F4A7C15) xor Integer.rotateLeft(mask, wordIndex + 1)
+                6 -> Integer.rotateRight(encoded + mask, rotation) xor tweak
+                7 -> Integer.rotateRight(encoded xor tweak, rotation) - mask
+                else -> error("AKEN bound lane family is invalid")
+            }
+        }
+
         internal fun encodeWord(value: Int, mask: Int, family: Int, wordIndex: Int): Int {
             val rotation = ((mask xor (family * 0x45D9F3B) xor wordIndex) and 31) + 1
             val tweak = Integer.rotateLeft(mask xor (0x9E3779B9.toInt() * (wordIndex + 1)), (wordIndex + family) and 31)
@@ -585,6 +617,14 @@ internal class AkenBoundDecryptorPlan private constructor(opaque: ByteArray) {
             out.write((value ushr 16) and 0xFF)
             out.write((value ushr 8) and 0xFF)
             out.write(value and 0xFF)
+        }
+
+        private fun writeWord(target: ByteArray, offset: Int, value: Int) {
+            require(offset >= 0 && offset <= target.size - Int.SIZE_BYTES) { "AKEN bound word is truncated" }
+            target[offset] = (value ushr 24).toByte()
+            target[offset + 1] = (value ushr 16).toByte()
+            target[offset + 2] = (value ushr 8).toByte()
+            target[offset + 3] = value.toByte()
         }
 
         internal fun readWord(value: ByteArray, offset: Int): Int {
@@ -646,6 +686,9 @@ private class ParsedPlan(
     var finalBinding = finalBinding.copyOf()
         private set
     private var lanesValue = lanes
+
+    val lanes: List<LaneRecord>
+        get() = lanesValue
 
     fun wipe() {
         Arrays.fill(pageNonce, 0)

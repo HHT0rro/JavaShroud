@@ -2721,18 +2721,14 @@ impl Default for ProgramBuilder {
     }
 }
 
-#[cfg(test)]
-mod parser_tests {
-    use super::*;
-
+/// Encode a current VBC4 frame whose program is `iconst 7; ireturn`.
+pub fn encode_iconst7_frame(material: &VmKeyMaterial) -> Result<Vec<u8>, VmError> {
     fn push_u16(output: &mut Vec<u8>, value: u16) {
         output.extend_from_slice(&value.to_be_bytes());
     }
-
     fn push_u32(output: &mut Vec<u8>, value: u32) {
         output.extend_from_slice(&value.to_be_bytes());
     }
-
     fn row(
         session: &[u8; 32],
         seed: u32,
@@ -2752,116 +2748,121 @@ mod parser_tests {
         output
     }
 
+    let session =
+        vbc4_session_material(material.crypto_domain_material(), material.layout_digest());
+    let seed = 0x1020_3040u32;
+    let nonce = [0x33; 16];
+    let build_key = vm_build_key(material.crypto_domain_material(), material.layout_digest())
+        .map_err(|_| VmError::InvalidHeader("vm build key"))?;
+    let identity = "0".repeat(64);
+    let metadata = format!("1|I|0|{identity}|{identity}||resource|1|0|1");
+    let string_nonce = [0x44; 16];
+    let (string_key, string_iv) = crypto::cp_string_material(
+        &build_key,
+        b"javashroud-vbc4-cp-string-key-v2",
+        b"javashroud-vbc4-cp-string-iv-v2",
+        &string_nonce,
+    );
+    let ciphertext = aes128_ctr(&string_key, &string_iv, metadata.as_bytes(), 0xffff)
+        .map_err(|_| VmError::InvalidHeader("cp string cipher"))?;
+    let tag = crypto::hmac_bytes(
+        &build_key,
+        &[
+            b"javashroud-vbc4-cp-string-tag-v2",
+            &string_nonce,
+            &ciphertext,
+        ],
+    );
+    let mut entry_plain = vec![CP_SEALED_STRING];
+    entry_plain.extend_from_slice(&string_nonce);
+    push_u16(&mut entry_plain, ciphertext.len() as u16);
+    entry_plain.extend_from_slice(&ciphertext);
+    entry_plain.extend_from_slice(&tag);
+    let (entry_key, entry_iv) =
+        vbc4_aes_material(&session, &nonce, seed, SECTION_CONSTANT_POOL_ENTRY, 0);
+    let entry_cipher = aes128_ctr(&entry_key, &entry_iv, &entry_plain, VBC4_MAX_SECTION_SIZE)
+        .map_err(|_| VmError::InvalidHeader("cp entry cipher"))?;
+    let mut cp_container = Vec::new();
+    push_u16(&mut cp_container, 1);
+    push_u32(&mut cp_container, entry_plain.len() as u32);
+    push_u32(&mut cp_container, entry_plain.len() as u32);
+    push_u32(&mut cp_container, entry_cipher.len() as u32);
+    cp_container.extend_from_slice(&entry_cipher);
+    let (cp_key, cp_iv) = vbc4_aes_material(&session, &nonce, seed, SECTION_CONSTANT_POOL, 0);
+    let cp_cipher = aes128_ctr(&cp_key, &cp_iv, &cp_container, VBC4_MAX_SECTION_SIZE)
+        .map_err(|_| VmError::InvalidHeader("cp cipher"))?;
+
+    let mut block_plain = Vec::new();
+    push_u16(&mut block_plain, 1);
+    push_u16(&mut block_plain, 4);
+    block_plain.extend_from_slice(&row(&session, seed, REG_META, 0, 0, 0));
+    block_plain.extend_from_slice(&row(&session, seed, ICONST, 1, 1, 7));
+    block_plain.extend_from_slice(&row(&session, seed, IRETURN, 2, 0, 0));
+    block_plain.extend_from_slice(&row(&session, seed, MAXS, 3, 0, 0));
+    push_u16(&mut block_plain, 0);
+    let (block_key, block_iv) = vbc4_aes_material(&session, &nonce, seed, SECTION_INSTRUCTIONS, 0);
+    let block_cipher = aes128_ctr(&block_key, &block_iv, &block_plain, VBC4_MAX_SECTION_SIZE)
+        .map_err(|_| VmError::InvalidHeader("block cipher"))?;
+
+    let mut exception_plain = Vec::new();
+    push_u16(&mut exception_plain, 0);
+    let (exception_key, exception_iv) =
+        vbc4_aes_material(&session, &nonce, seed, SECTION_EXCEPTIONS, 0);
+    let exception_cipher = aes128_ctr(
+        &exception_key,
+        &exception_iv,
+        &exception_plain,
+        VBC4_MAX_SECTION_SIZE,
+    )
+    .map_err(|_| VmError::InvalidHeader("exception cipher"))?;
+    let dispatch_state = dispatch_state_candidates(seed, 0, 1, 1);
+    let dispatch_mask = seed.rotate_left(7) ^ 0x119d_e1f3;
+    let dispatch_token = ((u32::from(dispatch_state) << 16) | 1) ^ dispatch_mask;
+    let flags = REQUIRED_FLAGS | FLAG_POLYMORPHIC_CP;
+    let wrapped_mask = vbc4_hmac(&session, 0, &[&nonce, b""], b"vbc4-seed-wrap");
+    let token = vbc4_hmac(&session, seed, &[&nonce, b""], b"vbc4-seed-token");
+    let seed_bytes = seed.to_be_bytes();
+    let mut wrapped = [0u8; 16];
+    for index in 0..4 {
+        wrapped[index] = seed_bytes[index] ^ wrapped_mask[index];
+    }
+    wrapped[4..].copy_from_slice(&token[..12]);
+    let key_id = key_id_for(&session, seed, &nonce);
+    let mut body = Vec::new();
+    body.extend_from_slice(&VBC4_MAGIC);
+    body.extend_from_slice(&nonce);
+    push_u32(&mut body, key_id);
+    body.extend_from_slice(&wrapped);
+    push_u16(&mut body, flags);
+    push_u16(&mut body, 1);
+    push_u32(&mut body, cp_container.len() as u32);
+    push_u32(&mut body, cp_cipher.len() as u32);
+    body.extend_from_slice(&cp_cipher);
+    push_u16(&mut body, 0);
+    push_u32(&mut body, 0);
+    push_u32(&mut body, dispatch_token);
+    push_u32(&mut body, block_plain.len() as u32);
+    push_u32(&mut body, block_cipher.len() as u32);
+    push_u32(&mut body, block_cipher.len() as u32);
+    body.extend_from_slice(&block_cipher);
+    push_u32(&mut body, exception_plain.len() as u32);
+    push_u32(&mut body, exception_cipher.len() as u32);
+    push_u32(&mut body, exception_cipher.len() as u32);
+    body.extend_from_slice(&exception_cipher);
+    push_u32(&mut body, 8);
+    body.extend_from_slice(&[0; 8]);
+    let mac = vbc4_hmac_fields(&session, seed, &[&nonce, &body]);
+    body.extend_from_slice(&mac);
+    Ok(body)
+}
+
+#[cfg(test)]
+mod parser_tests {
+    use super::*;
+
     fn valid_frame() -> (VmKeyMaterial, Vec<u8>) {
         let material = VmKeyMaterial::new([0x11; 32], [0x22; 32]);
-        let session =
-            vbc4_session_material(material.crypto_domain_material(), material.layout_digest());
-        let seed = 0x1020_3040u32;
-        let nonce = [0x33; 16];
-        let build_key = vm_build_key(material.crypto_domain_material(), material.layout_digest())
-            .expect("build key");
-        let identity = "0".repeat(64);
-        let metadata = format!("1|I|0|{identity}|{identity}||resource|1|0|1");
-        let string_nonce = [0x44; 16];
-        let (string_key, string_iv) = crypto::cp_string_material(
-            &build_key,
-            b"javashroud-vbc4-cp-string-key-v2",
-            b"javashroud-vbc4-cp-string-iv-v2",
-            &string_nonce,
-        );
-        let ciphertext = crypto::aes128_ctr(&string_key, &string_iv, metadata.as_bytes(), 0xffff)
-            .expect("string cipher");
-        let tag = crypto::hmac_bytes(
-            &build_key,
-            &[
-                b"javashroud-vbc4-cp-string-tag-v2",
-                &string_nonce,
-                &ciphertext,
-            ],
-        );
-        let mut entry_plain = vec![CP_SEALED_STRING];
-        entry_plain.extend_from_slice(&string_nonce);
-        push_u16(&mut entry_plain, ciphertext.len() as u16);
-        entry_plain.extend_from_slice(&ciphertext);
-        entry_plain.extend_from_slice(&tag);
-        let (entry_key, entry_iv) =
-            vbc4_aes_material(&session, &nonce, seed, SECTION_CONSTANT_POOL_ENTRY, 0);
-        let entry_cipher =
-            crypto::aes128_ctr(&entry_key, &entry_iv, &entry_plain, VBC4_MAX_SECTION_SIZE)
-                .expect("entry cipher");
-        let mut cp_container = Vec::new();
-        push_u16(&mut cp_container, 1);
-        push_u32(&mut cp_container, entry_plain.len() as u32);
-        push_u32(&mut cp_container, entry_plain.len() as u32);
-        push_u32(&mut cp_container, entry_cipher.len() as u32);
-        cp_container.extend_from_slice(&entry_cipher);
-        let (cp_key, cp_iv) = vbc4_aes_material(&session, &nonce, seed, SECTION_CONSTANT_POOL, 0);
-        let cp_cipher = crypto::aes128_ctr(&cp_key, &cp_iv, &cp_container, VBC4_MAX_SECTION_SIZE)
-            .expect("CP cipher");
-
-        let mut block_plain = Vec::new();
-        push_u16(&mut block_plain, 1);
-        push_u16(&mut block_plain, 4);
-        block_plain.extend_from_slice(&row(&session, seed, REG_META, 0, 0, 0));
-        block_plain.extend_from_slice(&row(&session, seed, ICONST, 1, 1, 7));
-        block_plain.extend_from_slice(&row(&session, seed, IRETURN, 2, 0, 0));
-        block_plain.extend_from_slice(&row(&session, seed, MAXS, 3, 0, 0));
-        push_u16(&mut block_plain, 0);
-        let (block_key, block_iv) =
-            vbc4_aes_material(&session, &nonce, seed, SECTION_INSTRUCTIONS, 0);
-        let block_cipher =
-            crypto::aes128_ctr(&block_key, &block_iv, &block_plain, VBC4_MAX_SECTION_SIZE)
-                .expect("block cipher");
-
-        let mut exception_plain = Vec::new();
-        push_u16(&mut exception_plain, 0);
-        let (exception_key, exception_iv) =
-            vbc4_aes_material(&session, &nonce, seed, SECTION_EXCEPTIONS, 0);
-        let exception_cipher = crypto::aes128_ctr(
-            &exception_key,
-            &exception_iv,
-            &exception_plain,
-            VBC4_MAX_SECTION_SIZE,
-        )
-        .expect("exception cipher");
-        let dispatch_state = dispatch_state_candidates(seed, 0, 1, 1);
-        let dispatch_mask = seed.rotate_left(7) ^ 0x119d_e1f3;
-        let dispatch_token = ((u32::from(dispatch_state) << 16) | 1) ^ dispatch_mask;
-        let flags = REQUIRED_FLAGS | FLAG_POLYMORPHIC_CP;
-        let wrapped_mask = vbc4_hmac(&session, 0, &[&nonce, b""], b"vbc4-seed-wrap");
-        let token = vbc4_hmac(&session, seed, &[&nonce, b""], b"vbc4-seed-token");
-        let seed_bytes = seed.to_be_bytes();
-        let mut wrapped = [0u8; 16];
-        for index in 0..4 {
-            wrapped[index] = seed_bytes[index] ^ wrapped_mask[index];
-        }
-        wrapped[4..].copy_from_slice(&token[..12]);
-        let key_id = key_id_for(&session, seed, &nonce);
-        let mut body = Vec::new();
-        body.extend_from_slice(&VBC4_MAGIC);
-        body.extend_from_slice(&nonce);
-        push_u32(&mut body, key_id);
-        body.extend_from_slice(&wrapped);
-        push_u16(&mut body, flags);
-        push_u16(&mut body, 1);
-        push_u32(&mut body, cp_container.len() as u32);
-        push_u32(&mut body, cp_cipher.len() as u32);
-        body.extend_from_slice(&cp_cipher);
-        push_u16(&mut body, 0);
-        push_u32(&mut body, 0);
-        push_u32(&mut body, dispatch_token);
-        push_u32(&mut body, block_plain.len() as u32);
-        push_u32(&mut body, block_cipher.len() as u32);
-        push_u32(&mut body, block_cipher.len() as u32);
-        body.extend_from_slice(&block_cipher);
-        push_u32(&mut body, exception_plain.len() as u32);
-        push_u32(&mut body, exception_cipher.len() as u32);
-        push_u32(&mut body, exception_cipher.len() as u32);
-        body.extend_from_slice(&exception_cipher);
-        push_u32(&mut body, 8);
-        body.extend_from_slice(&[0; 8]);
-        let mac = vbc4_hmac_fields(&session, seed, &[&nonce, &body]);
-        body.extend_from_slice(&mac);
+        let body = encode_iconst7_frame(&material).expect("encode");
         (material, body)
     }
 

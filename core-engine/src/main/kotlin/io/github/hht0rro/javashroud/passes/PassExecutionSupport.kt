@@ -13,7 +13,6 @@ import io.github.hht0rro.javashroud.model.config.PassSpec
 import io.github.hht0rro.javashroud.model.config.RuleSet
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.model.passes.PassContext
-import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
 
 internal data class PassApplyResult(
     val context: PassContext,
@@ -50,10 +49,8 @@ internal fun applyRegisteredPassWithMetrics(spec: PassSpec, executable: Executab
         }
     }
     val effectivePassParams = if (spec.id == "method-virtualization") {
-        require(EmbeddedHelperDeployment.hasLoadableNativeKernel()) {
-            "method-virtualization requires a bundled sealed JNI VM kernel; " +
-                "no compatible native kernel resource is available, so refusing to emit a native-only VM stub that would return default values at runtime"
-        }
+        // Native runtime availability is validated when the final artifact is sealed.
+        // The compiler is not a bundled resource during this bytecode pass.
         passParams + ("__nativeOnlyInterpreter" to true)
     } else {
         passParams

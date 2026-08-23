@@ -54,6 +54,10 @@ public final class JniMicrokernelHelper {
     private static volatile boolean sealedNativeBindingsPublished;
     private static final String AKEN_NATIVE_LOCATOR_RESOURCE = "META-INF/jsrt/native.locator";
     private static final String AKEN_NATIVE_BINDINGS_LOCATOR_RESOURCE = "META-INF/jsrt/native.bindings.locator";
+    private static final String AKEN_R1_CATALOG_INDEX_RESOURCE = "META-INF/jsrt/catalog.index";
+    private static final String AKEN_R1_CATALOG_RESOURCE_PREFIX = "META-INF/jsrt/catalog/";
+    private static final int AKEN_R1_CATALOG_INDEX_MAX_BYTES = 64 * 1024;
+    private static final int AKEN_R1_CATALOG_MAX_FILES = 4096;
     private static final String AKEN_NATIVE_RESOURCE_ROOT = "META-INF/";
     private static final int AKEN_NATIVE_LOCATOR_MAGIC_0 = 0xD7;
     private static final int AKEN_NATIVE_LOCATOR_MAGIC_1 = 0xA4;
@@ -193,6 +197,7 @@ public final class JniMicrokernelHelper {
         String previousClassBindings = System.getProperty(sealedBindingPropertyName());
         String previousMethodBindings = System.getProperty(sealedMethodBindingPropertyName());
         String previousFieldBindings = System.getProperty(sealedFieldBindingPropertyName());
+        String previousCatalogSidecar = System.getProperty(sealedCatalogPropertyName());
         boolean previousBindingsPublished = sealedNativeBindingsPublished;
         boolean loaded = false;
         try (InputStream in = resourceStream(locator.resourcePath)) {
@@ -228,6 +233,10 @@ public final class JniMicrokernelHelper {
                 tempLib.setExecutable(true, true);
                 publishSealedNativeBindings(bindingText);
                 sealedNativeBindingsPublished = true;
+                File catalogSidecar = extractAkenR1CatalogSidecar(tempLib);
+                if (catalogSidecar != null) {
+                    System.setProperty(sealedCatalogPropertyName(), catalogSidecar.getAbsolutePath());
+                }
                 System.load(tempLib.getAbsolutePath());
                 int initResult = initializeNativeKernel(platformTarget);
                 if (initResult < 0) {
@@ -260,6 +269,7 @@ public final class JniMicrokernelHelper {
                 restoreProperty(sealedMethodBindingPropertyName(), previousMethodBindings);
                 restoreProperty(sealedFieldBindingPropertyName(), previousFieldBindings);
             }
+            restoreProperty(sealedCatalogPropertyName(), previousCatalogSidecar);
         }
     }
 
@@ -1599,6 +1609,68 @@ public final class JniMicrokernelHelper {
         String suffix = Integer.toUnsignedString(hash, 36);
         return ("n" + suffix + "xxxx").substring(0, 8);
     }
+    private static File extractAkenR1CatalogSidecar(File nativeLib) throws Exception {
+        if (nativeLib == null) return null;
+        byte[] indexBytes = null;
+        try (InputStream index = resourceStream(AKEN_R1_CATALOG_INDEX_RESOURCE)) {
+            if (index == null) return null;
+            indexBytes = readAllBounded(index, AKEN_R1_CATALOG_INDEX_MAX_BYTES);
+        }
+        String indexText = new String(indexBytes, StandardCharsets.US_ASCII);
+        String[] lines = indexText.split("\n");
+        if (lines.length == 0 || lines.length > AKEN_R1_CATALOG_MAX_FILES) {
+            throw new SecurityException("AKEN-R1 catalog index is invalid");
+        }
+        File sidecar = new File(nativeLib.getParentFile(), nativeLib.getName() + ".catalog");
+        if (!sidecar.mkdirs() && !sidecar.isDirectory()) {
+            throw new SecurityException("AKEN-R1 catalog sidecar is unavailable");
+        }
+        boolean sawDirectory = false;
+        for (String raw : lines) {
+            String relative = raw.replace("\r", "").trim();
+            if (relative.length() == 0) continue;
+            if (!isAkenR1CatalogRelativePath(relative)) {
+                throw new SecurityException("AKEN-R1 catalog sidecar path is invalid");
+            }
+            if (relative.equals("directory.jsr1")) sawDirectory = true;
+            File destination = new File(sidecar, relative.replace('/', File.separatorChar));
+            File parent = destination.getParentFile();
+            if (parent != null && !parent.mkdirs() && !parent.isDirectory()) {
+                throw new SecurityException("AKEN-R1 catalog sidecar path is unavailable");
+            }
+            try (InputStream in = resourceStream(AKEN_R1_CATALOG_RESOURCE_PREFIX + relative)) {
+                if (in == null) {
+                    throw new SecurityException("AKEN-R1 catalog sidecar member is missing");
+                }
+                byte[] payload = readAllBounded(in, AKEN_NATIVE_MAX_LIBRARY_BYTES);
+                try (FileOutputStream out = new FileOutputStream(destination)) {
+                    out.write(payload);
+                } finally {
+                    Arrays.fill(payload, (byte) 0);
+                }
+            }
+        }
+        if (!sawDirectory || !new File(sidecar, "directory.jsr1").isFile()) {
+            throw new SecurityException("AKEN-R1 catalog sidecar is missing directory.jsr1");
+        }
+        return sidecar;
+    }
+
+    private static boolean isAkenR1CatalogRelativePath(String relative) {
+        if (relative.length() == 0 || relative.length() > 4096) return false;
+        if (relative.charAt(0) == '/' || relative.indexOf('\\') >= 0 || relative.indexOf(':') >= 0) return false;
+        String[] parts = relative.split("/");
+        for (int i = 0; i < parts.length; i++) {
+            String part = parts[i];
+            if (part.length() == 0 || part.equals(".") || part.equals("..")) return false;
+            for (int n = 0; n < part.length(); n++) {
+                char ch = part.charAt(n);
+                if (ch <= 0x1F || ch == 0x7F) return false;
+            }
+        }
+        return true;
+    }
+
     private static InputStream resourceStream(String resourcePath) {
         InputStream in = JniMicrokernelHelper.class.getResourceAsStream("/" + resourcePath);
         if (in != null) return in;
@@ -1706,6 +1778,10 @@ public final class JniMicrokernelHelper {
 
     private static String sealedFieldBindingPropertyName() {
         return new String(new char[]{'j', '.', 'f'});
+    }
+
+    private static String sealedCatalogPropertyName() {
+        return new String(new char[]{'j', '.', 'c'});
     }
 
     private static String sealedNativeBindingText(AkenNativeLibrary locator) {

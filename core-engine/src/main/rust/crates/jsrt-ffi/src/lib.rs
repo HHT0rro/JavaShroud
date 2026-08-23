@@ -543,8 +543,15 @@ mod jni_bridge {
     fn native_init_inner(env: JNIEnv, platform: JString) -> Result<JInt, BridgeFailure> {
         let platform = unsafe { copy_string(env, platform) }?;
         let target = target_from_platform(&platform)?;
+        let sidecar = unsafe { read_system_property(env, b"j.c\0")? };
         let mut state = lock_state()?;
         state.initialize(target)?;
+        if let Some(path) = sidecar {
+            state
+                .router
+                .install_sidecar(std::path::Path::new(&path))
+                .map_err(router_failure)?;
+        }
         Ok(JSRT_R1_OK)
     }
 
@@ -607,7 +614,14 @@ mod jni_bridge {
         _args: JObject,
     ) -> JObject {
         match open_page_route(env, _entry_token, handle, page_index, proof, PageKind::Vm) {
-            Ok(_opened) => core::ptr::null_mut(),
+            Ok(opened) => match opened.execute_vm() {
+                Ok(Some(value)) => box_int(env, value).unwrap_or(core::ptr::null_mut()),
+                Ok(None) => core::ptr::null_mut(),
+                Err(error) => {
+                    throw_new(env, router_failure(error).0.as_bytes());
+                    core::ptr::null_mut()
+                }
+            },
             Err(failure) => {
                 throw_new(env, failure.0.as_bytes());
                 core::ptr::null_mut()
@@ -734,6 +748,7 @@ mod jni_bridge {
     #[repr(C)]
     union JValue {
         l: JObject,
+        i: JInt,
     }
 
     unsafe fn read_system_property(
@@ -803,6 +818,15 @@ mod jni_bridge {
         ) -> JObject = core::mem::transmute(entry);
         let value = function(env, class, method, args);
         (!value.is_null()).then_some(value)
+    }
+
+    unsafe fn box_int(env: JNIEnv, value: i32) -> Option<JObject> {
+        let class = find_class(env, b"java/lang/Integer\0")?;
+        let method = get_static_method_id(env, class, b"valueOf\0", b"(I)Ljava/lang/Integer;\0")?;
+        let args = [JValue { i: value }];
+        let boxed = call_static_object_method_a(env, class, method, args.as_ptr());
+        delete_local_ref(env, class);
+        boxed
     }
 
     unsafe fn new_byte_array(env: JNIEnv, bytes: &[u8]) -> Option<JByteArray> {
