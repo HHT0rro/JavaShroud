@@ -94,3 +94,8 @@ local-release/
 a.out
 nul
 .mimosa/
+
+# Rust native runtime build outputs
+core-engine/src/main/rust/target/
+core-engine/src/main/rust/**/target/
+core-engine/src/main/rust/**/.target-*
