@@ -1,0 +1,92 @@
+# AKEN-R1 locked Rust standalone archives. The parser accepts only this v1 shape.
+[lock]
+format = 1
+channel = "1.78.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+max_archive_bytes = 536870912
+max_extracted_bytes = 2147483648
+max_archive_entries = 65536
+archive_count = 8
+
+[target.windows-x64]
+rustup_target = "x86_64-pc-windows-gnu"
+artifact_suffix = ".dll"
+glibc_floor = ""
+
+[target.linux-x64]
+rustup_target = "x86_64-unknown-linux-gnu"
+artifact_suffix = ".so"
+glibc_floor = "2.17"
+
+[archive.windows-rust]
+host = "windows-x64"
+target = "windows-x64"
+kind = "rust"
+url = "https://static.rust-lang.org/dist/2024-05-02/rust-1.78.0-x86_64-pc-windows-gnu.tar.xz"
+size = 241808864
+sha256 = "4fe659c9928632e5a43388544504ef7e75069d7f8e4e79a45c2b18b9e9791052"
+root = "rust-1.78.0-x86_64-pc-windows-gnu"
+
+[archive.windows-cargo]
+host = "windows-x64"
+target = "windows-x64"
+kind = "cargo"
+url = "https://static.rust-lang.org/dist/2024-05-02/cargo-1.78.0-x86_64-pc-windows-gnu.tar.xz"
+size = 10564380
+sha256 = "b00f0332f22de5a4e97d7d60f80be6715f7c8f072584ab453d6127d9e4d7b7a3"
+root = "cargo-1.78.0-x86_64-pc-windows-gnu"
+
+[archive.windows-rustfmt]
+host = "windows-x64"
+target = "windows-x64"
+kind = "rustfmt"
+url = "https://static.rust-lang.org/dist/2024-05-02/rustfmt-1.78.0-x86_64-pc-windows-gnu.tar.xz"
+size = 3336212
+sha256 = "50675e975dd5a6136e5e213c537d110a1bcd82a49f9ce607de9b98443bb489cd"
+root = "rustfmt-1.78.0-x86_64-pc-windows-gnu"
+
+[archive.windows-clippy]
+host = "windows-x64"
+target = "windows-x64"
+kind = "clippy"
+url = "https://static.rust-lang.org/dist/2024-05-02/clippy-1.78.0-x86_64-pc-windows-gnu.tar.xz"
+size = 3650272
+sha256 = "185f217cac038293c748ed2dbf253dde9f63ae272a288b82eb0374488977b618"
+root = "clippy-1.78.0-x86_64-pc-windows-gnu"
+
+[archive.linux-rust]
+host = "linux-x64"
+target = "linux-x64"
+kind = "rust"
+url = "https://static.rust-lang.org/dist/2024-05-02/rust-1.78.0-x86_64-unknown-linux-gnu.tar.xz"
+size = 163959816
+sha256 = "ea144a052c0980dfbc6c84b3eda21e9f61b02b7b171787c7de80d7a8ad344ab3"
+root = "rust-1.78.0-x86_64-unknown-linux-gnu"
+
+[archive.linux-cargo]
+host = "linux-x64"
+target = "linux-x64"
+kind = "cargo"
+url = "https://static.rust-lang.org/dist/2024-05-02/cargo-1.78.0-x86_64-unknown-linux-gnu.tar.xz"
+size = 8435440
+sha256 = "f8aacf7a101eb10dc000b8bf26de90a9d0ce678d02ccf70430ed20dd31ecec6b"
+root = "cargo-1.78.0-x86_64-unknown-linux-gnu"
+
+[archive.linux-rustfmt]
+host = "linux-x64"
+target = "linux-x64"
+kind = "rustfmt"
+url = "https://static.rust-lang.org/dist/2024-05-02/rustfmt-1.78.0-x86_64-unknown-linux-gnu.tar.xz"
+size = 2376572
+sha256 = "c9b9a240602b568eafa04905b7f731eccd7079d701b72dc9f23d8c7395ef9a92"
+root = "rustfmt-1.78.0-x86_64-unknown-linux-gnu"
+
+[archive.linux-clippy]
+host = "linux-x64"
+target = "linux-x64"
+kind = "clippy"
+url = "https://static.rust-lang.org/dist/2024-05-02/clippy-1.78.0-x86_64-unknown-linux-gnu.tar.xz"
+size = 2392128
+sha256 = "b15184ba6078dd7976f06239a258313a96de2677b37e4c560779cf7f261c3ee5"
+root = "clippy-1.78.0-x86_64-unknown-linux-gnu"

@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/jsrt-ffi",
+    "crates/jsrt-runtime",
+    "crates/jsrt-crypto",
+    "crates/jsrt-page",
+    "crates/jsrt-resource",
+    "crates/jsrt-vm",
+    "crates/jsrt-shell",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.78"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/HHT0rro/JavaShroud-public"
+
+[workspace.dependencies]
+jsrt-crypto = { path = "crates/jsrt-crypto" }
+jsrt-page = { path = "crates/jsrt-page" }
+jsrt-resource = { path = "crates/jsrt-resource" }
+jsrt-vm = { path = "crates/jsrt-vm" }
+jsrt-shell = { path = "crates/jsrt-shell" }
+jsrt-runtime = { path = "crates/jsrt-runtime" }
+jsrt-ffi = { path = "crates/jsrt-ffi" }
+ruzstd = { version = "0.7.3", default-features = false, features = ["std"] }
+
+[workspace.metadata.aken-r1]
+runtime_abi = "jsrt_ffi"
+runtime_resource_root = "META-INF/jsrt"
+rust_toolchain = "1.78.0"
+windows_platform = "windows-x64"
+windows_target = "x86_64-pc-windows-gnu"
+linux_platform = "linux-x64"
+linux_rustup_target = "x86_64-unknown-linux-gnu"
+linux_zigbuild_target = "x86_64-unknown-linux-gnu.2.17"
+linux_glibc_floor = "2.17"
+cargo_zigbuild_version = "0.18.0"
+zig_version = "0.13.0"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = "fat"
+incremental = false
+strip = "symbols"

@@ -1,0 +1,10 @@
+[toolchain]
+channel = "1.78.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]
+# The Linux base target is installed for cargo-zigbuild; the only emitted
+# Linux artifact target is x86_64-unknown-linux-gnu.2.17.
+targets = [
+    "x86_64-pc-windows-gnu",
+    "x86_64-unknown-linux-gnu",
+]
