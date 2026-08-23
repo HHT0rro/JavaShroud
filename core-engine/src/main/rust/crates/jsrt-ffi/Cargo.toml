@@ -1,0 +1,20 @@
+[package]
+name = "jsrt-ffi"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+jsrt-crypto.workspace = true
+jsrt-page.workspace = true
+jsrt-runtime.workspace = true
+
+[dev-dependencies]
+jsrt-shell.workspace = true
+
+[lints]
+workspace = true

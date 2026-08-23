@@ -1,0 +1,16 @@
+[package]
+name = "jsrt-runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+jsrt-crypto.workspace = true
+jsrt-page.workspace = true
+jsrt-resource.workspace = true
+jsrt-vm.workspace = true
+jsrt-shell.workspace = true
+
+[lints]
+workspace = true
