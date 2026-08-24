@@ -1,36 +1,17 @@
 package io.github.hht0rro.javashroud.capabilities
 
-
-
 import com.fasterxml.jackson.databind.node.JsonNodeFactory
-
 import io.github.hht0rro.javashroud.model.schema.ModuleDefinition
 import io.github.hht0rro.javashroud.model.schema.ModuleTargetingCapability
 import io.github.hht0rro.javashroud.model.schema.ParamSchema
 
-
-
 private val jniMicrokernelAnchorPassIds = listOf(
-
-    "anti-dump-protection",
-
-    "anti-instrumentation",
-
-    "anti-symbolic-execution",
-
+    "os-anti-debug",
+    "os-anti-vm",
     "callsite-rotation-protection",
-
-    "class-encryption-loader",
-
-    "environment-bound-keys",
-
     "exception-semantic-virtualization",
-
-    "method-body-delayed-decryption",
-
     "method-virtualization",
     "string-encryption",
-
 )
 
 private val nativeKernelClassTargeting = ModuleTargetingCapability(
@@ -38,298 +19,78 @@ private val nativeKernelClassTargeting = ModuleTargetingCapability(
     targetKinds = listOf("class"),
 )
 
-
-
-/**
-
- * Phase 4: High-cost protection kernel capabilities.
-
- *
-
- * These are advanced anti-tamper and anti-analysis capabilities that:
-
- * - Are only for user-owned JAR authorized protection scenarios
-
- * - Default to OFF
-
- * - Stay outside the default pipeline until explicitly selected by the user
-
- * - Include detailed risk, platform, and compatibility annotations
-
- */
-
+/** Current-format JNI microkernel capability. */
 internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
-
     CapabilityBinding(
-
-        targeting = nativeKernelClassTargeting,
-        id = "anti-instrumentation",
-
-        name = "反插桩保护",
-
-        description = "检测 -javaagent、ByteBuddy、常见 JVMTI/instrumentation transform 和运行时 class retransformation，" +
-
-            "并对 attach 痕迹进行探测，可选择记录、降级、拒绝或切换保护路径。",
-
-        tagIds = listOf("native-kernel", "runtime-defense"),
-
-        stability = "experimental",
-
-        risk = "high",
-
-        requiresRuntimeFlags = emptyList(),
-
-        platformConstraints = emptyList(),
-
-        compatibilityNotes = "需要平台特定 native 库和 Java 11+ 目标运行时。可能与调试、测试、APM、游戏反作弊或监控工具冲突。仅用于授权保护场景。",
-
-        requiredPassIds = listOf("jni-microkernel-loader"),
-
-        defaultEnabled = false,
-
-        params = listOf(
-
-            ParamSchema(
-
-                key = "detectionLevel",
-
-                type = "enum",
-
-                defaultValue = JsonNodeFactory.instance.textNode("standard"),
-
-                options = listOf("standard", "aggressive"),
-
-                description = "检测级别：standard 检查 -javaagent 与 JVMTI；aggressive 额外增加 ByteBuddy/attach 检测。",
-
-            ),
-
-            ParamSchema(
-
-                key = "response",
-
-                type = "enum",
-
-                defaultValue = JsonNodeFactory.instance.textNode("log"),
-
-                options = listOf("log", "degrade", "refuse", "switch-path"),
-
-                description = "响应策略：log 仅记录；degrade 降低保护强度；refuse 拒绝运行；switch-path 切换保护路径。",
-
-            ),
-
-            ParamSchema(
-
-                key = "seed",
-
-                type = "number",
-
-                defaultValue = JsonNodeFactory.instance.nullNode(),
-
-                options = null,
-
-                description = "确定性种子。",
-
-            ),
-
-        ),
-
-    ),
-
-    CapabilityBinding(
-
-        targeting = nativeKernelClassTargeting,
-        id = "anti-dump-protection",
-
-        name = "反内存转储",
-
-        description = "通过 JNI/native 辅助降低 heap dump、class dump、hprof 等内存转储时的关键材料可见性。" +
-
-            " field-scramble 是低强度 Java 字段扰动；jni-key-hold/full 依赖 native 可用性并在 native 缺失时 fail-closed。",
-
-        tagIds = listOf("native-kernel", "runtime-defense"),
-
-        stability = "experimental",
-
-        risk = "high",
-
-        requiresRuntimeFlags = emptyList(),
-
-        platformConstraints = listOf("HotSpot JVM"),
-
-        compatibilityNotes = "仅用于授权保护场景，可能与诊断、分析、heap 调试工具冲突。field-scramble 应保持输入 classfile major；jni-key-hold/full 要求 Java 11+、平台 native 库和 jni-microkernel-loader 成功加载。",
-
-        requiredPassIds = listOf("jni-microkernel-loader"),
-
-        defaultEnabled = false,
-
-        params = listOf(
-
-            ParamSchema(
-
-                key = "protectionLevel",
-
-                type = "enum",
-
-                defaultValue = JsonNodeFactory.instance.textNode("field-scramble"),
-
-                options = listOf("field-scramble", "jni-key-hold", "full"),
-
-                description = "保护级别：field-scramble 为低强度字段扰动；jni-key-hold 将密钥持有在 JNI 层；full 启用 native 严格路径，native 不可用则拒绝。",
-
-            ),
-
-        ),
-
-    ),
-
-    CapabilityBinding(
-
         targeting = nativeKernelClassTargeting,
         id = "jni-microkernel-loader",
-
-        name = "JNI 微内核加载器",
-
-        description = "将 loader、解密或 VM 解释器等高价值保护内核下沉到 JNI/native 层。" +
-
-            "不将整个程序强制 native 化，只下沉保护核心。",
-
+        name = "JNI Microkernel Loader",
+        description = "Build and embed the current AKEN-R1 Rust native runtime for protected string, page, VM, and unified-defense routes.",
         tagIds = listOf("native-kernel"),
-
         stability = "experimental",
-
         risk = "high",
-
-        requiresRuntimeFlags = emptyList(),
-
         platformConstraints = listOf("Windows x64", "Linux x64"),
-
-        compatibilityNotes = "仅支持锁定 Rust 1.78.0 工具链。Windows x64 使用 x86_64-pc-windows-gnu；Linux x64 使用 x86_64-unknown-linux-gnu.2.17。工具链缺失、版本不符或编译失败时立即终止，不使用预编译或系统路径回退。只能与类加密、方法虚拟化或其他需要运行时 helper 的 pass 一起启用，不能单独启用。",
-
+        compatibilityNotes = "The current format requires a verified Rust native image. Toolchain, ABI, registration, image validation, and runtime load failure are fail-closed. Retired loader, environment-binding, and delayed-decryption formats are not accepted.",
         requiresAnyPassIds = jniMicrokernelAnchorPassIds,
-
         defaultEnabled = false,
-
         params = listOf(
-
             ParamSchema(
-
                 key = "kernelComponents",
-
                 type = "enum",
-
                 defaultValue = JsonNodeFactory.instance.textNode("loader"),
-
                 options = listOf("loader", "decrypt", "vm", "guards", "all"),
-
-                description = "下沉的内核组件。loader 保持默认兼容；decrypt、vm、guards 或 all 会随 JNI 微内核声明对应 native 能力。",
-
+                description = "Native capability subset.",
             ),
-
             ParamSchema(
-
                 key = "targetPlatform",
-
                 type = "string",
-
                 defaultValue = JsonNodeFactory.instance.textNode("auto"),
-
                 options = null,
-
-                description = "原生微内核目标平台。支持 auto（当前构建平台）、all（全部受支持平台），或以逗号分隔的平台列表，例如 windows-x64,linux-x64。",
-
+                description = "auto, all, windows-x64, linux-x64, or a comma-separated supported target list.",
             ),
-
             ParamSchema(
-
                 key = "diversifiedVirtualization",
-
                 type = "boolean",
-
                 defaultValue = JsonNodeFactory.instance.booleanNode(true),
-
                 options = null,
-
-                description = "多样化虚拟化混淆：开启后，下沉到 native 内核的保护逻辑使用种子多样化的虚拟指令编码，" +
-
-                    "同一逻辑在不同构建/种子下产生不同的虚拟指令字节但语义保持不变，提高静态去虚拟化难度。",
-
+                description = "Enable diversified VM serialization.",
                 hidden = true,
-
             ),
-
             ParamSchema(
-
                 key = "nativeRecompilation",
-
                 type = "boolean",
-
                 defaultValue = JsonNodeFactory.instance.booleanNode(true),
-
                 options = null,
-
-                description = "混淆时从内置 AKEN-R1 Rust workspace 构建锁定目标；该选项必须开启，工具链或编译验证失败时终止，不使用旧产物回退。",
-
-                hidden = false,
-
+                description = "Rebuild and validate the bundled Rust runtime for this artifact.",
             ),
-
             ParamSchema(
-
                 key = "nativeProtectionLevel",
-
                 type = "enum",
-
                 defaultValue = JsonNodeFactory.instance.textNode("standard"),
-
                 options = listOf("standard", "aggressive"),
-
-                description = "Rust runtime 反逆向保护级别。standard 启用基础运行时完整性防护；aggressive 增强运行时检查与产物自校验。",
-
+                description = "Native runtime hardening level.",
                 hidden = true,
-
             ),
-
-
             ParamSchema(
-
                 key = "nativePackingLevel",
-
                 type = "enum",
-
                 defaultValue = JsonNodeFactory.instance.textNode("max"),
-
                 options = listOf("off", "standard", "max", "max-hardening"),
-
-                description = "AKEN-R1 Rust cdylib 加固策略。off、standard、max、max-hardening 仅作为 Rust 构建身份与内部强化级别；所有值都直接输出到 META-INF/jsrt，不改变 R1 ABI、资源根或平台边界。",
-
-                hidden = false,
-
+                description = "AKEN-R1 Rust cdylib hardening level.",
             ),
-
             ParamSchema(
-
                 key = "seed",
-
                 type = "number",
-
                 defaultValue = JsonNodeFactory.instance.nullNode(),
-
                 options = null,
-
-                description = "确定性种子，控制 native 微内核多样化编码。",
-
+                description = "Deterministic native diversification seed.",
             ),
-
         ),
-
     ),
-
 )
 
-
-
 fun buildNativeKernelCapabilityDefinitions(): List<ModuleDefinition> =
-    nativeKernelCapabilityBindings().map { binding: CapabilityBinding ->
+    nativeKernelCapabilityBindings().map { binding ->
         ModuleDefinition(
             id = binding.id,
             name = binding.name,

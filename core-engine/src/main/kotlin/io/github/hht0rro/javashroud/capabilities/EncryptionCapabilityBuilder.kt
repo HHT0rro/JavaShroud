@@ -44,7 +44,7 @@ internal fun encryptionCapabilityBindings(): List<CapabilityBinding> = listOf(
                 key = "payloadCodec",
                 type = "enum",
                 defaultValue = JsonNodeFactory.instance.textNode("auto"),
-                options = listOf("auto", "xor", "indexed", "des"),
+                options = listOf("auto", "xor", "indexed", "aes-gcm"),
                 description = "Resolver payload codec for the jvm-resolver backend. auto derives the codec from strength.",
             ),
             ParamSchema(
