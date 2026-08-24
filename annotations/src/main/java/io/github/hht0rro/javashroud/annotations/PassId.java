@@ -5,23 +5,19 @@ public final class PassId {
     private PassId() {}
 
     public static final String ANTI_DECOMPILER_STRUCTURE = "anti-decompiler-structure";
-    public static final String ANTI_DUMP_PROTECTION = "anti-dump-protection";
-    public static final String ANTI_INSTRUMENTATION = "anti-instrumentation";
-    public static final String ANTI_SYMBOLIC_EXECUTION = "anti-symbolic-execution";
     public static final String CALLSITE_ROTATION_PROTECTION = "callsite-rotation-protection";
-    public static final String CLASS_ENCRYPTION_LOADER = "class-encryption-loader";
     public static final String CONDY_CONSTANT_INDIRECTION = "condy-constant-indirection";
     public static final String CONTROL_FLOW_FLATTENING = "control-flow-flattening";
     public static final String CONTROL_FLOW_OBFUSCATION = "control-flow-obfuscation";
-    public static final String ENVIRONMENT_BOUND_KEYS = "environment-bound-keys";
     public static final String EXCEPTION_SEMANTIC_VIRTUALIZATION = "exception-semantic-virtualization";
     public static final String FIELD_STRING_ENCRYPTION = "field-string-encryption";
     public static final String INTEGER_CONSTANT_OBFUSCATION = "integer-constant-obfuscation";
     public static final String INVOKE_DYNAMIC_INDIRECTION = "invoke-dynamic-indirection";
     public static final String JNI_MICROKERNEL_LOADER = "jni-microkernel-loader";
     public static final String MEMBER_HIDE = "member-hide";
-    public static final String METHOD_BODY_DELAYED_DECRYPTION = "method-body-delayed-decryption";
     public static final String METHOD_VIRTUALIZATION = "method-virtualization";
+    public static final String OS_ANTI_DEBUG = "os-anti-debug";
+    public static final String OS_ANTI_VM = "os-anti-vm";
     public static final String REFERENCE_PROXY = "reference-proxy";
     public static final String RENAME_CLASSES = "rename-classes";
     public static final String RENAME_FIELDS = "rename-fields";
