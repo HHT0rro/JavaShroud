@@ -3,6 +3,11 @@ package io.github.hht0rro.javashroud.naming
 import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
 import java.util.Locale
 
+/**
+ * Builds one artifact-local class relocation map. Retired fixed generated names
+ * are relocated out of their original package rather than merely having their
+ * simple class name changed, because [r/<number>/] itself is forbidden.
+ */
 fun buildClassRenameMap(
     classArtifacts: List<ClassArtifact>,
     matchedClassNames: Set<String>,
@@ -16,18 +21,66 @@ fun buildClassRenameMap(
     val existingClassNames = classArtifacts
         .mapTo(mutableSetOf()) { it.summary.internalName.lowercase(Locale.ROOT) }
     val allocatedClassNames = mutableSetOf<String>()
+    val relocatedPackages = linkedMapOf<String, String>()
+    val allocatedPackages = mutableSetOf<String>()
+
+    fun relocationPackageFor(originalPackage: String): String = relocatedPackages.getOrPut(originalPackage) {
+        var candidate: String
+        do {
+            // Two generated segments remove both the fixed root package and its
+            // numeric second segment, while remaining artifact-local.
+            candidate = listOf(generator.generatePackageSegment(), generator.generatePackageSegment()).joinToString("/")
+        } while (
+            isFixedGeneratedInternalName("$candidate/C") ||
+                candidate.lowercase(Locale.ROOT) in allocatedPackages
+        )
+        allocatedPackages += candidate.lowercase(Locale.ROOT)
+        candidate
+    }
 
     return selectedClassArtifacts.mapNotNull { classArtifact ->
         val original = classArtifact.summary.internalName
-        val packageName = original.substringBeforeLast('/', "")
+        val originalPackage = original.substringBeforeLast('/', "")
+        val packageName = if (isFixedGeneratedInternalName(original)) {
+            relocationPackageFor(originalPackage)
+        } else {
+            originalPackage
+        }
         var fullNewName: String
         do {
             val newName = generator.generateSimpleName("C")
             fullNewName = if (packageName.isBlank()) newName else "$packageName/$newName"
-        } while (fullNewName.lowercase(Locale.ROOT) in existingClassNames || fullNewName.lowercase(Locale.ROOT) in allocatedClassNames)
+        } while (
+            isFixedGeneratedInternalName(fullNewName) ||
+                fullNewName.lowercase(Locale.ROOT) in existingClassNames ||
+                fullNewName.lowercase(Locale.ROOT) in allocatedClassNames
+        )
         allocatedClassNames += fullNewName.lowercase(Locale.ROOT)
         if (original == fullNewName) null else original to fullNewName
     }.toMap()
+}
+
+/**
+ * Explicit helper for the post-rename cleanup stage. It shares the ordinary
+ * [NameGenerator] allocation and collision rules while guaranteeing that every
+ * selected name moves out of the retired fixed namespace.
+ */
+fun buildFixedGeneratedClassRelocationMap(
+    classArtifacts: List<ClassArtifact>,
+    fixedGeneratedClassNames: Set<String>,
+    config: RenameConfig = RenameConfig(),
+): Map<String, String> {
+    require(fixedGeneratedClassNames.all(::isFixedGeneratedInternalName)) {
+        "fixed generated name relocation received a non-fixed class name"
+    }
+    return buildClassRenameMap(classArtifacts, fixedGeneratedClassNames, config).also { map ->
+        require(map.keys == fixedGeneratedClassNames) {
+            "fixed generated name relocation did not allocate every fixed class"
+        }
+        require(map.values.none(::isFixedGeneratedInternalName)) {
+            "fixed generated name relocation produced a reserved r/<number>/ name"
+        }
+    }
 }
 
 fun buildPackageRenameMap(
@@ -54,6 +107,9 @@ fun buildPackageRenameMap(
             classArtifact.summary.internalName in matchedClassNames &&
                 classArtifact.summary.internalName.substringBeforeLast('/', "") == packageName
         }
+        require(packageClasses.none { isFixedGeneratedInternalName(it.summary.internalName) }) {
+            "fixed generated package '$packageName' requires class relocation before package rename"
+        }
         val caseFoldedSimpleNames = packageClasses.map { classArtifact ->
             classArtifact.summary.internalName.substringAfterLast('/').lowercase(Locale.ROOT)
         }
@@ -76,7 +132,7 @@ fun buildPackageRenameMap(
             }
         } while (
             newPackageName == packageName ||
-            candidateNames.any { it in immutableFinalNames || it in allocatedFinalNames }
+                candidateNames.any { isFixedGeneratedInternalName(it) || it in immutableFinalNames || it in allocatedFinalNames }
         )
         renameMap[packageName] = newPackageName
         allocatedFinalNames += candidateNames
@@ -106,6 +162,9 @@ fun applyPackageRenameMap(
             val renamedName = if (renamedPackageName == null) originalName else "$renamedPackageName/$simpleName"
             originalName to renamedName
         }
+    require(projected.none { (_, renamedName) -> isFixedGeneratedInternalName(renamedName) }) {
+        "package rename plan would emit a reserved r/<number>/ class name"
+    }
     val caseFoldedNames = projected.map { (_, renamedName) -> renamedName.lowercase(Locale.ROOT) }
     require(caseFoldedNames.size == caseFoldedNames.toSet().size) {
         "package rename plan produces a case-insensitive class path collision"

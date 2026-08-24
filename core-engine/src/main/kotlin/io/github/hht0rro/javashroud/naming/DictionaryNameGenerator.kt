@@ -45,15 +45,21 @@ internal class NameGenerator(
     }
 
     fun generatePackageSegment(): String {
-        return when (config.dictionaryStyle) {
-            "iiliii" -> generateIiliiiName().lowercase(Locale.ROOT)
-            "ooO0oO" -> generateOoO0oOName().lowercase(Locale.ROOT)
-            "nnmnmnm" -> generateNnmnmnmName().lowercase(Locale.ROOT)
-            "sequential" -> "p${counter++.toString().padStart(4, '0')}"
-            "unicode-confusable" -> generateUnicodeConfusableName().lowercase(Locale.ROOT)
-            "custom-file" -> generateCustomFileName().lowercase(Locale.ROOT)
-            else -> "p${counter++.toString().padStart(4, '0')}"
-        }.let { applyCollisionPolicy(it) }
+        repeat(MAX_RESERVED_PACKAGE_RETRIES) {
+            val candidate = when (config.dictionaryStyle) {
+                "iiliii" -> generateIiliiiName().lowercase(Locale.ROOT)
+                "ooO0oO" -> generateOoO0oOName().lowercase(Locale.ROOT)
+                "nnmnmnm" -> generateNnmnmnmName().lowercase(Locale.ROOT)
+                "sequential" -> "p${counter++.toString().padStart(4, '0')}"
+                "unicode-confusable" -> generateUnicodeConfusableName().lowercase(Locale.ROOT)
+                "custom-file" -> generateCustomFileName().lowercase(Locale.ROOT)
+                else -> "p${counter++.toString().padStart(4, '0')}"
+            }
+            if (!isReservedGeneratedPackageSegment(candidate)) {
+                return applyCollisionPolicy(candidate)
+            }
+        }
+        throw IllegalStateException("Rename dictionary repeatedly emitted reserved package segment 'r'")
     }
 
     /**
@@ -196,6 +202,8 @@ internal class NameGenerator(
     }
 
     companion object {
+        private const val MAX_RESERVED_PACKAGE_RETRIES = 64
+
         fun loadCustomDictionary(path: String): List<String> {
             if (path.isBlank()) return emptyList()
             return try {
