@@ -1,3 +1,4 @@
+import java.io.File
 import java.io.RandomAccessFile
 import org.gradle.api.GradleException
 import org.gradle.api.tasks.Sync
@@ -35,7 +36,7 @@ private data class RustRuntimeTarget(
 private fun resolveCargoExecutable(): String {
     val cargoHome = System.getenv("CARGO_HOME")?.takeIf { it.isNotBlank() } ?: return "cargo"
     val executableName = if (System.getProperty("os.name").lowercase().startsWith("windows")) "cargo.exe" else "cargo"
-    val candidate = java.io.File(cargoHome, "bin/$executableName")
+    val candidate = File(cargoHome, "bin/$executableName")
     return if (candidate.isFile) candidate.absolutePath else "cargo"
 }
 
