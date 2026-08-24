@@ -17,7 +17,6 @@ import org.objectweb.asm.tree.VarInsnNode
 import java.util.Base64
 import java.util.Random
 import javax.crypto.Cipher
-import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 private const val SHROUD_ENCRYPT_DESC = "Lio/github/hht0rro/javashroud/bytecode/ShroudEncrypt;"
@@ -43,9 +42,10 @@ fun encryptClassStringsEmbeddedResolver(
         "string-encryption strength '$strength' is not supported; supported values: ${STRING_RESOLVER_STRENGTHS.joinToString(", ")}"
     }
     val codec = config.payloadCodec ?: when (strength) {
-        "max" -> "indexed"
+        "max" -> "aes-gcm"
         else -> "xor"
     }
+    require(codec != "des") { "string-encryption payloadCodec 'des' is retired; use aes-gcm" }
     require(codec in STRING_PAYLOAD_CODECS) {
         "string-encryption payloadCodec '$codec' is not supported; supported values: ${STRING_PAYLOAD_CODECS.joinToString(", ")}"
     }
@@ -59,7 +59,7 @@ fun encryptClassStringsEmbeddedResolver(
     val classSeed = random.nextInt() xor classNode.name.hashCode()
     val payloadField = resolverUniqueMemberName(classNode, "sp", random)
     val cacheField = resolverUniqueMemberName(classNode, "sc", random)
-    val desKeyField = if (codec == "des") resolverUniqueMemberName(classNode, "sk", random) else null
+    val desKeyField = if (codec == "aes-gcm") resolverUniqueMemberName(classNode, "sk", random) else null
     val indexedKeyField = if (codec == "indexed") resolverUniqueMemberName(classNode, "ik", random) else null
     val indexedSlotField = if (codec == "indexed") resolverUniqueMemberName(classNode, "is", random) else null
     val permutationField = if (codec == "indexed") resolverUniqueMemberName(classNode, "ip", random) else null
@@ -141,7 +141,7 @@ fun encryptClassStringsEmbeddedResolver(
     val injectDeadFlow = strength == "flow-guarded"
     classNode.methods.add(
         when (codec) {
-            "des" -> createDesStringResolver(
+            "aes-gcm" -> createDesStringResolver(
                 classNode.name,
                 isInterface,
                 resolverName,
@@ -194,12 +194,13 @@ private fun resolverEncodeString(
 ): ResolverEncodedString {
     val plain = value.toByteArray(Charsets.UTF_8)
     return when (codec) {
-        "des" -> {
-            val key = ByteArray(8).also(random::nextBytes)
-            val cipher = Cipher.getInstance("DES/CBC/PKCS5Padding")
-            cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "DES"), IvParameterSpec(ByteArray(8)))
+        "aes-gcm" -> {
+            val key = ByteArray(16).also(random::nextBytes)
+            val nonce = ByteArray(12).also(random::nextBytes)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), javax.crypto.spec.GCMParameterSpec(128, nonce))
             ResolverEncodedString(
-                payload = Base64.getEncoder().encodeToString(cipher.doFinal(plain)),
+                payload = Base64.getEncoder().encodeToString(nonce + cipher.doFinal(plain)),
                 desKey = Base64.getEncoder().encodeToString(key),
             )
         }
@@ -364,7 +365,6 @@ private fun createXorStringResolver(
     method.visitVarInsn(Opcodes.ALOAD, 2)
     method.visitFieldInsn(Opcodes.GETSTATIC, "java/nio/charset/StandardCharsets", "UTF_8", "Ljava/nio/charset/Charset;")
     method.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/String", "<init>", "([BLjava/nio/charset/Charset;)V", false)
-    method.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "intern", "()Ljava/lang/String;", false)
     method.visitVarInsn(Opcodes.ASTORE, 5)
     method.visitFieldInsn(Opcodes.GETSTATIC, owner, cacheField, STRING_ARRAY_DESC)
     method.visitVarInsn(Opcodes.ILOAD, 0)
@@ -554,7 +554,6 @@ private fun createIndexedStringResolver(
         "([BLjava/nio/charset/Charset;)V",
         false,
     )
-    method.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "intern", "()Ljava/lang/String;", false)
     method.visitVarInsn(Opcodes.ASTORE, 12)
     method.visitFieldInsn(Opcodes.GETSTATIC, owner, cacheField, STRING_ARRAY_DESC)
     method.visitVarInsn(Opcodes.ILOAD, 1)
@@ -601,6 +600,17 @@ private fun createDesStringResolver(
     method.visitInsn(Opcodes.AALOAD)
     method.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Base64\$Decoder", "decode", "(Ljava/lang/String;)[B", false)
     method.visitVarInsn(Opcodes.ASTORE, 2)
+    method.visitVarInsn(Opcodes.ALOAD, 2)
+    method.visitInsn(Opcodes.ICONST_0)
+    method.visitIntInsn(Opcodes.BIPUSH, 12)
+    method.visitMethodInsn(Opcodes.INVOKESTATIC, "java/util/Arrays", "copyOfRange", "([BII)[B", false)
+    method.visitVarInsn(Opcodes.ASTORE, 7)
+    method.visitVarInsn(Opcodes.ALOAD, 2)
+    method.visitIntInsn(Opcodes.BIPUSH, 12)
+    method.visitVarInsn(Opcodes.ALOAD, 2)
+    method.visitInsn(Opcodes.ARRAYLENGTH)
+    method.visitMethodInsn(Opcodes.INVOKESTATIC, "java/util/Arrays", "copyOfRange", "([BII)[B", false)
+    method.visitVarInsn(Opcodes.ASTORE, 8)
     method.visitTypeInsn(Opcodes.NEW, "javax/crypto/spec/SecretKeySpec")
     method.visitInsn(Opcodes.DUP)
     method.visitMethodInsn(Opcodes.INVOKESTATIC, "java/util/Base64", "getDecoder", "()Ljava/util/Base64\$Decoder;", false)
@@ -608,20 +618,20 @@ private fun createDesStringResolver(
     method.visitVarInsn(Opcodes.ILOAD, 0)
     method.visitInsn(Opcodes.AALOAD)
     method.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Base64\$Decoder", "decode", "(Ljava/lang/String;)[B", false)
-    method.visitLdcInsn("DES")
+    method.visitLdcInsn("AES")
     method.visitMethodInsn(Opcodes.INVOKESPECIAL, "javax/crypto/spec/SecretKeySpec", "<init>", "([BLjava/lang/String;)V", false)
     method.visitVarInsn(Opcodes.ASTORE, 3)
-    method.visitLdcInsn("DES/CBC/PKCS5Padding")
+    method.visitLdcInsn("AES/GCM/NoPadding")
     method.visitMethodInsn(Opcodes.INVOKESTATIC, "javax/crypto/Cipher", "getInstance", "(Ljava/lang/String;)Ljavax/crypto/Cipher;", false)
     method.visitVarInsn(Opcodes.ASTORE, 4)
     method.visitVarInsn(Opcodes.ALOAD, 4)
     method.visitInsn(Opcodes.ICONST_2)
     method.visitVarInsn(Opcodes.ALOAD, 3)
-    method.visitTypeInsn(Opcodes.NEW, "javax/crypto/spec/IvParameterSpec")
+    method.visitTypeInsn(Opcodes.NEW, "javax/crypto/spec/GCMParameterSpec")
     method.visitInsn(Opcodes.DUP)
-    method.visitIntInsn(Opcodes.BIPUSH, 8)
-    method.visitIntInsn(Opcodes.NEWARRAY, Opcodes.T_BYTE)
-    method.visitMethodInsn(Opcodes.INVOKESPECIAL, "javax/crypto/spec/IvParameterSpec", "<init>", "([B)V", false)
+    method.visitIntInsn(Opcodes.SIPUSH, 128)
+    method.visitVarInsn(Opcodes.ALOAD, 7)
+    method.visitMethodInsn(Opcodes.INVOKESPECIAL, "javax/crypto/spec/GCMParameterSpec", "<init>", "(I[B)V", false)
     method.visitMethodInsn(
         Opcodes.INVOKEVIRTUAL,
         "javax/crypto/Cipher",
@@ -632,11 +642,10 @@ private fun createDesStringResolver(
     method.visitTypeInsn(Opcodes.NEW, "java/lang/String")
     method.visitInsn(Opcodes.DUP)
     method.visitVarInsn(Opcodes.ALOAD, 4)
-    method.visitVarInsn(Opcodes.ALOAD, 2)
+    method.visitVarInsn(Opcodes.ALOAD, 8)
     method.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "javax/crypto/Cipher", "doFinal", "([B)[B", false)
     method.visitFieldInsn(Opcodes.GETSTATIC, "java/nio/charset/StandardCharsets", "UTF_8", "Ljava/nio/charset/Charset;")
     method.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/String", "<init>", "([BLjava/nio/charset/Charset;)V", false)
-    method.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "intern", "()Ljava/lang/String;", false)
     method.visitVarInsn(Opcodes.ASTORE, 5)
     method.visitFieldInsn(Opcodes.GETSTATIC, owner, cacheField, STRING_ARRAY_DESC)
     method.visitVarInsn(Opcodes.ILOAD, 0)
@@ -660,5 +669,5 @@ private fun createDesStringResolver(
 }
 
 private val STRING_RESOLVER_STRENGTHS = setOf("standard", "strong", "flow-guarded", "max")
-private val STRING_PAYLOAD_CODECS = setOf("xor", "indexed", "des")
+private val STRING_PAYLOAD_CODECS = setOf("xor", "indexed", "aes-gcm")
 private val STRING_ENCRYPTION_SCOPES = setOf("all-strings", "annotated", "length-threshold")

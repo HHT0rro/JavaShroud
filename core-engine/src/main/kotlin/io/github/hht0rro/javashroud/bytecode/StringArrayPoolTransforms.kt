@@ -128,7 +128,7 @@ private fun containsAkenStringPageDecodeCallsite(classNode: ClassNode): Boolean 
                 insn.desc == AKEN_STRING_PAGE_DECODE_DESC &&
                 (
                     (insn.owner == STRING_ENCRYPTION_HELPER_OWNER && insn.name == AKEN_STRING_PAGE_DECODE_NAME) ||
-                        insn.owner.startsWith("r/")
+                        insn.owner.startsWith("r/") || insn.owner.startsWith("jsh/")
                     )
         }
     }

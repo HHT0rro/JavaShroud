@@ -20,12 +20,16 @@ import org.objectweb.asm.Opcodes
  * re-implemented as JavaShroud-native Kotlin.
  */
 fun obfuscateIntegerConstants(classBytes: ByteArray): ByteArray {
-    val reader = ClassReader(classBytes)
-    val writer = computeFramesWriter(reader)
-    val tracker = IntObfuscationTracker()
-    val visitor = IntObfuscationClassVisitor(writer, tracker)
-    reader.accept(visitor, 0)
-    return if (tracker.obfuscatedCount > 0) writer.toByteArray() else classBytes
+    return try {
+        val reader = ClassReader(classBytes)
+        val writer = computeFramesWriter(reader)
+        val tracker = IntObfuscationTracker()
+        val visitor = IntObfuscationClassVisitor(writer, tracker)
+        reader.accept(visitor, 0)
+        if (tracker.obfuscatedCount > 0) writer.toByteArray() else classBytes
+    } catch (_: Throwable) {
+        classBytes
+    }
 }
 
 internal class IntObfuscationTracker {

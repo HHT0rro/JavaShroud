@@ -2,35 +2,69 @@ package io.github.hht0rro.javashroud.bytecode
 
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassWriter
-import org.objectweb.asm.Opcodes
 import org.objectweb.asm.commons.ClassRemapper
 
 fun remapClasses(classBytes: ByteArray, classRenameMap: Map<String, String>): ByteArray = try {
-    // First pass: apply ClassRemapper to rewrite class/package references.
-    // Use ClassWriter(0) WITHOUT ClassReader so the new constant pool is built
-    // from scratch, avoiding copy of old unreferenced entries.
+    remapClassesStrict(classBytes, classRenameMap)
+} catch (_: Exception) {
+    // Ordinary optional rename passes preserve their existing resilience model.
+    // Current-format fixed-name cleanup uses [remapClassesStrict] directly.
+    classBytes
+}
+
+/**
+ * Fail-closed class remapping for release-required relocations. A caller that
+ * removes fixed generated names must never retain source bytes after a remap
+ * error, because retaining them would emit a forbidden class name.
+ */
+internal fun remapClassesStrict(classBytes: ByteArray, classRenameMap: Map<String, String>): ByteArray {
     val resourcePathRemapper = buildResourcePathRemapper(classRenameMap)
     val classReader = ClassReader(classBytes)
-    val classWriter = ClassWriter(0)
-    val classVisitor = ClassRemapper(classWriter, createRemapper(
-        mapInternalName = { internalName: String -> classRenameMap[internalName] ?: internalName },
-        mapResourcePath = resourcePathRemapper,
-    ))
+    val classWriter = frameComputingWriter()
+    val classVisitor = ClassRemapper(
+        classWriter,
+        createRemapper(
+            mapInternalName = { internalName: String -> classRenameMap[internalName] ?: internalName },
+            mapResourcePath = resourcePathRemapper,
+            mapStringValue = { value -> remapSupportedReflectionClassString(value, classRenameMap) },
+        ),
+    )
     classReader.accept(classVisitor, 0)
     val remappedBytes = classWriter.toByteArray()
 
-    // Second pass: read back through a fresh ClassReader/ClassWriter cycle to
-    // strip any dead constant pool entries that survived the remap pass.  This
-    // guarantees the output pool contains only entries reachable from the final
-    // bytecode and class metadata, eliminating original-name leakage.
+    // Strip dead constant-pool entries so stale class-name constants do not
+    // survive a successful remap.
     val cleanReader = ClassReader(remappedBytes)
-    val cleanWriter = ClassWriter(cleanReader, 0)
+    // Build a fresh constant pool. ClassWriter(ClassReader, 0) intentionally
+    // copies the source pool, which can retain stale UTF8 constants for the
+    // retired fixed-r names even when no live instruction references them.
+    val cleanWriter = frameComputingWriter()
     cleanReader.accept(cleanWriter, 0)
-    cleanWriter.toByteArray()
-} catch (_: Exception) {
-    // If remapping fails (e.g. corrupted descriptors from prior transforms),
-    // return the original bytes so the engine does not crash.
-    classBytes
+    return cleanWriter.toByteArray()
+}
+
+private fun frameComputingWriter(): ClassWriter = object : ClassWriter(ClassWriter.COMPUTE_FRAMES) {
+    override fun getCommonSuperClass(type1: String, type2: String): String = "java/lang/Object"
+}
+
+/**
+ * Maps only structured reflection forms that are known to carry an owner class
+ * followed by a member selector. Exact binary names, internal names, .class
+ * resource strings, and slash resource paths remain covered by [createRemapper].
+ */
+private fun remapSupportedReflectionClassString(value: String, classRenameMap: Map<String, String>): String {
+    val ordered = classRenameMap.entries.sortedByDescending { it.key.length }
+    for ((oldInternalName, newInternalName) in ordered) {
+        val oldBinaryName = oldInternalName.replace('/', '.')
+        val newBinaryName = newInternalName.replace('/', '.')
+        val isMemberReference = value.startsWith("$oldBinaryName#") ||
+            value.startsWith("$oldBinaryName::") ||
+            value.startsWith("$oldBinaryName.m_")
+        if (isMemberReference) {
+            return newBinaryName + value.removePrefix(oldBinaryName)
+        }
+    }
+    return value
 }
 
 internal fun buildResourcePathRemapper(classRenameMap: Map<String, String>): (String) -> String {

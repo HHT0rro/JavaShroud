@@ -5,13 +5,18 @@ import org.objectweb.asm.Handle
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.Type
 import org.objectweb.asm.tree.FieldInsnNode
+import org.objectweb.asm.tree.AbstractInsnNode
 import org.objectweb.asm.tree.InsnList
 import org.objectweb.asm.tree.InsnNode
 import org.objectweb.asm.tree.IntInsnNode
 import org.objectweb.asm.tree.InvokeDynamicInsnNode
+import org.objectweb.asm.tree.JumpInsnNode
+import org.objectweb.asm.tree.LabelNode
 import org.objectweb.asm.tree.LdcInsnNode
+import org.objectweb.asm.tree.LookupSwitchInsnNode
 import org.objectweb.asm.tree.MethodInsnNode
 import org.objectweb.asm.tree.MethodNode
+import org.objectweb.asm.tree.TableSwitchInsnNode
 import org.objectweb.asm.tree.TypeInsnNode
 import org.objectweb.asm.tree.VarInsnNode
 import java.security.MessageDigest
@@ -19,6 +24,8 @@ import java.security.SecureRandom
 import java.util.Arrays
 import java.util.Base64
 import java.util.Random
+import java.util.Collections
+import java.util.IdentityHashMap
 import io.github.hht0rro.javashroud.transforms.protection.requireVbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHandle
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenStringPageCandidate
@@ -101,9 +108,14 @@ fun encryptClassStrings(
             expandStringConcatRecipes(method)
             val annotated = hasShroudEncryptAnnotation(method)
             val instructions = method.instructions ?: continue
+            val reflectionMemberNameNodes = reflectionMemberNameConstants(method)
+            val loopMembers = backwardLoopMembers(method)
+            val loopLocalInitializers = InsnList()
             var methodLiteralOrdinal = 0
             for (insn in instructions.toArray()) {
-                val value = (insn as? LdcInsnNode)?.cst as? String ?: continue
+                val ldc = insn as? LdcInsnNode ?: continue
+                if (reflectionMemberNameNodes.contains(ldc)) continue
+                val value = ldc.cst as? String ?: continue
                 if (value.isEmpty() || !shouldEncryptString(value, config, annotated)) continue
 
                 val buildNonce = ByteArray(AKEN_STRING_PAGE_NONCE_SIZE).also(random::nextBytes)
@@ -151,7 +163,16 @@ fun encryptClassStrings(
                         callSiteProof = callSiteProof,
                         shape = callsiteShape,
                     )
-                    instructions.insert(insn, decodeCallsite)
+                    val replacement = if (loopMembers.contains(insn)) {
+                        val local = method.maxLocals
+                        method.maxLocals += 1
+                        loopLocalInitializers.add(InsnNode(Opcodes.ACONST_NULL))
+                        loopLocalInitializers.add(VarInsnNode(Opcodes.ASTORE, local))
+                        lazyLoopStringLoad(local, decodeCallsite)
+                    } else {
+                        decodeCallsite
+                    }
+                    instructions.insert(insn, replacement)
                     instructions.remove(insn)
                     candidates += candidate
                     candidate = null
@@ -165,6 +186,9 @@ fun encryptClassStrings(
                     encodedHandle?.let { Arrays.fill(it, 0) }
                     callSiteProof?.let { Arrays.fill(it, 0) }
                 }
+            }
+            if (loopLocalInitializers.size() > 0) {
+                instructions.insertBefore(instructions.first, loopLocalInitializers)
             }
         }
 
@@ -182,6 +206,54 @@ fun encryptClassStrings(
     } finally {
         candidates.forEach { it.wipe() }
     }
+}
+
+/**
+ * Finds instructions enclosed by a backward jump/switch edge. String pages in
+ * such a region are authenticated lazily once per method invocation and then
+ * kept only in a local variable until that invocation returns. This preserves
+ * all-strings protection without turning a loop-invariant literal into a JNI
+ * page open on every iteration or introducing a Java/static plaintext cache.
+ */
+private fun backwardLoopMembers(method: MethodNode): Set<AbstractInsnNode> {
+    val instructions = method.instructions?.toArray() ?: return emptySet()
+    if (instructions.isEmpty()) return emptySet()
+    val positions = IdentityHashMap<AbstractInsnNode, Int>(instructions.size)
+    instructions.forEachIndexed { index, instruction -> positions[instruction] = index }
+    val members = Collections.newSetFromMap(IdentityHashMap<AbstractInsnNode, Boolean>())
+
+    fun addBackwardRange(branchIndex: Int, target: LabelNode) {
+        val targetIndex = positions[target] ?: return
+        if (targetIndex >= branchIndex) return
+        for (index in targetIndex..branchIndex) members.add(instructions[index])
+    }
+
+    instructions.forEachIndexed { index, instruction ->
+        when (instruction) {
+            is JumpInsnNode -> addBackwardRange(index, instruction.label)
+            is TableSwitchInsnNode -> {
+                addBackwardRange(index, instruction.dflt)
+                instruction.labels.forEach { label -> addBackwardRange(index, label) }
+            }
+            is LookupSwitchInsnNode -> {
+                addBackwardRange(index, instruction.dflt)
+                instruction.labels.forEach { label -> addBackwardRange(index, label) }
+            }
+        }
+    }
+    return members
+}
+
+private fun lazyLoopStringLoad(local: Int, decodeCallsite: InsnList): InsnList = InsnList().apply {
+    val ready = LabelNode()
+    add(VarInsnNode(Opcodes.ALOAD, local))
+    add(InsnNode(Opcodes.DUP))
+    add(JumpInsnNode(Opcodes.IFNONNULL, ready))
+    add(InsnNode(Opcodes.POP))
+    add(decodeCallsite)
+    add(InsnNode(Opcodes.DUP))
+    add(VarInsnNode(Opcodes.ASTORE, local))
+    add(ready)
 }
 
 
@@ -282,6 +354,46 @@ private fun shouldEncryptString(value: String, config: StringEncryptionConfig, a
     "length-threshold" -> value.length >= config.lengthThreshold
     "annotated" -> annotated
     else -> true
+}
+
+private val REFLECTION_MEMBER_LOOKUP_METHODS = setOf(
+    "getDeclaredMethod",
+    "getMethod",
+    "getDeclaredField",
+    "getField",
+)
+
+/**
+ * Returns string LDC nodes used as member names by java.lang.Class reflection
+ * lookups. These names must remain ordinary constants until the member rename
+ * stage can rewrite them together with the corresponding declaration.
+ */
+private fun reflectionMemberNameConstants(method: MethodNode): Set<LdcInsnNode> {
+    val marked = Collections.newSetFromMap(IdentityHashMap<LdcInsnNode, Boolean>())
+    val instructions = method.instructions ?: return marked
+    for (instruction in instructions.toArray()) {
+        val call = instruction as? MethodInsnNode ?: continue
+        if (call.owner != "java/lang/Class" || call.name !in REFLECTION_MEMBER_LOOKUP_METHODS) continue
+        reflectionMemberNameConstantBefore(call)?.let(marked::add)
+    }
+    return marked
+}
+
+private fun reflectionMemberNameConstantBefore(call: MethodInsnNode): LdcInsnNode? {
+    var current = call.previous
+    var scanned = 0
+    while (current != null && scanned < 48) {
+        if (current.opcode >= 0) {
+            scanned++
+            val ldc = current as? LdcInsnNode
+            if (ldc?.cst is String) return ldc
+            // Do not cross another invocation: any earlier string belongs to a
+            // different call's arguments rather than this reflection lookup.
+            if (current is MethodInsnNode || current is InvokeDynamicInsnNode) break
+        }
+        current = current.previous
+    }
+    return null
 }
 
 private fun buildAkenStringPageDecodeCallsite(

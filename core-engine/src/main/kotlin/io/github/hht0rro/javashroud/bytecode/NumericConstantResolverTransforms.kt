@@ -46,15 +46,13 @@ fun obfuscateNumericConstantsResolver(
     require(config.longCoverage in LONG_COVERAGE_LEVELS) {
         "integer-constant-obfuscation longCoverage '${config.longCoverage}' is not supported; supported values: ${LONG_COVERAGE_LEVELS.joinToString(", ")}"
     }
+    require(config.resolverCodec != "des") {
+        "integer-constant-obfuscation resolverCodec 'des' is retired; use xor"
+    }
     require(config.resolverCodec in NUMERIC_RESOLVER_CODECS) {
         "integer-constant-obfuscation resolverCodec '${config.resolverCodec}' is not supported; supported values: ${NUMERIC_RESOLVER_CODECS.joinToString(", ")}"
     }
-
-    return if (config.resolverCodec == "des") {
-        obfuscateNumericConstantsWithDes(classBytes, classNode, reader, config)
-    } else {
-        obfuscateNumericConstantsWithXor(classBytes, classNode, reader, config)
-    }
+    return obfuscateNumericConstantsWithXor(classBytes, classNode, reader, config)
 }
 
 private fun obfuscateNumericConstantsWithXor(
@@ -585,4 +583,4 @@ private fun resolverLongBytes(value: Long): ByteArray = ByteArray(8) { index ->
 private val INT_FIELD_DESCRIPTORS = setOf("Z", "B", "C", "S", "I")
 private val INT_COVERAGE_LEVELS = setOf("none", "normal", "aggressive")
 private val LONG_COVERAGE_LEVELS = setOf("none", "normal")
-private val NUMERIC_RESOLVER_CODECS = setOf("xor", "des")
+private val NUMERIC_RESOLVER_CODECS = setOf("xor")

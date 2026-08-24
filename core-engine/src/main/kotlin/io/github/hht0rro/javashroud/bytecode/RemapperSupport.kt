@@ -27,10 +27,16 @@ internal fun createRemapper(
             }
             if (value is String && mapInternalName != null) {
                 if (value.endsWith(".class")) {
-                    val internalName = value.removeSuffix(".class")
+                    val bareName = value.removeSuffix(".class")
+                    val dotted = bareName.indexOf('/') < 0 && bareName.indexOf('.') >= 0
+                    val internalName = if (dotted) bareName.replace('.', '/') else bareName
                     val mappedName = mapInternalName(internalName)
                     if (mappedName != internalName) {
-                        return "$mappedName.class"
+                        return if (dotted) {
+                            "${mappedName.replace('/', '.')}.class"
+                        } else {
+                            "$mappedName.class"
+                        }
                     }
                 }
                 if (mapResourcePath != null && value.indexOf('/') >= 0) {

@@ -7,7 +7,7 @@ import org.objectweb.asm.tree.*
 import java.security.SecureRandom
 import java.util.Base64
 import javax.crypto.Cipher
-import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
@@ -122,24 +122,24 @@ private fun createFieldDecryptHelper(): MethodNode {
     method.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/util/Base64${"$"}Decoder", "decode", "(Ljava/lang/String;)[B", false)
     method.visitVarInsn(Opcodes.ASTORE, 2)
 
-    method.visitIntInsn(Opcodes.BIPUSH, 16)
+    method.visitIntInsn(Opcodes.BIPUSH, 12)
     method.visitIntInsn(Opcodes.NEWARRAY, Opcodes.T_BYTE)
     method.visitVarInsn(Opcodes.ASTORE, 3)
     method.visitVarInsn(Opcodes.ALOAD, 2)
     method.visitInsn(Opcodes.ICONST_0)
     method.visitVarInsn(Opcodes.ALOAD, 3)
     method.visitInsn(Opcodes.ICONST_0)
-    method.visitIntInsn(Opcodes.BIPUSH, 16)
+    method.visitIntInsn(Opcodes.BIPUSH, 12)
     method.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "arraycopy", "(Ljava/lang/Object;ILjava/lang/Object;II)V", false)
 
     method.visitVarInsn(Opcodes.ALOAD, 2)
     method.visitInsn(Opcodes.ARRAYLENGTH)
-    method.visitIntInsn(Opcodes.BIPUSH, 16)
+    method.visitIntInsn(Opcodes.BIPUSH, 12)
     method.visitInsn(Opcodes.ISUB)
     method.visitIntInsn(Opcodes.NEWARRAY, Opcodes.T_BYTE)
     method.visitVarInsn(Opcodes.ASTORE, 4)
     method.visitVarInsn(Opcodes.ALOAD, 2)
-    method.visitIntInsn(Opcodes.BIPUSH, 16)
+    method.visitIntInsn(Opcodes.BIPUSH, 12)
     method.visitVarInsn(Opcodes.ALOAD, 4)
     method.visitInsn(Opcodes.ICONST_0)
     method.visitVarInsn(Opcodes.ALOAD, 4)
@@ -155,16 +155,17 @@ private fun createFieldDecryptHelper(): MethodNode {
     method.visitMethodInsn(Opcodes.INVOKESPECIAL, "javax/crypto/spec/SecretKeySpec", "<init>", "([BLjava/lang/String;)V", false)
     method.visitVarInsn(Opcodes.ASTORE, 5)
 
-    method.visitLdcInsn("AES/CBC/PKCS5Padding")
+    method.visitLdcInsn("AES/GCM/NoPadding")
     method.visitMethodInsn(Opcodes.INVOKESTATIC, "javax/crypto/Cipher", "getInstance", "(Ljava/lang/String;)Ljavax/crypto/Cipher;", false)
     method.visitVarInsn(Opcodes.ASTORE, 6)
     method.visitVarInsn(Opcodes.ALOAD, 6)
     method.visitInsn(Opcodes.ICONST_2)
     method.visitVarInsn(Opcodes.ALOAD, 5)
-    method.visitTypeInsn(Opcodes.NEW, "javax/crypto/spec/IvParameterSpec")
+    method.visitTypeInsn(Opcodes.NEW, "javax/crypto/spec/GCMParameterSpec")
     method.visitInsn(Opcodes.DUP)
+    method.visitIntInsn(Opcodes.SIPUSH, 128)
     method.visitVarInsn(Opcodes.ALOAD, 3)
-    method.visitMethodInsn(Opcodes.INVOKESPECIAL, "javax/crypto/spec/IvParameterSpec", "<init>", "([B)V", false)
+    method.visitMethodInsn(Opcodes.INVOKESPECIAL, "javax/crypto/spec/GCMParameterSpec", "<init>", "(I[B)V", false)
     method.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "javax/crypto/Cipher", "init", "(ILjava/security/Key;Ljava/security/spec/AlgorithmParameterSpec;)V", false)
 
     method.visitTypeInsn(Opcodes.NEW, "java/lang/String")
@@ -191,8 +192,8 @@ private fun createFieldDecryptHelper(): MethodNode {
 }
 
 internal fun aesEncryptFieldString(input: String, key: ByteArray): String {
-    val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-    val iv = ByteArray(16).also { SecureRandom().nextBytes(it) }
-    cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
-    return Base64.getEncoder().encodeToString(iv + cipher.doFinal(input.toByteArray(Charsets.UTF_8)))
+    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+    val nonce = ByteArray(12).also { SecureRandom().nextBytes(it) }
+    cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, nonce))
+    return Base64.getEncoder().encodeToString(nonce + cipher.doFinal(input.toByteArray(Charsets.UTF_8)))
 }

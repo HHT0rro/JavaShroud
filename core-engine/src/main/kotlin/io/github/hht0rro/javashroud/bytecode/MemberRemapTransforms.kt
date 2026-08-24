@@ -343,7 +343,7 @@ private fun addMethodRenameBridges(
         node.methods.add(buildBridgeMethod(node, rename, rename.renamedName, rename.originalName))
     }
 
-    val writer = ClassWriter(ClassWriter.COMPUTE_MAXS)
+    val writer = computeFramesWriter(ClassReader(classBytes))
     node.accept(writer)
     return writer.toByteArray()
 }

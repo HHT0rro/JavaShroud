@@ -48,7 +48,7 @@ fun createReferenceProxies(classBytes: ByteArray): ByteArray {
     var proxyIndex = 0
 
     for (target in targets) {
-        val proxyName = "a_px${proxyIndex++}"
+        val proxyName = diversifiedProxyName(classNode.name, target.owner, target.name, target.desc, proxyIndex++)
         createStaticForwarderProxy(classNode, target.owner, target.name, target.desc, target.isInterface, proxyName)
         proxyMap[target] = proxyName
     }
@@ -64,6 +64,14 @@ fun createReferenceProxies(classBytes: ByteArray): ByteArray {
     val writer = computeFramesWriter(reader)
     classNode.accept(writer)
     return writer.toByteArray()
+}
+
+private fun diversifiedProxyName(className: String, owner: String, name: String, desc: String, index: Int): String {
+    val seed = (className + "#" + owner + "#" + name + "#" + desc + "#" + index).hashCode()
+    val alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    val suffix = CharArray(3) { offset -> alphabet[(Math.abs(seed + offset * 31) % alphabet.length)] }
+    val families = arrayOf("p", "q", "r", "x", "z")
+    return families[Math.abs(seed) % families.size] + "_" + String(suffix) + Integer.toHexString(seed and 0xFFFF)
 }
 
 private fun isPlatformInvocationOwner(owner: String): Boolean =

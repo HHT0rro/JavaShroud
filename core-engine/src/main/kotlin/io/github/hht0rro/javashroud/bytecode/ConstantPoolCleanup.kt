@@ -14,7 +14,12 @@ import org.objectweb.asm.ClassWriter
  */
 fun stripDeadConstantPoolEntries(classBytes: ByteArray): ByteArray {
     val reader = ClassReader(classBytes)
-    val writer = ClassWriter(reader, 0)
+    // Do not seed the writer from the input reader.  ClassWriter(reader, ...)
+    // intentionally copies the complete original constant pool, including
+    // Utf8 entries that became unreachable after SourceFile/parameter-debug
+    // stripping.  A fresh writer retains the emitted graph only, which is the
+    // release gate needed to prevent removed debug names leaking in bytes.
+    val writer = ClassWriter(0)
     reader.accept(writer, 0)
     return writer.toByteArray()
 }
