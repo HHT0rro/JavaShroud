@@ -176,6 +176,30 @@ val buildRustNativeRuntime = tasks.register<Exec>("buildRustNativeRuntime") {
     commandLine(resolveCargoExecutable(), "zigbuild", "--locked", "--workspace", "--release", "--target", cargoTarget)
 }
 
+val packageRustWorkspaceSources = tasks.register<Sync>("packageRustWorkspaceSources") {
+    group = "build"
+    description = "Packages the AKEN-R1 Rust workspace sources for on-machine recompilation."
+    val outputRoot = layout.buildDirectory.dir("generated/rust-workspace-sources/META-INF/rust-runtime")
+    from(fileTree(rustWorkspaceDir) {
+        exclude("target/**")
+        exclude("**/.target*/**")
+        exclude("**/*.pdb")
+    })
+    into(outputRoot)
+    doLast {
+        val root = outputRoot.get().asFile
+        val files = root.walkTopDown()
+            .filter { it.isFile && it.name != "file-list.txt" }
+            .map { it.relativeTo(root).invariantSeparatorsPath }
+            .sorted()
+            .toList()
+        root.resolve("file-list.txt").writeText(files.joinToString("\n"))
+        if (files.none { it == "Cargo.toml" } || files.none { it == "Cargo.lock" }) {
+            throw GradleException("AKEN-R1 Rust workspace sources are missing Cargo.toml or Cargo.lock")
+        }
+    }
+}
+
 val packageRustNativeRuntime = tasks.register<Sync>("packageRustNativeRuntime") {
     group = "build"
     description = "Packages exactly one authenticated AKEN-R1 Rust native runtime resource."
@@ -242,8 +266,9 @@ val packageRustNativeRuntime = tasks.register<Sync>("packageRustNativeRuntime") 
 }
 
 tasks.named<ProcessResources>("processResources") {
-    dependsOn(packageRustNativeRuntime)
+    dependsOn(packageRustNativeRuntime, packageRustWorkspaceSources)
     from(packageRustNativeRuntime)
+    from(layout.buildDirectory.dir("generated/rust-workspace-sources"))
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
 

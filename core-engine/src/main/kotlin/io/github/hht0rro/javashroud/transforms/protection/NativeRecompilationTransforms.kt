@@ -142,7 +142,7 @@ object NativeRecompilationTransforms {
             return RecompilationDiagnostics(emptyList(), messages)
         }
         val resolution = try {
-            RustToolchainProvisioner.resolve()
+            RustToolchainProvisioner.resolve(autoInstall = true)
         } catch (error: Exception) {
             report(rustMessage("error", "AKEN-R1 Rust toolchain resolution failed: ${error.message.orEmpty()}"))
             return RecompilationDiagnostics(emptyList(), messages)
@@ -263,8 +263,7 @@ object NativeRecompilationTransforms {
             }
             val compiled = compileNativeTasksBounded(
                 compileTasks = tasks,
-                rustcPath = toolchain.rustcPath,
-                cargoPath = toolchain.cargoPath,
+                toolchain = toolchain,
                 rustWorkspace = rustWorkspace,
                 cfgEvidenceExports = cfgEvidenceExports,
             )
@@ -325,8 +324,7 @@ object NativeRecompilationTransforms {
 
     private fun compileNativeTasksBounded(
         compileTasks: List<NativeCompileTask>,
-        rustcPath: Path,
-        cargoPath: Path,
+        toolchain: RustToolchainProvisioner.RustToolchain,
         rustWorkspace: Path,
         cfgEvidenceExports: Boolean,
     ): List<Pair<NativeCompileTask, NativeArtifactBuildResult>> {
@@ -338,8 +336,7 @@ object NativeRecompilationTransforms {
                 copyRustWorkspace(rustWorkspace, task.workspace)
                 writeSpecializationModule(task)
                 task to compileOrLoadRustArtifact(
-                    rustcPath = rustcPath,
-                    cargoPath = cargoPath,
+                    toolchain = toolchain,
                     rustWorkspace = task.workspace,
                     task = task,
                     cfgEvidenceExports = cfgEvidenceExports,
@@ -381,8 +378,7 @@ object NativeRecompilationTransforms {
     }
 
     private fun compileOrLoadRustArtifact(
-        rustcPath: Path,
-        cargoPath: Path,
+        toolchain: RustToolchainProvisioner.RustToolchain,
         rustWorkspace: Path,
         task: NativeCompileTask,
         cfgEvidenceExports: Boolean,
@@ -394,8 +390,7 @@ object NativeRecompilationTransforms {
         }
         val specializationHex = HexEncodingSupport.toHexLower(task.specializationDigest)
         val compileResult = runRustCompile(
-            rustcPath = rustcPath,
-            cargoPath = cargoPath,
+            toolchain = toolchain,
             workspace = rustWorkspace,
             targetDir = task.targetDir,
             target = task.rustTarget,
@@ -595,15 +590,50 @@ object NativeRecompilationTransforms {
                 root = root?.parent
             }
         }
-        classLoader.getResource("META-INF/rust-runtime/Cargo.toml")?.let { resource ->
-            runCatching { Path.of(resource.toURI()).parent }.getOrNull()?.let(candidates::add)
-        }
+        extractBundledRustWorkspace(classLoader)?.let(candidates::add)
         return candidates.asSequence()
             .map { it.toAbsolutePath().normalize() }
             .firstOrNull { isRustWorkspaceTemplate(it) }
             ?: throw IllegalStateException(
                 "AKEN-R1 Rust workspace is unavailable; expected core-engine/src/main/rust with Cargo.lock",
             )
+    }
+
+    private fun extractBundledRustWorkspace(classLoader: ClassLoader): Path? {
+        val listBytes = classLoader.getResourceAsStream("META-INF/rust-runtime/file-list.txt")?.use { it.readBytes() }
+            ?: return null
+        val digest = HexEncodingSupport.toHexLower(MessageDigest.getInstance("SHA-256").digest(listBytes))
+        val destination = Path.of(System.getProperty("user.home"), ".javashroud", "rust-workspace", "aken-r1-$digest")
+            .toAbsolutePath().normalize()
+        if (isRustWorkspaceTemplate(destination)) return destination
+        val files = String(listBytes, StandardCharsets.UTF_8).lineSequence()
+            .map(String::trim)
+            .filter { it.isNotEmpty() && it != "file-list.txt" && ".." !in it }
+            .toList()
+        Files.createDirectories(destination.parent)
+        val staging = Files.createTempDirectory(destination.parent, ".stage-rust-workspace-")
+        return try {
+            files.forEach { relative ->
+                val output = staging.resolve(relative).normalize()
+                require(output.startsWith(staging)) { "bundled Rust workspace entry escapes staging: $relative" }
+                val input = classLoader.getResourceAsStream("META-INF/rust-runtime/$relative")
+                    ?: throw IllegalStateException("bundled Rust workspace is missing $relative")
+                input.use { stream ->
+                    Files.createDirectories(output.parent)
+                    Files.copy(stream, output, StandardCopyOption.REPLACE_EXISTING)
+                }
+            }
+            if (!isRustWorkspaceTemplate(staging)) return null
+            if (Files.exists(destination)) destination.toFile().deleteRecursively()
+            try {
+                Files.move(staging, destination, StandardCopyOption.ATOMIC_MOVE)
+            } catch (_: Exception) {
+                Files.move(staging, destination, StandardCopyOption.REPLACE_EXISTING)
+            }
+            destination
+        } finally {
+            if (Files.exists(staging)) staging.toFile().deleteRecursively()
+        }
     }
 
     private fun isRustWorkspaceTemplate(path: Path): Boolean {
@@ -643,7 +673,10 @@ object NativeRecompilationTransforms {
                     throw IllegalStateException("AKEN-R1 rejects symlinked Rust workspace entries: $entry")
                 }
                 val relative = source.relativize(entry)
-                if (relative.nameCount > 0 && relative.getName(0).toString() == "target") return@forEach
+                val relativeText = relative.toString().replace('\\', '/')
+                if (relativeText.split('/').any { part -> part == "target" || part.startsWith(".target") }) {
+                    return@forEach
+                }
                 val target = normalizedDestination.resolve(relative.toString()).normalize()
                 require(target.startsWith(normalizedDestination)) {
                     "AKEN-R1 Rust workspace entry escapes its isolated build directory: $relative"
@@ -733,8 +766,7 @@ object NativeRecompilationTransforms {
     }.digest()
 
     private fun runRustCompile(
-        rustcPath: Path,
-        cargoPath: Path,
+        toolchain: RustToolchainProvisioner.RustToolchain,
         workspace: Path,
         targetDir: Path,
         target: String,
@@ -746,12 +778,10 @@ object NativeRecompilationTransforms {
             "AKEN-R1 specialization digest is invalid"
         }
         Files.createDirectories(targetDir)
-        val subcommand = "zigbuild"
         val command = listOf(
-            cargoPath.toString(),
-            subcommand,
+            toolchain.cargoPath.toString(),
+            "zigbuild",
             "--locked",
-            "--offline",
             "--workspace",
             "--release",
             "--target",
@@ -763,21 +793,31 @@ object NativeRecompilationTransforms {
             .directory(workspace.toFile())
             .redirectErrorStream(false)
         processBuilder.environment().apply {
-            put("CARGO_NET_OFFLINE", "true")
+            putAll(toolchain.extraEnvironment)
             put("CARGO_TERM_COLOR", "never")
-            put("RUSTC", rustcPath.toAbsolutePath().normalize().toString())
+            put("RUSTC", toolchain.rustcPath.toAbsolutePath().normalize().toString())
             put("CARGO_TARGET_DIR", targetDir.toString())
             put("RUSTFLAGS", "-C metadata=jsr1_${specializationHex.take(16)}")
+            prependPath(toolchain.extraPathEntries)
             if (cfgEvidenceExports) put("JSRT_R1_CFG_EVIDENCE", "1") else remove("JSRT_R1_CFG_EVIDENCE")
         }
         return runRustProcess(processBuilder, target)
+    }
+
+    private fun MutableMap<String, String>.prependPath(entries: List<Path>) {
+        if (entries.isEmpty()) return
+        val pathKey = keys.firstOrNull { it.equals("PATH", ignoreCase = true) } ?: "PATH"
+        val separator = if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) ";" else ":"
+        val prefix = entries.joinToString(separator) { it.toAbsolutePath().normalize().toString() }
+        val existing = this[pathKey].orEmpty()
+        this[pathKey] = if (existing.isBlank()) prefix else "$prefix$separator$existing"
     }
 
     internal fun rustCargoCommandForTest(cargoPath: Path, target: String, targetDir: Path): List<String> {
         require(target in RUST_TARGETS.values) { "AKEN-R1 Rust target is not locked: $target" }
         val subcommand = "zigbuild"
         return listOf(
-            cargoPath.toString(), subcommand, "--locked", "--offline", "--workspace", "--release",
+            cargoPath.toString(), subcommand, "--locked", "--workspace", "--release",
             "--target", target, "--target-dir", targetDir.toString(),
         )
     }

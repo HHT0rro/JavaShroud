@@ -1,5 +1,6 @@
 package io.github.hht0rro.javashroud
 
+import io.github.hht0rro.javashroud.transforms.protection.NativeBuildToolchainProvisioner
 import io.github.hht0rro.javashroud.transforms.protection.RustToolchainProvisioner
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -306,6 +307,20 @@ class RustToolchainProvisionerTest {
         assertFailsWith<RustToolchainProvisioner.RustToolchainException> {
             RustToolchainProvisioner.parseLock(validLock.replace("format = 1", "format = 2"))
         }
+    }
+
+    @Test
+    fun locked_zig_and_cargo_zigbuild_archives_are_https_and_versioned() {
+        val windowsZig = NativeBuildToolchainProvisioner.zigArchive(RustToolchainProvisioner.HostPlatform.WINDOWS_X64)
+        val linuxZig = NativeBuildToolchainProvisioner.zigArchive(RustToolchainProvisioner.HostPlatform.LINUX_X64)
+        val windowsCargo = NativeBuildToolchainProvisioner.cargoZigbuildArchive(RustToolchainProvisioner.HostPlatform.WINDOWS_X64)
+        val linuxCargo = NativeBuildToolchainProvisioner.cargoZigbuildArchive(RustToolchainProvisioner.HostPlatform.LINUX_X64)
+        assertTrue(windowsZig.url.startsWith("https://ziglang.org/download/0.13.0/"))
+        assertTrue(linuxZig.url.startsWith("https://ziglang.org/download/0.13.0/"))
+        assertTrue(windowsCargo.url.startsWith("https://github.com/rust-cross/cargo-zigbuild/releases/download/v0.23.2/"))
+        assertTrue(linuxCargo.url.startsWith("https://github.com/rust-cross/cargo-zigbuild/releases/download/v0.23.2/"))
+        assertEquals(64, windowsZig.sha256.length)
+        assertEquals(64, linuxCargo.sha256.length)
     }
 
     @Test

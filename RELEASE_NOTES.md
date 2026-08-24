@@ -9,6 +9,8 @@
 - AKEN R1：新增打包与 wire format、artifact 目录编解码器、当前页绑定解密器与 Eval7 DEK wrap。
 - Catalog sidecar：`System.load` 前抽取认证目录到 `META-INF/jsrt/`，每页携带 handle、locator、PageKey 与 RuntimeBindingDigest。
 - Per-artifact Native 重编译：每次构建生成 specialization nonce 并覆写 `specialization.rs`，构建锁以完整 specialization identity 为键。
+- 无本机工具链也能混淆：首次 Native 重编译自动下载锁定 Rust 1.78.0、Zig 0.13.0 与 cargo-zigbuild 0.18.0（SHA-256 校验后缓存到 `~/.javashroud/toolchains`），Rust 源码随引擎分发；不再依赖 rustup / 系统 zig / mingw 预装。
+- 桌面端自动丢弃已退役 pass（`anti-dump-protection`、`anti-instrumentation`、`anti-symbolic-execution` 等），旧配置不再直接被引擎校验拒绝。
 
 ## 随机化 VM 方言与数据布局
 

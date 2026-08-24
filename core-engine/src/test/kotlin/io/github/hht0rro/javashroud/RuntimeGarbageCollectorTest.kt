@@ -43,10 +43,26 @@ class RuntimeGarbageCollectorTest {
 
             assertTrue(result.applied)
             assertEquals(3, result.deleted.size)
-            assertFalse(Files.exists(userCache))
+            assertFalse(Files.exists(userCache.resolve("zig")))
             assertFalse(Files.exists(userNativeCache))
             assertFalse(Files.exists(nativeCache))
             assertTrue(Files.exists(ordinaryFile))
+        }
+    }
+
+    @Test
+    fun collect_apply_preserves_toolchains_and_rust_workspace() {
+        withTempRoots { userHome, workspace ->
+            val userCache = userHome.resolve(".javashroud")
+            val toolchain = writeFile(userCache.resolve("toolchains/zig-0.13.0-windows-x64/zig.exe"), 3)
+            val workspaceFiles = writeFile(userCache.resolve("rust-workspace/aken-r1/Cargo.toml"), 4)
+            writeFile(userCache.resolve("zig/0.13.0/zig.exe"), 5)
+
+            RuntimeGarbageCollector.collect(userHome, workspace, apply = true)
+
+            assertTrue(Files.exists(toolchain))
+            assertTrue(Files.exists(workspaceFiles))
+            assertFalse(Files.exists(userCache.resolve("zig")))
         }
     }
 

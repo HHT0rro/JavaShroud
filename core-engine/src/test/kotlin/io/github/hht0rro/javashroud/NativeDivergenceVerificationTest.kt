@@ -42,7 +42,7 @@ class NativeDivergenceVerificationTest {
     }
 
     @Test
-    fun r1_cargo_commands_are_locked_offline_and_target_directory_is_explicit() {
+    fun r1_cargo_commands_are_locked_and_target_directory_is_explicit() {
         val windows = NativeRecompilationTransforms.rustCargoCommandForTest(
             Path.of("cargo"),
             RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET,
@@ -53,7 +53,6 @@ class NativeDivergenceVerificationTest {
                 "cargo",
                 "zigbuild",
                 "--locked",
-                "--offline",
                 "--workspace",
                 "--release",
                 "--target",
@@ -71,7 +70,7 @@ class NativeDivergenceVerificationTest {
         )
         assertEquals("zigbuild", linux[1])
         assertTrue(linux.contains("--locked"))
-        assertTrue(linux.contains("--offline"))
+        assertFalse(linux.contains("--offline"))
         assertTrue(linux.contains("--target-dir"))
     }
 

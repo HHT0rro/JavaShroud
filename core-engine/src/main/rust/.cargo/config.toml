@@ -3,8 +3,5 @@
 # x86_64-unknown-linux-gnu.2.17 command target; it is not a Rust target JSON
 # and must not be installed through rustup.
 [alias]
-r1-windows-release = "build --locked --offline --release --package jsrt-ffi --lib --target x86_64-pc-windows-gnu"
-r1-linux-release = "zigbuild --locked --offline --release --package jsrt-ffi --lib --target x86_64-unknown-linux-gnu.2.17"
-
-[target.x86_64-pc-windows-gnu]
-linker = "x86_64-w64-mingw32-gcc"
+r1-windows-release = "zigbuild --locked --release --package jsrt-ffi --lib --target x86_64-pc-windows-gnu"
+r1-linux-release = "zigbuild --locked --release --package jsrt-ffi --lib --target x86_64-unknown-linux-gnu.2.17"

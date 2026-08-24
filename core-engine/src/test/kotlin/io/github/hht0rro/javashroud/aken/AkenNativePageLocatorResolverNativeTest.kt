@@ -40,15 +40,15 @@ class AkenNativePageLocatorResolverNativeTest {
     }
 
     @Test
-    fun r1_cargo_route_is_offline_locked_and_explicitly_targeted() {
+    fun r1_cargo_route_is_locked_and_explicitly_targeted() {
         val command = NativeRecompilationTransforms.rustCargoCommandForTest(
             cargoPath = java.nio.file.Path.of("cargo"),
             target = RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET,
             targetDir = java.nio.file.Path.of("build", "r1", "windows"),
         )
-        assertEquals("build", command[1])
+        assertEquals("zigbuild", command[1])
         assertTrue(command.contains("--locked"))
-        assertTrue(command.contains("--offline"))
+        assertTrue(!command.contains("--offline"))
         assertTrue(command.containsAll(listOf("--workspace", "--release", "--target", "--target-dir")))
     }
 }

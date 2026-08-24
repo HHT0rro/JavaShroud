@@ -402,6 +402,41 @@ func TestValidateObfuscationRequest_RejectsDuplicateAndMalformedSelectionTargets
 	}
 }
 
+func TestPrepareConfigFile_DropsRetiredCurrentFormatPasses(t *testing.T) {
+	request := ObfuscationRequest{
+		InputJarPath:     writeTempJar(t),
+		OutputJarPath:    filepath.Join(t.TempDir(), "out.jar"),
+		AllowOptInPasses: true,
+		Passes: []PassSpec{
+			{ID: "string-encryption", Enabled: true, Params: map[string]json.RawMessage{}},
+			{ID: "anti-dump-protection", Enabled: true, Params: map[string]json.RawMessage{}},
+			{ID: "anti-instrumentation", Enabled: true, Params: map[string]json.RawMessage{}},
+			{ID: "anti-symbolic-execution", Enabled: true, Params: map[string]json.RawMessage{}},
+		},
+	}
+
+	tempDir, configPath, cleanup, err := prepareConfigFile(request)
+	if err != nil {
+		t.Fatalf("prepareConfigFile returned error: %v", err)
+	}
+	defer cleanup()
+	defer os.RemoveAll(tempDir)
+
+	payload, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config failed: %v", err)
+	}
+	content := string(payload)
+	if !strings.Contains(content, `id = "string-encryption"`) {
+		t.Fatalf("expected live pass to remain, got %s", content)
+	}
+	for _, retired := range []string{"anti-dump-protection", "anti-instrumentation", "anti-symbolic-execution"} {
+		if strings.Contains(content, retired) {
+			t.Fatalf("retired pass %q leaked into engine config: %s", retired, content)
+		}
+	}
+}
+
 func TestPrepareConfigFile_NormalizesPassSelectionValues(t *testing.T) {
 	request := validPassSelectionRequest(t)
 	request.Passes[0].ID = " method-virtualization "

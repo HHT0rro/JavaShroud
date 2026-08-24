@@ -231,6 +231,8 @@ object RustToolchainProvisioner {
         val rustcPath: Path,
         val cargoPath: Path,
         val host: HostPlatform,
+        val extraPathEntries: List<Path> = emptyList(),
+        val extraEnvironment: Map<String, String> = emptyMap(),
     )
 
     data class InstalledToolchain(
@@ -364,6 +366,7 @@ object RustToolchainProvisioner {
                     fileSystem.deleteRecursively(archivePath)
                 }
                 fileSystem.deleteRecursively(archiveDirectory)
+                promoteCompilerLayout(staging, host, fileSystem)
                 val stagedEnvironment = isolatedEnvironment(staging, host)
                 verifyInstallation(staging, host, selectedLock, stagedEnvironment, versionRunner, fileSystem)
                 fileSystem.createDirectories(staging.resolve("rustup-home"))
@@ -456,6 +459,10 @@ object RustToolchainProvisioner {
         osName: String = System.getProperty("os.name"),
         osArch: String = System.getProperty("os.arch"),
         commandRunner: (List<String>) -> CommandResult = ::runCommand,
+        userHome: Path = Paths.get(System.getProperty("user.home")),
+        autoInstall: Boolean = false,
+        fetcher: ArchiveFetcher = ArchiveFetcher(::fetchArchive),
+        buildToolFetcher: NativeBuildToolchainProvisioner.ArchiveFetcher? = null,
     ): ResolutionResult {
         val messages = mutableListOf<ResolutionMessage>()
         fun report(level: String, message: String) {
@@ -472,6 +479,7 @@ object RustToolchainProvisioner {
         val explicitCargo = environment[CARGO_ENV]?.trim()?.takeIf(String::isNotEmpty) != null
         var rustc = findExecutable(RUSTC_ENV, "rustc", environment, pathEnv, host)
         var cargo = findExecutable(CARGO_ENV, "cargo", environment, pathEnv, host)
+        var extraEnvironment = emptyMap<String, String>()
 
         fun verifyVersion(path: Path, command: String, validator: (String) -> Boolean): Boolean {
             val result = try {
@@ -497,11 +505,34 @@ object RustToolchainProvisioner {
             if (installed != null) {
                 rustc = installed.first
                 cargo = installed.second
-                if (isLockedPair()) {
-                    report("info", "Using installed locked Rust $LOCKED_CHANNEL on ${host.name.lowercase(Locale.ROOT)}")
-                    return ResolutionResult(RustToolchain(rustc!!, cargo!!, host), messages)
-                }
             }
+        }
+
+        if (!isLockedPair() && !explicitRustc && !explicitCargo && autoInstall) {
+            report("info", "Downloading locked Rust $LOCKED_CHANNEL for ${host.runtimeId}")
+            val installed = try {
+                installLocked(
+                    target = host.runtimeId,
+                    osName = osName,
+                    osArch = osArch,
+                    userHome = userHome,
+                    fetcher = fetcher,
+                    versionRunner = VersionRunner { executable, arguments, _ ->
+                        commandRunner(listOf(executable.toString()) + arguments)
+                    },
+                )
+            } catch (error: Exception) {
+                report("error", "AKEN-R1 Rust toolchain download failed: ${error.message.orEmpty()}")
+                return ResolutionResult(null, messages)
+            }
+            rustc = installed.rustcPath
+            cargo = installed.cargoPath
+            extraEnvironment = installed.environment
+            if (!isLockedPair()) {
+                report("error", "downloaded Rust $LOCKED_CHANNEL failed locked validation")
+                return ResolutionResult(null, messages)
+            }
+            report("info", "Installed locked Rust $LOCKED_CHANNEL on ${host.name.lowercase(Locale.ROOT)}")
         }
 
         if (rustc == null || cargo == null) {
@@ -509,8 +540,41 @@ object RustToolchainProvisioner {
             return ResolutionResult(null, messages)
         }
         if (!isLockedPair()) return ResolutionResult(null, messages)
+
+        val buildTools = if (autoInstall) {
+            try {
+                NativeBuildToolchainProvisioner.resolve(
+                    osName = osName,
+                    osArch = osArch,
+                    userHome = userHome,
+                    pathEnv = extraEnvironment["PATH"] ?: pathEnv,
+                    fetcher = buildToolFetcher ?: NativeBuildToolchainProvisioner.ArchiveFetcher { spec ->
+                        val (input, contentLength) = NativeBuildToolchainProvisioner.fetchArchiveForTest(spec)
+                        input to contentLength
+                    },
+                    versionRunner = VersionRunner { executable, arguments, _ ->
+                        commandRunner(listOf(executable.toString()) + arguments)
+                    },
+                )
+            } catch (error: Exception) {
+                report("error", "AKEN-R1 Zig/cargo-zigbuild download failed: ${error.message.orEmpty()}")
+                return ResolutionResult(null, messages)
+            }
+        } else {
+            null
+        }
+        buildTools?.messages?.forEach { messages += it }
         report("info", "Using locked Rust $LOCKED_CHANNEL on ${host.name.lowercase(Locale.ROOT)}")
-        return ResolutionResult(RustToolchain(rustc, cargo, host), messages)
+        return ResolutionResult(
+            RustToolchain(
+                rustcPath = rustc,
+                cargoPath = cargo,
+                host = host,
+                extraPathEntries = buildTools?.pathEntries.orEmpty(),
+                extraEnvironment = extraEnvironment,
+            ),
+            messages,
+        )
     }
 
     fun validateRustcVersion(versionOutput: String): Boolean = validateLockedVersion(versionOutput, "rustc", LOCKED_CHANNEL)
@@ -598,8 +662,10 @@ object RustToolchainProvisioner {
     }
 
     private fun readDefaultLock(): String {
-        val resource = RustToolchainProvisioner::class.java.getResourceAsStream("/native-toolchain.lock")
-        if (resource != null) return resource.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        RustToolchainProvisioner::class.java.getResourceAsStream("/native-toolchain.lock")
+            ?.let { return it.bufferedReader(Charsets.UTF_8).use { stream -> stream.readText() } }
+        RustToolchainProvisioner::class.java.getResourceAsStream("/META-INF/rust-runtime/native-toolchain.lock")
+            ?.let { return it.bufferedReader(Charsets.UTF_8).use { stream -> stream.readText() } }
         val relativeCandidates = listOf(
             Paths.get("core-engine", "src", "main", "rust", "native-toolchain.lock"),
             Paths.get("src", "main", "rust", "native-toolchain.lock"),
@@ -752,6 +818,47 @@ object RustToolchainProvisioner {
             "Rust archive contains traversal syntax: $name"
         }
         return parts
+    }
+
+    private fun promoteCompilerLayout(staging: Path, host: HostPlatform, fileSystem: ToolchainFileSystem) {
+        val suffix = if (host == HostPlatform.WINDOWS_X64) ".exe" else ""
+        val bin = staging.resolve("bin")
+        fileSystem.createDirectories(bin)
+        val wanted = setOf("rustc$suffix", "cargo$suffix", "rustfmt$suffix", "clippy-driver$suffix")
+        val tools = Files.walk(staging).use { stream ->
+            stream.filter { Files.isRegularFile(it) }
+                .filter { it.parent?.fileName?.toString() == "bin" }
+                .filter { wanted.contains(it.fileName.toString()) }
+                .toList()
+        }
+        tools.forEach { file ->
+            val dest = bin.resolve(file.fileName.toString())
+            if (file.toAbsolutePath().normalize() != dest.toAbsolutePath().normalize()) {
+                Files.copy(file, dest, StandardCopyOption.REPLACE_EXISTING)
+                fileSystem.setExecutable(dest)
+            }
+        }
+        val rustlibDest = staging.resolve("lib").resolve("rustlib")
+        val rustlibs = Files.walk(staging).use { stream ->
+            stream.filter { Files.isDirectory(it) && it.fileName.toString() == "rustlib" }
+                .filter { it.toAbsolutePath().normalize() != rustlibDest.toAbsolutePath().normalize() }
+                .toList()
+        }
+        rustlibs.forEach { rustlib -> copyFileTree(rustlib, rustlibDest) }
+    }
+
+    private fun copyFileTree(source: Path, dest: Path) {
+        Files.walk(source).use { stream ->
+            stream.forEach { entry ->
+                val target = dest.resolve(source.relativize(entry).toString())
+                if (Files.isDirectory(entry)) {
+                    Files.createDirectories(target)
+                } else if (Files.isRegularFile(entry)) {
+                    Files.createDirectories(target.parent)
+                    Files.copy(entry, target, StandardCopyOption.REPLACE_EXISTING)
+                }
+            }
+        }
     }
 
     private fun verifyInstallation(
@@ -1000,6 +1107,7 @@ object RustToolchainProvisioner {
         val root = Paths.get(System.getProperty("user.home"))
             .resolve(".rustup")
             .resolve("toolchains")
+        if (!Files.isDirectory(root)) return null
         val candidates = Files.list(root).use { stream -> stream.toList() }
         val toolchain = candidates.firstOrNull { path ->
             path.fileName.toString().startsWith("$LOCKED_CHANNEL-")

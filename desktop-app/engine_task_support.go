@@ -57,8 +57,12 @@ func normalizeObfuscationRequest(request ObfuscationRequest) ObfuscationRequest 
 func clonePassSelections(passSelections []PassSelection) []PassSelection {
 	result := make([]PassSelection, 0, len(passSelections))
 	for _, passSelection := range passSelections {
+		passID := strings.TrimSpace(passSelection.PassID)
+		if isRetiredCurrentFormatPassID(passID) {
+			continue
+		}
 		result = append(result, PassSelection{
-			PassID: strings.TrimSpace(passSelection.PassID),
+			PassID: passID,
 			Mode:   PassSelectionMode(strings.TrimSpace(string(passSelection.Mode))),
 			Rules:  cloneRules(passSelection.Rules),
 		})

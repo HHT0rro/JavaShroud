@@ -36,7 +36,7 @@ class NativeRecompilationTransformsTest {
             Path.of("build", "windows"),
         )
         assertEquals(
-            listOf("cargo", "zigbuild", "--locked", "--offline", "--workspace", "--release", "--target", "x86_64-pc-windows-gnu", "--target-dir", "build/windows"),
+            listOf("cargo", "zigbuild", "--locked", "--workspace", "--release", "--target", "x86_64-pc-windows-gnu", "--target-dir", "build/windows"),
             windows.map { it.replace('\\', '/') },
         )
 
@@ -47,8 +47,8 @@ class NativeRecompilationTransformsTest {
         )
         assertEquals("zigbuild", linux[1])
         assertTrue(linux.contains("--locked"))
-        assertTrue(linux.contains("--offline"))
         assertTrue(linux.contains("--target-dir"))
+        assertFalse(linux.contains("--offline"))
     }
 
     @Test

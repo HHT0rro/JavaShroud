@@ -66,9 +66,29 @@ func normalizeEngineConfigPath(inputPath string) (string, error) {
 func clonePasses(passSpecs []PassSpec) []PassSpec {
 	result := make([]PassSpec, 0, len(passSpecs))
 	for _, passSpec := range passSpecs {
-		result = append(result, PassSpec{ID: strings.TrimSpace(passSpec.ID), Enabled: passSpec.Enabled, Params: clonePassParams(passSpec.Params)})
+		id := strings.TrimSpace(passSpec.ID)
+		if isRetiredCurrentFormatPassID(id) {
+			continue
+		}
+		result = append(result, PassSpec{ID: id, Enabled: passSpec.Enabled, Params: clonePassParams(passSpec.Params)})
 	}
 	return result
+}
+
+func isRetiredCurrentFormatPassID(passID string) bool {
+	switch passID {
+	case "environment-bound-keys",
+		"method-body-delayed-decryption",
+		"class-encryption-loader",
+		"anti-instrumentation",
+		"anti-jvmti-agent",
+		"anti-bytebuddy-transform",
+		"anti-dump-protection",
+		"anti-symbolic-execution":
+		return true
+	default:
+		return false
+	}
 }
 
 func clonePassParams(params map[string]json.RawMessage) map[string]json.RawMessage {

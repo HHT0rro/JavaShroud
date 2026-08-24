@@ -8,6 +8,14 @@ object RuntimeGarbageCollector {
     private const val USER_CACHE_DIR_NAME = ".javashroud"
     private const val WORKSPACE_NATIVE_DIR_NAME = ".javashroud-native"
 
+    /**
+     * Downloaded Rust/Zig/cargo-zigbuild installs and the extracted Rust
+     * workspace live under these directories. Deleting them after every run
+     * forces a multi-hundred-megabyte re-download on the next run and races
+     * concurrent engine processes, so the garbage collector preserves them.
+     */
+    private val PRESERVED_USER_CACHE_CHILDREN = setOf("toolchains", "rust-workspace")
+
     data class GarbageCandidate(
         val path: Path,
         val kind: String,
@@ -126,15 +134,34 @@ object RuntimeGarbageCollector {
 
     private fun deleteCandidate(path: Path, skipped: MutableList<String>): Path? {
         return try {
-            Files.walk(path).use { stream ->
-                stream.sorted(Comparator.reverseOrder()).forEach { entry ->
-                    Files.deleteIfExists(entry)
+            if (path.fileName?.toString() == USER_CACHE_DIR_NAME) {
+                deleteUserCacheChildren(path)
+            } else {
+                Files.walk(path).use { stream ->
+                    stream.sorted(Comparator.reverseOrder()).forEach { entry ->
+                        Files.deleteIfExists(entry)
+                    }
                 }
             }
             path
         } catch (error: Exception) {
             skipped += "Failed to delete $path: ${error.message ?: error::class.java.simpleName}"
             null
+        }
+    }
+
+    private fun deleteUserCacheChildren(userCache: Path) {
+        Files.list(userCache).use { stream ->
+            stream.forEach { child ->
+                if (child.fileName?.toString() in PRESERVED_USER_CACHE_CHILDREN) {
+                    return@forEach
+                }
+                Files.walk(child).use { walk ->
+                    walk.sorted(Comparator.reverseOrder()).forEach { entry ->
+                        Files.deleteIfExists(entry)
+                    }
+                }
+            }
         }
     }
 
