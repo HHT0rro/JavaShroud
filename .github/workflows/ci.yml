@@ -60,9 +60,9 @@ jobs:
           update: true
           install: mingw-w64-x86_64-gcc
       - name: Build Gradle modules and package Windows runtime
+        run: ./gradlew.bat :annotations:build :core-engine:build
+      - name: Verify packaged Windows runtime
         run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          ./gradlew :annotations:build :core-engine:build
           test -s core-engine/build/core-engine/resources/main/META-INF/jsrt/windows-x64/jsrt_ffi.dll
           ! find core-engine/build/core-engine/resources/main -type f -name '*.dylib' -print -quit | grep -q .
         shell: msys2 {0}
