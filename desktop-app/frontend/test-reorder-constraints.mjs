@@ -112,19 +112,6 @@ test('rename before virtualization even when user selected virtualization first'
   assert.ok(ids.indexOf('rename-packages') < ids.indexOf('method-virtualization'), 'rename-packages before method-virtualization');
 });
 
-// 2. Renaming before loader
-test('rename before loader', () => {
-  const passes = ['class-encryption-loader', 'rename-classes', 'rename-packages'].map(makePass);
-  const constraints = [
-    { before: 'rename-classes', after: 'class-encryption-loader', reason: '', hard: true },
-    { before: 'rename-packages', after: 'class-encryption-loader', reason: '', hard: true },
-  ];
-  const result = reorderByConstraints(passes, constraints);
-  const ids = result.map(p => p.id);
-  assert.ok(ids.indexOf('rename-classes') < ids.indexOf('class-encryption-loader'), 'rename-classes before loader');
-  assert.ok(ids.indexOf('rename-packages') < ids.indexOf('class-encryption-loader'), 'rename-packages before loader');
-});
-
 // 4. Unconstrained passes preserve original order
 test('unconstrained passes preserve original order', () => {
   const passes = ['obfuscate-int-constants', 'inject-junk-code', 'apply-reference-proxy'].map(makePass);
@@ -171,19 +158,6 @@ test('deterministic output for same input', () => {
   assert.deepEqual(r2.map(p => p.id), r3.map(p => p.id), 'deterministic r2 vs r3');
 });
 
-// 9. Metadata stripping before loader
-test('metadata stripping before loader', () => {
-  const passes = ['class-encryption-loader', 'strip-source-debug', 'strip-line-numbers'].map(makePass);
-  const constraints = [
-    { before: 'strip-source-debug', after: 'class-encryption-loader', reason: '', hard: true },
-    { before: 'strip-line-numbers', after: 'class-encryption-loader', reason: '', hard: true },
-  ];
-  const result = reorderByConstraints(passes, constraints);
-  const ids = result.map(p => p.id);
-  assert.ok(ids.indexOf('strip-source-debug') < ids.indexOf('class-encryption-loader'), 'strip-source before loader');
-  assert.ok(ids.indexOf('strip-line-numbers') < ids.indexOf('class-encryption-loader'), 'strip-line before loader');
-});
-
 // 10. Planner before loader and delayed decryption
 // 11. Invoke dynamic before bootstrap table encryption
 test('invoke-dynamic before bootstrap-table-encryption', () => {
@@ -197,9 +171,9 @@ test('invoke-dynamic before bootstrap-table-encryption', () => {
 
 // 13. Native and runtime defense passes without constraints preserve order
 test('native passes without constraints preserve order', () => {
-  const passes = ['anti-instrumentation', 'anti-jvmti-agent', 'anti-dump-protection', 'anti-bytebuddy-transform'].map(makePass);
+  const passes = ['jni-microkernel-loader', 'os-anti-debug', 'os-anti-vm', 'method-virtualization'].map(makePass);
   const result = reorderByConstraints(passes, []);
-  assert.deepEqual(result.map(p => p.id), ['anti-instrumentation', 'anti-jvmti-agent', 'anti-dump-protection', 'anti-bytebuddy-transform']);
+  assert.deepEqual(result.map(p => p.id), ['jni-microkernel-loader', 'os-anti-debug', 'os-anti-vm', 'method-virtualization']);
 });
 
 // 14. 2-node chain

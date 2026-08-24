@@ -89,7 +89,7 @@ const commonParamDescriptions: Readonly<Record<string, LocalizedText>> = {
   codeSectionEncryption: text('代码段扰动：通过重编译期源码和编译参数变化制造 native 二进制差异。', 'Code-section diversity: varies native binaries through recompilation-time source and compiler changes.'),
   density: text('扰动密度：控制每个方法中插入多少分发节点、异常边或噪声块。值越高混淆越强，字节码也越膨胀。', 'Density: controls how many dispatcher nodes, exception edges, or noise blocks are inserted per method. Higher values strengthen obfuscation and grow bytecode.'),
   depth: text('嵌套深度：控制 try-finally 或包装层数。越深越难读，也越容易产生体积膨胀。', 'Depth: controls try-finally or wrapper nesting. Deeper nesting is harder to read and can grow bytecode quickly.'),
-  detectionLevel: text('检测级别：控制反插桩检查的强度，仅保留 standard 与 aggressive 两档。', 'Detection level: controls anti-instrumentation intensity with only standard and aggressive modes.'),
+  detectionLevel: text('检测级别：控制反插桩检查的强度，仅保留 standard 与 aggressive 两档。', 'Detection level: controls OS anti-debug intensity with only standard and aggressive modes.'),
   detectionMode: text('检测模式：选择被动检查还是主动持续观察 agent 或运行时状态变化。', 'Detection mode: chooses passive checks or active monitoring of agent and runtime state changes.'),
   dictionaryFile: text('自定义字典文件：每行一个候选名称，仅在字典风格选择自定义文件时使用。', 'Custom dictionary file: one candidate name per line, used when dictionary style is set to custom file.'),
   dictionaryStyle: text('命名字典风格：决定生成新名称的字符形态，例如顺序编号、相似字符或自定义词库。', 'Naming dictionary style: controls generated name appearance, such as sequential counters, confusable characters, or a custom dictionary.'),
@@ -273,25 +273,17 @@ const passCopies: Readonly<Record<string, LocalizedPassCopy>> = {
     name: text('反编译干扰结构', 'Anti-decompiler structure'),
     description: text('加入虚假异常处理器和死代码块，让反编译器更难还原清晰结构，同时不改变运行结果。', 'Adds bogus exception handlers and dead blocks that confuse decompilers without changing runtime behavior.'),
   },
-  'anti-dump-protection': {
-    name: text('内存转储防护', 'Anti-dump protection'),
-    description: text('通过 JNI/native 层降低 dump 中关键材料的可见性；jni-key-hold/full 依赖 native 可用并失败拒绝。', 'Uses JNI/native support to reduce key-material visibility in dumps; jni-key-hold/full require native availability and fail closed.'),
+  'os-anti-debug': {
+    name: text('操作系统反调试', 'OS anti-debug'),
+    description: text('在 native 层统一检测调试器、JVMTI、Instrumentation、Java agent、ByteBuddy、Attach 与转换器状态；启动、心跳和分布式探针认证失败时直接拒绝执行。', 'Uses the unified native defense kernel to detect debuggers, JVMTI, Instrumentation, Java agents, ByteBuddy, Attach, and transformer state; startup, heartbeat, or distributed-probe authentication failures fail closed.'),
   },
-  'anti-instrumentation': {
-    name: text('反插桩检测', 'Anti-instrumentation'),
-    description: text('检测 -javaagent、ByteBuddy、JVMTI、attach 与 class retransformation，并按策略记录、降级或拒绝。', 'Detects -javaagent, ByteBuddy, JVMTI, attach, and class retransformation, then logs, degrades, or refuses according to policy.'),
-  },
-  'anti-symbolic-execution': {
-    name: text('符号执行陷阱', 'Anti-symbolic execution'),
-    description: text('插入依赖运行时环境的谓词，让符号执行工具更难通过约束求解覆盖真实分支。', 'Adds runtime-dependent predicates that make constraint solving and symbolic branch coverage harder.'),
+  'os-anti-vm': {
+    name: text('操作系统反虚拟机', 'OS anti-VM'),
+    description: text('在 native 层组合 CPUID、虚拟化厂商、固件和 DMI/sysfs 证据，并把认证状态绑定到 evaluator、VM session、predicate share 与字段材料。', 'Combines authenticated native CPUID, hypervisor-vendor, firmware, and DMI/sysfs evidence and binds the result to evaluator, VM-session, predicate-share, and field material.'),
   },
   'callsite-rotation-protection': {
     name: text('调用点轮换防护', 'Callsite rotation protection'),
     description: text('用 MutableCallSite、epoch、线程或随机信号动态切换调用目标，提高静态恢复成本。', 'Uses MutableCallSite, epoch, thread, or random signals to rotate call targets and raise static recovery cost.'),
-  },
-  'class-encryption-loader': {
-    name: text('类加密加载器', 'Class encryption loader'),
-    description: text('把选定 .class 以 AES-GCM 认证加密存入资源，由 native 派生密钥；认证失败拒绝加载。', 'Stores selected .class files as AES-GCM authenticated resources with native-derived keys; authentication failure refuses loading.'),
   },
   'condy-constant-indirection': {
     name: text('动态常量间接化', 'ConstantDynamic indirection'),
@@ -304,10 +296,6 @@ const passCopies: Readonly<Record<string, LocalizedPassCopy>> = {
   'control-flow-obfuscation': {
     name: text('控制流混淆', 'Control-flow obfuscation'),
     description: text('通过不透明谓词、分发逻辑和代数恒等式重组方法控制流，可叠加条件边注入与异常处理器拆分。', 'Restructures method control flow using opaque predicates, dispatch logic, and algebraic identities, with optional conditional-edge injection and handler splitting.'),
-  },
-  'environment-bound-keys': {
-    name: text('环境绑定密钥', 'Environment-bound keys'),
-    description: text('把规范化环境信号纳入 native KDF；材料缺失或绑定不匹配时拒绝解密。', 'Feeds normalized environment signals into the native KDF; missing material or binding mismatch refuses decryption.'),
   },
   'exception-semantic-virtualization': {
     name: text('异常语义虚拟化', 'Exception semantic virtualization'),
@@ -332,10 +320,6 @@ const passCopies: Readonly<Record<string, LocalizedPassCopy>> = {
   'member-hide': {
     name: text('隐藏成员', 'Member hide'),
     description: text('把字段和方法标记为合成成员，让 IDE 和反编译器更不容易直接展示。', 'Marks fields and methods as synthetic so IDEs and decompilers are less likely to show them directly.'),
-  },
-  'method-body-delayed-decryption': {
-    name: text('方法体延迟解密', 'Method body delayed decryption'),
-    description: text('把方法体放入 AES-GCM 认证资源，trampoline 仅携带 metadata，native 派生密钥并在认证失败时拒绝。', 'Stores method bodies in AES-GCM authenticated resources; trampolines carry metadata only, native-derived keys, and fail closed on authentication failure.'),
   },
   'method-virtualization': {
     name: text('方法虚拟化', 'Method virtualization'),

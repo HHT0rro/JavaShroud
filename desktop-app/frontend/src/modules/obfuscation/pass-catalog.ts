@@ -9,11 +9,6 @@ const controlFlowPassIds: ReadonlySet<string> = new Set<string>([
   'reference-proxy',
 ])
 
-const helperLoaderPassIds: ReadonlySet<string> = new Set<string>([
-  'class-encryption-loader',
-  'method-body-delayed-decryption',
-])
-
 export const requiredPassIdsFor = (passItem: Pick<PassItem, 'id' | 'params' | 'requiredPassIds' | 'variantRequirements'>): readonly string[] => [
   ...new Set<string>([
     ...(legacyPassDependencies.get(passItem.id) ?? []),
@@ -216,7 +211,7 @@ const deriveDisplayCategory = (moduleDefinition: ModuleDefinition): string => {
     return 'string-protection'
   }
 
-  if (helperLoaderPassIds.has(moduleDefinition.id) || primaryTag === 'helper-deployment' || primaryTag === 'loader-protection') {
+  if (primaryTag === 'helper-deployment' || primaryTag === 'loader-protection') {
     return 'helper-loader'
   }
 
@@ -250,13 +245,10 @@ const inferRisk = (passId: string, category: string): PassItem['risk'] => {
   }
 
   const highRiskPassIds = new Set([
-    'anti-dump-protection',
-    'anti-instrumentation',
-    'class-encryption-loader',
-    'environment-bound-keys',
     'jni-microkernel-loader',
-    'method-body-delayed-decryption',
     'method-virtualization',
+    'os-anti-debug',
+    'os-anti-vm',
   ])
 
   if (highRiskPassIds.has(passId) || category === 'native-kernel' || category === 'virtualization') {

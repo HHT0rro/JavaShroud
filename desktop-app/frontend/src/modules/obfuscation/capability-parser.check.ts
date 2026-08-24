@@ -275,18 +275,18 @@ const dependencySchema = parseEngineSchema({
       ...baseSchema.modules[0],
       id: 'jni-microkernel-loader',
       defaultEnabled: false,
-      requiresAnyPassIds: ['anti-instrumentation'],
+      requiresAnyPassIds: ['os-anti-debug'],
       params: [],
     },
     {
       ...baseSchema.modules[0],
-      id: 'anti-instrumentation',
+      id: 'os-anti-debug',
       requiredPassIds: ['jni-microkernel-loader'],
       defaultEnabled: false,
       params: [],
     },
   ],
-  defaultPipeline: ['anti-instrumentation'],
+  defaultPipeline: ['os-anti-debug'],
 })
 const dependencyPasses = buildPassItemsFromSchema(dependencySchema)
 assert(dependencyPasses.find((passItem) => passItem.id === 'jni-microkernel-loader')?.enabled === true, 'expected requiredPassIds dependency to auto-enable jni-microkernel-loader')
@@ -618,9 +618,9 @@ const tomlSchema = [
   "schemaVersion = '2'",
   "engineVersion = 'check-engine'",
   "tags = [{id = 'runtime-defense', name = 'Runtime Defense', description = 'runtime defense', order = 80}]",
-  "modules = [{id = 'anti-symbolic-execution', name = 'Anti Symbolic', description = 'adds runtime traps', tagIds = ['runtime-defense'], params = [{key = 'seed', type = 'number', description = 'deterministic seed', hidden = false}], stability = 'experimental', targeting = {supported = true, targetKinds = ['class']}}]",
+  "modules = [{id = 'os-anti-vm', name = 'OS Anti VM', description = 'native virtual-machine defense', tagIds = ['runtime-defense'], params = [{key = 'seed', type = 'number', description = 'deterministic seed', hidden = false}], stability = 'experimental', targeting = {supported = true, targetKinds = ['class']}}]",
   'compatibility = []',
-  "defaultPipeline = ['anti-symbolic-execution']",
+  "defaultPipeline = ['os-anti-vm']",
   'orderingConstraints = []',
 ].join('\n')
 const tomlParsedSchema = parseEngineSchema(tomlSchema)
