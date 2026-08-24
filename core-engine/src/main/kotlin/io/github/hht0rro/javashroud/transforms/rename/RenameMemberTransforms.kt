@@ -55,8 +55,9 @@ fun renameMethods(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, para
         .filter { methodSignature(it.name, it.descriptor) !in protectedSignatures }
     val returnSensitiveNaming = (params["returnSensitiveNaming"] as? Boolean) == true
     val occupiedMethodKeys = declaredMethodKeys(workingArtifact)
+    val nativeKeys = nativeMethodKeys(workingArtifact)
     val methodRenameMap = buildMethodRenameMap(
-        matchedMembers,
+        matchedMembers.filter { member -> MemberKey(member.owner, member.name, member.descriptor) !in nativeKeys },
         config,
         returnSensitive = returnSensitiveNaming,
         occupiedMethodKeys = occupiedMethodKeys,
