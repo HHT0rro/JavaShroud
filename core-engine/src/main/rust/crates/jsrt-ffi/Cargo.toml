@@ -12,6 +12,7 @@ crate-type = ["rlib", "cdylib"]
 jsrt-crypto.workspace = true
 jsrt-page.workspace = true
 jsrt-runtime.workspace = true
+jsrt-vm.workspace = true
 
 [dev-dependencies]
 jsrt-shell.workspace = true

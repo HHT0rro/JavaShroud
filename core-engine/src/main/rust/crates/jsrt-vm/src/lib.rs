@@ -2,11 +2,12 @@
 #![allow(clippy::too_many_arguments)]
 
 mod crypto;
+mod dialect;
 pub mod executor;
 mod zstd;
 
 pub use executor::{
-    ExecutionLimits, InvokeKind, NoObjectOperations, ObjectOperations, VmExecutor, VmHostError,
+    ExecutionLimits, InvokeKind, ObjectOperations, VmExecutor, VmHostError,
     VmValue,
 };
 
@@ -187,6 +188,9 @@ use std::ops::Range;
 
 pub const VBC4_MAGIC: [u8; 4] = *b"VBC4";
 pub const VBC4_AUTH_TAG_SIZE: usize = 32;
+pub const VBC4_DIALECT_COMMITMENT_SIZE: usize = 32;
+pub const VBC4_HEADER_SIZE: usize =
+    4 + 16 + VBC4_DIALECT_COMMITMENT_SIZE + 4 + 16 + 2 + 2 + 4 + 4;
 pub const VBC4_MAX_BLOCKS: usize = 12;
 pub const VBC4_MAX_FRAME_SIZE: usize = 32 * 1024 * 1024;
 pub const VBC4_MAX_SECTION_SIZE: usize = 16 * 1024 * 1024;
@@ -243,6 +247,7 @@ const SECTION_EXCEPTIONS: u32 = 3;
 const SECTION_CONSTANT_POOL_ENTRY: u32 = 9;
 const CFG_MASK: u32 = 0xffff;
 const CP_SEALED_STRING: u8 = 0x06;
+const VBC4_CLEAN_ENTRY_INTEGRITY_HEX: &[u8] = b"10429f6c";
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum VmError {
@@ -266,6 +271,8 @@ pub enum VmError {
     InvalidMagic,
     InvalidFlags(u16),
     InvalidHeader(&'static str),
+    DialectCommitmentMismatch,
+    StateBindingMismatch,
     AuthenticationFailed,
     InvalidSeed,
     InvalidKeyId,
@@ -375,10 +382,14 @@ pub struct VmParser<'a> {
     material: &'a VmKeyMaterial,
     state_binding: Vec<u8>,
     limits: ParserLimits,
+    dialect: dialect::VmDialect,
 }
 
 impl<'a> VmParser<'a> {
     pub fn new(material: &'a VmKeyMaterial, state_binding: &[u8]) -> Result<Self, VmError> {
+        if state_binding.is_empty() {
+            return Err(VmError::StateBindingMismatch);
+        }
         if state_binding.len() > VBC4_MAX_STATE_BINDING {
             return Err(VmError::LengthTooLarge {
                 field: "state binding",
@@ -390,6 +401,10 @@ impl<'a> VmParser<'a> {
             material,
             state_binding: state_binding.to_vec(),
             limits: ParserLimits::default(),
+            dialect: dialect::VmDialect::from_material(
+                material.crypto_domain_material(),
+                material.layout_digest(),
+            )?,
         })
     }
 
@@ -409,7 +424,7 @@ impl<'a> VmParser<'a> {
                 maximum: self.limits.max_frame_size,
             });
         }
-        if frame.len() < 4 + 16 + 4 + 16 + 2 + 2 + 4 + 4 + VBC4_AUTH_TAG_SIZE {
+        if frame.len() < VBC4_HEADER_SIZE + VBC4_AUTH_TAG_SIZE {
             return Err(VmError::Truncated {
                 offset: frame.len(),
                 requested: 1,
@@ -422,6 +437,10 @@ impl<'a> VmParser<'a> {
             return Err(VmError::InvalidMagic);
         }
         let nonce = header.read_fixed::<16>()?;
+        let dialect_commitment = header.read_fixed::<VBC4_DIALECT_COMMITMENT_SIZE>()?;
+        if !ct_eq(&dialect_commitment, &self.dialect.commitment) {
+            return Err(VmError::DialectCommitmentMismatch);
+        }
         let key_id = header.read_u32_be()?;
         let wrapped_seed = header.read_fixed::<16>()?;
         let flags = header.read_u16_be()?;
@@ -467,6 +486,7 @@ impl<'a> VmParser<'a> {
         let session_material = vbc4_session_material(
             self.material.crypto_domain_material(),
             self.material.layout_digest(),
+            &self.state_binding,
         );
         let result = self.parse_authenticated(
             frame,
@@ -694,6 +714,7 @@ impl<'a> VmParser<'a> {
             seed,
             session_material,
             self.limits,
+            &self.dialect,
         )?;
 
         let exception_plain_length = checked_section_length(
@@ -786,6 +807,11 @@ impl<'a> VmParser<'a> {
         program.nonce = nonce;
         program.seed = seed;
         let metadata = parse_metadata(&program.constants, metadata_cp_index, nested_profile)?;
+        validate_state_binding(
+            &self.state_binding,
+            &metadata,
+            self.material.layout_digest(),
+        )?;
         program.metadata = metadata;
         Ok(program)
     }
@@ -1054,7 +1080,7 @@ struct BlockRows {
     rows: Vec<RawRow>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct RawRow {
     opcode: u16,
     flags: u16,
@@ -1080,6 +1106,35 @@ fn validate_flags(flags: u16) -> Result<(), VmError> {
         return Err(VmError::InvalidFlags(flags));
     }
     Ok(())
+}
+
+fn validate_state_binding(
+    state_binding: &[u8],
+    metadata: &VmMetadata,
+    layout_digest: &[u8; 32],
+) -> Result<(), VmError> {
+    let fields: Vec<&[u8]> = state_binding.split(|byte| *byte == 0).collect();
+    if fields.len() != 4 || fields.iter().any(|field| field.is_empty()) {
+        return Err(VmError::StateBindingMismatch);
+    }
+
+    let expected_entry_token = format!("{:x}", metadata.entry_token);
+    let mut expected_layout_hex = [0u8; 64];
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for (index, byte) in layout_digest.iter().copied().enumerate() {
+        expected_layout_hex[index * 2] = HEX[usize::from(byte >> 4)];
+        expected_layout_hex[index * 2 + 1] = HEX[usize::from(byte & 0x0f)];
+    }
+    let valid = fields[0] == expected_entry_token.as_bytes()
+        && fields[1] == metadata.resource_path.as_str().as_bytes()
+        && fields[2] == VBC4_CLEAN_ENTRY_INTEGRITY_HEX
+        && fields[3] == expected_layout_hex;
+    expected_layout_hex.fill(0);
+    if valid {
+        Ok(())
+    } else {
+        Err(VmError::StateBindingMismatch)
+    }
 }
 
 fn checked_section_length(
@@ -2040,6 +2095,7 @@ fn lower_rows(
     seed: u32,
     session_material: &[u8; 32],
     limits: ParserLimits,
+    dialect: &dialect::VmDialect,
 ) -> Result<(VmProgram, usize), VmError> {
     let mut operands = Vec::new();
     let mut instructions = Vec::new();
@@ -2068,7 +2124,7 @@ fn lower_rows(
         }
         if row.flags & REG_SEMANTIC_SPLIT != 0 {
             if row_index + 1 >= rows.len()
-                || rows[row_index + 1].opcode != REG_SEMANTIC_SHARE
+                || rows[row_index + 1].opcode != opcode::REG_SEMANTIC_SHARE
                 || rows[row_index + 1].flags != REG_SEMANTIC_SHARE
             {
                 return Err(VmError::InvalidRow("semantic split share is missing"));
@@ -2091,7 +2147,7 @@ fn lower_rows(
             row_index += 1;
         }
         let mask = opcode_mask(session_material, seed, logical_index);
-        let decoded_raw = row.opcode ^ u16::from(mask);
+        let decoded_raw = dialect.decode(row.opcode ^ u16::from(mask));
         let decoded = if (SUPER_CONST..=SUPER_INVOKE).contains(&decoded_raw) {
             decoded_raw
         } else {
@@ -2343,11 +2399,14 @@ fn cfg_decode(seed: u32, instruction_count: usize, encoded: i32) -> Result<usize
         return Err(VmError::InvalidControlFlow);
     }
     let inverse = modular_inverse(cfg_multiplier(seed, instruction_count))
-        .ok_or(VmError::InvalidControlFlow)?;
+        .ok_or_else(|| {
+            VmError::InvalidControlFlow
+        })?;
     let normalized = (encoded as u32).wrapping_sub(cfg_offset(seed, instruction_count)) & CFG_MASK;
     let decoded = (normalized.wrapping_mul(inverse)) & CFG_MASK;
     if decoded as usize > instruction_count {
-        return Err(VmError::InvalidControlFlow);
+        // Let the caller report the owning opcode/operand context before the
+        // fail-closed range rejection.
     }
     Ok(decoded as usize)
 }
@@ -2372,8 +2431,14 @@ fn decode_instruction_targets(
         for index in instruction.operand_range.clone() {
             let operand_index = index - instruction.operand_range.start;
             if is_target_operand(instruction.opcode, operand_index) {
-                program.operands[index] =
-                    cfg_decode(seed, instruction_count, program.operands[index])? as i32;
+                let encoded = program.operands[index];
+                let decoded_target = match cfg_decode(seed, instruction_count, encoded) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return Err(error);
+                    }
+                };
+                program.operands[index] = decoded_target as i32;
                 if program.operands[index] as usize >= instruction_count {
                     return Err(VmError::InvalidControlFlow);
                 }
@@ -2405,12 +2470,12 @@ fn parse_exception_section(
         if token != expected {
             return Err(VmError::InvalidException("exception token is invalid"));
         }
-        let start =
-            cursor.read_u16_be()? ^ exception_mask(session_material, seed, index, 0, expected);
-        let end =
-            cursor.read_u16_be()? ^ exception_mask(session_material, seed, index, 1, expected);
-        let handler =
-            cursor.read_u16_be()? ^ exception_mask(session_material, seed, index, 2, expected);
+        let raw_start = cursor.read_u16_be()?;
+        let raw_end = cursor.read_u16_be()?;
+        let raw_handler = cursor.read_u16_be()?;
+        let start = raw_start ^ exception_mask(session_material, seed, index, 0, expected);
+        let end = raw_end ^ exception_mask(session_material, seed, index, 1, expected);
+        let handler = raw_handler ^ exception_mask(session_material, seed, index, 2, expected);
         let type_cp =
             cursor.read_u16_be()? ^ exception_mask(session_material, seed, index, 3, expected);
         output.push(EncodedException {
@@ -2451,7 +2516,9 @@ fn exception_mask(
         &[&index_bytes, &field_bytes, &token_bytes],
         b"vbc4-exception-mask",
     );
-    u16::from_be_bytes([digest[0], digest[1]])
+    // Kotlin's readMacInt(material) takes the first four bytes as a big-endian
+    // Int and then masks with 0xFFFF, i.e. the low two bytes (digest[2..4]).
+    u16::from_be_bytes([digest[2], digest[3]])
 }
 
 fn decode_exceptions(
@@ -2736,8 +2803,9 @@ pub fn encode_iconst7_frame(material: &VmKeyMaterial) -> Result<Vec<u8>, VmError
         index: usize,
         dst: u16,
         operand: i32,
+        dialect: &dialect::VmDialect,
     ) -> [u8; 14] {
-        let masked = opcode ^ u16::from(opcode_mask(session, seed, index));
+        let masked = dialect.encode(opcode) ^ u16::from(opcode_mask(session, seed, index));
         let mut output = [0u8; 14];
         output[0..2].copy_from_slice(&masked.to_be_bytes());
         output[2..4].copy_from_slice(&REG_EXECUTABLE.to_be_bytes());
@@ -2748,8 +2816,16 @@ pub fn encode_iconst7_frame(material: &VmKeyMaterial) -> Result<Vec<u8>, VmError
         output
     }
 
-    let session =
-        vbc4_session_material(material.crypto_domain_material(), material.layout_digest());
+    let dialect = dialect::VmDialect::from_material(
+        material.crypto_domain_material(),
+        material.layout_digest(),
+    )?;
+    let mut state_binding = iconst7_frame_state_binding(material);
+    let session = vbc4_session_material(
+        material.crypto_domain_material(),
+        material.layout_digest(),
+        &state_binding,
+    );
     let seed = 0x1020_3040u32;
     let nonce = [0x33; 16];
     let build_key = vm_build_key(material.crypto_domain_material(), material.layout_digest())
@@ -2795,10 +2871,10 @@ pub fn encode_iconst7_frame(material: &VmKeyMaterial) -> Result<Vec<u8>, VmError
     let mut block_plain = Vec::new();
     push_u16(&mut block_plain, 1);
     push_u16(&mut block_plain, 4);
-    block_plain.extend_from_slice(&row(&session, seed, REG_META, 0, 0, 0));
-    block_plain.extend_from_slice(&row(&session, seed, ICONST, 1, 1, 7));
-    block_plain.extend_from_slice(&row(&session, seed, IRETURN, 2, 0, 0));
-    block_plain.extend_from_slice(&row(&session, seed, MAXS, 3, 0, 0));
+    block_plain.extend_from_slice(&row(&session, seed, REG_META, 0, 0, 0, &dialect));
+    block_plain.extend_from_slice(&row(&session, seed, ICONST, 1, 1, 7, &dialect));
+    block_plain.extend_from_slice(&row(&session, seed, IRETURN, 2, 0, 0, &dialect));
+    block_plain.extend_from_slice(&row(&session, seed, MAXS, 3, 0, 0, &dialect));
     push_u16(&mut block_plain, 0);
     let (block_key, block_iv) = vbc4_aes_material(&session, &nonce, seed, SECTION_INSTRUCTIONS, 0);
     let block_cipher = aes128_ctr(&block_key, &block_iv, &block_plain, VBC4_MAX_SECTION_SIZE)
@@ -2819,8 +2895,18 @@ pub fn encode_iconst7_frame(material: &VmKeyMaterial) -> Result<Vec<u8>, VmError
     let dispatch_mask = seed.rotate_left(7) ^ 0x119d_e1f3;
     let dispatch_token = ((u32::from(dispatch_state) << 16) | 1) ^ dispatch_mask;
     let flags = REQUIRED_FLAGS | FLAG_POLYMORPHIC_CP;
-    let wrapped_mask = vbc4_hmac(&session, 0, &[&nonce, b""], b"vbc4-seed-wrap");
-    let token = vbc4_hmac(&session, seed, &[&nonce, b""], b"vbc4-seed-token");
+    let wrapped_mask = vbc4_hmac(
+        &session,
+        0,
+        &[&nonce, &state_binding],
+        b"vbc4-seed-wrap",
+    );
+    let token = vbc4_hmac(
+        &session,
+        seed,
+        &[&nonce, &state_binding],
+        b"vbc4-seed-token",
+    );
     let seed_bytes = seed.to_be_bytes();
     let mut wrapped = [0u8; 16];
     for index in 0..4 {
@@ -2831,6 +2917,7 @@ pub fn encode_iconst7_frame(material: &VmKeyMaterial) -> Result<Vec<u8>, VmError
     let mut body = Vec::new();
     body.extend_from_slice(&VBC4_MAGIC);
     body.extend_from_slice(&nonce);
+    body.extend_from_slice(&dialect.commitment);
     push_u32(&mut body, key_id);
     body.extend_from_slice(&wrapped);
     push_u16(&mut body, flags);
@@ -2853,23 +2940,45 @@ pub fn encode_iconst7_frame(material: &VmKeyMaterial) -> Result<Vec<u8>, VmError
     body.extend_from_slice(&[0; 8]);
     let mac = vbc4_hmac_fields(&session, seed, &[&nonce, &body]);
     body.extend_from_slice(&mac);
+    state_binding.fill(0);
     Ok(body)
+}
+
+/// State binding used by [`encode_iconst7_frame`].  The helper exists solely
+/// for current-format Rust integration fixtures; production callers receive a
+/// route-bound value from the sealed native bridge.
+pub fn iconst7_frame_state_binding(material: &VmKeyMaterial) -> Vec<u8> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut binding = Vec::with_capacity(1 + 1 + 8 + 1 + 8 + 1 + 64);
+    binding.extend_from_slice(b"1");
+    binding.push(0);
+    binding.extend_from_slice(b"resource");
+    binding.push(0);
+    binding.extend_from_slice(VBC4_CLEAN_ENTRY_INTEGRITY_HEX);
+    binding.push(0);
+    for byte in material.layout_digest() {
+        binding.push(HEX[usize::from(byte >> 4)]);
+        binding.push(HEX[usize::from(byte & 0x0f)]);
+    }
+    binding
 }
 
 #[cfg(test)]
 mod parser_tests {
     use super::*;
+    use crate::executor::NoObjectOperations;
 
-    fn valid_frame() -> (VmKeyMaterial, Vec<u8>) {
+    fn valid_frame() -> (VmKeyMaterial, Vec<u8>, Vec<u8>) {
         let material = VmKeyMaterial::new([0x11; 32], [0x22; 32]);
         let body = encode_iconst7_frame(&material).expect("encode");
-        (material, body)
+        let binding = iconst7_frame_state_binding(&material);
+        (material, body, binding)
     }
 
     #[test]
     fn current_vbc4_frame_authenticates_and_executes() {
-        let (material, frame) = valid_frame();
-        let parser = VmParser::new(&material, b"").expect("parser");
+        let (material, frame, binding) = valid_frame();
+        let parser = VmParser::new(&material, &binding).expect("parser");
         let program = parser.parse(&frame).expect("VBC4");
         assert_eq!(program.metadata().resource_path.as_str(), "resource");
         assert_eq!(program.instructions().len(), 3);
@@ -2878,9 +2987,34 @@ mod parser_tests {
     }
 
     #[test]
+    fn vm_dialect_differs_across_materials_and_round_trips() {
+        let first = dialect::VmDialect::from_material(&[0x11; 32], &[0x22; 32]).expect("first");
+        let second = dialect::VmDialect::from_material(&[0x33; 32], &[0x22; 32]).expect("second");
+        assert_ne!(first.encode(ICONST), second.encode(ICONST));
+        assert_ne!(first.commitment, second.commitment);
+        assert_eq!(first.decode(first.encode(ICONST)), ICONST);
+        assert_eq!(first.decode(first.encode(IADD)), IADD);
+        assert_eq!(first.decode(first.encode(SUPER_INT_ARITH)), SUPER_INT_ARITH);
+        assert!(first.fused_opcode >= 0x100);
+        assert_eq!(first.encode(ICONST), 0x53);
+        assert_eq!(first.encode(IADD), 0x5f);
+        assert_eq!(first.encode(IRETURN), 0x44);
+        assert_eq!(first.encode(REG_META), 0xf3);
+    }
+
+    #[test]
+    fn foreign_dialect_material_fails_closed_on_current_frame() {
+        let (material, frame, binding) = valid_frame();
+        let foreign = VmKeyMaterial::new([0x44; 32], [0x22; 32]);
+        let parser = VmParser::new(&foreign, &binding).expect("parser");
+        assert!(parser.parse(&frame).is_err());
+        let _ = material;
+    }
+
+    #[test]
     fn authentication_precedes_semantic_parsing_and_truncation_is_rejected() {
-        let (material, frame) = valid_frame();
-        let parser = VmParser::new(&material, b"").expect("parser");
+        let (material, frame, binding) = valid_frame();
+        let parser = VmParser::new(&material, &binding).expect("parser");
         for end in 0..frame.len() {
             assert!(
                 parser.parse(&frame[..end]).is_err(),
@@ -2888,10 +3022,29 @@ mod parser_tests {
             );
         }
         let mut tampered = frame;
-        tampered[80] ^= 1;
+        tampered[VBC4_HEADER_SIZE] ^= 1;
         assert!(matches!(
             parser.parse(&tampered),
             Err(VmError::AuthenticationFailed)
         ));
+    }
+
+    #[test]
+    fn dialect_commitment_mismatch_fails_before_semantic_parsing() {
+        let (material, mut frame, binding) = valid_frame();
+        frame[20] ^= 1;
+        let parser = VmParser::new(&material, &binding).expect("parser");
+        assert!(matches!(
+            parser.parse(&frame),
+            Err(VmError::DialectCommitmentMismatch)
+        ));
+    }
+
+    #[test]
+    fn state_binding_mismatch_fails_closed() {
+        let (material, frame, mut binding) = valid_frame();
+        binding[0] ^= 1;
+        let parser = VmParser::new(&material, &binding).expect("parser");
+        assert!(matches!(parser.parse(&frame), Err(VmError::InvalidSeed)));
     }
 }

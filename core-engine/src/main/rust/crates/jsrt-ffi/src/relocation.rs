@@ -4,10 +4,12 @@ use std::collections::BTreeMap;
 pub const ORIGINAL_HELPER_OWNER: &str =
     "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper";
 
-pub const TYPED_R1_METHODS: [(&str, &str); 7] = [
+pub const TYPED_R1_METHOD_COUNT: usize = 11;
+pub const TYPED_R1_METHODS: [(&str, &str); TYPED_R1_METHOD_COUNT] = [
     ("nativeInit", "(Ljava/lang/String;)I"),
     ("nativeHeartbeat", "()I"),
     ("nativeInstallAkenSessionNonce", "([B)Z"),
+    ("nativeInstallAkenCatalog", "([B[B)I"),
     (
         "nativeExecuteAkenVmPage",
         "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;",
@@ -15,6 +17,15 @@ pub const TYPED_R1_METHODS: [(&str, &str); 7] = [
     ("nativeOpenAkenString", "([BI[B)Ljava/lang/String;"),
     ("nativeReadAkenClassPage", "([BI[B)[B"),
     ("nativeConsumeAkenNativeChunk", "([BI[B)V"),
+    (
+        "nativeInitializeDefense",
+        "(Ljava/lang/String;Ljava/lang/String;)I",
+    ),
+    (
+        "nativeProbeDefense",
+        "(Ljava/lang/String;Ljava/lang/String;)I",
+    ),
+    ("nativeTransformDefense", "([BLjava/lang/String;)[B"),
 ];
 
 const BINDING_DOMAIN: &[u8] = b"AKEN-BINDING-V1|";
@@ -22,7 +33,7 @@ const BINDING_DOMAIN: &[u8] = b"AKEN-BINDING-V1|";
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RegistrationPlan {
     pub owner: String,
-    pub methods: [(String, &'static str); 7],
+    pub methods: [(String, &'static str); TYPED_R1_METHOD_COUNT],
 }
 
 pub fn sealed_binding_key(value: &str) -> String {
@@ -50,7 +61,9 @@ pub fn parse_binding_map(text: &str) -> Result<BTreeMap<String, String>, &'stati
         if key.is_empty() || value.is_empty() || value.contains('\0') {
             return Err("AKEN-R1 method binding value is invalid");
         }
-        map.insert(key, value);
+        if map.insert(key, value).is_some() {
+            return Err("AKEN-R1 method binding map has duplicate keys");
+        }
     }
     Ok(map)
 }
@@ -66,14 +79,22 @@ pub fn resolve_registration(
     if owner.contains('\0') || owner.len() > 512 {
         return Err("AKEN-R1 helper owner is invalid");
     }
+    let relocated_owner = owner != ORIGINAL_HELPER_OWNER;
     let methods = TYPED_R1_METHODS.map(|(name, signature)| {
         let key = sealed_binding_key(&format!("{ORIGINAL_HELPER_OWNER}#{name}#{signature}"));
-        let remapped = method_bindings
-            .get(&key)
-            .cloned()
-            .unwrap_or_else(|| name.to_string());
-        (remapped, signature)
+        let remapped = match method_bindings.get(&key) {
+            Some(value) => value.clone(),
+            None if !relocated_owner => name.to_string(),
+            None => return Err("AKEN-R1 sealed JNI binding map is incomplete"),
+        };
+        Ok((remapped, signature))
     });
+    let methods: [(String, &'static str); TYPED_R1_METHOD_COUNT] = methods
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error)?
+        .try_into()
+        .map_err(|_| "AKEN-R1 typed JNI registration shape is invalid")?;
     let mut seen = BTreeMap::new();
     for (name, signature) in &methods {
         if name.is_empty() || name.contains('\0') || name.len() > 256 {
@@ -116,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_bindings_keep_the_source_helper_surface() {
+    fn missing_bindings_keep_the_source_helper_surface_only() {
         let plan = resolve_registration(None, &BTreeMap::new()).expect("plan");
         assert_eq!(plan.owner, ORIGINAL_HELPER_OWNER);
         assert_eq!(
@@ -126,15 +147,24 @@ mod tests {
     }
 
     #[test]
-    fn published_loader_and_method_bindings_restore_the_renamed_surface() {
-        let native_init_key = sealed_binding_key(&format!(
-            "{ORIGINAL_HELPER_OWNER}#nativeInit#(Ljava/lang/String;)I"
-        ));
+    fn relocated_owner_requires_every_typed_binding() {
+        let error = resolve_registration(Some("a/b/SealedHelper"), &BTreeMap::new())
+            .expect_err("relocated owner must fail closed without bindings");
+        assert_eq!(error, "AKEN-R1 sealed JNI binding map is incomplete");
+    }
+
+    #[test]
+    fn published_loader_and_method_bindings_restore_the_complete_renamed_surface() {
         let mut methods = BTreeMap::new();
-        methods.insert(native_init_key, "m_init".to_string());
+        for (index, (name, signature)) in TYPED_R1_METHODS.iter().enumerate() {
+            methods.insert(
+                sealed_binding_key(&format!("{ORIGINAL_HELPER_OWNER}#{name}#{signature}")),
+                format!("m_{index}"),
+            );
+        }
         let plan = resolve_registration(Some("a/b/SealedHelper"), &methods).expect("plan");
         assert_eq!(plan.owner, "a/b/SealedHelper");
-        assert_eq!(plan.methods[0].0, "m_init");
-        assert_eq!(plan.methods[1].0, "nativeHeartbeat");
+        assert_eq!(plan.methods[0].0, "m_0");
+        assert_eq!(plan.methods[TYPED_R1_METHOD_COUNT - 1].0, "m_10");
     }
 }

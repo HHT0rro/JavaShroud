@@ -1,5 +1,7 @@
 use crate::page::{PageKind, PageRequest};
-use jsrt_page::{PageEnvelope, PageError as WirePageError, PageLease};
+use jsrt_crypto::{constant_time_eq, Sha256};
+use jsrt_page::{PageCipherSchedule, PageEnvelope, PageError as WirePageError, PageLease};
+use std::collections::HashMap;
 use std::fmt;
 
 const MAX_ATTACHED_PAGES: usize = 4096;
@@ -7,27 +9,98 @@ const MAX_ATTACHED_PAGES: usize = 4096;
 pub struct AttachedPage {
     envelope: PageEnvelope,
     encoded: Vec<u8>,
-    dek: Vec<u8>,
+    /// Descriptor decoded and authenticated once at catalog installation.
+    ///
+    /// Re-decoding the same descriptor for every typed page open made hot
+    /// StringPage call sites pay the complete wire/parser cost on each access.
+    /// The descriptor remains artifact-bound and immutable after installation;
+    /// its child owners wipe evaluator/proof material on drop.
+    descriptor: jsrt_page::PageDescriptor,
+    schedule_template: EvaluatorScheduleTemplate,
+}
+
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+struct RouteIndexKey {
+    kind_id: u8,
+    encoded_handle: [u8; jsrt_page::ENCODED_HANDLE_SIZE],
 }
 
 impl Drop for AttachedPage {
     fn drop(&mut self) {
         self.envelope.wipe();
         self.encoded.fill(0);
-        self.dek.fill(0);
+    }
+}
+
+/// Parsed, authenticated evaluator material that contains no reconstructed
+/// page key.  Fragment masks are precomputed once when the catalog is sealed;
+/// each open still materializes a transient page schedule and wipes it through
+/// `PageLease` after authenticated decryption.
+struct EvaluatorScheduleTemplate {
+    fragments: Vec<EvaluatorScheduleFragment>,
+}
+
+struct EvaluatorScheduleFragment {
+    offset: usize,
+    length: usize,
+    family: u8,
+    opcode: u8,
+    register: u8,
+    encoded: Vec<u8>,
+    mask: Vec<u8>,
+}
+
+impl Drop for EvaluatorScheduleTemplate {
+    fn drop(&mut self) {
+        self.fragments.clear();
+    }
+}
+
+impl Drop for EvaluatorScheduleFragment {
+    fn drop(&mut self) {
+        self.encoded.fill(0);
+        self.mask.fill(0);
+    }
+}
+
+impl EvaluatorScheduleTemplate {
+    fn materialize(&self) -> Result<PageCipherSchedule, RouterError> {
+        let mut material = TransientMaterial([0u8; 32]);
+        for fragment in &self.fragments {
+            if fragment.offset + fragment.length > material.0.len()
+                || fragment.encoded.len() != fragment.length
+                || fragment.mask.len() != fragment.length
+            {
+                return Err(RouterError::AuthenticationFailed);
+            }
+            for index in 0..fragment.length {
+                let tweak = fragment
+                    .family
+                    .wrapping_mul(17)
+                    .wrapping_add(fragment.opcode)
+                    .wrapping_add(fragment.register)
+                    .wrapping_add(index as u8);
+                material.0[fragment.offset + index] =
+                    fragment.encoded[index] ^ fragment.mask[index] ^ tweak;
+            }
+        }
+        PageCipherSchedule::from_material(&material.0)
+            .map_err(|_| RouterError::AuthenticationFailed)
     }
 }
 
 #[derive(Default)]
 pub struct TypedPageRouter {
     pages: Vec<AttachedPage>,
+    route_index: HashMap<RouteIndexKey, usize>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct OpenedPage {
     kind: PageKind,
     payload: Vec<u8>,
-    dek: Vec<u8>,
+    entry_token: i64,
+    logical_binding_path: String,
 }
 
 impl OpenedPage {
@@ -45,39 +118,35 @@ impl OpenedPage {
         payload
     }
 
-    pub fn dek(&self) -> &[u8] {
-        &self.dek
+    pub fn entry_token(&self) -> i64 {
+        self.entry_token
     }
 
-    pub fn execute_vm(&self) -> Result<Option<i32>, RouterError> {
+    pub fn logical_binding_path(&self) -> &str {
+        &self.logical_binding_path
+    }
+
+    pub fn parse_vm_with_material(
+        &self,
+        crypto_domain: [u8; 32],
+        layout_digest: [u8; 32],
+        state_binding: &[u8],
+    ) -> Result<jsrt_vm::VmProgram, RouterError> {
         if self.kind != PageKind::Vm {
             return Err(RouterError::RouteUnavailable { kind: self.kind });
         }
-        if self.dek.len() != 32 {
-            return Err(RouterError::InvalidRequest("VM page key length is invalid"));
-        }
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&self.dek);
-        let material = jsrt_vm::VmKeyMaterial::new(key, key);
-        let parser = jsrt_vm::VmParser::new(&material, b"")
+        let material = jsrt_vm::VmKeyMaterial::new(crypto_domain, layout_digest);
+        let parser = jsrt_vm::VmParser::new(&material, state_binding)
             .map_err(|_| RouterError::AuthenticationFailed)?;
-        let program = parser
+        parser
             .parse(&self.payload)
-            .map_err(|_| RouterError::AuthenticationFailed)?;
-        let mut executor = jsrt_vm::VmExecutor::new(jsrt_vm::NoObjectOperations);
-        match executor.execute(&program, &[]) {
-            Ok(jsrt_vm::VmValue::Int(value)) => Ok(Some(value)),
-            Ok(jsrt_vm::VmValue::Null) => Ok(None),
-            Ok(_) => Ok(None),
-            Err(_) => Err(RouterError::RouteUnavailable { kind: PageKind::Vm }),
-        }
+            .map_err(|_| RouterError::AuthenticationFailed)
     }
 }
 
 impl Drop for OpenedPage {
     fn drop(&mut self) {
         self.payload.fill(0);
-        self.dek.fill(0);
     }
 }
 
@@ -117,7 +186,10 @@ impl From<WirePageError> for RouterError {
 
 impl TypedPageRouter {
     pub fn new() -> Self {
-        Self { pages: Vec::new() }
+        Self {
+            pages: Vec::new(),
+            route_index: HashMap::new(),
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -128,30 +200,75 @@ impl TypedPageRouter {
         self.pages.is_empty()
     }
 
-    pub fn install(
+    /// Install only an artifact-specific descriptor-bound page. Generic
+    /// catalog keys/DEKs are intentionally not accepted by the current format.
+    /// Install a page whose page-local decryptor is carried by the authenticated
+    /// descriptor.  No generic key or sidecar is accepted on this path.
+    pub fn install_descriptor_bound(
         &mut self,
         envelope: PageEnvelope,
         encoded: Vec<u8>,
-        dek: Vec<u8>,
+        descriptor: Vec<u8>,
     ) -> Result<(), RouterError> {
         if encoded.is_empty() {
             return Err(RouterError::InvalidRequest(
                 "attached page is missing ciphertext",
             ));
         }
-        if !dek.is_empty() && dek.len() != 32 {
+        if descriptor.is_empty() {
             return Err(RouterError::InvalidRequest(
-                "attached page key length is invalid",
+                "attached page is missing descriptor",
             ));
         }
         if self.pages.len() >= MAX_ATTACHED_PAGES {
             return Err(RouterError::TooManyPages);
         }
+        let encoded_handle = envelope
+            .encoded_handle()
+            .map_err(|_| RouterError::AuthenticationFailed)?;
+        let key = RouteIndexKey {
+            kind_id: envelope.kind().id(),
+            encoded_handle,
+        };
+        if self.route_index.contains_key(&key) {
+            return Err(RouterError::AuthenticationFailed);
+        }
+        let parsed_descriptor = jsrt_page::PageDescriptor::decode(&descriptor)?;
+        if !envelope.matches_descriptor(&parsed_descriptor) {
+            return Err(RouterError::AuthenticationFailed);
+        }
+        let schedule_template = compile_descriptor_schedule(&parsed_descriptor)?;
+        self.install_descriptor_bound_parsed(
+            envelope,
+            encoded,
+            parsed_descriptor,
+            schedule_template,
+            key,
+        )
+    }
+
+    fn install_descriptor_bound_parsed(
+        &mut self,
+        envelope: PageEnvelope,
+        encoded: Vec<u8>,
+        descriptor: jsrt_page::PageDescriptor,
+        schedule_template: EvaluatorScheduleTemplate,
+        key: RouteIndexKey,
+    ) -> Result<(), RouterError> {
+        if self.pages.len() >= MAX_ATTACHED_PAGES {
+            return Err(RouterError::TooManyPages);
+        }
+        if self.route_index.contains_key(&key) {
+            return Err(RouterError::AuthenticationFailed);
+        }
+        let page_position = self.pages.len();
         self.pages.push(AttachedPage {
             envelope,
             encoded,
-            dek,
+            descriptor,
+            schedule_template,
         });
+        self.route_index.insert(key, page_position);
         Ok(())
     }
 
@@ -160,50 +277,118 @@ impl TypedPageRouter {
             .map_err(|_| RouterError::InvalidRequest("page index does not fit the wire type"))?;
         let encoded_handle = request.handle().as_bytes();
         let proof = request.proof().as_bytes();
-        let Some(attached) = self.pages.iter().find(|page| {
-            page.envelope.kind().id() == request.kind().id()
-                && page.envelope.matches_typed_bridge_request(
-                    entry_token,
-                    encoded_handle,
-                    page_index,
-                    proof,
-                )
-        }) else {
+        let key = RouteIndexKey {
+            kind_id: request.kind().id(),
+            encoded_handle: *encoded_handle,
+        };
+        let Some(&page_position) = self.route_index.get(&key) else {
             return Err(RouterError::RouteUnavailable {
                 kind: request.kind(),
             });
         };
-        let descriptor = attached
-            .envelope
-            .inline_descriptor()?
+        let attached = self
+            .pages
+            .get(page_position)
             .ok_or(RouterError::AuthenticationFailed)?;
-        let descriptor = jsrt_page::PageDescriptor::decode(&descriptor)?;
-        if !attached.envelope.matches_descriptor(&descriptor) {
+        if !matches_attached_request(attached, entry_token, encoded_handle, page_index, proof) {
             return Err(RouterError::AuthenticationFailed);
         }
-        let mut dek = attached.dek.clone();
-        if dek.is_empty() {
-            dek = descriptor.evaluator_plan().recover_page_dek()?.to_vec();
-        }
-        let mut lease = PageLease::open(attached.encoded.clone(), dek.clone());
-        lease
-            .authenticate_with_descriptor(&descriptor)
-            .map_err(|_| RouterError::AuthenticationFailed)?;
-        let payload = lease
-            .consume()
-            .map_err(|_| RouterError::AuthenticationFailed)?;
+        let (payload, descriptor) = self.open_attached_page(attached)?;
         Ok(OpenedPage {
             kind: request.kind(),
             payload,
-            dek,
+            entry_token,
+            logical_binding_path: descriptor.route().logical_binding_path().to_string(),
         })
     }
 
-    pub fn install_catalog(
+    /// Open and concatenate every VBC4 page belonging to one method route.
+    ///
+    /// A VBC4 program is partitioned across page-local authenticated frames;
+    /// the VM parser must receive the reconstructed serialized program rather
+    /// than page zero alone.  The caller still authenticates one concrete page
+    /// request (normally page zero) before the complete contiguous route is
+    /// opened.
+    pub fn open_vm_pages(
+        &self,
+        entry_token: i64,
+        request: &PageRequest,
+    ) -> Result<OpenedPage, RouterError> {
+        if request.kind() != PageKind::Vm {
+            return Err(RouterError::RouteUnavailable { kind: request.kind() });
+        }
+        let mut pages: Vec<&AttachedPage> = self
+            .pages
+            .iter()
+            .filter(|page| {
+                page.envelope.kind() == jsrt_page::PageKind::Vm
+                    && page.envelope.entry_token() == entry_token
+            })
+            .collect();
+        if pages.is_empty() {
+            return Err(RouterError::RouteUnavailable { kind: PageKind::Vm });
+        }
+        if !pages.iter().any(|page| {
+            page.envelope.matches_typed_bridge_request(
+                entry_token,
+                request.handle().as_bytes(),
+                request.page_index() as i32,
+                request.proof().as_bytes(),
+            )
+        }) {
+            return Err(RouterError::RouteUnavailable { kind: PageKind::Vm });
+        }
+        pages.sort_by_key(|page| page.envelope.page_index());
+
+        let mut payload = Vec::new();
+        let mut logical_binding_path: Option<String> = None;
+        for (expected_index, page) in pages.iter().enumerate() {
+            if page.envelope.page_index() != expected_index as i32 {
+                return Err(RouterError::AuthenticationFailed);
+            }
+            let (part, descriptor) = self.open_attached_page(page)?;
+            let current_path = descriptor.route().logical_binding_path().to_string();
+            if let Some(expected_path) = logical_binding_path.as_deref() {
+                if expected_path != current_path {
+                    return Err(RouterError::AuthenticationFailed);
+                }
+            } else {
+                logical_binding_path = Some(current_path);
+            }
+            payload.extend_from_slice(&part);
+            let mut part = part;
+            part.fill(0);
+        }
+        Ok(OpenedPage {
+            kind: PageKind::Vm,
+            payload,
+            entry_token,
+            logical_binding_path: logical_binding_path.ok_or(RouterError::AuthenticationFailed)?,
+        })
+    }
+
+    fn open_attached_page(
+        &self,
+        attached: &AttachedPage,
+    ) -> Result<(Vec<u8>, jsrt_page::PageDescriptor), RouterError> {
+        let schedule = attached.schedule_template.materialize()?;
+        let mut lease = PageLease::open(attached.encoded.clone(), schedule);
+        if lease
+            .authenticate_with_descriptor(&attached.descriptor)
+            .is_err()
+        {
+            return Err(RouterError::AuthenticationFailed);
+        }
+        let payload = lease
+            .consume()
+            .map_err(|_| RouterError::AuthenticationFailed)?;
+        Ok((payload, attached.descriptor.clone()))
+    }
+
+    pub fn install_catalog_descriptor_bound(
         &mut self,
         directory: &jsrt_page::ArtifactDirectory,
         stored_pages: &std::collections::BTreeMap<String, Vec<u8>>,
-        dek: &[u8],
     ) -> Result<usize, RouterError> {
         let mut installed = 0usize;
         for entry in &directory.entries {
@@ -216,40 +401,270 @@ impl TypedPageRouter {
                 ));
             }
             let envelope = jsrt_page::PageEnvelope::decode(&entry.envelope)?;
-            self.install(envelope, encoded.clone(), dek.to_vec())?;
+            let descriptor = jsrt_page::PageDescriptor::decode(&entry.descriptor)?;
+            if !envelope.matches_descriptor(&descriptor) {
+                return Err(RouterError::AuthenticationFailed);
+            }
+            let encoded_handle = envelope
+                .encoded_handle()
+                .map_err(|_| RouterError::AuthenticationFailed)?;
+            let key = RouteIndexKey {
+                kind_id: envelope.kind().id(),
+                encoded_handle,
+            };
+            let schedule_template = compile_descriptor_schedule(&descriptor)?;
+            self.install_descriptor_bound_parsed(
+                envelope,
+                encoded.clone(),
+                descriptor,
+                schedule_template,
+                key,
+            )?;
             installed = installed.checked_add(1).ok_or(RouterError::TooManyPages)?;
         }
         Ok(installed)
     }
 
-    pub fn install_sidecar(&mut self, root: &std::path::Path) -> Result<usize, RouterError> {
-        let directory_bytes = std::fs::read(root.join("directory.jsr1"))
-            .map_err(|_| RouterError::InvalidRequest("catalog sidecar directory is missing"))?;
-        let dek = std::fs::read(root.join("dek.bin")).unwrap_or_default();
-        if !dek.is_empty() && dek.len() != 32 {
-            return Err(RouterError::InvalidRequest(
-                "catalog sidecar key length is invalid",
-            ));
-        }
-        let directory = jsrt_page::decode_directory(&directory_bytes)?;
-        let mut stored = std::collections::BTreeMap::new();
-        for entry in &directory.entries {
-            let encoded = std::fs::read(root.join(&entry.relative_path))
-                .map_err(|_| RouterError::InvalidRequest("catalog sidecar page is missing"))?;
-            stored.insert(entry.relative_path.clone(), encoded);
-        }
-        self.install_catalog(&directory, &stored, &dek)
-    }
-
     pub fn clear(&mut self) {
         self.pages.clear();
+        self.route_index.clear();
     }
+}
+
+/// Validate a request against the immutable, catalog-authenticated page
+/// record without recomputing the proof digest on every open.
+///
+/// `PageEnvelope::matches_typed_bridge_request` remains the public generic
+/// verifier for callers that only possess an envelope.  The runtime router has
+/// the stronger descriptor-bound record available after installation, so it
+/// can compare the raw call-site proof directly with the proof authenticated
+/// by `matches_descriptor` at install time.  This preserves fail-closed
+/// semantics while removing one SHA-256 over every hot StringPage access.
+fn matches_attached_request(
+    attached: &AttachedPage,
+    entry_token: i64,
+    encoded_handle: &[u8],
+    page_index: i32,
+    raw_call_site_proof: &[u8],
+) -> bool {
+    if attached.envelope.is_wiped()
+        || page_index < 0
+        || encoded_handle.len() != jsrt_page::ENCODED_HANDLE_SIZE
+        || raw_call_site_proof.is_empty()
+        || raw_call_site_proof.len() > jsrt_page::MAX_CALL_SITE_PROOF_SIZE
+    {
+        return false;
+    }
+    let expected_handle = match attached.envelope.encoded_handle() {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    let token_match = entry_token == 0 || attached.envelope.entry_token() == entry_token;
+    let page_match = attached.envelope.page_index() == page_index;
+    let handle_match = constant_time_eq(&expected_handle, encoded_handle);
+    let proof_match = constant_time_eq(
+        attached.descriptor.proof().call_site_proof(),
+        raw_call_site_proof,
+    );
+    token_match && page_match && handle_match && proof_match
 }
 
 impl Drop for TypedPageRouter {
     fn drop(&mut self) {
         self.clear();
     }
+}
+
+/// Evaluate one artifact-specific VBC4 descriptor into a transient page
+/// material buffer. The wire grammar is intentionally variable: every page
+/// chooses its own dialect byte, fragment count, offsets, opcodes, registers,
+/// tokens and fragment lengths. Authentication is completed before any
+/// fragment is decoded.
+fn compile_descriptor_schedule(
+    descriptor: &jsrt_page::PageDescriptor,
+) -> Result<EvaluatorScheduleTemplate, RouterError> {
+    const MARKER: &[u8; 4] = b"VBC4";
+    const MATERIAL_SIZE: usize = 32;
+    const NONCE_SIZE: usize = 12;
+    const PLAN_NONCE_SIZE: usize = 16;
+    const DIGEST_SIZE: usize = 32;
+    const DIALECT_SIZE: usize = 32;
+    const TAG_SIZE: usize = 16;
+    const MIN_FRAGMENTS: usize = 4;
+    const MAX_FRAGMENTS: usize = 12;
+
+    let opaque = descriptor.evaluator_plan().opaque();
+    let body_end = opaque
+        .len()
+        .checked_sub(DIGEST_SIZE)
+        .ok_or(RouterError::AuthenticationFailed)?;
+    if opaque.len() < 4 + 2 + NONCE_SIZE + PLAN_NONCE_SIZE + DIGEST_SIZE * 3 + DIGEST_SIZE {
+        return Err(RouterError::AuthenticationFailed);
+    }
+    let supplied_plan_tag = &opaque[body_end..];
+    let expected_plan_tag = sha256_with_domain(b"vbc4-evaluator-seal", &opaque[..body_end]);
+    if !constant_time_eq(&expected_plan_tag, supplied_plan_tag) {
+        return Err(RouterError::AuthenticationFailed);
+    }
+
+    let mut cursor = 0usize;
+    let read = |cursor: &mut usize, length: usize| -> Result<&[u8], RouterError> {
+        if *cursor > body_end.saturating_sub(length) {
+            return Err(RouterError::AuthenticationFailed);
+        }
+        let start = *cursor;
+        *cursor += length;
+        Ok(&opaque[start..start + length])
+    };
+    if read(&mut cursor, MARKER.len())? != MARKER {
+        return Err(RouterError::AuthenticationFailed);
+    }
+    let dialect_byte = read(&mut cursor, 1)?[0];
+    let fragment_count = read(&mut cursor, 1)?[0] as usize;
+    if !(MIN_FRAGMENTS..=MAX_FRAGMENTS).contains(&fragment_count) {
+        return Err(RouterError::AuthenticationFailed);
+    }
+    let _page_nonce = read(&mut cursor, NONCE_SIZE)?;
+    let plan_nonce = read(&mut cursor, PLAN_NONCE_SIZE)?;
+    let static_binding = read(&mut cursor, DIGEST_SIZE)?.to_vec();
+    let _final_binding = read(&mut cursor, DIGEST_SIZE)?;
+    let dialect_commitment = read(&mut cursor, DIALECT_SIZE)?.to_vec();
+
+    let expected_dialect = {
+        let mut hasher = Sha256::new();
+        hasher.update(b"vbc4-evaluator-dialect");
+        hasher.update(&static_binding);
+        hasher.update(plan_nonce);
+        hasher.update(&[dialect_byte]);
+        hasher.finalize().into_bytes()
+    };
+    if !constant_time_eq(&expected_dialect, &dialect_commitment) {
+        return Err(RouterError::AuthenticationFailed);
+    }
+
+    let mut covered = [false; MATERIAL_SIZE];
+    let mut fragments = Vec::with_capacity(fragment_count);
+    for _ in 0..fragment_count {
+        let offset = read(&mut cursor, 1)?[0] as usize;
+        let length = read(&mut cursor, 1)?[0] as usize;
+        let family = read(&mut cursor, 1)?[0];
+        let opcode = read(&mut cursor, 1)?[0];
+        let register = read(&mut cursor, 1)?[0];
+        if length == 0 || offset >= MATERIAL_SIZE || offset + length > MATERIAL_SIZE {
+            return Err(RouterError::AuthenticationFailed);
+        }
+        if (offset..offset + length).any(|index| covered[index]) {
+            return Err(RouterError::AuthenticationFailed);
+        }
+        let token_len = read_u32(opaque, &mut cursor, body_end)? as usize;
+        if !(17..=48).contains(&token_len) {
+            return Err(RouterError::AuthenticationFailed);
+        }
+        let token = read(&mut cursor, token_len)?;
+        let salt = read(&mut cursor, 16)?;
+        let encoded_len = read_u32(opaque, &mut cursor, body_end)? as usize;
+        if encoded_len != length {
+            return Err(RouterError::AuthenticationFailed);
+        }
+        let encoded = read(&mut cursor, encoded_len)?;
+        let supplied_tag = read(&mut cursor, TAG_SIZE)?;
+
+        let mut tag_hasher = Sha256::new();
+        tag_hasher.update(b"vbc4-evaluator-fragment");
+        tag_hasher.update(&static_binding);
+        tag_hasher.update(&dialect_commitment);
+        update_i32(&mut tag_hasher, offset as u32);
+        update_i32(&mut tag_hasher, length as u32);
+        update_i32(&mut tag_hasher, family as u32);
+        update_i32(&mut tag_hasher, opcode as u32);
+        update_i32(&mut tag_hasher, register as u32);
+        update_frame(&mut tag_hasher, token);
+        update_frame(&mut tag_hasher, salt);
+        update_frame(&mut tag_hasher, encoded);
+        let expected_tag = tag_hasher.finalize();
+        if !constant_time_eq(&expected_tag.as_ref()[..TAG_SIZE], supplied_tag) {
+            return Err(RouterError::AuthenticationFailed);
+        }
+
+        let mut produced = 0usize;
+        let mut counter = 0u32;
+        let mut mask = vec![0u8; length];
+        while produced < length {
+            let mut mask_hasher = Sha256::new();
+            mask_hasher.update(b"vbc4-evaluator-mask");
+            mask_hasher.update(&static_binding);
+            mask_hasher.update(&dialect_commitment);
+            update_i32(&mut mask_hasher, offset as u32);
+            update_i32(&mut mask_hasher, length as u32);
+            update_i32(&mut mask_hasher, family as u32);
+            update_i32(&mut mask_hasher, opcode as u32);
+            update_i32(&mut mask_hasher, register as u32);
+            update_frame(&mut mask_hasher, token);
+            update_frame(&mut mask_hasher, salt);
+            update_i32(&mut mask_hasher, counter);
+            let block = mask_hasher.finalize();
+            let take = (length - produced).min(block.as_ref().len());
+            for index in 0..take {
+                mask[produced + index] = block.as_ref()[index];
+            }
+            produced += take;
+            counter = counter.wrapping_add(1);
+        }
+        for index in offset..offset + length {
+            covered[index] = true;
+        }
+        fragments.push(EvaluatorScheduleFragment {
+            offset,
+            length,
+            family,
+            opcode,
+            register,
+            encoded: encoded.to_vec(),
+            mask,
+        });
+    }
+    if cursor != body_end || !covered.iter().all(|value| *value) {
+        return Err(RouterError::AuthenticationFailed);
+    }
+    Ok(EvaluatorScheduleTemplate { fragments })
+}
+
+struct TransientMaterial([u8; 32]);
+
+impl Drop for TransientMaterial {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
+fn read_u32(bytes: &[u8], cursor: &mut usize, limit: usize) -> Result<u32, RouterError> {
+    if *cursor > limit.saturating_sub(4) {
+        return Err(RouterError::AuthenticationFailed);
+    }
+    let value = u32::from_be_bytes([
+        bytes[*cursor],
+        bytes[*cursor + 1],
+        bytes[*cursor + 2],
+        bytes[*cursor + 3],
+    ]);
+    *cursor += 4;
+    Ok(value)
+}
+
+fn update_i32(hasher: &mut Sha256, value: u32) {
+    hasher.update(&value.to_be_bytes());
+}
+
+fn update_frame(hasher: &mut Sha256, value: &[u8]) {
+    update_i32(hasher, value.len() as u32);
+    hasher.update(value);
+}
+
+fn sha256_with_domain(domain: &[u8], value: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update(value);
+    hasher.finalize().into_bytes()
 }
 
 #[cfg(test)]
@@ -265,7 +680,7 @@ mod tests {
     fn attached_string_page() -> (
         PageEnvelope,
         Vec<u8>,
-        Vec<u8>,
+        [u8; 32],
         [u8; PAGE_HANDLE_SIZE],
         Vec<u8>,
     ) {
@@ -280,7 +695,7 @@ mod tests {
     ) -> (
         PageEnvelope,
         Vec<u8>,
-        Vec<u8>,
+        [u8; 32],
         [u8; PAGE_HANDLE_SIZE],
         Vec<u8>,
     ) {
@@ -304,6 +719,11 @@ mod tests {
             "META-INF/jsrt/page",
         )
         .expect("route");
+        let proof_bytes = if page_index == 3 {
+            b"call-site-proof".to_vec()
+        } else {
+            format!("call-site-proof-{page_index}").into_bytes()
+        };
         let proof = PageProof::new(
             leaf,
             &[0x10; DIGEST_SIZE],
@@ -311,20 +731,22 @@ mod tests {
             &[0x14; DIGEST_SIZE],
             vec![[0x15; DIGEST_SIZE], [0x16; DIGEST_SIZE]],
             vec![false, true],
-            b"call-site-proof",
+            &proof_bytes,
             CANONICAL_CODEC_VARIANT,
             &layout_variant,
         )
         .expect("proof");
-        let wrapped_dek =
-            jsrt_page::wrap_bound_page_dek(&[0x40; 32], &fingerprint).expect("wrap dek");
-        let evaluator = EvaluatorPlan::new(&wrapped_dek, &fingerprint).expect("evaluator");
+        let page_material = [0x40u8; 32];
+        let evaluator_opaque = current_evaluator_opaque(&page_material);
+        let evaluator = EvaluatorPlan::new(&evaluator_opaque, &fingerprint).expect("evaluator");
+        let mut evaluator_opaque = evaluator_opaque;
+        evaluator_opaque.fill(0);
         let descriptor = PageDescriptor::new(route, proof, 1024, evaluator).expect("descriptor");
         let envelope =
-            PageEnvelope::create(0, &handle, &descriptor, b"call-site-proof").expect("envelope");
+            PageEnvelope::create(0, &handle, &descriptor, &proof_bytes).expect("envelope");
         let encoded = encode_page(
             payload,
-            &[0x40; 32],
+            &page_material,
             &[0x10; DIGEST_SIZE],
             identity.as_bytes(),
             page_index,
@@ -338,13 +760,87 @@ mod tests {
             &[0x62; 8],
         )
         .expect("encode");
-        (
-            envelope,
-            encoded,
-            vec![0x40; 32],
-            encoded_handle,
-            b"call-site-proof".to_vec(),
-        )
+        (envelope, encoded, [0x40; 32], encoded_handle, proof_bytes)
+    }
+
+    fn current_evaluator_opaque(material: &[u8; 32]) -> Vec<u8> {
+        let dialect = 0x42u8;
+        let plan_nonce = [0x51u8; 16];
+        let static_binding = [0x32u8; 32];
+        let mut dialect_hasher = Sha256::new();
+        dialect_hasher.update(b"vbc4-evaluator-dialect");
+        dialect_hasher.update(&static_binding);
+        dialect_hasher.update(&plan_nonce);
+        dialect_hasher.update(&[dialect]);
+        let dialect_commitment = dialect_hasher.finalize().into_bytes();
+        let mut body = Vec::new();
+        body.extend_from_slice(b"VBC4");
+        body.push(dialect);
+        body.push(4);
+        body.extend_from_slice(&[0x41; 12]);
+        body.extend_from_slice(&plan_nonce);
+        body.extend_from_slice(&static_binding);
+        body.extend_from_slice(&[0x33; 32]);
+        body.extend_from_slice(&dialect_commitment);
+        for ordinal in 0..4usize {
+            let offset = ordinal * 8;
+            let length = 8usize;
+            let family = (ordinal + 1) as u8;
+            let opcode = (0x80 + ordinal) as u8;
+            let register = (3 + ordinal) as u8;
+            let token = vec![0x61u8.wrapping_add(ordinal as u8); 17];
+            let salt = vec![0x71u8.wrapping_add(ordinal as u8); 16];
+            let mut mask_hasher = Sha256::new();
+            mask_hasher.update(b"vbc4-evaluator-mask");
+            mask_hasher.update(&static_binding);
+            mask_hasher.update(&dialect_commitment);
+            update_i32(&mut mask_hasher, offset as u32);
+            update_i32(&mut mask_hasher, length as u32);
+            update_i32(&mut mask_hasher, family as u32);
+            update_i32(&mut mask_hasher, opcode as u32);
+            update_i32(&mut mask_hasher, register as u32);
+            update_frame(&mut mask_hasher, &token);
+            update_frame(&mut mask_hasher, &salt);
+            update_i32(&mut mask_hasher, 0);
+            let mask = mask_hasher.finalize();
+            let encoded: Vec<u8> = (0..length)
+                .map(|index| {
+                    let tweak = family
+                        .wrapping_mul(17)
+                        .wrapping_add(opcode)
+                        .wrapping_add(register)
+                        .wrapping_add(index as u8);
+                    material[offset + index] ^ mask.as_ref()[index] ^ tweak
+                })
+                .collect();
+            let mut tag_hasher = Sha256::new();
+            tag_hasher.update(b"vbc4-evaluator-fragment");
+            tag_hasher.update(&static_binding);
+            tag_hasher.update(&dialect_commitment);
+            update_i32(&mut tag_hasher, offset as u32);
+            update_i32(&mut tag_hasher, length as u32);
+            update_i32(&mut tag_hasher, family as u32);
+            update_i32(&mut tag_hasher, opcode as u32);
+            update_i32(&mut tag_hasher, register as u32);
+            update_frame(&mut tag_hasher, &token);
+            update_frame(&mut tag_hasher, &salt);
+            update_frame(&mut tag_hasher, &encoded);
+            let tag = tag_hasher.finalize();
+            body.extend_from_slice(&[offset as u8, length as u8, family, opcode, register]);
+            update_u32(&mut body, token.len() as u32);
+            body.extend_from_slice(&token);
+            body.extend_from_slice(&salt);
+            update_u32(&mut body, encoded.len() as u32);
+            body.extend_from_slice(&encoded);
+            body.extend_from_slice(&tag.as_ref()[..16]);
+        }
+        let plan_tag = sha256_with_domain(b"vbc4-evaluator-seal", &body);
+        body.extend_from_slice(&plan_tag);
+        body
+    }
+
+    fn update_u32(output: &mut Vec<u8>, value: u32) {
+        output.extend_from_slice(&value.to_be_bytes());
     }
 
     #[test]
@@ -366,254 +862,72 @@ mod tests {
     }
 
     #[test]
-    fn installed_page_opens_only_after_envelope_and_lease_authentication() {
-        let (envelope, encoded, dek, handle, proof) = attached_string_page();
+    fn descriptor_bound_install_requires_ciphertext_and_descriptor() {
+        let (envelope, _encoded, _dek, _handle, _proof) = attached_string_page();
         let mut router = TypedPageRouter::new();
-        router.install(envelope, encoded, dek).expect("install");
+        assert_eq!(
+            router.install_descriptor_bound(envelope, Vec::new(), b"descriptor".to_vec()),
+            Err(RouterError::InvalidRequest(
+                "attached page is missing ciphertext"
+            ))
+        );
+        let (envelope, encoded, _dek, _handle, _proof) = attached_string_page();
+        assert_eq!(
+            router.install_descriptor_bound(envelope, encoded, Vec::new()),
+            Err(RouterError::InvalidRequest(
+                "attached page is missing descriptor"
+            ))
+        );
+    }
+
+    #[test]
+    fn descriptor_bound_install_retains_only_authenticated_descriptor_bytes() {
+        let (envelope, encoded, _dek, _handle, _proof) = attached_string_page();
+        let descriptor = envelope
+            .inline_descriptor()
+            .expect("inline descriptor")
+            .expect("descriptor bytes");
+        let mut router = TypedPageRouter::new();
+        router
+            .install_descriptor_bound(envelope, encoded, descriptor)
+            .expect("descriptor-bound install");
+        assert_eq!(router.len(), 1);
+    }
+
+    #[test]
+    fn current_evaluator_schedule_round_trips_an_authenticated_page() {
+        let (envelope, encoded, _material, handle, proof) = attached_string_page();
+        let descriptor = envelope
+            .inline_descriptor()
+            .expect("inline descriptor")
+            .expect("descriptor bytes");
+        let mut router = TypedPageRouter::new();
+        router
+            .install_descriptor_bound(envelope, encoded, descriptor)
+            .expect("descriptor-bound install");
         let request = PageRequest::new(&handle, 3, &proof, PageKind::String).expect("request");
-        let opened = router.open(0, &request).expect("open");
-        assert_eq!(opened.kind(), PageKind::String);
+        let opened = router.open(0, &request).expect("open current evaluator page");
         assert_eq!(opened.payload(), b"hello-r1");
-
-        let tampered = PageRequest::new(&handle, 3, b"wrong-proof", PageKind::String).expect("bad");
-        assert_eq!(
-            router.open(0, &tampered),
-            Err(RouterError::RouteUnavailable {
-                kind: PageKind::String
-            })
-        );
-        let wrong_kind = PageRequest::new(&handle, 3, &proof, PageKind::Vm).expect("vm");
-        assert_eq!(
-            router.open(0, &wrong_kind),
-            Err(RouterError::RouteUnavailable { kind: PageKind::Vm })
-        );
     }
 
     #[test]
-    fn catalog_install_opens_pages_from_an_authenticated_directory() {
-        let (envelope, encoded, dek, handle, proof) = attached_string_page();
-        let envelope_bytes = envelope.encode().expect("envelope bytes");
+    fn descriptor_bound_open_rejects_wrong_raw_call_site_proof() {
+        let (envelope, encoded, _material, handle, proof) = attached_string_page();
         let descriptor = envelope
             .inline_descriptor()
-            .expect("inline")
-            .expect("descriptor");
-        let runtime = jsrt_page::DirectoryRuntimeBinding::new(
-            [1; 32],
-            [2; 32],
-            [3; 32],
-            "x86_64-pc-windows-gnu",
-            [4; 32],
-            "aken-r1-rust-ffi-v1",
-        )
-        .expect("runtime");
-        let entry = jsrt_page::ArtifactDirectoryEntry {
-            kind: WireKind::StringPage,
-            page_index: 3,
-            encoded_handle: handle,
-            locator: [0x12; 16],
-            relative_path: "pages/page-3.bin".to_string(),
-            offset: 0,
-            stored_length: encoded.len() as i32,
-            descriptor,
-            envelope: envelope_bytes,
-            binding_digest: [0; 32],
-        };
-        let encoded_dir = jsrt_page::encode_directory(&jsrt_page::ArtifactDirectory {
-            runtime,
-            entries: vec![entry],
-            root_digest: [0; 32],
-        })
-        .expect("dir");
-        let directory = jsrt_page::decode_directory(&encoded_dir).expect("decode dir");
-        let mut stored = std::collections::BTreeMap::new();
-        stored.insert("pages/page-3.bin".to_string(), encoded);
+            .expect("inline descriptor")
+            .expect("descriptor bytes");
         let mut router = TypedPageRouter::new();
+        router
+            .install_descriptor_bound(envelope, encoded, descriptor)
+            .expect("descriptor-bound install");
+        let mut wrong = proof.clone();
+        wrong[0] ^= 0x5a;
+        let request = PageRequest::new(&handle, 3, &wrong, PageKind::String).expect("request");
         assert_eq!(
-            router
-                .install_catalog(&directory, &stored, &dek)
-                .expect("catalog"),
-            1
-        );
-        let request = PageRequest::new(&handle, 3, &proof, PageKind::String).expect("request");
-        assert_eq!(
-            router.open(0, &request).expect("open").payload(),
-            b"hello-r1"
+            router.open(0, &request),
+            Err(RouterError::AuthenticationFailed)
         );
     }
 
-    #[test]
-    fn catalog_sidecar_round_trips_from_the_filesystem() {
-        let (envelope, encoded, _dek, handle, proof) = attached_string_page();
-        let envelope_bytes = envelope.encode().expect("envelope bytes");
-        let descriptor = envelope
-            .inline_descriptor()
-            .expect("inline")
-            .expect("descriptor");
-        let runtime = jsrt_page::DirectoryRuntimeBinding::new(
-            [1; 32],
-            [2; 32],
-            [3; 32],
-            "x86_64-pc-windows-gnu",
-            [4; 32],
-            "aken-r1-rust-ffi-v1",
-        )
-        .expect("runtime");
-        let encoded_dir = jsrt_page::encode_directory(&jsrt_page::ArtifactDirectory {
-            runtime,
-            entries: vec![jsrt_page::ArtifactDirectoryEntry {
-                kind: WireKind::StringPage,
-                page_index: 3,
-                encoded_handle: handle,
-                locator: [0x12; 16],
-                relative_path: "pages/page-3.bin".to_string(),
-                offset: 0,
-                stored_length: encoded.len() as i32,
-                descriptor,
-                envelope: envelope_bytes,
-                binding_digest: [0; 32],
-            }],
-            root_digest: [0; 32],
-        })
-        .expect("dir");
-        let root = std::env::temp_dir().join(format!("jsrt-r1-sidecar-{}", std::process::id()));
-        std::fs::create_dir_all(root.join("pages")).expect("pages dir");
-        std::fs::write(root.join("directory.jsr1"), encoded_dir).expect("directory");
-        std::fs::write(root.join("pages/page-3.bin"), encoded).expect("page");
-        let mut router = TypedPageRouter::new();
-        assert_eq!(router.install_sidecar(&root).expect("sidecar"), 1);
-        let request = PageRequest::new(&handle, 3, &proof, PageKind::String).expect("request");
-        assert_eq!(
-            router.open(0, &request).expect("open").payload(),
-            b"hello-r1"
-        );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn catalog_sidecar_opens_string_class_and_native_pages() {
-        let vm_material = jsrt_vm::VmKeyMaterial::new([0x40; 32], [0x40; 32]);
-        let vm_frame = jsrt_vm::encode_iconst7_frame(&vm_material).expect("vbc4");
-        let pages = [
-            (
-                "pages/page-3.bin",
-                attached_typed_page(WireKind::StringPage, 3, 0x11, b"hello-r1"),
-            ),
-            (
-                "pages/page-4.bin",
-                attached_typed_page(WireKind::EncryptedClassPage, 4, 0x21, b"class-r1"),
-            ),
-            (
-                "pages/page-5.bin",
-                attached_typed_page(WireKind::NativeChunk, 5, 0x31, b"native-r1"),
-            ),
-            (
-                "pages/page-6.bin",
-                attached_typed_page(WireKind::Vbc4Method, 6, 0x41, &vm_frame),
-            ),
-        ];
-        let runtime = jsrt_page::DirectoryRuntimeBinding::new(
-            [1; 32],
-            [2; 32],
-            [3; 32],
-            "x86_64-pc-windows-gnu",
-            [4; 32],
-            "aken-r1-rust-ffi-v1",
-        )
-        .expect("runtime");
-        let mut entries = Vec::new();
-        for (path, (envelope, encoded, _, handle, _)) in &pages {
-            let envelope_bytes = envelope.encode().expect("envelope");
-            let descriptor = envelope
-                .inline_descriptor()
-                .expect("inline")
-                .expect("descriptor");
-            entries.push(jsrt_page::ArtifactDirectoryEntry {
-                kind: match *path {
-                    "pages/page-3.bin" => WireKind::StringPage,
-                    "pages/page-4.bin" => WireKind::EncryptedClassPage,
-                    "pages/page-5.bin" => WireKind::NativeChunk,
-                    _ => WireKind::Vbc4Method,
-                },
-                page_index: match *path {
-                    "pages/page-3.bin" => 3,
-                    "pages/page-4.bin" => 4,
-                    "pages/page-5.bin" => 5,
-                    _ => 6,
-                },
-                encoded_handle: *handle,
-                locator: [0x12u8.wrapping_add(handle[0]); 16],
-                relative_path: (*path).to_string(),
-                offset: 0,
-                stored_length: encoded.len() as i32,
-                descriptor,
-                envelope: envelope_bytes,
-                binding_digest: [0; 32],
-            });
-        }
-        let encoded_dir = jsrt_page::encode_directory(&jsrt_page::ArtifactDirectory {
-            runtime,
-            entries,
-            root_digest: [0; 32],
-        })
-        .expect("dir");
-        let root =
-            std::env::temp_dir().join(format!("jsrt-r1-typed-sidecar-{}", std::process::id()));
-        std::fs::create_dir_all(root.join("pages")).expect("pages dir");
-        std::fs::write(root.join("directory.jsr1"), encoded_dir).expect("directory");
-        for (path, (_, encoded, _, handle, proof)) in &pages {
-            std::fs::write(root.join(path), encoded).expect("page");
-            let stem = path.rsplit('/').next().expect("stem").replace(".bin", "");
-            std::fs::write(root.join(format!("{stem}.handle")), handle).expect("handle");
-            std::fs::write(root.join(format!("{stem}.proof")), proof).expect("proof");
-            if *path == "pages/page-3.bin" {
-                std::fs::write(root.join("handle.bin"), handle).expect("string handle");
-                std::fs::write(root.join("proof.bin"), proof).expect("string proof");
-            }
-        }
-        let mut router = TypedPageRouter::new();
-        assert_eq!(router.install_sidecar(&root).expect("sidecar"), 4);
-        let kinds = [
-            (PageKind::String, 3, 0x11, b"hello-r1".as_slice()),
-            (PageKind::Class, 4, 0x21, b"class-r1".as_slice()),
-            (PageKind::Native, 5, 0x31, b"native-r1".as_slice()),
-        ];
-        for (kind, index, fill, payload) in kinds {
-            let request =
-                PageRequest::new(&[fill; PAGE_HANDLE_SIZE], index, b"call-site-proof", kind)
-                    .expect("request");
-            assert_eq!(router.open(0, &request).expect("open").payload(), payload);
-        }
-        let vm_request = PageRequest::new(
-            &[0x41; PAGE_HANDLE_SIZE],
-            6,
-            b"call-site-proof",
-            PageKind::Vm,
-        )
-        .expect("vm request");
-        assert_eq!(
-            router.open(0, &vm_request).expect("vm open").execute_vm(),
-            Ok(Some(7))
-        );
-        let dest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../../test/resources/aken-r1-sidecar");
-        if dest.join("directory.jsr1").exists() {
-            let _ = std::fs::remove_dir_all(&dest);
-            std::fs::create_dir_all(dest.join("pages")).expect("export pages");
-            copy_dir(&root, &dest);
-        }
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
-        for entry in std::fs::read_dir(from).expect("read") {
-            let entry = entry.expect("entry");
-            let dest = to.join(entry.file_name());
-            if entry.file_type().expect("ty").is_dir() {
-                std::fs::create_dir_all(&dest).expect("dir");
-                copy_dir(&entry.path(), &dest);
-            } else {
-                std::fs::copy(entry.path(), dest).expect("copy");
-            }
-        }
-    }
 }

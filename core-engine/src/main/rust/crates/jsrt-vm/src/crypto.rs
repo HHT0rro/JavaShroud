@@ -40,11 +40,19 @@ pub(crate) fn hkdf_sha256(
     };
     let mut prk = hmac_bytes(extract_key, &[ikm]);
     let mut output = Vec::with_capacity(length);
+    // RFC 5869 expands from an empty T(0).  Supplying a zero-filled digest
+    // here changes every derived key and is not a standards-conformant HKDF.
     let mut previous = [0u8; DIGEST_SIZE];
+    let mut has_previous = false;
     let mut counter = 1u8;
     while output.len() < length {
-        let block = hmac_bytes(&prk, &[&previous, info, &[counter]]);
+        let block = if has_previous {
+            hmac_bytes(&prk, &[&previous, info, &[counter]])
+        } else {
+            hmac_bytes(&prk, &[info, &[counter]])
+        };
         previous = block;
+        has_previous = true;
         let take = (length - output.len()).min(DIGEST_SIZE);
         output.extend_from_slice(&previous[..take]);
         counter = counter.wrapping_add(1);
@@ -69,11 +77,18 @@ pub(crate) fn aes128_ctr(
 pub(crate) fn vbc4_session_material(
     crypto_domain_material: &[u8; 32],
     layout_digest: &[u8; 32],
+    state_binding: &[u8],
 ) -> [u8; 32] {
-    let mut material = Vec::with_capacity(21 + 32 + 32 + 4);
-    material.extend_from_slice(b"vbc4-session-integrity");
+    let state_binding_length = u32::try_from(state_binding.len())
+        .expect("bounded VBC4 state binding length fits u32");
+    let mut material = Vec::with_capacity(
+        b"vbc4-session-integrity-v2".len() + 32 + 32 + 4 + state_binding.len() + 4,
+    );
+    material.extend_from_slice(b"vbc4-session-integrity-v2");
     material.extend_from_slice(crypto_domain_material);
     material.extend_from_slice(layout_digest);
+    material.extend_from_slice(&state_binding_length.to_be_bytes());
+    material.extend_from_slice(state_binding);
     material.extend_from_slice(&[0x10, 0x42, 0x9f, 0x6c]);
     let digest = sha256_bytes(&material);
     material.fill(0);
@@ -143,7 +158,7 @@ pub(crate) fn vm_build_key(
 ) -> Result<[u8; 32], CryptoError> {
     let derived = hkdf_sha256(
         crypto_domain_material,
-        b"javashroud-vbc4-vm-build-key-v2",
+        b"javashroud-aken-r1-vm-build-key-v3",
         layout_digest,
         32,
     )?;
@@ -179,4 +194,33 @@ pub(crate) fn wipe_array<const N: usize>(bytes: &mut [u8; N]) {
 
 pub(crate) fn equal_tag(left: &[u8], right: &[u8]) -> bool {
     ct_eq(left, right)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hex(value: &str) -> Vec<u8> {
+        let compact: String = value.chars().filter(|character| !character.is_whitespace()).collect();
+        (0..compact.len())
+            .step_by(2)
+            .map(|offset| u8::from_str_radix(&compact[offset..offset + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    #[test]
+    fn hkdf_sha256_matches_rfc5869_test_case_1() {
+        let ikm = hex("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b");
+        let salt = hex("000102030405060708090a0b0c");
+        let info = hex("f0f1f2f3f4f5f6f7f8f9");
+        let expected = hex(
+            "3cb25f25faacd57a90434f64d0362f2a\
+             2d2d0a90cf1a5a4c5db02d56ecc4c5bf\
+             34007208d5b887185865",
+        );
+
+        let mut actual = hkdf_sha256(&ikm, &salt, &info, 42).expect("RFC 5869 HKDF");
+        assert_eq!(actual, expected);
+        actual.fill(0);
+    }
 }

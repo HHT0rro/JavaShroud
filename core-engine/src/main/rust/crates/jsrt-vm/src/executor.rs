@@ -54,6 +54,14 @@ impl<O> VmValue<O> {
 pub trait ObjectOperations {
     type Object: Clone;
 
+    /// Return a Java/host exception raised by the immediately preceding host
+    /// operation.  Native hosts use this to preserve the original throwable
+    /// across the VM boundary so VM-level catch handlers can match it instead
+    /// of seeing a synthetic LinkageError.
+    fn take_pending_exception(&mut self) -> Option<(String, Self::Object)> {
+        None
+    }
+
     fn invoke(
         &mut self,
         _kind: InvokeKind,
@@ -165,11 +173,21 @@ pub trait ObjectOperations {
     fn string_constant(&mut self, _value: &str) -> Result<Self::Object, VmHostError> {
         Err(VmHostError::Unsupported)
     }
+
+    /// Materialize a JVM `ldc` class literal as a host class object.  A class
+    /// literal is not a Java String: reflection calls such as
+    /// `Class.getFields()` and `Class.getResourceAsStream()` require the
+    /// actual `java.lang.Class` object associated with the descriptor.
+    fn type_constant(&mut self, _descriptor: &str) -> Result<Self::Object, VmHostError> {
+        Err(VmHostError::Unsupported)
+    }
 }
 
+#[cfg(test)]
 #[derive(Default)]
-pub struct NoObjectOperations;
+pub(crate) struct NoObjectOperations;
 
+#[cfg(test)]
 impl ObjectOperations for NoObjectOperations {
     type Object = ();
 }
@@ -262,6 +280,15 @@ impl<H: ObjectOperations> VmExecutor<H> {
 
     pub fn host_mut(&mut self) -> &mut H {
         &mut self.host
+    }
+
+    /// Consume the executor and return its host bridge after execution.
+    ///
+    /// Native hosts use this to transfer ownership of a JNI return reference
+    /// out of the execution scope without exposing VM internals to the FFI
+    /// layer.
+    pub fn into_host(self) -> H {
+        self.host
     }
 
     pub fn execute(
@@ -1135,8 +1162,13 @@ impl<H: ObjectOperations> VmExecutor<H> {
                     .string_constant(value.as_str())
                     .map_err(|_| VmError::HostFailure)?,
             )),
+            (opcode::LDC_TYPE, VmConstant::String(value)) => Ok(VmValue::Object(
+                self.host
+                    .type_constant(value.as_str())
+                    .map_err(|_| VmError::HostFailure)?,
+            )),
             (
-                opcode::LDC_TYPE | opcode::LDC_HANDLE | opcode::LDC_CONDY,
+                opcode::LDC_HANDLE | opcode::LDC_CONDY,
                 VmConstant::String(value),
             ) => Ok(VmValue::Object(
                 self.host
@@ -1162,10 +1194,12 @@ impl<H: ObjectOperations> VmExecutor<H> {
             return Err(thrown("java/lang/StackOverflowError", VmValue::Null));
         }
         let reference = cp_string(program, operand(operands, 0)?)?;
-        let descriptor = reference
-            .rsplit_once(':')
-            .map(|(_, value)| value)
-            .ok_or_else(|| thrown("java/lang/VerifyError", VmValue::Null))?;
+        let descriptor = if opcode == opcode::INVOKEDYNAMIC {
+            dynamic_descriptor(reference)
+        } else {
+            reference.rsplit_once(':').map(|(_, value)| value)
+        }
+        .ok_or_else(|| thrown("java/lang/VerifyError", VmValue::Null))?;
         let argument_count = descriptor_arity(descriptor)
             .ok_or_else(|| thrown("java/lang/VerifyError", VmValue::Null))?;
         if argument_count > frame.stack.len() {
@@ -1183,18 +1217,28 @@ impl<H: ObjectOperations> VmExecutor<H> {
             opcode::INVOKEINTERFACE => InvokeKind::Interface,
             _ => InvokeKind::Dynamic,
         };
-        let receiver_object = if matches!(kind, InvokeKind::Static | InvokeKind::Dynamic) {
-            None
-        } else {
-            Some(as_object(pop(frame)?)?)
-        };
-        let result = self
+            let receiver_object = if matches!(kind, InvokeKind::Static | InvokeKind::Dynamic) {
+                None
+            } else {
+                let receiver = pop(frame)?;
+                Some(as_object(receiver)?)
+            };
+        let result = match self
             .host
             .invoke(kind, reference, receiver_object.as_ref(), &arguments)
-            .map_err(|_| thrown("java/lang/LinkageError", VmValue::Null));
+        {
+            Ok(value) => Ok(value),
+            Err(_) => match self.host.take_pending_exception() {
+                Some((class_name, object)) => Err(Thrown {
+                    class_name,
+                    value: VmValue::Object(object),
+                }),
+                None => Err(thrown("java/lang/LinkageError", VmValue::Null)),
+            },
+        };
         arguments.clear();
         let value = result?;
-        if !matches!(value, VmValue::Null) || descriptor_return_tag(descriptor) != Some(b'V') {
+        if !matches!(value, VmValue::Null) || method_return_tag(descriptor) != Some(b'V') {
             push(frame, value, self.limits.max_stack)?;
         }
         Ok(Control::Next(next))
@@ -1265,13 +1309,23 @@ impl<H: ObjectOperations> VmExecutor<H> {
         thrown: &Thrown<H::Object>,
     ) -> Result<Option<usize>, VmError> {
         for handler in program.exceptions() {
-            if fault_pc < handler.start || fault_pc >= handler.end {
+            let in_range = fault_pc >= handler.start && fault_pc < handler.end;
+            if !in_range {
                 continue;
             }
             if let Some(type_cp) = handler.type_cp {
                 let class = cp_string::<H::Object>(program, type_cp as i32)
                     .map_err(|_| VmError::InvalidException("handler type is not a string"))?;
-                if thrown.class_name != class {
+                let direct_match = thrown.class_name == class;
+                if !direct_match {
+                    // The serializer intentionally inserts synthetic exception
+                    // entries whose catch types are non-resolvable decoy names.
+                    // They must behave like non-matching handlers rather than
+                    // turning an otherwise valid throw into a host failure.  A
+                    // real catch type lookup failure remains fail-closed below.
+                    if class.starts_with("javashroud/decoy/") {
+                        continue;
+                    }
                     let matches = match &thrown.value {
                         VmValue::Object(object) => self
                             .host
@@ -1287,6 +1341,30 @@ impl<H: ObjectOperations> VmExecutor<H> {
             return Ok(Some(handler.handler));
         }
         Ok(None)
+    }
+}
+
+
+fn dynamic_descriptor(reference: &str) -> Option<&str> {
+    let mut fields = reference.split('|');
+    match fields.next()? {
+        "mhstatic" => fields.next().and_then(|_| fields.next()),
+        // The current-format lambda recipe is encoded as:
+        //
+        //   lambda|<factory-name>|<factory-descriptor>|<impl-tag>|...
+        //
+        // The VM invokes the generated factory with the captured arguments,
+        // so its descriptor (field 2) is the descriptor that determines how
+        // many values must be popped from the VM operand stack.  Treating
+        // field 1 as a member reference (the old generic fallback) produced
+        // a synthetic VerifyError before the host could link the SAM lambda.
+        "lambda" => fields.next().and_then(|_| fields.next()),
+        "sam" | "sam-lambda" => fields
+            .nth(1)
+            .and_then(|value| value.rsplit_once(':').map(|(_, descriptor)| descriptor)),
+        _ => fields
+            .next()
+            .and_then(|value| value.rsplit_once(':').map(|(_, descriptor)| descriptor)),
     }
 }
 
@@ -1537,10 +1615,26 @@ fn descriptor_return_tag(descriptor: &str) -> Option<u8> {
     }
 }
 
+fn method_return_tag(descriptor: &str) -> Option<u8> {
+    descriptor
+        .rsplit_once(')')
+        .and_then(|(_, return_descriptor)| descriptor_return_tag(return_descriptor))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::ProgramBuilder;
+
+    #[test]
+    fn lambda_recipe_uses_factory_descriptor_for_stack_arity() {
+        let reference = "lambda|run|(Lexample/Exec;)Ljava/lang/Runnable;|5|example/Exec|doAdd|()V|()V|()V|0;;";
+        assert_eq!(
+            dynamic_descriptor(reference),
+            Some("(Lexample/Exec;)Ljava/lang/Runnable;")
+        );
+        assert_eq!(descriptor_arity(dynamic_descriptor(reference).unwrap()), Some(1));
+    }
 
     #[test]
     fn wrapping_integer_arithmetic_and_branches_execute() {
@@ -1589,6 +1683,103 @@ mod tests {
             .finish();
         let mut executor = VmExecutor::new(Host);
         assert_eq!(executor.execute(&program, &[]), Ok(VmValue::Int(5)));
+    }
+
+    #[test]
+    fn host_throwable_is_preserved_for_vm_catch_handlers() {
+        struct Host {
+            pending: bool,
+        }
+
+        impl ObjectOperations for Host {
+            type Object = u32;
+
+            fn invoke(
+                &mut self,
+                _kind: InvokeKind,
+                reference: &str,
+                _receiver: Option<&u32>,
+                _arguments: &[VmValue<u32>],
+            ) -> Result<VmValue<u32>, VmHostError> {
+                assert_eq!(reference, "Host.fail:()V");
+                self.pending = true;
+                Err(VmHostError::Failure)
+            }
+
+            fn take_pending_exception(&mut self) -> Option<(String, u32)> {
+                self.pending
+                    .then(|| ("example/SpecificProblem".to_owned(), 0xE11))
+                    .inspect(|_| self.pending = false)
+            }
+
+            fn instance_of(&mut self, object: &u32, class: &str) -> Result<bool, VmHostError> {
+                Ok(*object == 0xE11 && class == "example/BaseProblem")
+            }
+        }
+
+        let program = ProgramBuilder::new()
+            .constant_string("Host.fail:()V")
+            .constant_string("example/BaseProblem")
+            .instruction(opcode::INVOKESTATIC, &[0])
+            .instruction(opcode::RETURN, &[])
+            .instruction(opcode::POP, &[])
+            .instruction(opcode::RETURN, &[])
+            .exception(0, 1, 2, Some(1))
+            .finish();
+        let mut executor = VmExecutor::new(Host { pending: false });
+        assert_eq!(executor.execute(&program, &[]), Ok(VmValue::Null));
+        assert!(!executor.into_host().pending);
+    }
+
+    #[test]
+    fn unresolved_decoy_exception_handlers_are_skipped() {
+        struct Host {
+            pending: bool,
+        }
+
+        impl ObjectOperations for Host {
+            type Object = u32;
+
+            fn invoke(
+                &mut self,
+                _kind: InvokeKind,
+                reference: &str,
+                _receiver: Option<&u32>,
+                _arguments: &[VmValue<u32>],
+            ) -> Result<VmValue<u32>, VmHostError> {
+                assert_eq!(reference, "Host.fail:()V");
+                self.pending = true;
+                Err(VmHostError::Failure)
+            }
+
+            fn take_pending_exception(&mut self) -> Option<(String, u32)> {
+                self.pending
+                    .then(|| ("example/SpecificProblem".to_owned(), 0xE11))
+                    .inspect(|_| self.pending = false)
+            }
+
+            fn instance_of(&mut self, object: &u32, class: &str) -> Result<bool, VmHostError> {
+                if class.starts_with("javashroud/decoy/") {
+                    return Err(VmHostError::Failure);
+                }
+                Ok(*object == 0xE11 && class == "example/BaseProblem")
+            }
+        }
+
+        let program = ProgramBuilder::new()
+            .constant_string("Host.fail:()V")
+            .constant_string("javashroud/decoy/Edead")
+            .constant_string("example/BaseProblem")
+            .instruction(opcode::INVOKESTATIC, &[0])
+            .instruction(opcode::RETURN, &[])
+            .instruction(opcode::POP, &[])
+            .instruction(opcode::RETURN, &[])
+            .exception(0, 1, 2, Some(1))
+            .exception(0, 1, 2, Some(2))
+            .finish();
+        let mut executor = VmExecutor::new(Host { pending: false });
+        assert_eq!(executor.execute(&program, &[]), Ok(VmValue::Null));
+        assert!(!executor.into_host().pending);
     }
 
     #[test]
