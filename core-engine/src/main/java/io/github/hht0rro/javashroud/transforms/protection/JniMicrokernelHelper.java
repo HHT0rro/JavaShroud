@@ -44,6 +44,15 @@ public final class JniMicrokernelHelper {
     private static final int LOAD_UNTRIED = 0;
     private static final int LOAD_LOADING = 1;
     private static final int LOAD_READY = 2;
+    private static final int KERNEL_UNINITIALIZED = 0;
+    private static final int KERNEL_BINDINGS_VERIFIED = 1;
+    private static final int KERNEL_NATIVE_READY = 2;
+    private static final int KERNEL_DEFENSE_READY = 3;
+    private static final int KERNEL_SUSPECT = 4;
+    private static final int KERNEL_TAMPERED = 5;
+    private static final int KERNEL_FAILED = 6;
+    private static volatile int kernelState = KERNEL_UNINITIALIZED;
+    private static volatile boolean defenseRequired;
     private static volatile int loadState = LOAD_UNTRIED;
     private static volatile String loadMessage = "";
     private static volatile int akenLoadState = LOAD_UNTRIED;
@@ -55,9 +64,7 @@ public final class JniMicrokernelHelper {
     private static final String AKEN_NATIVE_LOCATOR_RESOURCE = "META-INF/jsrt/native.locator";
     private static final String AKEN_NATIVE_BINDINGS_LOCATOR_RESOURCE = "META-INF/jsrt/native.bindings.locator";
     private static final String AKEN_R1_CATALOG_INDEX_RESOURCE = "META-INF/jsrt/catalog.index";
-    private static final String AKEN_R1_CATALOG_RESOURCE_PREFIX = "META-INF/jsrt/catalog/";
-    private static final int AKEN_R1_CATALOG_INDEX_MAX_BYTES = 64 * 1024;
-    private static final int AKEN_R1_CATALOG_MAX_FILES = 4096;
+    private static final String AKEN_R1_CATALOG_RESOURCE_ROOT = "META-INF/jsrt/catalog/";
     private static final String AKEN_NATIVE_RESOURCE_ROOT = "META-INF/";
     private static final int AKEN_NATIVE_LOCATOR_MAGIC_0 = 0xD7;
     private static final int AKEN_NATIVE_LOCATOR_MAGIC_1 = 0xA4;
@@ -93,16 +100,21 @@ public final class JniMicrokernelHelper {
     static native int nativeInit(String platform);
     static native int nativeHeartbeat();
     static native boolean nativeInstallAkenSessionNonce(byte[] startupNonce);
+    static native int nativeInstallAkenCatalog(byte[] directory, byte[] bundle);
     static native Object nativeExecuteAkenVmPage(long entryToken, byte[] encodedHandle, int pageIndex, byte[] callSiteProof, Object[] args);
     static native String nativeOpenAkenString(byte[] encodedHandle, int pageIndex, byte[] callSiteProof);
     static native byte[] nativeReadAkenClassPage(byte[] encodedHandle, int pageIndex, byte[] callSiteProof);
     static native void nativeConsumeAkenNativeChunk(byte[] encodedHandle, int pageIndex, byte[] callSiteProof);
+    public static native int nativeInitializeDefense(String surface, String profile);
+    public static native int nativeProbeDefense(String surface, String point);
+    public static native byte[] nativeTransformDefense(byte[] material, String binding);
 
     /* ---- AKEN R1 typed page bridge ---- */
 
     public static Object executeAkenVmPage(long entryToken, byte[] encodedHandle, int pageIndex, byte[] callSiteProof, Object[] args) {
         requireAkenPageRequest(encodedHandle, pageIndex, callSiteProof, "VM");
         ensureAkenNativeKernel();
+        requireDefenseForProtectedPath();
         try {
             /* A null result is valid for a virtualized void method and for a
              * reference-returning method whose value is null. The native bridge
@@ -117,6 +129,7 @@ public final class JniMicrokernelHelper {
     static String openAkenString(byte[] encodedHandle, int pageIndex, byte[] callSiteProof) {
         requireAkenPageRequest(encodedHandle, pageIndex, callSiteProof, "string");
         ensureAkenNativeKernel();
+        requireDefenseForProtectedPath();
         String result = nativeOpenAkenString(encodedHandle, pageIndex, callSiteProof);
         if (result == null) throw new SecurityException("AKEN string page access failed closed");
         return result;
@@ -125,6 +138,7 @@ public final class JniMicrokernelHelper {
     public static byte[] readAkenClassPage(byte[] encodedHandle, int pageIndex, byte[] callSiteProof) {
         requireAkenPageRequest(encodedHandle, pageIndex, callSiteProof, "class");
         ensureAkenNativeKernel();
+        requireDefenseForProtectedPath();
         return requireAkenPageResult(nativeReadAkenClassPage(encodedHandle, pageIndex, callSiteProof), "class");
     }
 
@@ -135,6 +149,7 @@ public final class JniMicrokernelHelper {
     public static void consumeAkenNativeChunk(byte[] encodedHandle, int pageIndex, byte[] callSiteProof) {
         requireAkenPageRequest(encodedHandle, pageIndex, callSiteProof, "native");
         ensureAkenNativeKernel();
+        requireDefenseForProtectedPath();
         nativeConsumeAkenNativeChunk(encodedHandle, pageIndex, callSiteProof);
     }
 
@@ -148,6 +163,9 @@ public final class JniMicrokernelHelper {
         if (akenLoadState == LOAD_UNTRIED) loadAkenNativeKernel();
         if (akenLoadState != LOAD_READY) {
             throw new SecurityException("AKEN page access requires the sealed native kernel (" + akenLoadMessage + ")");
+        }
+        if (kernelState < KERNEL_NATIVE_READY) {
+            kernelState = KERNEL_NATIVE_READY;
         }
     }
 
@@ -197,7 +215,6 @@ public final class JniMicrokernelHelper {
         String previousClassBindings = System.getProperty(sealedBindingPropertyName());
         String previousMethodBindings = System.getProperty(sealedMethodBindingPropertyName());
         String previousFieldBindings = System.getProperty(sealedFieldBindingPropertyName());
-        String previousCatalogSidecar = System.getProperty(sealedCatalogPropertyName());
         boolean previousBindingsPublished = sealedNativeBindingsPublished;
         boolean loaded = false;
         try (InputStream in = resourceStream(locator.resourcePath)) {
@@ -233,10 +250,6 @@ public final class JniMicrokernelHelper {
                 tempLib.setExecutable(true, true);
                 publishSealedNativeBindings(bindingText);
                 sealedNativeBindingsPublished = true;
-                File catalogSidecar = extractAkenR1CatalogSidecar(tempLib);
-                if (catalogSidecar != null) {
-                    System.setProperty(sealedCatalogPropertyName(), catalogSidecar.getAbsolutePath());
-                }
                 System.load(tempLib.getAbsolutePath());
                 int initResult = initializeNativeKernel(platformTarget);
                 if (initResult < 0) {
@@ -244,7 +257,10 @@ public final class JniMicrokernelHelper {
                     return false;
                 }
                 installAkenSessionNonce();
-                if (!verifyAkenNativeAbiAfterLoad()) return false;
+                installAkenR1Catalog();
+                if (!verifyAkenNativeAbiAfterLoad()) {
+                    return false;
+                }
                 akenLoadMessage = "aken:native:bundled:" + platformTarget + ":" + initResult;
                 loaded = true;
                 return true;
@@ -269,7 +285,6 @@ public final class JniMicrokernelHelper {
                 restoreProperty(sealedMethodBindingPropertyName(), previousMethodBindings);
                 restoreProperty(sealedFieldBindingPropertyName(), previousFieldBindings);
             }
-            restoreProperty(sealedCatalogPropertyName(), previousCatalogSidecar);
         }
     }
 
@@ -300,6 +315,23 @@ public final class JniMicrokernelHelper {
                 nativeConsumeAkenNativeChunk(handle, 0, proof);
             } catch (SecurityException expectedRouteFailure) {
                 // Registered typed route reached native code.
+            }
+            if (nativeInitializeDefense("abi-probe", "balanced") != 0) {
+                akenLoadMessage = "aken:abi-failed:nativeInitializeDefense";
+                return false;
+            }
+            if (nativeProbeDefense("abi-probe", "abi") != 0) {
+                akenLoadMessage = "aken:abi-failed:nativeProbeDefense";
+                return false;
+            }
+            byte[] defenseShare = nativeTransformDefense(new byte[] { 1 }, "abi");
+            try {
+                if (defenseShare == null || defenseShare.length != 32) {
+                    akenLoadMessage = "aken:abi-failed:nativeTransformDefense";
+                    return false;
+                }
+            } finally {
+                if (defenseShare != null) Arrays.fill(defenseShare, (byte) 0);
             }
             return true;
         } catch (UnsatisfiedLinkError error) {
@@ -370,10 +402,14 @@ public final class JniMicrokernelHelper {
             "nativeInit",
             "nativeHeartbeat",
             "nativeInstallAkenSessionNonce",
+            "nativeInstallAkenCatalog",
             "nativeExecuteAkenVmPage",
             "nativeOpenAkenString",
             "nativeReadAkenClassPage",
             "nativeConsumeAkenNativeChunk",
+            "nativeInitializeDefense",
+            "nativeProbeDefense",
+            "nativeTransformDefense",
         };
         for (String marker : requiredMarkers) {
             if (!containsAscii(bytes, marker)) {
@@ -903,9 +939,19 @@ public final class JniMicrokernelHelper {
         try {
             ClassLoader loader = JniMicrokernelHelper.class.getClassLoader();
             Class<?> ownerClass = Class.forName(owner.replace('/', '.'), false, loader);
-            String resolvedName = resolveBoundMethodName(owner, name, descriptor);
             MethodType methodType = descriptorMethodType(descriptor, ownerClass.getClassLoader());
-            MethodHandle linked = resolveMethodHandle(ownerClass, resolvedName, methodType, implTag);
+            // Lambda recipes are emitted after class/member remapping, so the
+            // implementation name in the recipe is already the artifact name.
+            // Prefer it verbatim.  Only fall back to the sealed binding map for
+            // older/generated recipes that still carry a pre-remap member name.
+            MethodHandle linked;
+            try {
+                linked = resolveMethodHandle(ownerClass, name, methodType, implTag);
+            } catch (NoSuchMethodException directFailure) {
+                String resolvedName = resolveBoundMethodName(owner, name, descriptor);
+                if (resolvedName.equals(name)) throw directFailure;
+                linked = resolveMethodHandle(ownerClass, resolvedName, methodType, implTag);
+            }
             if (linked == null) throw new IllegalArgumentException("unsupported lambda implementation handle tag: " + implTag);
             MethodHandle existing = SAM_LAMBDA_CACHE.putIfAbsent(key, linked);
             return existing == null ? linked : existing;
@@ -922,7 +968,11 @@ public final class JniMicrokernelHelper {
         Object[] args = new Object[available];
         System.arraycopy(captured, 0, args, 0, captured.length);
         System.arraycopy(callArgs, 0, args, captured.length, callArgs.length);
-        return linkedTarget.invokeWithArguments(args);
+        try {
+            return linkedTarget.invokeWithArguments(args);
+        } catch (Throwable error) {
+            throw error;
+        }
     }
 
     private static MethodHandle adaptSamLambdaTarget(MethodHandle linkedTarget, Object[] captured, MethodType instantiatedType)
@@ -1455,9 +1505,36 @@ public final class JniMicrokernelHelper {
         return diversifiedVmEnabled;
     }
 
-    /** True once the authenticated R1 image and all seven JNI entries are ready. */
+    /** True only after the authenticated native defense state reached DEFENSE_READY. */
     public static boolean isKernelIntegrityReady() {
-        return akenLoadState == LOAD_READY && !nativeSelfCheckFailed;
+        return kernelState == KERNEL_DEFENSE_READY && akenLoadState == LOAD_READY && !nativeSelfCheckFailed;
+    }
+
+    public static synchronized void markDefenseBindingsVerified() {
+        if (kernelState == KERNEL_FAILED || kernelState == KERNEL_TAMPERED || kernelState == KERNEL_SUSPECT) {
+            throw new SecurityException("Unified defense kernel is not usable");
+        }
+        kernelState = KERNEL_BINDINGS_VERIFIED;
+        defenseRequired = true;
+    }
+
+    public static synchronized void markDefenseReady() {
+        if (akenLoadState != LOAD_READY || nativeSelfCheckFailed) {
+            kernelState = KERNEL_FAILED;
+            defenseRequired = true;
+            throw new SecurityException("Unified defense native readiness is incomplete");
+        }
+        kernelState = KERNEL_DEFENSE_READY;
+        defenseRequired = true;
+    }
+
+    public static synchronized void markDefenseFailed() {
+        kernelState = KERNEL_FAILED;
+        defenseRequired = true;
+    }
+
+    private static void requireDefenseForProtectedPath() {
+        if (defenseRequired) requireHealthyKernel();
     }
 
     /** Status string for the diversified-VM load-time self-exercise. */
@@ -1475,9 +1552,10 @@ public final class JniMicrokernelHelper {
         vmSelfCheck = isNativeLoaded() ? "native:vm-diverse:ok" : "native:vm-diverse:unavailable";
     }
 
-    /** Require a ready authenticated R1 runtime. */
+    /** Require the current unified defense state before accessing protected data. */
     public static void requireHealthyKernel() {
         if (!isKernelIntegrityReady() || (vmSelfCheck != null && vmSelfCheck.contains("mismatch"))) {
+            kernelState = KERNEL_TAMPERED;
             throw new SecurityException("Kernel integrity mismatch");
         }
     }
@@ -1557,6 +1635,110 @@ public final class JniMicrokernelHelper {
         }
     }
 
+    /** Install the authenticated current-format page directory into native state. */
+    private static void installAkenR1Catalog() {
+        CatalogBundle bundle = readAkenR1CatalogBundle();
+        if (bundle == null) return;
+        try {
+            int installed = nativeInstallAkenCatalog(bundle.directory, bundle.pages);
+            if (installed <= 0) {
+                throw new SecurityException("AKEN current catalog installed no pages");
+            }
+        } finally {
+            bundle.clear();
+        }
+    }
+
+    /**
+     * Read the sealed directory and page resources into one bounded JNI bundle.
+     * Bundle format: u32 count, then repeated u32 UTF-8 path length + path,
+     * followed by u32 byte length + page bytes. The directory itself is passed
+     * separately so native can authenticate it before accepting page frames.
+     */
+    private static CatalogBundle readAkenR1CatalogBundle() {
+        InputStream indexStream = resourceStream(AKEN_R1_CATALOG_INDEX_RESOURCE);
+        if (indexStream == null) return null;
+        byte[] directory = null;
+        ByteArrayOutputStream pages = new ByteArrayOutputStream(1024);
+        DataOutputStream pageWriter = new DataOutputStream(pages);
+        int count = 0;
+        try (InputStream in = indexStream) {
+            byte[] indexBytes = readAllBounded(in, 256 * 1024);
+            String index = new String(indexBytes, StandardCharsets.US_ASCII);
+            Arrays.fill(indexBytes, (byte) 0);
+            String[] entries = index.split("\\r?\\n", -1);
+            for (String raw : entries) {
+                String relative = raw.trim();
+                if (relative.length() == 0) continue;
+                validateCatalogRelativePath(relative);
+                if ("directory.jsr1".equals(relative)) {
+                    if (directory != null) throw new SecurityException("AKEN catalog directory is duplicated");
+                    try (InputStream source = resourceStream(AKEN_R1_CATALOG_RESOURCE_ROOT + relative)) {
+                        if (source == null) throw new SecurityException("AKEN catalog directory is missing");
+                        directory = readAllBounded(source, 64 * 1024 * 1024);
+                    }
+                    continue;
+                }
+                if (!relative.startsWith("pages/")) {
+                    throw new SecurityException("AKEN catalog entry is not a page: " + relative);
+                }
+                try (InputStream source = resourceStream(AKEN_R1_CATALOG_RESOURCE_ROOT + relative)) {
+                    if (source == null) throw new SecurityException("AKEN catalog page is missing: " + relative);
+                    byte[] page = readAllBounded(source, 16 * 1024 * 1024 + 1024);
+                    byte[] path = relative.getBytes(StandardCharsets.UTF_8);
+                    pageWriter.writeInt(path.length);
+                    pageWriter.write(path);
+                    pageWriter.writeInt(page.length);
+                    pageWriter.write(page);
+                    Arrays.fill(path, (byte) 0);
+                    Arrays.fill(page, (byte) 0);
+                    count++;
+                }
+            }
+            if (directory == null || count == 0) {
+                throw new SecurityException("AKEN current catalog is incomplete");
+            }
+            pageWriter.flush();
+            byte[] body = pages.toByteArray();
+            ByteArrayOutputStream framed = new ByteArrayOutputStream(body.length + 4);
+            DataOutputStream framedWriter = new DataOutputStream(framed);
+            framedWriter.writeInt(count);
+            framedWriter.write(body);
+            framedWriter.flush();
+            Arrays.fill(body, (byte) 0);
+            return new CatalogBundle(directory, framed.toByteArray());
+        } catch (IOException error) {
+            if (directory != null) Arrays.fill(directory, (byte) 0);
+            throw new SecurityException("AKEN current catalog is unreadable", error);
+        } finally {
+            try { pageWriter.close(); } catch (IOException ignored) { }
+            Arrays.fill(pages.toByteArray(), (byte) 0);
+        }
+    }
+
+    private static void validateCatalogRelativePath(String relative) {
+        if (relative.length() == 0 || relative.length() > 4096 ||
+            relative.indexOf('\\') >= 0 || relative.indexOf('\0') >= 0 ||
+            relative.startsWith("/") || relative.contains("..")) {
+            throw new SecurityException("AKEN catalog path is invalid");
+        }
+    }
+
+    private static final class CatalogBundle {
+        private byte[] directory;
+        private byte[] pages;
+        private CatalogBundle(byte[] directory, byte[] pages) {
+            this.directory = directory;
+            this.pages = pages;
+        }
+        private void clear() {
+            if (directory != null) Arrays.fill(directory, (byte) 0);
+            if (pages != null) Arrays.fill(pages, (byte) 0);
+            directory = null;
+            pages = null;
+        }
+    }
+
     private static File[] nativeExtractDirectories() {
         LinkedHashSet<String> paths = new LinkedHashSet<>();
         addNativeExtractDirectory(paths, System.getProperty("javashroud.native.extract.dir", ""));
@@ -1609,68 +1791,6 @@ public final class JniMicrokernelHelper {
         String suffix = Integer.toUnsignedString(hash, 36);
         return ("n" + suffix + "xxxx").substring(0, 8);
     }
-    private static File extractAkenR1CatalogSidecar(File nativeLib) throws Exception {
-        if (nativeLib == null) return null;
-        byte[] indexBytes = null;
-        try (InputStream index = resourceStream(AKEN_R1_CATALOG_INDEX_RESOURCE)) {
-            if (index == null) return null;
-            indexBytes = readAllBounded(index, AKEN_R1_CATALOG_INDEX_MAX_BYTES);
-        }
-        String indexText = new String(indexBytes, StandardCharsets.US_ASCII);
-        String[] lines = indexText.split("\n");
-        if (lines.length == 0 || lines.length > AKEN_R1_CATALOG_MAX_FILES) {
-            throw new SecurityException("AKEN-R1 catalog index is invalid");
-        }
-        File sidecar = new File(nativeLib.getParentFile(), nativeLib.getName() + ".catalog");
-        if (!sidecar.mkdirs() && !sidecar.isDirectory()) {
-            throw new SecurityException("AKEN-R1 catalog sidecar is unavailable");
-        }
-        boolean sawDirectory = false;
-        for (String raw : lines) {
-            String relative = raw.replace("\r", "").trim();
-            if (relative.length() == 0) continue;
-            if (!isAkenR1CatalogRelativePath(relative)) {
-                throw new SecurityException("AKEN-R1 catalog sidecar path is invalid");
-            }
-            if (relative.equals("directory.jsr1")) sawDirectory = true;
-            File destination = new File(sidecar, relative.replace('/', File.separatorChar));
-            File parent = destination.getParentFile();
-            if (parent != null && !parent.mkdirs() && !parent.isDirectory()) {
-                throw new SecurityException("AKEN-R1 catalog sidecar path is unavailable");
-            }
-            try (InputStream in = resourceStream(AKEN_R1_CATALOG_RESOURCE_PREFIX + relative)) {
-                if (in == null) {
-                    throw new SecurityException("AKEN-R1 catalog sidecar member is missing");
-                }
-                byte[] payload = readAllBounded(in, AKEN_NATIVE_MAX_LIBRARY_BYTES);
-                try (FileOutputStream out = new FileOutputStream(destination)) {
-                    out.write(payload);
-                } finally {
-                    Arrays.fill(payload, (byte) 0);
-                }
-            }
-        }
-        if (!sawDirectory || !new File(sidecar, "directory.jsr1").isFile()) {
-            throw new SecurityException("AKEN-R1 catalog sidecar is missing directory.jsr1");
-        }
-        return sidecar;
-    }
-
-    private static boolean isAkenR1CatalogRelativePath(String relative) {
-        if (relative.length() == 0 || relative.length() > 4096) return false;
-        if (relative.charAt(0) == '/' || relative.indexOf('\\') >= 0 || relative.indexOf(':') >= 0) return false;
-        String[] parts = relative.split("/");
-        for (int i = 0; i < parts.length; i++) {
-            String part = parts[i];
-            if (part.length() == 0 || part.equals(".") || part.equals("..")) return false;
-            for (int n = 0; n < part.length(); n++) {
-                char ch = part.charAt(n);
-                if (ch <= 0x1F || ch == 0x7F) return false;
-            }
-        }
-        return true;
-    }
-
     private static InputStream resourceStream(String resourcePath) {
         InputStream in = JniMicrokernelHelper.class.getResourceAsStream("/" + resourcePath);
         if (in != null) return in;
@@ -1778,10 +1898,6 @@ public final class JniMicrokernelHelper {
 
     private static String sealedFieldBindingPropertyName() {
         return new String(new char[]{'j', '.', 'f'});
-    }
-
-    private static String sealedCatalogPropertyName() {
-        return new String(new char[]{'j', '.', 'c'});
     }
 
     private static String sealedNativeBindingText(AkenNativeLibrary locator) {
