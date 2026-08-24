@@ -26,6 +26,10 @@ import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.CandidateProductionBuildEvidence
 import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.currentVbc4BuildContextOrNull
+import io.github.hht0rro.javashroud.transforms.protection.hardening.HardenedArtifactFinalizer
+import io.github.hht0rro.javashroud.transforms.protection.hardening.ProtectionFormat
+import io.github.hht0rro.javashroud.transforms.protection.hardening.ReleaseArtifactScan
+import io.github.hht0rro.javashroud.transforms.protection.hardening.SignedDebugMap
 import java.nio.file.Files
 import java.nio.file.Path
 
@@ -243,8 +247,11 @@ internal fun executeWithOrderedPasses(
                 emit = emit,
             )
             val executedPassIds = reorderedPasses.filter { it.spec.enabled }.map { it.spec.id }
+            val artifactWithoutFixedGeneratedNames = io.github.hht0rro.javashroud.transforms.rename
+                .removeFixedGeneratedNames(passExecution.context.artifact)
+                .artifact
             val artifactWithHelpers = io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment.injectRequiredHelpers(
-                artifact = passExecution.context.artifact,
+                artifact = artifactWithoutFixedGeneratedNames,
                 executedPassIds = executedPassIds,
             )
             io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.reserveAkenVbc4PreSealRoutesIfNeeded(
@@ -278,11 +285,34 @@ internal fun executeWithOrderedPasses(
                 artifactContext = passExecution.context.copy(artifact = artifactWithNative),
                 registeredPasses = reorderedPasses,
             )
-            val artifactForWrite = io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.sealIfRequested(
+            val sealedArtifact = io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.sealIfRequested(
                 artifact = artifactWithProcessedHelpers,
                 config = config,
             )
+            val artifactForWrite = HardenedArtifactFinalizer.finalizeForWrite(sealedArtifact, config)
             writeBytecodeArtifact(outputJarPath, artifactForWrite)
+            val artifactDigest = SignedDebugMap.sha256(outputJarPath)
+            currentVbc4BuildContextOrNull()?.signedDebugMapDraftOrNull()?.let { draft ->
+                if (draft.methodMappings.isNotEmpty() || draft.fieldMappings.isNotEmpty()) {
+                    SignedDebugMap.write(outputJarPath, draft, artifactDigest)
+                }
+            }
+            val enabledPasses = reorderedPasses.filter { it.spec.enabled }.map { it.spec.id }
+            val nativeBytes = artifactForWrite.jarEntries.map { it.bytes }.filter { bytes ->
+                bytes.size >= 4 && ((bytes[0] == 0x4D.toByte() && bytes[1] == 0x5A.toByte()) ||
+                    (bytes[0] == 0x7F.toByte() && bytes[1] == 0x45.toByte()))
+            }
+            val scanReport = ReleaseArtifactScan.scan(
+                outputJarPath = outputJarPath,
+                artifact = artifactForWrite,
+                profile = config.protectionProfile,
+                enabledPasses = enabledPasses,
+                nativeBytes = nativeBytes,
+            )
+            ReleaseArtifactScan.writeReport(outputJarPath, scanReport)
+            if (config.protectionProfile.requiresReleaseScan) {
+                scanReport.requirePass()
+            }
             currentVbc4BuildContextOrNull()?.productionBuildEvidence?.writeAfterFinalJar(
                 artifact = artifactForWrite,
                 outputJarPath = outputJarPath,

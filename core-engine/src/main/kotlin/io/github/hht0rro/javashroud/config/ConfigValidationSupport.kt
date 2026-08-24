@@ -32,6 +32,24 @@ fun optionalNestedBooleanOrDefault(
     return valueNode.booleanValue()
 }
 
+fun optionalNestedTextOrDefault(
+    node: JsonNode,
+    fieldName: String,
+    configPath: Path,
+    parentPath: String,
+    default: String,
+): String {
+    val valueNode = node.get(fieldName) ?: return default
+    if (!valueNode.isTextual) {
+        throw IllegalArgumentException(
+            "Config validation failed: $parentPath.$fieldName must be a string, path=${configPath.absolutePathString()}"
+        )
+    }
+    val value = valueNode.textValue().trim()
+    if (value.isEmpty()) return default
+    return value
+}
+
 fun requiredNestedText(node: JsonNode, fieldName: String, configPath: Path, parentPath: String): String {
     val valueNode = node.get(fieldName)
     if (valueNode == null || !valueNode.isTextual) {

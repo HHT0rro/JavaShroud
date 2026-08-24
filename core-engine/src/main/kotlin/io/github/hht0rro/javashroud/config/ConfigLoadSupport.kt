@@ -2,7 +2,9 @@ package io.github.hht0rro.javashroud.config
 
 import io.github.hht0rro.javashroud.capabilities.buildEngineSchemaPayload
 import io.github.hht0rro.javashroud.compatibility.hardConflictPairs
+import io.github.hht0rro.javashroud.model.config.HardenedProtectionProfile
 import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
+import io.github.hht0rro.javashroud.transforms.protection.hardening.HardenedDefaultPipeline
 import io.github.hht0rro.javashroud.model.config.PassSelectionMode
 import io.github.hht0rro.javashroud.model.config.PassSpec
 import io.github.hht0rro.javashroud.model.schema.requiredPassIdsFor
@@ -31,6 +33,11 @@ fun validateConfig(config: ObfuscationConfig, configPath: Path): ObfuscationConf
         },
     )
     rejectRemovedAkenV4Parameters(normalizedConfig.passes)
+    rejectRetiredCurrentFormatPassIds(
+        passes = normalizedConfig.passes,
+        globalRules = normalizedConfig.ruleSet.rules,
+        passSelections = normalizedConfig.passSelections,
+    )
     if (normalizedConfig.inputJarPath.isBlank()) {
         throw IllegalArgumentException("Config validation failed: inputJarPath is blank, path=${configPath.absolutePathString()}")
     }
@@ -39,11 +46,21 @@ fun validateConfig(config: ObfuscationConfig, configPath: Path): ObfuscationConf
         throw IllegalArgumentException("Config validation failed: outputJarPath is blank, path=${configPath.absolutePathString()}")
     }
 
-    if (normalizedConfig.passes.isEmpty()) {
+    val profileFilled = if (normalizedConfig.passes.isEmpty() &&
+        normalizedConfig.protectionProfile == HardenedProtectionProfile.RELEASE_HARDENED
+    ) {
+        normalizedConfig.copy(
+            passes = HardenedDefaultPipeline.defaultPassSpecs(),
+            allowOptInPasses = true,
+        )
+    } else {
+        normalizedConfig
+    }
+    if (profileFilled.passes.isEmpty()) {
         throw IllegalArgumentException("Config validation failed: passes is empty, path=${configPath.absolutePathString()}")
     }
 
-    val executablePasses = normalizedConfig.passes.filterNot { it.id == PASS_ORDERING_PLANNER_ID }
+    val executablePasses = profileFilled.passes.filterNot { it.id == PASS_ORDERING_PLANNER_ID }
     val enabledIds = executablePasses.filter { it.enabled }.map { it.id }
     val duplicateIds = enabledIds.groupBy { it }.filter { it.value.size > 1 }.keys
     if (duplicateIds.isNotEmpty()) {
@@ -62,14 +79,15 @@ fun validateConfig(config: ObfuscationConfig, configPath: Path): ObfuscationConf
 
     validateKnownPassIds(executablePasses, configPath)
     val normalizedPasses = normalizePassDependencies(executablePasses)
-    validatePassSelections(normalizedConfig.passSelections, normalizedPasses, configPath)
+    validatePassSelections(profileFilled.passSelections, normalizedPasses, configPath)
     validateRequiredPassDependencies(normalizedPasses, configPath)
-    validatePassCompatibility(normalizedPasses, configPath, normalizedConfig.allowIncomplete)
+    validatePassCompatibility(normalizedPasses, configPath, profileFilled.allowIncomplete)
     validateRequiresAnyPassDependencies(normalizedPasses, configPath)
-    validateOptInPasses(normalizedPasses, configPath, normalizedConfig.allowOptInPasses)
-    validateRedundantPasses(normalizedPasses, configPath, normalizedConfig.allowRedundantPasses)
+    validateOptInPasses(normalizedPasses, configPath, profileFilled.allowOptInPasses)
+    validateRedundantPasses(normalizedPasses, configPath, profileFilled.allowRedundantPasses)
+    HardenedDefaultPipeline.validate(profileFilled, normalizedPasses, configPath)
 
-    return normalizedConfig.copy(
+    return profileFilled.copy(
         passes = normalizedPasses,
         inputJarPath = inputJarPath.absolutePathString(),
         outputJarPath = outputJarPath.absolutePathString(),
@@ -81,6 +99,42 @@ internal fun rejectRemovedAkenV4Parameters(passes: List<PassSpec>) {
             pass.id == JNI_MICROKERNEL_LOADER_ID && pass.params.containsKey(REMOVED_BOOT_KEY_DELIVERY_PARAM)
         }) {
         throw IllegalArgumentException(REMOVED_BOOT_KEY_DELIVERY_MESSAGE)
+    }
+}
+
+internal val RETIRED_CURRENT_FORMAT_PASS_IDS = setOf(
+    "environment-bound-keys",
+    "method-body-delayed-decryption",
+    "class-encryption-loader",
+    "anti-instrumentation",
+    "anti-jvmti-agent",
+    "anti-bytebuddy-transform",
+    "anti-dump-protection",
+    "anti-symbolic-execution",
+)
+
+internal fun rejectRetiredCurrentFormatPassIds(
+    passes: List<PassSpec>,
+    globalRules: List<io.github.hht0rro.javashroud.model.config.RuleSpec> = emptyList(),
+    passSelections: List<io.github.hht0rro.javashroud.model.config.PassSelectionSpec>,
+) {
+    val configuredIds = buildList {
+        addAll(passes.map(PassSpec::id))
+        addAll(globalRules.map { it.action })
+        passSelections.forEach { selection ->
+            add(selection.passId)
+            addAll(selection.rules.map { it.action })
+        }
+    }
+    val retired = configuredIds
+        .filter { it in RETIRED_CURRENT_FORMAT_PASS_IDS }
+        .distinct()
+        .sorted()
+    if (retired.isNotEmpty()) {
+        throw IllegalArgumentException(
+            "Config validation failed: retired/unsupported current-format pass IDs found: " +
+                retired.joinToString(", ") { "'$it'" },
+        )
     }
 }
 

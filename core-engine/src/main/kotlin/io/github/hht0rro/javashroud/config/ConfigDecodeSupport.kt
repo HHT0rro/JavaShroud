@@ -1,6 +1,7 @@
 package io.github.hht0rro.javashroud.config
 
 import com.fasterxml.jackson.databind.JsonNode
+import io.github.hht0rro.javashroud.model.config.HardenedProtectionProfile
 import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
 import io.github.hht0rro.javashroud.model.config.RuleSet
 import java.nio.file.Path
@@ -30,6 +31,15 @@ fun decodeConfig(rootNode: JsonNode, configPath: Path): ObfuscationConfig {
     )
     val allowRedundantPasses = optionalNestedBoolean(scalarRoot, "allowRedundantPasses", configPath, scalarRootPath)
     val allowAnnotationPasses = optionalNestedBoolean(scalarRoot, "allowAnnotationPasses", configPath, scalarRootPath)
+    val protectionProfile = HardenedProtectionProfile.fromWireValue(
+        optionalNestedTextOrDefault(
+            scalarRoot,
+            "protectionProfile",
+            configPath,
+            scalarRootPath,
+            default = HardenedProtectionProfile.RELEASE_HARDENED.wireValue,
+        ),
+    )
 
     return ObfuscationConfig(
         inputJarPath = inputJarPath,
@@ -41,6 +51,7 @@ fun decodeConfig(rootNode: JsonNode, configPath: Path): ObfuscationConfig {
         allowOptInPasses = allowOptInPasses,
         allowRedundantPasses = allowRedundantPasses,
         allowAnnotationPasses = allowAnnotationPasses,
+        protectionProfile = protectionProfile,
     )
 }
 

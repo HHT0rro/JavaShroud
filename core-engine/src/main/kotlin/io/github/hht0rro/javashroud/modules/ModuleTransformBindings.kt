@@ -18,23 +18,17 @@ import io.github.hht0rro.javashroud.transforms.rename.renameMethods
 import io.github.hht0rro.javashroud.transforms.rename.renamePackages
 import io.github.hht0rro.javashroud.transforms.obfuscation.applyCondyIndirection
 
-// Phase 1: Protection transforms
-import io.github.hht0rro.javashroud.transforms.protection.applyClassEncryptionLoader
-import io.github.hht0rro.javashroud.transforms.protection.applyMethodBodyDelayedDecryption
-
 // Phase 2: VM protection transforms
 import io.github.hht0rro.javashroud.transforms.protection.applyMethodVirtualization
 
 // Phase 3: Runtime defense transforms
 import io.github.hht0rro.javashroud.transforms.protection.applyCallsiteRotationProtection
-import io.github.hht0rro.javashroud.transforms.protection.applyEnvironmentBoundKeys
-import io.github.hht0rro.javashroud.transforms.protection.applyAntiSymbolicExecution
 
 // Phase 4: Native kernel transforms
-import io.github.hht0rro.javashroud.transforms.protection.applyAntiInstrumentation
-import io.github.hht0rro.javashroud.transforms.protection.applyAntiDumpProtection
 import io.github.hht0rro.javashroud.transforms.protection.applyJniMicrokernelLoader
 import io.github.hht0rro.javashroud.transforms.protection.applyExceptionSemanticVirtualization
+import io.github.hht0rro.javashroud.transforms.protection.applyOsAntiDebug
+import io.github.hht0rro.javashroud.transforms.protection.applyOsAntiVm
 
 internal fun metadataModuleBindings(): List<ModuleBinding> = listOf(
     ModuleBinding(id = "strip-compile-debug-info", transform = ModuleTransform(::stripCompileDebugInfo)),
@@ -70,10 +64,7 @@ internal fun hidingModuleBindings(): List<ModuleBinding> = listOf(
 
 // --- Phase 1: Loader protection ---
 
-internal fun loaderProtectionModuleBindings(): List<ModuleBinding> = listOf(
-    ModuleBinding(id = "class-encryption-loader", transform = ModuleTransform(::applyClassEncryptionLoader)),
-    ModuleBinding(id = "method-body-delayed-decryption", transform = ModuleTransform(::applyMethodBodyDelayedDecryption)),
-)
+internal fun loaderProtectionModuleBindings(): List<ModuleBinding> = emptyList()
 
 // --- Phase 1: Helper deployment ---
 
@@ -90,15 +81,13 @@ internal fun vmProtectionModuleBindings(): List<ModuleBinding> = listOf(
 
 internal fun runtimeDefenseModuleBindings(): List<ModuleBinding> = listOf(
     ModuleBinding(id = "callsite-rotation-protection", transform = ModuleTransform(::applyCallsiteRotationProtection)),
-    ModuleBinding(id = "environment-bound-keys", transform = ModuleTransform(::applyEnvironmentBoundKeys)),
-    ModuleBinding(id = "anti-symbolic-execution", transform = ModuleTransform(::applyAntiSymbolicExecution)),
+    ModuleBinding(id = "os-anti-debug", transform = ModuleTransform(::applyOsAntiDebug)),
+    ModuleBinding(id = "os-anti-vm", transform = ModuleTransform(::applyOsAntiVm)),
     ModuleBinding(id = "exception-semantic-virtualization", transform = ModuleTransform(::applyExceptionSemanticVirtualization)),
 )
 
 // --- Phase 4: Native kernel ---
 
 internal fun nativeKernelModuleBindings(): List<ModuleBinding> = listOf(
-    ModuleBinding(id = "anti-instrumentation", transform = ModuleTransform(::applyAntiInstrumentation)),
-    ModuleBinding(id = "anti-dump-protection", transform = ModuleTransform(::applyAntiDumpProtection)),
     ModuleBinding(id = "jni-microkernel-loader", transform = ModuleTransform(::applyJniMicrokernelLoader)),
 )

@@ -74,4 +74,5 @@ data class ObfuscationConfig(
     val allowOptInPasses: Boolean = false,
     val allowRedundantPasses: Boolean = false,
     val allowAnnotationPasses: Boolean = false,
+    val protectionProfile: HardenedProtectionProfile = HardenedProtectionProfile.RELEASE_HARDENED,
 )
