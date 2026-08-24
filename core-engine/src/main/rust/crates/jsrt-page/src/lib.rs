@@ -4529,10 +4529,9 @@ impl PageLease {
                 "page lease can authenticate only from Open",
             ));
         }
-        let schedule = self
-            .schedule
-            .take()
-            .ok_or(PageError::InvalidState("page lease schedule is unavailable"))?;
+        let schedule = self.schedule.take().ok_or(PageError::InvalidState(
+            "page lease schedule is unavailable",
+        ))?;
         let result = match PageLayout::from_variant(context.layout) {
             Ok(layout) => decode_page(
                 &self.encoded,

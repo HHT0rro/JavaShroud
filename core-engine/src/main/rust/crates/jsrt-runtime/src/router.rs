@@ -315,7 +315,9 @@ impl TypedPageRouter {
         request: &PageRequest,
     ) -> Result<OpenedPage, RouterError> {
         if request.kind() != PageKind::Vm {
-            return Err(RouterError::RouteUnavailable { kind: request.kind() });
+            return Err(RouterError::RouteUnavailable {
+                kind: request.kind(),
+            });
         }
         let mut pages: Vec<&AttachedPage> = self
             .pages
@@ -906,7 +908,9 @@ mod tests {
             .install_descriptor_bound(envelope, encoded, descriptor)
             .expect("descriptor-bound install");
         let request = PageRequest::new(&handle, 3, &proof, PageKind::String).expect("request");
-        let opened = router.open(0, &request).expect("open current evaluator page");
+        let opened = router
+            .open(0, &request)
+            .expect("open current evaluator page");
         assert_eq!(opened.payload(), b"hello-r1");
     }
 
@@ -929,5 +933,4 @@ mod tests {
             Err(RouterError::AuthenticationFailed)
         );
     }
-
 }

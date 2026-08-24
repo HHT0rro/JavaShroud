@@ -7,8 +7,7 @@ pub mod executor;
 mod zstd;
 
 pub use executor::{
-    ExecutionLimits, InvokeKind, ObjectOperations, VmExecutor, VmHostError,
-    VmValue,
+    ExecutionLimits, InvokeKind, ObjectOperations, VmExecutor, VmHostError, VmValue,
 };
 
 pub mod opcode {
@@ -189,8 +188,7 @@ use std::ops::Range;
 pub const VBC4_MAGIC: [u8; 4] = *b"VBC4";
 pub const VBC4_AUTH_TAG_SIZE: usize = 32;
 pub const VBC4_DIALECT_COMMITMENT_SIZE: usize = 32;
-pub const VBC4_HEADER_SIZE: usize =
-    4 + 16 + VBC4_DIALECT_COMMITMENT_SIZE + 4 + 16 + 2 + 2 + 4 + 4;
+pub const VBC4_HEADER_SIZE: usize = 4 + 16 + VBC4_DIALECT_COMMITMENT_SIZE + 4 + 16 + 2 + 2 + 4 + 4;
 pub const VBC4_MAX_BLOCKS: usize = 12;
 pub const VBC4_MAX_FRAME_SIZE: usize = 32 * 1024 * 1024;
 pub const VBC4_MAX_SECTION_SIZE: usize = 16 * 1024 * 1024;
@@ -2399,9 +2397,7 @@ fn cfg_decode(seed: u32, instruction_count: usize, encoded: i32) -> Result<usize
         return Err(VmError::InvalidControlFlow);
     }
     let inverse = modular_inverse(cfg_multiplier(seed, instruction_count))
-        .ok_or_else(|| {
-            VmError::InvalidControlFlow
-        })?;
+        .ok_or_else(|| VmError::InvalidControlFlow)?;
     let normalized = (encoded as u32).wrapping_sub(cfg_offset(seed, instruction_count)) & CFG_MASK;
     let decoded = (normalized.wrapping_mul(inverse)) & CFG_MASK;
     if decoded as usize > instruction_count {
@@ -2895,12 +2891,7 @@ pub fn encode_iconst7_frame(material: &VmKeyMaterial) -> Result<Vec<u8>, VmError
     let dispatch_mask = seed.rotate_left(7) ^ 0x119d_e1f3;
     let dispatch_token = ((u32::from(dispatch_state) << 16) | 1) ^ dispatch_mask;
     let flags = REQUIRED_FLAGS | FLAG_POLYMORPHIC_CP;
-    let wrapped_mask = vbc4_hmac(
-        &session,
-        0,
-        &[&nonce, &state_binding],
-        b"vbc4-seed-wrap",
-    );
+    let wrapped_mask = vbc4_hmac(&session, 0, &[&nonce, &state_binding], b"vbc4-seed-wrap");
     let token = vbc4_hmac(
         &session,
         seed,

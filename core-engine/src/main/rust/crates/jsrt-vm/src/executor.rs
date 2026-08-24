@@ -1167,14 +1167,13 @@ impl<H: ObjectOperations> VmExecutor<H> {
                     .type_constant(value.as_str())
                     .map_err(|_| VmError::HostFailure)?,
             )),
-            (
-                opcode::LDC_HANDLE | opcode::LDC_CONDY,
-                VmConstant::String(value),
-            ) => Ok(VmValue::Object(
-                self.host
-                    .string_constant(value.as_str())
-                    .map_err(|_| VmError::HostFailure)?,
-            )),
+            (opcode::LDC_HANDLE | opcode::LDC_CONDY, VmConstant::String(value)) => {
+                Ok(VmValue::Object(
+                    self.host
+                        .string_constant(value.as_str())
+                        .map_err(|_| VmError::HostFailure)?,
+                ))
+            }
             _ => Err(VmError::InvalidConstantPool(
                 "constant opcode/type mismatch",
             )),
@@ -1217,12 +1216,12 @@ impl<H: ObjectOperations> VmExecutor<H> {
             opcode::INVOKEINTERFACE => InvokeKind::Interface,
             _ => InvokeKind::Dynamic,
         };
-            let receiver_object = if matches!(kind, InvokeKind::Static | InvokeKind::Dynamic) {
-                None
-            } else {
-                let receiver = pop(frame)?;
-                Some(as_object(receiver)?)
-            };
+        let receiver_object = if matches!(kind, InvokeKind::Static | InvokeKind::Dynamic) {
+            None
+        } else {
+            let receiver = pop(frame)?;
+            Some(as_object(receiver)?)
+        };
         let result = match self
             .host
             .invoke(kind, reference, receiver_object.as_ref(), &arguments)
@@ -1343,7 +1342,6 @@ impl<H: ObjectOperations> VmExecutor<H> {
         Ok(None)
     }
 }
-
 
 fn dynamic_descriptor(reference: &str) -> Option<&str> {
     let mut fields = reference.split('|');
@@ -1628,12 +1626,16 @@ mod tests {
 
     #[test]
     fn lambda_recipe_uses_factory_descriptor_for_stack_arity() {
-        let reference = "lambda|run|(Lexample/Exec;)Ljava/lang/Runnable;|5|example/Exec|doAdd|()V|()V|()V|0;;";
+        let reference =
+            "lambda|run|(Lexample/Exec;)Ljava/lang/Runnable;|5|example/Exec|doAdd|()V|()V|()V|0;;";
         assert_eq!(
             dynamic_descriptor(reference),
             Some("(Lexample/Exec;)Ljava/lang/Runnable;")
         );
-        assert_eq!(descriptor_arity(dynamic_descriptor(reference).unwrap()), Some(1));
+        assert_eq!(
+            descriptor_arity(dynamic_descriptor(reference).unwrap()),
+            Some(1)
+        );
     }
 
     #[test]

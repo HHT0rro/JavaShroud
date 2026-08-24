@@ -32,6 +32,13 @@ private data class RustRuntimeTarget(
     val cargoTarget: String,
 )
 
+private fun resolveCargoExecutable(): String {
+    val cargoHome = System.getenv("CARGO_HOME")?.takeIf { it.isNotBlank() } ?: return "cargo"
+    val executableName = if (System.getProperty("os.name").lowercase().startsWith("windows")) "cargo.exe" else "cargo"
+    val candidate = java.io.File(cargoHome, "bin/$executableName")
+    return if (candidate.isFile) candidate.absolutePath else "cargo"
+}
+
 private fun hostRustRuntimePlatform(osName: String, osArch: String): String {
     val normalizedOs = osName.lowercase()
     val normalizedArch = osArch.lowercase()
@@ -165,7 +172,7 @@ val buildRustNativeRuntime = tasks.register<Exec>("buildRustNativeRuntime") {
             throw GradleException("AKEN-R1 Rust workspace is missing: $cargoManifest")
         }
     }
-    commandLine("cargo", "zigbuild", "--locked", "--workspace", "--release", "--target", cargoTarget)
+    commandLine(resolveCargoExecutable(), "zigbuild", "--locked", "--workspace", "--release", "--target", cargoTarget)
 }
 
 val packageRustNativeRuntime = tasks.register<Sync>("packageRustNativeRuntime") {

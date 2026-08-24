@@ -143,7 +143,9 @@ unsafe fn write_usize(bytes: &mut [u8], value: usize) {
 mod jni_bridge {
     use super::*;
     use jsrt_runtime::SupportedTarget;
-    use jsrt_vm::{InvokeKind, ObjectOperations, VmError, VmExecutor, VmHostError, VmProgram, VmValue};
+    use jsrt_vm::{
+        InvokeKind, ObjectOperations, VmError, VmExecutor, VmHostError, VmProgram, VmValue,
+    };
     use std::os::raw::{c_char, c_void};
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -533,10 +535,8 @@ mod jni_bridge {
 
         unsafe fn find_class_checked(&self, owner: &str) -> Result<JClass, VmHostError> {
             let owner = self.class_name(owner)?;
-            let class =
-                find_class(self.env, owner.as_bytes_with_nul()).ok_or_else(|| {
-                    VmHostError::Failure
-                })?;
+            let class = find_class(self.env, owner.as_bytes_with_nul())
+                .ok_or_else(|| VmHostError::Failure)?;
             Ok(class)
         }
 
@@ -1003,20 +1003,12 @@ mod jni_bridge {
                     let entry = native_entry(self.env, $index).ok_or(VmHostError::Failure)?;
                     let scalar: $ty = $scalar;
                     if is_static {
-                        let f: unsafe extern "system" fn(
-                            JNIEnv,
-                            JClass,
-                            *const c_void,
-                            $ty,
-                        ) = core::mem::transmute(entry);
+                        let f: unsafe extern "system" fn(JNIEnv, JClass, *const c_void, $ty) =
+                            core::mem::transmute(entry);
                         f(self.env, target, field, scalar);
                     } else {
-                        let f: unsafe extern "system" fn(
-                            JNIEnv,
-                            JObject,
-                            *const c_void,
-                            $ty,
-                        ) = core::mem::transmute(entry);
+                        let f: unsafe extern "system" fn(JNIEnv, JObject, *const c_void, $ty) =
+                            core::mem::transmute(entry);
                         f(self.env, target, field, scalar);
                     }
                 }};
@@ -1027,20 +1019,12 @@ mod jni_bridge {
                     let entry = native_entry(self.env, $index).ok_or(VmHostError::Failure)?;
                     let object: JObject = $object;
                     if is_static {
-                        let f: unsafe extern "system" fn(
-                            JNIEnv,
-                            JClass,
-                            *const c_void,
-                            JObject,
-                        ) = core::mem::transmute(entry);
+                        let f: unsafe extern "system" fn(JNIEnv, JClass, *const c_void, JObject) =
+                            core::mem::transmute(entry);
                         f(self.env, target, field, object);
                     } else {
-                        let f: unsafe extern "system" fn(
-                            JNIEnv,
-                            JObject,
-                            *const c_void,
-                            JObject,
-                        ) = core::mem::transmute(entry);
+                        let f: unsafe extern "system" fn(JNIEnv, JObject, *const c_void, JObject) =
+                            core::mem::transmute(entry);
                         f(self.env, target, field, object);
                     }
                 }};
@@ -1234,7 +1218,9 @@ mod jni_bridge {
                         *const c_void,
                         *const JValue,
                     ) -> JBoolean = core::mem::transmute(entry);
-                    VmValue::Int(i32::from(f(self.env, object, method, jvalue_ptr(&args)) != 0))
+                    VmValue::Int(i32::from(
+                        f(self.env, object, method, jvalue_ptr(&args)) != 0,
+                    ))
                 }
                 b'B' => {
                     let entry = native_entry(self.env, CALL_BYTE_METHOD_A_INDEX)
@@ -1407,8 +1393,6 @@ mod jni_bridge {
         }
     }
 
-
-
     fn primitive_value(value: &VmValue<JObject>, tag: u8) -> Result<JValue, VmHostError> {
         let result = match tag {
             b'Z' => JValue {
@@ -1521,10 +1505,8 @@ mod jni_bridge {
                 // captures are boxed exactly once for the Java helper call;
                 // object/null captures are passed through unchanged.
                 let object_class = unsafe { self.find_class_checked("java/lang/Object")? };
-                let new_array_entry = unsafe {
-                    native_entry(self.env, NEW_OBJECT_ARRAY_INDEX)
-                }
-                .ok_or(VmHostError::Failure)?;
+                let new_array_entry = unsafe { native_entry(self.env, NEW_OBJECT_ARRAY_INDEX) }
+                    .ok_or(VmHostError::Failure)?;
                 let new_array: unsafe extern "system" fn(
                     JNIEnv,
                     JSize,
@@ -1546,14 +1528,11 @@ mod jni_bridge {
                 let captured_array = self.own(captured_array);
                 let set_entry = unsafe { native_entry(self.env, SET_OBJECT_ARRAY_ELEMENT_INDEX) }
                     .ok_or(VmHostError::Failure)?;
-                let set_element: unsafe extern "system" fn(
-                    JNIEnv,
-                    JObject,
-                    JSize,
-                    JObject,
-                ) = unsafe { core::mem::transmute(set_entry) };
+                let set_element: unsafe extern "system" fn(JNIEnv, JObject, JSize, JObject) =
+                    unsafe { core::mem::transmute(set_entry) };
                 let mut boxed = Vec::new();
-                for (index, (tag, value)) in argument_tags.iter().zip(arguments.iter()).enumerate() {
+                for (index, (tag, value)) in argument_tags.iter().zip(arguments.iter()).enumerate()
+                {
                     let object = match tag {
                         b'L' | b'[' => match value {
                             VmValue::Object(object) => *object,
@@ -1561,8 +1540,10 @@ mod jni_bridge {
                             _ => return Err(VmHostError::Failure),
                         },
                         b'Z' | b'B' | b'C' | b'S' | b'I' | b'J' | b'F' | b'D' => {
-                            let object = unsafe { box_vm_value_with_tag(self.env, value.clone(), Some(*tag)) }
-                                .ok_or(VmHostError::Failure)?;
+                            let object = unsafe {
+                                box_vm_value_with_tag(self.env, value.clone(), Some(*tag))
+                            }
+                            .ok_or(VmHostError::Failure)?;
                             boxed.push(object);
                             object
                         }
@@ -1593,17 +1574,26 @@ mod jni_bridge {
                 let name_object = unsafe { self.new_string(name)? };
                 let descriptor_object = unsafe { self.new_string(descriptor)? };
                 let sam_descriptor_object = unsafe { self.new_string(sam_descriptor)? };
-                let instantiated_descriptor_object = unsafe { self.new_string(instantiated_descriptor)? };
+                let instantiated_descriptor_object =
+                    unsafe { self.new_string(instantiated_descriptor)? };
                 let options_object = unsafe { self.new_string(encoded_options)? };
                 let values = [
                     JValue { l: sam_name_object },
-                    JValue { l: factory_descriptor_object },
+                    JValue {
+                        l: factory_descriptor_object,
+                    },
                     JValue { l: owner_object },
                     JValue { l: name_object },
-                    JValue { l: descriptor_object },
+                    JValue {
+                        l: descriptor_object,
+                    },
                     JValue { i: impl_tag },
-                    JValue { l: sam_descriptor_object },
-                    JValue { l: instantiated_descriptor_object },
+                    JValue {
+                        l: sam_descriptor_object,
+                    },
+                    JValue {
+                        l: instantiated_descriptor_object,
+                    },
                     JValue { l: options_object },
                     JValue { l: captured_array },
                 ];
@@ -1668,9 +1658,8 @@ mod jni_bridge {
                 }
                 return Ok(result);
             }
-            let (owner, name, descriptor) = parse_member_reference(reference).map_err(|error| {
-                error
-            })?;
+            let (owner, name, descriptor) =
+                parse_member_reference(reference).map_err(|error| error)?;
             let (argument_tags, return_tag) = parse_method_descriptor(descriptor)?;
             if argument_tags.len() != arguments.len() {
                 return Err(VmHostError::Failure);
@@ -2185,9 +2174,7 @@ mod jni_bridge {
 
             if let Some(wrapper_name) = primitive_wrapper {
                 let wrapper = unsafe { self.find_class_checked(wrapper_name)? };
-                let field = unsafe {
-                    self.field_id(wrapper, "TYPE", "Ljava/lang/Class;", true)?
-                };
+                let field = unsafe { self.field_id(wrapper, "TYPE", "Ljava/lang/Class;", true)? };
                 let value = unsafe {
                     self.get_field_value(jsrt_vm::opcode::GETSTATIC, wrapper, field, b'L')?
                 };
@@ -2325,8 +2312,7 @@ mod jni_bridge {
 
     unsafe fn exception_occurred(env: JNIEnv) -> Option<JObject> {
         let entry = native_entry(env, EXCEPTION_OCCURRED_INDEX)?;
-        let occurred: unsafe extern "system" fn(JNIEnv) -> JObject =
-            core::mem::transmute(entry);
+        let occurred: unsafe extern "system" fn(JNIEnv) -> JObject = core::mem::transmute(entry);
         let throwable = occurred(env);
         (!throwable.is_null()).then_some(throwable)
     }
@@ -2335,8 +2321,7 @@ mod jni_bridge {
         let Some(entry) = native_entry(env, PUSH_LOCAL_FRAME_INDEX) else {
             return false;
         };
-        let push: unsafe extern "system" fn(JNIEnv, JInt) -> JInt =
-            core::mem::transmute(entry);
+        let push: unsafe extern "system" fn(JNIEnv, JInt) -> JInt = core::mem::transmute(entry);
         push(env, capacity) == JNI_OK
     }
 
@@ -2709,7 +2694,9 @@ mod jni_bridge {
         // a host-level hypervisor indication. RELEASE_HARDENED passes use the
         // default hardened profile and still fail closed on this high-
         // confidence signal.
-        if detected && !(surface == DefenseSurface::OsAntiVm && profile == Some(DefenseProfile::Balanced)) {
+        if detected
+            && !(surface == DefenseSurface::OsAntiVm && profile == Some(DefenseProfile::Balanced))
+        {
             return Err(BridgeFailure(
                 "AKEN unified defense detected a protected-host violation",
             ));
@@ -2799,7 +2786,6 @@ mod jni_bridge {
             .map_err(router_failure)
     }
 
-
     unsafe fn open_page_route_vm(
         env: JNIEnv,
         entry_token: JLong,
@@ -2853,12 +2839,16 @@ mod jni_bridge {
         directory: &ArtifactDirectory,
     ) -> Result<std::collections::BTreeMap<String, Vec<u8>>, BridgeFailure> {
         if bundle.len() > MAX_CATALOG_BUNDLE_SIZE {
-            return Err(BridgeFailure("AKEN current catalog bundle exceeds its bound"));
+            return Err(BridgeFailure(
+                "AKEN current catalog bundle exceeds its bound",
+            ));
         }
         let mut cursor = 0usize;
         let count = read_catalog_u32(bundle, &mut cursor)? as usize;
         if count != directory.entries.len() {
-            return Err(BridgeFailure("AKEN current catalog page count does not match the directory"));
+            return Err(BridgeFailure(
+                "AKEN current catalog page count does not match the directory",
+            ));
         }
         let mut stored = std::collections::BTreeMap::new();
         for _ in 0..count {
@@ -2869,7 +2859,11 @@ mod jni_bridge {
             let path_bytes = read_catalog_bytes(bundle, &mut cursor, path_len)?;
             let path = std::str::from_utf8(path_bytes)
                 .map_err(|_| BridgeFailure("AKEN current catalog path is not UTF-8"))?;
-            if path.starts_with('/') || path.contains('\\') || path.contains('\0') || path.contains("..") {
+            if path.starts_with('/')
+                || path.contains('\\')
+                || path.contains('\0')
+                || path.contains("..")
+            {
                 return Err(BridgeFailure("AKEN current catalog path is invalid"));
             }
             let page_len = read_catalog_u32(bundle, &mut cursor)? as usize;
@@ -2878,18 +2872,26 @@ mod jni_bridge {
             }
             let page = read_catalog_bytes(bundle, &mut cursor, page_len)?.to_vec();
             if stored.insert(path.to_owned(), page).is_some() {
-                return Err(BridgeFailure("AKEN current catalog contains duplicate pages"));
+                return Err(BridgeFailure(
+                    "AKEN current catalog contains duplicate pages",
+                ));
             }
         }
         if cursor != bundle.len() {
-            return Err(BridgeFailure("AKEN current catalog bundle has trailing bytes"));
+            return Err(BridgeFailure(
+                "AKEN current catalog bundle has trailing bytes",
+            ));
         }
         for entry in &directory.entries {
             let Some(page) = stored.get(&entry.relative_path) else {
-                return Err(BridgeFailure("AKEN current catalog is missing a directory page"));
+                return Err(BridgeFailure(
+                    "AKEN current catalog is missing a directory page",
+                ));
             };
             if page.len() != entry.stored_length as usize {
-                return Err(BridgeFailure("AKEN current catalog page length does not match the directory"));
+                return Err(BridgeFailure(
+                    "AKEN current catalog page length does not match the directory",
+                ));
             }
         }
         Ok(stored)
@@ -2921,20 +2923,25 @@ mod jni_bridge {
         directory_bytes: JByteArray,
         bundle_bytes: JByteArray,
     ) -> Result<JInt, BridgeFailure> {
-        let directory_bytes = unsafe { copy_byte_array(env, directory_bytes, MAX_CATALOG_DIRECTORY_SIZE) }?;
+        let directory_bytes =
+            unsafe { copy_byte_array(env, directory_bytes, MAX_CATALOG_DIRECTORY_SIZE) }?;
         let bundle_bytes = unsafe { copy_byte_array(env, bundle_bytes, MAX_CATALOG_BUNDLE_SIZE) }?;
         let directory = ArtifactDirectory::decode(directory_bytes.as_bytes())
             .map_err(|_| BridgeFailure("AKEN current catalog directory authentication failed"))?;
         let stored = parse_catalog_bundle(bundle_bytes.as_bytes(), &directory)?;
         let mut state = lock_state()?;
         if !state.initialized || state.session_nonce.is_none() {
-            return Err(BridgeFailure("AKEN current catalog session binding is missing"));
+            return Err(BridgeFailure(
+                "AKEN current catalog session binding is missing",
+            ));
         }
         let target = state
             .target
             .ok_or(BridgeFailure("AKEN current catalog target is missing"))?;
         if directory.runtime.target_triple != target.triple() {
-            return Err(BridgeFailure("AKEN current catalog target binding mismatch"));
+            return Err(BridgeFailure(
+                "AKEN current catalog target binding mismatch",
+            ));
         }
         if !state.router.is_empty() {
             return Err(BridgeFailure("AKEN current catalog was already installed"));
@@ -2944,9 +2951,12 @@ mod jni_bridge {
             .install_catalog_descriptor_bound(&directory, &stored)
             .map_err(|_| BridgeFailure("AKEN current catalog page installation failed"))?;
         if installed != directory.entries.len() {
-            return Err(BridgeFailure("AKEN current catalog installed an incomplete page set"));
+            return Err(BridgeFailure(
+                "AKEN current catalog installed an incomplete page set",
+            ));
         }
-        i32::try_from(installed).map_err(|_| BridgeFailure("AKEN current catalog page count overflow"))
+        i32::try_from(installed)
+            .map_err(|_| BridgeFailure("AKEN current catalog page count overflow"))
     }
 
     fn native_init_inner(env: JNIEnv, platform: JString) -> Result<JInt, BridgeFailure> {
@@ -3467,7 +3477,9 @@ mod jni_bridge {
                 b"java/lang/Boolean\0" as &[u8],
                 b"valueOf\0" as &[u8],
                 b"(Z)Ljava/lang/Boolean;\0" as &[u8],
-                JValue { z: u8::from(value != 0) },
+                JValue {
+                    z: u8::from(value != 0),
+                },
             ),
             VmValue::Int(value) => (
                 b"java/lang/Integer\0" as &[u8],
@@ -3567,13 +3579,12 @@ mod jni_bridge {
         let method_text = read_system_property(env, b"j.m\0")?;
         let method_map = match method_text.as_deref() {
             None => Default::default(),
-            Some(text) => crate::relocation::parse_binding_map(text).map_err(|error| {
-                BridgeFailure(error)
-            })?,
+            Some(text) => {
+                crate::relocation::parse_binding_map(text).map_err(|error| BridgeFailure(error))?
+            }
         };
-        crate::relocation::resolve_registration(loader_owner.as_deref(), &method_map).map_err(|error| {
-            BridgeFailure(error)
-        })
+        crate::relocation::resolve_registration(loader_owner.as_deref(), &method_map)
+            .map_err(|error| BridgeFailure(error))
     }
 
     unsafe fn unregister_natives(env: JNIEnv, class: JClass) {
@@ -3648,7 +3659,6 @@ mod jni_bridge {
         delete_local_ref(env, class);
         JNI_VERSION_1_8
     }
-
 
     #[no_mangle]
     pub unsafe extern "system" fn JNI_OnUnload(vm: JavaVM, _reserved: *mut c_void) {

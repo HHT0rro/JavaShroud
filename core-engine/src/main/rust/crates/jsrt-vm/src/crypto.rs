@@ -79,8 +79,8 @@ pub(crate) fn vbc4_session_material(
     layout_digest: &[u8; 32],
     state_binding: &[u8],
 ) -> [u8; 32] {
-    let state_binding_length = u32::try_from(state_binding.len())
-        .expect("bounded VBC4 state binding length fits u32");
+    let state_binding_length =
+        u32::try_from(state_binding.len()).expect("bounded VBC4 state binding length fits u32");
     let mut material = Vec::with_capacity(
         b"vbc4-session-integrity-v2".len() + 32 + 32 + 4 + state_binding.len() + 4,
     );
@@ -201,7 +201,10 @@ mod tests {
     use super::*;
 
     fn hex(value: &str) -> Vec<u8> {
-        let compact: String = value.chars().filter(|character| !character.is_whitespace()).collect();
+        let compact: String = value
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
         (0..compact.len())
             .step_by(2)
             .map(|offset| u8::from_str_radix(&compact[offset..offset + 2], 16).expect("hex"))
@@ -213,11 +216,9 @@ mod tests {
         let ikm = hex("0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b");
         let salt = hex("000102030405060708090a0b0c");
         let info = hex("f0f1f2f3f4f5f6f7f8f9");
-        let expected = hex(
-            "3cb25f25faacd57a90434f64d0362f2a\
+        let expected = hex("3cb25f25faacd57a90434f64d0362f2a\
              2d2d0a90cf1a5a4c5db02d56ecc4c5bf\
-             34007208d5b887185865",
-        );
+             34007208d5b887185865");
 
         let mut actual = hkdf_sha256(&ikm, &salt, &info, 42).expect("RFC 5869 HKDF");
         assert_eq!(actual, expected);
