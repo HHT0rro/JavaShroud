@@ -422,6 +422,11 @@ internal class AkenVbc4FinalizationLayout private constructor(
      * Supplies copies of one current-page native locator record per page to a
      * native code generator, then wipes every callback copy before returning.
      */
+    internal fun <T> withNativeCompileInputsForBuild(block: (List<AkenNativePageLocatorCompileInput>) -> T): T {
+        requireLive()
+        return block(nativeInputsValue.toList())
+    }
+
     internal fun <T> withNativeLocatorRecordsForBuild(block: (List<ByteArray>) -> T): T {
         requireLive()
         val records = ArrayList<ByteArray>(nativeInputsValue.size)

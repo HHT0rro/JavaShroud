@@ -11,11 +11,11 @@ import java.util.Arrays
  */
 internal object AkenVbc4InnerMaterial {
     private val cryptoDomainLabel =
-        "javashroud-aken-v4-vbc4-inner-crypto-v2".toByteArray(Charsets.US_ASCII)
+        "javashroud-aken-r1-vbc4-inner-crypto-v3".toByteArray(Charsets.US_ASCII)
     private val stateBindingLayoutLabel =
-        "javashroud-aken-v4-vbc4-inner-state-binding-v2".toByteArray(Charsets.US_ASCII)
+        "javashroud-aken-r1-vbc4-inner-state-binding-v3".toByteArray(Charsets.US_ASCII)
     private val vmBuildKeyDomain =
-        "javashroud-vbc4-vm-build-key-v2".toByteArray(Charsets.US_ASCII)
+        "javashroud-aken-r1-vm-build-key-v3".toByteArray(Charsets.US_ASCII)
 
     fun copyCryptoDomainMaterial(context: Vbc4BuildContext): ByteArray {
         val stateDigest = copyStateBindingLayoutDigest(context)

@@ -4,7 +4,6 @@ import io.github.hht0rro.javashroud.analysis.eligibleMembersForAction
 import io.github.hht0rro.javashroud.analysis.matchedMembersForAction
 import io.github.hht0rro.javashroud.bytecode.computeFramesWriter
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
-import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.config.RuleSetScope
 import io.github.hht0rro.javashroud.model.transforms.TransformResult
@@ -25,7 +24,6 @@ import java.security.MessageDigest
 import java.security.Provider
 import java.security.SecureRandom
 import java.security.SecureRandomSpi
-import java.util.Collections
 private const val VM_LEGACY_DISPATCH_DESCRIPTOR = "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;"
 private const val VM_TOKEN_DISPATCH_DESCRIPTOR = "(J[Ljava/lang/Object;)Ljava/lang/Object;"
 private const val VM_VOID_DISPATCH_DESCRIPTOR = "(J)V"
@@ -81,6 +79,48 @@ private fun isClassLoaderOrResourceBoundaryMethod(owner: String, name: String, d
     if (owner == "java/lang/ClassLoader" && name in setOf("defineClass", "findClass", "loadClass", "getResource", "getResourceAsStream")) return true
     if (owner == "java/lang/Class" && name in setOf("getClassLoader", "getResource", "getResourceAsStream")) return true
     return owner.endsWith("ClassLoader") && name in setOf("defineClass", "findClass", "loadClass", "getResource", "getResourceAsStream")
+}
+
+private fun isSecurityManagerBoundaryMethod(name: String, descriptor: String): Boolean =
+    name == "checkPermission" && descriptor in setOf(
+        "(Ljava/security/Permission;)V",
+        "(Ljava/security/Permission;Ljava/lang/Object;)V",
+    )
+
+private fun isJvmUiBoundaryMethod(name: String, descriptor: String): Boolean {
+    if (
+        descriptor.contains("Ljava/awt/") ||
+        descriptor.contains("Ljavax/swing/") ||
+        descriptor.contains("Ljava/beans/")
+    ) {
+        return true
+    }
+    return name in setOf(
+        "paint",
+        "paintComponent",
+        "paintChildren",
+        "update",
+        "actionPerformed",
+        "stateChanged",
+        "propertyChange",
+        "mouseClicked",
+        "mousePressed",
+        "mouseReleased",
+        "mouseEntered",
+        "mouseExited",
+        "mouseMoved",
+        "mouseDragged",
+        "keyPressed",
+        "keyReleased",
+        "keyTyped",
+        "windowOpened",
+        "windowClosing",
+        "windowClosed",
+        "windowIconified",
+        "windowDeiconified",
+        "windowActivated",
+        "windowDeactivated",
+    )
 }
 
 private fun unsafeSyntheticHandlerKeys(classBytes: ByteArray): Set<String> {
@@ -225,10 +265,6 @@ fun applyMethodVirtualization(
 
     val opcodeMapping = generateOpcodeMapping(random)
     val handlerOrder = generateHandlerOrder(opcodeMapping.size, random)
-    val vmResourcePlans = mutableListOf<PlannedMethodVmResources>()
-    val vmPreloadEntries = mutableListOf<VmPreloadEntry>()
-    var nextVmResourceOrdinal = 0
-
     var classCount = 0
     var methodCount = 0
     var broadVirtualizedMethodCount = 0
@@ -326,7 +362,35 @@ fun applyMethodVirtualization(
                         if (bodyCapture.callsTimingSensitiveSyntheticHandler(className, timingSensitiveSyntheticHandlers)) {
                             bodyCapture.markTimingSensitiveSyntheticHandlerUnsupported()
                         }
+                        // Preserve JVM-owned concurrency/reflection/class-loader
+                        // boundaries even when a broad/strict rule selected the
+                        // method. These APIs carry thread-local, loader-local,
+                        // security-manager, or reflective state that cannot be
+                        // reproduced by the native VM host without changing
+                        // application semantics. A narrow explicit rule must not
+                        // turn a valid artifact into a semantically broken one.
+                        if (
+                            isSecurityManagerBoundaryMethod(name, descriptor) ||
+                            isJvmUiBoundaryMethod(name, descriptor) ||
+                            bodyCapture.requiresJvmBoundaryPreservation()
+                        ) {
+                            bodyCapture.replayTo(superMv)
+                            return
+                        }
                         if (isSyntheticBridgeMethod(access)) {
+                            bodyCapture.replayTo(superMv)
+                            return
+                        }
+                        // LambdaMetafactory implementation methods are JVM
+                        // callback bodies.  They run on executor threads and
+                        // commonly call boundary-sensitive instance methods;
+                        // virtualizing the synthetic callback itself changes
+                        // the callback's receiver/exception/thread semantics
+                        // even when the body has no direct boundary call.
+                        if (access and Opcodes.ACC_SYNTHETIC != 0 &&
+                            access and Opcodes.ACC_STATIC != 0 &&
+                            !name.startsWith("a_bsm")
+                        ) {
                             bodyCapture.replayTo(superMv)
                             return
                         }
@@ -437,7 +501,6 @@ fun applyMethodVirtualization(
                             return
                         }
                         try {
-                            val slicedResource = slicedVmResources(random, keyRandom, className, vmMethodName, vmDescriptor, methodSeed, methodEntropy, vmBytes, resourcePath)
                             val methodEvidence = serializer.productionEvidence()
                             buildContext.productionBuildEvidence.recordMethod(
                                 CandidateProductionBuildEvidence.MethodObservation(
@@ -447,25 +510,11 @@ fun applyMethodVirtualization(
                                         guestOriginalDescriptor,
                                     ),
                                     entryToken = entryToken,
-                                    sourceResourcePath = slicedResource.manifestPath,
+                                    sourceResourcePath = resourcePath,
                                     opcodeStreamSha256 = methodEvidence.opcodeStreamSha256,
                                     operandStreamSha256 = methodEvidence.operandStreamSha256,
                                     methodEncodingSha256 = methodEvidence.methodEncodingSha256,
                                 ),
-                            )
-                            val decoyResources = decoyVmResources(random, keyRandom, className, vmMethodName, vmDescriptor, methodSeed, methodEntropy, vmBytes, slicedResource.reservedPaths)
-                            val preloadEntry = VmPreloadEntry(
-                                entryToken = entryToken,
-                                resourcePath = resourcePath,
-                                manifestPath = slicedResource.manifestPath,
-                                shardCount = slicedResource.shardCount,
-                                methodLocalProfile = methodLocalProfile,
-                                manifestPlan = slicedResource.manifestPlan,
-                            )
-                            vmPreloadEntries += preloadEntry
-                            vmResourcePlans += PlannedMethodVmResources(
-                                ordinal = nextVmResourceOrdinal++,
-                                resources = slicedResource.resources + decoyResources,
                             )
                             val logicalIdentity = buildContext
                                 .deriveVbc4Identity(className, vmMethodName, vmDescriptor)
@@ -553,27 +602,8 @@ fun applyMethodVirtualization(
 
     if (classCount == 0) return unchangedTransformResult(artifact)
 
-    val methodResources = vmResourcePlans
-        .sortedBy { it.ordinal }
-        .flatMap { it.resources }
-    val updatedArtifact = if (methodResources.isNotEmpty()) {
-        val mesh = interproceduralVmSliceMesh(vmPreloadEntries)
-        val meshPeers = vmPreloadEntries.mapIndexed { index, entry ->
-            entry.toMeshPeer(index)
-        }
-        val manifestResources = vmPreloadEntries.mapIndexed { index, entry ->
-            entry.manifestPlan.toJarEntry(keyRandom, mesh, index, vmPreloadEntries.size, meshPeers)
-        }
-        val scheduledResources = interproceduralVmResourceSchedule(methodResources + manifestResources, random)
-        val catalogPlan = runtimeVmCatalogPlan(
-            interproceduralVmPreloadSchedule(vmPreloadEntries, scheduledResources, random),
-        )
-        buildContext.publishRuntimeVmCatalogPlan(catalogPlan)
-        artifact.copy(jarEntries = artifact.jarEntries + scheduledResources)
-    } else artifact
-
     return updatedArtifactTransformResult(
-        artifact = updatedArtifact,
+        artifact = artifact,
         updatedClassArtifacts = updatedClassArtifacts,
         transformedClassCount = classCount,
         transformedMemberCount = methodCount,
@@ -581,65 +611,6 @@ fun applyMethodVirtualization(
 }
 
 internal const val VBC4_CLEAN_ENTRY_INTEGRITY_HEX = "10429f6c"
-
-private data class VmPreloadEntry(
-    val entryToken: Long,
-    val resourcePath: String,
-    val manifestPath: String,
-    val shardCount: Int,
-    val methodLocalProfile: Int,
-    val manifestPlan: VmSliceManifestPlan,
-)
-
-private data class PlannedMethodVmResources(
-    val ordinal: Int,
-    val resources: List<JarEntryData>,
-)
-
-private fun interproceduralVmResourceSchedule(resources: List<JarEntryData>, random: SecureRandom): List<JarEntryData> =
-    resources.toMutableList().also { Collections.shuffle(it, random) }
-
-private fun interproceduralVmPreloadSchedule(
-    entries: List<VmPreloadEntry>,
-    scheduledResources: List<JarEntryData>,
-    random: SecureRandom,
-): List<VmPreloadEntry> {
-    val scheduled = entries.toMutableList().also { Collections.shuffle(it, random) }
-    if (scheduled.size < 2) return scheduled
-    val emittedManifestOrder = scheduledResources.map { it.name }.filter { name -> entries.any { it.manifestPath == name } }
-    if (scheduled.map { it.manifestPath } == emittedManifestOrder) scheduled.reverse()
-    return scheduled
-}
-
-private data class VmSliceMeshPeer(
-    val ordinal: Int,
-    val manifestPath: String,
-    val shardCount: Int,
-    val material: String,
-)
-
-private fun VmPreloadEntry.toMeshPeer(ordinal: Int): VmSliceMeshPeer = VmSliceMeshPeer(
-    ordinal = ordinal,
-    manifestPath = manifestPath,
-    shardCount = shardCount,
-    material = manifestPlan.meshMaterial(entryToken, resourcePath, manifestPath, shardCount, methodLocalProfile),
-)
-
-private fun runtimeVmCatalogPlan(entries: List<VmPreloadEntry>): RuntimeVmCatalogPlan {
-    val mesh = interproceduralVmSliceMesh(entries)
-    return RuntimeVmCatalogPlan(
-        methods = entries.map { entry ->
-            RuntimeVmCatalogMethod(
-                entryToken = entry.entryToken,
-                resourcePath = entry.resourcePath,
-                manifestPath = entry.manifestPath,
-                shardCount = entry.shardCount,
-                mesh = mesh,
-                methodLocalProfile = entry.methodLocalProfile,
-            )
-        },
-    )
-}
 
 private fun buildContextAwareSecureRandom(
     label: String,
@@ -716,16 +687,6 @@ private fun intBytes(value: Int): ByteArray = byteArrayOf(
     (value and 0xFF).toByte(),
 )
 
-private fun interproceduralVmSliceMesh(entries: List<VmPreloadEntry>): String {
-    val orderedEntries = entries.sortedWith(compareBy<VmPreloadEntry> { it.manifestPath }.thenBy { it.resourcePath })
-    val material = orderedEntries.joinToString(separator = "\u0000") { entry ->
-        entry.manifestPlan.meshMaterial(entry.entryToken, entry.resourcePath, entry.manifestPath, entry.shardCount, entry.methodLocalProfile)
-    }.toByteArray(Charsets.UTF_8)
-    return MessageDigest.getInstance("SHA-256").digest(material).toHexLower()
-}
-
-
-
 internal fun vmStateBinding(entryToken: Long, resourcePath: String): String {
     val jarLayoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(requireVbc4BuildContext())
     return try {
@@ -776,283 +737,6 @@ internal fun generateHandlerOrder(count: Int, random: SecureRandom): List<Int> {
         result.add(insertPos, clone)
     }
     return result
-}
-
-private data class SlicedVmResources(
-    val resources: List<JarEntryData>,
-    val reservedPaths: Set<String>,
-    val manifestPath: String,
-    val shardCount: Int,
-    val manifestPlan: VmSliceManifestPlan,
-)
-
-private data class VmSliceManifestPlan(
-    val path: String,
-    val totalSize: Int,
-    val className: String,
-    val methodName: String,
-    val descriptor: String,
-    val shards: List<VmSliceShard>,
-) {
-    fun toJarEntry(keyRandom: SecureRandom, mesh: String, ordinal: Int, entryCount: Int, meshPeers: List<VmSliceMeshPeer>): JarEntryData {
-        val protocol = requireVbc4BuildContext().vmManifestProtocol()
-        val manifest = StringBuilder()
-        manifest.append(protocol.prefix)
-            .append(totalSize).append('|')
-            .append(shards.size).append('|')
-            .append(mesh).append('|')
-            .append(ordinal).append('|')
-            .append(entryCount).append('\n')
-        val manifestShards = meshOrderedShards(mesh, ordinal)
-        for (shard in manifestShards) {
-            val peer = meshPeerForShard(meshPeers, ordinal, shard)
-            manifest.append(shard.index).append('|')
-                .append(shard.offset).append('|')
-                .append(shard.length).append('|')
-                .append(shard.digest).append('|')
-                .append(shard.path).append('|')
-                .append(shard.meshLink(mesh, ordinal)).append('|')
-                .append(peer.ordinal).append('|')
-                .append(shard.peerLink(mesh, ordinal, peer, entryCount)).append('\n')
-        }
-        return JarEntryData(
-            name = path,
-            bytes = maybeEncodeNativeVmResource(manifest.toString().toByteArray(Charsets.UTF_8), keyRandom, className, "$methodName@manifest", descriptor),
-        )
-    }
-
-    fun meshMaterial(entryToken: Long, resourcePath: String, manifestPath: String, shardCount: Int, methodLocalProfile: Int): String = buildString {
-        append(entryToken.toULong().toString(16)).append('|')
-        append(resourcePath).append('|')
-        append(manifestPath).append('|')
-        append(shardCount).append('|')
-        append(methodLocalProfile.toUInt().toString(16)).append('|')
-        append(totalSize)
-        for (shard in shards.sortedBy { it.index }) append('\u0000').append(shard.meshMaterial())
-    }
-
-    private fun meshPeerForShard(meshPeers: List<VmSliceMeshPeer>, ordinal: Int, shard: VmSliceShard): VmSliceMeshPeer {
-        require(meshPeers.isNotEmpty()) { "VBC4 slice mesh must include at least one peer anchor" }
-        val mixed = MessageDigest.getInstance("SHA-256")
-            .digest("vbc4-cross-method-peer\u0000$ordinal\u0000${shard.index}\u0000${shard.digest}\u0000${shard.path}".toByteArray(Charsets.UTF_8))
-            .take(4)
-            .fold(0) { acc, byte -> (acc shl 8) or (byte.toInt() and 0xFF) }
-            .and(0x7FFFFFFF)
-        if (meshPeers.size == 1) return meshPeers.single()
-        var peerIndex = mixed % meshPeers.size
-        if (peerIndex == ordinal) peerIndex = (peerIndex + 1 + (mixed % (meshPeers.size - 1))) % meshPeers.size
-        return meshPeers[peerIndex]
-    }
-
-    private fun meshOrderedShards(mesh: String, ordinal: Int): List<VmSliceShard> =
-        shards.sortedBy { shard -> shard.meshOrderToken(mesh, ordinal) }
-}
-
-private data class VmSliceShard(
-    val index: Int,
-    val offset: Int,
-    val length: Int,
-    val digest: String,
-    val path: String,
-) {
-    fun meshLink(mesh: String, ordinal: Int): String = MessageDigest.getInstance("SHA-256")
-        .digest("$mesh\u0000$ordinal\u0000$index\u0000$offset\u0000$length\u0000$digest\u0000$path".toByteArray(Charsets.UTF_8))
-        .take(8)
-        .toByteArray()
-        .toHexLower()
-
-    fun peerLink(mesh: String, ordinal: Int, peer: VmSliceMeshPeer, entryCount: Int): String = MessageDigest.getInstance("SHA-256")
-        .digest("vbc4-peer-link\u0000$mesh\u0000$ordinal\u0000$entryCount\u0000$index\u0000$offset\u0000$length\u0000$digest\u0000$path\u0000${peer.ordinal}".toByteArray(Charsets.UTF_8))
-        .take(8)
-        .toByteArray()
-        .toHexLower()
-
-    fun meshOrderToken(mesh: String, ordinal: Int): String = MessageDigest.getInstance("SHA-256")
-        .digest("vbc4-shard-order\u0000$mesh\u0000$ordinal\u0000$index\u0000$path\u0000$digest".toByteArray(Charsets.UTF_8))
-        .take(8)
-        .toByteArray()
-        .toHexLower()
-
-    fun meshMaterial(): String = "$index|$offset|$length|$digest|$path"
-}
-
-private fun slicedVmResources(
-    random: SecureRandom,
-    keyRandom: SecureRandom,
-    className: String,
-    methodName: String,
-    descriptor: String,
-    methodSeed: Int,
-    entropyPlan: VmEntropyPlan,
-    vmBytes: ByteArray,
-    resourcePath: String,
-): SlicedVmResources {
-    val shardCount = randomShardCount(random, vmBytes.size)
-    val usedPaths = mutableSetOf(resourcePath)
-    val chunkSizes = randomizedChunkSizes(random, vmBytes.size, shardCount, entropyPlan.domain("shard-cut-plan"))
-    val resources = mutableListOf<JarEntryData>()
-    val shards = mutableListOf<VmSliceShard>()
-    var offset = 0
-    for (index in 0 until shardCount) {
-        val shardEntropy = entropyPlan.domain("shard-$index", methodKeySeed(keyRandom))
-        val shardSeed = shardEntropy.seed
-        var shardPath: String
-        do {
-            shardPath = opaqueVmResourcePath(random, className, "$methodName@slice$index", descriptor, shardEntropy)
-        } while (!usedPaths.add(shardPath))
-        val chunk = vmBytes.copyOfRange(offset, offset + chunkSizes[index])
-        offset += chunk.size
-        val chunkOffset = offset - chunk.size
-        val digest = MessageDigest.getInstance("SHA-256").digest(chunk).toHexLower()
-        shards += VmSliceShard(index = index, offset = chunkOffset, length = chunk.size, digest = digest, path = shardPath)
-        resources += JarEntryData(
-            name = shardPath,
-            bytes = maybeEncodeNativeVmResource(chunk, keyRandom, className, "$methodName@slice$index", descriptor, shardEntropy),
-        )
-    }
-    resources.shuffle(random)
-    return SlicedVmResources(
-        resources = resources,
-        reservedPaths = usedPaths,
-        manifestPath = resourcePath,
-        shardCount = shardCount,
-        manifestPlan = VmSliceManifestPlan(
-            path = resourcePath,
-            totalSize = vmBytes.size,
-            className = className,
-            methodName = methodName,
-            descriptor = descriptor,
-            shards = shards,
-        ),
-    )
-}
-
-private fun randomizedChunkSizes(random: SecureRandom, totalSize: Int, shardCount: Int, entropy: VmEntropyWord? = null): IntArray {
-    require(totalSize >= shardCount) { "VBC4 payload must be large enough to slice" }
-    if (shardCount == 1) return intArrayOf(totalSize)
-    val minShard = if (totalSize >= shardCount * 24) maxOf(8, totalSize / 64) else 1
-    val maxShard = if (totalSize >= shardCount * 8) maxOf(minShard, (totalSize * 55) / 100) else totalSize - shardCount + 1
-    repeat(96) { attempt ->
-        val cutPoints = mutableSetOf<Int>()
-        while (cutPoints.size < shardCount - 1) {
-            val selector = entropy?.intAt(attempt + cutPoints.size) ?: random.nextInt()
-            val curved = random.nextDouble() * random.nextDouble()
-            val mirrored = if ((selector and 1) == 0) curved else 1.0 - curved
-            val jitter = ((selector ushr 1) and 0xFFFF).toDouble() / 65535.0
-            val pos = 1 + (((mirrored * 0.75 + jitter * 0.25) * (totalSize - 1)).toInt().coerceIn(0, totalSize - 2))
-            cutPoints += pos
-        }
-        val sizes = sizesFromCutPoints(totalSize, cutPoints.sorted(), shardCount)
-        if (sizes.all { it in minShard..maxShard }) return sizes
-    }
-    return balancedJitteredChunkSizes(random, totalSize, shardCount, minShard, maxShard, entropy)
-}
-
-private fun sizesFromCutPoints(totalSize: Int, sortedCuts: List<Int>, shardCount: Int): IntArray {
-    val sizes = IntArray(shardCount)
-    var previous = 0
-    for ((index, cut) in sortedCuts.withIndex()) {
-        sizes[index] = cut - previous
-        previous = cut
-    }
-    sizes[shardCount - 1] = totalSize - previous
-    return sizes
-}
-
-private fun balancedJitteredChunkSizes(random: SecureRandom, totalSize: Int, shardCount: Int, minShard: Int, maxShard: Int, entropy: VmEntropyWord?): IntArray {
-    val sizes = IntArray(shardCount) { minShard }
-    var remaining = totalSize - minShard * shardCount
-    var cursor = ((entropy?.seed ?: random.nextInt()) and 0x7FFFFFFF) % shardCount
-    while (remaining > 0) {
-        val capacity = maxShard - sizes[cursor]
-        if (capacity > 0) {
-            val draw = 1 + (((entropy?.intAt(cursor + remaining) ?: random.nextInt()) and 0x7FFFFFFF) % minOf(capacity, remaining).coerceAtLeast(1))
-            sizes[cursor] += draw
-            remaining -= draw
-        }
-        cursor = (cursor + 1 + (((entropy?.intAt(cursor) ?: random.nextInt()) and 0x7FFFFFFF) % shardCount)) % shardCount
-    }
-    return sizes
-}
-
-private fun decoyVmResources(
-    random: SecureRandom,
-    keyRandom: SecureRandom,
-    className: String,
-    methodName: String,
-    descriptor: String,
-    methodSeed: Int,
-    entropyPlan: VmEntropyPlan,
-    vmBytes: ByteArray,
-    reservedPaths: Set<String>,
-): List<JarEntryData> {
-    val decoyCount = 1 + random.nextInt(3)
-    val usedPaths = reservedPaths.toMutableSet()
-    return (0 until decoyCount).map { index ->
-        val decoyEntropy = entropyPlan.domain("decoy-$index", methodKeySeed(keyRandom))
-        val decoySeed = decoyEntropy.seed
-        var decoyPath: String
-        do {
-            decoyPath = opaqueVmResourcePath(random, className, "$methodName#$index", descriptor, decoyEntropy)
-        } while (!usedPaths.add(decoyPath))
-        val decoyPlain = decoyVmPayload(random, vmBytes, methodSeed xor decoySeed xor index, decoyEntropy)
-        JarEntryData(
-            name = decoyPath,
-            bytes = maybeEncodeNativeVmResource(decoyPlain, keyRandom, className, "$methodName#decoy$index", descriptor, decoyEntropy),
-        )
-    }
-}
-
-private fun decoyVmPayload(random: SecureRandom, template: ByteArray, salt: Int, entropy: VmEntropyWord? = null): ByteArray {
-    val jitter = random.nextInt(33) - 16
-    val targetSize = (template.size + jitter + ((entropy?.intAt(3) ?: 0) % 23)).coerceAtLeast(96)
-    val payload = ByteArray(targetSize)
-    random.nextBytes(payload)
-    if (targetSize >= 48) {
-        payload[0] = 'V'.code.toByte()
-        payload[1] = 'B'.code.toByte()
-        payload[2] = 'C'.code.toByte()
-        payload[3] = '4'.code.toByte()
-        payload[4] = 0
-        payload[5] = 4
-        val nonceOffset = 6
-        val digest = entropy?.entropyDigest ?: MessageDigest.getInstance("SHA-256").digest(intBytes(salt) + template.copyOfRange(0, minOf(template.size, 32)))
-        for (index in 0 until 16) payload[nonceOffset + index] = digest[index % digest.size]
-        writeBigEndianInt(payload, 22, salt xor 0xD3C4_5A6B.toInt())
-        writeBigEndianInt(payload, 26, targetSize / 3)
-        writeBigEndianInt(payload, 30, 24 + ((digest[0].toInt() and 0xFF) % (targetSize - 40).coerceAtLeast(1)))
-        writeBigEndianInt(payload, 34, targetSize / 5)
-        writeBigEndianInt(payload, 38, digest.fold(0) { acc, byte -> acc.rotateLeft(3) xor (byte.toInt() and 0xFF) })
-        if (targetSize > 45) {
-            payload[42] = 0
-            payload[43] = 0
-            payload[44] = 0
-            payload[45] = 1
-        }
-        payload[targetSize - 1] = 32
-    }
-    return payload
-}
-
-private fun maybeEncodeNativeVmResource(
-    vmBytes: ByteArray,
-    keyRandom: SecureRandom,
-    className: String,
-    methodName: String,
-    descriptor: String,
-    entropy: VmEntropyWord? = null,
-): ByteArray {
-    val seed = entropy?.domainSeed("resource-codec") ?: methodKeySeed(keyRandom)
-    val variantId = ((seed ushr 24) xor (seed ushr 12) xor seed) and 0x7F
-    return RuntimeResourceCodec.encode(
-        bytes = vmBytes,
-        kind = RuntimeResourceKind.VmBytecode,
-        seed = seed,
-        variantId = variantId.coerceAtLeast(1),
-        layerCount = 4 + (variantId % 3),
-        compress = true,
-        partitionIdentity = ("vm|" + className + "|" + methodName + "|" + descriptor).toByteArray(Charsets.UTF_8),
-    )
 }
 
 internal fun encodeNativeDiversifiedVmResource(vmBytes: ByteArray, seed: Int): ByteArray = RuntimeResourceCodec.encode(
@@ -1132,13 +816,6 @@ internal data class VmEntropyPlan(private val root: VmEntropyWord) {
 
 private fun Int.floorMod(modulus: Int): Int = ((this % modulus) + modulus) % modulus
 
-private fun writeBigEndianInt(out: ByteArray, offset: Int, value: Int) {
-    out[offset] = ((value ushr 24) and 0xFF).toByte()
-    out[offset + 1] = ((value ushr 16) and 0xFF).toByte()
-    out[offset + 2] = ((value ushr 8) and 0xFF).toByte()
-    out[offset + 3] = (value and 0xFF).toByte()
-}
-
 internal fun opaqueVmResourcePath(random: SecureRandom, className: String, methodName: String, descriptor: String, methodSeed: Int): String {
     val salt = ByteArray(32)
     random.nextBytes(salt)
@@ -1175,12 +852,6 @@ internal fun opaqueVmResourcePath(random: SecureRandom, className: String, metho
     val exts = listOf("properties", "xml", "json", "yml", "cfg", "conf", "ini", "txt")
     val ext = exts[(entropy.intAt(8) and 0x7FFFFFFF) % exts.size]
     return "META-INF/${dirs.joinToString("/")}/$fileName.$ext"
-}
-
-private fun randomShardCount(random: SecureRandom, totalSize: Int): Int {
-    val maxShardCount = minOf(6, totalSize).coerceAtLeast(1)
-    if (maxShardCount <= 2) return maxShardCount
-    return 2 + random.nextInt(maxShardCount - 1)
 }
 
 private fun methodLocalHandlerProfile(selectionMode: MethodSelectionMode, className: String, methodName: String, descriptor: String, methodSeed: Int, highValueSelected: Boolean): Int {
@@ -2662,6 +2333,73 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         }
     }
 
+    /**
+     * JVM-boundary methods must retain their original execution semantics.
+     * Reflection, class-loader/resource, security-manager, and executor APIs
+     * all depend on JVM thread/loader state which is not representable by the
+     * artifact VM's host frame.  Keep these methods on the JVM unless they are
+     * explicitly selected under a strict rule.
+     */
+    fun requiresJvmBoundaryPreservation(): Boolean {
+        val reflectionOwners = setOf(
+            "java/lang/Class",
+            "java/lang/ClassLoader",
+            "java/lang/reflect/AccessibleObject",
+            "java/lang/reflect/Constructor",
+            "java/lang/reflect/Field",
+            "java/lang/reflect/Method",
+            "java/lang/reflect/Proxy",
+            "java/lang/invoke/MethodHandles",
+            "java/lang/invoke/MethodHandles\$Lookup",
+        )
+        val concurrencyOwners = setOf(
+            "java/lang/Thread",
+            "java/util/concurrent/ThreadPoolExecutor",
+            "java/util/concurrent/Executor",
+            "java/util/concurrent/ExecutorService",
+            "java/util/concurrent/Future",
+        )
+        val effectiveCalls = effectiveMethodCalls(capturedInstructions)
+        if (effectiveCalls.any { call ->
+                call.owner in reflectionOwners ||
+                    call.owner in concurrencyOwners ||
+                    call.owner.startsWith("java/awt/") ||
+                    call.owner.startsWith("javax/swing/") ||
+                    call.owner.startsWith("java/beans/") ||
+                    (call.owner == "java/lang/System" && call.name == "setSecurityManager")
+            }) {
+            return true
+        }
+        return capturedInstructions.any { instruction ->
+            when (instruction) {
+                is CapturedInstruction.MethodArg -> false
+                is CapturedInstruction.IndyArg -> {
+                    val returnType = runCatching { Type.getReturnType(instruction.desc) }.getOrNull()
+                    val returnsRunnable = returnType?.sort == Type.OBJECT &&
+                        returnType.internalName == "java/lang/Runnable"
+                    val isThreadSleep = instruction.name == "sleep" &&
+                        instruction.desc in setOf("(J)V", "(JI)V")
+                    val hasBoundaryHandle = instruction.bsmArgs.any { argument ->
+                        val handle = argument as? Handle ?: return@any false
+                        isThreadSleepCall(handle.owner, handle.name, handle.desc) ||
+                            isConcurrencyBoundaryMethod(handle.owner, handle.name, handle.desc) ||
+                            isClassLoaderOrResourceBoundaryMethod(handle.owner, handle.name, handle.desc)
+                    }
+                    returnsRunnable || isThreadSleep || hasBoundaryHandle
+                }
+                is CapturedInstruction.FieldArg ->
+                    instruction.owner == "java/lang/System" ||
+                        instruction.owner == "java/util/concurrent/ThreadPoolExecutor" ||
+                        instruction.owner.startsWith("java/awt/") ||
+                        instruction.owner.startsWith("javax/swing/")
+                is CapturedInstruction.TryCatch ->
+                    instruction.type == "java/lang/InterruptedException" ||
+                        instruction.type == "java/util/concurrent/RejectedExecutionException"
+                else -> false
+            }
+        }
+    }
+
     fun skipForBroadVirtualization(access: Int, name: String, descriptor: String): Boolean {
         isPureComputeCountIncrementHelper = isPureComputeCountIncrementHelper(name, descriptor, access)
         isElapsedTimeBenchmarkRoot = isElapsedTimeBenchmarkRoot(name, descriptor, access)
@@ -2892,13 +2630,9 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         }
     }
 
-    private fun isDirectNativeDefenseCall(owner: String, name: String): Boolean = when (owner) {
-        "io/github/hht0rro/javashroud/transforms/protection/AntiInstrumentationHelper" -> name == "nativeCheckInstrumentation"
-        "io/github/hht0rro/javashroud/transforms/protection/AntiJvmTiHelper" -> name == "nativeCheckJvmTiAgents"
-        "io/github/hht0rro/javashroud/transforms/protection/AntiDumpRuntimeHelper" -> name == "nativeInitializeProtection"
-        "io/github/hht0rro/javashroud/transforms/protection/AntiByteBuddyHelper" -> name == "nativeCheckByteBuddy"
-        else -> false
-    }
+    private fun isDirectNativeDefenseCall(owner: String, name: String): Boolean =
+        owner == "io/github/hht0rro/javashroud/transforms/protection/DefenseKernelRuntimeHelper" &&
+            name in setOf("initialize", "probe", "transform")
 
     override fun visitInsn(opcode: Int) {
         instructionCount++
@@ -3193,7 +2927,11 @@ private fun emitDeadCodeShadowDispatch(
     if (shadowChance >= 40) return
 
     val fakeId = { len: Int -> (1..len).map { "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[random.nextInt(62)] }.joinToString("") }
-    val fakeOwner = "r/${fakeId(2)}/C${fakeId(24)}"
+    // Keep opaque shadow dispatch owners outside every retired fixed-r
+    // namespace.  These references are dead-code decoys, but they still live
+    // in the final class metadata and are therefore covered by the release
+    // gate just like live owners.
+    val fakeOwner = "jsh/${fakeId(2)}/H${fakeId(24)}"
     val fakeMethod = fakeId(6)
     val shadowStart = Label()
     val shadowEnd = Label()

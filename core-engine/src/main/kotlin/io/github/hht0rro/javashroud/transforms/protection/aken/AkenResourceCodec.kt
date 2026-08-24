@@ -62,8 +62,8 @@ object AkenResourceCodec {
         layout: AkenPageLayout,
         locator: ByteArray,
         random: SecureRandom = SecureRandom(),
-        /** Build-selected page nonce for a bound native terminal; null keeps the legacy random path. */
-        nonceOverride: ByteArray? = null,
+        /** Build-selected page nonce for a bound native terminal. */
+        nonceOverride: ByteArray,
     ): ByteArray {
         require(dek.size == 32) { "AKEN DEK must be 32 bytes" }
         require(commitment.size == 32) { "AKEN artifact commitment must be 32 bytes" }
@@ -71,7 +71,7 @@ object AkenResourceCodec {
         require(pageIndex >= 0) { "AKEN page index must be non-negative" }
         require(fingerprint.size == 32) { "AKEN evaluator fingerprint must be 32 bytes" }
         require(locator.size == AkenHandle.LOCATOR_TOKEN_SIZE) { "AKEN locator token must be 16 bytes" }
-        nonceOverride?.let { require(it.size == NONCE_SIZE) { "AKEN bound page nonce must be 12 bytes" } }
+        require(nonceOverride.size == NONCE_SIZE) { "AKEN bound page nonce must be 12 bytes" }
         require(plain.size <= Int.MAX_VALUE - GCM_TAG_SIZE) { "AKEN plaintext is too large" }
 
         var nonce: ByteArray? = null
@@ -90,7 +90,7 @@ object AkenResourceCodec {
         try {
             val canonicalCodec = normalizeCodecVariant(codec)
             val layoutVariant = layout.variant
-            nonce = nonceOverride?.copyOf() ?: ByteArray(NONCE_SIZE).also(random::nextBytes)
+            nonce = nonceOverride.copyOf()
             header = ByteArray(LOGICAL_HEADER_SIZE)
             identityHash = sha256(identity)
             codecBytes = canonicalCodec.toByteArray(StandardCharsets.UTF_8)

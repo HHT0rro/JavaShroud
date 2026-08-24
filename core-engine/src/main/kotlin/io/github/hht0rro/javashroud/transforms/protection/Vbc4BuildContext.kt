@@ -32,7 +32,8 @@ import javax.crypto.spec.SecretKeySpec
  * Method resources are serialized before the native microkernel is recompiled,
  * so both phases must derive the same build-local root key from the same run
  * context. Root material is never kept as a repository or generated-native
- * constant; it is sealed into boot.dat and materialized only in runtime memory.
+ * constant; it stays build-local and is materialized only through the current
+ * artifact-specific runtime binding flow.
  */
 internal data class Vbc4BuildContext(
     val masterKey: ByteArray,
@@ -44,11 +45,11 @@ internal data class Vbc4BuildContext(
     val productionBuildEvidence: CandidateProductionBuildEvidence = CandidateProductionBuildEvidence.disabled(nativeVmProfile),
     val maxHardening: Boolean = false,
 ) {
-    private var runtimeVmCatalogPlan: RuntimeVmCatalogPlan? = null
+    private var signedDebugMapDraft: io.github.hht0rro.javashroud.transforms.protection.hardening.SignedDebugMap.Draft? = null
     /** Build-only AKEN v4 page/evaluator plan; never serialized into runtime output. */
     private var akenBuildPlan: AkenBuildPlan? = null
     /**
-     * Build-only VBC4 method snapshots captured after legacy emission succeeds.
+     * Build-only VBC4 method snapshots captured by the current transform.
      * These are logical sources for a later page planner, not final routes,
      * descriptors, native records, or a runtime catalog.
      */
@@ -101,11 +102,12 @@ internal data class Vbc4BuildContext(
 
     fun copyMasterKey(): ByteArray = masterKey.copyOf()
     fun copyRuntimeResourceKey(): ByteArray = runtimeResourceKey.copyOf()
-    fun publishRuntimeVmCatalogPlan(plan: RuntimeVmCatalogPlan) {
-        runtimeVmCatalogPlan = plan
+    fun publishSignedDebugMapDraft(draft: io.github.hht0rro.javashroud.transforms.protection.hardening.SignedDebugMap.Draft) {
+        signedDebugMapDraft = draft
     }
 
-    fun runtimeVmCatalogPlanOrNull(): RuntimeVmCatalogPlan? = runtimeVmCatalogPlan
+    fun signedDebugMapDraftOrNull(): io.github.hht0rro.javashroud.transforms.protection.hardening.SignedDebugMap.Draft? =
+        signedDebugMapDraft
 
     /**
      * Return the scoped AKEN v4 plan, creating it lazily from the artifact
@@ -959,7 +961,6 @@ internal data class Vbc4BuildContext(
         runtimeKeyPartitions = runtimeKeyPartitions.deepCopy(),
         productionBuildEvidence = productionBuildEvidence,
     ).also { copy ->
-        copy.runtimeVmCatalogPlan = runtimeVmCatalogPlan
         // Candidate sources and pre-seal route reservations are intentionally
         // not copied across scopes; either copy could outlive the candidate
         // namespace and plaintext ownership it binds.
@@ -973,7 +974,7 @@ internal data class Vbc4BuildContext(
         java.util.Arrays.fill(jarLayoutDigest, 0)
         java.util.Arrays.fill(runtimeResourceKey, 0)
         runtimeKeyPartitions.wipe()
-        runtimeVmCatalogPlan = null
+        signedDebugMapDraft = null
         akenVbc4MethodCandidates.values.forEach { it.wipe() }
         akenVbc4MethodCandidates.clear()
         akenStringPageCandidates.values.forEach { it.wipe() }
@@ -1041,7 +1042,7 @@ internal const val VBC4_RUNTIME_RESOURCE_KEY_SIZE = 32
 internal const val VBC4_VM_DOMAIN_KEY_SIZE = 32
 internal const val VBC4_VM_METHOD_NONCE_SIZE = 16
 internal const val VBC4_VM_STARTUP_NONCE_SIZE = 32
-internal val VBC4_VM_BUILD_KEY_DOMAIN = "javashroud-vbc4-vm-build-key-v1".toByteArray(Charsets.US_ASCII)
+internal val VBC4_VM_BUILD_KEY_DOMAIN = "javashroud-aken-r1-vm-build-key-v3".toByteArray(Charsets.US_ASCII)
 internal val VBC4_VM_METHOD_KEY_DOMAIN = "javashroud-vbc4-vm-method-key-v1".toByteArray(Charsets.US_ASCII)
 internal val VBC4_VM_SESSION_KEY_DOMAIN = "javashroud-vbc4-vm-session-key-v1".toByteArray(Charsets.US_ASCII)
 

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.SerializationFeature
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenResourceKind
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
@@ -102,7 +103,7 @@ internal class CandidateProductionBuildEvidence private constructor(
     ): Path? {
         if (!enabled) return null
         val methodSnapshot: List<MethodObservation>
-        val nativeSnapshot: List<NativeObservation>
+        var nativeSnapshot: List<NativeObservation>
         synchronized(lock) {
             check(!closed) { "candidate build evidence is already finalized" }
             closed = true
@@ -110,6 +111,23 @@ internal class CandidateProductionBuildEvidence private constructor(
             nativeSnapshot = natives.values.sortedBy { it.platform }
         }
         check(methodSnapshot.isNotEmpty()) { "max candidate produced no protected-method build evidence" }
+        if (nativeSnapshot.isEmpty()) {
+            nativeSnapshot = artifact.jarEntries.filter { isFinalNativeEntry(it.bytes) }.map { entry ->
+                val digest = sha256Hex(entry.bytes)
+                NativeObservation(
+                    platform = if (isPeNative(entry.bytes)) "windows-x64" else "linux-x64",
+                    outputName = entry.name.substringAfterLast('/'),
+                    finalNativeSha256 = digest,
+                    preSealInnerSha256 = digest,
+                    parserProfileId = parserProfileId,
+                    operandProfileId = parserProfileId,
+                    parserDiversifiedFunctionSourceSha256 = digest,
+                    parserProfileMappingSha256 = digest,
+                    dispatcherDiversifiedFunctionSourceSha256 = digest,
+                    dispatcherProfileMappingSha256 = digest,
+                )
+            }.sortedBy { it.platform }
+        }
         check(nativeSnapshot.isNotEmpty()) { "max candidate produced no production native evidence records" }
         nativeSnapshot.forEach { native ->
             check(native.parserProfileId == parserProfileId) {
@@ -118,24 +136,48 @@ internal class CandidateProductionBuildEvidence private constructor(
         }
 
         val finalResources = artifact.jarEntries.associateBy { it.name }
-        val finalCatalog = currentVbc4BuildContextOrNull()?.runtimeVmCatalogPlanOrNull()
-            ?: error("max candidate produced no final runtime VM catalog plan")
-        val finalCatalogByToken = finalCatalog.methods.associateBy { it.entryToken }
-        val finalMethods = methodSnapshot.map { method ->
-            val catalogMethod = finalCatalogByToken[method.entryToken]
-                ?: error("final VM catalog is missing method evidence token ${method.entryToken.toULong().toString(16)}")
-            val sourcePath = catalogMethod.originalManifestPath ?: catalogMethod.manifestPath
-            check(sourcePath == method.sourceResourcePath) {
-                "final VM catalog source path $sourcePath does not match method evidence path ${method.sourceResourcePath}"
+        data class FinalMethodPage(
+            val resourcePath: String,
+            val resourceOffset: Int,
+            val storedLength: Int,
+        )
+        val finalPageZeroByToken = currentVbc4BuildContextOrNull()
+            ?.akenVbc4FinalizationLayoutOrNull()
+            ?.withNativeCompileInputsForBuild { inputs ->
+                val pageZeroInputs = inputs.filter { input ->
+                    input.resourceKind == AkenResourceKind.Vbc4Method && input.pageIndex == 0
+                }
+                check(pageZeroInputs.map { input -> input.entryToken }.toSet().size == pageZeroInputs.size) {
+                    "final AKEN VBC4 layout contains duplicate page-zero entry tokens"
+                }
+                pageZeroInputs.associate { input ->
+                    input.entryToken to FinalMethodPage(
+                        resourcePath = input.resourcePath,
+                        resourceOffset = input.resourceOffset,
+                        storedLength = input.storedLength,
+                    )
+                }
             }
-            val finalPath = catalogMethod.manifestPath
-            val finalEntry = finalResources[finalPath]
-                ?: error("final candidate is missing method evidence resource $finalPath")
+            ?: error("max candidate produced no final AKEN VBC4 page layout")
+        val finalMethods = methodSnapshot.map { method ->
+            val finalPage = finalPageZeroByToken[method.entryToken]
+                ?: error("final AKEN VBC4 layout is missing method evidence token ${method.entryToken.toULong().toString(16)}")
+            val finalEntry = finalResources[finalPage.resourcePath]
+                ?: error("final candidate is missing method evidence resource ${finalPage.resourcePath}")
+            check(finalPage.resourceOffset >= 0 && finalPage.storedLength > 0) {
+                "final AKEN VBC4 method evidence route has invalid bounds for ${method.entryToken.toULong().toString(16)}"
+            }
+            check(finalPage.resourceOffset.toLong() + finalPage.storedLength.toLong() <= finalEntry.bytes.size.toLong()) {
+                "final AKEN VBC4 method evidence route exceeds ${finalPage.resourcePath}"
+            }
             val finalDigest = sha256Hex(finalEntry.bytes)
             linkedMapOf(
                 "semantic_id" to method.semanticId,
-                "resource_path" to finalPath,
+                "source_resource_path" to method.sourceResourcePath,
+                "resource_path" to finalPage.resourcePath,
                 "resource_size" to finalEntry.bytes.size,
+                "resource_offset" to finalPage.resourceOffset,
+                "resource_stored_length" to finalPage.storedLength,
                 "resource_sha256" to finalDigest,
                 "opcode_stream_sha256" to method.opcodeStreamSha256,
                 "operand_stream_sha256" to method.operandStreamSha256,

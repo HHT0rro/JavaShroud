@@ -13,6 +13,9 @@ import org.objectweb.asm.tree.InsnList
 import org.objectweb.asm.tree.InvokeDynamicInsnNode
 import org.objectweb.asm.tree.LdcInsnNode
 import org.objectweb.asm.tree.MethodInsnNode
+import io.github.hht0rro.javashroud.transforms.protection.hardening.IndyTargetTokenEnvelope
+import io.github.hht0rro.javashroud.transforms.protection.hardening.ProtectionFormat
+import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Arrays
 import javax.crypto.Mac
@@ -72,13 +75,20 @@ fun applyCallsiteRotationProtection(
                     false,
                 )
                 val indyDescriptor = "(L${call.owner};" + call.desc.substring(1)
+                val token = callsiteTargetToken(
+                    owner = call.owner,
+                    name = call.name,
+                    descriptor = call.desc,
+                    siteIndex = callCount,
+                    random = random,
+                )
                 instructions.set(
                     call,
                     InvokeDynamicInsnNode(
-                        call.name,
+                        "r" + Integer.toHexString(callCount xor 0x5f3759df),
                         indyDescriptor,
                         bsm,
-                        call.owner,
+                        token,
                         rotationStrategy,
                     ),
                 )
@@ -101,6 +111,46 @@ fun applyCallsiteRotationProtection(
         updatedClassArtifacts = updatedClassArtifacts,
         transformedClassCount = classCount,
         transformedMemberCount = callCount,
+    )
+}
+
+private fun callsiteTargetToken(
+    owner: String,
+    name: String,
+    descriptor: String,
+    siteIndex: Int,
+    random: SecureRandom,
+): String {
+    val key = ByteArray(IndyTargetTokenEnvelope.KEY_SIZE)
+    val material = currentVbc4BuildContextOrNull()?.copyMasterKey()
+    if (material != null) {
+        try {
+            MessageDigest.getInstance("SHA-256").digest(material + "indy-token-key-r1".toByteArray()).copyInto(key, endIndex = key.size)
+        } finally {
+            material.fill(0)
+        }
+    } else {
+        random.nextBytes(key)
+    }
+    val zeros = ByteArray(32)
+    val binding = IndyTargetTokenEnvelope.Binding(
+        artifactDigest = currentVbc4BuildContextOrNull()?.jarLayoutDigest?.copyOf() ?: zeros,
+        classIdentityDigest = MessageDigest.getInstance("SHA-256").digest(owner.toByteArray()),
+        descriptorDigest = MessageDigest.getInstance("SHA-256").digest(descriptor.toByteArray()),
+        callSiteIdentity = MessageDigest.getInstance("SHA-256").digest((owner + "#" + name + "#" + siteIndex).toByteArray()),
+        routeId = MessageDigest.getInstance("SHA-256").digest(("callsite-" + siteIndex).toByteArray()),
+    )
+    return IndyTargetTokenEnvelope.seal(
+        target = IndyTargetTokenEnvelope.Target(
+            owner = owner,
+            name = name,
+            descriptor = descriptor,
+            tag = Opcodes.H_INVOKEVIRTUAL,
+            isInterface = false,
+        ),
+        binding = binding,
+        key = key,
+        random = random,
     )
 }
 
@@ -141,365 +191,4 @@ private val classLoaderBoundaryMethodNames = setOf(
     "getResource",
     "getResourceAsStream",
 )
-
-/**
- * Environment Bound Keys transform.
- *
- * Generates decryption keys derived from environment-specific material
- * (hardware ID, JVM params, certificate fingerprint, etc.) so the JAR
- * cannot be decrypted outside the target environment.
- */
-fun applyEnvironmentBoundKeys(
-    artifact: BytecodeArtifact,
-    ruleMatches: List<RuleMatch>,
-    params: Map<String, Any>,
-): TransformResult {
-    val matchedClassNames = eligibleClassNamesForAction(artifact.classArtifacts, ruleMatches, "environment-bound-keys")
-    if (matchedClassNames.isEmpty()) return unchangedTransformResult(artifact)
-
-    val bindingSource = (params["bindingSource"] as? String) ?: "jvm-params"
-    val supportedBindingSources = setOf("hardware-id", "jvm-params", "certificate-fingerprint", "combined")
-    require(bindingSource in supportedBindingSources) { "environment-bound-keys bindingSource '$bindingSource' is not supported; supported values: ${supportedBindingSources.joinToString("", "")}" }
-    val expectedFingerprint = (params["expectedFingerprint"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
-    val bindBootSecret = (params["bindBootSecret"] as? Boolean) ?: false
-    val seed = (params["seed"] as? Int)?.toLong() ?: (params["seed"] as? Long)
-    val random = seed?.let { SecureRandom(it.toString().toByteArray()) } ?: SecureRandom()
-
-    // Generate environment-binding material
-    // Generate salt and derive expected key at obfuscation time using real KDF
-    val saltBytes = ByteArray(16).also { random.nextBytes(it) }
-    val saltB64 = java.util.Base64.getEncoder().encodeToString(saltBytes)
-    if (bindingSource == "hardware-id" && expectedFingerprint == null) {
-        System.err.println("[JavaShroud] warning: environment-bound-keys bindingSource=hardware-id without expectedFingerprint; verification will use the current build host fingerprint and may fail at runtime")
-    }
-    if (bindBootSecret && expectedFingerprint == null) {
-        throw IllegalArgumentException("environment-bound-keys bindBootSecret=true requires expectedFingerprint")
-    }
-    val expectedKey = deriveEnvironmentBindingKeyFallback(bindingSource, saltB64, expectedFingerprint)
-
-    var classCount = 0
-
-    val updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
-        if (!matchedClassNames.contains(classArtifact.summary.internalName)) return@map classArtifact
-
-        // Inject environment-binding clinit check
-        val cr = ClassReader(classArtifact.bytes)
-        val cw = ClassWriter(cr, ClassWriter.COMPUTE_FRAMES)
-        var classModified = false
-        var hasClinit = false
-
-        val cv = object : ClassVisitor(Opcodes.ASM9, cw) {
-            override fun visitMethod(
-                access: Int, name: String, descriptor: String, signature: String?, exceptions: Array<String>?,
-            ): MethodVisitor {
-                val superMv = super.visitMethod(access, name, descriptor, signature, exceptions)
-                if (name != "<clinit>") return superMv
-                hasClinit = true
-
-                return object : MethodVisitor(Opcodes.ASM9, superMv) {
-                    override fun visitInsn(opcode: Int) {
-                        if (opcode == Opcodes.RETURN) {
-                            emitEnvironmentBindingCheck(this, expectedKey, bindingSource, saltB64, expectedFingerprint)
-                            classModified = true
-                        }
-                        super.visitInsn(opcode)
-                    }
-                }
-            }
-
-            override fun visitEnd() {
-                if (!hasClinit) {
-                    val mv = super.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null)
-                    mv.visitCode()
-                    emitEnvironmentBindingCheck(mv, expectedKey, bindingSource, saltB64, expectedFingerprint)
-                    mv.visitInsn(Opcodes.RETURN)
-                    mv.visitMaxs(3, 0)
-                    mv.visitEnd()
-                    classModified = true
-                }
-                super.visitEnd()
-            }
-        }
-
-        try {
-            cr.accept(cv, 0)
-        } catch (_: Exception) { return@map classArtifact }
-        if (!classModified) return@map classArtifact
-        classCount++
-        reanalyzedClassArtifact(classArtifact, cw.toByteArray())
-    }
-
-    if (classCount == 0) return unchangedTransformResult(artifact)
-    return updatedArtifactTransformResult(
-        artifact = artifact,
-        updatedClassArtifacts = updatedClassArtifacts,
-        transformedClassCount = classCount,
-        transformedMemberCount = classCount,
-    )
-}
-
-private fun deriveEnvironmentBindingKeyFallback(bindingSource: String, saltB64: String, expectedFingerprint: String?): String {
-    // Keyed environment token: HMAC-SHA256(anchorKey, "envk1" || material)[0..4].
-    // The expected token can no longer be recomputed from the artifact alone.
-    // When expectedFingerprint is supplied, material includes it so the token is
-    // bound to a specific machine fingerprint.
-    val materialBuilder = StringBuilder("envkey:").append(bindingSource).append(':').append(saltB64)
-    if (expectedFingerprint != null) {
-        materialBuilder.append(':').append(expectedFingerprint)
-    }
-    val material = materialBuilder.toString().toByteArray(Charsets.UTF_8)
-    val key = requireVbc4BuildContext().runtimeKeyPartitions.copyAnchorKey()
-    return try {
-        val mac = Mac.getInstance("HmacSHA256")
-        mac.init(SecretKeySpec(key, "HmacSHA256"))
-        mac.update("envk1".toByteArray(Charsets.US_ASCII))
-        val digest = mac.doFinal(material)
-        digest.copyOfRange(0, 4).joinToString("") { "%02x".format(it) }
-    } finally {
-        Arrays.fill(key, 0)
-    }
-}
-
-private fun emitEnvironmentBindingCheck(mv: MethodVisitor, expectedKey: String, bindingSource: String, saltB64: String, expectedFingerprint: String?) {
-    mv.visitLdcInsn(expectedKey)
-    mv.visitLdcInsn(bindingSource)
-    mv.visitLdcInsn(saltB64)
-    mv.visitLdcInsn(expectedFingerprint ?: "")
-    mv.visitMethodInsn(
-        Opcodes.INVOKESTATIC,
-        "io/github/hht0rro/javashroud/transforms/protection/EnvironmentBindingHelper",
-        "verifyEnvironment",
-        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
-        false,
-    )
-}
-
-/**
- * Anti-Dump Constant Pool transform.
- *
- * Migrates sensitive strings from stable constant pool positions to
- * condy or runtime builder, preventing javap/ASM from reading them.
- */
-fun applyAntiDumpConstantPool(
-    artifact: BytecodeArtifact,
-    ruleMatches: List<RuleMatch>,
-    params: Map<String, Any>,
-): TransformResult {
-    val matchedClassNames = eligibleClassNamesForAction(artifact.classArtifacts, ruleMatches, "anti-dump-constant-pool")
-    if (matchedClassNames.isEmpty()) return unchangedTransformResult(artifact)
-
-    val migrationStrategy = (params["migrationStrategy"] as? String) ?: "condy"
-    val supportedMigrationStrategies = setOf("condy", "runtime-builder", "hybrid")
-    require(migrationStrategy in supportedMigrationStrategies) {
-        "anti-dump-constant-pool migrationStrategy '$migrationStrategy' is not supported; supported values: ${supportedMigrationStrategies.joinToString("", "")}"
-    }
-
-    var classCount = 0
-    var stringCount = 0
-
-    val updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
-        if (!matchedClassNames.contains(classArtifact.summary.internalName)) return@map classArtifact
-
-        if (isConstantPoolMigrationTimingSensitiveClass(classArtifact.bytes)) return@map classArtifact
-
-        val classNode = ClassNode()
-        try {
-            ClassReader(classArtifact.bytes).accept(classNode, 0)
-        } catch (_: Exception) {
-            return@map classArtifact
-        }
-        val useCondy = migrationStrategy == "condy" && classNode.version >= Opcodes.V11
-
-        var classModified = false
-        for (method in classNode.methods) {
-            val loadKernelArgs = findJniLoadKernelArgumentLdcs(method.instructions)
-            for (insn in method.instructions.toArray()) {
-                if (insn !is LdcInsnNode || insn in loadKernelArgs) continue
-                val value = insn.cst
-                if (value !is String || value.length <= 3) continue
-
-                if (useCondy) {
-                    val bsm = Handle(
-                        Opcodes.H_INVOKESTATIC,
-                        "io/github/hht0rro/javashroud/transforms/protection/AntiDumpHelper",
-                        "buildStringFromB64Condy",
-                        "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/String;",
-                        false,
-                    )
-                    val encoded = java.util.Base64.getEncoder().encodeToString(value.toByteArray())
-                    method.instructions.set(
-                        insn,
-                        LdcInsnNode(org.objectweb.asm.ConstantDynamic("_", "Ljava/lang/String;", bsm, encoded)),
-                    )
-                } else {
-                    val replacement = InsnList()
-                    replacement.add(LdcInsnNode(java.util.Base64.getEncoder().encodeToString(value.toByteArray())))
-                    replacement.add(
-                        MethodInsnNode(
-                            Opcodes.INVOKESTATIC,
-                            "io/github/hht0rro/javashroud/transforms/protection/AntiDumpHelper",
-                            "decodeString",
-                            "(Ljava/lang/String;)Ljava/lang/String;",
-                            false,
-                        ),
-                    )
-                    method.instructions.insert(insn, replacement)
-                    method.instructions.remove(insn)
-                }
-                classModified = true
-                stringCount++
-            }
-        }
-
-        if (!classModified) return@map classArtifact
-        val rewrittenBytes = try {
-            val cw = ClassWriter(ClassWriter.COMPUTE_FRAMES)
-            classNode.accept(cw)
-            cw.toByteArray()
-        } catch (_: Exception) {
-            return@map classArtifact
-        }
-        classCount++
-        reanalyzedClassArtifact(classArtifact, rewrittenBytes)
-    }
-
-    if (classCount == 0) return unchangedTransformResult(artifact)
-    return updatedArtifactTransformResult(
-        artifact = artifact,
-        updatedClassArtifacts = updatedClassArtifacts,
-        transformedClassCount = classCount,
-        transformedMemberCount = stringCount,
-    )
-}
-
-
-private fun isConstantPoolMigrationTimingSensitiveClass(classBytes: ByteArray): Boolean {
-    val classNode = ClassNode()
-    return try {
-        ClassReader(classBytes).accept(classNode, ClassReader.SKIP_DEBUG)
-        classNode.methods.any { method ->
-            method.instructions?.any { instruction ->
-                instruction is InvokeDynamicInsnNode ||
-                    (instruction is MethodInsnNode && isConstantPoolMigrationTimingSensitiveCall(instruction))
-            } == true
-        }
-    } catch (_: Exception) {
-        true
-    }
-}
-
-private fun isConstantPoolMigrationTimingSensitiveCall(call: MethodInsnNode): Boolean {
-    if (call.owner == "java/lang/Thread" && call.name == "sleep") return true
-    if (call.owner.startsWith("java/util/concurrent/")) return true
-    return false
-}
-private fun findJniLoadKernelArgumentLdcs(instructions: InsnList): Set<LdcInsnNode> {
-    val protectedLdcs = linkedSetOf<LdcInsnNode>()
-    val recentLdcs = ArrayDeque<LdcInsnNode>()
-    for (insn in instructions.toArray()) {
-        if (insn is LdcInsnNode) {
-            recentLdcs.addLast(insn)
-            if (recentLdcs.size > 3) recentLdcs.removeFirst()
-            continue
-        }
-        if (
-            insn is MethodInsnNode &&
-            insn.opcode == Opcodes.INVOKESTATIC &&
-            insn.owner == "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper" &&
-            insn.name == "loadKernel" &&
-            insn.desc == "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V" &&
-            recentLdcs.size >= 3
-        ) {
-            protectedLdcs.addAll(recentLdcs.takeLast(3))
-        }
-    }
-    return protectedLdcs
-}
-/**
- * Anti-Symbolic Execution transform.
- *
- * Inserts runtime-data-driven opaque predicates that cannot be resolved
- * by symbolic execution engines.
- */
-fun applyAntiSymbolicExecution(
-    artifact: BytecodeArtifact,
-    ruleMatches: List<RuleMatch>,
-    params: Map<String, Any>,
-): TransformResult {
-    val matchedClassNames = eligibleClassNamesForAction(artifact.classArtifacts, ruleMatches, "anti-symbolic-execution")
-    if (matchedClassNames.isEmpty()) return unchangedTransformResult(artifact)
-
-    val trapDensity = ((params["trapDensity"] as? Int) ?: 5).coerceIn(1, 10)
-    val seed = (params["seed"] as? Int)?.toLong() ?: (params["seed"] as? Long)
-    val random = seed?.let { SecureRandom(it.toString().toByteArray()) } ?: SecureRandom()
-
-    var classCount = 0
-    var trapCount = 0
-
-    val updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
-        if (!matchedClassNames.contains(classArtifact.summary.internalName)) return@map classArtifact
-
-        val cr = ClassReader(classArtifact.bytes)
-        val cw = ClassWriter(cr, ClassWriter.COMPUTE_FRAMES)
-        var classModified = false
-        var methodIndex = 0
-
-        val cv = object : ClassVisitor(Opcodes.ASM9, cw) {
-            override fun visitMethod(
-                access: Int, name: String, descriptor: String, signature: String?, exceptions: Array<String>?,
-            ): MethodVisitor {
-                val superMv = super.visitMethod(access, name, descriptor, signature, exceptions)
-                val currentMethodIndex = methodIndex++
-
-                if (currentMethodIndex % trapDensity != 0) return superMv
-
-                return object : MethodVisitor(Opcodes.ASM9, superMv) {
-                    override fun visitCode() {
-                        super.visitCode()
-
-                        // Insert a runtime-data-driven opaque predicate:
-                        // if (System.nanoTime() == Long.MIN_VALUE) { dead code }
-                        // The condition is always false but cannot be statically proven.
-                        val endLabel = org.objectweb.asm.Label()
-
-                        super.visitMethodInsn(
-                            Opcodes.INVOKESTATIC,
-                            "java/lang/System",
-                            "nanoTime",
-                            "()J",
-                            false,
-                        )
-                        super.visitLdcInsn(Long.MIN_VALUE)
-                        super.visitInsn(Opcodes.LCMP)
-                        super.visitJumpInsn(Opcodes.IFNE, endLabel)
-
-                        // Dead code (never reached but confuses symbolic execution)
-                        super.visitInsn(Opcodes.ACONST_NULL)
-                        super.visitInsn(Opcodes.ATHROW)
-
-                        super.visitLabel(endLabel)
-                        classModified = true
-                        trapCount++
-                    }
-                }
-            }
-        }
-
-        try {
-            cr.accept(cv, 0)
-        } catch (_: Exception) { return@map classArtifact }
-        if (!classModified) return@map classArtifact
-        classCount++
-        reanalyzedClassArtifact(classArtifact, cw.toByteArray())
-    }
-
-    if (classCount == 0) return unchangedTransformResult(artifact)
-    return updatedArtifactTransformResult(
-        artifact = artifact,
-        updatedClassArtifacts = updatedClassArtifacts,
-        transformedClassCount = classCount,
-        transformedMemberCount = trapCount,
-    )
-}
-
 

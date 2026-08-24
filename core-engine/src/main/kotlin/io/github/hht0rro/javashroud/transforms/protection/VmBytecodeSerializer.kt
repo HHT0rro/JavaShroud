@@ -1,5 +1,6 @@
 package io.github.hht0rro.javashroud.transforms.protection
 
+import io.github.hht0rro.javashroud.transforms.protection.hardening.VmDialectDescriptor
 import org.objectweb.asm.*
 import java.security.SecureRandom
 import java.nio.charset.StandardCharsets
@@ -46,6 +47,7 @@ private const val VBC4_ARGUMENT_TAGS = "ZBCSIJFDL["
 private const val VBC4_RETURN_TAGS = "VZBCSIJFDL["
 private const val VBC4_CP_SEALED_STRING_TYPE = 0x06
 private const val VBC4_CURRENT_MAGIC = "VBC4"
+internal const val VBC4_DIALECT_COMMITMENT_BYTES = 32
 private val VBC4_CP_STRING_KEY_DOMAIN = "javashroud-vbc4-cp-string-key-v2".toByteArray(Charsets.US_ASCII)
 private val VBC4_CP_STRING_IV_DOMAIN = "javashroud-vbc4-cp-string-iv-v2".toByteArray(Charsets.US_ASCII)
 private val VBC4_CP_STRING_TAG_DOMAIN = "javashroud-vbc4-cp-string-tag-v2".toByteArray(Charsets.US_ASCII)
@@ -156,6 +158,7 @@ internal class VmBytecodeSerializer(
     private val effectiveBuildSeed: Int = deriveVbc4StructureSeed(buildContext, buildSeed, entryMetadata, structureEntropy)
     private val vbc4MasterKey: ByteArray = AkenVbc4InnerMaterial.copyCryptoDomainMaterial(buildContext)
     private val vbc4LayoutDigest: ByteArray = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(buildContext)
+    private val opcodeDialect: VmDialectDescriptor = VmDialectDescriptor.fromKeyMaterial(vbc4MasterKey, vbc4LayoutDigest)
     private val opcodeDialectSalt: Int = vbc4OpcodeDialectSalt(effectiveBuildSeed, stateBinding, entryMetadata) xor readMacInt(structureEntropyDigest)
     private val structureSalt: Int = readMacInt(structureEntropyDigest)
     private var sensitiveMaterialCleared: Boolean = false
@@ -221,14 +224,14 @@ internal class VmBytecodeSerializer(
         ?: error("VBC4 production evidence requested before serialization completed")
 
     internal fun logicalProgramForTest(metadataCpIndex: Int = 0): VmLogicalProgram =
-        Vbc4CryptoScope.use(vbc4MasterKey, vbc4LayoutDigest) {
+        Vbc4CryptoScope.use(vbc4MasterKey, vbc4LayoutDigest, stateBinding) {
             lowerToLogicalProgram(metadataCpIndex)
         }
 
     fun serialize(): ByteArray {
         check(!sensitiveMaterialCleared) { "VBC4 serializer is one-shot" }
         return try {
-            Vbc4CryptoScope.use(vbc4MasterKey, vbc4LayoutDigest) {
+            Vbc4CryptoScope.use(vbc4MasterKey, vbc4LayoutDigest, stateBinding) {
                 serializeWithActiveKey()
             }
         } finally {
@@ -288,6 +291,10 @@ internal class VmBytecodeSerializer(
         val out = java.io.ByteArrayOutputStream()
         out.write(VBC4_CURRENT_MAGIC.toByteArray(Charsets.US_ASCII))
         out.write(nonce)
+        check(opcodeDialect.commitment.size == VBC4_DIALECT_COMMITMENT_BYTES) {
+            "VBC4 dialect commitment must be 256-bit"
+        }
+        out.write(opcodeDialect.commitment)
         writeU4(out, vbc4KeyId(cryptoSeed, nonce))
         out.write(wrappedSeed)
         writeU2(out, flags)
@@ -394,7 +401,7 @@ internal class VmBytecodeSerializer(
         val groups = mutableListOf<LogicalGroup>()
         groups.add(
             LogicalGroup(
-                maskedOpcodeBase = VBC4_REG_META,
+                maskedOpcodeBase = opcodeDialect.encodeOpcode(VBC4_REG_META),
                 primaryFlags = VBC4_REG_FLAG_EXECUTABLE,
                 primaryDst = 0,
                 primarySrcA = 0,
@@ -769,7 +776,7 @@ internal class VmBytecodeSerializer(
             emptyList()
         }
         return LogicalGroup(
-            maskedOpcodeBase = baseOpcode,
+            maskedOpcodeBase = opcodeDialect.encodeOpcode(baseOpcode),
             primaryFlags = flags,
             primaryDst = operands.size and 0xFFFF,
             primarySrcA = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, instruction.offset),
@@ -790,7 +797,7 @@ internal class VmBytecodeSerializer(
         if (selector % 4 == 0) return null
         val branchTarget = registerOperands(second).firstOrNull() ?: return null
         return LogicalGroup(
-            maskedOpcodeBase = VBC4_SUPER_CMP_BRANCH,
+            maskedOpcodeBase = opcodeDialect.encodeOpcode(VBC4_SUPER_CMP_BRANCH),
             primaryFlags = VBC4_REG_FLAG_EXECUTABLE or VBC4_REG_FLAG_SUPER or VBC4_REG_FLAG_FOLDED,
             primaryDst = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, first.offset),
             primarySrcA = domainSuperOperandOpcode(first.opcode, instructionIndex, 0),
@@ -811,7 +818,7 @@ internal class VmBytecodeSerializer(
         if (selector % 4 == 0) return null
         val constOperand = registerOperands(first).firstOrNull() ?: return null
         return LogicalGroup(
-            maskedOpcodeBase = VBC4_SUPER_INT_ARITH,
+            maskedOpcodeBase = opcodeDialect.encodeOpcode(VBC4_SUPER_INT_ARITH),
             primaryFlags = VBC4_REG_FLAG_EXECUTABLE or VBC4_REG_FLAG_SUPER or VBC4_REG_FLAG_FOLDED,
             primaryDst = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, first.offset),
             primarySrcA = domainSuperOperandOpcode(first.opcode, instructionIndex, 0),
@@ -840,7 +847,8 @@ internal class VmBytecodeSerializer(
     private fun registerOperands(instruction: VmInstruction): List<Int> = instruction.operands.mapIndexed { operandIndex, operand ->
         when (operand) {
             is Int -> if (vbc4OperandIsInstructionTarget(instruction.opcode, operandIndex)) {
-                vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, operand)
+                val encoded = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, operand)
+                encoded
             } else operand
             is Float -> java.lang.Float.floatToIntBits(operand)
             is String -> addConstant(operand)
@@ -1296,11 +1304,15 @@ internal class VmBytecodeSerializer(
         writeU2(out, entries.size)
         for ((index, entry) in entries.withIndex()) {
             val token = vbc4ExceptionToken(cryptoSeed, index)
+            val start = entry.start xor vbc4ExceptionMask(cryptoSeed, index, 0, token)
+            val end = entry.end xor vbc4ExceptionMask(cryptoSeed, index, 1, token)
+            val handler = entry.handler xor vbc4ExceptionMask(cryptoSeed, index, 2, token)
+            val typeCp = entry.typeCpIndex xor vbc4ExceptionMask(cryptoSeed, index, 3, token)
             writeU4(out, token)
-            writeU2(out, entry.start xor vbc4ExceptionMask(cryptoSeed, index, 0, token))
-            writeU2(out, entry.end xor vbc4ExceptionMask(cryptoSeed, index, 1, token))
-            writeU2(out, entry.handler xor vbc4ExceptionMask(cryptoSeed, index, 2, token))
-            writeU2(out, entry.typeCpIndex xor vbc4ExceptionMask(cryptoSeed, index, 3, token))
+            writeU2(out, start)
+            writeU2(out, end)
+            writeU2(out, handler)
+            writeU2(out, typeCp)
         }
         return out.toByteArray()
     }
@@ -2200,23 +2212,32 @@ private val VBC4_FOLDED_FUSION_OPCODES = setOf(
 private object Vbc4CryptoScope {
     private val activeSessionMaterial = ThreadLocal<ByteArray?>()
 
-    fun <T> use(masterKey: ByteArray, layoutDigest: ByteArray, block: () -> T): T {
+    fun <T> use(masterKey: ByteArray, layoutDigest: ByteArray, stateBinding: String, block: () -> T): T {
         val previous = activeSessionMaterial.get()
-        val sessionMaterial = deriveSessionIntegrityMaterial(masterKey, layoutDigest)
+        val stateBindingBytes = stateBinding.toByteArray(Charsets.UTF_8)
+        val sessionMaterial = deriveSessionIntegrityMaterial(masterKey, layoutDigest, stateBindingBytes)
         activeSessionMaterial.set(sessionMaterial)
         return try {
             block()
         } finally {
             java.util.Arrays.fill(sessionMaterial, 0)
+            java.util.Arrays.fill(stateBindingBytes, 0)
             if (previous == null) activeSessionMaterial.remove() else activeSessionMaterial.set(previous)
         }
     }
 
-    private fun deriveSessionIntegrityMaterial(masterKey: ByteArray, layoutDigest: ByteArray): ByteArray {
+    private fun deriveSessionIntegrityMaterial(
+        masterKey: ByteArray,
+        layoutDigest: ByteArray,
+        stateBinding: ByteArray,
+    ): ByteArray {
+        require(stateBinding.size <= 4 * 1024) { "VBC4 state binding exceeds the current format limit" }
         val digest = java.security.MessageDigest.getInstance("SHA-256")
-        digest.update("vbc4-session-integrity".toByteArray(Charsets.US_ASCII))
+        digest.update("vbc4-session-integrity-v2".toByteArray(Charsets.US_ASCII))
         digest.update(masterKey)
         digest.update(layoutDigest)
+        digest.update(intBytes(stateBinding.size))
+        digest.update(stateBinding)
         digest.update(byteArrayOf(0x10, 0x42, 0x9F.toByte(), 0x6C))
         return digest.digest()
     }
@@ -2445,7 +2466,9 @@ private fun vbc4ExceptionMask(seed: Int, index: Int, field: Int, token: Int): In
         intBytes(index),
         intBytes(field),
         intBytes(token),
-    ) { material -> readMacInt(material) and 0xFFFF }
+    ) { material ->
+        readMacInt(material) and 0xFFFF
+    }
 
 private fun vbc4Nonce(seed: Int, flags: Int, constantPoolPlain: ByteArray, exceptionPlain: ByteArray, blockCount: Int): ByteArray =
     withVbc4HmacMaterial(

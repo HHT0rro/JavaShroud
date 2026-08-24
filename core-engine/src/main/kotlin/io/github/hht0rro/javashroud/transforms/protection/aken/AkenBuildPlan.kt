@@ -1,6 +1,5 @@
 package io.github.hht0rro.javashroud.transforms.protection.aken
 
-import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Arrays
@@ -12,12 +11,12 @@ import kotlin.jvm.JvmSynthetic
 /**
  * Build-only AKEN v4 planner.
  *
- * Every registered high-value page receives an independent random DEK, an
- * independent physical frame, and a randomized seven-fragment evaluator graph.
- * The graph carries transformed XOR shares rather than a raw or contiguous
- * page key, so no fragment, table entry, or page descriptor is a root-key
- * substitute. This object deliberately provides no page enumeration, raw-DEK
- * export, or Java-visible generic decoder. Materialization can only emit a
+ * Every registered high-value page receives independent random page material,
+ * an independent physical frame, and an artifact-specific opaque VBC4
+ * evaluator. The evaluator's randomized dialect, fragments, bindings, and
+ * authenticated terminal schedule never expose a raw or contiguous page key.
+ * This object deliberately provides no page enumeration, raw-key export, or
+ * Java-visible generic decoder. Materialization can only emit a
  * page-local ciphertext or perform a boolean AEAD binding check whose transient
  * plaintext is zeroed before control returns.
  */
@@ -27,84 +26,11 @@ class AkenBuildPlan private constructor(
     val pageSizePolicy: AkenPageSizePolicy,
 ) : AutoCloseable {
 
-    /** One generated Java/native evaluator fragment with defensive-copy views. */
-    class EvaluatorFragment internal constructor(
-        val ordinal: Int,
-        val family: Int,
-        shape: ByteArray,
-        callToken: ByteArray,
-        tablePermutation: IntArray,
-    ) {
-        private var shapeValue: ByteArray = shape.copyOf()
-        private var callTokenValue: ByteArray = callToken.copyOf()
-        private var tablePermutationValue: IntArray = tablePermutation.copyOf()
-
-        @Volatile
-        private var wiped: Boolean = false
-
-        init {
-            require(ordinal in 0 until AKEN_FRAGMENT_COUNT) { "AKEN fragment ordinal is invalid" }
-            require(family in 0 until AKEN_TRANSFORM_FAMILY_COUNT) { "AKEN transform family is invalid" }
-            require(shapeValue.isNotEmpty()) { "AKEN fragment shape must not be empty" }
-            require(callTokenValue.isNotEmpty()) { "AKEN fragment call token must not be empty" }
-            require(isPermutation(tablePermutationValue)) { "AKEN fragment table is not a permutation" }
-        }
-
-        val shape: ByteArray
-            get() {
-                requireLive()
-                return shapeValue.copyOf()
-            }
-
-        val callToken: ByteArray
-            get() {
-                requireLive()
-                return callTokenValue.copyOf()
-            }
-
-        val tablePermutation: IntArray
-            get() {
-                requireLive()
-                return tablePermutationValue.copyOf()
-            }
-
-        internal fun wipe() {
-            if (wiped) return
-            Arrays.fill(shapeValue, 0)
-            Arrays.fill(callTokenValue, 0)
-            Arrays.fill(tablePermutationValue, 0)
-            shapeValue = ByteArray(0)
-            callTokenValue = ByteArray(0)
-            tablePermutationValue = IntArray(0)
-            wiped = true
-        }
-
-        private fun requireLive() {
-            check(!wiped) { "AKEN evaluator fragment has been wiped" }
-        }
-
-        private fun isPermutation(values: IntArray): Boolean {
-            if (values.isEmpty()) return false
-            val seen = BooleanArray(values.size)
-            for (value in values) {
-                if (value !in values.indices || seen[value]) return false
-                seen[value] = true
-            }
-            return true
-        }
-    }
-
-    /** Complete AKEN-7 evaluator graph for exactly one page. */
+    /** Current-format VBC4 evaluator plan for exactly one page. */
     class EvaluatorPlan internal constructor(
-        javaFragments: List<EvaluatorFragment>,
-        nativeFragments: List<EvaluatorFragment>,
-        terminal: EvaluatorFragment,
         fingerprint: ByteArray,
         boundDecryptorCore: AkenBoundDecryptorCore,
     ) {
-        private var javaFragmentsValue: List<EvaluatorFragment> = javaFragments.toList()
-        private var nativeFragmentsValue: List<EvaluatorFragment> = nativeFragments.toList()
-        private var terminalValue: EvaluatorFragment? = terminal
         private var fingerprintValue: ByteArray = fingerprint.copyOf()
         private var boundDecryptorCoreValue: AkenBoundDecryptorCore? = boundDecryptorCore
 
@@ -112,36 +38,10 @@ class AkenBuildPlan private constructor(
         private var wiped: Boolean = false
 
         init {
-            require(javaFragmentsValue.size == JAVA_FRAGMENT_COUNT) { "AKEN graph requires three Java fragments" }
-            require(nativeFragmentsValue.size == NATIVE_FRAGMENT_COUNT) { "AKEN graph requires three native fragments" }
             require(fingerprintValue.size == AkenHandle.FINGERPRINT_SIZE) {
                 "AKEN evaluator fingerprint has an invalid length"
             }
-            val ordinals = (javaFragmentsValue + nativeFragmentsValue + listOfNotNull(terminalValue)).map { it.ordinal }
-            require(ordinals.size == AKEN_FRAGMENT_COUNT && ordinals.toSet().size == AKEN_FRAGMENT_COUNT) {
-                "AKEN graph must contain seven unique fragments"
-            }
         }
-
-        /** Execution order is represented by the order of each returned list. */
-        val javaFragments: List<EvaluatorFragment>
-            get() {
-                requireLive()
-                return javaFragmentsValue.toList()
-            }
-
-        /** Execution order is represented by the order of each returned list. */
-        val nativeFragments: List<EvaluatorFragment>
-            get() {
-                requireLive()
-                return nativeFragmentsValue.toList()
-            }
-
-        val terminal: EvaluatorFragment
-            get() {
-                requireLive()
-                return terminalValue ?: error("AKEN evaluator terminal has been wiped")
-            }
 
         val fingerprint: ByteArray
             get() {
@@ -149,32 +49,17 @@ class AkenBuildPlan private constructor(
                 return fingerprintValue.copyOf()
             }
 
-        val allFragments: List<EvaluatorFragment>
-            get() {
-                requireLive()
-                return ArrayList<EvaluatorFragment>(AKEN_FRAGMENT_COUNT).apply {
-                    addAll(javaFragmentsValue)
-                    addAll(nativeFragmentsValue)
-                    add(terminalValue ?: error("AKEN evaluator terminal has been wiped"))
-                }
-            }
-
-        /** Compact, non-secret execution-order metadata for code generators. */
-        val executionOrder: IntArray
-            get() {
-                requireLive()
-                return allFragments.map { it.ordinal }.toIntArray()
-            }
-
         internal fun copyFingerprintForBuild(): ByteArray {
             requireLive()
             return fingerprintValue.copyOf()
         }
 
-        /** Page-local nonce is owned by the bound terminal seed, never by Java runtime state. */
+        /** Page-local nonce is owned by the bound VBC4 terminal seed. */
         internal fun copyPageNonceForCodec(): ByteArray {
             requireLive()
-            return (boundDecryptorCoreValue ?: error("AKEN bound decryptor core has been wiped")).copyPageNonceForCodec()
+            return (boundDecryptorCoreValue
+                ?: error("AKEN bound decryptor core has been wiped"))
+                .copyPageNonceForCodec()
         }
 
         /** Finalize one typed native descriptor after route/proof materialization. */
@@ -183,19 +68,14 @@ class AkenBuildPlan private constructor(
             callSiteProof: ByteArray,
         ): AkenBoundDecryptorPlan {
             requireLive()
-            return (boundDecryptorCoreValue ?: error("AKEN bound decryptor core has been wiped"))
+            return (boundDecryptorCoreValue
+                ?: error("AKEN bound decryptor core has been wiped"))
                 .finalizeForRuntime(route, callSiteProof)
         }
 
         internal fun wipe() {
             if (wiped) return
-            javaFragmentsValue.forEach { it.wipe() }
-            nativeFragmentsValue.forEach { it.wipe() }
-            terminalValue?.wipe()
             boundDecryptorCoreValue?.wipe()
-            javaFragmentsValue = emptyList()
-            nativeFragmentsValue = emptyList()
-            terminalValue = null
             boundDecryptorCoreValue = null
             Arrays.fill(fingerprintValue, 0)
             fingerprintValue = ByteArray(0)
@@ -412,10 +292,6 @@ class AkenBuildPlan private constructor(
             return commitment.copyOf()
         }
 
-    /**
-     * Register exactly one page. The kind, logical identity, page index triple
-     * is unique within a plan regardless of requested codec/layout names.
-     */
     @JvmOverloads
     @Synchronized
     fun registerPage(
@@ -454,8 +330,6 @@ class AkenBuildPlan private constructor(
         var handle: AkenHandle? = null
         var page: Page? = null
         var dek: ByteArray? = null
-        var evaluatorShares: Array<ByteArray>? = null
-        var artifactCommitmentShares: Array<ByteArray>? = null
         var encodedHandle: ByteArray? = null
         var locator: ByteArray? = null
         var pageNonce: ByteArray? = null
@@ -469,79 +343,19 @@ class AkenBuildPlan private constructor(
             require(targetSize in allowedTargetSizes) {
                 "AKEN selected page target size is unsupported for resource kind"
             }
-            // Handles are part of the evaluator-state binding.  Mint them
-            // before the first fragment and bind them again into the final
-            // graph fingerprint below.
+
+            // The handle, locator and evaluator fingerprint are page-local
+            // binding inputs.  VBC4 compile creates the opaque randomized
+            // fragment program and authenticates the complete page material.
             encodedHandle = encodedHandleOverride?.copyOf()
                 ?: ByteArray(AkenHandle.ENCODED_HANDLE_SIZE).also(random::nextBytes)
             locator = ByteArray(AkenHandle.LOCATOR_TOKEN_SIZE).also(random::nextBytes)
             pageNonce = ByteArray(AkenResourceCodec.NONCE_SIZE).also(random::nextBytes)
-            dek = ByteArray(AkenEvaluatorState.STATE_WIDTH).also(random::nextBytes)
-            evaluatorShares = AkenEvaluatorState.splitDek(checkNotNull(dek), random)
-            artifactCommitmentShares = AkenEvaluatorState.splitArtifactCommitment(artifactCanonicalCommitment, random)
-            val javaFragments = randomizeExecution(
-                List(JAVA_FRAGMENT_COUNT) { ordinal ->
-                    createFragment(
-                        ordinal = ordinal,
-                        share = checkNotNull(evaluatorShares)[ordinal],
-                        artifactCommitmentShare = checkNotNull(artifactCommitmentShares)[ordinal],
-                        kind = kind,
-                        identity = identityCopy,
-                        pageIndex = pageIndex,
-                        targetSize = targetSize,
-                        codecVariant = canonicalCodec,
-                        layoutVariant = layout.variant,
-                        encodedHandle = checkNotNull(encodedHandle),
-                        locator = checkNotNull(locator),
-                    )
-                },
-            )
-            val nativeFragments = randomizeExecution(
-                List(NATIVE_FRAGMENT_COUNT) { index ->
-                    val ordinal = JAVA_FRAGMENT_COUNT + index
-                    createFragment(
-                        ordinal = ordinal,
-                        share = checkNotNull(evaluatorShares)[ordinal],
-                        artifactCommitmentShare = checkNotNull(artifactCommitmentShares)[ordinal],
-                        kind = kind,
-                        identity = identityCopy,
-                        pageIndex = pageIndex,
-                        targetSize = targetSize,
-                        codecVariant = canonicalCodec,
-                        layoutVariant = layout.variant,
-                        encodedHandle = checkNotNull(encodedHandle),
-                        locator = checkNotNull(locator),
-                    )
-                },
-            )
-            val terminal = createFragment(
-                ordinal = AKEN_FRAGMENT_COUNT - 1,
-                share = checkNotNull(evaluatorShares)[AKEN_FRAGMENT_COUNT - 1],
-                artifactCommitmentShare = checkNotNull(artifactCommitmentShares)[AKEN_FRAGMENT_COUNT - 1],
-                kind = kind,
-                identity = identityCopy,
-                pageIndex = pageIndex,
-                targetSize = targetSize,
-                codecVariant = canonicalCodec,
-                layoutVariant = layout.variant,
-                encodedHandle = checkNotNull(encodedHandle),
-                locator = checkNotNull(locator),
-            )
-            fingerprint = evaluatorFingerprint(
-                kind = kind,
-                identity = identityCopy,
-                pageIndex = pageIndex,
-                targetSize = targetSize,
-                codecVariant = canonicalCodec,
-                layout = layout,
-                encodedHandle = encodedHandle,
-                locator = locator,
-                javaFragments = javaFragments,
-                nativeFragments = nativeFragments,
-                terminal = terminal,
-            )
+            dek = ByteArray(AkenVbc4Material.PAGE_MATERIAL_SIZE).also(random::nextBytes)
+            fingerprint = ByteArray(AkenHandle.FINGERPRINT_SIZE).also(random::nextBytes)
+
             boundDecryptorCore = AkenBoundDecryptorCore.compile(
-                dek = checkNotNull(dek),
+                pageMaterial = checkNotNull(dek),
                 resourceKind = kind,
                 logicalIdentity = identityCopy,
                 pageIndex = pageIndex,
@@ -556,10 +370,7 @@ class AkenBuildPlan private constructor(
                 random = random,
             )
             evaluatorPlan = EvaluatorPlan(
-                javaFragments = javaFragments,
-                nativeFragments = nativeFragments,
-                terminal = terminal,
-                fingerprint = fingerprint,
+                fingerprint = checkNotNull(fingerprint),
                 boundDecryptorCore = checkNotNull(boundDecryptorCore),
             )
             handle = AkenHandle.create(
@@ -579,17 +390,6 @@ class AkenBuildPlan private constructor(
                 codecVariant = canonicalCodec,
                 layout = layout,
             )
-            val recovered = AkenEvaluatorState.recoverForBuildVerification(
-                page = checkNotNull(page),
-                expectedArtifactCommitment = artifactCanonicalCommitment,
-            )
-            try {
-                require(MessageDigest.isEqual(recovered, checkNotNull(dek))) {
-                    "AKEN evaluator graph does not reconstruct its page-local DEK"
-                }
-            } finally {
-                Arrays.fill(recovered, 0)
-            }
             val handleKey = handle.encodedKey()
             require(handleKey !in records) { "AKEN page handle encoding is already registered" }
             records[handleKey] = Record(page, dek)
@@ -602,8 +402,6 @@ class AkenBuildPlan private constructor(
             locator?.fill(0)
             pageNonce?.fill(0)
             fingerprint?.fill(0)
-            evaluatorShares?.forEach { Arrays.fill(it, 0) }
-            artifactCommitmentShares?.forEach { Arrays.fill(it, 0) }
             if (!success) {
                 dek?.fill(0)
                 page?.wipe() ?: run {
@@ -733,109 +531,6 @@ class AkenBuildPlan private constructor(
         check(!wiped) { "AKEN build plan has been wiped" }
     }
 
-    private fun createFragment(
-        ordinal: Int,
-        share: ByteArray,
-        artifactCommitmentShare: ByteArray,
-        kind: AkenResourceKind,
-        identity: ByteArray,
-        pageIndex: Int,
-        targetSize: Int,
-        codecVariant: String,
-        layoutVariant: String,
-        encodedHandle: ByteArray,
-        locator: ByteArray,
-    ): EvaluatorFragment = AkenEvaluatorState.createFragment(
-        random = random,
-        ordinal = ordinal,
-        share = share,
-        artifactCommitmentShare = artifactCommitmentShare,
-        kind = kind,
-        identity = identity,
-        pageIndex = pageIndex,
-        targetSize = targetSize,
-        codecVariant = codecVariant,
-        layoutVariant = layoutVariant,
-        encodedHandle = encodedHandle,
-        locator = locator,
-    )
-
-    private fun <T> randomizeExecution(values: List<T>): List<T> {
-        val shuffled = values.toMutableList()
-        for (index in shuffled.lastIndex downTo 1) {
-            val other = random.nextInt(index + 1)
-            val temporary = shuffled[index]
-            shuffled[index] = shuffled[other]
-            shuffled[other] = temporary
-        }
-        return shuffled
-    }
-
-    private fun evaluatorFingerprint(
-        kind: AkenResourceKind,
-        identity: ByteArray,
-        pageIndex: Int,
-        targetSize: Int,
-        codecVariant: String,
-        layout: AkenPageLayout,
-        encodedHandle: ByteArray,
-        locator: ByteArray,
-        javaFragments: List<EvaluatorFragment>,
-        nativeFragments: List<EvaluatorFragment>,
-        terminal: EvaluatorFragment,
-    ): ByteArray {
-        var codecBytes: ByteArray? = null
-        var layoutBytes: ByteArray? = null
-        try {
-            codecBytes = codecVariant.toByteArray(StandardCharsets.UTF_8)
-            layoutBytes = layout.variant.toByteArray(StandardCharsets.UTF_8)
-            val digest = MessageDigest.getInstance("SHA-256")
-            digest.update(EVALUATOR_DOMAIN)
-            digest.update(kind.id.toByte())
-            updateFramed(digest, identity)
-            updateInt(digest, pageIndex)
-            updateInt(digest, targetSize)
-            updateFramed(digest, codecBytes)
-            updateFramed(digest, layoutBytes)
-            updateFramed(digest, encodedHandle)
-            updateFramed(digest, locator)
-            updateFragments(digest, FRAGMENT_ROLE_JAVA, javaFragments)
-            updateFragments(digest, FRAGMENT_ROLE_NATIVE, nativeFragments)
-            updateFragments(digest, FRAGMENT_ROLE_TERMINAL, listOf(terminal))
-            return digest.digest()
-        } finally {
-            codecBytes?.fill(0)
-            layoutBytes?.fill(0)
-        }
-    }
-
-    private fun updateFragments(
-        digest: MessageDigest,
-        role: Byte,
-        fragments: List<EvaluatorFragment>,
-    ) {
-        updateInt(digest, fragments.size)
-        fragments.forEachIndexed { executionIndex, fragment ->
-            val shape = fragment.shape
-            val callToken = fragment.callToken
-            val tablePermutation = fragment.tablePermutation
-            try {
-                digest.update(role)
-                updateInt(digest, executionIndex)
-                updateInt(digest, fragment.ordinal)
-                updateInt(digest, fragment.family)
-                updateFramed(digest, shape)
-                updateInt(digest, tablePermutation.size)
-                tablePermutation.forEach { updateInt(digest, it) }
-                updateFramed(digest, callToken)
-            } finally {
-                Arrays.fill(shape, 0)
-                Arrays.fill(callToken, 0)
-                Arrays.fill(tablePermutation, 0)
-            }
-        }
-    }
-
     private fun registrationKey(kind: AkenResourceKind, identity: ByteArray, pageIndex: Int): String {
         val digest = MessageDigest.getInstance("SHA-256")
         digest.update(REGISTRATION_DOMAIN)
@@ -863,15 +558,7 @@ class AkenBuildPlan private constructor(
     }
 
     companion object {
-        private const val JAVA_FRAGMENT_COUNT = 3
-        private const val NATIVE_FRAGMENT_COUNT = 3
-        private const val AKEN_FRAGMENT_COUNT = JAVA_FRAGMENT_COUNT + NATIVE_FRAGMENT_COUNT + 1
-        private const val AKEN_TRANSFORM_FAMILY_COUNT = 16
-        private const val FRAGMENT_ROLE_JAVA: Byte = 1
-        private const val FRAGMENT_ROLE_NATIVE: Byte = 2
-        private const val FRAGMENT_ROLE_TERMINAL: Byte = 3
-        private val EVALUATOR_DOMAIN = "AKEN-v4-evaluator-graph".toByteArray(StandardCharsets.US_ASCII)
-        private val REGISTRATION_DOMAIN = "AKEN-v4-registration".toByteArray(StandardCharsets.US_ASCII)
+        private val REGISTRATION_DOMAIN = "AKEN-v4-registration".toByteArray(Charsets.US_ASCII)
 
         fun create(
             commitment: ByteArray,

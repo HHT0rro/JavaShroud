@@ -35,65 +35,33 @@ import java.util.Arrays
 
 private const val LEGACY_SEALED_NATIVE_INDEX_RESOURCE = "META-INF/.r/0.dat"
 private const val LEGACY_SEALED_NATIVE_BINDINGS_RESOURCE = "META-INF/.r/bindings.dat"
-private const val LEGACY_DELAYED_METHOD_RESOURCE_ROOT = "__jmd/"
-private const val LEGACY_CLASS_ENCRYPTION_RESOURCE_ROOT = "__jse/"
-private const val LEGACY_CLASS_ENCRYPTION_MANIFEST_RESOURCE = "__jse/index.tab"
 private const val AKEN_NATIVE_MAX_LIBRARY_BYTES = 256 * 1024 * 1024
 private const val AKEN_NATIVE_BINDINGS_MAX_BYTES = 4 * 1024 * 1024
 private const val PROTECTION_HELPER_PACKAGE = "io/github/hht0rro/javashroud/transforms/protection"
+
 private val AUTO_SEALED_HELPER_PASSES = setOf(
-    "anti-dump-protection",
-    "anti-instrumentation",
-    "anti-symbolic-execution",
     "callsite-rotation-protection",
-    "class-encryption-loader",
-    "environment-bound-keys",
     "exception-semantic-virtualization",
     "jni-microkernel-loader",
-    "method-body-delayed-decryption",
     "method-virtualization",
+    "os-anti-debug",
+    "os-anti-vm",
 )
 
 private val SEALED_RUNTIME_HELPERS = listOf(
-    "$PROTECTION_HELPER_PACKAGE/ClassEncryptionLoaderHelper",
-    "$PROTECTION_HELPER_PACKAGE/ClassEncryptionLoaderHelper${"$"}ParsedMetadata",
-    "$PROTECTION_HELPER_PACKAGE/ClassEncryptionLoaderHelper${"$"}SharedDecryptingClassLoader",
-    "$PROTECTION_HELPER_PACKAGE/AkenClassPageRuntimeDescriptor",
-    "$PROTECTION_HELPER_PACKAGE/AkenClassPageRuntimeDescriptor${"$"}PageBinding",
-    "$PROTECTION_HELPER_PACKAGE/AkenClassPageRuntimeDescriptor${"$"}DescriptorReader",
-    "$PROTECTION_HELPER_PACKAGE/AkenClassPageRuntimeDescriptor${"$"}WipableByteAccumulator",
-    "$PROTECTION_HELPER_PACKAGE/MethodBodyDecryptionHelper",
-    "$PROTECTION_HELPER_PACKAGE/MethodBodyDecryptionHelper${"$"}ParsedMetadata",
     "$PROTECTION_HELPER_PACKAGE/StringEncryptionHelper",
     "$PROTECTION_HELPER_PACKAGE/BootstrapEncryptionHelper",
-    "$PROTECTION_HELPER_PACKAGE/EnvironmentBindingHelper",
-    "$PROTECTION_HELPER_PACKAGE/AntiDumpHelper",
     "$PROTECTION_HELPER_PACKAGE/ExceptionVirtualizationHelper",
     "$PROTECTION_HELPER_PACKAGE/FlowControlException",
-    "$PROTECTION_HELPER_PACKAGE/AntiSymbolicExecutionHelper",
     "$PROTECTION_HELPER_PACKAGE/CallsiteRotationHelper",
-    "$PROTECTION_HELPER_PACKAGE/AntiInstrumentationHelper",
-    "$PROTECTION_HELPER_PACKAGE/AntiJvmTiHelper",
-    "$PROTECTION_HELPER_PACKAGE/AntiDumpRuntimeHelper",
-    "$PROTECTION_HELPER_PACKAGE/AntiByteBuddyHelper",
+    "$PROTECTION_HELPER_PACKAGE/IndyTargetBootstrap",
+    "$PROTECTION_HELPER_PACKAGE/DefenseKernelRuntimeHelper",
     "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper",
-    "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper${"$"}RuntimeResourceMetadata",
-    "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper${"$"}SealedNativeLibrary",
     "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper${"$"}AkenNativeLibrary",
+    "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper${"$"}CatalogBundle",
     "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper${"$"}TypeParseResult",
     "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper${"$"}SamLambdaOptions",
     "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper${"$"}SamInvocationHandler",
-)
-
-/**
- * Nested/helper classes that belong only to the retired generic resource and
- * manifest path. They remain nameable for legacy sealing, but a typed-only
- * AKEN artifact must neither relocate nor retain them.
- */
-private val LEGACY_AKEN_HELPER_INTERNAL_NAMES = setOf(
-    "$PROTECTION_HELPER_PACKAGE/ClassEncryptionLoaderHelper${"$"}ParsedMetadata",
-    "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper${"$"}RuntimeResourceMetadata",
-    "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper${"$"}SealedNativeLibrary",
 )
 
 /**
@@ -103,18 +71,6 @@ private val LEGACY_AKEN_HELPER_INTERNAL_NAMES = setOf(
  * execution happens before embedded helpers are added to the artifact.
  */
 object RuntimeArtifactSealing {
-    internal data class EnvBindingMetadata(val bindBootSecret: Boolean, val expectedFingerprint: String?)
-
-    /**
-     * New AKEN v4 outputs never retain the retired JSBM/JSBK delivery
-     * resources.  Sealing treats them as input cleanup only and deliberately
-     * emits no replacement path, catalog entry, or helper-string rewrite.
-     */
-    private val RETIRED_AKEN_V4_BOOT_RESOURCE_PATHS = setOf(
-        "META-INF/.r/boot.dat",
-        "META-INF/.r/kek.dat",
-    )
-
     fun isRequested(config: ObfuscationConfig): Boolean {
         val enabledPassIds = config.passes.filter { it.enabled }.map { it.id }.toSet()
         return enabledPassIds.any { it in AUTO_SEALED_HELPER_PASSES }
@@ -376,17 +332,10 @@ object RuntimeArtifactSealing {
             pass.enabled && pass.id == "jni-microkernel-loader" &&
                 pass.params["nativePackingLevel"]?.asText() == "max-hardening"
         }
-        val envPass = config.passes.find { it.id == "environment-bound-keys" && it.enabled }
-        val envBinding = if (envPass != null) {
-            val bindBootSecret = envPass.params["bindBootSecret"]?.asBoolean() ?: false
-            val expectedFingerprint = envPass.params["expectedFingerprint"]?.asText()?.trim()?.takeIf { it.isNotEmpty() }
-            EnvBindingMetadata(bindBootSecret, expectedFingerprint)
-        } else null
         return seal(
             artifact,
             seedFromConfig(config),
             rewritesVmRuntime = config.enablesPass("method-virtualization"),
-            envBindingMetadata = envBinding,
             maxHardening = maxHardening,
             typedOnlyRuntime = config.enablesPass("jni-microkernel-loader"),
         )
@@ -395,8 +344,8 @@ object RuntimeArtifactSealing {
     internal fun seal(
         artifact: BytecodeArtifact,
         seed: Long,
+        @Suppress("UNUSED_PARAMETER")
         rewritesVmRuntime: Boolean = true,
-        envBindingMetadata: EnvBindingMetadata? = null,
         maxHardening: Boolean = false,
         typedOnlyRuntime: Boolean = false,
     ): BytecodeArtifact {
@@ -469,20 +418,6 @@ object RuntimeArtifactSealing {
         }
         var sealedNativeBindingsResource: String? = null
         var akenNativeBindingsLocatorResource: String? = null
-        val vmCatalogPlan = if (rewritesVmRuntime) requireVbc4BuildContext().runtimeVmCatalogPlanOrNull() else null
-        val rewritesCurrentVmRuntime = vmCatalogPlan != null
-        val vmCatalogResource = if (rewritesCurrentVmRuntime) {
-            uniqueSealedResourceName(
-                seed = seed,
-                kind = "c",
-                originalName = "vm-catalog",
-                index = 0,
-                preferredName = sealedResourceName(seed, "c", "vm-catalog", 0),
-                reservedEntryNames = reservedEntryNames,
-            ).also(reservedEntryNames::add)
-        } else {
-            VBC4_VM_CATALOG_RESOURCE
-        }
         val sealedNativeIndexResource = uniqueSealedResourceName(
             seed = seed,
             kind = "i",
@@ -494,19 +429,8 @@ object RuntimeArtifactSealing {
         reservedEntryNames += sealedNativeIndexResource
         val helperClassRenameMap = sealedRuntimeHelperRenameMap(artifact, seed, typedOnlyRuntime)
         val helperMemberRenamePlan = sealedJavaOnlyHelperMemberRenamePlan(seed, helperClassRenameMap, typedOnlyRuntime)
-        val resourceRenameMap = linkedMapOf<String, String>()
-        val vmResourceRenameMap = linkedMapOf<String, String>()
-        val currentVmResourceNames = if (vmCatalogPlan != null) currentVirtualMachineResourceNames(vmCatalogPlan, artifact.jarEntries) else emptySet()
-        artifact.jarEntries.forEachIndexed { index, entry ->
-            if (entry.name in currentVmResourceNames) {
-                val sealedName = uniqueSealedResourceName(seed, "v", entry.name, index, sealedResourceName(seed, "v", entry.name, index), reservedEntryNames)
-                reservedEntryNames += sealedName
-                vmResourceRenameMap[entry.name] = sealedName
-            }
-        }
         val helperStringRewriteMap = linkedMapOf(
             LEGACY_SEALED_NATIVE_INDEX_RESOURCE to sealedNativeIndexResource,
-            VBC4_VM_CATALOG_RESOURCE to vmCatalogResource,
         )
         akenNativeLocatorResource?.let { sealedPath ->
             helperStringRewriteMap[AKEN_NATIVE_LOCATOR_LOGICAL_RESOURCE] = sealedPath
@@ -538,96 +462,27 @@ object RuntimeArtifactSealing {
             }
         }
         helperStringRewriteMap.putAll(sealedHelperStringRewriteMap(seed, helperClassRenameMap))
-        val resourceStringRewriteMap = linkedMapOf(
-            LEGACY_CLASS_ENCRYPTION_RESOURCE_ROOT to sealedSemanticText(seed, "class-encryption-root"),
-            ".enc" to sealedSemanticText(seed, "encrypted-resource-suffix"),
-        )
         val sealedNativeSpecs = mutableListOf<SealedNativeSpec>()
         val methodRenameBindings = parseMethodRenameBindings(artifact.jarEntries)
         val fieldRenameBindings = parseFieldRenameBindings(artifact.jarEntries)
-
-        // Parse class encryption manifest to get encryption keys for bytecode rewriting
-        val classEncryptionKeys = parseClassEncryptionManifest(artifact.jarEntries)
-
-        // Allocate every dynamic resource name in original entry order before
-        // encoding the class-encryption manifest. A manifest can precede its
-        // encrypted class entries, but it must commit the final sealed paths.
-        // This uses the same allocation order as the output pass so collision
-        // handling and unrelated sealed resource names remain stable.
         val sealedNativeResourceRenameMap = linkedMapOf<String, String>()
         artifact.jarEntries.forEachIndexed { index, entry ->
-            when {
-                isDelayedMethodResource(entry.name) || isClassEncryptionResource(entry.name) -> {
-                    val sealedName = uniqueSealedResourceName(
-                        seed = seed,
-                        kind = "v",
-                        originalName = entry.name,
-                        index = index,
-                        preferredName = sealedResourceName(seed, "v", entry.name, index),
-                        reservedEntryNames = reservedEntryNames,
-                    )
-                    reservedEntryNames += sealedName
-                    resourceRenameMap[entry.name] = sealedName
-                }
-                isR1NativeKernelResource(entry.name) -> {
-                    val nativeSpec = nativeSpecFor(entry.name)
-                    val sealedName = uniqueSealedNativeResourceName(
-                        seed = seed,
-                        originalName = entry.name,
-                        index = index,
-                        suffix = nativeSpec.loadSuffix,
-                        reservedEntryNames = reservedEntryNames,
-                    )
-                    reservedEntryNames += sealedName
-                    sealedNativeResourceRenameMap[entry.name] = sealedName
-                }
-                isClassEncryptionManifestResource(entry.name) -> {
-                    val sealedName = uniqueSealedResourceName(
-                        seed = seed,
-                        kind = "m",
-                        originalName = entry.name,
-                        index = index,
-                        preferredName = sealedResourceName(seed, "m", entry.name, index),
-                        reservedEntryNames = reservedEntryNames,
-                    )
-                    reservedEntryNames += sealedName
-                    resourceRenameMap[entry.name] = sealedName
-                }
+            if (isR1NativeKernelResource(entry.name)) {
+                val nativeSpec = nativeSpecFor(entry.name)
+                val sealedName = uniqueSealedNativeResourceName(
+                    seed = seed,
+                    originalName = entry.name,
+                    index = index,
+                    suffix = nativeSpec.loadSuffix,
+                    reservedEntryNames = reservedEntryNames,
+                )
+                reservedEntryNames += sealedName
+                sealedNativeResourceRenameMap[entry.name] = sealedName
             }
         }
 
         val renamedJarEntries = artifact.jarEntries.mapIndexedNotNull { index, entry ->
             when {
-                entry.name in RETIRED_AKEN_V4_BOOT_RESOURCE_PATHS -> null
-                typedOnlyRuntime && isLegacyAkenHelperEntry(entry.name) -> null
-                typedOnlyRuntime && (isClassEncryptionResource(entry.name) || isClassEncryptionManifestResource(entry.name)) -> null
-                isDelayedMethodResource(entry.name) || isClassEncryptionResource(entry.name) -> {
-                    val sealedName = resourceRenameMap.getValue(entry.name)
-                    // Rewrite encrypted class bytecode to update helper references
-                    val rewrittenBytes = rewriteEncryptedClassBytes(
-                        entry.bytes, entry.name, sealedName, classEncryptionKeys,
-                        helperStringRewriteMap + resourceStringRewriteMap + resourceRenameMap,
-                        seed,
-                        helperClassRenameMap,
-                        helperMemberRenamePlan,
-                    )
-                    entry.copy(name = sealedName, bytes = rewrittenBytes)
-                }
-                entry.name in currentVmResourceNames -> {
-                    val sealedName = vmResourceRenameMap.getValue(entry.name)
-                    val decoded = RuntimeResourceCodec.decode(entry.bytes)
-                        ?: error("current VM resource failed authentication: ${entry.name}")
-                    val rewrittenBytes = RuntimeResourceCodec.encode(
-                        bytes = decoded,
-                        kind = RuntimeResourceKind.VmBytecode,
-                        seed = sealedDigest(seed, "vm", entry.name, index).take(8).toLong(16).toInt(),
-                        variantId = index.coerceAtLeast(1),
-                        layerCount = 4,
-                        compress = true,
-                        partitionIdentity = ("vmr|" + sealedName).toByteArray(Charsets.UTF_8),
-                    )
-                    entry.copy(name = sealedName, bytes = rewrittenBytes)
-                }
                 isR1NativeKernelResource(entry.name) -> {
                     val nativeSpec = nativeSpecFor(entry.name)
                     val sealedName = sealedNativeResourceRenameMap.getValue(entry.name)
@@ -638,38 +493,26 @@ object RuntimeArtifactSealing {
                     }
                     entry.copy(name = sealedName, bytes = decoded ?: entry.bytes)
                 }
-                isClassEncryptionManifestResource(entry.name) -> {
-                    val sealedName = resourceRenameMap.getValue(entry.name)
-                    entry.copy(name = sealedName, bytes = encodeSealedClassEncryptionManifest(entry.bytes, resourceRenameMap))
-                }
                 entry.name == LEGACY_SEALED_NATIVE_INDEX_RESOURCE || entry.name == LEGACY_SEALED_NATIVE_BINDINGS_RESOURCE -> null
                 entry.name == METHOD_RENAME_BINDINGS_RESOURCE || entry.name == FIELD_RENAME_BINDINGS_RESOURCE -> null
                 else -> renamedClassEntry(entry, helperClassRenameMap)
             }
         }
 
-        val hasRetiredAkenV4BootResource = artifact.jarEntries.any { entry ->
-            entry.name in RETIRED_AKEN_V4_BOOT_RESOURCE_PATHS
-        }
         if (
-            resourceRenameMap.isEmpty() &&
-            vmResourceRenameMap.isEmpty() &&
             sealedNativeSpecs.isEmpty() &&
-            helperClassRenameMap.isEmpty() &&
-            !hasRetiredAkenV4BootResource
+            helperClassRenameMap.isEmpty()
         ) {
             publishAkenArtifactCommitment(artifact)
             return artifact
         }
 
-        val rewrittenClassArtifacts = artifact.classArtifacts
-            .filterNot { typedOnlyRuntime && isLegacyAkenHelperEntry(it.entryName) }
-            .map { classArtifact ->
+        val rewrittenClassArtifacts = artifact.classArtifacts.map { classArtifact ->
             rewriteClassArtifact(
                 classArtifact = classArtifact,
                 seed = seed,
                 helperStringRewriteMap = helperStringRewriteMap,
-                resourceStringRewriteMap = resourceStringRewriteMap + resourceRenameMap,
+                resourceStringRewriteMap = emptyMap(),
                 helperClassRenameMap = helperClassRenameMap,
                 helperMemberRenamePlan = helperMemberRenamePlan,
             ) ?: classArtifact
@@ -685,16 +528,6 @@ object RuntimeArtifactSealing {
             synchronizedEntry
         }.let { entries ->
             val runtimeEntries = entries.toMutableList()
-            if (vmCatalogPlan != null && vmResourceRenameMap.isNotEmpty()) {
-                val finalCatalogPlan = vmCatalogPlan.renamed(vmResourceRenameMap)
-                requireVbc4BuildContext().publishRuntimeVmCatalogPlan(finalCatalogPlan)
-                runtimeEntries += RuntimeVmCatalog.build(
-                    runtimeEntries = runtimeEntries,
-                    plan = finalCatalogPlan,
-                    rootResourcePath = vmCatalogResource,
-                    seed = seed,
-                ).entries
-            }
             if (sealedNativeSpecs.isNotEmpty() || helperClassRenameMap.isNotEmpty()) {
                 val applicationMethodBindings = expandMethodRenameBindingsAcrossFinalOwners(methodRenameBindings, rewrittenClassArtifacts) +
                     collectApplicationMethodRenameBindings(rewrittenClassArtifacts, helperClassRenameMap)
@@ -712,7 +545,6 @@ object RuntimeArtifactSealing {
                             applicationMethodBindings = applicationMethodBindings,
                             applicationFieldBindings = applicationFieldBindings,
                             seed = seed,
-                            envBindingMetadata = envBindingMetadata,
                         ),
                     )
                 }
@@ -818,7 +650,7 @@ object RuntimeArtifactSealing {
         // so a later AKEN emitter can reserve shards and call the same API
         // without reviving a boot/root-key path.
         publishAkenArtifactCommitment(sealedArtifact)
-        return sealedArtifact
+        return attachAkenR1CatalogSidecar(sealedArtifact)
     }
 }
 
@@ -912,7 +744,11 @@ private fun sealedRuntimeHelperRenameMap(
         .toMutableSet()
     val renameMap = linkedMapOf<String, String>()
     SEALED_RUNTIME_HELPERS.forEachIndexed { index, helperName ->
-        if (typedOnlyRuntime && helperName in LEGACY_AKEN_HELPER_INTERNAL_NAMES) return@forEachIndexed
+        // VBC4 pages can carry opaque invokedynamic terminal records whose
+        // bootstrap target embeds this owner.  Until those encrypted page
+        // constants are rewritten in the same sealing transaction, retain the
+        // helper owner so the native-backed terminal remains resolvable.
+        if (typedOnlyRuntime && helperName == "$PROTECTION_HELPER_PACKAGE/StringEncryptionHelper") return@forEachIndexed
         if (helperName in presentClassNames) {
             val outerName = helperName.substringBefore('$')
             val sealedOuterName = renameMap[outerName]
@@ -939,7 +775,7 @@ private fun uniqueSealedHelperName(
     if (preferredName !in reservedClassNames || preferredName == originalName) return preferredName
     for (attempt in 1..1024) {
         val digest = sealedDigest(seed, "hc", "$originalName#$attempt", index)
-        val candidate = "r/${digest.take(2)}/C${digest.drop(2).take(24)}"
+        val candidate = "jsh/${digest.take(2)}/H${digest.drop(2).take(24)}"
         if (candidate !in reservedClassNames) return candidate
     }
     error("Unable to allocate collision-free sealed helper name for $originalName")
@@ -975,14 +811,19 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
             "nativeInit",
             "nativeHeartbeat",
             "nativeInstallAkenSessionNonce",
+            "nativeInstallAkenCatalog",
             "nativeExecuteAkenVmPage",
             "nativeOpenAkenString",
             "nativeReadAkenClassPage",
             "nativeConsumeAkenNativeChunk",
+            "nativeInitializeDefense",
+            "nativeProbeDefense",
+            "nativeTransformDefense",
         )
+        if (name.startsWith("native") && name !in renamableAkenNativeMethods) return
         if (
             owner == "$PROTECTION_HELPER_PACKAGE/JniMicrokernelHelper" &&
-            ((name.startsWith("native") && name !in renamableAkenNativeMethods) || name == "createSamLambda" ||
+            (name == "createSamLambda" ||
                 name == "takeExpectedShellBindingCommitment" || name == "takeBootSecretForNativeShell")
         ) return
         val sealedMethodName = sealedMemberName(seed, owner, name, descriptor, "m")
@@ -1008,44 +849,6 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     addMethod(flowControlException, "getState", "()I")
     addField(flowControlException, "state", "I")
 
-    val stringStringVoid = "(Ljava/lang/String;Ljava/lang/String;)V"
-    val stringVoid = "(Ljava/lang/String;)V"
-    val byteArrayByteArray = "([B[B)[B"
-    val antiDump = "$PROTECTION_HELPER_PACKAGE/AntiDumpHelper"
-    addMethod(antiDump, "buildString", "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[B)Ljava/lang/String;")
-    addMethod(antiDump, "buildStringFromB64", "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;)Ljava/lang/String;")
-    addMethod(antiDump, "buildStringFromB64Condy", "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/String;")
-    addMethod(antiDump, "decodeString", "(Ljava/lang/String;)Ljava/lang/String;")
-    addMethod(antiDump, "nativeBuildString", "([B)Ljava/lang/String;")
-    addMethod(antiDump, "nativeBuildStringFromB64", "(Ljava/lang/String;)Ljava/lang/String;")
-    addMethod(antiDump, "nativeDecodeString", "(Ljava/lang/String;)Ljava/lang/String;")
-
-    val antiInstrumentation = "$PROTECTION_HELPER_PACKAGE/AntiInstrumentationHelper"
-    addMethod(antiInstrumentation, "checkInstrumentation", stringStringVoid)
-    addMethod(antiInstrumentation, "checkInstrumentationEx", stringStringVoid)
-    addMethod(antiInstrumentation, "checkInstrumentationExSafe", stringStringVoid)
-    addMethod(antiInstrumentation, "nativeCheckInstrumentation", stringStringVoid)
-
-    val antiJvmTi = "$PROTECTION_HELPER_PACKAGE/AntiJvmTiHelper"
-    addMethod(antiJvmTi, "checkJvmTiAgents", stringStringVoid)
-    addMethod(antiJvmTi, "nativeCheckJvmTiAgents", stringStringVoid)
-
-    val antiByteBuddy = "$PROTECTION_HELPER_PACKAGE/AntiByteBuddyHelper"
-    addMethod(antiByteBuddy, "checkByteBuddy", stringVoid)
-    addMethod(antiByteBuddy, "nativeCheckByteBuddy", stringVoid)
-
-    val antiDumpRuntime = "$PROTECTION_HELPER_PACKAGE/AntiDumpRuntimeHelper"
-    addMethod(antiDumpRuntime, "initializeProtection", stringVoid)
-    addMethod(antiDumpRuntime, "initializeProtection", "(Ljava/lang/String;Ljava/lang/Class;)V")
-    addMethod(antiDumpRuntime, "nativeInitializeProtection", stringVoid)
-    addMethod(antiDumpRuntime, "nativeInitializeProtection", "(Ljava/lang/String;Ljava/lang/Class;)V")
-    addMethod(antiDumpRuntime, "scrambleString", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;")
-    addMethod(antiDumpRuntime, "unscrambleString", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;")
-    addMethod(antiDumpRuntime, "scrambleBytes", "([BLjava/lang/String;Ljava/lang/String;)[B")
-    addMethod(antiDumpRuntime, "unscrambleBytes", "([BLjava/lang/String;Ljava/lang/String;)[B")
-    addMethod(antiDumpRuntime, "scrambleChars", "([CLjava/lang/String;Ljava/lang/String;)[C")
-    addMethod(antiDumpRuntime, "unscrambleChars", "([CLjava/lang/String;Ljava/lang/String;)[C")
-
     // AKEN v4 binds only the typed current-page/native-loader surface.  Do
     // not write legacy boot, generic resource decoder, or central VM dispatch
     // names into a sealed binding map for a new artifact.
@@ -1059,32 +862,22 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     addMethod(jniHelper, "nativeInit", "(Ljava/lang/String;)I")
     addMethod(jniHelper, "nativeHeartbeat", "()I")
     addMethod(jniHelper, "nativeInstallAkenSessionNonce", "([B)Z")
+    addMethod(jniHelper, "nativeInstallAkenCatalog", "([B[B)I")
     addMethod(jniHelper, "nativeExecuteAkenVmPage", "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;")
     addMethod(jniHelper, "nativeOpenAkenString", "([BI[B)Ljava/lang/String;")
     addMethod(jniHelper, "nativeReadAkenClassPage", "([BI[B)[B")
     addMethod(jniHelper, "nativeConsumeAkenNativeChunk", "([BI[B)V")
-    if (!typedOnlyRuntime) {
-        // Compatibility-only member bindings for pre-AKEN artifacts.  They are
-        // intentionally absent from the production typed-only binding map.
-        addMethod(jniHelper, "nativeVerify", "([B[B)I")
-        addMethod(jniHelper, "nativeGetVersion", "()Ljava/lang/String;")
-        addMethod(jniHelper, "nativeDecryptAes", "([B[B[B)[B")
-        addMethod(jniHelper, "nativeDeriveClassEncryptionKey", "([B[BI)[B")
-        addMethod(jniHelper, "nativeDecryptClassBytes", "([B[B[B[B[BI)[B")
-        addMethod(jniHelper, "nativeSealedBindingKey", "([B)Ljava/lang/String;")
-    }
+    // Unified defense is part of the current typed JNI ABI.  Keep these
+    // declarations in the sealed member map even though their canonical
+    // marker literals remain in the helper for native-image validation.
+    addMethod(jniHelper, "nativeInitializeDefense", "(Ljava/lang/String;Ljava/lang/String;)I")
+    addMethod(jniHelper, "nativeProbeDefense", "(Ljava/lang/String;Ljava/lang/String;)I")
+    addMethod(jniHelper, "nativeTransformDefense", "([BLjava/lang/String;)[B")
     addMethod(jniHelper, "createSamLambda", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;")
 
     val bootstrap = "$PROTECTION_HELPER_PACKAGE/BootstrapEncryptionHelper"
     addMethod(bootstrap, "decryptBytes", "(Ljava/lang/String;Ljava/lang/String;)[B")
     addMethod(bootstrap, "encryptedBootstrap", "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;")
-
-    val classEncryption = "$PROTECTION_HELPER_PACKAGE/ClassEncryptionLoaderHelper"
-    if (!typedOnlyRuntime) {
-        // Compatibility-only manifest bootstrap for pre-AKEN artifacts.
-        addMethod(classEncryption, "initializeClass", "(Ljava/lang/String;Ljava/lang/String;)V")
-    }
-    addMethod(classEncryption, "loadAkenClass", "(Ljava/lang/String;)Ljava/lang/Class;")
 
     val stringEncryption = "$PROTECTION_HELPER_PACKAGE/StringEncryptionHelper"
     addMethod(stringEncryption, "invokeAkenStringTerminal", "([BI[B)Ljava/lang/String;")
@@ -1094,19 +887,6 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     listOf("q0", "m7", "x3", "v8").forEach { bootstrapName ->
         addMethod(stringEncryption, bootstrapName, stringBootstrapDescriptor)
     }
-
-    val methodBody = "$PROTECTION_HELPER_PACKAGE/MethodBodyDecryptionHelper"
-    addMethod(methodBody, "invokeEncrypted", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Class;Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;")
-    addMethod(methodBody, "invokeEncrypted", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/Class;Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;")
-    addMethod(methodBody, "decryptBytes", "([B[BLjava/lang/String;)[B")
-
-    val environment = "$PROTECTION_HELPER_PACKAGE/EnvironmentBindingHelper"
-    addMethod(environment, "deriveKey", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;")
-    addMethod(environment, "verifyEnvironment", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V")
-    addMethod(environment, "getMachineFingerprint", "()Ljava/lang/String;")
-    addMethod(environment, "nativeDeriveKey", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;")
-    addMethod(environment, "nativeVerifyEnvironment", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V")
-    addMethod(environment, "nativeGetMachineFingerprint", "()Ljava/lang/String;")
 
 
     return SealedHelperMemberRenamePlan(methodRenames = methodRenames, fieldRenames = fieldRenames)
@@ -1131,10 +911,46 @@ private fun sealedHelperStringRewriteMap(seed: Long, helperClassRenameMap: Map<S
 }
 
 private fun sealedHelperMethodStringRewriteMap(helperMemberRenamePlan: SealedHelperMemberRenamePlan): Map<String, String> {
+    // JniMicrokernelHelper validates the bundled native image by searching for
+    // the canonical Rust ABI marker names.  Those marker strings describe the
+    // native registration surface, not Java call-site members, so they must
+    // remain unchanged even when the Java declarations are relocated/renamed.
+    // The sealed binding map still carries the Java-side renamed method names
+    // for dynamic registration; only these diagnostic marker literals are
+    // excluded from string rewriting.
+    val nativeAbiMarkers = setOf(
+        "nativeInit",
+        "nativeHeartbeat",
+        "nativeInstallAkenSessionNonce",
+        "nativeInstallAkenCatalog",
+        "nativeExecuteAkenVmPage",
+        "nativeOpenAkenString",
+        "nativeReadAkenClassPage",
+        "nativeConsumeAkenNativeChunk",
+        "nativeInitializeDefense",
+        "nativeProbeDefense",
+        "nativeTransformDefense",
+    )
     val rewriteMap = linkedMapOf<String, String>()
     for ((ref, sealedName) in helperMemberRenamePlan.methodRenames) {
-        if (ref.owner.startsWith(PROTECTION_HELPER_PACKAGE) && ref.name.startsWith("native")) {
+        if (
+            ref.owner.startsWith(PROTECTION_HELPER_PACKAGE) &&
+                ref.name.startsWith("native") &&
+                ref.name !in nativeAbiMarkers
+        ) {
             rewriteMap.putIfAbsent(ref.name, sealedName)
+        }
+        // The sealed helper keeps artifact-specific JNI method names, but its
+        // native-image validation table must continue to carry the canonical
+        // ABI marker strings.  A previous helper/member rewrite can encounter
+        // the marker after the declaration has already been renamed; reverse
+        // that string-only rewrite here without changing the actual JNI method
+        // binding map.
+        if (
+            ref.owner.startsWith(PROTECTION_HELPER_PACKAGE) &&
+                ref.name in nativeAbiMarkers
+        ) {
+            rewriteMap.putIfAbsent(sealedName, ref.name)
         }
     }
     return rewriteMap
@@ -1158,19 +974,6 @@ private fun validateAkenR1NativeInputs(entries: Iterable<JarEntryData>) {
         }
     }
 }
-
-private fun isDelayedMethodResource(entryName: String): Boolean =
-    entryName.startsWith(LEGACY_DELAYED_METHOD_RESOURCE_ROOT) && entryName.endsWith(".enc")
-
-private fun isClassEncryptionResource(entryName: String): Boolean =
-    entryName.startsWith(LEGACY_CLASS_ENCRYPTION_RESOURCE_ROOT) && entryName.endsWith(".enc")
-
-private fun isClassEncryptionManifestResource(entryName: String): Boolean =
-    entryName == LEGACY_CLASS_ENCRYPTION_MANIFEST_RESOURCE
-
-private fun isLegacyAkenHelperEntry(entryName: String): Boolean =
-    entryName.endsWith(".class") &&
-        entryName.removeSuffix(".class") in LEGACY_AKEN_HELPER_INTERNAL_NAMES
 
 private fun isR1NativeKernelResource(entryName: String): Boolean =
     NativeRecompilationRoute.canonicalPlatformOrder.any { platform ->
@@ -1260,7 +1063,9 @@ private fun uniqueSealedNativeResourceName(
 
 private fun sealedHelperInternalName(seed: Long, originalName: String, index: Int): String {
     val digest = sealedDigest(seed, "h", originalName, index)
-    return "r/${digest.take(2)}/C${digest.drop(2).take(24)}"
+    // Never recreate a retired fixed-r helper namespace. This includes the
+    // hexadecimal-shard form such as r.d2.C03c6b81f63fb4dc18f2033e7.
+    return "jsh/${digest.take(2)}/H${digest.drop(2).take(24)}"
 }
 
 private fun sealedNestedHelperInternalName(seed: Long, sealedOuterName: String, originalName: String, index: Int): String {
@@ -1310,7 +1115,6 @@ private fun encodeSealedNativeBindings(
     applicationMethodBindings: Map<SealedMemberRef, String> = emptyMap(),
     applicationFieldBindings: Map<SealedMemberRef, String> = emptyMap(),
     seed: Long,
-    envBindingMetadata: RuntimeArtifactSealing.EnvBindingMetadata? = null,
 ): ByteArray {
     val lines = mutableListOf<String>()
     lines += helperClassRenameMap.map { (originalName, sealedName) -> listOf("B", sealedBindingKey(originalName), sealedName).joinToString("|") }
@@ -1329,10 +1133,6 @@ private fun encodeSealedNativeBindings(
         .map { (ref, renamedName) -> listOf("F", sealedBindingKey("${ref.owner}#${ref.name}#${ref.descriptor}"), renamedName).joinToString("|") }
     lines += applicationFieldBindings
         .map { (ref, renamedName) -> listOf("F", sealedBindingKey("${ref.owner}#${ref.name}#${ref.descriptor}"), renamedName).joinToString("|") }
-    // Environment binding is enforced by EnvironmentBindingHelper clinit checks.
-    // The AKEN relocation table is B/M/F only; an E| row makes runtime load fail closed.
-    @Suppress("UNUSED_PARAMETER")
-    val unusedEnvBindingMetadata = envBindingMetadata
     return encodeSealedNativeBindingLines(lines, seed)
 }
 
@@ -1501,94 +1301,6 @@ private fun sealedBindingKey(value: String): String {
 }
 
 
-private fun currentVirtualMachineResourceNames(plan: RuntimeVmCatalogPlan, jarEntries: List<JarEntryData>): Set<String> {
-    val names = plan.resourceNames().toMutableSet()
-    require(names.isNotEmpty()) { "current VM index contains no resources" }
-    val entriesByName = jarEntries.associateBy { it.name }
-    for (manifestName in names.toList()) {
-        val manifestEntry = entriesByName[manifestName]
-            ?: error("current VM index references missing resource: $manifestName")
-        val decodedManifest = RuntimeResourceCodec.decode(manifestEntry.bytes)
-            ?: error("current VM resource failed authentication: $manifestName")
-        if (!decodedManifest.decodeToString().startsWith(requireVbc4BuildContext().vmManifestProtocol().prefix)) continue
-        decodedManifest.decodeToString()
-            .lineSequence()
-            .drop(1)
-            .forEach { line ->
-                val parts = line.split('|')
-                val shardPath = parts.getOrNull(4)
-                if (!shardPath.isNullOrBlank()) names += shardPath
-            }
-    }
-    names.forEach { name ->
-        require(entriesByName.containsKey(name)) { "current VM index references missing resource: $name" }
-    }
-    return names
-}
-
-private fun encodeSealedClassEncryptionManifest(bytes: ByteArray, resourceRenameMap: Map<String, String>): ByteArray {
-    val rewritten = String(bytes, Charsets.UTF_8)
-        .lineSequence()
-        .filter { it.isNotEmpty() }
-        .joinToString(separator = "\n", postfix = "\n") { line ->
-            val columns = line.split('	')
-            if (columns.size < 3) {
-                line
-            } else {
-                val className = columns[0]
-                val originalResourcePath = columns[1]
-                val sealedResourcePath = resourceRenameMap[originalResourcePath] ?: originalResourcePath
-                val metadata = rewriteClassEncryptionMetadataForResource(className, originalResourcePath, sealedResourcePath, columns[2])
-                listOf(className, sealedResourcePath, metadata).joinToString("	")
-            }
-        }
-        .toByteArray(Charsets.UTF_8)
-    val resourceSeed = MessageDigest.getInstance("SHA-256")
-        .digest(rewritten)
-        .take(4)
-        .fold(0) { acc, byte -> (acc shl 8) or (byte.toInt() and 0xFF) }
-    return RuntimeResourceCodec.encode(
-        bytes = rewritten,
-        kind = RuntimeResourceKind.Manifest,
-        seed = resourceSeed,
-        variantId = resourceRenameMap.size.coerceAtLeast(1),
-        layerCount = 3,
-        compress = true,
-        partitionIdentity = byteArrayOf(3) + rewritten,
-    )
-}
-
-private fun rewriteClassEncryptionMetadataForResource(
-    className: String,
-    originalResourcePath: String,
-    sealedResourcePath: String,
-    keyMetadata: String,
-): String {
-    if (originalResourcePath == sealedResourcePath) return keyMetadata
-    val parts = keyMetadata.split(':')
-    if (parts.size != 6 || parts[0] != "v2") return keyMetadata
-    val strategy = parts[1]
-    val expectedHash = runCatching { Base64.getDecoder().decode(parts[5]) }.getOrNull() ?: return keyMetadata
-    val keyMode = listOf("per-class", "global")
-        .firstOrNull { candidate ->
-            Arrays.equals(
-                MessageDigest.getInstance("SHA-256").digest(classEncryptionRewriteAad(className, originalResourcePath, strategy, candidate)),
-                expectedHash,
-            )
-        }
-        ?: return keyMetadata
-    val sealedAadHash = MessageDigest.getInstance("SHA-256")
-        .digest(classEncryptionRewriteAad(className, sealedResourcePath, strategy, keyMode))
-    return listOf(
-        parts[0],
-        parts[1],
-        parts[2],
-        parts[3],
-        parts[4],
-        Base64.getEncoder().encodeToString(sealedAadHash),
-    ).joinToString(":")
-}
-
 private fun rewriteClassArtifact(
     classArtifact: ClassArtifact,
     seed: Long,
@@ -1717,7 +1429,8 @@ private fun remapHelperReferences(
         if (
             classArtifact.summary.internalName in helperClassRenameMap.keys ||
             classArtifact.summary.internalName in helperClassRenameMap.values ||
-            remappedClassName in helperClassRenameMap.values
+            remappedClassName in helperClassRenameMap.values ||
+            classArtifact.summary.internalName == "$PROTECTION_HELPER_PACKAGE/StringEncryptionHelper"
         ) {
             val classNode = ClassNode()
             ClassReader(updatedBytes).accept(classNode, 0)
@@ -1783,9 +1496,15 @@ private fun remapHelperReferences(
                 "invokeAkenStringTerminal",
                 stringTerminalDescriptor,
             )
-            if (classNode.name == sealedStringOwner && sealedStringTerminalName != null) {
+            if (
+                (classNode.name == sealedStringOwner && sealedStringTerminalName != null) ||
+                    (classNode.name == originalStringOwner && sealedStringOwner == null)
+            ) {
                 classNode.methods
-                    .filter { it.name == sealedStringTerminalName && it.desc == stringTerminalDescriptor }
+                    .filter {
+                        it.name == (sealedStringTerminalName ?: "invokeAkenStringTerminal") &&
+                            it.desc == stringTerminalDescriptor
+                    }
                     .forEach { method ->
                         val publicAccess =
                             (method.access and (Opcodes.ACC_PRIVATE or Opcodes.ACC_PROTECTED).inv()) or Opcodes.ACC_PUBLIC
@@ -1978,173 +1697,6 @@ private fun rewriteClassStringConstants(
  * Parse the class encryption manifest to extract encryption keys for each encrypted class.
  * Returns a map of resourcePath -> AEAD rewrite key material.
  */
-private data class ClassEncryptionRewriteKey(
-    val className: String,
-    val strategy: String,
-    val keyMode: String,
-    val keyId: ByteArray,
-    val salt: ByteArray,
-    val key: ByteArray,
-    val nonce: ByteArray,
-    val aad: ByteArray,
-)
-
-private fun parseClassEncryptionManifest(jarEntries: List<JarEntryData>): Map<String, ClassEncryptionRewriteKey> {
-    val manifest = jarEntries.find { isClassEncryptionManifestResource(it.name) } ?: return emptyMap()
-    val buildContext = requireVbc4BuildContext()
-    val result = linkedMapOf<String, ClassEncryptionRewriteKey>()
-    for (line in String(manifest.bytes, Charsets.UTF_8).lines()) {
-        if (line.isEmpty()) continue
-        val cols = line.split('\t')
-        if (cols.size < 3) continue
-        val className = cols[0]
-        val resourcePath = cols[1]
-        val keyMetadata = cols[2]
-        val parts = keyMetadata.split(':')
-        if (parts.size != 6 || parts[0] != "v2") continue
-        val strategy = parts[1]
-        val keyId = Base64.getDecoder().decode(parts[2])
-        val salt = Base64.getDecoder().decode(parts[3])
-        val nonce = Base64.getDecoder().decode(parts[4])
-        val expectedHash = Base64.getDecoder().decode(parts[5])
-        val aad = listOf("per-class", "global")
-            .map { keyMode -> keyMode to classEncryptionRewriteAad(className, resourcePath, strategy, keyMode) }
-            .firstOrNull { (_, candidate) -> Arrays.equals(MessageDigest.getInstance("SHA-256").digest(candidate), expectedHash) }
-            ?: continue
-        if (nonce.size != 12) continue
-        val key = deriveClassEncryptionKey(buildContext, strategy, keyId, salt)
-        result[resourcePath] = ClassEncryptionRewriteKey(
-            className = className,
-            strategy = strategy,
-            keyMode = aad.first,
-            keyId = keyId,
-            salt = salt,
-            key = key,
-            nonce = nonce,
-            aad = aad.second,
-        )
-    }
-    return result
-}
-
-/**
- * Rewrite encrypted class bytecode to update helper class references after sealing.
- * Decrypts the class, rewrites string constants, and re-encrypts.
- */
-private fun rewriteEncryptedClassBytes(
-    encryptedBytes: ByteArray,
-    resourceName: String,
-    sealedResourceName: String,
-    classEncryptionKeys: Map<String, ClassEncryptionRewriteKey>,
-    stringRewriteMap: Map<String, String>,
-    seed: Long,
-    helperClassRenameMap: Map<String, String>,
-    helperMemberRenamePlan: SealedHelperMemberRenamePlan,
-): ByteArray {
-    if (classEncryptionKeys.isEmpty() || stringRewriteMap.isEmpty()) return encryptedBytes
-    val keyInfo = classEncryptionKeys[resourceName] ?: return encryptedBytes
-    val sealedKeyInfo = keyInfo.copy(
-        aad = classEncryptionRewriteAad(keyInfo.className, sealedResourceName, keyInfo.strategy, keyInfo.keyMode),
-    )
-    // Decrypt the class bytecode
-    val decryptedBytes = try {
-        decryptClassBytesForRewrite(encryptedBytes, keyInfo)
-    } catch (_: Exception) {
-        return encryptedBytes
-    } ?: return encryptedBytes
-    // Rewrite string constants and helper references in the decrypted bytecode
-    val rewrittenBytes = try {
-        rewriteEncryptedClassBytecode(decryptedBytes, seed, stringRewriteMap, helperClassRenameMap, helperMemberRenamePlan)
-    } catch (_: Exception) {
-        decryptedBytes
-    }
-    // Re-encrypt the rewritten bytecode
-    return try {
-        encryptClassBytesForSealing(rewrittenBytes, sealedKeyInfo)
-    } catch (_: Exception) {
-        encryptedBytes
-    }
-}
-
-private fun decryptClassBytesForRewrite(data: ByteArray, keyInfo: ClassEncryptionRewriteKey): ByteArray? {
-    require(keyInfo.strategy == "aes-128" || keyInfo.strategy == "aes-256") { "Unsupported encryption strategy: ${keyInfo.strategy}" }
-    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-    val keySpec = SecretKeySpec(keyInfo.key, "AES")
-    cipher.init(Cipher.DECRYPT_MODE, keySpec, GCMParameterSpec(128, keyInfo.nonce))
-    cipher.updateAAD(keyInfo.aad)
-    return cipher.doFinal(data)
-}
-
-private fun encryptClassBytesForSealing(data: ByteArray, keyInfo: ClassEncryptionRewriteKey): ByteArray {
-    require(keyInfo.strategy == "aes-128" || keyInfo.strategy == "aes-256") { "Unsupported encryption strategy: ${keyInfo.strategy}" }
-    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-    val keySpec = SecretKeySpec(keyInfo.key, "AES")
-    cipher.init(Cipher.ENCRYPT_MODE, keySpec, GCMParameterSpec(128, keyInfo.nonce))
-    cipher.updateAAD(keyInfo.aad)
-    return cipher.doFinal(data)
-}
-
-private fun classEncryptionRewriteAad(className: String, resourcePath: String, strategy: String, keyMode: String): ByteArray =
-    "javashroud:class-encryption:v2:$className:$resourcePath:$strategy:$keyMode:sealed-runtime".toByteArray(Charsets.UTF_8)
-
-/**
- * Rewrite string constants and helper references in decrypted class bytecode.
- */
-private fun rewriteEncryptedClassBytecode(
-    classBytes: ByteArray,
-    seed: Long,
-    stringRewriteMap: Map<String, String>,
-    helperClassRenameMap: Map<String, String>,
-    helperMemberRenamePlan: SealedHelperMemberRenamePlan,
-): ByteArray {
-    val reader = ClassReader(classBytes)
-    val writer = ClassWriter(0)
-    var modified = false
-    // First remap helper class references
-    val remapper = object : org.objectweb.asm.commons.Remapper(org.objectweb.asm.Opcodes.ASM9) {
-        override fun map(internalName: String?): String? {
-            val replacement = internalName?.let { helperClassRenameMap[it] }
-            if (replacement != null) modified = true
-            return replacement ?: internalName
-        }
-        override fun mapMethodName(owner: String?, name: String?, descriptor: String?): String? {
-            val replacement = helperMemberRenamePlan.methodName(owner, name, descriptor)
-            if (replacement != name) modified = true
-            return replacement
-        }
-        override fun mapFieldName(owner: String?, name: String?, descriptor: String?): String? {
-            val replacement = helperMemberRenamePlan.fieldName(owner, name, descriptor)
-            if (replacement != name) modified = true
-            return replacement
-        }
-    }
-    val remappedWriter = ClassWriter(0)
-    reader.accept(org.objectweb.asm.commons.ClassRemapper(remappedWriter, remapper), 0)
-    val remappedBytes = if (modified) remappedWriter.toByteArray() else classBytes
-    // Then rewrite string constants
-    val stringReader = ClassReader(remappedBytes)
-    val stringWriter = ClassWriter(0)
-    var stringModified = false
-    val visitor = object : ClassVisitor(org.objectweb.asm.Opcodes.ASM9, stringWriter) {
-        override fun visitMethod(access: Int, name: String, descriptor: String, signature: String?, exceptions: Array<String>?): MethodVisitor {
-            val mv = super.visitMethod(access, name, descriptor, signature, exceptions)
-            return object : MethodVisitor(org.objectweb.asm.Opcodes.ASM9, mv) {
-                override fun visitLdcInsn(value: Any?) {
-                    val replacement = if (value is String) sealedReplacementForString(value, seed, stringRewriteMap) else null
-                    if (replacement != null) {
-                        stringModified = true
-                        super.visitLdcInsn(replacement)
-                    } else {
-                        super.visitLdcInsn(value)
-                    }
-                }
-            }
-        }
-    }
-    stringReader.accept(visitor, 0)
-    return if (stringModified) stringWriter.toByteArray() else remappedBytes
-}
-
 private fun sealedReplacementForString(value: String, seed: Long, stringRewriteMap: Map<String, String>): String? {
     stringRewriteMap[value]?.let { return it }
     return null

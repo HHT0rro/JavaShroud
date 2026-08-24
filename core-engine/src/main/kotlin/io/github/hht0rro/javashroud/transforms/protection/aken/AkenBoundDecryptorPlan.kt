@@ -5,46 +5,60 @@ import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Arrays
 
-private const val BOUND_DIGEST_SIZE: Int = 32
-private const val BOUND_LANE_COUNT: Int = 8
-private const val BOUND_WORD_FAMILY_COUNT: Int = 8
-private const val BOUND_PLAN_NONCE_SIZE: Int = 16
-private const val BOUND_LANE_SALT_SIZE: Int = 16
-private const val BOUND_MIN_TOKEN_SIZE: Int = 17
-private const val BOUND_MAX_TOKEN_SIZE: Int = 48
+private const val EVALUATOR_DIGEST_SIZE: Int = 32
+private const val EVALUATOR_PLAN_NONCE_SIZE: Int = 16
+private const val EVALUATOR_FRAGMENT_SALT_SIZE: Int = 16
+private const val EVALUATOR_FRAGMENT_TAG_SIZE: Int = 16
+private const val EVALUATOR_DIALECT_SIZE: Int = 32
+private const val EVALUATOR_MIN_FRAGMENT_COUNT: Int = 4
+private const val EVALUATOR_MAX_FRAGMENT_COUNT: Int = 12
+private const val EVALUATOR_MIN_TOKEN_SIZE: Int = 17
+private const val EVALUATOR_MAX_TOKEN_SIZE: Int = 48
+private const val EVALUATOR_MAX_OPAQUE_SIZE: Int = 128 * 1024
+private val EVALUATOR_WIRE_MARKER = byteArrayOf(0x56, 0x42, 0x43, 0x34)
 
 /**
- * Build-only seed for one page-bound native decryptor.
- *
- * The seed never stores a raw page key after construction.  Instead it owns
- * eight independently encoded word lanes, each authenticated against the
- * page's static binding.  The final runtime descriptor adds the route and
- * call-site proof binding immediately before materialization.
+ * Build-only evaluator seed for one page. The serialized terminal is an
+ * artifact-specific VBC4 program: its fragment count, offsets, opcodes,
+ * registers, token sizes and dialect are randomized for every page.
  */
 internal class AkenBoundDecryptorCore private constructor(
     pageNonce: ByteArray,
     planNonce: ByteArray,
-    dispatchVariant: Int,
+    dialectByte: Int,
+    dialectCommitment: ByteArray,
     staticBinding: ByteArray,
-    laneRecords: List<LaneRecord>,
+    fragments: List<EvaluatorFragmentRecord>,
 ) : AutoCloseable {
-    private var dispatchVariantValue = dispatchVariant
+    private var dialectByteValue = dialectByte
+    private var dialectCommitmentValue = dialectCommitment.copyOf()
     private var staticBindingValue = staticBinding.copyOf()
     private var pageNonceValue = pageNonce.copyOf()
     private var planNonceValue = planNonce.copyOf()
-    private var laneRecordsValue = laneRecords
+    private var fragmentsValue = fragments
 
     @Volatile
     private var wiped = false
 
     init {
-        require(pageNonceValue.size == AkenResourceCodec.NONCE_SIZE) { "AKEN bound page nonce length is invalid" }
-        require(planNonceValue.size == BOUND_PLAN_NONCE_SIZE) { "AKEN bound plan nonce length is invalid" }
-        require(dispatchVariantValue in 0..0xFF) { "AKEN bound dispatcher variant is invalid" }
-        require(staticBindingValue.size == BOUND_DIGEST_SIZE) { "AKEN bound static binding length is invalid" }
-        require(laneRecordsValue.size == BOUND_LANE_COUNT) { "AKEN bound lane count is invalid" }
-        require(laneRecordsValue.map { it.wordIndex }.toSet() == (0 until BOUND_LANE_COUNT).toSet()) {
-            "AKEN bound lanes do not cover the page schedule"
+        require(pageNonceValue.size == AkenResourceCodec.NONCE_SIZE) {
+            "AKEN evaluator page nonce length is invalid"
+        }
+        require(planNonceValue.size == EVALUATOR_PLAN_NONCE_SIZE) {
+            "AKEN evaluator plan nonce length is invalid"
+        }
+        require(dialectByteValue in 0..0xFF) { "AKEN evaluator dialect byte is invalid" }
+        require(dialectCommitmentValue.size == EVALUATOR_DIALECT_SIZE) {
+            "AKEN evaluator dialect commitment length is invalid"
+        }
+        require(staticBindingValue.size == EVALUATOR_DIGEST_SIZE) {
+            "AKEN evaluator static binding length is invalid"
+        }
+        require(fragmentsValue.size in EVALUATOR_MIN_FRAGMENT_COUNT..EVALUATOR_MAX_FRAGMENT_COUNT) {
+            "AKEN evaluator fragment count is invalid"
+        }
+        require(hasFullEvaluatorCoverage(fragmentsValue)) {
+            "AKEN evaluator fragments do not cover page material exactly once"
         }
     }
 
@@ -53,27 +67,30 @@ internal class AkenBoundDecryptorCore private constructor(
         return pageNonceValue.copyOf()
     }
 
-    /**
-     * Seal the build-only seed into the opaque descriptor frame consumed by the
-     * native current-page terminal.  This operation has no raw-key output.
-     */
+    /** Seal the build-only evaluator into the descriptor consumed by native. */
     internal fun finalizeForRuntime(
         route: AkenRoutingMetadata,
         callSiteProof: ByteArray,
     ): AkenBoundDecryptorPlan {
         requireLive()
-        require(callSiteProof.isNotEmpty()) { "AKEN bound call-site proof must not be empty" }
-        laneRecordsValue.forEach { lane ->
-            val expected = AkenBoundDecryptorPlan.laneTag(
-                staticBindingValue,
-                lane.wordIndex,
-                lane.family,
-                lane.token,
-                lane.salt,
-                lane.encodedWord,
+        require(callSiteProof.isNotEmpty()) { "AKEN evaluator call-site proof must not be empty" }
+        fragmentsValue.forEach { fragment ->
+            val expected = AkenBoundDecryptorPlan.fragmentTag(
+                staticBinding = staticBindingValue,
+                dialectCommitment = dialectCommitmentValue,
+                offset = fragment.offset,
+                length = fragment.encoded.size,
+                family = fragment.family,
+                opcode = fragment.opcode,
+                register = fragment.register,
+                token = fragment.token,
+                salt = fragment.salt,
+                encoded = fragment.encoded,
             )
             try {
-                require(MessageDigest.isEqual(expected, lane.tag)) { "AKEN bound core lane authentication failed" }
+                require(MessageDigest.isEqual(expected, fragment.tag)) {
+                    "AKEN evaluator fragment authentication failed"
+                }
             } finally {
                 Arrays.fill(expected, 0)
             }
@@ -84,12 +101,13 @@ internal class AkenBoundDecryptorCore private constructor(
         try {
             finalBinding = AkenBoundDecryptorPlan.finalBinding(staticBindingValue, routeBytes, callSiteProof)
             encoded = AkenBoundDecryptorPlan.encodeOpaque(
-                dispatchVariant = dispatchVariantValue,
+                dialectByte = dialectByteValue,
                 pageNonce = pageNonceValue,
                 planNonce = planNonceValue,
                 staticBinding = staticBindingValue,
                 finalBinding = checkNotNull(finalBinding),
-                lanes = laneRecordsValue,
+                dialectCommitment = dialectCommitmentValue,
+                fragments = fragmentsValue,
             )
             return AkenBoundDecryptorPlan.fromOpaque(checkNotNull(encoded))
         } finally {
@@ -106,22 +124,24 @@ internal class AkenBoundDecryptorCore private constructor(
         Arrays.fill(pageNonceValue, 0)
         Arrays.fill(planNonceValue, 0)
         Arrays.fill(staticBindingValue, 0)
-        laneRecordsValue.forEach { it.wipe() }
+        Arrays.fill(dialectCommitmentValue, 0)
+        fragmentsValue.forEach { it.wipe() }
         pageNonceValue = ByteArray(0)
         planNonceValue = ByteArray(0)
         staticBindingValue = ByteArray(0)
-        laneRecordsValue = emptyList()
-        dispatchVariantValue = 0
+        dialectCommitmentValue = ByteArray(0)
+        fragmentsValue = emptyList()
+        dialectByteValue = 0
         wiped = true
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN bound decryptor core has been wiped" }
+        check(!wiped) { "AKEN evaluator core has been wiped" }
     }
 
     companion object {
         internal fun compile(
-            dek: ByteArray,
+            pageMaterial: ByteArray,
             resourceKind: AkenResourceKind,
             logicalIdentity: ByteArray,
             pageIndex: Int,
@@ -135,15 +155,23 @@ internal class AkenBoundDecryptorCore private constructor(
             pageNonce: ByteArray,
             random: SecureRandom,
         ): AkenBoundDecryptorCore {
-            require(dek.size == AkenEvaluatorState.STATE_WIDTH) { "AKEN bound page material length is invalid" }
-            require(pageNonce.size == AkenResourceCodec.NONCE_SIZE) { "AKEN bound page nonce length is invalid" }
-            require(evaluatorFingerprint.size == BOUND_DIGEST_SIZE) { "AKEN bound evaluator fingerprint length is invalid" }
-            require(artifactCanonicalCommitment.size == BOUND_DIGEST_SIZE) { "AKEN bound artifact commitment length is invalid" }
-
-            val planNonce = ByteArray(BOUND_PLAN_NONCE_SIZE).also(random::nextBytes)
-            val dispatchVariant = random.nextInt(256)
+            require(pageMaterial.size == AkenVbc4Material.PAGE_MATERIAL_SIZE) {
+                "AKEN evaluator page material length is invalid"
+            }
+            require(pageNonce.size == AkenResourceCodec.NONCE_SIZE) {
+                "AKEN evaluator page nonce length is invalid"
+            }
+            require(evaluatorFingerprint.size == EVALUATOR_DIGEST_SIZE) {
+                "AKEN evaluator fingerprint length is invalid"
+            }
+            require(artifactCanonicalCommitment.size == EVALUATOR_DIGEST_SIZE) {
+                "AKEN evaluator artifact commitment length is invalid"
+            }
+            val planNonce = ByteArray(EVALUATOR_PLAN_NONCE_SIZE).also(random::nextBytes)
+            val dialectByte = random.nextInt(256)
             var staticBinding: ByteArray? = null
-            val lanes = ArrayList<LaneRecord>(BOUND_LANE_COUNT)
+            var dialectCommitment: ByteArray? = null
+            val fragments = ArrayList<EvaluatorFragmentRecord>()
             var completed = false
             try {
                 staticBinding = AkenBoundDecryptorPlan.staticBinding(
@@ -159,56 +187,140 @@ internal class AkenBoundDecryptorCore private constructor(
                     artifactCanonicalCommitment = artifactCanonicalCommitment,
                     pageNonce = pageNonce,
                     planNonce = planNonce,
-                    dispatchVariant = dispatchVariant,
+                    dialectByte = dialectByte,
                 )
-                val order = IntArray(BOUND_LANE_COUNT) { it }
-                for (index in order.lastIndex downTo 1) {
-                    val other = random.nextInt(index + 1)
-                    val swap = order[index]
-                    order[index] = order[other]
-                    order[other] = swap
-                }
-                order.forEach { wordIndex ->
-                    val family = random.nextInt(BOUND_WORD_FAMILY_COUNT)
-                    val token = ByteArray(BOUND_MIN_TOKEN_SIZE + random.nextInt(BOUND_MAX_TOKEN_SIZE - BOUND_MIN_TOKEN_SIZE + 1)).also(random::nextBytes)
-                    val salt = ByteArray(BOUND_LANE_SALT_SIZE).also(random::nextBytes)
+                dialectCommitment = AkenBoundDecryptorPlan.dialectCommitment(
+                    staticBinding = checkNotNull(staticBinding),
+                    planNonce = planNonce,
+                    dialectByte = dialectByte,
+                )
+                val count = EVALUATOR_MIN_FRAGMENT_COUNT +
+                    random.nextInt(EVALUATOR_MAX_FRAGMENT_COUNT - EVALUATOR_MIN_FRAGMENT_COUNT + 1)
+                val lengths = chooseFragmentLengths(count, pageMaterial.size, random)
+                var offset = 0
+                val order = (0 until count).toMutableList()
+                order.shuffle(random)
+                order.forEach { ordinal ->
+                    val length = lengths[ordinal]
+                    val family = random.nextInt(16)
+                    val opcode = random.nextInt(256)
+                    val register = random.nextInt(32)
+                    val token = ByteArray(
+                        EVALUATOR_MIN_TOKEN_SIZE +
+                            random.nextInt(EVALUATOR_MAX_TOKEN_SIZE - EVALUATOR_MIN_TOKEN_SIZE + 1),
+                    ).also(random::nextBytes)
+                    val salt = ByteArray(EVALUATOR_FRAGMENT_SALT_SIZE).also(random::nextBytes)
+                    var encoded: ByteArray? = null
                     var tag: ByteArray? = null
                     try {
-                        val value = AkenBoundDecryptorPlan.readWord(dek, wordIndex * Int.SIZE_BYTES)
-                        val mask = AkenBoundDecryptorPlan.laneMask(checkNotNull(staticBinding), wordIndex, family, token, salt)
-                        val encodedWord = AkenBoundDecryptorPlan.encodeWord(value, mask, family, wordIndex)
-                        tag = AkenBoundDecryptorPlan.laneTag(checkNotNull(staticBinding), wordIndex, family, token, salt, encodedWord)
-                        lanes += LaneRecord(wordIndex, family, token, salt, encodedWord, checkNotNull(tag))
+                        encoded = encodeFragment(
+                            pageMaterial = pageMaterial,
+                            offset = offset,
+                            length = length,
+                            family = family,
+                            opcode = opcode,
+                            register = register,
+                            token = token,
+                            salt = salt,
+                            staticBinding = checkNotNull(staticBinding),
+                            dialectCommitment = checkNotNull(dialectCommitment),
+                        )
+                        tag = AkenBoundDecryptorPlan.fragmentTag(
+                            staticBinding = checkNotNull(staticBinding),
+                            dialectCommitment = checkNotNull(dialectCommitment),
+                            offset = offset,
+                            length = length,
+                            family = family,
+                            opcode = opcode,
+                            register = register,
+                            token = token,
+                            salt = salt,
+                            encoded = checkNotNull(encoded),
+                        )
+                        fragments += EvaluatorFragmentRecord(
+                            offset = offset,
+                            family = family,
+                            opcode = opcode,
+                            register = register,
+                            token = token,
+                            salt = salt,
+                            encoded = checkNotNull(encoded),
+                            tag = checkNotNull(tag),
+                        )
+                        offset += length
                     } finally {
                         Arrays.fill(token, 0)
                         Arrays.fill(salt, 0)
+                        encoded?.let { Arrays.fill(it, 0) }
                         tag?.let { Arrays.fill(it, 0) }
                     }
                 }
+                require(offset == pageMaterial.size) { "AKEN evaluator fragment coverage is incomplete" }
                 completed = true
                 return AkenBoundDecryptorCore(
                     pageNonce = pageNonce,
                     planNonce = planNonce,
-                    dispatchVariant = dispatchVariant,
+                    dialectByte = dialectByte,
+                    dialectCommitment = checkNotNull(dialectCommitment),
                     staticBinding = checkNotNull(staticBinding),
-                    laneRecords = lanes,
+                    fragments = fragments,
                 )
             } finally {
                 Arrays.fill(planNonce, 0)
                 staticBinding?.let { Arrays.fill(it, 0) }
-                if (!completed) lanes.forEach { it.wipe() }
+                dialectCommitment?.let { Arrays.fill(it, 0) }
+                if (!completed) fragments.forEach { it.wipe() }
+            }
+        }
+
+        private fun chooseFragmentLengths(count: Int, total: Int, random: SecureRandom): IntArray {
+            require(count in 1..total)
+            val lengths = IntArray(count) { 1 }
+            var remaining = total - count
+            while (remaining > 0) {
+                lengths[random.nextInt(count)]++
+                remaining--
+            }
+            return lengths
+        }
+
+        private fun encodeFragment(
+            pageMaterial: ByteArray,
+            offset: Int,
+            length: Int,
+            family: Int,
+            opcode: Int,
+            register: Int,
+            token: ByteArray,
+            salt: ByteArray,
+            staticBinding: ByteArray,
+            dialectCommitment: ByteArray,
+        ): ByteArray {
+            val stream = AkenBoundDecryptorPlan.fragmentMask(
+                staticBinding,
+                dialectCommitment,
+                offset,
+                length,
+                family,
+                opcode,
+                register,
+                token,
+                salt,
+            )
+            return try {
+                ByteArray(length) { index ->
+                    val value = pageMaterial[offset + index].toInt() and 0xFF
+                    val tweak = (family * 17 + opcode + register + index) and 0xFF
+                    (value xor (stream[index].toInt() and 0xFF) xor tweak).toByte()
+                }
+            } finally {
+                Arrays.fill(stream, 0)
             }
         }
     }
 }
 
-/**
- * Opaque, page-specific runtime descriptor for one AES-GCM terminal.
- *
- * It intentionally has no key getter, no generic resource input, and no
- * runtime decode routine.  The native terminal receives this descriptor only
- * after the locator has selected and authenticated the current page.
- */
+/** Opaque artifact-specific evaluator descriptor for one page terminal. */
 internal class AkenBoundDecryptorPlan private constructor(opaque: ByteArray) {
     private val opaqueValue = opaque.copyOf()
 
@@ -220,22 +332,6 @@ internal class AkenBoundDecryptorPlan private constructor(opaque: ByteArray) {
         get() = opaqueValue.size
 
     internal fun copyOpaqueForNative(): ByteArray = opaqueValue.copyOf()
-
-    /** Build/sealing check only. Reconstructs the page key after locator authentication. */
-    internal fun recoverPageKeyForBuildVerification(): ByteArray {
-        val parsed = parse(opaqueValue)
-        return try {
-            val dek = ByteArray(DIGEST_SIZE)
-            parsed.lanes.forEach { lane ->
-                val mask = laneMask(parsed.staticBinding, lane.wordIndex, lane.family, lane.token, lane.salt)
-                val word = decodeWord(lane.encodedWord, mask, lane.family, lane.wordIndex)
-                writeWord(dek, lane.wordIndex * Int.SIZE_BYTES, word)
-            }
-            dek
-        } finally {
-            parsed.wipe()
-        }
-    }
 
     internal fun matchesPageBinding(
         resourceKind: AkenResourceKind,
@@ -251,7 +347,7 @@ internal class AkenBoundDecryptorPlan private constructor(opaque: ByteArray) {
         route: AkenRoutingMetadata,
         callSiteProof: ByteArray,
     ): Boolean {
-        var parsed: ParsedPlan? = null
+        var parsed: ParsedEvaluator? = null
         var expectedStatic: ByteArray? = null
         var expectedFinal: ByteArray? = null
         var routeBytes: ByteArray? = null
@@ -270,9 +366,19 @@ internal class AkenBoundDecryptorPlan private constructor(opaque: ByteArray) {
                 artifactCanonicalCommitment = artifactCanonicalCommitment,
                 pageNonce = checkNotNull(parsed).pageNonce,
                 planNonce = checkNotNull(parsed).planNonce,
-                dispatchVariant = checkNotNull(parsed).dispatchVariant,
+                dialectByte = checkNotNull(parsed).dialectByte,
             )
             if (!MessageDigest.isEqual(expectedStatic, checkNotNull(parsed).staticBinding)) return false
+            val expectedDialect = dialectCommitment(
+                staticBinding = checkNotNull(expectedStatic),
+                planNonce = checkNotNull(parsed).planNonce,
+                dialectByte = checkNotNull(parsed).dialectByte,
+            )
+            try {
+                if (!MessageDigest.isEqual(expectedDialect, checkNotNull(parsed).dialectCommitment)) return false
+            } finally {
+                Arrays.fill(expectedDialect, 0)
+            }
             routeBytes = route.encode()
             expectedFinal = finalBinding(checkNotNull(parsed).staticBinding, routeBytes, callSiteProof)
             return MessageDigest.isEqual(expectedFinal, checkNotNull(parsed).finalBinding)
@@ -300,55 +406,61 @@ internal class AkenBoundDecryptorPlan private constructor(opaque: ByteArray) {
 
     override fun hashCode(): Int = opaqueValue.contentHashCode()
 
-    override fun toString(): String = "AkenBoundDecryptorPlan(page-bound, bytes=${opaqueValue.size})"
+    override fun toString(): String = "AkenBoundDecryptorPlan(vbc4-evaluator, bytes=\${opaqueValue.size})"
 
     companion object {
-        private const val LANE_COUNT: Int = 8
-        private const val WORD_FAMILY_COUNT: Int = 8
-        internal const val PLAN_NONCE_SIZE: Int = 16
-        private const val LANE_SALT_SIZE: Int = 16
-        private const val LANE_TAG_SIZE: Int = 16
-        private const val PLAN_TAG_SIZE: Int = 32
-        private const val DIGEST_SIZE: Int = 32
-        private const val MIN_TOKEN_SIZE: Int = 17
-        private const val MAX_TOKEN_SIZE: Int = 48
-        private const val MAX_OPAQUE_SIZE: Int = 128 * 1024
-        private val STATIC_BINDING_DOMAIN = "bound-page-static".toByteArray(Charsets.US_ASCII)
-        private val FINAL_BINDING_DOMAIN = "bound-page-final".toByteArray(Charsets.US_ASCII)
-        private val LANE_MASK_DOMAIN = "bound-page-lane-mask".toByteArray(Charsets.US_ASCII)
-        private val LANE_TAG_DOMAIN = "bound-page-lane-tag".toByteArray(Charsets.US_ASCII)
-        private val PLAN_TAG_DOMAIN = "bound-page-plan-tag".toByteArray(Charsets.US_ASCII)
+        private const val PLAN_TAG_SIZE: Int = EVALUATOR_DIGEST_SIZE
+        private const val MAX_TOKEN_SIZE: Int = EVALUATOR_MAX_TOKEN_SIZE
+        private const val MAX_FRAGMENT_SIZE: Int = AkenVbc4Material.PAGE_MATERIAL_SIZE
+        private val STATIC_BINDING_DOMAIN = "vbc4-evaluator-static".toByteArray(Charsets.US_ASCII)
+        private val ROUTE_BINDING_DOMAIN = "vbc4-evaluator-route".toByteArray(Charsets.US_ASCII)
+        private val MASK_DOMAIN = "vbc4-evaluator-mask".toByteArray(Charsets.US_ASCII)
+        private val FRAGMENT_TAG_DOMAIN = "vbc4-evaluator-fragment".toByteArray(Charsets.US_ASCII)
+        private val DIALECT_DOMAIN = "vbc4-evaluator-dialect".toByteArray(Charsets.US_ASCII)
+        private val PLAN_TAG_DOMAIN = "vbc4-evaluator-seal".toByteArray(Charsets.US_ASCII)
 
         internal fun fromOpaque(opaque: ByteArray): AkenBoundDecryptorPlan {
-            require(opaque.isNotEmpty() && opaque.size <= MAX_OPAQUE_SIZE) {
-                "AKEN bound decryptor descriptor length is invalid"
+            require(opaque.isNotEmpty() && opaque.size <= EVALUATOR_MAX_OPAQUE_SIZE) {
+                "AKEN evaluator descriptor length is invalid"
             }
             return AkenBoundDecryptorPlan(opaque)
         }
 
         internal fun encodeOpaque(
-            dispatchVariant: Int,
+            dialectByte: Int,
             pageNonce: ByteArray,
             planNonce: ByteArray,
             staticBinding: ByteArray,
             finalBinding: ByteArray,
-            lanes: List<LaneRecord>,
+            dialectCommitment: ByteArray,
+            fragments: List<EvaluatorFragmentRecord>,
         ): ByteArray {
-            require(lanes.size == LANE_COUNT) { "AKEN bound lane count is invalid" }
+            require(dialectByte in 0..0xFF)
+            require(pageNonce.size == AkenResourceCodec.NONCE_SIZE)
+            require(planNonce.size == EVALUATOR_PLAN_NONCE_SIZE)
+            require(staticBinding.size == EVALUATOR_DIGEST_SIZE)
+            require(finalBinding.size == EVALUATOR_DIGEST_SIZE)
+            require(dialectCommitment.size == EVALUATOR_DIALECT_SIZE)
+            require(fragments.size in EVALUATOR_MIN_FRAGMENT_COUNT..EVALUATOR_MAX_FRAGMENT_COUNT)
             val body = ByteArrayOutputStream().use { out ->
-                out.write(dispatchVariant)
-                out.write(LANE_COUNT)
+                out.write(EVALUATOR_WIRE_MARKER)
+                out.write(dialectByte)
+                out.write(fragments.size)
                 out.write(pageNonce)
                 out.write(planNonce)
                 out.write(staticBinding)
                 out.write(finalBinding)
-                lanes.forEach { lane ->
-                    out.write(lane.wordIndex)
-                    out.write(lane.family)
-                    writeFramed(out, lane.token)
-                    out.write(lane.salt)
-                    writeInt(out, lane.encodedWord)
-                    out.write(lane.tag)
+                out.write(dialectCommitment)
+                fragments.forEach { fragment ->
+                    out.write(fragment.offset)
+                    out.write(fragment.encoded.size)
+                    out.write(fragment.family)
+                    out.write(fragment.opcode)
+                    out.write(fragment.register)
+                    writeFramed(out, fragment.token)
+                    out.write(fragment.salt)
+                    writeFramed(out, fragment.encoded)
+                    out.write(fragment.tag)
                 }
                 out.toByteArray()
             }
@@ -364,86 +476,131 @@ internal class AkenBoundDecryptorPlan private constructor(opaque: ByteArray) {
 
         private fun validateStandalone(opaque: ByteArray) {
             val parsed = parse(opaque)
-            try {
-                // parse() verifies every lane tag and the terminal plan tag.
-            } finally {
-                parsed.wipe()
-            }
+            parsed.wipe()
         }
 
-        private fun parse(opaque: ByteArray): ParsedPlan {
-            require(opaque.size in minimumEncodedSize()..MAX_OPAQUE_SIZE) {
-                "AKEN bound decryptor descriptor length is invalid"
+        private fun parse(opaque: ByteArray): ParsedEvaluator {
+            require(opaque.size <= EVALUATOR_MAX_OPAQUE_SIZE) {
+                "AKEN evaluator descriptor length is invalid"
             }
-            val reader = BoundReader(opaque)
+            val reader = EvaluatorReader(opaque)
             var pageNonce: ByteArray? = null
             var planNonce: ByteArray? = null
             var staticBinding: ByteArray? = null
             var finalBinding: ByteArray? = null
-            val lanes = ArrayList<LaneRecord>(LANE_COUNT)
+            var dialectCommitment: ByteArray? = null
+            val fragments = ArrayList<EvaluatorFragmentRecord>()
             var planTag: ByteArray? = null
             var completed = false
             try {
-                val dispatchVariant = reader.readU8("AKEN bound dispatcher variant")
-                require(reader.readU8("AKEN bound lane count") == LANE_COUNT) {
-                    "AKEN bound lane count is invalid"
+                require(reader.readFixed(EVALUATOR_WIRE_MARKER.size, "AKEN evaluator marker")
+                    .contentEquals(EVALUATOR_WIRE_MARKER)) {
+                    "AKEN evaluator marker is invalid"
                 }
-                pageNonce = reader.readFixed(AkenResourceCodec.NONCE_SIZE, "AKEN bound page nonce")
-                planNonce = reader.readFixed(PLAN_NONCE_SIZE, "AKEN bound plan nonce")
-                staticBinding = reader.readFixed(DIGEST_SIZE, "AKEN bound static binding")
-                finalBinding = reader.readFixed(DIGEST_SIZE, "AKEN bound final binding")
-                repeat(LANE_COUNT) {
-                    val wordIndex = reader.readU8("AKEN bound lane word index")
-                    val family = reader.readU8("AKEN bound lane family")
-                    require(wordIndex in 0 until LANE_COUNT && family in 0 until WORD_FAMILY_COUNT) {
-                        "AKEN bound lane metadata is invalid"
+                val dialectByte = reader.readU8("AKEN evaluator dialect")
+                val fragmentCount = reader.readU8("AKEN evaluator fragment count")
+                require(fragmentCount in EVALUATOR_MIN_FRAGMENT_COUNT..EVALUATOR_MAX_FRAGMENT_COUNT) {
+                    "AKEN evaluator fragment count is invalid"
+                }
+                pageNonce = reader.readFixed(AkenResourceCodec.NONCE_SIZE, "AKEN evaluator page nonce")
+                planNonce = reader.readFixed(EVALUATOR_PLAN_NONCE_SIZE, "AKEN evaluator plan nonce")
+                staticBinding = reader.readFixed(EVALUATOR_DIGEST_SIZE, "AKEN evaluator static binding")
+                finalBinding = reader.readFixed(EVALUATOR_DIGEST_SIZE, "AKEN evaluator final binding")
+                dialectCommitment = reader.readFixed(EVALUATOR_DIALECT_SIZE, "AKEN evaluator dialect commitment")
+                repeat(fragmentCount) {
+                    val offset = reader.readU8("AKEN evaluator fragment offset")
+                    val encodedLength = reader.readU8("AKEN evaluator fragment length")
+                    val family = reader.readU8("AKEN evaluator fragment family")
+                    val opcode = reader.readU8("AKEN evaluator fragment opcode")
+                    val register = reader.readU8("AKEN evaluator fragment register")
+                    require(offset < AkenVbc4Material.PAGE_MATERIAL_SIZE && encodedLength > 0) {
+                        "AKEN evaluator fragment range is invalid"
                     }
-                    val token = reader.readFramed(MAX_TOKEN_SIZE, "AKEN bound lane token", allowEmpty = false)
-                    require(token.size >= MIN_TOKEN_SIZE) { "AKEN bound lane token is invalid" }
-                    val salt = reader.readFixed(LANE_SALT_SIZE, "AKEN bound lane salt")
-                    val encodedWord = reader.readInt("AKEN bound encoded lane")
-                    val tag = reader.readFixed(LANE_TAG_SIZE, "AKEN bound lane tag")
-                    val expectedTag = laneTag(checkNotNull(staticBinding), wordIndex, family, token, salt, encodedWord)
+                    require(offset + encodedLength <= AkenVbc4Material.PAGE_MATERIAL_SIZE) {
+                        "AKEN evaluator fragment exceeds page material"
+                    }
+                    val token = reader.readFramed(MAX_TOKEN_SIZE, "AKEN evaluator fragment token", false)
+                    require(token.size >= EVALUATOR_MIN_TOKEN_SIZE) { "AKEN evaluator token is invalid" }
+                    val salt = reader.readFixed(EVALUATOR_FRAGMENT_SALT_SIZE, "AKEN evaluator fragment salt")
+                    val encoded = reader.readFramed(MAX_FRAGMENT_SIZE, "AKEN evaluator fragment bytes", false)
+                    require(encoded.size == encodedLength) { "AKEN evaluator fragment length mismatch" }
+                    val tag = reader.readFixed(EVALUATOR_FRAGMENT_TAG_SIZE, "AKEN evaluator fragment tag")
+                    val expectedTag = fragmentTag(
+                        staticBinding = checkNotNull(staticBinding),
+                        dialectCommitment = checkNotNull(dialectCommitment),
+                        offset = offset,
+                        length = encodedLength,
+                        family = family,
+                        opcode = opcode,
+                        register = register,
+                        token = token,
+                        salt = salt,
+                        encoded = encoded,
+                    )
                     try {
-                        require(MessageDigest.isEqual(tag, expectedTag)) { "AKEN bound lane authentication failed" }
+                        require(MessageDigest.isEqual(tag, expectedTag)) {
+                            "AKEN evaluator fragment authentication failed"
+                        }
                     } finally {
                         Arrays.fill(expectedTag, 0)
                     }
-                    lanes += LaneRecord(wordIndex, family, token, salt, encodedWord, tag)
+                    fragments += EvaluatorFragmentRecord(
+                        offset = offset,
+                        family = family,
+                        opcode = opcode,
+                        register = register,
+                        token = token,
+                        salt = salt,
+                        encoded = encoded,
+                        tag = tag,
+                    )
                     Arrays.fill(token, 0)
                     Arrays.fill(salt, 0)
+                    Arrays.fill(encoded, 0)
                     Arrays.fill(tag, 0)
                 }
-                require(lanes.map { it.wordIndex }.toSet() == (0 until LANE_COUNT).toSet()) {
-                    "AKEN bound lanes do not cover the current page"
-                }
+                require(hasFullEvaluatorCoverage(fragments)) { "AKEN evaluator fragment coverage is invalid" }
                 val tagOffset = reader.offset
-                planTag = reader.readFixed(PLAN_TAG_SIZE, "AKEN bound plan tag")
-                reader.requireFullyRead("AKEN bound descriptor")
+                planTag = reader.readFixed(PLAN_TAG_SIZE, "AKEN evaluator seal")
+                reader.requireFullyRead("AKEN evaluator descriptor")
                 val expectedPlanTag = digest(PLAN_TAG_DOMAIN) { update(opaque, 0, tagOffset) }
                 try {
                     require(MessageDigest.isEqual(checkNotNull(planTag), expectedPlanTag)) {
-                        "AKEN bound descriptor authentication failed"
+                        "AKEN evaluator descriptor authentication failed"
                     }
                 } finally {
                     Arrays.fill(expectedPlanTag, 0)
                 }
+                val expectedDialect = dialectCommitment(
+                    staticBinding = checkNotNull(staticBinding),
+                    planNonce = checkNotNull(planNonce),
+                    dialectByte = dialectByte,
+                )
+                try {
+                    require(MessageDigest.isEqual(expectedDialect, checkNotNull(dialectCommitment))) {
+                        "AKEN evaluator dialect commitment is invalid"
+                    }
+                } finally {
+                    Arrays.fill(expectedDialect, 0)
+                }
                 completed = true
-                return ParsedPlan(
-                    dispatchVariant = dispatchVariant,
+                return ParsedEvaluator(
+                    dialectByte = dialectByte,
                     pageNonce = checkNotNull(pageNonce),
                     planNonce = checkNotNull(planNonce),
                     staticBinding = checkNotNull(staticBinding),
                     finalBinding = checkNotNull(finalBinding),
-                    lanes = lanes,
+                    dialectCommitment = checkNotNull(dialectCommitment),
+                    fragments = fragments,
                 )
             } finally {
                 pageNonce?.let { Arrays.fill(it, 0) }
                 planNonce?.let { Arrays.fill(it, 0) }
                 staticBinding?.let { Arrays.fill(it, 0) }
                 finalBinding?.let { Arrays.fill(it, 0) }
+                dialectCommitment?.let { Arrays.fill(it, 0) }
                 planTag?.let { Arrays.fill(it, 0) }
-                if (!completed) lanes.forEach { it.wipe() }
+                if (!completed) fragments.forEach { it.wipe() }
             }
         }
 
@@ -460,28 +617,28 @@ internal class AkenBoundDecryptorPlan private constructor(opaque: ByteArray) {
             artifactCanonicalCommitment: ByteArray,
             pageNonce: ByteArray,
             planNonce: ByteArray,
-            dispatchVariant: Int,
+            dialectByte: Int,
         ): ByteArray {
-            require(logicalIdentity.isNotEmpty()) { "AKEN bound logical identity must not be empty" }
-            require(pageIndex >= 0) { "AKEN bound page index is invalid" }
+            require(logicalIdentity.isNotEmpty()) { "AKEN evaluator logical identity must not be empty" }
+            require(pageIndex >= 0) { "AKEN evaluator page index is invalid" }
             require(targetPageSize in AkenPageSizePolicy.DEFAULT.allowedSizes(resourceKind)) {
-                "AKEN bound target page size is invalid"
+                "AKEN evaluator target page size is invalid"
             }
-            require(encodedHandle.size == AkenHandle.ENCODED_HANDLE_SIZE) { "AKEN bound handle size is invalid" }
-            require(locatorToken.size == AkenHandle.LOCATOR_TOKEN_SIZE) { "AKEN bound locator size is invalid" }
-            require(evaluatorFingerprint.size == DIGEST_SIZE) { "AKEN bound evaluator fingerprint size is invalid" }
-            require(artifactCanonicalCommitment.size == DIGEST_SIZE) { "AKEN bound artifact commitment size is invalid" }
-            require(pageNonce.size == AkenResourceCodec.NONCE_SIZE) { "AKEN bound page nonce size is invalid" }
-            require(planNonce.size == PLAN_NONCE_SIZE) { "AKEN bound plan nonce size is invalid" }
-            require(dispatchVariant in 0..0xFF) { "AKEN bound dispatcher variant is invalid" }
+            require(encodedHandle.size == AkenHandle.ENCODED_HANDLE_SIZE) { "AKEN evaluator handle size is invalid" }
+            require(locatorToken.size == AkenHandle.LOCATOR_TOKEN_SIZE) { "AKEN evaluator locator size is invalid" }
+            require(evaluatorFingerprint.size == EVALUATOR_DIGEST_SIZE) { "AKEN evaluator fingerprint size is invalid" }
+            require(artifactCanonicalCommitment.size == EVALUATOR_DIGEST_SIZE) { "AKEN evaluator artifact commitment size is invalid" }
+            require(pageNonce.size == AkenResourceCodec.NONCE_SIZE) { "AKEN evaluator page nonce size is invalid" }
+            require(planNonce.size == EVALUATOR_PLAN_NONCE_SIZE) { "AKEN evaluator plan nonce size is invalid" }
+            require(dialectByte in 0..0xFF) { "AKEN evaluator dialect byte is invalid" }
             val codecBytes = AkenResourceCodec.normalizeCodecVariant(codecVariant).toByteArray(Charsets.UTF_8)
             val layout = AkenPageLayout.fromVariant(layoutVariant)
             var layoutBytes: ByteArray? = null
             try {
-                require(layout.variant == layoutVariant) { "AKEN bound layout variant is not canonical" }
+                require(layout.variant == layoutVariant) { "AKEN evaluator layout variant is not canonical" }
                 layoutBytes = layout.variant.toByteArray(Charsets.UTF_8)
                 return digest(STATIC_BINDING_DOMAIN) {
-                    update(dispatchVariant.toByte())
+                    update(dialectByte.toByte())
                     update(resourceKind.id.toByte())
                     updateFramed(logicalIdentity)
                     updateInt(pageIndex)
@@ -502,90 +659,84 @@ internal class AkenBoundDecryptorPlan private constructor(opaque: ByteArray) {
             }
         }
 
-        internal fun finalBinding(staticBinding: ByteArray, routeEncoding: ByteArray, callSiteProof: ByteArray): ByteArray {
-            require(staticBinding.size == DIGEST_SIZE) { "AKEN bound static binding size is invalid" }
-            require(routeEncoding.isNotEmpty()) { "AKEN bound route encoding is invalid" }
-            require(callSiteProof.isNotEmpty()) { "AKEN bound call-site proof is invalid" }
-            return digest(FINAL_BINDING_DOMAIN) {
+        internal fun finalBinding(staticBinding: ByteArray, routeEncoding: ByteArray, callSiteProof: ByteArray): ByteArray =
+            digest(ROUTE_BINDING_DOMAIN) {
                 update(staticBinding)
                 updateFramed(routeEncoding)
                 updateFramed(callSiteProof)
             }
-        }
 
-        internal fun laneMask(
-            staticBinding: ByteArray,
-            wordIndex: Int,
-            family: Int,
-            token: ByteArray,
-            salt: ByteArray,
-        ): Int {
-            val hash = digest(LANE_MASK_DOMAIN) {
+        internal fun dialectCommitment(staticBinding: ByteArray, planNonce: ByteArray, dialectByte: Int): ByteArray =
+            digest(DIALECT_DOMAIN) {
                 update(staticBinding)
-                updateInt(wordIndex)
-                updateInt(family)
-                updateFramed(token)
-                updateFramed(salt)
+                update(planNonce)
+                update(dialectByte.toByte())
             }
-            return try {
-                readWord(hash, 0)
-            } finally {
-                Arrays.fill(hash, 0)
-            }
-        }
 
-        internal fun laneTag(
+        internal fun fragmentMask(
             staticBinding: ByteArray,
-            wordIndex: Int,
+            dialectCommitment: ByteArray,
+            offset: Int,
+            length: Int,
             family: Int,
+            opcode: Int,
+            register: Int,
             token: ByteArray,
             salt: ByteArray,
-            encodedWord: Int,
         ): ByteArray {
-            val full = digest(LANE_TAG_DOMAIN) {
+            require(offset >= 0 && length > 0 && offset + length <= AkenVbc4Material.PAGE_MATERIAL_SIZE)
+            val output = ByteArray(length)
+            var produced = 0
+            var counter = 0
+            while (produced < length) {
+                val block = digest(MASK_DOMAIN) {
+                    update(staticBinding)
+                    update(dialectCommitment)
+                    updateInt(offset)
+                    updateInt(length)
+                    updateInt(family)
+                    updateInt(opcode)
+                    updateInt(register)
+                    updateFramed(token)
+                    updateFramed(salt)
+                    updateInt(counter++)
+                }
+                val copy = minOf(block.size, length - produced)
+                block.copyInto(output, produced, 0, copy)
+                produced += copy
+                Arrays.fill(block, 0)
+            }
+            return output
+        }
+
+        internal fun fragmentTag(
+            staticBinding: ByteArray,
+            dialectCommitment: ByteArray,
+            offset: Int,
+            length: Int,
+            family: Int,
+            opcode: Int,
+            register: Int,
+            token: ByteArray,
+            salt: ByteArray,
+            encoded: ByteArray,
+        ): ByteArray {
+            val full = digest(FRAGMENT_TAG_DOMAIN) {
                 update(staticBinding)
-                updateInt(wordIndex)
+                update(dialectCommitment)
+                updateInt(offset)
+                updateInt(length)
                 updateInt(family)
+                updateInt(opcode)
+                updateInt(register)
                 updateFramed(token)
                 updateFramed(salt)
-                updateInt(encodedWord)
+                updateFramed(encoded)
             }
             return try {
-                full.copyOf(LANE_TAG_SIZE)
+                full.copyOf(EVALUATOR_FRAGMENT_TAG_SIZE)
             } finally {
                 Arrays.fill(full, 0)
-            }
-        }
-
-        internal fun decodeWord(encoded: Int, mask: Int, family: Int, wordIndex: Int): Int {
-            val rotation = ((mask xor (family * 0x45D9F3B) xor wordIndex) and 31) + 1
-            val tweak = Integer.rotateLeft(mask xor (0x9E3779B9.toInt() * (wordIndex + 1)), (wordIndex + family) and 31)
-            return when (family) {
-                0 -> encoded xor mask
-                1 -> Integer.rotateRight(encoded, rotation) - mask
-                2 -> Integer.rotateLeft(encoded - tweak, rotation) xor mask
-                3 -> Integer.rotateRight(encoded xor mask, rotation) - tweak
-                4 -> Integer.rotateLeft(encoded xor tweak, rotation) + mask
-                5 -> (encoded - 0x7F4A7C15) xor Integer.rotateLeft(mask, wordIndex + 1)
-                6 -> Integer.rotateRight(encoded + mask, rotation) xor tweak
-                7 -> Integer.rotateRight(encoded xor tweak, rotation) - mask
-                else -> error("AKEN bound lane family is invalid")
-            }
-        }
-
-        internal fun encodeWord(value: Int, mask: Int, family: Int, wordIndex: Int): Int {
-            val rotation = ((mask xor (family * 0x45D9F3B) xor wordIndex) and 31) + 1
-            val tweak = Integer.rotateLeft(mask xor (0x9E3779B9.toInt() * (wordIndex + 1)), (wordIndex + family) and 31)
-            return when (family) {
-                0 -> value xor mask
-                1 -> Integer.rotateLeft(value + mask, rotation)
-                2 -> Integer.rotateRight(value xor mask, rotation) + tweak
-                3 -> Integer.rotateLeft(value + tweak, rotation) xor mask
-                4 -> Integer.rotateRight(value - mask, rotation) xor tweak
-                5 -> (value xor Integer.rotateLeft(mask, wordIndex + 1)) + 0x7F4A7C15
-                6 -> Integer.rotateLeft(value xor tweak, rotation) - mask
-                7 -> Integer.rotateLeft(value + mask, rotation) xor tweak
-                else -> error("AKEN bound lane family is invalid")
             }
         }
 
@@ -618,64 +769,63 @@ internal class AkenBoundDecryptorPlan private constructor(opaque: ByteArray) {
             out.write((value ushr 8) and 0xFF)
             out.write(value and 0xFF)
         }
-
-        private fun writeWord(target: ByteArray, offset: Int, value: Int) {
-            require(offset >= 0 && offset <= target.size - Int.SIZE_BYTES) { "AKEN bound word is truncated" }
-            target[offset] = (value ushr 24).toByte()
-            target[offset + 1] = (value ushr 16).toByte()
-            target[offset + 2] = (value ushr 8).toByte()
-            target[offset + 3] = value.toByte()
-        }
-
-        internal fun readWord(value: ByteArray, offset: Int): Int {
-            require(offset >= 0 && offset <= value.size - Int.SIZE_BYTES) { "AKEN bound word is truncated" }
-            return ((value[offset].toInt() and 0xFF) shl 24) or
-                ((value[offset + 1].toInt() and 0xFF) shl 16) or
-                ((value[offset + 2].toInt() and 0xFF) shl 8) or
-                (value[offset + 3].toInt() and 0xFF)
-        }
-
-        private fun minimumEncodedSize(): Int =
-            2 + AkenResourceCodec.NONCE_SIZE + PLAN_NONCE_SIZE + DIGEST_SIZE + DIGEST_SIZE +
-                LANE_COUNT * (2 + Int.SIZE_BYTES + MIN_TOKEN_SIZE + LANE_SALT_SIZE + Int.SIZE_BYTES + LANE_TAG_SIZE) +
-                PLAN_TAG_SIZE
     }
 }
 
-internal class LaneRecord(
-    val wordIndex: Int,
+private fun hasFullEvaluatorCoverage(fragments: List<EvaluatorFragmentRecord>): Boolean {
+    if (fragments.isEmpty()) return false
+    val covered = BooleanArray(AkenVbc4Material.PAGE_MATERIAL_SIZE)
+    for (fragment in fragments) {
+        if (fragment.offset < 0 || fragment.encoded.isEmpty() ||
+            fragment.offset + fragment.encoded.size > covered.size
+        ) return false
+        for (index in fragment.offset until fragment.offset + fragment.encoded.size) {
+            if (covered[index]) return false
+            covered[index] = true
+        }
+    }
+    return covered.all { it }
+}
+
+internal class EvaluatorFragmentRecord(
+    val offset: Int,
     val family: Int,
+    val opcode: Int,
+    val register: Int,
     token: ByteArray,
     salt: ByteArray,
-    val encodedWord: Int,
+    encoded: ByteArray,
     tag: ByteArray,
 ) {
     var token = token.copyOf()
         private set
     var salt = salt.copyOf()
         private set
+    var encoded = encoded.copyOf()
+        private set
     var tag = tag.copyOf()
         private set
-
-    fun copyForOwner(): LaneRecord = LaneRecord(wordIndex, family, token, salt, encodedWord, tag)
 
     fun wipe() {
         Arrays.fill(token, 0)
         Arrays.fill(salt, 0)
+        Arrays.fill(encoded, 0)
         Arrays.fill(tag, 0)
         token = ByteArray(0)
         salt = ByteArray(0)
+        encoded = ByteArray(0)
         tag = ByteArray(0)
     }
 }
 
-private class ParsedPlan(
-    val dispatchVariant: Int,
+private class ParsedEvaluator(
+    val dialectByte: Int,
     pageNonce: ByteArray,
     planNonce: ByteArray,
     staticBinding: ByteArray,
     finalBinding: ByteArray,
-    lanes: List<LaneRecord>,
+    dialectCommitment: ByteArray,
+    fragments: List<EvaluatorFragmentRecord>,
 ) {
     var pageNonce = pageNonce.copyOf()
         private set
@@ -685,26 +835,27 @@ private class ParsedPlan(
         private set
     var finalBinding = finalBinding.copyOf()
         private set
-    private var lanesValue = lanes
-
-    val lanes: List<LaneRecord>
-        get() = lanesValue
+    var dialectCommitment = dialectCommitment.copyOf()
+        private set
+    private var fragmentsValue = fragments
 
     fun wipe() {
         Arrays.fill(pageNonce, 0)
         Arrays.fill(planNonce, 0)
         Arrays.fill(staticBinding, 0)
         Arrays.fill(finalBinding, 0)
-        lanesValue.forEach { it.wipe() }
+        Arrays.fill(dialectCommitment, 0)
+        fragmentsValue.forEach { it.wipe() }
         pageNonce = ByteArray(0)
         planNonce = ByteArray(0)
         staticBinding = ByteArray(0)
         finalBinding = ByteArray(0)
-        lanesValue = emptyList()
+        dialectCommitment = ByteArray(0)
+        fragmentsValue = emptyList()
     }
 }
 
-private class BoundReader(private val bytes: ByteArray) {
+private class EvaluatorReader(private val bytes: ByteArray) {
     var offset: Int = 0
         private set
 
@@ -713,30 +864,31 @@ private class BoundReader(private val bytes: ByteArray) {
         return bytes[offset++].toInt() and 0xFF
     }
 
-    fun readInt(label: String): Int {
-        requireRemaining(Int.SIZE_BYTES, label)
-        val result = ((bytes[offset].toInt() and 0xFF) shl 24) or
-            ((bytes[offset + 1].toInt() and 0xFF) shl 16) or
-            ((bytes[offset + 2].toInt() and 0xFF) shl 8) or
-            (bytes[offset + 3].toInt() and 0xFF)
-        offset += Int.SIZE_BYTES
-        return result
-    }
-
     fun readFixed(length: Int, label: String): ByteArray {
-        require(length >= 0) { "AKEN bound fixed length is invalid" }
+        require(length >= 0) { "AKEN evaluator fixed length is invalid" }
         requireRemaining(length, label)
         return bytes.copyOfRange(offset, offset + length).also { offset += length }
     }
 
     fun readFramed(maximum: Int, label: String, allowEmpty: Boolean): ByteArray {
-        val length = readInt("$label length")
+        val length = readU32("$label length")
         require(length in 0..maximum && (allowEmpty || length > 0)) { "$label length is invalid" }
         return readFixed(length, label)
     }
 
     fun requireFullyRead(label: String) {
         require(offset == bytes.size) { "$label contains trailing bytes" }
+    }
+
+    private fun readU32(label: String): Int {
+        requireRemaining(4, label)
+        val value = ((bytes[offset].toInt() and 0xFF) shl 24) or
+            ((bytes[offset + 1].toInt() and 0xFF) shl 16) or
+            ((bytes[offset + 2].toInt() and 0xFF) shl 8) or
+            (bytes[offset + 3].toInt() and 0xFF)
+        offset += 4
+        require(value >= 0) { "$label exceeds JVM bounds" }
+        return value
     }
 
     private fun requireRemaining(length: Int, label: String) {

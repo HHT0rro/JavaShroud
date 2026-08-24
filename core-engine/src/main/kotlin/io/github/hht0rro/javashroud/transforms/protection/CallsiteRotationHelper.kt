@@ -1,4 +1,4 @@
-﻿package io.github.hht0rro.javashroud.transforms.protection
+package io.github.hht0rro.javashroud.transforms.protection
 
 import java.lang.invoke.*
 import java.util.concurrent.ConcurrentHashMap
@@ -25,8 +25,7 @@ object CallsiteRotationHelper {
         owner: String,
         strategy: String,
     ): CallSite {
-        val ownerClass = Class.forName(owner.replace('/', '.'))
-        val target = lookup.findVirtual(ownerClass, name, type.dropParameterTypes(0, 1))
+        val target = resolveTarget(lookup, name, type, owner)
         val site = RotatingSite(MutableCallSite(type), strategy, equivalentTargets(target, type))
         val key = "$owner::$name${type.toMethodDescriptorString()}#${System.identityHashCode(site)}"
         callSites[key] = site
@@ -46,14 +45,30 @@ object CallsiteRotationHelper {
         }
     }
 
+    private fun resolveTarget(
+        lookup: MethodHandles.Lookup,
+        name: String,
+        type: MethodType,
+        ownerOrToken: String,
+    ): MethodHandle {
+        if (ownerOrToken.length >= 24) {
+            try {
+                return IndyTargetBootstrap.resolveHandle(lookup, ownerOrToken).asType(type)
+            } catch (ex: SecurityException) {
+                throw ex
+            } catch (_: Exception) {
+                throw SecurityException("callsite target token authentication failed")
+            }
+        }
+        throw SecurityException("callsite target token is required")
+    }
+
     private fun equivalentTargets(target: MethodHandle, type: MethodType): Array<MethodHandle> {
         val adapted = target.asType(type)
         val identityPermutation = IntArray(type.parameterCount()) { it }
-        return arrayOf(
-            adapted,
-            MethodHandles.permuteArguments(adapted, type, *identityPermutation),
-            adapted,
-        )
+        val permuted = MethodHandles.permuteArguments(adapted, type, *identityPermutation)
+        val cast = MethodHandles.explicitCastArguments(adapted, type)
+        return arrayOf(adapted, permuted, cast)
     }
 
     class RotatingSite(

@@ -16,6 +16,7 @@ import java.util.Arrays
 internal object AkenVbc4BlockClusterPlanner {
     private const val VBC4_CURRENT_MAGIC = "VBC4"
     private const val VBC4_NONCE_BYTES = 16
+    private const val VBC4_DIALECT_COMMITMENT_BYTES = 32
     private const val VBC4_WRAPPED_SEED_BYTES = 16
     private const val VBC4_BLOCK_INDEX_ENTRY_BYTES = 10
     private const val VBC4_BLOCK_FRAME_HEADER_BYTES = 12
@@ -115,6 +116,7 @@ internal object AkenVbc4BlockClusterPlanner {
         // Keep this grammar single-format so the planner cannot accept retired
         // container layouts.
         cursor.skip(VBC4_NONCE_BYTES, "nonce")
+        cursor.skip(VBC4_DIALECT_COMMITMENT_BYTES, "dialect commitment")
         cursor.readU4("key id")
         cursor.skip(VBC4_WRAPPED_SEED_BYTES, "wrapped seed")
         cursor.readU2("flags")

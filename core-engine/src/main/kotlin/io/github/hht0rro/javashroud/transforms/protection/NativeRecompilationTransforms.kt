@@ -671,7 +671,13 @@ object NativeRecompilationTransforms {
         val digestLiteral = task.specializationDigest.joinToString(", ") { byte ->
             "0x" + ((byte.toInt() and 0xFF).toString(16).padStart(2, '0'))
         }
-        val source = buildString {
+        val context = currentVbc4BuildContextOrNull()
+        val crypto = context?.let { AkenVbc4InnerMaterial.copyCryptoDomainMaterial(it) } ?: ByteArray(32)
+        val layout = context?.let { AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(it) } ?: ByteArray(32)
+        fun bytesLiteral(values: ByteArray) = values.joinToString(", ") { byte ->
+            "0x" + ((byte.toInt() and 0xFF).toString(16).padStart(2, '0'))
+        }
+        val source = try { buildString {
             append("//! Generated AKEN-R1 nonsecret specialization. Contains no keys or plaintext.\n")
             append("pub const TARGET_TRIPLE: &str = \"")
             append(task.rustTarget)
@@ -686,6 +692,16 @@ object NativeRecompilationTransforms {
             append("pub const PACKING_LEVEL: &str = \"")
             append(task.packingLevel)
             append("\";\n")
+            append("pub const VM_CRYPTO_DOMAIN: [u8; 32] = [")
+            append(bytesLiteral(crypto))
+            append("];\n")
+            append("pub const VM_LAYOUT_DIGEST: [u8; 32] = [")
+            append(bytesLiteral(layout))
+            append("];\n")
+        }
+        } finally {
+            crypto.fill(0)
+            layout.fill(0)
         }
         require(!source.contains("masterKey", ignoreCase = true) && !source.contains("runtimeResourceKey", ignoreCase = true)) {
             "AKEN-R1 specialization module must not contain secret field names"
@@ -730,7 +746,7 @@ object NativeRecompilationTransforms {
             "AKEN-R1 specialization digest is invalid"
         }
         Files.createDirectories(targetDir)
-        val subcommand = if (target == RustToolchainProvisioner.LINUX_RUNTIME_TARGET) "zigbuild" else "build"
+        val subcommand = "zigbuild"
         val command = listOf(
             cargoPath.toString(),
             subcommand,
@@ -759,7 +775,7 @@ object NativeRecompilationTransforms {
 
     internal fun rustCargoCommandForTest(cargoPath: Path, target: String, targetDir: Path): List<String> {
         require(target in RUST_TARGETS.values) { "AKEN-R1 Rust target is not locked: $target" }
-        val subcommand = if (target == RustToolchainProvisioner.LINUX_RUNTIME_TARGET) "zigbuild" else "build"
+        val subcommand = "zigbuild"
         return listOf(
             cargoPath.toString(), subcommand, "--locked", "--offline", "--workspace", "--release",
             "--target", target, "--target-dir", targetDir.toString(),
