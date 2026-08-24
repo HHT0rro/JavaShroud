@@ -336,68 +336,6 @@ class EmbeddedHelperDeploymentTest {
             "string-encryption must not embed a plaintext cache-policy helper class.",
         )
     }
-    @Test
-    fun class_encryption_loader_embeds_aken_class_page_runtime_helpers() {
-        val updated = withVbc4BuildContext(defaultVbc4BuildContext()) {
-            EmbeddedHelperDeployment.injectRequiredHelpers(
-                artifact = emptyArtifact(),
-                executedPassIds = listOf("class-encryption-loader"),
-            )
-        }
-        val entries = updated.jarEntries.map { it.name }.toSet()
-
-        for (entryName in listOf(
-            "io/github/hht0rro/javashroud/transforms/protection/AkenClassPageRuntimeDescriptor.class",
-            "io/github/hht0rro/javashroud/transforms/protection/AkenClassPageRuntimeDescriptor" + '$' + "PageBinding.class",
-            "io/github/hht0rro/javashroud/transforms/protection/AkenClassPageRuntimeDescriptor" + '$' + "DescriptorReader.class",
-            "io/github/hht0rro/javashroud/transforms/protection/AkenClassPageRuntimeDescriptor" + '$' + "WipableByteAccumulator.class",
-        )) {
-            assertTrue(
-                entryName in entries,
-                "class-encryption-loader must embed the AKEN ClassPage runtime dependency: $entryName",
-            )
-        }
-    }
-
-    @Test
-    fun class_encryption_loader_seals_runtime_helpers_without_exposing_legacy_helper_names() {
-        val inputJar = buildDiverseFixtureJar(Files.createTempFile("javashroud-helper-deploy", ".jar"))
-        try {
-            val outputJar = runEngine(inputJar, listOf("strip-compile-debug-info", "class-encryption-loader"))
-            try {
-                assertTrue(Files.exists(outputJar), "Output JAR should exist")
-
-                val entries = loadJarEntryNames(outputJar)
-                assertTrue(
-                    entries.any { it.startsWith("r/") && it.endsWith(".class") },
-                    "Class encryption runtime helpers should be sealed into neutral entries. Entries: $entries",
-                )
-                assertFalse(
-                    entries.any { it.contains("ClassEncryptionLoaderHelper") },
-                    "Relocated loader helpers must not expose fixed helper names. Entries: $entries",
-                )
-                for (legacyHelperName in listOf(
-                    "HiddenClassDeployerHelper",
-                    "PersonaSwitchHelper",
-                    "ThreadContextKeyHelper",
-                    "CrossClassCouplingHelper",
-                    "InterfaceProxyHelper",
-                    "VmBlockDispatcherHelper",
-                )) {
-                    assertFalse(
-                        entries.any { it.contains(legacyHelperName) },
-                        "Deleted helper '$legacyHelperName' must not be injected anymore. Entries: $entries",
-                    )
-                }
-            } finally {
-                Files.deleteIfExists(outputJar)
-            }
-        } finally {
-            Files.deleteIfExists(inputJar)
-        }
-    }
-
-
     private fun defineHelper(helperBytes: ByteArray): Class<*> = object : ClassLoader(javaClass.classLoader) {
         fun define(): Class<*> = defineClass(
             "io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper",

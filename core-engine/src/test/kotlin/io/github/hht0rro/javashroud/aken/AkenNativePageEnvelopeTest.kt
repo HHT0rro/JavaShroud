@@ -1,15 +1,13 @@
 package io.github.hht0rro.javashroud.aken
 
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenArtifactCommitment
+import io.github.hht0rro.javashroud.transforms.protection.aken.AkenBuildPlan
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHandle
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHighValueLeafIdentity
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenNativePageEnvelope
-import io.github.hht0rro.javashroud.transforms.protection.aken.AkenResourceCodec
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenResourceKind
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRoutingMetadata
-import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRuntimeEvaluatorFragment
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRuntimeEvaluatorPlan
-import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRuntimeEvaluatorRole
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRuntimePageDescriptor
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenSealingProofMetadata
 import java.util.Arrays
@@ -236,86 +234,60 @@ class AkenNativePageEnvelopeTest {
     }
 
     private fun fixture(seed: Int, callSiteProof: ByteArray): Fixture {
-        val kind = AkenResourceKind.Vbc4Method
-        val pageIndex = 2
-        val targetPageSize = 512
-        val codecVariant = AkenResourceCodec.CANONICAL_CODEC_VARIANT
-        val layoutVariant = "aken4-frame1:fixture:12:8:head:AAAAAAAAAAA"
-        val logicalIdentity = "fixture:native-page-envelope:$seed".encodeToByteArray()
-        val handleEncoding = ByteArray(AkenHandle.ENCODED_HANDLE_SIZE) { index -> (seed + index * 17).toByte() }
-        val locatorToken = ByteArray(AkenHandle.LOCATOR_TOKEN_SIZE) { index -> (seed * 3 + index * 11).toByte() }
         val commitment = ByteArray(AkenArtifactCommitment.DIGEST_SIZE) { index -> (seed + index * 19).toByte() }
-        val javaFragments = List(3) { ordinal -> runtimeFragment(AkenRuntimeEvaluatorRole.Java, ordinal, seed) }
-        val nativeFragments = List(3) { index -> runtimeFragment(AkenRuntimeEvaluatorRole.Native, index + 3, seed) }
-        val terminal = runtimeFragment(AkenRuntimeEvaluatorRole.Terminal, 6, seed)
-        var fingerprint: ByteArray? = null
-        var handle: AkenHandle? = null
+        val plan = AkenBuildPlan.create(commitment, DeterministicSecureRandom(seed))
+        var page: AkenBuildPlan.Page? = null
         var copiedProof: ByteArray? = null
         try {
-            fingerprint = AkenRuntimeEvaluatorPlan.computeFingerprint(
-                resourceKind = kind,
-                logicalIdentity = logicalIdentity,
-                pageIndex = pageIndex,
-                targetPageSize = targetPageSize,
-                codecVariant = codecVariant,
-                layoutVariant = layoutVariant,
-                handleEncoding = handleEncoding,
-                locatorToken = locatorToken,
-                javaFragments = javaFragments,
-                nativeFragments = nativeFragments,
-                terminal = terminal,
-            )
-            val evaluatorPlan = AkenRuntimeEvaluatorPlan.create(
-                javaFragments = javaFragments,
-                nativeFragments = nativeFragments,
-                terminal = terminal,
-                fingerprint = checkNotNull(fingerprint),
-            )
-            handle = AkenHandle.create(
-                resourceKind = kind,
-                pageIndex = pageIndex,
-                encoded = handleEncoding,
-                locatorToken = locatorToken,
-                evaluatorFingerprint = checkNotNull(fingerprint),
+            page = plan.registerPage(
+                kind = AkenResourceKind.Vbc4Method,
+                identity = "fixture:native-page-envelope:$seed".encodeToByteArray(),
+                pageIndex = 2,
             )
             copiedProof = callSiteProof.copyOf()
             val route = AkenRoutingMetadata.fromHandle(
-                handle = checkNotNull(handle),
-                logicalIdentity = logicalIdentity,
-                resourcePath = "META-INF/.aken/envelope/" + kind.id + "-" + pageIndex + ".bin",
+                handle = page.handle,
+                logicalIdentity = page.logicalIdentity,
+                resourcePath = "META-INF/.aken/envelope/" + page.resourceKind.id + "-" + page.pageIndex + ".bin",
                 resourceOffset = 17,
                 storedLength = 511,
-                codecVariant = codecVariant,
-                layoutVariant = layoutVariant,
+                codecVariant = page.codecVariant,
+                layoutVariant = page.layoutVariant,
             )
             val proof = proofFor(
-                handle = checkNotNull(handle),
-                identity = logicalIdentity,
+                handle = page.handle,
+                identity = page.logicalIdentity,
                 artifactCommitment = commitment,
                 callSiteProof = checkNotNull(copiedProof),
-                codecVariant = codecVariant,
-                layoutVariant = layoutVariant,
+                codecVariant = page.codecVariant,
+                layoutVariant = page.layoutVariant,
             )
+            val fingerprint = page.evaluatorPlan.fingerprint
+            val evaluatorPlan = try {
+                AkenRuntimeEvaluatorPlan.createBound(
+                    page.evaluatorPlan.boundPlanForRuntime(route, proof.callSiteProof),
+                    fingerprint,
+                )
+            } finally {
+                fingerprint.fill(0)
+            }
             val descriptor = AkenRuntimePageDescriptor.create(
-                handle = checkNotNull(handle),
-                logicalIdentity = logicalIdentity,
+                handle = page.handle,
+                logicalIdentity = page.logicalIdentity,
                 route = route,
                 proof = proof,
-                targetPageSize = targetPageSize,
+                targetPageSize = page.targetSize,
                 evaluatorPlan = evaluatorPlan,
             )
-            return Fixture(checkNotNull(handle), descriptor, checkNotNull(copiedProof)).also {
-                handle = null
+            return Fixture(page.handle, descriptor, checkNotNull(copiedProof), plan).also {
+                page = null
                 copiedProof = null
             }
         } finally {
-            Arrays.fill(logicalIdentity, 0)
-            Arrays.fill(handleEncoding, 0)
-            Arrays.fill(locatorToken, 0)
             Arrays.fill(commitment, 0)
-            fingerprint?.let { Arrays.fill(it, 0) }
             copiedProof?.let { Arrays.fill(it, 0) }
-            handle?.wipe()
+            page?.wipe()
+            if (page != null) plan.wipe()
         }
     }
 
@@ -349,39 +321,34 @@ class AkenNativePageEnvelopeTest {
         }
     }
 
-    private fun runtimeFragment(
-        role: AkenRuntimeEvaluatorRole,
-        ordinal: Int,
-        seed: Int,
-    ): AkenRuntimeEvaluatorFragment {
-        val shape = ByteArray(65) { index -> (seed + role.id * 41 + ordinal * 17 + index).toByte() }
-        val callToken = ByteArray(32) { index -> (seed * 3 + role.id * 23 + ordinal * 13 + index).toByte() }
-        val tablePermutation = IntArray(32) { index -> (index + ordinal) and 31 }
-        try {
-            shape[0] = 1
-            return AkenRuntimeEvaluatorFragment.create(
-                role = role,
-                ordinal = ordinal,
-                family = (seed + ordinal * 5) and 0x0F,
-                shape = shape,
-                callToken = callToken,
-                tablePermutation = tablePermutation,
-            )
-        } finally {
-            Arrays.fill(shape, 0)
-            Arrays.fill(callToken, 0)
-            Arrays.fill(tablePermutation, 0)
-        }
-    }
-
     private class Fixture(
         val handle: AkenHandle,
         val descriptor: AkenRuntimePageDescriptor,
         val callSiteProof: ByteArray,
+        private val plan: AkenBuildPlan,
     ) {
         fun wipe() {
             Arrays.fill(callSiteProof, 0)
             handle.wipe()
+            plan.wipe()
+        }
+    }
+
+    private class DeterministicSecureRandom(seed: Int) : java.security.SecureRandom() {
+        private var state = seed
+
+        override fun nextBytes(bytes: ByteArray) {
+            bytes.indices.forEach { index -> bytes[index] = nextValue().toByte() }
+        }
+
+        override fun nextInt(bound: Int): Int {
+            require(bound > 0)
+            return Math.floorMod(nextValue(), bound)
+        }
+
+        private fun nextValue(): Int {
+            state = state * 1_103_515_245 + 12_345
+            return state
         }
     }
 }

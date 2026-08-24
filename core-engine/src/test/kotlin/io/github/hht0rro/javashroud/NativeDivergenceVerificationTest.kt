@@ -51,7 +51,7 @@ class NativeDivergenceVerificationTest {
         assertEquals(
             listOf(
                 "cargo",
-                "build",
+                "zigbuild",
                 "--locked",
                 "--offline",
                 "--workspace",

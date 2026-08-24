@@ -81,7 +81,7 @@ class LegacyClassfileCompatibilityTest {
     @Test
     fun compatibility_matrix_covers_every_registered_pass() {
         val documentedPassIds = (JAVA8_CLASSFILE_PRESERVING_PASSES + JAVA8_FEATURE_GATED_PASSES + JAVA11_OR_NATIVE_BOUND_PASSES).toSet()
-        assertEquals(26, documentedPassIds.size, "Compatibility matrix should document every executable pass exactly once")
+        assertEquals(23, documentedPassIds.size, "Compatibility matrix should document every executable pass exactly once")
         assertEquals(EXPECTED_EXECUTABLE_PASS_IDS, documentedPassIds, "Compatibility matrix must match executable pass registry")
     }
 
@@ -255,20 +255,17 @@ class LegacyClassfileCompatibilityTest {
 
         val JAVA11_OR_NATIVE_BOUND_PASSES = listOf(
             "string-encryption",
-            "class-encryption-loader",
-            "method-body-delayed-decryption",
             "method-virtualization",
             "callsite-rotation-protection",
-            "environment-bound-keys",
-            "anti-symbolic-execution",
             "exception-semantic-virtualization",
-            "anti-instrumentation",
-            "anti-dump-protection",
+            "os-anti-debug",
+            "os-anti-vm",
             "jni-microkernel-loader",
         )
 
         val EXPECTED_EXECUTABLE_PASS_IDS = setOf(
             "strip-compile-debug-info",
+            "member-shuffle",
             "rename-classes",
             "rename-packages",
             "rename-methods",
@@ -284,15 +281,11 @@ class LegacyClassfileCompatibilityTest {
             "control-flow-flattening",
             "condy-constant-indirection",
             "member-hide",
-            "class-encryption-loader",
-            "method-body-delayed-decryption",
             "method-virtualization",
             "callsite-rotation-protection",
-            "environment-bound-keys",
-            "anti-symbolic-execution",
             "exception-semantic-virtualization",
-            "anti-instrumentation",
-            "anti-dump-protection",
+            "os-anti-debug",
+            "os-anti-vm",
             "jni-microkernel-loader",
         )
     }

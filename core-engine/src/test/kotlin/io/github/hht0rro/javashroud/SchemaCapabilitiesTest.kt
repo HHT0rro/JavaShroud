@@ -239,31 +239,24 @@ class SchemaCapabilitiesTest {
     }
 
     @Test
-    fun anti_instrumentation_detection_level_exposes_only_implemented_options() {
-        val antiInstrumentation = buildEngineSchemaPayload().modules.single { it.id == "anti-instrumentation" }
-        val detectionLevel = antiInstrumentation.params.single { it.key == "detectionLevel" }
-
-        assertEquals("standard", detectionLevel.defaultValue?.asText())
-        assertEquals(listOf("standard", "aggressive"), detectionLevel.options)
+    fun unified_defense_modules_expose_only_current_profile_controls() {
+        val moduleIndex = buildEngineSchemaPayload().modules.associateBy { it.id }
+        for (passId in listOf("os-anti-debug", "os-anti-vm")) {
+            val module = moduleIndex.getValue(passId)
+            assertEquals(listOf("jni-microkernel-loader"), module.requiredPassIds)
+            val profile = module.params.single { it.key == "profile" }
+            assertEquals("hardened", profile.defaultValue?.asText())
+            assertEquals(listOf("balanced", "hardened"), profile.options)
+            assertTrue(module.params.any { it.key == "distributedProbeCount" })
+        }
     }
 
     @Test
-    fun native_loader_and_vm_modules_use_top_risk_and_require_opt_in() {
+    fun current_native_vm_modules_use_top_risk_and_require_opt_in() {
         val moduleIndex = buildEngineSchemaPayload().modules.associateBy { it.id }
-        val topRiskModules = listOf(
-            "anti-dump-protection",
-            "anti-instrumentation",
-            "class-encryption-loader",
-            "environment-bound-keys",
-            "jni-microkernel-loader",
-            "method-body-delayed-decryption",
-            "method-virtualization",
-        )
-
-        for (passId in topRiskModules) {
-            val module = moduleIndex[passId]
-            assertTrue(module != null, "Schema should expose module '$passId'")
-            assertEquals("high", module!!.risk, "'$passId' should use the highest published risk level")
+        for (passId in listOf("jni-microkernel-loader", "method-virtualization")) {
+            val module = moduleIndex.getValue(passId)
+            assertEquals("high", module.risk, "'$passId' should use the highest published risk level")
             assertTrue(module.requiresOptIn, "'$passId' must require explicit opt-in")
         }
     }
@@ -284,7 +277,6 @@ class SchemaCapabilitiesTest {
             "static-init-perturbation",
             "string-encryption",
             "callsite-rotation-protection",
-            "anti-symbolic-execution",
             "exception-semantic-virtualization",
             "rename-classes",
             "rename-packages",
@@ -325,45 +317,17 @@ class SchemaCapabilitiesTest {
     }
 
     @Test
-    fun sealed_runtime_payload_combinations_remain_hard_conflicts_until_remapping_exists() {
-        val hardConflicts = buildEngineSchemaPayload().compatibility
-            .filter { it.severity == "hard" }
-            .map { it.passIds.toSet() }
-            .toSet()
-
-        assertEquals(
-            setOf(
-                setOf("class-encryption-loader", "method-virtualization"),
-                setOf("method-body-delayed-decryption", "method-virtualization"),
-            ),
-            hardConflicts,
-            "Only sealed runtime payload remapping boundaries should remain hard conflicts.",
-        )
-
-        assertTrue(
-            setOf("class-encryption-loader", "method-virtualization") in hardConflicts,
-            "class encryption must not package VM-dispatch bytecode that later sealing cannot remap",
-        )
-        assertTrue(
-            setOf("method-body-delayed-decryption", "method-virtualization") in hardConflicts,
-            "delayed method body resources must not be moved into VM payloads before sealing can remap them",
-        )
+    fun current_format_schema_has_no_legacy_compatibility_conflict_paths() {
+        val compatibility = buildEngineSchemaPayload().compatibility
+        assertTrue(compatibility.isEmpty(), "Current protected-artifact format must not expose compatibility conflict paths: $compatibility")
     }
 
     @Test
-    fun native_runtime_guards_declare_required_jni_loader_dependency() {
+    fun unified_defense_guards_declare_required_jni_loader_dependency() {
         val moduleIndex = buildEngineSchemaPayload().modules.associateBy { it.id }
-        val dependentIds = listOf(
-            "anti-instrumentation",
-            "anti-dump-protection",
-            "environment-bound-keys",
-            "method-body-delayed-decryption",
-        )
-
-        for (id in dependentIds) {
-            val module = moduleIndex[id]
-            assertTrue(module != null, "Module '$id' should exist in schema")
-            assertEquals(listOf("jni-microkernel-loader"), module!!.requiredPassIds, "Module '$id' should require jni-microkernel-loader")
+        for (id in listOf("os-anti-debug", "os-anti-vm")) {
+            val module = moduleIndex.getValue(id)
+            assertEquals(listOf("jni-microkernel-loader"), module.requiredPassIds)
         }
     }
 

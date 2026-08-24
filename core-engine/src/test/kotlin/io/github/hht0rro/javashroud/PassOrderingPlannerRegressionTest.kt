@@ -40,20 +40,6 @@ class PassOrderingPlannerRegressionTest {
     }
 
     @Test
-    fun planner_orders_string_and_field_encryption_before_loader() {
-        val result = planPassOrdering(
-            passIds = listOf("class-encryption-loader", "field-string-encryption", "string-encryption"),
-            orderingConstraints = buildOrderingConstraints(),
-            hardConflicts = hardConflictPairs,
-            softConflicts = softConflictPairs,
-        )
-
-        assertTrue(result.accepted, "Planner should accept retained encryption plus loader pipeline: ${result.diagnostics}")
-        assertBefore(result.orderedPasses, "string-encryption", "field-string-encryption")
-        assertBefore(result.orderedPasses, "field-string-encryption", "class-encryption-loader")
-    }
-
-    @Test
     fun planner_orders_class_and_package_renaming_before_string_encryption() {
         val result = planPassOrdering(
             passIds = listOf("string-encryption", "rename-packages", "rename-classes"),
@@ -68,15 +54,30 @@ class PassOrderingPlannerRegressionTest {
     }
 
     @Test
-    fun planner_keeps_full_native_encryption_subgraph_acyclic() {
+    fun planner_orders_native_string_and_vm_routes_before_jni_sealing() {
+        val result = planPassOrdering(
+            passIds = listOf("jni-microkernel-loader", "method-virtualization", "string-encryption", "field-string-encryption"),
+            orderingConstraints = buildOrderingConstraints(),
+            hardConflicts = hardConflictPairs,
+            softConflicts = softConflictPairs,
+        )
+
+        assertTrue(result.accepted, "Planner should accept the current native routes: ${result.diagnostics}")
+        assertBefore(result.orderedPasses, "string-encryption", "field-string-encryption")
+        assertBefore(result.orderedPasses, "string-encryption", "method-virtualization")
+        assertBefore(result.orderedPasses, "method-virtualization", "jni-microkernel-loader")
+    }
+
+    @Test
+    fun planner_keeps_current_native_subgraph_acyclic() {
         val result = planPassOrdering(
             passIds = listOf(
                 "string-encryption",
-                "class-encryption-loader",
-                "environment-bound-keys",
                 "field-string-encryption",
                 "jni-microkernel-loader",
-                "method-body-delayed-decryption",
+                "method-virtualization",
+                "os-anti-debug",
+                "os-anti-vm",
                 "rename-classes",
                 "rename-fields",
                 "rename-methods",
@@ -87,30 +88,29 @@ class PassOrderingPlannerRegressionTest {
             softConflicts = softConflictPairs,
         )
 
-        assertTrue(result.accepted, "Planner should not report cycles for full native encryption subgraph: ${result.diagnostics}")
-        assertTrue(
-            result.diagnostics.none { it.causeId == "circular-dependency" },
-            "Planner should avoid falling back to original order: ${result.diagnostics}",
-        )
+        assertTrue(result.accepted, "Planner should not report cycles for the current native subgraph: ${result.diagnostics}")
+        assertTrue(result.diagnostics.none { it.causeId == "circular-dependency" })
         assertBefore(result.orderedPasses, "rename-classes", "string-encryption")
         assertBefore(result.orderedPasses, "rename-packages", "string-encryption")
+        assertBefore(result.orderedPasses, "rename-methods", "method-virtualization")
+        assertBefore(result.orderedPasses, "rename-fields", "method-virtualization")
         assertBefore(result.orderedPasses, "string-encryption", "field-string-encryption")
-        assertBefore(result.orderedPasses, "field-string-encryption", "class-encryption-loader")
-        assertBefore(result.orderedPasses, "class-encryption-loader", "jni-microkernel-loader")
-        assertBefore(result.orderedPasses, "jni-microkernel-loader", "environment-bound-keys")
-        assertBefore(result.orderedPasses, "rename-fields", "method-body-delayed-decryption")
+        assertBefore(result.orderedPasses, "string-encryption", "method-virtualization")
+        assertBefore(result.orderedPasses, "method-virtualization", "jni-microkernel-loader")
+        assertBefore(result.orderedPasses, "jni-microkernel-loader", "os-anti-debug")
+        assertBefore(result.orderedPasses, "jni-microkernel-loader", "os-anti-vm")
     }
 
     @Test
-    fun planner_rejects_remaining_hard_conflict() {
+    fun planner_accepts_current_format_combinations_without_legacy_hard_conflicts() {
         val result = planPassOrdering(
-            passIds = listOf("class-encryption-loader", "method-virtualization"),
+            passIds = listOf("string-encryption", "method-virtualization"),
             orderingConstraints = buildOrderingConstraints(),
             hardConflicts = hardConflictPairs,
             softConflicts = softConflictPairs,
         )
 
-        assertTrue(!result.accepted, "Planner should reject retained hard conflict")
+        assertTrue(result.accepted, "Current format must not retain retired hard conflict pairs: ${result.diagnostics}")
     }
 
     @Test
@@ -157,12 +157,12 @@ class PassOrderingPlannerRegressionTest {
     }
 
     @Test
-    fun resolver_profile_planner_rejects_hard_conflicts_without_fallback_mode() {
+    fun resolver_profile_planner_rejects_supplied_hard_conflict_without_fallback_mode() {
         val result = planPassOrdering(
-            passIds = listOf("string-encryption", "class-encryption-loader", "method-virtualization"),
+            passIds = listOf("string-encryption", "method-virtualization"),
             orderingConstraints = buildOrderingConstraints(),
-            hardConflicts = hardConflictPairs,
-            softConflicts = softConflictPairs,
+            hardConflicts = setOf("string-encryption" to "method-virtualization"),
+            softConflicts = emptySet(),
             passParams = mapOf("string-encryption" to mapOf<String, Any?>("decoderBackend" to "jvm-resolver")),
         )
 

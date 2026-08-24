@@ -6,8 +6,6 @@ import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceCodec
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceKind
-import io.github.hht0rro.javashroud.transforms.protection.RuntimeVmCatalogMethod
-import io.github.hht0rro.javashroud.transforms.protection.RuntimeVmCatalogPlan
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
@@ -107,7 +105,7 @@ class RuntimeArtifactSealingCollisionTest {
 
     @Test
     fun `sealed runtime helper names avoid existing jar entries during re-obfuscation`() {
-        val helperName = "io/github/hht0rro/javashroud/transforms/protection/AntiDumpRuntimeHelper"
+        val helperName = "io/github/hht0rro/javashroud/transforms/protection/DefenseKernelRuntimeHelper"
         val helperBytes = loadClassBytes("$helperName.class")
         val preferredSealedName = sealedRuntimeHelperInternalName(helperName, 0x4A53524CL)
         val preferredIndexName = "META-INF/2b/133bbfe49e7328/ed/4922ed671e6c67376688c9616b4567.properties"
@@ -149,108 +147,6 @@ class RuntimeArtifactSealingCollisionTest {
     }
 
     @Test
-    fun `VM runtime sealing removes plaintext preload indices and emits an authenticated catalog`() {
-        val originalVmResource = "META-INF/.r/vm-existing.bin"
-        val context = fixedContext()
-        val sealed = withVbc4BuildContext(context) {
-            val artifact = artifactWithCurrentVmRuntime(originalVmResource)
-            requireVbc4BuildContext().publishRuntimeVmCatalogPlan(currentVmCatalogPlan(originalVmResource))
-            RuntimeArtifactSealing.seal(artifact, 0x4A53524CL, rewritesVmRuntime = true)
-        }
-
-        val sealedEntries = sealed.jarEntries.associateBy { it.name }
-        assertFalse(originalVmResource in sealedEntries.keys, "A VM-producing run should still reseal VM resources")
-        assertFalse("META-INF/.r/0.dat" in sealedEntries.keys, "A VM-producing run should replace the legacy sealed native index with this run's sealed index")
-
-        val catalogRoots = sealedEntries.values.filter { entry ->
-            withVbc4BuildContext(context) {
-                RuntimeResourceCodec.decode(entry.bytes)?.let { it.size >= 5 && it.copyOfRange(0, 5).contentEquals("JSC1|".toByteArray(Charsets.US_ASCII)) }
-            } == true
-        }
-        assertEquals(1, catalogRoots.size, "A VM-producing run must emit exactly one authenticated catalog root")
-        val catalogRootPlain = withVbc4BuildContext(context) { RuntimeResourceCodec.decode(catalogRoots.single().bytes)!! }
-        val directoryPaths = catalogRootPlain.decodeToString().lineSequence()
-            .filter { it.startsWith("D|") }
-            .map { line -> line.split('|').getOrElse(2) { error("Malformed VM catalog descriptor") } }
-            .toList()
-        assertTrue(directoryPaths.isNotEmpty(), "The catalog root must reference partition directories")
-        val committedStoragePaths = withVbc4BuildContext(context) {
-            directoryPaths.flatMap { path ->
-                RuntimeResourceCodec.decode(sealedEntries.getValue(path).bytes)!!.decodeToString().lineSequence()
-                    .filter { it.startsWith("R|") }
-                    .map { line -> line.split('|').getOrElse(2) { error("Malformed VM catalog resource") } }
-                    .toList()
-            }
-        }
-        assertTrue(committedStoragePaths.isNotEmpty(), "The catalog must commit the resealed VM resource")
-        assertTrue(committedStoragePaths.all { it in sealedEntries.keys }, "Every catalog commitment must resolve to a final JAR entry")
-    }
-
-    @Test
-    fun `final VM artifact keeps register IR and opcode labels out of Java-readable resources`() {
-        val originalVmResource = "META-INF/.r/vm-confidentiality.bin"
-        val context = fixedContext()
-        val forbiddenTokens = listOf(
-            "VM_IMUL",
-            "JS_VM_IMUL",
-            "VBC4_REG_META",
-            "VM_OPCODE_ALIASES",
-            "registerCount",
-            "srcA",
-            "srcB",
-            "operand",
-            "tryExecuteForwarderFallback",
-        )
-        val logicalVbc4 =
-            "VBC4|IR|${forbiddenTokens.joinToString("|")}".toByteArray(Charsets.US_ASCII)
-        assertTrue(
-            forbiddenTokens.all { logicalVbc4.containsAscii(it) },
-            "The confidentiality fixture must contain every protected IR/opcode marker before sealing",
-        )
-
-        val sealed = withVbc4BuildContext(context) {
-            val encoded = RuntimeResourceCodec.encode(
-                bytes = logicalVbc4,
-                kind = RuntimeResourceKind.VmBytecode,
-                seed = 0x1234,
-                variantId = 1,
-                layerCount = 4,
-                compress = false,
-                partitionIdentity = "vm-confidentiality".toByteArray(Charsets.US_ASCII),
-            )
-            val artifact = testAttachedArtifact(
-                classArtifacts = emptyList(),
-                jarEntries = listOf(
-                    JarEntryData(originalVmResource, encoded),
-                    JarEntryData("META-INF/.r/0.dat", "current-native-index".toByteArray(Charsets.UTF_8)),
-                ),
-            )
-            requireVbc4BuildContext().publishRuntimeVmCatalogPlan(currentVmCatalogPlan(originalVmResource))
-            RuntimeArtifactSealing.seal(artifact, 0x4A53524CL, rewritesVmRuntime = true)
-        }
-
-        val decodedVbc4 = withVbc4BuildContext(context) {
-            sealed.jarEntries.mapNotNull { entry ->
-                RuntimeResourceCodec.decode(entry.bytes)?.takeIf { it.startsWithAscii("VBC4") }
-            }
-        }
-        assertTrue(decodedVbc4.isNotEmpty(), "The final artifact must retain an authenticated VBC4 payload")
-
-        val javaReadableResources = sealed.jarEntries.filterNot { it.name.endsWith(".class") }
-        assertTrue(javaReadableResources.isNotEmpty(), "The final artifact must expose sealed runtime resources for scanning")
-        assertTrue(
-            javaReadableResources.none { it.bytes.startsWithAscii("VBC4") },
-            "VBC4 must not be stored as a Java-readable raw resource envelope",
-        )
-        forbiddenTokens.forEach { token ->
-            assertTrue(
-                javaReadableResources.none { it.bytes.containsAscii(token) },
-                "Final Java-readable resources must not expose plaintext IR/opcode marker '$token'",
-            )
-        }
-    }
-
-    @Test
     fun `sealed native binding publication merges with existing runtime bindings`() {
         val helperClass = Class.forName("io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper")
         val merge = helperClass.getDeclaredMethod("mergeBindingProperties", String::class.java, String::class.java).also { it.isAccessible = true }
@@ -289,50 +185,6 @@ class RuntimeArtifactSealingCollisionTest {
         )
     }
 
-    @Test
-    fun `sealed class encryption manifest commits renamed resources in either entry order`() {
-        val encryptedResource = "__jse/probe/EncryptedTarget.enc"
-        val manifest = "probe.EncryptedTarget\t$encryptedResource\tmetadata\n"
-        val entryOrders = listOf(
-            "manifest-first" to listOf(
-                JarEntryData("__jse/index.tab", manifest.toByteArray(Charsets.UTF_8)),
-                JarEntryData(encryptedResource, byteArrayOf(0x01, 0x02, 0x03)),
-            ),
-            "encrypted-resource-first" to listOf(
-                JarEntryData(encryptedResource, byteArrayOf(0x01, 0x02, 0x03)),
-                JarEntryData("__jse/index.tab", manifest.toByteArray(Charsets.UTF_8)),
-            ),
-        )
-
-        for ((order, entries) in entryOrders) {
-            withVbc4BuildContext(defaultVbc4BuildContext()) {
-                val sealed = RuntimeArtifactSealing.seal(
-                    artifact = testAttachedArtifact(classArtifacts = emptyList(), jarEntries = entries),
-                    seed = 0x4A53524CL,
-                    rewritesVmRuntime = false,
-                )
-                val sealedManifest = sealed.jarEntries.asSequence()
-                    .mapNotNull { entry ->
-                        runCatching { RuntimeResourceCodec.decode(entry.bytes)?.decodeToString() }.getOrNull()
-                    }
-                    .single { it.startsWith("probe.EncryptedTarget\t") }
-                val columns = sealedManifest.trim().split('\t')
-                val sealedResource = columns[1]
-
-                assertEquals("probe.EncryptedTarget", columns[0], "$order must preserve the binary class name")
-                assertTrue(sealedResource != encryptedResource, "$order must rewrite the manifest resource path")
-                assertTrue(
-                    sealed.jarEntries.any { it.name == sealedResource },
-                    "$order manifest must point to a JAR entry that exists after sealing",
-                )
-                assertFalse(
-                    sealed.jarEntries.any { it.name == encryptedResource },
-                    "$order must remove the original encrypted resource path",
-                )
-            }
-        }
-    }
-
     private fun loadClassBytes(resourceName: String): ByteArray =
         checkNotNull(Thread.currentThread().contextClassLoader.getResourceAsStream(resourceName)) {
             "missing test classpath resource $resourceName"
@@ -355,35 +207,6 @@ class RuntimeArtifactSealingCollisionTest {
     private fun bindingValue(text: String, key: String): String? =
         text.lines().firstOrNull { it.startsWith("$key=") }?.substringAfter('=')
 
-    private fun ByteArray.startsWithAscii(value: String): Boolean =
-        size >= value.length && value.indices.all { index -> this[index] == value[index].code.toByte() }
-
-    private fun ByteArray.containsAscii(value: String): Boolean {
-        val needle = value.toByteArray(Charsets.US_ASCII)
-        if (needle.isEmpty() || size < needle.size) return false
-        return (0..size - needle.size).any { offset ->
-            needle.indices.all { index -> this[offset + index] == needle[index] }
-        }
-    }
-
-    private fun artifactWithCurrentVmRuntime(resourcePath: String) = testAttachedArtifact(
-        classArtifacts = emptyList(),
-        jarEntries = listOf(
-            JarEntryData(
-                resourcePath,
-                RuntimeResourceCodec.encode(
-                    bytes = "VBC4\u0000payload".toByteArray(Charsets.UTF_8),
-                    kind = RuntimeResourceKind.VmBytecode,
-                    seed = 9,
-                    variantId = 1,
-                    layerCount = 4,
-                    compress = false,
-                ),
-            ),
-            JarEntryData("META-INF/.r/0.dat", "current-native-index".toByteArray(Charsets.UTF_8)),
-        ),
-    )
-
     private fun fixedContext() = Vbc4BuildContext(
         masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (0x23 + index * 7).toByte() },
         nativeSeed = 0x5151_2626L,
@@ -391,21 +214,4 @@ class RuntimeArtifactSealingCollisionTest {
         runtimeResourceKey = ByteArray(32) { index -> (0x31 + index * 13).toByte() },
     )
 
-    private fun currentVmCatalogPlan(resourcePath: String): RuntimeVmCatalogPlan {
-        val mesh = java.security.MessageDigest.getInstance("SHA-256")
-            .digest("current-catalog-mesh".toByteArray(Charsets.US_ASCII))
-            .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xFF) }
-        return RuntimeVmCatalogPlan(
-            methods = listOf(
-                RuntimeVmCatalogMethod(
-                    entryToken = 0x1234_5678_9ABC_DEF0UL.toLong(),
-                    resourcePath = resourcePath,
-                    manifestPath = resourcePath,
-                    shardCount = 2,
-                    mesh = mesh,
-                    methodLocalProfile = 1,
-                ),
-            ),
-        )
-    }
 }

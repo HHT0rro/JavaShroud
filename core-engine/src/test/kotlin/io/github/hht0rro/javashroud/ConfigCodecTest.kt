@@ -404,8 +404,31 @@ class ConfigCodecTest {
     @Test
     fun validateConfig_rejects_empty_passes() {
         val config = testConfig(inputJarPath = "C:/tmp/in.jar", outputJarPath = "C:/tmp/out.jar", passes = emptyList())
+            .copy(protectionProfile = io.github.hht0rro.javashroud.model.config.HardenedProtectionProfile.MINIMAL)
         assertFailsWith<IllegalArgumentException> {
             validateConfig(config, dummyPath)
+        }
+    }
+
+    @Test
+    fun validateConfig_fills_release_hardened_default_passes() {
+        val inputJar = Files.createTempFile("javashroud-config-default-passes", ".jar")
+        try {
+            val validated = validateConfig(
+                testConfig(
+                    inputJarPath = inputJar.toString(),
+                    outputJarPath = inputJar.resolveSibling("out.jar").toString(),
+                    passes = emptyList(),
+                ),
+                dummyPath,
+            )
+            assertEquals(
+                io.github.hht0rro.javashroud.transforms.protection.hardening.HardenedDefaultPipeline.RELEASE_PASSES,
+                validated.passes.filter { it.enabled }.map { it.id },
+            )
+            assertTrue(validated.allowOptInPasses)
+        } finally {
+            Files.deleteIfExists(inputJar)
         }
     }
 

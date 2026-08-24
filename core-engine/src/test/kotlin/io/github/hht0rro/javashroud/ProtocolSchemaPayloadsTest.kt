@@ -51,7 +51,7 @@ class ProtocolSchemaPayloadsTest {
                             targetKinds = listOf("class"),
                         ),
                         requiredPassIds = listOf("jni-microkernel-loader"),
-                        requiresAnyPassIds = listOf("class-encryption-loader", "method-virtualization"),
+                        requiresAnyPassIds = listOf("method-virtualization", "os-anti-debug"),
                         variantRequirements = listOf(
                             VariantRequirement(
                                 whenParam = "mode",
@@ -63,7 +63,7 @@ class ProtocolSchemaPayloadsTest {
                 ),
                 compatibility = listOf(
                     io.github.hht0rro.javashroud.model.schema.PassCompatibilityRule(
-                        passIds = listOf("class-encryption-loader", "method-virtualization"),
+                        passIds = listOf("method-virtualization", "os-anti-debug"),
                         severity = "hard",
                         description = "cannot run together",
                     ),
@@ -88,7 +88,7 @@ class ProtocolSchemaPayloadsTest {
         assertEquals(true, targeting["supported"])
         assertEquals(listOf("class"), targeting["targetKinds"])
         assertEquals(listOf("jni-microkernel-loader"), modulePayload["requiredPassIds"])
-        assertEquals(listOf("class-encryption-loader", "method-virtualization"), modulePayload["requiresAnyPassIds"])
+        assertEquals(listOf("method-virtualization", "os-anti-debug"), modulePayload["requiresAnyPassIds"])
         val variantRequirements = modulePayload["variantRequirements"] as List<*>
         assertEquals(1, variantRequirements.size)
         val variantRequirement = variantRequirements.single() as Map<*, *>
@@ -107,7 +107,7 @@ class ProtocolSchemaPayloadsTest {
         val compatibility = payload["compatibility"] as List<*>
         assertEquals(1, compatibility.size)
         val compatibilityPayload = compatibility.single() as Map<*, *>
-        assertEquals(listOf("class-encryption-loader", "method-virtualization"), compatibilityPayload["passIds"])
+        assertEquals(listOf("method-virtualization", "os-anti-debug"), compatibilityPayload["passIds"])
         assertEquals("hard", compatibilityPayload["severity"])
     }
 
@@ -127,8 +127,8 @@ class ProtocolSchemaPayloadsTest {
                 ),
                 modules = listOf(
                     ModuleDefinition(
-                        id = "anti-symbolic-execution",
-                        name = "Anti Symbolic Execution",
+                        id = "os-anti-vm",
+                        name = "OS Anti VM",
                         description = "adds traps",
                         tagIds = listOf("runtime-defense"),
                         params = listOf(

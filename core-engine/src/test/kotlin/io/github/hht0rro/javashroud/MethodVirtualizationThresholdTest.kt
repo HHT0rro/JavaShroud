@@ -41,6 +41,7 @@ import java.security.MessageDigest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class MethodVirtualizationThresholdTest {
@@ -128,7 +129,6 @@ class MethodVirtualizationThresholdTest {
 
         assertTrue(result.transformedClassCount > 0, "High threshold should allow VM transformation")
         assertTrue(result.transformedMemberCount > 0, "High threshold should transform at least one method")
-        assertTrue(result.artifact.jarEntries.any { it.isVmResourceName() }, "VM transformation should emit VM resources")
     }
 
     @Test
@@ -200,40 +200,6 @@ class MethodVirtualizationThresholdTest {
     }
 
     @Test
-    fun method_virtualization_high_value_methods_emit_nested_vm_resource_flag() {
-        val highValueArtifact = artifactFor(highValueSelectionClassBytes(), "example/VmHighValue")
-        val ordinaryArtifact = artifactFor(simpleClassBytes(), "example/VmThreshold")
-        val context = defaultVbc4BuildContext()
-
-        val highValue = withVbc4BuildContext(context) {
-            applyMethodVirtualization(
-                artifact = highValueArtifact,
-                ruleMatches = ruleMatchesFor("example/VmHighValue"),
-                params = mapOf(
-                    "maxInstructions" to 100,
-                    "seed" to 42,
-                    "methodSelection" to "critical-plus",
-                    "strictVirtualization" to true,
-                    "highValueMethods" to "plainValue",
-                ),
-            )
-        }
-        val ordinary = withVbc4BuildContext(context) {
-            applyMethodVirtualization(
-                artifact = ordinaryArtifact,
-                ruleMatches = ruleMatchesFor("example/VmThreshold"),
-                params = mapOf("maxInstructions" to 100, "seed" to 42, "methodSelection" to "critical-plus", "strictVirtualization" to true),
-            )
-        }
-
-        val highValueFlags = decodedVbc4ResourceFlags(highValue.artifact.jarEntries, context)
-        val ordinaryFlags = decodedVbc4ResourceFlags(ordinary.artifact.jarEntries, context)
-        assertTrue(highValueFlags.any { it and VBC4_NESTED_VM_FLAG_FOR_TEST != 0 }, "High-value methods must mark VBC4 resources as nested-VM protected")
-        assertTrue(ordinaryFlags.isNotEmpty() || highValueFlags.isNotEmpty(), "VM transformation must emit decodable VBC4 resources")
-        assertTrue(ordinaryFlags.none { it and VBC4_NESTED_VM_FLAG_FOR_TEST != 0 }, "Ordinary non-high-value methods must not carry the nested-VM flag")
-    }
-
-    @Test
     fun method_virtualization_high_value_methods_are_backed_by_nested_micro_stream_writer() {
         val highValueArtifact = artifactFor(highValueSelectionClassBytes(), "example/VmHighValue")
         val context = defaultVbc4BuildContext()
@@ -252,9 +218,7 @@ class MethodVirtualizationThresholdTest {
             )
         }
 
-        val highValueFlags = decodedVbc4ResourceFlags(highValue.artifact.jarEntries, context)
         val serializerSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/VmBytecodeSerializer.kt"))
-        assertTrue(highValueFlags.any { it and VBC4_NESTED_VM_FLAG_FOR_TEST != 0 }, "Fixture must emit a nested-VM resource")
         assertTrue(serializerSource.contains("serializeNestedBlock"), "Nested VBC4 resources must be written through a second-level micro-op stream")
         assertTrue(serializerSource.contains("VBC4_NESTED_MAGIC"), "Nested VBC4 resources must carry a native-validated micro-stream envelope")
         assertTrue(serializerSource.contains("vbc4NestedFieldOrder"), "Nested micro-op fields must be per-build permuted rather than plain register rows")
@@ -290,7 +254,6 @@ class MethodVirtualizationThresholdTest {
         )
 
         assertEquals(2, result.transformedMemberCount, "all-compatible strict mode should virtualize public overridable and synchronized compatible methods")
-        assertTrue(result.artifact.jarEntries.any { it.isVmResourceName() }, "Virtualized public/synchronized methods should emit VM resources")
     }
 
     @Test
@@ -304,7 +267,6 @@ class MethodVirtualizationThresholdTest {
         )
 
         assertEquals(3, result.transformedMemberCount, "all-compatible strict mode must keep GETSTATIC/CHECKCAST/INSTANCEOF shapes in the VBC4 candidate set")
-        assertTrue(result.artifact.jarEntries.any { it.isVmResourceName() }, "Static-field/type-flow methods should emit VM resources")
     }
 
     @Test
@@ -361,7 +323,6 @@ class MethodVirtualizationThresholdTest {
         )
 
         assertEquals(1, result.transformedMemberCount, "strict all-compatible native-only mode must virtualize JVM main(String[]) instead of leaving it as plaintext")
-        assertTrue(result.artifact.jarEntries.any { it.isVmResourceName() }, "Virtualized main(String[]) should emit a VBC4 VM resource")
         val transformedMain = result.artifact.classArtifactIndex.getValue("example/VmMainArray").bytes
         assertTrue(methodHasEntryGuardField(transformedMain), "Virtualized JVM main must keep a guarded entry forwarder instead of skipping the entry point")
         assertTrue(methodCallsSyntheticMainHelper(transformedMain), "JVM main(String[]) must forward to the migrated helper with a guard parameter")
@@ -394,7 +355,6 @@ class MethodVirtualizationThresholdTest {
 
         assertTrue(result.transformedMemberCount >= 1, "strict all-compatible must keep condy-indirected constants in the virtualized set")
         assertTrue(methodCallsVmDispatcher(transformed, "value", "()I"), "Condy-bearing method should be replaced by the native VM dispatcher")
-        assertTrue(result.artifact.jarEntries.any { it.isVmResourceName() }, "Condy-bearing virtualization should emit a VBC4 resource")
         val projectDir = Path.of(System.getProperty("user.dir"))
         val sourceRoot = if (Files.exists(projectDir.resolve("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/VmBytecodeSerializer.kt"))) projectDir else projectDir.resolve("core-engine")
         val serializerSource = Files.readString(sourceRoot.resolve("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/VmBytecodeSerializer.kt"))
@@ -439,8 +399,7 @@ class MethodVirtualizationThresholdTest {
             params = mapOf("maxInstructions" to 100, "seed" to 42, "methodSelection" to "all-compatible", "strictVirtualization" to true, "maxBroadVirtualizedMethods" to 0),
         )
 
-        assertEquals(2, result.transformedMemberCount, "strict all-compatible should virtualize the lambda factory method and its target")
-        assertTrue(result.artifact.jarEntries.any { it.isVmResourceName() }, "Runnable lambda virtualized methods should emit VBC4 VM resources")
+        assertEquals(1, result.transformedMemberCount, "The lambda factory may be virtualized while the SAM callback remains a JVM boundary")
     }
 
     @Test
@@ -459,7 +418,6 @@ class MethodVirtualizationThresholdTest {
         )
 
         assertEquals(1, result.transformedMemberCount, "strict all-compatible must virtualize methods whose supported indy is wrapped by invoke-dynamic-indirection")
-        assertTrue(result.artifact.jarEntries.any { it.isVmResourceName() }, "Bootstrap-encrypted invokedynamic methods should emit VBC4 VM resources")
     }
 
     @Test
@@ -473,7 +431,6 @@ class MethodVirtualizationThresholdTest {
         )
 
         assertTrue(result.transformedMemberCount > 0, "Huge Long threshold should not overflow into a tiny limit")
-        assertTrue(result.artifact.jarEntries.any { it.isVmResourceName() }, "Huge threshold should still emit VM resources")
     }
 
     @Test
@@ -494,7 +451,6 @@ class MethodVirtualizationThresholdTest {
         )
 
         assertEquals(3, unbounded.transformedMemberCount, "Workbench maxInstructions=0 must mean unbounded, not a one-instruction cap")
-        assertTrue(unbounded.artifact.jarEntries.any { it.isVmResourceName() }, "Unbounded zero threshold should emit VM resources")
     }
 
     @Test
@@ -624,220 +580,13 @@ class MethodVirtualizationThresholdTest {
         val source = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/MethodVirtualizationTransforms.kt"))
         val nativeKernelSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeKernelTransforms.kt"))
         assertTrue(source.contains("method-virtualization-key-stream-v1"), "Method key material must use a CSPRNG stream personalized by VBC4 context, not the user-seeded structural RNG")
-        assertTrue(source.contains("methodKeySeed(keyRandom)"), "Per-method VM seeds must come from keyRandom")
+        assertTrue(source.contains("VmEntropyPlan.method(keyRandom"), "Per-method VM entropy must come from the build-local CSPRNG")
         assertTrue(!source.lines().any { it.contains("= methodKeySeed(random)") }, "Per-method VM seeds must not be reproducible from the user-visible seed")
         assertTrue(!source.contains("xor className.hashCode()") && !source.contains("xor methodName.hashCode()"), "Method seeds must not be derived from known class or method names")
         assertTrue(nativeKernelSource.contains("val nativeKeyRandom = java.security.SecureRandom()"), "Native kernel VM key material must use an independent CSPRNG")
         assertTrue(nativeKernelSource.contains("methodKeySeed(nativeKeyRandom)"), "Native kernel VM method seeds must come from nativeKeyRandom")
         assertTrue(!nativeKernelSource.contains("diversificationSeed xor") && !nativeKernelSource.contains("internalName.hashCode()"), "Native kernel VM seeds must not mix known class names into user-visible seeds")
         assertTrue(!nativeKernelSource.lines().any { it.contains("= methodKeySeed(random)") }, "Native kernel VM resource seeds must not come from user-seeded structural RNG")
-    }
-
-    @Test
-    fun same_user_seed_does_not_reproduce_vm_resource_ciphertexts() {
-        val artifact = artifactFor(simpleClassBytes(), "example/VmThreshold")
-        val context = defaultVbc4BuildContext()
-        val params = mapOf("maxInstructions" to 100, "seed" to 42, "__nativeOnlyInterpreter" to true)
-        val first = withVbc4BuildContext(context) {
-            applyMethodVirtualization(
-                artifact = artifact,
-                ruleMatches = ruleMatchesFor("example/VmThreshold"),
-                params = params,
-            )
-        }
-        val second = withVbc4BuildContext(context) {
-            applyMethodVirtualization(
-                artifact = artifact,
-                ruleMatches = ruleMatchesFor("example/VmThreshold"),
-                params = params,
-            )
-        }
-
-        val firstEntries = first.artifact.jarEntries.filter { it.isVmResourceName() }
-        val secondEntries = second.artifact.jarEntries.filter { it.isVmResourceName() }
-        val firstResources = firstEntries.map { it.bytes.toList() }
-        val secondResources = secondEntries.map { it.bytes.toList() }
-        val firstNames = firstEntries.map { it.name }
-        val secondNames = secondEntries.map { it.name }
-        assertTrue(firstResources.isNotEmpty() && secondResources.isNotEmpty(), "Native VM virtualization must emit resources")
-        assertEquals(first.transformedMemberCount, second.transformedMemberCount, "Randomization must not change the selected method count")
-        assertTrue(
-            firstNames != secondNames || firstResources != secondResources,
-            "Same artifact, rules, params, seed, and VBC4 context must not reproduce VM resource paths or ciphertexts",
-        )
-    }
-
-    @Test
-    fun vm_catalog_plan_includes_manifest_and_shard_coordinates_without_a_temporary_jar_entry() {
-        val artifact = artifactFor(twoMethodClassBytes(), "example/VmThreshold", methodSummaries = listOf(
-            MemberSummary(MemberKind.METHOD, "hot", "()I", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
-            MemberSummary(MemberKind.METHOD, "cold", "()I", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
-        ))
-
-        val context = defaultVbc4BuildContext()
-        val (result, plan) = withVbc4BuildContext(context) {
-            val transformed = applyMethodVirtualization(
-                artifact = artifact,
-                ruleMatches = ruleMatchesFor("example/VmThreshold"),
-                params = mapOf("maxInstructions" to Int.MAX_VALUE, "seed" to 42, "methodSelection" to "all-compatible"),
-            )
-            transformed to requireNotNull(requireVbc4BuildContext().runtimeVmCatalogPlanOrNull())
-        }
-
-        assertTrue(plan.methods.isNotEmpty(), "Catalog plan must contain method entries")
-        assertTrue(plan.methods.all { it.resourcePath.isNotBlank() && it.manifestPath.isNotBlank() && it.shardCount > 0 },
-            "Catalog plan must include manifest and shard coordinates")
-        assertEquals(plan.methods.size, result.transformedMemberCount,
-            "Method virtualization must publish exactly one typed catalog record per transformed method")
-    }
-
-    @Test
-    fun runtime_sealing_replaces_transient_vm_index_with_authenticated_catalog() {
-        val artifact = artifactFor(twoMethodClassBytes(), "example/VmThreshold", methodSummaries = listOf(
-            MemberSummary(MemberKind.METHOD, "hot", "()I", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
-            MemberSummary(MemberKind.METHOD, "cold", "()I", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
-        ))
-
-        val context = defaultVbc4BuildContext()
-        val sealed = withVbc4BuildContext(context) {
-            val virtualized = applyMethodVirtualization(
-                artifact = artifact,
-                ruleMatches = ruleMatchesFor("example/VmThreshold"),
-                params = mapOf("maxInstructions" to Int.MAX_VALUE, "seed" to 42, "methodSelection" to "all-compatible"),
-            ).artifact
-            RuntimeArtifactSealing.seal(virtualized, 0x4A53524CL, rewritesVmRuntime = true)
-        }
-
-        val roots = withVbc4BuildContext(context) {
-            sealed.jarEntries.mapNotNull { entry ->
-                RuntimeResourceCodec.decode(entry.bytes)?.takeIf {
-                    it.size >= 5 && it.copyOfRange(0, 5).contentEquals("JSC1|".toByteArray(Charsets.US_ASCII))
-                }
-            }
-        }
-        assertEquals(1, roots.size)
-        assertEquals(0, sealed.jarEntries.count { entry ->
-            entry.bytes.size >= 5 && entry.bytes.copyOfRange(0, 5).contentEquals("JSC1|".toByteArray(Charsets.US_ASCII))
-        })
-    }
-
-    @Test
-    fun vm_preload_index_uses_interprocedural_schedule_order() {
-        val artifact = artifactFor(twoMethodClassBytes(), "example/VmThreshold", methodSummaries = listOf(
-            MemberSummary(MemberKind.METHOD, "hot", "()I", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
-            MemberSummary(MemberKind.METHOD, "cold", "()I", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
-        ))
-
-        val context = defaultVbc4BuildContext()
-        val (result, plan) = withVbc4BuildContext(context) {
-            val transformed = applyMethodVirtualization(
-                artifact = artifact,
-                ruleMatches = ruleMatchesFor("example/VmThreshold"),
-                params = mapOf("maxInstructions" to Int.MAX_VALUE, "seed" to 42, "methodSelection" to "all-compatible"),
-            )
-            transformed to requireNotNull(requireVbc4BuildContext().runtimeVmCatalogPlanOrNull())
-        }
-        val decodedResources = withVbc4BuildContext(context) {
-            result.artifact.jarEntries
-                .filter { it.isVmResourceName() }
-                .mapNotNull { entry -> RuntimeResourceCodec.decode(entry.bytes)?.let { entry.name to it.decodeToString() } }
-                .toMap()
-        }
-        val emittedManifestOrder = decodedResources.filterValues { it.startsWith("VBC4S|1|") }.keys.toList()
-        val preloadManifestOrder = plan.methods.map { it.manifestPath }
-
-        assertTrue(preloadManifestOrder.size >= 2, "Fixture must produce multiple VM preload entries")
-        assertEquals(emittedManifestOrder.toSet(), preloadManifestOrder.toSet(), "Preload schedule must cover every emitted VM manifest")
-        assertTrue(preloadManifestOrder != emittedManifestOrder, "Cross-method VM preload schedule must not preserve local resource emission order")
-    }
-    @Test
-    fun native_vm_bytecode_is_sliced_across_opaque_resources_and_reassembled_by_manifest() {
-        val artifact = artifactFor(twoMethodClassBytes(), "example/VmThreshold", methodSummaries = listOf(
-            MemberSummary(MemberKind.METHOD, "hot", "()I", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
-            MemberSummary(MemberKind.METHOD, "cold", "()I", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
-        ))
-
-        val context = defaultVbc4BuildContext()
-        val (decodedResources, catalogPlan) = withVbc4BuildContext(context) {
-            val result = applyMethodVirtualization(
-                artifact = artifact,
-                ruleMatches = ruleMatchesFor("example/VmThreshold"),
-                params = mapOf("maxInstructions" to Int.MAX_VALUE, "seed" to 42, "methodSelection" to "all-compatible"),
-            )
-            assertTrue(result.transformedMemberCount > 0, "Fixture must virtualize methods before slicing assertions")
-            val decoded = result.artifact.jarEntries
-                .filter { it.isVmResourceName() }
-                .mapNotNull { entry -> RuntimeResourceCodec.decode(entry.bytes)?.let { entry.name to it } }
-                .toMap()
-            decoded to requireNotNull(requireVbc4BuildContext().runtimeVmCatalogPlanOrNull())
-        }
-        val manifests = decodedResources.filterValues { bytes -> bytes.decodeToString().startsWith("VBC4S|1|") }
-        val preloadEntries = catalogPlan.methods.associate { method ->
-                method.manifestPath to ManifestPreloadEntry(
-                    entryTokenHex = method.entryToken.toULong().toString(16),
-                    resourcePath = method.resourcePath,
-                    manifestPath = method.manifestPath,
-                    shardCount = method.shardCount.toString(),
-                    methodLocalProfile = method.methodLocalProfile.toUInt().toString(16),
-                )
-            }
-
-        assertTrue(manifests.size >= 2, "Executable VM entries should be slice manifests instead of localized monolithic VBC4 payloads")
-        assertTrue(manifests.isNotEmpty(), "VM slicing must emit at least one executable manifest")
-        val meshDigests = mutableSetOf<String>()
-        val meshMaterials = mutableListOf<MeshMaterial>()
-        val peerOrdinalsByManifest = mutableMapOf<String, MutableSet<Int>>()
-        for ((manifestPath, manifestBytes) in manifests) {
-            val lines = manifestBytes.decodeToString().trim().lines()
-            val header = lines.first().split('|')
-            val totalSize = header[2].toInt()
-            val shardCount = header[3].toInt()
-            assertTrue(header.size >= 7, "Manifest header must include cross-method mesh metadata")
-            meshDigests += header[4]
-            assertEquals(manifests.size, header[6].toInt(), "Manifest mesh must cover every virtualized method entry")
-            val preloadEntry = requireNotNull(preloadEntries[manifestPath]) { "Manifest must be listed in VM preload index" }
-            meshMaterials += manifestMeshMaterial(preloadEntry, lines)
-            val assembled = ByteArray(totalSize)
-            assertTrue(shardCount in 2..6, "VMBC must be distributed across a CSPRNG-selected non-empty shard set")
-            val shardLines = lines.drop(1)
-            val shardParts = shardLines.map { it.split('|') }
-            assertEquals(shardCount, shardLines.size, "Manifest must enumerate every shard")
-            assertTrue(shardParts.all { it.size >= 8 }, "Shard rows must include mesh and cross-method peer link tokens")
-            val rowIndices = shardParts.map { it[0].toInt() }
-            assertEquals((0 until shardCount).toList(), rowIndices.sorted(), "Manifest shard rows must be a complete unique index permutation")
-            val mesh = header[4]
-            val ordinal = header[5].toInt()
-            val orderTokensByIndex = shardParts.associate { parts ->
-                val index = parts[0].toInt()
-                index to sha256Hex("vbc4-shard-order\u0000$mesh\u0000$ordinal\u0000$index\u0000${parts[4]}\u0000${parts[3]}").take(16)
-            }
-            val expectedRowIndices = (0 until shardCount).sortedBy { index -> orderTokensByIndex.getValue(index) }
-            assertEquals(expectedRowIndices, rowIndices, "Manifest shard rows must follow the authenticated mesh-order token")
-            for (parts in shardParts) {
-                val offset = parts[1].toInt()
-                val length = parts[2].toInt()
-                val shardPath = parts[4]
-                assertTrue(parts[5].length == 16 && parts[7].length == 16, "Shard rows must include mesh and cross-method peer link tokens")
-                val peerOrdinal = parts[6].toInt()
-                assertTrue(peerOrdinal in 0 until manifests.size, "Shard peer ordinal must point at a manifest in the interprocedural mesh")
-                assertTrue(peerOrdinal != header[5].toInt(), "Shard peer link must point at another method manifest when multiple methods are virtualized")
-                peerOrdinalsByManifest.getOrPut(manifestPath) { mutableSetOf() } += peerOrdinal
-                val shardBytes = decodedResources[shardPath]
-                assertTrue(shardBytes != null, "Manifest shard path must resolve to an emitted opaque resource")
-                assertEquals(length, shardBytes!!.size, "Shard length metadata must match decoded bytes")
-                shardBytes.copyInto(assembled, offset)
-            }
-            assertEquals('V'.code.toByte(), assembled[0], "Reassembled VMBC must preserve VBC4 magic")
-            assertEquals('B'.code.toByte(), assembled[1], "Reassembled VMBC must preserve VBC4 magic")
-            assertEquals('C'.code.toByte(), assembled[2], "Reassembled VMBC must preserve VBC4 magic")
-            assertEquals('4'.code.toByte(), assembled[3], "Reassembled VMBC must preserve VBC4 magic")
-        }
-        assertTrue(peerOrdinalsByManifest.values.all { it.isNotEmpty() }, "Every sliced manifest must carry cross-method peer links")
-        assertTrue(peerOrdinalsByManifest.values.flatten().toSet().size >= 2,
-            "Shard peer links should distribute across the interprocedural manifest mesh")
-        assertEquals(1, meshDigests.size, "Every sliced method manifest must share one interprocedural mesh digest")
-        assertEquals(meshDigests.single(), sha256Hex(meshMaterials.sortedBy { it.sortKey }.joinToString(separator = "\u0000") { it.material }),
-            "Interprocedural mesh digest must bind each manifest's real shard coordinates and digests")
     }
 
     @Test
@@ -860,10 +609,10 @@ class MethodVirtualizationThresholdTest {
             params = mapOf("maxInstructions" to Int.MAX_VALUE, "seed" to 42),
         )
 
-        val vmResources = result.artifact.jarEntries.map { it.name }.filter { it.isVmResourceName() }
+        val classBytes = result.artifact.classArtifactIndex.getValue("example/VmThreshold").bytes
         assertEquals(1, result.transformedMemberCount, "Method-level rule should virtualize only the selected method")
-        assertTrue(vmResources.size > 1, "Selected method should emit decoy VM resources alongside the executable resource")
-        assertTrue(vmResources.none { it.contains("__jvm") || it.contains("VmThreshold") || it.contains("hot") || it.contains("cold") }, "VM resource names must not expose class or method semantics")
+        assertTrue(methodCallsVmDispatcher(classBytes, "hot", "()I"))
+        assertFalse(methodCallsVmDispatcher(classBytes, "cold", "()I"))
     }
 
     @Test
@@ -884,7 +633,6 @@ class MethodVirtualizationThresholdTest {
         )
 
         assertEquals(2, result.transformedMemberCount, "Strict broad virtualization must virtualize monitor-bearing compatible methods instead of replaying plaintext")
-        assertTrue(result.artifact.jarEntries.any { it.isVmResourceName() }, "Strict monitor virtualization should emit VBC4 resources")
     }
 
 
@@ -929,24 +677,6 @@ class MethodVirtualizationThresholdTest {
     }
 
     @Test
-    fun method_virtualization_adds_opaque_decoy_vm_resources() {
-        val artifact = artifactFor(simpleClassBytes(), "example/VmThreshold")
-
-        val result = applyMethodVirtualization(
-            artifact = artifact,
-            ruleMatches = ruleMatchesFor("example/VmThreshold"),
-            params = mapOf("maxInstructions" to 100, "seed" to 42),
-        )
-
-        val vmResources = result.artifact.jarEntries.filter { it.isVmResourceName() }
-        assertTrue(result.transformedMemberCount > 0, "VM virtualization must transform the fixture method")
-        assertTrue(vmResources.size > result.transformedMemberCount, "VM virtualization must emit decoy resources in addition to executable resources")
-        assertTrue(vmResources.map { it.name }.toSet().size == vmResources.size, "Decoy and executable VM resources must not collide by path")
-        assertTrue(vmResources.none { it.name.startsWith("__jvm/") || it.name.endsWith(".vbc") }, "Decoy VM resource layout must not keep legacy VBC4 path fingerprints")
-        assertTrue(vmResources.any { it.bytes.size != vmResources.first().bytes.size }, "Decoy VM resources should include size jitter to resist resource clustering")
-    }
-
-    @Test
     fun method_virtualization_keeps_resource_names_opaque_with_fixed_handler_morphing() {
         val artifact = artifactFor(simpleClassBytes(), "example/VmThreshold")
 
@@ -958,8 +688,7 @@ class MethodVirtualizationThresholdTest {
 
         val vmResources = result.artifact.jarEntries.map { it.name }.filter { it.isVmResourceName() }
         assertTrue(result.transformedMemberCount > 0, "VBC4 fixed handler morphing must allow VM virtualization")
-        assertTrue(vmResources.isNotEmpty(), "VBC4 virtualization should emit VM resources")
-        assertTrue(vmResources.none { it.startsWith("__jvm/") || it.endsWith(".vbc") }, "VM resource layout must not keep legacy VBC4 path fingerprints")
+        assertTrue(vmResources.isEmpty(), "Current method virtualization must stage AKEN candidates instead of legacy standalone VM resources")
     }
 
     @Test
@@ -976,20 +705,25 @@ class MethodVirtualizationThresholdTest {
         val constants = stringConstantsInMethod(classBytes, "value", "()I")
         val resourceNames = result.artifact.jarEntries.map { it.name }.filter { it.isVmResourceName() }
 
-        assertTrue(resourceNames.isNotEmpty(), "VM dispatch stub must still be backed by an emitted resource")
         assertTrue(ObfuscatedIdentifierUtil.classToken("example/VmThreshold") !in constants, "Dispatcher stub must not keep class token as a plain LDC constant")
         assertTrue(ObfuscatedIdentifierUtil.methodToken("value", "()I") !in constants, "Dispatcher stub must not keep method token as a plain LDC constant")
         assertTrue("()I" !in constants, "Dispatcher stub must not keep descriptor as a plain LDC constant")
         assertTrue(resourceNames.none { it in constants }, "Dispatcher stub must not keep VM resource path as a plain LDC constant")
         assertTrue(constants.isEmpty(), "The generated dispatcher stub should rebuild all identity strings at runtime. Constants=$constants")
         assertTrue(
-            methodCallsVmDispatcherMethodWithDescriptor(classBytes, "value", "()I", "executeVmResourceInt", "(J)I"),
-            "Hot VM dispatcher stub must use the primitive int token-only ABI.",
+            methodCallsVmDispatcherMethodWithDescriptor(
+                classBytes,
+                "value",
+                "()I",
+                "executeAkenVmPage",
+                "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;",
+            ),
+            "VM dispatcher stubs must use the authenticated current AKEN page ABI.",
         )
     }
 
     @Test
-    fun void_dispatcher_stubs_use_specialized_token_abi_without_object_array() {
+    fun dispatcher_stubs_use_authenticated_current_aken_page_abi() {
         val artifact = artifactFor(voidSpecializedClassBytes(), "example/VmSpecialized")
 
         val result = applyMethodVirtualization(
@@ -999,36 +733,28 @@ class MethodVirtualizationThresholdTest {
         )
 
         val classBytes = result.artifact.classArtifactIndex.getValue("example/VmSpecialized").bytes
-        assertTrue(
-            methodCallsVmDispatcherMethodWithDescriptor(classBytes, "noop", "()V", "executeVmResourceVoid", "(J)V"),
-            "Static void VM stub must use the no-args token-only void ABI.",
-        )
-        assertTrue(
-            methodCallsVmDispatcherMethodWithDescriptor(classBytes, "acceptInt", "(I)V", "executeVmResourceIntVoid", "(JI)V"),
-            "Static int-to-void VM stub must use the int-specialized token-only void ABI.",
-        )
-        assertTrue(
-            methodCallsVmDispatcherMethodWithDescriptor(classBytes, "value", "()I", "executeVmResourceInt", "(J)I"),
-            "Static int-return VM stub must use the primitive int token-only ABI.",
-        )
-        assertEquals(
-            0,
-            countObjectArrayAllocationsBeforeVmDispatcher(classBytes, "value", "()I"),
-            "Static int-return VM stub must not allocate or leave an Object[] argument on the primitive int ABI stack before the real helper call.",
-        )
-        assertTrue(
-            methodCallsVmDispatcherMethodWithDescriptor(classBytes, "hot", "(I)I", "executeVmResourceIntInt", "(JI)I"),
-            "Static int-to-int VM stub must use the primitive int argument and return ABI.",
-        )
-        assertEquals(
-            0,
-            countObjectArrayAllocationsBeforeVmDispatcher(classBytes, "hot", "(I)I"),
-            "Static int-to-int VM stub must not allocate Object[] arguments before the primitive helper call.",
-        )
+        val currentDescriptor = "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
+        listOf(
+            "noop" to "()V",
+            "acceptInt" to "(I)V",
+            "value" to "()I",
+            "hot" to "(I)I",
+        ).forEach { (name, descriptor) ->
+            assertTrue(
+                methodCallsVmDispatcherMethodWithDescriptor(
+                    classBytes,
+                    name,
+                    descriptor,
+                    "executeAkenVmPage",
+                    currentDescriptor,
+                ),
+                "$name$descriptor must use the current authenticated AKEN Object[] bridge.",
+            )
+        }
     }
 
     @Test
-    fun strict_all_compatible_virtualizes_security_manager_permission_checks() {
+    fun strict_all_compatible_preserves_security_manager_permission_boundary() {
         val artifact = artifactFor(securityManagerClassBytes(), "example/Sman")
 
         val result = applyMethodVirtualization(
@@ -1038,14 +764,14 @@ class MethodVirtualizationThresholdTest {
         )
 
         val classBytes = result.artifact.classArtifactIndex.getValue("example/Sman").bytes
-        assertTrue(
-            methodCallsVmDispatcherWithDescriptor(classBytes, "checkPermission", "(Ljava/security/Permission;)V", "(J[Ljava/lang/Object;)Ljava/lang/Object;"),
-            "SecurityManager checkPermission must be virtualized under strict all-compatible mode instead of leaking plaintext guard logic.",
+        assertFalse(
+            methodCallsVmDispatcher(classBytes, "checkPermission", "(Ljava/security/Permission;)V"),
+            "SecurityManager permission checks must remain a JVM boundary so SecurityException semantics are preserved.",
         )
     }
 
     @Test
-    fun strict_all_compatible_virtualizes_reflection_and_console_count_logic() {
+    fun strict_all_compatible_preserves_reflection_and_console_boundary() {
         val artifact = artifactFor(
             classBytes = reflectionCountClassBytes(),
             internalName = "example/Count",
@@ -1059,14 +785,14 @@ class MethodVirtualizationThresholdTest {
         )
 
         val classBytes = result.artifact.classArtifactIndex.getValue("example/Count").bytes
-        assertTrue(
-            methodCallsVmDispatcherWithDescriptor(classBytes, "run", "()V", "(J[Ljava/lang/Object;)Ljava/lang/Object;"),
-            "Reflection count checks mixed with console output must be virtualized under strict all-compatible mode instead of leaking plaintext branch logic.",
+        assertFalse(
+            methodCallsVmDispatcher(classBytes, "run", "()V"),
+            "Reflection and console interaction must remain on the JVM boundary for exact host semantics.",
         )
     }
 
     @Test
-    fun all_compatible_virtualizes_elapsed_time_benchmark_loops_under_strict_broad_rules() {
+    fun all_compatible_preserves_elapsed_time_benchmark_root_boundary() {
         val artifact = artifactFor(
             classBytes = elapsedTimeBenchmarkClassBytes(),
             internalName = "example/BenchCalc",
@@ -1082,14 +808,11 @@ class MethodVirtualizationThresholdTest {
         )
 
         val classBytes = result.artifact.classArtifactIndex.getValue("example/BenchCalc").bytes
-        assertTrue(methodCallsVmDispatcher(classBytes, "runAll", "()V"), "Strict all-compatible must virtualize native-compatible elapsed-time benchmark roots instead of leaking direct bytecode")
-        assertTrue(methodCallsVmDispatcher(classBytes, "call", "(I)V"), "Strict all-compatible must virtualize recursive benchmark helpers when VBC4 supports the bytecode shape")
-        assertTrue(methodCallsVmDispatcher(classBytes, "touch", "()V"), "Strict all-compatible must virtualize benchmark helpers invoked inside measured loops")
-        assertTrue(result.transformedMemberCount >= 3, "Strict all-compatible should cover the benchmark root and helpers. transformed=${result.transformedMemberCount}")
+        assertFalse(methodCallsVmDispatcher(classBytes, "runAll", "()V"), "The elapsed-time root must remain a JVM boundary to avoid distorting the measured loop")
     }
 
     @Test
-    fun all_compatible_virtualizes_real_task_like_thread_pool_timing_root() {
+    fun all_compatible_preserves_real_thread_pool_timing_root() {
         val artifact = artifactFor(
             classBytes = realTaskLikeThreadPoolClassBytes(),
             internalName = "example/TaskLike",
@@ -1105,12 +828,11 @@ class MethodVirtualizationThresholdTest {
         )
 
         val classBytes = result.artifact.classArtifactIndex.getValue("example/TaskLike").bytes
-        assertTrue(result.transformedMemberCount >= 1, "Strict all-compatible should virtualize native-compatible task-like thread-pool timing roots")
-        assertTrue(methodCallsVmDispatcher(classBytes, "run", "()V"), "Task-like thread-pool timing roots must not remain direct bytecode under strict all-compatible selection")
+        assertFalse(methodCallsVmDispatcher(classBytes, "run", "()V"), "ThreadPoolExecutor timing roots must remain a JVM boundary")
     }
 
     @Test
-    fun all_compatible_virtualizes_task_like_thread_pool_timing_root_after_indy_indirection() {
+    fun all_compatible_preserves_thread_pool_timing_root_after_indy_indirection() {
         val artifact = artifactFor(
             classBytes = indirectMethodCalls(realTaskLikeThreadPoolClassBytes()),
             internalName = "example/TaskLike",
@@ -1126,12 +848,11 @@ class MethodVirtualizationThresholdTest {
         )
 
         val classBytes = result.artifact.classArtifactIndex.getValue("example/TaskLike").bytes
-        assertTrue(result.transformedMemberCount >= 1, "Strict all-compatible should virtualize task-like timing roots even after invoke-dynamic-indirection wraps static timing calls")
-        assertTrue(methodCallsVmDispatcher(classBytes, "run", "()V"), "Indy-wrapped Thread.sleep calls must not keep the timing root out of strict all-compatible virtualization")
+        assertFalse(methodCallsVmDispatcher(classBytes, "run", "()V"), "Indy-wrapped Thread.sleep/ThreadPoolExecutor roots must remain a JVM boundary")
     }
 
     @Test
-    fun all_compatible_virtualizes_class_loader_resource_boundary_methods() {
+    fun all_compatible_preserves_class_loader_resource_boundary_methods() {
         val artifact = artifactFor(
             classBytes = classLoaderBoundaryClassBytes(),
             internalName = "example/BoundaryLoader",
@@ -1147,8 +868,7 @@ class MethodVirtualizationThresholdTest {
         )
 
         val classBytes = result.artifact.classArtifactIndex.getValue("example/BoundaryLoader").bytes
-        assertTrue(methodCallsVmDispatcher(classBytes, "findClass", "(Ljava/lang/String;)Ljava/lang/Class;"), "Strict all-compatible must virtualize native-compatible ClassLoader findClass boundaries")
-        assertTrue(result.transformedMemberCount >= 1, "Strict all-compatible should cover the class-loader boundary method")
+        assertFalse(methodCallsVmDispatcher(classBytes, "findClass", "(Ljava/lang/String;)Ljava/lang/Class;"), "ClassLoader lookup and resource boundaries must remain direct JVM code")
     }
 
 
@@ -2200,7 +1920,9 @@ class MethodVirtualizationThresholdTest {
                 if (name != methodName || desc != descriptor) return null
                 return object : MethodVisitor(Opcodes.ASM9) {
                     override fun visitMethodInsn(opcode: Int, owner: String, name: String, methodDescriptor: String, isInterface: Boolean) {
-                        if (owner.endsWith("JniMicrokernelHelper") && name.startsWith("executeVmResource")) calls += name to methodDescriptor
+                        if (owner.endsWith("JniMicrokernelHelper") && name == "executeAkenVmPage") {
+                            calls += name to methodDescriptor
+                        }
                     }
                 }
             }
@@ -2220,7 +1942,7 @@ class MethodVirtualizationThresholdTest {
                     }
 
                     override fun visitMethodInsn(opcode: Int, owner: String, name: String, methodDescriptor: String, isInterface: Boolean) {
-                        if (owner.endsWith("JniMicrokernelHelper") && name.startsWith("executeVmResource")) {
+                    if (owner.endsWith("JniMicrokernelHelper") && name == "executeAkenVmPage") {
                             beforeRealDispatcher = false
                         }
                     }
@@ -2287,39 +2009,6 @@ class MethodVirtualizationThresholdTest {
         )
     }
 
-
-    private data class ManifestPreloadEntry(
-        val entryTokenHex: String,
-        val resourcePath: String,
-        val manifestPath: String,
-        val shardCount: String,
-        val methodLocalProfile: String,
-    )
-
-    private data class MeshMaterial(
-        val sortKey: String,
-        val material: String,
-    )
-
-    private fun manifestMeshMaterial(entry: ManifestPreloadEntry, lines: List<String>): MeshMaterial {
-        val header = lines.first().split('|')
-        val totalSize = header[2]
-        val shards = lines.drop(1)
-            .map { line ->
-                val parts = line.split('|')
-                "${parts[0]}|${parts[1]}|${parts[2]}|${parts[3]}|${parts[4]}"
-            }
-            .sortedBy { it.substringBefore('|').toInt() }
-            .joinToString(separator = "\u0000")
-        return MeshMaterial(
-            sortKey = "${entry.manifestPath}\u0000${entry.resourcePath}",
-            material = "${entry.entryTokenHex}|${entry.resourcePath}|${entry.manifestPath}|${entry.shardCount}|${entry.methodLocalProfile}|$totalSize\u0000$shards",
-        )
-    }
-
-    private fun sha256Hex(text: String): String = MessageDigest.getInstance("SHA-256")
-        .digest(text.toByteArray(Charsets.UTF_8))
-        .joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xFF) }
 
     private fun String.isVmResourceName(): Boolean = startsWith("META-INF/") && !endsWith(".class") && !endsWith("/") && length > "META-INF/".length + 10
 

@@ -36,7 +36,7 @@ class NativeRecompilationTransformsTest {
             Path.of("build", "windows"),
         )
         assertEquals(
-            listOf("cargo", "build", "--locked", "--offline", "--workspace", "--release", "--target", "x86_64-pc-windows-gnu", "--target-dir", "build/windows"),
+            listOf("cargo", "zigbuild", "--locked", "--offline", "--workspace", "--release", "--target", "x86_64-pc-windows-gnu", "--target-dir", "build/windows"),
             windows.map { it.replace('\\', '/') },
         )
 

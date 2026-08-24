@@ -6,13 +6,11 @@ import io.github.hht0rro.javashroud.transforms.protection.aken.AkenPageSizePolic
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenResourceCodec
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenResourceKind
 import java.security.SecureRandom
-import java.util.Base64
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
-import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -62,6 +60,7 @@ class AkenV4BuildTest {
                     layout = layout,
                     locator = locator,
                     random = DeterministicSecureRandom(53),
+                    nonceOverride = ByteArray(AkenResourceCodec.NONCE_SIZE) { index -> (index + 53).toByte() },
                 )
                 try {
                     val decodedProbe = AkenResourceCodec.decode(
@@ -251,7 +250,7 @@ class AkenV4BuildTest {
     }
 
     @Test
-    fun graph_is_aken7_fingerprint_bound_polymorphic_and_defensive() {
+    fun current_vbc4_evaluator_is_fingerprint_bound_polymorphic_and_defensive() {
         val plan = AkenBuildPlan.create(commitment, DeterministicSecureRandom(23))
         try {
             val page = plan.registerPage(
@@ -259,26 +258,16 @@ class AkenV4BuildTest {
                 "fixture:class".encodeToByteArray(),
                 3,
             )
-            val graph = page.evaluatorPlan
-            assertEquals(3, graph.javaFragments.size)
-            assertEquals(3, graph.nativeFragments.size)
-            assertEquals(7, graph.allFragments.size)
-            assertTrue(graph.allFragments.all { it.family in 0..15 })
-            assertContentEquals(graph.fingerprint, page.handle.evaluatorPlanFingerprint)
+            val evaluator = page.evaluatorPlan
+            assertContentEquals(evaluator.fingerprint, page.handle.evaluatorPlanFingerprint)
 
             val returnedIdentity = page.logicalIdentity
-            val returnedFingerprint = graph.fingerprint
-            val returnedShape = graph.javaFragments.first().shape
-            val returnedCallToken = graph.nativeFragments.first().callToken
-            val returnedTable = graph.terminal.tablePermutation
+            val returnedFingerprint = evaluator.fingerprint
             val returnedHandle = page.handle.encoded
             val returnedLocator = page.handle.locatorToken
             try {
                 returnedIdentity.fill(0x11)
                 returnedFingerprint.fill(0x22)
-                returnedShape.fill(0x33)
-                returnedCallToken.fill(0x44)
-                returnedTable.fill(-1)
                 returnedHandle.fill(0x55)
                 returnedLocator.fill(0x66)
                 val encoded = plan.encodeForMaterialization(page.handle, "defensive-copy".encodeToByteArray())
@@ -290,9 +279,6 @@ class AkenV4BuildTest {
             } finally {
                 returnedIdentity.fill(0)
                 returnedFingerprint.fill(0)
-                returnedShape.fill(0)
-                returnedCallToken.fill(0)
-                returnedTable.fill(0)
                 returnedHandle.fill(0)
                 returnedLocator.fill(0)
             }
@@ -300,11 +286,25 @@ class AkenV4BuildTest {
             assertFailsWith<IllegalArgumentException> {
                 plan.registerPage(AkenResourceKind.EncryptedClassPage, "fixture:class".encodeToByteArray(), 3)
             }
+            val publicMethodNames = AkenBuildPlan.EvaluatorPlan::class.java.methods.map { it.name.lowercase() }
+            assertFalse(
+                publicMethodNames.any { name ->
+                    name.contains("fragment") ||
+                        name.contains("terminal") ||
+                        name.contains("execution") ||
+                        name.contains("recover") ||
+                        name.contains("dek")
+                },
+            )
+            assertFalse(
+                AkenBuildPlan::class.java.declaredClasses.any { nested ->
+                    nested.simpleName == "EvaluatorFragment"
+                },
+            )
         } finally {
             plan.wipe()
         }
 
-        val signatures = LinkedHashSet<String>()
         val encodings = LinkedHashSet<String>()
         val locators = LinkedHashSet<String>()
         val fingerprints = LinkedHashSet<String>()
@@ -313,31 +313,23 @@ class AkenV4BuildTest {
             val build = AkenBuildPlan.create(commitment, DeterministicSecureRandom(seed + 101))
             try {
                 val page = build.registerPage(AkenResourceKind.StringPage, "fixture:poly".encodeToByteArray(), 1)
-                val graph = page.evaluatorPlan
-                val signature = buildString {
-                    append(page.layoutVariant)
-                    append('|')
-                    append(graph.executionOrder.joinToString(","))
-                    graph.allFragments.forEach { fragment ->
-                        append('|').append(fragment.ordinal).append(':').append(fragment.family)
-                        append(':').append(Base64.getUrlEncoder().withoutPadding().encodeToString(fragment.shape))
-                        append(':').append(Base64.getUrlEncoder().withoutPadding().encodeToString(fragment.callToken))
-                        append(':').append(fragment.tablePermutation.joinToString(","))
-                    }
+                val fingerprint = page.evaluatorPlan.fingerprint
+                val encoding = page.handle.encoded
+                val locator = page.handle.locatorToken
+                try {
+                    encodings += encoding.joinToString(separator = ",")
+                    locators += locator.joinToString(separator = ",")
+                    fingerprints += fingerprint.joinToString(separator = ",")
+                    targetSizes += page.targetSize
+                } finally {
+                    fingerprint.fill(0)
+                    encoding.fill(0)
+                    locator.fill(0)
                 }
-                val encoding = Base64.getUrlEncoder().withoutPadding().encodeToString(page.handle.encoded)
-                val locator = Base64.getUrlEncoder().withoutPadding().encodeToString(page.handle.locatorToken)
-                val fingerprint = Base64.getUrlEncoder().withoutPadding().encodeToString(graph.fingerprint)
-                signatures += signature
-                encodings += encoding
-                locators += locator
-                fingerprints += fingerprint
-                targetSizes += page.targetSize
             } finally {
                 build.wipe()
             }
         }
-        assertEquals(10, signatures.size)
         assertEquals(10, encodings.size)
         assertEquals(10, locators.size)
         assertEquals(10, fingerprints.size)

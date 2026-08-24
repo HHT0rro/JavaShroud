@@ -123,35 +123,6 @@ class StringEncryptionDepthTest {
         }
     }
 
-    @Test
-    fun anti_symbolic_execution_preserves_runtime_behavior() {
-        val inputJar = buildDiverseFixtureJar(Files.createTempFile("javashroud-antidump", ".jar"))
-        try {
-            val outputJar = runEngine(
-                inputJar,
-                listOf("strip-compile-debug-info", "anti-symbolic-execution"),
-            )
-            try {
-                assertTrue(Files.exists(outputJar), "Output JAR should exist")
-
-                val process = ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().toString())
-                    .redirectErrorStream(true)
-                    .start()
-                val output = process.inputStream.bufferedReader().readText()
-                val exitCode = process.waitFor()
-                assertEquals(
-                    1,
-                    exitCode,
-                    "Anti-symbolic JAR should preserve call()=1 behavior. Output: ${output.take(500)}",
-                )
-            } finally {
-                Files.deleteIfExists(outputJar)
-            }
-        } finally {
-            Files.deleteIfExists(inputJar)
-        }
-    }
-
     private fun scanForStringConstants(classBytes: ByteArray): List<String> {
         val strings = mutableListOf<String>()
         val cr = ClassReader(classBytes)

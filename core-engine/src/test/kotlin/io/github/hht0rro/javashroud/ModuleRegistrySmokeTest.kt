@@ -89,10 +89,8 @@ class ModuleRegistrySmokeTest {
     }
 
     @Test
-    fun buildLoaderProtectionModules_contains_expected_ids() {
-        val ids = buildLoaderProtectionModules().map { module -> module.definition.id }
-        assertTrue(ids.contains("class-encryption-loader"))
-        assertTrue(ids.contains("method-body-delayed-decryption"))
+    fun buildLoaderProtectionModules_is_empty_after_current_format_retirement() {
+        assertEquals(emptyList(), buildLoaderProtectionModules())
     }
 
     @Test
@@ -102,12 +100,17 @@ class ModuleRegistrySmokeTest {
     }
 
     @Test
-    fun buildRuntimeDefenseModules_contains_expected_ids() {
+    fun buildRuntimeDefenseModules_contains_current_unified_defense_ids() {
         val ids = buildRuntimeDefenseModules().map { module -> module.definition.id }
-        assertTrue(ids.contains("callsite-rotation-protection"))
-        assertTrue(ids.contains("environment-bound-keys"))
-        assertTrue(ids.contains("anti-symbolic-execution"))
-        assertTrue(ids.contains("exception-semantic-virtualization"))
+        assertEquals(
+            listOf(
+                "callsite-rotation-protection",
+                "os-anti-debug",
+                "os-anti-vm",
+                "exception-semantic-virtualization",
+            ),
+            ids,
+        )
     }
 
     @Test

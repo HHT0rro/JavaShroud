@@ -166,10 +166,10 @@ class ResolverProfileMatrixTest {
         val profile = resolverProfiles.single { it.id == "maximum-compatible" }
         val schema = buildEngineSchemaPayload()
         val result = planPassOrdering(
-            passIds = profile.passParams().keys.toList() + listOf("class-encryption-loader", "method-virtualization"),
+            passIds = profile.passParams().keys.toList() + listOf("method-virtualization", "os-anti-debug"),
             orderingConstraints = buildOrderingConstraints(),
-            hardConflicts = hardConflictPairs,
-            softConflicts = softConflictPairs,
+            hardConflicts = setOf("method-virtualization" to "os-anti-debug"),
+            softConflicts = emptySet(),
             availablePassIds = schema.modules.mapTo(linkedSetOf(), ModuleDefinition::id),
             passParams = profile.passParams(),
         )

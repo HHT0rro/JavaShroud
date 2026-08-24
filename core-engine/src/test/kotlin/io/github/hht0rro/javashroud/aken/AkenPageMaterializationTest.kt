@@ -299,11 +299,6 @@ class AkenPageMaterializationTest {
         try {
             val descriptor = output.pagesForBuild().single().descriptorForBuild
             val evaluator = descriptor.evaluatorPlan
-            assertFalse(evaluator.isLegacyAken7)
-            assertTrue(evaluator.javaFragments.isEmpty())
-            assertTrue(evaluator.nativeFragments.isEmpty())
-            assertFailsWith<IllegalStateException> { evaluator.terminal }
-
             val encoded = evaluator.encode()
             val tampered = encoded.copyOf()
             try {

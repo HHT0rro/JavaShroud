@@ -10,7 +10,6 @@ import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.model.config.RuleSpec
-import io.github.hht0rro.javashroud.transforms.protection.applyAntiDumpConstantPool
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.ConstantDynamic
@@ -30,19 +29,6 @@ class CondyVersionCompatibilityTest {
 
         assertTrue(output.contentEquals(input), "Java 8 classfiles must not receive CONSTANT_Dynamic entries")
         assertFalse(containsConstantDynamic(output), "Output must remain loadable by Java 8 classfile rules")
-    }
-
-    @Test
-    fun anti_dump_constant_pool_falls_back_for_java8_classfiles() {
-        val artifact = artifactFor(java8ClassWithStringConstant(), "example/Java8CondyGuard")
-        val ruleMatches = ruleMatchesFor("condy-constant-indirection", "example/Java8CondyGuard")
-
-        val result = applyAntiDumpConstantPool(artifact, ruleMatches, emptyMap())
-        val output = result.artifact.classArtifacts.single().bytes
-
-        assertTrue(result.transformedClassCount > 0, "Runtime-builder fallback should still protect strings")
-        assertFalse(containsConstantDynamic(output), "Java 8 fallback must not write CONSTANT_Dynamic")
-        ClassReader(output)
     }
 
     private fun java8ClassWithStringConstant(): ByteArray {

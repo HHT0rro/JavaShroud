@@ -50,8 +50,10 @@ class VmInterpreterExecutionTest {
 
         assertEquals("VBC4", bytes.copyOfRange(0, 4).toString(Charsets.US_ASCII))
         assertFalse(bytes.containsInt32BigEndian(0x2468_1357), "Build seed must not be stored in plaintext")
-        assertEquals(16, bytes.copyOfRange(24, 40).size, "VBC4 header must carry a wrapped seed token")
-        val flags = readU2(bytes, 40)
+        assertEquals(32, bytes.copyOfRange(20, 52).size, "VBC4 header must carry a dialect commitment")
+        assertTrue(bytes.copyOfRange(20, 52).any { it != 0.toByte() }, "VBC4 dialect commitment must not be an all-zero placeholder")
+        assertEquals(16, bytes.copyOfRange(56, 72).size, "VBC4 header must carry a wrapped seed token")
+        val flags = readU2(bytes, 72)
         assertTrue(flags and 0x0001 != 0, "Constant pool section must be encrypted")
         assertTrue(flags and 0x0002 != 0, "Instruction section must be block encrypted")
         assertTrue(flags and 0x0004 != 0, "Stream must contain MAC")
@@ -73,7 +75,7 @@ class VmInterpreterExecutionTest {
         serializer.visitEnd()
 
         val bytes = serializer.serialize()
-        val blockCount = readU2(bytes, 42)
+        val blockCount = readU2(bytes, 74)
         assertTrue(blockCount > 1, "Large methods must lower into multiple VM blocks, got $blockCount")
         assertTrue(blockCount <= 12, "Multi-block layout must respect the block ceiling, got $blockCount")
     }
@@ -91,7 +93,7 @@ class VmInterpreterExecutionTest {
             serializer.visitInsn(Opcodes.IRETURN)
             serializer.visitMaxs(8, 8)
             serializer.visitEnd()
-            return readU2(serializer.serialize(), 44)
+            return readU2(serializer.serialize(), 76)
         }
         val repeated = (1..16).map { emit(0x13572468) }
         assertTrue(repeated.toSet().size > 1, "Block layout must vary even for a repeated fixed seed")
@@ -111,7 +113,7 @@ class VmInterpreterExecutionTest {
             serializer.visitMaxs(8, 8)
             serializer.visitEnd()
             val bytes = serializer.serialize()
-            val blockCount = readU2(bytes, 42)
+            val blockCount = readU2(bytes, 74)
             return readBlockIndexEntries(bytes, blockCount).map { it.blockId }
         }
 
@@ -141,8 +143,8 @@ class VmInterpreterExecutionTest {
         serializer.visitEnd()
 
         val bytes = serializer.serialize()
-        val flags = readU2(bytes, 40)
-        val blockCount = readU2(bytes, 42)
+        val flags = readU2(bytes, 72)
+        val blockCount = readU2(bytes, 74)
         val entries = readBlockIndexEntries(bytes, blockCount)
 
         assertTrue(flags and 0x0800 != 0, "VBC4 must mark block-dispatch metadata as required")
@@ -176,7 +178,7 @@ class VmInterpreterExecutionTest {
             serializer.visitMaxs(8, 8)
             serializer.visitEnd()
             val bytes = serializer.serialize()
-            val blockCount = readU2(bytes, 42)
+            val blockCount = readU2(bytes, 74)
             val blockIds = readBlockIndexEntries(bytes, blockCount).map { it.blockId }
             return bytes to blockIds
         }
@@ -1095,8 +1097,8 @@ class VmInterpreterExecutionTest {
     private data class BlockIndexEntry(val blockId: Int, val entryToken: Int, val maskedNext: Int)
 
     private fun readBlockIndexEntries(bytes: ByteArray, blockCount: Int): List<BlockIndexEntry> {
-        val cpSectionSize = readU4(bytes, 48)
-        var offset = 52 + cpSectionSize
+        val cpSectionSize = readU4(bytes, 80)
+        var offset = 84 + cpSectionSize
         return (0 until blockCount).map {
             val entry = BlockIndexEntry(
                 blockId = readU2(bytes, offset),

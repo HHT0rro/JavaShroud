@@ -12,29 +12,18 @@ import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.analysis.TargetSelector
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
-import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceCodec
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.applyMethodVirtualization
-import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.requireVbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
 import java.nio.file.Files
 import java.nio.file.Path
-import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import java.util.jar.JarEntry
 import java.util.jar.JarInputStream
 import java.util.jar.JarOutputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
-import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class CrossMethodOutliningExecutionTest {
@@ -71,92 +60,6 @@ class CrossMethodOutliningExecutionTest {
         }
     }
 
-    @Test
-    fun cross_method_outlining_emits_shared_mesh_manifests_and_non_standalone_shards() {
-        val context = defaultVbc4BuildContext()
-        val (decodedResources, catalogPlan) = decodedCrossMethodResources(context = context, seed = 73)
-
-        val preloadIndex = catalogPlan.methods.associate { method -> method.manifestPath to method.shardCount }
-        val manifests = decodedResources.filterValues { bytes -> bytes.decodeToString().startsWith("VBC4S|1|") }
-        assertTrue(manifests.size >= 3, "Cross-method outlining must emit one slice manifest per virtualized method")
-        assertEquals(manifests.keys, preloadIndex.keys, "VM preload index must cover every cross-method slice manifest")
-
-        val meshDigests = mutableSetOf<String>()
-        val referencedPeerOrdinals = mutableSetOf<Int>()
-        for ((manifestPath, manifestBytes) in manifests) {
-            val lines = manifestBytes.decodeToString().trim().lines()
-            val header = lines.first().split('|')
-            val totalSize = header[2].toInt()
-            val shardCount = header[3].toInt()
-            val ownOrdinal = header[5].toInt()
-            meshDigests += header[4]
-            assertEquals(manifests.size, header[6].toInt(), "Manifest mesh must bind every virtualized method entry")
-            assertEquals(shardCount, preloadIndex[manifestPath], "Preload shard count must match manifest header")
-            assertTrue(shardCount in 2..6, "Outlined VMBC must be split across a bounded CSPRNG-selected shard count")
-
-            val assembled = ByteArray(totalSize)
-            val shardLines = lines.drop(1)
-            assertEquals(shardCount, shardLines.size, "Manifest must enumerate every shard")
-            var previousOrderToken: String? = null
-            for (line in shardLines) {
-                val parts = line.split('|')
-                val index = parts[0].toInt()
-                val offset = parts[1].toInt()
-                val length = parts[2].toInt()
-                val digest = parts[3]
-                val shardPath = parts[4]
-                val peerOrdinal = parts[6].toInt()
-                val shardBytes = assertNotNull(decodedResources[shardPath], "Manifest shard path must resolve to an emitted opaque resource")
-                val orderToken = shardOrderToken(header[4], ownOrdinal, index, shardPath, digest)
-                previousOrderToken?.let { previous ->
-                    assertTrue(previous <= orderToken, "Manifest shard order must match native reassemble order-token validation")
-                }
-                previousOrderToken = orderToken
-                referencedPeerOrdinals += peerOrdinal
-                assertTrue(peerOrdinal in 0 until manifests.size, "Shard peer ordinal must point into shared manifest mesh")
-                assertTrue(peerOrdinal != ownOrdinal, "Cross-method shard peer link must point at another method manifest")
-                assertEquals(length, shardBytes.size, "Shard length metadata must match decoded bytes")
-                assertTrue(shardBytes.size < totalSize, "Single outlined shard must not contain the complete VMBC payload")
-                shardBytes.copyInto(assembled, offset)
-            }
-            assertEquals('V'.code.toByte(), assembled[0], "Reassembled VMBC must preserve VBC4 magic")
-            assertEquals('B'.code.toByte(), assembled[1], "Reassembled VMBC must preserve VBC4 magic")
-            assertEquals('C'.code.toByte(), assembled[2], "Reassembled VMBC must preserve VBC4 magic")
-            assertEquals('4'.code.toByte(), assembled[3], "Reassembled VMBC must preserve VBC4 magic")
-            for (line in shardLines) {
-                val shardBytes = decodedResources.getValue(line.split('|')[4])
-                assertFalse(shardBytes.contentEquals(assembled), "No single outlined shard may independently restore the full VM method")
-            }
-        }
-        assertEquals(1, meshDigests.size, "All sliced method manifests must share one interprocedural mesh digest")
-        assertTrue(referencedPeerOrdinals.size >= 2, "Cross-method peer links should distribute across the shared dispatch mesh")
-    }
-
-    @Test
-    fun cross_method_outlining_is_not_reproducible_for_same_seed_and_vbc4_context() {
-        val first = encodedCrossMethodResources(context = fixedContext(0x4A53_0001), seed = 73).first
-        val second = encodedCrossMethodResources(context = fixedContext(0x4A53_0001), seed = 73).first
-        val differentContext = encodedCrossMethodResources(context = fixedContext(0x4A53_0002), seed = 73).first
-
-        assertTrue(
-            first.map { it.name } != second.map { it.name } ||
-                first.map { it.bytes.toList() } != second.map { it.bytes.toList() },
-            "same seed/context must not reproduce outlined resource paths or encoded resources",
-        )
-        assertTrue(
-            first.map { it.name } != differentContext.map { it.name } ||
-                first.map { it.bytes.toList() } != differentContext.map { it.bytes.toList() },
-            "outlined manifests/shards must diverge across VBC4 build contexts",
-        )
-    }
-
-    private fun shardOrderToken(mesh: String, ordinal: Int, index: Int, path: String, digest: String): String {
-        val material = "vbc4-shard-order\u0000$mesh\u0000$ordinal\u0000$index\u0000$path\u0000$digest"
-        return MessageDigest.getInstance("SHA-256")
-            .digest(material.toByteArray(Charsets.UTF_8))
-            .take(8)
-            .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xFF) }
-    }
     private fun runEngine(inputJar: Path): Path {
         val outputJar = inputJar.resolveSibling("javashroud-cross-method-output.jar")
         val configPath = inputJar.resolveSibling("javashroud-cross-method-config.toml")
@@ -262,26 +165,6 @@ class CrossMethodOutliningExecutionTest {
         return cw.toByteArray()
     }
 
-    private fun encodedCrossMethodResources(context: Vbc4BuildContext, seed: Int) =
-        withVbc4BuildContext(context) {
-            val result = applyMethodVirtualization(
-                artifact = crossMethodArtifact(),
-                ruleMatches = crossMethodRuleMatches(),
-                params = mapOf("maxInstructions" to Int.MAX_VALUE, "seed" to seed),
-            )
-            assertEquals(3, result.transformedMemberCount, "Fixture must virtualize all selected cross-method entries")
-            result.artifact.jarEntries
-                .filter { entry -> entry.name.isVmResourceName() }
-                .sortedBy { it.name } to requireNotNull(requireVbc4BuildContext().runtimeVmCatalogPlanOrNull())
-        }
-
-    private fun decodedCrossMethodResources(context: Vbc4BuildContext, seed: Int) =
-        withVbc4BuildContext(context) {
-            val (entries, plan) = encodedCrossMethodResources(context, seed)
-            entries.mapNotNull { entry -> RuntimeResourceCodec.decode(entry.bytes)?.let { entry.name to it } }
-                .toMap() to plan
-        }
-
     private fun crossMethodArtifact() = testAttachedArtifact(
         classArtifacts = listOf(
             testClassArtifact(
@@ -294,12 +177,6 @@ class CrossMethodOutliningExecutionTest {
                 ),
             ),
         ),
-    )
-
-    private fun fixedContext(seed: Int): Vbc4BuildContext = Vbc4BuildContext(
-        masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (seed ushr ((index and 3) * 8) xor index * 23).toByte() },
-        nativeSeed = seed.toLong() xor 0x5C4D_1A33L,
-        jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (seed.rotateLeft(index and 31) xor index * 37).toByte() },
     )
 
     private fun crossMethodRuleMatches(): List<RuleMatch> = listOf(

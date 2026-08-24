@@ -224,8 +224,8 @@ class VmStructureDivergenceTest {
             serializer.visitEnd()
 
             val bytes = serializer.serialize()
-            val flags = readU2(bytes, 40)
-            val blockCount = readU2(bytes, 42)
+            val flags = readU2(bytes, 72)
+            val blockCount = readU2(bytes, 74)
             val entries = readBlockIndex(bytes, blockCount)
             LayoutSnapshot(
                 payload = bytes,
@@ -280,8 +280,8 @@ class VmStructureDivergenceTest {
             serializer.visitMaxs(4, 1)
             serializer.visitEnd()
             val bytes = serializer.serialize()
-            val flags = readU2(bytes, 40)
-            val blockCount = readU2(bytes, 42)
+            val flags = readU2(bytes, 72)
+            val blockCount = readU2(bytes, 74)
             val entries = readBlockIndex(bytes, blockCount)
             LayoutSnapshot(bytes, seed, context, effectiveBuildSeed(serializer), flags, blockCount, entries, entries.map { it.blockId }, entries.map { it.token })
         }
@@ -510,8 +510,8 @@ class VmStructureDivergenceTest {
     private fun Int.floorMod(modulus: Int): Int = ((this % modulus) + modulus) % modulus
 
     private fun readBlockIndex(bytes: ByteArray, blockCount: Int): List<BlockIndexEntry> {
-        val cpSectionSize = readU4(bytes, 48)
-        var offset = 52 + cpSectionSize
+        val cpSectionSize = readU4(bytes, 80)
+        var offset = 84 + cpSectionSize
         return (0 until blockCount).map {
             val entry = BlockIndexEntry(
                 blockId = readU2(bytes, offset),

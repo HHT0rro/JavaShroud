@@ -12,22 +12,6 @@ import java.util.jar.JarOutputStream
 class PassCompatibilityRegressionTest {
 
     @Test
-    fun class_encryption_loader_and_method_virtualization_remain_hard_conflicted() {
-        assertIncompatibleCombination(
-            listOf("class-encryption-loader", "method-virtualization"),
-            allowOptInPasses = true,
-        )
-    }
-
-    @Test
-    fun method_body_delayed_decryption_and_method_virtualization_remain_hard_conflicted() {
-        assertIncompatibleCombination(
-            listOf("method-body-delayed-decryption", "method-virtualization"),
-            allowOptInPasses = true,
-        )
-    }
-
-    @Test
     fun formerly_hard_conflicted_bytecode_surface_pairs_are_allowed_for_planner_ordering() {
         val pairs = listOf(
             listOf("control-flow-obfuscation", "field-string-encryption"),
@@ -61,31 +45,6 @@ class PassCompatibilityRegressionTest {
     @Test
     fun method_virtualization_and_control_flow_flattening_allowed_with_ordering() {
         assertCompatibleCombination(listOf("method-virtualization", "control-flow-flattening"), allowOptInPasses = true)
-    }
-
-    @Test
-    fun class_encryption_loader_and_string_encryption_allowed() {
-        assertCompatibleCombination(listOf("class-encryption-loader", "string-encryption"), allowOptInPasses = true)
-    }
-
-    @Test
-    fun class_encryption_loader_and_field_string_encryption_allowed() {
-        assertCompatibleCombination(listOf("class-encryption-loader", "field-string-encryption"), allowOptInPasses = true)
-    }
-
-    @Test
-    fun anti_instrumentation_auto_includes_jni_microkernel_loader() {
-        assertAutoIncludedJniLoaderDependency("anti-instrumentation")
-    }
-
-    @Test
-    fun environment_bound_keys_auto_includes_jni_microkernel_loader() {
-        assertAutoIncludedJniLoaderDependency("environment-bound-keys")
-    }
-
-    @Test
-    fun class_encryption_loader_auto_includes_jni_microkernel_loader() {
-        assertAutoIncludedJniLoaderDependency("class-encryption-loader")
     }
 
     @Test
@@ -138,9 +97,19 @@ class PassCompatibilityRegressionTest {
     }
 
     @Test
-    fun high_risk_passes_require_explicit_opt_in() {
-        assertOptInRejected(listOf("class-encryption-loader"))
-        assertCompatibleCombination(listOf("class-encryption-loader"), allowOptInPasses = true)
+    fun high_risk_current_format_vm_pass_requires_explicit_opt_in() {
+        assertOptInRejected(listOf("method-virtualization"))
+        assertCompatibleCombination(listOf("method-virtualization"), allowOptInPasses = true)
+    }
+
+    @Test
+    fun os_anti_debug_auto_includes_jni_microkernel_loader() {
+        assertAutoIncludedJniLoaderDependency("os-anti-debug")
+    }
+
+    @Test
+    fun os_anti_vm_auto_includes_jni_microkernel_loader() {
+        assertAutoIncludedJniLoaderDependency("os-anti-vm")
     }
 
     private fun assertAutoIncludedJniLoaderDependency(passId: String) {

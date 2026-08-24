@@ -130,6 +130,107 @@ class StringEncryptionSmokeTest {
     }
 
     @Test
+    fun encryptClassStrings_preserves_reflection_member_names_for_member_rename_stage() {
+        val context = defaultVbc4BuildContext()
+        try {
+            val encrypted = withVbc4BuildContext(context) {
+                encryptClassStrings(buildReflectiveLookupClassWithExtraLiteral())
+            }
+            val constants = linkedSetOf<String>()
+            val node = org.objectweb.asm.tree.ClassNode()
+            ClassReader(encrypted).accept(node, 0)
+            node.methods.orEmpty().forEach { method ->
+                method.instructions?.forEach { instruction ->
+                    val value = (instruction as? org.objectweb.asm.tree.LdcInsnNode)?.cst as? String
+                    if (value != null) constants += value
+                }
+            }
+            assertTrue("add" in constants, "Reflection member name must remain an LDC for rename-methods")
+            assertFalse("protected-literal" in constants, "Ordinary literals should still be encrypted")
+        } finally {
+            context.wipe()
+        }
+    }
+
+    @Test
+    fun encryptClassStrings_lazily_hoists_loop_invariant_pages_into_method_locals() {
+        val context = defaultVbc4BuildContext()
+        try {
+            val encrypted = withVbc4BuildContext(context) {
+                encryptClassStrings(buildLoopStringClass()).also {
+                    requireVbc4BuildContext().withAkenStringPageCandidatesForBuild { candidates ->
+                        assertEquals(1, candidates.size)
+                    }
+                }
+            }
+
+            var originalLiteralPresent = false
+            var guardedLoadCount = 0
+            var localStoreCount = 0
+            var terminalCount = 0
+            ClassReader(encrypted).accept(object : ClassVisitor(Opcodes.ASM9) {
+                override fun visitMethod(
+                    access: Int,
+                    name: String,
+                    descriptor: String,
+                    signature: String?,
+                    exceptions: Array<out String>?,
+                ): MethodVisitor = object : MethodVisitor(Opcodes.ASM9) {
+                    override fun visitLdcInsn(value: Any?) {
+                        if (value == "loop-value") originalLiteralPresent = true
+                    }
+
+                    override fun visitJumpInsn(opcode: Int, label: org.objectweb.asm.Label) {
+                        if (opcode == Opcodes.IFNONNULL) guardedLoadCount++
+                    }
+
+                    override fun visitVarInsn(opcode: Int, variable: Int) {
+                        if (opcode == Opcodes.ASTORE && variable > 0) localStoreCount++
+                    }
+
+                    override fun visitMethodInsn(
+                        opcode: Int,
+                        owner: String,
+                        name: String,
+                        descriptor: String,
+                        isInterface: Boolean,
+                    ) {
+                        if (
+                            opcode == Opcodes.INVOKESTATIC &&
+                            owner == "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper" &&
+                            name == "invokeAkenStringTerminal"
+                        ) {
+                            terminalCount++
+                        }
+                    }
+
+                    override fun visitInvokeDynamicInsn(
+                        name: String,
+                        descriptor: String,
+                        bootstrapMethodHandle: org.objectweb.asm.Handle,
+                        vararg bootstrapMethodArguments: Any,
+                    ) {
+                        if (
+                            descriptor == "([BI[B)Ljava/lang/String;" &&
+                            bootstrapMethodHandle.owner ==
+                                "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper"
+                        ) {
+                            terminalCount++
+                        }
+                    }
+                }
+            }, 0)
+
+            assertFalse(originalLiteralPresent)
+            assertEquals(1, terminalCount, "The page terminal remains authenticated and unique")
+            assertEquals(1, guardedLoadCount, "The loop page must be decoded lazily once per invocation")
+            assertTrue(localStoreCount >= 2, "The local must be initialized and populated after authentication")
+        } finally {
+            context.wipe()
+        }
+    }
+
+    @Test
     fun encryptClassStrings_preserves_class_structure() {
         val classBytes = buildTestClassWithStrings("TestString")
         val encrypted = withVbc4BuildContext(defaultVbc4BuildContext()) {
@@ -178,6 +279,74 @@ class StringEncryptionSmokeTest {
             module.definition.requiredPassIdsFor(emptyMap()).contains("jni-microkernel-loader"),
             "Should require JNI microkernel loader for the default native-kernel decoder backend",
         )
+    }
+
+    private fun buildReflectiveLookupClassWithExtraLiteral(): ByteArray {
+        val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "ReflectiveLookup", null, "java/lang/Object", null)
+
+        val init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
+        init.visitCode()
+        init.visitVarInsn(Opcodes.ALOAD, 0)
+        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+        init.visitInsn(Opcodes.RETURN)
+        init.visitMaxs(1, 1)
+        init.visitEnd()
+
+        val lookup = cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "lookup", "()Ljava/lang/reflect/Method;", null, null)
+        lookup.visitCode()
+        lookup.visitLdcInsn(org.objectweb.asm.Type.getObjectType("ReflectiveLookup"))
+        lookup.visitLdcInsn("add")
+        lookup.visitInsn(Opcodes.ICONST_0)
+        lookup.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Class")
+        lookup.visitMethodInsn(
+            Opcodes.INVOKEVIRTUAL,
+            "java/lang/Class",
+            "getDeclaredMethod",
+            "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;",
+            false,
+        )
+        lookup.visitInsn(Opcodes.ARETURN)
+        lookup.visitMaxs(3, 0)
+        lookup.visitEnd()
+
+        val literal = cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "literal", "()V", null, null)
+        literal.visitCode()
+        literal.visitLdcInsn("protected-literal")
+        literal.visitInsn(Opcodes.POP)
+        literal.visitInsn(Opcodes.RETURN)
+        literal.visitMaxs(1, 0)
+        literal.visitEnd()
+
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    private fun buildLoopStringClass(): ByteArray {
+        val cw = ClassWriter(ClassWriter.COMPUTE_FRAMES or ClassWriter.COMPUTE_MAXS)
+        cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "LoopStringClass", null, "java/lang/Object", null)
+
+        val method = cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "runLoop", "()V", null, null)
+        val loop = org.objectweb.asm.Label()
+        val done = org.objectweb.asm.Label()
+        method.visitCode()
+        method.visitInsn(Opcodes.ICONST_0)
+        method.visitVarInsn(Opcodes.ISTORE, 0)
+        method.visitLabel(loop)
+        method.visitVarInsn(Opcodes.ILOAD, 0)
+        method.visitInsn(Opcodes.ICONST_3)
+        method.visitJumpInsn(Opcodes.IF_ICMPGE, done)
+        method.visitLdcInsn("loop-value")
+        method.visitInsn(Opcodes.POP)
+        method.visitIincInsn(0, 1)
+        method.visitJumpInsn(Opcodes.GOTO, loop)
+        method.visitLabel(done)
+        method.visitInsn(Opcodes.RETURN)
+        method.visitMaxs(0, 0)
+        method.visitEnd()
+
+        cw.visitEnd()
+        return cw.toByteArray()
     }
 
     private fun buildTestClassWithStrings(vararg strings: String): ByteArray {

@@ -36,19 +36,17 @@ class EmbeddedResolverTransformsTest {
             assertFalse(String(bytes, Charsets.ISO_8859_1).contains("DES/CBC/PKCS5Padding"))
             val decoded = load(bytes).getMethod("stringValue").invoke(null) as String
             assertEquals(value, decoded)
-            assertTrue(decoded === value.intern())
         }
 
         val desOriginal = buildFixture("resolver/StringDes", "DES content: \u4f60\u597d")
         val desBytes = encryptClassStringsEmbeddedResolver(
             desOriginal,
-            EmbeddedStringResolverConfig(seed = 42L, strength = "max", payloadCodec = "des"),
+            EmbeddedStringResolverConfig(seed = 42L, strength = "max", payloadCodec = "aes-gcm"),
         )
         assertFalse(String(desBytes, Charsets.ISO_8859_1).contains("DES content: \u4f60\u597d"))
-        assertTrue(String(desBytes, Charsets.ISO_8859_1).contains("DES/CBC/PKCS5Padding"))
+        assertTrue(String(desBytes, Charsets.ISO_8859_1).contains("AES/GCM/NoPadding"))
         val desDecoded = load(desBytes).getMethod("stringValue").invoke(null) as String
         assertEquals("DES content: \u4f60\u597d", desDecoded)
-        assertTrue(desDecoded === "DES content: \u4f60\u597d".intern())
     }
 
     @Test
@@ -76,7 +74,7 @@ class EmbeddedResolverTransformsTest {
         assertTrue(resolverInstructions.any { it.opcode == Opcodes.BALOAD })
         assertTrue(resolverInstructions.any { it.opcode == Opcodes.BASTORE })
         assertTrue(resolverInstructions.any { it.opcode == Opcodes.IUSHR })
-        assertTrue(
+        assertFalse(
             resolverInstructions.filterIsInstance<MethodInsnNode>().any {
                 it.owner == "java/lang/String" && it.name == "intern" && it.desc == "()Ljava/lang/String;"
             },
@@ -169,18 +167,12 @@ class EmbeddedResolverTransformsTest {
         assertEquals(7, xorClass.getField("SMALL_INT_FIELD").getInt(null))
         assertEquals(0x123456789ABCDEFL, xorClass.getField("LONG_FIELD").getLong(null))
 
-        val desBytes = obfuscateNumericConstantsResolver(
-            buildFixture("resolver/NumericDes", "numeric"),
-            NumericResolverConfig(seed = 102L, intCoverage = "aggressive", longCoverage = "normal", resolverCodec = "des"),
-        )
-        assertNumericConstantValuesMoved(desBytes)
-        assertTrue(String(desBytes, Charsets.ISO_8859_1).contains("DES/CBC/NoPadding"))
-        val desClass = load(desBytes)
-        assertEquals(0x12345678, desClass.getMethod("intValue").invoke(null))
-        assertEquals(0x123456789ABCDEFL, desClass.getMethod("longValue").invoke(null))
-        assertEquals(0x12345678, desClass.getField("INT_FIELD").getInt(null))
-        assertEquals(7, desClass.getField("SMALL_INT_FIELD").getInt(null))
-        assertEquals(0x123456789ABCDEFL, desClass.getField("LONG_FIELD").getLong(null))
+        assertFailsWith<IllegalArgumentException> {
+            obfuscateNumericConstantsResolver(
+                buildFixture("resolver/NumericDes", "numeric"),
+                NumericResolverConfig(seed = 102L, intCoverage = "aggressive", longCoverage = "normal", resolverCodec = "des"),
+            )
+        }
 
         assertFailsWith<IllegalArgumentException> {
             obfuscateNumericConstantsResolver(

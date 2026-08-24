@@ -6,9 +6,7 @@ import io.github.hht0rro.javashroud.transforms.protection.aken.AkenBuildPlan
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHighValueLeafIdentity
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenResourceKind
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRoutingMetadata
-import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRuntimeEvaluatorFragment
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRuntimeEvaluatorPlan
-import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRuntimeEvaluatorRole
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenRuntimePageDescriptor
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenSealingProofMetadata
 import java.security.SecureRandom
@@ -24,7 +22,7 @@ class AkenRuntimePageDescriptorTest {
     }
 
     @Test
-    fun descriptor_round_trips_one_page_and_rechecks_the_aken7_graph_binding() {
+    fun descriptor_round_trips_one_page_and_rechecks_current_vbc4_evaluator_binding() {
         val plan = AkenBuildPlan.create(commitment, DeterministicSecureRandom(701))
         try {
             val page = plan.registerPage(
@@ -46,7 +44,6 @@ class AkenRuntimePageDescriptorTest {
                 assertEquals(descriptor.route.logicalBindingPath, decoded.route.logicalBindingPath)
                 assertContentEquals(descriptor.proof.callSiteProof, decoded.proof.callSiteProof)
                 assertContentEquals(descriptor.evaluatorPlan.fingerprint, decoded.evaluatorPlan.fingerprint)
-                assertTrue(!decoded.evaluatorPlan.isLegacyAken7)
                 val boundOpaque = decoded.evaluatorPlan.copyBoundDecryptorForNative()
                 try {
                     assertTrue(boundOpaque != null && boundOpaque.isNotEmpty())
@@ -155,7 +152,7 @@ class AkenRuntimePageDescriptorTest {
     }
 
     @Test
-    fun descriptor_parse_rejects_invalid_version_lengths_trailing_bytes_and_invalid_topology() {
+    fun descriptor_parse_rejects_invalid_version_lengths_and_trailing_bytes() {
         val plan = AkenBuildPlan.create(commitment, DeterministicSecureRandom(919))
         try {
             val page = plan.registerPage(
@@ -183,22 +180,32 @@ class AkenRuntimePageDescriptorTest {
                 trailing.fill(0)
             }
 
-            val invalidJava = AkenRuntimeEvaluatorFragment.create(
-                role = AkenRuntimeEvaluatorRole.Java,
-                ordinal = 4,
-                family = 1,
-                shape = byteArrayOf(1),
-                callToken = byteArrayOf(2),
-                tablePermutation = intArrayOf(0),
+        } finally {
+            plan.wipe()
+        }
+    }
+
+    @Test
+    fun current_vbc4_evaluator_uses_variable_fragment_dialect_and_no_retired_lane_domains() {
+        val plan = AkenBuildPlan.create(commitment, DeterministicSecureRandom(1_013))
+        try {
+            val page = plan.registerPage(
+                kind = AkenResourceKind.Vbc4Method,
+                identity = "fixture:runtime:current-evaluator".encodeToByteArray(),
+                pageIndex = 0,
             )
-            val graph = legacyRuntimePlanFor(page)
-            assertFailsWith<IllegalArgumentException> {
-                AkenRuntimeEvaluatorPlan.create(
-                    javaFragments = listOf(invalidJava) + graph.javaFragments.drop(1),
-                    nativeFragments = graph.nativeFragments,
-                    terminal = graph.terminal,
-                    fingerprint = graph.fingerprint,
-                )
+            val descriptor = descriptorFor(plan, page)
+            val opaque = checkNotNull(descriptor.evaluatorPlan.copyBoundDecryptorForNative())
+            try {
+                assertContentEquals("VBC4".encodeToByteArray(), opaque.copyOfRange(0, 4))
+                val fragmentCount = opaque[5].toInt() and 0xFF
+                assertTrue(fragmentCount in 4..12)
+                val text = opaque.toString(Charsets.ISO_8859_1)
+                assertTrue("vbc4-evaluator-dialect" !in text)
+                assertTrue("bound-page-lane" !in text)
+                assertTrue("bound-page-plan" !in text)
+            } finally {
+                opaque.fill(0)
             }
         } finally {
             plan.wipe()
@@ -259,44 +266,6 @@ class AkenRuntimePageDescriptorTest {
         } finally {
             callSiteProof.fill(0)
             fingerprint.fill(0)
-        }
-    }
-
-    private fun legacyRuntimePlanFor(page: AkenBuildPlan.Page): AkenRuntimeEvaluatorPlan {
-        val graph = page.evaluatorPlan
-        val fingerprint = graph.fingerprint
-        return try {
-            AkenRuntimeEvaluatorPlan.create(
-                javaFragments = graph.javaFragments.map { runtimeFragment(AkenRuntimeEvaluatorRole.Java, it) },
-                nativeFragments = graph.nativeFragments.map { runtimeFragment(AkenRuntimeEvaluatorRole.Native, it) },
-                terminal = runtimeFragment(AkenRuntimeEvaluatorRole.Terminal, graph.terminal),
-                fingerprint = fingerprint,
-            )
-        } finally {
-            fingerprint.fill(0)
-        }
-    }
-
-    private fun runtimeFragment(
-        role: AkenRuntimeEvaluatorRole,
-        fragment: AkenBuildPlan.EvaluatorFragment,
-    ): AkenRuntimeEvaluatorFragment {
-        val shape = fragment.shape
-        val callToken = fragment.callToken
-        val tablePermutation = fragment.tablePermutation
-        return try {
-            AkenRuntimeEvaluatorFragment.create(
-                role = role,
-                ordinal = fragment.ordinal,
-                family = fragment.family,
-                shape = shape,
-                callToken = callToken,
-                tablePermutation = tablePermutation,
-            )
-        } finally {
-            shape.fill(0)
-            callToken.fill(0)
-            tablePermutation.fill(0)
         }
     }
 
