@@ -32,8 +32,8 @@ JavaShroud 是一套 Java 混淆与加固工具链：Kotlin 引擎做字节码�
 | 常量与字符串 | `integer-constant-obfuscation`、`string-encryption`、`field-string-encryption` |
 | 控制流 | `control-flow-obfuscation`、`control-flow-flattening`、`reference-proxy`、`invoke-dynamic-indirection`、`condy-constant-indirection` |
 | 方法虚拟化 | `method-virtualization`：JVM bytecode lowering 为 VBC4，由 NBVM 执行 |
-| 资源与类加密 | JSRP 资源封装、`class-encryption-loader`、`method-body-delayed-decryption` |
-| 运行时防护 | `anti-instrumentation`、`anti-dump-protection`、`environment-bound-keys`、`callsite-rotation-protection`、`anti-symbolic-execution`、`exception-semantic-virtualization` |
+| 资源与类保护 | JSRP 当前格式认证资源封装、Native typed page 路由 |
+| 运行时防御 | `os-anti-debug`、`os-anti-vm`、`callsite-rotation-protection`、`exception-semantic-virtualization` |
 | Native runtime | `jni-microkernel-loader`：AKEN-R1 Rust runtime、认证资源与平台绑定 |
 | 桌面工作流 | Wails + Vue 界面、配置编辑、引擎任务管理 |
 

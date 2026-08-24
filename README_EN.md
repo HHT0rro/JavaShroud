@@ -32,8 +32,8 @@ The design is Kerckhoffs-oriented: protection strength comes from per-artifact k
 | Constants and strings | `integer-constant-obfuscation`, `string-encryption`, `field-string-encryption` |
 | Control flow | `control-flow-obfuscation`, `control-flow-flattening`, `reference-proxy`, `invoke-dynamic-indirection`, `condy-constant-indirection` |
 | Method virtualization | `method-virtualization`: JVM bytecode lowering to VBC4, executed by the NBVM |
-| Resource and class encryption | JSRP resource envelopes, `class-encryption-loader`, `method-body-delayed-decryption` |
-| Runtime defenses | `anti-instrumentation`, `anti-dump-protection`, `environment-bound-keys`, `callsite-rotation-protection`, `anti-symbolic-execution`, `exception-semantic-virtualization` |
+| Resource and class protection | JSRP current-format authenticated resource envelopes and native typed-page routing |
+| Runtime defenses | `os-anti-debug`, `os-anti-vm`, `callsite-rotation-protection`, `exception-semantic-virtualization` |
 | Native runtime | `jni-microkernel-loader`: AKEN-R1 Rust runtime, authenticated resources, and platform binding |
 | Desktop workflow | Wails + Vue UI, configuration editing, engine task management |
 
