@@ -14,7 +14,7 @@ import java.util.Arrays
  * record.
  */
 internal object AkenVbc4BlockClusterPlanner {
-    private const val VBC4_CURRENT_MAGIC = "VBC4"
+    private const val VBC4_CURRENT_MAGIC = "VBC5"
     private const val VBC4_NONCE_BYTES = 16
     private const val VBC4_DIALECT_COMMITMENT_BYTES = 32
     private const val VBC4_WRAPPED_SEED_BYTES = 16

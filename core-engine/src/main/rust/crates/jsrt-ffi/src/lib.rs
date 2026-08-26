@@ -335,7 +335,7 @@ mod jni_bridge {
     const DEFENSE_DEBUG_SURFACE: u8 = 1;
     const DEFENSE_VM_SURFACE: u8 = 1 << 1;
     const DEFENSE_ABI_PROBE_SURFACE: u8 = 1 << 2;
-    const DEFENSE_SHARE_DOMAIN: &[u8] = b"JavaShroud/AKEN-R1/UnifiedDefense/v1";
+    const DEFENSE_SHARE_DOMAIN: &[u8] = b"JavaShroud/AKEN-R2/UnifiedDefense/v2";
 
     #[derive(Default)]
     struct BridgeState {

@@ -3,6 +3,21 @@
 use jsrt_crypto::{aes128_ctr_crypt, constant_time_eq, hmac_sha256, sha256};
 
 pub const DIGEST_SIZE: usize = 32;
+const SESSION_INTEGRITY_LABEL: [u8; 25] = [
+    0x2c, 0x38, 0x39, 0x6e, 0x77, 0x29, 0x3f, 0x29, 0x29, 0x33, 0x35, 0x34, 0x77, 0x33, 0x34, 0x2e,
+    0x3f, 0x3d, 0x28, 0x33, 0x2e, 0x23, 0x77, 0x2c, 0x68,
+];
+const AES_KEY_LABEL: [u8; 12] = [0x2c, 0x38, 0x39, 0x6e, 0x77, 0x3b, 0x3f, 0x29, 0x77, 0x31, 0x3f, 0x23];
+const AES_IV_LABEL: [u8; 11] = [0x2c, 0x38, 0x39, 0x6e, 0x77, 0x3b, 0x3f, 0x29, 0x77, 0x33, 0x2c];
+const VM_BUILD_KEY_LABEL: [u8; 34] = [
+    0x30, 0x3b, 0x2c, 0x3b, 0x29, 0x32, 0x28, 0x35, 0x2f, 0x3e, 0x77, 0x3b, 0x31, 0x3f, 0x34, 0x77,
+    0x28, 0x6b, 0x77, 0x2c, 0x37, 0x77, 0x38, 0x2f, 0x33, 0x36, 0x3e, 0x77, 0x31, 0x3f, 0x23, 0x77,
+    0x2c, 0x69,
+];
+pub(crate) const DIALECT_DOMAIN_LABEL: [u8; 32] = [
+    0x30, 0x3b, 0x2c, 0x3b, 0x29, 0x32, 0x28, 0x35, 0x2f, 0x3e, 0x77, 0x3b, 0x31, 0x3f, 0x34, 0x77,
+    0x28, 0x6b, 0x77, 0x2c, 0x37, 0x77, 0x3e, 0x33, 0x3b, 0x36, 0x3f, 0x39, 0x2e, 0x77, 0x2c, 0x6b,
+];
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum CryptoError {
@@ -80,11 +95,9 @@ pub(crate) fn vbc4_session_material(
     state_binding: &[u8],
 ) -> [u8; 32] {
     let state_binding_length =
-        u32::try_from(state_binding.len()).expect("bounded VBC4 state binding length fits u32");
-    let mut material = Vec::with_capacity(
-        b"vbc4-session-integrity-v2".len() + 32 + 32 + 4 + state_binding.len() + 4,
-    );
-    material.extend_from_slice(b"vbc4-session-integrity-v2");
+        u32::try_from(state_binding.len()).expect("bounded VM state binding length fits u32");
+    let mut material = Vec::with_capacity(SESSION_INTEGRITY_LABEL.len() + 32 + 32 + 4 + state_binding.len() + 4);
+    material.extend_from_slice(&SESSION_INTEGRITY_LABEL);
     material.extend_from_slice(crypto_domain_material);
     material.extend_from_slice(layout_digest);
     material.extend_from_slice(&state_binding_length.to_be_bytes());
@@ -139,8 +152,8 @@ pub(crate) fn vbc4_aes_material(
     let section_bytes = section.to_be_bytes();
     let block_bytes = block_id.to_be_bytes();
     let parts = [&nonce[..], &section_bytes[..], &block_bytes[..]];
-    let key_digest = vbc4_hmac(session_material, seed, &parts, b"vbc4-aes-key");
-    let iv_digest = vbc4_hmac(session_material, seed, &parts, b"vbc4-aes-iv");
+    let key_digest = vbc4_hmac(session_material, seed, &parts, &AES_KEY_LABEL);
+    let iv_digest = vbc4_hmac(session_material, seed, &parts, &AES_IV_LABEL);
     let mut key = [0u8; 16];
     let mut iv = [0u8; 16];
     key.copy_from_slice(&key_digest[..16]);
@@ -156,12 +169,7 @@ pub(crate) fn vm_build_key(
     crypto_domain_material: &[u8; 32],
     layout_digest: &[u8; 32],
 ) -> Result<[u8; 32], CryptoError> {
-    let derived = hkdf_sha256(
-        crypto_domain_material,
-        b"javashroud-aken-r1-vm-build-key-v3",
-        layout_digest,
-        32,
-    )?;
+    let derived = hkdf_sha256(crypto_domain_material, &VM_BUILD_KEY_LABEL, layout_digest, 32)?;
     let mut output = [0u8; 32];
     output.copy_from_slice(&derived);
     let mut wiped = derived;
@@ -223,5 +231,13 @@ mod tests {
         let mut actual = hkdf_sha256(&ikm, &salt, &info, 42).expect("RFC 5869 HKDF");
         assert_eq!(actual, expected);
         actual.fill(0);
+    }
+
+    #[test]
+    fn domain_labels_are_not_ascii_rdata_anchors() {
+        assert!(!SESSION_INTEGRITY_LABEL.windows(4).any(|window| window == b"vbc4"));
+        assert!(!AES_KEY_LABEL.windows(4).any(|window| window == b"vbc4"));
+        assert!(!VM_BUILD_KEY_LABEL.windows(10).any(|window| window == b"javashroud"));
+        assert!(!DIALECT_DOMAIN_LABEL.windows(10).any(|window| window == b"javashroud"));
     }
 }

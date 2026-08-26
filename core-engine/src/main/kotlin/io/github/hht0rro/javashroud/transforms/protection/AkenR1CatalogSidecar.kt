@@ -3,6 +3,7 @@ package io.github.hht0rro.javashroud.transforms.protection
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHandle
+import io.github.hht0rro.javashroud.transforms.protection.aken.r1.FinalNativeBinding
 import io.github.hht0rro.javashroud.transforms.protection.aken.r1.PageKey
 import io.github.hht0rro.javashroud.transforms.protection.aken.r1.R1ArtifactDirectorySerializer
 import io.github.hht0rro.javashroud.transforms.protection.aken.r1.R1ArtifactPage
@@ -13,7 +14,10 @@ import java.util.Arrays
 private const val CATALOG_INDEX = "META-INF/jsrt/catalog.index"
 private const val CATALOG_PREFIX = "META-INF/jsrt/catalog/"
 
-internal fun attachAkenR1CatalogSidecar(artifact: BytecodeArtifact): BytecodeArtifact {
+internal fun attachAkenR1CatalogSidecar(
+    artifact: BytecodeArtifact,
+    nativeBinding: FinalNativeBinding,
+): BytecodeArtifact {
     if (artifact.jarEntries.any { it.name == CATALOG_INDEX }) return artifact
     val layout = currentVbc4BuildContextOrNull()?.akenVbc4FinalizationLayoutOrNull() ?: return artifact
     val extras = ArrayList<JarEntryData>()
@@ -24,11 +28,7 @@ internal fun attachAkenR1CatalogSidecar(artifact: BytecodeArtifact): BytecodeArt
             artifactCommitment = layout.copyArtifactCommitmentForBuild().let { src ->
                 if (src.size == 32) src else MessageDigest.getInstance("SHA-256").digest(src)
             },
-            nativeSha256 = ByteArray(32),
-            abiDigest = ByteArray(32),
-            targetTriple = RuntimeBindingDigest.TARGET_WINDOWS_GNU,
-            specializationDigest = ByteArray(32),
-            payloadProfile = "aken-r1",
+            binding = nativeBinding,
         )
         try {
             val builtEntries = layout.entriesForBuild()

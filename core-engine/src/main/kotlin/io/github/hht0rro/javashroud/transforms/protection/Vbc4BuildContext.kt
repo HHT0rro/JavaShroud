@@ -46,6 +46,7 @@ internal data class Vbc4BuildContext(
     val maxHardening: Boolean = false,
 ) {
     private var signedDebugMapDraft: io.github.hht0rro.javashroud.transforms.protection.hardening.SignedDebugMap.Draft? = null
+    private val nativeSpecializationDigests = LinkedHashMap<String, ByteArray>()
     /** Build-only AKEN v4 page/evaluator plan; never serialized into runtime output. */
     private var akenBuildPlan: AkenBuildPlan? = null
     /**
@@ -108,6 +109,28 @@ internal data class Vbc4BuildContext(
 
     fun signedDebugMapDraftOrNull(): io.github.hht0rro.javashroud.transforms.protection.hardening.SignedDebugMap.Draft? =
         signedDebugMapDraft
+
+    @Synchronized
+    fun publishNativeSpecializationDigests(digests: Map<String, ByteArray>) {
+        require(digests.isNotEmpty()) { "native specialization digest map must not be empty" }
+        nativeSpecializationDigests.values.forEach { java.util.Arrays.fill(it, 0) }
+        nativeSpecializationDigests.clear()
+        for ((platform, digest) in digests) {
+            require(digest.size == 32) { "native specialization digest must be 32 bytes" }
+            require(digest.any { it != 0.toByte() }) { "native specialization digest must not be all-zero" }
+            nativeSpecializationDigests[platform] = digest.copyOf()
+        }
+    }
+
+    @Synchronized
+    fun copyNativeSpecializationDigest(platform: String): ByteArray {
+        val digest = nativeSpecializationDigests[platform]
+            ?: error("native specialization digest for $platform is not published")
+        if (digest.size != 32 || digest.all { it == 0.toByte() }) {
+            error("native specialization digest for $platform is wiped")
+        }
+        return digest.copyOf()
+    }
 
     /**
      * Return the scoped AKEN v4 plan, creating it lazily from the artifact
@@ -961,6 +984,11 @@ internal data class Vbc4BuildContext(
         runtimeKeyPartitions = runtimeKeyPartitions.deepCopy(),
         productionBuildEvidence = productionBuildEvidence,
     ).also { copy ->
+        if (nativeSpecializationDigests.isNotEmpty()) {
+            copy.publishNativeSpecializationDigests(
+                nativeSpecializationDigests.mapValues { (_, digest) -> digest.copyOf() },
+            )
+        }
         // Candidate sources and pre-seal route reservations are intentionally
         // not copied across scopes; either copy could outlive the candidate
         // namespace and plaintext ownership it binds.
@@ -975,6 +1003,8 @@ internal data class Vbc4BuildContext(
         java.util.Arrays.fill(runtimeResourceKey, 0)
         runtimeKeyPartitions.wipe()
         signedDebugMapDraft = null
+        nativeSpecializationDigests.values.forEach { java.util.Arrays.fill(it, 0) }
+        nativeSpecializationDigests.clear()
         akenVbc4MethodCandidates.values.forEach { it.wipe() }
         akenVbc4MethodCandidates.clear()
         akenStringPageCandidates.values.forEach { it.wipe() }

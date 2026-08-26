@@ -66,7 +66,7 @@ pub const OFFSET_CIPHERTEXT_LENGTH: usize = 197;
 pub const CANONICAL_CODEC_VARIANT: &str = "aes-256-gcm";
 
 pub const R1_MAGIC: [u8; 4] = *b"JSR1";
-pub const R1_VERSION: u8 = 1;
+pub const R1_VERSION: u8 = 2;
 pub const R1_AUTH_TAG_SIZE: usize = DIGEST_SIZE;
 pub const R1_HEADER_SIZE: usize = 4 + 1 + 4 + DIGEST_SIZE;
 pub const R1_MIN_FRAME_SIZE: usize = R1_HEADER_SIZE + R1_AUTH_TAG_SIZE;
@@ -4723,11 +4723,11 @@ mod tests {
         let frame = encode_r1_frame(b"binding", b"payload").expect("R1 encode");
         assert_eq!(
             jsrt_crypto::RUNTIME_BINDING_DOMAIN,
-            b"JavaShroud/AKEN-R1/RuntimeBindingDigest/v1"
+            b"JavaShroud/AKEN-R2/RuntimeBindingDigest/v2"
         );
         assert_eq!(
             jsrt_crypto::AUTHENTICATION_DOMAIN,
-            b"JavaShroud/AKEN-R1/AuthenticatedFrame/v1"
+            b"JavaShroud/AKEN-R2/AuthenticatedFrame/v2"
         );
         assert_eq!(
             frame,

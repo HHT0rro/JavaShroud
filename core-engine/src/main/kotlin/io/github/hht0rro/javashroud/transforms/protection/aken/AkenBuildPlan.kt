@@ -351,11 +351,9 @@ class AkenBuildPlan private constructor(
                 ?: ByteArray(AkenHandle.ENCODED_HANDLE_SIZE).also(random::nextBytes)
             locator = ByteArray(AkenHandle.LOCATOR_TOKEN_SIZE).also(random::nextBytes)
             pageNonce = ByteArray(AkenResourceCodec.NONCE_SIZE).also(random::nextBytes)
-            dek = ByteArray(AkenVbc4Material.PAGE_MATERIAL_SIZE).also(random::nextBytes)
             fingerprint = ByteArray(AkenHandle.FINGERPRINT_SIZE).also(random::nextBytes)
 
             boundDecryptorCore = AkenBoundDecryptorCore.compile(
-                pageMaterial = checkNotNull(dek),
                 resourceKind = kind,
                 logicalIdentity = identityCopy,
                 pageIndex = pageIndex,
@@ -369,6 +367,7 @@ class AkenBuildPlan private constructor(
                 pageNonce = checkNotNull(pageNonce),
                 random = random,
             )
+            dek = checkNotNull(boundDecryptorCore).copyPageMaterialForBuild()
             evaluatorPlan = EvaluatorPlan(
                 fingerprint = checkNotNull(fingerprint),
                 boundDecryptorCore = checkNotNull(boundDecryptorCore),

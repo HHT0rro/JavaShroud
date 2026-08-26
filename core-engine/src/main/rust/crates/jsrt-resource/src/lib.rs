@@ -39,8 +39,8 @@ pub const MAX_ZSTD_FRAME_SIZE: usize = MAX_STORED_SIZE;
 
 const DIRECTORY_ENTRY_SIZE_WIRE: u16 = DIRECTORY_ENTRY_SIZE as u16;
 const FLAG_COMPRESSED: u8 = 1;
-const DIRECTORY_AUTH_DOMAIN: &[u8] = b"JavaShroud/AKEN-R1/ResourceDirectory/v1";
-const FRAME_AUTH_DOMAIN: &[u8] = b"JavaShroud/AKEN-R1/ResourceFrame/v1";
+const DIRECTORY_AUTH_DOMAIN: &[u8] = b"JavaShroud/AKEN-R2/ResourceDirectory/v2";
+const FRAME_AUTH_DOMAIN: &[u8] = b"JavaShroud/AKEN-R2/ResourceFrame/v2";
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
 const ZSTD_MAX_BLOCK_SIZE: usize = 128 * 1024;
 

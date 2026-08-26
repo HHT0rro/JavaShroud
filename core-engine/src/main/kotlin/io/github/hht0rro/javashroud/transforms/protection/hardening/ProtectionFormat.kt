@@ -2,8 +2,8 @@ package io.github.hht0rro.javashroud.transforms.protection.hardening
 
 /** Current protected-artifact format. Forbidden output signatures fail closed at the release gate. */
 internal object ProtectionFormat {
-    const val CURRENT = "AKEN-R1"
-    const val DEBUG_MAP_VERSION: Int = 1
+    const val CURRENT = "AKEN-R2"
+    const val DEBUG_MAP_VERSION: Int = 3
     const val INDY_TOKEN_MAGIC = "ITK1"
     const val DEBUG_MAP_MAGIC = "JSDM"
 
@@ -44,5 +44,7 @@ internal object ProtectionFormat {
         "JSBK1",
         "AKEN-R1/Eval7/v1",
         "JavaShroud/AKEN-R1/EvaluatorShare/v1",
+        "JSR1DIR",
+        "VBC4",
     )
 }

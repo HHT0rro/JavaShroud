@@ -23,6 +23,7 @@ internal const val AKEN_NATIVE_BINDINGS_LOCATOR_LOGICAL_RESOURCE = "META-INF/jsr
 internal const val AKEN_NATIVE_RESOURCE_ROOT = "META-INF/"
 internal const val AKEN_R1_NATIVE_RESOURCE_ROOT = "META-INF/jsrt/"
 internal const val AKEN_NATIVE_LOCATOR_VERSION = 2
+internal const val AKEN_R1_PAYLOAD_PROFILE = "aken-r1-rust-ffi-v1"
 internal val AKEN_NATIVE_LOCATOR_MAGIC_BYTES = byteArrayOf(0xD7.toByte(), 0xA4.toByte(), 0x91.toByte(), 0xE3.toByte())
 
 internal class AkenNativeLocatorEntry(
@@ -86,6 +87,30 @@ internal class AkenNativeBindingsLocatorEntry(
     internal fun wipeDigest() = Arrays.fill(digestValue, 0)
 }
 
+internal data class CatalogNativeBindingInputs(
+    val nativeSha256: ByteArray,
+    val abiDigest: ByteArray,
+    val targetTriple: String,
+    val payloadProfile: String,
+    val platform: String,
+) : AutoCloseable {
+    init {
+        require(nativeSha256.size == AKEN_NATIVE_SHA256_SIZE && nativeSha256.any { it != 0.toByte() }) {
+            "AKEN catalog native SHA-256 is empty or all-zero"
+        }
+        require(abiDigest.size == AKEN_NATIVE_SHA256_SIZE && abiDigest.any { it != 0.toByte() }) {
+            "AKEN catalog ABI digest is empty or all-zero"
+        }
+    }
+
+    fun wipe() {
+        Arrays.fill(nativeSha256, 0)
+        Arrays.fill(abiDigest, 0)
+    }
+
+    override fun close() = wipe()
+}
+
 /**
  * Build-only serializer.  The runtime owns an independent strict parser in
  * [JniMicrokernelHelper], keeping the runtime dependency surface Java-only.
@@ -112,6 +137,30 @@ internal object AkenNativeLocator {
         storedLength = storedBytes.size,
         sha256 = sha256(storedBytes),
     )
+
+    fun catalogBindingInputs(entries: Iterable<AkenNativeLocatorEntry>): CatalogNativeBindingInputs {
+        val primary = orderedEntries(entries).first()
+        val nativeSha256 = primary.copyDigest()
+        val targetTriple = targetTripleForPlatform(primary.platform)
+        val targetBytes = targetTriple.toByteArray(StandardCharsets.US_ASCII)
+        try {
+            val abiDigest = nativeAbiDigest(targetBytes, nativeSha256)
+            try {
+                return CatalogNativeBindingInputs(
+                    nativeSha256 = nativeSha256.copyOf(),
+                    abiDigest = abiDigest.copyOf(),
+                    targetTriple = targetTriple,
+                    payloadProfile = AKEN_R1_PAYLOAD_PROFILE,
+                    platform = primary.platform,
+                )
+            } finally {
+                Arrays.fill(abiDigest, 0)
+            }
+        } finally {
+            Arrays.fill(nativeSha256, 0)
+            Arrays.fill(targetBytes, 0)
+        }
+    }
 
     fun encode(
         entries: Iterable<AkenNativeLocatorEntry>,

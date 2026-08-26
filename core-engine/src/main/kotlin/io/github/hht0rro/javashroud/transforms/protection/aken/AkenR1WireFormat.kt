@@ -13,7 +13,7 @@ import java.util.Arrays
  */
 object AkenR1WireFormat {
     const val MAGIC: String = "JSR1"
-    const val VERSION: Int = 1
+    const val VERSION: Int = 2
     const val DIGEST_SIZE: Int = 32
     const val AUTH_TAG_SIZE: Int = DIGEST_SIZE
     const val MAX_BINDING_SIZE: Int = 4 * 1024
@@ -24,9 +24,9 @@ object AkenR1WireFormat {
 
     private val MAGIC_BYTES = MAGIC.toByteArray(Charsets.US_ASCII)
     internal val RUNTIME_BINDING_DOMAIN =
-        "JavaShroud/AKEN-R1/RuntimeBindingDigest/v1".toByteArray(Charsets.US_ASCII)
+        "JavaShroud/AKEN-R2/RuntimeBindingDigest/v2".toByteArray(Charsets.US_ASCII)
     private val AUTHENTICATION_DOMAIN =
-        "JavaShroud/AKEN-R1/AuthenticatedFrame/v1".toByteArray(Charsets.US_ASCII)
+        "JavaShroud/AKEN-R2/AuthenticatedFrame/v2".toByteArray(Charsets.US_ASCII)
 
     /** Computes the domain-separated SHA-256 runtime binding digest. */
     fun runtimeBindingDigest(binding: ByteArray): RuntimeBindingDigest = RuntimeBindingDigest.compute(binding)

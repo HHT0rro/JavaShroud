@@ -66,7 +66,7 @@ object EmbeddedHelperDeployment {
         mapOf(
             "$PKG/StringEncryptionHelper" to { loadClasspathHelperByName("StringEncryptionHelper") },
             "$PKG/BootstrapEncryptionHelper" to { loadClasspathHelperByName("BootstrapEncryptionHelper") },
-            "$PKG/CallsiteRotationHelper" to ::generateCallsiteRotationHelper,
+            "$PKG/CallsiteRotationHelper" to { loadClasspathHelperByName("CallsiteRotationHelper") },
             "$PKG/IndyTargetBootstrap" to { loadClasspathHelperByName("IndyTargetBootstrap") },
             "$PKG/ExceptionVirtualizationHelper" to ::generateExceptionVirtualizationHelper,
             "$PKG/FlowControlException" to ::generateFlowControlException,
@@ -942,32 +942,6 @@ object EmbeddedHelperDeployment {
 
 
     // --- ASM Generators (all use COMPUTE_MAXS only) ---
-
-    private fun generateCallsiteRotationHelper(): ByteArray {
-
-        val owner = "$PKG/CallsiteRotationHelper"
-        val cw = ClassWriter(ClassWriter.COMPUTE_FRAMES or ClassWriter.COMPUTE_MAXS)
-        cw.visit(Opcodes.V11, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, owner, null, "java/lang/Object", null)
-        emitCtor(cw)
-        val mv = cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "createRotatingCallSite",
-            "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/invoke/CallSite;",
-            null, arrayOf("java/lang/Exception"))
-        mv.visitCode()
-        mv.visitVarInsn(Opcodes.ALOAD, 0)
-        mv.visitVarInsn(Opcodes.ALOAD, 3)
-        mv.visitMethodInsn(Opcodes.INVOKESTATIC, "$PKG/IndyTargetBootstrap", "resolveHandle", "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;)Ljava/lang/invoke/MethodHandle;", false)
-        mv.visitVarInsn(Opcodes.ALOAD, 2)
-        mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/invoke/MethodHandle", "asType", "(Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;", false)
-        mv.visitVarInsn(Opcodes.ASTORE, 7)
-        mv.visitTypeInsn(Opcodes.NEW, "java/lang/invoke/MutableCallSite"); mv.visitInsn(Opcodes.DUP); mv.visitVarInsn(Opcodes.ALOAD, 2)
-        mv.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/invoke/MutableCallSite", "<init>", "(Ljava/lang/invoke/MethodType;)V", false)
-        mv.visitVarInsn(Opcodes.ASTORE, 8)
-        mv.visitVarInsn(Opcodes.ALOAD, 8); mv.visitVarInsn(Opcodes.ALOAD, 7)
-        mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/invoke/MutableCallSite", "setTarget", "(Ljava/lang/invoke/MethodHandle;)V", false)
-        mv.visitVarInsn(Opcodes.ALOAD, 8); mv.visitInsn(Opcodes.ARETURN)
-        mv.visitMaxs(4, 9); mv.visitEnd()
-        cw.visitEnd(); return cw.toByteArray()
-    }
 
     private fun generateFlowControlException(): ByteArray {
         val owner = "$PKG/FlowControlException"

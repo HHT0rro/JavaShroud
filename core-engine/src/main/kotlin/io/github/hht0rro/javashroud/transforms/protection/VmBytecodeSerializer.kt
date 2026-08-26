@@ -46,11 +46,11 @@ internal data class Vbc4EntryMetadata(
 private const val VBC4_ARGUMENT_TAGS = "ZBCSIJFDL["
 private const val VBC4_RETURN_TAGS = "VZBCSIJFDL["
 private const val VBC4_CP_SEALED_STRING_TYPE = 0x06
-private const val VBC4_CURRENT_MAGIC = "VBC4"
+private const val VBC4_CURRENT_MAGIC = "VBC5"
 internal const val VBC4_DIALECT_COMMITMENT_BYTES = 32
-private val VBC4_CP_STRING_KEY_DOMAIN = "javashroud-vbc4-cp-string-key-v2".toByteArray(Charsets.US_ASCII)
-private val VBC4_CP_STRING_IV_DOMAIN = "javashroud-vbc4-cp-string-iv-v2".toByteArray(Charsets.US_ASCII)
-private val VBC4_CP_STRING_TAG_DOMAIN = "javashroud-vbc4-cp-string-tag-v2".toByteArray(Charsets.US_ASCII)
+private val VBC4_CP_STRING_KEY_DOMAIN = "javashroud-vbc4-cp-string-key-v3".toByteArray(Charsets.US_ASCII)
+private val VBC4_CP_STRING_IV_DOMAIN = "javashroud-vbc4-cp-string-iv-v3".toByteArray(Charsets.US_ASCII)
+private val VBC4_CP_STRING_TAG_DOMAIN = "javashroud-vbc4-cp-string-tag-v3".toByteArray(Charsets.US_ASCII)
 
 private fun isLowerHexDigit(value: Char): Boolean = value in '0'..'9' || value in 'a'..'f'
 
@@ -776,7 +776,7 @@ internal class VmBytecodeSerializer(
             emptyList()
         }
         return LogicalGroup(
-            maskedOpcodeBase = opcodeDialect.encodeOpcode(baseOpcode),
+            maskedOpcodeBase = opcodeDialect.encodeOpcode(canonicalVmOpcode(baseOpcode)),
             primaryFlags = flags,
             primaryDst = operands.size and 0xFFFF,
             primarySrcA = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, instruction.offset),
@@ -2233,7 +2233,12 @@ private object Vbc4CryptoScope {
     ): ByteArray {
         require(stateBinding.size <= 4 * 1024) { "VBC4 state binding exceeds the current format limit" }
         val digest = java.security.MessageDigest.getInstance("SHA-256")
-        digest.update("vbc4-session-integrity-v2".toByteArray(Charsets.US_ASCII))
+        digest.update(
+            byteArrayOf(
+                0x2c, 0x38, 0x39, 0x6e, 0x77, 0x29, 0x3f, 0x29, 0x29, 0x33, 0x35, 0x34, 0x77, 0x33, 0x34,
+                0x2e, 0x3f, 0x3d, 0x28, 0x33, 0x2e, 0x23, 0x77, 0x2c, 0x68,
+            ),
+        )
         digest.update(masterKey)
         digest.update(layoutDigest)
         digest.update(intBytes(stateBinding.size))
@@ -2289,7 +2294,7 @@ private fun compressCpEntrySection(bytes: ByteArray): Vbc4StoredSection {
 
 private fun vbc4AesKey(seed: Int, nonce: ByteArray, section: Int, blockId: Int): ByteArray =
     withVbc4HmacMaterial(
-        "vbc4-aes-key".toByteArray(Charsets.US_ASCII),
+        byteArrayOf(0x2c, 0x38, 0x39, 0x6e, 0x77, 0x3b, 0x3f, 0x29, 0x77, 0x31, 0x3f, 0x23),
         seed,
         nonce,
         intBytes(section),
@@ -2298,7 +2303,7 @@ private fun vbc4AesKey(seed: Int, nonce: ByteArray, section: Int, blockId: Int):
 
 private fun vbc4AesIv(seed: Int, nonce: ByteArray, section: Int, blockId: Int): ByteArray =
     withVbc4HmacMaterial(
-        "vbc4-aes-iv".toByteArray(Charsets.US_ASCII),
+        byteArrayOf(0x2c, 0x38, 0x39, 0x6e, 0x77, 0x3b, 0x3f, 0x29, 0x77, 0x33, 0x2c),
         seed,
         nonce,
         intBytes(section),

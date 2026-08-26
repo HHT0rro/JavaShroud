@@ -10,6 +10,8 @@ import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenArtifactCommitment
 import io.github.hht0rro.javashroud.transforms.protection.aken.AkenArtifactEntry
+import io.github.hht0rro.javashroud.transforms.protection.aken.r1.FinalNativeBinding
+import io.github.hht0rro.javashroud.transforms.protection.hardening.HardenedArtifactFinalizer
 import io.github.hht0rro.javashroud.transforms.rename.FIELD_RENAME_BINDINGS_RESOURCE
 import io.github.hht0rro.javashroud.transforms.rename.METHOD_RENAME_BINDINGS_RESOURCE
 import org.objectweb.asm.ClassReader
@@ -523,6 +525,7 @@ object RuntimeArtifactSealing {
                 "${classArtifact.summary.internalName}.class" to classArtifact.bytes,
             )
         }.toMap()
+        var catalogNativeBinding: FinalNativeBinding? = null
         val synchronizedJarEntries = renamedJarEntries.map { entry ->
             val synchronizedEntry = rewrittenClassBytesByEntry[entry.name]?.let { bytes -> entry.copy(bytes = bytes) } ?: entry
             synchronizedEntry
@@ -624,6 +627,7 @@ object RuntimeArtifactSealing {
                     Arrays.fill(digestBytes, 0)
                 }
                 runtimeEntries += JarEntryData(name = locatorPath, bytes = locatorBytes)
+                catalogNativeBinding = catalogNativeBindingFromLocator(locatorEntries)
             }
             runtimeEntries
         }
@@ -650,7 +654,13 @@ object RuntimeArtifactSealing {
         // so a later AKEN emitter can reserve shards and call the same API
         // without reviving a boot/root-key path.
         publishAkenArtifactCommitment(sealedArtifact)
-        return attachAkenR1CatalogSidecar(sealedArtifact)
+        val wrappedArtifact = HardenedArtifactFinalizer.wrapIndyTargets(sealedArtifact)
+        val nativeBinding = catalogNativeBinding ?: return wrappedArtifact
+        try {
+            return attachAkenR1CatalogSidecar(wrappedArtifact, nativeBinding)
+        } finally {
+            nativeBinding.wipe()
+        }
     }
 }
 
@@ -685,6 +695,25 @@ internal fun publishAkenArtifactCommitment(artifact: BytecodeArtifact): AkenArti
         }
     }
     return commitment
+}
+
+private fun catalogNativeBindingFromLocator(locatorEntries: List<AkenNativeLocatorEntry>): FinalNativeBinding {
+    AkenNativeLocator.catalogBindingInputs(locatorEntries).use { inputs ->
+        val context = currentVbc4BuildContextOrNull()
+            ?: error("AKEN catalog native binding requires a live VBC4 build context")
+        val specializationDigest = context.copyNativeSpecializationDigest(inputs.platform)
+        try {
+            return FinalNativeBinding(
+                nativeSha256 = inputs.nativeSha256,
+                abiDigest = inputs.abiDigest,
+                targetTriple = inputs.targetTriple,
+                specializationDigest = specializationDigest,
+                payloadProfile = inputs.payloadProfile,
+            )
+        } finally {
+            Arrays.fill(specializationDigest, 0)
+        }
+    }
 }
 
 private data class SealedNativeSpec(
@@ -870,6 +899,7 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     // Unified defense is part of the current typed JNI ABI.  Keep these
     // declarations in the sealed member map even though their canonical
     // marker literals remain in the helper for native-image validation.
+    addMethod(jniHelper, "expectDefenseForProtectedPath", "()V")
     addMethod(jniHelper, "nativeInitializeDefense", "(Ljava/lang/String;Ljava/lang/String;)I")
     addMethod(jniHelper, "nativeProbeDefense", "(Ljava/lang/String;Ljava/lang/String;)I")
     addMethod(jniHelper, "nativeTransformDefense", "([BLjava/lang/String;)[B")
@@ -880,12 +910,20 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     addMethod(bootstrap, "encryptedBootstrap", "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;")
 
     val stringEncryption = "$PROTECTION_HELPER_PACKAGE/StringEncryptionHelper"
+    addMethod(stringEncryption, "invokeAkenStringTerminal", "([B)Ljava/lang/String;")
     addMethod(stringEncryption, "invokeAkenStringTerminal", "([BI[B)Ljava/lang/String;")
+    addMethod(stringEncryption, "materializeAkenStringToken", "(Ljava/lang/String;)[B")
     val stringBootstrapDescriptor =
         "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;" +
             "Ljava/lang/invoke/MethodHandle;)Ljava/lang/invoke/CallSite;"
     listOf("q0", "m7", "x3", "v8").forEach { bootstrapName ->
         addMethod(stringEncryption, bootstrapName, stringBootstrapDescriptor)
+    }
+    val stringTokenBootstrapDescriptor =
+        "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;" +
+            "Ljava/lang/String;)Ljava/lang/invoke/CallSite;"
+    listOf("u0", "u1", "u2", "u3").forEach { bootstrapName ->
+        addMethod(stringEncryption, bootstrapName, stringTokenBootstrapDescriptor)
     }
 
 
@@ -1488,7 +1526,7 @@ private fun remapHelperReferences(
              * generated application call sites.  No cache or generic decoder
              * API is reintroduced by this linkage adjustment.
              */
-            val stringTerminalDescriptor = "([BI[B)Ljava/lang/String;"
+            val stringTerminalDescriptor = "([B)Ljava/lang/String;"
             val originalStringOwner = "$PROTECTION_HELPER_PACKAGE/StringEncryptionHelper"
             val sealedStringOwner = helperClassRenameMap[originalStringOwner]
             val sealedStringTerminalName = helperMemberRenamePlan.methodName(

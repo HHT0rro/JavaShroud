@@ -185,7 +185,7 @@ use opcode::*;
 use std::fmt;
 use std::ops::Range;
 
-pub const VBC4_MAGIC: [u8; 4] = *b"VBC4";
+pub const VBC4_MAGIC: [u8; 4] = *b"VBC5";
 pub const VBC4_AUTH_TAG_SIZE: usize = 32;
 pub const VBC4_DIALECT_COMMITMENT_SIZE: usize = 32;
 pub const VBC4_HEADER_SIZE: usize = 4 + 16 + VBC4_DIALECT_COMMITMENT_SIZE + 4 + 16 + 2 + 2 + 4 + 4;
@@ -1313,7 +1313,7 @@ fn parse_sealed_string(bytes: &[u8], build_key: &[u8; 32]) -> Result<VmString, V
     cursor.require_empty()?;
     let expected = crypto::hmac_bytes(
         build_key,
-        &[b"javashroud-vbc4-cp-string-tag-v2", &nonce, &ciphertext],
+        &[b"javashroud-vbc4-cp-string-tag-v3", &nonce, &ciphertext],
     );
     if !ct_eq(&expected, &tag) {
         let mut ciphertext_wipe = ciphertext;
@@ -1322,8 +1322,8 @@ fn parse_sealed_string(bytes: &[u8], build_key: &[u8; 32]) -> Result<VmString, V
     }
     let (key, iv) = crypto::cp_string_material(
         build_key,
-        b"javashroud-vbc4-cp-string-key-v2",
-        b"javashroud-vbc4-cp-string-iv-v2",
+        b"javashroud-vbc4-cp-string-key-v3",
+        b"javashroud-vbc4-cp-string-iv-v3",
         &nonce,
     );
     let mut ciphertext_wipe = ciphertext;
@@ -2831,8 +2831,8 @@ pub fn encode_iconst7_frame(material: &VmKeyMaterial) -> Result<Vec<u8>, VmError
     let string_nonce = [0x44; 16];
     let (string_key, string_iv) = crypto::cp_string_material(
         &build_key,
-        b"javashroud-vbc4-cp-string-key-v2",
-        b"javashroud-vbc4-cp-string-iv-v2",
+        b"javashroud-vbc4-cp-string-key-v3",
+        b"javashroud-vbc4-cp-string-iv-v3",
         &string_nonce,
     );
     let ciphertext = aes128_ctr(&string_key, &string_iv, metadata.as_bytes(), 0xffff)
@@ -2840,7 +2840,7 @@ pub fn encode_iconst7_frame(material: &VmKeyMaterial) -> Result<Vec<u8>, VmError
     let tag = crypto::hmac_bytes(
         &build_key,
         &[
-            b"javashroud-vbc4-cp-string-tag-v2",
+            b"javashroud-vbc4-cp-string-tag-v3",
             &string_nonce,
             &ciphertext,
         ],

@@ -40,11 +40,16 @@ data class StringEncryptionConfig(
 )
 
 private const val STRING_HELPER_OWNER = "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper"
-private const val STRING_HELPER_AKEN_DECODE_DESC = "([BI[B)Ljava/lang/String;"
+private const val STRING_HELPER_AKEN_DECODE_DESC = "([B)Ljava/lang/String;"
 private const val STRING_HELPER_AKEN_BSM_DESC =
     "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;" +
         "Ljava/lang/invoke/MethodHandle;)Ljava/lang/invoke/CallSite;"
 private val STRING_HELPER_AKEN_BSM_NAMES = arrayOf("q0", "m7", "x3", "v8")
+private const val STRING_HELPER_TOKEN_DESC = "(Ljava/lang/String;)[B"
+private const val STRING_HELPER_TOKEN_BSM_DESC =
+    "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;" +
+        "Ljava/lang/String;)Ljava/lang/invoke/CallSite;"
+private val STRING_HELPER_TOKEN_BSM_NAMES = arrayOf("u0", "u1", "u2", "u3")
 private const val SHROUD_ENCRYPT_DESC = "Lio/github/hht0rro/javashroud/bytecode/ShroudEncrypt;"
 private const val AKEN_STRING_PAGE_NONCE_SIZE = 16
 
@@ -55,6 +60,12 @@ private enum class AkenIntPushShape {
     Ldc,
 }
 
+private enum class AkenTokenEmission {
+    PackedArray,
+    LdcPayload,
+    IndyConstant,
+}
+
 private data class AkenStringCallsiteShape(
     val handleLengthPush: AkenIntPushShape,
     val proofLengthPush: AkenIntPushShape,
@@ -62,6 +73,7 @@ private data class AkenStringCallsiteShape(
     val reverseStores: Boolean,
     val useInvokeDynamic: Boolean,
     val bootstrapSlot: Int,
+    val tokenEmission: AkenTokenEmission,
 )
 
 private val AKEN_STRING_PAGE_IDENTITY_DOMAIN =
@@ -402,9 +414,7 @@ private fun buildAkenStringPageDecodeCallsite(
     callSiteProof: ByteArray,
     shape: AkenStringCallsiteShape,
 ): InsnList = InsnList().apply {
-    addByteArray(encodedHandle, shape.handleLengthPush, shape.reverseStores)
-    addInt(pageIndex, shape.pageIndexPush)
-    addByteArray(callSiteProof, shape.proofLengthPush, !shape.reverseStores)
+    addAkenStringToken(encodedHandle, pageIndex, callSiteProof, shape)
     if (shape.useInvokeDynamic) {
         add(
             InvokeDynamicInsnNode(
@@ -436,6 +446,48 @@ private fun buildAkenStringPageDecodeCallsite(
                 false,
             ),
         )
+    }
+}
+
+private fun InsnList.addAkenStringToken(
+    encodedHandle: ByteArray,
+    pageIndex: Int,
+    callSiteProof: ByteArray,
+    shape: AkenStringCallsiteShape,
+) {
+    val packed = packAkenStringToken(encodedHandle, pageIndex, callSiteProof)
+    try {
+        when (shape.tokenEmission) {
+            AkenTokenEmission.PackedArray -> addByteArray(packed, shape.handleLengthPush, shape.reverseStores)
+            AkenTokenEmission.LdcPayload -> {
+                add(LdcInsnNode(Base64.getUrlEncoder().withoutPadding().encodeToString(packed)))
+                add(
+                    MethodInsnNode(
+                        Opcodes.INVOKESTATIC,
+                        STRING_HELPER_OWNER,
+                        "materializeAkenStringToken",
+                        STRING_HELPER_TOKEN_DESC,
+                        false,
+                    ),
+                )
+            }
+            AkenTokenEmission.IndyConstant -> add(
+                InvokeDynamicInsnNode(
+                    "t${shape.bootstrapSlot}",
+                    "()[B",
+                    Handle(
+                        Opcodes.H_INVOKESTATIC,
+                        STRING_HELPER_OWNER,
+                        STRING_HELPER_TOKEN_BSM_NAMES[shape.bootstrapSlot],
+                        STRING_HELPER_TOKEN_BSM_DESC,
+                        false,
+                    ),
+                    Base64.getUrlEncoder().withoutPadding().encodeToString(packed),
+                ),
+            )
+        }
+    } finally {
+        Arrays.fill(packed, 0)
     }
 }
 
@@ -479,6 +531,19 @@ private fun InsnList.addInt(value: Int, shape: AkenIntPushShape = AkenIntPushSha
         }
         AkenIntPushShape.Ldc -> add(LdcInsnNode(value))
     }
+}
+
+private fun packAkenStringToken(encodedHandle: ByteArray, pageIndex: Int, callSiteProof: ByteArray): ByteArray {
+    require(encodedHandle.size == 24) { "AKEN string handle must be 24 bytes" }
+    require(callSiteProof.isNotEmpty() && callSiteProof.size <= 4096) { "AKEN string proof size is invalid" }
+    val packed = ByteArray(24 + 4 + callSiteProof.size)
+    encodedHandle.copyInto(packed)
+    packed[24] = (pageIndex ushr 24).toByte()
+    packed[25] = (pageIndex ushr 16).toByte()
+    packed[26] = (pageIndex ushr 8).toByte()
+    packed[27] = pageIndex.toByte()
+    callSiteProof.copyInto(packed, 28)
+    return packed
 }
 
 private fun deriveAkenStringPageIndex(
@@ -526,6 +591,9 @@ private fun selectAkenStringCallsiteShape(
             // randomizes the surrounding encodings and bootstrap alias.
             useInvokeDynamic = (classLiteralOrdinal and 1) != 0,
             bootstrapSlot = (second ushr 1) and (STRING_HELPER_AKEN_BSM_NAMES.lastIndex),
+            tokenEmission = AkenTokenEmission.entries[
+                (classLiteralOrdinal + (digest[2].toInt() and 0xFF)) % AkenTokenEmission.entries.size
+            ],
         )
     } finally {
         Arrays.fill(digest, 0)

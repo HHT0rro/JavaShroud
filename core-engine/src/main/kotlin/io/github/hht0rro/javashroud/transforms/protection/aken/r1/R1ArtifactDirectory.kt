@@ -219,6 +219,35 @@ class RuntimeBindingDigest(
             payloadProfile,
         )
 
+        fun create(
+            artifactCommitment: ByteArray,
+            binding: FinalNativeBinding,
+        ): RuntimeBindingDigest {
+            val nativeSha256 = binding.nativeSha256
+            val abiDigest = binding.abiDigest
+            val specializationDigest = binding.specializationDigest
+            try {
+                requireNonZeroRuntimeDigests(
+                    artifactCommitment,
+                    nativeSha256,
+                    abiDigest,
+                    specializationDigest,
+                )
+                return RuntimeBindingDigest(
+                    artifactCommitment,
+                    nativeSha256,
+                    abiDigest,
+                    binding.targetTriple,
+                    specializationDigest,
+                    binding.payloadProfile,
+                )
+            } finally {
+                Arrays.fill(nativeSha256, 0)
+                Arrays.fill(abiDigest, 0)
+                Arrays.fill(specializationDigest, 0)
+            }
+        }
+
         fun compute(
             artifactCommitment: ByteArray,
             nativeSha256: ByteArray,
@@ -270,7 +299,7 @@ class RuntimeBindingDigest(
             }
         }
 
-        private fun requireTarget(value: String) {
+        internal fun requireTarget(value: String) {
             val bytes = value.toByteArray(StandardCharsets.US_ASCII)
             try {
                 if (value !in setOf(TARGET_WINDOWS_GNU, TARGET_LINUX_GNU_217) ||
@@ -287,7 +316,7 @@ class RuntimeBindingDigest(
             }
         }
 
-        private fun requireProfile(value: String) {
+        internal fun requireProfile(value: String) {
             val bytes = value.toByteArray(StandardCharsets.US_ASCII)
             try {
                 if (bytes.isEmpty() || bytes.size > MAX_PAYLOAD_PROFILE_BYTES || !isAscii(value)) {
@@ -1131,6 +1160,37 @@ internal fun requireLiveCopy(value: ByteArray, label: String): ByteArray {
 
 private fun ByteArray.copyLive(label: String): ByteArray = requireLiveCopy(this, label)
 
+internal fun requireDigestNonZero(value: ByteArray, field: String) {
+    if (value.size != R1_DIGEST_SIZE) {
+        R1ArtifactDirectoryException.fail(
+            R1ArtifactDirectoryException.Code.INVALID_INPUT,
+            "$field must be $R1_DIGEST_SIZE bytes",
+        )
+    }
+    var nonzero = 0
+    for (byte in value) {
+        nonzero = nonzero or (byte.toInt() and 0xFF)
+    }
+    if (nonzero == 0) {
+        R1ArtifactDirectoryException.fail(
+            R1ArtifactDirectoryException.Code.INVALID_INPUT,
+            "$field must not be all zeros",
+        )
+    }
+}
+
+internal fun requireNonZeroRuntimeDigests(
+    artifactCommitment: ByteArray,
+    nativeSha256: ByteArray,
+    abiDigest: ByteArray,
+    specializationDigest: ByteArray,
+) {
+    requireDigestNonZero(artifactCommitment, "artifact commitment")
+    requireDigestNonZero(nativeSha256, "native SHA-256")
+    requireDigestNonZero(abiDigest, "ABI digest")
+    requireDigestNonZero(specializationDigest, "specialization digest")
+}
+
 private fun encodePageKey(
     resourceKind: AkenResourceKind,
     pageIndex: Int,
@@ -1173,4 +1233,4 @@ private fun compareUnsigned(left: ByteArray, right: ByteArray): Int {
 }
 
 private val R1_RUNTIME_BINDING_DOMAIN =
-    "JavaShroud/AKEN-R1/ArtifactDirectory/RuntimeBindingDigest".toByteArray(StandardCharsets.US_ASCII)
+    "JavaShroud/AKEN-R2/ArtifactDirectory/RuntimeBindingDigest".toByteArray(StandardCharsets.US_ASCII)

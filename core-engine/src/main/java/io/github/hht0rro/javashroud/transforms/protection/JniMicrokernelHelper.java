@@ -1,6 +1,7 @@
 package io.github.hht0rro.javashroud.transforms.protection;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.ByteArrayOutputStream;
@@ -250,7 +251,15 @@ public final class JniMicrokernelHelper {
                 tempLib.setExecutable(true, true);
                 publishSealedNativeBindings(bindingText);
                 sealedNativeBindingsPublished = true;
+                if (!extractedNativeMatchesLocator(tempLib, locator)) {
+                    akenLoadMessage = "aken:native-extract-digest-mismatch:" + platformTarget;
+                    return false;
+                }
                 System.load(tempLib.getAbsolutePath());
+                if (!extractedNativeMatchesLocator(tempLib, locator)) {
+                    akenLoadMessage = "aken:native-loaded-digest-mismatch:" + platformTarget;
+                    return false;
+                }
                 int initResult = initializeNativeKernel(platformTarget);
                 if (initResult < 0) {
                     akenLoadMessage = "aken:native-init-failed:" + initResult;
@@ -1510,6 +1519,11 @@ public final class JniMicrokernelHelper {
         return kernelState == KERNEL_DEFENSE_READY && akenLoadState == LOAD_READY && !nativeSelfCheckFailed;
     }
 
+    /** Arm protected-data gates even if initialize() is later skipped or nopped. */
+    public static void expectDefenseForProtectedPath() {
+        defenseRequired = true;
+    }
+
     public static synchronized void markDefenseBindingsVerified() {
         if (kernelState == KERNEL_FAILED || kernelState == KERNEL_TAMPERED || kernelState == KERNEL_SUSPECT) {
             throw new SecurityException("Unified defense kernel is not usable");
@@ -1534,7 +1548,9 @@ public final class JniMicrokernelHelper {
     }
 
     private static void requireDefenseForProtectedPath() {
-        if (defenseRequired) requireHealthyKernel();
+        if (!defenseRequired) return;
+        requireHealthyKernel();
+        DefenseKernelRuntimeHelper.authorizeProtectedData();
     }
 
     /** Status string for the diversified-VM load-time self-exercise. */
@@ -1954,6 +1970,36 @@ public final class JniMicrokernelHelper {
 
     public static byte[] decryptClassBytes(byte[] keyId, byte[] salt, byte[] nonce, byte[] ciphertext, byte[] aad, int keyLength) {
         throw new SecurityException("class-encryption decryption is not part of the R1 Java helper");
+    }
+
+    private static boolean extractedNativeMatchesLocator(File extracted, AkenNativeLibrary locator) {
+        byte[] digest = null;
+        try {
+            digest = sha256File(extracted, locator.storedLength);
+            return digest != null && MessageDigest.isEqual(locator.sha256, digest);
+        } catch (SecurityException error) {
+            return false;
+        } finally {
+            if (digest != null) Arrays.fill(digest, (byte) 0);
+        }
+    }
+
+    private static byte[] sha256File(File file, int expectedLength) {
+        try (FileInputStream in = new FileInputStream(file)) {
+            byte[] bytes = readAllBounded(in, expectedLength);
+            try {
+                if (bytes.length != expectedLength) {
+                    throw new SecurityException("native extract length mismatch");
+                }
+                return sha256(bytes);
+            } finally {
+                Arrays.fill(bytes, (byte) 0);
+            }
+        } catch (SecurityException error) {
+            throw error;
+        } catch (Exception error) {
+            throw new SecurityException("native extract digest is unavailable", error);
+        }
     }
 
     private static byte[] sha256(byte[] data) {

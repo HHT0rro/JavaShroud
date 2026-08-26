@@ -9,7 +9,7 @@ import java.util.Arrays
 
 /** Current-only serializer for one authenticated AKEN-R1 artifact directory. */
 object R1ArtifactDirectorySerializer {
-    const val MAGIC: String = "JSR1DIR"
+    const val MAGIC: String = "JSR2DIR"
     const val DIGEST_SIZE: Int = R1_DIGEST_SIZE
     const val MAX_ENTRIES: Int = 4096
     const val MAX_PATH_SIZE: Int = 4096
@@ -788,7 +788,7 @@ private class R1Writer(private val maximum: Int) : AutoCloseable {
     }
 }
 
-private const val RECORD_BINDING_DOMAIN_TEXT = "JavaShroud/AKEN-R1/ArtifactDirectory/RecordBinding"
+private const val RECORD_BINDING_DOMAIN_TEXT = "JavaShroud/AKEN-R2/ArtifactDirectory/RecordBinding"
 private val RECORD_BINDING_DOMAIN = RECORD_BINDING_DOMAIN_TEXT.toByteArray(StandardCharsets.US_ASCII)
 private val ROOT_BINDING_DOMAIN =
-    "JavaShroud/AKEN-R1/ArtifactDirectory/RootBinding".toByteArray(StandardCharsets.US_ASCII)
+    "JavaShroud/AKEN-R2/ArtifactDirectory/RootBinding".toByteArray(StandardCharsets.US_ASCII)

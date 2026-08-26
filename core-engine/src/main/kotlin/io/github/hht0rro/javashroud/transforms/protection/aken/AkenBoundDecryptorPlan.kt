@@ -15,7 +15,7 @@ private const val EVALUATOR_MAX_FRAGMENT_COUNT: Int = 12
 private const val EVALUATOR_MIN_TOKEN_SIZE: Int = 17
 private const val EVALUATOR_MAX_TOKEN_SIZE: Int = 48
 private const val EVALUATOR_MAX_OPAQUE_SIZE: Int = 128 * 1024
-private val EVALUATOR_WIRE_MARKER = byteArrayOf(0x56, 0x42, 0x43, 0x34)
+private val EVALUATOR_WIRE_MARKER = byteArrayOf(0x41, 0x4B, 0x45, 0x31)
 
 /**
  * Build-only evaluator seed for one page. The serialized terminal is an
@@ -57,14 +57,25 @@ internal class AkenBoundDecryptorCore private constructor(
         require(fragmentsValue.size in EVALUATOR_MIN_FRAGMENT_COUNT..EVALUATOR_MAX_FRAGMENT_COUNT) {
             "AKEN evaluator fragment count is invalid"
         }
-        require(hasFullEvaluatorCoverage(fragmentsValue)) {
-            "AKEN evaluator fragments do not cover page material exactly once"
+        require(hasValidEvaluatorSchedule(fragmentsValue)) {
+            "AKEN evaluator schedule is invalid"
         }
     }
 
     internal fun copyPageNonceForCodec(): ByteArray {
         requireLive()
         return pageNonceValue.copyOf()
+    }
+
+    internal fun copyPageMaterialForBuild(): ByteArray {
+        requireLive()
+        return AkenBoundDecryptorPlan.materializePageMaterial(
+            dialectByte = dialectByteValue,
+            planNonce = planNonceValue,
+            staticBinding = staticBindingValue,
+            dialectCommitment = dialectCommitmentValue,
+            fragments = fragmentsValue,
+        )
     }
 
     /** Seal the build-only evaluator into the descriptor consumed by native. */
@@ -141,7 +152,6 @@ internal class AkenBoundDecryptorCore private constructor(
 
     companion object {
         internal fun compile(
-            pageMaterial: ByteArray,
             resourceKind: AkenResourceKind,
             logicalIdentity: ByteArray,
             pageIndex: Int,
@@ -155,9 +165,6 @@ internal class AkenBoundDecryptorCore private constructor(
             pageNonce: ByteArray,
             random: SecureRandom,
         ): AkenBoundDecryptorCore {
-            require(pageMaterial.size == AkenVbc4Material.PAGE_MATERIAL_SIZE) {
-                "AKEN evaluator page material length is invalid"
-            }
             require(pageNonce.size == AkenResourceCodec.NONCE_SIZE) {
                 "AKEN evaluator page nonce length is invalid"
             }
@@ -196,12 +203,9 @@ internal class AkenBoundDecryptorCore private constructor(
                 )
                 val count = EVALUATOR_MIN_FRAGMENT_COUNT +
                     random.nextInt(EVALUATOR_MAX_FRAGMENT_COUNT - EVALUATOR_MIN_FRAGMENT_COUNT + 1)
-                val lengths = chooseFragmentLengths(count, pageMaterial.size, random)
-                var offset = 0
-                val order = (0 until count).toMutableList()
-                order.shuffle(random)
-                order.forEach { ordinal ->
-                    val length = lengths[ordinal]
+                val steps = (0 until count).toMutableList()
+                steps.shuffle(random)
+                steps.forEach { offset ->
                     val family = random.nextInt(16)
                     val opcode = random.nextInt(256)
                     val register = random.nextInt(32)
@@ -210,32 +214,23 @@ internal class AkenBoundDecryptorCore private constructor(
                             random.nextInt(EVALUATOR_MAX_TOKEN_SIZE - EVALUATOR_MIN_TOKEN_SIZE + 1),
                     ).also(random::nextBytes)
                     val salt = ByteArray(EVALUATOR_FRAGMENT_SALT_SIZE).also(random::nextBytes)
-                    var encoded: ByteArray? = null
+                    val encoded = ByteArray(
+                        EVALUATOR_MIN_TOKEN_SIZE +
+                            random.nextInt(EVALUATOR_MAX_TOKEN_SIZE - EVALUATOR_MIN_TOKEN_SIZE + 1),
+                    ).also(random::nextBytes)
                     var tag: ByteArray? = null
                     try {
-                        encoded = encodeFragment(
-                            pageMaterial = pageMaterial,
-                            offset = offset,
-                            length = length,
-                            family = family,
-                            opcode = opcode,
-                            register = register,
-                            token = token,
-                            salt = salt,
-                            staticBinding = checkNotNull(staticBinding),
-                            dialectCommitment = checkNotNull(dialectCommitment),
-                        )
                         tag = AkenBoundDecryptorPlan.fragmentTag(
                             staticBinding = checkNotNull(staticBinding),
                             dialectCommitment = checkNotNull(dialectCommitment),
                             offset = offset,
-                            length = length,
+                            length = encoded.size,
                             family = family,
                             opcode = opcode,
                             register = register,
                             token = token,
                             salt = salt,
-                            encoded = checkNotNull(encoded),
+                            encoded = encoded,
                         )
                         fragments += EvaluatorFragmentRecord(
                             offset = offset,
@@ -244,18 +239,16 @@ internal class AkenBoundDecryptorCore private constructor(
                             register = register,
                             token = token,
                             salt = salt,
-                            encoded = checkNotNull(encoded),
+                            encoded = encoded,
                             tag = checkNotNull(tag),
                         )
-                        offset += length
                     } finally {
                         Arrays.fill(token, 0)
                         Arrays.fill(salt, 0)
-                        encoded?.let { Arrays.fill(it, 0) }
+                        Arrays.fill(encoded, 0)
                         tag?.let { Arrays.fill(it, 0) }
                     }
                 }
-                require(offset == pageMaterial.size) { "AKEN evaluator fragment coverage is incomplete" }
                 completed = true
                 return AkenBoundDecryptorCore(
                     pageNonce = pageNonce,
@@ -273,50 +266,6 @@ internal class AkenBoundDecryptorCore private constructor(
             }
         }
 
-        private fun chooseFragmentLengths(count: Int, total: Int, random: SecureRandom): IntArray {
-            require(count in 1..total)
-            val lengths = IntArray(count) { 1 }
-            var remaining = total - count
-            while (remaining > 0) {
-                lengths[random.nextInt(count)]++
-                remaining--
-            }
-            return lengths
-        }
-
-        private fun encodeFragment(
-            pageMaterial: ByteArray,
-            offset: Int,
-            length: Int,
-            family: Int,
-            opcode: Int,
-            register: Int,
-            token: ByteArray,
-            salt: ByteArray,
-            staticBinding: ByteArray,
-            dialectCommitment: ByteArray,
-        ): ByteArray {
-            val stream = AkenBoundDecryptorPlan.fragmentMask(
-                staticBinding,
-                dialectCommitment,
-                offset,
-                length,
-                family,
-                opcode,
-                register,
-                token,
-                salt,
-            )
-            return try {
-                ByteArray(length) { index ->
-                    val value = pageMaterial[offset + index].toInt() and 0xFF
-                    val tweak = (family * 17 + opcode + register + index) and 0xFF
-                    (value xor (stream[index].toInt() and 0xFF) xor tweak).toByte()
-                }
-            } finally {
-                Arrays.fill(stream, 0)
-            }
-        }
     }
 }
 
@@ -406,18 +355,24 @@ internal class AkenBoundDecryptorPlan private constructor(opaque: ByteArray) {
 
     override fun hashCode(): Int = opaqueValue.contentHashCode()
 
-    override fun toString(): String = "AkenBoundDecryptorPlan(vbc4-evaluator, bytes=\${opaqueValue.size})"
+    override fun toString(): String = "AkenBoundDecryptorPlan(bytes=${opaqueValue.size})"
 
     companion object {
         private const val PLAN_TAG_SIZE: Int = EVALUATOR_DIGEST_SIZE
         private const val MAX_TOKEN_SIZE: Int = EVALUATOR_MAX_TOKEN_SIZE
-        private const val MAX_FRAGMENT_SIZE: Int = AkenVbc4Material.PAGE_MATERIAL_SIZE
-        private val STATIC_BINDING_DOMAIN = "vbc4-evaluator-static".toByteArray(Charsets.US_ASCII)
-        private val ROUTE_BINDING_DOMAIN = "vbc4-evaluator-route".toByteArray(Charsets.US_ASCII)
-        private val MASK_DOMAIN = "vbc4-evaluator-mask".toByteArray(Charsets.US_ASCII)
-        private val FRAGMENT_TAG_DOMAIN = "vbc4-evaluator-fragment".toByteArray(Charsets.US_ASCII)
-        private val DIALECT_DOMAIN = "vbc4-evaluator-dialect".toByteArray(Charsets.US_ASCII)
-        private val PLAN_TAG_DOMAIN = "vbc4-evaluator-seal".toByteArray(Charsets.US_ASCII)
+        private const val MAX_FRAGMENT_SIZE: Int = EVALUATOR_MAX_TOKEN_SIZE
+        private val EVALUATOR_DOMAIN_SALT = byteArrayOf(
+            0xA1.toByte(), 0xE1.toByte(), 0x09, 0xC3.toByte(),
+            0x77, 0x2B, 0xD4.toByte(), 0x18,
+        )
+        private fun evaluatorDomain(role: Byte): ByteArray = EVALUATOR_DOMAIN_SALT + byteArrayOf(role)
+        private val STATIC_BINDING_DOMAIN = evaluatorDomain(1)
+        private val ROUTE_BINDING_DOMAIN = evaluatorDomain(2)
+        private val MASK_DOMAIN = evaluatorDomain(3)
+        private val FRAGMENT_TAG_DOMAIN = evaluatorDomain(4)
+        private val DIALECT_DOMAIN = evaluatorDomain(5)
+        private val PLAN_TAG_DOMAIN = evaluatorDomain(6)
+        private val MATERIALIZE_DOMAIN = evaluatorDomain(7)
 
         internal fun fromOpaque(opaque: ByteArray): AkenBoundDecryptorPlan {
             require(opaque.isNotEmpty() && opaque.size <= EVALUATOR_MAX_OPAQUE_SIZE) {
@@ -513,11 +468,8 @@ internal class AkenBoundDecryptorPlan private constructor(opaque: ByteArray) {
                     val family = reader.readU8("AKEN evaluator fragment family")
                     val opcode = reader.readU8("AKEN evaluator fragment opcode")
                     val register = reader.readU8("AKEN evaluator fragment register")
-                    require(offset < AkenVbc4Material.PAGE_MATERIAL_SIZE && encodedLength > 0) {
-                        "AKEN evaluator fragment range is invalid"
-                    }
-                    require(offset + encodedLength <= AkenVbc4Material.PAGE_MATERIAL_SIZE) {
-                        "AKEN evaluator fragment exceeds page material"
+                    require(encodedLength in EVALUATOR_MIN_TOKEN_SIZE..EVALUATOR_MAX_TOKEN_SIZE) {
+                        "AKEN evaluator fragment operand length is invalid"
                     }
                     val token = reader.readFramed(MAX_TOKEN_SIZE, "AKEN evaluator fragment token", false)
                     require(token.size >= EVALUATOR_MIN_TOKEN_SIZE) { "AKEN evaluator token is invalid" }
@@ -559,7 +511,7 @@ internal class AkenBoundDecryptorPlan private constructor(opaque: ByteArray) {
                     Arrays.fill(encoded, 0)
                     Arrays.fill(tag, 0)
                 }
-                require(hasFullEvaluatorCoverage(fragments)) { "AKEN evaluator fragment coverage is invalid" }
+                require(hasValidEvaluatorSchedule(fragments)) { "AKEN evaluator schedule is invalid" }
                 val tagOffset = reader.offset
                 planTag = reader.readFixed(PLAN_TAG_SIZE, "AKEN evaluator seal")
                 reader.requireFullyRead("AKEN evaluator descriptor")
@@ -673,6 +625,34 @@ internal class AkenBoundDecryptorPlan private constructor(opaque: ByteArray) {
                 update(dialectByte.toByte())
             }
 
+        internal fun materializePageMaterial(
+            dialectByte: Int,
+            planNonce: ByteArray,
+            staticBinding: ByteArray,
+            dialectCommitment: ByteArray,
+            fragments: List<EvaluatorFragmentRecord>,
+        ): ByteArray {
+            require(hasValidEvaluatorSchedule(fragments)) { "AKEN evaluator schedule is invalid" }
+            return digest(MATERIALIZE_DOMAIN) {
+                update(staticBinding)
+                update(dialectCommitment)
+                update(planNonce)
+                update(dialectByte.toByte())
+                fragments.sortedWith(
+                    compareBy<EvaluatorFragmentRecord> { (it.opcode + dialectByte * 13 + it.register * 7) and 0xFF }
+                        .thenBy { it.offset },
+                ).forEach { fragment ->
+                    updateInt(fragment.offset)
+                    updateInt(fragment.family)
+                    updateInt(fragment.opcode)
+                    updateInt(fragment.register)
+                    updateFramed(fragment.token)
+                    update(fragment.salt)
+                    updateFramed(fragment.encoded)
+                }
+            }
+        }
+
         internal fun fragmentMask(
             staticBinding: ByteArray,
             dialectCommitment: ByteArray,
@@ -772,19 +752,14 @@ internal class AkenBoundDecryptorPlan private constructor(opaque: ByteArray) {
     }
 }
 
-private fun hasFullEvaluatorCoverage(fragments: List<EvaluatorFragmentRecord>): Boolean {
-    if (fragments.isEmpty()) return false
-    val covered = BooleanArray(AkenVbc4Material.PAGE_MATERIAL_SIZE)
+private fun hasValidEvaluatorSchedule(fragments: List<EvaluatorFragmentRecord>): Boolean {
+    if (fragments.size !in EVALUATOR_MIN_FRAGMENT_COUNT..EVALUATOR_MAX_FRAGMENT_COUNT) return false
+    val offsets = hashSetOf<Int>()
     for (fragment in fragments) {
-        if (fragment.offset < 0 || fragment.encoded.isEmpty() ||
-            fragment.offset + fragment.encoded.size > covered.size
-        ) return false
-        for (index in fragment.offset until fragment.offset + fragment.encoded.size) {
-            if (covered[index]) return false
-            covered[index] = true
-        }
+        if (fragment.encoded.size !in EVALUATOR_MIN_TOKEN_SIZE..EVALUATOR_MAX_TOKEN_SIZE) return false
+        if (!offsets.add(fragment.offset)) return false
     }
-    return covered.all { it }
+    return true
 }
 
 internal class EvaluatorFragmentRecord(

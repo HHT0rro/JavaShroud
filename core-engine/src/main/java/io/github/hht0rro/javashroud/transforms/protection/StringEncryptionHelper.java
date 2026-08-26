@@ -41,6 +41,53 @@ public final class StringEncryptionHelper {
         return bindAkenStringCallSite(lookup, invokedName, invokedType, target);
     }
 
+    public static CallSite u0(MethodHandles.Lookup lookup, String invokedName, MethodType invokedType, String packed) {
+        return bindAkenStringToken(lookup, invokedName, invokedType, packed);
+    }
+
+    public static CallSite u1(MethodHandles.Lookup lookup, String invokedName, MethodType invokedType, String packed) {
+        return bindAkenStringToken(lookup, invokedName, invokedType, packed);
+    }
+
+    public static CallSite u2(MethodHandles.Lookup lookup, String invokedName, MethodType invokedType, String packed) {
+        return bindAkenStringToken(lookup, invokedName, invokedType, packed);
+    }
+
+    public static CallSite u3(MethodHandles.Lookup lookup, String invokedName, MethodType invokedType, String packed) {
+        return bindAkenStringToken(lookup, invokedName, invokedType, packed);
+    }
+
+    public static byte[] materializeAkenStringToken(String packed) {
+        if (packed == null || packed.isEmpty()) {
+            throw new SecurityException("AKEN string token is invalid");
+        }
+        final byte[] token;
+        try {
+            token = java.util.Base64.getUrlDecoder().decode(packed);
+        } catch (RuntimeException error) {
+            throw new SecurityException("AKEN string token is invalid", error);
+        }
+        if (token.length < 24 + 4 + 1 || token.length > 24 + 4 + 4096) {
+            java.util.Arrays.fill(token, (byte) 0);
+            throw new SecurityException("AKEN string token is invalid");
+        }
+        return token;
+    }
+
+    private static CallSite bindAkenStringToken(
+        MethodHandles.Lookup lookup,
+        String invokedName,
+        MethodType invokedType,
+        String packed
+    ) {
+        if (lookup == null || invokedName == null || invokedName.isEmpty() ||
+            invokedType == null || !invokedType.equals(MethodType.methodType(byte[].class))) {
+            throw new SecurityException("AKEN string token bootstrap binding is invalid");
+        }
+        byte[] token = materializeAkenStringToken(packed);
+        return new ConstantCallSite(MethodHandles.constant(byte[].class, token));
+    }
+
     private static CallSite bindAkenStringCallSite(
         MethodHandles.Lookup lookup,
         String invokedName,
@@ -82,7 +129,7 @@ public final class StringEncryptionHelper {
             if (!java.lang.reflect.Modifier.isStatic(method.getModifiers()) ||
                 !method.getReturnType().equals(String.class) ||
                 !java.util.Arrays.equals(method.getParameterTypes(), new Class<?>[] {
-                    byte[].class, int.class, byte[].class,
+                    byte[].class,
                 })) {
                 continue;
             }
@@ -93,7 +140,7 @@ public final class StringEncryptionHelper {
     }
 
     private static MethodType akenStringCallSiteType() {
-        return MethodType.methodType(String.class, byte[].class, int.class, byte[].class);
+        return MethodType.methodType(String.class, byte[].class);
     }
 
     /*
@@ -103,6 +150,24 @@ public final class StringEncryptionHelper {
      * it.  Keeping this terminal package-private prevents an unsealed helper
      * class from exposing a stable reflection-friendly whole-page decoder.
      */
+    static String invokeAkenStringTerminal(byte[] token) {
+        if (token == null || token.length < 24 + 4 + 1) {
+            throw new SecurityException("AKEN string page request is invalid");
+        }
+        byte[] encodedHandle = java.util.Arrays.copyOfRange(token, 0, 24);
+        int pageIndex = ((token[24] & 0xFF) << 24)
+            | ((token[25] & 0xFF) << 16)
+            | ((token[26] & 0xFF) << 8)
+            | (token[27] & 0xFF);
+        byte[] callSiteProof = java.util.Arrays.copyOfRange(token, 28, token.length);
+        try {
+            return invokeAkenStringTerminal(encodedHandle, pageIndex, callSiteProof);
+        } finally {
+            java.util.Arrays.fill(encodedHandle, (byte) 0);
+            java.util.Arrays.fill(callSiteProof, (byte) 0);
+        }
+    }
+
     static String invokeAkenStringTerminal(byte[] encodedHandle, int pageIndex, byte[] callSiteProof) {
         requireAkenStringPageRequest(encodedHandle, pageIndex, callSiteProof);
         try {

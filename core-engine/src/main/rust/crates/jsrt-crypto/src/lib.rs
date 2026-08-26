@@ -13,8 +13,8 @@ const AES_BLOCK_SIZE: usize = 16;
 const GCM_NONCE_SIZE: usize = 12;
 const GCM_TAG_SIZE: usize = AES_BLOCK_SIZE;
 const MAX_GCM_BLOCKS: usize = 0xffff_fffe;
-pub const RUNTIME_BINDING_DOMAIN: &[u8] = b"JavaShroud/AKEN-R1/RuntimeBindingDigest/v1";
-pub const AUTHENTICATION_DOMAIN: &[u8] = b"JavaShroud/AKEN-R1/AuthenticatedFrame/v1";
+pub const RUNTIME_BINDING_DOMAIN: &[u8] = b"JavaShroud/AKEN-R2/RuntimeBindingDigest/v2";
+pub const AUTHENTICATION_DOMAIN: &[u8] = b"JavaShroud/AKEN-R2/AuthenticatedFrame/v2";
 
 const K: [u32; 64] = [
     0x428a_2f98,
@@ -1263,7 +1263,7 @@ mod tests {
         );
         assert_eq!(
             hex(first.as_bytes()),
-            "611e402b187c76217b735b5a28eb713929647213ca597fa26bf537c41450fee4"
+            "45a9b7e01030eaeb2a9abd080287f1018a9d7d06ed25faa60f325e390c3976fa"
         );
         assert_ne!(first.as_bytes(), sha256(binding.as_bytes()).as_ref());
         assert_ne!(
@@ -1280,7 +1280,7 @@ mod tests {
         assert!(!constant_time_eq(tag.as_ref(), &[0; DIGEST_SIZE]));
         assert_eq!(
             hex(tag.as_ref()),
-            "37f74cde6f51b07db51c83a73133b68ed0d14454a61b3310576c420be948b34a"
+            "6fedc64a375f42482e5aa492c3808c94dcfa95e3ba7c4a932eab160c7927e69a"
         );
         assert_ne!(tag, authentication_tag(&digest, b"payload2").expect("tag"));
     }

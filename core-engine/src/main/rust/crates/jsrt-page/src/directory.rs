@@ -1,7 +1,7 @@
 use crate::{PageError, PageKind, DIGEST_SIZE, ENCODED_HANDLE_SIZE, LOCATOR_TOKEN_SIZE};
 use jsrt_crypto::{constant_time_eq, Sha256};
 
-pub const DIRECTORY_MAGIC: &[u8; 7] = b"JSR1DIR";
+pub const DIRECTORY_MAGIC: &[u8; 7] = b"JSR2DIR";
 pub const PAGE_KEY_SIZE: usize = 1 + 4 + ENCODED_HANDLE_SIZE + LOCATOR_TOKEN_SIZE;
 pub const MAX_DIRECTORY_ENTRIES: usize = 4096;
 pub const MAX_DIRECTORY_SIZE: usize = 64 * 1024 * 1024;
@@ -10,9 +10,9 @@ pub const MAX_STORED_LENGTH: usize = 16 * 1024 * 1024 + 1024;
 const MAX_TARGET_BYTES: usize = 64;
 const MAX_PROFILE_BYTES: usize = 256;
 
-const RUNTIME_BINDING_DOMAIN: &[u8] = b"JavaShroud/AKEN-R1/ArtifactDirectory/RuntimeBindingDigest";
-const RECORD_BINDING_DOMAIN: &[u8] = b"JavaShroud/AKEN-R1/ArtifactDirectory/RecordBinding";
-const ROOT_BINDING_DOMAIN: &[u8] = b"JavaShroud/AKEN-R1/ArtifactDirectory/RootBinding";
+const RUNTIME_BINDING_DOMAIN: &[u8] = b"JavaShroud/AKEN-R2/ArtifactDirectory/RuntimeBindingDigest";
+const RECORD_BINDING_DOMAIN: &[u8] = b"JavaShroud/AKEN-R2/ArtifactDirectory/RecordBinding";
+const ROOT_BINDING_DOMAIN: &[u8] = b"JavaShroud/AKEN-R2/ArtifactDirectory/RootBinding";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirectoryRuntimeBinding {

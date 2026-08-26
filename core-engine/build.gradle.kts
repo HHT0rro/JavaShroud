@@ -86,11 +86,10 @@ val rustLibraryArtifact = rustReleaseDir.file(rustLibraryFileName)
 val rustNativeResourceOutput = layout.buildDirectory.dir("generated/rust-native-resources")
 
 kotlin {
-    jvmToolchain(21)
     compilerOptions {
         languageVersion.set(KotlinVersion.KOTLIN_2_1)
         apiVersion.set(KotlinVersion.KOTLIN_2_1)
-        jvmTarget.set(JvmTarget.JVM_21)
+        jvmTarget.set(JvmTarget.JVM_17)
         allWarningsAsErrors.set(false)
         suppressWarnings.set(false)
         freeCompilerArgs.addAll(

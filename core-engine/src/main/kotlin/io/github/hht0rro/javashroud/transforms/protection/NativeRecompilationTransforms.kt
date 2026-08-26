@@ -26,7 +26,7 @@ object NativeRecompilationTransforms {
     private const val DEFAULT_NATIVE_COMPILE_PARALLELISM = 2
 
     private const val NATIVE_CACHE_MAGIC = "JSR1-RUST-CACHE1"
-    private const val NATIVE_CACHE_VERSION = 1
+    private const val NATIVE_CACHE_VERSION = 2
     private const val NATIVE_CACHE_HEADER_SIZE = 16 + 4 + 32 + 8 + 32
     private const val MAX_NATIVE_ARTIFACT_BYTES = 256L * 1024L * 1024L
     private const val MAX_RUST_DIAGNOSTIC_BYTES = 8_192
@@ -39,7 +39,13 @@ object NativeRecompilationTransforms {
     private const val RUST_WORKSPACE_DIR = "src/main/rust"
     private const val RUST_FFI_PACKAGE = "jsrt-ffi"
     private const val RUST_FFI_LIBRARY = "jsrt_ffi"
-    private const val RUST_SPECIALIZATION_DOMAIN = "JavaShroud/AKEN-R1/RustSpecialization/v1"
+    private const val RUST_SPECIALIZATION_DOMAIN = "JavaShroud/AKEN-R2/RustSpecialization/v2"
+    private val RUST_RELEASE_EXPORTS = setOf(
+        "JNI_OnLoad",
+        "JNI_OnUnload",
+        "jsrt_r1_open_frame",
+        "jsrt_r1_runtime_binding_digest",
+    )
 
     /** Only the two locked AKEN-R1 Rust runtime targets are accepted. */
     internal val RUST_TARGETS: Map<String, String> = linkedMapOf(
@@ -51,8 +57,14 @@ object NativeRecompilationTransforms {
         val platform: String,
         val libName: String,
         val bytes: ByteArray,
+        val specializationDigest: ByteArray,
         val shellBindingCommitment: ByteArray? = null,
-    )
+    ) {
+        init {
+            require(specializationDigest.size == 32) { "native specialization digest must be 32 bytes" }
+            require(specializationDigest.any { it != 0.toByte() }) { "native specialization digest must not be all-zero" }
+        }
+    }
 
     fun recompile(
         seed: Long,
@@ -217,6 +229,9 @@ object NativeRecompilationTransforms {
         val rustWorkspace = workDir.resolve("rust-workspace")
         try {
             copyRustWorkspace(workspace, rustWorkspace)
+            check(Files.readString(rustWorkspace.resolve("crates/jsrt-ffi/src/lib.rs")).contains("fn JNI_OnLoad")) {
+                "AKEN-R1 isolated Rust workspace is missing JNI_OnLoad source"
+            }
             sourceDigest = digestRustWorkspace(rustWorkspace)
             val toolchainIdentity = rustToolchainIdentity(toolchain)
             tasks = request.routes.map { route ->
@@ -281,7 +296,12 @@ object NativeRecompilationTransforms {
                     if (!cfgEvidenceExports && !result.fromCache) {
                         writeRustArtifactCache(task.cachePath, bytes, task.cacheKey, task.platform, task.outputName)
                     }
-                    results += RecompiledNative(task.platform, task.outputName, bytes)
+                    results += RecompiledNative(
+                        task.platform,
+                        task.outputName,
+                        bytes,
+                        task.specializationDigest.copyOf(),
+                    )
                     report(rustMessage("info", "Built AKEN-R1 Rust JNI runtime for ${task.platform}"))
                 } catch (error: Exception) {
                     failed = true
@@ -290,9 +310,15 @@ object NativeRecompilationTransforms {
                 }
             }
             if (failed || results.size != tasks.size) {
-                results.forEach { it.bytes.fill(0) }
+                results.forEach { result ->
+                    result.bytes.fill(0)
+                    result.specializationDigest.fill(0)
+                }
                 return emptyList()
             }
+            context.publishNativeSpecializationDigests(
+                results.associate { it.platform to it.specializationDigest.copyOf() },
+            )
             return results
         } finally {
             tasks.forEach { task -> task.specializationDigest.fill(0) }
@@ -782,7 +808,9 @@ object NativeRecompilationTransforms {
             toolchain.cargoPath.toString(),
             "zigbuild",
             "--locked",
-            "--workspace",
+            "--package",
+            "jsrt-ffi",
+            "--lib",
             "--release",
             "--target",
             target,
@@ -797,12 +825,24 @@ object NativeRecompilationTransforms {
             put("CARGO_TERM_COLOR", "never")
             put("RUSTC", toolchain.rustcPath.toAbsolutePath().normalize().toString())
             put("CARGO_TARGET_DIR", targetDir.toString())
-            put("RUSTFLAGS", "-C metadata=jsr1_${specializationHex.take(16)}")
+            put("RUSTFLAGS", rustFlagsForCompile(target, specializationHex))
             prependPath(toolchain.extraPathEntries)
             if (cfgEvidenceExports) put("JSRT_R1_CFG_EVIDENCE", "1") else remove("JSRT_R1_CFG_EVIDENCE")
         }
         return runRustProcess(processBuilder, target)
     }
+
+    private fun rustFlagsForCompile(target: String, specializationHex: String): String = buildString {
+        append("-C metadata=jsr1_").append(specializationHex.take(16))
+        if (target == RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET) {
+            RUST_RELEASE_EXPORTS.sorted().forEach { export ->
+                append(" -C link-arg=/EXPORT:").append(export)
+            }
+        }
+    }
+
+    internal fun rustFlagsForTest(target: String, specializationHex: String): String =
+        rustFlagsForCompile(target, specializationHex)
 
     private fun MutableMap<String, String>.prependPath(entries: List<Path>) {
         if (entries.isEmpty()) return
@@ -817,7 +857,7 @@ object NativeRecompilationTransforms {
         require(target in RUST_TARGETS.values) { "AKEN-R1 Rust target is not locked: $target" }
         val subcommand = "zigbuild"
         return listOf(
-            cargoPath.toString(), subcommand, "--locked", "--workspace", "--release",
+            cargoPath.toString(), subcommand, "--locked", "--package", "jsrt-ffi", "--lib", "--release",
             "--target", target, "--target-dir", targetDir.toString(),
         )
     }
@@ -945,7 +985,12 @@ object NativeRecompilationTransforms {
             "Rust artifact resource name is not canonical for $platform: $name"
         }
         when (platform) {
-            RustToolchainProvisioner.RUNTIME_TARGET_WINDOWS -> validatePe64Artifact(bytes)
+            RustToolchainProvisioner.RUNTIME_TARGET_WINDOWS -> {
+                validatePe64Artifact(bytes)
+                require(readPeExportNames(bytes).containsAll(RUST_RELEASE_EXPORTS)) {
+                    "Rust Windows artifact export surface is missing the current AKEN-R1 JNI ABI"
+                }
+            }
             RustToolchainProvisioner.RUNTIME_TARGET_LINUX -> validateElf64Artifact(bytes)
             else -> error("unsupported AKEN-R1 Rust artifact platform: $platform")
         }
@@ -983,6 +1028,59 @@ object NativeRecompilationTransforms {
             val rawOffset = readU32Le(bytes, section + 20).toLong()
             if (rawSize != 0L) requireRange(bytes, rawOffset, rawSize, "PE section data")
         }
+    }
+
+    private fun readPeExportNames(bytes: ByteArray): Set<String> {
+        val peOffset = readU32Le(bytes, 0x3C)
+        val sectionCount = readU16Le(bytes, peOffset + 6)
+        val optionalSize = readU16Le(bytes, peOffset + 20)
+        val optionalOffset = peOffset.checkedAdd(24L)
+        val exportRva = readU32Le(bytes, optionalOffset + 112)
+        require(exportRva != 0L) { "Rust Windows artifact has no PE export directory" }
+        val sectionTable = optionalOffset.checkedAdd(optionalSize.toLong())
+        val sections = (0 until sectionCount).map { index ->
+            val section = sectionTable + index.toLong() * 40L
+            val virtualSize = readU32Le(bytes, section + 8)
+            val virtualAddress = readU32Le(bytes, section + 12)
+            val rawSize = readU32Le(bytes, section + 16)
+            val rawOffset = readU32Le(bytes, section + 20)
+            PeSection(virtualAddress, maxOf(virtualSize, rawSize), rawOffset)
+        }
+        fun offsetForRva(rva: Long): Long {
+            val section = sections.firstOrNull { candidate ->
+                rva >= candidate.virtualAddress && rva - candidate.virtualAddress < candidate.span
+            } ?: error("Rust Windows artifact PE export RVA is unmapped")
+            val offset = section.rawOffset.checkedAdd(rva - section.virtualAddress)
+            requireRange(bytes, offset, 1, "PE export RVA")
+            return offset
+        }
+        val exportOffset = offsetForRva(exportRva)
+        val nameCount = readU32Le(bytes, exportOffset + 24)
+        require(nameCount in 1..65_536) { "Rust Windows artifact PE export count is invalid" }
+        val nameTableOffset = offsetForRva(readU32Le(bytes, exportOffset + 32))
+        requireRange(bytes, nameTableOffset, nameCount * 4L, "PE export name table")
+        return (0 until nameCount.toInt()).mapTo(linkedSetOf()) { index ->
+            val nameRva = readU32Le(bytes, nameTableOffset + index.toLong() * 4L)
+            readAsciiCString(bytes, offsetForRva(nameRva), "PE export name")
+        }
+    }
+
+    private data class PeSection(
+        val virtualAddress: Long,
+        val span: Long,
+        val rawOffset: Long,
+    )
+
+    private fun readAsciiCString(bytes: ByteArray, offset: Long, label: String): String {
+        requireRange(bytes, offset, 1, label)
+        val start = offset.toInt()
+        var end = start
+        while (end < bytes.size && end - start <= 512 && bytes[end] != 0.toByte()) {
+            require(bytes[end].toInt() and 0xFF in 0x20..0x7E) { "$label is not ASCII" }
+            end++
+        }
+        require(end < bytes.size && bytes[end] == 0.toByte() && end > start) { "$label is unterminated or empty" }
+        return String(bytes, start, end - start, StandardCharsets.US_ASCII)
     }
 
     private fun validateElf64Artifact(bytes: ByteArray) {

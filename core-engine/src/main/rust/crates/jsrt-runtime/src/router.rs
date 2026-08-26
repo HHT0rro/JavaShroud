@@ -37,56 +37,82 @@ impl Drop for AttachedPage {
 /// each open still materializes a transient page schedule and wipes it through
 /// `PageLease` after authenticated decryption.
 struct EvaluatorScheduleTemplate {
+    dialect_byte: u8,
+    plan_nonce: Vec<u8>,
+    static_binding: Vec<u8>,
+    dialect_commitment: Vec<u8>,
     fragments: Vec<EvaluatorScheduleFragment>,
 }
 
 struct EvaluatorScheduleFragment {
     offset: usize,
-    length: usize,
     family: u8,
     opcode: u8,
     register: u8,
+    token: Vec<u8>,
+    salt: Vec<u8>,
     encoded: Vec<u8>,
-    mask: Vec<u8>,
 }
 
 impl Drop for EvaluatorScheduleTemplate {
     fn drop(&mut self) {
+        self.plan_nonce.fill(0);
+        self.static_binding.fill(0);
+        self.dialect_commitment.fill(0);
         self.fragments.clear();
     }
 }
 
 impl Drop for EvaluatorScheduleFragment {
     fn drop(&mut self) {
+        self.token.fill(0);
+        self.salt.fill(0);
         self.encoded.fill(0);
-        self.mask.fill(0);
     }
 }
 
 impl EvaluatorScheduleTemplate {
     fn materialize(&self) -> Result<PageCipherSchedule, RouterError> {
-        let mut material = TransientMaterial([0u8; 32]);
-        for fragment in &self.fragments {
-            if fragment.offset + fragment.length > material.0.len()
-                || fragment.encoded.len() != fragment.length
-                || fragment.mask.len() != fragment.length
-            {
-                return Err(RouterError::AuthenticationFailed);
-            }
-            for index in 0..fragment.length {
-                let tweak = fragment
-                    .family
-                    .wrapping_mul(17)
-                    .wrapping_add(fragment.opcode)
-                    .wrapping_add(fragment.register)
-                    .wrapping_add(index as u8);
-                material.0[fragment.offset + index] =
-                    fragment.encoded[index] ^ fragment.mask[index] ^ tweak;
-            }
+        let mut hasher = Sha256::new();
+        hasher.update(&eval_domain(7));
+        hasher.update(&self.static_binding);
+        hasher.update(&self.dialect_commitment);
+        hasher.update(&self.plan_nonce);
+        hasher.update(&[self.dialect_byte]);
+        let mut order: Vec<usize> = (0..self.fragments.len()).collect();
+        order.sort_by_key(|&index| {
+            let fragment = &self.fragments[index];
+            (
+                (fragment.opcode as u32)
+                    .wrapping_add((self.dialect_byte as u32).wrapping_mul(13))
+                    .wrapping_add((fragment.register as u32).wrapping_mul(7))
+                    & 0xFF,
+                fragment.offset,
+            )
+        });
+        for index in order {
+            let fragment = &self.fragments[index];
+            update_i32(&mut hasher, fragment.offset as u32);
+            update_i32(&mut hasher, fragment.family as u32);
+            update_i32(&mut hasher, fragment.opcode as u32);
+            update_i32(&mut hasher, fragment.register as u32);
+            update_frame(&mut hasher, &fragment.token);
+            hasher.update(&fragment.salt);
+            update_frame(&mut hasher, &fragment.encoded);
         }
+        let digest = hasher.finalize();
+        let mut material = TransientMaterial([0u8; 32]);
+        material.0.copy_from_slice(digest.as_ref());
         PageCipherSchedule::from_material(&material.0)
             .map_err(|_| RouterError::AuthenticationFailed)
     }
+}
+
+fn eval_domain(role: u8) -> [u8; 9] {
+    let mut domain = [0u8; 9];
+    domain[..8].copy_from_slice(&[0xA1, 0xE1, 0x09, 0xC3, 0x77, 0x2B, 0xD4, 0x18]);
+    domain[8] = role;
+    domain
 }
 
 #[derive(Default)]
@@ -485,8 +511,7 @@ impl Drop for TypedPageRouter {
 fn compile_descriptor_schedule(
     descriptor: &jsrt_page::PageDescriptor,
 ) -> Result<EvaluatorScheduleTemplate, RouterError> {
-    const MARKER: &[u8; 4] = b"VBC4";
-    const MATERIAL_SIZE: usize = 32;
+    const MARKER: &[u8; 4] = b"AKE1";
     const NONCE_SIZE: usize = 12;
     const PLAN_NONCE_SIZE: usize = 16;
     const DIGEST_SIZE: usize = 32;
@@ -504,7 +529,7 @@ fn compile_descriptor_schedule(
         return Err(RouterError::AuthenticationFailed);
     }
     let supplied_plan_tag = &opaque[body_end..];
-    let expected_plan_tag = sha256_with_domain(b"vbc4-evaluator-seal", &opaque[..body_end]);
+    let expected_plan_tag = sha256_with_domain(&eval_domain(6), &opaque[..body_end]);
     if !constant_time_eq(&expected_plan_tag, supplied_plan_tag) {
         return Err(RouterError::AuthenticationFailed);
     }
@@ -534,7 +559,7 @@ fn compile_descriptor_schedule(
 
     let expected_dialect = {
         let mut hasher = Sha256::new();
-        hasher.update(b"vbc4-evaluator-dialect");
+        hasher.update(&eval_domain(5));
         hasher.update(&static_binding);
         hasher.update(plan_nonce);
         hasher.update(&[dialect_byte]);
@@ -544,20 +569,18 @@ fn compile_descriptor_schedule(
         return Err(RouterError::AuthenticationFailed);
     }
 
-    let mut covered = [false; MATERIAL_SIZE];
     let mut fragments = Vec::with_capacity(fragment_count);
+    let mut seen_offsets = [false; 256];
     for _ in 0..fragment_count {
         let offset = read(&mut cursor, 1)?[0] as usize;
         let length = read(&mut cursor, 1)?[0] as usize;
         let family = read(&mut cursor, 1)?[0];
         let opcode = read(&mut cursor, 1)?[0];
         let register = read(&mut cursor, 1)?[0];
-        if length == 0 || offset >= MATERIAL_SIZE || offset + length > MATERIAL_SIZE {
+        if !(17..=48).contains(&length) || seen_offsets[offset] {
             return Err(RouterError::AuthenticationFailed);
         }
-        if (offset..offset + length).any(|index| covered[index]) {
-            return Err(RouterError::AuthenticationFailed);
-        }
+        seen_offsets[offset] = true;
         let token_len = read_u32(opaque, &mut cursor, body_end)? as usize;
         if !(17..=48).contains(&token_len) {
             return Err(RouterError::AuthenticationFailed);
@@ -572,7 +595,7 @@ fn compile_descriptor_schedule(
         let supplied_tag = read(&mut cursor, TAG_SIZE)?;
 
         let mut tag_hasher = Sha256::new();
-        tag_hasher.update(b"vbc4-evaluator-fragment");
+        tag_hasher.update(&eval_domain(4));
         tag_hasher.update(&static_binding);
         tag_hasher.update(&dialect_commitment);
         update_i32(&mut tag_hasher, offset as u32);
@@ -587,48 +610,26 @@ fn compile_descriptor_schedule(
         if !constant_time_eq(&expected_tag.as_ref()[..TAG_SIZE], supplied_tag) {
             return Err(RouterError::AuthenticationFailed);
         }
-
-        let mut produced = 0usize;
-        let mut counter = 0u32;
-        let mut mask = vec![0u8; length];
-        while produced < length {
-            let mut mask_hasher = Sha256::new();
-            mask_hasher.update(b"vbc4-evaluator-mask");
-            mask_hasher.update(&static_binding);
-            mask_hasher.update(&dialect_commitment);
-            update_i32(&mut mask_hasher, offset as u32);
-            update_i32(&mut mask_hasher, length as u32);
-            update_i32(&mut mask_hasher, family as u32);
-            update_i32(&mut mask_hasher, opcode as u32);
-            update_i32(&mut mask_hasher, register as u32);
-            update_frame(&mut mask_hasher, token);
-            update_frame(&mut mask_hasher, salt);
-            update_i32(&mut mask_hasher, counter);
-            let block = mask_hasher.finalize();
-            let take = (length - produced).min(block.as_ref().len());
-            for index in 0..take {
-                mask[produced + index] = block.as_ref()[index];
-            }
-            produced += take;
-            counter = counter.wrapping_add(1);
-        }
-        for index in offset..offset + length {
-            covered[index] = true;
-        }
         fragments.push(EvaluatorScheduleFragment {
             offset,
-            length,
             family,
             opcode,
             register,
+            token: token.to_vec(),
+            salt: salt.to_vec(),
             encoded: encoded.to_vec(),
-            mask,
         });
     }
-    if cursor != body_end || !covered.iter().all(|value| *value) {
+    if cursor != body_end {
         return Err(RouterError::AuthenticationFailed);
     }
-    Ok(EvaluatorScheduleTemplate { fragments })
+    Ok(EvaluatorScheduleTemplate {
+        dialect_byte,
+        plan_nonce: plan_nonce.to_vec(),
+        static_binding,
+        dialect_commitment,
+        fragments,
+    })
 }
 
 struct TransientMaterial([u8; 32]);
@@ -738,8 +739,7 @@ mod tests {
             &layout_variant,
         )
         .expect("proof");
-        let page_material = [0x40u8; 32];
-        let evaluator_opaque = current_evaluator_opaque(&page_material);
+        let (evaluator_opaque, page_material) = current_evaluator_opaque();
         let evaluator = EvaluatorPlan::new(&evaluator_opaque, &fingerprint).expect("evaluator");
         let mut evaluator_opaque = evaluator_opaque;
         evaluator_opaque.fill(0);
@@ -762,21 +762,21 @@ mod tests {
             &[0x62; 8],
         )
         .expect("encode");
-        (envelope, encoded, [0x40; 32], encoded_handle, proof_bytes)
+        (envelope, encoded, page_material, encoded_handle, proof_bytes)
     }
 
-    fn current_evaluator_opaque(material: &[u8; 32]) -> Vec<u8> {
+    fn current_evaluator_opaque() -> (Vec<u8>, [u8; 32]) {
         let dialect = 0x42u8;
         let plan_nonce = [0x51u8; 16];
         let static_binding = [0x32u8; 32];
         let mut dialect_hasher = Sha256::new();
-        dialect_hasher.update(b"vbc4-evaluator-dialect");
+        dialect_hasher.update(&eval_domain(5));
         dialect_hasher.update(&static_binding);
         dialect_hasher.update(&plan_nonce);
         dialect_hasher.update(&[dialect]);
         let dialect_commitment = dialect_hasher.finalize().into_bytes();
         let mut body = Vec::new();
-        body.extend_from_slice(b"VBC4");
+        body.extend_from_slice(b"AKE1");
         body.push(dialect);
         body.push(4);
         body.extend_from_slice(&[0x41; 12]);
@@ -784,39 +784,18 @@ mod tests {
         body.extend_from_slice(&static_binding);
         body.extend_from_slice(&[0x33; 32]);
         body.extend_from_slice(&dialect_commitment);
+        let mut schedule = Vec::new();
         for ordinal in 0..4usize {
-            let offset = ordinal * 8;
-            let length = 8usize;
+            let offset = ordinal;
             let family = (ordinal + 1) as u8;
             let opcode = (0x80 + ordinal) as u8;
             let register = (3 + ordinal) as u8;
             let token = vec![0x61u8.wrapping_add(ordinal as u8); 17];
             let salt = vec![0x71u8.wrapping_add(ordinal as u8); 16];
-            let mut mask_hasher = Sha256::new();
-            mask_hasher.update(b"vbc4-evaluator-mask");
-            mask_hasher.update(&static_binding);
-            mask_hasher.update(&dialect_commitment);
-            update_i32(&mut mask_hasher, offset as u32);
-            update_i32(&mut mask_hasher, length as u32);
-            update_i32(&mut mask_hasher, family as u32);
-            update_i32(&mut mask_hasher, opcode as u32);
-            update_i32(&mut mask_hasher, register as u32);
-            update_frame(&mut mask_hasher, &token);
-            update_frame(&mut mask_hasher, &salt);
-            update_i32(&mut mask_hasher, 0);
-            let mask = mask_hasher.finalize();
-            let encoded: Vec<u8> = (0..length)
-                .map(|index| {
-                    let tweak = family
-                        .wrapping_mul(17)
-                        .wrapping_add(opcode)
-                        .wrapping_add(register)
-                        .wrapping_add(index as u8);
-                    material[offset + index] ^ mask.as_ref()[index] ^ tweak
-                })
-                .collect();
+            let encoded = vec![0x81u8.wrapping_add(ordinal as u8); 17];
+            let length = encoded.len();
             let mut tag_hasher = Sha256::new();
-            tag_hasher.update(b"vbc4-evaluator-fragment");
+            tag_hasher.update(&eval_domain(4));
             tag_hasher.update(&static_binding);
             tag_hasher.update(&dialect_commitment);
             update_i32(&mut tag_hasher, offset as u32);
@@ -835,10 +814,41 @@ mod tests {
             update_u32(&mut body, encoded.len() as u32);
             body.extend_from_slice(&encoded);
             body.extend_from_slice(&tag.as_ref()[..16]);
+            schedule.push((offset, family, opcode, register, token, salt, encoded));
         }
-        let plan_tag = sha256_with_domain(b"vbc4-evaluator-seal", &body);
+        let plan_tag = sha256_with_domain(&eval_domain(6), &body);
         body.extend_from_slice(&plan_tag);
-        body
+        let mut hasher = Sha256::new();
+        hasher.update(&eval_domain(7));
+        hasher.update(&static_binding);
+        hasher.update(&dialect_commitment);
+        hasher.update(&plan_nonce);
+        hasher.update(&[dialect]);
+        let mut order: Vec<usize> = (0..schedule.len()).collect();
+        order.sort_by_key(|&index| {
+            let item = &schedule[index];
+            (
+                (item.2 as u32)
+                    .wrapping_add((dialect as u32).wrapping_mul(13))
+                    .wrapping_add((item.3 as u32).wrapping_mul(7))
+                    & 0xFF,
+                item.0,
+            )
+        });
+        for index in order {
+            let item = &schedule[index];
+            update_i32(&mut hasher, item.0 as u32);
+            update_i32(&mut hasher, item.1 as u32);
+            update_i32(&mut hasher, item.2 as u32);
+            update_i32(&mut hasher, item.3 as u32);
+            update_frame(&mut hasher, &item.4);
+            hasher.update(&item.5);
+            update_frame(&mut hasher, &item.6);
+        }
+        let digest = hasher.finalize();
+        let mut material = [0u8; 32];
+        material.copy_from_slice(digest.as_ref());
+        (body, material)
     }
 
     fn update_u32(output: &mut Vec<u8>, value: u32) {

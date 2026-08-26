@@ -15,7 +15,7 @@ import org.objectweb.asm.tree.InsnNode
 private const val STRING_ENCRYPTION_HELPER_OWNER =
     "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper"
 private const val AKEN_STRING_PAGE_DECODE_NAME = "invokeAkenStringTerminal"
-private const val AKEN_STRING_PAGE_DECODE_DESC = "([BI[B)Ljava/lang/String;"
+private const val AKEN_STRING_PAGE_DECODE_DESC = "([B)Ljava/lang/String;"
 
 /**
  * String array pool transform.
