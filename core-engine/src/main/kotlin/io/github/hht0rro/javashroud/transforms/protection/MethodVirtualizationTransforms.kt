@@ -143,6 +143,23 @@ private fun unsafeSyntheticHandlerKeys(classBytes: ByteArray): Set<String> {
         emptySet()
     }
 }
+
+private fun jvmBoundaryBootstrapKeys(classNode: ClassNode): Set<String> = classNode.methods
+    .asSequence()
+    .flatMap { method -> method.instructions?.toArray()?.asSequence() ?: emptySequence() }
+    .mapNotNull { instruction ->
+        val indy = instruction as? org.objectweb.asm.tree.InvokeDynamicInsnNode ?: return@mapNotNull null
+        val bootstrap = indy.bsm
+        if (bootstrap.owner != classNode.name || !bootstrap.name.startsWith("a_bsm")) return@mapNotNull null
+        val targetsJvmBoundary = indy.bsmArgs.filterIsInstance<Handle>().any { target ->
+            isThreadSleepCall(target.owner, target.name, target.desc) ||
+                isConcurrencyBoundaryMethod(target.owner, target.name, target.desc) ||
+                isClassLoaderOrResourceBoundaryMethod(target.owner, target.name, target.desc)
+        }
+        (bootstrap.name + bootstrap.desc).takeIf { targetsJvmBoundary }
+    }
+    .toSet()
+
 private fun rejectUnsupportedVbc4Params(params: Map<String, Any>) {
     val unsupported = params.keys.filter { it !in VBC4_ALLOWED_PARAMS }
     if (unsupported.isNotEmpty()) {
@@ -286,6 +303,7 @@ fun applyMethodVirtualization(
         val cw = computeFramesWriter(cr)
         val className = classArtifact.summary.internalName
         val timingSensitiveSyntheticHandlers = unsafeSyntheticHandlerKeys(classArtifact.bytes)
+        val jvmBoundaryBootstrapKeys = jvmBoundaryBootstrapKeys(classNode)
         val existingMethodKeys = classArtifact.summary.methodSummaries
             .map { it.name + it.descriptor }
             .toMutableSet()
@@ -347,6 +365,10 @@ fun applyMethodVirtualization(
                             // Replay original body to the ClassWriter's MethodVisitor so the
                             // method retains its Code attribute. Without this, skipped methods
                             // produce ClassFormatError: Absent Code attribute.
+                            bodyCapture.replayTo(superMv)
+                            return
+                        }
+                        if (name + descriptor in jvmBoundaryBootstrapKeys) {
                             bodyCapture.replayTo(superMv)
                             return
                         }
@@ -2435,7 +2457,7 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
     }
 
     private fun criticalForBroadVirtualization(access: Int, name: String, descriptor: String): Boolean {
-        if (skipForBroadVirtualization(access, name, descriptor) || !nativeVmCompatible) return false
+        if (skipForBroadVirtualization(access, name, descriptor) || hasThreadSleepCall || !nativeVmCompatible) return false
         val isNonOverridable = access and (Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC or Opcodes.ACC_FINAL) != 0
         if (!isNonOverridable) return false
         val hasCriticalSignal = hasMethodCall || hasFieldAccess || hasTypeOperation || hasExceptionHandler || hasComplexBranch || hasInvokeDynamic

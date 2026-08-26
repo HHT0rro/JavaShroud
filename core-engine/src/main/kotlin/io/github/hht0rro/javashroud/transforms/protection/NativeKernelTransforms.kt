@@ -1,6 +1,7 @@
 package io.github.hht0rro.javashroud.transforms.protection
 
 import io.github.hht0rro.javashroud.analysis.eligibleClassNamesForAction
+import io.github.hht0rro.javashroud.bytecode.computeFramesWriter
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.transforms.TransformResult
@@ -183,7 +184,7 @@ fun applyJniMicrokernelLoader(
         val attachesNativeChunk = classNode.name == nativeChunkBinding?.ownerInternalName
 
         val cr = ClassReader(classArtifact.bytes)
-        val cw = ClassWriter(cr, ClassWriter.COMPUTE_FRAMES)
+        val cw = computeFramesWriter(cr)
         var classModified = false
         var clinitSeen = false
         var isInterfaceClass = false

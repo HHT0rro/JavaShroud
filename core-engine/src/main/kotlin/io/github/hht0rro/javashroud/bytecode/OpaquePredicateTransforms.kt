@@ -134,8 +134,13 @@ private class OpaquePredicateMethodVisitor(
                 mv.visitJumpInsn(Opcodes.IFNE, skipLabel)
             }
             "modular-arithmetic" -> {
-                mv.visitInsn(Opcodes.ICONST_4)
-                mv.visitInsn(Opcodes.ICONST_0)
+                val even = 2 + random.nextInt(4) * 2
+                if (even in 0..5) {
+                    mv.visitInsn(Opcodes.ICONST_0 + even)
+                } else {
+                    mv.visitIntInsn(Opcodes.BIPUSH, even)
+                }
+                mv.visitInsn(Opcodes.ICONST_1)
                 mv.visitInsn(Opcodes.IAND)
                 mv.visitJumpInsn(Opcodes.IFEQ, skipLabel)
             }

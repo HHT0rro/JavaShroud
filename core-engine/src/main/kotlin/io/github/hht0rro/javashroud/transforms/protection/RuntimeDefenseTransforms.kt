@@ -14,12 +14,7 @@ import org.objectweb.asm.tree.InvokeDynamicInsnNode
 import org.objectweb.asm.tree.LdcInsnNode
 import org.objectweb.asm.tree.MethodInsnNode
 import io.github.hht0rro.javashroud.transforms.protection.hardening.IndyTargetTokenEnvelope
-import io.github.hht0rro.javashroud.transforms.protection.hardening.ProtectionFormat
-import java.security.MessageDigest
 import java.security.SecureRandom
-import java.util.Arrays
-import javax.crypto.Mac
-import javax.crypto.spec.SecretKeySpec
 
 // --- Phase 3: Runtime Defense Transforms ---
 
@@ -37,14 +32,27 @@ fun applyCallsiteRotationProtection(
     val matchedClassNames = eligibleClassNamesForAction(artifact.classArtifacts, ruleMatches, "callsite-rotation-protection")
     if (matchedClassNames.isEmpty()) return unchangedTransformResult(artifact)
 
-    val rotationStrategy = (params["rotationStrategy"] as? String) ?: "epoch"
-    val supportedRotationStrategies = setOf("epoch", "counter", "thread-local", "random")
-    require(rotationStrategy in supportedRotationStrategies) {
-        "callsite-rotation-protection rotationStrategy '$rotationStrategy' is not supported; supported values: ${supportedRotationStrategies.joinToString("", "")}"
+    val rotationStrategy = (params["rotationStrategy"] as? String) ?: "mixed"
+    val canonicalByAlias = mapOf(
+        "mixed" to "mixed",
+        "mutable" to "mutable",
+        "guarded" to "guarded",
+        "table" to "table",
+        "thread-slot" to "thread-slot",
+        "oneshot" to "oneshot",
+        "epoch" to "mutable",
+        "counter" to "table",
+        "thread-local" to "thread-slot",
+        "random" to "guarded",
+    )
+    require(rotationStrategy in canonicalByAlias) {
+        "callsite-rotation-protection rotationStrategy '$rotationStrategy' is not supported; supported values: ${canonicalByAlias.keys.joinToString(", ")}"
     }
-
+    val resolvedStrategy = canonicalByAlias.getValue(rotationStrategy)
     val seed = (params["seed"] as? Int)?.toLong() ?: (params["seed"] as? Long)
     val random = seed?.let { SecureRandom(it.toString().toByteArray()) } ?: SecureRandom()
+    val mixedPool = mutableListOf("mutable", "guarded", "table", "thread-slot", "oneshot")
+    mixedPool.shuffle(java.util.Random(seed ?: random.nextLong()))
 
     var classCount = 0
     var callCount = 0
@@ -66,6 +74,7 @@ fun applyCallsiteRotationProtection(
                 if (call.owner.startsWith("[")) continue
                 if (isReflectionSurfaceVirtualCall(call.owner, call.name)) continue
                 if (isClassLoadingBoundaryVirtualCall(call.owner, call.name)) continue
+                if (isConcurrencyBoundaryVirtualCall(call.owner, call.name)) continue
                 if (random.nextInt(100) >= 30) continue
                 val bsm = Handle(
                     Opcodes.H_INVOKESTATIC,
@@ -74,22 +83,31 @@ fun applyCallsiteRotationProtection(
                     "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/invoke/CallSite;",
                     false,
                 )
+                val indyName = "r" + Integer.toHexString(callCount xor 0x5f3759df)
                 val indyDescriptor = "(L${call.owner};" + call.desc.substring(1)
                 val token = callsiteTargetToken(
-                    owner = call.owner,
-                    name = call.name,
-                    descriptor = call.desc,
+                    callerOwner = classNode.name,
+                    indyName = indyName,
+                    indyMethodType = indyDescriptor,
+                    targetOwner = call.owner,
+                    targetName = call.name,
+                    targetDescriptor = call.desc,
                     siteIndex = callCount,
                     random = random,
                 )
+                val siteStrategy = if (resolvedStrategy == "mixed") {
+                    mixedPool[callCount % mixedPool.size]
+                } else {
+                    resolvedStrategy
+                }
                 instructions.set(
                     call,
                     InvokeDynamicInsnNode(
-                        "r" + Integer.toHexString(callCount xor 0x5f3759df),
+                        indyName,
                         indyDescriptor,
                         bsm,
                         token,
-                        rotationStrategy,
+                        siteStrategy,
                     ),
                 )
                 classModified = true
@@ -115,41 +133,33 @@ fun applyCallsiteRotationProtection(
 }
 
 private fun callsiteTargetToken(
-    owner: String,
-    name: String,
-    descriptor: String,
+    callerOwner: String,
+    indyName: String,
+    indyMethodType: String,
+    targetOwner: String,
+    targetName: String,
+    targetDescriptor: String,
     siteIndex: Int,
     random: SecureRandom,
 ): String {
-    val key = ByteArray(IndyTargetTokenEnvelope.KEY_SIZE)
-    val material = currentVbc4BuildContextOrNull()?.copyMasterKey()
-    if (material != null) {
-        try {
-            MessageDigest.getInstance("SHA-256").digest(material + "indy-token-key-r1".toByteArray()).copyInto(key, endIndex = key.size)
-        } finally {
-            material.fill(0)
-        }
-    } else {
-        random.nextBytes(key)
-    }
     val zeros = ByteArray(32)
     val binding = IndyTargetTokenEnvelope.Binding(
         artifactDigest = currentVbc4BuildContextOrNull()?.jarLayoutDigest?.copyOf() ?: zeros,
-        classIdentityDigest = MessageDigest.getInstance("SHA-256").digest(owner.toByteArray()),
-        descriptorDigest = MessageDigest.getInstance("SHA-256").digest(descriptor.toByteArray()),
-        callSiteIdentity = MessageDigest.getInstance("SHA-256").digest((owner + "#" + name + "#" + siteIndex).toByteArray()),
-        routeId = MessageDigest.getInstance("SHA-256").digest(("callsite-" + siteIndex).toByteArray()),
+        callerOwner = callerOwner,
+        indyName = indyName,
+        indyMethodType = indyMethodType,
+        siteIndex = siteIndex,
+        protocolVersion = 3,
     )
     return IndyTargetTokenEnvelope.seal(
         target = IndyTargetTokenEnvelope.Target(
-            owner = owner,
-            name = name,
-            descriptor = descriptor,
+            owner = targetOwner,
+            name = targetName,
+            descriptor = targetDescriptor,
             tag = Opcodes.H_INVOKEVIRTUAL,
             isInterface = false,
         ),
         binding = binding,
-        key = key,
         random = random,
     )
 }
@@ -170,13 +180,22 @@ private val reflectionSurfaceVirtualMethodNames = setOf(
 )
 
 private fun isReflectionSurfaceVirtualCall(owner: String, name: String): Boolean =
-    owner == "java/lang/Class" && name in reflectionSurfaceVirtualMethodNames
+    (owner == "java/lang/Class" && name in reflectionSurfaceVirtualMethodNames) ||
+        (owner == "java/lang/reflect/Method" && name == "invoke") ||
+        (owner == "java/lang/reflect/Constructor" && name == "newInstance") ||
+        // Class identity is a JVM linkage boundary used by lambda construction;
+        // rotating it adds startup latency without changing the protected target.
+        (owner == "java/lang/Object" && name == "getClass")
 
 private fun isClassLoadingBoundaryVirtualCall(owner: String, name: String): Boolean {
     if (owner == "java/lang/Class" && name in classResourceAndLoaderMethodNames) return true
     if (owner == "java/lang/ClassLoader" && name in classLoaderBoundaryMethodNames) return true
     return owner.endsWith("ClassLoader") && name in classLoaderBoundaryMethodNames
 }
+
+private fun isConcurrencyBoundaryVirtualCall(owner: String, name: String): Boolean =
+    owner.startsWith("java/util/concurrent/") ||
+        (owner == "java/lang/Thread" && name in setOf("start", "join", "interrupt"))
 
 private val classResourceAndLoaderMethodNames = setOf(
     "getClassLoader",

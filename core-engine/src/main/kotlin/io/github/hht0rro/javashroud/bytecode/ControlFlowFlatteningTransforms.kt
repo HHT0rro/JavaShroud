@@ -93,6 +93,8 @@ fun flattenControlFlow(classBytes: ByteArray, config: ControlFlowConfig = Contro
                     add(VarInsnNode(Opcodes.ILOAD, dispatchVar))
                     add(FieldInsnNode(Opcodes.PUTSTATIC, classNode.name, "__js_dispatch_state", "I"))
                 }
+                add(VarInsnNode(Opcodes.ILOAD, dispatchVar))
+                add(JumpInsnNode(Opcodes.IFNE, target))
                 add(JumpInsnNode(Opcodes.GOTO, target))
             }
             insns.insertBefore(gotoInsn, guardBlock)

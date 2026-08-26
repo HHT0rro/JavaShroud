@@ -19,9 +19,20 @@ internal fun runtimeDefenseCapabilityBindings(): List<CapabilityBinding> = listO
             ParamSchema(
                 key = "rotationStrategy",
                 type = "enum",
-                defaultValue = JsonNodeFactory.instance.textNode("epoch"),
-                options = listOf("epoch", "counter", "thread-local", "random"),
-                description = "Rotation strategy.",
+                defaultValue = JsonNodeFactory.instance.textNode("mixed"),
+                options = listOf(
+                    "mixed",
+                    "mutable",
+                    "guarded",
+                    "table",
+                    "thread-slot",
+                    "oneshot",
+                    "epoch",
+                    "counter",
+                    "thread-local",
+                    "random",
+                ),
+                description = "Per-site dispatch strategy. mixed selects a shuffled pool per artifact.",
             ),
             ParamSchema(
                 key = "seed",

@@ -47,6 +47,7 @@ fun indirectMethodCalls(classBytes: ByteArray): ByteArray {
                 if (insn.name == "<clinit>" || insn.name == "<init>") continue
                 if (insn.owner == classNode.name) continue
                 if (insn.owner == "java/lang/invoke/LambdaMetafactory") continue
+                if (isJvmTimingBoundaryCall(insn)) continue
                 val target = CallTarget(insn.owner, insn.name, insn.desc, insn.itf)
                 targets.add(target)
                 callSites.add(Triple(method, insn, target))
@@ -121,6 +122,10 @@ fun indirectMethodCalls(classBytes: ByteArray): ByteArray {
     classNode.accept(writer)
     return writer.toByteArray()
 }
+
+private fun isJvmTimingBoundaryCall(call: MethodInsnNode): Boolean =
+    call.owner == "java/lang/Thread" && call.name == "sleep" &&
+        call.desc in setOf("(J)V", "(JI)V")
 
 private fun isClassLoadingBoundarySensitive(classNode: ClassNode): Boolean {
     if (classNode.superName == "java/lang/ClassLoader" || classNode.superName?.endsWith("ClassLoader") == true) return true

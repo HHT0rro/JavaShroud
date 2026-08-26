@@ -138,9 +138,9 @@ internal fun obfuscationCapabilityBindings(): List<CapabilityBinding> = listOf(
                 key = "dispatchMode",
                 type = "enum",
                 defaultValue = JsonNodeFactory.instance.textNode("if-chain"),
-                options = listOf("lookupswitch", "if-chain", "tableswitch-hybrid"),
-                description = "Dispatch mechanism for control flow restructuring: lookupswitch (table-driven), " +
-                    "if-chain (conditional branch chains), tableswitch-hybrid (combined approach).",
+                options = listOf("mixed", "lookupswitch", "if-chain", "tableswitch-hybrid"),
+                description = "Dispatch mechanism for control flow restructuring: mixed (per-site), lookupswitch, " +
+                    "if-chain, or tableswitch-hybrid.",
             ),
             ParamSchema(
                 key = "algebraicFamily",

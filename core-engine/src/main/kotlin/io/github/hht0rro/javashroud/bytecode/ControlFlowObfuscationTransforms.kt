@@ -7,9 +7,12 @@ import org.objectweb.asm.tree.AbstractInsnNode
 import org.objectweb.asm.tree.ClassNode
 import org.objectweb.asm.tree.InsnList
 import org.objectweb.asm.tree.InsnNode
+import org.objectweb.asm.tree.IntInsnNode
 import org.objectweb.asm.tree.JumpInsnNode
 import org.objectweb.asm.tree.LabelNode
 import org.objectweb.asm.tree.LdcInsnNode
+import org.objectweb.asm.tree.LookupSwitchInsnNode
+import org.objectweb.asm.tree.TableSwitchInsnNode
 import org.objectweb.asm.tree.VarInsnNode
 import java.util.Random
 
@@ -80,10 +83,15 @@ private fun obfuscatePredicateDispatch(classBytes: ByteArray, config: ControlFlo
         for (gotoInsn in gotosToWrap) {
             val target = gotoInsn.label
             val skipLabel = LabelNode()
-            val replacement = when (config.dispatchMode) {
+            val mode = if (config.dispatchMode == "mixed") {
+                listOf("if-chain", "lookupswitch", "tableswitch-hybrid")[rng.nextInt(3)]
+            } else {
+                config.dispatchMode
+            }
+            val replacement = when (mode) {
                 "lookupswitch" -> buildLookupSwitchGuard(target, skipLabel, rng)
                 "tableswitch-hybrid" -> buildTableSwitchHybridGuard(target, skipLabel, rng)
-                else -> buildIfChainGuard(target, skipLabel) // if-chain (default)
+                else -> buildIfChainGuard(target, skipLabel)
             }
             insns.insertBefore(gotoInsn, replacement)
             insns.remove(gotoInsn)
@@ -124,14 +132,14 @@ private fun buildAlgebraicPredicate(family: String, deadEnd: LabelNode, rng: Ran
             add(deadEnd)
         }
         "modular-arithmetic" -> InsnList().apply {
-            // (x * x + x) % 2 == 0 is always true for any integer
-            add(InsnNode(Opcodes.ICONST_3))
+            val x = 2 + rng.nextInt(6)
+            add(pushInt(x))
             add(InsnNode(Opcodes.DUP))
-            add(InsnNode(Opcodes.IMUL)) // 9
-            add(InsnNode(Opcodes.ICONST_3))
-            add(InsnNode(Opcodes.IADD)) // 12
+            add(InsnNode(Opcodes.IMUL))
+            add(pushInt(x))
+            add(InsnNode(Opcodes.IADD))
             add(InsnNode(Opcodes.ICONST_2))
-            add(InsnNode(Opcodes.IREM)) // 0
+            add(InsnNode(Opcodes.IREM))
             add(JumpInsnNode(Opcodes.IFNE, deadEnd))
             add(InsnNode(Opcodes.NOP))
             add(deadEnd)
@@ -147,44 +155,67 @@ private fun buildIfChainGuard(target: org.objectweb.asm.tree.LabelNode, skipLabe
     return InsnList().apply {
         add(InsnNode(Opcodes.ICONST_0))
         add(InsnNode(Opcodes.ICONST_0))
-        add(JumpInsnNode(Opcodes.IF_ICMPEQ, skipLabel))
-        add(JumpInsnNode(Opcodes.GOTO, target)) // dead branch
+        add(JumpInsnNode(Opcodes.IF_ICMPEQ, target))
         add(skipLabel)
-        add(JumpInsnNode(Opcodes.GOTO, target)) // always taken
+        add(InsnNode(Opcodes.NOP))
+        add(JumpInsnNode(Opcodes.GOTO, target))
     }
 }
 
 private fun buildLookupSwitchGuard(target: org.objectweb.asm.tree.LabelNode, skipLabel: LabelNode, rng: Random): InsnList {
+    val cases = intArrayOf(0, 1, 2)
+    val labels = Array(3) { LabelNode() }
+    val defaultLabel = LabelNode()
     return InsnList().apply {
         add(InsnNode(Opcodes.ICONST_0))
-        val cases = intArrayOf(0, 1, 2)
-        val labels = Array(3) { LabelNode() }
-        add(org.objectweb.asm.tree.LookupSwitchInsnNode(
-            labels[0],
-            cases,
-            labels,
-        ))
+        add(LookupSwitchInsnNode(defaultLabel, cases, labels))
         add(labels[0])
-        add(JumpInsnNode(Opcodes.GOTO, skipLabel))
+        add(InsnNode(Opcodes.NOP))
+        add(JumpInsnNode(Opcodes.GOTO, target))
         add(labels[1])
-        add(JumpInsnNode(Opcodes.GOTO, skipLabel))
+        add(pushInt(rng.nextInt(7) + 1))
+        add(InsnNode(Opcodes.POP))
+        add(JumpInsnNode(Opcodes.GOTO, target))
         add(labels[2])
         add(JumpInsnNode(Opcodes.GOTO, skipLabel))
+        add(defaultLabel)
+        add(InsnNode(Opcodes.NOP))
+        add(JumpInsnNode(Opcodes.GOTO, target))
         add(skipLabel)
         add(JumpInsnNode(Opcodes.GOTO, target))
     }
 }
 
 private fun buildTableSwitchHybridGuard(target: org.objectweb.asm.tree.LabelNode, skipLabel: LabelNode, rng: Random): InsnList {
+    val case0 = LabelNode()
+    val case1 = LabelNode()
+    val case2 = LabelNode()
+    val defaultLabel = LabelNode()
     return InsnList().apply {
         add(InsnNode(Opcodes.ICONST_0))
-        val defaultLabel = LabelNode()
-        add(org.objectweb.asm.tree.TableSwitchInsnNode(0, 2, defaultLabel, defaultLabel, defaultLabel, defaultLabel))
-        add(defaultLabel)
+        add(TableSwitchInsnNode(0, 2, defaultLabel, case0, case1, case2))
+        add(case0)
+        add(InsnNode(Opcodes.NOP))
+        add(JumpInsnNode(Opcodes.GOTO, target))
+        add(case1)
+        add(pushInt(rng.nextInt(7) + 1))
+        add(InsnNode(Opcodes.POP))
+        add(JumpInsnNode(Opcodes.GOTO, target))
+        add(case2)
         add(JumpInsnNode(Opcodes.GOTO, skipLabel))
+        add(defaultLabel)
+        add(InsnNode(Opcodes.NOP))
+        add(JumpInsnNode(Opcodes.GOTO, target))
         add(skipLabel)
         add(JumpInsnNode(Opcodes.GOTO, target))
     }
+}
+
+private fun pushInt(value: Int): AbstractInsnNode = when (value) {
+    -1 -> InsnNode(Opcodes.ICONST_M1)
+    in 0..5 -> InsnNode(Opcodes.ICONST_0 + value)
+    in Byte.MIN_VALUE..Byte.MAX_VALUE -> IntInsnNode(Opcodes.BIPUSH, value)
+    else -> LdcInsnNode(value)
 }
 
 private fun findFirstRealInstruction(insns: org.objectweb.asm.tree.InsnList): AbstractInsnNode? {

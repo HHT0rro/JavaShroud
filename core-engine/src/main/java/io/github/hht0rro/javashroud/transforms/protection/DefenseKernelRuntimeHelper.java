@@ -37,7 +37,10 @@ public final class DefenseKernelRuntimeHelper {
                 throw new SecurityException("unified defense kernel is not usable");
             }
             if ((armedSurfaces & surfaceBit) != 0) {
-                probe(surface, "startup-repeat");
+                // The protected-data gate performs the authenticated probe before
+                // release. Repeating the full native share exchange for every
+                // application class only delays worker startup.
+                JniMicrokernelHelper.requireHealthyKernel();
                 return;
             }
             try {
@@ -124,6 +127,22 @@ public final class DefenseKernelRuntimeHelper {
 
     public static boolean isDefenseReady() {
         return state == DEFENSE_READY && armedSurfaces != 0 && JniMicrokernelHelper.isKernelIntegrityReady();
+    }
+
+    /**
+     * Re-runs armed probes immediately before protected-data release.
+     * Deleting injected method probe call sites does not skip this gate.
+     */
+    public static void authorizeProtectedData() {
+        if (state != DEFENSE_READY || armedSurfaces == 0) {
+            return;
+        }
+        if ((armedSurfaces & DEBUG_SURFACE) != 0) {
+            probe("os-anti-debug", "data-access");
+        }
+        if ((armedSurfaces & VM_SURFACE) != 0) {
+            probe("os-anti-vm", "data-access");
+        }
     }
 
     private static void verifyShortLivedShare(String surface, String point) {

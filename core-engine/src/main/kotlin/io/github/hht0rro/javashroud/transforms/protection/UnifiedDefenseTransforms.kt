@@ -17,6 +17,8 @@ import org.objectweb.asm.tree.ClassNode
 
 private const val DEFENSE_KERNEL_HELPER_OWNER =
     "io/github/hht0rro/javashroud/transforms/protection/DefenseKernelRuntimeHelper"
+private const val JNI_HELPER_OWNER =
+    "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper"
 
 /**
  * Current-format native-defense injection.  Both public passes use exactly the
@@ -72,7 +74,7 @@ private fun applyUnifiedDefense(
         val probeMethods = classNode.methods.orEmpty()
             .asSequence()
             .filter { method -> method.name != "<clinit>" && method.name != "<init>" }
-            .filter { method -> method.access and (Opcodes.ACC_ABSTRACT or Opcodes.ACC_NATIVE) == 0 }
+            .filter { method -> method.access and (Opcodes.ACC_ABSTRACT or Opcodes.ACC_NATIVE or Opcodes.ACC_SYNTHETIC) == 0 }
             .map { method -> method.name + method.desc }
             .sortedBy { methodKey -> stableProbeOrder(classNode.name, methodKey, surface) }
             .take(distributedProbeCount)
@@ -159,6 +161,13 @@ private fun applyUnifiedDefense(
 }
 
 private fun emitDefenseInitialize(methodVisitor: MethodVisitor, surface: String, profile: String) {
+    methodVisitor.visitMethodInsn(
+        Opcodes.INVOKESTATIC,
+        JNI_HELPER_OWNER,
+        "expectDefenseForProtectedPath",
+        "()V",
+        false,
+    )
     methodVisitor.visitLdcInsn(surface)
     methodVisitor.visitLdcInsn(profile)
     methodVisitor.visitMethodInsn(
