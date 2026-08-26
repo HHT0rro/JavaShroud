@@ -302,12 +302,18 @@ internal fun executeWithOrderedPasses(
                 bytes.size >= 4 && ((bytes[0] == 0x4D.toByte() && bytes[1] == 0x5A.toByte()) ||
                     (bytes[0] == 0x7F.toByte() && bytes[1] == 0x45.toByte()))
             }
+            val inputJarBytes = try {
+                Files.size(Path.of(config.inputJarPath))
+            } catch (_: Exception) {
+                -1L
+            }
             val scanReport = ReleaseArtifactScan.scan(
                 outputJarPath = outputJarPath,
                 artifact = artifactForWrite,
                 profile = config.protectionProfile,
                 enabledPasses = enabledPasses,
                 nativeBytes = nativeBytes,
+                inputJarBytes = inputJarBytes,
             )
             ReleaseArtifactScan.writeReport(outputJarPath, scanReport)
             if (config.protectionProfile.requiresReleaseScan) {

@@ -9,9 +9,13 @@ import java.nio.file.StandardCopyOption
 import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.MessageDigest
+import java.security.PrivateKey
+import java.security.PublicKey
 import java.security.Signature
 import java.security.spec.NamedParameterSpec
+import java.security.spec.PKCS8EncodedKeySpec
 import java.security.spec.X509EncodedKeySpec
+import java.util.Base64
 
 /**
  * Versioned, Ed25519-signed rename/debug mapping.
@@ -24,6 +28,12 @@ internal class SignedDebugMap private constructor(
     val fieldMappings: List<MemberMapping>,
     val transformVersion: String,
     val buildId: String,
+    val issuerKeyId: String,
+    val passConfigDigest: ByteArray,
+    val nativeSha256: ByteArray,
+    val abiDigest: ByteArray,
+    val specializationDigest: ByteArray,
+    val targetTriple: String,
     val publicKey: ByteArray,
     val signature: ByteArray,
     val encoded: ByteArray,
@@ -40,7 +50,53 @@ internal class SignedDebugMap private constructor(
         val fieldMappings: List<MemberMapping>,
         val transformVersion: String,
         val buildId: String,
+        val issuerKeyId: String = "",
+        val passConfigDigest: ByteArray = ByteArray(32),
+        val nativeSha256: ByteArray = ByteArray(32),
+        val abiDigest: ByteArray = ByteArray(32),
+        val specializationDigest: ByteArray = ByteArray(32),
+        val targetTriple: String = "",
     )
+
+    data class Issuer(
+        val keyId: String,
+        val privateKey: PrivateKey,
+        val publicKey: PublicKey,
+    ) {
+        companion object {
+            fun generate(keyId: String): Issuer {
+                val generator = KeyPairGenerator.getInstance("Ed25519")
+                generator.initialize(NamedParameterSpec("Ed25519"))
+                val pair = generator.generateKeyPair()
+                return Issuer(keyId, pair.private, pair.public)
+            }
+
+            fun fromEnvironment(): Issuer {
+                val keyId = System.getenv("JAVASHROUD_DEBUGMAP_ISSUER_ID")
+                    ?: error("JAVASHROUD_DEBUGMAP_ISSUER_ID is required to sign a debug map")
+                val pkcs8 = decodeEnv("JAVASHROUD_DEBUGMAP_ISSUER_PKCS8")
+                val spki = decodeEnv("JAVASHROUD_DEBUGMAP_ISSUER_SPKI")
+                val factory = KeyFactory.getInstance("Ed25519")
+                return Issuer(
+                    keyId = keyId,
+                    privateKey = factory.generatePrivate(PKCS8EncodedKeySpec(pkcs8)),
+                    publicKey = factory.generatePublic(X509EncodedKeySpec(spki)),
+                )
+            }
+
+            fun fromEnvironmentOrEphemeral(): Issuer =
+                try {
+                    fromEnvironment()
+                } catch (_: IllegalStateException) {
+                    generate("ephemeral")
+                }
+
+            private fun decodeEnv(name: String): ByteArray {
+                val value = System.getenv(name) ?: error("$name is required to sign a debug map")
+                return Base64.getDecoder().decode(value)
+            }
+        }
+    }
 
     fun verify(expectedArtifactSha256: ByteArray) {
         require(artifactSha256.contentEquals(expectedArtifactSha256)) {
@@ -60,25 +116,33 @@ internal class SignedDebugMap private constructor(
         private const val RAW_PUBLIC_KEY_BYTES = 32
         private const val SIGNATURE_BYTES = 64
 
-        fun create(artifactSha256: ByteArray, draft: Draft): SignedDebugMap {
+        fun create(
+            artifactSha256: ByteArray,
+            draft: Draft,
+            issuer: Issuer = Issuer.generate("ephemeral"),
+        ): SignedDebugMap {
             require(artifactSha256.size == 32) { "artifact digest must be 32 bytes" }
-            val payload = encodePayload(ProtectionFormat.CURRENT, artifactSha256, draft)
-            val generator = KeyPairGenerator.getInstance("Ed25519")
-            generator.initialize(NamedParameterSpec("Ed25519"))
-            val keyPair = generator.generateKeyPair()
+            val signedDraft = if (draft.issuerKeyId.isEmpty()) draft.copy(issuerKeyId = issuer.keyId) else draft
+            val payload = encodePayload(ProtectionFormat.CURRENT, artifactSha256, signedDraft)
             val signer = Signature.getInstance("Ed25519")
-            signer.initSign(keyPair.private)
+            signer.initSign(issuer.privateKey)
             signer.update(payload)
             val signatureBytes = signer.sign()
-            val rawPublic = rawEd25519PublicKey(keyPair.public.encoded)
+            val rawPublic = rawEd25519PublicKey(issuer.publicKey.encoded)
             val encoded = encodeFile(payload, rawPublic, signatureBytes)
             return SignedDebugMap(
                 formatVersion = ProtectionFormat.CURRENT,
                 artifactSha256 = artifactSha256.copyOf(),
-                methodMappings = draft.methodMappings,
-                fieldMappings = draft.fieldMappings,
-                transformVersion = draft.transformVersion,
-                buildId = draft.buildId,
+                methodMappings = signedDraft.methodMappings,
+                fieldMappings = signedDraft.fieldMappings,
+                transformVersion = signedDraft.transformVersion,
+                buildId = signedDraft.buildId,
+                issuerKeyId = signedDraft.issuerKeyId,
+                passConfigDigest = signedDraft.passConfigDigest.copyOf(),
+                nativeSha256 = signedDraft.nativeSha256.copyOf(),
+                abiDigest = signedDraft.abiDigest.copyOf(),
+                specializationDigest = signedDraft.specializationDigest.copyOf(),
+                targetTriple = signedDraft.targetTriple,
                 publicKey = rawPublic,
                 signature = signatureBytes,
                 encoded = encoded,
@@ -109,6 +173,12 @@ internal class SignedDebugMap private constructor(
                 fieldMappings = parsed.fieldMappings,
                 transformVersion = parsed.transformVersion,
                 buildId = parsed.buildId,
+                issuerKeyId = parsed.issuerKeyId,
+                passConfigDigest = parsed.passConfigDigest,
+                nativeSha256 = parsed.nativeSha256,
+                abiDigest = parsed.abiDigest,
+                specializationDigest = parsed.specializationDigest,
+                targetTriple = parsed.targetTriple,
                 publicKey = publicKey,
                 signature = signatureBytes,
                 encoded = bytes.copyOf(),
@@ -120,8 +190,13 @@ internal class SignedDebugMap private constructor(
         fun sidecarPath(outputJarPath: Path): Path =
             outputJarPath.resolveSibling(outputJarPath.fileName.toString().removeSuffix(".jar") + ".debugmap")
 
-        fun write(outputJarPath: Path, draft: Draft, artifactSha256: ByteArray): Path {
-            val map = create(artifactSha256, draft)
+        fun write(
+            outputJarPath: Path,
+            draft: Draft,
+            artifactSha256: ByteArray,
+            issuer: Issuer = Issuer.fromEnvironmentOrEphemeral(),
+        ): Path {
+            val map = create(artifactSha256, draft, issuer)
             val path = sidecarPath(outputJarPath)
             Files.createDirectories(requireNotNull(path.parent) { "debug map path has no parent" })
             val temporary = Files.createTempFile(path.parent, ".debugmap.", ".tmp")
@@ -154,6 +229,12 @@ internal class SignedDebugMap private constructor(
             val fieldMappings: List<MemberMapping>,
             val transformVersion: String,
             val buildId: String,
+            val issuerKeyId: String,
+            val passConfigDigest: ByteArray,
+            val nativeSha256: ByteArray,
+            val abiDigest: ByteArray,
+            val specializationDigest: ByteArray,
+            val targetTriple: String,
         )
 
         private fun encodeFile(payload: ByteArray, publicKey: ByteArray, signatureBytes: ByteArray): ByteArray {
@@ -175,6 +256,12 @@ internal class SignedDebugMap private constructor(
             writeMappings(out, draft.fieldMappings)
             writeUtf8(out, draft.transformVersion)
             writeUtf8(out, draft.buildId)
+            writeUtf8(out, draft.issuerKeyId)
+            writeDigest(out, draft.passConfigDigest)
+            writeDigest(out, draft.nativeSha256)
+            writeDigest(out, draft.abiDigest)
+            writeDigest(out, draft.specializationDigest)
+            writeUtf8(out, draft.targetTriple)
             return out.toByteArray()
         }
 
@@ -188,8 +275,39 @@ internal class SignedDebugMap private constructor(
             val fields = readMappings(buffer)
             val transformVersion = readUtf8(buffer)
             val buildId = readUtf8(buffer)
+            val issuerKeyId = readUtf8(buffer)
+            val passConfigDigest = readDigest(buffer)
+            val nativeSha256 = readDigest(buffer)
+            val abiDigest = readDigest(buffer)
+            val specializationDigest = readDigest(buffer)
+            val targetTriple = readUtf8(buffer)
             require(!buffer.hasRemaining()) { "signed debug map payload has trailing bytes" }
-            return ParsedPayload(formatVersion, digest, methods, fields, transformVersion, buildId)
+            return ParsedPayload(
+                formatVersion,
+                digest,
+                methods,
+                fields,
+                transformVersion,
+                buildId,
+                issuerKeyId,
+                passConfigDigest,
+                nativeSha256,
+                abiDigest,
+                specializationDigest,
+                targetTriple,
+            )
+        }
+
+        private fun writeDigest(out: ByteArrayOutputStream, digest: ByteArray) {
+            require(digest.size == 32) { "signed debug map digest must be 32 bytes" }
+            out.write(digest)
+        }
+
+        private fun readDigest(buffer: ByteBuffer): ByteArray {
+            require(buffer.remaining() >= 32) { "signed debug map digest is truncated" }
+            val digest = ByteArray(32)
+            buffer.get(digest)
+            return digest
         }
 
         private fun writeMappings(out: ByteArrayOutputStream, mappings: List<MemberMapping>) {
