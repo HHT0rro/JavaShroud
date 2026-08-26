@@ -38,7 +38,7 @@ class RuntimeResourceCodecTest {
             layerCount = 3,
         )
 
-        assertTrue(!encoded.startsWithAscii("VBC4"), "encoded resource must not expose raw VBC4 magic before sealing")
+        assertTrue(!encoded.startsWithAscii("VBC5"), "encoded resource must not expose raw VBC5 magic before sealing")
         assertEquals(8, encoded[4].toInt() and 0xFF, "runtime resources must use only the partitioned JSRP v8 envelope")
         assertEquals(96, readLe16ForTest(encoded, 21), "public v3 header must expose only encrypted metadata length")
         assertEquals(32, readLe16ForTest(encoded, 23), "public v3 header must expose only MAC length")

@@ -10,6 +10,7 @@ import io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.requireVbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
@@ -158,6 +159,53 @@ class AkenNativeLocatorTest {
     }
 
     @Test
+    fun catalogBindingInputs_matches_library_sha256_and_nonzero_abi_digest() {
+        val storedBytes = byteArrayOf(1, 2, 3, 4)
+        val entry = AkenNativeLocator.entry(
+            platform = "windows-x64",
+            resourcePath = "META-INF/final.dll",
+            fileSuffix = ".dll",
+            storedBytes = storedBytes,
+        )
+        AkenNativeLocator.catalogBindingInputs(listOf(entry)).use { inputs ->
+            assertTrue(
+                MessageDigest.getInstance("SHA-256").digest(storedBytes).contentEquals(inputs.nativeSha256),
+                "catalog native SHA-256 must match sha256(storedBytes)",
+            )
+            assertEquals(32, inputs.abiDigest.size)
+            assertTrue(inputs.abiDigest.any { it != 0.toByte() }, "catalog ABI digest must not be all-zero")
+            assertEquals("x86_64-pc-windows-gnu", inputs.targetTriple)
+            assertEquals("aken-r1-rust-ffi-v1", inputs.payloadProfile)
+            assertEquals("windows-x64", inputs.platform)
+        }
+    }
+
+    @Test
+    fun catalogBindingInputs_rejects_empty_entries() {
+        assertFailsWith<IllegalArgumentException> {
+            AkenNativeLocator.catalogBindingInputs(emptyList())
+        }
+    }
+
+    @Test
+    fun catalogBindingInputs_wipe_zeros_owned_copies() {
+        val entry = AkenNativeLocator.entry(
+            platform = "linux-x64",
+            resourcePath = "META-INF/final.so",
+            fileSuffix = ".so",
+            storedBytes = byteArrayOf(7, 8, 9),
+        )
+        val inputs = AkenNativeLocator.catalogBindingInputs(listOf(entry))
+        val nativeSha256 = inputs.nativeSha256
+        val abiDigest = inputs.abiDigest
+        assertTrue(nativeSha256.any { it != 0.toByte() })
+        assertTrue(abiDigest.any { it != 0.toByte() })
+        inputs.wipe()
+        assertTrue(nativeSha256.all { it == 0.toByte() })
+        assertTrue(abiDigest.all { it == 0.toByte() })
+    }
+
+    @Test
     fun sealing_rejects_macos_native_entries_before_rewriting() {
         assertFailsWith<IllegalStateException> {
             sealFixture(
@@ -180,7 +228,14 @@ class AkenNativeLocatorTest {
             masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { (it * 29 + 7).toByte() },
             nativeSeed = 0x5A17C0DEL,
             jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { (it * 17 + 3).toByte() },
-        ),
+        ).also { context ->
+            context.publishNativeSpecializationDigests(
+                mapOf(
+                    "windows-x64" to ByteArray(32) { (it + 1).toByte() },
+                    "linux-x64" to ByteArray(32) { (it + 2).toByte() },
+                ),
+            )
+        },
     ) {
         val helperName = "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper"
         val helperBytes = checkNotNull(javaClass.classLoader.getResourceAsStream("$helperName.class")).use { it.readBytes() }
@@ -196,6 +251,12 @@ class AkenNativeLocatorTest {
                 JarEntryData("META-INF/jsrt/windows-x64/jsrt_ffi.dll", windowsBytes),
                 JarEntryData("META-INF/jsrt/linux-x64/libjsrt_ffi.so", linuxBytes),
             ) + listOfNotNull(additionalNativeEntry),
+        )
+        requireVbc4BuildContext().publishNativeSpecializationDigests(
+            mapOf(
+                "windows-x64" to ByteArray(32) { (it + 1).toByte() },
+                "linux-x64" to ByteArray(32) { (it + 2).toByte() },
+            ),
         )
         RuntimeArtifactSealing.seal(artifact, seed = 0x5A17C0DEL, rewritesVmRuntime = false)
     }

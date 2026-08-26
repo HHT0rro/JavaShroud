@@ -15,12 +15,32 @@ class R1ArtifactDirectoryTest {
         val rust = java.nio.file.Files.readString(
             java.nio.file.Path.of("src/main/rust/crates/jsrt-page/src/directory.rs"),
         )
-        assertTrue(rust.contains("JSR1DIR"), "Rust directory parser must use the current magic")
-        assertTrue(rust.contains("JavaShroud/AKEN-R1/ArtifactDirectory/RuntimeBindingDigest"))
-        assertTrue(rust.contains("JavaShroud/AKEN-R1/ArtifactDirectory/RecordBinding"))
-        assertTrue(rust.contains("JavaShroud/AKEN-R1/ArtifactDirectory/RootBinding"))
+        assertTrue(rust.contains("JSR2DIR"), "Rust directory parser must use the current magic")
+        assertTrue(rust.contains("JavaShroud/AKEN-R2/ArtifactDirectory/RuntimeBindingDigest"))
+        assertTrue(rust.contains("JavaShroud/AKEN-R2/ArtifactDirectory/RecordBinding"))
+        assertTrue(rust.contains("JavaShroud/AKEN-R2/ArtifactDirectory/RootBinding"))
         assertTrue(rust.contains("x86_64-unknown-linux-gnu.2.17"))
         assertTrue(rust.contains("x86_64-apple-darwin"))
+    }
+
+    @Test
+    fun directory_encode_is_stable_across_locales() {
+        val runtime = sampleRuntime()
+        val page = samplePage(runtime, 0, AkenResourceKind.StringPage)
+        val directory = R1ArtifactDirectory.create(runtime, listOf(page))
+        val previous = java.util.Locale.getDefault()
+        try {
+            java.util.Locale.setDefault(java.util.Locale.US)
+            val first = directory.encode()
+            java.util.Locale.setDefault(java.util.Locale.GERMANY)
+            val second = directory.encode()
+            assertContentEquals(first, second)
+        } finally {
+            java.util.Locale.setDefault(previous)
+            directory.wipe()
+            page.wipe()
+            runtime.wipe()
+        }
     }
 
     @Test
@@ -144,6 +164,16 @@ class R1ArtifactDirectoryTest {
             )
             headerMutations.forEach { assertReject(it, runtime) }
 
+            val retiredMagic = encoded.copyOf()
+            "JSR1DIR".toByteArray().copyInto(retiredMagic)
+            assertReject(retiredMagic, runtime)
+
+            val zeroDigest = encoded.copyOf()
+            for (index in 0 until 32) {
+                zeroDigest[layout.runtimeDigestOffset + index] = 0
+            }
+            assertReject(zeroDigest, runtime)
+
             val keyMutation = encoded.copyOf().also {
                 it[layout.recordStarts[0] + 5] = (it[layout.recordStarts[0] + 5].toInt() xor 1).toByte()
             }
@@ -217,6 +247,68 @@ class R1ArtifactDirectoryTest {
             directory.wipe()
             pages.forEach { it.wipe() }
             runtime.wipe()
+        }
+    }
+
+    @Test
+    fun final_native_binding_rejects_wrong_size_and_all_zero_digests() {
+        val native = ByteArray(32) { (it + 32).toByte() }
+        val abi = ByteArray(32) { (it + 64).toByte() }
+        val spec = ByteArray(32) { (it + 96).toByte() }
+        val target = RuntimeBindingDigest.TARGET_WINDOWS_GNU
+        val profile = "golden-profile"
+
+        assertFailsWith<R1ArtifactDirectoryException> {
+            FinalNativeBinding(ByteArray(31) { 1 }, abi, target, spec, profile)
+        }
+        assertFailsWith<R1ArtifactDirectoryException> {
+            FinalNativeBinding(native, ByteArray(33) { 1 }, target, spec, profile)
+        }
+        assertFailsWith<R1ArtifactDirectoryException> {
+            FinalNativeBinding(native, abi, target, ByteArray(0), profile)
+        }
+        assertFailsWith<R1ArtifactDirectoryException> {
+            FinalNativeBinding(ByteArray(32), abi, target, spec, profile)
+        }
+        assertFailsWith<R1ArtifactDirectoryException> {
+            FinalNativeBinding(native, ByteArray(32), target, spec, profile)
+        }
+        assertFailsWith<R1ArtifactDirectoryException> {
+            FinalNativeBinding(native, abi, target, ByteArray(32), profile)
+        }
+    }
+
+    @Test
+    fun create_from_final_native_binding_round_trips_and_rejects_all_zero_digests() {
+        val native = ByteArray(32) { (it + 32).toByte() }
+        val abi = ByteArray(32) { (it + 64).toByte() }
+        val spec = ByteArray(32) { (it + 96).toByte() }
+        val commitment = ByteArray(32) { it.toByte() }
+        val binding = FinalNativeBinding(
+            nativeSha256 = native,
+            abiDigest = abi,
+            targetTriple = RuntimeBindingDigest.TARGET_WINDOWS_GNU,
+            specializationDigest = spec,
+            payloadProfile = "golden-profile",
+        )
+        try {
+            val runtime = RuntimeBindingDigest.create(commitment, binding)
+            try {
+                assertContentEquals(commitment, runtime.artifactCommitment)
+                assertContentEquals(native, runtime.nativeSha256)
+                assertContentEquals(abi, runtime.abiDigest)
+                assertEquals(RuntimeBindingDigest.TARGET_WINDOWS_GNU, runtime.targetTriple)
+                assertContentEquals(spec, runtime.specializationDigest)
+                assertEquals("golden-profile", runtime.payloadProfile)
+            } finally {
+                runtime.wipe()
+            }
+
+            assertFailsWith<R1ArtifactDirectoryException> {
+                RuntimeBindingDigest.create(ByteArray(32), binding)
+            }
+        } finally {
+            binding.wipe()
         }
     }
 
@@ -358,6 +450,6 @@ class R1ArtifactDirectoryTest {
     private companion object {
         const val PageKeySize: Int = 45
         const val GOLDEN_HEX: String =
-            "4a53523144495200000001000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f000000157838365f36342d70632d77696e646f77732d676e75606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f0000000e676f6c64656e2d70726f66696c65641e4457e0214b7f2a7c28cb37615df8b0d76ca12c61cccfb3b58eb7a07706200200000000000102030405060708090a0b0c0d0e0f1011121314151617a0a1a2a3a4a5a6a7a8a9aaabacadaeaf0000001070616765732f706167652d302e62696e000000110000006300000004010203000000000409080700503a3ce9d1dae1566b4f130472b3f162c96c3ae92582e0bc767022cfde7419c4e34db6d8067cc0808989f0afc16da7014d1be887737353bbf0affcd56c4dc3cd"
+            "4a53523244495200000001000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f000000157838365f36342d70632d77696e646f77732d676e75606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f0000000e676f6c64656e2d70726f66696c6509c4436f15e332722ca7a065cd62af60170e95bedf243cfac6a6228ad8c645f10200000000000102030405060708090a0b0c0d0e0f1011121314151617a0a1a2a3a4a5a6a7a8a9aaabacadaeaf0000001070616765732f706167652d302e62696e000000110000006300000004010203000000000409080700d112b8ceed1cadfde95bb162c0da3a14fe91e2766e10127d59aa5096c7654656283e3c2237a431e698d6c4dd3e03c52bcc81c83dea959a9f686ff52a0615f7a3"
     }
 }

@@ -13,6 +13,8 @@ public final class LinuxR1LoadProbe {
 
     static native boolean nativeInstallAkenSessionNonce(byte[] startupNonce);
 
+    static native int nativeInstallAkenCatalog(byte[] directory, byte[] bundle);
+
     static native Object nativeExecuteAkenVmPage(
             long entryToken,
             byte[] encodedHandle,
@@ -27,12 +29,19 @@ public final class LinuxR1LoadProbe {
 
     static native void nativeConsumeAkenNativeChunk(byte[] encodedHandle, int pageIndex, byte[] callSiteProof);
 
+    static native int nativeInitializeDefense(String surface, String profile);
+
+    static native int nativeProbeDefense(String surface, String point);
+
+    static native byte[] nativeTransformDefense(byte[] material, String binding);
+
     public static void main(String[] args) {
         if (args.length < 1 || args.length > 2) {
             System.err.println("usage: LinuxR1LoadProbe <libjsrt_ffi.so> [catalog-sidecar]");
             System.exit(2);
         }
         System.setProperty("j.l", "io/github/hht0rro/javashroud/LinuxR1LoadProbe");
+        System.setProperty("j.m", bindingMap());
         if (args.length == 2) {
             System.setProperty("j.c", args[1]);
         }
@@ -46,6 +55,36 @@ public final class LinuxR1LoadProbe {
             System.out.println("NAT=ok");
             System.out.println("VM=" + nativeExecuteAkenVmPage(0L, readAll("page-6.handle"), 6, readAll("page-6.proof"), null));
         }
+    }
+
+    private static String bindingMap() {
+        String owner = "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper";
+        String[][] methods = {
+                {"nativeInit", "(Ljava/lang/String;)I", "nativeInit"},
+                {"nativeHeartbeat", "()I", "nativeHeartbeat"},
+                {"nativeInstallAkenSessionNonce", "([B)Z", "nativeInstallAkenSessionNonce"},
+                {"nativeInstallAkenCatalog", "([B[B)I", "nativeInstallAkenCatalog"},
+                {"nativeExecuteAkenVmPage", "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;", "nativeExecuteAkenVmPage"},
+                {"nativeOpenAkenString", "([BI[B)Ljava/lang/String;", "nativeOpenAkenString"},
+                {"nativeReadAkenClassPage", "([BI[B)[B", "nativeReadAkenClassPage"},
+                {"nativeConsumeAkenNativeChunk", "([BI[B)V", "nativeConsumeAkenNativeChunk"},
+                {"nativeInitializeDefense", "(Ljava/lang/String;Ljava/lang/String;)I", "nativeInitializeDefense"},
+                {"nativeProbeDefense", "(Ljava/lang/String;Ljava/lang/String;)I", "nativeProbeDefense"},
+                {"nativeTransformDefense", "([BLjava/lang/String;)[B", "nativeTransformDefense"},
+        };
+        StringBuilder result = new StringBuilder();
+        for (String[] method : methods) {
+            try {
+                byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                        .digest(("AKEN-BINDING-V1|" + owner + "#" + method[0] + "#" + method[1])
+                                .getBytes(java.nio.charset.StandardCharsets.US_ASCII));
+                for (int i = 0; i < 8; i++) result.append(String.format("%02x", digest[i] & 0xff));
+            } catch (java.security.NoSuchAlgorithmException error) {
+                throw new IllegalStateException(error);
+            }
+            result.append('=').append(method[2]).append('\n');
+        }
+        return result.toString();
     }
 
     private static byte[] readAll(String name) {

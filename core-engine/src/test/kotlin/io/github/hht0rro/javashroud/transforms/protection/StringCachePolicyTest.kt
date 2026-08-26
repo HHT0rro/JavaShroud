@@ -99,7 +99,7 @@ class StringCachePolicyTest {
 
     @Test
     fun string_bootstrap_rejects_foreign_same_signature_targets() {
-        val type = MethodType.methodType(String::class.java, ByteArray::class.java, Int::class.javaPrimitiveType, ByteArray::class.java)
+        val type = MethodType.methodType(String::class.java, ByteArray::class.java)
         val foreign = MethodHandles.lookup().findStatic(
             StringCachePolicyTest::class.java,
             "foreignStringTarget",
@@ -124,7 +124,7 @@ class StringCachePolicyTest {
 
     @Test
     fun string_bootstrap_accepts_only_the_current_terminal_handle() {
-        val type = MethodType.methodType(String::class.java, ByteArray::class.java, Int::class.javaPrimitiveType, ByteArray::class.java)
+        val type = MethodType.methodType(String::class.java, ByteArray::class.java)
         val terminal = MethodHandles.privateLookupIn(
             StringEncryptionHelper::class.java,
             MethodHandles.lookup(),
@@ -141,7 +141,7 @@ class StringCachePolicyTest {
 
     private companion object {
         @JvmStatic
-        private fun foreignStringTarget(handle: ByteArray, pageIndex: Int, proof: ByteArray): String =
-            "foreign-$pageIndex-${handle.size}-${proof.size}"
+        private fun foreignStringTarget(token: ByteArray): String =
+            "foreign-${token.size}"
     }
 }

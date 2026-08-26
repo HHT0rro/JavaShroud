@@ -14,6 +14,7 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class AkenRuntimePageDescriptorTest {
@@ -47,6 +48,7 @@ class AkenRuntimePageDescriptorTest {
                 val boundOpaque = decoded.evaluatorPlan.copyBoundDecryptorForNative()
                 try {
                     assertTrue(boundOpaque != null && boundOpaque.isNotEmpty())
+                    assertFalse(opaquePartitionsThirtyTwoByteDek(boundOpaque!!), "descriptor must not carry a 32-byte DEK overlay")
                 } finally {
                     boundOpaque?.fill(0)
                 }
@@ -197,7 +199,7 @@ class AkenRuntimePageDescriptorTest {
             val descriptor = descriptorFor(plan, page)
             val opaque = checkNotNull(descriptor.evaluatorPlan.copyBoundDecryptorForNative())
             try {
-                assertContentEquals("VBC4".encodeToByteArray(), opaque.copyOfRange(0, 4))
+                assertContentEquals("AKE1".encodeToByteArray(), opaque.copyOfRange(0, 4))
                 val fragmentCount = opaque[5].toInt() and 0xFF
                 assertTrue(fragmentCount in 4..12)
                 val text = opaque.toString(Charsets.ISO_8859_1)
@@ -267,6 +269,38 @@ class AkenRuntimePageDescriptorTest {
             callSiteProof.fill(0)
             fingerprint.fill(0)
         }
+    }
+
+    private fun opaquePartitionsThirtyTwoByteDek(opaque: ByteArray): Boolean {
+        if (opaque.size < 8 || opaque[0] != 'A'.code.toByte() || opaque[1] != 'K'.code.toByte()) return false
+        val fragmentCount = opaque[5].toInt() and 0xFF
+        if (fragmentCount !in 4..12) return false
+        val covered = BooleanArray(32)
+        var cursor = 6 + 12 + 16 + 32 + 32 + 32
+        repeat(fragmentCount) {
+            if (cursor + 5 > opaque.size) return false
+            val offset = opaque[cursor].toInt() and 0xFF
+            val length = opaque[cursor + 1].toInt() and 0xFF
+            cursor += 5
+            if (length == 0 || offset + length > 32) return false
+            for (index in offset until offset + length) {
+                if (covered[index]) return false
+                covered[index] = true
+            }
+            if (cursor + 4 > opaque.size) return false
+            val tokenLen = ((opaque[cursor].toInt() and 0xFF) shl 24) or
+                ((opaque[cursor + 1].toInt() and 0xFF) shl 16) or
+                ((opaque[cursor + 2].toInt() and 0xFF) shl 8) or
+                (opaque[cursor + 3].toInt() and 0xFF)
+            cursor += 4 + tokenLen + 16
+            if (cursor + 4 > opaque.size) return false
+            val encodedLen = ((opaque[cursor].toInt() and 0xFF) shl 24) or
+                ((opaque[cursor + 1].toInt() and 0xFF) shl 16) or
+                ((opaque[cursor + 2].toInt() and 0xFF) shl 8) or
+                (opaque[cursor + 3].toInt() and 0xFF)
+            cursor += 4 + encodedLen + 16
+        }
+        return covered.all { it }
     }
 
     private class DeterministicSecureRandom(seed: Int) : SecureRandom() {

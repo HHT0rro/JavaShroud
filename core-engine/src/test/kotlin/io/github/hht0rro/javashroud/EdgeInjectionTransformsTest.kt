@@ -12,6 +12,7 @@ import org.objectweb.asm.Label
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.tree.ClassNode
 import org.objectweb.asm.tree.FieldInsnNode
+import org.objectweb.asm.tree.TableSwitchInsnNode
 import org.objectweb.asm.tree.VarInsnNode
 import java.lang.reflect.InvocationTargetException
 
@@ -141,6 +142,23 @@ class EdgeInjectionTransformsTest {
             error.cause
         }
         assertTrue(thrown is RuntimeException, "The relay must preserve the original thrown type")
+    }
+
+    @Test
+    fun tableswitch_hybrid_uses_distinct_case_labels_and_keeps_behavior() {
+        val transformed = obfuscateControlFlow(
+            buildLinearGotoHost(),
+            ControlFlowConfig(density = 10, dispatchMode = "tableswitch-hybrid", seed = 3L),
+        )
+        val switches = readNode(transformed).methods.flatMap { method ->
+            method.instructions.toArray().filterIsInstance<TableSwitchInsnNode>()
+        }
+        assertTrue(switches.isNotEmpty(), "tableswitch-hybrid must emit a tableswitch")
+        switches.forEach { sw ->
+            val labels = listOfNotNull(sw.dflt) + sw.labels
+            assertTrue(labels.map { System.identityHashCode(it) }.toSet().size >= 2, "case/default labels must not share one target")
+        }
+        assertEquals(7, define(transformed).getMethod("run").invoke(null))
     }
 
     private fun buildLinearGotoHost(): ByteArray {

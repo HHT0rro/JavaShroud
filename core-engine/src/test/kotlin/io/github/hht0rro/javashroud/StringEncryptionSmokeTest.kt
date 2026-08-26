@@ -86,7 +86,7 @@ class StringEncryptionSmokeTest {
 
                         override fun visitMethodInsn(opcode: Int, owner: String, name: String, descriptor: String, isInterface: Boolean) {
                             if (opcode != Opcodes.INVOKESTATIC || owner != "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper") return
-                            if (name == "invokeAkenStringTerminal" && descriptor == "([BI[B)Ljava/lang/String;") {
+                            if (name == "invokeAkenStringTerminal" && descriptor == "([B)Ljava/lang/String;") {
                                 akenHelperInvokeCount++
                             }
                             if (name == "cachedDecodeString" || descriptor == "([BIIJJ)Ljava/lang/String;") {
@@ -101,7 +101,7 @@ class StringEncryptionSmokeTest {
                             vararg bootstrapMethodArguments: Any,
                         ) {
                             if (
-                                descriptor == "([BI[B)Ljava/lang/String;" &&
+                                descriptor == "([B)Ljava/lang/String;" &&
                                 bootstrapMethodHandle.owner == "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper" &&
                                 bootstrapMethodHandle.desc ==
                                     "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;" +
@@ -112,7 +112,7 @@ class StringEncryptionSmokeTest {
                                 assertTrue(bootstrapMethodArguments[0] is org.objectweb.asm.Handle)
                                 val target = bootstrapMethodArguments[0] as org.objectweb.asm.Handle
                                 assertEquals("invokeAkenStringTerminal", target.name)
-                                assertEquals("([BI[B)Ljava/lang/String;", target.desc)
+                                assertEquals("([B)Ljava/lang/String;", target.desc)
                                 akenHelperInvokeDynamicCount++
                             }
                         }

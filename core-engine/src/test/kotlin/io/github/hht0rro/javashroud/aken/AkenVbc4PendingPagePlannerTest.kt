@@ -58,9 +58,9 @@ class AkenVbc4PendingPagePlannerTest {
             assertEquals(listOf(0, 2, 3), partitions.map { it.firstStorageBlockOrdinal })
             assertEquals(listOf(1, 2, 4), partitions.map { it.lastStorageBlockOrdinal })
             assertEquals(listOf(480, 600, 300), partitions.map { it.physicalBlockLength })
-            assertEquals(listOf(106, 0, 0), partitions.map { it.framePrefixLength })
+            assertEquals(listOf(138, 0, 0), partitions.map { it.framePrefixLength })
             assertEquals(listOf(0, 0, 49), partitions.map { it.frameSuffixLength })
-            assertEquals(listOf(586, 600, 349), partitions.map { it.plaintextLength })
+            assertEquals(listOf(618, 600, 349), partitions.map { it.plaintextLength })
             assertEquals(3, proofRequests)
 
             batch.consumePendingPagesForBuild { pages ->
@@ -343,8 +343,9 @@ class AkenVbc4PendingPagePlannerTest {
     ): ByteArray {
         require(blockIds.isNotEmpty() && blockIds.size == encryptedPayloadLengths.size)
         val out = ByteArrayOutputStream()
-        out.write("VBC4".encodeToByteArray())
+        out.write("VBC5".encodeToByteArray())
         out.write(ByteArray(16))
+        out.write(ByteArray(32))
         writeU4(out, 0xAABBCCDDL)
         out.write(ByteArray(16))
         writeU2(out, 0)

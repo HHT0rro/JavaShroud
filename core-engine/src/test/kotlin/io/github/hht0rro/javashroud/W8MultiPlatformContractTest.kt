@@ -172,7 +172,7 @@ class W8MultiPlatformContractTest {
     }
 
     private fun recompiledNative(platform: String, libName: String) =
-        NativeRecompilationTransforms.RecompiledNative(platform, libName, byteArrayOf(1))
+        NativeRecompilationTransforms.RecompiledNative(platform, libName, byteArrayOf(1), ByteArray(32) { 1 })
 
     private fun nativeObservation(platform: String, outputName: String, bytes: ByteArray) =
         CandidateProductionBuildEvidence.NativeObservation(

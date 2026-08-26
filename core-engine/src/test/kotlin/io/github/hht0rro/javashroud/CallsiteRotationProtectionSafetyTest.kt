@@ -5,9 +5,14 @@ import io.github.hht0rro.javashroud.model.analysis.MemberSummary
 import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.analysis.TargetSelector
 import io.github.hht0rro.javashroud.model.config.RuleSpec
+import io.github.hht0rro.javashroud.transforms.protection.CallsiteRotationHelper
 import io.github.hht0rro.javashroud.transforms.protection.applyCallsiteRotationProtection
+import io.github.hht0rro.javashroud.transforms.protection.hardening.IndyTargetTokenEnvelope
+import java.lang.invoke.MethodHandles
+import java.lang.invoke.MethodType
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.Opcodes
@@ -69,6 +74,120 @@ class CallsiteRotationProtectionSafetyTest {
     }
 
     @Test
+    fun callsite_rotation_keeps_reflection_execution_calls_visible() {
+        val internalName = "sample/ReflectionExecutionHost"
+        val descriptor = "(Ljava/lang/reflect/Method;Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;"
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = internalName,
+                    bytes = buildReflectionExecutionHost(internalName, 32),
+                    methodSummaries = (0 until 32).map { index ->
+                        MemberSummary(MemberKind.METHOD, "m$index", descriptor, Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC)
+                    },
+                ),
+            ),
+        )
+        val result = applyCallsiteRotationProtection(
+            artifact = artifact,
+            ruleMatches = listOf(ruleMatchFor(internalName)),
+            params = mapOf("seed" to 1),
+        )
+        val node = ClassNode()
+        ClassReader(result.artifact.classArtifactIndex[internalName]!!.bytes).accept(node, ClassReader.SKIP_FRAMES)
+        val instructions = node.methods.orEmpty().flatMap { it.instructions?.toArray()?.asList().orEmpty() }
+        assertEquals(0, instructions.filterIsInstance<InvokeDynamicInsnNode>().count { indy ->
+            indy.desc == "(Ljava/lang/reflect/Method;Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;"
+        })
+        assertEquals(
+            32,
+            instructions.filterIsInstance<MethodInsnNode>().count {
+                it.owner == "java/lang/reflect/Method" && it.name == "invoke"
+            },
+        )
+    }
+
+    @Test
+    fun callsite_rotation_assigns_mixed_strategies_per_site() {
+        val internalName = "sample/MixedRotationHost"
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = internalName,
+                    bytes = buildManyVirtualCallsHost(internalName, 20),
+                    methodSummaries = (0 until 20).map { index ->
+                        MemberSummary(MemberKind.METHOD, "m$index", "(Ljava/lang/String;)I", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC)
+                    },
+                ),
+            ),
+        )
+        val result = applyCallsiteRotationProtection(
+            artifact = artifact,
+            ruleMatches = listOf(ruleMatchFor(internalName)),
+            params = mapOf("seed" to 1),
+        )
+        val node = ClassNode()
+        ClassReader(result.artifact.classArtifactIndex[internalName]!!.bytes).accept(node, ClassReader.SKIP_FRAMES)
+        val strategies = node.methods.orEmpty().flatMap { method ->
+            method.instructions?.toArray()?.filterIsInstance<InvokeDynamicInsnNode>().orEmpty()
+        }.mapNotNull { indy -> indy.bsmArgs.getOrNull(1) as? String }
+        assertTrue(strategies.size >= 4, "expected enough rotating sites, got ${strategies.size}")
+        assertTrue(strategies.toSet().size >= 2, "expected mixed strategies, got $strategies")
+    }
+
+    @Test
+    fun callsite_rotation_keeps_concurrency_boundaries_direct() {
+        val internalName = "sample/ConcurrencyBoundaryHost"
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(
+                testClassArtifact(
+                    internalName = internalName,
+                    bytes = buildConcurrencyBoundaryHost(internalName, 32),
+                    methodSummaries = (0 until 32).map { index ->
+                        MemberSummary(MemberKind.METHOD, "m$index", "(Ljava/util/concurrent/ThreadPoolExecutor;Ljava/lang/Runnable;)Ljava/util/concurrent/Future;", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC)
+                    },
+                ),
+            ),
+        )
+        val result = applyCallsiteRotationProtection(
+            artifact = artifact,
+            ruleMatches = listOf(ruleMatchFor(internalName)),
+            params = mapOf("seed" to 1),
+        )
+        val node = ClassNode()
+        ClassReader(result.artifact.classArtifactIndex[internalName]!!.bytes).accept(node, ClassReader.SKIP_FRAMES)
+        val instructions = node.methods.orEmpty().flatMap { it.instructions?.toArray()?.asList().orEmpty() }
+        assertEquals(0, instructions.filterIsInstance<InvokeDynamicInsnNode>().size)
+        assertEquals(32, instructions.filterIsInstance<MethodInsnNode>().count { it.owner == "java/util/concurrent/ThreadPoolExecutor" && it.name == "submit" })
+    }
+
+    @Test
+    fun rotation_strategies_invoke_resolved_virtual_target() {
+        val lookup = MethodHandles.lookup()
+        val type = MethodType.methodType(Int::class.javaPrimitiveType, String::class.java)
+        val caller = lookup.lookupClass().name.replace('.', '/')
+        val binding = IndyTargetTokenEnvelope.Binding(
+            artifactDigest = ByteArray(32) { 7 },
+            callerOwner = caller,
+            indyName = "len",
+            indyMethodType = type.toMethodDescriptorString(),
+            siteIndex = 0,
+        )
+        val token = IndyTargetTokenEnvelope.seal(
+            IndyTargetTokenEnvelope.Target("java/lang/String", "length", "()I", Opcodes.H_INVOKEVIRTUAL, false),
+            binding,
+        )
+        val strategies = listOf("mutable", "guarded", "table", "thread-slot", "oneshot", "epoch", "counter")
+        for (strategy in strategies) {
+            val site = CallsiteRotationHelper.createRotatingCallSite(lookup, "len", type, token, strategy)
+            val first = site.dynamicInvoker().invokeWithArguments("abcd") as Int
+            val second = site.dynamicInvoker().invokeWithArguments("xyz") as Int
+            assertEquals(4, first, strategy)
+            assertEquals(3, second, strategy)
+        }
+    }
+
+    @Test
     fun callsite_rotation_keeps_class_loading_and_resource_boundary_calls_visible() {
         val internalName = "sample/LoaderBoundaryHost"
         val artifact = testAttachedArtifact(
@@ -94,6 +213,49 @@ class CallsiteRotationProtectionSafetyTest {
         assertEquals(1, instructions.filterIsInstance<MethodInsnNode>().count { it.owner == "java/lang/Class" && it.name == "getResourceAsStream" })
         assertEquals(1, instructions.filterIsInstance<MethodInsnNode>().count { it.owner == "java/lang/Class" && it.name == "getClassLoader" })
         assertEquals(1, instructions.filterIsInstance<MethodInsnNode>().count { it.owner == "java/lang/ClassLoader" && it.name == "findClass" })
+    }
+
+    private fun buildReflectionExecutionHost(internalName: String, count: Int): ByteArray {
+        val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", null)
+        val descriptor = "(Ljava/lang/reflect/Method;Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;"
+        repeat(count) { index ->
+            val method = cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "m$index", descriptor, null, null)
+            method.visitCode()
+            method.visitVarInsn(Opcodes.ALOAD, 0)
+            method.visitVarInsn(Opcodes.ALOAD, 1)
+            method.visitVarInsn(Opcodes.ALOAD, 2)
+            method.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/reflect/Method", "invoke", "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;", false)
+            method.visitInsn(Opcodes.ARETURN)
+            method.visitMaxs(3, 3)
+            method.visitEnd()
+        }
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    private fun buildConcurrencyBoundaryHost(internalName: String, count: Int): ByteArray {
+        val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", null)
+        val descriptor = "(Ljava/util/concurrent/ThreadPoolExecutor;Ljava/lang/Runnable;)Ljava/util/concurrent/Future;"
+        repeat(count) { index ->
+            val method = cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "m$index", descriptor, null, null)
+            method.visitCode()
+            method.visitVarInsn(Opcodes.ALOAD, 0)
+            method.visitVarInsn(Opcodes.ALOAD, 1)
+            method.visitMethodInsn(
+                Opcodes.INVOKEVIRTUAL,
+                "java/util/concurrent/ThreadPoolExecutor",
+                "submit",
+                "(Ljava/lang/Runnable;)Ljava/util/concurrent/Future;",
+                false,
+            )
+            method.visitInsn(Opcodes.ARETURN)
+            method.visitMaxs(2, 2)
+            method.visitEnd()
+        }
+        cw.visitEnd()
+        return cw.toByteArray()
     }
 
     private fun buildReflectionSurfaceHost(internalName: String): ByteArray {
@@ -123,6 +285,22 @@ class CallsiteRotationProtectionSafetyTest {
         method.visitInsn(Opcodes.ARETURN)
         method.visitMaxs(1, 1)
         method.visitEnd()
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    private fun buildManyVirtualCallsHost(internalName: String, count: Int): ByteArray {
+        val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, internalName, null, "java/lang/Object", null)
+        repeat(count) { index ->
+            val method = cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "m$index", "(Ljava/lang/String;)I", null, null)
+            method.visitCode()
+            method.visitVarInsn(Opcodes.ALOAD, 0)
+            method.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "hashCode", "()I", false)
+            method.visitInsn(Opcodes.IRETURN)
+            method.visitMaxs(1, 1)
+            method.visitEnd()
+        }
         cw.visitEnd()
         return cw.toByteArray()
     }

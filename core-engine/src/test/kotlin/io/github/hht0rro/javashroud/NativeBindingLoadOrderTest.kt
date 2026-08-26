@@ -18,8 +18,10 @@ class NativeBindingLoadOrderTest {
 
         assertTrue(method.indexOf("validateR1NativeImage(platformTarget, nativeBytes)") < method.indexOf("nativeExtractDirectories()"))
         assertTrue(method.indexOf("String bindingText = sealedNativeBindingText(locator)") < method.indexOf("nativeExtractDirectories()"))
-        assertTrue(method.indexOf("publishSealedNativeBindings(bindingText);") < method.indexOf("extractAkenR1CatalogSidecar(tempLib)"))
-        assertTrue(method.indexOf("extractAkenR1CatalogSidecar(tempLib)") < method.indexOf("System.load(tempLib.getAbsolutePath());"))
+        assertTrue(method.indexOf("publishSealedNativeBindings(bindingText);") < method.indexOf("extractedNativeMatchesLocator(tempLib, locator)"))
+        assertTrue(method.indexOf("aken:native-extract-digest-mismatch") < method.indexOf("System.load(tempLib.getAbsolutePath());"))
+        assertTrue(method.indexOf("System.load(tempLib.getAbsolutePath());") < method.indexOf("aken:native-loaded-digest-mismatch"))
+        assertTrue(method.indexOf("aken:native-loaded-digest-mismatch") < method.indexOf("initializeNativeKernel(platformTarget)"))
         assertTrue(method.indexOf("System.load(tempLib.getAbsolutePath());") < method.indexOf("initializeNativeKernel(platformTarget)"))
         assertTrue(method.indexOf("initializeNativeKernel(platformTarget)") < method.indexOf("installAkenSessionNonce()"))
         assertTrue(method.indexOf("installAkenSessionNonce()") < method.indexOf("verifyAkenNativeAbiAfterLoad()"))

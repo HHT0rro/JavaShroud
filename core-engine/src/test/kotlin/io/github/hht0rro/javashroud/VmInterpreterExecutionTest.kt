@@ -48,7 +48,7 @@ class VmInterpreterExecutionTest {
 
         val bytes = serializer.serialize()
 
-        assertEquals("VBC4", bytes.copyOfRange(0, 4).toString(Charsets.US_ASCII))
+        assertEquals("VBC5", bytes.copyOfRange(0, 4).toString(Charsets.US_ASCII))
         assertFalse(bytes.containsInt32BigEndian(0x2468_1357), "Build seed must not be stored in plaintext")
         assertEquals(32, bytes.copyOfRange(20, 52).size, "VBC4 header must carry a dialect commitment")
         assertTrue(bytes.copyOfRange(20, 52).any { it != 0.toByte() }, "VBC4 dialect commitment must not be an all-zero placeholder")
@@ -777,7 +777,7 @@ class VmInterpreterExecutionTest {
                         "callSiteForm" to "bootstrap-table",
                     ),
                     "callsite-rotation-protection" to mapOf(
-                        "rotationStrategy" to "counter",
+                        "rotationStrategy" to "mixed",
                     ),
                     "method-virtualization" to mapOf(
                         "methodSelection" to "critical-plus",

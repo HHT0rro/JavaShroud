@@ -18,7 +18,7 @@ class AkenR1WireFormatTest {
         val digest = AkenR1WireFormat.runtimeBindingDigest("binding".encodeToByteArray())
 
         assertContentEquals(
-            hex("611e402b187c76217b735b5a28eb713929647213ca597fa26bf537c41450fee4"),
+            hex("45a9b7e01030eaeb2a9abd080287f1018a9d7d06ed25faa60f325e390c3976fa"),
             digest.asBytes(),
         )
         assertEquals(digest, RuntimeBindingDigest.compute("binding".encodeToByteArray()))
@@ -36,10 +36,10 @@ class AkenR1WireFormatTest {
 
         assertContentEquals(
             hex(
-                "4a5352310100000007" +
-                    "611e402b187c76217b735b5a28eb713929647213ca597fa26bf537c41450fee4" +
+                "4a5352310200000007" +
+                    "45a9b7e01030eaeb2a9abd080287f1018a9d7d06ed25faa60f325e390c3976fa" +
                     "7061796c6f6164" +
-                    "9f96b0ef983abda70e08cd6e9138fab33d5d2baaef18e287ec24e5591b80d166",
+                    "c404e2bf95078737d5f0bec3e9a0f13523f2b4bf7fedf314721aa428e1539415",
             ),
             frame,
         )
@@ -100,6 +100,10 @@ class AkenR1WireFormatTest {
         val badVersion = original.copyOf().also { it[4] = 0 }
         assertCode(AkenR1WireException.Code.UNSUPPORTED_VERSION) {
             AkenR1WireFormat.open(binding, badVersion)
+        }
+        val retiredVersion = original.copyOf().also { it[4] = 1 }
+        assertCode(AkenR1WireException.Code.UNSUPPORTED_VERSION) {
+            AkenR1WireFormat.open(binding, retiredVersion)
         }
 
         val badMagic = original.copyOf().also { it[0] = 'X'.code.toByte() }

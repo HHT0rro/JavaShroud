@@ -40,39 +40,44 @@ class StringAkenCallsiteDiversityTest {
             }
             val method = classNode(transformed).methods.single { it.name == FIXTURE_METHOD }
             val fills = byteArrayFills(method.instructions.toArray())
-            val handles = fills.filter { it.length == HANDLE_LENGTH }
-            val proofs = fills.filter { it.length == PROOF_LENGTH }
+            val tokens = fills.filter { it.length == PACKED_TOKEN_LENGTH }
+            val tokenIndy = method.instructions.toArray()
+                .filterIsInstance<InvokeDynamicInsnNode>()
+                .filter { it.desc == "()[B" }
+            val ldcMaterialize = method.instructions.toArray()
+                .filterIsInstance<MethodInsnNode>()
+                .filter { it.name == "materializeAkenStringToken" && it.desc == "(Ljava/lang/String;)[B" }
 
-            assertEquals(LITERAL_COUNT, handles.size, "each literal must build one opaque handle")
-            assertEquals(LITERAL_COUNT, proofs.size, "each literal must build one call-site proof")
+            assertEquals(
+                LITERAL_COUNT,
+                tokens.size + tokenIndy.size + ldcMaterialize.size,
+                "each literal must emit exactly one token strategy",
+            )
+            assertTrue(tokens.isNotEmpty() && tokenIndy.isNotEmpty() && ldcMaterialize.isNotEmpty())
+            assertTrue(tokens.size < LITERAL_COUNT, "a single NEWARRAY fill must not cover every string site")
+            assertTrue(
+                fills.none { it.length == HANDLE_LENGTH },
+                "call sites must not emit a standalone 24-byte handle array",
+            )
             assertTrue(
                 setOf(PushEncoding.Bipush, PushEncoding.Sipush, PushEncoding.Ldc)
-                    .all { expected -> fills.any { it.length in setOf(HANDLE_LENGTH, PROOF_LENGTH) && it.lengthEncoding == expected } },
-                "fixed handle/proof lengths must use multiple bytecode encodings",
+                    .all { expected -> tokens.any { it.lengthEncoding == expected } },
+                "packed token lengths must use multiple bytecode encodings",
             )
             assertEquals(
                 setOf(StoreOrder.Ascending, StoreOrder.Descending),
-                handles.mapTo(linkedSetOf()) { it.storeOrder },
-                "opaque handle stores must not retain one fixed order",
+                tokens.mapTo(linkedSetOf()) { it.storeOrder },
+                "packed token stores must not retain one fixed order",
             )
-            assertEquals(
-                setOf(StoreOrder.Ascending, StoreOrder.Descending),
-                proofs.mapTo(linkedSetOf()) { it.storeOrder },
-                "call-site proof stores must not retain one fixed order",
-            )
-
-            val pageIndexInstructions = handles.map { fill ->
-                checkNotNull(fill.nextInstruction) { "missing emitted StringPage pageIndex" }
+            val packedPageIndexes = tokens.map { token ->
+                val packed = token.bytes
+                ((packed[24].toInt() and 0xFF) shl 24) or
+                    ((packed[25].toInt() and 0xFF) shl 16) or
+                    ((packed[26].toInt() and 0xFF) shl 8) or
+                    (packed[27].toInt() and 0xFF)
             }
-            val pageIndexes = pageIndexInstructions.map { instruction ->
-                checkNotNull(instruction.intConstant()) { "StringPage pageIndex is not an integer constant" }
-            }
-            assertTrue(pageIndexes.all { it in 1..32 }, "typed StringPages must emit bounded non-zero page indexes")
-            assertTrue(pageIndexes.toSet().size > 1, "StringPage callsites must not share one fixed pageIndex")
-            assertTrue(
-                pageIndexInstructions.mapTo(linkedSetOf()) { it.pushEncoding() }.size > 1,
-                "pageIndex constants must use more than one bytecode encoding",
-            )
+            assertTrue(packedPageIndexes.all { it in 1..32 }, "typed StringPages must pack bounded non-zero page indexes")
+            assertTrue(packedPageIndexes.toSet().size > 1, "packed tokens must not share one fixed pageIndex")
 
             val directCalls = method.instructions.toArray()
                 .filterIsInstance<MethodInsnNode>()
@@ -97,6 +102,11 @@ class StringAkenCallsiteDiversityTest {
                 assertEquals(STRING_HELPER_OWNER, target.owner)
                 assertEquals(STRING_TERMINAL_NAME, target.name)
                 assertEquals(STRING_TERMINAL_DESCRIPTOR, target.desc)
+            }
+            tokenIndy.forEach { callsite ->
+                assertEquals(STRING_TOKEN_BOOTSTRAP_DESCRIPTOR, callsite.bsm.desc)
+                assertTrue(callsite.bsm.name in STRING_TOKEN_BOOTSTRAP_ALIASES)
+                assertTrue(callsite.bsmArgs.single() is String)
             }
 
             val transformedText = transformed.toString(Charsets.ISO_8859_1)
@@ -131,7 +141,7 @@ class StringAkenCallsiteDiversityTest {
                     ),
                     seed = SEALING_SEED,
                     rewritesVmRuntime = false,
-                    typedOnlyRuntime = true,
+                    typedOnlyRuntime = false,
                 )
             }
 
@@ -184,7 +194,10 @@ class StringAkenCallsiteDiversityTest {
             )
             assertFalse(
                 helperNode.methods.any { methodNode ->
-                    methodNode.name == STRING_TERMINAL_NAME || methodNode.name in STRING_BOOTSTRAP_ALIASES
+                    methodNode.name == STRING_TERMINAL_NAME ||
+                        methodNode.name == "materializeAkenStringToken" ||
+                        methodNode.name in STRING_BOOTSTRAP_ALIASES ||
+                        methodNode.name in STRING_TOKEN_BOOTSTRAP_ALIASES
                 },
                 "unsealed StringPage helper method names must not survive in the relocated helper",
             )
@@ -211,19 +224,23 @@ class StringAkenCallsiteDiversityTest {
                 val lengthInstruction = checkNotNull(newArray.previousOpcode()) { "byte-array length instruction is missing" }
                 val length = checkNotNull(lengthInstruction.intConstant()) { "byte-array length is not constant" }
                 val indices = ArrayList<Int>(length)
+                val values = ByteArray(length)
                 var cursor = newArray.nextOpcode()
                 repeat(length) {
                     check(cursor?.opcode == Opcodes.DUP) { "byte-array fill is missing DUP" }
                     val indexInstruction = checkNotNull(cursor.nextOpcode()) { "byte-array index is missing" }
-                    indices += checkNotNull(indexInstruction.intConstant()) { "byte-array index is not constant" }
+                    val index = checkNotNull(indexInstruction.intConstant()) { "byte-array index is not constant" }
+                    indices += index
                     val valueInstruction = checkNotNull(indexInstruction.nextOpcode()) { "byte-array value is missing" }
-                    checkNotNull(valueInstruction.intConstant()) { "byte-array value is not constant" }
+                    val value = checkNotNull(valueInstruction.intConstant()) { "byte-array value is not constant" }
+                    values[index] = value.toByte()
                     val storeInstruction = checkNotNull(valueInstruction.nextOpcode()) { "byte-array store is missing" }
                     check(storeInstruction.opcode == Opcodes.BASTORE) { "byte-array fill does not end in BASTORE" }
                     cursor = storeInstruction.nextOpcode()
                 }
                 ByteArrayFill(
                     length = length,
+                    bytes = values,
                     lengthEncoding = lengthInstruction.pushEncoding(),
                     storeOrder = when (indices) {
                         (0 until length).toList() -> StoreOrder.Ascending
@@ -313,6 +330,7 @@ class StringAkenCallsiteDiversityTest {
 
     private data class ByteArrayFill(
         val length: Int,
+        val bytes: ByteArray,
         val lengthEncoding: PushEncoding,
         val storeOrder: StoreOrder,
         val nextInstruction: AbstractInsnNode?,
@@ -333,10 +351,15 @@ class StringAkenCallsiteDiversityTest {
         const val STRING_HELPER_OWNER = "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper"
         const val STRING_HELPER_RESOURCE = "$STRING_HELPER_OWNER.class"
         const val STRING_TERMINAL_NAME = "invokeAkenStringTerminal"
-        const val STRING_TERMINAL_DESCRIPTOR = "([BI[B)Ljava/lang/String;"
+        const val STRING_TERMINAL_DESCRIPTOR = "([B)Ljava/lang/String;"
+        const val PACKED_TOKEN_LENGTH = HANDLE_LENGTH + 4 + PROOF_LENGTH
         const val STRING_BOOTSTRAP_DESCRIPTOR =
             "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;" +
                 "Ljava/lang/invoke/MethodHandle;)Ljava/lang/invoke/CallSite;"
         val STRING_BOOTSTRAP_ALIASES = setOf("q0", "m7", "x3", "v8")
+        const val STRING_TOKEN_BOOTSTRAP_DESCRIPTOR =
+            "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;" +
+                "Ljava/lang/String;)Ljava/lang/invoke/CallSite;"
+        val STRING_TOKEN_BOOTSTRAP_ALIASES = setOf("u0", "u1", "u2", "u3")
     }
 }

@@ -12,6 +12,7 @@ import org.objectweb.asm.Opcodes
 import org.objectweb.asm.tree.ClassNode
 import org.objectweb.asm.tree.FieldInsnNode
 import org.objectweb.asm.tree.LdcInsnNode
+import org.objectweb.asm.tree.VarInsnNode
 
 class ControlFlowFlatteningSafetyTest {
     @Test
@@ -100,6 +101,22 @@ class ControlFlowFlatteningSafetyTest {
         val method = node.methods.single { it.name == "run" }
         val states = method.instructions.toArray().filterIsInstance<LdcInsnNode>().mapNotNull { it.cst as? Int }
         assertTrue(states.isNotEmpty(), "same-depth monitor GOTOs must receive edge state")
+    }
+
+    @Test
+    fun flattening_reads_dispatch_local_instead_of_dead_store() {
+        val transformed = flattenControlFlow(
+            buildGotoHost(),
+            ControlFlowConfig(density = 10, seed = 7L),
+        )
+        val node = ClassNode()
+        ClassReader(transformed).accept(node, 0)
+        val method = node.methods.single { it.name == "run" }
+        val stores = method.instructions.toArray().filterIsInstance<VarInsnNode>().filter { it.opcode == Opcodes.ISTORE }.map { it.`var` }
+        val loads = method.instructions.toArray().filterIsInstance<VarInsnNode>().filter { it.opcode == Opcodes.ILOAD }.map { it.`var` }.toSet()
+        assertTrue(stores.isNotEmpty(), "flattened GOTOs must write dispatch state")
+        assertTrue(stores.all { it in loads }, "dispatch stores must be read, stores=$stores loads=$loads")
+        assertEquals(1, loadClass(transformed, "sample.GotoHost").getMethod("run", Int::class.javaPrimitiveType).invoke(null, 20))
     }
 
     private fun buildTryCatchHost(): ByteArray {

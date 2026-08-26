@@ -49,6 +49,6 @@ class AkenNativePageLocatorResolverNativeTest {
         assertEquals("zigbuild", command[1])
         assertTrue(command.contains("--locked"))
         assertTrue(!command.contains("--offline"))
-        assertTrue(command.containsAll(listOf("--workspace", "--release", "--target", "--target-dir")))
+        assertTrue(command.containsAll(listOf("--package", "jsrt-ffi", "--lib", "--release", "--target", "--target-dir")))
     }
 }

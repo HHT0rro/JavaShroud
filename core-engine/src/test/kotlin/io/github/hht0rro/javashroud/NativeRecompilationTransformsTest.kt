@@ -8,6 +8,7 @@ import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
 import io.github.hht0rro.javashroud.transforms.protection.RustToolchainProvisioner
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -36,7 +37,7 @@ class NativeRecompilationTransformsTest {
             Path.of("build", "windows"),
         )
         assertEquals(
-            listOf("cargo", "zigbuild", "--locked", "--workspace", "--release", "--target", "x86_64-pc-windows-gnu", "--target-dir", "build/windows"),
+            listOf("cargo", "zigbuild", "--locked", "--package", "jsrt-ffi", "--lib", "--release", "--target", "x86_64-pc-windows-gnu", "--target-dir", "build/windows"),
             windows.map { it.replace('\\', '/') },
         )
 
@@ -49,6 +50,24 @@ class NativeRecompilationTransformsTest {
         assertTrue(linux.contains("--locked"))
         assertTrue(linux.contains("--target-dir"))
         assertFalse(linux.contains("--offline"))
+    }
+
+    @Test
+    fun windows_rust_flags_keep_the_current_native_exports() {
+        val flags = NativeRecompilationTransforms.rustFlagsForTest(
+            RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET,
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        )
+        assertTrue(flags.contains("-C metadata=jsr1_0123456789abcdef"))
+        for (export in listOf("JNI_OnLoad", "JNI_OnUnload", "jsrt_r1_open_frame", "jsrt_r1_runtime_binding_digest")) {
+            assertTrue(flags.contains("-C link-arg=/EXPORT:$export"))
+        }
+        assertFalse(
+            NativeRecompilationTransforms.rustFlagsForTest(
+                RustToolchainProvisioner.LINUX_RUNTIME_TARGET,
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            ).contains("/EXPORT:"),
+        )
     }
 
     @Test
@@ -170,6 +189,51 @@ class NativeRecompilationTransformsTest {
                 "libjsrt_ffi.so",
                 ByteArray(64) { 0 },
             )
+        }
+    }
+
+    @Test
+    fun recompiled_native_rejects_invalid_specialization_digest() {
+        assertFailsWith<IllegalArgumentException> {
+            NativeRecompilationTransforms.RecompiledNative("windows-x64", "jsrt_ffi.dll", byteArrayOf(1), ByteArray(0))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            NativeRecompilationTransforms.RecompiledNative("windows-x64", "jsrt_ffi.dll", byteArrayOf(1), ByteArray(32))
+        }
+        assertFailsWith<IllegalArgumentException> {
+            NativeRecompilationTransforms.RecompiledNative("windows-x64", "jsrt_ffi.dll", byteArrayOf(1), ByteArray(16) { 1 })
+        }
+    }
+
+    @Test
+    fun recompiled_native_retains_specialization_digest() {
+        val digest = ByteArray(32) { it.toByte() }
+        val native = NativeRecompilationTransforms.RecompiledNative(
+            "windows-x64",
+            "jsrt_ffi.dll",
+            byteArrayOf(1),
+            digest.copyOf(),
+        )
+        assertContentEquals(digest, native.specializationDigest)
+    }
+
+    @Test
+    fun native_specialization_digests_are_published_copied_and_wiped() {
+        val context = fixedContext()
+        val digest = ByteArray(32) { (it + 3).toByte() }
+        try {
+            context.publishNativeSpecializationDigests(mapOf("windows-x64" to digest))
+            digest.fill(0)
+            assertContentEquals(ByteArray(32) { (it + 3).toByte() }, context.copyNativeSpecializationDigest("windows-x64"))
+            assertFailsWith<IllegalStateException> {
+                context.copyNativeSpecializationDigest("linux-x64")
+            }
+            context.wipe()
+            assertFailsWith<IllegalStateException> {
+                context.copyNativeSpecializationDigest("windows-x64")
+            }
+        } finally {
+            context.wipe()
         }
     }
 

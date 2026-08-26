@@ -11,8 +11,8 @@ class Vbc4ProtocolLabelParityTest {
     fun current_kotlin_serializer_and_rust_kernel_use_identical_vbc4_magic() {
         val serializer = source("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/VmBytecodeSerializer.kt")
         val rustVm = source("src/main/rust/crates/jsrt-vm/src/lib.rs")
-        assertTrue("private const val VBC4_CURRENT_MAGIC = \"VBC4\"" in serializer)
-        assertTrue("pub const VBC4_MAGIC: [u8; 4] = *b\"VBC4\";" in rustVm)
+        assertTrue("private const val VBC4_CURRENT_MAGIC = \"VBC5\"" in serializer)
+        assertTrue("pub const VBC4_MAGIC: [u8; 4] = *b\"VBC5\";" in rustVm)
         assertTrue("pub const VBC4_AUTH_TAG_SIZE: usize = 32;" in rustVm)
         val production = serializer + "\n" + rustVm
         listOf("VBCX", "inner-crypto-public-v1").forEach { stale ->

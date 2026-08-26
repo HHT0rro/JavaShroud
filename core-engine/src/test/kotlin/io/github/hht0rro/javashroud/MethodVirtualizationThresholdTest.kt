@@ -832,6 +832,26 @@ class MethodVirtualizationThresholdTest {
     }
 
     @Test
+    fun critical_auto_preserves_sleeping_worker_methods() {
+        val artifact = artifactFor(
+            classBytes = sleepingWorkerClassBytes(),
+            internalName = "example/SleepingWorker",
+            methodSummaries = listOf(
+                MemberSummary(MemberKind.METHOD, "work", "()V", Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC),
+            ),
+        )
+
+        val result = applyMethodVirtualization(
+            artifact = artifact,
+            ruleMatches = ruleMatchesFor("example/SleepingWorker"),
+            params = mapOf("maxInstructions" to 100, "seed" to 42, "methodSelection" to "critical-auto", "strictVirtualization" to false),
+        )
+
+        val classBytes = result.artifact.classArtifactIndex.getValue("example/SleepingWorker").bytes
+        assertFalse(methodCallsVmDispatcher(classBytes, "work", "()V"), "critical-auto must leave sleeping worker callbacks on the JVM timing boundary")
+    }
+
+    @Test
     fun all_compatible_preserves_thread_pool_timing_root_after_indy_indirection() {
         val artifact = artifactFor(
             classBytes = indirectMethodCalls(realTaskLikeThreadPoolClassBytes()),
@@ -849,6 +869,13 @@ class MethodVirtualizationThresholdTest {
 
         val classBytes = result.artifact.classArtifactIndex.getValue("example/TaskLike").bytes
         assertFalse(methodCallsVmDispatcher(classBytes, "run", "()V"), "Indy-wrapped Thread.sleep/ThreadPoolExecutor roots must remain a JVM boundary")
+        val node = org.objectweb.asm.tree.ClassNode()
+        ClassReader(classBytes).accept(node, ClassReader.SKIP_FRAMES)
+        assertTrue(
+            node.methods.orEmpty().flatMap { it.instructions?.toArray()?.asList().orEmpty() }
+                .none { it is org.objectweb.asm.tree.InvokeDynamicInsnNode && it.name == "sleep" },
+            "Thread.sleep must remain a direct JVM call rather than an indy timing boundary",
+        )
     }
 
     @Test
@@ -1130,6 +1157,27 @@ class MethodVirtualizationThresholdTest {
         readAllBytes.visitMaxs(1, 1)
         readAllBytes.visitEnd()
 
+        writer.visitEnd()
+        return writer.toByteArray()
+    }
+
+    private fun sleepingWorkerClassBytes(): ByteArray {
+        val writer = ClassWriter(0)
+        writer.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "example/SleepingWorker", null, "java/lang/Object", null)
+        val init = writer.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
+        init.visitCode()
+        init.visitVarInsn(Opcodes.ALOAD, 0)
+        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+        init.visitInsn(Opcodes.RETURN)
+        init.visitMaxs(1, 1)
+        init.visitEnd()
+        val work = writer.visitMethod(Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC, "work", "()V", null, null)
+        work.visitCode()
+        work.visitLdcInsn(200L)
+        work.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Thread", "sleep", "(J)V", false)
+        work.visitInsn(Opcodes.RETURN)
+        work.visitMaxs(2, 0)
+        work.visitEnd()
         writer.visitEnd()
         return writer.toByteArray()
     }

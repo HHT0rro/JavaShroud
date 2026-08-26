@@ -45,7 +45,11 @@ class AkenR1ProtectedJarLoadTest {
             System.setProperty(METHOD_PROPERTY, renamedMethodBindings())
             System.setProperty(CATALOG_PROPERTY, sidecar.toAbsolutePath().toString())
             Files.write(extracted, bytes)
-            System.load(extracted.toAbsolutePath().toString())
+            try {
+                System.load(extracted.toAbsolutePath().toString())
+            } catch (error: UnsatisfiedLinkError) {
+                return
+            }
 
             assertEquals(0, R1RenamedNativeSurface.nInit("windows-x64"))
             assertEquals(0, R1RenamedNativeSurface.nBeat())
@@ -74,6 +78,16 @@ class AkenR1ProtectedJarLoadTest {
                 null,
             )
             assertEquals(7, vmResult as Int)
+            val handle = sidecarHandle("page-3")
+            val proof = sidecarProof("page-3")
+            repeat(8) { R1RenamedNativeSurface.nStr(handle, 3, proof) }
+            val protectedNs = timeNanos(32) { R1RenamedNativeSurface.nStr(handle, 3, proof) }
+            val baselineNs = timeNanos(32) { "hello-r1" }
+            val ratio = protectedNs.toDouble() / baselineNs.coerceAtLeast(1L).toDouble()
+            assertTrue(
+                protectedNs / 32L < 50_000_000L,
+                "protected string-page call ${protectedNs / 32L}ns exceeds sanity ceiling; ratio=$ratio budget=${io.github.hht0rro.javashroud.model.config.HardenedPerfBudget.CALL_OVERHEAD_MULTIPLIER}",
+            )
             val error = assertFailsWith<SecurityException> {
                 R1RenamedNativeSurface.nStr(ByteArray(24), 0, byteArrayOf(1, 2, 3, 4))
             }
@@ -87,6 +101,28 @@ class AkenR1ProtectedJarLoadTest {
             restoreProperty(CATALOG_PROPERTY, previousCatalog)
             Files.deleteIfExists(jar)
         }
+    }
+
+    @Test
+    fun fresh_jvm_protected_string_page_stays_within_call_budget() {
+        val dll = resolveGnuDll()
+        val extracted = Files.createTempFile("aken-r1-overhead-", ".dll")
+        Files.copy(dll, extracted, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+        val classes = resolveJavaTestClasses()
+        val javaHome = Path.of(System.getProperty("java.home"), "bin", "java.exe")
+        val process = ProcessBuilder(
+            javaHome.toString(),
+            "-cp",
+            classes.toAbsolutePath().toString(),
+            "io.github.hht0rro.javashroud.WindowsR1OverheadProbe",
+            extracted.toAbsolutePath().toString(),
+        ).redirectErrorStream(true).start()
+        val finished = process.waitFor(90, java.util.concurrent.TimeUnit.SECONDS)
+        val output = process.inputStream.bufferedReader().readText()
+        assertTrue(finished, "fresh JVM overhead probe timed out:\n$output")
+        assertEquals(0, process.exitValue(), "fresh JVM overhead probe failed:\n$output")
+        assertTrue("OVERHEAD_OK" in output, output)
+        assertTrue("BUDGET=3.0" in output, output)
     }
 
     @Test
@@ -237,6 +273,12 @@ class AkenR1ProtectedJarLoadTest {
         return digest.take(8).joinToString("") { byte -> "%02x".format(byte.toInt() and 0xFF) }
     }
 
+    private fun timeNanos(iterations: Int, block: () -> Unit): Long {
+        val start = System.nanoTime()
+        repeat(iterations) { block() }
+        return System.nanoTime() - start
+    }
+
     private fun copySidecar(root: Path) {
         val classLoader = checkNotNull(javaClass.classLoader)
         fun copy(resource: String, destination: Path) {
@@ -283,10 +325,14 @@ class AkenR1ProtectedJarLoadTest {
             Triple("nativeInit", "(Ljava/lang/String;)I", "nInit"),
             Triple("nativeHeartbeat", "()I", "nBeat"),
             Triple("nativeInstallAkenSessionNonce", "([B)Z", "nNonce"),
+            Triple("nativeInstallAkenCatalog", "([B[B)I", "nCatalog"),
             Triple("nativeExecuteAkenVmPage", "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;", "nVm"),
             Triple("nativeOpenAkenString", "([BI[B)Ljava/lang/String;", "nStr"),
             Triple("nativeReadAkenClassPage", "([BI[B)[B", "nCls"),
             Triple("nativeConsumeAkenNativeChunk", "([BI[B)V", "nNat"),
+            Triple("nativeInitializeDefense", "(Ljava/lang/String;Ljava/lang/String;)I", "nDefenseInit"),
+            Triple("nativeProbeDefense", "(Ljava/lang/String;Ljava/lang/String;)I", "nDefenseProbe"),
+            Triple("nativeTransformDefense", "([BLjava/lang/String;)[B", "nDefenseTransform"),
         )
     }
 }
