@@ -67,17 +67,17 @@ JavaShroud 的控制流保护分成两类：`control-flow-obfuscation` 改写现
 
 ## 资源封装：JSRP
 
-JSRP 是项目内部的受保护资源封装格式（magic `JSRP`，当前版本 7）。VM 字节码、Native 库、manifest、bootstrap 索引统一经 `RuntimeResourceCodec` 封装：
+JSRP 是项目内部的受保护资源封装格式（magic `JSRP`，当前版本 7）。VM 字节码、Native 库、manifest、bootstrap 索引统一经 `QpResourceCodec` 封装：
 
 - 结构为 27 字节 header + 96 字节加密 metadata + AES-CTR body + 32 字节 HMAC-SHA256 tag；metadata 与 body 的密钥、IV 由分区密钥经 HMAC 域分离派生。
 - 密钥来自构建期 CSPRNG 生成的分区密钥表（`RuntimeKeyPartitions`），按资源分区选取；header、metadata、body 任何一处改动都会让 tag 校验失败。
-- body 默认先经 zstd 压缩（`Vbc4ZstdCodec`）；metadata 记录原文与压缩后的 SHA-256，解码时逐级核对长度与哈希。
+- body 默认先经 zstd 压缩（`QpCompressionCodec`）；metadata 记录原文与压缩后的 SHA-256，解码时逐级核对长度与哈希。
 
-协议字段与解码流程见 `RuntimeResourceCodec`。
+协议字段与解码流程见 `QpResourceCodec`。
 
 ## VMBC / NBVM 执行链
 
-`method-virtualization` 把选中的 Java 方法 lowering 成 VBC4 字节码（`VmBytecodeSerializer`），封装为 JSRP 资源；原方法体替换成 dispatcher stub。运行时 stub 调 `JniMicrokernelHelper.executeVmResource(entryToken, …)` 进入 JNI 微内核，由 `js_vm_execute_resource` 对应的 Native VM 完成资源认证、解析、执行和敏感状态清理。
+`method-virtualization` 把选中的 Java 方法 lowering 成 VBC4 字节码（`QpSerializer`），封装为 JSRP 资源；原方法体替换成 dispatcher stub。运行时 stub 调 `QpBridge.executeVmResource(entryToken, …)` 进入 JNI 微内核，由 `js_vm_execute_resource` 对应的 Native VM 完成资源认证、解析、执行和敏感状态清理。
 
 ```mermaid
 flowchart LR

@@ -4,7 +4,7 @@
 
 ## Rust-only Native 运行时
 
-- 删除全部 C 语言 Native 内核源码，Native 运行时由 Rust workspace 完整接管（jsrt-vm / jsrt-crypto / jsrt-page / jsrt-ffi / jsrt-shell / jsrt-resource / jsrt-runtime 共 7 个 crate）。
+- 删除全部 C 语言 Native 内核源码，Native 运行时由 Rust workspace 完整接管（qp-vm / qp-crypto / qp-page / qp-ffi / qp-shell / qp-resource / qp-runtime 共 7 个 crate）。
 - 新增 Rust 工具链自动 provisioner，Native 一律 zigbuild 构建，CI 同步预置 Rust 工具链。
 - AKEN R1：新增打包与 wire format、artifact 目录编解码器、当前页绑定解密器与 Eval7 DEK wrap。
 - Catalog sidecar：`System.load` 前抽取认证目录到 `META-INF/jsrt/`，每页携带 handle、locator、PageKey 与 RuntimeBindingDigest。
@@ -24,7 +24,7 @@
 
 - 新增 UnifiedDefenseTransforms：os-anti-debug 与 os-anti-vm 合并为同一套 Native 状态机，支持 balanced / hardened 两档 profile 与 1–4 个分布式探针方法注入。
 - Rust FFI 真实环境检测：Linux 读 TracerPid 与 javaagent / JAVA_TOOL_OPTIONS 注入检测，Windows 调 IsDebuggerPresent；反 VM 使用 CPUID hypervisor 位 + DMI / cpuinfo 厂商串双证据判定。
-- 新增 DefenseKernelRuntimeHelper：7 态防御状态机，全部状态迁移须经认证 JNI，仅产出 32 字节短期认证 share，密钥材料用后即刻清零。
+- 新增 QpGuard：7 态防御状态机，全部状态迁移须经认证 JNI，仅产出 32 字节短期认证 share，密钥材料用后即刻清零。
 
 ## 强化管线与产物收口
 

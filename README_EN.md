@@ -67,17 +67,17 @@ The passes do not force coverage. Constructors, interfaces, abstract / native me
 
 ## Resource Envelopes: JSRP
 
-JSRP is the project's protected resource envelope format (magic `JSRP`, current version 7). VM bytecode, Native libraries, manifests, and the bootstrap index are all sealed through `RuntimeResourceCodec`:
+JSRP is the project's protected resource envelope format (magic `JSRP`, current version 7). VM bytecode, Native libraries, manifests, and the bootstrap index are all sealed through `QpResourceCodec`:
 
 - Layout: a 27-byte header + 96 bytes of encrypted metadata + an AES-CTR body + a 32-byte HMAC-SHA256 tag. Keys and IVs for metadata and body are derived from the partition key via HMAC domain separation.
 - Keys come from a build-time CSPRNG-generated partition table (`RuntimeKeyPartitions`) and are selected per resource partition; any change to header, metadata, or body fails tag verification.
-- The body is zstd-compressed by default (`Vbc4ZstdCodec`); metadata records the SHA-256 of both plaintext and compressed bytes, and decode re-checks lengths and hashes at each step.
+- The body is zstd-compressed by default (`QpCompressionCodec`); metadata records the SHA-256 of both plaintext and compressed bytes, and decode re-checks lengths and hashes at each step.
 
-Field layout and the decode flow are in `RuntimeResourceCodec`.
+Field layout and the decode flow are in `QpResourceCodec`.
 
 ## VMBC / NBVM Execution Path
 
-`method-virtualization` lowers selected Java methods into VBC4 bytecode (`VmBytecodeSerializer`) sealed as JSRP resources; the original method body is replaced by a dispatcher stub. At runtime the stub calls `JniMicrokernelHelper.executeVmResource(entryToken, …)` to enter the JNI microkernel, and the Native VM behind `js_vm_execute_resource` authenticates, parses, executes, and wipes sensitive state.
+`method-virtualization` lowers selected Java methods into VBC4 bytecode (`QpSerializer`) sealed as JSRP resources; the original method body is replaced by a dispatcher stub. At runtime the stub calls `QpBridge.executeVmResource(entryToken, …)` to enter the JNI microkernel, and the Native VM behind `js_vm_execute_resource` authenticates, parses, executes, and wipes sensitive state.
 
 ```mermaid
 flowchart LR

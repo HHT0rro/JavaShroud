@@ -64,7 +64,7 @@ jobs:
         run: ./gradlew.bat :annotations:build :core-engine:build
       - name: Verify packaged Windows runtime
         run: |
-          test -s core-engine/build/core-engine/resources/main/META-INF/jsrt/windows-x64/jsrt_ffi.dll
+          test -s core-engine/build/core-engine/resources/main/META-INF/jsrt/windows-x64/qp_ffi.dll
           ! find core-engine/build/core-engine/resources/main -type f -name '*.dylib' -print -quit | grep -q .
         shell: msys2 {0}
 
@@ -98,7 +98,7 @@ jobs:
       - name: Build Gradle modules and package Linux runtime
         run: |
           ./gradlew :annotations:build :core-engine:build -Pjavashroud.rust.platform=x86_64-unknown-linux-gnu.2.17
-          test -s core-engine/build/core-engine/resources/main/META-INF/jsrt/linux-x64/libjsrt_ffi.so
+          test -s core-engine/build/core-engine/resources/main/META-INF/jsrt/linux-x64/libqp_ffi.so
           ! find core-engine/build/core-engine/resources/main -type f -name '*.dylib' -print -quit | grep -q .
         shell: bash
 
