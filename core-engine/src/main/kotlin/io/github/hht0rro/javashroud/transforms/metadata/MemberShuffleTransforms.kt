@@ -11,7 +11,7 @@ import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.model.transforms.TransformResult
 import io.github.hht0rro.javashroud.transforms.reanalyzedClassArtifact
 import io.github.hht0rro.javashroud.transforms.unchangedTransformResult
-import io.github.hht0rro.javashroud.transforms.protection.requireVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.requireQpBuildContext
 import java.security.MessageDigest
 
 fun shuffleMembers(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, params: Map<String, Any>): TransformResult {
@@ -20,7 +20,7 @@ fun shuffleMembers(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, par
         return unchangedTransformResult(artifact)
     }
     val artifactShape = artifactShape(artifact)
-    val buildEntropy = requireVbc4BuildContext().deriveSubKey(
+    val buildEntropy = requireQpBuildContext().deriveSubKey(
         "javashroud-member-shuffle-layout-v1",
         32,
         artifactShape,

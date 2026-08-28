@@ -81,14 +81,15 @@ internal object ReleaseArtifactScan {
         findings += scanRotationStrategyDiversity(artifact)
         findings += scanCfgFixedTemplate(artifact, enabledPasses)
         findings += scanExceptionBodyClone(artifact)
-        findings += scanAkenEvaluatorDirectRecovery(artifact)
-        findings += scanVbc4FixedMaterial(artifact, nativeBytes)
+        findings += scanQpEvaluatorDirectRecovery(artifact)
+        findings += scanQpFixedMaterial(artifact, nativeBytes)
         findings += scanDebugMapProvenance(outputJarPath, artifact)
         findings += scanBlockingJdk(profile)
         findings += scanFreshCwdReproducibility(artifact)
         findings += scanPerfBudget(outputJarPath, inputJarBytes, profile)
         findings += scanDiagnostics(artifact, nativeBytes, profile)
         findings += scanNativeSecrets(nativeBytes, profile)
+        findings += scanDualNativePlatforms(artifact, enabledPasses)
         val failed = findings.any { !it.passed }
         val passed = when (profile) {
             HardenedProtectionProfile.RELEASE_HARDENED -> !failed
@@ -100,7 +101,7 @@ internal object ReleaseArtifactScan {
         return ReleaseArtifactScanReport(
             profile = profile,
             artifactDigestHex = digest.joinToString("") { b -> "%02x".format(b) },
-            protocolVersion = ProtectionFormat.CURRENT,
+            protocolVersion = ProtectionFormat.CURRENT_LABEL,
             enabledPasses = enabledPasses,
             findings = findings,
             passed = passed,
@@ -135,7 +136,7 @@ internal object ReleaseArtifactScan {
             return ReleaseArtifactScanReport(
                 profile = profile,
                 artifactDigestHex = digest.joinToString("") { b -> "%02x".format(b) },
-                protocolVersion = ProtectionFormat.CURRENT,
+                protocolVersion = ProtectionFormat.CURRENT_LABEL,
                 enabledPasses = enabledPasses,
                 findings = findings,
                 passed = passed,
@@ -217,13 +218,13 @@ internal object ReleaseArtifactScan {
     }
 
     private fun scanRuntimeBinding(artifact: BytecodeArtifact): List<ReleaseArtifactScanReport.Finding> {
-        val catalog = artifact.jarEntries.firstOrNull { it.name == "META-INF/jsrt/catalog/directory.jsr1" }
+        val catalog = artifact.jarEntries.firstOrNull { it.name.startsWith("META-INF/") && "/catalog/" in it.name && !it.name.endsWith("/") }
             ?: return listOf(
                 ReleaseArtifactScanReport.Finding("runtime-binding-nonzero", true, "no-catalog"),
                 ReleaseArtifactScanReport.Finding("runtime-binding-match", true, "no-catalog"),
             )
         return try {
-            val directory = io.github.hht0rro.javashroud.transforms.protection.aken.r1.R1ArtifactDirectory.decode(catalog.bytes)
+            val directory = io.github.hht0rro.javashroud.transforms.protection.qp.catalog.QpArtifactDirectory.decode(catalog.bytes)
             try {
                 val native = directory.runtimeBindingDigest.nativeSha256
                 val abi = directory.runtimeBindingDigest.abiDigest
@@ -353,7 +354,7 @@ internal object ReleaseArtifactScan {
         )
     }
 
-    private fun scanAkenEvaluatorDirectRecovery(artifact: BytecodeArtifact): ReleaseArtifactScanReport.Finding {
+    private fun scanQpEvaluatorDirectRecovery(artifact: BytecodeArtifact): ReleaseArtifactScanReport.Finding {
         val marker = byteArrayOf('A'.code.toByte(), 'K'.code.toByte(), 'E'.code.toByte(), '1'.code.toByte())
         var overlays = 0
         val haystacks = artifact.classArtifacts.map { it.bytes } + artifact.jarEntries.map { it.bytes }
@@ -373,7 +374,7 @@ internal object ReleaseArtifactScan {
             }
         }
         return ReleaseArtifactScanReport.Finding(
-            "aken-evaluator-direct-recovery",
+            "qp-evaluator-direct-recovery",
             overlays == 0,
             if (overlays == 0) "absent" else "dek-overlay=$overlays",
         )
@@ -637,7 +638,7 @@ internal object ReleaseArtifactScan {
                 method.instructions?.forEach { insn ->
                     val indy = insn as? InvokeDynamicInsnNode ?: return@forEach
                     val bsm = indy.bsm ?: return@forEach
-                    if (bsm.owner != "io/github/hht0rro/javashroud/transforms/protection/CallsiteRotationHelper") return@forEach
+                    if (bsm.owner != "io/github/hht0rro/javashroud/transforms/protection/qp/QpCallsiteBridge") return@forEach
                     if (bsm.name != "createRotatingCallSite") return@forEach
                     val strategy = indy.bsmArgs.orEmpty().getOrNull(1) as? String ?: return@forEach
                     strategies[strategy] = (strategies[strategy] ?: 0) + 1
@@ -670,7 +671,7 @@ internal object ReleaseArtifactScan {
                     val indy = insn as? InvokeDynamicInsnNode ?: return@forEach
                     indy.bsmArgs.orEmpty().forEach { arg ->
                         val handle = arg as? Handle ?: return@forEach
-                        if (IndyTargetTokenEnvelope.isBusinessTargetHandle(handle)) leaked++
+                        if (QpTargetTokenEnvelope.isBusinessTargetHandle(handle)) leaked++
                     }
                 }
             }
@@ -758,11 +759,16 @@ internal object ReleaseArtifactScan {
                         else -> null
                     } ?: return@forEach
                     val argCount = Type.getArgumentTypes(descriptor).size
+                    val returnsString = Type.getReturnType(descriptor).sort == Type.OBJECT &&
+                        Type.getReturnType(descriptor).internalName == "java/lang/String"
+                    if (returnsString && stack.size >= 3 && isHandlePageProofTriple(stack.takeLast(3))) {
+                        triples++
+                    }
                     val args = List(argCount) { pop() }.asReversed()
                     if (
                         insn is MethodInsnNode &&
                             insn.opcode == Opcodes.INVOKESTATIC &&
-                            insn.desc == "([BI[B)Ljava/lang/String;" &&
+                            (insn.desc == "([BI[B)Ljava/lang/String;" || insn.desc == "([B)Ljava/lang/String;") &&
                             isHandlePageProofTriple(args)
                     ) triples++
                     if (Type.getReturnType(descriptor).sort != Type.VOID) push(ScanValue.Other)
@@ -806,30 +812,30 @@ internal object ReleaseArtifactScan {
         return ReleaseArtifactScanReport.Finding("diagnostics", hit == null, hit ?: "absent")
     }
 
-    private fun scanVbc4FixedMaterial(
+    private fun scanQpFixedMaterial(
         artifact: BytecodeArtifact,
         nativeBytes: List<ByteArray>,
     ): ReleaseArtifactScanReport.Finding {
         val labels = listOf(
-            "javashroud-aken-r1-vbc4-inner-crypto-v3",
-            "javashroud-aken-r1-vbc4-inner-state-binding-v3",
-            "javashroud-aken-r1-vm-build-key-v3",
-            "javashroud-aken-r1-vm-dialect-v1",
-            "javashroud-aken-v4-vbc4-inner-crypto-v2",
-            "javashroud-aken-r1-vbc4-inner-crypto-v2",
-            "vbc4-session-integrity-v2",
-            "vbc4-aes-key",
-            "vbc4-aes-iv",
+            "javashroud-qp-qp-inner-crypto-v3",
+            "javashroud-qp-qp-inner-state-binding-v3",
+            "javashroud-qp-vm-build-key-v3",
+            "javashroud-qp-vm-dialect-v1",
+            "javashroud-qp-v4-qp-inner-crypto-v2",
+            "javashroud-qp-qp-inner-crypto-v2",
+            "qp-session-integrity-v2",
+            "qp-aes-key",
+            "qp-aes-iv",
         )
         val classHay = artifact.classArtifacts.map { it.bytes } + artifact.jarEntries.map { it.bytes }
         val labelHit = labels.firstOrNull { needle -> (classHay + nativeBytes).any { bytes -> containsAscii(bytes, needle) } }
         if (labelHit != null) {
-            return ReleaseArtifactScanReport.Finding("vbc4-fixed-material", false, labelHit)
+            return ReleaseArtifactScanReport.Finding("qp-fixed-material", false, labelHit)
         }
         val magic = byteArrayOf('V'.code.toByte(), 'B'.code.toByte(), 'C'.code.toByte(), '4'.code.toByte())
         val magicHit = classHay.any { bytes -> containsBytes(bytes, magic) }
         return ReleaseArtifactScanReport.Finding(
-            "vbc4-fixed-material",
+            "qp-fixed-material",
             !magicHit,
             if (magicHit) "VBC4" else "absent",
         )
@@ -882,10 +888,44 @@ internal object ReleaseArtifactScan {
         if (nativeBytes.isEmpty()) {
             return ReleaseArtifactScanReport.Finding("native-secrets", true, "no-native")
         }
-        val needles = listOf("native_secrets", "bindingSalt", "public-root", "javashroud-aken-v4-vbc4-inner-crypto-v2")
+        val needles = listOf("native_secrets", "bindingSalt", "public-root", "javashroud-qp-v4-qp-inner-crypto-v2")
         val hit = needles.firstOrNull { needle -> nativeBytes.any { bytes -> containsAscii(bytes, needle) } }
         val ok = hit == null || profile.allowsDiagnostics
         return ReleaseArtifactScanReport.Finding("native-secrets", ok, hit ?: "absent")
+    }
+
+    private fun scanDualNativePlatforms(
+        artifact: BytecodeArtifact,
+        enabledPasses: List<String>,
+    ): ReleaseArtifactScanReport.Finding {
+        if (enabledPasses.none { it == "jni-microkernel-loader" }) {
+            return ReleaseArtifactScanReport.Finding("native-dual-platform", true, "not-required")
+        }
+        var windows = false
+        var linux = false
+        artifact.jarEntries.forEach { entry ->
+            val name = entry.name.replace('\\', '/').lowercase()
+            if (name.contains("meta-inf/jsrt")) return@forEach
+            if (name.endsWith(".dll") && entry.bytes.size >= 2 &&
+                entry.bytes[0] == 'M'.code.toByte() && entry.bytes[1] == 'Z'.code.toByte()
+            ) {
+                windows = true
+            }
+            if (name.endsWith(".so") && entry.bytes.size >= 4 &&
+                entry.bytes[0] == 0x7F.toByte() && entry.bytes[1] == 'E'.code.toByte() &&
+                entry.bytes[2] == 'L'.code.toByte() && entry.bytes[3] == 'F'.code.toByte()
+            ) {
+                linux = true
+            }
+        }
+        val passed = windows || linux
+        val detail = when {
+            windows && linux -> "windows+linux"
+            windows -> "host-only-windows"
+            linux -> "host-only-linux"
+            else -> "windows=false linux=false"
+        }
+        return ReleaseArtifactScanReport.Finding("native-dual-platform", passed, detail)
     }
 
     private fun containsAscii(bytes: ByteArray, needle: String): Boolean {

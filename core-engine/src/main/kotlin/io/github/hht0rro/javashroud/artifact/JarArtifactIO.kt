@@ -9,6 +9,8 @@ import java.nio.file.Path
 import java.util.jar.JarEntry
 import java.util.jar.JarOutputStream
 import java.util.jar.Manifest
+import java.util.zip.CRC32
+import java.util.zip.ZipEntry
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.MethodVisitor
@@ -31,12 +33,47 @@ fun writeBytecodeArtifact(outputJarPath: Path, artifact: BytecodeArtifact) {
         artifact.jarEntries.forEach { jarEntryData: JarEntryData ->
             val updatedClassArtifact = classArtifactByEntryName[jarEntryData.name]
             val outputBytes = updatedClassArtifact?.bytes ?: jarEntryData.bytes
-            val jarEntry = JarEntry(jarEntryData.name)
-            jarOutputStream.putNextEntry(jarEntry)
-            jarOutputStream.write(outputBytes)
-            jarOutputStream.closeEntry()
+            writeJarEntry(jarOutputStream, jarEntryData.name, outputBytes)
         }
     }
+}
+
+private fun writeJarEntry(jarOutputStream: JarOutputStream, name: String, bytes: ByteArray) {
+    val jarEntry = JarEntry(name)
+    if (shouldStoreUncompressed(name, bytes)) {
+        jarEntry.method = ZipEntry.STORED
+        jarEntry.size = bytes.size.toLong()
+        jarEntry.compressedSize = bytes.size.toLong()
+        val crc = CRC32()
+        crc.update(bytes)
+        jarEntry.crc = crc.value
+    }
+    jarOutputStream.putNextEntry(jarEntry)
+    jarOutputStream.write(bytes)
+    jarOutputStream.closeEntry()
+}
+
+private fun shouldStoreUncompressed(name: String, bytes: ByteArray): Boolean {
+    val lower = name.lowercase()
+    if (lower.endsWith(".dll") || lower.endsWith(".so")) return true
+    if ("/catalog/" in lower || lower.endsWith(".index")) return true
+    if (bytes.size < 1024) return false
+    return entropyBitsPerByte(bytes) >= 7.5
+}
+
+private fun entropyBitsPerByte(bytes: ByteArray): Double {
+    val freq = IntArray(256)
+    for (value in bytes) {
+        freq[value.toInt() and 0xFF]++
+    }
+    var entropy = 0.0
+    val n = bytes.size.toDouble()
+    for (count in freq) {
+        if (count == 0) continue
+        val p = count / n
+        entropy -= p * (kotlin.math.ln(p) / kotlin.math.ln(2.0))
+    }
+    return entropy
 }
 
 private fun inferredManifestEntry(artifact: BytecodeArtifact): JarEntryData? {

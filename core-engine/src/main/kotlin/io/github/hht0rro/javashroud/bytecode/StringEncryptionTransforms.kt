@@ -26,9 +26,9 @@ import java.util.Base64
 import java.util.Random
 import java.util.Collections
 import java.util.IdentityHashMap
-import io.github.hht0rro.javashroud.transforms.protection.requireVbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHandle
-import io.github.hht0rro.javashroud.transforms.protection.aken.AkenStringPageCandidate
+import io.github.hht0rro.javashroud.transforms.protection.requireQpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.qp.QpHandle
+import io.github.hht0rro.javashroud.transforms.protection.qp.QpTextPageCandidate
 
 /**
  * Configuration for native-backed string encryption.
@@ -39,7 +39,7 @@ data class StringEncryptionConfig(
     val seed: Long? = null,
 )
 
-private const val STRING_HELPER_OWNER = "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper"
+private const val STRING_HELPER_OWNER = "io/github/hht0rro/javashroud/transforms/protection/qp/QpTextBridge"
 private const val STRING_HELPER_AKEN_DECODE_DESC = "([B)Ljava/lang/String;"
 private const val STRING_HELPER_AKEN_BSM_DESC =
     "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;" +
@@ -53,27 +53,27 @@ private val STRING_HELPER_TOKEN_BSM_NAMES = arrayOf("u0", "u1", "u2", "u3")
 private const val SHROUD_ENCRYPT_DESC = "Lio/github/hht0rro/javashroud/bytecode/ShroudEncrypt;"
 private const val AKEN_STRING_PAGE_NONCE_SIZE = 16
 
-private enum class AkenIntPushShape {
+private enum class QpIntPushShape {
     Canonical,
     Bipush,
     Sipush,
     Ldc,
 }
 
-private enum class AkenTokenEmission {
+private enum class QpTokenEmission {
     PackedArray,
     LdcPayload,
     IndyConstant,
 }
 
-private data class AkenStringCallsiteShape(
-    val handleLengthPush: AkenIntPushShape,
-    val proofLengthPush: AkenIntPushShape,
-    val pageIndexPush: AkenIntPushShape,
+private data class QpStringCallsiteShape(
+    val handleLengthPush: QpIntPushShape,
+    val proofLengthPush: QpIntPushShape,
+    val pageIndexPush: QpIntPushShape,
     val reverseStores: Boolean,
     val useInvokeDynamic: Boolean,
     val bootstrapSlot: Int,
-    val tokenEmission: AkenTokenEmission,
+    val tokenEmission: QpTokenEmission,
 )
 
 private val AKEN_STRING_PAGE_IDENTITY_DOMAIN =
@@ -111,7 +111,7 @@ fun encryptClassStrings(
 
     val random = deterministicRandom(config.seed, classNode.name)
     val candidateRandom = SecureRandom()
-    val candidates = ArrayList<AkenStringPageCandidate>()
+    val candidates = ArrayList<QpTextPageCandidate>()
     var encryptedCount = 0
 
     try {
@@ -135,9 +135,9 @@ fun encryptClassStrings(
                 var plaintext: ByteArray? = null
                 var encodedHandle: ByteArray? = null
                 var callSiteProof: ByteArray? = null
-                var candidate: AkenStringPageCandidate? = null
+                var candidate: QpTextPageCandidate? = null
                 try {
-                    logicalIdentity = deriveAkenStringPageIdentity(
+                    logicalIdentity = deriveQpStringPageIdentity(
                         classInternalName = classNode.name,
                         methodName = method.name,
                         methodDescriptor = method.desc,
@@ -145,17 +145,17 @@ fun encryptClassStrings(
                         methodLiteralOrdinal = methodLiteralOrdinal,
                         buildNonce = buildNonce,
                     )
-                    encodedHandle = deriveAkenStringPageHandle(logicalIdentity, buildNonce)
-                    val pageIndex = deriveAkenStringPageIndex(logicalIdentity, buildNonce)
-                    val logicalBindingPath = akenStringPageLogicalBindingPath(logicalIdentity, encodedHandle)
-                    callSiteProof = deriveAkenStringPageCallSiteProof(
+                    encodedHandle = deriveQpStringPageHandle(logicalIdentity, buildNonce)
+                    val pageIndex = deriveQpStringPageIndex(logicalIdentity, buildNonce)
+                    val logicalBindingPath = qpTextPageLogicalBindingPath(logicalIdentity, encodedHandle)
+                    callSiteProof = deriveQpStringPageCallSiteProof(
                         logicalIdentity = logicalIdentity,
                         encodedHandle = encodedHandle,
                         pageIndex = pageIndex,
                         logicalBindingPath = logicalBindingPath,
                     )
                     plaintext = value.toByteArray(Charsets.UTF_8)
-                    candidate = AkenStringPageCandidate.create(
+                    candidate = QpTextPageCandidate.create(
                         logicalIdentity = logicalIdentity,
                         plaintext = plaintext,
                         pageIndex = pageIndex,
@@ -164,12 +164,12 @@ fun encryptClassStrings(
                         logicalBindingPath = logicalBindingPath,
                         random = candidateRandom,
                     )
-                    val callsiteShape = selectAkenStringCallsiteShape(
+                    val callsiteShape = selectQpStringCallsiteShape(
                         logicalIdentity = logicalIdentity,
                         classLiteralOrdinal = encryptedCount,
                         methodLiteralOrdinal = methodLiteralOrdinal,
                     )
-                    val decodeCallsite = buildAkenStringPageDecodeCallsite(
+                    val decodeCallsite = buildQpStringPageDecodeCallsite(
                         encodedHandle = encodedHandle,
                         pageIndex = pageIndex,
                         callSiteProof = callSiteProof,
@@ -213,7 +213,7 @@ fun encryptClassStrings(
         val writer = computeFramesWriter()
         classNode.accept(writer)
         val transformed = writer.toByteArray()
-        requireVbc4BuildContext().registerAkenStringPageCandidates(candidates)
+        requireQpBuildContext().registerQpTextPageCandidates(candidates)
         return transformed
     } finally {
         candidates.forEach { it.wipe() }
@@ -408,13 +408,13 @@ private fun reflectionMemberNameConstantBefore(call: MethodInsnNode): LdcInsnNod
     return null
 }
 
-private fun buildAkenStringPageDecodeCallsite(
+private fun buildQpStringPageDecodeCallsite(
     encodedHandle: ByteArray,
     pageIndex: Int,
     callSiteProof: ByteArray,
-    shape: AkenStringCallsiteShape,
+    shape: QpStringCallsiteShape,
 ): InsnList = InsnList().apply {
-    addAkenStringToken(encodedHandle, pageIndex, callSiteProof, shape)
+    addQpStringToken(encodedHandle, pageIndex, callSiteProof, shape)
     if (shape.useInvokeDynamic) {
         add(
             InvokeDynamicInsnNode(
@@ -430,7 +430,7 @@ private fun buildAkenStringPageDecodeCallsite(
                 Handle(
                     Opcodes.H_INVOKESTATIC,
                     STRING_HELPER_OWNER,
-                    "invokeAkenStringTerminal",
+                    "invokeQpStringTerminal",
                     STRING_HELPER_AKEN_DECODE_DESC,
                     false,
                 ),
@@ -441,7 +441,7 @@ private fun buildAkenStringPageDecodeCallsite(
             MethodInsnNode(
                 Opcodes.INVOKESTATIC,
                 STRING_HELPER_OWNER,
-                "invokeAkenStringTerminal",
+                "invokeQpStringTerminal",
                 STRING_HELPER_AKEN_DECODE_DESC,
                 false,
             ),
@@ -449,29 +449,29 @@ private fun buildAkenStringPageDecodeCallsite(
     }
 }
 
-private fun InsnList.addAkenStringToken(
+private fun InsnList.addQpStringToken(
     encodedHandle: ByteArray,
     pageIndex: Int,
     callSiteProof: ByteArray,
-    shape: AkenStringCallsiteShape,
+    shape: QpStringCallsiteShape,
 ) {
-    val packed = packAkenStringToken(encodedHandle, pageIndex, callSiteProof)
+    val packed = packQpStringToken(encodedHandle, pageIndex, callSiteProof)
     try {
         when (shape.tokenEmission) {
-            AkenTokenEmission.PackedArray -> addByteArray(packed, shape.handleLengthPush, shape.reverseStores)
-            AkenTokenEmission.LdcPayload -> {
+            QpTokenEmission.PackedArray -> addByteArray(packed, shape.handleLengthPush, shape.reverseStores)
+            QpTokenEmission.LdcPayload -> {
                 add(LdcInsnNode(Base64.getUrlEncoder().withoutPadding().encodeToString(packed)))
                 add(
                     MethodInsnNode(
                         Opcodes.INVOKESTATIC,
                         STRING_HELPER_OWNER,
-                        "materializeAkenStringToken",
+                        "materializeQpStringToken",
                         STRING_HELPER_TOKEN_DESC,
                         false,
                     ),
                 )
             }
-            AkenTokenEmission.IndyConstant -> add(
+            QpTokenEmission.IndyConstant -> add(
                 InvokeDynamicInsnNode(
                     "t${shape.bootstrapSlot}",
                     "()[B",
@@ -493,7 +493,7 @@ private fun InsnList.addAkenStringToken(
 
 private fun InsnList.addByteArray(
     bytes: ByteArray,
-    lengthPush: AkenIntPushShape = AkenIntPushShape.Canonical,
+    lengthPush: QpIntPushShape = QpIntPushShape.Canonical,
     reverseStores: Boolean = false,
 ) {
     addInt(bytes.size, lengthPush)
@@ -507,9 +507,9 @@ private fun InsnList.addByteArray(
     }
 }
 
-private fun InsnList.addInt(value: Int, shape: AkenIntPushShape = AkenIntPushShape.Canonical) {
+private fun InsnList.addInt(value: Int, shape: QpIntPushShape = QpIntPushShape.Canonical) {
     when (shape) {
-        AkenIntPushShape.Canonical -> when (value) {
+        QpIntPushShape.Canonical -> when (value) {
             -1 -> add(InsnNode(Opcodes.ICONST_M1))
             0 -> add(InsnNode(Opcodes.ICONST_0))
             1 -> add(InsnNode(Opcodes.ICONST_1))
@@ -521,19 +521,19 @@ private fun InsnList.addInt(value: Int, shape: AkenIntPushShape = AkenIntPushSha
             in Short.MIN_VALUE..Short.MAX_VALUE -> add(IntInsnNode(Opcodes.SIPUSH, value))
             else -> add(LdcInsnNode(value))
         }
-        AkenIntPushShape.Bipush -> {
+        QpIntPushShape.Bipush -> {
             require(value in Byte.MIN_VALUE..Byte.MAX_VALUE) { "AKEN callsite BIPUSH value is out of range" }
             add(IntInsnNode(Opcodes.BIPUSH, value))
         }
-        AkenIntPushShape.Sipush -> {
+        QpIntPushShape.Sipush -> {
             require(value in Short.MIN_VALUE..Short.MAX_VALUE) { "AKEN callsite SIPUSH value is out of range" }
             add(IntInsnNode(Opcodes.SIPUSH, value))
         }
-        AkenIntPushShape.Ldc -> add(LdcInsnNode(value))
+        QpIntPushShape.Ldc -> add(LdcInsnNode(value))
     }
 }
 
-private fun packAkenStringToken(encodedHandle: ByteArray, pageIndex: Int, callSiteProof: ByteArray): ByteArray {
+private fun packQpStringToken(encodedHandle: ByteArray, pageIndex: Int, callSiteProof: ByteArray): ByteArray {
     require(encodedHandle.size == 24) { "AKEN string handle must be 24 bytes" }
     require(callSiteProof.isNotEmpty() && callSiteProof.size <= 4096) { "AKEN string proof size is invalid" }
     val packed = ByteArray(24 + 4 + callSiteProof.size)
@@ -546,11 +546,11 @@ private fun packAkenStringToken(encodedHandle: ByteArray, pageIndex: Int, callSi
     return packed
 }
 
-private fun deriveAkenStringPageIndex(
+private fun deriveQpStringPageIndex(
     logicalIdentity: ByteArray,
     buildNonce: ByteArray,
 ): Int {
-    val digest = digestAkenBinding(AKEN_STRING_PAGE_INDEX_DOMAIN, logicalIdentity, buildNonce)
+    val digest = digestQpBinding(AKEN_STRING_PAGE_INDEX_DOMAIN, logicalIdentity, buildNonce)
     return try {
         // Typed StringPages are not dispatcher page-zero bindings. Keep the
         // index bounded and non-zero while still binding it into the proof,
@@ -562,12 +562,12 @@ private fun deriveAkenStringPageIndex(
     }
 }
 
-private fun selectAkenStringCallsiteShape(
+private fun selectQpStringCallsiteShape(
     logicalIdentity: ByteArray,
     classLiteralOrdinal: Int,
     methodLiteralOrdinal: Int,
-): AkenStringCallsiteShape {
-    val digest = digestAkenBinding(
+): QpStringCallsiteShape {
+    val digest = digestQpBinding(
         AKEN_STRING_PAGE_TEMPLATE_DOMAIN,
         logicalIdentity,
         intBytes(classLiteralOrdinal),
@@ -576,13 +576,13 @@ private fun selectAkenStringCallsiteShape(
     return try {
         val first = digest[0].toInt() and 0xFF
         val second = digest[1].toInt() and 0xFF
-        fun pushShape(bits: Int): AkenIntPushShape = when (bits and 0x03) {
-            0 -> AkenIntPushShape.Canonical
-            1 -> AkenIntPushShape.Bipush
-            2 -> AkenIntPushShape.Sipush
-            else -> AkenIntPushShape.Ldc
+        fun pushShape(bits: Int): QpIntPushShape = when (bits and 0x03) {
+            0 -> QpIntPushShape.Canonical
+            1 -> QpIntPushShape.Bipush
+            2 -> QpIntPushShape.Sipush
+            else -> QpIntPushShape.Ldc
         }
-        AkenStringCallsiteShape(
+        QpStringCallsiteShape(
             handleLengthPush = pushShape(first),
             proofLengthPush = pushShape(first ushr 2),
             pageIndexPush = pushShape(first ushr 4),
@@ -591,8 +591,8 @@ private fun selectAkenStringCallsiteShape(
             // randomizes the surrounding encodings and bootstrap alias.
             useInvokeDynamic = (classLiteralOrdinal and 1) != 0,
             bootstrapSlot = (second ushr 1) and (STRING_HELPER_AKEN_BSM_NAMES.lastIndex),
-            tokenEmission = AkenTokenEmission.entries[
-                (classLiteralOrdinal + (digest[2].toInt() and 0xFF)) % AkenTokenEmission.entries.size
+            tokenEmission = QpTokenEmission.entries[
+                (classLiteralOrdinal + (digest[2].toInt() and 0xFF)) % QpTokenEmission.entries.size
             ],
         )
     } finally {
@@ -600,7 +600,7 @@ private fun selectAkenStringCallsiteShape(
     }
 }
 
-private fun deriveAkenStringPageIdentity(
+private fun deriveQpStringPageIdentity(
     classInternalName: String,
     methodName: String,
     methodDescriptor: String,
@@ -609,27 +609,27 @@ private fun deriveAkenStringPageIdentity(
     buildNonce: ByteArray,
 ): ByteArray = MessageDigest.getInstance("SHA-256").apply {
     update(AKEN_STRING_PAGE_IDENTITY_DOMAIN)
-    updateAkenString(classInternalName)
-    updateAkenString(methodName)
-    updateAkenString(methodDescriptor)
-    updateAkenInt(classLiteralOrdinal)
-    updateAkenInt(methodLiteralOrdinal)
-    updateAkenBytes(buildNonce)
+    updateQpString(classInternalName)
+    updateQpString(methodName)
+    updateQpString(methodDescriptor)
+    updateQpInt(classLiteralOrdinal)
+    updateQpInt(methodLiteralOrdinal)
+    updateQpBytes(buildNonce)
 }.digest()
 
-private fun deriveAkenStringPageHandle(
+private fun deriveQpStringPageHandle(
     logicalIdentity: ByteArray,
     buildNonce: ByteArray,
 ): ByteArray {
-    val digest = digestAkenBinding(AKEN_STRING_PAGE_HANDLE_DOMAIN, logicalIdentity, buildNonce)
+    val digest = digestQpBinding(AKEN_STRING_PAGE_HANDLE_DOMAIN, logicalIdentity, buildNonce)
     return try {
-        digest.copyOf(AkenHandle.ENCODED_HANDLE_SIZE)
+        digest.copyOf(QpHandle.ENCODED_HANDLE_SIZE)
     } finally {
         Arrays.fill(digest, 0)
     }
 }
 
-private fun deriveAkenStringPageCallSiteProof(
+private fun deriveQpStringPageCallSiteProof(
     logicalIdentity: ByteArray,
     encodedHandle: ByteArray,
     pageIndex: Int,
@@ -638,7 +638,7 @@ private fun deriveAkenStringPageCallSiteProof(
     val pageBytes = intBytes(pageIndex)
     val pathBytes = logicalBindingPath.toByteArray(Charsets.UTF_8)
     return try {
-        digestAkenBinding(
+        digestQpBinding(
             AKEN_STRING_PAGE_PROOF_DOMAIN,
             logicalIdentity,
             encodedHandle,
@@ -651,11 +651,11 @@ private fun deriveAkenStringPageCallSiteProof(
     }
 }
 
-private fun akenStringPageLogicalBindingPath(
+private fun qpTextPageLogicalBindingPath(
     logicalIdentity: ByteArray,
     encodedHandle: ByteArray,
 ): String {
-    val digest = digestAkenBinding(AKEN_STRING_PAGE_PATH_DOMAIN, logicalIdentity, encodedHandle)
+    val digest = digestQpBinding(AKEN_STRING_PAGE_PATH_DOMAIN, logicalIdentity, encodedHandle)
     return try {
         val token = Base64.getUrlEncoder().withoutPadding().encodeToString(digest)
         val root = AKEN_STRING_PAGE_PATH_ROOTS[(digest[0].toInt() and 0xFF) % AKEN_STRING_PAGE_PATH_ROOTS.size]
@@ -667,27 +667,27 @@ private fun akenStringPageLogicalBindingPath(
     }
 }
 
-private fun digestAkenBinding(domain: ByteArray, vararg values: ByteArray): ByteArray =
+private fun digestQpBinding(domain: ByteArray, vararg values: ByteArray): ByteArray =
     MessageDigest.getInstance("SHA-256").apply {
         update(domain)
-        values.forEach(::updateAkenBytes)
+        values.forEach(::updateQpBytes)
     }.digest()
 
-private fun MessageDigest.updateAkenString(value: String) {
+private fun MessageDigest.updateQpString(value: String) {
     val encoded = value.toByteArray(Charsets.UTF_8)
     try {
-        updateAkenBytes(encoded)
+        updateQpBytes(encoded)
     } finally {
         Arrays.fill(encoded, 0)
     }
 }
 
-private fun MessageDigest.updateAkenBytes(value: ByteArray) {
-    updateAkenInt(value.size)
+private fun MessageDigest.updateQpBytes(value: ByteArray) {
+    updateQpInt(value.size)
     update(value)
 }
 
-private fun MessageDigest.updateAkenInt(value: Int) {
+private fun MessageDigest.updateQpInt(value: Int) {
     update((value ushr 24).toByte())
     update((value ushr 16).toByte())
     update((value ushr 8).toByte())

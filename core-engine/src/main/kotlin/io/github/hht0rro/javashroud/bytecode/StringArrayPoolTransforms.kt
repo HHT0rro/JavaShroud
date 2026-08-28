@@ -13,8 +13,8 @@ import org.objectweb.asm.tree.TypeInsnNode
 import org.objectweb.asm.tree.InsnNode
 
 private const val STRING_ENCRYPTION_HELPER_OWNER =
-    "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper"
-private const val AKEN_STRING_PAGE_DECODE_NAME = "invokeAkenStringTerminal"
+    "io/github/hht0rro/javashroud/transforms/protection/qp/QpTextBridge"
+private const val AKEN_STRING_PAGE_DECODE_NAME = "invokeQpStringTerminal"
 private const val AKEN_STRING_PAGE_DECODE_DESC = "([B)Ljava/lang/String;"
 
 /**
@@ -39,7 +39,7 @@ fun poolClassStrings(classBytes: ByteArray): ByteArray {
         return classBytes
     }
 
-    if (containsAkenStringPageDecodeCallsite(classNode)) {
+    if (containsQpStringPageDecodeCallsite(classNode)) {
         return classBytes
     }
 
@@ -119,7 +119,7 @@ fun poolClassStrings(classBytes: ByteArray): ByteArray {
     return writer.toByteArray()
 }
 
-private fun containsAkenStringPageDecodeCallsite(classNode: ClassNode): Boolean =
+private fun containsQpStringPageDecodeCallsite(classNode: ClassNode): Boolean =
     classNode.methods.any { method ->
         val insns = method.instructions ?: return@any false
         insns.any { insn ->

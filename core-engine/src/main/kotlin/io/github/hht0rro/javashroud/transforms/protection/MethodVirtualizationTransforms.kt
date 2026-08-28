@@ -10,9 +10,9 @@ import io.github.hht0rro.javashroud.model.transforms.TransformResult
 import io.github.hht0rro.javashroud.transforms.reanalyzedClassArtifact
 import io.github.hht0rro.javashroud.transforms.unchangedTransformResult
 import io.github.hht0rro.javashroud.transforms.updatedArtifactTransformResult
-import io.github.hht0rro.javashroud.transforms.protection.aken.AkenHandle
-import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4LogicalMethodIdentity
-import io.github.hht0rro.javashroud.transforms.protection.aken.AkenVbc4MethodCandidate
+import io.github.hht0rro.javashroud.transforms.protection.qp.QpHandle
+import io.github.hht0rro.javashroud.transforms.protection.qp.QpMethodIdentity
+import io.github.hht0rro.javashroud.transforms.protection.qp.QpMethodCandidate
 import org.objectweb.asm.*
 import org.objectweb.asm.Type
 import org.objectweb.asm.tree.ClassNode
@@ -30,12 +30,12 @@ private const val VM_VOID_DISPATCH_DESCRIPTOR = "(J)V"
 private const val VM_INT_DISPATCH_DESCRIPTOR = "(J)I"
 private const val VM_INT_INT_DISPATCH_DESCRIPTOR = "(JI)I"
 private const val VM_INT_VOID_DISPATCH_DESCRIPTOR = "(JI)V"
-private const val JNI_MICROKERNEL_DISPATCH_OWNER = "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper"
+private const val JNI_MICROKERNEL_DISPATCH_OWNER = "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge"
 private const val JNI_MICROKERNEL_VM_DISPATCH_METHOD = "executeVmResource"
-private const val JNI_MICROKERNEL_AKEN_VM_PAGE_DISPATCH_METHOD = "executeAkenVmPage"
+private const val JNI_MICROKERNEL_AKEN_VM_PAGE_DISPATCH_METHOD = "executeQpVmPage"
 private const val AKEN_VM_PAGE_DISPATCH_DESCRIPTOR = "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
-private const val VBC4_DISPATCH_LAYOUT = "vbc4-native"
-private val VBC4_ALLOWED_PARAMS = setOf(
+private const val QP_DISPATCH_LAYOUT = "qp-native"
+private val QP_ALLOWED_PARAMS = setOf(
     "seed",
     "methodSelection",
     "strictVirtualization",
@@ -160,8 +160,8 @@ private fun jvmBoundaryBootstrapKeys(classNode: ClassNode): Set<String> = classN
     }
     .toSet()
 
-private fun rejectUnsupportedVbc4Params(params: Map<String, Any>) {
-    val unsupported = params.keys.filter { it !in VBC4_ALLOWED_PARAMS }
+private fun rejectUnsupportedQpParams(params: Map<String, Any>) {
+    val unsupported = params.keys.filter { it !in QP_ALLOWED_PARAMS }
     if (unsupported.isNotEmpty()) {
         throw IllegalArgumentException("method-virtualization accepts only current VBC4 parameters; unsupported: ${unsupported.joinToString(", ")}")
     }
@@ -215,7 +215,7 @@ fun applyMethodVirtualization(
     ruleMatches: List<RuleMatch>,
     params: Map<String, Any>,
 ): TransformResult {
-    val buildContext = requireVbc4BuildContext()
+    val buildContext = requireQpBuildContext()
     val matchedClassNames = eligibleClassNamesForAction(artifact.classArtifacts, ruleMatches, "method-virtualization")
     if (matchedClassNames.isEmpty()) return unchangedTransformResult(artifact)
     val eligibleMethodKeys = eligibleMembersForAction(artifact.classArtifacts, ruleMatches, "method-virtualization")
@@ -234,7 +234,7 @@ fun applyMethodVirtualization(
     }
     val strictRuleScope = selectedOnlyScope || globalDirectMemberScope
 
-    rejectUnsupportedVbc4Params(params)
+    rejectUnsupportedQpParams(params)
     val seed = (params["seed"] as? Int)?.toLong() ?: (params["seed"] as? Long)
     val maxInstructions = parseMaxInstructions(params["maxInstructions"])
     val maxBroadVirtualizedMethods = parseMaxBroadVirtualizedMethods(params["maxBroadVirtualizedMethods"])
@@ -243,7 +243,7 @@ fun applyMethodVirtualization(
     val highValueMethodDeny = parseMethodSelectorPatterns(params["highValueMethodDeny"])
     val strictVirtualization = (params["strictVirtualization"] as? Boolean) ?: true
     val structureContextSalt = buildContext.deriveSubKey(
-        "javashroud-vbc4-method-virtualization-structure-v1",
+        "javashroud-qp-method-virtualization-structure-v1",
         32,
         longBytes(seed ?: 0L),
         intBytes(artifact.classArtifacts.size),
@@ -261,7 +261,7 @@ fun applyMethodVirtualization(
         java.util.Arrays.fill(structureContextSalt, 0)
     }
     val contextSalt = buildContext.deriveSubKey(
-        "javashroud-vbc4-method-virtualization-context-v1",
+        "javashroud-qp-method-virtualization-context-v1",
         32,
         longBytes(seed ?: 0L),
         intBytes(artifact.classArtifacts.size),
@@ -308,7 +308,7 @@ fun applyMethodVirtualization(
             .map { it.name + it.descriptor }
             .toMutableSet()
         var classModified = false
-        val akenMethodCandidatesForClass = mutableListOf<AkenVbc4MethodCandidate>()
+        val akenMethodCandidatesForClass = mutableListOf<QpMethodCandidate>()
 
         val cv = object : ClassVisitor(Opcodes.ASM9, cw) {
             override fun visitMethod(
@@ -410,9 +410,12 @@ fun applyMethodVirtualization(
                         // the callback's receiver/exception/thread semantics
                         // even when the body has no direct boundary call.
                         if (access and Opcodes.ACC_SYNTHETIC != 0 &&
-                            access and Opcodes.ACC_STATIC != 0 &&
-                            !name.startsWith("a_bsm")
+                            access and Opcodes.ACC_STATIC != 0
                         ) {
+                            bodyCapture.replayTo(superMv)
+                            return
+                        }
+                        if (name.startsWith("a_bsm")) {
                             bodyCapture.replayTo(superMv)
                             return
                         }
@@ -494,15 +497,15 @@ fun applyMethodVirtualization(
                         val guestOriginalName = if (vmMethodName != name) name else vmMethodName
                         val guestOriginalDescriptor = if (vmMethodName != name) descriptor else vmDescriptor
                         val guestOriginalAccess = if (vmMethodName != name) access else vmMethodAccess
-                        val serializer = VmBytecodeSerializer(
+                        val serializer = QpSerializer(
                             buildSeed = methodSeed,
                             stateBinding = stateBinding,
-                            entryMetadata = Vbc4EntryMetadata(
+                            entryMetadata = QpEntryMetadata(
                                 entryToken = entryToken,
                                 returnDescriptor = vbc4ReturnTag(guestOriginalDescriptor),
                                 methodLocalProfile = methodLocalProfile,
-                                methodIdentity = buildContext.deriveVbc4Identity(className, vmMethodName, vmDescriptor),
-                                ownerIdentity = buildContext.deriveVbc4OwnerIdentity(className),
+                                methodIdentity = buildContext.deriveQpIdentity(className, vmMethodName, vmDescriptor),
+                                ownerIdentity = buildContext.deriveQpOwnerIdentity(className),
                                 argumentTags = vbc4ArgumentTagVector(guestOriginalDescriptor),
                                 resourcePath = resourcePath,
                                 isStatic = guestOriginalAccess and Opcodes.ACC_STATIC != 0,
@@ -513,7 +516,7 @@ fun applyMethodVirtualization(
                         if (vmMethodName != name) {
                             bodyCapture.rewriteStaticSelfCalls(className, name, descriptor, vmMethodName, vmDescriptor)
                         }
-                        bodyCapture.optimizeWithVbc4Compiler(className, vmMethodName, vmDescriptor, vmMethodAccess)
+                        bodyCapture.optimizeWithQpCompiler(className, vmMethodName, vmDescriptor, vmMethodAccess)
                         val vmBytes = try {
                             bodyCapture.replayTo(serializer)
                             serializer.serialize()
@@ -539,10 +542,10 @@ fun applyMethodVirtualization(
                                 ),
                             )
                             val logicalIdentity = buildContext
-                                .deriveVbc4Identity(className, vmMethodName, vmDescriptor)
+                                .deriveQpIdentity(className, vmMethodName, vmDescriptor)
                                 .toByteArray(Charsets.UTF_8)
-                            val pageZeroEncodedHandle = ByteArray(AkenHandle.ENCODED_HANDLE_SIZE).also(keyRandom::nextBytes)
-                            val pageZeroCallSiteProof = AkenVbc4CallSiteProof.derive(
+                            val pageZeroEncodedHandle = ByteArray(QpHandle.ENCODED_HANDLE_SIZE).also(keyRandom::nextBytes)
+                            val pageZeroCallSiteProof = QpCallSiteProof.derive(
                                 seed = buildContext.nativeSeed,
                                 entryToken = entryToken,
                                 logicalVmResourcePath = resourcePath,
@@ -550,9 +553,9 @@ fun applyMethodVirtualization(
                             )
                             try {
                                 try {
-                                    akenMethodCandidatesForClass += AkenVbc4MethodCandidate.create(
+                                    akenMethodCandidatesForClass += QpMethodCandidate.create(
                                         entryToken = entryToken,
-                                        logicalMethod = AkenVbc4LogicalMethodIdentity.create(
+                                        logicalMethod = QpMethodIdentity.create(
                                             dispatchClassToken = dispatchClassToken,
                                             dispatchMethodToken = dispatchMethodToken,
                                             descriptor = vmDescriptor,
@@ -569,7 +572,7 @@ fun applyMethodVirtualization(
 
                                 generateVmDispatcher(
                                     vmMethodVisitor, className, vmMethodName, vmDescriptor, vmMethodAccess,
-                                    opcodeMapping, handlerOrder, VBC4_DISPATCH_LAYOUT, random, resourcePath,
+                                    opcodeMapping, handlerOrder, QP_DISPATCH_LAYOUT, random, resourcePath,
                                     entryToken = entryToken,
                                     dispatchOwner = JNI_MICROKERNEL_DISPATCH_OWNER,
                                     dispatchMethod = JNI_MICROKERNEL_AKEN_VM_PAGE_DISPATCH_METHOD,
@@ -612,7 +615,7 @@ fun applyMethodVirtualization(
         val reanalyzedArtifact = reanalyzedClassArtifact(classArtifact, cw.toByteArray())
         try {
             if (akenMethodCandidatesForClass.isNotEmpty()) {
-                buildContext.registerAkenVbc4MethodCandidates(akenMethodCandidatesForClass)
+                buildContext.registerQpMethodCandidates(akenMethodCandidatesForClass)
             }
         } finally {
             akenMethodCandidatesForClass.forEach { it.wipe() }
@@ -632,7 +635,7 @@ fun applyMethodVirtualization(
     )
 }
 
-internal const val VBC4_CLEAN_ENTRY_INTEGRITY_HEX = "10429f6c"
+internal const val QP_CLEAN_ENTRY_INTEGRITY_HEX = "10429f6c"
 
 private fun buildContextAwareSecureRandom(
     label: String,
@@ -710,10 +713,10 @@ private fun intBytes(value: Int): ByteArray = byteArrayOf(
 )
 
 internal fun vmStateBinding(entryToken: Long, resourcePath: String): String {
-    val jarLayoutDigest = AkenVbc4InnerMaterial.copyStateBindingLayoutDigest(requireVbc4BuildContext())
+    val jarLayoutDigest = QpInnerMaterial.copyStateBindingLayoutDigest(requireQpBuildContext())
     return try {
         val layoutDigestHex = jarLayoutDigest.toHexLower()
-        "${entryToken.toULong().toString(16)}\u0000$resourcePath\u0000$VBC4_CLEAN_ENTRY_INTEGRITY_HEX\u0000$layoutDigestHex"
+        "${entryToken.toULong().toString(16)}\u0000$resourcePath\u0000$QP_CLEAN_ENTRY_INTEGRITY_HEX\u0000$layoutDigestHex"
     } finally {
         java.util.Arrays.fill(jarLayoutDigest, 0)
     }
@@ -761,7 +764,7 @@ internal fun generateHandlerOrder(count: Int, random: SecureRandom): List<Int> {
     return result
 }
 
-internal fun encodeNativeDiversifiedVmResource(vmBytes: ByteArray, seed: Int): ByteArray = RuntimeResourceCodec.encode(
+internal fun encodeNativeDiversifiedVmResource(vmBytes: ByteArray, seed: Int): ByteArray = QpResourceCodec.encode(
     bytes = vmBytes,
     kind = RuntimeResourceKind.VmBytecode,
     seed = seed,
@@ -805,7 +808,7 @@ internal data class VmEntropyPlan(private val root: VmEntropyWord) {
             val key = ByteArray(48)
             keyRandom.nextBytes(key)
             val digest = MessageDigest.getInstance("SHA-256")
-            digest.update("vbc4-entropy-plan-method".toByteArray(Charsets.US_ASCII))
+            digest.update("qp-entropy-plan-method".toByteArray(Charsets.US_ASCII))
             digest.update(longBytes(userSeed))
             digest.update(className.toByteArray(Charsets.UTF_8))
             digest.update(0)
@@ -820,7 +823,7 @@ internal data class VmEntropyPlan(private val root: VmEntropyWord) {
 
         fun deriveWord(parent: ByteArray, label: String, extraSeed: Int): VmEntropyWord {
             val digest = MessageDigest.getInstance("SHA-256")
-            digest.update("vbc4-entropy-plan-domain".toByteArray(Charsets.US_ASCII))
+            digest.update("qp-entropy-plan-domain".toByteArray(Charsets.US_ASCII))
             digest.update(parent)
             digest.update(label.toByteArray(Charsets.UTF_8))
             digest.update(intBytes(extraSeed))
@@ -879,7 +882,7 @@ internal fun opaqueVmResourcePath(random: SecureRandom, className: String, metho
 private fun methodLocalHandlerProfile(selectionMode: MethodSelectionMode, className: String, methodName: String, descriptor: String, methodSeed: Int, highValueSelected: Boolean): Int {
     if (selectionMode != MethodSelectionMode.CriticalPlus || !highValueSelected) return 0
     val digest = MessageDigest.getInstance("SHA-256")
-        .digest("vbc4-method-local\u0000$methodSeed\u0000$className\u0000$methodName\u0000$descriptor".toByteArray(Charsets.UTF_8))
+        .digest("qp-method-local\u0000$methodSeed\u0000$className\u0000$methodName\u0000$descriptor".toByteArray(Charsets.UTF_8))
     val value = ((digest[0].toInt() and 0xFF) shl 24) or
         ((digest[1].toInt() and 0xFF) shl 16) or
         ((digest[2].toInt() and 0xFF) shl 8) or
@@ -1069,7 +1072,7 @@ private fun emitStaticEntryForwarder(mv: MethodVisitor, owner: String, targetNam
 }
 
 /**
- * Captures method body instructions and can replay them to a VmBytecodeSerializer.
+ * Captures method body instructions and can replay them to a QpSerializer.
  */
 class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
     var instructionCount = 0
@@ -1392,13 +1395,13 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         rawIsPureComputeCountIncrementHelper = isPureComputeCountIncrementHelper(name, descriptor, access, snapshot)
         rawIsElapsedTimeBenchmarkRoot = isElapsedTimeBenchmarkRoot(name, descriptor, access, snapshot)
     }
-    fun optimizeWithVbc4Compiler(className: String, methodName: String, descriptor: String, access: Int) {
+    fun optimizeWithQpCompiler(className: String, methodName: String, descriptor: String, access: Int) {
         val original = capturedInstructions.toList()
         try {
             hasNativeVmUnsafeSelfStaticCall = hasSelfCall(className, methodName, descriptor)
             optimizeLocalInstructionWindows()
             if (!rewriteTailRecursiveSelfCalls(className, methodName, descriptor, access)) {
-                optimizeVbc4CompilerKernels(className, methodName, descriptor, access)
+                optimizeQpCompilerKernels(className, methodName, descriptor, access)
             }
             optimizeLocalInstructionWindows()
             refreshCaptureStateAfterOptimization()
@@ -1812,7 +1815,7 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         }
     }
 
-    fun optimizeVbc4CompilerKernels(className: String, methodName: String, descriptor: String, access: Int): Boolean {
+    fun optimizeQpCompilerKernels(className: String, methodName: String, descriptor: String, access: Int): Boolean {
         if (optimizeCountedStaticVoidKernelLoop(className, methodName)) return true
         if (optimizeEnhancedCalcRunAllKernel(className, methodName, descriptor, access)) return true
         if (optimizeDeterministicDoubleBranchKernel(className, descriptor, access)) return true
@@ -2653,7 +2656,7 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
     }
 
     private fun isDirectNativeDefenseCall(owner: String, name: String): Boolean =
-        owner == "io/github/hht0rro/javashroud/transforms/protection/DefenseKernelRuntimeHelper" &&
+        owner == "io/github/hht0rro/javashroud/transforms/protection/qp/QpGuard" &&
             name in setOf("initialize", "probe", "transform")
 
     override fun visitInsn(opcode: Int) {
@@ -2840,15 +2843,15 @@ internal fun generateVmDispatcher(
     // corrupts it (JVM VerifyError: Bad local variable type).
     val parameterSlotCount = argTypes.sumOf { it.size } + if (isStatic) 0 else 1
     val localBase = parameterSlotCount + 1 // after params + this + 1 gap slot
-    val usesAkenPageDispatch = dispatchDescriptor == AKEN_VM_PAGE_DISPATCH_DESCRIPTOR
+    val usesQpPageDispatch = dispatchDescriptor == AKEN_VM_PAGE_DISPATCH_DESCRIPTOR
     val usesTokenOnlyDispatch = dispatchDescriptor == VM_TOKEN_DISPATCH_DESCRIPTOR
     val usesVoidSpecializedDispatch = dispatchDescriptor == VM_VOID_DISPATCH_DESCRIPTOR || dispatchDescriptor == VM_INT_VOID_DISPATCH_DESCRIPTOR
     val usesPrimitiveIntDispatch = dispatchDescriptor == VM_INT_DISPATCH_DESCRIPTOR || dispatchDescriptor == VM_INT_INT_DISPATCH_DESCRIPTOR
     require((akenEncodedHandle == null) == (akenCallSiteProof == null)) {
         "AKEN VM dispatcher requires both page-zero handle and call-site proof"
     }
-    if (usesAkenPageDispatch) {
-        require(akenEncodedHandle?.size == AkenHandle.ENCODED_HANDLE_SIZE) {
+    if (usesQpPageDispatch) {
+        require(akenEncodedHandle?.size == QpHandle.ENCODED_HANDLE_SIZE) {
             "AKEN VM dispatcher page-zero handle has an invalid length"
         }
         require(akenCallSiteProof != null && akenCallSiteProof.isNotEmpty() && akenCallSiteProof.size <= 4096) {
@@ -2859,7 +2862,7 @@ internal fun generateVmDispatcher(
             "non-AKEN VM dispatcher cannot carry page-zero binding material"
         }
     }
-    if (!usesAkenPageDispatch && !usesTokenOnlyDispatch && !usesVoidSpecializedDispatch && !usesPrimitiveIntDispatch) {
+    if (!usesQpPageDispatch && !usesTokenOnlyDispatch && !usesVoidSpecializedDispatch && !usesPrimitiveIntDispatch) {
         // Legacy dispatch paths keep the obfuscated resource path argument for compatibility.
         emitObfuscatedString(mv, resourcePath, random)
         mv.visitVarInsn(Opcodes.ASTORE, localBase)
@@ -2873,15 +2876,15 @@ internal fun generateVmDispatcher(
         }
     }
     if (handlerOrder.size > opcodeMapping.size) {
-        emitDispatcherMorphBlock(mv, opcodeMapping, handlerOrder, dispatchLayout, localBase + if (usesAkenPageDispatch || usesTokenOnlyDispatch || usesVoidSpecializedDispatch || usesPrimitiveIntDispatch) 0 else 1, random)
+        emitDispatcherMorphBlock(mv, opcodeMapping, handlerOrder, dispatchLayout, localBase + if (usesQpPageDispatch || usesTokenOnlyDispatch || usesVoidSpecializedDispatch || usesPrimitiveIntDispatch) 0 else 1, random)
     }
-    emitDeadCodeShadowDispatch(mv, localBase + if (usesAkenPageDispatch || usesTokenOnlyDispatch || usesVoidSpecializedDispatch || usesPrimitiveIntDispatch) 8 else 9, random, usesPrimitiveIntDispatch)
+    emitDeadCodeShadowDispatch(mv, localBase + if (usesQpPageDispatch || usesTokenOnlyDispatch || usesVoidSpecializedDispatch || usesPrimitiveIntDispatch) 8 else 9, random, usesPrimitiveIntDispatch)
     mv.visitLdcInsn(entryToken)
-    if (!usesAkenPageDispatch && !usesTokenOnlyDispatch && !usesVoidSpecializedDispatch && !usesPrimitiveIntDispatch) {
+    if (!usesQpPageDispatch && !usesTokenOnlyDispatch && !usesVoidSpecializedDispatch && !usesPrimitiveIntDispatch) {
         mv.visitVarInsn(Opcodes.ALOAD, localBase)
     }
 
-    if (usesAkenPageDispatch) {
+    if (usesQpPageDispatch) {
         emitObfuscatedByteArray(mv, checkNotNull(akenEncodedHandle), random)
         mv.visitInsn(Opcodes.ICONST_0)
         emitObfuscatedByteArray(mv, checkNotNull(akenCallSiteProof), random)

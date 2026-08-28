@@ -2,10 +2,15 @@ package io.github.hht0rro.javashroud.transforms.protection.hardening
 
 /** Current protected-artifact format. Forbidden output signatures fail closed at the release gate. */
 internal object ProtectionFormat {
-    const val CURRENT = "AKEN-R2"
+    const val CURRENT: Int = 3
+    val CURRENT_LABEL: String = CURRENT.toString()
     const val DEBUG_MAP_VERSION: Int = 3
-    const val INDY_TOKEN_MAGIC = "ITK1"
     const val DEBUG_MAP_MAGIC = "JSDM"
+    const val RETIRED_FRAME_MAGIC_HEX = "4a535231"
+    const val RETIRED_DIRECTORY_MAGIC_HEX = "4a535232444952"
+    const val RETIRED_TOKEN_MAGIC_HEX = "49544b31"
+    const val RETIRED_RESOURCE_MAGIC_HEX = "4a535250"
+    const val RETIRED_VM_MAGIC_HEX = "56424335"
 
     private val FORBIDDEN_RELEASE_RESOURCE_BASENAMES: Set<String> = setOf(
         "boot.dat",
@@ -24,6 +29,10 @@ internal object ProtectionFormat {
      * never remove, relocate, or otherwise clean up a matching input entry.
      */
     fun isForbiddenReleaseResourcePath(entryName: String): Boolean {
+        val normalized = entryName.replace('\\', '/').lowercase()
+        if (normalized == "meta-inf/jsrt" || normalized.startsWith("meta-inf/jsrt/")) {
+            return true
+        }
         val basename = entryName.substringAfterLast('/')
         return basename in FORBIDDEN_RELEASE_RESOURCE_BASENAMES ||
             basename in FORBIDDEN_RELEASE_RENAME_INDEX_BASENAMES
@@ -45,6 +54,13 @@ internal object ProtectionFormat {
         "AKEN-R1/Eval7/v1",
         "JavaShroud/AKEN-R1/EvaluatorShare/v1",
         "JSR1DIR",
+        "JSR2DIR",
+        "JSR1",
         "VBC4",
+        "VBC5",
+        "ITK1",
+        "JSRP",
+        "JSITKAAD",
+        "JSITKKDF",
     )
 }

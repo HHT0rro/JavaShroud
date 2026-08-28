@@ -146,7 +146,7 @@ internal class MaxBuildSecurityPlan private constructor(
 
     /**
      * Freeze the build authority before target inventory exists. This narrow
-     * path is used by [Vbc4BuildContext] creation: it mints the production
+     * path is used by [QpBuildContext] creation: it mints the production
      * build root without pretending that the later target/method hierarchy has
      * already been collected.
      */

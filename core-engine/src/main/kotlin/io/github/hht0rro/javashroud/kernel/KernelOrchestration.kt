@@ -5,7 +5,7 @@ import io.github.hht0rro.javashroud.analysis.effectiveRuleSetForPass
 import io.github.hht0rro.javashroud.analysis.eligibleClassNamesForAction
 import io.github.hht0rro.javashroud.analysis.eligibleMembersForAction
 import io.github.hht0rro.javashroud.capabilities.buildEngineSchemaPayload
-import io.github.hht0rro.javashroud.config.rejectRemovedAkenV4Parameters
+import io.github.hht0rro.javashroud.config.rejectRemovedQpV4Parameters
 import io.github.hht0rro.javashroud.analysis.loadBytecodeArtifact
 import io.github.hht0rro.javashroud.artifact.writeBytecodeArtifact
 import io.github.hht0rro.javashroud.model.analysis.MemberKind
@@ -21,11 +21,11 @@ import io.github.hht0rro.javashroud.maintenance.RuntimeGarbageCollector
 import io.github.hht0rro.javashroud.passes.RegisteredPass
 import io.github.hht0rro.javashroud.passes.buildRegisteredPasses
 import io.github.hht0rro.javashroud.passes.requireExecutablePass
-import io.github.hht0rro.javashroud.transforms.protection.buildVbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.buildQpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.CandidateProductionBuildEvidence
-import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.currentVbc4BuildContextOrNull
+import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.currentQpBuildContextOrNull
 import io.github.hht0rro.javashroud.transforms.protection.hardening.HardenedArtifactFinalizer
 import io.github.hht0rro.javashroud.transforms.protection.hardening.ProtectionFormat
 import io.github.hht0rro.javashroud.transforms.protection.hardening.ReleaseArtifactScan
@@ -128,9 +128,9 @@ internal fun executeKernelRun(
     config: ObfuscationConfig,
     configPath: Path,
     emit: (EngineEvent) -> Unit = {},
-    vbc4BuildContextOverride: Vbc4BuildContext? = null,
+    vbc4BuildContextOverride: QpBuildContext? = null,
 ): EngineRunResult {
-    rejectRemovedAkenV4Parameters(config.passes)
+    rejectRemovedQpV4Parameters(config.passes)
     val bootstrapEvents = buildBootstrapEvents(configPath)
     bootstrapEvents.forEach(emit)
     val preparation = prepareKernelRun(config = config, artifact = loadBytecodeArtifact(config))
@@ -213,7 +213,7 @@ internal fun executeKernelRunWithFallbackOrder(
     planningResult: io.github.hht0rro.javashroud.transforms.protection.PlanningResult,
     enabledPassIds: List<String>,
     emit: (EngineEvent) -> Unit = {},
-    vbc4BuildContextOverride: Vbc4BuildContext? = null,
+    vbc4BuildContextOverride: QpBuildContext? = null,
 ): EngineRunResult {
     val passMap = registeredPasses.associateBy { it.spec.id }
     val reorderedPasses = planningResult.orderedPasses.mapNotNull { passMap[it] }
@@ -231,14 +231,14 @@ internal fun executeWithOrderedPasses(
     preparation: KernelPreparation,
     reorderedPasses: List<RegisteredPass>,
     emit: (EngineEvent) -> Unit = {},
-    vbc4BuildContextOverride: Vbc4BuildContext? = null,
+    vbc4BuildContextOverride: QpBuildContext? = null,
 ): EngineRunResult {
     val outputJarPath = resolveOutputJarPath(config)
     Files.deleteIfExists(CandidateProductionBuildEvidence.evidencePath(outputJarPath))
-    val ownsVbc4BuildContext = vbc4BuildContextOverride == null
-    val vbc4BuildContext = vbc4BuildContextOverride ?: buildVbc4BuildContext(config, preparation.artifact)
+    val ownsQpBuildContext = vbc4BuildContextOverride == null
+    val vbc4BuildContext = vbc4BuildContextOverride ?: buildQpBuildContext(config, preparation.artifact)
     return try {
-        withVbc4BuildContext(vbc4BuildContext) {
+        withQpBuildContext(vbc4BuildContext) {
             val knownBrokenPassWarnings = buildKnownBrokenPassWarnings(reorderedPasses.filter { it.spec.enabled }.map { it.spec.id })
             knownBrokenPassWarnings.forEach(emit)
             val passExecution = executeRegisteredPasses(
@@ -254,28 +254,28 @@ internal fun executeWithOrderedPasses(
                 artifact = artifactWithoutFixedGeneratedNames,
                 executedPassIds = executedPassIds,
             )
-            io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.reserveAkenVbc4PreSealRoutesIfNeeded(
+            io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.reserveQpPreSealRoutesIfNeeded(
                 artifact = artifactWithHelpers,
                 seed = vbc4BuildContext.nativeSeed,
             )
-            io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.reserveAkenStringPagePreSealRoutesIfNeeded(
+            io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.reserveQpTextRoutesIfNeeded(
                 artifact = artifactWithHelpers,
                 seed = vbc4BuildContext.nativeSeed,
             )
-            io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.reserveAkenClassPagePreSealRoutesIfNeeded(
+            io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.reserveQpClassRoutesIfNeeded(
                 artifact = artifactWithHelpers,
                 seed = vbc4BuildContext.nativeSeed,
             )
-            io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.reserveAkenNativeChunkPreSealRoutesIfNeeded(
+            io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.reserveQpNativeRoutesIfNeeded(
                 artifact = artifactWithHelpers,
                 seed = vbc4BuildContext.nativeSeed,
             )
-            val artifactWithAkenPages = io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.materializeAkenVbc4PagesForNativeCompilation(
+            val artifactWithQpPages = io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.materializeQpPagesForNativeCompilation(
                 artifact = artifactWithHelpers,
                 seed = vbc4BuildContext.nativeSeed,
             )
             val artifactWithNative = io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment.bundleNativeLibrariesIfAvailable(
-                artifact = artifactWithAkenPages,
+                artifact = artifactWithQpPages,
                 executedPassIds = executedPassIds,
                 config = config,
                 emit = emit,
@@ -292,7 +292,7 @@ internal fun executeWithOrderedPasses(
             val artifactForWrite = HardenedArtifactFinalizer.finalizeForWrite(sealedArtifact, config)
             writeBytecodeArtifact(outputJarPath, artifactForWrite)
             val artifactDigest = SignedDebugMap.sha256(outputJarPath)
-            currentVbc4BuildContextOrNull()?.signedDebugMapDraftOrNull()?.let { draft ->
+            currentQpBuildContextOrNull()?.signedDebugMapDraftOrNull()?.let { draft ->
                 if (draft.methodMappings.isNotEmpty() || draft.fieldMappings.isNotEmpty()) {
                     SignedDebugMap.write(outputJarPath, draft, artifactDigest)
                 }
@@ -319,7 +319,7 @@ internal fun executeWithOrderedPasses(
             if (config.protectionProfile.requiresReleaseScan) {
                 scanReport.requirePass()
             }
-            currentVbc4BuildContextOrNull()?.productionBuildEvidence?.writeAfterFinalJar(
+            currentQpBuildContextOrNull()?.productionBuildEvidence?.writeAfterFinalJar(
                 artifact = artifactForWrite,
                 outputJarPath = outputJarPath,
             )
@@ -335,7 +335,7 @@ internal fun executeWithOrderedPasses(
             EngineRunResult(events = emptyList())
         }
     } finally {
-        if (ownsVbc4BuildContext) vbc4BuildContext.wipe()
+        if (ownsQpBuildContext) vbc4BuildContext.wipe()
         RuntimeGarbageCollector.collect(apply = true)
     }
 }

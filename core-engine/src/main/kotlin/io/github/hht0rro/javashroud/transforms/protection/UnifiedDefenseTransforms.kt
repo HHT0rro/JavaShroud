@@ -16,9 +16,9 @@ import org.objectweb.asm.Opcodes
 import org.objectweb.asm.tree.ClassNode
 
 private const val DEFENSE_KERNEL_HELPER_OWNER =
-    "io/github/hht0rro/javashroud/transforms/protection/DefenseKernelRuntimeHelper"
+    "io/github/hht0rro/javashroud/transforms/protection/qp/QpGuard"
 private const val JNI_HELPER_OWNER =
-    "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper"
+    "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge"
 
 /**
  * Current-format native-defense injection.  Both public passes use exactly the

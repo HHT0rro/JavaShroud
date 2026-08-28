@@ -5,7 +5,8 @@ import com.fasterxml.jackson.databind.SerializationFeature
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
-import io.github.hht0rro.javashroud.transforms.protection.aken.AkenResourceKind
+import io.github.hht0rro.javashroud.transforms.protection.qp.QpResourceKind
+import io.github.hht0rro.javashroud.transforms.protection.qp.qpPageBundlePath
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
@@ -17,7 +18,7 @@ import java.util.Locale
 /**
  * Build-local evidence collector for max candidates.
  *
- * The collector lives inside [Vbc4BuildContext], so method/native observations
+ * The collector lives inside [QpBuildContext], so method/native observations
  * come from the same production run that owns the secret material. No evidence
  * value is accepted from configuration or the CLI. The final document is only
  * rendered after the output JAR has been written and every resource binding has
@@ -141,11 +142,11 @@ internal class CandidateProductionBuildEvidence private constructor(
             val resourceOffset: Int,
             val storedLength: Int,
         )
-        val finalPageZeroByToken = currentVbc4BuildContextOrNull()
-            ?.akenVbc4FinalizationLayoutOrNull()
+        val finalPageZeroByToken = currentQpBuildContextOrNull()
+            ?.qpFinalizationLayoutOrNull()
             ?.withNativeCompileInputsForBuild { inputs ->
                 val pageZeroInputs = inputs.filter { input ->
-                    input.resourceKind == AkenResourceKind.Vbc4Method && input.pageIndex == 0
+                    input.resourceKind == QpResourceKind.QpMethod && input.pageIndex == 0
                 }
                 check(pageZeroInputs.map { input -> input.entryToken }.toSet().size == pageZeroInputs.size) {
                     "final AKEN VBC4 layout contains duplicate page-zero entry tokens"
@@ -163,6 +164,7 @@ internal class CandidateProductionBuildEvidence private constructor(
             val finalPage = finalPageZeroByToken[method.entryToken]
                 ?: error("final AKEN VBC4 layout is missing method evidence token ${method.entryToken.toULong().toString(16)}")
             val finalEntry = finalResources[finalPage.resourcePath]
+                ?: finalResources[qpPageBundlePath()]
                 ?: error("final candidate is missing method evidence resource ${finalPage.resourcePath}")
             check(finalPage.resourceOffset >= 0 && finalPage.storedLength > 0) {
                 "final AKEN VBC4 method evidence route has invalid bounds for ${method.entryToken.toULong().toString(16)}"

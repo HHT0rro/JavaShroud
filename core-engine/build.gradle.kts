@@ -65,12 +65,24 @@ private fun resolveRustRuntimeTarget(value: String): RustRuntimeTarget = when (v
     )
 }
 
+// cargo-zigbuild accepts the glibc floor as part of the command target
+// (`x86_64-unknown-linux-gnu.2.17`) but emits Cargo artifacts below the base
+// Rust target directory (`x86_64-unknown-linux-gnu`). Keep the command target
+// and the on-disk output target distinct so Linux packaging consumes the
+// artifact that the just-completed build actually produced.
+private fun cargoOutputTarget(target: RustRuntimeTarget): String =
+    if (target.cargoTarget == "x86_64-unknown-linux-gnu.2.17") {
+        "x86_64-unknown-linux-gnu"
+    } else {
+        target.cargoTarget
+    }
+
 private val rustRuntimeTarget: RustRuntimeTarget = providers.gradleProperty("javashroud.rust.platform").orNull
     ?.let(::resolveRustRuntimeTarget)
     ?: resolveRustRuntimeTarget(
         hostRustRuntimePlatform(System.getProperty("os.name"), System.getProperty("os.arch")),
     )
-val rustLibraryName = providers.gradleProperty("javashroud.rust.library").orElse("jsrt_ffi").get()
+val rustLibraryName = providers.gradleProperty("javashroud.rust.library").orElse("qp_ffi").get()
 require(rustLibraryName.isNotEmpty() && rustLibraryName.all { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' || it == '_' }) {
     "javashroud.rust.library must contain only ASCII letters, digits, and underscores"
 }
@@ -81,7 +93,8 @@ val rustLibraryFileName = if (rustRuntimeTarget.platform == "windows-x64") {
 }
 val rustWorkspaceDir = layout.projectDirectory.dir("src/main/rust")
 val rustCargoManifest = rustWorkspaceDir.file("Cargo.toml")
-val rustReleaseDir = rustWorkspaceDir.dir("target/${rustRuntimeTarget.cargoTarget}/release")
+val rustOutputTarget = cargoOutputTarget(rustRuntimeTarget)
+val rustReleaseDir = rustWorkspaceDir.dir("target/$rustOutputTarget/release")
 val rustLibraryArtifact = rustReleaseDir.file(rustLibraryFileName)
 val rustNativeResourceOutput = layout.buildDirectory.dir("generated/rust-native-resources")
 

@@ -32,7 +32,7 @@ fun validateConfig(config: ObfuscationConfig, configPath: Path): ObfuscationConf
             )
         },
     )
-    rejectRemovedAkenV4Parameters(normalizedConfig.passes)
+    rejectRemovedQpV4Parameters(normalizedConfig.passes)
     rejectRetiredCurrentFormatPassIds(
         passes = normalizedConfig.passes,
         globalRules = normalizedConfig.ruleSet.rules,
@@ -94,7 +94,7 @@ fun validateConfig(config: ObfuscationConfig, configPath: Path): ObfuscationConf
     )
 }
 
-internal fun rejectRemovedAkenV4Parameters(passes: List<PassSpec>) {
+internal fun rejectRemovedQpV4Parameters(passes: List<PassSpec>) {
     if (passes.any { pass ->
             pass.id == JNI_MICROKERNEL_LOADER_ID && pass.params.containsKey(REMOVED_BOOT_KEY_DELIVERY_PARAM)
         }) {

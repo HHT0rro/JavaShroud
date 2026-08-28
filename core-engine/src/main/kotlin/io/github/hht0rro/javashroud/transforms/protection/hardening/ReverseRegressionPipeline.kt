@@ -2,7 +2,7 @@ package io.github.hht0rro.javashroud.transforms.protection.hardening
 
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.config.HardenedProtectionProfile
-import io.github.hht0rro.javashroud.transforms.protection.aken.r1.R1ArtifactDirectory
+import io.github.hht0rro.javashroud.transforms.protection.qp.catalog.QpArtifactDirectory
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
@@ -31,9 +31,9 @@ internal object ReverseRegressionPipeline {
     )
 
     private val STAGE_CHECKS: Map<String, List<String>> = mapOf(
-        "page-extraction" to listOf("aken-evaluator-direct-recovery", "runtime-binding-nonzero", "runtime-binding-match"),
-        "vm-page-regrouping" to listOf("native-secrets", "vbc4-fixed-material"),
-        "vm-parser" to listOf("aken-evaluator-direct-recovery", "native-secrets", "vbc4-fixed-material"),
+        "page-extraction" to listOf("qp-evaluator-direct-recovery", "runtime-binding-nonzero", "runtime-binding-match"),
+        "vm-page-regrouping" to listOf("native-secrets", "qp-fixed-material"),
+        "vm-parser" to listOf("qp-evaluator-direct-recovery", "native-secrets", "qp-fixed-material"),
         "string-literalization-probe" to listOf("string-key-triple", "string-static-triple"),
         "itk-token-probe" to listOf("itk-aad-used", "itk-key-lane-absent", "indy-target-opacity"),
         "exception-clone-detector" to listOf("exception-body-clone"),
@@ -142,7 +142,7 @@ internal object ReverseRegressionPipeline {
             instructionCount = counts.instructions,
             constantCount = counts.constants,
             jdk = System.getProperty("java.specification.version") ?: "unknown",
-            toolVersion = ProtectionFormat.CURRENT,
+            toolVersion = ProtectionFormat.CURRENT_LABEL,
             cwd = Path.of("").toAbsolutePath().toString(),
             envSummary = envSummary(),
             stages = stages,
@@ -181,10 +181,10 @@ internal object ReverseRegressionPipeline {
     )
 
     private fun readBinding(artifact: BytecodeArtifact): BindingView {
-        val catalog = artifact.jarEntries.firstOrNull { it.name == "META-INF/jsrt/catalog/directory.jsr1" }
+        val catalog = artifact.jarEntries.firstOrNull { it.name.startsWith("META-INF/") && "/catalog/" in it.name && !it.name.endsWith("/") }
             ?: return BindingView("absent", "absent", "absent", "absent", 0)
         return try {
-            val directory = R1ArtifactDirectory.decode(catalog.bytes)
+            val directory = QpArtifactDirectory.decode(catalog.bytes)
             try {
                 val runtime = directory.runtimeBindingDigest
                 try {

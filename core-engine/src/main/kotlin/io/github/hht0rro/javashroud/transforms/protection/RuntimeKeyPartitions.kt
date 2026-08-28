@@ -31,8 +31,8 @@ internal class RuntimeKeyPartitions private constructor(
     init {
         require(resourceKeys.isNotEmpty()) { "at least one resource partition is required" }
         require(resourceKeys.size <= MAX_RESOURCE_PARTITIONS) { "too many resource partitions" }
-        require(resourceKeys.all { it.size == VBC4_RUNTIME_RESOURCE_KEY_SIZE }) { "partition keys must be 32 bytes" }
-        require(anchorKey.size == VBC4_RUNTIME_RESOURCE_KEY_SIZE) { "anchor key must be 32 bytes" }
+        require(resourceKeys.all { it.size == QP_RUNTIME_RESOURCE_KEY_SIZE }) { "partition keys must be 32 bytes" }
+        require(anchorKey.size == QP_RUNTIME_RESOURCE_KEY_SIZE) { "anchor key must be 32 bytes" }
     }
 
     fun copyResourceKey(partitionId: Int): ByteArray {
@@ -78,8 +78,8 @@ internal class RuntimeKeyPartitions private constructor(
 
         fun generate(random: SecureRandom = SecureRandom()): RuntimeKeyPartitions {
             val count = MIN_RESOURCE_PARTITIONS + random.nextInt(MAX_RESOURCE_PARTITIONS - MIN_RESOURCE_PARTITIONS + 1)
-            val keys = Array(count) { ByteArray(VBC4_RUNTIME_RESOURCE_KEY_SIZE).also(random::nextBytes) }
-            val anchor = ByteArray(VBC4_RUNTIME_RESOURCE_KEY_SIZE).also(random::nextBytes)
+            val keys = Array(count) { ByteArray(QP_RUNTIME_RESOURCE_KEY_SIZE).also(random::nextBytes) }
+            val anchor = ByteArray(QP_RUNTIME_RESOURCE_KEY_SIZE).also(random::nextBytes)
             return RuntimeKeyPartitions(keys, anchor)
         }
     }

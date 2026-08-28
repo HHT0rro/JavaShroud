@@ -9,6 +9,14 @@ import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.model.protocol.EngineEvent
+import io.github.hht0rro.javashroud.transforms.protection.qp.RETIRED_CATALOG_INDEX
+import io.github.hht0rro.javashroud.transforms.protection.qp.RETIRED_CATALOG_PREFIX
+import io.github.hht0rro.javashroud.transforms.protection.qp.RETIRED_DIRECTORY_FILE
+import io.github.hht0rro.javashroud.transforms.protection.qp.RETIRED_RESOURCE_DIR
+import io.github.hht0rro.javashroud.transforms.protection.qp.qpCatalogIndexPath
+import io.github.hht0rro.javashroud.transforms.protection.qp.qpCatalogPrefix
+import io.github.hht0rro.javashroud.transforms.protection.qp.qpDirectoryFileName
+import io.github.hht0rro.javashroud.transforms.protection.qp.qpResourceDir
 import org.objectweb.asm.*
 
 /**
@@ -24,6 +32,11 @@ import org.objectweb.asm.*
 object EmbeddedHelperDeployment {
 
     private const val PKG = "io/github/hht0rro/javashroud/transforms/protection"
+    private val legacyBootResourcePaths = setOf(
+        "META-INF/.r/boot.dat",
+        "META-INF/.r/kek.dat",
+    )
+    private const val QP_PKG = "$PKG/qp"
     private const val HELPER_RESOURCE_ROOT = "META-INF/javashroud-helpers"
     /**
      * The AKEN v4 helper set deliberately omits legacy boot/resource decoder
@@ -31,54 +44,54 @@ object EmbeddedHelperDeployment {
      * typed current-page surface and its relocation/lambda support closure.
      */
     private val akenRuntimeHelpers = listOf(
-        "$PKG/JniMicrokernelHelper",
-        "$PKG/JniMicrokernelHelper${"$"}AkenNativeLibrary",
-        "$PKG/JniMicrokernelHelper${"$"}CatalogBundle",
-        "$PKG/JniMicrokernelHelper${"$"}TypeParseResult",
-        "$PKG/JniMicrokernelHelper${"$"}SamLambdaOptions",
-        "$PKG/JniMicrokernelHelper${"$"}SamInvocationHandler",
+        "$QP_PKG/QpBridge",
+        "$QP_PKG/QpBridge${"$"}QpNativeLibrary",
+        "$QP_PKG/QpBridge${"$"}CatalogBundle",
+        "$QP_PKG/QpBridge${"$"}TypeParseResult",
+        "$QP_PKG/QpBridge${"$"}SamLambdaOptions",
+        "$QP_PKG/QpBridge${"$"}SamInvocationHandler",
     )
     /** Entries regenerated for an AKEN production closure. */
     private val akenProductionHelperEntryNames = (
         akenRuntimeHelpers +
             listOf(
-                "$PKG/DefenseKernelRuntimeHelper",
-                "$PKG/JniMicrokernelHelper${"$"}RuntimeResourceMetadata",
-                "$PKG/JniMicrokernelHelper${"$"}SealedNativeLibrary",
+                "$QP_PKG/QpGuard",
+                "$QP_PKG/QpBridge${"$"}RuntimeResourceMetadata",
+                "$QP_PKG/QpBridge${"$"}SealedNativeLibrary",
             )
         ).mapTo(linkedSetOf()) { "$it.class" }
 
     private val passToHelpers: Map<String, List<String>> = mapOf(
-        "string-encryption" to listOf("$PKG/StringEncryptionHelper"),
-        "callsite-rotation-protection" to listOf("$PKG/CallsiteRotationHelper", "$PKG/IndyTargetBootstrap"),
-        "invoke-dynamic-indirection" to listOf("$PKG/IndyTargetBootstrap"),
-        "bootstrap-table-encryption" to listOf("$PKG/IndyTargetBootstrap"),
+        "string-encryption" to listOf("$QP_PKG/QpTextBridge"),
+        "callsite-rotation-protection" to listOf("$QP_PKG/QpCallsiteBridge", "$QP_PKG/QpBootstrap"),
+        "invoke-dynamic-indirection" to listOf("$QP_PKG/QpBootstrap"),
+        "bootstrap-table-encryption" to listOf("$QP_PKG/QpBootstrap"),
         "exception-semantic-virtualization" to listOf(
             "$PKG/ExceptionVirtualizationHelper",
             "$PKG/FlowControlException",
         ),
-        "os-anti-debug" to listOf("$PKG/DefenseKernelRuntimeHelper") + akenRuntimeHelpers,
-        "os-anti-vm" to listOf("$PKG/DefenseKernelRuntimeHelper") + akenRuntimeHelpers,
+        "os-anti-debug" to listOf("$QP_PKG/QpGuard") + akenRuntimeHelpers,
+        "os-anti-vm" to listOf("$QP_PKG/QpGuard") + akenRuntimeHelpers,
         "jni-microkernel-loader" to akenRuntimeHelpers,
         "method-virtualization" to emptyList(),
     )
     private val helperGenerators: Map<String, () -> ByteArray> by lazy {
         mapOf(
-            "$PKG/StringEncryptionHelper" to { loadClasspathHelperByName("StringEncryptionHelper") },
+            "$QP_PKG/QpTextBridge" to { loadClasspathHelperByName("QpTextBridge") },
             "$PKG/BootstrapEncryptionHelper" to { loadClasspathHelperByName("BootstrapEncryptionHelper") },
-            "$PKG/CallsiteRotationHelper" to { loadClasspathHelperByName("CallsiteRotationHelper") },
-            "$PKG/IndyTargetBootstrap" to { loadClasspathHelperByName("IndyTargetBootstrap") },
+            "$QP_PKG/QpCallsiteBridge" to { loadClasspathHelperByName("QpCallsiteBridge") },
+            "$QP_PKG/QpBootstrap" to { loadClasspathHelperByName("QpBootstrap") },
             "$PKG/ExceptionVirtualizationHelper" to ::generateExceptionVirtualizationHelper,
             "$PKG/FlowControlException" to ::generateFlowControlException,
-            "$PKG/DefenseKernelRuntimeHelper" to { loadClasspathHelperByName("DefenseKernelRuntimeHelper") },
-            "$PKG/JniMicrokernelHelper" to { loadClasspathHelperByName("JniMicrokernelHelper") },
-            "$PKG/JniMicrokernelHelper${"$"}RuntimeResourceMetadata" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}RuntimeResourceMetadata") },
-            "$PKG/JniMicrokernelHelper${"$"}SealedNativeLibrary" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}SealedNativeLibrary") },
-            "$PKG/JniMicrokernelHelper${"$"}AkenNativeLibrary" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}AkenNativeLibrary") },
-            "$PKG/JniMicrokernelHelper${"$"}CatalogBundle" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}CatalogBundle") },
-            "$PKG/JniMicrokernelHelper${"$"}TypeParseResult" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}TypeParseResult") },
-            "$PKG/JniMicrokernelHelper${"$"}SamLambdaOptions" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}SamLambdaOptions") },
-            "$PKG/JniMicrokernelHelper${"$"}SamInvocationHandler" to { loadClasspathHelperByName("JniMicrokernelHelper${"$"}SamInvocationHandler") },
+            "$QP_PKG/QpGuard" to { loadClasspathHelperByName("QpGuard") },
+            "$QP_PKG/QpBridge" to { loadClasspathHelperByName("QpBridge") },
+            "$QP_PKG/QpBridge${"$"}RuntimeResourceMetadata" to { loadClasspathHelperByName("QpBridge${"$"}RuntimeResourceMetadata") },
+            "$QP_PKG/QpBridge${"$"}SealedNativeLibrary" to { loadClasspathHelperByName("QpBridge${"$"}SealedNativeLibrary") },
+            "$QP_PKG/QpBridge${"$"}QpNativeLibrary" to { loadClasspathHelperByName("QpBridge${"$"}QpNativeLibrary") },
+            "$QP_PKG/QpBridge${"$"}CatalogBundle" to { loadClasspathHelperByName("QpBridge${"$"}CatalogBundle") },
+            "$QP_PKG/QpBridge${"$"}TypeParseResult" to { loadClasspathHelperByName("QpBridge${"$"}TypeParseResult") },
+            "$QP_PKG/QpBridge${"$"}SamLambdaOptions" to { loadClasspathHelperByName("QpBridge${"$"}SamLambdaOptions") },
+            "$QP_PKG/QpBridge${"$"}SamInvocationHandler" to { loadClasspathHelperByName("QpBridge${"$"}SamInvocationHandler") },
         )
     }
 
@@ -124,7 +137,7 @@ object EmbeddedHelperDeployment {
         }
         val retainedJarEntries = if (akenRuntimeDeployment) {
             artifact.jarEntries.filterNot { entry ->
-                entry.name in akenProductionHelperEntryNames
+                entry.name in akenProductionHelperEntryNames || entry.name in legacyBootResourcePaths
             }
         } else {
             artifact.jarEntries
@@ -181,8 +194,8 @@ object EmbeddedHelperDeployment {
         val generator = helperGenerators[helperInternalName]
             ?: throw IllegalStateException("missing generator")
         val generated = generator()
-        return if (akenRuntimeDeployment && helperInternalName == "$PKG/JniMicrokernelHelper") {
-            emitAkenOnlyJniMicrokernelHelper(generated)
+        return if (akenRuntimeDeployment && helperInternalName == "$QP_PKG/QpBridge") {
+            emitQpOnlyQpBridge(generated)
         } else {
             generated
         }
@@ -195,10 +208,10 @@ object EmbeddedHelperDeployment {
      * helper remains in the build process for old-engine tests; new output gets
      * this lean runtime implementation only.
      */
-    private fun emitAkenOnlyJniMicrokernelHelper(source: ByteArray): ByteArray {
-        val owner = "$PKG/JniMicrokernelHelper"
+    private fun emitQpOnlyQpBridge(source: ByteArray): ByteArray {
+        val owner = "$QP_PKG/QpBridge"
         val allowedNested = setOf(
-            "$owner${"$"}AkenNativeLibrary",
+            "$owner${"$"}QpNativeLibrary",
             "$owner${"$"}CatalogBundle",
             "$owner${"$"}TypeParseResult",
             "$owner${"$"}SamLambdaOptions",
@@ -256,7 +269,7 @@ object EmbeddedHelperDeployment {
         )
         val removedNames = setOf(
             // AKEN keeps only the native loader handshake (nativeInit,
-            // nativeHeartbeat, and nativeInstallAkenSessionNonce) plus the
+            // nativeHeartbeat, and nativeInstallSessionNonce) plus the
             // typed page bridge below.  All generic verification, machine-
             // fingerprint, key-taking, and legacy class/resource entrypoints
             // are compatibility-only and must not enter a production helper.
@@ -385,7 +398,7 @@ object EmbeddedHelperDeployment {
                 signature: String?,
                 value: Any?,
             ): FieldVisitor? = if (name in allowedFields) {
-                super.visitField(access, name, descriptor, signature, value)
+                super.visitField(access, name, descriptor, signature, rewriteRetiredResourceString(value))
             } else {
                 null
             }
@@ -408,12 +421,17 @@ object EmbeddedHelperDeployment {
                 exceptions: Array<String>?,
             ): MethodVisitor? {
                 if (name == "<clinit>" || dropMethod(name, descriptor) || replaceMethod(name, descriptor)) return null
-                return super.visitMethod(access, name, descriptor, signature, exceptions)
+                val mv = super.visitMethod(access, name, descriptor, signature, exceptions) ?: return null
+                return object : MethodVisitor(Opcodes.ASM9, mv) {
+                    override fun visitLdcInsn(value: Any?) {
+                        super.visitLdcInsn(rewriteRetiredResourceString(value))
+                    }
+                }
             }
 
             override fun visitEnd() {
-                emitAkenOnlyJniHelperClinit(writer, owner)
-                emitAkenOnlyJniHelperLoadMethods(writer, owner)
+                emitQpOnlyJniHelperClinit(writer, owner)
+                emitQpOnlyJniHelperLoadMethods(writer, owner)
                 super.visitEnd()
             }
         }
@@ -421,7 +439,7 @@ object EmbeddedHelperDeployment {
         return writer.toByteArray()
     }
 
-    private fun emitAkenOnlyJniHelperClinit(writer: ClassWriter, owner: String) {
+    private fun emitQpOnlyJniHelperClinit(writer: ClassWriter, owner: String) {
         val mv = writer.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null)
         mv.visitCode()
         mv.visitTypeInsn(Opcodes.NEW, "java/util/concurrent/ConcurrentHashMap")
@@ -437,7 +455,7 @@ object EmbeddedHelperDeployment {
         mv.visitEnd()
     }
 
-    private fun emitAkenOnlyJniHelperLoadMethods(writer: ClassWriter, owner: String) {
+    private fun emitQpOnlyJniHelperLoadMethods(writer: ClassWriter, owner: String) {
         writer.visitMethod(
             Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC,
             "loadKernel",
@@ -472,14 +490,14 @@ object EmbeddedHelperDeployment {
             visitVarInsn(Opcodes.ALOAD, 2)
             visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "equals", "(Ljava/lang/Object;)Z", false)
             visitFieldInsn(Opcodes.PUTSTATIC, owner, "diversifiedVmEnabled", "Z")
-            visitMethodInsn(Opcodes.INVOKESTATIC, owner, "ensureAkenNativeKernel", "()V", false)
+            visitMethodInsn(Opcodes.INVOKESTATIC, owner, "ensureQpNativeKernel", "()V", false)
             visitInsn(Opcodes.RETURN)
             visitMaxs(2, 3)
             visitEnd()
         }
     }
 
-    private fun emitAkenOnlyJniHelperIntegrityMethods(writer: ClassWriter, owner: String) {
+    private fun emitQpOnlyJniHelperIntegrityMethods(writer: ClassWriter, owner: String) {
         writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "isKernelIntegrityReady", "()Z", null, null).apply {
             visitCode()
             visitInsn(Opcodes.ICONST_1)
@@ -493,14 +511,14 @@ object EmbeddedHelperDeployment {
         }
         writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "requireHealthyKernel", "()V", null, null).apply {
             visitCode()
-            visitMethodInsn(Opcodes.INVOKESTATIC, owner, "ensureAkenNativeKernel", "()V", false)
+            visitMethodInsn(Opcodes.INVOKESTATIC, owner, "ensureQpNativeKernel", "()V", false)
             visitInsn(Opcodes.RETURN)
             visitMaxs(0, 0)
             visitEnd()
         }
     }
 
-    private fun emitAkenOnlyClassEncryptionHelperClinit(writer: ClassWriter, owner: String) {
+    private fun emitQpOnlyClassEncryptionHelperClinit(writer: ClassWriter, owner: String) {
         val mv = writer.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null)
         val tryStart = Label()
         val tryEnd = Label()
@@ -583,7 +601,7 @@ object EmbeddedHelperDeployment {
         mv.visitEnd()
     }
 
-    private fun emitAkenOnlySharedDecryptingClassLoaderLoadClass(writer: ClassWriter, owner: String) {
+    private fun emitQpOnlySharedDecryptingClassLoaderLoadClass(writer: ClassWriter, owner: String) {
         val mv = writer.visitMethod(
             Opcodes.ACC_PROTECTED or Opcodes.ACC_SYNCHRONIZED,
             "loadClass",
@@ -612,7 +630,7 @@ object EmbeddedHelperDeployment {
         mv.visitMethodInsn(
             Opcodes.INVOKESPECIAL,
             owner,
-            "defineAkenClassIfPresent",
+            "defineQpClassIfPresent",
             "(Ljava/lang/String;)Ljava/lang/Class;",
             false,
         )
@@ -667,12 +685,23 @@ object EmbeddedHelperDeployment {
     }
     // --- Native Library Bundling ---
 
-    private const val NATIVE_RESOURCE_ROOT = "META-INF/jsrt"
+    private fun rewriteRetiredResourceString(value: Any?): Any? {
+        if (value !is String) return value
+        return when (value) {
+            RETIRED_CATALOG_INDEX -> qpCatalogIndexPath()
+            RETIRED_CATALOG_PREFIX -> qpCatalogPrefix()
+            RETIRED_DIRECTORY_FILE -> qpDirectoryFileName()
+            else -> value.replace(RETIRED_RESOURCE_DIR, qpResourceDir())
+        }
+    }
+
+    private val NATIVE_RESOURCE_ROOT: String
+        get() = io.github.hht0rro.javashroud.transforms.protection.qp.qpResourceDir()
     private val REQUIRED_R1_NATIVE_ABI_EXPORTS = listOf(
         "JNI_OnLoad",
         "JNI_OnUnload",
-        "jsrt_r1_runtime_binding_digest",
-        "jsrt_r1_open_frame",
+        "qp_r1_runtime_binding_digest",
+        "qp_r1_open_frame",
     )
 
     private val REJECTED_LEGACY_NATIVE_ABI_MARKERS = listOf(
@@ -703,7 +732,7 @@ object EmbeddedHelperDeployment {
         val recompiledNatives = compileNativeLibrariesOrThrow(config, emit)
         return try {
             val retainedJarEntries = artifact.jarEntries.filterNot { entry ->
-                isNativeKernelResource(entry.name)
+                isNativeKernelResource(entry.name) || entry.name in legacyBootResourcePaths
             }
             val existingEntries = retainedJarEntries.map { it.name }.toSet()
             val newEntries = mutableListOf<JarEntryData>()
@@ -716,7 +745,7 @@ object EmbeddedHelperDeployment {
                 if (entryName in existingEntries) continue
                 if (!nativeLibraryContainsRequiredJniVmAbi(rn.bytes)) {
                     throw IllegalStateException(
-                        "AKEN-R1 Rust JNI runtime for ${rn.platform} does not contain the required jsrt_r1 ABI exports",
+                        "AKEN-R1 Rust JNI runtime for ${rn.platform} does not contain the required qp_r1 ABI exports",
                     )
                 }
                 newEntries.add(JarEntryData(name = entryName, bytes = rn.bytes))
@@ -764,6 +793,7 @@ object EmbeddedHelperDeployment {
             lowerFileName.endsWith(".so") ||
             lowerFileName.endsWith(".dylib")
         return (lowerEntryName.startsWith("${NATIVE_RESOURCE_ROOT.lowercase()}/") ||
+            lowerEntryName.startsWith("meta-inf/jsrt/") ||
             lowerEntryName.startsWith("meta-inf/js-native/")) && dynamicSuffix ||
             lowerFileName.startsWith("js_kernel_") && dynamicSuffix
     }
@@ -787,13 +817,13 @@ object EmbeddedHelperDeployment {
 
     /**
      * Compile the current Rust JNI runtime. The request has already rejected
-     * retired platforms, and NativeRecompilationTransforms owns the isolated
+     * retired platforms, and QpNativeCompilerPass owns the isolated
      * Cargo workspace and locked toolchain invocation.
      */
     private fun compileNativeLibrariesOrThrow(
         config: io.github.hht0rro.javashroud.model.config.ObfuscationConfig?,
         emit: (EngineEvent) -> Unit = {},
-    ): List<NativeRecompilationTransforms.RecompiledNative> {
+    ): List<QpNativeCompilerPass.RecompiledNative> {
         if (config == null) {
             throw IllegalStateException("jni-microkernel-loader requires an obfuscation config for AKEN-R1 Rust compilation")
         }
@@ -811,9 +841,9 @@ object EmbeddedHelperDeployment {
             ?.textValue() ?: "standard"
         val nativePackingLevel = (loaderPass.params["nativePackingLevel"] as? com.fasterxml.jackson.databind.node.TextNode)
             ?.textValue() ?: "max"
-        val request = NativeRecompilationRequest.forTargets(
+        val request = QpNativeCompilerRequest.forTargets(
             nativeProtectionLevel = nativeProtectionLevel,
-            nativePackingLevel = AkenR1PackingLevel.parse(nativePackingLevel),
+            nativePackingLevel = QpPackingLevel.parse(nativePackingLevel),
             targetPlatforms = resolveNativeCompileTargetPlatforms(targetPlatformParam),
         )
 
@@ -823,7 +853,7 @@ object EmbeddedHelperDeployment {
 
         val classLoader = this::class.java.classLoader
         try {
-            val diagnostics = NativeRecompilationTransforms.recompileWithDiagnostics(
+            val diagnostics = QpNativeCompilerPass.recompileWithDiagnostics(
                 seed = seed,
                 classLoader = classLoader,
                 request = request,
@@ -882,8 +912,8 @@ object EmbeddedHelperDeployment {
 
     internal fun requireCompleteNativeCompileTargets(
         requestedPlatforms: List<String>,
-        results: List<NativeRecompilationTransforms.RecompiledNative>,
-    ): List<NativeRecompilationTransforms.RecompiledNative> {
+        results: List<QpNativeCompilerPass.RecompiledNative>,
+    ): List<QpNativeCompilerPass.RecompiledNative> {
         val requested = requestedPlatforms.distinct()
         val resultsByPlatform = results.groupBy { it.platform }
         val missing = requested.filterNot(resultsByPlatform::containsKey)
@@ -1001,7 +1031,8 @@ object EmbeddedHelperDeployment {
 
     /** Load a pre-compiled helper .class from the classpath by simple name. */
     private fun loadClasspathHelperByName(simpleName: String): ByteArray {
-        val resourceName = "$PKG/$simpleName.class"
+        val pkg = if (simpleName.startsWith("Qp")) QP_PKG else PKG
+        val resourceName = "$pkg/$simpleName.class"
         return readHelperResource(resourceName)
             ?: throw IllegalStateException("$simpleName.class not found on classpath at /$resourceName")
     }

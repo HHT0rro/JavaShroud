@@ -123,7 +123,7 @@ internal class SignedDebugMap private constructor(
         ): SignedDebugMap {
             require(artifactSha256.size == 32) { "artifact digest must be 32 bytes" }
             val signedDraft = if (draft.issuerKeyId.isEmpty()) draft.copy(issuerKeyId = issuer.keyId) else draft
-            val payload = encodePayload(ProtectionFormat.CURRENT, artifactSha256, signedDraft)
+            val payload = encodePayload(ProtectionFormat.CURRENT_LABEL, artifactSha256, signedDraft)
             val signer = Signature.getInstance("Ed25519")
             signer.initSign(issuer.privateKey)
             signer.update(payload)
@@ -131,7 +131,7 @@ internal class SignedDebugMap private constructor(
             val rawPublic = rawEd25519PublicKey(issuer.publicKey.encoded)
             val encoded = encodeFile(payload, rawPublic, signatureBytes)
             return SignedDebugMap(
-                formatVersion = ProtectionFormat.CURRENT,
+                formatVersion = ProtectionFormat.CURRENT_LABEL,
                 artifactSha256 = artifactSha256.copyOf(),
                 methodMappings = signedDraft.methodMappings,
                 fieldMappings = signedDraft.fieldMappings,
@@ -268,7 +268,7 @@ internal class SignedDebugMap private constructor(
         private fun decodePayload(payload: ByteArray): ParsedPayload {
             val buffer = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN)
             val formatVersion = readUtf8(buffer)
-            require(formatVersion == ProtectionFormat.CURRENT) { "signed debug map format version is unsupported" }
+            require(formatVersion == ProtectionFormat.CURRENT_LABEL) { "signed debug map format version is unsupported" }
             val digest = ByteArray(32)
             buffer.get(digest)
             val methods = readMappings(buffer)

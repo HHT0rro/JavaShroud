@@ -7,7 +7,7 @@ import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.model.config.HardenedProtectionProfile
 import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
-import io.github.hht0rro.javashroud.transforms.protection.currentVbc4BuildContextOrNull
+import io.github.hht0rro.javashroud.transforms.protection.currentQpBuildContextOrNull
 import io.github.hht0rro.javashroud.transforms.rename.FIELD_RENAME_BINDINGS_RESOURCE
 import io.github.hht0rro.javashroud.transforms.rename.METHOD_RENAME_BINDINGS_RESOURCE
 import java.security.MessageDigest
@@ -15,7 +15,7 @@ import java.security.MessageDigest
 internal object HardenedArtifactFinalizer {
     fun finalizeForWrite(artifact: BytecodeArtifact, config: ObfuscationConfig): BytecodeArtifact {
         val draft = captureRenameDraft(artifact)
-        currentVbc4BuildContextOrNull()?.publishSignedDebugMapDraft(draft)
+        currentQpBuildContextOrNull()?.publishSignedDebugMapDraft(draft)
         if (config.protectionProfile == HardenedProtectionProfile.MINIMAL) return artifact
         return wrapIndyTargets(artifact)
     }
@@ -23,7 +23,7 @@ internal object HardenedArtifactFinalizer {
     /** Wrap business invokedynamic targets after natives are final and before catalog attach. */
     fun wrapIndyTargets(artifact: BytecodeArtifact): BytecodeArtifact {
         val digest = artifactDigest(artifact)
-        return IndyTargetRewriter.wrapBusinessHandles(injectIndyBootstrap(artifact), digest)
+        return QpTargetRewriter.wrapBusinessHandles(injectIndyBootstrap(artifact), digest)
     }
 
     private fun captureRenameDraft(artifact: BytecodeArtifact): SignedDebugMap.Draft {
@@ -37,15 +37,15 @@ internal object HardenedArtifactFinalizer {
         return SignedDebugMap.Draft(
             methodMappings = parse(METHOD_RENAME_BINDINGS_RESOURCE),
             fieldMappings = parse(FIELD_RENAME_BINDINGS_RESOURCE),
-            transformVersion = ProtectionFormat.CURRENT,
-            buildId = currentVbc4BuildContextOrNull()?.nativeSeed?.toString(16) ?: "build",
+            transformVersion = ProtectionFormat.CURRENT_LABEL,
+            buildId = currentQpBuildContextOrNull()?.nativeSeed?.toString(16) ?: "build",
         )
     }
 
 
     private fun artifactDigest(artifact: BytecodeArtifact): ByteArray {
         val digest = MessageDigest.getInstance("SHA-256")
-        digest.update(ProtectionFormat.CURRENT.toByteArray())
+        digest.update(ProtectionFormat.CURRENT_LABEL.toByteArray())
         artifact.classArtifacts.sortedBy { it.entryName }.forEach { classArtifact ->
             digest.update(classArtifact.entryName.toByteArray())
             digest.update(classArtifact.bytes)
@@ -54,7 +54,7 @@ internal object HardenedArtifactFinalizer {
     }
 
     private fun injectIndyBootstrap(artifact: BytecodeArtifact): BytecodeArtifact {
-        val internalName = IndyTargetRewriter.BOOTSTRAP_OWNER
+        val internalName = QpTargetRewriter.BOOTSTRAP_OWNER
         val entryName = internalName + ".class"
         val existing = artifact.classArtifacts.firstOrNull { it.summary.internalName == internalName }
         if (existing != null) return artifact

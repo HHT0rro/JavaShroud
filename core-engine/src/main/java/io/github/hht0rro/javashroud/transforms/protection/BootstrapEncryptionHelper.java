@@ -1,4 +1,5 @@
 package io.github.hht0rro.javashroud.transforms.protection;
+import io.github.hht0rro.javashroud.transforms.protection.qp.QpBridge;
 
 import java.lang.invoke.CallSite;
 import java.lang.invoke.MethodHandle;
@@ -10,7 +11,7 @@ import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
 public final class BootstrapEncryptionHelper {
-    static { JniMicrokernelHelper.loadKernel("loader", "auto", "vm-diverse"); }
+    static { QpBridge.loadKernel("loader", "auto", "vm-diverse"); }
     private BootstrapEncryptionHelper() { }
 
     public static byte[] decryptBytes(String encryptedBase64, String keyBase64) {

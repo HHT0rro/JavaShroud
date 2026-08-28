@@ -13,7 +13,7 @@ import org.objectweb.asm.tree.InsnList
 import org.objectweb.asm.tree.InvokeDynamicInsnNode
 import org.objectweb.asm.tree.LdcInsnNode
 import org.objectweb.asm.tree.MethodInsnNode
-import io.github.hht0rro.javashroud.transforms.protection.hardening.IndyTargetTokenEnvelope
+import io.github.hht0rro.javashroud.transforms.protection.hardening.QpTargetTokenEnvelope
 import java.security.SecureRandom
 
 // --- Phase 3: Runtime Defense Transforms ---
@@ -78,7 +78,7 @@ fun applyCallsiteRotationProtection(
                 if (random.nextInt(100) >= 30) continue
                 val bsm = Handle(
                     Opcodes.H_INVOKESTATIC,
-                    "io/github/hht0rro/javashroud/transforms/protection/CallsiteRotationHelper",
+                    "io/github/hht0rro/javashroud/transforms/protection/qp/QpCallsiteBridge",
                     "createRotatingCallSite",
                     "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/invoke/CallSite;",
                     false,
@@ -143,16 +143,16 @@ private fun callsiteTargetToken(
     random: SecureRandom,
 ): String {
     val zeros = ByteArray(32)
-    val binding = IndyTargetTokenEnvelope.Binding(
-        artifactDigest = currentVbc4BuildContextOrNull()?.jarLayoutDigest?.copyOf() ?: zeros,
+    val binding = QpTargetTokenEnvelope.Binding(
+        artifactDigest = currentQpBuildContextOrNull()?.jarLayoutDigest?.copyOf() ?: zeros,
         callerOwner = callerOwner,
         indyName = indyName,
         indyMethodType = indyMethodType,
         siteIndex = siteIndex,
-        protocolVersion = 3,
+        protocolVersion = 4,
     )
-    return IndyTargetTokenEnvelope.seal(
-        target = IndyTargetTokenEnvelope.Target(
+    return QpTargetTokenEnvelope.seal(
+        target = QpTargetTokenEnvelope.Target(
             owner = targetOwner,
             name = targetName,
             descriptor = targetDescriptor,
