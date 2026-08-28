@@ -9,26 +9,26 @@ class NativeRuntimeVmPreparedExecutionBenchmarkTest {
     @Test
     fun rust_r1_vm_and_shell_loader_contracts_are_bounded_authenticated_safe_and_format_strict() {
         val rustRoot = rustRoot()
-        val vmManifest = Files.readString(rustRoot.resolve("crates/jsrt-vm/Cargo.toml"))
-        val vm = Files.readString(rustRoot.resolve("crates/jsrt-vm/src/lib.rs"))
-        val zstd = Files.readString(rustRoot.resolve("crates/jsrt-vm/src/zstd.rs"))
-        val executor = Files.readString(rustRoot.resolve("crates/jsrt-vm/src/executor.rs"))
-        val loaderManifest = Files.readString(rustRoot.resolve("crates/jsrt-shell/Cargo.toml"))
-        val loader = Files.readString(rustRoot.resolve("crates/jsrt-shell/src/lib.rs")) +
-            Files.readString(rustRoot.resolve("crates/jsrt-shell/src/loader.rs"))
-        val pe = Files.readString(rustRoot.resolve("crates/jsrt-shell/src/pe.rs"))
-        val elf = Files.readString(rustRoot.resolve("crates/jsrt-shell/src/elf.rs"))
-        val runtimeManifest = Files.readString(rustRoot.resolve("crates/jsrt-runtime/Cargo.toml"))
-        val runtime = Files.readString(rustRoot.resolve("crates/jsrt-runtime/src/lib.rs"))
-        val runtimeShell = Files.readString(rustRoot.resolve("crates/jsrt-runtime/src/shell.rs"))
+        val vmManifest = Files.readString(rustRoot.resolve("crates/qp-vm/Cargo.toml"))
+        val vm = Files.readString(rustRoot.resolve("crates/qp-vm/src/lib.rs"))
+        val zstd = Files.readString(rustRoot.resolve("crates/qp-vm/src/zstd.rs"))
+        val executor = Files.readString(rustRoot.resolve("crates/qp-vm/src/executor.rs"))
+        val loaderManifest = Files.readString(rustRoot.resolve("crates/qp-shell/Cargo.toml"))
+        val loader = Files.readString(rustRoot.resolve("crates/qp-shell/src/lib.rs")) +
+            Files.readString(rustRoot.resolve("crates/qp-shell/src/loader.rs"))
+        val pe = Files.readString(rustRoot.resolve("crates/qp-shell/src/pe.rs"))
+        val elf = Files.readString(rustRoot.resolve("crates/qp-shell/src/elf.rs"))
+        val runtimeManifest = Files.readString(rustRoot.resolve("crates/qp-runtime/Cargo.toml"))
+        val runtime = Files.readString(rustRoot.resolve("crates/qp-runtime/src/lib.rs"))
+        val runtimeShell = Files.readString(rustRoot.resolve("crates/qp-runtime/src/shell.rs"))
 
-        assertContains(vmManifest, "name = \"jsrt-vm\"", "jsrt-vm manifest")
-        assertContains(vmManifest, "unsafe_code = \"forbid\"", "jsrt-vm manifest")
-        assertContains(loaderManifest, "name = \"jsrt-shell\"", "jsrt-shell manifest")
-        assertContains(runtimeManifest, "name = \"jsrt-runtime\"", "jsrt-runtime manifest")
-        assertNoUnsafe(vm, "jsrt-vm")
-        assertNoUnsafe(loader, "jsrt-shell loader")
-        assertNoUnsafe(runtime, "jsrt-runtime")
+        assertContains(vmManifest, "name = \"qp-vm\"", "qp-vm manifest")
+        assertContains(vmManifest, "unsafe_code = \"forbid\"", "qp-vm manifest")
+        assertContains(loaderManifest, "name = \"qp-shell\"", "qp-shell manifest")
+        assertContains(runtimeManifest, "name = \"qp-runtime\"", "qp-runtime manifest")
+        assertNoUnsafe(vm, "qp-vm")
+        assertNoUnsafe(loader, "qp-shell loader")
+        assertNoUnsafe(runtime, "qp-runtime")
 
         for (testName in listOf(
             "raw_and_rle_frames_are_bounded",
@@ -58,10 +58,10 @@ class NativeRuntimeVmPreparedExecutionBenchmarkTest {
         }
 
         for (marker in listOf(
-            "pub const VBC4_MAX_FRAME_SIZE",
-            "pub const VBC4_MAX_SECTION_SIZE",
-            "pub const VBC4_MAX_BLOCKS",
-            "pub const VBC4_MAX_INSTRUCTIONS",
+            "pub const QP_MAX_FRAME_SIZE",
+            "pub const QP_MAX_SECTION_SIZE",
+            "pub const QP_MAX_BLOCKS",
+            "pub const QP_MAX_INSTRUCTIONS",
             "pub struct ParserLimits",
             "parser limit exceeds the R1 bound",
             "if frame.len() > self.limits.max_frame_size",
@@ -113,7 +113,7 @@ class NativeRuntimeVmPreparedExecutionBenchmarkTest {
             "UnsupportedFormat",
             "impl Drop for LoadedArtifact",
         )) {
-            assertContains(loader, marker, "jsrt-shell loader safe R1 format contract")
+            assertContains(loader, marker, "qp-shell loader safe R1 format contract")
         }
         for (marker in listOf(
             "PE_MACHINE_AMD64",
@@ -129,11 +129,11 @@ class NativeRuntimeVmPreparedExecutionBenchmarkTest {
             "PT_DYNAMIC missing",
         )) {
             val source = if (marker.startsWith("ELF") || marker.startsWith("MAX_DYNAMIC") || marker.startsWith("program_count") || marker.startsWith("if flags") || marker.startsWith("PT_DYNAMIC")) elf else pe
-            assertContains(source, marker, "jsrt-shell PE/ELF parser contract")
+            assertContains(source, marker, "qp-shell PE/ELF parser contract")
         }
-        assertContains(runtime, "validate_artifact", "jsrt-runtime shell loader boundary")
-        assertContains(runtime, "use jsrt_shell::", "jsrt-runtime shell loader boundary")
-        assertContains(runtimeShell, "ShellArtifact::validate", "jsrt-runtime shell validation")
+        assertContains(runtime, "validate_artifact", "qp-runtime shell loader boundary")
+        assertContains(runtime, "use qp_shell::", "qp-runtime shell loader boundary")
+        assertContains(runtimeShell, "ShellArtifact::validate", "qp-runtime shell validation")
     }
 
     private fun assertContains(source: String, marker: String, contract: String) {

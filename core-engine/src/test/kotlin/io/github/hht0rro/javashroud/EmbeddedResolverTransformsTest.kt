@@ -32,7 +32,7 @@ class EmbeddedResolverTransformsTest {
                 EmbeddedStringResolverConfig(seed = 41L + index, strength = strength),
             )
             assertFalse(String(bytes, Charsets.ISO_8859_1).contains(value))
-            assertFalse(String(bytes, Charsets.ISO_8859_1).contains("StringEncryptionHelper"))
+            assertFalse(String(bytes, Charsets.ISO_8859_1).contains("QpTextBridge"))
             assertFalse(String(bytes, Charsets.ISO_8859_1).contains("DES/CBC/PKCS5Padding"))
             val decoded = load(bytes).getMethod("stringValue").invoke(null) as String
             assertEquals(value, decoded)

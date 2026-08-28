@@ -36,7 +36,7 @@ class ReverseRegressionPipelineTest {
                 inputJarBytes = Files.size(inputJar),
             )
             assertTrue(Files.exists(path))
-            assertEquals(ProtectionFormat.CURRENT, manifest.protocolVersion)
+            assertEquals(ProtectionFormat.CURRENT_LABEL, manifest.protocolVersion)
             assertEquals(64, manifest.inputSha256.length)
             assertEquals(64, manifest.outputSha256.length)
             assertEquals(HardenedDefaultPipeline.RELEASE_PASSES, manifest.enabledPasses)
@@ -45,7 +45,7 @@ class ReverseRegressionPipelineTest {
             assertEquals("absent", manifest.abiDigest)
             assertEquals("absent", manifest.specializationDigest)
             assertTrue(manifest.jdk.isNotBlank())
-            assertEquals(ProtectionFormat.CURRENT, manifest.toolVersion)
+            assertEquals(ProtectionFormat.CURRENT_LABEL, manifest.toolVersion)
             assertTrue(manifest.cwd.isNotBlank())
             assertTrue(manifest.envSummary.contains("os="))
             assertTrue(manifest.envSummary.contains("locale="))

@@ -1,6 +1,6 @@
 package io.github.hht0rro.javashroud
 
-import io.github.hht0rro.javashroud.transforms.protection.NativeRecompilationTransforms
+import io.github.hht0rro.javashroud.transforms.protection.QpNativeCompilerPass
 import io.github.hht0rro.javashroud.transforms.protection.RustToolchainProvisioner
 import java.nio.file.Files
 import java.nio.file.Path
@@ -36,14 +36,14 @@ class NativeDivergenceVerificationTest {
                 RustToolchainProvisioner.RUNTIME_TARGET_WINDOWS to RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET,
                 RustToolchainProvisioner.RUNTIME_TARGET_LINUX to RustToolchainProvisioner.LINUX_RUNTIME_TARGET,
             ),
-            NativeRecompilationTransforms.RUST_TARGETS,
+            QpNativeCompilerPass.RUST_TARGETS,
         )
-        assertFalse(NativeRecompilationTransforms.RUST_TARGETS.keys.any { it.contains("mac", ignoreCase = true) })
+        assertFalse(QpNativeCompilerPass.RUST_TARGETS.keys.any { it.contains("mac", ignoreCase = true) })
     }
 
     @Test
     fun r1_cargo_commands_are_locked_and_target_directory_is_explicit() {
-        val windows = NativeRecompilationTransforms.rustCargoCommandForTest(
+        val windows = QpNativeCompilerPass.rustCargoCommandForTest(
             Path.of("cargo"),
             RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET,
             Path.of("build", "windows"),
@@ -54,7 +54,7 @@ class NativeDivergenceVerificationTest {
                 "zigbuild",
                 "--locked",
                 "--package",
-                "jsrt-ffi",
+                "qp-ffi",
                 "--lib",
                 "--release",
                 "--target",
@@ -65,7 +65,7 @@ class NativeDivergenceVerificationTest {
             windows,
         )
 
-        val linux = NativeRecompilationTransforms.rustCargoCommandForTest(
+        val linux = QpNativeCompilerPass.rustCargoCommandForTest(
             Path.of("cargo"),
             RustToolchainProvisioner.LINUX_RUNTIME_TARGET,
             Path.of("build", "linux"),

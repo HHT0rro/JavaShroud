@@ -1,10 +1,10 @@
 package io.github.hht0rro.javashroud
 
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.VmBytecodeSerializer
-import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.QP_LAYOUT_DIGEST_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.QP_MASTER_KEY_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.QpSerializer
+import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
 import java.nio.file.Files
 import java.nio.file.Path
 import org.objectweb.asm.Opcodes
@@ -41,8 +41,8 @@ class PerfBaselineProbeTest {
         return if (Files.exists(cwd.resolve("settings.gradle.kts"))) cwd else cwd.parent
     }
 
-    private fun serializeFixture(instructionPairs: Int): ByteArray = withVbc4BuildContext(fixedContext()) {
-        val serializer = VmBytecodeSerializer(
+    private fun serializeFixture(instructionPairs: Int): ByteArray = withQpBuildContext(fixedContext()) {
+        val serializer = QpSerializer(
             buildSeed = 0x5150_0000 + instructionPairs,
             stateBinding = "perf-baseline-probe",
             buildContext = fixedContext(),
@@ -59,10 +59,10 @@ class PerfBaselineProbeTest {
         serializer.serialize()
     }
 
-    private fun fixedContext(): Vbc4BuildContext = Vbc4BuildContext(
-        masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (index * 13 + 7).toByte() },
+    private fun fixedContext(): QpBuildContext = QpBuildContext(
+        masterKey = ByteArray(QP_MASTER_KEY_SIZE) { index -> (index * 13 + 7).toByte() },
         nativeSeed = 0x5150_600DL,
-        jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (index * 17 + 5).toByte() },
+        jarLayoutDigest = ByteArray(QP_LAYOUT_DIGEST_SIZE) { index -> (index * 17 + 5).toByte() },
     )
 
     private data class ProbeMetric(

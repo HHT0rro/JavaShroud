@@ -11,9 +11,9 @@ class NativeVmExecutionFrameTest {
     fun c_vm_execution_frame_probe_is_retired_in_favor_of_rust_vm_frames() {
         assertFalse(Files.exists(resolveSource("src/main/native")))
         assertFalse(Files.exists(resolveSource("src/test/native/vm_execution_frame_probe.c")))
-        val vm = Files.readString(resolveSource("src/main/rust/crates/jsrt-vm/src/lib.rs"))
-        val executor = Files.readString(resolveSource("src/main/rust/crates/jsrt-vm/src/executor.rs"))
-        assertTrue(vm.contains("VBC4_MAX_FRAME_SIZE"))
+        val vm = Files.readString(resolveSource("src/main/rust/crates/qp-vm/src/lib.rs"))
+        val executor = Files.readString(resolveSource("src/main/rust/crates/qp-vm/src/executor.rs"))
+        assertTrue(vm.contains("QP_MAX_FRAME_SIZE"))
         assertTrue(executor.contains("fn execute") || executor.contains("execute("))
     }
 

@@ -7,10 +7,10 @@ import io.github.hht0rro.javashroud.adapters.protocol.dispatchRequest
 import io.github.hht0rro.javashroud.kernel.EngineKernel
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.VmBytecodeSerializer
+import io.github.hht0rro.javashroud.transforms.protection.QP_LAYOUT_DIGEST_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.QP_MASTER_KEY_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.QpSerializer
 import io.github.hht0rro.javashroud.transforms.protection.vbc4CfgDecodeIndex
 import io.github.hht0rro.javashroud.transforms.protection.vbc4CfgEncodeIndex
 import org.objectweb.asm.ClassReader
@@ -70,7 +70,7 @@ class BasicBlockShuffleSemanticTest {
 
     @Test
     fun serializer_rejects_vm_maxs_that_would_exceed_the_u16_cfg_limit() {
-        val serializer = VmBytecodeSerializer(buildSeed = 0x41A7_29C3, buildContext = fixedVbc4Context())
+        val serializer = QpSerializer(buildSeed = 0x41A7_29C3, buildContext = fixedQpContext())
         serializer.visitCode()
         repeat(0xFFFF) { serializer.visitInsn(Opcodes.NOP) }
 
@@ -246,10 +246,10 @@ class BasicBlockShuffleSemanticTest {
         }
     }
 
-    private fun fixedVbc4Context(): Vbc4BuildContext = Vbc4BuildContext(
-        masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (index * 19 + 7).toByte() },
+    private fun fixedQpContext(): QpBuildContext = QpBuildContext(
+        masterKey = ByteArray(QP_MASTER_KEY_SIZE) { index -> (index * 19 + 7).toByte() },
         nativeSeed = 0x5642_4334L,
-        jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (index * 23 + 11).toByte() },
+        jarLayoutDigest = ByteArray(QP_LAYOUT_DIGEST_SIZE) { index -> (index * 23 + 11).toByte() },
     )
 
     private companion object {

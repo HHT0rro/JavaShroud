@@ -5,9 +5,9 @@ import io.github.hht0rro.javashroud.model.analysis.MemberSummary
 import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.analysis.TargetSelector
 import io.github.hht0rro.javashroud.model.config.RuleSpec
-import io.github.hht0rro.javashroud.transforms.protection.CallsiteRotationHelper
+import io.github.hht0rro.javashroud.transforms.protection.qp.QpCallsiteBridge
 import io.github.hht0rro.javashroud.transforms.protection.applyCallsiteRotationProtection
-import io.github.hht0rro.javashroud.transforms.protection.hardening.IndyTargetTokenEnvelope
+import io.github.hht0rro.javashroud.transforms.protection.hardening.QpTargetTokenEnvelope
 import java.lang.invoke.MethodHandles
 import java.lang.invoke.MethodType
 import kotlin.test.Test
@@ -166,20 +166,20 @@ class CallsiteRotationProtectionSafetyTest {
         val lookup = MethodHandles.lookup()
         val type = MethodType.methodType(Int::class.javaPrimitiveType, String::class.java)
         val caller = lookup.lookupClass().name.replace('.', '/')
-        val binding = IndyTargetTokenEnvelope.Binding(
+        val binding = QpTargetTokenEnvelope.Binding(
             artifactDigest = ByteArray(32) { 7 },
             callerOwner = caller,
             indyName = "len",
             indyMethodType = type.toMethodDescriptorString(),
             siteIndex = 0,
         )
-        val token = IndyTargetTokenEnvelope.seal(
-            IndyTargetTokenEnvelope.Target("java/lang/String", "length", "()I", Opcodes.H_INVOKEVIRTUAL, false),
+        val token = QpTargetTokenEnvelope.seal(
+            QpTargetTokenEnvelope.Target("java/lang/String", "length", "()I", Opcodes.H_INVOKEVIRTUAL, false),
             binding,
         )
         val strategies = listOf("mutable", "guarded", "table", "thread-slot", "oneshot", "epoch", "counter")
         for (strategy in strategies) {
-            val site = CallsiteRotationHelper.createRotatingCallSite(lookup, "len", type, token, strategy)
+            val site = QpCallsiteBridge.createRotatingCallSite(lookup, "len", type, token, strategy)
             val first = site.dynamicInvoker().invokeWithArguments("abcd") as Int
             val second = site.dynamicInvoker().invokeWithArguments("xyz") as Int
             assertEquals(4, first, strategy)

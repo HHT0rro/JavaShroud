@@ -480,7 +480,7 @@ class ConfigCodecTest {
 
     @Test
     fun validateConfig_rejects_removed_aken_v4_boot_key_delivery_with_migration_message() {
-        val inputJar = Files.createTempFile("javashroud-config-aken-v4-removed-param", ".jar")
+        val inputJar = Files.createTempFile("javashroud-config-qp-v4-removed-param", ".jar")
         try {
             val error = assertFailsWith<IllegalArgumentException> {
                 validateConfig(

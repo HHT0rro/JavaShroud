@@ -1,6 +1,6 @@
 package io.github.hht0rro.javashroud
 
-import io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper
+import io.github.hht0rro.javashroud.transforms.protection.qp.QpBridge
 import io.github.hht0rro.javashroud.transforms.protection.encodeSamLambdaMetafactoryConstant
 import io.github.hht0rro.javashroud.transforms.protection.extractSamLambdaMetafactoryRecipe
 import io.github.hht0rro.javashroud.transforms.protection.isNativeVmSupportedInvokeDynamicCall
@@ -32,7 +32,7 @@ class LambdaRecipeFidelityTest {
     fun generic_sam_recipe_preserves_reference_primitive_void_and_capture_shapes() {
         val owner = LambdaRecipeFidelityTest::class.java.name.replace('.', '/')
 
-        val runnable = JniMicrokernelHelper.createSamLambda(
+        val runnable = QpBridge.createSamLambda(
             "run", "(Ljava/lang/String;)Ljava/lang/Runnable;", owner, "record",
             "(Ljava/lang/String;)V", Opcodes.H_INVOKESTATIC, "()V", "()V", "0;;", arrayOf("ran"),
         ) as Runnable
@@ -41,14 +41,14 @@ class LambdaRecipeFidelityTest {
         assertEquals("ran", lastValue)
 
         @Suppress("UNCHECKED_CAST")
-        val function = JniMicrokernelHelper.createSamLambda(
+        val function = QpBridge.createSamLambda(
             "apply", "(Ljava/lang/String;)Ljava/util/function/Function;", owner, "decorate",
             "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", Opcodes.H_INVOKESTATIC,
             "(Ljava/lang/Object;)Ljava/lang/Object;", "(Ljava/lang/String;)Ljava/lang/String;", "0;;", arrayOf("pre-"),
         ) as Function<String, String>
         assertEquals("pre-value", function.apply("value"))
 
-        val consumer = JniMicrokernelHelper.createSamLambda(
+        val consumer = QpBridge.createSamLambda(
             "accept", "(Ljava/lang/String;)Ljava/util/function/Consumer;", owner, "recordPair",
             "(Ljava/lang/String;Ljava/lang/String;)V", Opcodes.H_INVOKESTATIC,
             "(Ljava/lang/Object;)V", "(Ljava/lang/String;)V", "0;;", arrayOf("seen:"),
@@ -56,7 +56,7 @@ class LambdaRecipeFidelityTest {
         consumer.accept("item")
         assertEquals("seen:item", lastValue)
 
-        val intOperator = JniMicrokernelHelper.createSamLambda(
+        val intOperator = QpBridge.createSamLambda(
             "applyAsInt", "()Ljava/util/function/IntUnaryOperator;", owner, "doubleValue",
             "(I)I", Opcodes.H_INVOKESTATIC, "(I)I", "(I)I", "0;;", emptyArray(),
         ) as IntUnaryOperator
@@ -76,7 +76,7 @@ class LambdaRecipeFidelityTest {
         ).joinToString(";")
 
         @Suppress("UNCHECKED_CAST")
-        val function = JniMicrokernelHelper.createSamLambda(
+        val function = QpBridge.createSamLambda(
             "apply", "(Ljava/lang/String;)Ljava/util/function/Function;", owner, "decorate",
             "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;", Opcodes.H_INVOKESTATIC,
             "(Ljava/lang/Object;)Ljava/lang/Object;", "(Ljava/lang/String;)Ljava/lang/String;",
@@ -95,7 +95,7 @@ class LambdaRecipeFidelityTest {
         val owner = LambdaRecipeFidelityTest::class.java.name.replace('.', '/')
 
         @Suppress("UNCHECKED_CAST")
-        val bound = JniMicrokernelHelper.createSamLambda(
+        val bound = QpBridge.createSamLambda(
             "apply", "(L$owner;)Ljava/util/function/Function;", owner, "suffix",
             "(Ljava/lang/String;)Ljava/lang/String;", Opcodes.H_INVOKEVIRTUAL,
             "(Ljava/lang/Object;)Ljava/lang/Object;", "(Ljava/lang/String;)Ljava/lang/String;", "0;;", arrayOf(this),
@@ -103,7 +103,7 @@ class LambdaRecipeFidelityTest {
         assertEquals("value-bound", bound.apply("value"))
 
         @Suppress("UNCHECKED_CAST")
-        val unbound = JniMicrokernelHelper.createSamLambda(
+        val unbound = QpBridge.createSamLambda(
             "apply", "()Ljava/util/function/Function;", owner, "suffixValue",
             "()Ljava/lang/String;", Opcodes.H_INVOKEVIRTUAL,
             "(Ljava/lang/Object;)Ljava/lang/Object;", "(L$owner;)Ljava/lang/String;", "0;;", emptyArray(),
@@ -111,7 +111,7 @@ class LambdaRecipeFidelityTest {
         assertEquals("value-bound", unbound.apply(this))
 
         @Suppress("UNCHECKED_CAST")
-        val interfaceCall = JniMicrokernelHelper.createSamLambda(
+        val interfaceCall = QpBridge.createSamLambda(
             "apply", "(Ljava/lang/CharSequence;I)Ljava/util/function/Function;", "java/lang/CharSequence", "subSequence",
             "(II)Ljava/lang/CharSequence;", Opcodes.H_INVOKEINTERFACE,
             "(Ljava/lang/Object;)Ljava/lang/Object;", "(Ljava/lang/Integer;)Ljava/lang/CharSequence;", "0;;", arrayOf("abcd", 1),
@@ -119,7 +119,7 @@ class LambdaRecipeFidelityTest {
         assertEquals("bc", interfaceCall.apply(3).toString())
 
         @Suppress("UNCHECKED_CAST")
-        val special = JniMicrokernelHelper.createSamLambda(
+        val special = QpBridge.createSamLambda(
             "apply", "(L$owner;)Ljava/util/function/Function;", owner, "specialSuffix",
             "(Ljava/lang/String;)Ljava/lang/String;", Opcodes.H_INVOKESPECIAL,
             "(Ljava/lang/Object;)Ljava/lang/Object;", "(Ljava/lang/String;)Ljava/lang/String;", "0;;", arrayOf(this),
@@ -127,7 +127,7 @@ class LambdaRecipeFidelityTest {
         assertEquals("value-special", special.apply("value"))
 
         @Suppress("UNCHECKED_CAST")
-        val constructor = JniMicrokernelHelper.createSamLambda(
+        val constructor = QpBridge.createSamLambda(
             "get", "(Ljava/lang/String;)Ljava/util/function/Supplier;", "java/lang/StringBuilder", "<init>",
             "(Ljava/lang/String;)V", Opcodes.H_NEWINVOKESPECIAL,
             "()Ljava/lang/Object;", "()Ljava/lang/StringBuilder;", "0;;", arrayOf("built"),
@@ -139,7 +139,7 @@ class LambdaRecipeFidelityTest {
     fun generic_sam_recipe_preserves_checked_exceptions_and_non_public_interfaces() {
         val owner = LambdaRecipeFidelityTest::class.java.name.replace('.', '/')
         @Suppress("UNCHECKED_CAST")
-        val checked = JniMicrokernelHelper.createSamLambda(
+        val checked = QpBridge.createSamLambda(
             "call", "()Ljava/util/concurrent/Callable;", owner, "checkedFailure",
             "()Ljava/lang/String;", Opcodes.H_INVOKESTATIC,
             "()Ljava/lang/Object;", "()Ljava/lang/String;", "0;;", emptyArray(),
@@ -147,7 +147,7 @@ class LambdaRecipeFidelityTest {
         assertFailsWith<IOException> { checked.call() }
 
         val hiddenOwner = HiddenSupplier::class.java.name.replace('.', '/')
-        val hidden = JniMicrokernelHelper.createSamLambda(
+        val hidden = QpBridge.createSamLambda(
             "get", "()L$hiddenOwner;", owner, "hiddenValue",
             "()Ljava/lang/String;", Opcodes.H_INVOKESTATIC,
             "()Ljava/lang/String;", "()Ljava/lang/String;", "0;;", emptyArray(),
@@ -207,7 +207,7 @@ class LambdaRecipeFidelityTest {
         ).joinToString(";")
         assertEquals(options, encodedParts[9])
         @Suppress("UNCHECKED_CAST")
-        val function = JniMicrokernelHelper.createSamLambda(
+        val function = QpBridge.createSamLambda(
             "apply", factoryDescriptor, owner, "decorate",
             impl.desc, Opcodes.H_INVOKESTATIC, samType.descriptor, instantiatedType.descriptor,
             options, arrayOf("alt-"),

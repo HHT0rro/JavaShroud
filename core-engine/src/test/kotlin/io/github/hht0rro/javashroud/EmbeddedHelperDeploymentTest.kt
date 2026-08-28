@@ -10,8 +10,8 @@ import io.github.hht0rro.javashroud.model.analysis.RenamePlan
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
-import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.defaultQpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.Opcodes
@@ -40,17 +40,17 @@ class EmbeddedHelperDeploymentTest {
         val entries = updated.jarEntries.map { it.name }.toSet()
 
         for (entryName in listOf(
-            "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.class",
-            "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper${"$"}AkenNativeLibrary.class",
-            "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper${"$"}TypeParseResult.class",
-            "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper${"$"}SamLambdaOptions.class",
-            "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper${"$"}SamInvocationHandler.class",
+            "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.class",
+            "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge${"$"}QpNativeLibrary.class",
+            "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge${"$"}TypeParseResult.class",
+            "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge${"$"}SamLambdaOptions.class",
+            "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge${"$"}SamInvocationHandler.class",
         )) {
             assertTrue(entryName in entries, "AKEN JNI helper dependency must be embedded: $entryName")
         }
         for (legacyEntry in listOf(
-            "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper${"$"}RuntimeResourceMetadata.class",
-            "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper${"$"}SealedNativeLibrary.class",
+            "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge${"$"}RuntimeResourceMetadata.class",
+            "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge${"$"}SealedNativeLibrary.class",
         )) {
             assertFalse(legacyEntry in entries, "AKEN deployment must not embed legacy runtime helper: $legacyEntry")
         }
@@ -63,7 +63,7 @@ class EmbeddedHelperDeploymentTest {
             executedPassIds = listOf("jni-microkernel-loader"),
         )
         val helperBytes = updated.jarEntries
-            .first { it.name == "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.class" }
+            .first { it.name == "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.class" }
             .bytes
         val helperText = helperBytes.toString(Charsets.ISO_8859_1)
 
@@ -93,7 +93,7 @@ class EmbeddedHelperDeploymentTest {
             executedPassIds = listOf("jni-microkernel-loader"),
         )
         val helperBytes = updated.jarEntries
-            .first { it.name == "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.class" }
+            .first { it.name == "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.class" }
             .bytes
         val methods = linkedSetOf<String>()
         val nativeMethods = linkedSetOf<String>()
@@ -116,26 +116,31 @@ class EmbeddedHelperDeploymentTest {
         val requiredNativeMethods = linkedSetOf(
             "nativeInit(Ljava/lang/String;)I",
             "nativeHeartbeat()I",
-            "nativeInstallAkenSessionNonce([B)Z",
-            "nativeExecuteAkenVmPage(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;",
-            "nativeOpenAkenString([BI[B)Ljava/lang/String;",
-            "nativeReadAkenClassPage([BI[B)[B",
-            "nativeConsumeAkenNativeChunk([BI[B)V",
+            "nativeInstallSessionNonce([B)Z",
+            "nativeInstallCatalog([B[B)I",
+            "nativeExecuteVmPage(J[B[Ljava/lang/Object;)Ljava/lang/Object;",
+            "nativeOpenStringPage([B)Ljava/lang/String;",
+            "nativeReadClassPage([B)[B",
+            "nativeConsumeNativeSegment([B)V",
+            "nativeInitializeDefense(Ljava/lang/String;Ljava/lang/String;)I",
+            "nativeProbeDefense(Ljava/lang/String;Ljava/lang/String;)I",
+            "nativeTransformDefense([BLjava/lang/String;)[B",
         )
-        assertEquals(requiredNativeMethods, nativeMethods, "Emitted helper must expose exactly seven R1 native registrations")
+        assertEquals(requiredNativeMethods, nativeMethods, "Emitted helper must expose the current typed JNI registrations")
 
         val requiredTypedMethods = setOf(
             "nativeInit(Ljava/lang/String;)I",
             "nativeHeartbeat()I",
-            "nativeInstallAkenSessionNonce([B)Z",
-            "nativeExecuteAkenVmPage(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;",
-            "nativeOpenAkenString([BI[B)Ljava/lang/String;",
-            "nativeReadAkenClassPage([BI[B)[B",
-            "nativeConsumeAkenNativeChunk([BI[B)V",
-            "executeAkenVmPage(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;",
-            "openAkenString([BI[B)Ljava/lang/String;",
-            "readAkenClassPage([BI[B)[B",
-            "consumeAkenNativeChunk([BI[B)V",
+            "nativeInstallSessionNonce([B)Z",
+            "nativeInstallCatalog([B[B)I",
+            "nativeExecuteVmPage(J[B[Ljava/lang/Object;)Ljava/lang/Object;",
+            "nativeOpenStringPage([B)Ljava/lang/String;",
+            "nativeReadClassPage([B)[B",
+            "nativeConsumeNativeSegment([B)V",
+            "executeQpVmPage(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;",
+            "openQpString([BI[B)Ljava/lang/String;",
+            "readQpClassPage([BI[B)[B",
+            "consumeQpNativeChunk([BI[B)V",
         )
         assertTrue(
             methods.containsAll(requiredTypedMethods),
@@ -177,11 +182,11 @@ class EmbeddedHelperDeploymentTest {
 
     @Test
     fun incomplete_r1_exports_do_not_satisfy_the_native_abi_probe() {
-        val incomplete = "JNI_OnLoad-JNI_OnUnload-jsrt_r1_runtime_binding_digest".toByteArray(Charsets.US_ASCII)
+        val incomplete = "JNI_OnLoad-JNI_OnUnload-qp_r1_runtime_binding_digest".toByteArray(Charsets.US_ASCII)
 
         assertFalse(
             EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(incomplete),
-            "R1 artifacts must expose the complete typed jsrt_r1 export set.",
+            "R1 artifacts must expose the complete typed qp_r1 export set.",
         )
     }
 
@@ -190,13 +195,13 @@ class EmbeddedHelperDeploymentTest {
         val r1Bytes = listOf(
             "JNI_OnLoad",
             "JNI_OnUnload",
-            "jsrt_r1_runtime_binding_digest",
-            "jsrt_r1_open_frame",
+            "qp_r1_runtime_binding_digest",
+            "qp_r1_open_frame",
         ).joinToString("-").toByteArray(Charsets.US_ASCII)
 
         assertTrue(
             EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(r1Bytes),
-            "Rust R1 artifacts must carry the typed jsrt_r1 exports and JNI lifecycle.",
+            "Rust R1 artifacts must carry the typed qp_r1 exports and JNI lifecycle.",
         )
         assertFalse(
             EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(
@@ -208,7 +213,7 @@ class EmbeddedHelperDeploymentTest {
 
     @Test
     fun jni_microkernel_helper_validates_r1_images_before_system_load() {
-        val helperSource = Files.readString(resolveWorkspacePath("core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
+        val helperSource = Files.readString(resolveWorkspacePath("core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.java"))
 
         assertTrue(helperSource.contains("validateR1NativeImage(platformTarget, nativeBytes)"), "R1 images must be validated before extraction.")
         assertTrue(helperSource.contains("System.load(tempLib.getAbsolutePath())"), "Bundled native loading must use the authenticated extracted R1 image.")
@@ -220,7 +225,7 @@ class EmbeddedHelperDeploymentTest {
 
     @Test
     fun jni_microkernel_helper_retains_only_fail_closed_java_compatibility_wrappers() {
-        val helperSource = Files.readString(resolveWorkspacePath("core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
+        val helperSource = Files.readString(resolveWorkspacePath("core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.java"))
 
         assertTrue(helperSource.contains("public static byte[] deriveClassEncryptionKey"))
         assertTrue(helperSource.contains("class-encryption key derivation is not part of the R1 Java helper"))
@@ -286,7 +291,7 @@ class EmbeddedHelperDeploymentTest {
         assertFalse("META-INF/.r/kek.dat" in entries, "AKEN deployment must drop the legacy JSBK sidecar resource")
         assertTrue("META-INF/app/retained.bin" in entries, "AKEN cleanup must preserve unrelated resources")
         assertTrue(
-            "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.class" in entries,
+            "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.class" in entries,
             "AKEN cleanup must not prevent required JNI helper injection",
         )
     }
@@ -319,7 +324,7 @@ class EmbeddedHelperDeploymentTest {
 
     @Test
     fun string_encryption_embeds_native_string_terminal_without_plaintext_cache_helper() {
-        val updated = withVbc4BuildContext(defaultVbc4BuildContext()) {
+        val updated = withQpBuildContext(defaultQpBuildContext()) {
             EmbeddedHelperDeployment.injectRequiredHelpers(
                 artifact = emptyArtifact(),
                 executedPassIds = listOf("string-encryption"),
@@ -328,17 +333,17 @@ class EmbeddedHelperDeploymentTest {
         val entries = updated.jarEntries.map { it.name }.toSet()
 
         assertTrue(
-            "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper.class" in entries,
+            "io/github/hht0rro/javashroud/transforms/protection/qp/QpTextBridge.class" in entries,
             "string-encryption must embed its native decode helper.",
         )
         assertFalse(
-            entries.any { it.startsWith("io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper${"$"}CachePolicy") },
+            entries.any { it.startsWith("io/github/hht0rro/javashroud/transforms/protection/qp/QpTextBridge${"$"}CachePolicy") },
             "string-encryption must not embed a plaintext cache-policy helper class.",
         )
     }
     private fun defineHelper(helperBytes: ByteArray): Class<*> = object : ClassLoader(javaClass.classLoader) {
         fun define(): Class<*> = defineClass(
-            "io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper",
+            "io.github.hht0rro.javashroud.transforms.protection.qp.QpBridge",
             helperBytes,
             0,
             helperBytes.size,

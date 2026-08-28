@@ -91,6 +91,6 @@ class ReferenceProxyProtectionBoundaryTest {
     private companion object {
         const val APPLICATION_HELPER_OWNER = "fixture/ApplicationHelper"
         const val PROTECTION_OWNER_PREFIX = "io/github/hht0rro/javashroud/transforms/protection/"
-        const val PROTECTION_HELPER_OWNER = "${PROTECTION_OWNER_PREFIX}JniMicrokernelHelper"
+        const val PROTECTION_HELPER_OWNER = "${PROTECTION_OWNER_PREFIX}QpBridge"
     }
 }

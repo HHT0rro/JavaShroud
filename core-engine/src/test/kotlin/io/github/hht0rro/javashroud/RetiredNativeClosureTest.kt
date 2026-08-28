@@ -71,10 +71,10 @@ class RetiredNativeClosureTest {
 
     @Test
     fun rust_cdylib_source_exports_only_r1_lifecycle_and_binding_symbols() {
-        val ffi = Files.readString(workspacePath("core-engine/src/main/rust/crates/jsrt-ffi/src/lib.rs"))
+        val ffi = Files.readString(workspacePath("core-engine/src/main/rust/crates/qp-ffi/src/lib.rs"))
         val productionFfi = ffi.substringBefore("    #[cfg(test)]")
-        val manifest = Files.readString(workspacePath("core-engine/src/main/rust/crates/jsrt-ffi/Cargo.toml"))
-        val header = Files.readString(workspacePath("core-engine/src/main/rust/crates/jsrt-ffi/include/jsrt_ffi.h"))
+        val manifest = Files.readString(workspacePath("core-engine/src/main/rust/crates/qp-ffi/Cargo.toml"))
+        val header = Files.readString(workspacePath("core-engine/src/main/rust/crates/qp-ffi/include/qp_ffi.h"))
         val exportedNames = Regex(
             "#\\[no_mangle]\\s+(?:pub\\s+unsafe\\s+|pub\\s+)?extern\\s+\\\"(?:C|system)\\\"\\s+fn\\s+([A-Za-z0-9_]+)",
         ).findAll(productionFfi).map { it.groupValues[1] }.toList()
@@ -84,13 +84,13 @@ class RetiredNativeClosureTest {
             exportedNames.toSet() == setOf(
                 "JNI_OnLoad",
                 "JNI_OnUnload",
-                "jsrt_r1_runtime_binding_digest",
-                "jsrt_r1_open_frame",
+                "qp_r1_runtime_binding_digest",
+                "qp_r1_open_frame",
             ),
             "unexpected R1 FFI exports: $exportedNames",
         )
-        assertTrue(header.contains("jsrt_r1_runtime_binding_digest"))
-        assertTrue(header.contains("jsrt_r1_open_frame"))
+        assertTrue(header.contains("qp_r1_runtime_binding_digest"))
+        assertTrue(header.contains("qp_r1_open_frame"))
         assertFalse(productionFfi.contains("jsn_k13"))
         assertFalse(productionFfi.contains("nativeInstallBoot"))
     }
@@ -100,8 +100,8 @@ class RetiredNativeClosureTest {
         val requiredR1 = listOf(
             "JNI_OnLoad",
             "JNI_OnUnload",
-            "jsrt_r1_runtime_binding_digest",
-            "jsrt_r1_open_frame",
+            "qp_r1_runtime_binding_digest",
+            "qp_r1_open_frame",
         ).joinToString("|")
         assertTrue(
             io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment

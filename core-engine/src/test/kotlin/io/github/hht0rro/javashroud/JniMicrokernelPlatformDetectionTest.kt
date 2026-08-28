@@ -1,12 +1,12 @@
 package io.github.hht0rro.javashroud
 
-import io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper
+import io.github.hht0rro.javashroud.transforms.protection.qp.QpBridge
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull
 
 class JniMicrokernelPlatformDetectionTest {
-    private val detectPlatform = JniMicrokernelHelper::class.java.getDeclaredMethod(
+    private val detectPlatform = QpBridge::class.java.getDeclaredMethod(
         "detectPlatform",
         String::class.java,
         String::class.java,

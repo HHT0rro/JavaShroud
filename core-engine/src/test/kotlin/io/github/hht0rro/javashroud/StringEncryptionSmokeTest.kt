@@ -5,9 +5,9 @@ import io.github.hht0rro.javashroud.bytecode.poolClassStrings
 import io.github.hht0rro.javashroud.bytecode.StringEncryptionConfig
 import io.github.hht0rro.javashroud.model.schema.requiredPassIdsFor
 import io.github.hht0rro.javashroud.modules.buildModuleRegistry
-import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.requireVbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.defaultQpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.requireQpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.ClassWriter
@@ -25,11 +25,11 @@ class StringEncryptionSmokeTest {
     @Test
     fun encryptClassStrings_replaces_ldc_strings_with_native_aken_callsite() {
         val classBytes = buildTestClassWithStrings("Hello", "World")
-        val context = defaultVbc4BuildContext()
+        val context = defaultQpBuildContext()
         try {
-            val encrypted = withVbc4BuildContext(context) {
+            val encrypted = withQpBuildContext(context) {
                 encryptClassStrings(classBytes).also {
-                    requireVbc4BuildContext().withAkenStringPageCandidatesForBuild { candidates ->
+                    requireQpBuildContext().withQpTextPageCandidatesForBuild { candidates ->
                         assertEquals(2, candidates.size, "Each protected literal must register one StringPage candidate")
                         val identities = candidates.map { it.copyLogicalIdentityForBuild() }
                         val plaintexts = candidates.map { it.copyPlaintextForBuild() }
@@ -85,8 +85,8 @@ class StringEncryptionSmokeTest {
                         }
 
                         override fun visitMethodInsn(opcode: Int, owner: String, name: String, descriptor: String, isInterface: Boolean) {
-                            if (opcode != Opcodes.INVOKESTATIC || owner != "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper") return
-                            if (name == "invokeAkenStringTerminal" && descriptor == "([B)Ljava/lang/String;") {
+                            if (opcode != Opcodes.INVOKESTATIC || owner != "io/github/hht0rro/javashroud/transforms/protection/qp/QpTextBridge") return
+                            if (name == "invokeQpStringTerminal" && descriptor == "([B)Ljava/lang/String;") {
                                 akenHelperInvokeCount++
                             }
                             if (name == "cachedDecodeString" || descriptor == "([BIIJJ)Ljava/lang/String;") {
@@ -102,7 +102,7 @@ class StringEncryptionSmokeTest {
                         ) {
                             if (
                                 descriptor == "([B)Ljava/lang/String;" &&
-                                bootstrapMethodHandle.owner == "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper" &&
+                                bootstrapMethodHandle.owner == "io/github/hht0rro/javashroud/transforms/protection/qp/QpTextBridge" &&
                                 bootstrapMethodHandle.desc ==
                                     "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;" +
                                         "Ljava/lang/invoke/MethodHandle;)Ljava/lang/invoke/CallSite;"
@@ -111,7 +111,7 @@ class StringEncryptionSmokeTest {
                                 assertEquals(1, bootstrapMethodArguments.size)
                                 assertTrue(bootstrapMethodArguments[0] is org.objectweb.asm.Handle)
                                 val target = bootstrapMethodArguments[0] as org.objectweb.asm.Handle
-                                assertEquals("invokeAkenStringTerminal", target.name)
+                                assertEquals("invokeQpStringTerminal", target.name)
                                 assertEquals("([B)Ljava/lang/String;", target.desc)
                                 akenHelperInvokeDynamicCount++
                             }
@@ -131,9 +131,9 @@ class StringEncryptionSmokeTest {
 
     @Test
     fun encryptClassStrings_preserves_reflection_member_names_for_member_rename_stage() {
-        val context = defaultVbc4BuildContext()
+        val context = defaultQpBuildContext()
         try {
-            val encrypted = withVbc4BuildContext(context) {
+            val encrypted = withQpBuildContext(context) {
                 encryptClassStrings(buildReflectiveLookupClassWithExtraLiteral())
             }
             val constants = linkedSetOf<String>()
@@ -154,11 +154,11 @@ class StringEncryptionSmokeTest {
 
     @Test
     fun encryptClassStrings_lazily_hoists_loop_invariant_pages_into_method_locals() {
-        val context = defaultVbc4BuildContext()
+        val context = defaultQpBuildContext()
         try {
-            val encrypted = withVbc4BuildContext(context) {
+            val encrypted = withQpBuildContext(context) {
                 encryptClassStrings(buildLoopStringClass()).also {
-                    requireVbc4BuildContext().withAkenStringPageCandidatesForBuild { candidates ->
+                    requireQpBuildContext().withQpTextPageCandidatesForBuild { candidates ->
                         assertEquals(1, candidates.size)
                     }
                 }
@@ -197,8 +197,8 @@ class StringEncryptionSmokeTest {
                     ) {
                         if (
                             opcode == Opcodes.INVOKESTATIC &&
-                            owner == "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper" &&
-                            name == "invokeAkenStringTerminal"
+                            owner == "io/github/hht0rro/javashroud/transforms/protection/qp/QpTextBridge" &&
+                            name == "invokeQpStringTerminal"
                         ) {
                             terminalCount++
                         }
@@ -211,9 +211,9 @@ class StringEncryptionSmokeTest {
                         vararg bootstrapMethodArguments: Any,
                     ) {
                         if (
-                            descriptor == "([BI[B)Ljava/lang/String;" &&
+                            descriptor == "([B)Ljava/lang/String;" &&
                             bootstrapMethodHandle.owner ==
-                                "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper"
+                                "io/github/hht0rro/javashroud/transforms/protection/qp/QpTextBridge"
                         ) {
                             terminalCount++
                         }
@@ -233,7 +233,7 @@ class StringEncryptionSmokeTest {
     @Test
     fun encryptClassStrings_preserves_class_structure() {
         val classBytes = buildTestClassWithStrings("TestString")
-        val encrypted = withVbc4BuildContext(defaultVbc4BuildContext()) {
+        val encrypted = withQpBuildContext(defaultQpBuildContext()) {
             encryptClassStrings(classBytes)
         }
 
@@ -250,9 +250,9 @@ class StringEncryptionSmokeTest {
 
     @Test
     fun string_array_pool_does_not_rewrite_classes_with_typed_aken_string_pages() {
-        val context = defaultVbc4BuildContext()
+        val context = defaultQpBuildContext()
         try {
-            val encrypted = withVbc4BuildContext(context) {
+            val encrypted = withQpBuildContext(context) {
                 encryptClassStrings(
                     buildTestClassWithStrings("protected-value", "x"),
                     StringEncryptionConfig(lengthThreshold = 3),

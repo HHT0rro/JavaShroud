@@ -317,7 +317,7 @@ class KernelRunSupportTest {
 
     @Test
     fun engineKernelRun_rejects_removed_aken_v4_boot_key_delivery_before_bootstrap_or_artifact_io() {
-        val tempDir = Files.createTempDirectory("javashroud-kernel-aken-v4-removed-param")
+        val tempDir = Files.createTempDirectory("javashroud-kernel-qp-v4-removed-param")
         try {
             val inputJar = tempDir.resolve("must-not-be-read.jar")
             val outputJar = tempDir.resolve("must-not-be-written.jar")

@@ -18,7 +18,7 @@ class RootKeyLiteralTest {
     fun helper_source_and_bytecode_have_no_share_injection_or_legacy_boot_producer() {
         val helperBytes = checkNotNull(
             javaClass.classLoader.getResourceAsStream(
-                "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.class"
+                "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.class"
             )
         ).use { it.readBytes() }
         val node = ClassNode()
@@ -26,17 +26,17 @@ class RootKeyLiteralTest {
         assertFalse(node.methods.any { it.name.startsWith("jsRrkS") }, "helper must not contain generated key-share methods")
 
         val deployment = Files.readString(resolveSource("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/EmbeddedHelperDeployment.kt"))
-        val helper = Files.readString(resolveSource("src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
+        val helper = Files.readString(resolveSource("src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.java"))
         val coupling = Files.readString(resolveSource("src/main/java/io/github/hht0rro/javashroud/transforms/protection/CrossClassCouplingHelper.java"))
-        val crypto = Files.readString(resolveSource("src/main/rust/crates/jsrt-crypto/src/lib.rs"))
+        val crypto = Files.readString(resolveSource("src/main/rust/crates/qp-crypto/src/lib.rs"))
         assertFalse(deployment.contains("emitShareMethod"), "deployment must not emit byte-array share literals")
         assertFalse(deployment.contains("emitPartitionKeyDispatch"), "deployment must not emit Java key reconstruction code")
         assertFalse(deployment.contains("BootMaterialEnvelope"), "AKEN deployment must not emit a JSBM boot-material producer")
         assertFalse(deployment.contains("BootKekSidecar"), "AKEN deployment must not emit a JSBK sidecar producer")
         assertTrue(
-            helper.contains("nativeOpenAkenString") &&
-                helper.contains("nativeReadAkenClassPage") &&
-                helper.contains("nativeConsumeAkenNativeChunk"),
+            helper.contains("nativeOpenStringPage") &&
+                helper.contains("nativeReadClassPage") &&
+                helper.contains("nativeConsumeNativeSegment"),
             "helper must expose purpose-split AKEN page routes",
         )
         assertFalse(coupling.contains("reconstructKey"), "AKEN compatibility helper must not recover a page key")

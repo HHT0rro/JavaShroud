@@ -55,7 +55,7 @@ class RuntimeGarbageCollectorTest {
         withTempRoots { userHome, workspace ->
             val userCache = userHome.resolve(".javashroud")
             val toolchain = writeFile(userCache.resolve("toolchains/zig-0.13.0-windows-x64/zig.exe"), 3)
-            val workspaceFiles = writeFile(userCache.resolve("rust-workspace/aken-r1/Cargo.toml"), 4)
+            val workspaceFiles = writeFile(userCache.resolve("rust-workspace/qp/Cargo.toml"), 4)
             writeFile(userCache.resolve("zig/0.13.0/zig.exe"), 5)
 
             RuntimeGarbageCollector.collect(userHome, workspace, apply = true)

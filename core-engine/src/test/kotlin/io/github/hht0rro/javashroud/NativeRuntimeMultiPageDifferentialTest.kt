@@ -11,7 +11,7 @@ class NativeRuntimeMultiPageDifferentialTest {
     fun c_crypto_benchmark_probe_is_retired_in_favor_of_rust_crypto() {
         assertFalse(Files.exists(resolveSource("src/main/native")))
         assertFalse(Files.exists(resolveSource("src/test/native/native_runtime_benchmark.c")))
-        val crypto = Files.readString(resolveSource("src/main/rust/crates/jsrt-crypto/src/lib.rs"))
+        val crypto = Files.readString(resolveSource("src/main/rust/crates/qp-crypto/src/lib.rs"))
         assertTrue(crypto.contains("aes256_gcm_decrypt"))
     }
 

@@ -6,17 +6,17 @@ import io.github.hht0rro.javashroud.model.analysis.MemberSummary
 import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.analysis.TargetSelector
 import io.github.hht0rro.javashroud.model.config.RuleSpec
-import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceCodec
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.QpResourceCodec
+import io.github.hht0rro.javashroud.transforms.protection.QP_LAYOUT_DIGEST_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.QP_MASTER_KEY_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.NativeVmBuildProfile
-import io.github.hht0rro.javashroud.transforms.protection.Vbc4EntryMetadata
-import io.github.hht0rro.javashroud.transforms.protection.VmBytecodeSerializer
+import io.github.hht0rro.javashroud.transforms.protection.QpEntryMetadata
+import io.github.hht0rro.javashroud.transforms.protection.QpSerializer
 import io.github.hht0rro.javashroud.transforms.protection.vbc4CfgDecodeIndex
 import io.github.hht0rro.javashroud.transforms.protection.vbc4CfgEncodeIndex
 import io.github.hht0rro.javashroud.transforms.protection.applyMethodVirtualization
-import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
 import org.objectweb.asm.Opcodes
 import java.nio.file.Files
 import java.nio.file.Path
@@ -40,7 +40,7 @@ class VmStructureDivergenceTest {
         assertEquals(3, setOf(sha256Hex(plain.payload), sha256Hex(register.payload), sha256Hex(mixed.payload)).size)
     }
     private companion object {
-        const val VBC4_FLAG_NESTED_VM_TEST = 0x1000
+        const val QP_FLAG_NESTED_VM_TEST = 0x1000
     }
 
     @Test
@@ -172,7 +172,7 @@ class VmStructureDivergenceTest {
     @Test
     fun self_heal_rotation_contract_uses_resident_seed_and_shared_dispatch_state() {
         assertFalse(Files.exists(Path.of("src/main/native/js_vm_core.c")), "C VM core must be deleted")
-        val executor = Files.readString(Path.of("src/main/rust/crates/jsrt-vm/src/executor.rs"))
+        val executor = Files.readString(Path.of("src/main/rust/crates/qp-vm/src/executor.rs"))
         assertTrue(executor.contains("execute("), "Rust VM must keep a private execution frame")
 
         val initial = residentDump(
@@ -192,19 +192,19 @@ class VmStructureDivergenceTest {
     }
     private fun serializedLayout(seed: Int, contextSeed: Int = seed, nestedProfile: Int = 0, structureEntropy: ByteArray? = null, nativeVmProfile: NativeVmBuildProfile? = null): LayoutSnapshot {
         val context = fixedContext(contextSeed, nativeVmProfile)
-        return withVbc4BuildContext(context) {
+        return withQpBuildContext(context) {
             val serializer = if (structureEntropy == null) {
-                VmBytecodeSerializer(
+                QpSerializer(
                     buildSeed = seed,
                     stateBinding = "structure-divergence-fixture",
-                    entryMetadata = Vbc4EntryMetadata(methodLocalProfile = nestedProfile),
+                    entryMetadata = QpEntryMetadata(methodLocalProfile = nestedProfile),
                     buildContext = context,
                 )
             } else {
-                VmBytecodeSerializer(
+                QpSerializer(
                     buildSeed = seed,
                     stateBinding = "structure-divergence-fixture",
-                    entryMetadata = Vbc4EntryMetadata(methodLocalProfile = nestedProfile),
+                    entryMetadata = QpEntryMetadata(methodLocalProfile = nestedProfile),
                     buildContext = context,
                     structureEntropy = structureEntropy,
                 )
@@ -243,11 +243,11 @@ class VmStructureDivergenceTest {
 
     private fun controlFlowLayout(seed: Int): LayoutSnapshot {
         val context = fixedContext(seed)
-        return withVbc4BuildContext(context) {
-            val serializer = VmBytecodeSerializer(
+        return withQpBuildContext(context) {
+            val serializer = QpSerializer(
                 buildSeed = seed,
                 stateBinding = "control-flow-structure-fixture",
-                entryMetadata = Vbc4EntryMetadata(methodLocalProfile = 0),
+                entryMetadata = QpEntryMetadata(methodLocalProfile = 0),
                 buildContext = context,
             )
             val start = org.objectweb.asm.Label()
@@ -291,8 +291,8 @@ class VmStructureDivergenceTest {
         val layout = serializedLayout(seed = seed, contextSeed = contextSeed, nestedProfile = 0x1357_2468)
         val context = fixedContext(contextSeed)
         val resources = encodedOutlinedResources(context = context, seed = seed)
-        val decoded = withVbc4BuildContext(context) {
-            resources.mapNotNull { entry -> RuntimeResourceCodec.decode(entry.bytes)?.let { entry.name to it } }.toMap()
+        val decoded = withQpBuildContext(context) {
+            resources.mapNotNull { entry -> QpResourceCodec.decode(entry.bytes)?.let { entry.name to it } }.toMap()
         }
         val manifestHeaders = decoded.values
             .mapNotNull { bytes -> bytes.decodeToString().trim().lines().firstOrNull()?.takeIf { it.startsWith("VBC4S|1|") } }
@@ -300,7 +300,7 @@ class VmStructureDivergenceTest {
         return FullChainSnapshot(
             blockIds = layout.blockIds,
             dispatchTokens = layout.dispatchTokens,
-            nestedFlags = layout.flags and VBC4_FLAG_NESTED_VM_TEST,
+            nestedFlags = layout.flags and QP_FLAG_NESTED_VM_TEST,
             nestedDigest = sha256Hex(layout.payload),
             resourceNames = resources.map { it.name },
             resourceDigests = resources.map { sha256Hex(it.bytes) },
@@ -308,7 +308,7 @@ class VmStructureDivergenceTest {
         )
     }
 
-    private fun encodedOutlinedResources(context: Vbc4BuildContext, seed: Int) = withVbc4BuildContext(context) {
+    private fun encodedOutlinedResources(context: QpBuildContext, seed: Int) = withQpBuildContext(context) {
         val result = applyMethodVirtualization(
             artifact = outliningArtifact(),
             ruleMatches = outliningRuleMatches(),
@@ -406,13 +406,13 @@ class VmStructureDivergenceTest {
         .digest(bytes)
         .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xFF) }
 
-    private fun fixedContext(seed: Int, nativeVmProfile: NativeVmBuildProfile? = null): Vbc4BuildContext = Vbc4BuildContext(
-        masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (seed ushr ((index and 3) * 8) xor index * 17).toByte() },
+    private fun fixedContext(seed: Int, nativeVmProfile: NativeVmBuildProfile? = null): QpBuildContext = QpBuildContext(
+        masterKey = ByteArray(QP_MASTER_KEY_SIZE) { index -> (seed ushr ((index and 3) * 8) xor index * 17).toByte() },
         nativeSeed = seed.toLong() xor 0x5A5A_1357L,
-        jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (seed.rotateLeft(index and 31) xor index * 31).toByte() },
+        jarLayoutDigest = ByteArray(QP_LAYOUT_DIGEST_SIZE) { index -> (seed.rotateLeft(index and 31) xor index * 31).toByte() },
         nativeVmProfile = nativeVmProfile ?: NativeVmBuildProfile.fromBuildMaterial(
             seed.toLong() xor 0x5A5A_1357L,
-            ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (seed.rotateLeft(index and 31) xor index * 31).toByte() },
+            ByteArray(QP_LAYOUT_DIGEST_SIZE) { index -> (seed.rotateLeft(index and 31) xor index * 31).toByte() },
         ),
     )
 
@@ -429,7 +429,7 @@ class VmStructureDivergenceTest {
     private data class LayoutSnapshot(
         val payload: ByteArray,
         val seed: Int,
-        val context: Vbc4BuildContext,
+        val context: QpBuildContext,
         val effectiveSeed: Int,
         val flags: Int,
         val blockCount: Int,
@@ -564,7 +564,7 @@ class VmStructureDivergenceTest {
         (value and 0xFF).toByte(),
     )
 
-    private fun effectiveBuildSeed(serializer: VmBytecodeSerializer): Int =
+    private fun effectiveBuildSeed(serializer: QpSerializer): Int =
         serializer.javaClass.getDeclaredField("effectiveBuildSeed").apply { isAccessible = true }.getInt(serializer)
 
     private fun readU2(bytes: ByteArray, offset: Int): Int =

@@ -146,13 +146,7 @@ class NestedVmExecutionTest {
                                 override fun visitMethodInsn(opcode: Int, owner: String, name: String, descriptor: String, isInterface: Boolean) {
                                     if (
                                         opcode == Opcodes.INVOKESTATIC &&
-                                        (descriptor == "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;" ||
-                                            descriptor == "(J[Ljava/lang/Object;)Ljava/lang/Object;" ||
-                                            descriptor == "(J)V" ||
-                                            descriptor == "(J)I" ||
-                                            descriptor == "(JI)I" ||
-                                            descriptor == "(JI)V" ||
-                                            descriptor == "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;")
+                                        descriptor == "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
                                     ) {
                                         found = true
                                     }
@@ -169,7 +163,7 @@ class NestedVmExecutionTest {
     }
 
     private fun runJava(jarPath: Path): ProcessResult {
-        val process = ProcessBuilder("java", "-jar", jarPath.toAbsolutePath().normalize().toString())
+        val process = ProcessBuilder("java", "-Xverify:all", "-jar", jarPath.toAbsolutePath().normalize().toString())
             .withTestBootSecret()
             .redirectErrorStream(true)
             .start()

@@ -9,8 +9,8 @@ import kotlin.test.assertTrue
 class NativePeLoaderAlignmentTest {
     @Test
     fun rust_pe_and_elf_parsers_copy_bounded_headers_without_c_overlays() {
-        val pe = Files.readString(resolveSource("src/main/rust/crates/jsrt-shell/src/pe.rs"))
-        val elf = Files.readString(resolveSource("src/main/rust/crates/jsrt-shell/src/elf.rs"))
+        val pe = Files.readString(resolveSource("src/main/rust/crates/qp-shell/src/pe.rs"))
+        val elf = Files.readString(resolveSource("src/main/rust/crates/qp-shell/src/elf.rs"))
         assertTrue(pe.contains("pub fn parse(bytes: &[u8])"))
         assertTrue(elf.contains("pub fn parse(bytes: &[u8])"))
         assertFalse(pe.contains("(const IMAGE_DOS_HEADER *)"))

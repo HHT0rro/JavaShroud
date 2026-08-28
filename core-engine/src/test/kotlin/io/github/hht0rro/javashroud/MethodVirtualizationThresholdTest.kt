@@ -18,13 +18,13 @@ import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.bytecode.applyCondyConstantIndirection
 import io.github.hht0rro.javashroud.bytecode.indirectMethodCalls
 import io.github.hht0rro.javashroud.transforms.protection.ObfuscatedIdentifierUtil
-import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceCodec
+import io.github.hht0rro.javashroud.transforms.protection.QpResourceCodec
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceKind
-import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.currentVbc4BuildContextOrNull
-import io.github.hht0rro.javashroud.transforms.protection.requireVbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.currentQpBuildContextOrNull
+import io.github.hht0rro.javashroud.transforms.protection.requireQpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.defaultQpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.applyBootstrapTableEncryption
 import io.github.hht0rro.javashroud.transforms.protection.applyMethodVirtualization as applyMethodVirtualizationTransform
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing
@@ -46,34 +46,34 @@ import kotlin.test.assertTrue
 
 class MethodVirtualizationThresholdTest {
     private companion object {
-        const val VBC4_FLAGS_OFFSET_FOR_TEST = 42
-        const val VBC4_NESTED_VM_FLAG_FOR_TEST = 0x1000
+        const val QP_FLAGS_OFFSET_FOR_TEST = 42
+        const val QP_NESTED_VM_FLAG_FOR_TEST = 0x1000
     }
 
     private fun applyMethodVirtualization(
         artifact: BytecodeArtifact,
         ruleMatches: List<RuleMatch>,
         params: Map<String, Any>,
-    ) = if (currentVbc4BuildContextOrNull() != null) {
+    ) = if (currentQpBuildContextOrNull() != null) {
         applyMethodVirtualizationTransform(artifact = artifact, ruleMatches = ruleMatches, params = params)
     } else {
-        withVbc4BuildContext(defaultVbc4BuildContext()) {
+        withQpBuildContext(defaultQpBuildContext()) {
             applyMethodVirtualizationTransform(artifact = artifact, ruleMatches = ruleMatches, params = params)
         }
     }
 
-    private fun decodedVbc4ResourceFlags(entries: List<JarEntryData>, context: Vbc4BuildContext): List<Int> =
-        withVbc4BuildContext(context) {
+    private fun decodedQpResourceFlags(entries: List<JarEntryData>, context: QpBuildContext): List<Int> =
+        withQpBuildContext(context) {
             val decodedByName = entries
                 .filter { it.isVmResourceName() }
-                .mapNotNull { entry -> RuntimeResourceCodec.decode(entry.bytes)?.let { entry.name to it } }
+                .mapNotNull { entry -> QpResourceCodec.decode(entry.bytes)?.let { entry.name to it } }
                 .toMap()
-            val rawResources = decodedByName.values.filter(::isRawVbc4Resource)
-            val slicedResources = decodedByName.values.mapNotNull { bytes -> reassembleSlicedVbc4(bytes, decodedByName) }
-            (rawResources + slicedResources).map { readU2At(it, VBC4_FLAGS_OFFSET_FOR_TEST) }
+            val rawResources = decodedByName.values.filter(::isRawQpResource)
+            val slicedResources = decodedByName.values.mapNotNull { bytes -> reassembleSlicedQp(bytes, decodedByName) }
+            (rawResources + slicedResources).map { readU2At(it, QP_FLAGS_OFFSET_FOR_TEST) }
         }
 
-    private fun reassembleSlicedVbc4(manifestBytes: ByteArray, decodedByName: Map<String, ByteArray>): ByteArray? {
+    private fun reassembleSlicedQp(manifestBytes: ByteArray, decodedByName: Map<String, ByteArray>): ByteArray? {
         val lines = runCatching { manifestBytes.decodeToString().trim().lines() }.getOrNull() ?: return null
         val header = lines.firstOrNull()?.split('|') ?: return null
         if (header.size < 4 || header[0] != "VBC4S" || header[1] != "1") return null
@@ -88,11 +88,11 @@ class MethodVirtualizationThresholdTest {
             if (shard.size != length || offset < 0 || offset + length > out.size) return null
             shard.copyInto(out, offset)
         }
-        return out.takeIf(::isRawVbc4Resource)
+        return out.takeIf(::isRawQpResource)
     }
 
-    private fun isRawVbc4Resource(bytes: ByteArray): Boolean =
-        bytes.size > VBC4_FLAGS_OFFSET_FOR_TEST + 1 &&
+    private fun isRawQpResource(bytes: ByteArray): Boolean =
+        bytes.size > QP_FLAGS_OFFSET_FOR_TEST + 1 &&
             bytes[0] == 'V'.code.toByte() &&
             bytes[1] == 'B'.code.toByte() &&
             bytes[2] == 'C'.code.toByte() &&
@@ -153,16 +153,16 @@ class MethodVirtualizationThresholdTest {
     @Test
     fun method_virtualization_critical_plus_selects_high_value_methods_and_honors_allow_deny_lists() {
         val artifact = artifactFor(highValueSelectionClassBytes(), "example/VmHighValue")
-        val context = defaultVbc4BuildContext()
+        val context = defaultQpBuildContext()
 
-        val defaultHighValue = withVbc4BuildContext(context) {
+        val defaultHighValue = withQpBuildContext(context) {
             applyMethodVirtualization(
                 artifact = artifact,
                 ruleMatches = ruleMatchesFor("example/VmHighValue"),
                 params = mapOf("maxInstructions" to 100, "seed" to 42, "methodSelection" to "critical-plus", "strictVirtualization" to true),
             )
         }
-        val allowPlain = withVbc4BuildContext(context) {
+        val allowPlain = withQpBuildContext(context) {
             applyMethodVirtualization(
                 artifact = artifact,
                 ruleMatches = ruleMatchesFor("example/VmHighValue"),
@@ -175,7 +175,7 @@ class MethodVirtualizationThresholdTest {
                 ),
             )
         }
-        val denyVerify = withVbc4BuildContext(context) {
+        val denyVerify = withQpBuildContext(context) {
             applyMethodVirtualization(
                 artifact = artifact,
                 ruleMatches = ruleMatchesFor("example/VmHighValue"),
@@ -202,9 +202,9 @@ class MethodVirtualizationThresholdTest {
     @Test
     fun method_virtualization_high_value_methods_are_backed_by_nested_micro_stream_writer() {
         val highValueArtifact = artifactFor(highValueSelectionClassBytes(), "example/VmHighValue")
-        val context = defaultVbc4BuildContext()
+        val context = defaultQpBuildContext()
 
-        val highValue = withVbc4BuildContext(context) {
+        val highValue = withQpBuildContext(context) {
             applyMethodVirtualization(
                 artifact = highValueArtifact,
                 ruleMatches = ruleMatchesFor("example/VmHighValue"),
@@ -218,9 +218,9 @@ class MethodVirtualizationThresholdTest {
             )
         }
 
-        val serializerSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/VmBytecodeSerializer.kt"))
+        val serializerSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/QpSerializer.kt"))
         assertTrue(serializerSource.contains("serializeNestedBlock"), "Nested VBC4 resources must be written through a second-level micro-op stream")
-        assertTrue(serializerSource.contains("VBC4_NESTED_MAGIC"), "Nested VBC4 resources must carry a native-validated micro-stream envelope")
+        assertTrue(serializerSource.contains("QP_NESTED_MAGIC"), "Nested VBC4 resources must carry a native-validated micro-stream envelope")
         assertTrue(serializerSource.contains("vbc4NestedFieldOrder"), "Nested micro-op fields must be per-build permuted rather than plain register rows")
     }
 
@@ -356,10 +356,10 @@ class MethodVirtualizationThresholdTest {
         assertTrue(result.transformedMemberCount >= 1, "strict all-compatible must keep condy-indirected constants in the virtualized set")
         assertTrue(methodCallsVmDispatcher(transformed, "value", "()I"), "Condy-bearing method should be replaced by the native VM dispatcher")
         val projectDir = Path.of(System.getProperty("user.dir"))
-        val sourceRoot = if (Files.exists(projectDir.resolve("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/VmBytecodeSerializer.kt"))) projectDir else projectDir.resolve("core-engine")
-        val serializerSource = Files.readString(sourceRoot.resolve("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/VmBytecodeSerializer.kt"))
-        val nativeSource = Files.readString(sourceRoot.resolve("src/main/rust/crates/jsrt-vm/src/lib.rs"))
-        val executorSource = Files.readString(sourceRoot.resolve("src/main/rust/crates/jsrt-vm/src/executor.rs"))
+        val sourceRoot = if (Files.exists(projectDir.resolve("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/QpSerializer.kt"))) projectDir else projectDir.resolve("core-engine")
+        val serializerSource = Files.readString(sourceRoot.resolve("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/QpSerializer.kt"))
+        val nativeSource = Files.readString(sourceRoot.resolve("src/main/rust/crates/qp-vm/src/lib.rs"))
+        val executorSource = Files.readString(sourceRoot.resolve("src/main/rust/crates/qp-vm/src/executor.rs"))
         assertTrue(serializerSource.contains("VM_LDC_CONDY"), "Serializer must keep a dedicated guarded ConstantDynamic LDC opcode")
         assertTrue(nativeSource.contains("LDC_CONDY") && executorSource.contains("LDC_CONDY"), "Rust VM must execute guarded ConstantDynamic LDC values")
     }
@@ -715,7 +715,7 @@ class MethodVirtualizationThresholdTest {
                 classBytes,
                 "value",
                 "()I",
-                "executeAkenVmPage",
+                "executeQpVmPage",
                 "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;",
             ),
             "VM dispatcher stubs must use the authenticated current AKEN page ABI.",
@@ -745,7 +745,7 @@ class MethodVirtualizationThresholdTest {
                     classBytes,
                     name,
                     descriptor,
-                    "executeAkenVmPage",
+                    "executeQpVmPage",
                     currentDescriptor,
                 ),
                 "$name$descriptor must use the current authenticated AKEN Object[] bridge.",
@@ -1968,7 +1968,7 @@ class MethodVirtualizationThresholdTest {
                 if (name != methodName || desc != descriptor) return null
                 return object : MethodVisitor(Opcodes.ASM9) {
                     override fun visitMethodInsn(opcode: Int, owner: String, name: String, methodDescriptor: String, isInterface: Boolean) {
-                        if (owner.endsWith("JniMicrokernelHelper") && name == "executeAkenVmPage") {
+                        if (owner.endsWith("QpBridge") && name == "executeQpVmPage") {
                             calls += name to methodDescriptor
                         }
                     }
@@ -1990,7 +1990,7 @@ class MethodVirtualizationThresholdTest {
                     }
 
                     override fun visitMethodInsn(opcode: Int, owner: String, name: String, methodDescriptor: String, isInterface: Boolean) {
-                    if (owner.endsWith("JniMicrokernelHelper") && name == "executeAkenVmPage") {
+                    if (owner.endsWith("QpBridge") && name == "executeQpVmPage") {
                             beforeRealDispatcher = false
                         }
                     }

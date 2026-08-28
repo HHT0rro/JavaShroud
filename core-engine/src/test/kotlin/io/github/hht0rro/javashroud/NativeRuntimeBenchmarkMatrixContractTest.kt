@@ -11,31 +11,31 @@ class NativeRuntimeBenchmarkMatrixContractTest {
     fun rust_r1_benchmark_contract_is_bounded_authenticated_software_only_and_workspace_locked() {
         val rustRoot = rustRoot()
         val workspace = Files.readString(rustRoot.resolve("Cargo.toml"))
-        val cryptoManifest = Files.readString(rustRoot.resolve("crates/jsrt-crypto/Cargo.toml"))
-        val crypto = Files.readString(rustRoot.resolve("crates/jsrt-crypto/src/lib.rs")) +
-            Files.readString(rustRoot.resolve("crates/jsrt-crypto/src/types.rs"))
-        val protocol = Files.readString(rustRoot.resolve("crates/jsrt-page/src/frame.rs"))
-        val vmManifest = Files.readString(rustRoot.resolve("crates/jsrt-vm/Cargo.toml"))
-        val vm = Files.readString(rustRoot.resolve("crates/jsrt-vm/src/lib.rs"))
-        val zstd = Files.readString(rustRoot.resolve("crates/jsrt-vm/src/zstd.rs"))
-        val executor = Files.readString(rustRoot.resolve("crates/jsrt-vm/src/executor.rs"))
+        val cryptoManifest = Files.readString(rustRoot.resolve("crates/qp-crypto/Cargo.toml"))
+        val crypto = Files.readString(rustRoot.resolve("crates/qp-crypto/src/lib.rs")) +
+            Files.readString(rustRoot.resolve("crates/qp-crypto/src/types.rs"))
+        val protocol = Files.readString(rustRoot.resolve("crates/qp-page/src/frame.rs"))
+        val vmManifest = Files.readString(rustRoot.resolve("crates/qp-vm/Cargo.toml"))
+        val vm = Files.readString(rustRoot.resolve("crates/qp-vm/src/lib.rs"))
+        val zstd = Files.readString(rustRoot.resolve("crates/qp-vm/src/zstd.rs"))
+        val executor = Files.readString(rustRoot.resolve("crates/qp-vm/src/executor.rs"))
 
         assertEquals(
             listOf(
-                "crates/jsrt-ffi",
-                "crates/jsrt-runtime",
-                "crates/jsrt-crypto",
-                "crates/jsrt-page",
-                "crates/jsrt-resource",
-                "crates/jsrt-vm",
-                "crates/jsrt-shell",
+                "crates/qp-ffi",
+                "crates/qp-runtime",
+                "crates/qp-crypto",
+                "crates/qp-page",
+                "crates/qp-resource",
+                "crates/qp-vm",
+                "crates/qp-shell",
             ),
             workspaceMembers(workspace),
             "current R1 workspace members",
         )
         for (marker in listOf(
-            "[workspace.metadata.aken-r1]",
-            "runtime_abi = \"jsrt_ffi\"",
+            "[workspace.metadata.qp]",
+            "runtime_abi = \"qp_ffi\"",
             "runtime_resource_root = \"META-INF/jsrt\"",
             "rust_toolchain = \"1.78.0\"",
             "windows_target = \"x86_64-pc-windows-gnu\"",
@@ -45,11 +45,11 @@ class NativeRuntimeBenchmarkMatrixContractTest {
             assertContains(workspace, marker, "R1 workspace")
         }
 
-        assertContains(cryptoManifest, "name = \"jsrt-crypto\"", "jsrt-crypto manifest")
-        assertContains(vmManifest, "name = \"jsrt-vm\"", "jsrt-vm manifest")
-        assertContains(vmManifest, "unsafe_code = \"forbid\"", "jsrt-vm manifest")
-        assertNoUnsafe(crypto, "jsrt-crypto")
-        assertNoUnsafe(vm, "jsrt-vm")
+        assertContains(cryptoManifest, "name = \"qp-crypto\"", "qp-crypto manifest")
+        assertContains(vmManifest, "name = \"qp-vm\"", "qp-vm manifest")
+        assertContains(vmManifest, "unsafe_code = \"forbid\"", "qp-vm manifest")
+        assertNoUnsafe(crypto, "qp-crypto")
+        assertNoUnsafe(vm, "qp-vm")
 
         for (testName in listOf(
             "authentication_tag_is_framed_and_constant_time",
@@ -91,8 +91,8 @@ class NativeRuntimeBenchmarkMatrixContractTest {
         assertOrder(decrypt, "let authenticated =", "let mut plaintext", "GCM authentication before decryption")
 
         for (marker in listOf(
-            "pub const VBC4_MAX_FRAME_SIZE",
-            "pub const VBC4_MAX_SECTION_SIZE",
+            "pub const QP_MAX_FRAME_SIZE",
+            "pub const QP_MAX_SECTION_SIZE",
             "pub struct ParserLimits",
             "parser limit exceeds the R1 bound",
             "if frame.len() > self.limits.max_frame_size",

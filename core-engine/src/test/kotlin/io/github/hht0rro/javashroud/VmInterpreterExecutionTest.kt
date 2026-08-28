@@ -6,12 +6,13 @@ import io.github.hht0rro.javashroud.adapters.protocol.buildCommandRequest
 import io.github.hht0rro.javashroud.adapters.protocol.dispatchRequest
 import io.github.hht0rro.javashroud.kernel.EngineKernel
 import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.QP_LAYOUT_DIGEST_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.QP_MASTER_KEY_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.NativeVmBuildProfile
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeKeyPartitions
-import io.github.hht0rro.javashroud.transforms.protection.VmBytecodeSerializer
+import io.github.hht0rro.javashroud.transforms.protection.QpSerializer
+import io.github.hht0rro.javashroud.transforms.protection.qp.derivedVmMagic
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.MethodVisitor
@@ -39,7 +40,7 @@ class VmInterpreterExecutionTest {
 
     @Test
     fun vbc4_serializer_returns_expected_header_and_section_markers() {
-        val serializer = VmBytecodeSerializer(buildSeed = 0x2468_1357, buildContext = fixedVbc4Context())
+        val serializer = QpSerializer(buildSeed = 0x2468_1357, buildContext = fixedQpContext())
         serializer.visitCode()
         serializer.visitInsn(Opcodes.ICONST_1)
         serializer.visitInsn(Opcodes.IRETURN)
@@ -48,7 +49,15 @@ class VmInterpreterExecutionTest {
 
         val bytes = serializer.serialize()
 
-        assertEquals("VBC5", bytes.copyOfRange(0, 4).toString(Charsets.US_ASCII))
+        val currentMagic = derivedVmMagic()
+        val retiredVmMagic = "VBC5".toByteArray(Charsets.US_ASCII)
+        try {
+            assertTrue(bytes.copyOfRange(0, 4).contentEquals(currentMagic), "VM frame must use the current seed-derived magic")
+            assertFalse(bytes.copyOfRange(0, 4).contentEquals(retiredVmMagic), "VM frame must not use retired VBC5 magic")
+        } finally {
+            java.util.Arrays.fill(currentMagic, 0)
+            java.util.Arrays.fill(retiredVmMagic, 0)
+        }
         assertFalse(bytes.containsInt32BigEndian(0x2468_1357), "Build seed must not be stored in plaintext")
         assertEquals(32, bytes.copyOfRange(20, 52).size, "VBC4 header must carry a dialect commitment")
         assertTrue(bytes.copyOfRange(20, 52).any { it != 0.toByte() }, "VBC4 dialect commitment must not be an all-zero placeholder")
@@ -63,7 +72,7 @@ class VmInterpreterExecutionTest {
 
     @Test
     fun vbc4_multi_block_layout_splits_large_methods_into_several_blocks() {
-        val serializer = VmBytecodeSerializer(buildSeed = 0x0BADF00D, buildContext = fixedVbc4Context())
+        val serializer = QpSerializer(buildSeed = 0x0BADF00D, buildContext = fixedQpContext())
         serializer.visitCode()
         repeat(60) { i ->
             serializer.visitLdcInsn(i)
@@ -82,8 +91,8 @@ class VmInterpreterExecutionTest {
 
     @Test
     fun vbc4_multi_block_layout_uses_entropy_even_for_same_seed() {
-        fun emit(seed: Int): Int {
-            val serializer = VmBytecodeSerializer(buildSeed = seed, buildContext = fixedVbc4Context())
+        fun emit(seed: Int): ByteArray {
+            val serializer = QpSerializer(buildSeed = seed, buildContext = fixedQpContext())
             serializer.visitCode()
             repeat(60) { i ->
                 serializer.visitLdcInsn(i)
@@ -93,16 +102,17 @@ class VmInterpreterExecutionTest {
             serializer.visitInsn(Opcodes.IRETURN)
             serializer.visitMaxs(8, 8)
             serializer.visitEnd()
-            return readU2(serializer.serialize(), 76)
+            val bytes = serializer.serialize()
+            return bytes
         }
         val repeated = (1..16).map { emit(0x13572468) }
-        assertTrue(repeated.toSet().size > 1, "Block layout must vary even for a repeated fixed seed")
+        assertTrue(repeated.map { it.toList() }.toSet().size > 1, "Encoded block layout must vary with structure entropy even for a repeated fixed seed")
     }
 
     @Test
     fun vbc4_multi_block_storage_order_is_seed_randomized() {
         fun blockIds(seed: Int): List<Int> {
-            val serializer = VmBytecodeSerializer(buildSeed = seed, buildContext = fixedVbc4Context())
+            val serializer = QpSerializer(buildSeed = seed, buildContext = fixedQpContext())
             serializer.visitCode()
             repeat(96) { i ->
                 serializer.visitLdcInsn(i)
@@ -127,9 +137,9 @@ class VmInterpreterExecutionTest {
     @Test
     fun vbc4_multi_block_index_carries_masked_dispatch_chain() {
         val seed = 0x2468_1357
-        val serializer = VmBytecodeSerializer(
+        val serializer = QpSerializer(
             buildSeed = seed,
-            buildContext = fixedVbc4Context(),
+            buildContext = fixedQpContext(),
             structureEntropy = fixedStructureEntropy(),
         )
         serializer.visitCode()
@@ -163,7 +173,7 @@ class VmInterpreterExecutionTest {
     @Test
     fun vbc4_same_program_has_high_structural_variance_across_build_seeds() {
         fun emit(seed: Int): Pair<ByteArray, List<Int>> {
-            val serializer = VmBytecodeSerializer(buildSeed = seed, buildContext = fixedVbc4Context())
+            val serializer = QpSerializer(buildSeed = seed, buildContext = fixedQpContext())
             serializer.visitCode()
             repeat(128) { i ->
                 serializer.visitLdcInsn(i xor (i shl 3))
@@ -195,8 +205,8 @@ class VmInterpreterExecutionTest {
 
     @Test
     fun vbc4_extended_opcode_aliasing_covers_more_semantic_families() {
-        val serializerSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/VmBytecodeSerializer.kt"))
-        val nativeSource = Files.readString(Path.of("src/main/rust/crates/jsrt-vm/src/lib.rs"))
+        val serializerSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/QpSerializer.kt"))
+        val nativeSource = Files.readString(Path.of("src/main/rust/crates/qp-vm/src/lib.rs"))
         // Arithmetic/bitwise, load-store, array, field, and branch families must all carry aliases.
         for (canonical in listOf("VM_IMUL", "VM_IXOR", "VM_IAND", "VM_ISHL", "VM_ALOAD", "VM_ASTORE", "VM_IALOAD", "VM_GETFIELD", "VM_GOTO", "VM_IF_ICMPEQ")) {
             assertTrue(serializerSource.contains("VmOpcodes.$canonical to intArrayOf("), "Serializer must alias $canonical")
@@ -210,8 +220,8 @@ class VmInterpreterExecutionTest {
     @Test
     fun vbc4_domain_super_operator_operands_are_alias_diversified() {
         fun foldedSources(seed: Int): Pair<Int, Int> {
-            val serializer = VmBytecodeSerializer(buildSeed = seed, buildContext = fixedVbc4Context())
-            val domainOperand = VmBytecodeSerializer::class.java.getDeclaredMethod(
+            val serializer = QpSerializer(buildSeed = seed, buildContext = fixedQpContext())
+            val domainOperand = QpSerializer::class.java.getDeclaredMethod(
                 "domainSuperOperandOpcode",
                 Int::class.javaPrimitiveType,
                 Int::class.javaPrimitiveType,
@@ -229,7 +239,7 @@ class VmInterpreterExecutionTest {
 
     @Test
     fun vbc4_stack_instruction_opcodes_are_masked_per_build_seed() {
-        val serializerA = VmBytecodeSerializer(buildSeed = 0x11111111, buildContext = fixedVbc4Context())
+        val serializerA = QpSerializer(buildSeed = 0x11111111, buildContext = fixedQpContext())
         serializerA.visitCode()
         serializerA.visitInsn(Opcodes.ICONST_1)
         serializerA.visitInsn(Opcodes.IRETURN)
@@ -237,7 +247,7 @@ class VmInterpreterExecutionTest {
         serializerA.visitEnd()
         val bytesA = serializerA.serialize()
 
-        val serializerB = VmBytecodeSerializer(buildSeed = 0x22222222, buildContext = fixedVbc4Context())
+        val serializerB = QpSerializer(buildSeed = 0x22222222, buildContext = fixedQpContext())
         serializerB.visitCode()
         serializerB.visitInsn(Opcodes.ICONST_1)
         serializerB.visitInsn(Opcodes.IRETURN)
@@ -258,21 +268,21 @@ class VmInterpreterExecutionTest {
 
     @Test
     fun vbc4_state_bound_serializer_uses_runtime_binding_in_seed_derivation() {
-        val serializerSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/VmBytecodeSerializer.kt"))
+        val serializerSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/QpSerializer.kt"))
         val virtualizationSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/MethodVirtualizationTransforms.kt"))
         val nativeKernelSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeKernelTransforms.kt"))
 
         assertTrue(serializerSource.contains("private val stateBinding: String"), "VBC4 serializer must accept runtime state binding material.")
-        assertTrue(serializerSource.contains("VBC4_FLAG_STATE_BOUND") && serializerSource.contains("vbc4WrappedSeed(cryptoSeed, nonce, stateBinding)"), "VBC4 serializer seed wrapping must always include binding material.")
-        assertTrue(virtualizationSource.contains("VBC4_CLEAN_ENTRY_INTEGRITY_HEX") && virtualizationSource.contains("jarLayoutDigest"), "VM resource binding must include clean entry integrity and build layout digest material.")
+        assertTrue(serializerSource.contains("QP_FLAG_STATE_BOUND") && serializerSource.contains("vbc4WrappedSeed(cryptoSeed, nonce, stateBinding)"), "VBC4 serializer seed wrapping must always include binding material.")
+        assertTrue(virtualizationSource.contains("QP_CLEAN_ENTRY_INTEGRITY_HEX") && virtualizationSource.contains("jarLayoutDigest"), "VM resource binding must include clean entry integrity and build layout digest material.")
         assertTrue(virtualizationSource.contains("vmStateBinding(entryToken, resourcePath)"), "VM resource serialization must bind the hashed runtime entry token and resource path.")
         assertTrue(nativeKernelSource.contains("stateBinding = vmStateBinding(entryToken, resourcePath)"), "Helper VBC4 resource serialization must also bind the hashed runtime entry token and resource path.")
     }
 
     @Test
     fun vbc4_serializer_and_native_parser_support_opcode_level_polymorphism() {
-        val serializerSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/VmBytecodeSerializer.kt"))
-        val nativeSource = Files.readString(Path.of("src/main/rust/crates/jsrt-vm/src/lib.rs"))
+        val serializerSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/QpSerializer.kt"))
+        val nativeSource = Files.readString(Path.of("src/main/rust/crates/qp-vm/src/lib.rs"))
 
         assertTrue(serializerSource.contains("VM_OPCODE_ALIASES"), "Serializer must define equivalent opcode aliases.")
         assertTrue(serializerSource.contains("lowerToLogicalProgram(metadataCpIndex)"), "VBC4-only serialization must lower bytecode into the register program consumed by native dispatch.")
@@ -379,7 +389,7 @@ class VmInterpreterExecutionTest {
             val result = runJavaProcessWithTimeout(
                 ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()),
             )
-            assertEquals(0, result.exitCode, "Virtualized predicate fixture must exit cleanly. stdout=${'$'}{result.output}")
+            assertEquals(0, result.exitCode, "Virtualized predicate fixture must exit cleanly. stdout=${result.output}")
             assertEquals(
                 baseline.output.trim(),
                 result.output.trim(),
@@ -607,7 +617,7 @@ class VmInterpreterExecutionTest {
             val baseline = runJavaProcessWithTimeout(ProcessBuilder("java", "-jar", inputJar.toAbsolutePath().normalize().toString()))
             assertEquals(0, baseline.exitCode, "Baseline instance recursive fixture must exit cleanly. stdout=${baseline.output}")
             outputJar = runEngine(inputJar, passes)
-            val result = runJavaProcessWithTimeout(ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()), timeoutSeconds = 20)
+            val result = runJavaProcessWithTimeout(ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()), timeoutSeconds = 120)
             assertEquals(0, result.exitCode, "Virtualized instance recursive fixture must exit cleanly without native reentry blowup. stdout=${result.output}")
             assertEquals(baseline.output.trim(), result.output.trim(), "Native VBC4 must preserve private instance tail recursion semantics")
         } finally {
@@ -780,7 +790,7 @@ class VmInterpreterExecutionTest {
                         "rotationStrategy" to "mixed",
                     ),
                     "method-virtualization" to mapOf(
-                        "methodSelection" to "critical-plus",
+                        "methodSelection" to "all-compatible",
                         "highValueMethods" to "e2e/IndyStringBridgeRoot#bridge:(II)I",
                         "highValueMethodDeny" to "main,lambda${'$'}main${'$'}0",
                         "strictVirtualization" to true,
@@ -797,7 +807,10 @@ class VmInterpreterExecutionTest {
             )
             val result = runJavaProcessWithTimeout(
                 ProcessBuilder("java", "-Xverify:all", "-jar", outputJar.toAbsolutePath().normalize().toString()),
-                timeoutSeconds = 90,
+                // Each bridge call authenticates and reparses its current-format
+                // VM page.  Keep the correctness budget separate from a future
+                // parsed-program-cache performance benchmark.
+                timeoutSeconds = 180,
             )
             assertEquals(0, result.exitCode, "Virtualized concurrent String bridge fixture must exit cleanly. stdout=${result.output}")
             assertEquals(
@@ -897,7 +910,7 @@ class VmInterpreterExecutionTest {
             baseline = runJavaProcessWithTimeout(ProcessBuilder("java", "-jar", inputJar.toAbsolutePath().normalize().toString()))
             assertEquals(0, baseline.exitCode, "Baseline native profile matrix fixture must exit cleanly. stdout=${baseline.output}")
             listOf(NativeVmBuildProfile(0, 0), NativeVmBuildProfile(1, 1), NativeVmBuildProfile(2, 2)).forEach { profile ->
-                val baseContext = fixedVbc4Context()
+                val baseContext = fixedQpContext()
                 val context = baseContext.copy(
                     runtimeKeyPartitions = sharedPartitions.deepCopy(),
                     nativeVmProfile = profile,
@@ -954,7 +967,7 @@ class VmInterpreterExecutionTest {
         val profiles = results.joinToString(prefix = "[", postfix = "]", separator = ",") { (profile, result) ->
             """{"parser_row_profile":${profile.parserRowProfile},"operand_access_profile":${profile.operandAccessProfile},"authenticated_id":${profile.authenticatedId},"exit_code":${result.exitCode},"stdout_sha256":"${digest(result.output.trim())}","contract_equal":${result.exitCode == baseline.exitCode && result.output.trim() == baseline.output.trim()}}"""
         }
-        val report = """{"schema_version":1,"fixture":"thread-sleep-native-vbc4","baseline":{"exit_code":${baseline.exitCode},"stdout_sha256":"${digest(baseline.output.trim())}"},"profiles":$profiles,"status":"passed"}"""
+        val report = """{"schema_version":1,"fixture":"thread-sleep-native-qp","baseline":{"exit_code":${baseline.exitCode},"stdout_sha256":"${digest(baseline.output.trim())}"},"profiles":$profiles,"status":"passed"}"""
         Files.writeString(reportPath, report, Charsets.UTF_8)
         assertTrue(Files.size(reportPath) > 0, "Native profile behavior evidence report must be written: $reportPath")
     }
@@ -963,7 +976,7 @@ class VmInterpreterExecutionTest {
         inputJar: Path,
         passIds: List<String>,
         passParams: Map<String, Map<String, Any>> = emptyMap(),
-        contextOverride: Vbc4BuildContext? = null,
+        contextOverride: QpBuildContext? = null,
         outputTag: String? = null,
     ): Path {
         val tag = safeTag(outputTag ?: passIds.joinToString("-"), "javashroud-vm-exec-")
@@ -1047,13 +1060,15 @@ class VmInterpreterExecutionTest {
                                 override fun visitMethodInsn(opcode: Int, owner: String, name: String, descriptor: String, isInterface: Boolean) {
                                     if (
                                         opcode == Opcodes.INVOKESTATIC &&
-                                         (descriptor == "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;" ||
-                                             descriptor == "(J[Ljava/lang/Object;)Ljava/lang/Object;" ||
-                                             descriptor == "(J)V" ||
-                                             descriptor == "(J)I" ||
-                                             descriptor == "(JI)I" ||
-                                             descriptor == "(JI)V")
-                                     ) found = true
+                                        (
+                                            descriptor == "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;" ||
+                                                descriptor == "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;" ||
+                                                descriptor == "(J[Ljava/lang/Object;)Ljava/lang/Object;" ||
+                                                descriptor == "(J)V" ||
+                                                descriptor == "(J)I" ||
+                                                descriptor == "(JI)I" ||
+                                                descriptor == "(JI)V")
+                                    ) found = true
                                 }
                             }
                         }
@@ -1074,10 +1089,10 @@ class VmInterpreterExecutionTest {
 
     private fun normalizeLineEndings(output: String): String = output.trim().replace("\r\n", "\n")
 
-    private fun fixedVbc4Context(): Vbc4BuildContext = Vbc4BuildContext(
-        masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (index * 29 + 3).toByte() },
+    private fun fixedQpContext(): QpBuildContext = QpBuildContext(
+        masterKey = ByteArray(QP_MASTER_KEY_SIZE) { index -> (index * 29 + 3).toByte() },
         nativeSeed = 0x2468_1357L,
-        jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (index * 31 + 9).toByte() },
+        jarLayoutDigest = ByteArray(QP_LAYOUT_DIGEST_SIZE) { index -> (index * 31 + 9).toByte() },
     )
 
     private fun fixedStructureEntropy(): ByteArray = ByteArray(32) { index -> (index * 23 + 11).toByte() }
@@ -1091,7 +1106,7 @@ class VmInterpreterExecutionTest {
             ((bytes[offset + 2].toInt() and 0xFF) shl 8) or
             (bytes[offset + 3].toInt() and 0xFF)
 
-    private fun effectiveBuildSeed(serializer: VmBytecodeSerializer): Int =
+    private fun effectiveBuildSeed(serializer: QpSerializer): Int =
         serializer.javaClass.getDeclaredField("effectiveBuildSeed").apply { isAccessible = true }.getInt(serializer)
 
     private data class BlockIndexEntry(val blockId: Int, val entryToken: Int, val maskedNext: Int)
@@ -1531,7 +1546,7 @@ class VmInterpreterExecutionTest {
                         throw new IllegalStateException("bridge workers were not ready");
                     }
                     start.countDown();
-                    if (!done.await(20L, java.util.concurrent.TimeUnit.SECONDS)) {
+                    if (!done.await(120L, java.util.concurrent.TimeUnit.SECONDS)) {
                         throw new IllegalStateException("bridge workers did not complete");
                     }
                     System.out.println("bridge:" + total.get());

@@ -5,7 +5,7 @@ import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.model.config.HardenedProtectionProfile
 import io.github.hht0rro.javashroud.testAttachedArtifact
 import io.github.hht0rro.javashroud.testClassArtifact
-import io.github.hht0rro.javashroud.transforms.protection.hardening.IndyTargetTokenEnvelope
+import io.github.hht0rro.javashroud.transforms.protection.hardening.QpTargetTokenEnvelope
 import io.github.hht0rro.javashroud.transforms.protection.hardening.ProtectionFormat
 import io.github.hht0rro.javashroud.transforms.protection.hardening.ReleaseArtifactScan
 import io.github.hht0rro.javashroud.transforms.protection.hardening.SignedDebugMap
@@ -20,14 +20,14 @@ import org.objectweb.asm.Opcodes
 class HardenedNegativeTamperTest {
     @Test
     fun itk_token_does_not_open_across_artifacts_or_sites() {
-        val target = IndyTargetTokenEnvelope.Target("com/example/T", "work", "(I)I", Opcodes.H_INVOKESTATIC, false)
+        val target = QpTargetTokenEnvelope.Target("com/example/T", "work", "(I)I", Opcodes.H_INVOKESTATIC, false)
         val artifactA = binding(digestFill = 3, owner = "com/foo/A", site = 1)
         val artifactB = binding(digestFill = 9, owner = "com/foo/A", site = 1)
         val siteB = binding(digestFill = 3, owner = "com/foo/A", site = 2)
-        val sealed = IndyTargetTokenEnvelope.seal(target, artifactA)
-        IndyTargetTokenEnvelope.open(sealed, artifactA)
-        assertFailsWith<SecurityException> { IndyTargetTokenEnvelope.open(sealed, artifactB) }
-        assertFailsWith<SecurityException> { IndyTargetTokenEnvelope.open(sealed, siteB) }
+        val sealed = QpTargetTokenEnvelope.seal(target, artifactA)
+        QpTargetTokenEnvelope.open(sealed, artifactA)
+        assertFailsWith<SecurityException> { QpTargetTokenEnvelope.open(sealed, artifactB) }
+        assertFailsWith<SecurityException> { QpTargetTokenEnvelope.open(sealed, siteB) }
     }
 
     @Test
@@ -97,14 +97,15 @@ class HardenedNegativeTamperTest {
                 emptyList(),
             )
             assertFalse(report.findings.single { it.check == "legacy-magic" }.passed)
+            assertFalse(report.findings.single { it.check == "legacy-path" }.passed)
             assertTrue(report.findings.none { it.check == "legacy-magic" && it.passed })
         } finally {
             Files.walk(dir).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
         }
     }
 
-    private fun binding(digestFill: Int, owner: String, site: Int): IndyTargetTokenEnvelope.Binding =
-        IndyTargetTokenEnvelope.Binding(
+    private fun binding(digestFill: Int, owner: String, site: Int): QpTargetTokenEnvelope.Binding =
+        QpTargetTokenEnvelope.Binding(
             artifactDigest = ByteArray(32) { (it + digestFill).toByte() },
             callerOwner = owner,
             indyName = "run",
@@ -115,7 +116,7 @@ class HardenedNegativeTamperTest {
     private fun boundDraft(): SignedDebugMap.Draft = SignedDebugMap.Draft(
         methodMappings = emptyList(),
         fieldMappings = emptyList(),
-        transformVersion = ProtectionFormat.CURRENT,
+        transformVersion = ProtectionFormat.CURRENT_LABEL,
         buildId = "build-1",
         issuerKeyId = "org-test",
         passConfigDigest = ByteArray(32) { (it + 1).toByte() },

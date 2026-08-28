@@ -11,7 +11,7 @@ class NativeRuntimeJniCacheProductionBenchmarkTest {
     fun c_jni_cache_probe_is_retired_in_favor_of_the_rust_runtime() {
         assertFalse(Files.exists(resolveSource("src/main/native")))
         assertFalse(Files.exists(resolveSource("src/test/native/jni_cache_production_benchmark_probe.c")))
-        val ffi = Files.readString(resolveSource("src/main/rust/crates/jsrt-ffi/src/lib.rs"))
+        val ffi = Files.readString(resolveSource("src/main/rust/crates/qp-ffi/src/lib.rs"))
         assertTrue(ffi.contains("RegisterNatives"))
         assertTrue(ffi.contains("JNI_OnLoad"))
     }

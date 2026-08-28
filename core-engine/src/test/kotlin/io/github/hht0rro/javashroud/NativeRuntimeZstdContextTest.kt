@@ -10,13 +10,13 @@ class NativeRuntimeZstdContextTest {
     fun rust_r1_crypto_contracts_are_bounded_authenticated_and_wipe_only() {
         val rustRoot = resolveRustRoot()
         val workspaceManifest = Files.readString(rustRoot.resolve("Cargo.toml"))
-        val manifest = Files.readString(rustRoot.resolve("crates/jsrt-crypto/Cargo.toml"))
-        val source = Files.readString(rustRoot.resolve("crates/jsrt-crypto/src/lib.rs"))
+        val manifest = Files.readString(rustRoot.resolve("crates/qp-crypto/Cargo.toml"))
+        val source = Files.readString(rustRoot.resolve("crates/qp-crypto/src/lib.rs"))
 
-        assertContains(workspaceManifest, "crates/jsrt-crypto", "Rust workspace")
+        assertContains(workspaceManifest, "crates/qp-crypto", "Rust workspace")
         assertContains(workspaceManifest, "unsafe_code = \"deny\"", "Rust workspace")
-        assertContains(manifest, "name = \"jsrt-crypto\"", "jsrt-crypto manifest")
-        assertContains(source, "#![forbid(unsafe_code)]", "jsrt-crypto")
+        assertContains(manifest, "name = \"qp-crypto\"", "qp-crypto manifest")
+        assertContains(source, "#![forbid(unsafe_code)]", "qp-crypto")
         for (testName in listOf(
             "authentication_tag_is_framed_and_constant_time",
             "aes256_gcm_matches_nist_vector_and_round_trips",
@@ -51,7 +51,7 @@ class NativeRuntimeZstdContextTest {
             "hardware_aes: false",
             "hardware_ghash: false",
         )) {
-            assertContains(source, marker, "jsrt-crypto R1 contract")
+            assertContains(source, marker, "qp-crypto R1 contract")
         }
 
         val decrypt = source.substringAfter("pub fn aes256_gcm_decrypt(").substringBefore("fn ensure_software_backend(")
@@ -67,19 +67,19 @@ class NativeRuntimeZstdContextTest {
     @Test
     fun rust_r1_zstd_contracts_are_bounded_and_wipe_only() {
         val rustRoot = resolveRustRoot()
-        val resourceManifest = Files.readString(rustRoot.resolve("crates/jsrt-resource/Cargo.toml"))
-        val resourceSource = Files.readString(rustRoot.resolve("crates/jsrt-resource/src/lib.rs"))
-        val vmManifest = Files.readString(rustRoot.resolve("crates/jsrt-vm/Cargo.toml"))
-        val vmSource = Files.readString(rustRoot.resolve("crates/jsrt-vm/src/zstd.rs"))
-        val vmCrateSource = Files.readString(rustRoot.resolve("crates/jsrt-vm/src/lib.rs"))
-        val runtimeManifest = Files.readString(rustRoot.resolve("crates/jsrt-runtime/Cargo.toml"))
-        val lifecycleSource = Files.readString(rustRoot.resolve("crates/jsrt-runtime/src/lifecycle.rs"))
+        val resourceManifest = Files.readString(rustRoot.resolve("crates/qp-resource/Cargo.toml"))
+        val resourceSource = Files.readString(rustRoot.resolve("crates/qp-resource/src/lib.rs"))
+        val vmManifest = Files.readString(rustRoot.resolve("crates/qp-vm/Cargo.toml"))
+        val vmSource = Files.readString(rustRoot.resolve("crates/qp-vm/src/zstd.rs"))
+        val vmCrateSource = Files.readString(rustRoot.resolve("crates/qp-vm/src/lib.rs"))
+        val runtimeManifest = Files.readString(rustRoot.resolve("crates/qp-runtime/Cargo.toml"))
+        val lifecycleSource = Files.readString(rustRoot.resolve("crates/qp-runtime/src/lifecycle.rs"))
 
-        assertContains(resourceManifest, "name = \"jsrt-resource\"", "jsrt-resource manifest")
-        assertContains(resourceManifest, "ruzstd", "jsrt-resource manifest")
-        assertContains(resourceManifest, "unsafe_code = \"forbid\"", "jsrt-resource manifest")
-        assertContains(resourceSource, "#![forbid(unsafe_code)]", "jsrt-resource")
-        assertContains(resourceSource, "FrameDecoder", "jsrt-resource Zstd adapter")
+        assertContains(resourceManifest, "name = \"qp-resource\"", "qp-resource manifest")
+        assertContains(resourceManifest, "ruzstd", "qp-resource manifest")
+        assertContains(resourceManifest, "unsafe_code = \"forbid\"", "qp-resource manifest")
+        assertContains(resourceSource, "#![forbid(unsafe_code)]", "qp-resource")
+        assertContains(resourceSource, "FrameDecoder", "qp-resource Zstd adapter")
         for (testName in listOf(
             "raw_and_rle_zstd_frames_are_bounded_and_wiped",
             "compressed_zstd_block_decodes_without_c_or_sys_dependencies",
@@ -107,12 +107,12 @@ class NativeRuntimeZstdContextTest {
             "decoded.fill(0);",
             "self.window.fill(0);",
         )) {
-            assertContains(resourceSource, marker, "jsrt-resource Zstd R1 contract")
+            assertContains(resourceSource, marker, "qp-resource Zstd R1 contract")
         }
 
-        assertContains(vmManifest, "name = \"jsrt-vm\"", "jsrt-vm manifest")
-        assertContains(vmManifest, "unsafe_code = \"forbid\"", "jsrt-vm manifest")
-        assertContains(vmCrateSource, "#![forbid(unsafe_code)]", "jsrt-vm")
+        assertContains(vmManifest, "name = \"qp-vm\"", "qp-vm manifest")
+        assertContains(vmManifest, "unsafe_code = \"forbid\"", "qp-vm manifest")
+        assertContains(vmCrateSource, "#![forbid(unsafe_code)]", "qp-vm")
         for (marker in listOf(
             "const BLOCK_RAW: u32 = 0;",
             "const BLOCK_RLE: u32 = 1;",
@@ -125,12 +125,12 @@ class NativeRuntimeZstdContextTest {
             "impl Drop for WipedVec",
             "self.0.fill(0);",
         )) {
-            assertContains(vmSource, marker, "jsrt-vm Zstd R1 contract")
+            assertContains(vmSource, marker, "qp-vm Zstd R1 contract")
         }
         assertRustTest(vmSource, "raw_and_rle_frames_are_bounded")
         assertRustTest(vmSource, "malformed_or_trailing_frames_fail")
 
-        assertContains(runtimeManifest, "name = \"jsrt-runtime\"", "jsrt-runtime manifest")
+        assertContains(runtimeManifest, "name = \"qp-runtime\"", "qp-runtime manifest")
         assertContains(lifecycleSource, "pub fn reset_and_wipe(", "Rust runtime wipe contract")
         assertContains(lifecycleSource, "impl Drop for SensitiveArena", "Rust runtime RAII wipe contract")
         assertContains(lifecycleSource, "impl Drop for DecoderContext", "Rust runtime RAII wipe contract")

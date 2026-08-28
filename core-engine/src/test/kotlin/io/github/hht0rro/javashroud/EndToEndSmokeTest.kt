@@ -7,8 +7,8 @@ import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.modules.buildModuleRegistry
-import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.defaultQpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.Opcodes
 import kotlin.test.Test
@@ -24,9 +24,9 @@ class EndToEndSmokeTest {
         val emptyMatches = emptyList<RuleMatch>()
 
         // Every registered module should be callable without throwing
-        val context = defaultVbc4BuildContext()
+        val context = defaultQpBuildContext()
         for ((id, module) in registry) {
-            val result = withVbc4BuildContext(context) {
+            val result = withQpBuildContext(context) {
                 module.transform.apply(artifact, emptyMatches, emptyMap())
             }
             assertTrue(result.transformedClassCount >= 0, "Module $id should return non-negative classCount")
@@ -40,7 +40,7 @@ class EndToEndSmokeTest {
         val registry = buildModuleRegistry()
         val module = registry["string-encryption"]!!
 
-        val result = withVbc4BuildContext(defaultVbc4BuildContext()) {
+        val result = withQpBuildContext(defaultQpBuildContext()) {
             module.transform.apply(artifact, emptyList(), emptyMap())
         }
 
@@ -60,7 +60,7 @@ class EndToEndSmokeTest {
         val registry = buildModuleRegistry()
         val module = registry["integer-constant-obfuscation"]!!
 
-        val result = withVbc4BuildContext(defaultVbc4BuildContext()) {
+        val result = withQpBuildContext(defaultQpBuildContext()) {
             module.transform.apply(artifact, emptyList(), emptyMap())
         }
 

@@ -10,8 +10,8 @@ import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.model.passes.PassContext
 import io.github.hht0rro.javashroud.passes.applyRegisteredPassWithMetrics
 import io.github.hht0rro.javashroud.passes.requireExecutablePass
-import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.defaultQpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.MethodVisitor
@@ -24,7 +24,7 @@ class PassExecutionRuleRemapTest {
     private val mapper = ObjectMapper()
 
     @Test
-    fun class_rename_remaps_selectedOnly_method_virtualization_selector() = withVbc4BuildContext(defaultVbc4BuildContext()) {
+    fun class_rename_remaps_selectedOnly_method_virtualization_selector() = withQpBuildContext(defaultQpBuildContext()) {
         val config = testConfig(
             allowOptInPasses = true,
             ruleSet = RuleSet(listOf(RuleSpec("example/Target", "rename-classes"))),
@@ -87,7 +87,7 @@ class PassExecutionRuleRemapTest {
     }
 
     @Test
-    fun selectedOnly_independent_scope_excludes_only_explicit_method() = withVbc4BuildContext(defaultVbc4BuildContext()) {
+    fun selectedOnly_independent_scope_excludes_only_explicit_method() = withQpBuildContext(defaultQpBuildContext()) {
         val classScope = "example/ClassScope"
         val methodScope = "example/MethodScope"
         val config = testConfig(
@@ -149,7 +149,7 @@ class PassExecutionRuleRemapTest {
     }
 
     @Test
-    fun selectedOnly_empty_independent_scope_virtualizes_every_owner_scope() = withVbc4BuildContext(defaultVbc4BuildContext()) {
+    fun selectedOnly_empty_independent_scope_virtualizes_every_owner_scope() = withQpBuildContext(defaultQpBuildContext()) {
         val classA = "example/ClassA"
         val classB = "example/ClassB"
         val config = testConfig(
@@ -209,7 +209,7 @@ class PassExecutionRuleRemapTest {
     }
 
     @Test
-    fun selectedOnly_independent_scope_method_exclude_skips_only_that_member_in_virtualization() = withVbc4BuildContext(defaultVbc4BuildContext()) {
+    fun selectedOnly_independent_scope_method_exclude_skips_only_that_member_in_virtualization() = withQpBuildContext(defaultQpBuildContext()) {
         val owner = "example/ExcludedMember"
         val config = testConfig(
             allowOptInPasses = true,
@@ -259,7 +259,7 @@ class PassExecutionRuleRemapTest {
     }
 
     @Test
-    fun selectedOnly_empty_independent_scope_keeps_broad_virtualization_budget() = withVbc4BuildContext(defaultVbc4BuildContext()) {
+    fun selectedOnly_empty_independent_scope_keeps_broad_virtualization_budget() = withQpBuildContext(defaultQpBuildContext()) {
         val owner = "example/SelectedOnlyBudget"
         val config = testConfig(
             allowOptInPasses = true,
@@ -307,7 +307,7 @@ class PassExecutionRuleRemapTest {
     }
 
     @Test
-    fun selectedOnly_class_exclude_with_method_obfuscate_virtualizes_only_that_member() = withVbc4BuildContext(defaultVbc4BuildContext()) {
+    fun selectedOnly_class_exclude_with_method_obfuscate_virtualizes_only_that_member() = withQpBuildContext(defaultQpBuildContext()) {
         val owner = "example/MethodOverride"
         val config = testConfig(
             allowOptInPasses = true,
@@ -358,7 +358,7 @@ class PassExecutionRuleRemapTest {
     }
 
     @Test
-    fun inheritGlobal_class_action_keeps_broad_budget_and_high_value_deny_behavior() = withVbc4BuildContext(defaultVbc4BuildContext()) {
+    fun inheritGlobal_class_action_keeps_broad_budget_and_high_value_deny_behavior() = withQpBuildContext(defaultQpBuildContext()) {
         val owner = "example/LegacyBroad"
         val config = testConfig(
             allowOptInPasses = true,
@@ -403,7 +403,7 @@ class PassExecutionRuleRemapTest {
     }
 
     @Test
-    fun inheritGlobal_method_action_remains_a_direct_member_scope() = withVbc4BuildContext(defaultVbc4BuildContext()) {
+    fun inheritGlobal_method_action_remains_a_direct_member_scope() = withQpBuildContext(defaultQpBuildContext()) {
         val owner = "example/LegacyDirect"
         val config = testConfig(
             allowOptInPasses = true,
@@ -492,7 +492,7 @@ class PassExecutionRuleRemapTest {
                 if (name != methodName || desc != descriptor) return null
                 return object : MethodVisitor(Opcodes.ASM9) {
                     override fun visitMethodInsn(opcode: Int, owner: String, name: String, methodDescriptor: String, isInterface: Boolean) {
-                        if (owner.endsWith("JniMicrokernelHelper") && name.startsWith("executeVmResource")) callsDispatcher = true
+                        if (owner.endsWith("QpBridge") && name.startsWith("executeVmResource")) callsDispatcher = true
                     }
                 }
             }

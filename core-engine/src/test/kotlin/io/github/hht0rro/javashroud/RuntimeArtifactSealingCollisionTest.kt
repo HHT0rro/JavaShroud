@@ -4,16 +4,16 @@ import io.github.hht0rro.javashroud.analysis.analyzeClassBytes
 import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing
-import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceCodec
+import io.github.hht0rro.javashroud.transforms.protection.QpResourceCodec
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceKind
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.requireVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.QP_LAYOUT_DIGEST_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.QP_MASTER_KEY_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.defaultQpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.requireQpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.sealedRuntimeHelperInternalName
 import io.github.hht0rro.javashroud.transforms.protection.sealedRuntimeHelperMethodName
-import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -27,7 +27,7 @@ import java.nio.file.Path
 class RuntimeArtifactSealingCollisionTest {
     @Test
     fun `final runtime sealing preserves the native SAM bridge name`() {
-        val helperName = "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper"
+        val helperName = "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge"
         val helperBytes = loadClassBytes("$helperName.class")
         val helperArtifact = ClassArtifact(
             entryName = "$helperName.class",
@@ -35,10 +35,10 @@ class RuntimeArtifactSealingCollisionTest {
             bytes = helperBytes,
         )
 
-        val sealed = withVbc4BuildContext(defaultVbc4BuildContext()) {
+        val sealed = withQpBuildContext(defaultQpBuildContext()) {
             RuntimeArtifactSealing.seal(testAttachedArtifact(listOf(helperArtifact)), 0x4A53524CL)
         }
-        val sealedHelper = sealed.classArtifacts.single { it.summary.internalName.startsWith("r/") }
+        val sealedHelper = sealed.classArtifacts.single { it.summary.internalName.startsWith("jsh/") }
         val node = ClassNode()
         org.objectweb.asm.ClassReader(sealedHelper.bytes).accept(node, org.objectweb.asm.ClassReader.SKIP_FRAMES)
         val bridgeDescriptor = "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;"
@@ -47,15 +47,11 @@ class RuntimeArtifactSealingCollisionTest {
             node.methods.any { it.name == "createSamLambda" && it.desc == bridgeDescriptor },
             "The native VM resolves createSamLambda by its fixed JNI method name after final sealing.",
         )
-        assertTrue(
-            node.methods.any { it.name == "takeExpectedShellBindingCommitment" && it.desc == "()[B" },
-            "The outer shell resolves the one-shot boot binding bridge by its fixed name after final sealing.",
-        )
     }
 
     @Test
     fun `sealed string helper removes CachePolicy and renames the String terminal`() {
-        val outerName = "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper"
+        val outerName = "io/github/hht0rro/javashroud/transforms/protection/qp/QpTextBridge"
         val seed = 0x4A53524CL
         val outerBytes = loadClassBytes("$outerName.class")
         val outerArtifact = ClassArtifact(
@@ -64,7 +60,7 @@ class RuntimeArtifactSealingCollisionTest {
             bytes = outerBytes,
         )
 
-        val sealed = withVbc4BuildContext(defaultVbc4BuildContext()) {
+        val sealed = withQpBuildContext(defaultQpBuildContext()) {
             RuntimeArtifactSealing.seal(
                 artifact = testAttachedArtifact(
                     classArtifacts = listOf(outerArtifact),
@@ -78,11 +74,11 @@ class RuntimeArtifactSealingCollisionTest {
         val sealedEntryNames = sealed.jarEntries.map { it.name }.toSet()
         val sealedOuterNode = ClassNode()
         org.objectweb.asm.ClassReader(sealedOuter.bytes).accept(sealedOuterNode, org.objectweb.asm.ClassReader.SKIP_FRAMES)
-        val akenStringPageDescriptor = "([BI[B)Ljava/lang/String;"
+        val qpTextPageDescriptor = "([B)Ljava/lang/String;"
         val sealedTerminalName = sealedRuntimeHelperMethodName(
             outerName,
-            "invokeAkenStringTerminal",
-            akenStringPageDescriptor,
+            "invokeQpStringTerminal",
+            qpTextPageDescriptor,
             seed,
         )
         assertFalse("$outerName.class" in sealedEntryNames)
@@ -94,18 +90,18 @@ class RuntimeArtifactSealingCollisionTest {
             "The removed plaintext cache policy must not survive runtime sealing.",
         )
         assertFalse(
-            sealedOuterNode.methods.any { it.name == "invokeAkenStringTerminal" && it.desc == akenStringPageDescriptor },
+            sealedOuterNode.methods.any { it.name == "invokeQpStringTerminal" && it.desc == qpTextPageDescriptor },
             "The public String terminal name must be sealed with the runtime helper.",
         )
         assertTrue(
-            sealedOuterNode.methods.any { it.name == sealedTerminalName && it.desc == akenStringPageDescriptor },
+            sealedOuterNode.methods.any { it.name == sealedTerminalName && it.desc == qpTextPageDescriptor },
             "The relocated String terminal must use its deterministic sealed method name.",
         )
     }
 
     @Test
     fun `sealed runtime helper names avoid existing jar entries during re-obfuscation`() {
-        val helperName = "io/github/hht0rro/javashroud/transforms/protection/DefenseKernelRuntimeHelper"
+        val helperName = "io/github/hht0rro/javashroud/transforms/protection/qp/QpGuard"
         val helperBytes = loadClassBytes("$helperName.class")
         val preferredSealedName = sealedRuntimeHelperInternalName(helperName, 0x4A53524CL)
         val preferredIndexName = "META-INF/2b/133bbfe49e7328/ed/4922ed671e6c67376688c9616b4567.properties"
@@ -131,7 +127,7 @@ class RuntimeArtifactSealingCollisionTest {
             ),
         )
 
-        val sealed = withVbc4BuildContext(defaultVbc4BuildContext()) {
+        val sealed = withQpBuildContext(defaultQpBuildContext()) {
             RuntimeArtifactSealing.seal(artifact, 0x4A53524CL)
         }
         val classEntries = sealed.jarEntries.map { it.name }.filter { it.endsWith(".class") }
@@ -139,7 +135,7 @@ class RuntimeArtifactSealingCollisionTest {
         assertEquals(classEntries.size, classEntries.toSet().size)
         assertTrue("$preferredSealedName.class" in classEntries)
         assertFalse(helperArtifact.entryName in classEntries)
-        assertTrue(classEntries.any { it.startsWith("r/") && it != "$preferredSealedName.class" })
+        assertTrue(classEntries.any { it.startsWith("jsh/") && it != "$preferredSealedName.class" })
         val sealedEntryNames = sealed.jarEntries.map { it.name }
         assertTrue(preferredIndexName in sealedEntryNames)
         assertTrue(previousVmResourceName in sealedEntryNames)
@@ -148,7 +144,7 @@ class RuntimeArtifactSealingCollisionTest {
 
     @Test
     fun `sealed native binding publication merges with existing runtime bindings`() {
-        val helperClass = Class.forName("io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper")
+        val helperClass = Class.forName("io.github.hht0rro.javashroud.transforms.protection.qp.QpBridge")
         val merge = helperClass.getDeclaredMethod("mergeBindingProperties", String::class.java, String::class.java).also { it.isAccessible = true }
 
         val merged = merge.invoke(null, "old.Owner=old.Alias\nshared.Owner=old.Shared", "new.Owner=new.Alias\nshared.Owner=new.Shared") as String
@@ -160,7 +156,7 @@ class RuntimeArtifactSealingCollisionTest {
 
     @Test
     fun `sealed native loader owner is scoped while bindings remain merged`() {
-        val helperSource = Files.readString(Path.of("src/main/java/io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper.java"))
+        val helperSource = Files.readString(Path.of("src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.java"))
 
         assertTrue(
             helperSource.contains("String previousLoaderOwner = System.getProperty(sealedLoaderPropertyName())"),
@@ -172,7 +168,7 @@ class RuntimeArtifactSealingCollisionTest {
         )
         assertTrue(
             helperSource.contains("publishSealedNativeLoaderOwner()") &&
-                helperSource.contains("System.setProperty(sealedLoaderPropertyName(), JniMicrokernelHelper.class.getName().replace('.', '/'))"),
+                helperSource.contains("System.setProperty(sealedLoaderPropertyName(), QpBridge.class.getName().replace('.', '/'))"),
             "The active helper still has to publish itself before registering or invoking native VM entries.",
         )
         assertTrue(
@@ -207,10 +203,10 @@ class RuntimeArtifactSealingCollisionTest {
     private fun bindingValue(text: String, key: String): String? =
         text.lines().firstOrNull { it.startsWith("$key=") }?.substringAfter('=')
 
-    private fun fixedContext() = Vbc4BuildContext(
-        masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (0x23 + index * 7).toByte() },
+    private fun fixedContext() = QpBuildContext(
+        masterKey = ByteArray(QP_MASTER_KEY_SIZE) { index -> (0x23 + index * 7).toByte() },
         nativeSeed = 0x5151_2626L,
-        jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (0x41 + index * 11).toByte() },
+        jarLayoutDigest = ByteArray(QP_LAYOUT_DIGEST_SIZE) { index -> (0x41 + index * 11).toByte() },
         runtimeResourceKey = ByteArray(32) { index -> (0x31 + index * 13).toByte() },
     )
 

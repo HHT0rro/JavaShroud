@@ -2,8 +2,8 @@ package io.github.hht0rro.javashroud
 
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing
-import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.defaultQpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
 import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -11,7 +11,7 @@ import kotlin.test.assertTrue
 class EmbeddedBootKeySealingTest {
     @Test
     fun sealing_discards_legacy_boot_resources_instead_of_renaming_them() {
-        val helperName = "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper"
+        val helperName = "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge"
         val helperBytes = requireNotNull(javaClass.classLoader.getResourceAsStream("$helperName.class")).use { it.readBytes() }
         val bootMaterial = "retired-jsbm-v3-material".toByteArray(Charsets.US_ASCII)
         val bootKek = "retired-jsbk1-sidecar".toByteArray(Charsets.US_ASCII)
@@ -25,7 +25,7 @@ class EmbeddedBootKeySealingTest {
             ),
         )
 
-        val sealed = withVbc4BuildContext(defaultVbc4BuildContext()) {
+        val sealed = withQpBuildContext(defaultQpBuildContext()) {
             RuntimeArtifactSealing.seal(artifact, seed = 0x454D4245444C, rewritesVmRuntime = false)
         }
 
@@ -45,7 +45,7 @@ class EmbeddedBootKeySealingTest {
             ),
         )
 
-        val sealed = withVbc4BuildContext(defaultVbc4BuildContext()) {
+        val sealed = withQpBuildContext(defaultQpBuildContext()) {
             RuntimeArtifactSealing.seal(artifact, seed = 0x454D4245444C, rewritesVmRuntime = false)
         }
 

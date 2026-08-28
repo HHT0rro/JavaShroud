@@ -6,8 +6,8 @@ import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.analysis.TargetSelector
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.protection.applyExceptionSemanticVirtualization
-import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.defaultQpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -34,7 +34,7 @@ class ExceptionSemanticVirtualizationTest {
             ),
         )
 
-        val result = withVbc4BuildContext(defaultVbc4BuildContext()) {
+        val result = withQpBuildContext(defaultQpBuildContext()) {
             applyExceptionSemanticVirtualization(
                 artifact = artifact,
                 ruleMatches = listOf(RuleMatch(
@@ -80,7 +80,7 @@ class ExceptionSemanticVirtualizationTest {
                 ),
             ),
         )
-        val result = withVbc4BuildContext(defaultVbc4BuildContext()) {
+        val result = withQpBuildContext(defaultQpBuildContext()) {
             applyExceptionSemanticVirtualization(
                 artifact = artifact,
                 ruleMatches = listOf(RuleMatch(
@@ -107,7 +107,7 @@ class ExceptionSemanticVirtualizationTest {
                 ),
             ),
         )
-        val result = withVbc4BuildContext(defaultVbc4BuildContext()) {
+        val result = withQpBuildContext(defaultQpBuildContext()) {
             applyExceptionSemanticVirtualization(
                 artifact = artifact,
                 ruleMatches = listOf(RuleMatch(
@@ -134,7 +134,7 @@ class ExceptionSemanticVirtualizationTest {
                 ),
             ),
         )
-        val result = withVbc4BuildContext(defaultVbc4BuildContext()) {
+        val result = withQpBuildContext(defaultQpBuildContext()) {
             applyExceptionSemanticVirtualization(
                 artifact = artifact,
                 ruleMatches = listOf(RuleMatch(

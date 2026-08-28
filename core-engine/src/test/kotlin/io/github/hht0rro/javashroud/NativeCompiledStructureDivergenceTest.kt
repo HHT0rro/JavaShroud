@@ -1,11 +1,11 @@
 package io.github.hht0rro.javashroud
 
-import io.github.hht0rro.javashroud.transforms.protection.NativeRecompilationTransforms
+import io.github.hht0rro.javashroud.transforms.protection.QpNativeCompilerPass
 import io.github.hht0rro.javashroud.transforms.protection.NativeVmBuildProfile
 import io.github.hht0rro.javashroud.transforms.protection.RustToolchainProvisioner
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.QP_LAYOUT_DIGEST_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.QP_MASTER_KEY_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
 import kotlin.test.Test
 import kotlin.test.assertNotEquals
 
@@ -23,10 +23,10 @@ class NativeCompiledStructureDivergenceTest {
         )
         try {
             val identities = contexts.map { context ->
-                NativeRecompilationTransforms.nativeArtifactCacheKey(
+                QpNativeCompilerPass.nativeArtifactCacheKey(
                     taskPlatform = RustToolchainProvisioner.RUNTIME_TARGET_WINDOWS,
                     rustTarget = RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET,
-                    outputName = "jsrt_ffi.dll",
+                    outputName = "qp_ffi.dll",
                     sourceDigest = sourceDigest,
                     toolchainIdentity = "rustc=1.78.0|cargo=1.78.0",
                     seed = 0x4455_6600L,
@@ -39,7 +39,7 @@ class NativeCompiledStructureDivergenceTest {
             assertNotEquals(identities[1], identities[2])
             assertNotEquals(identities[0], identities[2])
         } finally {
-            contexts.forEach(Vbc4BuildContext::wipe)
+            contexts.forEach(QpBuildContext::wipe)
             sourceDigest.fill(0)
             specializationDigest.fill(0)
             protectedSectionKey.fill(0)
@@ -54,10 +54,10 @@ class NativeCompiledStructureDivergenceTest {
         val specializationDigest = ByteArray(32) { (it * 3).toByte() }
         val protectedSectionKey = ByteArray(32) { (it * 5).toByte() }
         try {
-            fun key(source: ByteArray) = NativeRecompilationTransforms.nativeArtifactCacheKey(
+            fun key(source: ByteArray) = QpNativeCompilerPass.nativeArtifactCacheKey(
                 taskPlatform = RustToolchainProvisioner.RUNTIME_TARGET_WINDOWS,
                 rustTarget = RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET,
-                outputName = "jsrt_ffi.dll",
+                outputName = "qp_ffi.dll",
                 sourceDigest = source,
                 toolchainIdentity = "rustc=1.78.0|cargo=1.78.0",
                 seed = 0x4455_6600L,
@@ -75,10 +75,10 @@ class NativeCompiledStructureDivergenceTest {
         }
     }
 
-    private fun context(profile: NativeVmBuildProfile): Vbc4BuildContext = Vbc4BuildContext(
-        masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { (it * 11 + 5).toByte() },
+    private fun context(profile: NativeVmBuildProfile): QpBuildContext = QpBuildContext(
+        masterKey = ByteArray(QP_MASTER_KEY_SIZE) { (it * 11 + 5).toByte() },
         nativeSeed = 0x1122_3344_5566_7788L,
-        jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { (it * 13 + 7).toByte() },
+        jarLayoutDigest = ByteArray(QP_LAYOUT_DIGEST_SIZE) { (it * 13 + 7).toByte() },
         nativeVmProfile = profile,
     )
 }

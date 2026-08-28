@@ -1,6 +1,6 @@
 package io.github.hht0rro.javashroud
 
-import io.github.hht0rro.javashroud.transforms.protection.DefenseKernelRuntimeHelper
+import io.github.hht0rro.javashroud.transforms.protection.qp.QpGuard
 import io.github.hht0rro.javashroud.transforms.protection.applyOsAntiDebug
 import kotlin.test.Test
 import kotlin.test.assertFalse
@@ -14,7 +14,7 @@ import org.objectweb.asm.tree.MethodInsnNode
 class DefenseProtectedPathBindingTest {
     @Test
     fun authorize_protected_data_is_noop_before_initialize() {
-        DefenseKernelRuntimeHelper.authorizeProtectedData()
+        QpGuard.authorizeProtectedData()
     }
 
     @Test
@@ -99,7 +99,7 @@ class DefenseProtectedPathBindingTest {
 
     private companion object {
         const val HOST = "sample/DefenseHost"
-        const val JNI_HELPER = "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper"
-        const val DEFENSE_HELPER = "io/github/hht0rro/javashroud/transforms/protection/DefenseKernelRuntimeHelper"
+        const val JNI_HELPER = "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge"
+        const val DEFENSE_HELPER = "io/github/hht0rro/javashroud/transforms/protection/qp/QpGuard"
     }
 }

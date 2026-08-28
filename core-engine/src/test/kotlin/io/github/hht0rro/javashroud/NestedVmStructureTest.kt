@@ -1,13 +1,13 @@
 package io.github.hht0rro.javashroud
 
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.QP_LAYOUT_DIGEST_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.QP_MASTER_KEY_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.NativeVmBuildProfile
-import io.github.hht0rro.javashroud.transforms.protection.Vbc4EntryMetadata
-import io.github.hht0rro.javashroud.transforms.protection.VmBytecodeSerializer
-import io.github.hht0rro.javashroud.transforms.protection.deriveVbc4Identity
-import io.github.hht0rro.javashroud.transforms.protection.deriveVbc4OwnerIdentity
+import io.github.hht0rro.javashroud.transforms.protection.QpEntryMetadata
+import io.github.hht0rro.javashroud.transforms.protection.QpSerializer
+import io.github.hht0rro.javashroud.transforms.protection.deriveQpIdentity
+import io.github.hht0rro.javashroud.transforms.protection.deriveQpOwnerIdentity
 import io.github.hht0rro.javashroud.transforms.protection.vbc4ArgumentTagVector
 import org.objectweb.asm.Opcodes
 import kotlin.test.Test
@@ -46,7 +46,7 @@ class NestedVmStructureTest {
         val differentContext = nestedBlock(seed = 0x2468_1357, contextSeed = 0x0506_0708, profile = 0x1020_3040)
         val differentProfile = nestedBlock(seed = 0x2468_1357, contextSeed = 0x0102_0304, profile = 0x5060_7080)
 
-        assertFalse(base.bytes.contentEquals(differentContext.bytes), "Nested VM micro stream must bind to Vbc4BuildContext-derived structure seed")
+        assertFalse(base.bytes.contentEquals(differentContext.bytes), "Nested VM micro stream must bind to QpBuildContext-derived structure seed")
         assertFalse(base.bytes.contentEquals(differentProfile.bytes), "Nested VM micro stream must bind to method-local high-value profile")
         assertTrue(
             base.microOpcodes != differentContext.microOpcodes || base.dialect != differentContext.dialect,
@@ -64,7 +64,6 @@ class NestedVmStructureTest {
 
         assertEquals(4, nested.registerCount, "Fixture register count changed")
         assertEquals(0x4E56, nested.magic, "Nested VM block must carry native-validated nested envelope magic")
-        assertEquals(1, nested.version, "Nested VM envelope version changed")
         assertEquals(2, nested.rowCount, "Fixture row count changed")
         assertEquals(nested.rowCount * 7, nested.microCount, "Each register row must lower into six field micro-ops plus commit")
         assertTrue(nested.microOpcodes.take(6).all { it and 0xF000 == 0x7000 }, "Field writes must use nested micro-op opcode space")
@@ -87,31 +86,31 @@ class NestedVmStructureTest {
                 nativeVmProfile = NativeVmBuildProfile(parserProfile, parserProfile),
             )
         }
-        assertTrue(snapshots.all { it.magic == 0x4E56 && it.version == 1 && it.microCount == it.rowCount * 7 }, "Every native parser profile must preserve the nested VM envelope contract")
+        assertTrue(snapshots.all { it.magic == 0x4E56 && it.microCount == it.rowCount * 7 }, "Every native parser profile must preserve the nested VM envelope contract")
         assertEquals(3, snapshots.map { it.bytes.toList() }.toSet().size, "Nested VM bytes must still bind the authenticated build-local native profile id")
     }
 
-    private fun nestedBlock(seed: Int, contextSeed: Int, profile: Int, structureEntropy: ByteArray? = null, nativeVmProfile: NativeVmBuildProfile? = null, contextOverride: Vbc4BuildContext? = null): NestedSnapshot {
+    private fun nestedBlock(seed: Int, contextSeed: Int, profile: Int, structureEntropy: ByteArray? = null, nativeVmProfile: NativeVmBuildProfile? = null, contextOverride: QpBuildContext? = null): NestedSnapshot {
         val context = contextOverride ?: fixedContext(contextSeed, nativeVmProfile)
-        val entryMetadata = Vbc4EntryMetadata(
+        val entryMetadata = QpEntryMetadata(
                 entryToken = 0x1122_3344_5566_7788L,
                 returnDescriptor = "I",
                 methodLocalProfile = profile,
-                methodIdentity = context.deriveVbc4Identity("example/NestedVm", "verifyLicense", "()I"),
-                ownerIdentity = context.deriveVbc4OwnerIdentity("example/NestedVm"),
+                methodIdentity = context.deriveQpIdentity("example/NestedVm", "verifyLicense", "()I"),
+                ownerIdentity = context.deriveQpOwnerIdentity("example/NestedVm"),
                 argumentTags = vbc4ArgumentTagVector("()I"),
                 resourcePath = "META-INF/.r/nested.bin",
                 isStatic = true,
             )
         val serializer = if (structureEntropy == null) {
-            VmBytecodeSerializer(
+            QpSerializer(
                 buildSeed = seed,
                 stateBinding = "nested-vm-structure-test",
                 entryMetadata = entryMetadata,
                 buildContext = context,
             )
         } else {
-            VmBytecodeSerializer(
+            QpSerializer(
                 buildSeed = seed,
                 stateBinding = "nested-vm-structure-test",
                 entryMetadata = entryMetadata,
@@ -119,17 +118,17 @@ class NestedVmStructureTest {
                 structureEntropy = structureEntropy,
             )
         }
-        val block = VmBytecodeSerializer.VmLogicalBlock(
+        val block = QpSerializer.VmLogicalBlock(
             blockId = 3,
             entryToken = 0x55AA_33CC,
             instructions = listOf(
-                VmBytecodeSerializer.VmRegisterInstruction(0x0210, 0x0001, 1, 2, 3, 0x1234_5678),
-                VmBytecodeSerializer.VmRegisterInstruction(0x0340, 0x0002, 3, 1, 0, 0x7F00_0102),
+                QpSerializer.VmRegisterInstruction(0x0210, 0x0001, 1, 2, 3, 0x1234_5678),
+                QpSerializer.VmRegisterInstruction(0x0340, 0x0002, 3, 1, 0, 0x7F00_0102),
             ),
         )
-        val method = VmBytecodeSerializer::class.java.getDeclaredMethod(
+        val method = QpSerializer::class.java.getDeclaredMethod(
             "serializeNestedBlock",
-            VmBytecodeSerializer.VmLogicalBlock::class.java,
+            QpSerializer.VmLogicalBlock::class.java,
             Int::class.javaPrimitiveType,
         ).apply { isAccessible = true }
         val bytes = method.invoke(serializer, block, 4) as ByteArray
@@ -137,34 +136,80 @@ class NestedVmStructureTest {
     }
 
     private fun parseNested(bytes: ByteArray): NestedSnapshot {
-        val microCount = readU2(bytes, 16)
-        val microOpcodes = mutableListOf<Int>()
-        var offset = 18
-        repeat(microCount) {
-            microOpcodes += readU2(bytes, offset)
-            offset += 8
-        }
-        assertEquals(bytes.size, offset, "Nested VM micro stream parser must consume full block")
+        val microCount = readU2(bytes, 14)
+        val rowCount = readU2(bytes, 4)
+        assertEquals(rowCount * 7, microCount, "Nested VM micro-op count changed")
+
+        /*
+         * A nested field micro-op is variable-width in the current wire format:
+         * opcode (u16) + encoded field (u16) + value (u16 for fields 0..4,
+         * u32 for field 5).  The commit micro-op is always 8 bytes.  Field 5
+         * is shuffled, so the test parser tries the six possible wide-field
+         * positions and keeps the parse that reaches the exact block boundary.
+         * This keeps the fixture parser aligned with production without
+         * reimplementing the private field-order/masking schedule.
+         */
+        val microOpcodes = parseNestedMicroOpcodes(bytes, rowCount, 16)
         return NestedSnapshot(
             bytes = bytes,
             registerCount = readU2(bytes, 0),
             magic = readU2(bytes, 2),
-            version = readU2(bytes, 4),
-            rowCount = readU2(bytes, 6),
-            profile = readU4(bytes, 8),
-            dialect = readU4(bytes, 12),
+            rowCount = readU2(bytes, 4),
+            profile = readU4(bytes, 6),
+            dialect = readU4(bytes, 10),
             microCount = microCount,
             microOpcodes = microOpcodes,
         )
     }
 
-    private fun fixedContext(seed: Int, nativeVmProfile: NativeVmBuildProfile? = null): Vbc4BuildContext = Vbc4BuildContext(
-        masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (seed ushr ((index and 3) * 8) xor index * 19).toByte() },
+    private fun parseNestedMicroOpcodes(bytes: ByteArray, rowCount: Int, startOffset: Int): List<Int> {
+        fun parseRows(rowIndex: Int, offset: Int, opcodes: List<Int>): List<Int>? {
+            if (rowIndex == rowCount) return opcodes.takeIf { offset == bytes.size }
+            if (offset < 0 || offset > bytes.size) return null
+
+            for (wideSlot in 0 until 6) {
+                var cursor = offset
+                val rowOpcodes = ArrayList<Int>(7)
+                var valid = true
+                for (slot in 0 until 6) {
+                    if (cursor > bytes.size - 4) {
+                        valid = false
+                        break
+                    }
+                    val opcode = readU2(bytes, cursor)
+                    if (opcode and 0xF000 != 0x7000) {
+                        valid = false
+                        break
+                    }
+                    rowOpcodes += opcode
+                    val width = if (slot == wideSlot) 8 else 6
+                    if (cursor > bytes.size - width) {
+                        valid = false
+                        break
+                    }
+                    cursor += width
+                }
+                if (!valid || cursor > bytes.size - 8) continue
+                val commitOpcode = readU2(bytes, cursor)
+                if (commitOpcode and 0xF000 != 0x6000) continue
+                rowOpcodes += commitOpcode
+                val parsed = parseRows(rowIndex + 1, cursor + 8, opcodes + rowOpcodes)
+                if (parsed != null) return parsed
+            }
+            return null
+        }
+
+        return parseRows(0, startOffset, emptyList())
+            ?: error("Nested VM micro stream parser could not consume current variable-width rows")
+    }
+
+    private fun fixedContext(seed: Int, nativeVmProfile: NativeVmBuildProfile? = null): QpBuildContext = QpBuildContext(
+        masterKey = ByteArray(QP_MASTER_KEY_SIZE) { index -> (seed ushr ((index and 3) * 8) xor index * 19).toByte() },
         nativeSeed = seed.toLong() xor 0x1357_2468L,
-        jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (seed.rotateLeft(index and 31) xor index * 29).toByte() },
+        jarLayoutDigest = ByteArray(QP_LAYOUT_DIGEST_SIZE) { index -> (seed.rotateLeft(index and 31) xor index * 29).toByte() },
         nativeVmProfile = nativeVmProfile ?: NativeVmBuildProfile.fromBuildMaterial(
             seed.toLong() xor 0x1357_2468L,
-            ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (seed.rotateLeft(index and 31) xor index * 29).toByte() },
+            ByteArray(QP_LAYOUT_DIGEST_SIZE) { index -> (seed.rotateLeft(index and 31) xor index * 29).toByte() },
         ),
     )
 
@@ -174,7 +219,6 @@ class NestedVmStructureTest {
         val bytes: ByteArray,
         val registerCount: Int,
         val magic: Int,
-        val version: Int,
         val rowCount: Int,
         val profile: Int,
         val dialect: Int,

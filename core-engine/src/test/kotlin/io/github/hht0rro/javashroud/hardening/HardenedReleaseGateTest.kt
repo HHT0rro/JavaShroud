@@ -6,11 +6,11 @@ import io.github.hht0rro.javashroud.testAttachedArtifact
 import io.github.hht0rro.javashroud.testClassArtifact
 import io.github.hht0rro.javashroud.testConfig
 import io.github.hht0rro.javashroud.transforms.protection.hardening.HardenedArtifactFinalizer
-import io.github.hht0rro.javashroud.transforms.protection.hardening.IndyTargetTokenEnvelope
+import io.github.hht0rro.javashroud.transforms.protection.hardening.QpTargetTokenEnvelope
 import io.github.hht0rro.javashroud.transforms.protection.hardening.ProtectionFormat
 import io.github.hht0rro.javashroud.transforms.protection.hardening.ReleaseArtifactScan
 import io.github.hht0rro.javashroud.transforms.protection.hardening.SignedDebugMap
-import io.github.hht0rro.javashroud.transforms.protection.hardening.VmDialectDescriptor
+import io.github.hht0rro.javashroud.transforms.protection.hardening.QpDialectDescriptor
 import io.github.hht0rro.javashroud.transforms.rename.METHOD_RENAME_BINDINGS_RESOURCE
 import java.nio.file.Files
 import java.security.SecureRandom
@@ -124,7 +124,7 @@ class HardenedReleaseGateTest {
         writer.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC, "sample/VbcLeak", null, "java/lang/Object", null)
         val mv = writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "run", "()Ljava/lang/String;", null, null)
         mv.visitCode()
-        mv.visitLdcInsn("javashroud-aken-r1-vbc4-inner-crypto-v3")
+        mv.visitLdcInsn("javashroud-qp-qp-inner-crypto-v3")
         mv.visitInsn(Opcodes.ARETURN)
         mv.visitMaxs(1, 0)
         mv.visitEnd()
@@ -133,7 +133,7 @@ class HardenedReleaseGateTest {
         val leakArtifact = testAttachedArtifact(
             classArtifacts = listOf(testClassArtifact(internalName = "sample/VbcLeak", bytes = leaked)),
         )
-        val dir = Files.createTempDirectory("js-hard-vbc4")
+        val dir = Files.createTempDirectory("js-hard-qp")
         try {
             val leakJar = dir.resolve("leak.jar")
             io.github.hht0rro.javashroud.artifact.writeBytecodeArtifact(leakJar, leakArtifact)
@@ -143,7 +143,7 @@ class HardenedReleaseGateTest {
                 HardenedProtectionProfile.RELEASE_HARDENED,
                 emptyList(),
             )
-            assertFalse(leakReport.findings.single { it.check == "vbc4-fixed-material" }.passed)
+            assertFalse(leakReport.findings.single { it.check == "qp-fixed-material" }.passed)
 
             val cleanBytes = emptyClass("sample/VbcClean")
             val cleanArtifact = testAttachedArtifact(
@@ -157,7 +157,7 @@ class HardenedReleaseGateTest {
                 HardenedProtectionProfile.RELEASE_HARDENED,
                 emptyList(),
             )
-            assertTrue(cleanReport.findings.single { it.check == "vbc4-fixed-material" }.passed)
+            assertTrue(cleanReport.findings.single { it.check == "qp-fixed-material" }.passed)
         } finally {
             Files.walk(dir).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
         }
@@ -165,8 +165,8 @@ class HardenedReleaseGateTest {
 
     @Test
     fun packaged_native_runtime_omits_vbc4_ascii_domains() {
-        val native = javaClass.classLoader.getResourceAsStream("META-INF/jsrt/windows-x64/jsrt_ffi.dll")?.use { it.readBytes() }
-            ?: javaClass.classLoader.getResourceAsStream("META-INF/jsrt/linux-x64/libjsrt_ffi.so")?.use { it.readBytes() }
+        val native = javaClass.classLoader.getResourceAsStream("META-INF/jsrt/windows-x64/qp_ffi.dll")?.use { it.readBytes() }
+            ?: javaClass.classLoader.getResourceAsStream("META-INF/jsrt/linux-x64/libqp_ffi.so")?.use { it.readBytes() }
             ?: return
         val classBytes = emptyClass("sample/NativeLabelHost")
         val artifact = testAttachedArtifact(
@@ -183,7 +183,7 @@ class HardenedReleaseGateTest {
                 emptyList(),
                 nativeBytes = listOf(native),
             )
-            assertTrue(report.findings.single { it.check == "vbc4-fixed-material" }.passed, report.toReportText())
+            assertTrue(report.findings.single { it.check == "qp-fixed-material" }.passed, report.toReportText())
         } finally {
             Files.walk(dir).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
         }
@@ -206,7 +206,7 @@ class HardenedReleaseGateTest {
             val weak = SignedDebugMap.Draft(
                 methodMappings = emptyList(),
                 fieldMappings = emptyList(),
-                transformVersion = ProtectionFormat.CURRENT,
+                transformVersion = ProtectionFormat.CURRENT_LABEL,
                 buildId = "1",
             )
             SignedDebugMap.write(jar, weak, digest, SignedDebugMap.Issuer.generate("ephemeral"))
@@ -216,7 +216,7 @@ class HardenedReleaseGateTest {
             val bound = SignedDebugMap.Draft(
                 methodMappings = emptyList(),
                 fieldMappings = emptyList(),
-                transformVersion = ProtectionFormat.CURRENT,
+                transformVersion = ProtectionFormat.CURRENT_LABEL,
                 buildId = "build-1",
                 issuerKeyId = "org-test",
                 passConfigDigest = ByteArray(32) { (it + 1).toByte() },
@@ -268,8 +268,8 @@ class HardenedReleaseGateTest {
         packedMv.visitIntInsn(Opcodes.NEWARRAY, Opcodes.T_BYTE)
         packedMv.visitMethodInsn(
             Opcodes.INVOKESTATIC,
-            "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper",
-            "invokeAkenStringTerminal",
+            "io/github/hht0rro/javashroud/transforms/protection/qp/QpTextBridge",
+            "invokeQpStringTerminal",
             "([B)Ljava/lang/String;",
             false,
         )
@@ -290,7 +290,7 @@ class HardenedReleaseGateTest {
         nativeChunkMv.visitInsn(Opcodes.ICONST_0)
         nativeChunkMv.visitIntInsn(Opcodes.BIPUSH, 8)
         nativeChunkMv.visitIntInsn(Opcodes.NEWARRAY, Opcodes.T_BYTE)
-        nativeChunkMv.visitMethodInsn(Opcodes.INVOKESTATIC, "sample/Helper", "open", "([BI[B)V", false)
+        nativeChunkMv.visitMethodInsn(Opcodes.INVOKESTATIC, "sample/Helper", "open", "([B)V", false)
         nativeChunkMv.visitInsn(Opcodes.RETURN)
         nativeChunkMv.visitMaxs(3, 0)
         nativeChunkMv.visitEnd()
@@ -362,7 +362,7 @@ class HardenedReleaseGateTest {
         val draft = SignedDebugMap.Draft(
             methodMappings = listOf(SignedDebugMap.MemberMapping("a/B", "old", "()V", "m1")),
             fieldMappings = emptyList(),
-            transformVersion = ProtectionFormat.CURRENT,
+            transformVersion = ProtectionFormat.CURRENT_LABEL,
             buildId = "1",
             nativeSha256 = ByteArray(32) { (it + 2).toByte() },
             abiDigest = ByteArray(32) { (it + 3).toByte() },
@@ -389,21 +389,21 @@ class HardenedReleaseGateTest {
     fun indy_token_hides_owner_and_fails_closed_on_tamper() {
         val key = ByteArray(16) { (it + 3).toByte() }
         val binding = sampleBinding()
-        val token = IndyTargetTokenEnvelope.seal(
-            IndyTargetTokenEnvelope.Target("com/example/T", "work", "(I)I", Opcodes.H_INVOKESTATIC, false),
+        val token = QpTargetTokenEnvelope.seal(
+            QpTargetTokenEnvelope.Target("com/example/T", "work", "(I)I", Opcodes.H_INVOKESTATIC, false),
             binding,
             key,
             SecureRandom(byteArrayOf(1, 2, 3, 4)),
         )
         assertFalse(token.contains("com/example/T"))
         assertFalse(token.contains("work"))
-        val opened = IndyTargetTokenEnvelope.open(token, binding, key)
+        val opened = QpTargetTokenEnvelope.open(token, binding, key)
         assertEquals("com/example/T", opened.owner)
         assertEquals("work", opened.name)
         val tampered = token.dropLast(2) + "ab"
-        assertFailsWith<SecurityException> { IndyTargetTokenEnvelope.open(tampered, binding, key) }
+        assertFailsWith<SecurityException> { QpTargetTokenEnvelope.open(tampered, binding, key) }
         val otherKey = ByteArray(16) { 9 }
-        assertFailsWith<SecurityException> { IndyTargetTokenEnvelope.open(token, binding, otherKey) }
+        assertFailsWith<SecurityException> { QpTargetTokenEnvelope.open(token, binding, otherKey) }
     }
 
     @Test
@@ -439,7 +439,68 @@ class HardenedReleaseGateTest {
     @Test
     fun legacy_catalog_magic_is_rejected() {
         assertTrue("JSC1" in ProtectionFormat.FORBIDDEN_RELEASE_MAGICS)
-        assertFalse("JSR1" in ProtectionFormat.FORBIDDEN_RELEASE_MAGICS)
+        assertTrue("JSR1" in ProtectionFormat.FORBIDDEN_RELEASE_MAGICS)
+    }
+
+    @Test
+    fun jni_loader_release_scan_requires_windows_and_linux_natives_outside_jsrt() {
+        val classBytes = emptyClass("sample/Host")
+        val mz = byteArrayOf('M'.code.toByte(), 'Z'.code.toByte(), 0, 0)
+        val elf = byteArrayOf(0x7F, 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte())
+        val missingLinux = testAttachedArtifact(
+            classArtifacts = listOf(testClassArtifact(internalName = "sample/Host", bytes = classBytes)),
+            jarEntries = listOf(
+                JarEntryData("sample/Host.class", classBytes),
+                JarEntryData("META-INF/qpunit/windows-x64/qp_ffi.dll", mz),
+            ),
+        )
+        val both = testAttachedArtifact(
+            classArtifacts = listOf(testClassArtifact(internalName = "sample/Host", bytes = classBytes)),
+            jarEntries = listOf(
+                JarEntryData("sample/Host.class", classBytes),
+                JarEntryData("META-INF/qpunit/windows-x64/qp_ffi.dll", mz),
+                JarEntryData("META-INF/qpunit/linux-x64/libqp_ffi.so", elf),
+            ),
+        )
+        val dir = Files.createTempDirectory("js-dual-native")
+        try {
+            val missingJar = dir.resolve("missing.jar")
+            io.github.hht0rro.javashroud.artifact.writeBytecodeArtifact(missingJar, missingLinux)
+            val missingReport = ReleaseArtifactScan.scan(
+                missingJar,
+                missingLinux,
+                HardenedProtectionProfile.RELEASE_HARDENED,
+                listOf("jni-microkernel-loader"),
+            )
+            assertTrue(missingReport.findings.single { it.check == "native-dual-platform" }.passed)
+            assertEquals("host-only-windows", missingReport.findings.single { it.check == "native-dual-platform" }.detail)
+
+            val empty = testAttachedArtifact(
+                classArtifacts = listOf(testClassArtifact(internalName = "sample/Host", bytes = classBytes)),
+                jarEntries = listOf(JarEntryData("sample/Host.class", classBytes)),
+            )
+            val emptyJar = dir.resolve("empty.jar")
+            io.github.hht0rro.javashroud.artifact.writeBytecodeArtifact(emptyJar, empty)
+            val emptyReport = ReleaseArtifactScan.scan(
+                emptyJar,
+                empty,
+                HardenedProtectionProfile.RELEASE_HARDENED,
+                listOf("jni-microkernel-loader"),
+            )
+            assertFalse(emptyReport.findings.single { it.check == "native-dual-platform" }.passed)
+
+            val bothJar = dir.resolve("both.jar")
+            io.github.hht0rro.javashroud.artifact.writeBytecodeArtifact(bothJar, both)
+            val bothReport = ReleaseArtifactScan.scan(
+                bothJar,
+                both,
+                HardenedProtectionProfile.RELEASE_HARDENED,
+                listOf("jni-microkernel-loader"),
+            )
+            assertTrue(bothReport.findings.single { it.check == "native-dual-platform" }.passed)
+        } finally {
+            Files.walk(dir).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+        }
     }
 
     @Test
@@ -502,12 +563,12 @@ class HardenedReleaseGateTest {
         Files.walk(dir).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
 
         val helperBytes = javaClass.classLoader.getResourceAsStream(
-            "io/github/hht0rro/javashroud/transforms/protection/IndyTargetBootstrap.class",
+            "io/github/hht0rro/javashroud/transforms/protection/qp/QpBootstrap.class",
         )!!.use { it.readBytes() }
         val helperArtifact = testAttachedArtifact(
             classArtifacts = listOf(
                 testClassArtifact(
-                    internalName = "io/github/hht0rro/javashroud/transforms/protection/IndyTargetBootstrap",
+                    internalName = "io/github/hht0rro/javashroud/transforms/protection/qp/QpBootstrap",
                     bytes = helperBytes,
                 ),
             ),
@@ -597,7 +658,7 @@ class HardenedReleaseGateTest {
             val jar = dir.resolve("overlay.jar")
             io.github.hht0rro.javashroud.artifact.writeBytecodeArtifact(jar, artifact)
             val report = ReleaseArtifactScan.scan(jar, artifact, HardenedProtectionProfile.RELEASE_HARDENED, emptyList())
-            assertFalse(report.findings.single { it.check == "aken-evaluator-direct-recovery" }.passed)
+            assertFalse(report.findings.single { it.check == "qp-evaluator-direct-recovery" }.passed)
         } finally {
             Files.walk(dir).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
         }
@@ -664,8 +725,8 @@ class HardenedReleaseGateTest {
 
     @Test
     fun vm_dialect_differs_across_build_streams_and_round_trips() {
-        val first = VmDialectDescriptor.fromStream(ByteArray(512) { it.toByte() })
-        val second = VmDialectDescriptor.fromStream(ByteArray(512) { (it * 3 + 7).toByte() })
+        val first = QpDialectDescriptor.fromStream(ByteArray(512) { it.toByte() })
+        val second = QpDialectDescriptor.fromStream(ByteArray(512) { (it * 3 + 7).toByte() })
         assertFalse(first.commitment.contentEquals(second.commitment))
         assertNotEquals(first.encodeOpcode(0x40), second.encodeOpcode(0x40))
         val encoded = first.encodeOpcode(0x02)
@@ -678,8 +739,8 @@ class HardenedReleaseGateTest {
         val cryptoA = ByteArray(32) { 0x11 }
         val cryptoB = ByteArray(32) { 0x33 }
         val layout = ByteArray(32) { 0x22 }
-        val first = VmDialectDescriptor.fromKeyMaterial(cryptoA, layout)
-        val second = VmDialectDescriptor.fromKeyMaterial(cryptoB, layout)
+        val first = QpDialectDescriptor.fromKeyMaterial(cryptoA, layout)
+        val second = QpDialectDescriptor.fromKeyMaterial(cryptoB, layout)
         assertFalse(first.commitment.contentEquals(second.commitment))
         assertNotEquals(first.encodeOpcode(0x02), second.encodeOpcode(0x02))
         assertEquals(0x02, first.decodeOpcode(first.encodeOpcode(0x02)))
@@ -690,8 +751,8 @@ class HardenedReleaseGateTest {
         assertFailsWith<IllegalArgumentException> { first.decodeOpcode(0x1234) }
     }
 
-    private fun sampleBinding(): IndyTargetTokenEnvelope.Binding =
-        IndyTargetTokenEnvelope.Binding(
+    private fun sampleBinding(): QpTargetTokenEnvelope.Binding =
+        QpTargetTokenEnvelope.Binding(
             artifactDigest = ByteArray(32) { (it * 3 + 11).toByte() },
             callerOwner = "com/foo/Bar",
             indyName = "run",
@@ -768,7 +829,7 @@ class HardenedReleaseGateTest {
         mv.visitCode()
         val bsm = Handle(
             Opcodes.H_INVOKESTATIC,
-            "io/github/hht0rro/javashroud/transforms/protection/CallsiteRotationHelper",
+            "io/github/hht0rro/javashroud/transforms/protection/qp/QpCallsiteBridge",
             "createRotatingCallSite",
             "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/invoke/CallSite;",
             false,

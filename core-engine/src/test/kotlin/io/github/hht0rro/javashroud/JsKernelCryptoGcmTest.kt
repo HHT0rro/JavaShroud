@@ -9,10 +9,10 @@ class JsKernelCryptoGcmTest {
     @Test
     fun r1_rust_gcm_contract_preserves_vectors_authentication_bounds_and_wipes() {
         val rustRoot = rustRoot()
-        val manifest = Files.readString(rustRoot.resolve("crates/jsrt-crypto/Cargo.toml"))
-        val source = Files.readString(rustRoot.resolve("crates/jsrt-crypto/src/lib.rs"))
+        val manifest = Files.readString(rustRoot.resolve("crates/qp-crypto/Cargo.toml"))
+        val source = Files.readString(rustRoot.resolve("crates/qp-crypto/src/lib.rs"))
 
-        assertTrue(manifest.contains("name = \"jsrt-crypto\""), "GCM contract must use jsrt-crypto")
+        assertTrue(manifest.contains("name = \"qp-crypto\""), "GCM contract must use qp-crypto")
         for (contract in listOf(
             "pub fn aes256_gcm_encrypt(",
             "pub fn aes256_gcm_decrypt(",
@@ -44,13 +44,13 @@ class JsKernelCryptoGcmTest {
     @Test
     fun r1_resource_and_vm_zstd_contracts_are_bounded_raw_rle_trailing_and_wiped() {
         val rustRoot = rustRoot()
-        val vmManifest = Files.readString(rustRoot.resolve("crates/jsrt-vm/Cargo.toml"))
-        val vmZstd = Files.readString(rustRoot.resolve("crates/jsrt-vm/src/zstd.rs"))
-        val resourceManifest = Files.readString(rustRoot.resolve("crates/jsrt-resource/Cargo.toml"))
-        val resourceSource = Files.readString(rustRoot.resolve("crates/jsrt-resource/src/lib.rs"))
+        val vmManifest = Files.readString(rustRoot.resolve("crates/qp-vm/Cargo.toml"))
+        val vmZstd = Files.readString(rustRoot.resolve("crates/qp-vm/src/zstd.rs"))
+        val resourceManifest = Files.readString(rustRoot.resolve("crates/qp-resource/Cargo.toml"))
+        val resourceSource = Files.readString(rustRoot.resolve("crates/qp-resource/src/lib.rs"))
 
-        assertTrue(vmManifest.contains("name = \"jsrt-vm\""), "VM manifest must be current")
-        assertTrue(vmManifest.contains("jsrt-crypto.workspace = true"), "VM crate must use the workspace crypto crate")
+        assertTrue(vmManifest.contains("name = \"qp-vm\""), "VM manifest must be current")
+        assertTrue(vmManifest.contains("qp-crypto.workspace = true"), "VM crate must use the workspace crypto crate")
         assertTrue(vmManifest.contains("unsafe_code = \"forbid\""), "VM must forbid unsafe code")
         for (contract in listOf(
             "const BLOCK_RAW: u32 = 0;",
@@ -69,7 +69,7 @@ class JsKernelCryptoGcmTest {
         }
         assertRustTests(vmZstd, listOf("raw_and_rle_frames_are_bounded", "malformed_or_trailing_frames_fail"))
 
-        assertTrue(resourceManifest.contains("name = \"jsrt-resource\""), "resource manifest must be current")
+        assertTrue(resourceManifest.contains("name = \"qp-resource\""), "resource manifest must be current")
         assertTrue(resourceManifest.contains("ruzstd"), "resource crate must use the Rust zstd decoder")
         assertTrue(resourceManifest.contains("unsafe_code = \"forbid\""), "resource must forbid unsafe code")
         for (contract in listOf(

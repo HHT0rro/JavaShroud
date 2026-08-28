@@ -10,12 +10,12 @@ class NativeRuntimeCryptoKatTest {
     fun r1_rust_crypto_contract_is_bounded_authenticated_wipe_only_and_software_only() {
         val rustRoot = rustRoot()
         val workspace = Files.readString(rustRoot.resolve("Cargo.toml"))
-        val manifest = Files.readString(rustRoot.resolve("crates/jsrt-crypto/Cargo.toml"))
-        val source = Files.readString(rustRoot.resolve("crates/jsrt-crypto/src/lib.rs"))
+        val manifest = Files.readString(rustRoot.resolve("crates/qp-crypto/Cargo.toml"))
+        val source = Files.readString(rustRoot.resolve("crates/qp-crypto/src/lib.rs"))
 
-        assertTrue(workspace.contains("\"crates/jsrt-crypto\""), "R1 workspace must include jsrt-crypto")
-        assertTrue(manifest.contains("name = \"jsrt-crypto\""), "jsrt-crypto manifest must be current")
-        assertTrue(Files.isRegularFile(rustRoot.resolve("crates/jsrt-crypto/src/types.rs")), "jsrt-crypto must own Digest/Binding types")
+        assertTrue(workspace.contains("\"crates/qp-crypto\""), "R1 workspace must include qp-crypto")
+        assertTrue(manifest.contains("name = \"qp-crypto\""), "qp-crypto manifest must be current")
+        assertTrue(Files.isRegularFile(rustRoot.resolve("crates/qp-crypto/src/types.rs")), "qp-crypto must own Digest/Binding types")
 
         for (contract in listOf(
             "#![forbid(unsafe_code)]",

@@ -12,8 +12,8 @@ import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
 import io.github.hht0rro.javashroud.model.config.RuleSet
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.protection.applyMethodVirtualization
-import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.defaultQpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
 import java.lang.reflect.InvocationTargetException
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -40,14 +40,14 @@ class ProtectedArtifactFailClosedMutationTest {
             method.name == DISPATCH_METHOD_NAME && method.desc == DISPATCH_DESCRIPTOR
         }
         val calls = wrapper.instructions.asSequence().filterIsInstance<MethodInsnNode>().toList()
-        val requestCheck = calls.indexOfFirst { it.owner == PROTECTION_HELPER_INTERNAL_NAME && it.name == "requireAkenPageRequest" }
-        val readinessCheck = calls.indexOfFirst { it.owner == PROTECTION_HELPER_INTERNAL_NAME && it.name == "ensureAkenNativeKernel" }
-        val nativeTerminal = calls.indexOfFirst { it.owner == PROTECTION_HELPER_INTERNAL_NAME && it.name == "nativeExecuteAkenVmPage" }
+        val requestCheck = calls.indexOfFirst { it.owner == PROTECTION_HELPER_INTERNAL_NAME && it.name == "requireQpPageRequest" }
+        val readinessCheck = calls.indexOfFirst { it.owner == PROTECTION_HELPER_INTERNAL_NAME && it.name == "ensureQpNativeKernel" }
+        val nativeTerminal = calls.indexOfFirst { it.owner == PROTECTION_HELPER_INTERNAL_NAME && it.name == "nativeExecuteVmPage" }
 
         assertTrue(requestCheck >= 0, "the production wrapper must validate the typed page request")
         assertTrue(readinessCheck > requestCheck, "native readiness must follow request validation")
         assertTrue(nativeTerminal > readinessCheck, "the native VM terminal must follow both fail-closed gates")
-        assertEquals(1, calls.count { it.owner == PROTECTION_HELPER_INTERNAL_NAME && it.name == "nativeExecuteAkenVmPage" })
+        assertEquals(1, calls.count { it.owner == PROTECTION_HELPER_INTERNAL_NAME && it.name == "nativeExecuteVmPage" })
         assertEquals(1, wrapper.tryCatchBlocks.size, "only the UnsatisfiedLinkError translation is permitted around native dispatch")
         assertEquals("java/lang/UnsatisfiedLinkError", wrapper.tryCatchBlocks.single().type)
 
@@ -143,9 +143,9 @@ class ProtectedArtifactFailClosedMutationTest {
                 ),
             ),
         )
-        val context = defaultVbc4BuildContext()
+        val context = defaultQpBuildContext()
         return try {
-            val transformed = withVbc4BuildContext(context) {
+            val transformed = withQpBuildContext(context) {
                 applyMethodVirtualization(
                     artifact = attachAnalysisSummary(
                         config = ObfuscationConfig(
@@ -312,14 +312,14 @@ class ProtectedArtifactFailClosedMutationTest {
     private companion object {
         const val FIXTURE_INTERNAL_NAME = "attack/ProtectedMutationFixture"
         const val FIXTURE_BINARY_NAME = "attack.ProtectedMutationFixture"
-        const val PROTECTION_HELPER_INTERNAL_NAME = "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper"
-        const val PROTECTION_HELPER_BINARY_NAME = "io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper"
+        const val PROTECTION_HELPER_INTERNAL_NAME = "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge"
+        const val PROTECTION_HELPER_BINARY_NAME = "io.github.hht0rro.javashroud.transforms.protection.qp.QpBridge"
         const val PROTECTED_METHOD_NAME = "protectedValue"
         const val PROTECTED_METHOD_DESCRIPTOR = "()I"
         const val SUITE_METHOD_NAME = "runSuite"
         const val SUITE_MARKER_FIELD = "SUITE_MARKER"
         const val SUITE_COMPLETE_MARKER = "SUITE_COMPLETE"
-        const val DISPATCH_METHOD_NAME = "executeAkenVmPage"
+        const val DISPATCH_METHOD_NAME = "executeQpVmPage"
         const val DISPATCH_DESCRIPTOR = "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
         const val DISPATCH_COUNT_FIELD = "dispatchCount"
         const val EXPECTED_VALUE = 73

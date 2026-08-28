@@ -11,28 +11,28 @@ class NativeShellLoaderProductionBenchmarkTest {
     fun r1_rust_runtime_contracts_are_bounded_authenticated_and_wiped() {
         val rustRoot = rustRoot()
         val workspace = Files.readString(rustRoot.resolve("Cargo.toml"))
-        val crypto = Files.readString(rustRoot.resolve("crates/jsrt-crypto/src/lib.rs"))
-        val cryptoManifest = Files.readString(rustRoot.resolve("crates/jsrt-crypto/Cargo.toml"))
-        val resource = Files.readString(rustRoot.resolve("crates/jsrt-resource/src/lib.rs"))
-        val resourceManifest = Files.readString(rustRoot.resolve("crates/jsrt-resource/Cargo.toml"))
-        val vm = Files.readString(rustRoot.resolve("crates/jsrt-vm/src/lib.rs"))
-        val vmExecutor = Files.readString(rustRoot.resolve("crates/jsrt-vm/src/executor.rs"))
-        val vmZstd = Files.readString(rustRoot.resolve("crates/jsrt-vm/src/zstd.rs"))
-        val vmManifest = Files.readString(rustRoot.resolve("crates/jsrt-vm/Cargo.toml"))
-        val page = Files.readString(rustRoot.resolve("crates/jsrt-page/src/lib.rs"))
-        val pageManifest = Files.readString(rustRoot.resolve("crates/jsrt-page/Cargo.toml"))
-        val runtime = Files.readString(rustRoot.resolve("crates/jsrt-runtime/src/lib.rs"))
-        val lifecycle = Files.readString(rustRoot.resolve("crates/jsrt-runtime/src/lifecycle.rs"))
-        val runtimeManifest = Files.readString(rustRoot.resolve("crates/jsrt-runtime/Cargo.toml"))
+        val crypto = Files.readString(rustRoot.resolve("crates/qp-crypto/src/lib.rs"))
+        val cryptoManifest = Files.readString(rustRoot.resolve("crates/qp-crypto/Cargo.toml"))
+        val resource = Files.readString(rustRoot.resolve("crates/qp-resource/src/lib.rs"))
+        val resourceManifest = Files.readString(rustRoot.resolve("crates/qp-resource/Cargo.toml"))
+        val vm = Files.readString(rustRoot.resolve("crates/qp-vm/src/lib.rs"))
+        val vmExecutor = Files.readString(rustRoot.resolve("crates/qp-vm/src/executor.rs"))
+        val vmZstd = Files.readString(rustRoot.resolve("crates/qp-vm/src/zstd.rs"))
+        val vmManifest = Files.readString(rustRoot.resolve("crates/qp-vm/Cargo.toml"))
+        val page = Files.readString(rustRoot.resolve("crates/qp-page/src/lib.rs"))
+        val pageManifest = Files.readString(rustRoot.resolve("crates/qp-page/Cargo.toml"))
+        val runtime = Files.readString(rustRoot.resolve("crates/qp-runtime/src/lib.rs"))
+        val lifecycle = Files.readString(rustRoot.resolve("crates/qp-runtime/src/lifecycle.rs"))
+        val runtimeManifest = Files.readString(rustRoot.resolve("crates/qp-runtime/Cargo.toml"))
 
         val expectedMembers = listOf(
-            "crates/jsrt-ffi",
-            "crates/jsrt-runtime",
-            "crates/jsrt-crypto",
-            "crates/jsrt-page",
-            "crates/jsrt-resource",
-            "crates/jsrt-vm",
-            "crates/jsrt-shell",
+            "crates/qp-ffi",
+            "crates/qp-runtime",
+            "crates/qp-crypto",
+            "crates/qp-page",
+            "crates/qp-resource",
+            "crates/qp-vm",
+            "crates/qp-shell",
         )
         val members = workspace.substringAfter("members = [").substringBefore("]")
             .lineSequence()
@@ -41,11 +41,11 @@ class NativeShellLoaderProductionBenchmarkTest {
             .map { it.removeSuffix(",").removeSurrounding("\"") }
             .toList()
         assertEquals(expectedMembers, members, "Cargo workspace members must be the current R1 set")
-        assertContains(workspace, "runtime_abi = \"jsrt_ffi\"", "R1 workspace metadata")
+        assertContains(workspace, "runtime_abi = \"qp_ffi\"", "R1 workspace metadata")
         assertContains(workspace, "unsafe_code = \"deny\"", "R1 workspace lint policy")
 
-        assertContains(cryptoManifest, "name = \"jsrt-crypto\"", "jsrt-crypto manifest")
-        assertContains(crypto, "#![forbid(unsafe_code)]", "jsrt-crypto")
+        assertContains(cryptoManifest, "name = \"qp-crypto\"", "qp-crypto manifest")
+        assertContains(crypto, "#![forbid(unsafe_code)]", "qp-crypto")
         for (marker in listOf(
             "pub fn aes256_gcm_encrypt(",
             "pub fn aes256_gcm_decrypt(",
@@ -70,9 +70,9 @@ class NativeShellLoaderProductionBenchmarkTest {
             "public_helpers_enforce_the_kotlin_r1_bounds",
         )
 
-        assertContains(resourceManifest, "name = \"jsrt-resource\"", "jsrt-resource manifest")
-        assertContains(resourceManifest, "unsafe_code = \"forbid\"", "jsrt-resource lint policy")
-        assertContains(resource, "#![forbid(unsafe_code)]", "jsrt-resource")
+        assertContains(resourceManifest, "name = \"qp-resource\"", "qp-resource manifest")
+        assertContains(resourceManifest, "unsafe_code = \"forbid\"", "qp-resource lint policy")
+        assertContains(resource, "#![forbid(unsafe_code)]", "qp-resource")
         for (marker in listOf(
             "pub const MAX_DIRECTORY_ENTRIES",
             "pub const MAX_DIRECTORY_SIZE",
@@ -116,13 +116,13 @@ class NativeShellLoaderProductionBenchmarkTest {
             "generation_lease_can_be_released_from_another_thread",
         )
 
-        assertContains(vmManifest, "name = \"jsrt-vm\"", "jsrt-vm manifest")
-        assertContains(vmManifest, "unsafe_code = \"forbid\"", "jsrt-vm lint policy")
-        assertContains(vm, "#![forbid(unsafe_code)]", "jsrt-vm")
+        assertContains(vmManifest, "name = \"qp-vm\"", "qp-vm manifest")
+        assertContains(vmManifest, "unsafe_code = \"forbid\"", "qp-vm lint policy")
+        assertContains(vm, "#![forbid(unsafe_code)]", "qp-vm")
         for (marker in listOf(
-            "pub const VBC4_MAX_FRAME_SIZE",
-            "pub const VBC4_MAX_SECTION_SIZE",
-            "pub const VBC4_MAX_INSTRUCTIONS",
+            "pub const QP_MAX_FRAME_SIZE",
+            "pub const QP_MAX_SECTION_SIZE",
+            "pub const QP_MAX_INSTRUCTIONS",
             "pub struct ParserLimits",
             "parser limit exceeds the R1 bound",
             "if frame.len() > self.limits.max_frame_size",
@@ -167,9 +167,9 @@ class NativeShellLoaderProductionBenchmarkTest {
             "frame_state_is_wiped_after_failure",
         )
 
-        assertContains(pageManifest, "name = \"jsrt-page\"", "jsrt-page manifest")
-        assertContains(pageManifest, "unsafe_code = \"forbid\"", "jsrt-page lint policy")
-        assertContains(page, "#![forbid(unsafe_code)]", "jsrt-page")
+        assertContains(pageManifest, "name = \"qp-page\"", "qp-page manifest")
+        assertContains(pageManifest, "unsafe_code = \"forbid\"", "qp-page lint policy")
+        assertContains(page, "#![forbid(unsafe_code)]", "qp-page")
         for (marker in listOf(
             "pub const MAX_PAYLOAD_SIZE",
             "pub const MAX_PAGE_FRAME_SIZE",
@@ -195,8 +195,8 @@ class NativeShellLoaderProductionBenchmarkTest {
             "lease_only_exposes_authenticated_payload_and_transitions_once",
         )
 
-        assertContains(runtimeManifest, "name = \"jsrt-runtime\"", "jsrt-runtime manifest")
-        assertContains(runtime, "#![forbid(unsafe_code)]", "jsrt-runtime")
+        assertContains(runtimeManifest, "name = \"qp-runtime\"", "qp-runtime manifest")
+        assertContains(runtime, "#![forbid(unsafe_code)]", "qp-runtime")
         assertContains(runtime, "authenticate-before-parse", "runtime authentication boundary")
         assertContains(runtime, "pub fn authenticate_frame(", "runtime authentication entrypoint")
         assertContains(runtime, "RuntimeEnvelope::open(&self.binding, frame)", "runtime authenticated envelope")
@@ -238,19 +238,19 @@ class NativeShellLoaderProductionBenchmarkTest {
     @Test
     fun native_shell_loader_r1_contract_rejects_unsafe_pe_elf_and_legacy_formats() {
         val rustRoot = rustRoot()
-        val shellManifest = Files.readString(rustRoot.resolve("crates/jsrt-shell/Cargo.toml"))
-        val shell = Files.readString(rustRoot.resolve("crates/jsrt-shell/src/lib.rs"))
-        val payload = Files.readString(rustRoot.resolve("crates/jsrt-shell/src/payload.rs"))
-        val pe = Files.readString(rustRoot.resolve("crates/jsrt-shell/src/pe.rs"))
-        val elf = Files.readString(rustRoot.resolve("crates/jsrt-shell/src/elf.rs"))
-        val loaderManifest = Files.readString(rustRoot.resolve("crates/jsrt-shell/Cargo.toml"))
-        val loader = Files.readString(rustRoot.resolve("crates/jsrt-shell/src/loader.rs"))
-        val runtimeShell = Files.readString(rustRoot.resolve("crates/jsrt-runtime/src/shell.rs"))
-        val platform = Files.readString(rustRoot.resolve("crates/jsrt-shell/src/platform.rs"))
+        val shellManifest = Files.readString(rustRoot.resolve("crates/qp-shell/Cargo.toml"))
+        val shell = Files.readString(rustRoot.resolve("crates/qp-shell/src/lib.rs"))
+        val payload = Files.readString(rustRoot.resolve("crates/qp-shell/src/payload.rs"))
+        val pe = Files.readString(rustRoot.resolve("crates/qp-shell/src/pe.rs"))
+        val elf = Files.readString(rustRoot.resolve("crates/qp-shell/src/elf.rs"))
+        val loaderManifest = Files.readString(rustRoot.resolve("crates/qp-shell/Cargo.toml"))
+        val loader = Files.readString(rustRoot.resolve("crates/qp-shell/src/loader.rs"))
+        val runtimeShell = Files.readString(rustRoot.resolve("crates/qp-runtime/src/shell.rs"))
+        val platform = Files.readString(rustRoot.resolve("crates/qp-shell/src/platform.rs"))
 
-        assertContains(shellManifest, "name = \"jsrt-shell\"", "jsrt-shell manifest")
-        assertContains(shellManifest, "unsafe_code = \"deny\"", "jsrt-shell lint policy")
-        assertContains(shell, "#![forbid(unsafe_code)]", "jsrt-shell")
+        assertContains(shellManifest, "name = \"qp-shell\"", "qp-shell manifest")
+        assertContains(shellManifest, "unsafe_code = \"deny\"", "qp-shell lint policy")
+        assertContains(shell, "#![forbid(unsafe_code)]", "qp-shell")
         for (marker in listOf(
             "pub const MAX_ARTIFACT_SIZE",
             "pub const MAX_SECTIONS",
@@ -294,8 +294,8 @@ class NativeShellLoaderProductionBenchmarkTest {
             assertContains(elf, marker, "ELF parser bounds/rejection contract")
         }
 
-        assertContains(loaderManifest, "name = \"jsrt-shell\"", "jsrt-shell manifest")
-        assertContains(loader, "pub fn validate_artifact(", "jsrt-shell loader")
+        assertContains(loaderManifest, "name = \"qp-shell\"", "qp-shell manifest")
+        assertContains(loader, "pub fn validate_artifact(", "qp-shell loader")
         for (marker in listOf(
             "pub fn detect_format(",
             "fn is_x64_elf_shared(",
@@ -308,7 +308,7 @@ class NativeShellLoaderProductionBenchmarkTest {
             "self.bytes.fill(0);",
             "MachO",
         )) {
-            assertContains(loader, marker, "jsrt-shell loader format rejection contract")
+            assertContains(loader, marker, "qp-shell loader format rejection contract")
         }
         assertRustTests(
             loader,
@@ -316,9 +316,9 @@ class NativeShellLoaderProductionBenchmarkTest {
             "macho_dylib_and_legacy_paths_are_rejected",
         )
 
-        assertContains(runtimeShell, "ShellArtifact::validate", "jsrt-runtime shell validation")
-        assertContains(runtimeShell, "jsrt_shell::validate_artifact", "jsrt-runtime shell loader boundary")
-        assertContains(runtimeShell, "ShellBinding::from_artifact", "jsrt-runtime shell binding")
+        assertContains(runtimeShell, "ShellArtifact::validate", "qp-runtime shell validation")
+        assertContains(runtimeShell, "qp_shell::validate_artifact", "qp-runtime shell loader boundary")
+        assertContains(runtimeShell, "ShellBinding::from_artifact", "qp-runtime shell binding")
         assertRustTests(
             runtimeShell,
             "shell_binding_is_derived_only_after_image_validation",

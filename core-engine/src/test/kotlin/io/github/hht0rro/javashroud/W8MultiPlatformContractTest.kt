@@ -7,8 +7,8 @@ import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.protection.CandidateProductionBuildEvidence
 import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
-import io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper
-import io.github.hht0rro.javashroud.transforms.protection.NativeRecompilationTransforms
+import io.github.hht0rro.javashroud.transforms.protection.qp.QpBridge
+import io.github.hht0rro.javashroud.transforms.protection.QpNativeCompilerPass
 import io.github.hht0rro.javashroud.transforms.protection.applyJniMicrokernelLoader
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassWriter
@@ -39,7 +39,7 @@ class W8MultiPlatformContractTest {
     @Test
     fun compile_target_parser_supports_all_and_normalized_comma_lists() {
         assertEquals(
-            NativeRecompilationTransforms.RUST_TARGETS.keys.toList(),
+            QpNativeCompilerPass.RUST_TARGETS.keys.toList(),
             EmbeddedHelperDeployment.resolveNativeCompileTargetPlatforms("all"),
         )
         assertEquals(
@@ -53,8 +53,8 @@ class W8MultiPlatformContractTest {
 
     @Test
     fun explicit_compile_targets_require_one_result_per_requested_platform() {
-        val windows = recompiledNative("windows-x64", "jsrt_ffi.dll")
-        val linux = recompiledNative("linux-x64", "libjsrt_ffi.so")
+        val windows = recompiledNative("windows-x64", "qp_ffi.dll")
+        val linux = recompiledNative("linux-x64", "libqp_ffi.so")
 
         assertEquals(
             listOf(windows, linux),
@@ -81,7 +81,7 @@ class W8MultiPlatformContractTest {
 
     @Test
     fun runtime_selector_accepts_current_member_and_rejects_unrequested_platform() {
-        val selector = JniMicrokernelHelper::class.java.getDeclaredMethod(
+        val selector = QpBridge::class.java.getDeclaredMethod(
             "targetPlatformAllowsCurrent",
             String::class.java,
             String::class.java,
@@ -98,8 +98,8 @@ class W8MultiPlatformContractTest {
         val windows = byteArrayOf('M'.code.toByte(), 'Z'.code.toByte(), 1)
         val linux = byteArrayOf(0x7F.toByte(), 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte(), 2)
         val observations = listOf(
-            nativeObservation("windows-x64", "jsrt_ffi.dll", windows),
-            nativeObservation("linux-x64", "libjsrt_ffi.so", linux),
+            nativeObservation("windows-x64", "qp_ffi.dll", windows),
+            nativeObservation("linux-x64", "libqp_ffi.so", linux),
         )
         val entries = listOf(
             JarEntryData("META-INF/hidden/linux.bin", linux),
@@ -118,7 +118,7 @@ class W8MultiPlatformContractTest {
         }
         assertFailsWith<IllegalStateException> {
             CandidateProductionBuildEvidence.matchFinalNatives(
-                observations = listOf(nativeObservation("windows-x64", "jsrt_ffi.dll", linux)),
+                observations = listOf(nativeObservation("windows-x64", "qp_ffi.dll", linux)),
                 entries = listOf(JarEntryData("META-INF/hidden/windows.bin", windows)),
             )
         }
@@ -151,7 +151,7 @@ class W8MultiPlatformContractTest {
         val clinit = node.methods.single { it.name == "<clinit>" }
         val instructions = clinit.instructions.toArray()
         val callIndex = instructions.indexOfFirst { instruction ->
-            instruction is MethodInsnNode && instruction.owner.endsWith("/JniMicrokernelHelper") && instruction.name == "loadKernel"
+            instruction is MethodInsnNode && instruction.owner.endsWith("/QpBridge") && instruction.name == "loadKernel"
         }
         assertTrue(callIndex >= 3, "JNI loader call must have three string arguments")
         return (instructions[callIndex - 2] as LdcInsnNode).cst as String
@@ -172,7 +172,7 @@ class W8MultiPlatformContractTest {
     }
 
     private fun recompiledNative(platform: String, libName: String) =
-        NativeRecompilationTransforms.RecompiledNative(platform, libName, byteArrayOf(1), ByteArray(32) { 1 })
+        QpNativeCompilerPass.RecompiledNative(platform, libName, byteArrayOf(1), ByteArray(32) { 1 })
 
     private fun nativeObservation(platform: String, outputName: String, bytes: ByteArray) =
         CandidateProductionBuildEvidence.NativeObservation(

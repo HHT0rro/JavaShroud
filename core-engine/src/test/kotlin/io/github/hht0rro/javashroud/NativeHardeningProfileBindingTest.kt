@@ -1,11 +1,11 @@
 package io.github.hht0rro.javashroud
 
-import io.github.hht0rro.javashroud.transforms.protection.NativeRecompilationTransforms
+import io.github.hht0rro.javashroud.transforms.protection.QpNativeCompilerPass
 import io.github.hht0rro.javashroud.transforms.protection.NativeVmBuildProfile
 import io.github.hht0rro.javashroud.transforms.protection.RustToolchainProvisioner
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.QP_LAYOUT_DIGEST_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.QP_MASTER_KEY_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
@@ -41,10 +41,10 @@ class NativeHardeningProfileBindingTest {
         val specializationDigest = ByteArray(32) { (it * 7).toByte() }
         val protectedSectionKey = ByteArray(32) { (it * 11).toByte() }
         try {
-            val windows = NativeRecompilationTransforms.nativeArtifactCacheKey(
+            val windows = QpNativeCompilerPass.nativeArtifactCacheKey(
                 taskPlatform = RustToolchainProvisioner.RUNTIME_TARGET_WINDOWS,
                 rustTarget = RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET,
-                outputName = "jsrt_ffi.dll",
+                outputName = "qp_ffi.dll",
                 sourceDigest = sourceDigest,
                 toolchainIdentity = "rustc=1.78.0|cargo=1.78.0",
                 seed = 7L,
@@ -52,10 +52,10 @@ class NativeHardeningProfileBindingTest {
                 protectedSectionKey = protectedSectionKey,
                 specializationDigest = specializationDigest,
             )
-            val linux = NativeRecompilationTransforms.nativeArtifactCacheKey(
+            val linux = QpNativeCompilerPass.nativeArtifactCacheKey(
                 taskPlatform = RustToolchainProvisioner.RUNTIME_TARGET_LINUX,
                 rustTarget = RustToolchainProvisioner.LINUX_RUNTIME_TARGET,
-                outputName = "libjsrt_ffi.so",
+                outputName = "libqp_ffi.so",
                 sourceDigest = sourceDigest,
                 toolchainIdentity = "rustc=1.78.0|cargo=1.78.0",
                 seed = 7L,
@@ -73,14 +73,14 @@ class NativeHardeningProfileBindingTest {
     }
 
     private fun cacheKey(
-        context: Vbc4BuildContext,
+        context: QpBuildContext,
         sourceDigest: ByteArray,
         specializationDigest: ByteArray,
         protectedSectionKey: ByteArray,
-    ): String = NativeRecompilationTransforms.nativeArtifactCacheKey(
+    ): String = QpNativeCompilerPass.nativeArtifactCacheKey(
         taskPlatform = RustToolchainProvisioner.RUNTIME_TARGET_WINDOWS,
         rustTarget = RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET,
-        outputName = "jsrt_ffi.dll",
+        outputName = "qp_ffi.dll",
         sourceDigest = sourceDigest,
         toolchainIdentity = "rustc=1.78.0|cargo=1.78.0",
         seed = 7L,
@@ -89,10 +89,10 @@ class NativeHardeningProfileBindingTest {
         specializationDigest = specializationDigest,
     )
 
-    private fun context(profile: NativeVmBuildProfile): Vbc4BuildContext = Vbc4BuildContext(
-        masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { (it + 1).toByte() },
+    private fun context(profile: NativeVmBuildProfile): QpBuildContext = QpBuildContext(
+        masterKey = ByteArray(QP_MASTER_KEY_SIZE) { (it + 1).toByte() },
         nativeSeed = 0x1020304050607080L,
-        jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { (it + 2).toByte() },
+        jarLayoutDigest = ByteArray(QP_LAYOUT_DIGEST_SIZE) { (it + 2).toByte() },
         nativeVmProfile = profile,
     )
 }

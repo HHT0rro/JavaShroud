@@ -10,23 +10,17 @@ public final class WindowsR1OverheadProbe {
 
     static native int nativeHeartbeat();
 
-    static native boolean nativeInstallAkenSessionNonce(byte[] startupNonce);
+    static native boolean nativeInstallSessionNonce(byte[] startupNonce);
 
-    static native int nativeInstallAkenCatalog(byte[] directory, byte[] bundle);
+    static native int nativeInstallCatalog(byte[] directory, byte[] bundle);
 
-    static native Object nativeExecuteAkenVmPage(
-            long entryToken,
-            byte[] encodedHandle,
-            int pageIndex,
-            byte[] callSiteProof,
-            Object[] args
-    );
+    static native Object nativeExecuteVmPage(long entryToken, byte[] packedRequest, Object[] args);
 
-    static native String nativeOpenAkenString(byte[] encodedHandle, int pageIndex, byte[] callSiteProof);
+    static native String nativeOpenStringPage(byte[] packedRequest);
 
-    static native byte[] nativeReadAkenClassPage(byte[] encodedHandle, int pageIndex, byte[] callSiteProof);
+    static native byte[] nativeReadClassPage(byte[] packedRequest);
 
-    static native void nativeConsumeAkenNativeChunk(byte[] encodedHandle, int pageIndex, byte[] callSiteProof);
+    static native void nativeConsumeNativeSegment(byte[] packedRequest);
 
     static native int nativeInitializeDefense(String surface, String profile);
 
@@ -36,7 +30,7 @@ public final class WindowsR1OverheadProbe {
 
     public static void main(String[] args) {
         if (args.length != 1) {
-            System.err.println("usage: WindowsR1OverheadProbe <jsrt_ffi.dll>");
+            System.err.println("usage: WindowsR1OverheadProbe <qp_ffi.dll>");
             System.exit(2);
         }
         System.setProperty("j.l", "io/github/hht0rro/javashroud/WindowsR1OverheadProbe");
@@ -49,7 +43,7 @@ public final class WindowsR1OverheadProbe {
         }
         byte[] nonce = new byte[32];
         new java.security.SecureRandom().nextBytes(nonce);
-        if (!nativeInstallAkenSessionNonce(nonce)) {
+        if (!nativeInstallSessionNonce(nonce)) {
             System.err.println("native nonce install failed");
             System.exit(3);
         }
@@ -109,16 +103,16 @@ public final class WindowsR1OverheadProbe {
     }
 
     private static String bindingMap() {
-        String owner = "io/github/hht0rro/javashroud/transforms/protection/JniMicrokernelHelper";
+        String owner = "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge";
         String[][] methods = {
                 {"nativeInit", "(Ljava/lang/String;)I", "nativeInit"},
                 {"nativeHeartbeat", "()I", "nativeHeartbeat"},
-                {"nativeInstallAkenSessionNonce", "([B)Z", "nativeInstallAkenSessionNonce"},
-                {"nativeInstallAkenCatalog", "([B[B)I", "nativeInstallAkenCatalog"},
-                {"nativeExecuteAkenVmPage", "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;", "nativeExecuteAkenVmPage"},
-                {"nativeOpenAkenString", "([BI[B)Ljava/lang/String;", "nativeOpenAkenString"},
-                {"nativeReadAkenClassPage", "([BI[B)[B", "nativeReadAkenClassPage"},
-                {"nativeConsumeAkenNativeChunk", "([BI[B)V", "nativeConsumeAkenNativeChunk"},
+                {"nativeInstallSessionNonce", "([B)Z", "nativeInstallSessionNonce"},
+                {"nativeInstallCatalog", "([B[B)I", "nativeInstallCatalog"},
+                {"nativeExecuteVmPage", "(J[B[Ljava/lang/Object;)Ljava/lang/Object;", "nativeExecuteVmPage"},
+                {"nativeOpenStringPage", "([B)Ljava/lang/String;", "nativeOpenStringPage"},
+                {"nativeReadClassPage", "([B)[B", "nativeReadClassPage"},
+                {"nativeConsumeNativeSegment", "([B)V", "nativeConsumeNativeSegment"},
                 {"nativeInitializeDefense", "(Ljava/lang/String;Ljava/lang/String;)I", "nativeInitializeDefense"},
                 {"nativeProbeDefense", "(Ljava/lang/String;Ljava/lang/String;)I", "nativeProbeDefense"},
                 {"nativeTransformDefense", "([BLjava/lang/String;)[B", "nativeTransformDefense"},
@@ -128,7 +122,7 @@ public final class WindowsR1OverheadProbe {
             byte[] digest;
             try {
                 digest = java.security.MessageDigest.getInstance("SHA-256")
-                        .digest(("AKEN-BINDING-V1|" + owner + "#" + method[0] + "#" + method[1])
+                        .digest(("QP-BINDING-V1|" + owner + "#" + method[0] + "#" + method[1])
                                 .getBytes(java.nio.charset.StandardCharsets.US_ASCII));
             } catch (java.security.NoSuchAlgorithmException error) {
                 throw new IllegalStateException(error);

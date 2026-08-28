@@ -6,16 +6,16 @@ import io.github.hht0rro.javashroud.model.analysis.MemberSummary
 import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.analysis.TargetSelector
 import io.github.hht0rro.javashroud.model.config.RuleSpec
-import io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper
-import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceCodec
+import io.github.hht0rro.javashroud.transforms.protection.qp.QpBridge
+import io.github.hht0rro.javashroud.transforms.protection.QpResourceCodec
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceKind
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_LAYOUT_DIGEST_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_MASTER_KEY_SIZE
-import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.QP_LAYOUT_DIGEST_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.QP_MASTER_KEY_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
 import java.util.Arrays
 import io.github.hht0rro.javashroud.transforms.protection.applyMethodVirtualization
-import io.github.hht0rro.javashroud.transforms.protection.requireVbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.requireQpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
 import org.objectweb.asm.Opcodes
 import java.nio.file.Files
 import java.nio.file.Path
@@ -28,9 +28,9 @@ import kotlin.test.assertTrue
 
 class AttackRegressionTest {
     @Test
-    fun all_runtime_resource_kinds_reject_header_body_length_and_tag_tampering() = withVbc4BuildContext(fixedContext(1)) {
+    fun all_runtime_resource_kinds_reject_header_body_length_and_tag_tampering() = withQpBuildContext(fixedContext(1)) {
         for (kind in RuntimeResourceKind.entries) {
-            val encoded = RuntimeResourceCodec.encode(
+            val encoded = QpResourceCodec.encode(
                 bytes = "attack-regression-${kind.name}-resource".toByteArray(Charsets.UTF_8),
                 kind = kind,
                 seed = 0x1234_5678 xor kind.id,
@@ -42,15 +42,15 @@ class AttackRegressionTest {
             for (offset in offsets) {
                 val tampered = encoded.copyOf()
                 tampered[offset] = (tampered[offset].toInt() xor 0x5A).toByte()
-                assertEquals(null, RuntimeResourceCodec.decode(tampered), "${kind.name} tampering offset $offset must fail closed")
+                assertEquals(null, QpResourceCodec.decode(tampered), "${kind.name} tampering offset $offset must fail closed")
             }
         }
     }
 
     @Test
     fun copied_runtime_resource_with_wrong_layout_context_fails_closed() {
-        val encoded = withVbc4BuildContext(fixedContext(2)) {
-            RuntimeResourceCodec.encode(
+        val encoded = withQpBuildContext(fixedContext(2)) {
+            QpResourceCodec.encode(
                 bytes = "layout-bound-vm-resource".toByteArray(Charsets.UTF_8),
                 kind = RuntimeResourceKind.VmBytecode,
                 seed = 0x2468_1357,
@@ -61,8 +61,8 @@ class AttackRegressionTest {
 
         assertNotEquals(
             encoded.toList(),
-            withVbc4BuildContext(fixedContext(3)) {
-                RuntimeResourceCodec.encode(
+            withQpBuildContext(fixedContext(3)) {
+                QpResourceCodec.encode(
                     bytes = "layout-bound-vm-resource".toByteArray(Charsets.UTF_8),
                     kind = RuntimeResourceKind.VmBytecode,
                     seed = 0x2468_1357,
@@ -72,23 +72,23 @@ class AttackRegressionTest {
             },
             "different context must produce different authenticated resource bytes",
         )
-        assertEquals(null, withVbc4BuildContext(fixedContext(3)) { RuntimeResourceCodec.decode(encoded) }, "wrong layout/runtime key must fail closed")
+        assertEquals(null, withQpBuildContext(fixedContext(3)) { QpResourceCodec.decode(encoded) }, "wrong layout/runtime key must fail closed")
     }
 
     @Test
     fun rust_runtime_keeps_fail_closed_attack_gates_without_c_sources() {
         assertFalse(Files.exists(Path.of("src/main/native")), "C native runtime must be deleted")
-        val vm = Files.readString(Path.of("src/main/rust/crates/jsrt-vm/src/lib.rs"))
-        val ffi = Files.readString(Path.of("src/main/rust/crates/jsrt-ffi/src/lib.rs"))
+        val vm = Files.readString(Path.of("src/main/rust/crates/qp-vm/src/lib.rs"))
+        val ffi = Files.readString(Path.of("src/main/rust/crates/qp-ffi/src/lib.rs"))
         assertTrue(vm.contains("AuthenticationFailed") || vm.contains("parse_authenticated"), "Rust VM must authenticate before execute")
         assertTrue(ffi.contains("AKEN VM page route is unavailable") || ffi.contains("TypedPageRouter"), "Rust JNI must fail closed")
     }
 
     @Test
-    fun sliced_vm_resources_reject_tampered_manifest_missing_shard_and_shard_digest_mismatch() = withVbc4BuildContext(fixedContext(5)) {
+    fun sliced_vm_resources_reject_tampered_manifest_missing_shard_and_shard_digest_mismatch() = withQpBuildContext(fixedContext(5)) {
         val encodedResources = attackVmResources()
         val decodedResources = encodedResources.mapNotNull { entry ->
-            RuntimeResourceCodec.decode(entry.bytes)?.let { entry.name to it }
+            QpResourceCodec.decode(entry.bytes)?.let { entry.name to it }
         }.toMap()
         val manifest = decodedResources.entries.firstOrNull { it.value.decodeToString().startsWith("VBC4S|1|") }
         assertTrue(manifest != null, "attack fixture must emit at least one sliced VM manifest")
@@ -120,7 +120,7 @@ class AttackRegressionTest {
         val tamperedEncodedManifest = encodedManifest.bytes.copyOf().also { bytes ->
             bytes[bytes.lastIndex - 1] = (bytes[bytes.lastIndex - 1].toInt() xor 0x5A).toByte()
         }
-        assertEquals(null, RuntimeResourceCodec.decode(tamperedEncodedManifest), "encoded manifest byte tampering must fail closed")
+        assertEquals(null, QpResourceCodec.decode(tamperedEncodedManifest), "encoded manifest byte tampering must fail closed")
     }
 
     private fun attackVmResources() = applyMethodVirtualization(
@@ -235,18 +235,18 @@ class AttackRegressionTest {
     private fun String.isVmResourceName(): Boolean =
         startsWith("META-INF/") && !endsWith(".class") && !endsWith("/") && length > "META-INF/".length + 10
 
-    private fun fixedContext(seed: Int, runtimeResourceKey: ByteArray? = null): Vbc4BuildContext {
-        val masterKey = ByteArray(VBC4_MASTER_KEY_SIZE) { index -> (seed * 19 + index * 7).toByte() }
+    private fun fixedContext(seed: Int, runtimeResourceKey: ByteArray? = null): QpBuildContext {
+        val masterKey = ByteArray(QP_MASTER_KEY_SIZE) { index -> (seed * 19 + index * 7).toByte() }
         val nativeSeed = seed.toLong() * 0x1234_5679L
-        val jarLayoutDigest = ByteArray(VBC4_LAYOUT_DIGEST_SIZE) { index -> (seed * 23 + index * 11).toByte() }
+        val jarLayoutDigest = ByteArray(QP_LAYOUT_DIGEST_SIZE) { index -> (seed * 23 + index * 11).toByte() }
         return if (runtimeResourceKey == null) {
-            Vbc4BuildContext(
+            QpBuildContext(
                 masterKey = masterKey,
                 nativeSeed = nativeSeed,
                 jarLayoutDigest = jarLayoutDigest,
             )
         } else {
-            Vbc4BuildContext(
+            QpBuildContext(
                 masterKey = masterKey,
                 nativeSeed = nativeSeed,
                 jarLayoutDigest = jarLayoutDigest,

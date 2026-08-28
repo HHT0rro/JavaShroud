@@ -1,7 +1,7 @@
 package io.github.hht0rro.javashroud
 
-import io.github.hht0rro.javashroud.transforms.protection.JniMicrokernelHelper
-import io.github.hht0rro.javashroud.transforms.protection.VBC4_DERIVE_LABEL_CLASS_ENCRYPTION
+import io.github.hht0rro.javashroud.transforms.protection.qp.QpBridge
+import io.github.hht0rro.javashroud.transforms.protection.QP_DERIVE_LABEL_CLASS_ENCRYPTION
 import io.github.hht0rro.javashroud.transforms.protection.hkdfSha256
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -43,7 +43,7 @@ class CrossLanguageDerivationTest {
 
     @Test
     fun build_label_constant_is_the_native_jse_class_label() {
-        assertEquals("javashroud-vbc4-jse-class-v1", VBC4_DERIVE_LABEL_CLASS_ENCRYPTION)
+        assertEquals("javashroud-vbc4-jse-class-v1", QP_DERIVE_LABEL_CLASS_ENCRYPTION)
     }
 
     @Test
@@ -51,7 +51,7 @@ class CrossLanguageDerivationTest {
         val keyId = byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8)
         val salt = ByteArray(16) { (it * 3 + 1).toByte() }
         assertFailsWith<SecurityException>("class-key derivation must fail closed without the sealed native kernel") {
-            JniMicrokernelHelper.deriveClassEncryptionKey(keyId, salt, 32)
+            QpBridge.deriveClassEncryptionKey(keyId, salt, 32)
         }
     }
 }

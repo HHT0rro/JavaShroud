@@ -8,9 +8,9 @@ import io.github.hht0rro.javashroud.model.artifact.JarEntryData
 import io.github.hht0rro.javashroud.model.config.RuleSet
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.metadata.shuffleMembers
-import io.github.hht0rro.javashroud.transforms.protection.Vbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeKeyPartitions
-import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
@@ -61,9 +61,9 @@ class MemberShuffleTransformsTest {
 
         val firstContext = context(0x11)
         val secondContext = context(0x55)
-        val first = withVbc4BuildContext(firstContext) { shuffleMembers(artifact, matches, emptyMap()).artifact }
-        val firstAgain = withVbc4BuildContext(firstContext) { shuffleMembers(artifact, matches, emptyMap()).artifact }
-        val second = withVbc4BuildContext(secondContext) { shuffleMembers(artifact, matches, emptyMap()).artifact }
+        val first = withQpBuildContext(firstContext) { shuffleMembers(artifact, matches, emptyMap()).artifact }
+        val firstAgain = withQpBuildContext(firstContext) { shuffleMembers(artifact, matches, emptyMap()).artifact }
+        val second = withQpBuildContext(secondContext) { shuffleMembers(artifact, matches, emptyMap()).artifact }
 
         assertEquals(first.classArtifacts.map { it.entryName }, firstAgain.classArtifacts.map { it.entryName })
         assertEquals(first.jarEntries.map { it.name }, firstAgain.jarEntries.map { it.name })
@@ -82,11 +82,11 @@ class MemberShuffleTransformsTest {
         )
     }
 
-    private fun context(marker: Int): Vbc4BuildContext {
+    private fun context(marker: Int): QpBuildContext {
         val key = ByteArray(32) { index -> (marker + index).toByte() }
         val layout = ByteArray(32) { index -> (marker * 3 + index).toByte() }
         val random = java.security.SecureRandom.getInstance("SHA1PRNG").apply { setSeed(marker.toLong()) }
-        return Vbc4BuildContext(
+        return QpBuildContext(
             masterKey = key,
             nativeSeed = marker.toLong(),
             jarLayoutDigest = layout,

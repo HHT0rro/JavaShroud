@@ -1,4 +1,4 @@
-package io.github.hht0rro.javashroud.transforms.protection
+package io.github.hht0rro.javashroud.transforms.protection.qp
 
 import java.lang.ref.Reference
 import java.lang.reflect.Modifier
@@ -13,7 +13,7 @@ import java.lang.invoke.MethodType
 class StringCachePolicyTest {
     @Test
     fun string_helper_retains_no_plaintext_cache_fields_or_methods() {
-        val helper = StringEncryptionHelper::class.java
+        val helper = QpTextBridge::class.java
 
         helper.declaredFields.forEach { field ->
             assertFalse(field.name.contains("cache", ignoreCase = true), "String helper must not retain cache field ${field.name}")
@@ -33,9 +33,9 @@ class StringCachePolicyTest {
 
     @Test
     fun string_helper_bytecode_contains_no_retired_cache_contract() {
-        val resource = "io/github/hht0rro/javashroud/transforms/protection/StringEncryptionHelper.class"
-        val classBytes = checkNotNull(StringEncryptionHelper::class.java.classLoader.getResourceAsStream(resource)) {
-            "StringEncryptionHelper.class must be available on the test classpath"
+        val resource = "io/github/hht0rro/javashroud/transforms/protection/qp/QpTextBridge.class"
+        val classBytes = checkNotNull(QpTextBridge::class.java.classLoader.getResourceAsStream(resource)) {
+            "QpTextBridge.class must be available on the test classpath"
         }.use { it.readBytes() }
         val classText = String(classBytes, Charsets.ISO_8859_1)
 
@@ -44,8 +44,8 @@ class StringCachePolicyTest {
             "SOFT_" + "CACHE",
             "STRONG_" + "CACHE",
             "CachePolicy",
-            "cached" + "DecodeAkenStringPage",
-            "decode" + "AkenStringPage",
+            "cached" + "DecodeQpStringPage",
+            "decode" + "QpStringPage",
             "cacheForTesting",
             "resetCacheForTesting",
         ).forEach { retired ->
@@ -55,10 +55,10 @@ class StringCachePolicyTest {
 
     @Test
     fun string_terminal_is_not_a_public_repeatable_decoder_api() {
-        val helper = StringEncryptionHelper::class.java
+        val helper = QpTextBridge::class.java
         val primitiveInt = requireNotNull(Int::class.javaPrimitiveType)
         val terminal = helper.getDeclaredMethod(
-            "invokeAkenStringTerminal",
+            "invokeQpStringTerminal",
             ByteArray::class.java,
             primitiveInt,
             ByteArray::class.java,
@@ -84,16 +84,16 @@ class StringCachePolicyTest {
     @Test
     fun malformed_aken_page_request_fails_closed_before_native_dispatch() {
         assertFailsWith<SecurityException> {
-            StringEncryptionHelper.invokeAkenStringTerminal(ByteArray(23), 0, byteArrayOf(1))
+            QpTextBridge.invokeQpStringTerminal(ByteArray(23), 0, byteArrayOf(1))
         }
         assertFailsWith<SecurityException> {
-            StringEncryptionHelper.invokeAkenStringTerminal(ByteArray(24), -1, byteArrayOf(1))
+            QpTextBridge.invokeQpStringTerminal(ByteArray(24), -1, byteArrayOf(1))
         }
         assertFailsWith<SecurityException> {
-            StringEncryptionHelper.invokeAkenStringTerminal(ByteArray(24), 0, ByteArray(0))
+            QpTextBridge.invokeQpStringTerminal(ByteArray(24), 0, ByteArray(0))
         }
         assertFailsWith<SecurityException> {
-            StringEncryptionHelper.invokeAkenStringTerminal(ByteArray(24), 0, ByteArray(4097))
+            QpTextBridge.invokeQpStringTerminal(ByteArray(24), 0, ByteArray(4097))
         }
     }
 
@@ -106,10 +106,10 @@ class StringCachePolicyTest {
             type,
         )
         listOf(
-            StringEncryptionHelper::q0,
-            StringEncryptionHelper::m7,
-            StringEncryptionHelper::x3,
-            StringEncryptionHelper::v8,
+            QpTextBridge::q0,
+            QpTextBridge::m7,
+            QpTextBridge::x3,
+            QpTextBridge::v8,
         ).forEach { bootstrap ->
             assertFailsWith<SecurityException> {
                 bootstrap.invoke(
@@ -126,14 +126,14 @@ class StringCachePolicyTest {
     fun string_bootstrap_accepts_only_the_current_terminal_handle() {
         val type = MethodType.methodType(String::class.java, ByteArray::class.java)
         val terminal = MethodHandles.privateLookupIn(
-            StringEncryptionHelper::class.java,
+            QpTextBridge::class.java,
             MethodHandles.lookup(),
         ).findStatic(
-            StringEncryptionHelper::class.java,
-            "invokeAkenStringTerminal",
+            QpTextBridge::class.java,
+            "invokeQpStringTerminal",
             type,
         )
-        val callSite = StringEncryptionHelper.q0(MethodHandles.lookup(), "a0", type, terminal)
+        val callSite = QpTextBridge.q0(MethodHandles.lookup(), "a0", type, terminal)
         val actualTarget = callSite.javaClass.getMethod("getTarget").invoke(callSite) as java.lang.invoke.MethodHandle
         val actualType = java.lang.invoke.MethodHandle::class.java.getMethod("type").invoke(actualTarget) as MethodType
         assertEquals(type, actualType)

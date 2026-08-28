@@ -414,7 +414,7 @@ class SchemaCapabilitiesTest {
         assertEquals(0, module.params.single { it.key == "maxInstructions" }.defaultValue?.asInt(), "VM instruction threshold should default to unlimited")
         assertEquals(0, module.params.single { it.key == "maxBroadVirtualizedMethods" }.defaultValue?.asInt(), "Broad class method count should default to unlimited")
         assertTrue(module.params.filter { it.key in setOf("highValueMethods", "highValueMethodDeny") }.all { it.hidden && it.type == "string" }, "High-value selector allow/deny lists must stay hidden string controls")
-        assertTrue(module.params.filter { it.key.startsWith("vbc4") }.all { it.hidden && it.defaultValue?.asBoolean() == true }, "VBC4 high-strength invariants must be hidden fixed defaults")
+        assertTrue(module.params.filter { it.key.startsWith("qp") }.all { it.hidden && it.defaultValue?.asBoolean() == true }, "VBC4 high-strength invariants must be hidden fixed defaults")
         assertFalse(paramKeys.any { it in setOf("vmStrength", "fusionLevel", "stateBoundEncoding", "handlerMorphing", "vmDialect", "vmDiversityLevel") }, "Legacy/low-strength VM controls must not be exposed")
     }
 

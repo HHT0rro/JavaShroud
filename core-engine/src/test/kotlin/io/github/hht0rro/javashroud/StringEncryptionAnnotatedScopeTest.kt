@@ -2,8 +2,8 @@ package io.github.hht0rro.javashroud
 
 import io.github.hht0rro.javashroud.bytecode.StringEncryptionConfig
 import io.github.hht0rro.javashroud.bytecode.encryptClassStrings
-import io.github.hht0rro.javashroud.transforms.protection.defaultVbc4BuildContext
-import io.github.hht0rro.javashroud.transforms.protection.withVbc4BuildContext
+import io.github.hht0rro.javashroud.transforms.protection.defaultQpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
 import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -17,7 +17,7 @@ class StringEncryptionAnnotatedScopeTest {
     @Test
     fun annotated_scope_encrypts_only_methods_marked_with_shroud_encrypt() {
         val classBytes = buildAnnotatedScopeFixture()
-        val encrypted = withVbc4BuildContext(defaultVbc4BuildContext()) {
+        val encrypted = withQpBuildContext(defaultQpBuildContext()) {
             encryptClassStrings(
                 classBytes = classBytes,
                 config = StringEncryptionConfig(scope = "annotated", seed = 42),

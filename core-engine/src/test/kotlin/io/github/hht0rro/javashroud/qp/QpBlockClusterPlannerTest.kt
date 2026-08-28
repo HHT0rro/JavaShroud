@@ -1,0 +1,247 @@
+package io.github.hht0rro.javashroud.qp
+
+import io.github.hht0rro.javashroud.transforms.protection.qp.QpBlockClusterPlanner
+import io.github.hht0rro.javashroud.transforms.protection.qp.QpMethodIdentity
+import io.github.hht0rro.javashroud.transforms.protection.qp.QpMethodCandidate
+import io.github.hht0rro.javashroud.transforms.protection.qp.derivedVmMagic
+import java.io.ByteArrayOutputStream
+import java.util.Arrays
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
+
+class QpBlockClusterPlannerTest {
+    @Test
+    fun clusters_contiguous_physical_blocks_without_splitting_an_oversized_block() {
+        val program = framedQp(
+            blockIds = listOf(10, 20, 30, 40, 50),
+            encodedPayloadLengths = listOf(288, 168, 588, 88, 188),
+        )
+        val candidate = candidate(program)
+        try {
+            val plan = QpBlockClusterPlanner.plan(candidate) { 512 }
+
+            assertEquals(0x4A4B_454E_0000_0B10L, plan.entryToken)
+            assertEquals("META-INF/qp/planner-fixture.bin", plan.logicalVmResourcePath)
+            assertEquals(program.size, plan.serializedLength)
+            assertEquals(3, plan.clusters.size)
+            assertEquals(listOf(0, 1, 2), plan.clusters.map { it.pageIndex })
+            assertEquals(listOf(0, 2, 3), plan.clusters.map { it.firstStorageBlockOrdinal })
+            assertEquals(listOf(1, 2, 4), plan.clusters.map { it.lastStorageBlockOrdinal })
+            assertEquals(listOf(480, 600, 300), plan.clusters.map { it.encodedLength })
+            assertEquals(plan.blockRegionStart, plan.clusters.first().encodedStart)
+            assertEquals(plan.blockRegionEndExclusive, plan.clusters.last().encodedEndExclusive)
+            assertTrue(plan.clusters.zipWithNext().all { (left, right) -> left.encodedEndExclusive == right.encodedStart })
+            assertTrue(plan.clusters.all { cluster ->
+                cluster.encodedLength <= cluster.targetSize ||
+                    cluster.firstStorageBlockOrdinal == cluster.lastStorageBlockOrdinal
+            })
+        } finally {
+            candidate.wipe()
+            Arrays.fill(program, 0)
+        }
+    }
+
+    @Test
+    fun target_selector_is_page_local_and_rejects_values_outside_the_vbc4_set() {
+        val program = framedQp(
+            blockIds = listOf(7, 8, 9),
+            encodedPayloadLengths = listOf(588, 588, 188),
+        )
+        val candidate = candidate(program)
+        try {
+            val selectedTargets = listOf(512, 768, 1024)
+            var selectorCalls = 0
+            val plan = QpBlockClusterPlanner.plan(candidate) { pageIndex ->
+                assertEquals(pageIndex, selectorCalls)
+                selectedTargets[selectorCalls++]
+            }
+            assertEquals(listOf(512, 768, 1024), plan.clusters.map { it.targetSize })
+            assertEquals(3, selectorCalls)
+
+            assertFailsWith<IllegalArgumentException> {
+                QpBlockClusterPlanner.plan(candidate) { 511 }
+            }
+        } finally {
+            candidate.wipe()
+            Arrays.fill(program, 0)
+        }
+    }
+
+    @Test
+    fun malformed_public_frame_geometry_fails_closed_before_a_partial_plan_exists() {
+        val valid = framedQp(
+            blockIds = listOf(1, 2),
+            encodedPayloadLengths = listOf(100, 100),
+        )
+        val badMagic = valid.copyOf().also { it[0] = 'X'.code.toByte() }
+        val retiredVbcxMagic = valid.copyOf().also { it[3] = 'X'.code.toByte() }
+        val emptyConstantPool = framedQp(
+            blockIds = listOf(10),
+            encodedPayloadLengths = listOf(100),
+            constantPoolPlainLength = 0L,
+        )
+        val truncated = valid.copyOf(valid.size - 1)
+        val retiredAuthenticationLengthMarker = valid.copyOf(valid.size + 1).also { it[it.lastIndex] = 32 }
+        val trailingByte = valid.copyOf(valid.size + 1).also { it[it.lastIndex] = 1 }
+        val duplicateBlockId = framedQp(
+            blockIds = listOf(3, 3),
+            encodedPayloadLengths = listOf(100, 100),
+        )
+        val overlongConstantPoolPlainLength = framedQp(
+            blockIds = listOf(4),
+            encodedPayloadLengths = listOf(100),
+            constantPoolPlainLength = Int.MAX_VALUE.toLong() + 1L,
+        )
+        val overlongPlainBlockLength = framedQp(
+            blockIds = listOf(5),
+            encodedPayloadLengths = listOf(100),
+            plainPayloadLengths = listOf(Int.MAX_VALUE.toLong() + 1L),
+        )
+        val overlongExceptionPlainLength = framedQp(
+            blockIds = listOf(6),
+            encodedPayloadLengths = listOf(100),
+            exceptionPlainLength = Int.MAX_VALUE.toLong() + 1L,
+        )
+        val overlongExceptionStoredLength = framedQp(
+            blockIds = listOf(7),
+            encodedPayloadLengths = listOf(100),
+            exceptionStoredLength = Int.MAX_VALUE.toLong() + 1L,
+        )
+        val mismatchedBlockCiphertextLength = framedQp(
+            blockIds = listOf(8),
+            encodedPayloadLengths = listOf(100),
+            storedPayloadLengths = listOf(99),
+        )
+        val mismatchedExceptionCiphertextLength = framedQp(
+            blockIds = listOf(9),
+            encodedPayloadLengths = listOf(100),
+            exceptionStoredLength = 1,
+            exceptionEncryptedLength = 2,
+        )
+        try {
+            listOf(
+                badMagic,
+                retiredVbcxMagic,
+                emptyConstantPool,
+                truncated,
+                retiredAuthenticationLengthMarker,
+                trailingByte,
+                duplicateBlockId,
+                overlongConstantPoolPlainLength,
+                overlongPlainBlockLength,
+                overlongExceptionPlainLength,
+                overlongExceptionStoredLength,
+                mismatchedBlockCiphertextLength,
+                mismatchedExceptionCiphertextLength,
+            ).forEach { malformed ->
+                val candidate = candidate(malformed)
+                try {
+                    assertFailsWith<IllegalArgumentException> {
+                        QpBlockClusterPlanner.plan(candidate) { 512 }
+                    }
+                } finally {
+                    candidate.wipe()
+                    Arrays.fill(malformed, 0)
+                }
+            }
+        } finally {
+            Arrays.fill(valid, 0)
+        }
+    }
+
+    private fun candidate(program: ByteArray): QpMethodCandidate {
+        val identity = ByteArray(32) { index -> (index * 11 + 7).toByte() }
+        return try {
+            QpMethodCandidate.create(
+                entryToken = 0x4A4B_454E_0000_0B10L,
+                logicalMethod = QpMethodIdentity.create(
+                    dispatchClassToken = "planner/Fixture",
+                    dispatchMethodToken = "run",
+                    descriptor = "()V",
+                    logicalVmResourcePath = "META-INF/qp/planner-fixture.bin",
+                ),
+                logicalIdentity = identity,
+                serializedProgram = program,
+            )
+        } finally {
+            Arrays.fill(identity, 0)
+        }
+    }
+
+    private fun framedQp(
+        blockIds: List<Int>,
+        encodedPayloadLengths: List<Int>,
+        constantPoolPlainLength: Long = 4L,
+        plainPayloadLengths: List<Long> = encodedPayloadLengths.map { it.toLong() },
+        storedPayloadLengths: List<Int> = encodedPayloadLengths,
+        exceptionPlainLength: Long = 0L,
+        exceptionStoredLength: Long = 0L,
+        exceptionEncryptedLength: Int = 0,
+    ): ByteArray {
+        require(
+            blockIds.isNotEmpty() &&
+                blockIds.size == encodedPayloadLengths.size &&
+                blockIds.size == plainPayloadLengths.size &&
+                blockIds.size == storedPayloadLengths.size,
+        )
+        require(
+            constantPoolPlainLength >= 0 &&
+                exceptionPlainLength >= 0 &&
+                exceptionStoredLength >= 0 &&
+                exceptionEncryptedLength >= 0,
+        )
+        val out = ByteArrayOutputStream()
+        val currentMagic = derivedVmMagic()
+        try {
+            out.write(currentMagic)
+        } finally {
+            Arrays.fill(currentMagic, 0)
+        }
+        out.write(ByteArray(16))
+        out.write(ByteArray(32))
+        writeU4(out, 0xAABBCCDDL)
+        out.write(ByteArray(16))
+        writeU2(out, 0)
+        writeU2(out, blockIds.size)
+        writeU4(out, constantPoolPlainLength)
+        writeU4(out, 4)
+        out.write(byteArrayOf(1, 2, 3, 4))
+        blockIds.forEachIndexed { ordinal, blockId ->
+            writeU2(out, blockId)
+            writeU4(out, ordinal.toLong() + 1)
+            writeU4(out, ordinal.toLong() + 101)
+        }
+        encodedPayloadLengths.forEachIndexed { ordinal, encryptedLength ->
+            val plainLength = plainPayloadLengths[ordinal]
+            val storedLength = storedPayloadLengths[ordinal]
+            require(plainLength >= 0)
+            require(storedLength > 0 && encryptedLength > 0)
+            writeU4(out, plainLength)
+            writeU4(out, storedLength.toLong())
+            writeU4(out, encryptedLength.toLong())
+            out.write(ByteArray(encryptedLength) { index -> (ordinal * 17 + index).toByte() })
+        }
+        writeU4(out, exceptionPlainLength)
+        writeU4(out, exceptionStoredLength)
+        writeU4(out, exceptionEncryptedLength.toLong())
+        out.write(ByteArray(exceptionEncryptedLength))
+        writeU4(out, 0)
+        out.write(ByteArray(32))
+        return out.toByteArray()
+    }
+
+    private fun writeU2(out: ByteArrayOutputStream, value: Int) {
+        out.write((value ushr 8) and 0xFF)
+        out.write(value and 0xFF)
+    }
+
+    private fun writeU4(out: ByteArrayOutputStream, value: Long) {
+        require(value in 0..0xFFFF_FFFFL)
+        out.write(((value ushr 24) and 0xFF).toInt())
+        out.write(((value ushr 16) and 0xFF).toInt())
+        out.write(((value ushr 8) and 0xFF).toInt())
+        out.write((value and 0xFF).toInt())
+    }
+}

@@ -33,7 +33,7 @@ class EngineCliRunSupportTest {
 
     @Test
     fun buildRunRequest_rejects_removed_boot_key_delivery_before_engine_run() {
-        val tempDir: Path = Files.createTempDirectory("javashroud-run-request-aken-v4")
+        val tempDir: Path = Files.createTempDirectory("javashroud-run-request-qp-v4")
         val inputJarPath = tempDir.resolve("input.jar")
         val outputJarPath = tempDir.resolve("output.jar")
         val configPath = tempDir.resolve("config.toml")
