@@ -1,0 +1,16 @@
+[package]
+name = "qp-runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+qp-crypto.workspace = true
+qp-page.workspace = true
+qp-resource.workspace = true
+qp-vm.workspace = true
+qp-shell.workspace = true
+
+[lints]
+workspace = true

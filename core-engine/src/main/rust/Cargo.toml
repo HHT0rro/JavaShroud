@@ -1,13 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/jsrt-ffi",
-    "crates/jsrt-runtime",
-    "crates/jsrt-crypto",
-    "crates/jsrt-page",
-    "crates/jsrt-resource",
-    "crates/jsrt-vm",
-    "crates/jsrt-shell",
+    "crates/qp-ffi",
+    "crates/qp-runtime",
+    "crates/qp-crypto",
+    "crates/qp-page",
+    "crates/qp-resource",
+    "crates/qp-vm",
+    "crates/qp-shell",
 ]
 
 [workspace.package]
@@ -17,17 +17,17 @@ license = "GPL-3.0-or-later"
 repository = "https://github.com/HHT0rro/JavaShroud-public"
 
 [workspace.dependencies]
-jsrt-crypto = { path = "crates/jsrt-crypto" }
-jsrt-page = { path = "crates/jsrt-page" }
-jsrt-resource = { path = "crates/jsrt-resource" }
-jsrt-vm = { path = "crates/jsrt-vm" }
-jsrt-shell = { path = "crates/jsrt-shell" }
-jsrt-runtime = { path = "crates/jsrt-runtime" }
-jsrt-ffi = { path = "crates/jsrt-ffi" }
+qp-crypto = { path = "crates/qp-crypto" }
+qp-page = { path = "crates/qp-page" }
+qp-resource = { path = "crates/qp-resource" }
+qp-vm = { path = "crates/qp-vm" }
+qp-shell = { path = "crates/qp-shell" }
+qp-runtime = { path = "crates/qp-runtime" }
+qp-ffi = { path = "crates/qp-ffi" }
 ruzstd = { version = "0.7.3", default-features = false, features = ["std"] }
 
-[workspace.metadata.aken-r1]
-runtime_abi = "jsrt_ffi"
+[workspace.metadata.qp]
+runtime_abi = "qp_ffi"
 runtime_resource_root = "META-INF/jsrt"
 rust_toolchain = "1.78.0"
 windows_platform = "windows-x64"

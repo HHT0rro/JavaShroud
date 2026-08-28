@@ -3,58 +3,58 @@
 version = 3
 
 [[package]]
-name = "jsrt-crypto"
+name = "qp-crypto"
 version = "0.1.0"
 
 [[package]]
-name = "jsrt-ffi"
+name = "qp-ffi"
 version = "0.1.0"
 dependencies = [
- "jsrt-crypto",
- "jsrt-page",
- "jsrt-runtime",
- "jsrt-shell",
- "jsrt-vm",
+ "qp-crypto",
+ "qp-page",
+ "qp-runtime",
+ "qp-shell",
+ "qp-vm",
 ]
 
 [[package]]
-name = "jsrt-page"
+name = "qp-page"
 version = "0.1.0"
 dependencies = [
- "jsrt-crypto",
+ "qp-crypto",
 ]
 
 [[package]]
-name = "jsrt-resource"
+name = "qp-resource"
 version = "0.1.0"
 dependencies = [
  "ruzstd",
 ]
 
 [[package]]
-name = "jsrt-runtime"
+name = "qp-runtime"
 version = "0.1.0"
 dependencies = [
- "jsrt-crypto",
- "jsrt-page",
- "jsrt-resource",
- "jsrt-shell",
- "jsrt-vm",
+ "qp-crypto",
+ "qp-page",
+ "qp-resource",
+ "qp-shell",
+ "qp-vm",
 ]
 
 [[package]]
-name = "jsrt-shell"
+name = "qp-shell"
 version = "0.1.0"
 dependencies = [
- "jsrt-crypto",
- "jsrt-page",
+ "qp-crypto",
+ "qp-page",
 ]
 
 [[package]]
-name = "jsrt-vm"
+name = "qp-vm"
 version = "0.1.0"
 dependencies = [
- "jsrt-crypto",
+ "qp-crypto",
 ]
 
 [[package]]
