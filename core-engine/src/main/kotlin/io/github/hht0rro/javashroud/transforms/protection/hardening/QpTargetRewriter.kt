@@ -24,14 +24,74 @@ internal object QpTargetRewriter {
     const val BOOTSTRAP_DESC =
         "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;"
 
+    internal data class BootstrapTarget(val owner: String, val name: String)
+
+    private const val RESOLVE_HANDLE_NAME = "resolveHandle"
+    private const val RESOLVE_HANDLE_DESC =
+        "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;)Ljava/lang/invoke/MethodHandle;"
+
+    /**
+     * Return the class that owns the current target-token bootstrap. Runtime
+     * sealing may relocate QpBootstrap before this final pass, so looking only
+     * for the source owner would make the rewriter append a second canonical
+     * bootstrap whose QpBridge reference no longer exists.
+     */
+    internal fun bootstrapTargetOrNull(artifact: BytecodeArtifact): BootstrapTarget? {
+        for (classArtifact in artifact.classArtifacts) {
+            var hasBootstrap = false
+            var hasResolveHandle = false
+            try {
+                ClassReader(classArtifact.bytes).accept(object : org.objectweb.asm.ClassVisitor(Opcodes.ASM9) {
+                    override fun visitMethod(
+                        access: Int,
+                        name: String,
+                        descriptor: String,
+                        signature: String?,
+                        exceptions: Array<out String>?,
+                    ): org.objectweb.asm.MethodVisitor? {
+                        if (
+                            access and Opcodes.ACC_STATIC != 0 &&
+                                name == BOOTSTRAP_NAME &&
+                                descriptor == BOOTSTRAP_DESC
+                        ) {
+                            hasBootstrap = true
+                        }
+                        if (
+                            access and Opcodes.ACC_STATIC != 0 &&
+                                name == RESOLVE_HANDLE_NAME &&
+                                descriptor == RESOLVE_HANDLE_DESC
+                        ) {
+                            hasResolveHandle = true
+                        }
+                        return null
+                    }
+                }, ClassReader.SKIP_CODE or ClassReader.SKIP_DEBUG or ClassReader.SKIP_FRAMES)
+            } catch (_: RuntimeException) {
+                hasBootstrap = false
+                hasResolveHandle = false
+            }
+            if (hasBootstrap && hasResolveHandle) {
+                return BootstrapTarget(classArtifact.summary.internalName, BOOTSTRAP_NAME)
+            }
+        }
+        return null
+    }
+
     fun wrapBusinessHandles(
         artifact: BytecodeArtifact,
         artifactDigest: ByteArray,
         random: SecureRandom = SecureRandom(),
     ): BytecodeArtifact {
+        val bootstrapTarget = bootstrapTargetOrNull(artifact) ?: BootstrapTarget(BOOTSTRAP_OWNER, BOOTSTRAP_NAME)
         var changed = false
         val updatedClasses = artifact.classArtifacts.map { classArtifact ->
-            val rewritten = wrapClass(classArtifact.bytes, classArtifact.summary.internalName, artifactDigest, random)
+            val rewritten = wrapClass(
+                classBytes = classArtifact.bytes,
+                internalName = classArtifact.summary.internalName,
+                bootstrapTarget = bootstrapTarget,
+                artifactDigest = artifactDigest,
+                random = random,
+            )
             if (rewritten.contentEquals(classArtifact.bytes)) classArtifact else {
                 changed = true
                 reanalyzedClassArtifact(classArtifact, rewritten)
@@ -53,6 +113,7 @@ internal object QpTargetRewriter {
     private fun wrapClass(
         classBytes: ByteArray,
         internalName: String,
+        bootstrapTarget: BootstrapTarget,
         artifactDigest: ByteArray,
         random: SecureRandom,
     ): ByteArray {
@@ -62,7 +123,13 @@ internal object QpTargetRewriter {
         var modified = false
         var siteIndex = 0
         var bridgeIndex = 0
-        val wrapper = Handle(Opcodes.H_INVOKESTATIC, BOOTSTRAP_OWNER, BOOTSTRAP_NAME, BOOTSTRAP_DESC, false)
+        val wrapper = Handle(
+            Opcodes.H_INVOKESTATIC,
+            bootstrapTarget.owner,
+            bootstrapTarget.name,
+            BOOTSTRAP_DESC,
+            false,
+        )
         val existingMethodKeys = node.methods.orEmpty().mapTo(mutableSetOf()) { it.name + it.desc }
         val lambdaBridges = mutableMapOf<String, Handle>()
         val generatedLambdaBridges = mutableListOf<MethodNode>()
@@ -71,10 +138,36 @@ internal object QpTargetRewriter {
             val preserveLambdaLinkage = isJvmTimingSensitive(method)
             instructions.toArray().forEach { insn ->
                 val indy = insn as? InvokeDynamicInsnNode ?: return@forEach
-                if (indy.bsm.owner == BOOTSTRAP_OWNER) return@forEach
+                if (indy.bsm.owner == BOOTSTRAP_OWNER || indy.bsm.owner == bootstrapTarget.owner) return@forEach
                 if (indy.desc == "([B)Ljava/lang/String;") return@forEach
-                val args = indy.bsmArgs ?: emptyArray()
-                if (args.none { it is Handle && QpTargetTokenEnvelope.isBusinessTargetHandle(it) }) return@forEach
+                val originalArgs = indy.bsmArgs ?: emptyArray()
+                val reboundArgs = originalArgs.map { arg ->
+                    val token = arg as? String
+                    if (token == null || !QpTargetTokenEnvelope.isToken(token)) {
+                        arg
+                    } else {
+                        QpTargetTokenEnvelope.rebindArtifact(
+                            token = token,
+                            artifactDigest = artifactDigest,
+                            callerOwner = internalName,
+                            indyName = indy.name,
+                            indyMethodType = indy.desc,
+                            random = random,
+                        )
+                    }
+                }.toTypedArray()
+                val argsRebound = reboundArgs.withIndex().any { (index, arg) -> arg !== originalArgs[index] }
+                val args = if (argsRebound) reboundArgs else originalArgs
+                if (args.none { it is Handle && QpTargetTokenEnvelope.isBusinessTargetHandle(it) }) {
+                    if (argsRebound) {
+                        instructions.set(
+                            indy,
+                            InvokeDynamicInsnNode(indy.name, indy.desc, indy.bsm, *args),
+                        )
+                        modified = true
+                    }
+                    return@forEach
+                }
                 val isLambdaMetafactory = isStandardLambdaMetafactory(indy)
                 if (isLambdaMetafactory && preserveLambdaLinkage) {
                     val bridgedArgs = args.map { arg ->
@@ -99,7 +192,7 @@ internal object QpTargetRewriter {
                             bridgeHandle ?: arg
                         }
                     }
-                    if (bridgedArgs.withIndex().any { (index, arg) -> arg !== args[index] }) {
+                    if (argsRebound || bridgedArgs.withIndex().any { (index, arg) -> arg !== args[index] }) {
                         instructions.set(indy, InvokeDynamicInsnNode(indy.name, indy.desc, indy.bsm, *bridgedArgs.toTypedArray()))
                         modified = true
                     }

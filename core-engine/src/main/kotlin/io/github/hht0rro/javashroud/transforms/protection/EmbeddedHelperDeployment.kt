@@ -39,21 +39,26 @@ object EmbeddedHelperDeployment {
     private const val QP_PKG = "$PKG/qp"
     private const val HELPER_RESOURCE_ROOT = "META-INF/javashroud-helpers"
     /**
-     * The AKEN v4 helper set deliberately omits legacy boot/resource decoder
+     * The Qp v4 helper set deliberately omits legacy boot/resource decoder
      * nested classes.  The outer helper is regenerated below with only the
      * typed current-page surface and its relocation/lambda support closure.
      */
-    private val akenRuntimeHelpers = listOf(
+    private val qpRuntimeHelpers = listOf(
         "$QP_PKG/QpBridge",
         "$QP_PKG/QpBridge${"$"}QpNativeLibrary",
         "$QP_PKG/QpBridge${"$"}CatalogBundle",
         "$QP_PKG/QpBridge${"$"}TypeParseResult",
         "$QP_PKG/QpBridge${"$"}SamLambdaOptions",
         "$QP_PKG/QpBridge${"$"}SamInvocationHandler",
+        // The final target-token wrapper uses QpBootstrap even when the
+        // invoke-dynamic-indirection pass is disabled. Keep it in the same
+        // helper closure so sealing relocates the bootstrap and QpBridge in
+        // one transaction instead of appending a canonical late copy.
+        "$QP_PKG/QpBootstrap",
     )
-    /** Entries regenerated for an AKEN production closure. */
-    private val akenProductionHelperEntryNames = (
-        akenRuntimeHelpers +
+    /** Entries regenerated for an Qp production closure. */
+    private val qpProductionHelperEntryNames = (
+        qpRuntimeHelpers +
             listOf(
                 "$QP_PKG/QpGuard",
                 "$QP_PKG/QpBridge${"$"}RuntimeResourceMetadata",
@@ -63,16 +68,16 @@ object EmbeddedHelperDeployment {
 
     private val passToHelpers: Map<String, List<String>> = mapOf(
         "string-encryption" to listOf("$QP_PKG/QpTextBridge"),
-        "callsite-rotation-protection" to listOf("$QP_PKG/QpCallsiteBridge", "$QP_PKG/QpBootstrap"),
-        "invoke-dynamic-indirection" to listOf("$QP_PKG/QpBootstrap"),
-        "bootstrap-table-encryption" to listOf("$QP_PKG/QpBootstrap"),
+        "callsite-rotation-protection" to listOf("$QP_PKG/QpCallsiteBridge", "$QP_PKG/QpBootstrap", "$QP_PKG/QpBridge"),
+        "invoke-dynamic-indirection" to listOf("$QP_PKG/QpBootstrap", "$QP_PKG/QpBridge"),
+        "bootstrap-table-encryption" to listOf("$QP_PKG/QpBootstrap", "$QP_PKG/QpBridge"),
         "exception-semantic-virtualization" to listOf(
             "$PKG/ExceptionVirtualizationHelper",
             "$PKG/FlowControlException",
         ),
-        "os-anti-debug" to listOf("$QP_PKG/QpGuard") + akenRuntimeHelpers,
-        "os-anti-vm" to listOf("$QP_PKG/QpGuard") + akenRuntimeHelpers,
-        "jni-microkernel-loader" to akenRuntimeHelpers,
+        "os-anti-debug" to listOf("$QP_PKG/QpGuard") + qpRuntimeHelpers,
+        "os-anti-vm" to listOf("$QP_PKG/QpGuard") + qpRuntimeHelpers,
+        "jni-microkernel-loader" to qpRuntimeHelpers,
         "method-virtualization" to emptyList(),
     )
     private val helperGenerators: Map<String, () -> ByteArray> by lazy {
@@ -103,12 +108,12 @@ object EmbeddedHelperDeployment {
         executedPassIds: List<String>,
     ): BytecodeArtifact {
         val resolvedPassIds = resolvePassIdsWithSchemaDependencies(executedPassIds)
-        val akenRuntimeDeployment = "jni-microkernel-loader" in resolvedPassIds
+        val qpRuntimeDeployment = "jni-microkernel-loader" in resolvedPassIds
         val existingEntries = artifact.jarEntries
             .asSequence()
             .filterNot { entry ->
-                akenRuntimeDeployment &&
-                    entry.name in akenProductionHelperEntryNames
+                qpRuntimeDeployment &&
+                    entry.name in qpProductionHelperEntryNames
             }
             .map { entry -> entry.name }
             .toSet()
@@ -123,7 +128,7 @@ object EmbeddedHelperDeployment {
             val entryName = "$helperInternalName.class"
             if (entryName in existingEntries) continue
             val classBytes = try {
-                loadHelperBytes(helperInternalName, akenRuntimeDeployment)
+                loadHelperBytes(helperInternalName, qpRuntimeDeployment)
             } catch (error: Exception) {
                 generationFailures.add("$entryName (${error::class.java.simpleName}: ${error.message ?: "unknown error"})")
                 continue
@@ -135,16 +140,16 @@ object EmbeddedHelperDeployment {
                 "Failed to embed runtime helpers for passes ${executedPassIds.sorted()}: ${generationFailures.joinToString("; ")}"
             )
         }
-        val retainedJarEntries = if (akenRuntimeDeployment) {
+        val retainedJarEntries = if (qpRuntimeDeployment) {
             artifact.jarEntries.filterNot { entry ->
-                entry.name in akenProductionHelperEntryNames || entry.name in legacyBootResourcePaths
+                entry.name in qpProductionHelperEntryNames || entry.name in legacyBootResourcePaths
             }
         } else {
             artifact.jarEntries
         }
-        val retainedClassArtifacts = if (akenRuntimeDeployment) {
+        val retainedClassArtifacts = if (qpRuntimeDeployment) {
             artifact.classArtifacts.filterNot { classArtifact ->
-                classArtifact.entryName in akenProductionHelperEntryNames
+                classArtifact.entryName in qpProductionHelperEntryNames
             }
         } else {
             artifact.classArtifacts
@@ -190,11 +195,11 @@ object EmbeddedHelperDeployment {
         return resolvedPassIds
     }
 
-    private fun loadHelperBytes(helperInternalName: String, akenRuntimeDeployment: Boolean = false): ByteArray {
+    private fun loadHelperBytes(helperInternalName: String, qpRuntimeDeployment: Boolean = false): ByteArray {
         val generator = helperGenerators[helperInternalName]
             ?: throw IllegalStateException("missing generator")
         val generated = generator()
-        return if (akenRuntimeDeployment && helperInternalName == "$QP_PKG/QpBridge") {
+        return if (qpRuntimeDeployment && helperInternalName == "$QP_PKG/QpBridge") {
             emitQpOnlyQpBridge(generated)
         } else {
             generated
@@ -204,7 +209,7 @@ object EmbeddedHelperDeployment {
     /**
      * Copies the public/current-page closure of the source helper into a new
      * class file, rather than shipping the source helper's legacy boot protocol
-     * methods and constant-pool entries in a new AKEN artifact.  The original
+     * methods and constant-pool entries in a new Qp artifact.  The original
      * helper remains in the build process for old-engine tests; new output gets
      * this lean runtime implementation only.
      */
@@ -239,27 +244,27 @@ object EmbeddedHelperDeployment {
             "vmSelfCheck",
             "nativeSelfCheckFailed",
             "sealedNativeBindingsPublished",
-            "AKEN_NATIVE_LOCATOR_RESOURCE",
-            "AKEN_NATIVE_BINDINGS_LOCATOR_RESOURCE",
-            "AKEN_NATIVE_RESOURCE_ROOT",
-            "AKEN_NATIVE_LOCATOR_MAGIC_0",
-            "AKEN_NATIVE_LOCATOR_MAGIC_1",
-            "AKEN_NATIVE_LOCATOR_MAGIC_2",
-            "AKEN_NATIVE_LOCATOR_MAGIC_3",
-            "AKEN_NATIVE_LOCATOR_COMMITMENT_DOMAIN",
-            "AKEN_NATIVE_LOCATOR_ROUTE_MASK_DOMAIN",
-            "AKEN_NATIVE_LOCATOR_VERSION",
-            "AKEN_NATIVE_LOCATOR_HEADER_BYTES",
-            "AKEN_NATIVE_LOCATOR_COMMITMENT_BYTES",
-            "AKEN_NATIVE_LOCATOR_RECORD_FIXED_BYTES",
-            "AKEN_NATIVE_LOCATOR_MAX_RECORDS",
-            "AKEN_NATIVE_LOCATOR_MAX_ROUTE_BYTES",
-            "AKEN_NATIVE_LOCATOR_KIND_LIBRARY",
-            "AKEN_NATIVE_LOCATOR_KIND_BINDINGS",
-            "AKEN_NATIVE_LOCATOR_MAX_BYTES",
-            "AKEN_NATIVE_MAX_LIBRARY_BYTES",
-            "AKEN_NATIVE_SHA256_LENGTH",
-            "AKEN_NATIVE_BINDINGS_MAX_BYTES",
+            "QP_NATIVE_LOCATOR_RESOURCE",
+            "QP_NATIVE_BINDINGS_LOCATOR_RESOURCE",
+            "QP_NATIVE_RESOURCE_ROOT",
+            "QP_NATIVE_LOCATOR_MAGIC_0",
+            "QP_NATIVE_LOCATOR_MAGIC_1",
+            "QP_NATIVE_LOCATOR_MAGIC_2",
+            "QP_NATIVE_LOCATOR_MAGIC_3",
+            "QP_NATIVE_LOCATOR_COMMITMENT_DOMAIN",
+            "QP_NATIVE_LOCATOR_ROUTE_MASK_DOMAIN",
+            "QP_NATIVE_LOCATOR_VERSION",
+            "QP_NATIVE_LOCATOR_HEADER_BYTES",
+            "QP_NATIVE_LOCATOR_COMMITMENT_BYTES",
+            "QP_NATIVE_LOCATOR_RECORD_FIXED_BYTES",
+            "QP_NATIVE_LOCATOR_MAX_RECORDS",
+            "QP_NATIVE_LOCATOR_MAX_ROUTE_BYTES",
+            "QP_NATIVE_LOCATOR_KIND_LIBRARY",
+            "QP_NATIVE_LOCATOR_KIND_BINDINGS",
+            "QP_NATIVE_LOCATOR_MAX_BYTES",
+            "QP_NATIVE_MAX_LIBRARY_BYTES",
+            "QP_NATIVE_SHA256_LENGTH",
+            "QP_NATIVE_BINDINGS_MAX_BYTES",
             "LAMBDA_FLAG_SERIALIZABLE",
             "LAMBDA_FLAG_MARKERS",
             "LAMBDA_FLAG_BRIDGES",
@@ -268,7 +273,7 @@ object EmbeddedHelperDeployment {
             "SAM_BRIDGE_INTERFACE_CACHE",
         )
         val removedNames = setOf(
-            // AKEN keeps only the native loader handshake (nativeInit,
+            // Qp keeps only the native loader handshake (nativeInit,
             // nativeHeartbeat, and nativeInstallSessionNonce) plus the
             // typed page bridge below.  All generic verification, machine-
             // fingerprint, key-taking, and legacy class/resource entrypoints
@@ -739,19 +744,19 @@ object EmbeddedHelperDeployment {
             for (rn in recompiledNatives) {
                 val route = NativeRecompilationRoute.forPlatform(rn.platform)
                 require(rn.libName == route.outputName) {
-                    "AKEN-R1 Rust runtime name is not canonical for ${rn.platform}: ${rn.libName}"
+                    "Qp Rust runtime name is not canonical for ${rn.platform}: ${rn.libName}"
                 }
                 val entryName = route.preSealResourcePath
                 if (entryName in existingEntries) continue
                 if (!nativeLibraryContainsRequiredJniVmAbi(rn.bytes)) {
                     throw IllegalStateException(
-                        "AKEN-R1 Rust JNI runtime for ${rn.platform} does not contain the required qp_r1 ABI exports",
+                        "Qp Rust JNI runtime for ${rn.platform} does not contain the required qp_r1 ABI exports",
                     )
                 }
                 newEntries.add(JarEntryData(name = entryName, bytes = rn.bytes))
             }
             if (newEntries.isEmpty()) {
-                throw IllegalStateException("AKEN-R1 Rust compilation produced no loadable JNI runtime libraries")
+                throw IllegalStateException("Qp Rust compilation produced no loadable JNI runtime libraries")
             }
             val updatedJarEntries = retainedJarEntries + newEntries
             artifact.copy(
@@ -825,7 +830,7 @@ object EmbeddedHelperDeployment {
         emit: (EngineEvent) -> Unit = {},
     ): List<QpNativeCompilerPass.RecompiledNative> {
         if (config == null) {
-            throw IllegalStateException("jni-microkernel-loader requires an obfuscation config for AKEN-R1 Rust compilation")
+            throw IllegalStateException("jni-microkernel-loader requires an obfuscation config for Qp Rust compilation")
         }
         val loaderPass = config.passes.find { it.id == "jni-microkernel-loader" && it.enabled }
             ?: throw IllegalStateException("jni-microkernel-loader pass config is missing")
@@ -867,7 +872,7 @@ object EmbeddedHelperDeployment {
                 },
             )
             if (diagnostics.results.isEmpty()) {
-                throw IllegalStateException("AKEN-R1 Rust toolchain is unavailable or produced no loadable libraries")
+                throw IllegalStateException("Qp Rust toolchain is unavailable or produced no loadable libraries")
             }
             return requireCompleteNativeCompileTargets(
                 request.routes.map(NativeRecompilationRoute::platform),
@@ -887,7 +892,7 @@ object EmbeddedHelperDeployment {
         val host = try {
             RustToolchainProvisioner.hostPlatform(osName, osArch)
         } catch (error: RustToolchainProvisioner.RustToolchainException) {
-            throw IllegalArgumentException("AKEN-R1 Rust target host is unsupported: $osName/$osArch", error)
+            throw IllegalArgumentException("Qp Rust target host is unsupported: $osName/$osArch", error)
         }
         val trimmed = targetPlatformParam.trim()
         if (trimmed.equals("auto", ignoreCase = true)) {
@@ -906,7 +911,7 @@ object EmbeddedHelperDeployment {
         } else {
             listOf(trimmed)
         }
-        require(requested.isNotEmpty()) { "AKEN-R1 Rust target platform is empty" }
+        require(requested.isNotEmpty()) { "Qp Rust target platform is empty" }
         return requested.map(NativeRecompilationRoute::normalizePlatform).distinct()
     }
 
@@ -922,7 +927,7 @@ object EmbeddedHelperDeployment {
         if (missing.isNotEmpty() || unexpected.isNotEmpty() || duplicates.isNotEmpty()) {
             throw IllegalStateException(
                 buildString {
-                    append("AKEN-R1 Rust compilation did not produce exactly the requested target platforms")
+                    append("Qp Rust compilation did not produce exactly the requested target platforms")
                     if (missing.isNotEmpty()) append("; missing=${missing.joinToString(",")}")
                     if (unexpected.isNotEmpty()) append("; unexpected=${unexpected.joinToString(",")}")
                     if (duplicates.isNotEmpty()) append("; duplicate=${duplicates.joinToString(",")}")
@@ -934,7 +939,7 @@ object EmbeddedHelperDeployment {
             result.libName != NativeRecompilationRoute.forPlatform(result.platform).outputName
         }
         require(nonCanonicalNames.isEmpty()) {
-            "AKEN-R1 Rust compilation produced non-canonical runtime names: " +
+            "Qp Rust compilation produced non-canonical runtime names: " +
                 nonCanonicalNames.joinToString { "${it.platform}=${it.libName}" }
         }
         return ordered
@@ -963,7 +968,7 @@ object EmbeddedHelperDeployment {
             EngineEvent(
                 level = "error",
                 type = "error",
-                message = "AKEN-R1 Rust JNI runtime compilation failed ($reason). No legacy native fallback is available.",
+                message = "Qp Rust JNI runtime compilation failed ($reason). No legacy native fallback is available.",
                 progress = 94,
                 outPath = null,
             )

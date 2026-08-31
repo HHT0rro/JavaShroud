@@ -32,7 +32,7 @@ class EmbeddedHelperDeploymentTest {
     private val objectMapper = ObjectMapper()
 
     @Test
-    fun jni_microkernel_loader_embeds_only_aken_runtime_helper_closure() {
+    fun jni_microkernel_loader_embeds_only_native_runtime_helper_closure() {
         val updated = EmbeddedHelperDeployment.injectRequiredHelpers(
             artifact = emptyArtifact(),
             executedPassIds = listOf("jni-microkernel-loader"),
@@ -46,18 +46,18 @@ class EmbeddedHelperDeploymentTest {
             "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge${"$"}SamLambdaOptions.class",
             "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge${"$"}SamInvocationHandler.class",
         )) {
-            assertTrue(entryName in entries, "AKEN JNI helper dependency must be embedded: $entryName")
+            assertTrue(entryName in entries, "Qp JNI helper dependency must be embedded: $entryName")
         }
         for (legacyEntry in listOf(
             "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge${"$"}RuntimeResourceMetadata.class",
             "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge${"$"}SealedNativeLibrary.class",
         )) {
-            assertFalse(legacyEntry in entries, "AKEN deployment must not embed legacy runtime helper: $legacyEntry")
+            assertFalse(legacyEntry in entries, "Qp deployment must not embed legacy runtime helper: $legacyEntry")
         }
     }
 
 @Test
-    fun jni_microkernel_loader_emits_aken_only_outer_helper_without_legacy_boot_surface() {
+    fun jni_microkernel_loader_emits_native_only_outer_helper_without_legacy_boot_surface() {
         val updated = EmbeddedHelperDeployment.injectRequiredHelpers(
             artifact = emptyArtifact(),
             executedPassIds = listOf("jni-microkernel-loader"),
@@ -82,7 +82,7 @@ class EmbeddedHelperDeploymentTest {
             "nativeExecuteVmResource",
             "executeVmResource",
         )) {
-            assertFalse(helperText.contains(legacyMarker), "AKEN outer helper must omit legacy marker: $legacyMarker")
+            assertFalse(helperText.contains(legacyMarker), "Qp outer helper must omit legacy marker: $legacyMarker")
         }
     }
 
@@ -125,6 +125,7 @@ class EmbeddedHelperDeploymentTest {
             "nativeInitializeDefense(Ljava/lang/String;Ljava/lang/String;)I",
             "nativeProbeDefense(Ljava/lang/String;Ljava/lang/String;)I",
             "nativeTransformDefense([BLjava/lang/String;)[B",
+            "nativeOpenTargetToken([BLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)[B",
         )
         assertEquals(requiredNativeMethods, nativeMethods, "Emitted helper must expose the current typed JNI registrations")
 
@@ -144,7 +145,7 @@ class EmbeddedHelperDeploymentTest {
         )
         assertTrue(
             methods.containsAll(requiredTypedMethods),
-            "AKEN helper must retain the complete typed page ABI: ${requiredTypedMethods - methods}",
+            "Qp helper must retain the complete typed page ABI: ${requiredTypedMethods - methods}",
         )
 
         val forbiddenNativeOrGenericMethods = setOf(
@@ -176,12 +177,12 @@ class EmbeddedHelperDeploymentTest {
             "nativeReconstructKey",
         )
         val leakedMethods = methods.map { it.substringBefore('(') }.toSet().intersect(forbiddenNativeOrGenericMethods)
-        assertTrue(leakedMethods.isEmpty(), "AKEN helper must not emit generic or key-returning methods: $leakedMethods")
+        assertTrue(leakedMethods.isEmpty(), "Qp helper must not emit generic or key-returning methods: $leakedMethods")
     }
 
 
     @Test
-    fun incomplete_r1_exports_do_not_satisfy_the_native_abi_probe() {
+    fun incomplete_native_exports_do_not_satisfy_the_native_abi_probe() {
         val incomplete = "JNI_OnLoad-JNI_OnUnload-qp_r1_runtime_binding_digest".toByteArray(Charsets.US_ASCII)
 
         assertFalse(
@@ -191,7 +192,7 @@ class EmbeddedHelperDeploymentTest {
     }
 
     @Test
-    fun r1_exports_and_jni_lifecycle_satisfy_the_native_abi_probe() {
+    fun native_exports_and_jni_lifecycle_satisfy_the_native_abi_probe() {
         val r1Bytes = listOf(
             "JNI_OnLoad",
             "JNI_OnUnload",
@@ -212,7 +213,7 @@ class EmbeddedHelperDeploymentTest {
     }
 
     @Test
-    fun jni_microkernel_helper_validates_r1_images_before_system_load() {
+    fun jni_microkernel_helper_validates_native_images_before_system_load() {
         val helperSource = Files.readString(resolveWorkspacePath("core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.java"))
 
         assertTrue(helperSource.contains("validateR1NativeImage(platformTarget, nativeBytes)"), "R1 images must be validated before extraction.")
@@ -287,12 +288,12 @@ class EmbeddedHelperDeploymentTest {
         )
         val entries = updated.jarEntries.map { it.name }.toSet()
 
-        assertFalse("META-INF/.r/boot.dat" in entries, "AKEN deployment must drop the legacy JSBM boot resource")
-        assertFalse("META-INF/.r/kek.dat" in entries, "AKEN deployment must drop the legacy JSBK sidecar resource")
-        assertTrue("META-INF/app/retained.bin" in entries, "AKEN cleanup must preserve unrelated resources")
+        assertFalse("META-INF/.r/boot.dat" in entries, "Qp deployment must drop the legacy JSBM boot resource")
+        assertFalse("META-INF/.r/kek.dat" in entries, "Qp deployment must drop the legacy JSBK sidecar resource")
+        assertTrue("META-INF/app/retained.bin" in entries, "Qp cleanup must preserve unrelated resources")
         assertTrue(
             "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.class" in entries,
-            "AKEN cleanup must not prevent required JNI helper injection",
+            "Qp cleanup must not prevent required JNI helper injection",
         )
     }
 
@@ -314,9 +315,9 @@ class EmbeddedHelperDeploymentTest {
         )
         val entries = secondPass.jarEntries.map { it.name }.toSet()
 
-        assertFalse("META-INF/.r/boot.dat" in entries, "AKEN cleanup must run even when every helper is already present")
-        assertFalse("META-INF/.r/kek.dat" in entries, "AKEN cleanup must remove a reintroduced embedded boot-KEK resource")
-        assertTrue("META-INF/app/retained.bin" in entries, "AKEN cleanup must preserve unrelated resources on repeat deployment")
+        assertFalse("META-INF/.r/boot.dat" in entries, "Qp cleanup must run even when every helper is already present")
+        assertFalse("META-INF/.r/kek.dat" in entries, "Qp cleanup must remove a reintroduced embedded boot-KEK resource")
+        assertTrue("META-INF/app/retained.bin" in entries, "Qp cleanup must preserve unrelated resources on repeat deployment")
         assertEquals(firstPass.classArtifacts.size, secondPass.classArtifacts.size, "Repeat deployment must not duplicate helper class artifacts")
         assertEquals(firstPass.analysisSummary.resourceCount + 1, secondPass.analysisSummary.resourceCount, "Resource analysis must reflect only the retained reintroduced resource")
         assertEquals(firstPass.analysisSummary.classCount, secondPass.analysisSummary.classCount, "Repeat deployment must keep the class count stable")

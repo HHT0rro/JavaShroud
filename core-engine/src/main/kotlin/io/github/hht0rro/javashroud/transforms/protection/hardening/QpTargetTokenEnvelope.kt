@@ -119,33 +119,44 @@ internal object QpTargetTokenEnvelope {
     }
 
     fun seal(target: Target, binding: Binding, key: ByteArray, random: SecureRandom = SecureRandom()): String {
+        val nameSeed = io.github.hht0rro.javashroud.transforms.protection.qp.currentNameSeed()
+        return try {
+            seal(target, binding, key, random, nameSeed)
+        } finally {
+            Arrays.fill(nameSeed, 0)
+        }
+    }
+
+    private fun seal(
+        target: Target,
+        binding: Binding,
+        key: ByteArray,
+        random: SecureRandom,
+        nameSeed: ByteArray,
+    ): String {
         require(key.size == KEY_SIZE) { "indy token key must be 16 bytes" }
         require(binding.artifactDigest.size == ARTIFACT_DIGEST_SIZE) { "indy token artifact digest must be 32 bytes" }
+        require(nameSeed.size == NAME_SEED_SIZE) { "indy token name seed must be 16 bytes" }
         val plaintext = encodeTarget(target)
         val nonce = ByteArray(NONCE_SIZE).also(random::nextBytes)
         var aad: ByteArray? = null
         try {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(TAG_SIZE * 8, nonce))
-            aad = binding.aad()
+            aad = binding.aad(nameSeed)
             cipher.updateAAD(aad)
             val sealed = cipher.doFinal(plaintext)
             val ciphertext = sealed.copyOfRange(0, sealed.size - TAG_SIZE)
             val tag = sealed.copyOfRange(sealed.size - TAG_SIZE, sealed.size)
             val out = ByteArray(HEADER_SIZE + NONCE_SIZE + ciphertext.size + TAG_SIZE)
-            val magic = io.github.hht0rro.javashroud.transforms.protection.qp.derivedTokenMagic()
+            val magic = tokenMagic(nameSeed, binding.artifactDigest)
             try {
                 magic.copyInto(out)
             } finally {
                 Arrays.fill(magic, 0)
             }
             out[MAGIC_SIZE] = VERSION.toByte()
-            val nameSeed = io.github.hht0rro.javashroud.transforms.protection.qp.currentNameSeed()
-            try {
-                nameSeed.copyInto(out, NAME_SEED_OFFSET)
-            } finally {
-                Arrays.fill(nameSeed, 0)
-            }
+            nameSeed.copyInto(out, NAME_SEED_OFFSET)
             writeU32be(out, SITE_OFFSET, binding.siteIndex)
             binding.artifactDigest.copyInto(out, SITE_OFFSET + SITE_INDEX_SIZE)
             nonce.copyInto(out, HEADER_SIZE)
@@ -168,8 +179,12 @@ internal object QpTargetTokenEnvelope {
             throw SecurityException("indy target token is invalid")
         }
         require(raw.size > MAGIC_SIZE) { "indy target token is truncated" }
+        require((raw[MAGIC_SIZE].toInt() and 0xFF) == VERSION) { "indy target token version is unsupported" }
         val suppliedMagic = raw.copyOf(MAGIC_SIZE)
-        val expectedMagic = io.github.hht0rro.javashroud.transforms.protection.qp.derivedTokenMagic()
+        require(raw.size > HEADER_SIZE + NONCE_SIZE + TAG_SIZE) { "indy target token is truncated" }
+        val nameSeed = raw.copyOfRange(NAME_SEED_OFFSET, NAME_SEED_OFFSET + NAME_SEED_SIZE)
+        val headerDigest = raw.copyOfRange(SITE_OFFSET + SITE_INDEX_SIZE, HEADER_SIZE)
+        val expectedMagic = tokenMagic(nameSeed, headerDigest)
         try {
             require(!suppliedMagic.contentEquals(RETIRED_MAGIC)) { "retired indy target token magic is rejected" }
             require(suppliedMagic.contentEquals(expectedMagic)) { "indy target token is invalid" }
@@ -177,12 +192,8 @@ internal object QpTargetTokenEnvelope {
             Arrays.fill(suppliedMagic, 0)
             Arrays.fill(expectedMagic, 0)
         }
-        require((raw[MAGIC_SIZE].toInt() and 0xFF) == VERSION) { "indy target token version is unsupported" }
-        require(raw.size > HEADER_SIZE + NONCE_SIZE + TAG_SIZE) { "indy target token is truncated" }
-        val nameSeed = raw.copyOfRange(NAME_SEED_OFFSET, NAME_SEED_OFFSET + NAME_SEED_SIZE)
         val headerSiteBytes = raw.copyOfRange(SITE_OFFSET, SITE_OFFSET + SITE_INDEX_SIZE)
         val expectedSiteBytes = u32be(binding.siteIndex)
-        val headerDigest = raw.copyOfRange(SITE_OFFSET + SITE_INDEX_SIZE, HEADER_SIZE)
         val nonce = raw.copyOfRange(HEADER_SIZE, HEADER_SIZE + NONCE_SIZE)
         val ciphertext = raw.copyOfRange(HEADER_SIZE + NONCE_SIZE, raw.size - TAG_SIZE)
         val tag = raw.copyOfRange(raw.size - TAG_SIZE, raw.size)
@@ -233,11 +244,92 @@ internal object QpTargetTokenEnvelope {
         if (value.length < 24) return false
         return try {
             val raw = Base64.getUrlDecoder().decode(value)
-            raw.size > HEADER_SIZE &&
-                !raw.copyOf(MAGIC_SIZE).contentEquals(RETIRED_MAGIC) &&
-                (raw[MAGIC_SIZE].toInt() and 0xFF) == VERSION
+            try {
+                if (raw.size <= HEADER_SIZE + NONCE_SIZE + TAG_SIZE ||
+                    (raw[MAGIC_SIZE].toInt() and 0xFF) != VERSION
+                ) {
+                    false
+                } else {
+                    val suppliedMagic = raw.copyOf(MAGIC_SIZE)
+                    val nameSeed = raw.copyOfRange(NAME_SEED_OFFSET, NAME_SEED_OFFSET + NAME_SEED_SIZE)
+                    val artifactDigest = raw.copyOfRange(SITE_OFFSET + SITE_INDEX_SIZE, HEADER_SIZE)
+                    val expectedMagic = tokenMagic(nameSeed, artifactDigest)
+                    try {
+                        !suppliedMagic.contentEquals(RETIRED_MAGIC) &&
+                            MessageDigest.isEqual(suppliedMagic, expectedMagic)
+                    } finally {
+                        Arrays.fill(suppliedMagic, 0)
+                        Arrays.fill(nameSeed, 0)
+                        Arrays.fill(artifactDigest, 0)
+                        Arrays.fill(expectedMagic, 0)
+                    }
+                }
+            } finally {
+                Arrays.fill(raw, 0)
+            }
         } catch (_: RuntimeException) {
             false
+        }
+    }
+
+    /**
+     * Re-authenticate a build-time token and bind it to the commitment that is
+     * serialized into the runtime directory. This is used for tokens emitted
+     * before page finalization; it does not accept unauthenticated plaintext.
+     */
+    fun rebindArtifact(
+        token: String,
+        artifactDigest: ByteArray,
+        callerOwner: String,
+        indyName: String,
+        indyMethodType: String,
+        random: SecureRandom = SecureRandom(),
+    ): String {
+        require(artifactDigest.size == ARTIFACT_DIGEST_SIZE) { "indy token artifact digest must be 32 bytes" }
+        val raw = try {
+            Base64.getUrlDecoder().decode(token)
+        } catch (_: RuntimeException) {
+            throw SecurityException("indy target token is invalid")
+        }
+        require(raw.size > HEADER_SIZE + NONCE_SIZE + TAG_SIZE) { "indy target token is truncated" }
+        val nameSeed = raw.copyOfRange(NAME_SEED_OFFSET, NAME_SEED_OFFSET + NAME_SEED_SIZE)
+        val oldDigest = raw.copyOfRange(SITE_OFFSET + SITE_INDEX_SIZE, HEADER_SIZE)
+        val currentSeed = io.github.hht0rro.javashroud.transforms.protection.qp.currentNameSeed()
+        val siteIndex = readU32be(raw, SITE_OFFSET)
+        var oldKey: ByteArray? = null
+        var newKey: ByteArray? = null
+        try {
+            if (!MessageDigest.isEqual(nameSeed, currentSeed)) {
+                throw SecurityException("indy target token name binding mismatch")
+            }
+            val oldBinding = Binding(
+                artifactDigest = oldDigest,
+                callerOwner = callerOwner,
+                indyName = indyName,
+                indyMethodType = indyMethodType,
+                siteIndex = siteIndex,
+                protocolVersion = VERSION,
+            )
+            oldKey = oldBinding.siteKey(nameSeed)
+            val target = try {
+                open(token, oldBinding, checkNotNull(oldKey))
+            } catch (error: SecurityException) {
+                throw error
+            } catch (error: RuntimeException) {
+                throw SecurityException("indy target token authentication failed", error)
+            }
+            if (MessageDigest.isEqual(oldDigest, artifactDigest)) return token
+
+            val newBinding = oldBinding.copy(artifactDigest = artifactDigest)
+            newKey = newBinding.siteKey(currentSeed)
+            return seal(target, newBinding, checkNotNull(newKey), random, currentSeed)
+        } finally {
+            Arrays.fill(raw, 0)
+            Arrays.fill(nameSeed, 0)
+            Arrays.fill(oldDigest, 0)
+            Arrays.fill(currentSeed, 0)
+            oldKey?.let { Arrays.fill(it, 0) }
+            newKey?.let { Arrays.fill(it, 0) }
         }
     }
 
@@ -279,6 +371,15 @@ internal object QpTargetTokenEnvelope {
         }
     }
 
+    private fun tokenMagic(nameSeed: ByteArray, artifactDigest: ByteArray): ByteArray {
+        val schedule = io.github.hht0rro.javashroud.transforms.protection.qp.qpNameSchedule(artifactDigest, nameSeed)
+        return try {
+            schedule.deriveMagic(io.github.hht0rro.javashroud.transforms.protection.qp.QpNameSchedule.ROLE_TOKEN)
+        } finally {
+            schedule.close()
+        }
+    }
+
     private fun encodeTarget(target: Target): ByteArray {
         val text = target.owner + "\u0000" + target.name + "\u0000" + target.descriptor + "\u0000" +
             target.tag.toString() + "\u0000" + if (target.isInterface) "1" else "0"
@@ -315,6 +416,12 @@ internal object QpTargetTokenEnvelope {
         out[offset + 2] = (value ushr 8).toByte()
         out[offset + 3] = value.toByte()
     }
+
+    private fun readU32be(input: ByteArray, offset: Int): Int =
+        ((input[offset].toInt() and 0xFF) shl 24) or
+            ((input[offset + 1].toInt() and 0xFF) shl 16) or
+            ((input[offset + 2].toInt() and 0xFF) shl 8) or
+            (input[offset + 3].toInt() and 0xFF)
 
     private fun u32be(value: Int): ByteArray = byteArrayOf(
         (value ushr 24).toByte(),

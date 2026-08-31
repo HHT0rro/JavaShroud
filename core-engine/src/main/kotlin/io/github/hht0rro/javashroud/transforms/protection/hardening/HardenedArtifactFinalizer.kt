@@ -11,6 +11,7 @@ import io.github.hht0rro.javashroud.transforms.protection.currentQpBuildContextO
 import io.github.hht0rro.javashroud.transforms.rename.FIELD_RENAME_BINDINGS_RESOURCE
 import io.github.hht0rro.javashroud.transforms.rename.METHOD_RENAME_BINDINGS_RESOURCE
 import java.security.MessageDigest
+import java.util.Arrays
 
 internal object HardenedArtifactFinalizer {
     fun finalizeForWrite(artifact: BytecodeArtifact, config: ObfuscationConfig): BytecodeArtifact {
@@ -22,8 +23,16 @@ internal object HardenedArtifactFinalizer {
 
     /** Wrap business invokedynamic targets after natives are final and before catalog attach. */
     fun wrapIndyTargets(artifact: BytecodeArtifact): BytecodeArtifact {
-        val digest = artifactDigest(artifact)
-        return QpTargetRewriter.wrapBusinessHandles(injectIndyBootstrap(artifact), digest)
+        val prepared = injectIndyBootstrap(artifact)
+        val context = currentQpBuildContextOrNull()
+        val digest = context?.qpFinalizationLayoutOrNull()?.copyArtifactCommitmentForBuild()
+            ?: context?.qpBuildPlanOrNull()?.artifactCanonicalCommitment
+            ?: artifactDigest(prepared)
+        return try {
+            QpTargetRewriter.wrapBusinessHandles(prepared, digest)
+        } finally {
+            Arrays.fill(digest, 0)
+        }
     }
 
     private fun captureRenameDraft(artifact: BytecodeArtifact): SignedDebugMap.Draft {
@@ -56,8 +65,10 @@ internal object HardenedArtifactFinalizer {
     private fun injectIndyBootstrap(artifact: BytecodeArtifact): BytecodeArtifact {
         val internalName = QpTargetRewriter.BOOTSTRAP_OWNER
         val entryName = internalName + ".class"
-        val existing = artifact.classArtifacts.firstOrNull { it.summary.internalName == internalName }
-        if (existing != null) return artifact
+        // The sealing pass may already have relocated QpBootstrap. Detect the
+        // owner by its authenticated bootstrap signature instead of appending
+        // a second canonical class that still points at the old QpBridge name.
+        if (QpTargetRewriter.bootstrapTargetOrNull(artifact) != null) return artifact
         val resource = "/" + entryName
         val raw = HardenedArtifactFinalizer::class.java.getResourceAsStream(resource)?.readBytes()
             ?: return artifact

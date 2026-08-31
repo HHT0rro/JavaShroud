@@ -72,8 +72,15 @@ class QpTargetTokenEnvelopeTest {
 
         val raw = Base64.getUrlDecoder().decode(sealed)
         assertFalse(raw.copyOf(4).contentEquals(byteArrayOf(0x49, 0x54, 0x4b, 0x31)))
+        val expectedMagic = io.github.hht0rro.javashroud.transforms.protection.qp
+            .qpNameSchedule(binding().artifactDigest)
+            .use { schedule ->
+                schedule.deriveMagic(
+                    io.github.hht0rro.javashroud.transforms.protection.qp.QpNameSchedule.ROLE_TOKEN,
+                )
+            }
         assertContentEquals(
-            io.github.hht0rro.javashroud.transforms.protection.qp.derivedTokenMagic(),
+            expectedMagic,
             raw.copyOf(4),
         )
         assertEquals(4, raw[4].toInt() and 0xFF)
@@ -86,8 +93,8 @@ class QpTargetTokenEnvelopeTest {
     fun ciphertext_nonce_and_tag_flips_fail_closed() {
         val sealed = token()
         val raw = Base64.getUrlDecoder().decode(sealed)
-        val nonceIndex = 41
-        val ciphertextIndex = 53
+        val nonceIndex = 57
+        val ciphertextIndex = 69
         val tagIndex = raw.size - 16
         assertFailsWith<SecurityException> { openFlipped(sealed, ciphertextIndex) }
         assertFailsWith<SecurityException> { openFlipped(sealed, nonceIndex) }
@@ -116,6 +123,48 @@ class QpTargetTokenEnvelopeTest {
                 token(),
                 binding().copy(artifactDigest = ByteArray(32) { 1 }),
                 key(),
+            )
+        }
+    }
+
+    @Test
+    fun early_token_rebinds_to_directory_commitment_and_rejects_old_or_tampered_binding() {
+        val oldBinding = binding()
+        val directoryCommitment = ByteArray(32) { index -> (index * 7 + 19).toByte() }
+        val original = QpTargetTokenEnvelope.seal(
+            QpTargetTokenEnvelope.Target(
+                "com/example/T",
+                "work",
+                "(I)I",
+                Opcodes.H_INVOKESTATIC,
+                false,
+            ),
+            oldBinding,
+        )
+        val rebound = QpTargetTokenEnvelope.rebindArtifact(
+            token = original,
+            artifactDigest = directoryCommitment,
+            callerOwner = oldBinding.callerOwner,
+            indyName = oldBinding.indyName,
+            indyMethodType = oldBinding.indyMethodType,
+            random = SecureRandom(byteArrayOf(9, 8, 7, 6)),
+        )
+        val finalBinding = oldBinding.copy(artifactDigest = directoryCommitment)
+        assertEquals("work", QpTargetTokenEnvelope.open(rebound, finalBinding).name)
+        assertFailsWith<SecurityException> { QpTargetTokenEnvelope.open(rebound, oldBinding) }
+
+        val raw = Base64.getUrlDecoder().decode(rebound)
+        assertContentEquals(directoryCommitment, raw.copyOfRange(25, 57))
+        val tamperedCommitment = raw.copyOf().also { bytes -> bytes[25] = (bytes[25].toInt() xor 1).toByte() }
+        val tamperedToken = Base64.getUrlEncoder().withoutPadding().encodeToString(tamperedCommitment)
+        assertFalse(QpTargetTokenEnvelope.isToken(tamperedToken))
+        assertFailsWith<SecurityException> {
+            QpTargetTokenEnvelope.rebindArtifact(
+                token = tamperedToken,
+                artifactDigest = directoryCommitment,
+                callerOwner = oldBinding.callerOwner,
+                indyName = oldBinding.indyName,
+                indyMethodType = oldBinding.indyMethodType,
             )
         }
     }
