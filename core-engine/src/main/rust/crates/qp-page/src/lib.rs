@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
-//! Safe, standalone AKEN-R1 page wire support.
+//! Safe, standalone Qp page wire support.
 //!
 //! The byte layouts in this crate intentionally mirror the current Kotlin
 //! implementation. Parsers are bounded and strict: one parser consumes one
@@ -66,11 +66,11 @@ pub const OFFSET_CIPHERTEXT_LENGTH: usize = 197;
 pub const CANONICAL_CODEC_VARIANT: &str = "aes-256-gcm";
 
 pub const RETIRED_FRAME_MAGIC: [u8; 4] = qp_crypto::RETIRED_FRAME_MAGIC;
-pub const R1_VERSION: u8 = 2;
-pub const R1_AUTH_TAG_SIZE: usize = DIGEST_SIZE;
-pub const R1_HEADER_SIZE: usize = 4 + 1 + 4 + DIGEST_SIZE;
-pub const R1_MIN_FRAME_SIZE: usize = R1_HEADER_SIZE + R1_AUTH_TAG_SIZE;
-pub const R1_MAX_FRAME_SIZE: usize = R1_MIN_FRAME_SIZE + MAX_PAYLOAD_SIZE;
+pub const CURRENT_FRAME_VERSION: u8 = 2;
+pub const CURRENT_FRAME_AUTH_TAG_SIZE: usize = DIGEST_SIZE;
+pub const CURRENT_FRAME_HEADER_SIZE: usize = 4 + 1 + 4 + DIGEST_SIZE;
+pub const CURRENT_FRAME_MIN_SIZE: usize = CURRENT_FRAME_HEADER_SIZE + CURRENT_FRAME_AUTH_TAG_SIZE;
+pub const CURRENT_FRAME_MAX_SIZE: usize = CURRENT_FRAME_MIN_SIZE + MAX_PAYLOAD_SIZE;
 
 const PAGE_AAD_DOMAIN: &[u8] = b"page-aad";
 const DESCRIPTOR_BINDING_DOMAIN: &[u8] = b"page-envelope-descriptor";
@@ -3502,17 +3502,17 @@ impl Drop for AuthenticatedFrame {
 
 pub type QpAuthenticatedFrame = AuthenticatedFrame;
 
-pub fn encode_r1_frame(binding: &[u8], payload: &[u8]) -> Result<Vec<u8>, PageError> {
+pub fn encode_current_frame(binding: &[u8], payload: &[u8]) -> Result<Vec<u8>, PageError> {
     let binding = Binding::from_slice(binding).map_err(binding_error)?;
     RuntimeEnvelope::encode(&binding, payload).map_err(protocol_error)
 }
 
-pub fn locate_r1_frame(frame: &[u8]) -> Result<FrameView, PageError> {
-    if frame.len() > R1_MAX_FRAME_SIZE {
+pub fn locate_current_frame(frame: &[u8]) -> Result<FrameView, PageError> {
+    if frame.len() > CURRENT_FRAME_MAX_SIZE {
         return Err(PageError::LengthTooLarge {
             field: "runtime frame",
             length: frame.len(),
-            maximum: R1_MAX_FRAME_SIZE,
+            maximum: CURRENT_FRAME_MAX_SIZE,
         });
     }
     let mut cursor = Cursor::new(frame);
@@ -3523,7 +3523,7 @@ pub fn locate_r1_frame(frame: &[u8]) -> Result<FrameView, PageError> {
         return Err(PageError::InvalidMagic);
     }
     let version = cursor.read_u8()?;
-    if version != R1_VERSION {
+    if version != CURRENT_FRAME_VERSION {
         return Err(PageError::UnsupportedVersion(version));
     }
     let payload_length = cursor.read_u32_be()? as usize;
@@ -3539,7 +3539,7 @@ pub fn locate_r1_frame(frame: &[u8]) -> Result<FrameView, PageError> {
     let payload_offset = cursor.position();
     cursor.skip(payload_length)?;
     let auth_tag_offset = cursor.position();
-    cursor.skip(R1_AUTH_TAG_SIZE)?;
+    cursor.skip(CURRENT_FRAME_AUTH_TAG_SIZE)?;
     cursor.require_empty()?;
     Ok(FrameView {
         digest_offset,
@@ -3549,8 +3549,8 @@ pub fn locate_r1_frame(frame: &[u8]) -> Result<FrameView, PageError> {
     })
 }
 
-pub fn open_r1_frame(binding: &[u8], frame: &[u8]) -> Result<AuthenticatedFrame, PageError> {
-    let _ = locate_r1_frame(frame)?;
+pub fn open_current_frame(binding: &[u8], frame: &[u8]) -> Result<AuthenticatedFrame, PageError> {
+    let _ = locate_current_frame(frame)?;
     let binding = Binding::from_slice(binding).map_err(binding_error)?;
     let opened = RuntimeEnvelope::open(&binding, frame).map_err(protocol_error)?;
     Ok(AuthenticatedFrame {
@@ -3562,7 +3562,7 @@ pub fn open_r1_frame(binding: &[u8], frame: &[u8]) -> Result<AuthenticatedFrame,
 
 fn binding_error(error: BindingError) -> PageError {
     match error {
-        BindingError::Empty => PageError::InvalidInput("AKEN-R1 runtime binding is empty"),
+        BindingError::Empty => PageError::InvalidInput("Qp runtime binding is empty"),
         BindingError::TooLarge { size } => PageError::LengthTooLarge {
             field: "runtime binding",
             length: size,
@@ -3580,7 +3580,7 @@ fn crypto_error(error: qp_crypto::CryptoError) -> PageError {
             maximum: max,
         },
         qp_crypto::CryptoError::AuthenticationFailed => PageError::AuthenticationFailed,
-        _ => PageError::InvalidInput("AKEN-R1 crypto input is invalid"),
+        _ => PageError::InvalidInput("Qp crypto input is invalid"),
     }
 }
 
@@ -3616,21 +3616,21 @@ impl QpWireFormat {
     pub fn magic() -> [u8; 4] {
         qp_crypto::derived_frame_magic().expect("name schedule")
     }
-    pub const VERSION: u8 = R1_VERSION;
+    pub const VERSION: u8 = CURRENT_FRAME_VERSION;
     pub const DIGEST_SIZE: usize = DIGEST_SIZE;
-    pub const AUTH_TAG_SIZE: usize = R1_AUTH_TAG_SIZE;
+    pub const AUTH_TAG_SIZE: usize = CURRENT_FRAME_AUTH_TAG_SIZE;
     pub const MAX_BINDING_SIZE: usize = MAX_BINDING_SIZE;
     pub const MAX_PAYLOAD_SIZE: usize = MAX_PAYLOAD_SIZE;
-    pub const HEADER_SIZE: usize = R1_HEADER_SIZE;
-    pub const MIN_FRAME_SIZE: usize = R1_MIN_FRAME_SIZE;
-    pub const MAX_FRAME_SIZE: usize = R1_MAX_FRAME_SIZE;
+    pub const HEADER_SIZE: usize = CURRENT_FRAME_HEADER_SIZE;
+    pub const MIN_FRAME_SIZE: usize = CURRENT_FRAME_MIN_SIZE;
+    pub const MAX_FRAME_SIZE: usize = CURRENT_FRAME_MAX_SIZE;
 
     pub fn encode(binding: &[u8], payload: &[u8]) -> Result<Vec<u8>, PageError> {
-        encode_r1_frame(binding, payload)
+        encode_current_frame(binding, payload)
     }
 
     pub fn open(binding: &[u8], frame: &[u8]) -> Result<AuthenticatedFrame, PageError> {
-        open_r1_frame(binding, frame)
+        open_current_frame(binding, frame)
     }
 
     pub fn runtime_binding_digest(binding: &[u8]) -> Result<RuntimeBindingDigest, PageError> {
@@ -4879,7 +4879,7 @@ mod tests {
     }
 
     #[test]
-    fn sha256_and_r1_match_current_domain_framing() {
+    fn sha256_matches_current_domain_framing() {
         assert_eq!(
             sha256(b"abc"),
             [
@@ -4888,7 +4888,7 @@ mod tests {
                 0xf2, 0x00, 0x15, 0xad,
             ]
         );
-        let frame = encode_r1_frame(b"binding", b"payload").expect("R1 encode");
+        let frame = encode_current_frame(b"binding", b"payload").expect("frame encode");
         assert_ne!(&frame[..4], qp_crypto::RETIRED_FRAME_MAGIC.as_slice());
         assert_eq!(
             &frame[..4],
@@ -4903,31 +4903,31 @@ mod tests {
             .expect("envelope")
         );
         assert_eq!(
-            open_r1_frame(b"binding", &frame)
-                .expect("R1 open")
+            open_current_frame(b"binding", &frame)
+                .expect("frame open")
                 .payload(),
             b"payload"
         );
         assert_eq!(
-            locate_r1_frame(&frame).expect("R1 location").payload_length,
+            locate_current_frame(&frame).expect("frame location").payload_length,
             7
         );
         let mut tampered = frame.clone();
         *tampered.last_mut().expect("tag") ^= 1;
         assert!(matches!(
-            open_r1_frame(b"binding", &tampered),
+            open_current_frame(b"binding", &tampered),
             Err(PageError::AuthenticationFailed)
         ));
         assert!(matches!(
-            open_r1_frame(b"other", &frame),
+            open_current_frame(b"other", &frame),
             Err(PageError::AuthenticationFailed)
         ));
         assert!(matches!(
-            locate_r1_frame(&frame[..frame.len() - 1]),
+            locate_current_frame(&frame[..frame.len() - 1]),
             Err(PageError::Truncated { .. })
         ));
         assert!(matches!(
-            locate_r1_frame(&[frame.clone(), frame.clone()].concat()),
+            locate_current_frame(&[frame.clone(), frame.clone()].concat()),
             Err(PageError::TrailingBytes { .. })
         ));
     }

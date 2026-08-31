@@ -129,7 +129,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_the_two_r1_targets_are_accepted() {
+    fn only_the_two_supported_targets_are_accepted() {
         assert_eq!(
             SupportedTarget::parse(WINDOWS_X64_GNU),
             Ok(SupportedTarget::WindowsX64Gnu)

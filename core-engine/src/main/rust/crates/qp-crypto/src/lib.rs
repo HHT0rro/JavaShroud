@@ -410,7 +410,7 @@ impl Drop for Aes128 {
 }
 
 /// AES-256 in CTR mode with a big-endian 128-bit counter, matching the JCA
-/// AES/CTR/NoPadding counter convention used by the current R1 resource codec.
+/// AES/CTR/NoPadding counter convention used by the current resource codec.
 pub fn aes256_ctr_crypt(key: &[u8], iv: &[u8], input: &[u8]) -> Result<Vec<u8>, CryptoError> {
     if key.len() != 32 {
         return Err(CryptoError::InvalidKeyLength {
@@ -1543,7 +1543,7 @@ mod tests {
     }
 
     #[test]
-    fn public_helpers_enforce_the_kotlin_r1_bounds() {
+    fn public_helpers_enforce_the_current_bounds() {
         assert_eq!(
             RuntimeBindingDigest::compute_bytes(&[]),
             Err(CryptoError::InvalidBinding(BindingError::Empty)),

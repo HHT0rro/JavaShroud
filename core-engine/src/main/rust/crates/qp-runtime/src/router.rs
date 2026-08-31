@@ -179,16 +179,16 @@ pub enum RouterError {
 impl fmt::Display for RouterError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::TooManyPages => formatter.write_str("AKEN-R1 page catalog is full"),
+            Self::TooManyPages => formatter.write_str("Qp page catalog is full"),
             Self::InvalidRequest(reason) => {
-                write!(formatter, "AKEN-R1 page request is invalid: {reason}")
+                write!(formatter, "Qp page request is invalid: {reason}")
             }
-            Self::AuthenticationFailed => formatter.write_str("AKEN-R1 page authentication failed"),
+            Self::AuthenticationFailed => formatter.write_str("Qp page authentication failed"),
             Self::RouteUnavailable { kind } => match kind {
-                PageKind::Vm => formatter.write_str("AKEN VM page route is unavailable"),
-                _ => formatter.write_str("AKEN typed page route is unavailable"),
+                PageKind::Vm => formatter.write_str("Qp VM page route is unavailable"),
+                _ => formatter.write_str("Qp typed page route is unavailable"),
             },
-            Self::Wire(reason) => write!(formatter, "AKEN-R1 page wire error: {reason}"),
+            Self::Wire(reason) => write!(formatter, "Qp page wire error: {reason}"),
         }
     }
 }
@@ -338,9 +338,9 @@ impl TypedPageRouter {
         })
     }
 
-    /// Open and concatenate every VBC4 page belonging to one method route.
+    /// Open and concatenate every protected VM page belonging to one method route.
     ///
-    /// A VBC4 program is partitioned across page-local authenticated frames;
+    /// A protected VM program is partitioned across page-local authenticated frames;
     /// the VM parser must receive the reconstructed serialized program rather
     /// than page zero alone.  The caller still authenticates one concrete page
     /// request (normally page zero) before the complete contiguous route is
@@ -589,7 +589,7 @@ impl Drop for TypedPageRouter {
     }
 }
 
-/// Evaluate one artifact-specific VBC4 descriptor into a transient page
+/// Evaluate one artifact-specific VM descriptor into a transient page
 /// material buffer. The wire grammar is intentionally variable: every page
 /// chooses its own dialect byte, fragment count, offsets, opcodes, registers,
 /// tokens and fragment lengths. Authentication is completed before any
@@ -785,7 +785,7 @@ mod tests {
         [u8; PAGE_HANDLE_SIZE],
         Vec<u8>,
     ) {
-        attached_typed_page(WireKind::StringPage, 3, 0x11, b"hello-r1")
+        attached_typed_page(WireKind::StringPage, 3, 0x11, b"hello-native")
     }
 
     fn attached_typed_page(
@@ -1019,7 +1019,7 @@ mod tests {
         let opened = router
             .open(0, &request)
             .expect("open current evaluator page");
-        assert_eq!(opened.payload(), b"hello-r1");
+        assert_eq!(opened.payload(), b"hello-native");
     }
 
     #[test]

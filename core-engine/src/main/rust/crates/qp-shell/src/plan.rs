@@ -1,4 +1,4 @@
-use crate::{AddressRange, ParseError, R1_REQUIRED_EXPORTS};
+use crate::{AddressRange, ParseError, REQUIRED_NATIVE_EXPORTS};
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -469,8 +469,8 @@ impl ManualMapPlan {
         self.exports.iter().find(|export| export.name == name)
     }
 
-    pub fn require_r1_exports(&self) -> Result<(), crate::ShellError> {
-        for name in R1_REQUIRED_EXPORTS {
+    pub fn require_native_exports(&self) -> Result<(), crate::ShellError> {
+        for name in REQUIRED_NATIVE_EXPORTS {
             let export = self
                 .export(name)
                 .ok_or(crate::ShellError::MissingRequiredExport(name))?;

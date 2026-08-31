@@ -14,7 +14,7 @@ pub use elf::{Elf64Image, Elf64Segment, ElfDynamicEntry};
 pub use loader::{detect_format, validate_artifact, ArtifactFormat, LoadedArtifact, LoaderError};
 pub use payload::{
     Compression, DecompressError, PayloadDecompressor, PayloadEnvelope, PayloadError,
-    PayloadManifest, R1Decompressor, SensitiveBytes, R1_PAYLOAD_PROFILE,
+    PayloadManifest, NativePayloadDecompressor, SensitiveBytes, NATIVE_PAYLOAD_PROFILE,
 };
 pub use pe::{Pe64Image, PeDataDirectory, PeSection};
 pub use plan::{
@@ -39,7 +39,7 @@ pub const MAX_DYNAMIC_ENTRIES: usize = 4096;
 pub const MAX_STRING_BYTES: usize = 4096;
 pub const PAGE_SIZE: u64 = 4096;
 
-pub const R1_REQUIRED_EXPORTS: [&str; 4] = [
+pub const REQUIRED_NATIVE_EXPORTS: [&str; 4] = [
     "JNI_OnLoad",
     "JNI_OnUnload",
     "qp_r1_runtime_binding_digest",
@@ -245,7 +245,7 @@ impl ShellArtifact {
                 }
                 let image = Pe64Image::parse(bytes)?;
                 let plan = image.map_plan()?;
-                plan.require_r1_exports()?;
+                plan.require_native_exports()?;
                 let digest = sha256(bytes).into_bytes();
                 Ok(Self {
                     target,
@@ -262,7 +262,7 @@ impl ShellArtifact {
                 }
                 let image = Elf64Image::parse(bytes)?;
                 let plan = image.map_plan()?;
-                plan.require_r1_exports()?;
+                plan.require_native_exports()?;
                 let digest = sha256(bytes).into_bytes();
                 Ok(Self {
                     target,
@@ -308,7 +308,7 @@ impl ShellArtifact {
     }
 }
 
-pub fn parse_r1_plan(
+pub fn parse_native_plan(
     target: SupportedTarget,
     name: &str,
     bytes: &[u8],
@@ -329,7 +329,7 @@ pub fn parse_r1_plan(
                 return Err(ShellError::TargetFormatMismatch);
             }
             let plan = Pe64Image::parse(bytes)?.map_plan()?;
-            plan.require_r1_exports()?;
+            plan.require_native_exports()?;
             Ok(plan)
         }
         SupportedTarget::LinuxX64Gnu217 => {
@@ -337,7 +337,7 @@ pub fn parse_r1_plan(
                 return Err(ShellError::TargetFormatMismatch);
             }
             let plan = Elf64Image::parse(bytes)?.map_plan()?;
-            plan.require_r1_exports()?;
+            plan.require_native_exports()?;
             Ok(plan)
         }
     }

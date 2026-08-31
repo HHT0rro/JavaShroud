@@ -2,7 +2,7 @@ use qp_crypto::sha256;
 use qp_shell::SupportedTarget;
 use qp_shell::{
     Compression, Elf64Image, ParseError, PayloadDecompressor, PayloadEnvelope, PayloadManifest,
-    Pe64Image, R1Decompressor, R1_PAYLOAD_PROFILE,
+    Pe64Image, NativePayloadDecompressor, NATIVE_PAYLOAD_PROFILE,
 };
 
 fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
@@ -188,7 +188,7 @@ fn pe64_plan_checks_sections_exports_and_wx() {
     let bytes = pe_fixture();
     let image = Pe64Image::parse(&bytes).expect("PE fixture");
     let plan = image.map_plan().expect("PE plan");
-    plan.require_r1_exports().expect("R1 exports");
+    plan.require_native_exports().expect("native exports");
     assert_eq!(plan.relocations().len(), 0);
     assert_eq!(plan.executable_ranges().len(), 1);
 
@@ -204,7 +204,7 @@ fn pe64_plan_checks_sections_exports_and_wx() {
 fn elf64_plan_checks_dynamic_symbols_and_initializers() {
     let image = Elf64Image::parse(&elf_fixture()).expect("ELF fixture");
     let plan = image.map_plan().expect("ELF plan");
-    plan.require_r1_exports().expect("R1 exports");
+    plan.require_native_exports().expect("native exports");
     assert_eq!(plan.imports().len(), 0);
     assert_eq!(plan.init().entry_point(), Some(0x500));
     assert_eq!(plan.executable_ranges().len(), 1);
@@ -225,7 +225,7 @@ fn authenticated_payload_rejects_tamper_and_wipes_decoder_state() {
         payload.len(),
     )
     .expect("manifest");
-    assert_eq!(manifest.profile(), R1_PAYLOAD_PROFILE);
+    assert_eq!(manifest.profile(), NATIVE_PAYLOAD_PROFILE);
     let binding = b"shell-binding";
     let frame = PayloadEnvelope::encode(binding, &manifest, payload).expect("frame");
     assert_eq!(
@@ -240,7 +240,7 @@ fn authenticated_payload_rejects_tamper_and_wipes_decoder_state() {
     tampered[index] ^= 0x40;
     assert!(PayloadEnvelope::open(binding, &tampered).is_err());
 
-    let mut decoder = R1Decompressor::new();
+    let mut decoder = NativePayloadDecompressor::new();
     let encoded = [0x28, 0xb5, 0x2f, 0xfd, 0x20, 0x01, 0x01, 0x00, 0x00, 0x00];
     assert!(decoder.decompress(Compression::Zstd, &encoded, 1).is_err());
     decoder.reset_and_wipe();

@@ -20,14 +20,14 @@ impl Drop for BuildDirectory {
 }
 
 #[test]
-fn release_cdylib_exports_exactly_the_r1_surface() {
+fn release_cdylib_exports_exactly_the_native_surface() {
     let workspace = workspace_root();
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock")
         .as_nanos();
     let target_dir = std::env::temp_dir().join(format!(
-        "qp-r1-release-exports-{}-{unique}",
+        "qp-release-exports-{}-{unique}",
         std::process::id()
     ));
     let _build_directory = BuildDirectory(target_dir.clone());
@@ -61,7 +61,7 @@ fn release_cdylib_exports_exactly_the_r1_surface() {
     } else if cfg!(target_os = "linux") {
         target_dir.join("release/libqp_ffi.so")
     } else {
-        panic!("AKEN-R1 release export checks support only Windows x64 and Linux x64");
+        panic!("Qp release export checks support only Windows x64 and Linux x64");
     };
     let bytes = fs::read(&library)
         .unwrap_or_else(|error| panic!("read release cdylib {}: {error}", library.display()));
@@ -91,12 +91,12 @@ fn workspace_config_distinguishes_rustup_from_the_glibc_217_zigbuild_target() {
 
     let config = fs::read_to_string(workspace.join(".cargo/config.toml")).expect("Cargo config");
     assert!(config.contains(
-        "r1-linux-release = \"zigbuild --locked --offline --release --package qp-ffi --lib --target x86_64-unknown-linux-gnu.2.17\""
+        "qp-linux-release = \"zigbuild --locked --release --package qp-ffi --lib --target x86_64-unknown-linux-gnu.2.17\""
     ));
     assert!(config.contains(
-        "r1-windows-release = \"build --locked --offline --release --package qp-ffi --lib --target x86_64-pc-windows-gnu\""
+        "qp-windows-release = \"zigbuild --locked --release --package qp-ffi --lib --target x86_64-pc-windows-gnu\""
     ));
-    assert!(!config.contains("r1-linux-release = \"build "));
+    assert!(!config.contains("qp-linux-release = \"build "));
     assert!(!config.contains("--workspace"));
 
     let toolchain =

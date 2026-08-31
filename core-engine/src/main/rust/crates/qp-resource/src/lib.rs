@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-//! Bounded AKEN-R1 resource directory and authenticated page-frame support.
+//! Bounded Qp resource directory and authenticated page-frame support.
 //!
 //! This crate deliberately does not parse or emit the retired JSRP v8 envelope.
 //! A directory authenticates a sorted set of fixed-size [`PageKey`] references;
@@ -682,7 +682,7 @@ impl ResourceDirectory {
             })
     }
 
-    /// Encodes exactly the current authenticated R1 directory format.
+    /// Encodes exactly the current authenticated directory format.
     pub fn encode(&self, auth_key: &[u8]) -> Result<Vec<u8>, ResourceError> {
         require_auth_key(auth_key)?;
         let size = self.encoded_size()?;
@@ -859,7 +859,7 @@ impl ResourceFrameHeader {
     }
 }
 
-/// Encodes an authenticated R1 resource frame. The body is either raw bytes or
+/// Encodes an authenticated resource frame. The body is either raw bytes or
 /// a generated raw/RLE Zstandard frame; no legacy JSRP header is emitted.
 pub fn encode_resource(
     key: &PageKey,
@@ -1856,7 +1856,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_is_r1_only_sorted_and_binary_searchable() {
+    fn directory_is_current_sorted_and_binary_searchable() {
         let digest_a = sha256(b"a");
         let digest_b = sha256(b"b");
         let a = DirectoryEntry::new(key(1), ResourceRef::new(0, 4, &digest_a).unwrap()).unwrap();

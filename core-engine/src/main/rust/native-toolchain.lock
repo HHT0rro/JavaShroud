@@ -1,4 +1,4 @@
-# AKEN-R1 locked Rust standalone archives. The parser accepts only this v1 shape.
+# Qp locked Rust standalone archives. The parser accepts only this v1 shape.
 [lock]
 format = 1
 channel = "1.78.0"

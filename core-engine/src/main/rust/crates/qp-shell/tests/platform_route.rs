@@ -4,7 +4,7 @@ use qp_shell::{
 };
 
 #[test]
-fn only_windows_and_linux_r1_targets_are_supported() {
+fn only_windows_and_linux_targets_are_supported() {
     assert_eq!(
         SupportedTarget::parse(WINDOWS_X64_GNU),
         Ok(SupportedTarget::WindowsX64Gnu)

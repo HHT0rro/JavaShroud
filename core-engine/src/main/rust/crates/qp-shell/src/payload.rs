@@ -4,9 +4,9 @@ use qp_crypto::{Binding, BindingError};
 use qp_page::{ProtocolError, RuntimeEnvelope};
 use std::fmt;
 
-pub const R1_PAYLOAD_MAGIC: [u8; 4] = *b"JSPM";
-pub const R1_PAYLOAD_VERSION: u8 = 1;
-pub const R1_PAYLOAD_PROFILE: &str = "qp-rust-ffi-v1";
+pub const CURRENT_PAYLOAD_MAGIC: [u8; 4] = *b"JSPM";
+pub const CURRENT_PAYLOAD_VERSION: u8 = 1;
+pub const NATIVE_PAYLOAD_PROFILE: &str = "qp-rust-ffi-v1";
 pub const MAX_PAYLOAD_PROFILE_BYTES: usize = 64;
 pub const MAX_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_ZSTD_BLOCK_SIZE: usize = 128 * 1024;
@@ -113,7 +113,7 @@ impl PayloadManifest {
             native_sha256,
             abi_digest,
             specialization_digest,
-            profile: R1_PAYLOAD_PROFILE.to_owned(),
+            profile: NATIVE_PAYLOAD_PROFILE.to_owned(),
             compression,
             plaintext_length,
             stored_length,
@@ -199,8 +199,8 @@ impl PayloadManifest {
                 .and_then(|size| size.checked_add(stored.len()))
                 .ok_or(PayloadError::LengthOverflow)?,
         );
-        output.extend_from_slice(&R1_PAYLOAD_MAGIC);
-        output.push(R1_PAYLOAD_VERSION);
+        output.extend_from_slice(&CURRENT_PAYLOAD_MAGIC);
+        output.push(CURRENT_PAYLOAD_VERSION);
         output.push(target_id(self.target));
         output.push(self.compression.id());
         output.push(0);
@@ -230,11 +230,11 @@ impl PayloadManifest {
 
     fn decode(bytes: &[u8]) -> Result<(Self, usize), PayloadError> {
         let mut cursor = PayloadCursor::new(bytes);
-        if cursor.read_fixed::<4>()? != R1_PAYLOAD_MAGIC {
+        if cursor.read_fixed::<4>()? != CURRENT_PAYLOAD_MAGIC {
             return Err(PayloadError::InvalidMagic);
         }
         let version = cursor.read_u8()?;
-        if version != R1_PAYLOAD_VERSION {
+        if version != CURRENT_PAYLOAD_VERSION {
             return Err(PayloadError::UnsupportedVersion(version));
         }
         let target = target_from_id(cursor.read_u8()?)?;
@@ -293,7 +293,7 @@ impl PayloadEnvelope {
     }
 
     pub fn open(binding: &[u8], frame: &[u8]) -> Result<AuthenticatedPayload, PayloadError> {
-        let mut decoder = R1Decompressor::new();
+        let mut decoder = NativePayloadDecompressor::new();
         Self::open_with(binding, frame, &mut decoder)
     }
 
@@ -381,11 +381,11 @@ pub trait PayloadDecompressor {
 }
 
 #[derive(Debug)]
-pub struct R1Decompressor {
+pub struct NativePayloadDecompressor {
     workspace: SensitiveBytes,
 }
 
-impl R1Decompressor {
+impl NativePayloadDecompressor {
     pub fn new() -> Self {
         Self {
             workspace: SensitiveBytes::new(Vec::new()),
@@ -575,13 +575,13 @@ impl R1Decompressor {
     }
 }
 
-impl Default for R1Decompressor {
+impl Default for NativePayloadDecompressor {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl PayloadDecompressor for R1Decompressor {
+impl PayloadDecompressor for NativePayloadDecompressor {
     fn decompress(
         &mut self,
         compression: Compression,
@@ -679,34 +679,34 @@ impl fmt::Display for PayloadError {
         match self {
             Self::InvalidBinding(error) => error.fmt(formatter),
             Self::Protocol(error) => error.fmt(formatter),
-            Self::InvalidMagic => formatter.write_str("R1 payload manifest magic is invalid"),
+            Self::InvalidMagic => formatter.write_str("Qp payload manifest magic is invalid"),
             Self::UnsupportedVersion(version) => {
-                write!(formatter, "R1 payload version is unsupported: {version}")
+                write!(formatter, "Qp payload version is unsupported: {version}")
             }
             Self::UnsupportedCompression(codec) => {
-                write!(formatter, "R1 payload compression is unsupported: {codec}")
+                write!(formatter, "Qp payload compression is unsupported: {codec}")
             }
             Self::InvalidManifest(reason) => {
-                write!(formatter, "R1 payload manifest is invalid: {reason}")
+                write!(formatter, "Qp payload manifest is invalid: {reason}")
             }
-            Self::Truncated => formatter.write_str("R1 payload manifest is truncated"),
-            Self::TrailingBytes => formatter.write_str("R1 payload manifest has trailing bytes"),
-            Self::LengthOverflow => formatter.write_str("R1 payload manifest length overflows"),
+            Self::Truncated => formatter.write_str("Qp payload manifest is truncated"),
+            Self::TrailingBytes => formatter.write_str("Qp payload manifest has trailing bytes"),
+            Self::LengthOverflow => formatter.write_str("Qp payload manifest length overflows"),
             Self::LengthMismatch { expected, actual } => {
                 write!(
                     formatter,
-                    "R1 payload length mismatch: expected {expected}, got {actual}"
+                    "Qp payload length mismatch: expected {expected}, got {actual}"
                 )
             }
             Self::TargetMismatch { expected, actual } => {
                 write!(
                     formatter,
-                    "R1 payload target mismatch: expected {}, got {}",
+                    "Qp payload target mismatch: expected {}, got {}",
                     expected.triple(),
                     actual.triple()
                 )
             }
-            Self::PayloadDigestMismatch => formatter.write_str("R1 payload digest mismatch"),
+            Self::PayloadDigestMismatch => formatter.write_str("Qp payload digest mismatch"),
             Self::Decompression(error) => error.fmt(formatter),
         }
     }
@@ -797,7 +797,7 @@ impl<'a> PayloadCursor<'a> {
 }
 
 fn validate_profile(profile: &str) -> Result<(), PayloadError> {
-    if profile != R1_PAYLOAD_PROFILE
+    if profile != NATIVE_PAYLOAD_PROFILE
         || profile.is_empty()
         || profile.len() > MAX_PAYLOAD_PROFILE_BYTES
         || !profile.is_ascii()

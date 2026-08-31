@@ -77,7 +77,7 @@ impl From<CryptoError> for ProtocolError {
     }
 }
 
-/// Bounds-checked reader used by every R1 wire parser.  It never advances the
+/// Bounds-checked reader used by every current wire parser.  It never advances the
 /// cursor when a requested range is unavailable.
 pub struct Cursor<'a> {
     bytes: &'a [u8],
@@ -244,7 +244,7 @@ impl AuthenticatedFrame {
 pub struct RuntimeEnvelope;
 
 impl RuntimeEnvelope {
-    /// Encode only the current R1 format.  No retired version or compatibility
+    /// Encode only the current format.  No retired version or compatibility
     /// branch is accepted by this API.
     pub fn encode(binding: &Binding, payload: &[u8]) -> Result<Vec<u8>, ProtocolError> {
         if payload.len() > MAX_PAYLOAD_SIZE {
@@ -352,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn kotlin_vector_is_the_current_r1_frame() {
+    fn kotlin_vector_is_the_current_frame() {
         let binding = Binding::from_slice(b"binding").expect("binding");
         let frame = RuntimeEnvelope::encode(&binding, b"payload").expect("encode");
         assert_ne!(&frame[..4], qp_crypto::RETIRED_FRAME_MAGIC.as_slice());

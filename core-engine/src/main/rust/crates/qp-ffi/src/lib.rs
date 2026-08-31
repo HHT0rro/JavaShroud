@@ -475,7 +475,7 @@ mod jni_bridge {
             match value {
                 b"balanced" => Ok(Self::Balanced),
                 b"hardened" => Ok(Self::Hardened),
-                _ => Err(BridgeFailure("AKEN unified defense profile is invalid")),
+                _ => Err(BridgeFailure("Qp unified defense profile is invalid")),
             }
         }
 
@@ -500,7 +500,7 @@ mod jni_bridge {
                 b"os-anti-debug" => Ok(Self::OsAntiDebug),
                 b"os-anti-vm" => Ok(Self::OsAntiVm),
                 b"abi-probe" => Ok(Self::AbiProbe),
-                _ => Err(BridgeFailure("AKEN unified defense surface is invalid")),
+                _ => Err(BridgeFailure("Qp unified defense surface is invalid")),
             }
         }
 
@@ -2806,22 +2806,22 @@ mod jni_bridge {
         #[cfg(target_os = "linux")]
         {
             let status = std::fs::read_to_string("/proc/self/status")
-                .map_err(|_| BridgeFailure("AKEN unified defense cannot read TracerPid"))?;
+                .map_err(|_| BridgeFailure("Qp unified defense cannot read TracerPid"))?;
             let tracer_pid = status
                 .lines()
                 .find_map(|line| line.strip_prefix("TracerPid:"))
                 .ok_or(BridgeFailure(
-                    "AKEN unified defense TracerPid is unavailable",
+                    "Qp unified defense TracerPid is unavailable",
                 ))?
                 .trim()
                 .parse::<u32>()
-                .map_err(|_| BridgeFailure("AKEN unified defense TracerPid is malformed"))?;
+                .map_err(|_| BridgeFailure("Qp unified defense TracerPid is malformed"))?;
             if tracer_pid != 0 {
                 return Ok(true);
             }
 
             let command_line = std::fs::read("/proc/self/cmdline")
-                .map_err(|_| BridgeFailure("AKEN unified defense cannot read command line"))?;
+                .map_err(|_| BridgeFailure("Qp unified defense cannot read command line"))?;
             let agent_argument_present = command_line.split(|byte| *byte == 0).any(|argument| {
                 argument.starts_with(b"-javaagent:")
                     || argument.starts_with(b"-agentlib:")
@@ -2852,7 +2852,7 @@ mod jni_bridge {
 
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         {
-            Err(BridgeFailure("AKEN unified defense target is unsupported"))
+            Err(BridgeFailure("Qp unified defense target is unsupported"))
         }
     }
 
@@ -2910,7 +2910,7 @@ mod jni_bridge {
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(_) => {
                         return Err(BridgeFailure(
-                            "AKEN unified defense cannot read Linux DMI evidence",
+                            "Qp unified defense cannot read Linux DMI evidence",
                         ));
                     }
                 }
@@ -2919,7 +2919,7 @@ mod jni_bridge {
                 Ok(bytes) => contains_vm_vendor(&bytes),
                 Err(_) => {
                     return Err(BridgeFailure(
-                        "AKEN unified defense cannot read Linux CPU evidence",
+                        "Qp unified defense cannot read Linux CPU evidence",
                     ));
                 }
             };
@@ -2937,7 +2937,7 @@ mod jni_bridge {
 
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         {
-            Err(BridgeFailure("AKEN unified defense target is unsupported"))
+            Err(BridgeFailure("Qp unified defense target is unsupported"))
         }
     }
 
@@ -2946,11 +2946,11 @@ mod jni_bridge {
         point: &[u8],
         profile: Option<DefenseProfile>,
     ) -> Result<(), BridgeFailure> {
-        validate_defense_label(point, "AKEN unified defense probe point is invalid")?;
+        validate_defense_label(point, "Qp unified defense probe point is invalid")?;
         if surface == DefenseSurface::AbiProbe {
             if point != b"abi" && point != b"startup" {
                 return Err(BridgeFailure(
-                    "AKEN unified defense ABI probe point is invalid",
+                    "Qp unified defense ABI probe point is invalid",
                 ));
             }
             return Ok(());
@@ -2968,7 +2968,7 @@ mod jni_bridge {
             && !(surface == DefenseSurface::OsAntiVm && profile == Some(DefenseProfile::Balanced))
         {
             return Err(BridgeFailure(
-                "AKEN unified defense detected a protected-host violation",
+                "Qp unified defense detected a protected-host violation",
             ));
         }
         Ok(())
@@ -2980,13 +2980,13 @@ mod jni_bridge {
         binding: &[u8],
     ) -> Result<[u8; DIGEST_SIZE], BridgeFailure> {
         if state.defense_surface_mask == 0 {
-            return Err(BridgeFailure("AKEN unified defense is not armed"));
+            return Err(BridgeFailure("Qp unified defense is not armed"));
         }
         let target = state
             .target
-            .ok_or(BridgeFailure("AKEN unified defense target is missing"))?;
+            .ok_or(BridgeFailure("Qp unified defense target is missing"))?;
         let nonce = state.session_nonce.as_ref().ok_or(BridgeFailure(
-            "AKEN unified defense session binding is missing",
+            "Qp unified defense session binding is missing",
         ))?;
         let profile = state.defense_profile.unwrap_or(DefenseProfile::Balanced);
         let surface_mask = [state.defense_surface_mask];
@@ -3104,10 +3104,10 @@ mod jni_bridge {
     fn router_failure(error: RouterError) -> BridgeFailure {
         match error {
             RouterError::RouteUnavailable { kind: PageKind::Vm } => {
-                BridgeFailure("AKEN VM page route is unavailable")
+                BridgeFailure("Qp VM page route is unavailable")
             }
             RouterError::RouteUnavailable { .. } => {
-                BridgeFailure("AKEN typed page route is unavailable")
+                BridgeFailure("Qp typed page route is unavailable")
             }
             RouterError::AuthenticationFailed => {
                 BridgeFailure("Qp page authentication failed")
@@ -3128,22 +3128,22 @@ mod jni_bridge {
         for entry in &directory.entries {
             let Some(blob) = stored.get(&entry.relative_path) else {
                 return Err(BridgeFailure(
-                    "AKEN current catalog is missing a directory page",
+                    "Qp current catalog is missing a directory page",
                 ));
             };
             if entry.offset < 0 || entry.stored_length <= 0 {
                 return Err(BridgeFailure(
-                    "AKEN current catalog page range is invalid",
+                    "Qp current catalog page range is invalid",
                 ));
             }
             let start = entry.offset as usize;
             let length = entry.stored_length as usize;
             let end = start.checked_add(length).ok_or(BridgeFailure(
-                "AKEN current catalog page range overflow",
+                "Qp current catalog page range overflow",
             ))?;
             if end > blob.len() {
                 return Err(BridgeFailure(
-                    "AKEN current catalog page range is out of bounds",
+                    "Qp current catalog page range is out of bounds",
                 ));
             }
             ranges_by_path
@@ -3157,10 +3157,10 @@ mod jni_bridge {
                 let left_end = pair[0]
                     .0
                     .checked_add(pair[0].1)
-                    .ok_or(BridgeFailure("AKEN current catalog page range overflow"))?;
+                    .ok_or(BridgeFailure("Qp current catalog page range overflow"))?;
                 if left_end > pair[1].0 {
                     return Err(BridgeFailure(
-                        "AKEN current catalog page ranges overlap",
+                        "Qp current catalog page ranges overlap",
                     ));
                 }
             }
@@ -3174,46 +3174,46 @@ mod jni_bridge {
     ) -> Result<std::collections::BTreeMap<String, Vec<u8>>, BridgeFailure> {
         if bundle.len() > MAX_CATALOG_BUNDLE_SIZE {
             return Err(BridgeFailure(
-                "AKEN current catalog bundle exceeds its bound",
+                "Qp current catalog bundle exceeds its bound",
             ));
         }
         let mut cursor = 0usize;
         let count = read_catalog_u32(bundle, &mut cursor)? as usize;
         if count == 0 || count > directory.entries.len() {
             return Err(BridgeFailure(
-                "AKEN current catalog blob count does not match the directory",
+                "Qp current catalog blob count does not match the directory",
             ));
         }
         let mut stored = std::collections::BTreeMap::new();
         for _ in 0..count {
             let path_len = read_catalog_u32(bundle, &mut cursor)? as usize;
             if path_len == 0 || path_len > MAX_CATALOG_PATH_SIZE {
-                return Err(BridgeFailure("AKEN current catalog path length is invalid"));
+                return Err(BridgeFailure("Qp current catalog path length is invalid"));
             }
             let path_bytes = read_catalog_bytes(bundle, &mut cursor, path_len)?;
             let path = std::str::from_utf8(path_bytes)
-                .map_err(|_| BridgeFailure("AKEN current catalog path is not UTF-8"))?;
+                .map_err(|_| BridgeFailure("Qp current catalog path is not UTF-8"))?;
             if path.starts_with('/')
                 || path.contains('\\')
                 || path.contains('\0')
                 || path.contains("..")
             {
-                return Err(BridgeFailure("AKEN current catalog path is invalid"));
+                return Err(BridgeFailure("Qp current catalog path is invalid"));
             }
             let page_len = read_catalog_u32(bundle, &mut cursor)? as usize;
             if page_len == 0 || page_len > MAX_CATALOG_PAGE_SIZE {
-                return Err(BridgeFailure("AKEN current catalog page length is invalid"));
+                return Err(BridgeFailure("Qp current catalog page length is invalid"));
             }
             let page = read_catalog_bytes(bundle, &mut cursor, page_len)?.to_vec();
             if stored.insert(path.to_owned(), page).is_some() {
                 return Err(BridgeFailure(
-                    "AKEN current catalog contains duplicate pages",
+                    "Qp current catalog contains duplicate pages",
                 ));
             }
         }
         if cursor != bundle.len() {
             return Err(BridgeFailure(
-                "AKEN current catalog bundle has trailing bytes",
+                "Qp current catalog bundle has trailing bytes",
             ));
         }
         validate_catalog_bundle_ranges(directory, &stored)?;
@@ -3232,9 +3232,9 @@ mod jni_bridge {
     ) -> Result<&'a [u8], BridgeFailure> {
         let end = cursor
             .checked_add(length)
-            .ok_or(BridgeFailure("AKEN current catalog bundle length overflow"))?;
+            .ok_or(BridgeFailure("Qp current catalog bundle length overflow"))?;
         if end > bundle.len() {
-            return Err(BridgeFailure("AKEN current catalog bundle is truncated"));
+            return Err(BridgeFailure("Qp current catalog bundle is truncated"));
         }
         let range = &bundle[*cursor..end];
         *cursor = end;
@@ -3250,30 +3250,30 @@ mod jni_bridge {
             unsafe { copy_byte_array(env, directory_bytes, MAX_CATALOG_DIRECTORY_SIZE) }?;
         let bundle_bytes = unsafe { copy_byte_array(env, bundle_bytes, MAX_CATALOG_BUNDLE_SIZE) }?;
         let directory = ArtifactDirectory::decode(directory_bytes.as_bytes())
-            .map_err(|_| BridgeFailure("AKEN current catalog directory authentication failed"))?;
+            .map_err(|_| BridgeFailure("Qp current catalog directory authentication failed"))?;
         qp_crypto::install_name_schedule(
             &directory.name_seed,
             &directory.runtime.artifact_commitment,
             qp_crypto::QP_SCHEDULE_VERSION,
         )
-        .map_err(|_| BridgeFailure("AKEN current catalog name schedule is invalid"))?;
+        .map_err(|_| BridgeFailure("Qp current catalog name schedule is invalid"))?;
         let stored = parse_catalog_bundle(bundle_bytes.as_bytes(), &directory)?;
         let mut state = lock_state()?;
         if !state.initialized || state.session_nonce.is_none() {
             return Err(BridgeFailure(
-                "AKEN current catalog session binding is missing",
+                "Qp current catalog session binding is missing",
             ));
         }
         let target = state
             .target
-            .ok_or(BridgeFailure("AKEN current catalog target is missing"))?;
+            .ok_or(BridgeFailure("Qp current catalog target is missing"))?;
         if directory.runtime.target_triple != target.triple() {
             return Err(BridgeFailure(
-                "AKEN current catalog target binding mismatch",
+                "Qp current catalog target binding mismatch",
             ));
         }
         if !state.router.is_empty() {
-            return Err(BridgeFailure("AKEN current catalog was already installed"));
+            return Err(BridgeFailure("Qp current catalog was already installed"));
         }
         let mut artifact_commitment = [0u8; DIGEST_SIZE];
         artifact_commitment.copy_from_slice(&directory.runtime.artifact_commitment);
@@ -3283,14 +3283,14 @@ mod jni_bridge {
         let installed = state
             .router
             .install_catalog_descriptor_bound(&directory, &stored)
-            .map_err(|_| BridgeFailure("AKEN current catalog page installation failed"))?;
+            .map_err(|_| BridgeFailure("Qp current catalog page installation failed"))?;
         if installed != directory.entries.len() {
             return Err(BridgeFailure(
-                "AKEN current catalog installed an incomplete page set",
+                "Qp current catalog installed an incomplete page set",
             ));
         }
         i32::try_from(installed)
-            .map_err(|_| BridgeFailure("AKEN current catalog page count overflow"))
+            .map_err(|_| BridgeFailure("Qp current catalog page count overflow"))
     }
 
     fn native_init_inner(env: JNIEnv, platform: JString) -> Result<JInt, BridgeFailure> {
@@ -3329,12 +3329,12 @@ mod jni_bridge {
             let state = lock_state()?;
             if !state.initialized {
                 return Err(BridgeFailure(
-                    "AKEN unified defense initialized before native bridge",
+                    "Qp unified defense initialized before native bridge",
                 ));
             }
             if state.session_nonce.is_none() {
                 return Err(BridgeFailure(
-                    "AKEN unified defense session binding is missing",
+                    "Qp unified defense session binding is missing",
                 ));
             }
             if surface.needs_platform_probe()
@@ -3343,7 +3343,7 @@ mod jni_bridge {
                     .is_some_and(|existing| existing != profile)
             {
                 return Err(BridgeFailure(
-                    "AKEN unified defense profile changed after initialization",
+                    "Qp unified defense profile changed after initialization",
                 ));
             }
         }
@@ -3364,16 +3364,16 @@ mod jni_bridge {
         let surface = unsafe { copy_string(env, surface) }?;
         let point = unsafe { copy_string(env, point) }?;
         let surface = DefenseSurface::parse(&surface)?;
-        validate_defense_label(&point, "AKEN unified defense probe point is invalid")?;
+        validate_defense_label(&point, "Qp unified defense probe point is invalid")?;
         {
             let state = lock_state()?;
             if !state.initialized || state.session_nonce.is_none() {
                 return Err(BridgeFailure(
-                    "AKEN unified defense bridge state is incomplete",
+                    "Qp unified defense bridge state is incomplete",
                 ));
             }
             if state.defense_surface_mask & surface.mask() == 0 {
-                return Err(BridgeFailure("AKEN unified defense surface is not armed"));
+                return Err(BridgeFailure("Qp unified defense surface is not armed"));
             }
         }
         let profile = {
@@ -3391,16 +3391,16 @@ mod jni_bridge {
     ) -> Result<JByteArray, BridgeFailure> {
         let material = unsafe { copy_byte_array(env, material, 4096) }?;
         if material.as_bytes().is_empty() {
-            return Err(BridgeFailure("AKEN unified defense material is invalid"));
+            return Err(BridgeFailure("Qp unified defense material is invalid"));
         }
         let binding = unsafe { copy_string(env, binding) }?;
-        validate_defense_label(&binding, "AKEN unified defense binding is invalid")?;
+        validate_defense_label(&binding, "Qp unified defense binding is invalid")?;
         let mut share = {
             let state = lock_state()?;
             defense_share(&state, material.as_bytes(), &binding)?
         };
         let result = unsafe { new_byte_array(env, &share) }.ok_or(BridgeFailure(
-            "AKEN unified defense output allocation failed",
+            "Qp unified defense output allocation failed",
         ));
         wipe(&mut share);
         result
@@ -4524,7 +4524,7 @@ mod jni_bridge {
         }
 
         #[test]
-        fn target_aliases_are_restricted_to_the_two_r1_routes() {
+        fn target_aliases_are_restricted_to_supported_routes() {
             for (value, expected) in [
                 (b"windows-x64".as_slice(), SupportedTarget::WindowsX64Gnu),
                 (
@@ -4663,7 +4663,7 @@ mod tests {
     }
 
     #[test]
-    fn specialization_is_nonsecret_and_locked_to_r1_targets() {
+    fn specialization_is_nonsecret_and_locked_to_supported_targets() {
         assert_eq!(PAYLOAD_PROFILE, "qp-rust-ffi-v1");
         assert_eq!(SPECIALIZATION_DIGEST.len(), DIGEST_SIZE);
         assert!(
