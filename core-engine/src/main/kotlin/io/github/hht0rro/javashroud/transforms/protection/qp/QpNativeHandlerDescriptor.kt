@@ -6,7 +6,7 @@ import java.util.Arrays
 /**
  * Build-only binary contract for the fixed native loader-handler action.
  *
- * The descriptor is page plaintext only until the AKEN current-page opener
+ * The descriptor is page plaintext only until the Qp current-page opener
  * authenticates it inside the native kernel.  It is not a locator, a page
  * catalog, or a cryptographic key: the handle/proof fields merely make the
  * one native-private action reject a descriptor replayed through another
@@ -44,7 +44,7 @@ internal object QpNativeHandlerDescriptor {
 
     init {
         check(ACTION_TAG_OFFSET + IDENTITY_SIZE == ENCODED_SIZE) {
-            "AKEN native handler descriptor layout is inconsistent"
+            "Qp native handler descriptor layout is inconsistent"
         }
     }
 
@@ -55,16 +55,16 @@ internal object QpNativeHandlerDescriptor {
         nonce: ByteArray,
     ): ByteArray {
         require(logicalIdentity.size == IDENTITY_SIZE) {
-            "AKEN native handler descriptor identity length is invalid"
+            "Qp native handler descriptor identity length is invalid"
         }
         require(encodedHandle.size == ENCODED_HANDLE_SIZE) {
-            "AKEN native handler descriptor handle length is invalid"
+            "Qp native handler descriptor handle length is invalid"
         }
         require(callSiteProof.size == CALL_SITE_PROOF_SIZE) {
-            "AKEN native handler descriptor call-site proof length is invalid"
+            "Qp native handler descriptor call-site proof length is invalid"
         }
         require(nonce.size == NONCE_SIZE) {
-            "AKEN native handler descriptor nonce length is invalid"
+            "Qp native handler descriptor nonce length is invalid"
         }
 
         val descriptor = ByteArray(ENCODED_SIZE)

@@ -34,23 +34,23 @@ internal class QpPendingClassPage private constructor(
     private var wiped: Boolean = false
 
     init {
-        require(logicalIdentityValue.isNotEmpty()) { "AKEN pending ClassPage identity must not be empty" }
-        require(plaintextValue.isNotEmpty()) { "AKEN pending ClassPage plaintext must not be empty" }
+        require(logicalIdentityValue.isNotEmpty()) { "Qp pending ClassPage identity must not be empty" }
+        require(plaintextValue.isNotEmpty()) { "Qp pending ClassPage plaintext must not be empty" }
         require(callSiteProofValue.isNotEmpty() && callSiteProofValue.size <= MAX_CALL_SITE_PROOF_SIZE) {
-            "AKEN pending ClassPage call-site proof length is invalid"
+            "Qp pending ClassPage call-site proof length is invalid"
         }
         require(encodedHandleValue.size == QpHandle.ENCODED_HANDLE_SIZE) {
-            "AKEN pending ClassPage handle length is invalid"
+            "Qp pending ClassPage handle length is invalid"
         }
-        require(pageIndex >= 0) { "AKEN pending ClassPage index must be non-negative" }
-        require(resourceOffset >= 0) { "AKEN pending ClassPage offset must be non-negative" }
-        require(isValidArtifactPath(resourcePath)) { "AKEN pending ClassPage resource path is invalid" }
-        require(isValidArtifactPath(logicalBindingPath)) { "AKEN pending ClassPage logical binding path is invalid" }
+        require(pageIndex >= 0) { "Qp pending ClassPage index must be non-negative" }
+        require(resourceOffset >= 0) { "Qp pending ClassPage offset must be non-negative" }
+        require(isValidArtifactPath(resourcePath)) { "Qp pending ClassPage resource path is invalid" }
+        require(isValidArtifactPath(logicalBindingPath)) { "Qp pending ClassPage logical binding path is invalid" }
         require(targetPageSize in QpPageSizePolicy.DEFAULT.allowedSizes(QpResourceKind.EncryptedClassPage)) {
-            "AKEN pending ClassPage target size is unsupported"
+            "Qp pending ClassPage target size is unsupported"
         }
         validateLayout(layoutVariant)
-        require(expectedStoredLength > 0) { "AKEN pending ClassPage stored length is invalid" }
+        require(expectedStoredLength > 0) { "Qp pending ClassPage stored length is invalid" }
     }
 
     val isWiped: Boolean
@@ -152,7 +152,7 @@ internal class QpPendingClassPage private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN pending ClassPage has been wiped" }
+        check(!wiped) { "Qp pending ClassPage has been wiped" }
     }
 
     companion object {
@@ -178,7 +178,7 @@ internal class QpPendingClassPage private constructor(
         ): QpPendingClassPage {
             targetPageSize?.let { requestedTargetSize ->
                 require(requestedTargetSize in QpPageSizePolicy.DEFAULT.allowedSizes(QpResourceKind.EncryptedClassPage)) {
-                    "AKEN requested ClassPage target size is unsupported"
+                    "Qp requested ClassPage target size is unsupported"
                 }
             }
             var generatedLayout: QpPageLayout? = null

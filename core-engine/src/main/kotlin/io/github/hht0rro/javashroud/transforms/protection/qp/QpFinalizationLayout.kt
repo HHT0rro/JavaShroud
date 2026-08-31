@@ -6,14 +6,14 @@ import java.util.Arrays
 import java.util.Base64
 
 /**
- * Build-only pending definition for one VBC4 page before its final artifact
+ * Build-only pending definition for one Qp VM page before its final artifact
  * commitment exists.
  *
  * The physical frame is chosen here because its exact length is part of the
  * canonical reservation. The evaluator graph and DEK are still minted only
  * after [QpArtifactCommitment.reserve] has produced the final commitment.
  * Page zero may carry one preassigned opaque handle encoding so an already
- * generated VBC4 dispatcher can address precisely that page; it is neither a
+ * generated Qp VM dispatcher can address precisely that page; it is neither a
  * key nor a traversal capability.
  */
 internal class QpPendingPage private constructor(
@@ -38,25 +38,25 @@ internal class QpPendingPage private constructor(
     private var wiped: Boolean = false
 
     init {
-        require(logicalIdentityValue.isNotEmpty()) { "AKEN VBC4 pending-page identity must not be empty" }
-        require(plaintextValue.isNotEmpty()) { "AKEN VBC4 pending-page plaintext must not be empty" }
+        require(logicalIdentityValue.isNotEmpty()) { "Qp current-format pending-page identity must not be empty" }
+        require(plaintextValue.isNotEmpty()) { "Qp current-format pending-page plaintext must not be empty" }
         require(callSiteProofValue.isNotEmpty() && callSiteProofValue.size <= MAX_CALL_SITE_PROOF_SIZE) {
-            "AKEN VBC4 pending-page call-site proof length is invalid"
+            "Qp current-format pending-page call-site proof length is invalid"
         }
         encodedHandleOverrideValue?.let { encodedHandle ->
             require(pageIndex == 0 && encodedHandle.size == QpHandle.ENCODED_HANDLE_SIZE) {
-                "AKEN VBC4 pending-page handle override is invalid"
+                "Qp current-format pending-page handle override is invalid"
             }
         }
-        require(pageIndex >= 0) { "AKEN VBC4 pending-page index must be non-negative" }
-        require(resourceOffset >= 0) { "AKEN VBC4 pending-page offset must be non-negative" }
-        require(isValidResourcePath(resourcePath)) { "AKEN VBC4 pending-page resource path is invalid" }
-        require(isValidResourcePath(logicalBindingPath)) { "AKEN VBC4 pending-page logical binding path is invalid" }
+        require(pageIndex >= 0) { "Qp current-format pending-page index must be non-negative" }
+        require(resourceOffset >= 0) { "Qp current-format pending-page offset must be non-negative" }
+        require(isValidResourcePath(resourcePath)) { "Qp current-format pending-page resource path is invalid" }
+        require(isValidResourcePath(logicalBindingPath)) { "Qp current-format pending-page logical binding path is invalid" }
         require(targetPageSize in QpPageSizePolicy.DEFAULT.allowedSizes(QpResourceKind.QpMethod)) {
-            "AKEN VBC4 pending-page target size is unsupported"
+            "Qp current-format pending-page target size is unsupported"
         }
         validateLayout(layoutVariant)
-        require(expectedStoredLength > 0) { "AKEN VBC4 pending-page stored length is invalid" }
+        require(expectedStoredLength > 0) { "Qp current-format pending-page stored length is invalid" }
     }
 
     val isWiped: Boolean
@@ -140,7 +140,7 @@ internal class QpPendingPage private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN VBC4 pending page has been wiped" }
+        check(!wiped) { "Qp current-format pending page has been wiped" }
     }
 
     companion object {
@@ -150,7 +150,7 @@ internal class QpPendingPage private constructor(
          * Builds a page reservation with a freshly randomized physical frame.
          * A caller that already reserved a frame may instead pass its complete
          * [layoutVariant] and [targetPageSize] so the later evaluator graph
-         * binds that exact frame and VBC4 block-cluster geometry.
+         * binds that exact frame and Qp VM block-cluster geometry.
          */
         fun create(
             entryToken: Long,
@@ -168,7 +168,7 @@ internal class QpPendingPage private constructor(
         ): QpPendingPage {
             targetPageSize?.let { requestedTargetSize ->
                 require(requestedTargetSize in QpPageSizePolicy.DEFAULT.allowedSizes(QpResourceKind.QpMethod)) {
-                    "AKEN requested VBC4 page target size is unsupported"
+                    "Qp requested Qp VM page target size is unsupported"
                 }
             }
             var generatedLayout: QpPageLayout? = null
@@ -222,7 +222,7 @@ internal class QpFinalizationEntry private constructor(
     private var wiped: Boolean = false
 
     init {
-        require(isValidResourcePath(name)) { "AKEN VBC4 finalization entry name is invalid" }
+        require(isValidResourcePath(name)) { "Qp current-format finalization entry name is invalid" }
     }
 
     val byteSize: Int
@@ -249,7 +249,7 @@ internal class QpFinalizationEntry private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN VBC4 finalization entry has been wiped" }
+        check(!wiped) { "Qp current-format finalization entry has been wiped" }
     }
 
     companion object {
@@ -279,15 +279,15 @@ internal class QpDispatchBinding private constructor(
     private var wiped = false
 
     init {
-        require(pageIndex == 0) { "AKEN VBC4 dispatch binding must target page zero" }
+        require(pageIndex == 0) { "Qp current-format dispatch binding must target page zero" }
         require(encodedHandleValue.size == QpHandle.ENCODED_HANDLE_SIZE) {
-            "AKEN VBC4 dispatch binding has an invalid handle length"
+            "Qp current-format dispatch binding has an invalid handle length"
         }
         require(callSiteProofValue.isNotEmpty() && callSiteProofValue.size <= 4096) {
-            "AKEN VBC4 dispatch binding has an invalid call-site proof"
+            "Qp current-format dispatch binding has an invalid call-site proof"
         }
         require(logicalIdentityValue.isNotEmpty()) {
-            "AKEN VBC4 dispatch binding has an empty logical identity"
+            "Qp current-format dispatch binding has an empty logical identity"
         }
     }
 
@@ -335,12 +335,12 @@ internal class QpDispatchBinding private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN VBC4 dispatch binding has been wiped" }
+        check(!wiped) { "Qp current-format dispatch binding has been wiped" }
     }
 
     internal companion object {
         fun fromPageZeroEmission(emission: QpPageEmission): QpDispatchBinding {
-            require(emission.pageIndex == 0) { "AKEN VBC4 dispatch binding source must be page zero" }
+            require(emission.pageIndex == 0) { "Qp current-format dispatch binding source must be page zero" }
             val handle = emission.copyHandleForBuild()
             var encodedHandle: ByteArray? = null
             var callSiteProof: ByteArray? = null
@@ -367,11 +367,11 @@ internal class QpDispatchBinding private constructor(
 }
 
 /**
- * Pre-seal AKEN layout reservation plus current-page native compiler inputs.
+ * Pre-seal Qp layout reservation plus current-page native compiler inputs.
  *
  * This is the deliberately narrow S1 bridge between page planning and the
  * later native recompilation stage. It owns one full-payload materialization
- * mesh across VBC4 and typed pages, final page bytes, and per-page native
+ * mesh across Qp VM and typed pages, final page bytes, and per-page native
  * locator inputs only while the build is active. It is never injected as a
  * Java runtime catalog and offers no `find`, `list`, arbitrary resource
  * decode, DEK getter, root-key getter, or page plaintext getter.
@@ -387,13 +387,13 @@ internal class QpFinalizationLayout private constructor(
     private var wiped: Boolean = false
 
     init {
-        require(finalEntriesValue.isNotEmpty()) { "AKEN VBC4 finalization layout requires final entries" }
+        require(finalEntriesValue.isNotEmpty()) { "Qp current-format finalization layout requires final entries" }
         require(materializationValue?.isWiped == false) {
-            "AKEN VBC4 finalization layout requires a live unified page materialization"
+            "Qp current-format finalization layout requires a live unified page materialization"
         }
-        require(nativeInputsValue.isNotEmpty()) { "AKEN VBC4 finalization layout requires native page inputs" }
+        require(nativeInputsValue.isNotEmpty()) { "Qp current-format finalization layout requires native page inputs" }
         require(finalEntriesValue.map { it.name }.distinct().size == finalEntriesValue.size) {
-            "AKEN VBC4 finalization layout contains duplicate final entries"
+            "Qp current-format finalization layout contains duplicate final entries"
         }
     }
 
@@ -449,7 +449,7 @@ internal class QpFinalizationLayout private constructor(
     ): T {
         requireLive()
         val materialization = materializationValue
-            ?: error("AKEN ClassPage binding projection requires a live materialization")
+            ?: error("Qp ClassPage binding projection requires a live materialization")
         val bindings = ArrayList<QpClassPageBinding>()
         try {
             materialization.pagesForBuild()
@@ -463,7 +463,7 @@ internal class QpFinalizationLayout private constructor(
                     .thenBy { binding -> binding.pageIndex },
             )
             require(bindings.mapTo(linkedSetOf()) { binding -> binding.identityPageKeyForBuild() }.size == bindings.size) {
-                "AKEN ClassPage finalization contains duplicate logical page bindings"
+                "Qp ClassPage finalization contains duplicate logical page bindings"
             }
             return block(bindings.toList())
         } finally {
@@ -473,7 +473,7 @@ internal class QpFinalizationLayout private constructor(
 
     /**
      * Supplies one callback-scoped page-zero binding per virtualized method.
-     * Typed non-VBC4 pages deliberately do not enter this dispatcher-facing
+     * Typed non-Qp VM pages deliberately do not enter this dispatcher-facing
      * surface; a StringPage-only build therefore supplies an empty list.
      */
     internal fun <T> withPageZeroDispatchBindingsForBuild(
@@ -490,7 +490,7 @@ internal class QpFinalizationLayout private constructor(
                 .sortedBy { page -> page.entryToken }
                 .forEach { page -> bindings += QpDispatchBinding.fromPageZeroEmission(page) }
             require(bindings.mapTo(linkedSetOf()) { binding -> binding.entryToken } == expectedEntryTokens) {
-                "AKEN VBC4 finalization is missing a unique page-zero dispatch binding"
+                "Qp current-format finalization is missing a unique page-zero dispatch binding"
             }
             return block(bindings.toList())
         } finally {
@@ -502,7 +502,7 @@ internal class QpFinalizationLayout private constructor(
      * Rechecks the exact writer-equivalent artifact after a caller has emitted
      * the reserved bytes. The generic materialization owner validates the
      * canonical artifact commitment, root shards, every page route/payload, and
-     * one full-payload Merkle mesh spanning VBC4 and typed pages. This layout
+     * one full-payload Merkle mesh spanning Qp VM and typed pages. This layout
      * adds the exact current-page native record binding for every page.
      */
     internal fun verifyWriterEquivalentArtifactForBuild(entries: Iterable<QpArtifactEntry>): Boolean {
@@ -637,25 +637,25 @@ internal class QpFinalizationLayout private constructor(
     /**
      * The materialization owner authenticates payloads and the unified Merkle
      * mesh. This second build-only pass checks that each materialized page has
-     * exactly one matching current-page native compiler record. VBC4 records
+     * exactly one matching current-page native compiler record. Qp VM records
      * retain their dispatcher entry token; typed pages derive their token from
      * their own kind/page/handle tuple.
      */
     private fun verifyNativeInputBindingsForBuild(materialization: QpPageMaterialization): Boolean {
-        val vbc4TokensByHandle = LinkedHashMap<String, Long>()
+        val vmTokensByHandle = LinkedHashMap<String, Long>()
         val matchedNativeInputs = BooleanArray(nativeInputsValue.size)
         val pages = materialization.pagesForBuild()
         try {
-            val vbc4Emissions = emissionsValue?.pagesForBuild().orEmpty()
-            for (emission in vbc4Emissions) {
+            val vmEmissions = emissionsValue?.pagesForBuild().orEmpty()
+            for (emission in vmEmissions) {
                 var handle: QpHandle? = null
                 var encodedHandle: ByteArray? = null
                 try {
                     handle = emission.copyHandleForBuild()
                     encodedHandle = handle.encoded
                     val handleKey = handleBindingKey(encodedHandle)
-                    require(vbc4TokensByHandle.put(handleKey, emission.entryToken) == null) {
-                        "AKEN VBC4 finalization contains duplicate native handle bindings"
+                    require(vmTokensByHandle.put(handleKey, emission.entryToken) == null) {
+                        "Qp current-format finalization contains duplicate native handle bindings"
                     }
                 } finally {
                     encodedHandle?.let { Arrays.fill(it, 0) }
@@ -663,10 +663,10 @@ internal class QpFinalizationLayout private constructor(
                 }
             }
 
-            val vbc4PageCount = pages.count { page ->
+            val vmPageCount = pages.count { page ->
                 page.descriptorForBuild.resourceKind == QpResourceKind.QpMethod
             }
-            if (vbc4TokensByHandle.size != vbc4PageCount || nativeInputsValue.size != pages.size) {
+            if (vmTokensByHandle.size != vmPageCount || nativeInputsValue.size != pages.size) {
                 return false
             }
 
@@ -681,7 +681,7 @@ internal class QpFinalizationLayout private constructor(
                     rawProof = descriptor.proof.callSiteProof
                     val entryToken = when (descriptor.resourceKind) {
                         QpResourceKind.QpMethod ->
-                            vbc4TokensByHandle[handleBindingKey(encodedHandle)]
+                            vmTokensByHandle[handleBindingKey(encodedHandle)]
                                 ?: return false
                         else -> QpPageEntryToken.derive(
                             resourceKind = descriptor.resourceKind,
@@ -715,7 +715,7 @@ internal class QpFinalizationLayout private constructor(
             }
             return matchedNativeInputs.all { it }
         } finally {
-            vbc4TokensByHandle.clear()
+            vmTokensByHandle.clear()
         }
     }
 
@@ -723,7 +723,7 @@ internal class QpFinalizationLayout private constructor(
         Base64.getUrlEncoder().withoutPadding().encodeToString(encodedHandle)
 
     private fun requireLive() {
-        check(!wiped) { "AKEN VBC4 finalization layout has been wiped" }
+        check(!wiped) { "Qp current-format finalization layout has been wiped" }
     }
 
     private class VerifiedPage(
@@ -742,8 +742,8 @@ internal class QpFinalizationLayout private constructor(
 
     companion object {
         /**
-         * Materializes one pre-seal AKEN page layout using a plan already bound
-         * to [commitment]. VBC4, typed StringPage, encrypted ClassPage, and
+         * Materializes one pre-seal Qp page layout using a plan already bound
+         * to [commitment]. Qp VM, typed StringPage, encrypted ClassPage, and
          * NativeChunk records enter the same page materializer, so their descriptors share one canonical artifact
          * commitment and one full-payload Merkle mesh.
          *
@@ -761,7 +761,7 @@ internal class QpFinalizationLayout private constructor(
             pendingClassPages: Iterable<QpPendingClassPage> = emptyList(),
             pendingNativeChunks: Iterable<QpPendingNativeSegment> = emptyList(),
             rootShardRanges: Iterable<QpRootShardRange> = emptyList(),
-            vbc4StateBindingLayoutDigest: ByteArray,
+            pageStateBindingLayoutDigest: ByteArray,
         ): QpFinalizationLayout {
             val pages = ArrayList<QpPendingPage>()
             val stringPages = ArrayList<QpPendingTextPage>()
@@ -772,11 +772,11 @@ internal class QpFinalizationLayout private constructor(
             val expectedLengths = LinkedHashMap<String, Int>()
             val reservations = ArrayList<QpCanonicalReservation>()
             val selfReferential = LinkedHashMap<String, MutableList<QpCanonicalExclusionRange>>()
-            val vbc4PageDefinitions = LinkedHashMap<String, QpPendingPage>()
+            val vmPageDefinitions = LinkedHashMap<String, QpPendingPage>()
             val stringPageDefinitions = LinkedHashMap<String, QpPendingTextPage>()
             val classPageDefinitions = LinkedHashMap<String, QpPendingClassPage>()
             val nativeChunkDefinitions = LinkedHashMap<String, QpPendingNativeSegment>()
-            val vbc4Requests = ArrayList<QpPageEmissionRequest>()
+            val vmRequests = ArrayList<QpPageEmissionRequest>()
             val materializationInputs = ArrayList<QpPageMaterializationInput>()
             val emittedQpPages = ArrayList<QpPageEmission>()
             val compilerInputs = ArrayList<QpLocatorCompileInput>()
@@ -803,11 +803,11 @@ internal class QpFinalizationLayout private constructor(
                 ownerLabel: String,
             ) {
                 require(resourcePath !in fixed) {
-                    "AKEN " + ownerLabel + " path collides with a fixed final entry: " + resourcePath
+                    "Qp " + ownerLabel + " path collides with a fixed final entry: " + resourcePath
                 }
                 val end = resourceOffset.toLong() + expectedLength.toLong()
                 require(end <= Int.MAX_VALUE.toLong()) {
-                    "AKEN " + ownerLabel + " reservation exceeds JVM array bounds"
+                    "Qp " + ownerLabel + " reservation exceeds JVM array bounds"
                 }
                 val existing = pageBuffers[resourcePath]
                 if (existing == null || existing.size < end.toInt()) {
@@ -826,10 +826,10 @@ internal class QpFinalizationLayout private constructor(
             }
 
             try {
-                require(vbc4StateBindingLayoutDigest.size == 32) {
-                    "AKEN VBC4 state-binding layout digest must be 32 bytes"
+                require(pageStateBindingLayoutDigest.size == 32) {
+                    "Qp current-format state-binding layout digest must be 32 bytes"
                 }
-                stateBindingLayoutDigest = vbc4StateBindingLayoutDigest.copyOf()
+                stateBindingLayoutDigest = pageStateBindingLayoutDigest.copyOf()
                 for (page in pendingPages) pages += page
                 for (page in pendingStringPages) stringPages += page
                 for (page in pendingClassPages) classPages += page
@@ -840,11 +840,11 @@ internal class QpFinalizationLayout private constructor(
                         classPages.isNotEmpty() ||
                         nativeChunks.isNotEmpty(),
                 ) {
-                    "AKEN finalization requires at least one pending page"
+                    "Qp finalization requires at least one pending page"
                 }
                 for (entry in fixedEntries) {
                     require(fixed.put(entry.name, entry.copyBytesForCommitment()) == null) {
-                        "AKEN finalization contains duplicate fixed entry: " + entry.name
+                        "Qp finalization contains duplicate fixed entry: " + entry.name
                     }
                 }
 
@@ -852,7 +852,7 @@ internal class QpFinalizationLayout private constructor(
                 val suppliedCommitment = commitment.copyBytes()
                 try {
                     require(MessageDigest.isEqual(planCommitment, suppliedCommitment)) {
-                        "AKEN finalization plan is not bound to its reserved artifact commitment"
+                        "Qp finalization plan is not bound to its reserved artifact commitment"
                     }
                 } finally {
                     Arrays.fill(suppliedCommitment, 0)
@@ -866,15 +866,15 @@ internal class QpFinalizationLayout private constructor(
                             logicalIdentity = identity,
                             pageIndex = page.pageIndex,
                         )
-                        require(vbc4PageDefinitions.put(definitionKey, page) == null) {
-                            "AKEN VBC4 finalization contains duplicate logical identity/page index"
+                        require(vmPageDefinitions.put(definitionKey, page) == null) {
+                            "Qp current-format finalization contains duplicate logical identity/page index"
                         }
                         reservePhysicalRange(
                             definitionKey = definitionKey,
                             resourcePath = page.resourcePath,
                             resourceOffset = page.resourceOffset,
                             expectedLength = page.expectedStoredLength,
-                            ownerLabel = "VBC4 page",
+                            ownerLabel = "Qp VM page",
                         )
                     } finally {
                         Arrays.fill(identity, 0)
@@ -889,7 +889,7 @@ internal class QpFinalizationLayout private constructor(
                             pageIndex = page.pageIndex,
                         )
                         require(stringPageDefinitions.put(definitionKey, page) == null) {
-                            "AKEN StringPage finalization contains duplicate logical identity/page index"
+                            "Qp StringPage finalization contains duplicate logical identity/page index"
                         }
                         reservePhysicalRange(
                             definitionKey = definitionKey,
@@ -911,7 +911,7 @@ internal class QpFinalizationLayout private constructor(
                             pageIndex = page.pageIndex,
                         )
                         require(classPageDefinitions.put(definitionKey, page) == null) {
-                            "AKEN ClassPage finalization contains duplicate logical identity/page index"
+                            "Qp ClassPage finalization contains duplicate logical identity/page index"
                         }
                         reservePhysicalRange(
                             definitionKey = definitionKey,
@@ -933,7 +933,7 @@ internal class QpFinalizationLayout private constructor(
                             pageIndex = page.pageIndex,
                         )
                         require(nativeChunkDefinitions.put(definitionKey, page) == null) {
-                            "AKEN NativeChunk finalization contains duplicate logical identity/page index"
+                            "Qp NativeChunk finalization contains duplicate logical identity/page index"
                         }
                         reservePhysicalRange(
                             definitionKey = definitionKey,
@@ -969,7 +969,7 @@ internal class QpFinalizationLayout private constructor(
                 val expectedBytes = commitment.copyBytes()
                 try {
                     require(MessageDigest.isEqual(reservedBytes, expectedBytes)) {
-                        "AKEN finalization reservation does not reproduce the active artifact commitment"
+                        "Qp finalization reservation does not reproduce the active artifact commitment"
                     }
                 } finally {
                     Arrays.fill(reservedBytes, 0)
@@ -988,7 +988,7 @@ internal class QpFinalizationLayout private constructor(
                             targetPageSize = pending.targetPageSize,
                             encodedHandleOverride = encodedHandleOverride,
                         )
-                        vbc4Requests += pending.toEmissionRequest(registered)
+                        vmRequests += pending.toEmissionRequest(registered)
                     } finally {
                         Arrays.fill(identity, 0)
                         encodedHandleOverride?.let { Arrays.fill(it, 0) }
@@ -1003,14 +1003,14 @@ internal class QpFinalizationLayout private constructor(
                 nativeChunks.forEach { pending ->
                     materializationInputs += pending.toMaterializationInput(plan)
                 }
-                vbc4Requests.forEach { request ->
+                vmRequests.forEach { request ->
                     materializationInputs += request.toMaterializationInput()
                 }
                 require(
                     materializationInputs.size ==
                         pages.size + stringPages.size + classPages.size + nativeChunks.size,
                 ) {
-                    "AKEN finalization did not create one materialization input per page"
+                    "Qp finalization did not create one materialization input per page"
                 }
 
                 materialization = QpPageMaterializer.materializeAndWipe(plan, materializationInputs)
@@ -1019,7 +1019,7 @@ internal class QpFinalizationLayout private constructor(
                     outputPages.size ==
                         pages.size + stringPages.size + classPages.size + nativeChunks.size,
                 ) {
-                    "AKEN finalization emitted an unexpected page count"
+                    "Qp finalization emitted an unexpected page count"
                 }
 
                 var materializedQpPageCount = 0
@@ -1039,8 +1039,8 @@ internal class QpFinalizationLayout private constructor(
                                     logicalIdentity = identity,
                                     pageIndex = descriptor.pageIndex,
                                 )
-                                val pending = vbc4PageDefinitions[definitionKey]
-                                    ?: error("AKEN VBC4 finalization emitted an unknown logical page")
+                                val pending = vmPageDefinitions[definitionKey]
+                                    ?: error("Qp current-format finalization emitted an unknown logical page")
                                 val emission = QpPageEmission.fromMaterialized(
                                     page = materializedPage,
                                     entryToken = pending.entryToken,
@@ -1048,16 +1048,16 @@ internal class QpFinalizationLayout private constructor(
                                 try {
                                     require(emission.resourcePath == pending.resourcePath &&
                                         emission.resourceOffset == pending.resourceOffset) {
-                                        "AKEN VBC4 finalization route drifted from its reservation"
+                                        "Qp current-format finalization route drifted from its reservation"
                                     }
                                     require(emission.storedLength == expectedLengths.getValue(definitionKey)) {
-                                        "AKEN VBC4 finalization payload length drifted from its reservation"
+                                        "Qp current-format finalization payload length drifted from its reservation"
                                     }
                                     val descriptorBytes = emission.copyDescriptorBytesForBuild()
                                     try {
                                         val emittedDescriptor = QpPageDescriptor.decode(descriptorBytes)
                                         require(emittedDescriptor.targetPageSize == pending.targetPageSize) {
-                                            "AKEN VBC4 finalization evaluator target size drifted from its block-cluster page"
+                                            "Qp current-format finalization evaluator target size drifted from its block-cluster page"
                                         }
                                     } finally {
                                         Arrays.fill(descriptorBytes, 0)
@@ -1066,7 +1066,7 @@ internal class QpFinalizationLayout private constructor(
                                     val expectedProof = pending.copyCallSiteProofForBuild()
                                     try {
                                         require(MessageDigest.isEqual(proof, expectedProof)) {
-                                            "AKEN VBC4 finalization call-site proof drifted"
+                                            "Qp current-format finalization call-site proof drifted"
                                         }
                                     } finally {
                                         Arrays.fill(expectedProof, 0)
@@ -1082,7 +1082,7 @@ internal class QpFinalizationLayout private constructor(
                                     }
                                     compilerInputs += QpLocatorCompileInput.fromQpEmission(
                                         emission = emission,
-                                        vbc4StateBindingLayoutDigest = checkNotNull(stateBindingLayoutDigest),
+                                        pageStateBindingLayoutDigest = checkNotNull(stateBindingLayoutDigest),
                                     )
                                     emittedQpPages += emission
                                 } catch (error: Throwable) {
@@ -1106,26 +1106,26 @@ internal class QpFinalizationLayout private constructor(
                                     pageIndex = descriptor.pageIndex,
                                 )
                                 val pending = stringPageDefinitions[definitionKey]
-                                    ?: error("AKEN StringPage finalization emitted an unknown logical page")
+                                    ?: error("Qp StringPage finalization emitted an unknown logical page")
                                 val route = descriptor.route
                                 require(descriptor.targetPageSize == pending.targetPageSize) {
-                                    "AKEN StringPage evaluator target size drifted from its reserved page"
+                                    "Qp StringPage evaluator target size drifted from its reserved page"
                                 }
                                 require(
                                     route.resourcePath == pending.resourcePath &&
                                         route.resourceOffset == pending.resourceOffset &&
                                         route.storedLength == expectedLengths.getValue(definitionKey),
                                 ) {
-                                    "AKEN StringPage finalization route drifted from its reservation"
+                                    "Qp StringPage finalization route drifted from its reservation"
                                 }
                                 require(materializedPage.encodedLength == expectedLengths.getValue(definitionKey)) {
-                                    "AKEN StringPage finalization payload length drifted from its reservation"
+                                    "Qp StringPage finalization payload length drifted from its reservation"
                                 }
                                 proof = descriptor.proof.callSiteProof
                                 val expectedProof = pending.copyCallSiteProofForBuild()
                                 try {
                                     require(MessageDigest.isEqual(proof, expectedProof)) {
-                                        "AKEN StringPage finalization call-site proof drifted"
+                                        "Qp StringPage finalization call-site proof drifted"
                                     }
                                 } finally {
                                     Arrays.fill(expectedProof, 0)
@@ -1160,26 +1160,26 @@ internal class QpFinalizationLayout private constructor(
                                     pageIndex = descriptor.pageIndex,
                                 )
                                 val pending = classPageDefinitions[definitionKey]
-                                    ?: error("AKEN ClassPage finalization emitted an unknown logical page")
+                                    ?: error("Qp ClassPage finalization emitted an unknown logical page")
                                 val route = descriptor.route
                                 require(descriptor.targetPageSize == pending.targetPageSize) {
-                                    "AKEN ClassPage evaluator target size drifted from its reserved page"
+                                    "Qp ClassPage evaluator target size drifted from its reserved page"
                                 }
                                 require(
                                     route.resourcePath == pending.resourcePath &&
                                         route.resourceOffset == pending.resourceOffset &&
                                         route.storedLength == expectedLengths.getValue(definitionKey),
                                 ) {
-                                    "AKEN ClassPage finalization route drifted from its reservation"
+                                    "Qp ClassPage finalization route drifted from its reservation"
                                 }
                                 require(materializedPage.encodedLength == expectedLengths.getValue(definitionKey)) {
-                                    "AKEN ClassPage finalization payload length drifted from its reservation"
+                                    "Qp ClassPage finalization payload length drifted from its reservation"
                                 }
                                 proof = descriptor.proof.callSiteProof
                                 val expectedProof = pending.copyCallSiteProofForBuild()
                                 try {
                                     require(MessageDigest.isEqual(proof, expectedProof)) {
-                                        "AKEN ClassPage finalization call-site proof drifted"
+                                        "Qp ClassPage finalization call-site proof drifted"
                                     }
                                 } finally {
                                     Arrays.fill(expectedProof, 0)
@@ -1214,26 +1214,26 @@ internal class QpFinalizationLayout private constructor(
                                     pageIndex = descriptor.pageIndex,
                                 )
                                 val pending = nativeChunkDefinitions[definitionKey]
-                                    ?: error("AKEN NativeChunk finalization emitted an unknown logical page")
+                                    ?: error("Qp NativeChunk finalization emitted an unknown logical page")
                                 val route = descriptor.route
                                 require(descriptor.targetPageSize == pending.targetPageSize) {
-                                    "AKEN NativeChunk evaluator target size drifted from its reserved page"
+                                    "Qp NativeChunk evaluator target size drifted from its reserved page"
                                 }
                                 require(
                                     route.resourcePath == pending.resourcePath &&
                                         route.resourceOffset == pending.resourceOffset &&
                                         route.storedLength == expectedLengths.getValue(definitionKey),
                                 ) {
-                                    "AKEN NativeChunk finalization route drifted from its reservation"
+                                    "Qp NativeChunk finalization route drifted from its reservation"
                                 }
                                 require(materializedPage.encodedLength == expectedLengths.getValue(definitionKey)) {
-                                    "AKEN NativeChunk finalization payload length drifted from its reservation"
+                                    "Qp NativeChunk finalization payload length drifted from its reservation"
                                 }
                                 proof = descriptor.proof.callSiteProof
                                 val expectedProof = pending.copyCallSiteProofForBuild()
                                 try {
                                     require(MessageDigest.isEqual(proof, expectedProof)) {
-                                        "AKEN NativeChunk finalization call-site proof drifted"
+                                        "Qp NativeChunk finalization call-site proof drifted"
                                     }
                                 } finally {
                                     Arrays.fill(expectedProof, 0)
@@ -1257,23 +1257,23 @@ internal class QpFinalizationLayout private constructor(
                             }
                         }
 
-                        else -> error("AKEN finalization received an unsupported typed page resource kind")
+                        else -> error("Qp finalization received an unsupported typed page resource kind")
                     }
                 }
                 require(materializedQpPageCount == pages.size) {
-                    "AKEN finalization did not emit every VBC4 page"
+                    "Qp finalization did not emit every Qp VM page"
                 }
                 require(materializedStringPageCount == stringPages.size) {
-                    "AKEN finalization did not emit every StringPage"
+                    "Qp finalization did not emit every StringPage"
                 }
                 require(materializedClassPageCount == classPages.size) {
-                    "AKEN finalization did not emit every ClassPage"
+                    "Qp finalization did not emit every ClassPage"
                 }
                 require(materializedNativeChunkCount == nativeChunks.size) {
-                    "AKEN finalization did not emit every NativeChunk"
+                    "Qp finalization did not emit every NativeChunk"
                 }
                 require(compilerInputs.size == outputPages.size) {
-                    "AKEN finalization did not create one native input per page"
+                    "Qp finalization did not create one native input per page"
                 }
 
                 if (emittedQpPages.isNotEmpty()) {
@@ -1306,7 +1306,7 @@ internal class QpFinalizationLayout private constructor(
                 )
                 materialization = null
                 require(output.verifyOwnedEntriesForBuild()) {
-                    "AKEN finalization did not verify its own writer-equivalent artifact"
+                    "Qp finalization did not verify its own writer-equivalent artifact"
                 }
                 completed = true
                 return output
@@ -1316,7 +1316,7 @@ internal class QpFinalizationLayout private constructor(
                 stringPages.forEach { it.wipe() }
                 classPages.forEach { it.wipe() }
                 nativeChunks.forEach { it.wipe() }
-                vbc4Requests.forEach { it.wipe() }
+                vmRequests.forEach { it.wipe() }
                 materializationInputs.forEach { it.wipe() }
                 fixed.values.forEach { Arrays.fill(it, 0) }
                 pageBuffers.values.forEach { Arrays.fill(it, 0) }
@@ -1334,7 +1334,7 @@ internal class QpFinalizationLayout private constructor(
         }
 
         /**
-         * Computes the exact one-pass canonical commitment for pending VBC4,
+         * Computes the exact one-pass canonical commitment for pending Qp VM,
          * typed StringPage, encrypted ClassPage, and NativeChunk records without
          * consuming their plaintext owners.
          * Callers initialize one [QpBuildPlan] from the resulting commitment
@@ -1374,14 +1374,14 @@ internal class QpFinalizationLayout private constructor(
                 ownerLabel: String,
             ) {
                 require(resourcePath !in fixed) {
-                    "AKEN " + ownerLabel + " path collides with a fixed final entry: " + resourcePath
+                    "Qp " + ownerLabel + " path collides with a fixed final entry: " + resourcePath
                 }
                 require(definitions.add(definitionKey)) {
-                    "AKEN " + ownerLabel + " finalization contains duplicate logical identity/page index"
+                    "Qp " + ownerLabel + " finalization contains duplicate logical identity/page index"
                 }
                 val end = resourceOffset.toLong() + expectedLength.toLong()
                 require(end <= Int.MAX_VALUE.toLong()) {
-                    "AKEN " + ownerLabel + " reservation exceeds JVM array bounds"
+                    "Qp " + ownerLabel + " reservation exceeds JVM array bounds"
                 }
                 val existing = pageBuffers[resourcePath]
                 if (existing == null || existing.size < end.toInt()) {
@@ -1409,11 +1409,11 @@ internal class QpFinalizationLayout private constructor(
                         classPages.isNotEmpty() ||
                         nativeChunks.isNotEmpty(),
                 ) {
-                    "AKEN finalization requires at least one pending page"
+                    "Qp finalization requires at least one pending page"
                 }
                 for (entry in fixedEntries) {
                     require(fixed.put(entry.name, entry.copyBytesForCommitment()) == null) {
-                        "AKEN finalization contains duplicate fixed entry: " + entry.name
+                        "Qp finalization contains duplicate fixed entry: " + entry.name
                     }
                 }
                 pages.forEach { page ->
@@ -1428,7 +1428,7 @@ internal class QpFinalizationLayout private constructor(
                             resourcePath = page.resourcePath,
                             resourceOffset = page.resourceOffset,
                             expectedLength = page.expectedStoredLength,
-                            ownerLabel = "VBC4 page",
+                            ownerLabel = "Qp VM page",
                         )
                     } finally {
                         Arrays.fill(identity, 0)
@@ -1534,11 +1534,11 @@ internal class QpFinalizationLayout private constructor(
         ) {
             commitment.rootShardRanges.forEach { range ->
                 val entry = finalBytes[range.entryName]
-                    ?: throw IllegalArgumentException("AKEN VBC4 root shard references missing final entry: ${range.entryName}")
+                    ?: throw IllegalArgumentException("Qp current-format root shard references missing final entry: ${range.entryName}")
                 val shard = commitment.copyExpectedRootShardBytesForBuild(range)
                 try {
                     require(range.endExclusive <= entry.size.toLong()) {
-                        "AKEN VBC4 root shard exceeds final entry bounds: ${range.entryName}"
+                        "Qp current-format root shard exceeds final entry bounds: ${range.entryName}"
                     }
                     shard.copyInto(entry, destinationOffset = range.offset)
                 } finally {
@@ -1556,7 +1556,7 @@ internal class QpFinalizationLayout private constructor(
                 sorted.forEachIndexed { index, range ->
                     if (index > 0) {
                         require(priorEnd <= range.offset.toLong()) {
-                            "AKEN VBC4 page reservations overlap in '$entry'"
+                            "Qp current-format page reservations overlap in '$entry'"
                         }
                     }
                     priorEnd = range.endExclusive

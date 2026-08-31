@@ -22,11 +22,11 @@ internal class QpClassPageDescriptorSource private constructor(
 
     init {
         require(isValidQpClassPageInternalName(internalName)) {
-            "AKEN ClassPage descriptor source internal name is invalid"
+            "Qp ClassPage descriptor source internal name is invalid"
         }
-        require(pageIndex >= 0) { "AKEN ClassPage descriptor source index must be non-negative" }
+        require(pageIndex >= 0) { "Qp ClassPage descriptor source index must be non-negative" }
         require(logicalIdentityValue.isNotEmpty()) {
-            "AKEN ClassPage descriptor source logical identity must not be empty"
+            "Qp ClassPage descriptor source logical identity must not be empty"
         }
     }
 
@@ -80,7 +80,7 @@ internal class QpClassPageDescriptorSource private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN ClassPage descriptor source has been wiped" }
+        check(!wiped) { "Qp ClassPage descriptor source has been wiped" }
     }
 
     internal companion object {
@@ -113,7 +113,7 @@ internal class QpClassPageDescriptorSource private constructor(
 }
 
 /**
- * One finalized encrypted ClassPage binding projected from the unified AKEN
+ * One finalized encrypted ClassPage binding projected from the unified Qp
  * materialization. The owner is callback-scoped and wiped as soon as the
  * caller finishes constructing class-local descriptor bytes.
  */
@@ -131,15 +131,15 @@ internal class QpClassPageBinding private constructor(
     private var wiped: Boolean = false
 
     init {
-        require(pageIndex >= 0) { "AKEN ClassPage binding index must be non-negative" }
+        require(pageIndex >= 0) { "Qp ClassPage binding index must be non-negative" }
         require(logicalIdentityValue.isNotEmpty()) {
-            "AKEN ClassPage binding logical identity must not be empty"
+            "Qp ClassPage binding logical identity must not be empty"
         }
         require(encodedHandleValue.size == QpHandle.ENCODED_HANDLE_SIZE) {
-            "AKEN ClassPage binding handle length is invalid"
+            "Qp ClassPage binding handle length is invalid"
         }
         require(callSiteProofValue.isNotEmpty() && callSiteProofValue.size <= MAX_CALL_SITE_PROOF_SIZE) {
-            "AKEN ClassPage binding call-site proof length is invalid"
+            "Qp ClassPage binding call-site proof length is invalid"
         }
     }
 
@@ -192,7 +192,7 @@ internal class QpClassPageBinding private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN ClassPage binding has been wiped" }
+        check(!wiped) { "Qp ClassPage binding has been wiped" }
     }
 
     internal companion object {
@@ -201,7 +201,7 @@ internal class QpClassPageBinding private constructor(
         fun fromMaterializedPage(page: QpMaterializedPage): QpClassPageBinding {
             val descriptor = page.descriptorForBuild
             require(descriptor.resourceKind == QpResourceKind.EncryptedClassPage) {
-                "AKEN ClassPage binding source is not an encrypted ClassPage"
+                "Qp ClassPage binding source is not an encrypted ClassPage"
             }
 
             var logicalIdentity: ByteArray? = null
@@ -213,7 +213,7 @@ internal class QpClassPageBinding private constructor(
                 callSiteProof = descriptor.proof.callSiteProof
                 handle = descriptor.handle
                 require(descriptor.matches(handle)) {
-                    "AKEN ClassPage materialized descriptor handle binding is invalid"
+                    "Qp ClassPage materialized descriptor handle binding is invalid"
                 }
                 encodedHandle = handle.encoded
                 return QpClassPageBinding(

@@ -9,10 +9,10 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlin.jvm.JvmSynthetic
 
 /**
- * Build-only AKEN v4 planner.
+ * Build-only Qp current format planner.
  *
  * Every registered high-value page receives independent random page material,
- * an independent physical frame, and an artifact-specific opaque VBC4
+ * an independent physical frame, and an artifact-specific opaque Qp VM
  * evaluator. The evaluator's randomized dialect, fragments, bindings, and
  * authenticated terminal schedule never expose a raw or contiguous page key.
  * This object deliberately provides no page enumeration, raw-key export, or
@@ -26,7 +26,7 @@ class QpBuildPlan private constructor(
     val pageSizePolicy: QpPageSizePolicy,
 ) : AutoCloseable {
 
-    /** Current-format VBC4 evaluator plan for exactly one page. */
+    /** Current-format Qp VM evaluator plan for exactly one page. */
     class EvaluatorPlan internal constructor(
         fingerprint: ByteArray,
         boundDecryptorCore: QpBoundCore,
@@ -39,7 +39,7 @@ class QpBuildPlan private constructor(
 
         init {
             require(fingerprintValue.size == QpHandle.FINGERPRINT_SIZE) {
-                "AKEN evaluator fingerprint has an invalid length"
+                "Qp evaluator fingerprint has an invalid length"
             }
         }
 
@@ -54,11 +54,11 @@ class QpBuildPlan private constructor(
             return fingerprintValue.copyOf()
         }
 
-        /** Page-local nonce is owned by the bound VBC4 terminal seed. */
+        /** Page-local nonce is owned by the bound Qp VM terminal seed. */
         internal fun copyPageNonceForCodec(): ByteArray {
             requireLive()
             return (boundDecryptorCoreValue
-                ?: error("AKEN bound decryptor core has been wiped"))
+                ?: error("Qp bound decryptor core has been wiped"))
                 .copyPageNonceForCodec()
         }
 
@@ -69,7 +69,7 @@ class QpBuildPlan private constructor(
         ): QpBoundPlan {
             requireLive()
             return (boundDecryptorCoreValue
-                ?: error("AKEN bound decryptor core has been wiped"))
+                ?: error("Qp bound decryptor core has been wiped"))
                 .finalizeForRuntime(route, callSiteProof)
         }
 
@@ -83,7 +83,7 @@ class QpBuildPlan private constructor(
         }
 
         private fun requireLive() {
-            check(!wiped) { "AKEN evaluator plan has been wiped" }
+            check(!wiped) { "Qp evaluator plan has been wiped" }
         }
     }
 
@@ -113,7 +113,7 @@ class QpBuildPlan private constructor(
         val handle: QpHandle
             get() {
                 requireLive()
-                return handleValue ?: error("AKEN page handle has been wiped")
+                return handleValue ?: error("Qp page handle has been wiped")
             }
 
         val resourceKind: QpResourceKind
@@ -143,7 +143,7 @@ class QpBuildPlan private constructor(
         val evaluatorPlan: EvaluatorPlan
             get() {
                 requireLive()
-                return evaluatorPlanValue ?: error("AKEN page evaluator has been wiped")
+                return evaluatorPlanValue ?: error("Qp page evaluator has been wiped")
             }
 
         val codecVariant: String
@@ -156,26 +156,26 @@ class QpBuildPlan private constructor(
         val pageLayout: QpPageLayout
             get() {
                 requireLive()
-                return (layoutValue ?: error("AKEN page layout has been wiped")).copyForBuild()
+                return (layoutValue ?: error("Qp page layout has been wiped")).copyForBuild()
             }
 
         /** Canonical descriptor for [pageLayout], not a caller-provided decorative label. */
         val layoutVariant: String
             get() {
                 requireLive()
-                return (layoutValue ?: error("AKEN page layout has been wiped")).variant
+                return (layoutValue ?: error("Qp page layout has been wiped")).variant
             }
 
         internal fun <T> withCodecContext(block: (PageCodecContext) -> T): T {
             requireLive()
-            val evaluator = evaluatorPlanValue ?: error("AKEN page evaluator has been wiped")
+            val evaluator = evaluatorPlanValue ?: error("Qp page evaluator has been wiped")
             val context = PageCodecContext(
                 identity = logicalIdentityValue.copyOf(),
                 fingerprint = evaluator.copyFingerprintForBuild(),
-                locator = (handleValue ?: error("AKEN page handle has been wiped")).copyLocatorTokenForBuild(),
+                locator = (handleValue ?: error("Qp page handle has been wiped")).copyLocatorTokenForBuild(),
                 pageNonce = evaluator.copyPageNonceForCodec(),
                 codecVariant = codecVariantValue,
-                layout = (layoutValue ?: error("AKEN page layout has been wiped")).copyForBuild(),
+                layout = (layoutValue ?: error("Qp page layout has been wiped")).copyForBuild(),
             )
             return try {
                 block(context)
@@ -198,7 +198,7 @@ class QpBuildPlan private constructor(
         }
 
         private fun requireLive() {
-            check(!wiped) { "AKEN page has been wiped" }
+            check(!wiped) { "Qp page has been wiped" }
         }
     }
 
@@ -218,8 +218,8 @@ class QpBuildPlan private constructor(
         private var closed: Boolean = false
 
         fun <T> withDek(block: (ByteArray) -> T): T = synchronized(this) {
-            check(!closed) { "AKEN page lease is closed" }
-            val source = dekValue ?: error("AKEN page lease has no key material")
+            check(!closed) { "Qp page lease is closed" }
+            val source = dekValue ?: error("Qp page lease has no key material")
             val callbackCopy = source.copyOf()
             try {
                 block(callbackCopy)
@@ -304,24 +304,24 @@ class QpBuildPlan private constructor(
         encodedHandleOverride: ByteArray? = null,
     ): Page {
         requireLive()
-        require(identity.isNotEmpty()) { "AKEN page identity must not be empty" }
-        require(pageIndex >= 0) { "AKEN page index must be non-negative" }
+        require(identity.isNotEmpty()) { "Qp page identity must not be empty" }
+        require(pageIndex >= 0) { "Qp page index must be non-negative" }
         encodedHandleOverride?.let { encodedHandle ->
             require(encodedHandle.size == QpHandle.ENCODED_HANDLE_SIZE) {
-                "AKEN preassigned handle size is invalid"
+                "Qp preassigned handle size is invalid"
             }
         }
         val allowedTargetSizes = pageSizePolicy.allowedSizes(kind)
         targetPageSize?.let { requestedTargetSize ->
             require(requestedTargetSize in allowedTargetSizes) {
-                "AKEN requested page target size is unsupported for resource kind"
+                "Qp requested page target size is unsupported for resource kind"
             }
         }
 
         val identityCopy = identity.copyOf()
         val registrationKey = registrationKey(kind, identityCopy, pageIndex)
         require(registrationKey !in registrationKeys) {
-            "AKEN page identity is already registered for this resource kind and index"
+            "Qp page identity is already registered for this resource kind and index"
         }
 
         val canonicalCodec = QpPageCodec.normalizeCodecVariant(codecVariant)
@@ -341,11 +341,11 @@ class QpBuildPlan private constructor(
             layout = QpPageLayout.create(layoutVariant, random)
             val targetSize = targetPageSize ?: pageSizePolicy.choose(kind, random)
             require(targetSize in allowedTargetSizes) {
-                "AKEN selected page target size is unsupported for resource kind"
+                "Qp selected page target size is unsupported for resource kind"
             }
 
             // The handle, locator and evaluator fingerprint are page-local
-            // binding inputs.  VBC4 compile creates the opaque randomized
+            // binding inputs.  Qp VM compile creates the opaque randomized
             // fragment program and authenticates the complete page material.
             encodedHandle = encodedHandleOverride?.copyOf()
                 ?: ByteArray(QpHandle.ENCODED_HANDLE_SIZE).also(random::nextBytes)
@@ -390,7 +390,7 @@ class QpBuildPlan private constructor(
                 layout = layout,
             )
             val handleKey = handle.encodedKey()
-            require(handleKey !in records) { "AKEN page handle encoding is already registered" }
+            require(handleKey !in records) { "Qp page handle encoding is already registered" }
             records[handleKey] = Record(page, dek)
             registrationKeys += registrationKey
             success = true
@@ -520,14 +520,14 @@ class QpBuildPlan private constructor(
     private fun acquire(handle: QpHandle): AcquiredRecord = synchronized(this) {
         requireLive()
         val record = records[handle.encodedKey()]
-            ?: throw IllegalArgumentException("unknown AKEN page handle")
+            ?: throw IllegalArgumentException("unknown Qp page handle")
         val lease = QpPageLease(record.copyDekForLease()) { released -> activeLeases.remove(released) }
         activeLeases += lease
         AcquiredRecord(record, lease)
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN build plan has been wiped" }
+        check(!wiped) { "Qp build plan has been wiped" }
     }
 
     private fun registrationKey(kind: QpResourceKind, identity: ByteArray, pageIndex: Int): String {
@@ -564,7 +564,7 @@ class QpBuildPlan private constructor(
             random: SecureRandom = SecureRandom(),
             pageSizePolicy: QpPageSizePolicy = QpPageSizePolicy.DEFAULT,
         ): QpBuildPlan {
-            require(commitment.size == 32) { "AKEN artifact commitment must be 32 bytes" }
+            require(commitment.size == 32) { "Qp artifact commitment must be 32 bytes" }
             return QpBuildPlan(
                 commitment = commitment.copyOf(),
                 random = random,

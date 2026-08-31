@@ -34,23 +34,23 @@ internal class QpPendingTextPage private constructor(
     private var wiped: Boolean = false
 
     init {
-        require(logicalIdentityValue.isNotEmpty()) { "AKEN pending StringPage identity must not be empty" }
-        require(plaintextValue.isNotEmpty()) { "AKEN pending StringPage plaintext must not be empty" }
+        require(logicalIdentityValue.isNotEmpty()) { "Qp pending StringPage identity must not be empty" }
+        require(plaintextValue.isNotEmpty()) { "Qp pending StringPage plaintext must not be empty" }
         require(callSiteProofValue.isNotEmpty() && callSiteProofValue.size <= MAX_CALL_SITE_PROOF_SIZE) {
-            "AKEN pending StringPage call-site proof length is invalid"
+            "Qp pending StringPage call-site proof length is invalid"
         }
         require(encodedHandleValue.size == QpHandle.ENCODED_HANDLE_SIZE) {
-            "AKEN pending StringPage handle length is invalid"
+            "Qp pending StringPage handle length is invalid"
         }
-        require(pageIndex >= 0) { "AKEN pending StringPage index must be non-negative" }
-        require(resourceOffset >= 0) { "AKEN pending StringPage offset must be non-negative" }
-        require(isValidArtifactPath(resourcePath)) { "AKEN pending StringPage resource path is invalid" }
-        require(isValidArtifactPath(logicalBindingPath)) { "AKEN pending StringPage logical binding path is invalid" }
+        require(pageIndex >= 0) { "Qp pending StringPage index must be non-negative" }
+        require(resourceOffset >= 0) { "Qp pending StringPage offset must be non-negative" }
+        require(isValidArtifactPath(resourcePath)) { "Qp pending StringPage resource path is invalid" }
+        require(isValidArtifactPath(logicalBindingPath)) { "Qp pending StringPage logical binding path is invalid" }
         require(targetPageSize in QpPageSizePolicy.DEFAULT.allowedSizes(QpResourceKind.StringPage)) {
-            "AKEN pending StringPage target size is unsupported"
+            "Qp pending StringPage target size is unsupported"
         }
         validateLayout(layoutVariant)
-        require(expectedStoredLength > 0) { "AKEN pending StringPage stored length is invalid" }
+        require(expectedStoredLength > 0) { "Qp pending StringPage stored length is invalid" }
     }
 
     val isWiped: Boolean
@@ -152,7 +152,7 @@ internal class QpPendingTextPage private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN pending StringPage has been wiped" }
+        check(!wiped) { "Qp pending StringPage has been wiped" }
     }
 
     companion object {
@@ -178,7 +178,7 @@ internal class QpPendingTextPage private constructor(
         ): QpPendingTextPage {
             targetPageSize?.let { requestedTargetSize ->
                 require(requestedTargetSize in QpPageSizePolicy.DEFAULT.allowedSizes(QpResourceKind.StringPage)) {
-                    "AKEN requested StringPage target size is unsupported"
+                    "Qp requested StringPage target size is unsupported"
                 }
             }
             var generatedLayout: QpPageLayout? = null

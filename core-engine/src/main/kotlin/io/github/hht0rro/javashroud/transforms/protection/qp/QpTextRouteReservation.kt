@@ -36,7 +36,7 @@ internal class QpTextRouteCandidateRef private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN StringPage route candidate ref has been wiped" }
+        check(!wiped) { "Qp StringPage route candidate ref has been wiped" }
     }
 
     companion object {
@@ -47,7 +47,7 @@ internal class QpTextRouteCandidateRef private constructor(
             requireValidIdentityPageKey(identityPageKey)
             QpRouteCandidateRef.requireValidArtifactEntryPath(
                 value = logicalBindingPath,
-                label = "AKEN StringPage route candidate logical binding path",
+                label = "Qp StringPage route candidate logical binding path",
             )
             return QpTextRouteCandidateRef(identityPageKey, logicalBindingPath)
         }
@@ -64,7 +64,7 @@ internal class QpTextRouteCandidateRef private constructor(
                             character == '_'
                     },
             ) {
-                "AKEN StringPage route candidate identity key is invalid"
+                "Qp StringPage route candidate identity key is invalid"
             }
         }
 
@@ -119,7 +119,7 @@ internal class QpTextRoute private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN StringPage pre-seal route has been wiped" }
+        check(!wiped) { "Qp StringPage pre-seal route has been wiped" }
     }
 
     companion object {
@@ -131,11 +131,11 @@ internal class QpTextRoute private constructor(
             QpTextRouteCandidateRef.requireValidIdentityPageKey(identityPageKey)
             QpRouteCandidateRef.requireValidArtifactEntryPath(
                 value = logicalBindingPath,
-                label = "AKEN StringPage pre-seal logical binding path",
+                label = "Qp StringPage pre-seal logical binding path",
             )
             QpRouteCandidateRef.requireValidArtifactEntryPath(
                 value = futureResourcePath,
-                label = "AKEN StringPage pre-seal future resource path",
+                label = "Qp StringPage pre-seal future resource path",
             )
             return QpTextRoute(
                 identityPageKeyValue = identityPageKey,
@@ -191,7 +191,7 @@ internal class QpTextRouteReservation private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN StringPage pre-seal route reservation has been wiped" }
+        check(!wiped) { "Qp StringPage pre-seal route reservation has been wiped" }
     }
 
     private data class RouteAllocation(
@@ -211,7 +211,7 @@ internal class QpTextRouteReservation private constructor(
             val firstPass = allocatePass(candidates, initialNamespace, allocator)
             val verificationPass = allocatePass(candidates, initialNamespace, allocator)
             require(firstPass == verificationPass) {
-                "AKEN StringPage pre-seal route allocator must return deterministic paths"
+                "Qp StringPage pre-seal route allocator must return deterministic paths"
             }
             return QpTextRouteReservation(firstPass)
         }
@@ -225,15 +225,15 @@ internal class QpTextRouteReservation private constructor(
                     logicalBindingPath = candidate.logicalBindingPath,
                 )
             }
-            require(candidates.isNotEmpty()) { "AKEN StringPage pre-seal route candidates are not initialized" }
+            require(candidates.isNotEmpty()) { "Qp StringPage pre-seal route candidates are not initialized" }
             require(candidates.map { it.identityPageKey }.distinct().size == candidates.size) {
-                "AKEN StringPage pre-seal route candidates contain duplicate identity keys"
+                "Qp StringPage pre-seal route candidates contain duplicate identity keys"
             }
             candidates.forEach { candidate ->
                 QpTextRouteCandidateRef.requireValidIdentityPageKey(candidate.identityPageKey)
                 QpRouteCandidateRef.requireValidArtifactEntryPath(
                     value = candidate.logicalBindingPath,
-                    label = "AKEN StringPage pre-seal route candidate logical binding path",
+                    label = "Qp StringPage pre-seal route candidate logical binding path",
                 )
             }
             return candidates.sortedWith(
@@ -247,7 +247,7 @@ internal class QpTextRouteReservation private constructor(
             occupiedEntryPaths.forEach { path ->
                 QpRouteCandidateRef.requireValidArtifactEntryPath(
                     value = path,
-                    label = "AKEN StringPage pre-seal occupied resource path",
+                    label = "Qp StringPage pre-seal occupied resource path",
                 )
                 namespace += path
             }
@@ -277,10 +277,10 @@ internal class QpTextRouteReservation private constructor(
                 }
                 QpRouteCandidateRef.requireValidArtifactEntryPath(
                     value = futureResourcePath,
-                    label = "AKEN StringPage pre-seal allocator output path",
+                    label = "Qp StringPage pre-seal allocator output path",
                 )
                 require(futureResourcePath !in namespace) {
-                    "AKEN StringPage pre-seal allocator output collides with an occupied resource path"
+                    "Qp StringPage pre-seal allocator output collides with an occupied resource path"
                 }
                 namespace += futureResourcePath
                 allocations += RouteAllocation(

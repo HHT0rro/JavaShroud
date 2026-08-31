@@ -6,8 +6,8 @@ import java.util.Arrays
  * Build-only logical method identity captured before final artifact routes,
  * page frames, and the canonical commitment are available.
  *
- * This deliberately identifies the current VBC4 producer instead of trying to
- * reuse a legacy runtime binding as a future AKEN call-site proof. The latter
+ * This deliberately identifies the current Qp VM producer instead of trying to
+ * reuse a legacy runtime binding as a future Qp call-site proof. The latter
  * is minted only after final page routing exists.
  */
 internal data class QpMethodIdentity private constructor(
@@ -23,11 +23,11 @@ internal data class QpMethodIdentity private constructor(
             descriptor: String,
             logicalVmResourcePath: String,
         ): QpMethodIdentity {
-            require(dispatchClassToken.isNotBlank()) { "AKEN VBC4 dispatch class token must not be blank" }
-            require(dispatchMethodToken.isNotBlank()) { "AKEN VBC4 dispatch method token must not be blank" }
-            require(descriptor.isNotBlank()) { "AKEN VBC4 method descriptor must not be blank" }
+            require(dispatchClassToken.isNotBlank()) { "Qp current-format dispatch class token must not be blank" }
+            require(dispatchMethodToken.isNotBlank()) { "Qp current-format dispatch method token must not be blank" }
+            require(descriptor.isNotBlank()) { "Qp current-format method descriptor must not be blank" }
             require(isValidLogicalResourcePath(logicalVmResourcePath)) {
-                "AKEN VBC4 method candidate logical resource path is invalid"
+                "Qp current-format method candidate logical resource path is invalid"
             }
             return QpMethodIdentity(
                 dispatchClassToken = dispatchClassToken,
@@ -46,7 +46,7 @@ internal data class QpMethodIdentity private constructor(
 }
 
 /**
- * Build-only VBC4 method candidate captured before final artifact routes,
+ * Build-only Qp VM method candidate captured before final artifact routes,
  * page frames, and the canonical commitment are available.
  *
  * This owner never retains an evaluator graph, page descriptor, or DEK. A
@@ -73,19 +73,19 @@ internal class QpMethodCandidate private constructor(
     private var wiped: Boolean = false
 
     init {
-        require(logicalIdentityValue.isNotEmpty()) { "AKEN VBC4 method candidate identity must not be empty" }
-        require(serializedProgramValue.isNotEmpty()) { "AKEN VBC4 method candidate program must not be empty" }
+        require(logicalIdentityValue.isNotEmpty()) { "Qp current-format method candidate identity must not be empty" }
+        require(serializedProgramValue.isNotEmpty()) { "Qp current-format method candidate program must not be empty" }
         require((pageZeroEncodedHandleValue == null) == (pageZeroCallSiteProofValue == null)) {
-            "AKEN VBC4 page-zero dispatch binding must include both handle and proof"
+            "Qp current-format page-zero dispatch binding must include both handle and proof"
         }
         pageZeroEncodedHandleValue?.let { encodedHandle ->
             require(encodedHandle.size == QpHandle.ENCODED_HANDLE_SIZE) {
-                "AKEN VBC4 page-zero dispatch handle has an invalid length"
+                "Qp current-format page-zero dispatch handle has an invalid length"
             }
         }
         pageZeroCallSiteProofValue?.let { callSiteProof ->
             require(callSiteProof.isNotEmpty() && callSiteProof.size <= MAX_CALL_SITE_PROOF_SIZE) {
-                "AKEN VBC4 page-zero dispatch proof has an invalid length"
+                "Qp current-format page-zero dispatch proof has an invalid length"
             }
         }
     }
@@ -147,7 +147,7 @@ internal class QpMethodCandidate private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN VBC4 method candidate has been wiped" }
+        check(!wiped) { "Qp current-format method candidate has been wiped" }
     }
 
     companion object {
@@ -161,10 +161,10 @@ internal class QpMethodCandidate private constructor(
             pageZeroEncodedHandle: ByteArray? = null,
             pageZeroCallSiteProof: ByteArray? = null,
         ): QpMethodCandidate {
-            require(logicalIdentity.isNotEmpty()) { "AKEN VBC4 method candidate identity must not be empty" }
-            require(serializedProgram.isNotEmpty()) { "AKEN VBC4 method candidate program must not be empty" }
+            require(logicalIdentity.isNotEmpty()) { "Qp current-format method candidate identity must not be empty" }
+            require(serializedProgram.isNotEmpty()) { "Qp current-format method candidate program must not be empty" }
             require((pageZeroEncodedHandle == null) == (pageZeroCallSiteProof == null)) {
-                "AKEN VBC4 page-zero dispatch binding must include both handle and proof"
+                "Qp current-format page-zero dispatch binding must include both handle and proof"
             }
             return QpMethodCandidate(
                 entryToken = entryToken,

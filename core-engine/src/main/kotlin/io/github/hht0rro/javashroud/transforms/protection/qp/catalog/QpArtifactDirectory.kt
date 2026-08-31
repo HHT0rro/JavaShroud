@@ -312,7 +312,7 @@ class RuntimeBindingDigest(
                 ) {
                     QpDirectoryException.fail(
                         QpDirectoryException.Code.UNSUPPORTED_TARGET,
-                        "unsupported AKEN-R1 runtime target: $value",
+                        "unsupported Qp runtime target: $value",
                     )
                 }
             } finally {
@@ -844,7 +844,7 @@ class QpArtifactPage private constructor(
 
 typealias QpDirectoryEntry = QpArtifactPage
 
-/** Canonically sorted collection of current AKEN-R1 page records. */
+/** Canonically sorted collection of current Qp page records. */
 class QpArtifactDirectory private constructor(
     private var runtimeBindingValue: RuntimeBindingDigest,
     private var entriesValue: MutableList<QpArtifactPage>,
@@ -974,7 +974,7 @@ class QpArtifactDirectory private constructor(
     override fun toString(): String = "QpArtifactDirectory(entries=${entriesValue.size})"
 
     private fun requireLive() {
-        check(!wiped) { "AKEN-R1 artifact directory has been wiped" }
+        check(!wiped) { "Qp artifact directory has been wiped" }
     }
 
     companion object {

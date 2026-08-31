@@ -35,21 +35,21 @@ internal class QpClassPageCandidate private constructor(
     private var wiped: Boolean = false
 
     init {
-        require(logicalIdentityValue.isNotEmpty()) { "AKEN ClassPage candidate identity must not be empty" }
-        require(plaintextValue.isNotEmpty()) { "AKEN ClassPage candidate plaintext must not be empty" }
+        require(logicalIdentityValue.isNotEmpty()) { "Qp ClassPage candidate identity must not be empty" }
+        require(plaintextValue.isNotEmpty()) { "Qp ClassPage candidate plaintext must not be empty" }
         require(callSiteProofValue.isNotEmpty() && callSiteProofValue.size <= MAX_CALL_SITE_PROOF_SIZE) {
-            "AKEN ClassPage candidate call-site proof length is invalid"
+            "Qp ClassPage candidate call-site proof length is invalid"
         }
         require(encodedHandleValue.size == QpHandle.ENCODED_HANDLE_SIZE) {
-            "AKEN ClassPage candidate handle length is invalid"
+            "Qp ClassPage candidate handle length is invalid"
         }
-        require(pageIndex >= 0) { "AKEN ClassPage candidate page index must be non-negative" }
+        require(pageIndex >= 0) { "Qp ClassPage candidate page index must be non-negative" }
         require(targetPageSize in QpPageSizePolicy.DEFAULT.allowedSizes(QpResourceKind.EncryptedClassPage)) {
-            "AKEN ClassPage candidate target size is unsupported"
+            "Qp ClassPage candidate target size is unsupported"
         }
         QpRouteCandidateRef.requireValidArtifactEntryPath(
             value = logicalBindingPath,
-            label = "AKEN ClassPage candidate logical binding path",
+            label = "Qp ClassPage candidate logical binding path",
         )
         validateLayout(layoutVariant)
     }
@@ -104,10 +104,10 @@ internal class QpClassPageCandidate private constructor(
     internal fun toPendingPage(route: QpClassRoute): QpPendingClassPage {
         requireLive()
         require(route.identityPageKey == identityPageKeyForBuild()) {
-            "AKEN ClassPage pre-seal route does not match its candidate identity"
+            "Qp ClassPage pre-seal route does not match its candidate identity"
         }
         require(route.logicalBindingPath == logicalBindingPath) {
-            "AKEN ClassPage pre-seal route does not match its logical binding path"
+            "Qp ClassPage pre-seal route does not match its logical binding path"
         }
         val identity = logicalIdentityValue.copyOf()
         val plaintext = plaintextValue.copyOf()
@@ -150,7 +150,7 @@ internal class QpClassPageCandidate private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN ClassPage candidate has been wiped" }
+        check(!wiped) { "Qp ClassPage candidate has been wiped" }
     }
 
     companion object {
@@ -169,7 +169,7 @@ internal class QpClassPageCandidate private constructor(
         ): QpClassPageCandidate {
             targetPageSize?.let { requestedTargetSize ->
                 require(requestedTargetSize in QpPageSizePolicy.DEFAULT.allowedSizes(QpResourceKind.EncryptedClassPage)) {
-                    "AKEN requested ClassPage target size is unsupported"
+                    "Qp requested ClassPage target size is unsupported"
                 }
             }
             var generatedLayout: QpPageLayout? = null
@@ -207,8 +207,8 @@ internal fun qpClassPageIdentityPageKey(
     logicalIdentity: ByteArray,
     pageIndex: Int,
 ): String {
-    require(logicalIdentity.isNotEmpty()) { "AKEN ClassPage route identity must not be empty" }
-    require(pageIndex >= 0) { "AKEN ClassPage route page index must be non-negative" }
+    require(logicalIdentity.isNotEmpty()) { "Qp ClassPage route identity must not be empty" }
+    require(pageIndex >= 0) { "Qp ClassPage route page index must be non-negative" }
     val digest = MessageDigest.getInstance("SHA-256").apply {
         update(CLASS_PAGE_IDENTITY_KEY_DOMAIN)
         update(QpResourceKind.EncryptedClassPage.id.toByte())

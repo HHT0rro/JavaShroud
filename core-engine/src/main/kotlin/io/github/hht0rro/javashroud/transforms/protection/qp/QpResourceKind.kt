@@ -1,6 +1,6 @@
 package io.github.hht0rro.javashroud.transforms.protection.qp
 
-/** High-value page families protected by the AKEN v4 build plan. */
+/** High-value page families protected by the Qp current format build plan. */
 enum class QpResourceKind(
     val id: Int,
     val logicalName: String,

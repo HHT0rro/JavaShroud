@@ -217,7 +217,7 @@ internal fun derivedVmMagic(): ByteArray =
 
 /**
  * VM program magic is bound to [currentNameSeed] only. Method virtualization
- * serializes VBC4 before the canonical artifact commitment exists; page AEAD
+ * serializes Qp VM before the canonical artifact commitment exists; page AEAD
  * still uses the later commitment. Runtime must therefore derive VM magic
  * without that commitment or nested/high-value pages fail closed on parse.
  */

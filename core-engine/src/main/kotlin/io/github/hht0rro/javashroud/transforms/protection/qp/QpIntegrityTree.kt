@@ -6,7 +6,7 @@ import java.util.Arrays
 import java.util.Base64
 
 /**
- * Merkle integrity mesh for encrypted AKEN pages and native chunks.
+ * Merkle integrity mesh for encrypted Qp pages and native chunks.
  *
  * Leaf hashes always cover the complete supplied payload. Artifact canonical
  * hashing is deliberately separate: only that operation may zero approved root
@@ -30,7 +30,7 @@ class QpIntegrityTree private constructor(
         private val payloadValue: ByteArray = payload.copyOf()
 
         init {
-            require(identityValue.isNotEmpty()) { "AKEN integrity leaf identity must not be empty" }
+            require(identityValue.isNotEmpty()) { "Qp integrity leaf identity must not be empty" }
         }
 
         val identity: ByteArray
@@ -58,11 +58,11 @@ class QpIntegrityTree private constructor(
         private val rootValue: ByteArray = root.copyOf()
 
         init {
-            require(leafIndex >= 0) { "AKEN Merkle proof leaf index must be non-negative" }
-            require(leafDigestValue.size == HASH_SIZE) { "AKEN Merkle leaf digest has an invalid length" }
-            require(siblingValues.size == siblingIsLeftValue.size) { "AKEN Merkle proof path is malformed" }
-            require(siblingValues.all { it.size == HASH_SIZE }) { "AKEN Merkle sibling has an invalid length" }
-            require(rootValue.size == HASH_SIZE) { "AKEN Merkle root has an invalid length" }
+            require(leafIndex >= 0) { "Qp Merkle proof leaf index must be non-negative" }
+            require(leafDigestValue.size == HASH_SIZE) { "Qp Merkle leaf digest has an invalid length" }
+            require(siblingValues.size == siblingIsLeftValue.size) { "Qp Merkle proof path is malformed" }
+            require(siblingValues.all { it.size == HASH_SIZE }) { "Qp Merkle sibling has an invalid length" }
+            require(rootValue.size == HASH_SIZE) { "Qp Merkle root has an invalid length" }
         }
 
         val leafDigest: ByteArray
@@ -152,7 +152,7 @@ class QpIntegrityTree private constructor(
         private val CANONICAL_DOMAIN = "AKEN-v4-artifact-canonical".toByteArray(StandardCharsets.US_ASCII)
 
         fun build(leaves: List<Leaf>): QpIntegrityTree {
-            require(leaves.isNotEmpty()) { "AKEN integrity mesh requires at least one leaf" }
+            require(leaves.isNotEmpty()) { "Qp integrity mesh requires at least one leaf" }
 
             val identityKeys = HashSet<String>()
             val firstLevel = ArrayList<ByteArray>(leaves.size)
@@ -162,9 +162,9 @@ class QpIntegrityTree private constructor(
                     val identity = leaf.copyIdentityForBuild()
                     val payload = leaf.copyPayloadForBuild()
                     try {
-                        require(identity.isNotEmpty()) { "AKEN integrity leaf identity must not be empty" }
+                        require(identity.isNotEmpty()) { "Qp integrity leaf identity must not be empty" }
                         require(identityKeys.add(identityKey(identity))) {
-                            "AKEN integrity mesh contains a duplicate leaf identity"
+                            "Qp integrity mesh contains a duplicate leaf identity"
                         }
                         firstLevel += leafDigest(identity, payload)
                     } finally {
@@ -268,14 +268,14 @@ class QpIntegrityTree private constructor(
             var previous: IntRange? = null
             sorted.forEach { range ->
                 require(range.first >= 0 && range.last >= range.first) {
-                    "AKEN root shard range must be non-negative and ordered"
+                    "Qp root shard range must be non-negative and ordered"
                 }
                 require(range.first < artifactSize && range.last < artifactSize) {
-                    "AKEN root shard range is outside the artifact"
+                    "Qp root shard range is outside the artifact"
                 }
                 val prior = previous
                 require(prior == null || prior.last < range.first) {
-                    "AKEN root shard ranges must not overlap"
+                    "Qp root shard ranges must not overlap"
                 }
                 previous = range
             }

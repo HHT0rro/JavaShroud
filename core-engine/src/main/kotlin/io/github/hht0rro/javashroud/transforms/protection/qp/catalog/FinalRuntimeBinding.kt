@@ -4,7 +4,7 @@ import java.security.MessageDigest
 import java.util.Arrays
 
 /**
- * Final native identity bound into one AKEN-R1 directory.
+ * Final native identity bound into one Qp directory.
  * Digest fields are 32-byte non-zero copies; [payloadProfile] is bounded printable ASCII
  * (production value `qp-rust-ffi-v1`, but other test profiles such as `golden-profile` are allowed).
  */

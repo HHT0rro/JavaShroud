@@ -36,7 +36,7 @@ internal class QpClassRouteCandidateRef private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN ClassPage route candidate ref has been wiped" }
+        check(!wiped) { "Qp ClassPage route candidate ref has been wiped" }
     }
 
     companion object {
@@ -47,7 +47,7 @@ internal class QpClassRouteCandidateRef private constructor(
             requireValidIdentityPageKey(identityPageKey)
             QpRouteCandidateRef.requireValidArtifactEntryPath(
                 value = logicalBindingPath,
-                label = "AKEN ClassPage route candidate logical binding path",
+                label = "Qp ClassPage route candidate logical binding path",
             )
             return QpClassRouteCandidateRef(identityPageKey, logicalBindingPath)
         }
@@ -64,7 +64,7 @@ internal class QpClassRouteCandidateRef private constructor(
                             character == '_'
                     },
             ) {
-                "AKEN ClassPage route candidate identity key is invalid"
+                "Qp ClassPage route candidate identity key is invalid"
             }
         }
 
@@ -119,7 +119,7 @@ internal class QpClassRoute private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN ClassPage pre-seal route has been wiped" }
+        check(!wiped) { "Qp ClassPage pre-seal route has been wiped" }
     }
 
     companion object {
@@ -131,11 +131,11 @@ internal class QpClassRoute private constructor(
             QpClassRouteCandidateRef.requireValidIdentityPageKey(identityPageKey)
             QpRouteCandidateRef.requireValidArtifactEntryPath(
                 value = logicalBindingPath,
-                label = "AKEN ClassPage pre-seal logical binding path",
+                label = "Qp ClassPage pre-seal logical binding path",
             )
             QpRouteCandidateRef.requireValidArtifactEntryPath(
                 value = futureResourcePath,
-                label = "AKEN ClassPage pre-seal future resource path",
+                label = "Qp ClassPage pre-seal future resource path",
             )
             return QpClassRoute(
                 identityPageKeyValue = identityPageKey,
@@ -191,7 +191,7 @@ internal class QpClassRouteReservation private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN ClassPage pre-seal route reservation has been wiped" }
+        check(!wiped) { "Qp ClassPage pre-seal route reservation has been wiped" }
     }
 
     private data class RouteAllocation(
@@ -211,7 +211,7 @@ internal class QpClassRouteReservation private constructor(
             val firstPass = allocatePass(candidates, initialNamespace, allocator)
             val verificationPass = allocatePass(candidates, initialNamespace, allocator)
             require(firstPass == verificationPass) {
-                "AKEN ClassPage pre-seal route allocator must return deterministic paths"
+                "Qp ClassPage pre-seal route allocator must return deterministic paths"
             }
             return QpClassRouteReservation(firstPass)
         }
@@ -225,15 +225,15 @@ internal class QpClassRouteReservation private constructor(
                     logicalBindingPath = candidate.logicalBindingPath,
                 )
             }
-            require(candidates.isNotEmpty()) { "AKEN ClassPage pre-seal route candidates are not initialized" }
+            require(candidates.isNotEmpty()) { "Qp ClassPage pre-seal route candidates are not initialized" }
             require(candidates.map { it.identityPageKey }.distinct().size == candidates.size) {
-                "AKEN ClassPage pre-seal route candidates contain duplicate identity keys"
+                "Qp ClassPage pre-seal route candidates contain duplicate identity keys"
             }
             candidates.forEach { candidate ->
                 QpClassRouteCandidateRef.requireValidIdentityPageKey(candidate.identityPageKey)
                 QpRouteCandidateRef.requireValidArtifactEntryPath(
                     value = candidate.logicalBindingPath,
-                    label = "AKEN ClassPage pre-seal route candidate logical binding path",
+                    label = "Qp ClassPage pre-seal route candidate logical binding path",
                 )
             }
             return candidates.sortedWith(
@@ -247,7 +247,7 @@ internal class QpClassRouteReservation private constructor(
             occupiedEntryPaths.forEach { path ->
                 QpRouteCandidateRef.requireValidArtifactEntryPath(
                     value = path,
-                    label = "AKEN ClassPage pre-seal occupied resource path",
+                    label = "Qp ClassPage pre-seal occupied resource path",
                 )
                 namespace += path
             }
@@ -277,10 +277,10 @@ internal class QpClassRouteReservation private constructor(
                 }
                 QpRouteCandidateRef.requireValidArtifactEntryPath(
                     value = futureResourcePath,
-                    label = "AKEN ClassPage pre-seal allocator output path",
+                    label = "Qp ClassPage pre-seal allocator output path",
                 )
                 require(futureResourcePath !in namespace) {
-                    "AKEN ClassPage pre-seal allocator output collides with an occupied resource path"
+                    "Qp ClassPage pre-seal allocator output collides with an occupied resource path"
                 }
                 namespace += futureResourcePath
                 allocations += RouteAllocation(

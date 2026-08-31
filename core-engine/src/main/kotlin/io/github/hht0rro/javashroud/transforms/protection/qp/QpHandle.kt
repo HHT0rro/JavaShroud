@@ -4,7 +4,7 @@ import java.util.Arrays
 import java.util.Base64
 
 /**
- * Opaque locator for exactly one AKEN page.
+ * Opaque locator for exactly one Qp page.
  *
  * It deliberately carries no catalog or traversal API. Callers can only give
  * this handle back to the build plan that minted it.
@@ -22,15 +22,15 @@ class QpHandle internal constructor(
     private var wiped = false
 
     init {
-        require(pageIndex >= 0) { "AKEN page index must be non-negative" }
+        require(pageIndex >= 0) { "Qp page index must be non-negative" }
         require(encodedValue.size == ENCODED_HANDLE_SIZE) {
-            "AKEN handle encoding has an invalid length"
+            "Qp handle encoding has an invalid length"
         }
         require(locatorValue.size == LOCATOR_TOKEN_SIZE) {
-            "AKEN locator token has an invalid length"
+            "Qp locator token has an invalid length"
         }
         require(fingerprintValue.size == FINGERPRINT_SIZE) {
-            "AKEN evaluator fingerprint has an invalid length"
+            "Qp evaluator fingerprint has an invalid length"
         }
     }
 
@@ -90,7 +90,7 @@ class QpHandle internal constructor(
         "QpHandle(kind=" + resourceKind.logicalName + ", page=" + pageIndex + ")"
 
     private fun requireLive() {
-        check(!wiped) { "AKEN handle has been wiped" }
+        check(!wiped) { "Qp handle has been wiped" }
     }
 
     internal companion object {

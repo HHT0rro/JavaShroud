@@ -7,7 +7,7 @@ import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
 import java.util.Arrays
 
-/** Current-only serializer for one authenticated AKEN-R1 artifact directory. */
+/** Current-only serializer for one authenticated Qp artifact directory. */
 object QpDirectorySerializer {
     const val FORMAT_VERSION: Int = io.github.hht0rro.javashroud.transforms.protection.hardening.ProtectionFormat.CURRENT
     const val DIGEST_SIZE: Int = QP_DIGEST_SIZE
@@ -208,7 +208,7 @@ object QpDirectorySerializer {
     internal const val MAGIC_BYTES_SIZE: Int = 1 + 1 + 16 + 4
 }
 
-/** Strict two-pass parser for one complete current AKEN-R1 directory. */
+/** Strict two-pass parser for one complete current Qp directory. */
 object QpDirectoryParser {
     fun decode(encoded: ByteArray): QpArtifactDirectory = decodeInternal(encoded, null)
 

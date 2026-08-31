@@ -35,21 +35,21 @@ internal class QpNativeSegmentCandidate private constructor(
     private var wiped: Boolean = false
 
     init {
-        require(logicalIdentityValue.isNotEmpty()) { "AKEN NativeChunk candidate identity must not be empty" }
-        require(plaintextValue.isNotEmpty()) { "AKEN NativeChunk candidate plaintext must not be empty" }
+        require(logicalIdentityValue.isNotEmpty()) { "Qp NativeChunk candidate identity must not be empty" }
+        require(plaintextValue.isNotEmpty()) { "Qp NativeChunk candidate plaintext must not be empty" }
         require(callSiteProofValue.isNotEmpty() && callSiteProofValue.size <= MAX_CALL_SITE_PROOF_SIZE) {
-            "AKEN NativeChunk candidate call-site proof length is invalid"
+            "Qp NativeChunk candidate call-site proof length is invalid"
         }
         require(encodedHandleValue.size == QpHandle.ENCODED_HANDLE_SIZE) {
-            "AKEN NativeChunk candidate handle length is invalid"
+            "Qp NativeChunk candidate handle length is invalid"
         }
-        require(pageIndex >= 0) { "AKEN NativeChunk candidate page index must be non-negative" }
+        require(pageIndex >= 0) { "Qp NativeChunk candidate page index must be non-negative" }
         require(targetPageSize in QpPageSizePolicy.DEFAULT.allowedSizes(QpResourceKind.NativeChunk)) {
-            "AKEN NativeChunk candidate target size is unsupported"
+            "Qp NativeChunk candidate target size is unsupported"
         }
         QpRouteCandidateRef.requireValidArtifactEntryPath(
             value = logicalBindingPath,
-            label = "AKEN NativeChunk candidate logical binding path",
+            label = "Qp NativeChunk candidate logical binding path",
         )
         validateLayout(layoutVariant)
     }
@@ -104,10 +104,10 @@ internal class QpNativeSegmentCandidate private constructor(
     internal fun toPendingPage(route: QpNativeRoute): QpPendingNativeSegment {
         requireLive()
         require(route.identityPageKey == identityPageKeyForBuild()) {
-            "AKEN NativeChunk pre-seal route does not match its candidate identity"
+            "Qp NativeChunk pre-seal route does not match its candidate identity"
         }
         require(route.logicalBindingPath == logicalBindingPath) {
-            "AKEN NativeChunk pre-seal route does not match its logical binding path"
+            "Qp NativeChunk pre-seal route does not match its logical binding path"
         }
         val identity = logicalIdentityValue.copyOf()
         val plaintext = plaintextValue.copyOf()
@@ -150,7 +150,7 @@ internal class QpNativeSegmentCandidate private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN NativeChunk candidate has been wiped" }
+        check(!wiped) { "Qp NativeChunk candidate has been wiped" }
     }
 
     companion object {
@@ -169,7 +169,7 @@ internal class QpNativeSegmentCandidate private constructor(
         ): QpNativeSegmentCandidate {
             targetPageSize?.let { requestedTargetSize ->
                 require(requestedTargetSize in QpPageSizePolicy.DEFAULT.allowedSizes(QpResourceKind.NativeChunk)) {
-                    "AKEN requested NativeChunk target size is unsupported"
+                    "Qp requested NativeChunk target size is unsupported"
                 }
             }
             var generatedLayout: QpPageLayout? = null
@@ -207,8 +207,8 @@ internal fun qpNativeSegmentIdentityPageKey(
     logicalIdentity: ByteArray,
     pageIndex: Int,
 ): String {
-    require(logicalIdentity.isNotEmpty()) { "AKEN NativeChunk route identity must not be empty" }
-    require(pageIndex >= 0) { "AKEN NativeChunk route page index must be non-negative" }
+    require(logicalIdentity.isNotEmpty()) { "Qp NativeChunk route identity must not be empty" }
+    require(pageIndex >= 0) { "Qp NativeChunk route page index must be non-negative" }
     val digest = MessageDigest.getInstance("SHA-256").apply {
         update(NATIVE_CHUNK_IDENTITY_KEY_DOMAIN)
         update(QpResourceKind.NativeChunk.id.toByte())

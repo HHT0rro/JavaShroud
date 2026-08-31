@@ -34,23 +34,23 @@ internal class QpPendingNativeSegment private constructor(
     private var wiped: Boolean = false
 
     init {
-        require(logicalIdentityValue.isNotEmpty()) { "AKEN pending NativeChunk identity must not be empty" }
-        require(plaintextValue.isNotEmpty()) { "AKEN pending NativeChunk plaintext must not be empty" }
+        require(logicalIdentityValue.isNotEmpty()) { "Qp pending NativeChunk identity must not be empty" }
+        require(plaintextValue.isNotEmpty()) { "Qp pending NativeChunk plaintext must not be empty" }
         require(callSiteProofValue.isNotEmpty() && callSiteProofValue.size <= MAX_CALL_SITE_PROOF_SIZE) {
-            "AKEN pending NativeChunk call-site proof length is invalid"
+            "Qp pending NativeChunk call-site proof length is invalid"
         }
         require(encodedHandleValue.size == QpHandle.ENCODED_HANDLE_SIZE) {
-            "AKEN pending NativeChunk handle length is invalid"
+            "Qp pending NativeChunk handle length is invalid"
         }
-        require(pageIndex >= 0) { "AKEN pending NativeChunk index must be non-negative" }
-        require(resourceOffset >= 0) { "AKEN pending NativeChunk offset must be non-negative" }
-        require(isValidArtifactPath(resourcePath)) { "AKEN pending NativeChunk resource path is invalid" }
-        require(isValidArtifactPath(logicalBindingPath)) { "AKEN pending NativeChunk logical binding path is invalid" }
+        require(pageIndex >= 0) { "Qp pending NativeChunk index must be non-negative" }
+        require(resourceOffset >= 0) { "Qp pending NativeChunk offset must be non-negative" }
+        require(isValidArtifactPath(resourcePath)) { "Qp pending NativeChunk resource path is invalid" }
+        require(isValidArtifactPath(logicalBindingPath)) { "Qp pending NativeChunk logical binding path is invalid" }
         require(targetPageSize in QpPageSizePolicy.DEFAULT.allowedSizes(QpResourceKind.NativeChunk)) {
-            "AKEN pending NativeChunk target size is unsupported"
+            "Qp pending NativeChunk target size is unsupported"
         }
         validateLayout(layoutVariant)
-        require(expectedStoredLength > 0) { "AKEN pending NativeChunk stored length is invalid" }
+        require(expectedStoredLength > 0) { "Qp pending NativeChunk stored length is invalid" }
     }
 
     val isWiped: Boolean
@@ -152,7 +152,7 @@ internal class QpPendingNativeSegment private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN pending NativeChunk has been wiped" }
+        check(!wiped) { "Qp pending NativeChunk has been wiped" }
     }
 
     companion object {
@@ -178,7 +178,7 @@ internal class QpPendingNativeSegment private constructor(
         ): QpPendingNativeSegment {
             targetPageSize?.let { requestedTargetSize ->
                 require(requestedTargetSize in QpPageSizePolicy.DEFAULT.allowedSizes(QpResourceKind.NativeChunk)) {
-                    "AKEN requested NativeChunk target size is unsupported"
+                    "Qp requested NativeChunk target size is unsupported"
                 }
             }
             var generatedLayout: QpPageLayout? = null

@@ -19,7 +19,7 @@ private val EVALUATOR_WIRE_MARKER = byteArrayOf(0x41, 0x4B, 0x45, 0x31)
 
 /**
  * Build-only evaluator seed for one page. The serialized terminal is an
- * artifact-specific VBC4 program: its fragment count, offsets, opcodes,
+ * artifact-specific Qp VM program: its fragment count, offsets, opcodes,
  * registers, token sizes and dialect are randomized for every page.
  */
 internal class QpBoundCore private constructor(
@@ -42,23 +42,23 @@ internal class QpBoundCore private constructor(
 
     init {
         require(pageNonceValue.size == QpPageCodec.NONCE_SIZE) {
-            "AKEN evaluator page nonce length is invalid"
+            "Qp evaluator page nonce length is invalid"
         }
         require(planNonceValue.size == EVALUATOR_PLAN_NONCE_SIZE) {
-            "AKEN evaluator plan nonce length is invalid"
+            "Qp evaluator plan nonce length is invalid"
         }
-        require(dialectByteValue in 0..0xFF) { "AKEN evaluator dialect byte is invalid" }
+        require(dialectByteValue in 0..0xFF) { "Qp evaluator dialect byte is invalid" }
         require(dialectCommitmentValue.size == EVALUATOR_DIALECT_SIZE) {
-            "AKEN evaluator dialect commitment length is invalid"
+            "Qp evaluator dialect commitment length is invalid"
         }
         require(staticBindingValue.size == EVALUATOR_DIGEST_SIZE) {
-            "AKEN evaluator static binding length is invalid"
+            "Qp evaluator static binding length is invalid"
         }
         require(fragmentsValue.size in EVALUATOR_MIN_FRAGMENT_COUNT..EVALUATOR_MAX_FRAGMENT_COUNT) {
-            "AKEN evaluator fragment count is invalid"
+            "Qp evaluator fragment count is invalid"
         }
         require(hasValidEvaluatorSchedule(fragmentsValue)) {
-            "AKEN evaluator schedule is invalid"
+            "Qp evaluator schedule is invalid"
         }
     }
 
@@ -84,7 +84,7 @@ internal class QpBoundCore private constructor(
         callSiteProof: ByteArray,
     ): QpBoundPlan {
         requireLive()
-        require(callSiteProof.isNotEmpty()) { "AKEN evaluator call-site proof must not be empty" }
+        require(callSiteProof.isNotEmpty()) { "Qp evaluator call-site proof must not be empty" }
         fragmentsValue.forEach { fragment ->
             val expected = QpBoundPlan.fragmentTag(
                 staticBinding = staticBindingValue,
@@ -100,7 +100,7 @@ internal class QpBoundCore private constructor(
             )
             try {
                 require(MessageDigest.isEqual(expected, fragment.tag)) {
-                    "AKEN evaluator fragment authentication failed"
+                    "Qp evaluator fragment authentication failed"
                 }
             } finally {
                 Arrays.fill(expected, 0)
@@ -147,7 +147,7 @@ internal class QpBoundCore private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN evaluator core has been wiped" }
+        check(!wiped) { "Qp evaluator core has been wiped" }
     }
 
     companion object {
@@ -166,13 +166,13 @@ internal class QpBoundCore private constructor(
             random: SecureRandom,
         ): QpBoundCore {
             require(pageNonce.size == QpPageCodec.NONCE_SIZE) {
-                "AKEN evaluator page nonce length is invalid"
+                "Qp evaluator page nonce length is invalid"
             }
             require(evaluatorFingerprint.size == EVALUATOR_DIGEST_SIZE) {
-                "AKEN evaluator fingerprint length is invalid"
+                "Qp evaluator fingerprint length is invalid"
             }
             require(artifactCanonicalCommitment.size == EVALUATOR_DIGEST_SIZE) {
-                "AKEN evaluator artifact commitment length is invalid"
+                "Qp evaluator artifact commitment length is invalid"
             }
             val planNonce = ByteArray(EVALUATOR_PLAN_NONCE_SIZE).also(random::nextBytes)
             val dialectByte = random.nextInt(256)
@@ -376,7 +376,7 @@ internal class QpBoundPlan private constructor(opaque: ByteArray) {
 
         internal fun fromOpaque(opaque: ByteArray): QpBoundPlan {
             require(opaque.isNotEmpty() && opaque.size <= EVALUATOR_MAX_OPAQUE_SIZE) {
-                "AKEN evaluator descriptor length is invalid"
+                "Qp evaluator descriptor length is invalid"
             }
             return QpBoundPlan(opaque)
         }
@@ -436,7 +436,7 @@ internal class QpBoundPlan private constructor(opaque: ByteArray) {
 
         private fun parse(opaque: ByteArray): ParsedEvaluator {
             require(opaque.size <= EVALUATOR_MAX_OPAQUE_SIZE) {
-                "AKEN evaluator descriptor length is invalid"
+                "Qp evaluator descriptor length is invalid"
             }
             val reader = EvaluatorReader(opaque)
             var pageNonce: ByteArray? = null
@@ -448,35 +448,35 @@ internal class QpBoundPlan private constructor(opaque: ByteArray) {
             var planTag: ByteArray? = null
             var completed = false
             try {
-                require(reader.readFixed(EVALUATOR_WIRE_MARKER.size, "AKEN evaluator marker")
+                require(reader.readFixed(EVALUATOR_WIRE_MARKER.size, "Qp evaluator marker")
                     .contentEquals(EVALUATOR_WIRE_MARKER)) {
-                    "AKEN evaluator marker is invalid"
+                    "Qp evaluator marker is invalid"
                 }
-                val dialectByte = reader.readU8("AKEN evaluator dialect")
-                val fragmentCount = reader.readU8("AKEN evaluator fragment count")
+                val dialectByte = reader.readU8("Qp evaluator dialect")
+                val fragmentCount = reader.readU8("Qp evaluator fragment count")
                 require(fragmentCount in EVALUATOR_MIN_FRAGMENT_COUNT..EVALUATOR_MAX_FRAGMENT_COUNT) {
-                    "AKEN evaluator fragment count is invalid"
+                    "Qp evaluator fragment count is invalid"
                 }
-                pageNonce = reader.readFixed(QpPageCodec.NONCE_SIZE, "AKEN evaluator page nonce")
-                planNonce = reader.readFixed(EVALUATOR_PLAN_NONCE_SIZE, "AKEN evaluator plan nonce")
-                staticBinding = reader.readFixed(EVALUATOR_DIGEST_SIZE, "AKEN evaluator static binding")
-                finalBinding = reader.readFixed(EVALUATOR_DIGEST_SIZE, "AKEN evaluator final binding")
-                dialectCommitment = reader.readFixed(EVALUATOR_DIALECT_SIZE, "AKEN evaluator dialect commitment")
+                pageNonce = reader.readFixed(QpPageCodec.NONCE_SIZE, "Qp evaluator page nonce")
+                planNonce = reader.readFixed(EVALUATOR_PLAN_NONCE_SIZE, "Qp evaluator plan nonce")
+                staticBinding = reader.readFixed(EVALUATOR_DIGEST_SIZE, "Qp evaluator static binding")
+                finalBinding = reader.readFixed(EVALUATOR_DIGEST_SIZE, "Qp evaluator final binding")
+                dialectCommitment = reader.readFixed(EVALUATOR_DIALECT_SIZE, "Qp evaluator dialect commitment")
                 repeat(fragmentCount) {
-                    val offset = reader.readU8("AKEN evaluator fragment offset")
-                    val encodedLength = reader.readU8("AKEN evaluator fragment length")
-                    val family = reader.readU8("AKEN evaluator fragment family")
-                    val opcode = reader.readU8("AKEN evaluator fragment opcode")
-                    val register = reader.readU8("AKEN evaluator fragment register")
+                    val offset = reader.readU8("Qp evaluator fragment offset")
+                    val encodedLength = reader.readU8("Qp evaluator fragment length")
+                    val family = reader.readU8("Qp evaluator fragment family")
+                    val opcode = reader.readU8("Qp evaluator fragment opcode")
+                    val register = reader.readU8("Qp evaluator fragment register")
                     require(encodedLength in EVALUATOR_MIN_TOKEN_SIZE..EVALUATOR_MAX_TOKEN_SIZE) {
-                        "AKEN evaluator fragment operand length is invalid"
+                        "Qp evaluator fragment operand length is invalid"
                     }
-                    val token = reader.readFramed(MAX_TOKEN_SIZE, "AKEN evaluator fragment token", false)
-                    require(token.size >= EVALUATOR_MIN_TOKEN_SIZE) { "AKEN evaluator token is invalid" }
-                    val salt = reader.readFixed(EVALUATOR_FRAGMENT_SALT_SIZE, "AKEN evaluator fragment salt")
-                    val encoded = reader.readFramed(MAX_FRAGMENT_SIZE, "AKEN evaluator fragment bytes", false)
-                    require(encoded.size == encodedLength) { "AKEN evaluator fragment length mismatch" }
-                    val tag = reader.readFixed(EVALUATOR_FRAGMENT_TAG_SIZE, "AKEN evaluator fragment tag")
+                    val token = reader.readFramed(MAX_TOKEN_SIZE, "Qp evaluator fragment token", false)
+                    require(token.size >= EVALUATOR_MIN_TOKEN_SIZE) { "Qp evaluator token is invalid" }
+                    val salt = reader.readFixed(EVALUATOR_FRAGMENT_SALT_SIZE, "Qp evaluator fragment salt")
+                    val encoded = reader.readFramed(MAX_FRAGMENT_SIZE, "Qp evaluator fragment bytes", false)
+                    require(encoded.size == encodedLength) { "Qp evaluator fragment length mismatch" }
+                    val tag = reader.readFixed(EVALUATOR_FRAGMENT_TAG_SIZE, "Qp evaluator fragment tag")
                     val expectedTag = fragmentTag(
                         staticBinding = checkNotNull(staticBinding),
                         dialectCommitment = checkNotNull(dialectCommitment),
@@ -491,7 +491,7 @@ internal class QpBoundPlan private constructor(opaque: ByteArray) {
                     )
                     try {
                         require(MessageDigest.isEqual(tag, expectedTag)) {
-                            "AKEN evaluator fragment authentication failed"
+                            "Qp evaluator fragment authentication failed"
                         }
                     } finally {
                         Arrays.fill(expectedTag, 0)
@@ -511,14 +511,14 @@ internal class QpBoundPlan private constructor(opaque: ByteArray) {
                     Arrays.fill(encoded, 0)
                     Arrays.fill(tag, 0)
                 }
-                require(hasValidEvaluatorSchedule(fragments)) { "AKEN evaluator schedule is invalid" }
+                require(hasValidEvaluatorSchedule(fragments)) { "Qp evaluator schedule is invalid" }
                 val tagOffset = reader.offset
-                planTag = reader.readFixed(PLAN_TAG_SIZE, "AKEN evaluator seal")
-                reader.requireFullyRead("AKEN evaluator descriptor")
+                planTag = reader.readFixed(PLAN_TAG_SIZE, "Qp evaluator seal")
+                reader.requireFullyRead("Qp evaluator descriptor")
                 val expectedPlanTag = digest(PLAN_TAG_DOMAIN) { update(opaque, 0, tagOffset) }
                 try {
                     require(MessageDigest.isEqual(checkNotNull(planTag), expectedPlanTag)) {
-                        "AKEN evaluator descriptor authentication failed"
+                        "Qp evaluator descriptor authentication failed"
                     }
                 } finally {
                     Arrays.fill(expectedPlanTag, 0)
@@ -530,7 +530,7 @@ internal class QpBoundPlan private constructor(opaque: ByteArray) {
                 )
                 try {
                     require(MessageDigest.isEqual(expectedDialect, checkNotNull(dialectCommitment))) {
-                        "AKEN evaluator dialect commitment is invalid"
+                        "Qp evaluator dialect commitment is invalid"
                     }
                 } finally {
                     Arrays.fill(expectedDialect, 0)
@@ -571,23 +571,23 @@ internal class QpBoundPlan private constructor(opaque: ByteArray) {
             planNonce: ByteArray,
             dialectByte: Int,
         ): ByteArray {
-            require(logicalIdentity.isNotEmpty()) { "AKEN evaluator logical identity must not be empty" }
-            require(pageIndex >= 0) { "AKEN evaluator page index is invalid" }
+            require(logicalIdentity.isNotEmpty()) { "Qp evaluator logical identity must not be empty" }
+            require(pageIndex >= 0) { "Qp evaluator page index is invalid" }
             require(targetPageSize in QpPageSizePolicy.DEFAULT.allowedSizes(resourceKind)) {
-                "AKEN evaluator target page size is invalid"
+                "Qp evaluator target page size is invalid"
             }
-            require(encodedHandle.size == QpHandle.ENCODED_HANDLE_SIZE) { "AKEN evaluator handle size is invalid" }
-            require(locatorToken.size == QpHandle.LOCATOR_TOKEN_SIZE) { "AKEN evaluator locator size is invalid" }
-            require(evaluatorFingerprint.size == EVALUATOR_DIGEST_SIZE) { "AKEN evaluator fingerprint size is invalid" }
-            require(artifactCanonicalCommitment.size == EVALUATOR_DIGEST_SIZE) { "AKEN evaluator artifact commitment size is invalid" }
-            require(pageNonce.size == QpPageCodec.NONCE_SIZE) { "AKEN evaluator page nonce size is invalid" }
-            require(planNonce.size == EVALUATOR_PLAN_NONCE_SIZE) { "AKEN evaluator plan nonce size is invalid" }
-            require(dialectByte in 0..0xFF) { "AKEN evaluator dialect byte is invalid" }
+            require(encodedHandle.size == QpHandle.ENCODED_HANDLE_SIZE) { "Qp evaluator handle size is invalid" }
+            require(locatorToken.size == QpHandle.LOCATOR_TOKEN_SIZE) { "Qp evaluator locator size is invalid" }
+            require(evaluatorFingerprint.size == EVALUATOR_DIGEST_SIZE) { "Qp evaluator fingerprint size is invalid" }
+            require(artifactCanonicalCommitment.size == EVALUATOR_DIGEST_SIZE) { "Qp evaluator artifact commitment size is invalid" }
+            require(pageNonce.size == QpPageCodec.NONCE_SIZE) { "Qp evaluator page nonce size is invalid" }
+            require(planNonce.size == EVALUATOR_PLAN_NONCE_SIZE) { "Qp evaluator plan nonce size is invalid" }
+            require(dialectByte in 0..0xFF) { "Qp evaluator dialect byte is invalid" }
             val codecBytes = QpPageCodec.normalizeCodecVariant(codecVariant).toByteArray(Charsets.UTF_8)
             val layout = QpPageLayout.fromVariant(layoutVariant)
             var layoutBytes: ByteArray? = null
             try {
-                require(layout.variant == layoutVariant) { "AKEN evaluator layout variant is not canonical" }
+                require(layout.variant == layoutVariant) { "Qp evaluator layout variant is not canonical" }
                 layoutBytes = layout.variant.toByteArray(Charsets.UTF_8)
                 return digest(STATIC_BINDING_DOMAIN) {
                     update(dialectByte.toByte())
@@ -632,7 +632,7 @@ internal class QpBoundPlan private constructor(opaque: ByteArray) {
             dialectCommitment: ByteArray,
             fragments: List<EvaluatorFragmentRecord>,
         ): ByteArray {
-            require(hasValidEvaluatorSchedule(fragments)) { "AKEN evaluator schedule is invalid" }
+            require(hasValidEvaluatorSchedule(fragments)) { "Qp evaluator schedule is invalid" }
             return digest(MATERIALIZE_DOMAIN) {
                 update(staticBinding)
                 update(dialectCommitment)
@@ -840,7 +840,7 @@ private class EvaluatorReader(private val bytes: ByteArray) {
     }
 
     fun readFixed(length: Int, label: String): ByteArray {
-        require(length >= 0) { "AKEN evaluator fixed length is invalid" }
+        require(length >= 0) { "Qp evaluator fixed length is invalid" }
         requireRemaining(length, label)
         return bytes.copyOfRange(offset, offset + length).also { offset += length }
     }

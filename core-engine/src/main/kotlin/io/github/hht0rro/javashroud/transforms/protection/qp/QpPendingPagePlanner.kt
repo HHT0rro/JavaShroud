@@ -5,25 +5,25 @@ import java.security.MessageDigest
 import java.util.Arrays
 
 /**
- * Converts one build-only serialized VBC4 method candidate into contiguous
- * pending AKEN pages for one already-reserved container route.
+ * Converts one build-only serialized Qp VM method candidate into contiguous
+ * pending Qp pages for one already-reserved container route.
  *
- * VBC4's public outer frame is divided without decrypting its constant pool,
+ * Qp VM's public outer frame is divided without decrypting its constant pool,
  * physical block payloads, or exception payload. The first page owns the
  * method-frame prefix through its first physical block cluster; middle pages
  * own only complete physical block clusters; the final page owns its final
  * cluster plus the authenticated frame suffix. Concatenating the pending-page
- * plaintexts in page-index order therefore reproduces the original VBC4
+ * plaintexts in page-index order therefore reproduces the original Qp VM
  * serialization byte-for-byte, while no physical block is split.
  *
  * This is a build-only hand-off. It neither writes an artifact entry nor
- * initializes an AKEN build plan, emits a native locator, changes a runtime
+ * initializes an Qp build plan, emits a native locator, changes a runtime
  * dispatcher, or exposes a runtime page enumeration API.
  */
 internal object QpPendingPagePlanner {
     /**
-     * Uses a build CSPRNG for independent VBC4 physical-block target selection
-     * and for each pending page's AKEN frame variant.
+     * Uses a build CSPRNG for independent Qp VM physical-block target selection
+     * and for each pending page's Qp frame variant.
      *
      * [callSiteProofForPage] transfers ownership of every returned byte array
      * to this method. Each array is copied into the pending page and cleared
@@ -48,7 +48,7 @@ internal object QpPendingPagePlanner {
         }
 
     /**
-     * Testable form of [partitionAndWipe] with explicit per-page VBC4 target
+     * Testable form of [partitionAndWipe] with explicit per-page Qp VM target
      * selection. Production callers should use the CSPRNG-selected overload.
      */
     internal fun partitionAndWipe(
@@ -78,16 +78,16 @@ internal object QpPendingPagePlanner {
         random: SecureRandom,
     ): QpPendingPageBatch {
         require(candidate.entryToken == route.entryToken) {
-            "AKEN VBC4 pending-page route entry token does not match its candidate"
+            "Qp current-format pending-page route entry token does not match its candidate"
         }
         require(candidate.logicalMethod.logicalVmResourcePath == route.logicalVmResourcePath) {
-            "AKEN VBC4 pending-page route logical resource path does not match its candidate"
+            "Qp current-format pending-page route logical resource path does not match its candidate"
         }
         require(blockPlan.entryToken == candidate.entryToken) {
-            "AKEN VBC4 block-cluster plan entry token does not match its candidate"
+            "Qp current-format block-cluster plan entry token does not match its candidate"
         }
         require(blockPlan.logicalVmResourcePath == candidate.logicalMethod.logicalVmResourcePath) {
-            "AKEN VBC4 block-cluster plan logical resource path does not match its candidate"
+            "Qp current-format block-cluster plan logical resource path does not match its candidate"
         }
 
         var serializedProgram: ByteArray? = null
@@ -100,20 +100,20 @@ internal object QpPendingPagePlanner {
             logicalIdentity = candidate.copyLogicalIdentityForBuild()
             val source = checkNotNull(serializedProgram)
             require(source.size == blockPlan.serializedLength) {
-                "AKEN VBC4 block-cluster plan serialized length drifted from its candidate"
+                "Qp current-format block-cluster plan serialized length drifted from its candidate"
             }
 
             var expectedSerializedStart = 0
             var nextResourceOffset = 0
             blockPlan.clusters.forEachIndexed { ordinal, cluster ->
                 require(cluster.pageIndex == ordinal) {
-                    "AKEN VBC4 block-cluster page indices are not contiguous"
+                    "Qp current-format block-cluster page indices are not contiguous"
                 }
                 require(
                     cluster.encodedStart >= blockPlan.blockRegionStart &&
                         cluster.encodedEndExclusive <= blockPlan.blockRegionEndExclusive,
                 ) {
-                    "AKEN VBC4 block-cluster range is outside its physical block region"
+                    "Qp current-format block-cluster range is outside its physical block region"
                 }
 
                 val serializedStart = if (ordinal == 0) 0 else cluster.encodedStart
@@ -123,15 +123,15 @@ internal object QpPendingPagePlanner {
                     cluster.encodedEndExclusive
                 }
                 require(serializedStart == expectedSerializedStart) {
-                    "AKEN VBC4 pending-page slices are not contiguous"
+                    "Qp current-format pending-page slices are not contiguous"
                 }
                 require(serializedEndExclusive > serializedStart && serializedEndExclusive <= source.size) {
-                    "AKEN VBC4 pending-page slice is outside its serialized method"
+                    "Qp current-format pending-page slice is outside its serialized method"
                 }
                 val prefixLength = cluster.encodedStart - serializedStart
                 val suffixLength = serializedEndExclusive - cluster.encodedEndExclusive
                 require(prefixLength >= 0 && suffixLength >= 0) {
-                    "AKEN VBC4 pending-page frame ownership is invalid"
+                    "Qp current-format pending-page frame ownership is invalid"
                 }
 
                 val partition = QpPagePartition(
@@ -162,7 +162,7 @@ internal object QpPendingPagePlanner {
                                 checkNotNull(callSiteProof),
                             ),
                         ) {
-                            "AKEN VBC4 page-zero dispatch proof drifted from the pending page proof"
+                            "Qp current-format page-zero dispatch proof drifted from the pending page proof"
                         }
                     } else {
                         callSiteProof = derivedCallSiteProof
@@ -184,7 +184,7 @@ internal object QpPendingPagePlanner {
                     pendingPages += pending
                     val nextOffset = nextResourceOffset.toLong() + pending.expectedStoredLength.toLong()
                     require(nextOffset <= Int.MAX_VALUE.toLong()) {
-                        "AKEN VBC4 pending-page container exceeds JVM bounds"
+                        "Qp current-format pending-page container exceeds JVM bounds"
                     }
                     nextResourceOffset = nextOffset.toInt()
                     partitions += partition
@@ -197,7 +197,7 @@ internal object QpPendingPagePlanner {
                 expectedSerializedStart = serializedEndExclusive
             }
             require(expectedSerializedStart == source.size) {
-                "AKEN VBC4 pending-page slices do not cover the serialized method"
+                "Qp current-format pending-page slices do not cover the serialized method"
             }
             return QpPendingPageBatch.create(
                 entryToken = candidate.entryToken,
@@ -219,7 +219,7 @@ internal object QpPendingPagePlanner {
 }
 
 /**
- * Build-only metadata for one serialized VBC4 slice. The structure describes
+ * Build-only metadata for one serialized Qp VM slice. The structure describes
  * ownership of public outer-frame bytes only; it never retains the bytes,
  * page plaintext, DEK, handle, descriptor, locator record, evaluator graph,
  * or final artifact commitment.
@@ -237,24 +237,24 @@ internal data class QpPagePartition(
     val frameSuffixLength: Int,
 ) {
     init {
-        require(pageIndex >= 0) { "AKEN VBC4 page partition index must be non-negative" }
+        require(pageIndex >= 0) { "Qp current-format page partition index must be non-negative" }
         require(QpBlockClusterPlanner.isSupportedTargetSize(targetSize)) {
-            "AKEN VBC4 page partition target size is unsupported"
+            "Qp current-format page partition target size is unsupported"
         }
         require(firstStorageBlockOrdinal >= 0 && lastStorageBlockOrdinal >= firstStorageBlockOrdinal) {
-            "AKEN VBC4 page partition storage ordinals are invalid"
+            "Qp current-format page partition storage ordinals are invalid"
         }
         require(encodedBlockStart >= 0 && encodedBlockEndExclusive > encodedBlockStart) {
-            "AKEN VBC4 page partition physical block range is invalid"
+            "Qp current-format page partition physical block range is invalid"
         }
         require(serializedStart >= 0 && serializedEndExclusive > serializedStart) {
-            "AKEN VBC4 page partition serialized range is invalid"
+            "Qp current-format page partition serialized range is invalid"
         }
         require(
             encodedBlockStart == serializedStart + framePrefixLength &&
                 encodedBlockEndExclusive + frameSuffixLength == serializedEndExclusive,
         ) {
-            "AKEN VBC4 page partition frame ownership does not close around its block cluster"
+            "Qp current-format page partition frame ownership does not close around its block cluster"
         }
     }
 
@@ -266,7 +266,7 @@ internal data class QpPagePartition(
 }
 
 /**
- * Short-lived owner for all pending pages of one VBC4 method container.
+ * Short-lived owner for all pending pages of one Qp VM method container.
  *
  * The batch exposes only non-secret partition geometry until it is consumed.
  * [consumePendingPagesForBuild] transfers the private pending pages to one
@@ -288,10 +288,10 @@ internal class QpPendingPageBatch private constructor(
     private var wiped: Boolean = false
 
     init {
-        require(resourcePathValue.isNotBlank()) { "AKEN VBC4 pending-page batch resource path is blank" }
-        require(serializedLengthValue > 0) { "AKEN VBC4 pending-page batch serialized length is invalid" }
+        require(resourcePathValue.isNotBlank()) { "Qp current-format pending-page batch resource path is blank" }
+        require(serializedLengthValue > 0) { "Qp current-format pending-page batch serialized length is invalid" }
         require(partitionsValue.isNotEmpty() && partitionsValue.size == pagesValue.size) {
-            "AKEN VBC4 pending-page batch page count is invalid"
+            "Qp current-format pending-page batch page count is invalid"
         }
         validateOwnership()
     }
@@ -311,7 +311,7 @@ internal class QpPendingPageBatch private constructor(
             return resourcePathValue
         }
 
-    /** Build-only immutable copy of the VBC4 ownership geometry. */
+    /** Build-only immutable copy of the Qp VM ownership geometry. */
     fun partitionsForBuild(): List<QpPagePartition> {
         requireLive()
         return partitionsValue.toList()
@@ -362,37 +362,37 @@ internal class QpPendingPageBatch private constructor(
             val partition = partitionsValue[index]
             val page = pagesValue[index]
             require(partition.pageIndex == expectedPageIndex++) {
-                "AKEN VBC4 pending-page batch page indices are not contiguous"
+                "Qp current-format pending-page batch page indices are not contiguous"
             }
             require(partition.serializedStart == expectedSerializedStart) {
-                "AKEN VBC4 pending-page batch serialized ranges are not contiguous"
+                "Qp current-format pending-page batch serialized ranges are not contiguous"
             }
             expectedSerializedStart = partition.serializedEndExclusive
             require(page.entryToken == entryTokenValue) {
-                "AKEN VBC4 pending-page batch entry-token binding drifted"
+                "Qp current-format pending-page batch entry-token binding drifted"
             }
             require(page.resourcePath == resourcePathValue) {
-                "AKEN VBC4 pending-page batch resource path binding drifted"
+                "Qp current-format pending-page batch resource path binding drifted"
             }
             require(page.pageIndex == partition.pageIndex) {
-                "AKEN VBC4 pending-page batch page index binding drifted"
+                "Qp current-format pending-page batch page index binding drifted"
             }
             require(page.resourceOffset == expectedResourceOffset) {
-                "AKEN VBC4 pending-page batch physical page offsets are not contiguous"
+                "Qp current-format pending-page batch physical page offsets are not contiguous"
             }
             val nextOffset = expectedResourceOffset.toLong() + page.expectedStoredLength.toLong()
             require(nextOffset <= Int.MAX_VALUE.toLong()) {
-                "AKEN VBC4 pending-page batch container exceeds JVM bounds"
+                "Qp current-format pending-page batch container exceeds JVM bounds"
             }
             expectedResourceOffset = nextOffset.toInt()
         }
         require(expectedSerializedStart == serializedLengthValue) {
-            "AKEN VBC4 pending-page batch does not cover its serialized method"
+            "Qp current-format pending-page batch does not cover its serialized method"
         }
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN VBC4 pending-page batch has been wiped" }
+        check(!wiped) { "Qp current-format pending-page batch has been wiped" }
     }
 
     companion object {

@@ -4,11 +4,11 @@ import java.util.Collections
 import java.util.LinkedHashSet
 
 /**
- * Minimal build-only projection used while reserving future VBC4 page-container
+ * Minimal build-only projection used while reserving future Qp VM page-container
  * routes before sealing assigns the artifact namespace.
  *
  * The projection intentionally carries only the dispatcher entry token and the
- * logical VBC4 resource identity. It is scoped and invalidated after use so a
+ * logical Qp VM resource identity. It is scoped and invalidated after use so a
  * routing allocator never receives a serialized method program or page state.
  */
 internal class QpRouteCandidateRef private constructor(
@@ -40,7 +40,7 @@ internal class QpRouteCandidateRef private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN VBC4 route candidate ref has been wiped" }
+        check(!wiped) { "Qp current-format route candidate ref has been wiped" }
     }
 
     companion object {
@@ -50,7 +50,7 @@ internal class QpRouteCandidateRef private constructor(
         ): QpRouteCandidateRef {
             requireValidArtifactEntryPath(
                 value = logicalVmResourcePath,
-                label = "AKEN VBC4 route candidate logical resource path",
+                label = "Qp current-format route candidate logical resource path",
             )
             return QpRouteCandidateRef(
                 entryTokenValue = entryToken,
@@ -91,7 +91,7 @@ internal fun interface QpPreSealRouteAllocator {
 }
 
 /**
- * One sealed-name reservation for a VBC4 method entry.
+ * One sealed-name reservation for a Qp VM method entry.
  *
  * The result retains the entry token and logical resource identity so a later
  * sealing pass can re-check the binding before it consumes the future
@@ -135,7 +135,7 @@ internal class QpPreSealRoute private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN VBC4 pre-seal route has been wiped" }
+        check(!wiped) { "Qp current-format pre-seal route has been wiped" }
     }
 
     companion object {
@@ -153,7 +153,7 @@ internal class QpPreSealRoute private constructor(
 }
 
 /**
- * Pure pre-seal reservation of future VBC4 page-container paths.
+ * Pure pre-seal reservation of future Qp VM page-container paths.
  *
  * This object is build-only. It validates the supplied candidate projection,
  * invokes the sealing-owned allocator in a canonical order, validates the
@@ -204,7 +204,7 @@ internal class QpPreSealRouteReservation private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN VBC4 pre-seal route reservation has been wiped" }
+        check(!wiped) { "Qp current-format pre-seal route reservation has been wiped" }
     }
 
     private data class RouteAllocation(
@@ -215,7 +215,7 @@ internal class QpPreSealRouteReservation private constructor(
 
     companion object {
         /**
-         * Reserve one future container path per unique VBC4 entry token.
+         * Reserve one future container path per unique Qp VM entry token.
          *
          * [allocator] is intentionally injected by the sealing layer. It must
          * be pure for a candidate, ordinal, and reserved namespace; this method
@@ -231,7 +231,7 @@ internal class QpPreSealRouteReservation private constructor(
             val firstPass = allocatePass(candidates, initialNamespace, allocator)
             val verificationPass = allocatePass(candidates, initialNamespace, allocator)
             require(firstPass == verificationPass) {
-                "AKEN VBC4 pre-seal route allocator must return deterministic paths"
+                "Qp current-format pre-seal route allocator must return deterministic paths"
             }
             return QpPreSealRouteReservation(
                 routes = firstPass,
@@ -247,17 +247,17 @@ internal class QpPreSealRouteReservation private constructor(
                     logicalVmResourcePath = candidate.logicalVmResourcePath,
                 )
             }
-            require(candidates.isNotEmpty()) { "AKEN VBC4 pre-seal route candidates are not initialized" }
+            require(candidates.isNotEmpty()) { "Qp current-format pre-seal route candidates are not initialized" }
             require(candidates.map { candidate -> candidate.entryToken }.distinct().size == candidates.size) {
-                "AKEN VBC4 pre-seal route candidates contain duplicate entry tokens"
+                "Qp current-format pre-seal route candidates contain duplicate entry tokens"
             }
             require(candidates.map { candidate -> candidate.logicalVmResourcePath }.distinct().size == candidates.size) {
-                "AKEN VBC4 pre-seal route candidates contain duplicate logical resource paths"
+                "Qp current-format pre-seal route candidates contain duplicate logical resource paths"
             }
             candidates.forEach { candidate ->
                 QpRouteCandidateRef.requireValidArtifactEntryPath(
                     value = candidate.logicalVmResourcePath,
-                    label = "AKEN VBC4 pre-seal route candidate logical resource path",
+                    label = "Qp current-format pre-seal route candidate logical resource path",
                 )
             }
             return candidates.sortedWith(
@@ -271,7 +271,7 @@ internal class QpPreSealRouteReservation private constructor(
             occupiedEntryPaths.forEach { path ->
                 QpRouteCandidateRef.requireValidArtifactEntryPath(
                     value = path,
-                    label = "AKEN VBC4 pre-seal occupied resource path",
+                    label = "Qp current-format pre-seal occupied resource path",
                 )
                 namespace += path
             }
@@ -301,10 +301,10 @@ internal class QpPreSealRouteReservation private constructor(
                 }
                 QpRouteCandidateRef.requireValidArtifactEntryPath(
                     value = futureContainerPath,
-                    label = "AKEN VBC4 pre-seal allocator output path",
+                    label = "Qp current-format pre-seal allocator output path",
                 )
                 require(futureContainerPath !in namespace) {
-                    "AKEN VBC4 pre-seal allocator output collides with an occupied resource path"
+                    "Qp current-format pre-seal allocator output collides with an occupied resource path"
                 }
                 namespace += futureContainerPath
                 allocations += RouteAllocation(

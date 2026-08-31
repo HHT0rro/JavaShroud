@@ -1,6 +1,6 @@
 package io.github.hht0rro.javashroud.transforms.protection.qp.catalog
 
-/** Strict failure reported by the current AKEN-R1 artifact-directory codec. */
+/** Strict failure reported by the current Qp artifact-directory codec. */
 class QpDirectoryException(
     val code: Code,
     message: String,

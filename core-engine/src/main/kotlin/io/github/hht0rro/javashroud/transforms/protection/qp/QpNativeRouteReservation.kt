@@ -36,7 +36,7 @@ internal class QpNativeRouteCandidateRef private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN NativeChunk route candidate ref has been wiped" }
+        check(!wiped) { "Qp NativeChunk route candidate ref has been wiped" }
     }
 
     companion object {
@@ -47,7 +47,7 @@ internal class QpNativeRouteCandidateRef private constructor(
             requireValidIdentityPageKey(identityPageKey)
             QpRouteCandidateRef.requireValidArtifactEntryPath(
                 value = logicalBindingPath,
-                label = "AKEN NativeChunk route candidate logical binding path",
+                label = "Qp NativeChunk route candidate logical binding path",
             )
             return QpNativeRouteCandidateRef(identityPageKey, logicalBindingPath)
         }
@@ -64,7 +64,7 @@ internal class QpNativeRouteCandidateRef private constructor(
                             character == '_'
                     },
             ) {
-                "AKEN NativeChunk route candidate identity key is invalid"
+                "Qp NativeChunk route candidate identity key is invalid"
             }
         }
 
@@ -119,7 +119,7 @@ internal class QpNativeRoute private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN NativeChunk pre-seal route has been wiped" }
+        check(!wiped) { "Qp NativeChunk pre-seal route has been wiped" }
     }
 
     companion object {
@@ -131,11 +131,11 @@ internal class QpNativeRoute private constructor(
             QpNativeRouteCandidateRef.requireValidIdentityPageKey(identityPageKey)
             QpRouteCandidateRef.requireValidArtifactEntryPath(
                 value = logicalBindingPath,
-                label = "AKEN NativeChunk pre-seal logical binding path",
+                label = "Qp NativeChunk pre-seal logical binding path",
             )
             QpRouteCandidateRef.requireValidArtifactEntryPath(
                 value = futureResourcePath,
-                label = "AKEN NativeChunk pre-seal future resource path",
+                label = "Qp NativeChunk pre-seal future resource path",
             )
             return QpNativeRoute(
                 identityPageKeyValue = identityPageKey,
@@ -191,7 +191,7 @@ internal class QpNativeRouteReservation private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN NativeChunk pre-seal route reservation has been wiped" }
+        check(!wiped) { "Qp NativeChunk pre-seal route reservation has been wiped" }
     }
 
     private data class RouteAllocation(
@@ -211,7 +211,7 @@ internal class QpNativeRouteReservation private constructor(
             val firstPass = allocatePass(candidates, initialNamespace, allocator)
             val verificationPass = allocatePass(candidates, initialNamespace, allocator)
             require(firstPass == verificationPass) {
-                "AKEN NativeChunk pre-seal route allocator must return deterministic paths"
+                "Qp NativeChunk pre-seal route allocator must return deterministic paths"
             }
             return QpNativeRouteReservation(firstPass)
         }
@@ -225,15 +225,15 @@ internal class QpNativeRouteReservation private constructor(
                     logicalBindingPath = candidate.logicalBindingPath,
                 )
             }
-            require(candidates.isNotEmpty()) { "AKEN NativeChunk pre-seal route candidates are not initialized" }
+            require(candidates.isNotEmpty()) { "Qp NativeChunk pre-seal route candidates are not initialized" }
             require(candidates.map { it.identityPageKey }.distinct().size == candidates.size) {
-                "AKEN NativeChunk pre-seal route candidates contain duplicate identity keys"
+                "Qp NativeChunk pre-seal route candidates contain duplicate identity keys"
             }
             candidates.forEach { candidate ->
                 QpNativeRouteCandidateRef.requireValidIdentityPageKey(candidate.identityPageKey)
                 QpRouteCandidateRef.requireValidArtifactEntryPath(
                     value = candidate.logicalBindingPath,
-                    label = "AKEN NativeChunk pre-seal route candidate logical binding path",
+                    label = "Qp NativeChunk pre-seal route candidate logical binding path",
                 )
             }
             return candidates.sortedWith(
@@ -247,7 +247,7 @@ internal class QpNativeRouteReservation private constructor(
             occupiedEntryPaths.forEach { path ->
                 QpRouteCandidateRef.requireValidArtifactEntryPath(
                     value = path,
-                    label = "AKEN NativeChunk pre-seal occupied resource path",
+                    label = "Qp NativeChunk pre-seal occupied resource path",
                 )
                 namespace += path
             }
@@ -277,10 +277,10 @@ internal class QpNativeRouteReservation private constructor(
                 }
                 QpRouteCandidateRef.requireValidArtifactEntryPath(
                     value = futureResourcePath,
-                    label = "AKEN NativeChunk pre-seal allocator output path",
+                    label = "Qp NativeChunk pre-seal allocator output path",
                 )
                 require(futureResourcePath !in namespace) {
-                    "AKEN NativeChunk pre-seal allocator output collides with an occupied resource path"
+                    "Qp NativeChunk pre-seal allocator output collides with an occupied resource path"
                 }
                 namespace += futureResourcePath
                 allocations += RouteAllocation(

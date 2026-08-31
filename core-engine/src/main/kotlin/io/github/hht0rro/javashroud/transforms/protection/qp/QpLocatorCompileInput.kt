@@ -5,7 +5,7 @@ import java.security.MessageDigest
 import java.util.Arrays
 
 /**
- * Build-only native compiler input for one exact AKEN v4 high-value page.
+ * Build-only native compiler input for one exact Qp current format high-value page.
  *
  * This owner serializes one current-page locator record for the native
  * compilation phase. It is intentionally not a Java runtime locator, a
@@ -51,30 +51,30 @@ internal class QpLocatorCompileInput private constructor(
     private var wiped: Boolean = false
 
     init {
-        require(pageIndex >= 0) { "AKEN native page locator page index must be non-negative" }
+        require(pageIndex >= 0) { "Qp native page locator page index must be non-negative" }
         require(resourcePath.isNotBlank() && '\u0000' !in resourcePath && '\\' !in resourcePath) {
-            "AKEN native page locator resource path is invalid"
+            "Qp native page locator resource path is invalid"
         }
         require(resourceOffset >= 0 && storedLength > 0) {
-            "AKEN native page locator route bounds are invalid"
+            "Qp native page locator route bounds are invalid"
         }
         require(encodedHandleValue.size == QpHandle.ENCODED_HANDLE_SIZE) {
-            "AKEN native page locator handle length is invalid"
+            "Qp native page locator handle length is invalid"
         }
         require(nativeEnvelopeValue.isNotEmpty() && nativeEnvelopeValue.size <= MAX_ENVELOPE_BYTES) {
-            "AKEN native page locator envelope length is invalid"
+            "Qp native page locator envelope length is invalid"
         }
         require(resolvedDescriptorValue.isNotEmpty() && resolvedDescriptorValue.size <= MAX_DESCRIPTOR_BYTES) {
-            "AKEN native page locator descriptor length is invalid"
+            "Qp native page locator descriptor length is invalid"
         }
         require(routeEncodingValue.isNotEmpty() && routeEncodingValue.size <= MAX_ROUTE_BYTES) {
-            "AKEN native page locator route length is invalid"
+            "Qp native page locator route length is invalid"
         }
         require(pageBindingDigestValue.size == PAGE_BINDING_DIGEST_SIZE) {
-            "AKEN native page locator page-binding digest length is invalid"
+            "Qp native page locator page-binding digest length is invalid"
         }
         require(recordBindingValue.size == RECORD_BINDING_SIZE) {
-            "AKEN native page locator record binding length is invalid"
+            "Qp native page locator record binding length is invalid"
         }
         verifyStaticBindings()
     }
@@ -111,7 +111,7 @@ internal class QpLocatorCompileInput private constructor(
 
     /**
      * Returns the public page-specific binding digest for this one current
-     * page. VBC4 carries its state-layout digest here; typed non-VBC4 records
+     * page. Qp VM carries its state-layout digest here; typed non-Qp VM records
      * carry their handle/route binding. It is integrity metadata, never a DEK
      * or root key.
      */
@@ -138,7 +138,7 @@ internal class QpLocatorCompileInput private constructor(
             out.write(recordBindingValue)
             out.toByteArray().also { encoded ->
                 require(encoded.size <= MAX_COMPILER_RECORD_BYTES) {
-                    "AKEN native page locator compiler record exceeds its bounded size"
+                    "Qp native page locator compiler record exceeds its bounded size"
                 }
             }
         }
@@ -219,23 +219,23 @@ internal class QpLocatorCompileInput private constructor(
         try {
             descriptor = QpPageDescriptor.decode(resolvedDescriptorValue)
             require(descriptor.resourceKind == resourceKind && descriptor.pageIndex == pageIndex) {
-                "AKEN native page locator descriptor identity is invalid"
+                "Qp native page locator descriptor identity is invalid"
             }
             route = descriptor.route.encode()
             require(MessageDigest.isEqual(route, routeEncodingValue)) {
-                "AKEN native page locator descriptor route binding is invalid"
+                "Qp native page locator descriptor route binding is invalid"
             }
             require(
                 descriptor.route.resourcePath == resourcePath &&
                     descriptor.route.resourceOffset == resourceOffset &&
                     descriptor.route.storedLength == storedLength,
-            ) { "AKEN native page locator route metadata is invalid" }
+            ) { "Qp native page locator route metadata is invalid" }
 
             handle = descriptor.handle
             val descriptorHandle = handle.encoded
             try {
                 require(MessageDigest.isEqual(descriptorHandle, encodedHandleValue)) {
-                    "AKEN native page locator handle binding is invalid"
+                    "Qp native page locator handle binding is invalid"
                 }
             } finally {
                 Arrays.fill(descriptorHandle, 0)
@@ -252,7 +252,7 @@ internal class QpLocatorCompileInput private constructor(
                         rawCallSiteProof = proof,
                         descriptor = descriptor,
                     ),
-                ) { "AKEN native page locator envelope binding is invalid" }
+                ) { "Qp native page locator envelope binding is invalid" }
             } finally {
                 Arrays.fill(proof, 0)
             }
@@ -268,7 +268,7 @@ internal class QpLocatorCompileInput private constructor(
                 pageBindingDigest = pageBindingDigestValue,
             )
             require(MessageDigest.isEqual(expectedBinding, recordBindingValue)) {
-                "AKEN native page locator compiler record binding is invalid"
+                "Qp native page locator compiler record binding is invalid"
             }
         } finally {
             route?.let { Arrays.fill(it, 0) }
@@ -279,7 +279,7 @@ internal class QpLocatorCompileInput private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN native page locator compiler input has been wiped" }
+        check(!wiped) { "Qp native page locator compiler input has been wiped" }
     }
 
     companion object {
@@ -293,7 +293,7 @@ internal class QpLocatorCompileInput private constructor(
             "native-page-locator-compile-input".toByteArray(Charsets.US_ASCII)
 
         /**
-         * Converts one independently materialized VBC4 page into native compile
+         * Converts one independently materialized Qp VM page into native compile
          * input. The resulting object owns fresh copies and can therefore
          * outlive the immediately adjacent emission owner until the native
          * compiler consumes it.
@@ -301,10 +301,10 @@ internal class QpLocatorCompileInput private constructor(
         @JvmSynthetic
         fun fromQpEmission(
             emission: QpPageEmission,
-            vbc4StateBindingLayoutDigest: ByteArray,
+            pageStateBindingLayoutDigest: ByteArray,
         ): QpLocatorCompileInput {
-            require(vbc4StateBindingLayoutDigest.size == PAGE_BINDING_DIGEST_SIZE) {
-                "AKEN native page locator VBC4 state-binding layout digest length is invalid"
+            require(pageStateBindingLayoutDigest.size == PAGE_BINDING_DIGEST_SIZE) {
+                "Qp native page locator Qp VM state-binding layout digest length is invalid"
             }
             var descriptorBytes: ByteArray? = null
             var routeBytes: ByteArray? = null
@@ -319,10 +319,10 @@ internal class QpLocatorCompileInput private constructor(
                 descriptorBytes = emission.copyDescriptorBytesForBuild()
                 descriptor = QpPageDescriptor.decode(descriptorBytes)
                 require(descriptor.resourceKind == QpResourceKind.QpMethod) {
-                    "AKEN native page locator requires a VBC4 descriptor"
+                    "Qp native page locator requires a Qp VM descriptor"
                 }
                 require(descriptor.pageIndex == emission.pageIndex) {
-                    "AKEN native page locator descriptor page index is invalid"
+                    "Qp native page locator descriptor page index is invalid"
                 }
 
                 val route = descriptor.route
@@ -330,17 +330,17 @@ internal class QpLocatorCompileInput private constructor(
                     route.resourcePath == emission.resourcePath &&
                         route.resourceOffset == emission.resourceOffset &&
                         route.storedLength == emission.storedLength,
-                ) { "AKEN native page locator emission route is invalid" }
+                ) { "Qp native page locator emission route is invalid" }
 
                 rawCallSiteProof = emission.copyCallSiteProofForBuild()
                 descriptorProof = descriptor.proof.callSiteProof
                 require(MessageDigest.isEqual(rawCallSiteProof, descriptorProof)) {
-                    "AKEN native page locator call-site proof is invalid"
+                    "Qp native page locator call-site proof is invalid"
                 }
 
                 handle = emission.copyHandleForBuild()
                 require(descriptor.matches(handle)) {
-                    "AKEN native page locator handle does not match descriptor"
+                    "Qp native page locator handle does not match descriptor"
                 }
                 encodedHandle = handle.encoded
                 envelope = QpPageEnvelope.create(
@@ -363,7 +363,7 @@ internal class QpLocatorCompileInput private constructor(
                     nativeEnvelope = envelopeBytes,
                     resolvedDescriptor = descriptorBytes,
                     routeEncoding = routeBytes,
-                    pageBindingDigest = vbc4StateBindingLayoutDigest,
+                    pageBindingDigest = pageStateBindingLayoutDigest,
                 )
             } finally {
                 descriptorBytes?.let { Arrays.fill(it, 0) }
@@ -379,7 +379,7 @@ internal class QpLocatorCompileInput private constructor(
 
         /**
          * Converts one already-materialized typed page into native compiler
-         * input.  The entry token is derived only from the exact non-VBC4
+         * input.  The entry token is derived only from the exact non-Qp VM
          * kind/page/handle tuple so the typed JNI bridge does not need to accept
          * a caller-controlled token.
          */
@@ -389,7 +389,7 @@ internal class QpLocatorCompileInput private constructor(
             rawCallSiteProof: ByteArray,
         ): QpLocatorCompileInput {
             require(descriptor.resourceKind != QpResourceKind.QpMethod) {
-                "AKEN typed native page locator does not apply to VBC4"
+                "Qp typed native page locator does not apply to Qp VM"
             }
             var descriptorBytes: ByteArray? = null
             var routeBytes: ByteArray? = null
@@ -404,17 +404,17 @@ internal class QpLocatorCompileInput private constructor(
                 descriptorBytes = descriptor.encode()
                 val resolvedDescriptor = QpPageDescriptor.decode(descriptorBytes)
                 require(resolvedDescriptor.resourceKind != QpResourceKind.QpMethod) {
-                    "AKEN typed native page locator requires a non-VBC4 descriptor"
+                    "Qp typed native page locator requires a non-Qp VM descriptor"
                 }
                 copiedProof = rawCallSiteProof.copyOf()
                 descriptorProof = resolvedDescriptor.proof.callSiteProof
                 require(MessageDigest.isEqual(copiedProof, descriptorProof)) {
-                    "AKEN typed native page locator call-site proof is invalid"
+                    "Qp typed native page locator call-site proof is invalid"
                 }
 
                 handle = resolvedDescriptor.handle
                 require(resolvedDescriptor.matches(handle)) {
-                    "AKEN typed native page locator handle does not match descriptor"
+                    "Qp typed native page locator handle does not match descriptor"
                 }
                 encodedHandle = handle.encoded
                 val route = resolvedDescriptor.route

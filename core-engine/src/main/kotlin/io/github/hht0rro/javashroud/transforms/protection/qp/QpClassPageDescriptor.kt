@@ -6,7 +6,7 @@ import java.util.Arrays
 import java.util.Base64
 
 /**
- * Build-only, class-local routing descriptor for AKEN EncryptedClassPage
+ * Build-only, class-local routing descriptor for Qp EncryptedClassPage
  * material.  It describes exactly one logical class and deliberately contains
  * no resource path, DEK, evaluator state, catalog entry, or cross-class index.
  *
@@ -23,13 +23,13 @@ internal class QpClassPageDescriptor private constructor(
     private var wiped: Boolean = false
 
     init {
-        require(isValidQpClassPageInternalName(internalName)) { "AKEN ClassPage descriptor internal name is invalid" }
+        require(isValidQpClassPageInternalName(internalName)) { "Qp ClassPage descriptor internal name is invalid" }
         require(pagesValue.isNotEmpty() && pagesValue.size <= MAX_PAGE_COUNT) {
-            "AKEN ClassPage descriptor page count is invalid"
+            "Qp ClassPage descriptor page count is invalid"
         }
         pagesValue.forEachIndexed { expectedIndex, page ->
             require(page.pageIndex == expectedIndex) {
-                "AKEN ClassPage descriptor pages must use contiguous zero-based indices"
+                "Qp ClassPage descriptor pages must use contiguous zero-based indices"
             }
         }
     }
@@ -73,7 +73,7 @@ internal class QpClassPageDescriptor private constructor(
         requireLive()
         val nameBytes = internalName.toByteArray(Charsets.UTF_8)
         require(nameBytes.size in 1..MAX_INTERNAL_NAME_BYTES) {
-            "AKEN ClassPage descriptor internal name encoding is invalid"
+            "Qp ClassPage descriptor internal name encoding is invalid"
         }
         val output = ByteArrayOutputStream(nameBytes.size + pagesValue.size * MIN_PAGE_RECORD_BYTES + 4)
         try {
@@ -94,7 +94,7 @@ internal class QpClassPageDescriptor private constructor(
                 }
             }
             return output.toByteArray().also { encoded ->
-                require(encoded.size <= MAX_ENCODED_SIZE) { "AKEN ClassPage descriptor encoding is too large" }
+                require(encoded.size <= MAX_ENCODED_SIZE) { "Qp ClassPage descriptor encoding is too large" }
             }
         } finally {
             Arrays.fill(nameBytes, 0)
@@ -108,7 +108,7 @@ internal class QpClassPageDescriptor private constructor(
     fun copyBase64UrlChunksForBuild(maxChunkChars: Int = DEFAULT_BASE64_CHUNK_CHARS): List<String> {
         requireLive()
         require(maxChunkChars in MIN_BASE64_CHUNK_CHARS..MAX_BASE64_CHUNK_CHARS) {
-            "AKEN ClassPage descriptor Base64 chunk limit is invalid"
+            "Qp ClassPage descriptor Base64 chunk limit is invalid"
         }
         val encoded = copyEncodedForBuild()
         return try {
@@ -140,7 +140,7 @@ internal class QpClassPageDescriptor private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN ClassPage descriptor has been wiped" }
+        check(!wiped) { "Qp ClassPage descriptor has been wiped" }
     }
 
     companion object {
@@ -174,7 +174,7 @@ internal class QpClassPageDescriptor private constructor(
          */
         fun resourcePathForInternalNameForBuild(internalName: String): String {
             require(isValidQpClassPageInternalName(internalName)) {
-                "AKEN ClassPage descriptor internal name is invalid"
+                "Qp ClassPage descriptor internal name is invalid"
             }
             val digest = descriptorDigest(DESCRIPTOR_ROUTE_DOMAIN, internalName)
             return try {
@@ -187,7 +187,7 @@ internal class QpClassPageDescriptor private constructor(
         /** Strictly decodes one class-local descriptor; trailing data is rejected. */
         fun decodeForBuild(encoded: ByteArray): QpClassPageDescriptor {
             require(encoded.isNotEmpty() && encoded.size <= MAX_ENCODED_SIZE) {
-                "AKEN ClassPage descriptor encoding length is invalid"
+                "Qp ClassPage descriptor encoding length is invalid"
             }
             val reader = DescriptorReader(encoded)
             val nameBytes = reader.readExact(reader.readUnsignedShort("internal name length"), "internal name")
@@ -196,15 +196,15 @@ internal class QpClassPageDescriptor private constructor(
             } finally {
                 Arrays.fill(nameBytes, 0)
             }
-            require(isValidQpClassPageInternalName(internalName)) { "AKEN ClassPage descriptor internal name is invalid" }
+            require(isValidQpClassPageInternalName(internalName)) { "Qp ClassPage descriptor internal name is invalid" }
             val pageCount = reader.readUnsignedShort("page count")
-            require(pageCount in 1..MAX_PAGE_COUNT) { "AKEN ClassPage descriptor page count is invalid" }
+            require(pageCount in 1..MAX_PAGE_COUNT) { "Qp ClassPage descriptor page count is invalid" }
             val pages = ArrayList<QpClassPageDescriptorPage>(pageCount)
             try {
                 repeat(pageCount) { expectedIndex ->
                     val pageIndex = reader.readInt("page index")
                     require(pageIndex == expectedIndex) {
-                        "AKEN ClassPage descriptor pages must use contiguous zero-based indices"
+                        "Qp ClassPage descriptor pages must use contiguous zero-based indices"
                     }
                     val handle = reader.readExact(QpHandle.ENCODED_HANDLE_SIZE, "page handle")
                     val proof = reader.readExact(reader.readUnsignedShort("call-site proof length"), "call-site proof")
@@ -219,7 +219,7 @@ internal class QpClassPageDescriptor private constructor(
                         Arrays.fill(proof, 0)
                     }
                 }
-                require(reader.isAtEnd) { "AKEN ClassPage descriptor has trailing bytes" }
+                require(reader.isAtEnd) { "Qp ClassPage descriptor has trailing bytes" }
                 return QpClassPageDescriptor(internalName, pages)
             } catch (error: Throwable) {
                 pages.forEach { it.wipe() }
@@ -242,12 +242,12 @@ internal class QpClassPageDescriptorPage private constructor(
     private var wiped: Boolean = false
 
     init {
-        require(pageIndex >= 0) { "AKEN ClassPage descriptor page index is invalid" }
+        require(pageIndex >= 0) { "Qp ClassPage descriptor page index is invalid" }
         require(encodedHandleValue.size == QpHandle.ENCODED_HANDLE_SIZE) {
-            "AKEN ClassPage descriptor handle length is invalid"
+            "Qp ClassPage descriptor handle length is invalid"
         }
         require(callSiteProofValue.isNotEmpty() && callSiteProofValue.size <= MAX_CALL_SITE_PROOF_SIZE) {
-            "AKEN ClassPage descriptor call-site proof length is invalid"
+            "Qp ClassPage descriptor call-site proof length is invalid"
         }
     }
 
@@ -281,7 +281,7 @@ internal class QpClassPageDescriptorPage private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN ClassPage descriptor page binding has been wiped" }
+        check(!wiped) { "Qp ClassPage descriptor page binding has been wiped" }
     }
 
     companion object {
@@ -330,7 +330,7 @@ private fun MessageDigest.updateDescriptorInt(value: Int) {
 }
 
 private fun descriptorRouteFromDigest(digest: ByteArray): String {
-    require(digest.size >= 3) { "AKEN ClassPage descriptor route digest is invalid" }
+    require(digest.size >= 3) { "Qp ClassPage descriptor route digest is invalid" }
     val token = Base64.getUrlEncoder().withoutPadding().encodeToString(digest)
     val root = DESCRIPTOR_ROUTE_ROOTS[(digest[0].toInt() and 0xFF) % DESCRIPTOR_ROUTE_ROOTS.size]
     val prefixLength = 2 + ((digest[1].toInt() and 0xFF) % 3)
@@ -349,7 +349,7 @@ internal fun isValidQpClassPageInternalName(value: String): Boolean {
 }
 
 private fun writeUnsignedShort(output: ByteArrayOutputStream, value: Int) {
-    require(value in 0..0xFFFF) { "AKEN ClassPage descriptor unsigned-short value is invalid" }
+    require(value in 0..0xFFFF) { "Qp ClassPage descriptor unsigned-short value is invalid" }
     output.write((value ushr 8) and 0xFF)
     output.write(value and 0xFF)
 }
@@ -386,12 +386,12 @@ private class DescriptorReader(private val source: ByteArray) {
     }
 
     fun readExact(size: Int, label: String): ByteArray {
-        require(size >= 0) { "AKEN ClassPage descriptor $label size is invalid" }
+        require(size >= 0) { "Qp ClassPage descriptor $label size is invalid" }
         requireRemaining(size, label)
         return source.copyOfRange(offset, offset + size).also { offset += size }
     }
 
     private fun requireRemaining(size: Int, label: String) {
-        require(size <= source.size - offset) { "AKEN ClassPage descriptor $label is truncated" }
+        require(size <= source.size - offset) { "Qp ClassPage descriptor $label is truncated" }
     }
 }

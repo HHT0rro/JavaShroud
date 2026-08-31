@@ -6,7 +6,7 @@ import java.security.MessageDigest
 import java.util.Arrays
 
 /**
- * One final artifact entry in AKEN v4's build-only canonical representation.
+ * One final artifact entry in Qp current format's build-only canonical representation.
  *
  * The entry makes a defensive copy of its bytes. It represents final output
  * data only; it does not retain or expose any page DEK.
@@ -19,7 +19,7 @@ class QpArtifactEntry(
 
     init {
         require(name.isNotEmpty() && '\u0000' !in name) {
-            "AKEN artifact entry name must be non-empty and NUL-free"
+            "Qp artifact entry name must be non-empty and NUL-free"
         }
     }
 
@@ -44,10 +44,10 @@ data class QpRootShardRange(
 ) {
     init {
         require(entryName.isNotEmpty() && '\u0000' !in entryName) {
-            "AKEN root shard entry name must be non-empty and NUL-free"
+            "Qp root shard entry name must be non-empty and NUL-free"
         }
-        require(offset >= 0) { "AKEN root shard offset must be non-negative" }
-        require(length > 0) { "AKEN root shard length must be positive" }
+        require(offset >= 0) { "Qp root shard offset must be non-negative" }
+        require(length > 0) { "Qp root shard length must be positive" }
     }
 
     internal val endExclusive: Long
@@ -57,7 +57,7 @@ data class QpRootShardRange(
 /**
  * The only byte classes which may be zeroed in the canonical artifact view.
  *
- * [HighValuePayload] covers the complete physical bytes of one AKEN page. It
+ * [HighValuePayload] covers the complete physical bytes of one Qp page. It
  * breaks `canonical commitment -> AEAD AAD -> encrypted page -> canonical
  * commitment` without making those bytes unauthenticated: the page remains a
  * full-payload [QpIntegrityTree] leaf.
@@ -90,10 +90,10 @@ data class QpCanonicalExclusionRange(
 ) {
     init {
         require(entryName.isNotEmpty() && '\u0000' !in entryName) {
-            "AKEN canonical exclusion entry name must be non-empty and NUL-free"
+            "Qp canonical exclusion entry name must be non-empty and NUL-free"
         }
-        require(offset >= 0) { "AKEN canonical exclusion offset must be non-negative" }
-        require(length > 0) { "AKEN canonical exclusion length must be positive" }
+        require(offset >= 0) { "Qp canonical exclusion offset must be non-negative" }
+        require(length > 0) { "Qp canonical exclusion length must be positive" }
     }
 
     internal val endExclusive: Long
@@ -119,13 +119,13 @@ class QpCanonicalReservation(
 
     init {
         require(entryName.isNotEmpty() && '\u0000' !in entryName) {
-            "AKEN canonical reservation entry name must be non-empty and NUL-free"
+            "Qp canonical reservation entry name must be non-empty and NUL-free"
         }
         require(rootShardRanges.all { it.entryName == entryName }) {
-            "AKEN canonical reservation root shard entry name mismatch"
+            "Qp canonical reservation root shard entry name mismatch"
         }
         require(selfReferentialRanges.all { it.entryName == entryName }) {
-            "AKEN canonical reservation exclusion entry name mismatch"
+            "Qp canonical reservation exclusion entry name mismatch"
         }
     }
 
@@ -141,7 +141,7 @@ class QpCanonicalReservation(
 /**
  * SHA-256 over a writer-equivalent, sorted stable `(name, bytes)` entry set.
  *
- * AKEN v4 computes this value exactly once, before encrypting a high-value
+ * Qp current format computes this value exactly once, before encrypting a high-value
  * page. The writer reserves exact final entry names, lengths, and ranges for
  * every self-referential page payload/descriptor and every root shard. Hashing
  * replaces only those declared ranges with zeroes; all other final bytes remain
@@ -163,7 +163,7 @@ class QpArtifactCommitment private constructor(
     private val selfReferentialRangesValue = selfReferentialRanges.toList()
 
     init {
-        require(digestValue.size == DIGEST_SIZE) { "AKEN artifact commitment must be 32 bytes" }
+        require(digestValue.size == DIGEST_SIZE) { "Qp artifact commitment must be 32 bytes" }
     }
 
     val bytes: ByteArray
@@ -210,7 +210,7 @@ class QpArtifactCommitment private constructor(
      */
     internal fun copyExpectedRootShardBytesForBuild(range: QpRootShardRange): ByteArray {
         val rangeIndex = rootShardRangesValue.indexOf(range)
-        require(rangeIndex >= 0) { "AKEN root shard range is not declared by this commitment" }
+        require(rangeIndex >= 0) { "Qp root shard range is not declared by this commitment" }
         return deriveRootShard(range, rangeIndex)
     }
 
@@ -351,7 +351,7 @@ class QpArtifactCommitment private constructor(
             val entriesByName = linkedMapOf<String, QpArtifactEntry>()
             entries.forEach { entry ->
                 require(entriesByName.put(entry.name, entry) == null) {
-                    "AKEN artifact commitment rejects duplicate entry name: ${entry.name}"
+                    "Qp artifact commitment rejects duplicate entry name: ${entry.name}"
                 }
             }
             val normalizedRootShards = normalizeRootShardRanges(entriesByName, rootShardRanges.toList())
@@ -403,14 +403,14 @@ class QpArtifactCommitment private constructor(
             var previous: QpRootShardRange? = null
             sorted.forEach { range ->
                 val entry = entriesByName[range.entryName]
-                    ?: throw IllegalArgumentException("AKEN root shard range references missing entry: ${range.entryName}")
+                    ?: throw IllegalArgumentException("Qp root shard range references missing entry: ${range.entryName}")
                 require(range.endExclusive <= entry.byteSize.toLong()) {
-                    "AKEN root shard range exceeds entry bounds: ${range.entryName}@${range.offset}+${range.length}"
+                    "Qp root shard range exceeds entry bounds: ${range.entryName}@${range.offset}+${range.length}"
                 }
                 val prior = previous
                 if (prior != null && prior.entryName == range.entryName) {
                     require(prior.endExclusive <= range.offset.toLong()) {
-                        "AKEN root shard ranges must not overlap in entry: ${range.entryName}"
+                        "Qp root shard ranges must not overlap in entry: ${range.entryName}"
                     }
                 }
                 previous = range
@@ -434,16 +434,16 @@ class QpArtifactCommitment private constructor(
             sorted.forEach { range ->
                 val entry = entriesByName[range.entryName]
                     ?: throw IllegalArgumentException(
-                        "AKEN canonical exclusion references missing entry: ${range.entryName}",
+                        "Qp canonical exclusion references missing entry: ${range.entryName}",
                     )
                 require(range.endExclusive <= entry.byteSize.toLong()) {
-                    "AKEN canonical exclusion exceeds entry bounds: " +
+                    "Qp canonical exclusion exceeds entry bounds: " +
                         "${range.entryName}@${range.offset}+${range.length}"
                 }
                 val prior = previous
                 if (prior != null && prior.entryName == range.entryName) {
                     require(prior.endExclusive <= range.offset.toLong()) {
-                        "AKEN canonical exclusions must not overlap in entry: ${range.entryName}"
+                        "Qp canonical exclusions must not overlap in entry: ${range.entryName}"
                     }
                 }
                 previous = range
@@ -479,14 +479,14 @@ class QpArtifactCommitment private constructor(
             var previous: CanonicalZeroRange? = null
             sorted.forEach { range ->
                 val entry = entriesByName[range.entryName]
-                    ?: throw IllegalArgumentException("AKEN canonical zero range references missing entry: ${range.entryName}")
+                    ?: throw IllegalArgumentException("Qp canonical zero range references missing entry: ${range.entryName}")
                 require(range.endExclusive <= entry.byteSize.toLong()) {
-                    "AKEN canonical zero range exceeds entry bounds: ${range.entryName}@${range.offset}+${range.length}"
+                    "Qp canonical zero range exceeds entry bounds: ${range.entryName}@${range.offset}+${range.length}"
                 }
                 val prior = previous
                 if (prior != null && prior.entryName == range.entryName) {
                     require(prior.endExclusive <= range.offset.toLong()) {
-                        "AKEN root shard and self-referential ranges must not overlap in entry: ${range.entryName}"
+                        "Qp root shard and self-referential ranges must not overlap in entry: ${range.entryName}"
                     }
                 }
                 previous = range
@@ -582,12 +582,12 @@ class QpLeafIdentity private constructor(
     private val logicalIdentityValue = logicalIdentity.copyOf()
 
     init {
-        require(pageIndex >= 0) { "AKEN leaf page index must be non-negative" }
-        require(handleEncodingValue.size == QpHandle.ENCODED_HANDLE_SIZE) { "AKEN leaf handle length is invalid" }
-        require(locatorTokenValue.size == QpHandle.LOCATOR_TOKEN_SIZE) { "AKEN leaf locator length is invalid" }
-        require(evaluatorFingerprintValue.size == QpHandle.FINGERPRINT_SIZE) { "AKEN leaf fingerprint length is invalid" }
+        require(pageIndex >= 0) { "Qp leaf page index must be non-negative" }
+        require(handleEncodingValue.size == QpHandle.ENCODED_HANDLE_SIZE) { "Qp leaf handle length is invalid" }
+        require(locatorTokenValue.size == QpHandle.LOCATOR_TOKEN_SIZE) { "Qp leaf locator length is invalid" }
+        require(evaluatorFingerprintValue.size == QpHandle.FINGERPRINT_SIZE) { "Qp leaf fingerprint length is invalid" }
         require(logicalIdentityValue.isNotEmpty() && logicalIdentityValue.size <= MAX_LOGICAL_IDENTITY_SIZE) {
-            "AKEN leaf logical identity length is invalid"
+            "Qp leaf logical identity length is invalid"
         }
     }
 
@@ -693,15 +693,15 @@ class QpLeafIdentity private constructor(
 
         fun decode(encoded: ByteArray): QpLeafIdentity {
             val reader = QpMetadataReader(encoded)
-            val kind = QpResourceKind.fromId(reader.readUnsignedByte("AKEN leaf resource kind"))
-                ?: throw IllegalArgumentException("unknown AKEN leaf resource kind")
-            val page = reader.readInt("AKEN leaf page index")
-            val handle = reader.readFixed(QpHandle.ENCODED_HANDLE_SIZE, "AKEN leaf handle")
-            val locator = reader.readFixed(QpHandle.LOCATOR_TOKEN_SIZE, "AKEN leaf locator")
-            val fingerprint = reader.readFixed(QpHandle.FINGERPRINT_SIZE, "AKEN leaf fingerprint")
-            val logical = reader.readFramed(MAX_LOGICAL_IDENTITY_SIZE, "AKEN leaf logical identity", allowEmpty = false)
+            val kind = QpResourceKind.fromId(reader.readUnsignedByte("Qp leaf resource kind"))
+                ?: throw IllegalArgumentException("unknown Qp leaf resource kind")
+            val page = reader.readInt("Qp leaf page index")
+            val handle = reader.readFixed(QpHandle.ENCODED_HANDLE_SIZE, "Qp leaf handle")
+            val locator = reader.readFixed(QpHandle.LOCATOR_TOKEN_SIZE, "Qp leaf locator")
+            val fingerprint = reader.readFixed(QpHandle.FINGERPRINT_SIZE, "Qp leaf fingerprint")
+            val logical = reader.readFramed(MAX_LOGICAL_IDENTITY_SIZE, "Qp leaf logical identity", allowEmpty = false)
             return try {
-                reader.requireFullyRead("AKEN leaf identity")
+                reader.requireFullyRead("Qp leaf identity")
                 of(kind, page, handle, locator, fingerprint, logical)
             } finally {
                 Arrays.fill(handle, 0)
@@ -733,17 +733,17 @@ class QpProofMetadata private constructor(
     private val callSiteProofValue = callSiteProof.copyOf()
 
     init {
-        require(artifactCommitmentValue.size == QpArtifactCommitment.DIGEST_SIZE) { "AKEN proof commitment length is invalid" }
-        require(meshRootValue.size == QpArtifactCommitment.DIGEST_SIZE) { "AKEN proof root length is invalid" }
-        require(leafDigestValue.size == QpArtifactCommitment.DIGEST_SIZE) { "AKEN proof leaf length is invalid" }
+        require(artifactCommitmentValue.size == QpArtifactCommitment.DIGEST_SIZE) { "Qp proof commitment length is invalid" }
+        require(meshRootValue.size == QpArtifactCommitment.DIGEST_SIZE) { "Qp proof root length is invalid" }
+        require(leafDigestValue.size == QpArtifactCommitment.DIGEST_SIZE) { "Qp proof leaf length is invalid" }
         require(siblingsValue.size == siblingIsLeftValue.size && siblingsValue.size <= MAX_MERKLE_DEPTH) {
-            "AKEN proof sibling count is invalid"
+            "Qp proof sibling count is invalid"
         }
         require(siblingsValue.all { it.size == QpArtifactCommitment.DIGEST_SIZE }) {
-            "AKEN proof sibling length is invalid"
+            "Qp proof sibling length is invalid"
         }
         require(callSiteProofValue.isNotEmpty() && callSiteProofValue.size <= MAX_CALL_SITE_PROOF_SIZE) {
-            "AKEN call-site proof length is invalid"
+            "Qp call-site proof length is invalid"
         }
         validateVariant(codecVariant, "codec")
         validateVariant(layoutVariant, "layout")
@@ -812,26 +812,26 @@ class QpProofMetadata private constructor(
             var callSiteProof: ByteArray? = null
             val siblings = ArrayList<ByteArray>()
             return try {
-                identityBytes = reader.readFramed(MAX_LEAF_IDENTITY_ENCODING_SIZE, "AKEN proof leaf identity", allowEmpty = false)
+                identityBytes = reader.readFramed(MAX_LEAF_IDENTITY_ENCODING_SIZE, "Qp proof leaf identity", allowEmpty = false)
                 val identity = QpLeafIdentity.decode(checkNotNull(identityBytes))
-                commitment = reader.readFixed(QpArtifactCommitment.DIGEST_SIZE, "AKEN proof commitment")
-                root = reader.readFixed(QpArtifactCommitment.DIGEST_SIZE, "AKEN proof root")
-                leaf = reader.readFixed(QpArtifactCommitment.DIGEST_SIZE, "AKEN proof leaf")
-                val siblingCount = reader.readInt("AKEN proof sibling count")
-                require(siblingCount in 0..MAX_MERKLE_DEPTH) { "AKEN proof sibling count is invalid" }
+                commitment = reader.readFixed(QpArtifactCommitment.DIGEST_SIZE, "Qp proof commitment")
+                root = reader.readFixed(QpArtifactCommitment.DIGEST_SIZE, "Qp proof root")
+                leaf = reader.readFixed(QpArtifactCommitment.DIGEST_SIZE, "Qp proof leaf")
+                val siblingCount = reader.readInt("Qp proof sibling count")
+                require(siblingCount in 0..MAX_MERKLE_DEPTH) { "Qp proof sibling count is invalid" }
                 val directions = ArrayList<Boolean>(siblingCount)
                 repeat(siblingCount) {
-                    siblings += reader.readFixed(QpArtifactCommitment.DIGEST_SIZE, "AKEN proof sibling")
-                    directions += when (reader.readUnsignedByte("AKEN proof direction")) {
+                    siblings += reader.readFixed(QpArtifactCommitment.DIGEST_SIZE, "Qp proof sibling")
+                    directions += when (reader.readUnsignedByte("Qp proof direction")) {
                         0 -> false
                         1 -> true
-                        else -> throw IllegalArgumentException("AKEN proof direction is invalid")
+                        else -> throw IllegalArgumentException("Qp proof direction is invalid")
                     }
                 }
-                callSiteProof = reader.readFramed(MAX_CALL_SITE_PROOF_SIZE, "AKEN call-site proof", allowEmpty = false)
-                val codec = reader.readString(MAX_VARIANT_SIZE, "AKEN codec variant")
-                val layout = reader.readString(MAX_VARIANT_SIZE, "AKEN layout variant")
-                reader.requireFullyRead("AKEN proof")
+                callSiteProof = reader.readFramed(MAX_CALL_SITE_PROOF_SIZE, "Qp call-site proof", allowEmpty = false)
+                val codec = reader.readString(MAX_VARIANT_SIZE, "Qp codec variant")
+                val layout = reader.readString(MAX_VARIANT_SIZE, "Qp layout variant")
+                reader.requireFullyRead("Qp proof")
                 create(
                     identity,
                     checkNotNull(commitment),
@@ -855,7 +855,7 @@ class QpProofMetadata private constructor(
 
         private fun validateVariant(value: String, label: String) {
             require(value.isNotBlank() && '\u0000' !in value && value.toByteArray(StandardCharsets.UTF_8).size <= MAX_VARIANT_SIZE) {
-                "AKEN $label variant is invalid"
+                "Qp $label variant is invalid"
             }
         }
     }
@@ -872,10 +872,10 @@ class QpRouteMetadata private constructor(
     val logicalBindingPath: String,
 ) {
     init {
-        require(resourceOffset >= 0 && storedLength > 0) { "AKEN route bounds are invalid" }
-        requireNormalizedPath(resourcePath, "AKEN route path")
-        requireNormalizedPath(logicalBindingPath, "AKEN logical binding path")
-        require(codecVariant.isNotBlank() && layoutVariant.isNotBlank()) { "AKEN route variants must be non-blank" }
+        require(resourceOffset >= 0 && storedLength > 0) { "Qp route bounds are invalid" }
+        requireNormalizedPath(resourcePath, "Qp route path")
+        requireNormalizedPath(logicalBindingPath, "Qp logical binding path")
+        require(codecVariant.isNotBlank() && layoutVariant.isNotBlank()) { "Qp route variants must be non-blank" }
     }
 
     val resourceKind: QpResourceKind
@@ -927,16 +927,16 @@ class QpRouteMetadata private constructor(
 
         fun decode(encoded: ByteArray): QpRouteMetadata {
             val reader = QpMetadataReader(encoded)
-            val identityBytes = reader.readFramed(MAX_LEAF_IDENTITY_ENCODING_SIZE, "AKEN route identity", allowEmpty = false)
+            val identityBytes = reader.readFramed(MAX_LEAF_IDENTITY_ENCODING_SIZE, "Qp route identity", allowEmpty = false)
             return try {
                 val identity = QpLeafIdentity.decode(identityBytes)
-                val path = reader.readString(MAX_RESOURCE_PATH_SIZE, "AKEN route path")
-                val offset = reader.readInt("AKEN route offset")
-                val length = reader.readInt("AKEN route length")
-                val codec = reader.readString(MAX_VARIANT_SIZE, "AKEN route codec")
-                val layout = reader.readString(MAX_VARIANT_SIZE, "AKEN route layout")
-                val logicalBindingPath = reader.readString(MAX_RESOURCE_PATH_SIZE, "AKEN logical binding path")
-                reader.requireFullyRead("AKEN route")
+                val path = reader.readString(MAX_RESOURCE_PATH_SIZE, "Qp route path")
+                val offset = reader.readInt("Qp route offset")
+                val length = reader.readInt("Qp route length")
+                val codec = reader.readString(MAX_VARIANT_SIZE, "Qp route codec")
+                val layout = reader.readString(MAX_VARIANT_SIZE, "Qp route layout")
+                val logicalBindingPath = reader.readString(MAX_RESOURCE_PATH_SIZE, "Qp logical binding path")
+                reader.requireFullyRead("Qp route")
                 QpRouteMetadata(identity, path, offset, length, codec, layout, logicalBindingPath)
             } finally {
                 Arrays.fill(identityBytes, 0)
@@ -1017,7 +1017,7 @@ private class QpMetadataReader(private val bytes: ByteArray) {
     }
 
     fun readFixed(length: Int, label: String): ByteArray {
-        require(length >= 0) { "AKEN metadata fixed length must be non-negative" }
+        require(length >= 0) { "Qp metadata fixed length must be non-negative" }
         requireRemaining(length, label)
         return bytes.copyOfRange(offset, offset + length).also { offset += length }
     }
