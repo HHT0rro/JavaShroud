@@ -27,6 +27,7 @@ internal object HardenedArtifactFinalizer {
         val context = currentQpBuildContextOrNull()
         val digest = context?.qpFinalizationLayoutOrNull()?.copyArtifactCommitmentForBuild()
             ?: context?.qpBuildPlanOrNull()?.artifactCanonicalCommitment
+            ?: context?.jarLayoutDigest?.copyOf()
             ?: artifactDigest(prepared)
         return try {
             QpTargetRewriter.wrapBusinessHandles(prepared, digest)
