@@ -62,6 +62,10 @@ pub trait ObjectOperations {
         None
     }
 
+    fn throwable_message(&mut self, _object: &Self::Object) -> Result<Option<String>, VmHostError> {
+        Ok(None)
+    }
+
     fn invoke(
         &mut self,
         _kind: InvokeKind,
@@ -383,7 +387,16 @@ impl<H: ObjectOperations> VmExecutor<H> {
                             return Err(VmError::StepLimit);
                         }
                     } else {
-                        return Err(VmError::UncaughtException(thrown.class_name));
+                        let message = match &thrown.value {
+                            VmValue::Object(object) => {
+                                self.host.throwable_message(object).ok().flatten()
+                            }
+                            _ => None,
+                        };
+                        return Err(VmError::UncaughtException {
+                            class_name: thrown.class_name,
+                            message,
+                        });
                     }
                 }
             }
@@ -1113,11 +1126,8 @@ impl<H: ObjectOperations> VmExecutor<H> {
                         .map_err(|_| thrown("java/lang/VerifyError", VmValue::Null))?
                         .saturating_add(3)
                 };
-                Ok(Control::Next(target_operand(
-                    operands,
-                    index,
-                    program.instructions().len(),
-                )?))
+                let next_target = target_operand(operands, index, program.instructions().len())?;
+                Ok(Control::Next(next_target))
             }
             opcode::LOOKUPSWITCH => {
                 let key = to_i32(&pop(frame)?)
@@ -1244,8 +1254,8 @@ impl<H: ObjectOperations> VmExecutor<H> {
                 None => Err(thrown("java/lang/LinkageError", VmValue::Null)),
             },
         };
-        arguments.clear();
         let value = result?;
+        arguments.clear();
         if !matches!(value, VmValue::Null) || method_return_tag(descriptor) != Some(b'V') {
             push(frame, value, self.limits.max_stack)?;
         }
@@ -1539,10 +1549,9 @@ fn compare_float<O>(
 ) -> Result<Control<O>, Thrown<O>> {
     let right_value = pop(frame)?;
     let left_value = pop(frame)?;
-    let right = to_f32(&right_value)
-        .ok_or_else(|| thrown("java/lang/VerifyError", VmValue::Null))?;
-    let left = to_f32(&left_value)
-        .ok_or_else(|| thrown("java/lang/VerifyError", VmValue::Null))?;
+    let right =
+        to_f32(&right_value).ok_or_else(|| thrown("java/lang/VerifyError", VmValue::Null))?;
+    let left = to_f32(&left_value).ok_or_else(|| thrown("java/lang/VerifyError", VmValue::Null))?;
     let value = if left.is_nan() || right.is_nan() {
         if less_nan {
             -1

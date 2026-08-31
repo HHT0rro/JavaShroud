@@ -294,7 +294,10 @@ pub enum VmError {
     OperandOutOfBounds,
     RecursionLimit,
     StepLimit,
-    UncaughtException(String),
+    UncaughtException {
+        class_name: String,
+        message: Option<String>,
+    },
     HostFailure,
 }
 
@@ -374,7 +377,9 @@ impl ParserLimits {
             || self.max_operands_per_instruction > QP_MAX_OPERANDS_PER_INSTRUCTION
             || self.max_exceptions > QP_MAX_EXCEPTIONS
         {
-            return Err(VmError::InvalidHeader("parser limit exceeds the R1 bound"));
+            return Err(VmError::InvalidHeader(
+                "parser limit exceeds the current bound",
+            ));
         }
         Ok(self)
     }
@@ -1493,8 +1498,8 @@ fn parse_block_rows(
     }
     let encoded_register_count = cursor.read_u16_be()?;
     let register_count = usize::from(encoded_register_count & REGISTER_COUNT_MASK);
-    let compact_regs = encoded_register_count & WIDE_REGISTER_COUNT_FLAG == 0
-        && register_count <= 255;
+    let compact_regs =
+        encoded_register_count & WIDE_REGISTER_COUNT_FLAG == 0 && register_count <= 255;
     let row_count = usize::from(cursor.read_u16_be()?);
     if register_count == 0 || row_count == 0 || row_count > limits.max_rows_per_block {
         return Err(VmError::InvalidRow("register or row count is invalid"));
@@ -2846,7 +2851,7 @@ impl Default for ProgramBuilder {
     }
 }
 
-/// Encode a current VBC4 frame whose program is `iconst 7; ireturn`.
+/// Encode a current protected frame whose program is `iconst 7; ireturn`.
 pub fn encode_iconst7_frame(material: &VmKeyMaterial) -> Result<Vec<u8>, VmError> {
     fn push_u16(output: &mut Vec<u8>, value: u16) {
         output.extend_from_slice(&value.to_be_bytes());
@@ -2954,12 +2959,7 @@ pub fn encode_iconst7_frame(material: &VmKeyMaterial) -> Result<Vec<u8>, VmError
     let dispatch_token = ((u32::from(dispatch_state) << 16) | 1) ^ dispatch_mask;
     let flags = REQUIRED_FLAGS | FLAG_POLYMORPHIC_CP;
     let wrapped_mask = vbc4_hmac(&session, 0, &[&nonce, &state_binding], b"qp-seed-wrap");
-    let token = vbc4_hmac(
-        &session,
-        seed,
-        &[&nonce, &state_binding],
-        b"qp-seed-token",
-    );
+    let token = vbc4_hmac(&session, seed, &[&nonce, &state_binding], b"qp-seed-token");
     let seed_bytes = seed.to_be_bytes();
     let mut wrapped = [0u8; 16];
     for index in 0..4 {
@@ -3029,10 +3029,10 @@ mod parser_tests {
     }
 
     #[test]
-    fn current_vbc4_frame_authenticates_and_executes() {
+    fn current_frame_authenticates_and_executes() {
         let (material, frame, binding) = valid_frame();
         let parser = VmParser::new(&material, &binding).expect("parser");
-        let program = parser.parse(&frame).expect("VBC4");
+        let program = parser.parse(&frame).expect("current frame");
         assert_eq!(program.metadata().resource_path.as_str(), "resource");
         assert_eq!(program.instructions().len(), 3);
         let mut executor = VmExecutor::new(NoObjectOperations);
