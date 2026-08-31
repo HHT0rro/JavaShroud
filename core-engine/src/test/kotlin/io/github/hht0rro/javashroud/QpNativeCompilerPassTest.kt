@@ -18,7 +18,7 @@ import java.nio.file.Path
 
 class QpNativeCompilerPassTest {
     @Test
-    fun r1_exposes_exactly_the_locked_runtime_targets() {
+    fun native_exposes_exactly_the_locked_runtime_targets() {
         assertEquals(
             mapOf(
                 "windows-x64" to "x86_64-pc-windows-gnu",
@@ -30,7 +30,7 @@ class QpNativeCompilerPassTest {
     }
 
     @Test
-    fun r1_cargo_command_is_locked_and_target_directory_is_explicit() {
+    fun native_cargo_command_is_locked_and_target_directory_is_explicit() {
         val windows = QpNativeCompilerPass.rustCargoCommandForTest(
             Path.of("cargo"),
             RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET,
@@ -148,6 +148,57 @@ class QpNativeCompilerPassTest {
             first.wipe()
             second.wipe()
         }
+    }
+
+    @Test
+    fun native_cache_identity_binds_target_token_material() {
+        val context = fixedContext()
+        val source = ByteArray(32) { it.toByte() }
+        val protectedSection = ByteArray(32) { 5 }
+        val specialization = ByteArray(32) { 7 }
+        val commitment = ByteArray(32) { 9 }
+        val nameSeed = ByteArray(16) { 11 }
+        val base = QpNativeCompilerPass.nativeArtifactCacheKey(
+            taskPlatform = "windows-x64",
+            rustTarget = RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET,
+            outputName = "qp_ffi.dll",
+            sourceDigest = source,
+            toolchainIdentity = "rustc=1.78.0|cargo=1.78.0",
+            seed = 7L,
+            vbc4BuildContext = context,
+            protectedSectionKey = protectedSection,
+            specializationDigest = specialization,
+            targetTokenCommitment = commitment,
+            targetTokenNameSeed = nameSeed,
+        )
+        val changedCommitment = QpNativeCompilerPass.nativeArtifactCacheKey(
+            taskPlatform = "windows-x64",
+            rustTarget = RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET,
+            outputName = "qp_ffi.dll",
+            sourceDigest = source,
+            toolchainIdentity = "rustc=1.78.0|cargo=1.78.0",
+            seed = 7L,
+            vbc4BuildContext = context,
+            protectedSectionKey = protectedSection,
+            specializationDigest = specialization,
+            targetTokenCommitment = commitment.copyOf().also { it[0] = 10 },
+            targetTokenNameSeed = nameSeed,
+        )
+        val changedNameSeed = QpNativeCompilerPass.nativeArtifactCacheKey(
+            taskPlatform = "windows-x64",
+            rustTarget = RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET,
+            outputName = "qp_ffi.dll",
+            sourceDigest = source,
+            toolchainIdentity = "rustc=1.78.0|cargo=1.78.0",
+            seed = 7L,
+            vbc4BuildContext = context,
+            protectedSectionKey = protectedSection,
+            specializationDigest = specialization,
+            targetTokenCommitment = commitment,
+            targetTokenNameSeed = nameSeed.copyOf().also { it[0] = 12 },
+        )
+        assertNotEquals(base, changedCommitment)
+        assertNotEquals(base, changedNameSeed)
     }
 
     @Test

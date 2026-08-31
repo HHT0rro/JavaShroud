@@ -16,7 +16,7 @@ import java.util.concurrent.TimeUnit
 object QpNativeCompilerPass {
 
     /*
-     * AKEN-R1 has one production native path: copy the Rust workspace into a
+     * Qp has one production native path: copy the Rust workspace into a
      * build-private directory and invoke the locked Cargo command there.  The
      * lock is keyed by the complete specialization identity so two builds can
      * never share a mutable target directory or a partially-written cache entry.
@@ -47,7 +47,7 @@ object QpNativeCompilerPass {
         "qp_r1_runtime_binding_digest",
     )
 
-    /** Only the two locked AKEN-R1 Rust runtime targets are accepted. */
+    /** Only the two locked Qp Rust runtime targets are accepted. */
     internal val RUST_TARGETS: Map<String, String> = linkedMapOf(
         RustToolchainProvisioner.RUNTIME_TARGET_WINDOWS to RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET,
         RustToolchainProvisioner.RUNTIME_TARGET_LINUX to RustToolchainProvisioner.LINUX_RUNTIME_TARGET,
@@ -156,26 +156,26 @@ object QpNativeCompilerPass {
         val resolution = try {
             RustToolchainProvisioner.resolve(autoInstall = true)
         } catch (error: Exception) {
-            report(rustMessage("error", "AKEN-R1 Rust toolchain resolution failed: ${error.message.orEmpty()}"))
+            report(rustMessage("error", "Qp Rust toolchain resolution failed: ${error.message.orEmpty()}"))
             return RecompilationDiagnostics(emptyList(), messages)
         }
         resolution.messages.forEach { message ->
             report(rustMessage(message.level, message.message))
         }
         val toolchain = resolution.toolchain ?: run {
-            report(rustMessage("error", "AKEN-R1 Rust toolchain is unavailable; native recompilation is disabled"))
+            report(rustMessage("error", "Qp Rust toolchain is unavailable; native recompilation is disabled"))
             return RecompilationDiagnostics(emptyList(), messages)
         }
         val workspace = try {
             resolveRustWorkspace(classLoader)
         } catch (error: Exception) {
-            report(rustMessage("error", "AKEN-R1 Rust workspace resolution failed: ${error.message.orEmpty()}"))
+            report(rustMessage("error", "Qp Rust workspace resolution failed: ${error.message.orEmpty()}"))
             return RecompilationDiagnostics(emptyList(), messages)
         }
         val workDir = try {
             Files.createTempDirectory("javashroud-qp-rust-")
         } catch (error: Exception) {
-            report(rustMessage("error", "AKEN-R1 Rust build directory could not be created: ${error.message.orEmpty()}"))
+            report(rustMessage("error", "Qp Rust build directory could not be created: ${error.message.orEmpty()}"))
             return RecompilationDiagnostics(emptyList(), messages)
         }
         return try {
@@ -192,12 +192,12 @@ object QpNativeCompilerPass {
             )
             RecompilationDiagnostics(results, messages)
         } catch (error: Exception) {
-            report(rustMessage("error", "AKEN-R1 Rust native recompilation failed: ${error.message.orEmpty()}"))
+            report(rustMessage("error", "Qp Rust native recompilation failed: ${error.message.orEmpty()}"))
             RecompilationDiagnostics(emptyList(), messages)
         } finally {
             val deleted = runCatching { workDir.toFile().deleteRecursively() }.getOrDefault(false)
             if (!deleted && Files.exists(workDir)) {
-                report(rustMessage("error", "AKEN-R1 Rust build directory cleanup failed; refusing to reuse it"))
+                report(rustMessage("error", "Qp Rust build directory cleanup failed; refusing to reuse it"))
             }
         }
     }
@@ -227,13 +227,23 @@ object QpNativeCompilerPass {
         var sourceDigest = ByteArray(0)
         var tasks: List<NativeCompileTask> = emptyList()
         val rustWorkspace = workDir.resolve("rust-workspace")
+        var cryptoDomain = ByteArray(0)
+        var layoutDigest = ByteArray(0)
+        var targetTokenCommitment = ByteArray(0)
+        var targetTokenNameSeed = ByteArray(0)
         try {
             copyRustWorkspace(workspace, rustWorkspace)
             check(Files.readString(rustWorkspace.resolve("crates/qp-ffi/src/lib.rs")).contains("fn JNI_OnLoad")) {
-                "AKEN-R1 isolated Rust workspace is missing JNI_OnLoad source"
+                "Qp isolated Rust workspace is missing JNI_OnLoad source"
             }
             sourceDigest = digestRustWorkspace(rustWorkspace)
             val toolchainIdentity = rustToolchainIdentity(toolchain)
+            cryptoDomain = QpInnerMaterial.copyCryptoDomainMaterial(context)
+            layoutDigest = QpInnerMaterial.copyStateBindingLayoutDigest(context)
+            targetTokenCommitment = context.qpFinalizationLayoutOrNull()?.copyArtifactCommitmentForBuild()
+                ?: context.qpBuildPlanOrNull()?.artifactCanonicalCommitment
+                ?: context.jarLayoutDigest.copyOf()
+            targetTokenNameSeed = context.copyNameSeed()
             tasks = request.routes.map { route ->
                 val target = rustTargetForPlatform(route.platform)
                 val specializationDigest = rustSpecializationDigest(
@@ -244,6 +254,8 @@ object QpNativeCompilerPass {
                     context = context,
                     request = request,
                     specializationNonce = specializationNonce,
+                    targetTokenCommitment = targetTokenCommitment,
+                    targetTokenNameSeed = targetTokenNameSeed,
                 )
                 val outputName = route.outputName
                 val cacheKey = nativeArtifactCacheKey(
@@ -259,9 +271,11 @@ object QpNativeCompilerPass {
                     nativePackingLevel = request.nativePackingLevel.configValue,
                     nativeShellPackerVersion = 1,
                     nativeShellPayloadProfile = "qp-rust-ffi-v1",
-                    nativeShellLoaderProfile = "rust-ffi-${route.platform}-v1",
-                    specializationDigest = specializationDigest,
-                )
+                   nativeShellLoaderProfile = "rust-ffi-${route.platform}-v1",
+                   specializationDigest = specializationDigest,
+                    targetTokenCommitment = targetTokenCommitment,
+                    targetTokenNameSeed = targetTokenNameSeed,
+               )
                 NativeCompileTask(
                     platform = route.platform,
                     rustTarget = target,
@@ -274,6 +288,10 @@ object QpNativeCompilerPass {
                     specializationDigest = specializationDigest,
                     protectionLevel = request.nativeProtectionLevel,
                     packingLevel = request.nativePackingLevel.configValue,
+                    cryptoDomain = cryptoDomain.copyOf(),
+                    layoutDigest = layoutDigest.copyOf(),
+                    targetTokenCommitment = targetTokenCommitment.copyOf(),
+                    targetTokenNameSeed = targetTokenNameSeed.copyOf(),
                 )
             }
             val compiled = compileNativeTasksBounded(
@@ -288,7 +306,7 @@ object QpNativeCompilerPass {
                 val bytes = result.bytes
                 if (!result.success || bytes == null || bytes.isEmpty()) {
                     failed = true
-                    report(rustMessage("error", "AKEN-R1 Rust target ${task.platform} failed: ${sanitizeDiagnostic(result.output)}"))
+                    report(rustMessage("error", "Qp Rust target ${task.platform} failed: ${sanitizeDiagnostic(result.output)}"))
                     continue
                 }
                 try {
@@ -302,11 +320,11 @@ object QpNativeCompilerPass {
                         bytes,
                         task.specializationDigest.copyOf(),
                     )
-                    report(rustMessage("info", "Built AKEN-R1 Rust JNI runtime for ${task.platform}"))
+                    report(rustMessage("info", "Built Qp Rust JNI runtime for ${task.platform}"))
                 } catch (error: Exception) {
                     failed = true
                     bytes.fill(0)
-                    report(rustMessage("error", "AKEN-R1 Rust artifact for ${task.platform} was rejected: ${error.message.orEmpty()}"))
+                    report(rustMessage("error", "Qp Rust artifact for ${task.platform} was rejected: ${error.message.orEmpty()}"))
                 }
             }
             if (failed || results.size != tasks.size) {
@@ -321,9 +339,19 @@ object QpNativeCompilerPass {
             )
             return results
         } finally {
-            tasks.forEach { task -> task.specializationDigest.fill(0) }
+            tasks.forEach { task ->
+                task.specializationDigest.fill(0)
+                task.cryptoDomain.fill(0)
+                task.layoutDigest.fill(0)
+                task.targetTokenCommitment.fill(0)
+                task.targetTokenNameSeed.fill(0)
+            }
             sourceDigest.fill(0)
             specializationNonce.fill(0)
+            cryptoDomain.fill(0)
+            layoutDigest.fill(0)
+            targetTokenCommitment.fill(0)
+            targetTokenNameSeed.fill(0)
         }
     }
 
@@ -339,6 +367,10 @@ object QpNativeCompilerPass {
         val specializationDigest: ByteArray,
         val protectionLevel: String,
         val packingLevel: String,
+        val cryptoDomain: ByteArray,
+        val layoutDigest: ByteArray,
+        val targetTokenCommitment: ByteArray,
+        val targetTokenNameSeed: ByteArray,
     )
 
     private data class NativeArtifactBuildResult(
@@ -381,7 +413,7 @@ object QpNativeCompilerPass {
                 try {
                     future.get()
                 } catch (error: Exception) {
-                    throw IllegalStateException("AKEN-R1 Rust compile worker failed", error)
+                    throw IllegalStateException("Qp Rust compile worker failed", error)
                 }
             }
         } finally {
@@ -577,12 +609,12 @@ object QpNativeCompilerPass {
     private fun requireR1Request(request: QpNativeCompilerRequest) {
         val unsupported = request.routes.filterNot { route -> route.platform in RUST_TARGETS }
         require(unsupported.isEmpty()) {
-            "AKEN-R1 rejects macOS, Mach-O, .dylib, and legacy native routes: ${unsupported.joinToString { it.platform }}"
+            "Qp rejects macOS, Mach-O, .dylib, and legacy native routes: ${unsupported.joinToString { it.platform }}"
         }
         request.routes.forEach { route ->
             val expectedTarget = RUST_TARGETS.getValue(route.platform)
             require(expectedTarget == rustTargetForPlatform(route.platform)) {
-                "AKEN-R1 Rust target mapping is inconsistent for ${route.platform}"
+                "Qp Rust target mapping is inconsistent for ${route.platform}"
             }
         }
     }
@@ -590,13 +622,13 @@ object QpNativeCompilerPass {
     private fun rustTargetForPlatform(platform: String): String =
         RUST_TARGETS[platform]
             ?: throw IllegalArgumentException(
-                "AKEN-R1 Rust target is unsupported: $platform; only Windows x64 and Linux x64 glibc 2.17 are accepted",
+                "Qp Rust target is unsupported: $platform; only Windows x64 and Linux x64 glibc 2.17 are accepted",
             )
 
     private fun rustLibraryFileName(platform: String): String = when (platform) {
         RustToolchainProvisioner.RUNTIME_TARGET_WINDOWS -> "$RUST_FFI_LIBRARY.dll"
         RustToolchainProvisioner.RUNTIME_TARGET_LINUX -> "lib$RUST_FFI_LIBRARY.so"
-        else -> throw IllegalArgumentException("AKEN-R1 Rust artifact platform is unsupported: $platform")
+        else -> throw IllegalArgumentException("Qp Rust artifact platform is unsupported: $platform")
     }
 
     private fun resolveRustWorkspace(classLoader: ClassLoader): Path {
@@ -631,7 +663,7 @@ object QpNativeCompilerPass {
             .map { it.toAbsolutePath().normalize() }
             .firstOrNull { isRustWorkspaceTemplate(it) }
             ?: throw IllegalStateException(
-                "AKEN-R1 Rust workspace is unavailable; expected core-engine/src/main/rust with Cargo.lock",
+                "Qp Rust workspace is unavailable; expected core-engine/src/main/rust with Cargo.lock",
             )
     }
 
@@ -700,13 +732,13 @@ object QpNativeCompilerPass {
     }
 
     private fun copyRustWorkspace(source: Path, destination: Path) {
-        require(isRustWorkspaceTemplate(source)) { "AKEN-R1 Rust workspace template is invalid: $source" }
+        require(isRustWorkspaceTemplate(source)) { "Qp Rust workspace template is invalid: $source" }
         Files.createDirectories(destination)
         val normalizedDestination = destination.toAbsolutePath().normalize()
         Files.walk(source).use { stream ->
             stream.sorted().forEach { entry ->
                 if (Files.isSymbolicLink(entry)) {
-                    throw IllegalStateException("AKEN-R1 rejects symlinked Rust workspace entries: $entry")
+                    throw IllegalStateException("Qp rejects symlinked Rust workspace entries: $entry")
                 }
                 val relative = source.relativize(entry)
                 val relativeText = relative.toString().replace('\\', '/')
@@ -715,7 +747,7 @@ object QpNativeCompilerPass {
                 }
                 val target = normalizedDestination.resolve(relative.toString()).normalize()
                 require(target.startsWith(normalizedDestination)) {
-                    "AKEN-R1 Rust workspace entry escapes its isolated build directory: $relative"
+                    "Qp Rust workspace entry escapes its isolated build directory: $relative"
                 }
                 if (Files.isDirectory(entry)) {
                     Files.createDirectories(target)
@@ -723,31 +755,33 @@ object QpNativeCompilerPass {
                     Files.createDirectories(target.parent)
                     Files.copy(entry, target, StandardCopyOption.REPLACE_EXISTING)
                 } else {
-                    throw IllegalStateException("AKEN-R1 rejects non-regular Rust workspace entry: $entry")
+                    throw IllegalStateException("Qp rejects non-regular Rust workspace entry: $entry")
                 }
             }
         }
         require(Files.isRegularFile(normalizedDestination.resolve("Cargo.lock"))) {
-            "AKEN-R1 isolated Rust workspace is missing Cargo.lock"
+            "Qp isolated Rust workspace is missing Cargo.lock"
         }
     }
 
     private fun writeSpecializationModule(task: NativeCompileTask) {
         val destination = task.workspace.resolve("crates").resolve("qp-ffi").resolve("src").resolve("specialization.rs")
         require(Files.isRegularFile(destination.parent.resolve("lib.rs"))) {
-            "AKEN-R1 isolated Rust workspace is missing qp-ffi/src/lib.rs"
+            "Qp isolated Rust workspace is missing qp-ffi/src/lib.rs"
         }
         val digestLiteral = task.specializationDigest.joinToString(", ") { byte ->
             "0x" + ((byte.toInt() and 0xFF).toString(16).padStart(2, '0'))
         }
-        val context = currentQpBuildContextOrNull()
-        val crypto = context?.let { QpInnerMaterial.copyCryptoDomainMaterial(it) } ?: ByteArray(32)
-        val layout = context?.let { QpInnerMaterial.copyStateBindingLayoutDigest(it) } ?: ByteArray(32)
+        require(task.specializationDigest.size == 32) { "Qp specialization digest must be 32 bytes" }
+        require(task.cryptoDomain.size == 32) { "Qp crypto domain must be 32 bytes" }
+        require(task.layoutDigest.size == 32) { "Qp layout digest must be 32 bytes" }
+        require(task.targetTokenCommitment.size == 32) { "Qp token commitment must be 32 bytes" }
+        require(task.targetTokenNameSeed.size == 16) { "Qp token name seed must be 16 bytes" }
         fun bytesLiteral(values: ByteArray) = values.joinToString(", ") { byte ->
             "0x" + ((byte.toInt() and 0xFF).toString(16).padStart(2, '0'))
         }
-        val source = try { buildString {
-            append("//! Generated AKEN-R1 nonsecret specialization. Contains no keys or plaintext.\n")
+        val source = buildString {
+            append("//! Generated Qp nonsecret specialization. Contains no keys or plaintext.\n")
             append("pub const TARGET_TRIPLE: &str = \"")
             append(task.rustTarget)
             append("\";\n")
@@ -762,18 +796,20 @@ object QpNativeCompilerPass {
             append(task.packingLevel)
             append("\";\n")
             append("pub const VM_CRYPTO_DOMAIN: [u8; 32] = [")
-            append(bytesLiteral(crypto))
+            append(bytesLiteral(task.cryptoDomain))
             append("];\n")
             append("pub const VM_LAYOUT_DIGEST: [u8; 32] = [")
-            append(bytesLiteral(layout))
+            append(bytesLiteral(task.layoutDigest))
+            append("];\n")
+            append("pub const TARGET_TOKEN_COMMITMENT: [u8; 32] = [")
+            append(bytesLiteral(task.targetTokenCommitment))
+            append("];\n")
+            append("pub const TARGET_TOKEN_NAME_SEED: [u8; 16] = [")
+            append(bytesLiteral(task.targetTokenNameSeed))
             append("];\n")
         }
-        } finally {
-            crypto.fill(0)
-            layout.fill(0)
-        }
         require(!source.contains("masterKey", ignoreCase = true) && !source.contains("runtimeResourceKey", ignoreCase = true)) {
-            "AKEN-R1 specialization module must not contain secret field names"
+            "Qp specialization module must not contain secret field names"
         }
         Files.writeString(destination, source, StandardCharsets.US_ASCII)
     }
@@ -786,6 +822,8 @@ object QpNativeCompilerPass {
         context: QpBuildContext,
         request: QpNativeCompilerRequest,
         specializationNonce: ByteArray,
+        targetTokenCommitment: ByteArray,
+        targetTokenNameSeed: ByteArray,
     ): ByteArray = MessageDigest.getInstance("SHA-256").apply {
         update(RUST_SPECIALIZATION_DOMAIN.toByteArray(StandardCharsets.US_ASCII))
         updateUtf8(targetPlatform)
@@ -797,6 +835,10 @@ object QpNativeCompilerPass {
         updateUtf8(request.nativePackingLevel.configValue)
         updateUtf8("qp-rust-ffi-v1")
         updateInt(context.nativeVmProfile.authenticatedId)
+        require(targetTokenCommitment.size == 32) { "Qp token commitment must be 32 bytes" }
+        require(targetTokenNameSeed.size == 16) { "Qp token name seed must be 16 bytes" }
+        update(targetTokenCommitment)
+        update(targetTokenNameSeed)
         update(sourceDigest)
         update(specializationNonce)
     }.digest()
@@ -809,9 +851,9 @@ object QpNativeCompilerPass {
         specializationHex: String,
         cfgEvidenceExports: Boolean,
     ): RustCompileResult {
-        require(target in RUST_TARGETS.values) { "AKEN-R1 Rust target is not locked: $target" }
+        require(target in RUST_TARGETS.values) { "Qp Rust target is not locked: $target" }
         require(specializationHex.length == 64 && specializationHex.all { it in "0123456789abcdefABCDEF" }) {
-            "AKEN-R1 specialization digest is invalid"
+            "Qp specialization digest is invalid"
         }
         Files.createDirectories(targetDir)
         val command = listOf(
@@ -864,7 +906,7 @@ object QpNativeCompilerPass {
     }
 
     internal fun rustCargoCommandForTest(cargoPath: Path, target: String, targetDir: Path): List<String> {
-        require(target in RUST_TARGETS.values) { "AKEN-R1 Rust target is not locked: $target" }
+        require(target in RUST_TARGETS.values) { "Qp Rust target is not locked: $target" }
         val subcommand = "zigbuild"
         return listOf(
             cargoPath.toString(), subcommand, "--locked", "--package", "qp-ffi", "--lib", "--release",
@@ -998,11 +1040,11 @@ object QpNativeCompilerPass {
             RustToolchainProvisioner.RUNTIME_TARGET_WINDOWS -> {
                 validatePe64Artifact(bytes)
                 require(readPeExportNames(bytes).containsAll(RUST_RELEASE_EXPORTS)) {
-                    "Rust Windows artifact export surface is missing the current AKEN-R1 JNI ABI"
+                    "Rust Windows artifact export surface is missing the current Qp JNI ABI"
                 }
             }
             RustToolchainProvisioner.RUNTIME_TARGET_LINUX -> validateElf64Artifact(bytes)
-            else -> error("unsupported AKEN-R1 Rust artifact platform: $platform")
+            else -> error("unsupported Qp Rust artifact platform: $platform")
         }
         require(bytes.containsAscii("qp_r1_runtime_binding_digest")) {
             "Rust artifact is missing qp_r1_runtime_binding_digest"
@@ -1200,10 +1242,12 @@ object QpNativeCompilerPass {
         nativeShellPayloadProfile: String = "qp-rust-ffi-v1",
         nativeShellLoaderProfile: String = "direct-rust-loader",
         specializationDigest: ByteArray = sourceDigest,
+        targetTokenCommitment: ByteArray = ByteArray(32),
+        targetTokenNameSeed: ByteArray = ByteArray(16),
     ): String {
-        require(taskPlatform in RUST_TARGETS) { "AKEN-R1 target platform is unsupported: $taskPlatform" }
+        require(taskPlatform in RUST_TARGETS) { "Qp target platform is unsupported: $taskPlatform" }
         require(rustTarget == RUST_TARGETS.getValue(taskPlatform)) {
-            "AKEN-R1 target triple does not match $taskPlatform: $rustTarget"
+            "Qp target triple does not match $taskPlatform: $rustTarget"
         }
         val digest = MessageDigest.getInstance("SHA-256")
         digest.update(RUST_SPECIALIZATION_DOMAIN.toByteArray(StandardCharsets.US_ASCII))
@@ -1223,6 +1267,10 @@ object QpNativeCompilerPass {
         digest.updateLong(vbc4BuildContext.nativeSeed)
         digest.update(vbc4BuildContext.jarLayoutDigest)
         digest.updateInt(vbc4BuildContext.nativeVmProfile.authenticatedId)
+        require(targetTokenCommitment.size == 32) { "Qp token commitment must be 32 bytes" }
+        require(targetTokenNameSeed.size == 16) { "Qp token name seed must be 16 bytes" }
+        digest.update(targetTokenCommitment)
+        digest.update(targetTokenNameSeed)
         digest.update(protectedSectionKey)
         return HexEncodingSupport.toHexLower(digest.digest())
     }
