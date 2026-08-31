@@ -29,4 +29,6 @@ final class RenamedNativeSurface {
     static native int nDefenseProbe(String surface, String point);
 
     static native byte[] nDefenseTransform(byte[] material, String binding);
+
+    static native byte[] nTargetToken(byte[] token, String callerOwner, String indyName, String methodType);
 }

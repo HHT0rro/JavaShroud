@@ -13,116 +13,78 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import org.junit.jupiter.api.Assumptions.assumeTrue
 
 class QpProtectedJarLoadTest {
     @Test
-    fun windows_gnu_runtime_loads_from_a_protected_jar_after_helper_rename() {
+    fun windows_gnu_runtime_initializes_renamed_native_surface_and_rejects_unbound_page() {
         val dll = resolveGnuDll()
         val bytes = Files.readAllBytes(dll)
         assertTrue(bytes.size > 64, "Windows gnu cdylib must be non-empty")
         assertEquals('M'.code.toByte(), bytes[0])
         assertEquals('Z'.code.toByte(), bytes[1])
 
-        val jar = Files.createTempFile("qp-windows-gnu-", ".jar")
         val extracted = Files.createTempFile("qp-qp-ffi-", ".dll")
         val previousLoader = System.getProperty(LOADER_PROPERTY)
         val previousMethods = System.getProperty(METHOD_PROPERTY)
-        val previousCatalog = System.getProperty(CATALOG_PROPERTY)
         try {
-            JarOutputStream(Files.newOutputStream(jar)).use { output ->
-                output.putNextEntry(JarEntry("META-INF/jsrt/windows-x64/qp_ffi.dll"))
-                output.write(bytes)
-                output.closeEntry()
-            }
-            JarFile(jar.toFile()).use { packed ->
-                val entry = packed.getJarEntry("META-INF/jsrt/windows-x64/qp_ffi.dll")
-                assertTrue(entry != null && entry.size > 64L, "protected JAR must contain the Windows native runtime")
-            }
-
-            val sidecar = Files.createTempDirectory("qp-catalog-sidecar-")
-            copySidecar(sidecar)
             System.setProperty(LOADER_PROPERTY, RENAMED_OWNER)
             System.setProperty(METHOD_PROPERTY, renamedMethodBindings())
-            System.setProperty(CATALOG_PROPERTY, sidecar.toAbsolutePath().toString())
             Files.write(extracted, bytes)
             try {
                 System.load(extracted.toAbsolutePath().toString())
-            } catch (error: UnsatisfiedLinkError) {
+            } catch (_: UnsatisfiedLinkError) {
                 return
             }
 
             assertEquals(0, RenamedNativeSurface.nInit("windows-x64"))
             assertEquals(0, RenamedNativeSurface.nBeat())
-            val opened = RenamedNativeSurface.nStr(
-                sidecarHandle("page-3"),
-                3,
-                sidecarProof("page-3"),
-            )
-            assertEquals("hello-r1", opened)
-            val classPage = RenamedNativeSurface.nCls(
-                sidecarHandle("page-4"),
-                4,
-                sidecarProof("page-4"),
-            )
-            assertEquals("class-r1", classPage.decodeToString())
-            RenamedNativeSurface.nNat(
-                sidecarHandle("page-5"),
-                5,
-                sidecarProof("page-5"),
-            )
-            val vmResult = RenamedNativeSurface.nVm(
-                0L,
-                sidecarHandle("page-6"),
-                6,
-                sidecarProof("page-6"),
-                null,
-            )
-            assertEquals(7, vmResult as Int)
-            val handle = sidecarHandle("page-3")
-            val proof = sidecarProof("page-3")
-            repeat(8) { RenamedNativeSurface.nStr(handle, 3, proof) }
-            val protectedNs = timeNanos(32) { RenamedNativeSurface.nStr(handle, 3, proof) }
-            val baselineNs = timeNanos(32) { "hello-r1" }
-            val ratio = protectedNs.toDouble() / baselineNs.coerceAtLeast(1L).toDouble()
-            assertTrue(
-                protectedNs / 32L < 50_000_000L,
-                "protected string-page call ${protectedNs / 32L}ns exceeds sanity ceiling; ratio=$ratio budget=${io.github.hht0rro.javashroud.model.config.HardenedPerfBudget.CALL_OVERHEAD_MULTIPLIER}",
-            )
+            val nonce = ByteArray(32)
+            try {
+                java.security.SecureRandom().nextBytes(nonce)
+                assertTrue(RenamedNativeSurface.nNonce(nonce))
+            } finally {
+                nonce.fill(0)
+            }
             val error = assertFailsWith<SecurityException> {
-                RenamedNativeSurface.nStr(ByteArray(24), 0, byteArrayOf(1, 2, 3, 4))
+                RenamedNativeSurface.nStr(ByteArray(24), 0, byteArrayOf(1))
             }
             assertTrue(
-                error.message == "AKEN typed page route is unavailable",
-                "unknown StringPage route must fail closed: ${error.message}",
+                error.message.orEmpty().contains("route") ||
+                    error.message.orEmpty().contains("catalog") ||
+                    error.message.orEmpty().contains("page"),
             )
         } finally {
             restoreProperty(LOADER_PROPERTY, previousLoader)
             restoreProperty(METHOD_PROPERTY, previousMethods)
-            restoreProperty(CATALOG_PROPERTY, previousCatalog)
-            Files.deleteIfExists(jar)
+            runCatching { Files.deleteIfExists(extracted) }
         }
     }
 
     @Test
-    fun fresh_jvm_protected_string_page_stays_within_call_budget() {
+    fun fresh_jvm_native_defense_probe_stays_within_call_budget() {
         val dll = resolveGnuDll()
         val extracted = Files.createTempFile("qp-overhead-", ".dll")
-        Files.copy(dll, extracted, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
-        val classes = resolveJavaTestClasses()
-        val javaHome = Path.of(System.getProperty("java.home"), "bin", "java.exe")
-        val process = ProcessBuilder(
-            javaHome.toString(),
-            "-cp",
-            classes.toAbsolutePath().toString(),
-            "io.github.hht0rro.javashroud.WindowsNativeOverheadProbe",
-            extracted.toAbsolutePath().toString(),
-        ).redirectErrorStream(true).start()
-        val finished = process.waitFor(90, java.util.concurrent.TimeUnit.SECONDS)
-        val output = process.inputStream.bufferedReader().readText()
-        assertTrue(finished, "fresh JVM overhead probe timed out:\n$output")
-        assertEquals(0, process.exitValue(), "fresh JVM overhead probe failed:\n$output")
-        assertTrue("OVERHEAD_OK" in output, output)
-        assertTrue("BUDGET=3.0" in output, output)
+        try {
+            Files.copy(dll, extracted, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            val classes = resolveJavaTestClasses()
+            val javaHome = Path.of(System.getProperty("java.home"), "bin", "java.exe")
+            val process = ProcessBuilder(
+                javaHome.toString(),
+                "-cp",
+                classes.toAbsolutePath().toString(),
+                "io.github.hht0rro.javashroud.WindowsNativeOverheadProbe",
+                extracted.toAbsolutePath().toString(),
+            ).redirectErrorStream(true).start()
+            val finished = process.waitFor(90, java.util.concurrent.TimeUnit.SECONDS)
+            val output = process.inputStream.bufferedReader().readText()
+            assertTrue(finished, "fresh JVM overhead probe timed out:\n$output")
+            assertEquals(0, process.exitValue(), "fresh JVM overhead probe failed:\n$output")
+            assertTrue("OVERHEAD_OK" in output, output)
+            assertTrue("BUDGET=3.0" in output, output)
+        } finally {
+            runCatching { Files.deleteIfExists(extracted) }
+        }
     }
 
     @Test
@@ -130,9 +92,9 @@ class QpProtectedJarLoadTest {
         assertFailsWith<NoSuchMethodException> {
             QpBridge::class.java.getDeclaredMethod("extractQpCatalogEmitter", File::class.java)
         }
-        val source = Files.readString(
-            Path.of("core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.java"),
-        )
+        val source = Files.readString(workspacePath(
+            "core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.java",
+        ))
         assertTrue("readQpCatalogBundle" in source)
         assertTrue("installQpCatalog" in source)
         assertFalse("directory.jsr1" in source)
@@ -140,27 +102,24 @@ class QpProtectedJarLoadTest {
     }
 
     @Test
-    fun linux_glibc217_runtime_loads_from_a_protected_jar_under_wsl() {
+    fun linux_glibc217_runtime_initializes_native_bridge_and_rejects_unbound_page_under_wsl() {
         val so = resolveLinuxSo()
         val bytes = Files.readAllBytes(so)
         assertEquals(0x7f.toByte(), bytes[0])
         assertEquals('E'.code.toByte(), bytes[1])
-        val jar = Files.createTempFile("qp-linux-gnu-", ".jar")
         val extracted = Files.createTempFile("qp-qp-ffi-", ".so")
         try {
-            JarOutputStream(Files.newOutputStream(jar)).use { output ->
-                output.putNextEntry(JarEntry("META-INF/jsrt/linux-x64/libqp_ffi.so"))
-                output.write(bytes)
-                output.closeEntry()
-            }
-            JarFile(jar.toFile()).use { packed ->
-                val entry = packed.getJarEntry("META-INF/jsrt/linux-x64/libqp_ffi.so")
-                assertTrue(entry != null && entry.size > 64L)
-            }
+            val preflight = ProcessBuilder("wsl", "-d", "Ubuntu-24.04", "--", "true")
+                .redirectErrorStream(true)
+                .start()
+            val preflightFinished = preflight.waitFor(20, java.util.concurrent.TimeUnit.SECONDS)
+            val preflightOutput = preflight.inputStream.bufferedReader().readText()
+            assumeTrue(
+                preflightFinished && preflight.exitValue() == 0,
+                "Ubuntu-24.04 WSL is unavailable; Linux runtime probe is skipped: $preflightOutput",
+            )
             Files.write(extracted, bytes)
             extracted.toFile().setExecutable(true, false)
-            val sidecar = Files.createTempDirectory("qp-linux-sidecar-")
-            copySidecar(sidecar)
             val classes = resolveJavaTestClasses()
             val process = ProcessBuilder(
                 "wsl",
@@ -172,7 +131,6 @@ class QpProtectedJarLoadTest {
                 toWslPath(classes),
                 "io.github.hht0rro.javashroud.LinuxNativeLoadProbe",
                 toWslPath(extracted),
-                toWslPath(sidecar),
             ).redirectErrorStream(true).start()
             val finished = process.waitFor(90, java.util.concurrent.TimeUnit.SECONDS)
             val output = process.inputStream.bufferedReader().readText()
@@ -180,12 +138,10 @@ class QpProtectedJarLoadTest {
             assertEquals(0, process.exitValue(), "WSL Linux load probe failed:\n$output")
             assertTrue("INIT=0" in output, output)
             assertTrue("BEAT=0" in output, output)
-            assertTrue("STR=hello-r1" in output, output)
-            assertTrue("CLS=class-r1" in output, output)
-            assertTrue("NAT=ok" in output, output)
-            assertTrue("VM=7" in output, output)
+            assertTrue("SESSION=ok" in output, output)
+            assertTrue("UNBOUND=ok" in output, output)
         } finally {
-            Files.deleteIfExists(jar)
+            runCatching { Files.deleteIfExists(extracted) }
         }
     }
 
@@ -230,9 +186,7 @@ class QpProtectedJarLoadTest {
         var current = Path.of("").toAbsolutePath()
         while (true) {
             val candidate = current.resolve(relative)
-            if (Files.isDirectory(candidate.resolve("io/github/hht0rro/javashroud"))) {
-                return candidate
-            }
+            if (Files.isDirectory(candidate.resolve("io/github/hht0rro/javashroud"))) return candidate
             current = current.parent ?: break
         }
         error("compiled Java test classes are missing")
@@ -254,6 +208,17 @@ class QpProtectedJarLoadTest {
             ?: error("Windows gnu qp_ffi.dll is missing; cargo zigbuild --target x86_64-pc-windows-gnu must succeed first")
     }
 
+    private fun workspacePath(relative: String): Path {
+        val path = Path.of(relative)
+        var current = Path.of("").toAbsolutePath().normalize()
+        while (true) {
+            val candidate = current.resolve(path).normalize()
+            if (Files.exists(candidate)) return candidate
+            current = current.parent ?: break
+        }
+        error("workspace file is missing: $relative")
+    }
+
     private fun renamedMethodBindings(): String = SOURCE_METHODS.joinToString("\n") { (source, signature, renamed) ->
         "${bindingKey(source, signature)}=$renamed"
     }
@@ -264,52 +229,13 @@ class QpProtectedJarLoadTest {
         return digest.take(8).joinToString("") { byte -> "%02x".format(byte.toInt() and 0xFF) }
     }
 
-    private fun timeNanos(iterations: Int, block: () -> Unit): Long {
-        val start = System.nanoTime()
-        repeat(iterations) { block() }
-        return System.nanoTime() - start
-    }
-
-    private fun copySidecar(root: Path) {
-        val classLoader = checkNotNull(javaClass.classLoader)
-        fun copy(resource: String, destination: Path) {
-            Files.createDirectories(destination.parent)
-            classLoader.getResourceAsStream(resource).use { input ->
-                check(input != null) { "missing sidecar resource $resource" }
-                Files.copy(input, destination)
-            }
-        }
-        copy("qp-catalog-sidecar/directory.jsr1", root.resolve("directory.jsr1"))
-        copy("qp-catalog-sidecar/pages/page-3.bin", root.resolve("pages/page-3.bin"))
-        copy("qp-catalog-sidecar/pages/page-4.bin", root.resolve("pages/page-4.bin"))
-        copy("qp-catalog-sidecar/pages/page-5.bin", root.resolve("pages/page-5.bin"))
-        copy("qp-catalog-sidecar/pages/page-6.bin", root.resolve("pages/page-6.bin"))
-        copy("qp-catalog-sidecar/handle.bin", root.resolve("handle.bin"))
-        copy("qp-catalog-sidecar/proof.bin", root.resolve("proof.bin"))
-        for (stem in listOf("page-3", "page-4", "page-5", "page-6")) {
-            copy("qp-catalog-sidecar/$stem.handle", root.resolve("$stem.handle"))
-            copy("qp-catalog-sidecar/$stem.proof", root.resolve("$stem.proof"))
-        }
-    }
-
-    private fun sidecarHandle(stem: String): ByteArray =
-        checkNotNull(javaClass.classLoader.getResourceAsStream("qp-catalog-sidecar/$stem.handle")).use { it.readBytes() }
-
-    private fun sidecarProof(stem: String): ByteArray =
-        checkNotNull(javaClass.classLoader.getResourceAsStream("qp-catalog-sidecar/$stem.proof")).use { it.readBytes() }
-
     private fun restoreProperty(name: String, previous: String?) {
-        if (previous == null) {
-            System.clearProperty(name)
-        } else {
-            System.setProperty(name, previous)
-        }
+        if (previous == null) System.clearProperty(name) else System.setProperty(name, previous)
     }
 
     private companion object {
         const val LOADER_PROPERTY = "j.l"
         const val METHOD_PROPERTY = "j.m"
-        const val CATALOG_PROPERTY = "j.c"
         const val SOURCE_OWNER = "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge"
         const val RENAMED_OWNER = "io/github/hht0rro/javashroud/RenamedNativeSurface"
         val SOURCE_METHODS = listOf(

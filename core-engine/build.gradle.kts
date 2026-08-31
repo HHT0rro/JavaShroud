@@ -40,19 +40,33 @@ private fun resolveCargoExecutable(): String {
     return if (candidate.isFile) candidate.absolutePath else "cargo"
 }
 
+private fun lockedNativeToolchainExecutables(): List<File> {
+    val root = File(System.getProperty("user.home"), ".javashroud/toolchains")
+    if (!root.isDirectory) return emptyList()
+    val zig = root.listFiles()
+        .orEmpty()
+        .firstOrNull { it.isDirectory && it.name.startsWith("zig-0.13.0-") }
+        ?.resolve(if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) "zig.exe" else "zig")
+    val cargoZigbuild = root.listFiles()
+        .orEmpty()
+        .firstOrNull { it.isDirectory && it.name.startsWith("cargo-zigbuild-0.23.2-") }
+        ?.resolve(if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) "cargo-zigbuild.exe" else "cargo-zigbuild")
+    return listOfNotNull(zig, cargoZigbuild).filter(File::isFile)
+}
+
 private fun hostRustRuntimePlatform(osName: String, osArch: String): String {
     val normalizedOs = osName.lowercase()
     val normalizedArch = osArch.lowercase()
     if (normalizedArch !in setOf("amd64", "x86_64")) {
         throw GradleException(
-            "AKEN-R1 Rust native runtime is supported only on x86_64 hosts; host architecture '$osArch' is unsupported",
+            "Qp Rust native runtime is supported only on x86_64 hosts; host architecture '$osArch' is unsupported",
         )
     }
     return when {
         normalizedOs.startsWith("windows") -> "windows-x64"
         normalizedOs.startsWith("linux") -> "linux-x64"
         else -> throw GradleException(
-            "AKEN-R1 Rust native runtime is supported only on Windows x64 and Linux x64; host '$osName' is unsupported",
+            "Qp Rust native runtime is supported only on Windows x64 and Linux x64; host '$osName' is unsupported",
         )
     }
 }
@@ -61,7 +75,7 @@ private fun resolveRustRuntimeTarget(value: String): RustRuntimeTarget = when (v
     "windows-x64", "x86_64-pc-windows-gnu" -> RustRuntimeTarget("windows-x64", "x86_64-pc-windows-gnu")
     "linux-x64", "x86_64-unknown-linux-gnu.2.17" -> RustRuntimeTarget("linux-x64", "x86_64-unknown-linux-gnu.2.17")
     else -> throw GradleException(
-        "AKEN-R1 Rust native runtime target '$value' is unsupported; macOS, Mach-O, and .dylib targets are rejected",
+        "Qp Rust native runtime target '$value' is unsupported; macOS, Mach-O, and .dylib targets are rejected",
     )
 }
 
@@ -76,6 +90,20 @@ private fun cargoOutputTarget(target: RustRuntimeTarget): String =
     } else {
         target.cargoTarget
     }
+
+private val requiredWindowsNativeExports = listOf(
+    "JNI_OnLoad",
+    "JNI_OnUnload",
+    "qp_r1_runtime_binding_digest",
+    "qp_r1_open_frame",
+)
+
+private fun nativeReleaseRustFlags(target: RustRuntimeTarget): String {
+    if (target.platform != "windows-x64") return ""
+    return requiredWindowsNativeExports.joinToString(" ") { export ->
+        "-C link-arg=/EXPORT:$export"
+    }
+}
 
 private val rustRuntimeTarget: RustRuntimeTarget = providers.gradleProperty("javashroud.rust.platform").orNull
     ?.let(::resolveRustRuntimeTarget)
@@ -117,6 +145,17 @@ kotlin {
 
 application {
     mainClass.set("io.github.hht0rro.javashroud.MainKt")
+}
+
+// A stale Gradle/Kotlin output snapshot can report compileKotlin as up-to-date
+// after the relocated root build directory has lost a production class. Keep
+// the runtime entrypoint from starting with a partial classpath.
+val runtimeGarbageCollectorClass = layout.buildDirectory.file(
+    "classes/kotlin/main/io/github/hht0rro/javashroud/maintenance/RuntimeGarbageCollector.class",
+)
+
+tasks.named<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>("compileKotlin") {
+    outputs.file(runtimeGarbageCollectorClass)
 }
 
 // Runtime helper classes under src/main/java are embedded into obfuscated
@@ -168,11 +207,12 @@ tasks.test {
 
 tasks.named<JavaExec>("run") {
     outputs.upToDateWhen { false }
+    inputs.file(runtimeGarbageCollectorClass)
 }
 
 val buildRustNativeRuntime = tasks.register<Exec>("buildRustNativeRuntime") {
     group = "build"
-    description = "Builds the AKEN-R1 Rust native runtime for the selected Windows or Linux target."
+    description = "Builds the Qp Rust native runtime for the selected Windows or Linux target."
     val workspace = rustWorkspaceDir.asFile
     val cargoManifest = rustCargoManifest.asFile
     val artifact = rustLibraryArtifact.asFile
@@ -182,15 +222,33 @@ val buildRustNativeRuntime = tasks.register<Exec>("buildRustNativeRuntime") {
     outputs.file(artifact)
     doFirst {
         if (!cargoManifest.isFile) {
-            throw GradleException("AKEN-R1 Rust workspace is missing: $cargoManifest")
+            throw GradleException("Qp Rust workspace is missing: $cargoManifest")
         }
     }
+    val inheritedRustFlags = System.getenv("RUSTFLAGS").orEmpty().trim()
+    val requiredRustFlags = nativeReleaseRustFlags(rustRuntimeTarget)
+    val lockedToolExecutables = lockedNativeToolchainExecutables()
+    val inheritedPath = System.getenv("PATH").orEmpty()
+    val toolDirectories = lockedToolExecutables.map { it.parentFile.absolutePath }
+    if (toolDirectories.isNotEmpty()) {
+        environment("PATH", (toolDirectories + inheritedPath).joinToString(File.pathSeparator))
+        lockedToolExecutables.firstOrNull { it.name.startsWith("zig", ignoreCase = true) }?.let { zig ->
+            environment("ZIG", zig.absolutePath)
+        }
+    }
+    environment(
+        "RUSTFLAGS",
+        listOf(inheritedRustFlags, requiredRustFlags)
+            .filter { it.isNotEmpty() }
+            .joinToString(" "),
+    )
+    environment("CARGO_TERM_COLOR", "never")
     commandLine(resolveCargoExecutable(), "zigbuild", "--locked", "--workspace", "--release", "--target", cargoTarget)
 }
 
 val packageRustWorkspaceSources = tasks.register<Sync>("packageRustWorkspaceSources") {
     group = "build"
-    description = "Packages the AKEN-R1 Rust workspace sources for on-machine recompilation."
+    description = "Packages the Qp Rust workspace sources for on-machine recompilation."
     val outputRoot = layout.buildDirectory.dir("generated/rust-workspace-sources/META-INF/rust-runtime")
     from(fileTree(rustWorkspaceDir) {
         exclude("target/**")
@@ -207,14 +265,14 @@ val packageRustWorkspaceSources = tasks.register<Sync>("packageRustWorkspaceSour
             .toList()
         root.resolve("file-list.txt").writeText(files.joinToString("\n"))
         if (files.none { it == "Cargo.toml" } || files.none { it == "Cargo.lock" }) {
-            throw GradleException("AKEN-R1 Rust workspace sources are missing Cargo.toml or Cargo.lock")
+            throw GradleException("Qp Rust workspace sources are missing Cargo.toml or Cargo.lock")
         }
     }
 }
 
 val packageRustNativeRuntime = tasks.register<Sync>("packageRustNativeRuntime") {
     group = "build"
-    description = "Packages exactly one authenticated AKEN-R1 Rust native runtime resource."
+    description = "Packages exactly one authenticated Qp Rust native runtime resource."
     val artifact = rustLibraryArtifact.asFile
     val targetPlatform = rustRuntimeTarget.platform
     val releaseDirectory = rustReleaseDir.asFile
@@ -225,10 +283,10 @@ val packageRustNativeRuntime = tasks.register<Sync>("packageRustNativeRuntime") 
     }
     doFirst {
         if (!artifact.isFile || artifact.length() == 0L) {
-            throw GradleException("AKEN-R1 Rust runtime artifact is missing or empty: $artifact")
+            throw GradleException("Qp Rust runtime artifact is missing or empty: $artifact")
         }
         if (artifact.extension.equals("dylib", ignoreCase = true) || artifact.name.contains(".dylib", ignoreCase = true)) {
-            throw GradleException("AKEN-R1 rejects Mach-O/.dylib runtime artifacts: $artifact")
+            throw GradleException("Qp rejects Mach-O/.dylib runtime artifacts: $artifact")
         }
         val header = artifact.inputStream().use { it.readNBytes(20) }
         val validImage = when (targetPlatform) {
@@ -267,12 +325,34 @@ val packageRustNativeRuntime = tasks.register<Sync>("packageRustNativeRuntime") 
             else -> false
         }
         if (!validImage) {
-            throw GradleException("AKEN-R1 Rust runtime artifact has an invalid $targetPlatform image header: $artifact")
+            throw GradleException("Qp Rust runtime artifact has an invalid $targetPlatform image header: $artifact")
+        }
+        if (targetPlatform == "windows-x64") {
+            val imageBytes = artifact.readBytes()
+            try {
+                fun containsAscii(value: String): Boolean {
+                    val needle = value.toByteArray(Charsets.US_ASCII)
+                    return imageBytes.indices.any { start ->
+                        start + needle.size <= imageBytes.size &&
+                            needle.indices.all { offset -> imageBytes[start + offset] == needle[offset] }
+                    }
+                }
+                val missing = requiredWindowsNativeExports.filterNot { export ->
+                    containsAscii(export)
+                }
+                if (missing.isNotEmpty()) {
+                    throw GradleException(
+                        "Qp Windows runtime is missing required exported JNI symbols: ${missing.joinToString(",")}",
+                    )
+                }
+            } finally {
+                imageBytes.fill(0)
+            }
         }
         val machOArtifacts = releaseDirectory.listFiles().orEmpty()
             .filter { it.extension.equals("dylib", ignoreCase = true) }
         if (machOArtifacts.isNotEmpty()) {
-            throw GradleException("AKEN-R1 release directory contains rejected Mach-O artifacts: ${machOArtifacts.joinToString()}")
+            throw GradleException("Qp release directory contains rejected Mach-O artifacts: ${machOArtifacts.joinToString()}")
         }
     }
 }

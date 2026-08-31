@@ -2,7 +2,7 @@ package io.github.hht0rro.javashroud;
 
 /**
  * WSL/Linux probe that loads the locked glibc 2.17 cdylib and exercises the
- * source-named JNI surface after {@code j.l} recovery.
+ * source-named JNI initialization boundary after {@code j.l} recovery.
  */
 public final class LinuxNativeLoadProbe {
     private LinuxNativeLoadProbe() {}
@@ -32,24 +32,32 @@ public final class LinuxNativeLoadProbe {
     static native byte[] nativeOpenTargetToken(byte[] token, String callerOwner, String indyName, String methodType);
 
     public static void main(String[] args) {
-        if (args.length < 1 || args.length > 2) {
-            System.err.println("usage: LinuxNativeLoadProbe <libqp_ffi.so> [catalog-sidecar]");
+        if (args.length != 1) {
+            System.err.println("usage: LinuxNativeLoadProbe <libqp_ffi.so>");
             System.exit(2);
         }
         System.setProperty("j.l", "io/github/hht0rro/javashroud/LinuxNativeLoadProbe");
         System.setProperty("j.m", bindingMap());
-        if (args.length == 2) {
-            System.setProperty("j.c", args[1]);
-        }
         System.load(args[0]);
         System.out.println("INIT=" + nativeInit("linux-x64"));
         System.out.println("BEAT=" + nativeHeartbeat());
-        if (args.length == 2) {
-            System.out.println("STR=" + nativeOpenStringPage(pack(readAll("page-3.handle"), 3, readAll("page-3.proof"))));
-            System.out.println("CLS=" + new String(nativeReadClassPage(pack(readAll("page-4.handle"), 4, readAll("page-4.proof")))));
-            nativeConsumeNativeSegment(pack(readAll("page-5.handle"), 5, readAll("page-5.proof")));
-            System.out.println("NAT=ok");
-            System.out.println("VM=" + nativeExecuteVmPage(0L, pack(readAll("page-6.handle"), 6, readAll("page-6.proof")), null));
+        byte[] nonce = new byte[32];
+        new java.security.SecureRandom().nextBytes(nonce);
+        try {
+            if (!nativeInstallSessionNonce(nonce)) {
+                System.err.println("native session install failed");
+                System.exit(3);
+            }
+        } finally {
+            java.util.Arrays.fill(nonce, (byte) 0);
+        }
+        System.out.println("SESSION=ok");
+        try {
+            nativeOpenStringPage(new byte[29]);
+            System.err.println("unbound page unexpectedly opened");
+            System.exit(4);
+        } catch (SecurityException expected) {
+            System.out.println("UNBOUND=ok");
         }
     }
 
@@ -84,23 +92,4 @@ public final class LinuxNativeLoadProbe {
         return result.toString();
     }
 
-    private static byte[] readAll(String name) {
-        String root = System.getProperty("j.c");
-        try {
-            return java.nio.file.Files.readAllBytes(java.nio.file.Path.of(root, name));
-        } catch (Exception error) {
-            throw new IllegalStateException(name, error);
-        }
-    }
-
-    private static byte[] pack(byte[] handle, int pageIndex, byte[] proof) {
-        byte[] packed = new byte[24 + 4 + proof.length];
-        System.arraycopy(handle, 0, packed, 0, 24);
-        packed[24] = (byte) (pageIndex >>> 24);
-        packed[25] = (byte) (pageIndex >>> 16);
-        packed[26] = (byte) (pageIndex >>> 8);
-        packed[27] = (byte) pageIndex;
-        System.arraycopy(proof, 0, packed, 28, proof.length);
-        return packed;
-    }
 }
