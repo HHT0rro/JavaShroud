@@ -20,7 +20,7 @@
 
 ## Positioning
 
-JavaShroud is a Java obfuscation and hardening toolchain: a Kotlin engine performs bytecode transformation, selected methods can be lowered into VMBC resources executed by a Native bytecode VM (NBVM), and a Wails + Vue desktop app handles configuration and task management.
+JavaShroud is a Java obfuscation and hardening toolchain: a Kotlin engine performs bytecode transformation, selected methods can be lowered into protected resources executed by the Native runtime, and a Wails + Vue desktop app handles configuration and task management.
 
 The design is Kerckhoffs-oriented: protection strength comes from per-artifact keys, layouts, opcode dialects, and the Java / Native execution boundary, not from long-term secrecy of the implementation. The artifact ships with everything needed to run, so the goal is to raise the cost of analysis and cross-sample reuse rather than claim absolute irreversibility.
 
@@ -31,10 +31,10 @@ The design is Kerckhoffs-oriented: protection strength comes from per-artifact k
 | Renaming | `rename-classes`, `rename-packages`, `rename-methods`, `rename-fields` (stable) |
 | Constants and strings | `integer-constant-obfuscation`, `string-encryption`, `field-string-encryption` |
 | Control flow | `control-flow-obfuscation`, `control-flow-flattening`, `reference-proxy`, `invoke-dynamic-indirection`, `condy-constant-indirection` |
-| Method virtualization | `method-virtualization`: JVM bytecode lowering to VBC4, executed by the NBVM |
+| Method virtualization | `method-virtualization`: JVM bytecode lowering to native VM bytecode, executed by the Native runtime |
 | Resource and class protection | JSRP current-format authenticated resource envelopes and native typed-page routing |
 | Runtime defenses | `os-anti-debug`, `os-anti-vm`, `callsite-rotation-protection`, `exception-semantic-virtualization` |
-| Native runtime | `jni-microkernel-loader`: AKEN-R1 Rust runtime, authenticated resources, and platform binding |
+| Native runtime | `jni-microkernel-loader`: Qp Rust runtime, authenticated resources, and platform binding |
 | Desktop workflow | Wails + Vue UI, configuration editing, engine task management |
 
 26 passes are registered; the default pipeline contains only `strip-compile-debug-info`. Stable passes are enabled by default. Experimental passes must be enabled explicitly in the config, and opt-in passes additionally require `allowOptInPasses = true`.
@@ -59,7 +59,7 @@ The pass also has two structural rewrites:
 | Low disruption | `control-flow-obfuscation`, `density = 3..5`, `if-chain` | Adds entry predicates and a small number of synthetic edges, with lower size and debugging impact. |
 | General protection | `density = 6..8`, `algebraicFamily = "mixed"`, plus `control-flow-flattening` | Mixes predicate and dispatch-block forms within a method, producing less direct decompiler output. |
 | High disruption | `density = 9..10`, `tableswitch-hybrid` or `lookupswitch`, with compatible `branchInjection` / `handlerSplit` | Changes more branch, exception-table, and local-dispatch structure; exception paths, hot methods, and startup time need focused testing. |
-| High-value logic | Control-flow passes plus call indirection and string / constant protection; use `method-virtualization` where required | Changes call resolution as well, or moves selected methods into VMBC / NBVM execution. |
+| High-value logic | Control-flow passes plus call indirection and string / constant protection; use `method-virtualization` where required | Changes call resolution as well, or moves selected methods into Native runtime execution. |
 
 “Strength” here means the amount of work required for static reading, CFG recovery, and pattern matching. It is not an irreversibility claim. JVM instructions remain in the artifact, and invariant conditions or dead paths can be simplified with enough analysis time. Start with a small set of important classes and expand only after testing.
 
@@ -75,17 +75,17 @@ JSRP is the project's protected resource envelope format (magic `JSRP`, current 
 
 Field layout and the decode flow are in `QpResourceCodec`.
 
-## VMBC / NBVM Execution Path
+## Method Virtualization Execution Path
 
-`method-virtualization` lowers selected Java methods into VBC4 bytecode (`QpSerializer`) sealed as JSRP resources; the original method body is replaced by a dispatcher stub. At runtime the stub calls `QpBridge.executeVmResource(entryToken, …)` to enter the JNI microkernel, and the Native VM behind `js_vm_execute_resource` authenticates, parses, executes, and wipes sensitive state.
+`method-virtualization` lowers selected Java methods into native VM bytecode (`QpSerializer`) sealed as JSRP resources; the original method body is replaced by a dispatcher stub. At runtime the stub calls `QpBridge.executeVmResource(entryToken, …)` to enter the JNI microkernel, and the Native runtime behind `js_vm_execute_resource` authenticates, parses, executes, and wipes sensitive state.
 
 ```mermaid
 flowchart LR
-  A["Method selection and compatibility checks"] --> B["VBC4 lowering"]
+  A["Method selection and compatibility checks"] --> B["native VM lowering"]
   B --> C["JSRP sealed envelope"]
   C --> D["dispatcher stub"]
   D --> E["JNI microkernel"]
-  E --> F["NBVM authenticated execution"]
+  E --> F["Native runtime authenticated execution"]
   A -.incompatible.-> X["build-time fail-closed"]
   E -.authentication failure.-> Y["runtime fail-closed"]
 ```
@@ -94,7 +94,7 @@ Execution entry is bound to per-artifact entry tokens, opcode dialects, resource
 
 ## Native hardening
 
-AKEN-R1 uses the Rust-only runtime boundary and the final authenticated resource locator:
+Qp uses the Rust-only runtime boundary and the final authenticated resource locator:
 
 - Production resources are selected only for Windows x64 and Linux x64, then bound to the final artifact digest and current runtime format.
 - Resource, platform, length, image, and binding failures reject loading; Java does not fall back to an old C shell or system-path library.
@@ -102,19 +102,19 @@ AKEN-R1 uses the Rust-only runtime boundary and the final authenticated resource
 
 ### Platform Boundaries
 
-| Platform | AKEN-R1 Native boundary |
+| Platform | Qp Native boundary |
 | --- | --- |
 | Windows x64 | Rust runtime; the only cargo target is `x86_64-pc-windows-gnu`, with a `.dll` resource; the old PE/C loader is not a production path |
 | Linux x64 | Rust runtime; the only cargo target is `x86_64-unknown-linux-gnu.2.17`, with a `.so` resource; the old ELF/C loader is not a production path |
 | Other platforms | macOS, Mach-O, and `.dylib` selection, build, resource, and load paths fail closed |
 
-AKEN-R1 no longer compiles, packages, or runs the retired C/Zig Native runtime. Retired build/cache/temp entrypoints remain only as fail-closed quarantine shims.
+Qp no longer compiles, packages, or runs the retired C/Zig Native runtime. Retired build/cache/temp entrypoints remain only as fail-closed quarantine shims.
 
 ## Compared With JNIC / Native Obfuscation
 
-| Dimension | Typical JNIC / Native obfuscation | JavaShroud VMBC / NBVM |
+| Dimension | Typical JNIC / Native obfuscation | JavaShroud method virtualization |
 | --- | --- | --- |
-| Conversion target | Java method to native function | Java method to VMBC resource |
+| Conversion target | Java method to native function | Java method to a protected Native VM resource |
 | Execution | JNI calls the corresponding native function | Native VM authenticates, parses, and dispatches virtual instructions |
 | Main analysis surface | JNI bridge, exports, and machine code | Dispatcher, resource envelope, virtual ISA, VM state, and Native boundary |
 | Diversification | Native compiler output | Per-artifact keys, layout, opcodes, tokens, and runtime profiles |
@@ -125,8 +125,8 @@ The two approaches are not mutually exclusive; in JavaShroud the Native layer is
 
 - The JavaShroud engine itself builds and runs on JDK 21+.
 - Renaming, metadata cleanup, and most basic passes can process Java 8 classfiles without raising the classfile version.
-- `ConstantDynamic` features require Java 11+; VMBC, the Rust Native runtime, and most runtime defense passes target Java 11+ runtimes.
-- The Native runtime accepts only the declared AKEN-R1 Windows/Linux x64 targets; release acceptance should use the final artifact digest, locator, and runtime result.
+- `ConstantDynamic` features require Java 11+; method virtualization, the Rust Native runtime, and most runtime defense passes target Java 11+ runtimes.
+- The Native runtime accepts only the declared Qp Windows/Linux x64 targets; release acceptance should use the final artifact digest, locator, and runtime result.
 
 ## Quick Start
 
@@ -188,7 +188,7 @@ The release script builds the core engine, the GraalVM native engine, frontend a
 ## Repository Layout
 
 ```text
-core-engine/          Kotlin / Java engine, VMBC, and Native runtime
+core-engine/          Kotlin / Java engine, method virtualization, and Native runtime
 desktop-app/          Go / Wails desktop host and Vue frontend
 annotations/          JavaShroud annotation module
 assets/               README and release assets

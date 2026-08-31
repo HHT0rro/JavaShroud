@@ -85,7 +85,7 @@ const defaultSchema: EngineSchemaPayload = {
     {
       id: 'method-virtualization',
       name: 'Method Virtualization',
-      description: 'Lowers selected methods into the VBC4 native bytecode VM path.',
+      description: 'Lowers selected methods into the native bytecode VM path.',
       tagIds: ['vm-protection'],
       stability: 'experimental',
       risk: 'high',

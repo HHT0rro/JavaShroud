@@ -25,7 +25,7 @@ const baseSchema = {
       description: 'Sample pass',
       tagIds: ['obfuscation'],
       stability: 'stable',
-      compatibilityNotes: 'Use only the current VBC4 native VM target.',
+      compatibilityNotes: 'Use only the current native VM target.',
       defaultEnabled: false,
       targeting: { supported: true, targetKinds: ['class', 'method'] },
       params: [
@@ -72,10 +72,10 @@ const expectParseError = (schema: unknown, expectedMessagePart: string): void =>
 const parsedSchema = parseEngineSchema(baseSchema)
 assert(parsedSchema.modules[0]?.params[0]?.defaultValue === 'safe', 'expected valid enum default to be preserved')
 assert(parsedSchema.modules[0]?.params[2]?.hidden === true, 'expected hidden param flag to be preserved')
-assert(parsedSchema.modules[0]?.compatibilityNotes === 'Use only the current VBC4 native VM target.', 'expected compatibility notes to be preserved')
+assert(parsedSchema.modules[0]?.compatibilityNotes === 'Use only the current native VM target.', 'expected compatibility notes to be preserved')
 assert(parsedSchema.modules[0]?.targeting.targetKinds.includes('method') === true, 'expected targeting capability to be preserved')
 assert(buildPassItemsFromSchema(parsedSchema)[0]?.params.salt === 42, 'expected hidden param default to be preserved in pass params')
-assert(buildPassItemsFromSchema(parsedSchema)[0]?.compatibilityNotes === 'Use only the current VBC4 native VM target.', 'expected compatibility notes to be copied to pass items')
+assert(buildPassItemsFromSchema(parsedSchema)[0]?.compatibilityNotes === 'Use only the current native VM target.', 'expected compatibility notes to be copied to pass items')
 assert(!buildPassItemsFromSchema(parsedSchema)[0]?.paramSchemas.some((paramSchema) => paramSchema.key === 'salt'), 'expected hidden params to be omitted from visible param schemas')
 assert(buildPassItemsFromSchema(parsedSchema)[0]?.paramSchemas.some((paramSchema) => paramSchema.key === 'enabled'), 'expected visible params to be included in visible param schemas')
 assert(parsedSchema.defaultPipeline[0] === 'sample-pass', 'expected defaultPipeline to be preserved')

@@ -20,7 +20,7 @@
 
 ## 项目定位
 
-JavaShroud 是一套 Java 混淆与加固工具链：Kotlin 引擎做字节码变换，选中的方法可以 lowering 成 VMBC 资源交给 Native bytecode VM（NBVM）执行，桌面端（Wails + Vue）负责配置编辑和任务管理。
+JavaShroud 是一套 Java 混淆与加固工具链：Kotlin 引擎做字节码变换，选中的方法可以 lowering 成受保护资源并交给 Native runtime 执行，桌面端（Wails + Vue）负责配置编辑和任务管理。
 
 设计取向接近 Kerckhoffs 原则：保护强度来自每份产物独立生成的密钥、布局、opcode 方言和 Java / Native 执行边界，不依赖实现细节长期保密。产物自带运行所需的全部材料，所以这里的目标是拉高分析和跨样本复用的成本，而不是宣称绝对不可逆。
 
@@ -31,10 +31,10 @@ JavaShroud 是一套 Java 混淆与加固工具链：Kotlin 引擎做字节码�
 | 重命名 | `rename-classes`、`rename-packages`、`rename-methods`、`rename-fields`（stable） |
 | 常量与字符串 | `integer-constant-obfuscation`、`string-encryption`、`field-string-encryption` |
 | 控制流 | `control-flow-obfuscation`、`control-flow-flattening`、`reference-proxy`、`invoke-dynamic-indirection`、`condy-constant-indirection` |
-| 方法虚拟化 | `method-virtualization`：JVM bytecode lowering 为 VBC4，由 NBVM 执行 |
+| 方法虚拟化 | `method-virtualization`：JVM bytecode lowering 为 native VM 字节码，由 Native runtime 执行 |
 | 资源与类保护 | JSRP 当前格式认证资源封装、Native typed page 路由 |
 | 运行时防御 | `os-anti-debug`、`os-anti-vm`、`callsite-rotation-protection`、`exception-semantic-virtualization` |
-| Native runtime | `jni-microkernel-loader`：AKEN-R1 Rust runtime、认证资源与平台绑定 |
+| Native runtime | `jni-microkernel-loader`：Qp Rust runtime、认证资源与平台绑定 |
 | 桌面工作流 | Wails + Vue 界面、配置编辑、引擎任务管理 |
 
 注册 pass 共 26 个，默认 pipeline 只含 `strip-compile-debug-info`。stable pass 默认启用；experimental pass 需在配置里显式打开，其中带 opt-in 标记的还要求 `allowOptInPasses = true`。
@@ -59,7 +59,7 @@ JavaShroud 的控制流保护分成两类：`control-flow-obfuscation` 改写现
 | 低干扰 | `control-flow-obfuscation`，`density = 3..5`，`if-chain` | 增加入口谓词和少量伪边，体积与调试影响较小。 |
 | 常规保护 | `density = 6..8`，`algebraicFamily = "mixed"`，配合 `control-flow-flattening` | 同一方法内会混入多种谓词和分派块，反编译结果更零散。 |
 | 高干扰 | `density = 9..10`，`tableswitch-hybrid` 或 `lookupswitch`，按兼容性开启 `branchInjection` / `handlerSplit` | 跳转图、异常表和局部分派结构变化更多；应重点测试异常路径、热点方法和启动时间。 |
-| 高价值逻辑 | 控制流 pass 加调用间接、字符串/常量保护；必要时使用 `method-virtualization` | 普通字节码层之外还会改变调用解析或转入 VMBC / NBVM 执行。 |
+| 高价值逻辑 | 控制流 pass 加调用间接、字符串/常量保护；必要时使用 `method-virtualization` | 普通字节码层之外还会改变调用解析或转入 Native runtime 执行。 |
 
 这里的“强度”说的是静态阅读、CFG 还原和规则匹配的工作量，不是不可逆承诺。JVM 指令仍在产物中；恒等条件和死路径在足够时间下可以被化简。实际配置应从少量关键类开始，逐步扩大范围。
 
@@ -75,17 +75,17 @@ JSRP 是项目内部的受保护资源封装格式（magic `JSRP`，当前版本
 
 协议字段与解码流程见 `QpResourceCodec`。
 
-## VMBC / NBVM 执行链
+## 方法虚拟化执行链
 
-`method-virtualization` 把选中的 Java 方法 lowering 成 VBC4 字节码（`QpSerializer`），封装为 JSRP 资源；原方法体替换成 dispatcher stub。运行时 stub 调 `QpBridge.executeVmResource(entryToken, …)` 进入 JNI 微内核，由 `js_vm_execute_resource` 对应的 Native VM 完成资源认证、解析、执行和敏感状态清理。
+`method-virtualization` 把选中的 Java 方法 lowering 成 native VM 字节码（`QpSerializer`），封装为 JSRP 资源；原方法体替换成 dispatcher stub。运行时 stub 调 `QpBridge.executeVmResource(entryToken, …)` 进入 JNI 微内核，由 `js_vm_execute_resource` 对应的 Native runtime 完成资源认证、解析、执行和敏感状态清理。
 
 ```mermaid
 flowchart LR
-  A["方法选择与兼容性校验"] --> B["VBC4 lowering"]
+  A["方法选择与兼容性校验"] --> B["native VM lowering"]
   B --> C["JSRP 加密封装"]
   C --> D["dispatcher stub"]
   D --> E["JNI 微内核"]
-  E --> F["NBVM 认证执行"]
+  E --> F["Native runtime 认证执行"]
   A -.不兼容.-> X["构建期 fail-closed"]
   E -.认证失败.-> Y["运行期 fail-closed"]
 ```
@@ -94,7 +94,7 @@ flowchart LR
 
 ## Native 加固
 
-AKEN-R1 使用 Rust-only runtime 边界与最终认证 Native locator：
+Qp 使用 Rust-only runtime 边界与最终认证 Native locator：
 
 - 生产资源只为 Windows x64 与 Linux x64 选择，并绑定最终 artifact digest 与当前 runtime 格式。
 - 资源、平台、长度、镜像和 binding 任一校验失败都会拒绝加载；Java 不回退到旧 C shell 或系统路径库。
@@ -102,19 +102,19 @@ AKEN-R1 使用 Rust-only runtime 边界与最终认证 Native locator：
 
 ### 平台边界
 
-| 平台 | AKEN-R1 当前 Native 边界 |
+| 平台 | Qp 当前 Native 边界 |
 | --- | --- |
 | Windows x64 | Rust runtime，唯一 cargo target 为 `x86_64-pc-windows-gnu`，资源后缀为 `.dll`；PE/旧 C loader 不再是生产路径 |
 | Linux x64 | Rust runtime，唯一 cargo target 为 `x86_64-unknown-linux-gnu.2.17`，资源后缀为 `.so`；ELF/旧 C loader 不再是生产路径 |
 | 其他平台 | 包括 macOS、Mach-O 与 `.dylib`：平台识别、构建、资源选择和加载均 fail-closed |
 
-AKEN-R1 不再编译、打包或运行旧 C/Zig Native runtime；旧 build/cache/temp 入口只保留 fail-closed 封存脚本。
+Qp 不再编译、打包或运行旧 C/Zig Native runtime；旧 build/cache/temp 入口只保留 fail-closed 封存脚本。
 
 ## 与 JNIC / Native 混淆的区别
 
-| 维度 | 常见 JNIC / Native 混淆 | JavaShroud VMBC / NBVM |
+| 维度 | 常见 JNIC / Native 混淆 | JavaShroud 方法虚拟化 |
 | --- | --- | --- |
-| 转换目标 | Java 方法转为本地函数 | Java 方法转为 VMBC 资源 |
+| 转换目标 | Java 方法转为本地函数 | Java 方法转为受保护的 Native VM 资源 |
 | 执行方式 | JNI 调用对应本地函数 | Native VM 认证、解析并调度虚拟指令 |
 | 主要分析面 | JNI bridge、导出与机器码 | dispatcher、资源封装、虚拟 ISA、VM 状态与 Native 边界 |
 | 差异化来源 | 本地编译结果 | 每产物密钥、布局、opcode、token 与 runtime profile |
@@ -125,8 +125,8 @@ AKEN-R1 不再编译、打包或运行旧 C/Zig Native runtime；旧 build/cache
 
 - JavaShroud 引擎本身用 JDK 21+ 构建和运行。
 - 重命名、metadata 清理和多数基础 pass 可处理 Java 8 classfile，不会主动抬升 classfile 版本。
-- `ConstantDynamic` 相关能力要求 Java 11+；VMBC、Rust Native runtime 与多数运行时防护面向 Java 11+ 目标运行时。
-- Native runtime 只接受 AKEN-R1 声明的 Windows/Linux x64 target；正式交付前以实际产物的 digest、locator 和运行结果为准。
+- `ConstantDynamic` 相关能力要求 Java 11+；方法虚拟化、Rust Native runtime 与多数运行时防护面向 Java 11+ 目标运行时。
+- Native runtime 只接受 Qp 声明的 Windows/Linux x64 target；正式交付前以实际产物的 digest、locator 和运行结果为准。
 
 ## 快速开始
 
@@ -188,7 +188,7 @@ Windows 完整发布入口：
 ## 目录结构
 
 ```text
-core-engine/          Kotlin / Java 引擎、VMBC 与 Native runtime
+core-engine/          Kotlin / Java 引擎、方法虚拟化与 Native runtime
 desktop-app/          Go / Wails 桌面宿主与 Vue 前端
 annotations/          JavaShroud 注解模块
 assets/               README 与发布资源
