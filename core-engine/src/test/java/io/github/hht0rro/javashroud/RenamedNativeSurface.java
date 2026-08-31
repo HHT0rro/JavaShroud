@@ -1,12 +1,12 @@
 package io.github.hht0rro.javashroud;
 
 /**
- * Sealed-helper stand-in used to prove AKEN-R1 RegisterNatives recovery after
+ * Sealed-helper stand-in used to prove RegisterNatives recovery after
  * method renaming. JNI_OnLoad reads {@code j.l}/{@code j.m} and binds these
  * short names instead of the source {@code nativeInit} surface.
  */
-final class R1RenamedNativeSurface {
-    private R1RenamedNativeSurface() {}
+final class RenamedNativeSurface {
+    private RenamedNativeSurface() {}
 
     static native int nInit(String platform);
 

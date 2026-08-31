@@ -2,10 +2,10 @@ package io.github.hht0rro.javashroud;
 
 /**
  * WSL/Linux probe that loads the locked glibc 2.17 cdylib and exercises the
- * source-named R1 JNI surface after {@code j.l} recovery.
+ * source-named JNI surface after {@code j.l} recovery.
  */
-public final class LinuxR1LoadProbe {
-    private LinuxR1LoadProbe() {}
+public final class LinuxNativeLoadProbe {
+    private LinuxNativeLoadProbe() {}
 
     static native int nativeInit(String platform);
 
@@ -29,12 +29,14 @@ public final class LinuxR1LoadProbe {
 
     static native byte[] nativeTransformDefense(byte[] material, String binding);
 
+    static native byte[] nativeOpenTargetToken(byte[] token, String callerOwner, String indyName, String methodType);
+
     public static void main(String[] args) {
         if (args.length < 1 || args.length > 2) {
-            System.err.println("usage: LinuxR1LoadProbe <libqp_ffi.so> [catalog-sidecar]");
+            System.err.println("usage: LinuxNativeLoadProbe <libqp_ffi.so> [catalog-sidecar]");
             System.exit(2);
         }
-        System.setProperty("j.l", "io/github/hht0rro/javashroud/LinuxR1LoadProbe");
+        System.setProperty("j.l", "io/github/hht0rro/javashroud/LinuxNativeLoadProbe");
         System.setProperty("j.m", bindingMap());
         if (args.length == 2) {
             System.setProperty("j.c", args[1]);
@@ -65,6 +67,7 @@ public final class LinuxR1LoadProbe {
                 {"nativeInitializeDefense", "(Ljava/lang/String;Ljava/lang/String;)I", "nativeInitializeDefense"},
                 {"nativeProbeDefense", "(Ljava/lang/String;Ljava/lang/String;)I", "nativeProbeDefense"},
                 {"nativeTransformDefense", "([BLjava/lang/String;)[B", "nativeTransformDefense"},
+                {"nativeOpenTargetToken", "([BLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)[B", "nativeOpenTargetToken"},
         };
         StringBuilder result = new StringBuilder();
         for (String[] method : methods) {

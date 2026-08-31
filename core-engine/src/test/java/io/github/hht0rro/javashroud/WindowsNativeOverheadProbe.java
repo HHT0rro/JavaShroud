@@ -3,8 +3,8 @@ package io.github.hht0rro.javashroud;
 /**
  * Fresh-JVM probe for protected string-page call overhead against a trivial baseline.
  */
-public final class WindowsR1OverheadProbe {
-    private WindowsR1OverheadProbe() {}
+public final class WindowsNativeOverheadProbe {
+    private WindowsNativeOverheadProbe() {}
 
     static native int nativeInit(String platform);
 
@@ -28,12 +28,14 @@ public final class WindowsR1OverheadProbe {
 
     static native byte[] nativeTransformDefense(byte[] material, String binding);
 
+    static native byte[] nativeOpenTargetToken(byte[] token, String callerOwner, String indyName, String methodType);
+
     public static void main(String[] args) {
         if (args.length != 1) {
-            System.err.println("usage: WindowsR1OverheadProbe <qp_ffi.dll>");
+            System.err.println("usage: WindowsNativeOverheadProbe <qp_ffi.dll>");
             System.exit(2);
         }
-        System.setProperty("j.l", "io/github/hht0rro/javashroud/WindowsR1OverheadProbe");
+        System.setProperty("j.l", "io/github/hht0rro/javashroud/WindowsNativeOverheadProbe");
         System.setProperty("j.m", bindingMap());
         long startupStart = System.nanoTime();
         System.load(args[0]);
@@ -116,6 +118,7 @@ public final class WindowsR1OverheadProbe {
                 {"nativeInitializeDefense", "(Ljava/lang/String;Ljava/lang/String;)I", "nativeInitializeDefense"},
                 {"nativeProbeDefense", "(Ljava/lang/String;Ljava/lang/String;)I", "nativeProbeDefense"},
                 {"nativeTransformDefense", "([BLjava/lang/String;)[B", "nativeTransformDefense"},
+                {"nativeOpenTargetToken", "([BLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)[B", "nativeOpenTargetToken"},
         };
         StringBuilder result = new StringBuilder();
         for (String[] method : methods) {

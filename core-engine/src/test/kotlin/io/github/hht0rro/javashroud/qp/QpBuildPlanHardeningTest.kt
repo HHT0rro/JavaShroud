@@ -14,7 +14,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-class QpV4BuildTest {
+class QpBuildPlanHardeningTest {
     private val commitment = ByteArray(32) { index -> (index * 11 + 3).toByte() }
 
     @Test
@@ -250,7 +250,7 @@ class QpV4BuildTest {
     }
 
     @Test
-    fun current_vbc4_evaluator_is_fingerprint_bound_polymorphic_and_defensive() {
+    fun current_native_evaluator_is_fingerprint_bound_polymorphic_and_defensive() {
         val plan = QpBuildPlan.create(commitment, DeterministicSecureRandom(23))
         try {
             val page = plan.registerPage(

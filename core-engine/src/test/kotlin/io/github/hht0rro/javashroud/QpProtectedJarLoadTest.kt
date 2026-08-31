@@ -16,7 +16,7 @@ import kotlin.test.assertTrue
 
 class QpProtectedJarLoadTest {
     @Test
-    fun windows_gnu_runtime_loads_from_an_r1_jar_after_helper_rename() {
+    fun windows_gnu_runtime_loads_from_a_protected_jar_after_helper_rename() {
         val dll = resolveGnuDll()
         val bytes = Files.readAllBytes(dll)
         assertTrue(bytes.size > 64, "Windows gnu cdylib must be non-empty")
@@ -36,7 +36,7 @@ class QpProtectedJarLoadTest {
             }
             JarFile(jar.toFile()).use { packed ->
                 val entry = packed.getJarEntry("META-INF/jsrt/windows-x64/qp_ffi.dll")
-                assertTrue(entry != null && entry.size > 64L, "protected JAR must contain the R1 Windows runtime")
+                assertTrue(entry != null && entry.size > 64L, "protected JAR must contain the Windows native runtime")
             }
 
             val sidecar = Files.createTempDirectory("qp-catalog-sidecar-")
@@ -51,26 +51,26 @@ class QpProtectedJarLoadTest {
                 return
             }
 
-            assertEquals(0, R1RenamedNativeSurface.nInit("windows-x64"))
-            assertEquals(0, R1RenamedNativeSurface.nBeat())
-            val opened = R1RenamedNativeSurface.nStr(
+            assertEquals(0, RenamedNativeSurface.nInit("windows-x64"))
+            assertEquals(0, RenamedNativeSurface.nBeat())
+            val opened = RenamedNativeSurface.nStr(
                 sidecarHandle("page-3"),
                 3,
                 sidecarProof("page-3"),
             )
             assertEquals("hello-r1", opened)
-            val classPage = R1RenamedNativeSurface.nCls(
+            val classPage = RenamedNativeSurface.nCls(
                 sidecarHandle("page-4"),
                 4,
                 sidecarProof("page-4"),
             )
             assertEquals("class-r1", classPage.decodeToString())
-            R1RenamedNativeSurface.nNat(
+            RenamedNativeSurface.nNat(
                 sidecarHandle("page-5"),
                 5,
                 sidecarProof("page-5"),
             )
-            val vmResult = R1RenamedNativeSurface.nVm(
+            val vmResult = RenamedNativeSurface.nVm(
                 0L,
                 sidecarHandle("page-6"),
                 6,
@@ -80,8 +80,8 @@ class QpProtectedJarLoadTest {
             assertEquals(7, vmResult as Int)
             val handle = sidecarHandle("page-3")
             val proof = sidecarProof("page-3")
-            repeat(8) { R1RenamedNativeSurface.nStr(handle, 3, proof) }
-            val protectedNs = timeNanos(32) { R1RenamedNativeSurface.nStr(handle, 3, proof) }
+            repeat(8) { RenamedNativeSurface.nStr(handle, 3, proof) }
+            val protectedNs = timeNanos(32) { RenamedNativeSurface.nStr(handle, 3, proof) }
             val baselineNs = timeNanos(32) { "hello-r1" }
             val ratio = protectedNs.toDouble() / baselineNs.coerceAtLeast(1L).toDouble()
             assertTrue(
@@ -89,7 +89,7 @@ class QpProtectedJarLoadTest {
                 "protected string-page call ${protectedNs / 32L}ns exceeds sanity ceiling; ratio=$ratio budget=${io.github.hht0rro.javashroud.model.config.HardenedPerfBudget.CALL_OVERHEAD_MULTIPLIER}",
             )
             val error = assertFailsWith<SecurityException> {
-                R1RenamedNativeSurface.nStr(ByteArray(24), 0, byteArrayOf(1, 2, 3, 4))
+                RenamedNativeSurface.nStr(ByteArray(24), 0, byteArrayOf(1, 2, 3, 4))
             }
             assertTrue(
                 error.message == "AKEN typed page route is unavailable",
@@ -114,7 +114,7 @@ class QpProtectedJarLoadTest {
             javaHome.toString(),
             "-cp",
             classes.toAbsolutePath().toString(),
-            "io.github.hht0rro.javashroud.WindowsR1OverheadProbe",
+            "io.github.hht0rro.javashroud.WindowsNativeOverheadProbe",
             extracted.toAbsolutePath().toString(),
         ).redirectErrorStream(true).start()
         val finished = process.waitFor(90, java.util.concurrent.TimeUnit.SECONDS)
@@ -126,26 +126,17 @@ class QpProtectedJarLoadTest {
     }
 
     @Test
-    fun production_helper_extracts_the_r1_catalog_sidecar_before_native_init() {
-        val method = QpBridge::class.java.getDeclaredMethod("extractQpCatalogEmitter", File::class.java)
-        method.isAccessible = true
-        val nativeLib = Files.createTempFile("qp-helper-", ".dll")
-        try {
-            val sidecar = method.invoke(null, nativeLib.toFile()) as File
-            assertTrue(File(sidecar, "directory.jsr1").isFile)
-            assertFalse(File(sidecar, "dek.bin").isFile, "catalog sidecar must not ship a raw page key")
-            assertTrue(File(sidecar, "pages${File.separator}page-3.bin").isFile)
-            assertTrue(File(sidecar, "pages${File.separator}page-4.bin").isFile)
-            assertTrue(File(sidecar, "pages${File.separator}page-5.bin").isFile)
-            assertTrue(File(sidecar, "pages${File.separator}page-6.bin").isFile)
-            val directory = Files.readAllBytes(File(sidecar, "directory.jsr1").toPath())
-            assertEquals('J'.code.toByte(), directory[0])
-            assertEquals('S'.code.toByte(), directory[1])
-            assertEquals('R'.code.toByte(), directory[2])
-            assertEquals('1'.code.toByte(), directory[3])
-        } finally {
-            Files.deleteIfExists(nativeLib)
+    fun production_helper_does_not_reintroduce_the_retired_catalog_sidecar() {
+        assertFailsWith<NoSuchMethodException> {
+            QpBridge::class.java.getDeclaredMethod("extractQpCatalogEmitter", File::class.java)
         }
+        val source = Files.readString(
+            Path.of("core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.java"),
+        )
+        assertTrue("readQpCatalogBundle" in source)
+        assertTrue("installQpCatalog" in source)
+        assertFalse("directory.jsr1" in source)
+        assertFalse("dek.bin" in source)
     }
 
     @Test
@@ -179,7 +170,7 @@ class QpProtectedJarLoadTest {
                 "java",
                 "-cp",
                 toWslPath(classes),
-                "io.github.hht0rro.javashroud.LinuxR1LoadProbe",
+                "io.github.hht0rro.javashroud.LinuxNativeLoadProbe",
                 toWslPath(extracted),
                 toWslPath(sidecar),
             ).redirectErrorStream(true).start()
@@ -216,7 +207,7 @@ class QpProtectedJarLoadTest {
             }
             JarFile(jar.toFile()).use { packed ->
                 val entry = packed.getJarEntry("META-INF/jsrt/linux-x64/libqp_ffi.so")
-                assertTrue(entry != null && entry.size > 64L, "protected JAR must contain the R1 Linux runtime")
+                assertTrue(entry != null && entry.size > 64L, "protected JAR must contain the Linux native runtime")
             }
         } finally {
             Files.deleteIfExists(jar)
@@ -320,7 +311,7 @@ class QpProtectedJarLoadTest {
         const val METHOD_PROPERTY = "j.m"
         const val CATALOG_PROPERTY = "j.c"
         const val SOURCE_OWNER = "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge"
-        const val RENAMED_OWNER = "io/github/hht0rro/javashroud/R1RenamedNativeSurface"
+        const val RENAMED_OWNER = "io/github/hht0rro/javashroud/RenamedNativeSurface"
         val SOURCE_METHODS = listOf(
             Triple("nativeInit", "(Ljava/lang/String;)I", "nInit"),
             Triple("nativeHeartbeat", "()I", "nBeat"),
@@ -333,6 +324,7 @@ class QpProtectedJarLoadTest {
             Triple("nativeInitializeDefense", "(Ljava/lang/String;Ljava/lang/String;)I", "nDefenseInit"),
             Triple("nativeProbeDefense", "(Ljava/lang/String;Ljava/lang/String;)I", "nDefenseProbe"),
             Triple("nativeTransformDefense", "([BLjava/lang/String;)[B", "nDefenseTransform"),
+            Triple("nativeOpenTargetToken", "([BLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)[B", "nTargetToken"),
         )
     }
 }

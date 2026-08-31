@@ -6,13 +6,13 @@ import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
-class RetiredNativeClosureTest {
+class NativeClosureContractTest {
     @Test
     fun retired_c_runtime_tree_is_gone() {
         val nativeRoot = workspacePath("core-engine/src/main/native")
         val testNative = workspacePath("core-engine/src/test/native")
-        assertFalse(Files.exists(nativeRoot), "AKEN-R1 must not keep a C/Zig native product tree")
-        assertFalse(Files.exists(testNative), "AKEN-R1 must not keep C native probe sources")
+        assertFalse(Files.exists(nativeRoot), "The current runtime must not keep a C/Zig native product tree")
+        assertFalse(Files.exists(testNative), "The current runtime must not keep C native probe sources")
     }
 
     @Test
@@ -30,14 +30,14 @@ class RetiredNativeClosureTest {
         )) {
             assertFalse(gradle.contains(forbidden), "Gradle production packaging must not retain the retired path: $forbidden")
         }
-        assertTrue(gradle.contains("src/main/rust"), "AKEN-R1 production packaging must use the Rust workspace")
-        assertTrue(gradle.contains("META-INF/jsrt"), "AKEN-R1 production resources must use the Rust runtime root")
+        assertTrue(gradle.contains("src/main/rust"), "Production packaging must use the Rust workspace")
+        assertTrue(gradle.contains("META-INF/jsrt"), "Production resources must use the Rust runtime root")
         assertTrue(gradle.contains("x86_64-pc-windows-gnu"), "Windows runtime must use the locked GNU target")
         assertTrue(gradle.contains("x86_64-unknown-linux-gnu.2.17"), "Linux runtime must use the explicit glibc 2.17 target")
     }
 
     @Test
-    fun production_build_and_ci_expose_only_the_two_locked_r1_runtime_routes() {
+    fun production_build_and_ci_expose_only_the_two_locked_runtime_routes() {
         val gradle = Files.readString(workspacePath("core-engine/build.gradle.kts"))
         val ci = Files.readString(workspacePath(".github/workflows/ci.yml"))
         val cargo = Files.readString(workspacePath("core-engine/src/main/rust/Cargo.toml"))
@@ -51,7 +51,7 @@ class RetiredNativeClosureTest {
             "META-INF/jsrt/linux-x64",
             "cargo", "zigbuild",
         )) {
-            assertTrue(productionContract.contains(required), "R1 production contract is missing: $required")
+            assertTrue(productionContract.contains(required), "Production contract is missing: $required")
         }
         for (retired in listOf(
             "META-INF/native-src",
@@ -64,13 +64,13 @@ class RetiredNativeClosureTest {
             "js_kernel.c",
             "js_shell_loader_macho.c",
         )) {
-            assertFalse(productionContract.contains(retired), "R1 production contract retains retired marker: $retired")
+            assertFalse(productionContract.contains(retired), "Production contract retains retired marker: $retired")
         }
         assertTrue(cargoConfig.contains("it is not a Rust target JSON"), "glibc 2.17 must not be represented as a generic rustup target")
     }
 
     @Test
-    fun rust_cdylib_source_exports_only_r1_lifecycle_and_binding_symbols() {
+    fun rust_cdylib_source_exports_only_current_lifecycle_and_binding_symbols() {
         val ffi = Files.readString(workspacePath("core-engine/src/main/rust/crates/qp-ffi/src/lib.rs"))
         val productionFfi = ffi.substringBefore("    #[cfg(test)]")
         val manifest = Files.readString(workspacePath("core-engine/src/main/rust/crates/qp-ffi/Cargo.toml"))
@@ -79,7 +79,7 @@ class RetiredNativeClosureTest {
             "#\\[no_mangle]\\s+(?:pub\\s+unsafe\\s+|pub\\s+)?extern\\s+\\\"(?:C|system)\\\"\\s+fn\\s+([A-Za-z0-9_]+)",
         ).findAll(productionFfi).map { it.groupValues[1] }.toList()
 
-        assertTrue(manifest.contains("\"cdylib\""), "AKEN-R1 FFI crate must emit a loadable cdylib")
+        assertTrue(manifest.contains("\"cdylib\""), "The FFI crate must emit a loadable cdylib")
         assertTrue(
             exportedNames.toSet() == setOf(
                 "JNI_OnLoad",
@@ -87,7 +87,7 @@ class RetiredNativeClosureTest {
                 "qp_r1_runtime_binding_digest",
                 "qp_r1_open_frame",
             ),
-            "unexpected R1 FFI exports: $exportedNames",
+            "unexpected FFI exports: $exportedNames",
         )
         assertTrue(header.contains("qp_r1_runtime_binding_digest"))
         assertTrue(header.contains("qp_r1_open_frame"))
@@ -97,7 +97,7 @@ class RetiredNativeClosureTest {
 
     @Test
     fun native_abi_probe_rejects_every_retired_export_family() {
-        val requiredR1 = listOf(
+        val requiredExports = listOf(
             "JNI_OnLoad",
             "JNI_OnUnload",
             "qp_r1_runtime_binding_digest",
@@ -105,8 +105,8 @@ class RetiredNativeClosureTest {
         ).joinToString("|")
         assertTrue(
             io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
-                .nativeLibraryContainsRequiredJniVmAbi(requiredR1.toByteArray(Charsets.US_ASCII)),
-            "complete R1 exports must satisfy the ABI probe",
+                .nativeLibraryContainsRequiredJniVmAbi(requiredExports.toByteArray(Charsets.US_ASCII)),
+            "Complete exports must satisfy the ABI probe",
         )
 
         for (legacy in listOf(
@@ -121,11 +121,11 @@ class RetiredNativeClosureTest {
             "js_shell_",
             "js_kernel_",
         )) {
-            val candidate = "$requiredR1|$legacy".toByteArray(Charsets.US_ASCII)
+            val candidate = "$requiredExports|$legacy".toByteArray(Charsets.US_ASCII)
             assertFalse(
                 io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
                     .nativeLibraryContainsRequiredJniVmAbi(candidate),
-                "R1 ABI probe accepted retired export marker: $legacy",
+                "ABI probe accepted retired export marker: $legacy",
             )
         }
     }

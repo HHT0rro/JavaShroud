@@ -5,9 +5,9 @@ import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertTrue
 
-class JsKernelCryptoGcmTest {
+class QpKernelCryptoGcmTest {
     @Test
-    fun r1_rust_gcm_contract_preserves_vectors_authentication_bounds_and_wipes() {
+    fun native_gcm_contract_preserves_vectors_authentication_bounds_and_wipes() {
         val rustRoot = rustRoot()
         val manifest = Files.readString(rustRoot.resolve("crates/qp-crypto/Cargo.toml"))
         val source = Files.readString(rustRoot.resolve("crates/qp-crypto/src/lib.rs"))
@@ -28,7 +28,7 @@ class JsKernelCryptoGcmTest {
             "hardware_aes: false",
             "hardware_ghash: false",
         )) {
-            assertTrue(source.contains(contract), "R1 GCM contract is missing: $contract")
+            assertTrue(source.contains(contract), "Native GCM contract is missing: $contract")
         }
 
         assertRustTests(
@@ -42,7 +42,7 @@ class JsKernelCryptoGcmTest {
     }
 
     @Test
-    fun r1_resource_and_vm_zstd_contracts_are_bounded_raw_rle_trailing_and_wiped() {
+    fun native_resource_and_vm_zstd_contracts_are_bounded_raw_rle_trailing_and_wiped() {
         val rustRoot = rustRoot()
         val vmManifest = Files.readString(rustRoot.resolve("crates/qp-vm/Cargo.toml"))
         val vmZstd = Files.readString(rustRoot.resolve("crates/qp-vm/src/zstd.rs"))
@@ -65,7 +65,7 @@ class JsKernelCryptoGcmTest {
             "impl Drop for WipedVec",
             "self.0.fill(0);",
         )) {
-            assertTrue(vmZstd.contains(contract), "R1 VM zstd contract is missing: $contract")
+            assertTrue(vmZstd.contains(contract), "Native VM zstd contract is missing: $contract")
         }
         assertRustTests(vmZstd, listOf("raw_and_rle_frames_are_bounded", "malformed_or_trailing_frames_fail"))
 
@@ -95,7 +95,7 @@ class JsKernelCryptoGcmTest {
             "WipedVec",
             "self.reset_and_wipe();",
         )) {
-            assertTrue(resourceSource.contains(contract), "R1 resource zstd contract is missing: $contract")
+            assertTrue(resourceSource.contains(contract), "Native resource zstd contract is missing: $contract")
         }
         assertRustTests(
             resourceSource,

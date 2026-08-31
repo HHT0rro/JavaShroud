@@ -7,10 +7,10 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
-/** R1 replacement for the retired native source/include resolver fixture. */
-class QpNativePageLocatorResolverNativeTest {
+/** Contract checks for the current native source/include resolver. */
+class QpNativeRouteContractTest {
     @Test
-    fun r1_runtime_routes_use_only_locked_rust_targets() {
+    fun native_runtime_routes_use_only_locked_rust_targets() {
         assertEquals(
             mapOf(
                 RustToolchainProvisioner.RUNTIME_TARGET_WINDOWS to RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET,
@@ -22,7 +22,7 @@ class QpNativePageLocatorResolverNativeTest {
     }
 
     @Test
-    fun r1_runtime_artifact_validation_rejects_truncation_and_retired_formats() {
+    fun native_runtime_artifact_validation_rejects_truncation_and_retired_formats() {
         assertFailsWith<IllegalArgumentException> {
             QpNativeCompilerPass.validateRustArtifactForTest(
                 RustToolchainProvisioner.RUNTIME_TARGET_WINDOWS,
@@ -40,11 +40,11 @@ class QpNativePageLocatorResolverNativeTest {
     }
 
     @Test
-    fun r1_cargo_route_is_locked_and_explicitly_targeted() {
+    fun native_cargo_route_is_locked_and_explicitly_targeted() {
         val command = QpNativeCompilerPass.rustCargoCommandForTest(
             cargoPath = java.nio.file.Path.of("cargo"),
             target = RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET,
-            targetDir = java.nio.file.Path.of("build", "r1", "windows"),
+            targetDir = java.nio.file.Path.of("build", "native", "windows"),
         )
         assertEquals("zigbuild", command[1])
         assertTrue(command.contains("--locked"))
