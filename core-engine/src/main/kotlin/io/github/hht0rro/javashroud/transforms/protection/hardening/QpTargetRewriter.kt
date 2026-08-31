@@ -214,7 +214,7 @@ internal object QpTargetRewriter {
                     indyName = rewrittenName,
                     indyMethodType = indy.desc,
                     siteIndex = siteIndex,
-                    protocolVersion = 4,
+                    protocolVersion = ProtectionFormat.CURRENT,
                 )
                 val rewrittenArgs = ArrayList<Any>(args.size + 1)
                 rewrittenArgs += QpTargetTokenEnvelope.seal(

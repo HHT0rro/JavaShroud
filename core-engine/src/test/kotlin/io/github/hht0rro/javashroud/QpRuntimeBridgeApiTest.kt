@@ -13,7 +13,7 @@ import kotlin.test.assertTrue
 
 class QpRuntimeBridgeApiTest {
     @Test
-    fun typed_aken_bridge_exposes_only_page_bound_native_requests() {
+    fun typed_native_bridge_exposes_only_page_bound_native_requests() {
         val helper = Class.forName("io.github.hht0rro.javashroud.transforms.protection.qp.QpBridge")
         val expected = mapOf(
             "nativeInit" to arrayOf(String::class.java),
@@ -31,6 +31,12 @@ class QpRuntimeBridgeApiTest {
             "nativeInitializeDefense" to arrayOf(String::class.java, String::class.java),
             "nativeProbeDefense" to arrayOf(String::class.java, String::class.java),
             "nativeTransformDefense" to arrayOf(ByteArray::class.java, String::class.java),
+            "nativeOpenTargetToken" to arrayOf(
+                ByteArray::class.java,
+                String::class.java,
+                String::class.java,
+                String::class.java,
+            ),
         )
 
         expected.forEach { (name, parameters) ->
@@ -50,7 +56,7 @@ class QpRuntimeBridgeApiTest {
         assertEquals(String::class.java, nativeStringTerminal.returnType)
         assertEquals(String::class.java, stringTerminal.returnType)
         assertFalse(Modifier.isPublic(nativeStringTerminal.modifiers), "native String terminal must remain package-private")
-        assertFalse(Modifier.isPublic(stringTerminal.modifiers), "validated String terminal must remain package-private")
+        assertTrue(Modifier.isPublic(stringTerminal.modifiers), "validated String terminal must remain callable from generated application dispatchers")
 
         val nativeChunkConsumer = helper.getDeclaredMethod(
             "nativeConsumeNativeSegment",
@@ -75,22 +81,22 @@ class QpRuntimeBridgeApiTest {
     }
 
     @Test
-    fun aken_readiness_loader_is_independent_from_legacy_boot_chain() {
+    fun native_readiness_loader_is_independent_from_legacy_boot_chain() {
         val source = Files.readString(workspacePath("core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.java"))
         val readinessStart = source.indexOf("private static synchronized void loadQpNativeKernel()")
         val readinessEnd = source.indexOf("private static byte[] requireQpPageResult", readinessStart)
         assertTrue(readinessStart >= 0 && readinessEnd > readinessStart, "AKEN readiness block must remain locatable")
         val readiness = source.substring(readinessStart, readinessEnd)
 
-        assertTrue(source.contains("AKEN_NATIVE_LOCATOR_RESOURCE = \"META-INF/jsrt/native.locator\""), "R1 readiness must use the Rust runtime locator root")
-        assertTrue(source.contains("AKEN_NATIVE_BINDINGS_LOCATOR_RESOURCE = \"META-INF/jsrt/native.bindings.locator\""), "R1 readiness must use the Rust runtime bindings locator root")
+        assertTrue(source.contains("QP_NATIVE_LOCATOR_RESOURCE = \"META-INF/jsrt/native.locator\""), "R1 readiness must use the Rust runtime locator root")
+        assertTrue(source.contains("QP_NATIVE_BINDINGS_LOCATOR_RESOURCE = \"META-INF/jsrt/native.bindings.locator\""), "R1 readiness must use the Rust runtime bindings locator root")
         assertFalse(source.contains("META-INF/qp/native.locator"), "R1 readiness must not retain the retired logical locator path")
         assertFalse(source.contains("META-INF/qp/native.bindings.locator"), "R1 readiness must not retain the retired logical bindings path")
-        assertTrue(source.contains("AKEN_NATIVE_RESOURCE_ROOT = \"META-INF/\""), "R1 locator routes must remain constrained to the final resource root")
+        assertTrue(source.contains("QP_NATIVE_RESOURCE_ROOT = \"META-INF/\""), "R1 locator routes must remain constrained to the final resource root")
         assertTrue(readiness.contains("readQpLocator"), "R1 readiness must authenticate the binary locator before extraction")
         assertTrue(readiness.contains("validateR1NativeImage"), "R1 readiness must validate the selected PE or ELF image and exports")
         assertTrue(readiness.contains("publishSealedNativeBindings"), "R1 readiness must publish final relocation metadata before native registration")
-        assertTrue(source.contains("AKEN_R1_CATALOG_INDEX_RESOURCE = \"META-INF/jsrt/catalog.index\""), "R1 readiness must locate the authenticated page catalog index")
+        assertTrue(source.contains("QP_CATALOG_INDEX_RESOURCE = \"META-INF/jsrt/catalog.index\""), "R1 readiness must locate the authenticated page catalog index")
         assertTrue(source.contains("installQpCatalog"), "R1 readiness must install the page catalog after native load")
         assertFalse(source.contains("directory.jsr1"), "catalog loader must not hard-code the retired directory file name")
         assertTrue(source.contains("readQpCatalogBundle"), "R1 load must read the catalog bundle from original page containers")
@@ -137,7 +143,7 @@ class QpRuntimeBridgeApiTest {
     }
 
     @Test
-    fun aken_native_locator_is_binary_v2_per_platform_and_rejects_legacy_envelopes() {
+    fun native_locator_is_binary_v2_per_platform_and_rejects_legacy_envelopes() {
         val helperSource = Files.readString(workspacePath("core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.java"))
         val parserStart = helperSource.indexOf("private static QpNativeLibrary readQpLocator")
         val parserEnd = helperSource.indexOf("private static boolean hasQpLocatorMagic", parserStart)
@@ -145,8 +151,8 @@ class QpRuntimeBridgeApiTest {
         val parser = helperSource.substring(parserStart, parserEnd)
 
         assertTrue(parser.contains("hasQpLocatorMagic"), "locator parser must require the binary D7 A4 91 E3 magic")
-        assertTrue(parser.contains("AKEN_NATIVE_LOCATOR_VERSION"), "locator parser must enforce the current binary version")
-        assertTrue(parser.contains("AKEN_NATIVE_LOCATOR_COMMITMENT_BYTES"), "locator parser must reserve a terminal commitment")
+        assertTrue(parser.contains("QP_NATIVE_LOCATOR_VERSION"), "locator parser must enforce the current binary version")
+        assertTrue(parser.contains("QP_NATIVE_LOCATOR_COMMITMENT_BYTES"), "locator parser must reserve a terminal commitment")
         assertTrue(parser.contains("readQpLocatorU16"), "locator parser must decode bounded big-endian record counts and routes")
         assertTrue(parser.contains("readQpLocatorPositiveU32"), "locator parser must validate positive u32 stored lengths")
         assertTrue(parser.contains("unmaskQpLocatorRoute"), "locator parser must unmask and validate binary routes")
@@ -156,13 +162,13 @@ class QpRuntimeBridgeApiTest {
         assertTrue(parser.contains("seenRoutes"), "locator parser must reject duplicate routes")
         assertTrue(parser.contains("bindingSeen"), "locator parser must reject duplicate or non-terminal bindings")
         assertTrue(parser.contains("hasQpRejectedLegacyHeader"), "locator parser must reject legacy protocol headers")
-        assertTrue(helperSource.contains("AKEN_NATIVE_LOCATOR_MAGIC_0 = 0xD7"), "locator magic must remain non-ASCII")
-        assertTrue(helperSource.contains("AKEN_NATIVE_LOCATOR_MAGIC_1 = 0xA4"), "locator magic must remain non-ASCII")
-        assertTrue(helperSource.contains("AKEN_NATIVE_LOCATOR_MAGIC_2 = 0x91"), "locator magic must remain non-ASCII")
-        assertTrue(helperSource.contains("AKEN_NATIVE_LOCATOR_MAGIC_3 = 0xE3"), "locator magic must remain non-ASCII")
-        assertTrue(helperSource.contains("AKEN_NATIVE_LOCATOR_ROUTE_MASK_DOMAIN"), "route masking domain must remain explicit and versioned")
-        assertFalse(parser.contains("\"AKEN_NATIVE_LOCATOR_RECORD\""), "binary locator parser must not retain textual record tags")
-        assertFalse(parser.contains("\"AKEN_NATIVE_BINDINGS_LOCATOR_RECORD\""), "binary locator parser must not retain textual binding tags")
+        assertTrue(helperSource.contains("QP_NATIVE_LOCATOR_MAGIC_0 = 0xD7"), "locator magic must remain non-ASCII")
+        assertTrue(helperSource.contains("QP_NATIVE_LOCATOR_MAGIC_1 = 0xA4"), "locator magic must remain non-ASCII")
+        assertTrue(helperSource.contains("QP_NATIVE_LOCATOR_MAGIC_2 = 0x91"), "locator magic must remain non-ASCII")
+        assertTrue(helperSource.contains("QP_NATIVE_LOCATOR_MAGIC_3 = 0xE3"), "locator magic must remain non-ASCII")
+        assertTrue(helperSource.contains("QP_NATIVE_LOCATOR_ROUTE_MASK_DOMAIN"), "route masking domain must remain explicit and versioned")
+        assertFalse(parser.contains("\"QP_NATIVE_LOCATOR_RECORD\""), "binary locator parser must not retain textual record tags")
+        assertFalse(parser.contains("\"QP_NATIVE_BINDINGS_LOCATOR_RECORD\""), "binary locator parser must not retain textual binding tags")
         assertFalse(parser.contains("parseQpNativeLength"), "binary locator parser must not parse decimal text lengths")
         assertFalse(parser.contains("parseQpNativeSha256"), "binary locator parser must not parse hexadecimal text digests")
         assertFalse(parser.contains("sealedNativeIndexText"), "raw locator parser must not traverse legacy JSBI")
@@ -171,9 +177,9 @@ class QpRuntimeBridgeApiTest {
 
         val sealingSource = Files.readString(workspacePath("core-engine/src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/RuntimeArtifactSealing.kt"))
         val locatorSource = Files.readString(workspacePath("core-engine/src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/QpLocator.kt"))
-        assertTrue(sealingSource.contains("AKEN_NATIVE_LOCATOR_LOGICAL_RESOURCE"), "sealing must rewrite the logical locator path")
-        assertTrue(locatorSource.contains("AKEN_NATIVE_LOCATOR_LOGICAL_RESOURCE = \"META-INF/jsrt/native.locator\""), "the logical locator must use the R1 jsrt root")
-        assertTrue(locatorSource.contains("AKEN_NATIVE_BINDINGS_LOCATOR_LOGICAL_RESOURCE = \"META-INF/jsrt/native.bindings.locator\""), "the bindings locator must use the R1 jsrt root")
+        assertTrue(sealingSource.contains("QP_NATIVE_LOCATOR_LOGICAL_RESOURCE"), "sealing must rewrite the logical locator path")
+        assertTrue(locatorSource.contains("QP_NATIVE_LOCATOR_LOGICAL_RESOURCE = \"META-INF/jsrt/native.locator\""), "the logical locator must use the R1 jsrt root")
+        assertTrue(locatorSource.contains("QP_NATIVE_BINDINGS_LOCATOR_LOGICAL_RESOURCE = \"META-INF/jsrt/native.bindings.locator\""), "the bindings locator must use the R1 jsrt root")
         assertFalse(locatorSource.contains("META-INF/qp/native.locator"), "the serializer must not retain the retired logical locator path")
         assertFalse(locatorSource.contains("META-INF/qp/native.bindings.locator"), "the serializer must not retain the retired logical bindings path")
         assertTrue(sealingSource.contains("QpLocator.entry("), "sealing must create one locator row per final native resource")
@@ -183,7 +189,7 @@ class QpRuntimeBridgeApiTest {
     }
 
     @Test
-    fun typed_aken_bridge_native_registration_is_purpose_split_and_fail_closed() {
+    fun typed_native_bridge_native_registration_is_purpose_split_and_fail_closed() {
         val ffi = Files.readString(workspacePath("core-engine/src/main/rust/crates/qp-ffi/src/lib.rs"))
         val relocation = Files.readString(workspacePath("core-engine/src/main/rust/crates/qp-ffi/src/relocation.rs"))
         for (marker in listOf(
@@ -217,14 +223,14 @@ class QpRuntimeBridgeApiTest {
     }
 
     @Test
-    fun r1_image_validator_accepts_only_complete_amd64_cdylibs() {
+    fun native_image_validator_accepts_only_complete_amd64_cdylibs() {
         validateR1Image("x86_64-pc-windows-gnu", peR1Image())
         validateR1Image("x86_64-unknown-linux-gnu.2.17", elfR1Image())
 
         val missingRegistration = assertFailsWith<SecurityException> {
             validateR1Image("x86_64-pc-windows-gnu", peR1Image(R1_BINDING_MARKERS.dropLast(1)))
         }
-        assertTrue(missingRegistration.message.orEmpty().contains("nativeTransformDefense"))
+        assertTrue(missingRegistration.message.orEmpty().contains("nativeOpenTargetToken"))
 
         val executableImage = peR1Image().also { putLe16(it, PE_OFFSET + 22, 0x0022) }
         assertFailsWith<SecurityException> {
@@ -239,7 +245,7 @@ class QpRuntimeBridgeApiTest {
     }
 
     @Test
-    fun r1_resource_validator_rejects_retired_and_non_current_routes() {
+    fun native_resource_validator_rejects_retired_and_non_current_routes() {
         val derivedRoot = io.github.hht0rro.javashroud.transforms.protection.qp.qpResourceDir()
         assertTrue(isR1ResourcePath("$derivedRoot/windows-x64/qp_ffi.dll"))
         assertTrue(isR1ResourcePath("$derivedRoot/linux-x64/libqp_ffi.so"))
@@ -375,6 +381,7 @@ class QpRuntimeBridgeApiTest {
             "nativeInitializeDefense",
             "nativeProbeDefense",
             "nativeTransformDefense",
+            "nativeOpenTargetToken",
         )
 
         val VALIDATE_R1_IMAGE =

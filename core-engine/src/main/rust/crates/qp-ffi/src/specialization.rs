@@ -14,3 +14,5 @@ pub const PROTECTION_LEVEL: &str = "standard";
 pub const PACKING_LEVEL: &str = "off";
 pub const VM_CRYPTO_DOMAIN: [u8; 32] = [0; 32];
 pub const VM_LAYOUT_DIGEST: [u8; 32] = [0; 32];
+pub const TARGET_TOKEN_COMMITMENT: [u8; 32] = [0; 32];
+pub const TARGET_TOKEN_NAME_SEED: [u8; 16] = [0; 16];

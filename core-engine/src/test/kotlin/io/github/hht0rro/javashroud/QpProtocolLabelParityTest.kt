@@ -8,7 +8,7 @@ import kotlin.test.assertTrue
 
 class QpProtocolLabelParityTest {
     @Test
-    fun current_kotlin_serializer_and_rust_kernel_use_identical_vbc4_magic() {
+    fun current_kotlin_serializer_and_rust_kernel_use_identical_native_magic() {
         val serializer = source("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/QpSerializer.kt")
         val rustVm = source("src/main/rust/crates/qp-vm/src/lib.rs")
         assertTrue("derivedVmMagic" in serializer)
@@ -22,7 +22,7 @@ class QpProtocolLabelParityTest {
     }
 
     @Test
-    fun vbc4_mac_trailer_is_exactly_32_bytes_without_bucket_marker() {
+    fun native_mac_trailer_is_exactly_32_bytes_without_bucket_marker() {
         val serializer = source("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/QpSerializer.kt")
         val rustVm = source("src/main/rust/crates/qp-vm/src/lib.rs")
         assertTrue(
@@ -37,7 +37,7 @@ class QpProtocolLabelParityTest {
             "len-pos == 33",
             "out.write(32)",
         ).forEach { bucketMarker ->
-            assertFalse(bucketMarker in serializer, "VBC4 MAC layout must not expose bucket marker '$bucketMarker'")
+            assertFalse(bucketMarker in serializer, "Native VM MAC layout must not expose bucket marker '$bucketMarker'")
         }
     }
 
@@ -85,14 +85,14 @@ class QpProtocolLabelParityTest {
     }
 
     @Test
-    fun runtime_product_gates_keep_itk_v4_locator_rewrite_and_public_string_open() {
+    fun runtime_product_gates_keep_locator_rewrite_and_public_string_open() {
         val rewriter = source("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/hardening/QpTargetRewriter.kt")
         val rotation = source("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/RuntimeDefenseTransforms.kt")
         val sealing = source("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/RuntimeArtifactSealing.kt")
         val virtualization = source("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/MethodVirtualizationTransforms.kt")
         val bridge = source("src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.java")
-        assertTrue("protocolVersion = 4" in rewriter)
-        assertTrue("protocolVersion = 4" in rotation)
+        assertTrue("protocolVersion = ProtectionFormat.CURRENT" in rewriter)
+        assertTrue("protocolVersion = ProtectionFormat.CURRENT" in rotation)
         assertFalse("protocolVersion = 3" in rewriter)
         assertFalse("protocolVersion = 3" in rotation)
         assertTrue("qpResourceDir() + \"/native.locator\"" in sealing)

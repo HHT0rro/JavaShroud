@@ -62,31 +62,31 @@ public final class QpBridge {
     private static volatile String vmSelfCheck = "";
     private static volatile boolean nativeSelfCheckFailed;
     private static volatile boolean sealedNativeBindingsPublished;
-    private static final String AKEN_NATIVE_LOCATOR_RESOURCE = "META-INF/jsrt/native.locator";
-    private static final String AKEN_NATIVE_BINDINGS_LOCATOR_RESOURCE = "META-INF/jsrt/native.bindings.locator";
-    private static final String AKEN_R1_CATALOG_INDEX_RESOURCE = "META-INF/jsrt/catalog.index";
-    private static final String AKEN_R1_CATALOG_RESOURCE_ROOT = "META-INF/jsrt/catalog/";
-    private static final String AKEN_NATIVE_RESOURCE_ROOT = "META-INF/";
-    private static final int AKEN_NATIVE_LOCATOR_MAGIC_0 = 0xD7;
-    private static final int AKEN_NATIVE_LOCATOR_MAGIC_1 = 0xA4;
-    private static final int AKEN_NATIVE_LOCATOR_MAGIC_2 = 0x91;
-    private static final int AKEN_NATIVE_LOCATOR_MAGIC_3 = 0xE3;
-    private static final String AKEN_NATIVE_LOCATOR_COMMITMENT_DOMAIN =
+    private static final String QP_NATIVE_LOCATOR_RESOURCE = "META-INF/jsrt/native.locator";
+    private static final String QP_NATIVE_BINDINGS_LOCATOR_RESOURCE = "META-INF/jsrt/native.bindings.locator";
+    private static final String QP_CATALOG_INDEX_RESOURCE = "META-INF/jsrt/catalog.index";
+    private static final String QP_CATALOG_RESOURCE_ROOT = "META-INF/jsrt/catalog/";
+    private static final String QP_NATIVE_RESOURCE_ROOT = "META-INF/";
+    private static final int QP_NATIVE_LOCATOR_MAGIC_0 = 0xD7;
+    private static final int QP_NATIVE_LOCATOR_MAGIC_1 = 0xA4;
+    private static final int QP_NATIVE_LOCATOR_MAGIC_2 = 0x91;
+    private static final int QP_NATIVE_LOCATOR_MAGIC_3 = 0xE3;
+    private static final String QP_NATIVE_LOCATOR_COMMITMENT_DOMAIN =
         "javashroud-qp-native-locator-commitment-v2";
-    private static final String AKEN_NATIVE_LOCATOR_ROUTE_MASK_DOMAIN =
+    private static final String QP_NATIVE_LOCATOR_ROUTE_MASK_DOMAIN =
         "javashroud-qp-native-locator-route-mask-v2";
-    private static final int AKEN_NATIVE_LOCATOR_VERSION = 2;
-    private static final int AKEN_NATIVE_LOCATOR_HEADER_BYTES = 8;
-    private static final int AKEN_NATIVE_LOCATOR_COMMITMENT_BYTES = 32;
-    private static final int AKEN_NATIVE_LOCATOR_RECORD_FIXED_BYTES = 40;
-    private static final int AKEN_NATIVE_LOCATOR_MAX_RECORDS = 3;
-    private static final int AKEN_NATIVE_LOCATOR_MAX_ROUTE_BYTES = 2048;
-    private static final int AKEN_NATIVE_LOCATOR_KIND_LIBRARY = 1;
-    private static final int AKEN_NATIVE_LOCATOR_KIND_BINDINGS = 2;
-    private static final int AKEN_NATIVE_LOCATOR_MAX_BYTES = 16 * 1024;
-    private static final int AKEN_NATIVE_MAX_LIBRARY_BYTES = 256 * 1024 * 1024;
-    private static final int AKEN_NATIVE_SHA256_LENGTH = 32;
-    private static final int AKEN_NATIVE_BINDINGS_MAX_BYTES = 4 * 1024 * 1024;
+    private static final int QP_NATIVE_LOCATOR_VERSION = 2;
+    private static final int QP_NATIVE_LOCATOR_HEADER_BYTES = 8;
+    private static final int QP_NATIVE_LOCATOR_COMMITMENT_BYTES = 32;
+    private static final int QP_NATIVE_LOCATOR_RECORD_FIXED_BYTES = 40;
+    private static final int QP_NATIVE_LOCATOR_MAX_RECORDS = 3;
+    private static final int QP_NATIVE_LOCATOR_MAX_ROUTE_BYTES = 2048;
+    private static final int QP_NATIVE_LOCATOR_KIND_LIBRARY = 1;
+    private static final int QP_NATIVE_LOCATOR_KIND_BINDINGS = 2;
+    private static final int QP_NATIVE_LOCATOR_MAX_BYTES = 16 * 1024;
+    private static final int QP_NATIVE_MAX_LIBRARY_BYTES = 256 * 1024 * 1024;
+    private static final int QP_NATIVE_SHA256_LENGTH = 32;
+    private static final int QP_NATIVE_BINDINGS_MAX_BYTES = 4 * 1024 * 1024;
     private static final int LAMBDA_FLAG_SERIALIZABLE = 1;
     private static final int LAMBDA_FLAG_MARKERS = 2;
     private static final int LAMBDA_FLAG_BRIDGES = 4;
@@ -109,6 +109,44 @@ public final class QpBridge {
     public static native int nativeInitializeDefense(String surface, String profile);
     public static native int nativeProbeDefense(String surface, String point);
     public static native byte[] nativeTransformDefense(byte[] material, String binding);
+    static native byte[] nativeOpenTargetToken(
+        byte[] token,
+        String callerOwner,
+        String indyName,
+        String methodType
+    );
+
+    /**
+     * Native-only token terminal used by the invokedynamic bootstrap.  The
+     * caller receives an authenticated, bounded description and never owns a
+     * token key or cipher context.
+     */
+    public static byte[] openTargetToken(
+        byte[] token,
+        String callerOwner,
+        String indyName,
+        String methodType
+    ) {
+        if (token == null || token.length == 0 || token.length > 64 * 1024 ||
+            callerOwner == null || callerOwner.length() == 0 || callerOwner.length() > 512 ||
+            indyName == null || indyName.length() == 0 || indyName.length() > 512 ||
+            methodType == null || methodType.length() == 0 || methodType.length() > 512) {
+            throw new SecurityException("indy target token request is invalid");
+        }
+        ensureQpNativeKernel();
+        byte[] copy = Arrays.copyOf(token, token.length);
+        try {
+            byte[] result = nativeOpenTargetToken(copy, callerOwner, indyName, methodType);
+            if (result == null || result.length == 0 || result.length > 512) {
+                throw new SecurityException("indy target token terminal returned invalid data");
+            }
+            return result;
+        } catch (UnsatisfiedLinkError error) {
+            throw new SecurityException("indy target token Native terminal is unavailable", error);
+        } finally {
+            Arrays.fill(copy, (byte) 0);
+        }
+    }
 
     /* ---- AKEN R1 typed page bridge ---- */
 
@@ -182,7 +220,7 @@ public final class QpBridge {
         }
     }
 
-    /** Load only the authenticated AKEN-R1 Rust JNI artifact. */
+    /** Load only the authenticated Qp Rust JNI artifact. */
     private static synchronized void loadQpNativeKernel() {
         if (akenLoadState != LOAD_UNTRIED) return;
         akenLoadState = LOAD_LOADING;
@@ -372,17 +410,17 @@ public final class QpBridge {
 
     private static void validateR1NativeImage(String platformTarget, byte[] bytes) {
         if (bytes == null || bytes.length < 64 || hasQpRejectedLegacyHeader(bytes)) {
-            throw new SecurityException("AKEN-R1 native image is invalid");
+            throw new SecurityException("Qp native image is invalid");
         }
         if ("x86_64-pc-windows-gnu".equals(platformTarget)) {
             if (bytes[0] != 'M' || bytes[1] != 'Z') {
-                throw new SecurityException("AKEN-R1 Windows image is not PE");
+                throw new SecurityException("Qp Windows image is not PE");
             }
             int peOffset = readLittleEndianInt(bytes, 0x3C);
             if (peOffset < 0 || peOffset > bytes.length - 24 || bytes[peOffset] != 'P' ||
                 bytes[peOffset + 1] != 'E' || bytes[peOffset + 2] != 0 || bytes[peOffset + 3] != 0 ||
                 readLittleEndianShort(bytes, peOffset + 4) != 0x8664) {
-                throw new SecurityException("AKEN-R1 Windows image architecture is invalid");
+                throw new SecurityException("Qp Windows image architecture is invalid");
             }
             int sectionCount = readLittleEndianShort(bytes, peOffset + 6);
             int optionalHeaderSize = readLittleEndianShort(bytes, peOffset + 20);
@@ -392,18 +430,18 @@ public final class QpBridge {
                 optionalHeaderOffset > bytes.length - optionalHeaderSize ||
                 readLittleEndianShort(bytes, optionalHeaderOffset) != 0x20B ||
                 (characteristics & 0x2000) == 0) {
-                throw new SecurityException("AKEN-R1 Windows image is not an AMD64 DLL");
+                throw new SecurityException("Qp Windows image is not an AMD64 DLL");
             }
             long sectionTableEnd = (long) optionalHeaderOffset + optionalHeaderSize + (long) sectionCount * 40L;
             if (sectionTableEnd > bytes.length) {
-                throw new SecurityException("AKEN-R1 Windows image section table is invalid");
+                throw new SecurityException("Qp Windows image section table is invalid");
             }
         } else if ("x86_64-unknown-linux-gnu.2.17".equals(platformTarget)) {
             if (bytes[0] != 0x7F || bytes[1] != 'E' || bytes[2] != 'L' || bytes[3] != 'F' ||
                 bytes[4] != 2 || bytes[5] != 1 || bytes[6] != 1 ||
                 readLittleEndianShort(bytes, 16) != 3 || readLittleEndianShort(bytes, 18) != 62 ||
                 readLittleEndianInt(bytes, 20) != 1) {
-                throw new SecurityException("AKEN-R1 Linux image is not an AMD64 ELF shared object");
+                throw new SecurityException("Qp Linux image is not an AMD64 ELF shared object");
             }
             long programHeaderOffset = readLittleEndianLong(bytes, 32);
             int elfHeaderSize = readLittleEndianShort(bytes, 52);
@@ -413,10 +451,10 @@ public final class QpBridge {
             if (programHeaderOffset < 0L || elfHeaderSize < 64 || programHeaderEntrySize < 56 ||
                 programHeaderCount < 1 || programHeaderCount > 1024 ||
                 programHeaderOffset > bytes.length || programHeaderBytes > bytes.length - programHeaderOffset) {
-                throw new SecurityException("AKEN-R1 Linux image program headers are invalid");
+                throw new SecurityException("Qp Linux image program headers are invalid");
             }
         } else {
-            throw new SecurityException("AKEN-R1 target is unsupported");
+            throw new SecurityException("Qp target is unsupported");
         }
         String[] requiredMarkers = new String[] {
             "JNI_OnLoad",
@@ -434,10 +472,11 @@ public final class QpBridge {
             "nativeInitializeDefense",
             "nativeProbeDefense",
             "nativeTransformDefense",
+            "nativeOpenTargetToken",
         };
         for (String marker : requiredMarkers) {
             if (!containsAscii(bytes, marker)) {
-                throw new SecurityException("AKEN-R1 native image is missing binding " + marker);
+                throw new SecurityException("Qp native image is missing binding " + marker);
             }
         }
     }
@@ -486,12 +525,12 @@ public final class QpBridge {
     }
 
     private static byte[] readQpLocatorBytes() throws Exception {
-        try (InputStream in = resourceStream(AKEN_NATIVE_LOCATOR_RESOURCE)) {
-            return in == null ? null : readAllBounded(in, AKEN_NATIVE_LOCATOR_MAX_BYTES);
+        try (InputStream in = resourceStream(QP_NATIVE_LOCATOR_RESOURCE)) {
+            return in == null ? null : readAllBounded(in, QP_NATIVE_LOCATOR_MAX_BYTES);
         }
     }
 
-    /** Resolve and authenticate one binary AKEN-R1 locator for the active target. */
+    /** Resolve and authenticate one binary Qp locator for the active target. */
     private static QpNativeLibrary readQpLocator(String expectedPlatform) {
         byte[] raw = null;
         byte[] expectedCommitment = null;
@@ -502,19 +541,19 @@ public final class QpBridge {
         try {
             raw = readQpLocatorBytes();
             if (raw == null) throw new SecurityException("AKEN native locator is missing");
-            if (raw.length < AKEN_NATIVE_LOCATOR_HEADER_BYTES + AKEN_NATIVE_LOCATOR_COMMITMENT_BYTES ||
+            if (raw.length < QP_NATIVE_LOCATOR_HEADER_BYTES + QP_NATIVE_LOCATOR_COMMITMENT_BYTES ||
                 hasQpRejectedLegacyHeader(raw) || !hasQpLocatorMagic(raw) ||
-                (raw[4] & 0xFF) != AKEN_NATIVE_LOCATOR_VERSION || (raw[5] & 0xFF) != 0) {
+                (raw[4] & 0xFF) != QP_NATIVE_LOCATOR_VERSION || (raw[5] & 0xFF) != 0) {
                 throw new SecurityException("AKEN native locator binary header is invalid");
             }
-            int payloadLength = raw.length - AKEN_NATIVE_LOCATOR_COMMITMENT_BYTES;
+            int payloadLength = raw.length - QP_NATIVE_LOCATOR_COMMITMENT_BYTES;
             expectedCommitment = akenNativeLocatorCommitment(raw, payloadLength);
             storedCommitment = Arrays.copyOfRange(raw, payloadLength, raw.length);
             if (!MessageDigest.isEqual(expectedCommitment, storedCommitment)) {
                 throw new SecurityException("AKEN native locator commitment is invalid");
             }
             int recordCount = readQpLocatorU16(raw, 6, payloadLength);
-            if (recordCount < 1 || recordCount > AKEN_NATIVE_LOCATOR_MAX_RECORDS) {
+            if (recordCount < 1 || recordCount > QP_NATIVE_LOCATOR_MAX_RECORDS) {
                 throw new SecurityException("AKEN native locator record count is invalid");
             }
 
@@ -522,14 +561,14 @@ public final class QpBridge {
             if (expectedPlatformId == 0) {
                 throw new SecurityException("AKEN native locator requested platform is invalid");
             }
-            int offset = AKEN_NATIVE_LOCATOR_HEADER_BYTES;
+            int offset = QP_NATIVE_LOCATOR_HEADER_BYTES;
             int lastPlatformId = 0;
             boolean bindingSeen = false;
             String bindingResourcePath = null;
             int bindingStoredLength = 0;
             LinkedHashSet<String> seenRoutes = new LinkedHashSet<>();
             for (int recordIndex = 0; recordIndex < recordCount; recordIndex++) {
-                if (offset < 0 || offset > payloadLength - AKEN_NATIVE_LOCATOR_RECORD_FIXED_BYTES) {
+                if (offset < 0 || offset > payloadLength - QP_NATIVE_LOCATOR_RECORD_FIXED_BYTES) {
                     throw new SecurityException("AKEN native locator record is truncated");
                 }
                 int kind = raw[offset++] & 0xFF;
@@ -538,13 +577,13 @@ public final class QpBridge {
                 offset += 2;
                 int storedLength = readQpLocatorPositiveU32(raw, offset, payloadLength);
                 offset += 4;
-                if (routeLength < 1 || routeLength > AKEN_NATIVE_LOCATOR_MAX_ROUTE_BYTES ||
-                    offset > payloadLength - AKEN_NATIVE_SHA256_LENGTH ||
-                    routeLength > payloadLength - offset - AKEN_NATIVE_SHA256_LENGTH) {
+                if (routeLength < 1 || routeLength > QP_NATIVE_LOCATOR_MAX_ROUTE_BYTES ||
+                    offset > payloadLength - QP_NATIVE_SHA256_LENGTH ||
+                    routeLength > payloadLength - offset - QP_NATIVE_SHA256_LENGTH) {
                     throw new SecurityException("AKEN native locator route length is invalid");
                 }
-                byte[] digest = Arrays.copyOfRange(raw, offset, offset + AKEN_NATIVE_SHA256_LENGTH);
-                offset += AKEN_NATIVE_SHA256_LENGTH;
+                byte[] digest = Arrays.copyOfRange(raw, offset, offset + QP_NATIVE_SHA256_LENGTH);
+                offset += QP_NATIVE_SHA256_LENGTH;
                 byte[] maskedRoute = Arrays.copyOfRange(raw, offset, offset + routeLength);
                 offset += routeLength;
                 byte[] routeBytes = null;
@@ -565,9 +604,9 @@ public final class QpBridge {
                         throw new SecurityException("AKEN native locator route is invalid or duplicated");
                     }
 
-                    if (kind == AKEN_NATIVE_LOCATOR_KIND_LIBRARY) {
+                    if (kind == QP_NATIVE_LOCATOR_KIND_LIBRARY) {
                         if (bindingSeen || platformId <= lastPlatformId || platformId > 2 ||
-                            storedLength > AKEN_NATIVE_MAX_LIBRARY_BYTES) {
+                            storedLength > QP_NATIVE_MAX_LIBRARY_BYTES) {
                             throw new SecurityException("AKEN native locator platform record is invalid");
                         }
                         lastPlatformId = platformId;
@@ -582,9 +621,9 @@ public final class QpBridge {
                             selected = new QpNativeLibrary(resourcePath, fileSuffix, storedLength, digest);
                             digestTransferred = true;
                         }
-                    } else if (kind == AKEN_NATIVE_LOCATOR_KIND_BINDINGS) {
+                    } else if (kind == QP_NATIVE_LOCATOR_KIND_BINDINGS) {
                         if (platformId != 0 || bindingSeen || recordIndex != recordCount - 1 ||
-                            storedLength > AKEN_NATIVE_BINDINGS_MAX_BYTES) {
+                            storedLength > QP_NATIVE_BINDINGS_MAX_BYTES) {
                             throw new SecurityException("AKEN native bindings locator record is invalid");
                         }
                         bindingSeen = true;
@@ -627,10 +666,10 @@ public final class QpBridge {
 
     private static boolean hasQpLocatorMagic(byte[] bytes) {
         return bytes != null && bytes.length >= 4 &&
-            (bytes[0] & 0xFF) == AKEN_NATIVE_LOCATOR_MAGIC_0 &&
-            (bytes[1] & 0xFF) == AKEN_NATIVE_LOCATOR_MAGIC_1 &&
-            (bytes[2] & 0xFF) == AKEN_NATIVE_LOCATOR_MAGIC_2 &&
-            (bytes[3] & 0xFF) == AKEN_NATIVE_LOCATOR_MAGIC_3;
+            (bytes[0] & 0xFF) == QP_NATIVE_LOCATOR_MAGIC_0 &&
+            (bytes[1] & 0xFF) == QP_NATIVE_LOCATOR_MAGIC_1 &&
+            (bytes[2] & 0xFF) == QP_NATIVE_LOCATOR_MAGIC_2 &&
+            (bytes[3] & 0xFF) == QP_NATIVE_LOCATOR_MAGIC_3;
     }
 
     private static int akenNativePlatformId(String platform) {
@@ -646,8 +685,8 @@ public final class QpBridge {
     }
 
     private static boolean isQpNativeResourcePath(String resourcePath) {
-        if (resourcePath == null || !resourcePath.startsWith(AKEN_NATIVE_RESOURCE_ROOT) ||
-            resourcePath.length() == AKEN_NATIVE_RESOURCE_ROOT.length() || resourcePath.indexOf('\\') >= 0 ||
+        if (resourcePath == null || !resourcePath.startsWith(QP_NATIVE_RESOURCE_ROOT) ||
+            resourcePath.length() == QP_NATIVE_RESOURCE_ROOT.length() || resourcePath.indexOf('\\') >= 0 ||
             resourcePath.indexOf('\u0000') >= 0 || resourcePath.indexOf('|') >= 0 ||
             resourcePath.indexOf('\r') >= 0 || resourcePath.indexOf('\n') >= 0) {
             return false;
@@ -659,7 +698,7 @@ public final class QpBridge {
             !hasCurrentR1ResourceSuffix(normalizedPath)) {
             return false;
         }
-        String tail = resourcePath.substring(AKEN_NATIVE_RESOURCE_ROOT.length());
+        String tail = resourcePath.substring(QP_NATIVE_RESOURCE_ROOT.length());
         String[] segments = tail.split("/", -1);
         if (segments.length == 0 || isRetiredR1PathSegment(segments[0])) return false;
         for (String segment : segments) {
@@ -723,7 +762,7 @@ public final class QpBridge {
         byte[] domain = null;
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            domain = AKEN_NATIVE_LOCATOR_COMMITMENT_DOMAIN.getBytes(StandardCharsets.US_ASCII);
+            domain = QP_NATIVE_LOCATOR_COMMITMENT_DOMAIN.getBytes(StandardCharsets.US_ASCII);
             digest.update(domain);
             digest.update(payload, 0, payloadLength);
             return digest.digest();
@@ -746,7 +785,7 @@ public final class QpBridge {
         int blockIndex = 0;
         byte[] domain = null;
         try {
-            domain = AKEN_NATIVE_LOCATOR_ROUTE_MASK_DOMAIN.getBytes(StandardCharsets.US_ASCII);
+            domain = QP_NATIVE_LOCATOR_ROUTE_MASK_DOMAIN.getBytes(StandardCharsets.US_ASCII);
             while (offset < route.length) {
                 MessageDigest digest = MessageDigest.getInstance("SHA-256");
                 digest.update(domain);
@@ -1715,7 +1754,7 @@ public final class QpBridge {
      * separately so native can authenticate it before accepting page frames.
      */
     private static CatalogBundle readQpCatalogBundle() {
-        InputStream indexStream = resourceStream(AKEN_R1_CATALOG_INDEX_RESOURCE);
+        InputStream indexStream = resourceStream(QP_CATALOG_INDEX_RESOURCE);
         if (indexStream == null) return null;
         byte[] directory = null;
         byte[][] paths = new byte[4][];
@@ -1733,7 +1772,7 @@ public final class QpBridge {
                 validateCatalogRelativePath(relative);
                 if (relative.indexOf('/') < 0) {
                     if (directory != null) throw new SecurityException("AKEN catalog directory is duplicated");
-                    try (InputStream source = resourceStream(AKEN_R1_CATALOG_RESOURCE_ROOT + relative)) {
+                    try (InputStream source = resourceStream(QP_CATALOG_RESOURCE_ROOT + relative)) {
                         if (source == null) throw new SecurityException("AKEN catalog directory is missing");
                         directory = readAllBounded(source, 64 * 1024 * 1024);
                     }
@@ -1982,7 +2021,7 @@ public final class QpBridge {
         }
         try (InputStream in = resourceStream(resourcePath)) {
             if (in == null) return null;
-            byte[] raw = readAllBounded(in, AKEN_NATIVE_BINDINGS_MAX_BYTES);
+            byte[] raw = readAllBounded(in, QP_NATIVE_BINDINGS_MAX_BYTES);
             try {
                 if (locator != null) verifyQpNativeBinding(locator, raw);
                 if (raw.length == 0 || hasQpRejectedLegacyHeader(raw) || !isAscii(raw)) {

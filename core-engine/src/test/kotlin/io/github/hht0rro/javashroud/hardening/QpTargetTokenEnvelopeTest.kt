@@ -1,6 +1,7 @@
 package io.github.hht0rro.javashroud.hardening
 
 import io.github.hht0rro.javashroud.transforms.protection.hardening.QpTargetTokenEnvelope
+import io.github.hht0rro.javashroud.transforms.protection.hardening.ProtectionFormat
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.Base64
@@ -83,7 +84,7 @@ class QpTargetTokenEnvelopeTest {
             expectedMagic,
             raw.copyOf(4),
         )
-        assertEquals(4, raw[4].toInt() and 0xFF)
+        assertEquals(ProtectionFormat.CURRENT, raw[4].toInt() and 0xFF)
         assertEquals(7, readU32be(raw, 21))
         assertTrue(binding().artifactDigest.contentEquals(raw.copyOfRange(25, 57)))
         assertTrue(canonicalAad(binding()).contentEquals(binding().aad()))

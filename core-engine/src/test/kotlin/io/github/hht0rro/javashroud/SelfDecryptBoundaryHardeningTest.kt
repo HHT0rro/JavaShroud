@@ -11,6 +11,7 @@ class SelfDecryptBoundaryHardeningTest {
     fun current_format_boundary_is_the_typed_unified_native_route() {
         val kernelHelper = source("src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.java")
         val ffi = source("src/main/rust/crates/qp-ffi/src/lib.rs")
+        val bootstrap = source("src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpBootstrap.java")
 
         for (entry in listOf(
             "nativeExecuteVmPage",
@@ -18,6 +19,7 @@ class SelfDecryptBoundaryHardeningTest {
             "nativeInitializeDefense",
             "nativeProbeDefense",
             "nativeTransformDefense",
+            "nativeOpenTargetToken",
         )) {
             assertTrue(entry in kernelHelper, "Current JNI helper must declare $entry")
             assertTrue(entry in ffi, "Rust FFI must register $entry")
@@ -32,6 +34,10 @@ class SelfDecryptBoundaryHardeningTest {
         val defenseInject = source("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/UnifiedDefenseTransforms.kt")
         assertTrue("expectDefenseForProtectedPath" in defenseInject, "os-anti injection must arm protected-data gates")
         assertTrue("RegisterNatives" in ffi, "Current runtime must use typed RegisterNatives registration")
+        assertTrue("openTargetToken" in bootstrap, "indy token resolution must use the native terminal")
+        assertFalse("javax.crypto" in bootstrap, "indy bootstrap must not carry a Java crypto oracle")
+        assertFalse("SecretKeySpec" in bootstrap, "indy bootstrap must not assemble token keys in Java")
+        assertFalse("hkdfSha256" in bootstrap, "indy bootstrap must not derive token keys in Java")
         assertFalse("jsn_k14" in ffi, "Retired native bridge identifiers must not survive")
         assertFalse(Files.exists(resolveSource("src/main/native/js_vm_core.c")))
     }

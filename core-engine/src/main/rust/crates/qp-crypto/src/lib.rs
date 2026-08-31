@@ -707,7 +707,7 @@ pub fn aes256_gcm_encrypt(
 ) -> Result<Vec<u8>, CryptoError> {
     validate_gcm_inputs(key, nonce, aad.len(), plaintext.len())?;
     ensure_software_backend()?;
-    let mut workspace = GcmWorkspace::new(key, nonce, aad)?;
+    let mut workspace = GcmWorkspace::new(Aes256::new(key)?, nonce, aad)?;
     let output_len = plaintext
         .len()
         .checked_add(GCM_TAG_SIZE)
@@ -718,6 +718,60 @@ pub fn aes256_gcm_encrypt(
     output.as_mut_slice()[plaintext.len()..].copy_from_slice(&tag);
     tag.fill(0);
     Ok(output.into_inner())
+}
+
+/// AES-128-GCM counterpart used by the current Native-owned target-token
+/// bridge.  The key never needs to be assembled in the Java helper.
+pub fn aes128_gcm_encrypt(
+    key: &[u8],
+    nonce: &[u8],
+    aad: &[u8],
+    plaintext: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    validate_gcm_inputs_with_key_size(key, nonce, aad.len(), plaintext.len(), 16)?;
+    ensure_software_backend()?;
+    let mut workspace = GcmWorkspace::new(Aes128::new(key)?, nonce, aad)?;
+    let output_len = plaintext
+        .len()
+        .checked_add(GCM_TAG_SIZE)
+        .ok_or(CryptoError::LengthOverflow)?;
+    let mut output = WipedVec::new(output_len);
+    workspace.crypt_payload(plaintext, &mut output.as_mut_slice()[..plaintext.len()])?;
+    let mut tag = workspace.tag_for(&output.as_mut_slice()[..plaintext.len()])?;
+    output.as_mut_slice()[plaintext.len()..].copy_from_slice(&tag);
+    tag.fill(0);
+    Ok(output.into_inner())
+}
+
+/// Authenticated AES-128-GCM decryption for a bounded Native bridge input.
+/// Authentication is checked before plaintext is returned.
+pub fn aes128_gcm_decrypt(
+    key: &[u8],
+    nonce: &[u8],
+    aad: &[u8],
+    ciphertext_and_tag: &[u8],
+) -> Result<Vec<u8>, CryptoError> {
+    if ciphertext_and_tag.len() < GCM_TAG_SIZE {
+        return Err(CryptoError::InvalidCiphertextLength {
+            actual: ciphertext_and_tag.len(),
+        });
+    }
+    let ciphertext_len = ciphertext_and_tag.len() - GCM_TAG_SIZE;
+    validate_gcm_inputs_with_key_size(key, nonce, aad.len(), ciphertext_len, 16)?;
+    ensure_software_backend()?;
+    let mut workspace = GcmWorkspace::new(Aes128::new(key)?, nonce, aad)?;
+    let mut expected_tag = workspace.tag_for(&ciphertext_and_tag[..ciphertext_len])?;
+    let authenticated = constant_time_tag_eq(&expected_tag, &ciphertext_and_tag[ciphertext_len..]);
+    expected_tag.fill(0);
+    if !authenticated {
+        return Err(CryptoError::AuthenticationFailed);
+    }
+    let mut plaintext = WipedVec::new(ciphertext_len);
+    workspace.crypt_payload(
+        &ciphertext_and_tag[..ciphertext_len],
+        plaintext.as_mut_slice(),
+    )?;
+    Ok(plaintext.into_inner())
 }
 
 pub fn aes256_gcm_decrypt(
@@ -735,7 +789,7 @@ pub fn aes256_gcm_decrypt(
     validate_gcm_inputs(key, nonce, aad.len(), ciphertext_len)?;
     ensure_software_backend()?;
 
-    let mut workspace = GcmWorkspace::new(key, nonce, aad)?;
+    let mut workspace = GcmWorkspace::new(Aes256::new(key)?, nonce, aad)?;
     let mut expected_tag = workspace.tag_for(&ciphertext_and_tag[..ciphertext_len])?;
     let authenticated = constant_time_tag_eq(&expected_tag, &ciphertext_and_tag[ciphertext_len..]);
     expected_tag.fill(0);
@@ -765,9 +819,19 @@ fn validate_gcm_inputs(
     aad_len: usize,
     payload_len: usize,
 ) -> Result<(), CryptoError> {
-    if key.len() != 32 {
+    validate_gcm_inputs_with_key_size(key, nonce, aad_len, payload_len, 32)
+}
+
+fn validate_gcm_inputs_with_key_size(
+    key: &[u8],
+    nonce: &[u8],
+    aad_len: usize,
+    payload_len: usize,
+    key_size: usize,
+) -> Result<(), CryptoError> {
+    if key.len() != key_size {
         return Err(CryptoError::InvalidKeyLength {
-            expected: 32,
+            expected: key_size,
             actual: key.len(),
         });
     }
@@ -901,8 +965,24 @@ impl Drop for WipedVec {
     }
 }
 
-struct GcmWorkspace {
-    cipher: Aes256,
+trait BlockEncryptor {
+    fn encrypt_block(&self, state: &mut [u8; AES_BLOCK_SIZE]);
+}
+
+impl BlockEncryptor for Aes128 {
+    fn encrypt_block(&self, state: &mut [u8; AES_BLOCK_SIZE]) {
+        Aes128::encrypt_block(self, state);
+    }
+}
+
+impl BlockEncryptor for Aes256 {
+    fn encrypt_block(&self, state: &mut [u8; AES_BLOCK_SIZE]) {
+        Aes256::encrypt_block(self, state);
+    }
+}
+
+struct GcmWorkspace<C: BlockEncryptor> {
+    cipher: C,
     nonce: [u8; GCM_NONCE_SIZE],
     aad: Vec<u8>,
     j0: [u8; AES_BLOCK_SIZE],
@@ -913,9 +993,8 @@ struct GcmWorkspace {
     ghash: GhashWorkspace,
 }
 
-impl GcmWorkspace {
-    fn new(key: &[u8], nonce: &[u8], aad: &[u8]) -> Result<Self, CryptoError> {
-        let cipher = Aes256::new(key)?;
+impl<C: BlockEncryptor> GcmWorkspace<C> {
+    fn new(cipher: C, nonce: &[u8], aad: &[u8]) -> Result<Self, CryptoError> {
         let mut nonce_copy = [0u8; GCM_NONCE_SIZE];
         nonce_copy.copy_from_slice(nonce);
         let aad_copy = aad.to_vec();
@@ -976,7 +1055,7 @@ impl GcmWorkspace {
     }
 }
 
-impl Drop for GcmWorkspace {
+impl<C: BlockEncryptor> Drop for GcmWorkspace<C> {
     fn drop(&mut self) {
         self.nonce.fill(0);
         self.aad.fill(0);
@@ -1410,6 +1489,32 @@ mod tests {
             aes256_gcm_decrypt(&key, &nonce, &[], &[0u8; GCM_TAG_SIZE - 1]),
             Err(CryptoError::InvalidCiphertextLength { .. })
         ));
+    }
+
+    #[test]
+    fn aes128_gcm_empty_vector_and_tamper_rejection() {
+        if !supported_runtime_target() {
+            assert_eq!(
+                aes128_gcm_encrypt(&[0; 16], &[0; GCM_NONCE_SIZE], &[], &[]),
+                Err(CryptoError::SelfTestFailed)
+            );
+            return;
+        }
+        let key = [0u8; 16];
+        let nonce = [0u8; GCM_NONCE_SIZE];
+        let expected = decode_hex("58e2fccefa7e3061367f1d57a4e7455a");
+        let sealed = aes128_gcm_encrypt(&key, &nonce, &[], &[]).expect("AES-128 GCM encrypt");
+        assert_eq!(sealed, expected);
+        assert_eq!(
+            aes128_gcm_decrypt(&key, &nonce, &[], &sealed).expect("AES-128 GCM decrypt"),
+            Vec::<u8>::new()
+        );
+        let mut tampered = sealed;
+        tampered[0] ^= 1;
+        assert_eq!(
+            aes128_gcm_decrypt(&key, &nonce, &[], &tampered),
+            Err(CryptoError::AuthenticationFailed)
+        );
     }
 
     #[test]

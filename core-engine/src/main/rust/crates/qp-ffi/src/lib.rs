@@ -2,15 +2,18 @@
 
 mod relocation;
 mod specialization;
+mod sensitive_memory;
 
 pub use specialization::{
     PACKING_LEVEL, PAYLOAD_PROFILE, PROTECTION_LEVEL, SPECIALIZATION_DIGEST, TARGET_TRIPLE,
-    VM_CRYPTO_DOMAIN, VM_LAYOUT_DIGEST,
+    TARGET_TOKEN_COMMITMENT, TARGET_TOKEN_NAME_SEED, VM_CRYPTO_DOMAIN, VM_LAYOUT_DIGEST,
 };
+pub use sensitive_memory::{SensitiveMemoryError, SensitiveMemoryLease, MAX_SENSITIVE_LEASE_BYTES};
 
 use qp_crypto::{
-    hmac_sha256_bytes, Binding, RuntimeBindingDigest, DIGEST_SIZE, MAX_BINDING_SIZE,
-    MAX_PAYLOAD_SIZE,
+    aes128_gcm_decrypt, constant_time_eq, hmac_sha256_bytes, hkdf_sha256, Binding, QpNameSchedule,
+    RuntimeBindingDigest, Sha256, DIGEST_SIZE, LANE_TOKEN_AAD, LANE_TOKEN_KEY,
+    MAX_BINDING_SIZE, MAX_PAYLOAD_SIZE, QP_NAME_SEED_SIZE, QP_SCHEDULE_VERSION, ROLE_TOKEN,
 };
 use qp_page::{ArtifactDirectory, MAX_FRAME_SIZE};
 use qp_runtime::{
@@ -341,7 +344,10 @@ mod jni_bridge {
     struct BridgeState {
         target: Option<SupportedTarget>,
         initialized: bool,
-        session_nonce: Option<Vec<u8>>,
+        session_nonce: Option<SensitiveMemoryLease>,
+        session_epoch: u64,
+        artifact_commitment: Option<[u8; DIGEST_SIZE]>,
+        name_seed: Option<[u8; qp_crypto::QP_NAME_SEED_SIZE]>,
         defense_surface_mask: u8,
         defense_profile: Option<DefenseProfile>,
         registered: bool,
@@ -350,12 +356,46 @@ mod jni_bridge {
     }
 
     impl BridgeState {
+        fn install_token_binding(
+            &mut self,
+            commitment: [u8; DIGEST_SIZE],
+            name_seed: [u8; qp_crypto::QP_NAME_SEED_SIZE],
+        ) -> Result<(), BridgeFailure> {
+            let commitment_absent = commitment.iter().all(|byte| *byte == 0);
+            let seed_absent = name_seed.iter().all(|byte| *byte == 0);
+            if commitment_absent && seed_absent {
+                return Ok(());
+            }
+            if commitment_absent || seed_absent {
+                return Err(BridgeFailure("Qp target token specialization binding is invalid"));
+            }
+            if self
+                .artifact_commitment
+                .is_some_and(|existing| !constant_time_eq(&existing, &commitment))
+            {
+                return Err(BridgeFailure("Qp target token artifact binding changed"));
+            }
+            if self
+                .name_seed
+                .is_some_and(|existing| !constant_time_eq(&existing, &name_seed))
+            {
+                return Err(BridgeFailure("Qp target token name binding changed"));
+            }
+            self.artifact_commitment = Some(commitment);
+            self.name_seed = Some(name_seed);
+            Ok(())
+        }
+
         fn initialize(&mut self, target: SupportedTarget) -> Result<(), BridgeFailure> {
             if let Some(existing) = self.target {
                 if existing != target {
-                    return Err(BridgeFailure("AKEN-R1 target changed after initialization"));
+                    return Err(BridgeFailure("Qp target changed after initialization"));
                 }
             }
+            self.install_token_binding(
+                specialization::TARGET_TOKEN_COMMITMENT,
+                specialization::TARGET_TOKEN_NAME_SEED,
+            )?;
             self.target = Some(target);
             self.initialized = true;
             Ok(())
@@ -364,23 +404,44 @@ mod jni_bridge {
         fn install_nonce(&mut self, nonce: Vec<u8>) -> Result<(), BridgeFailure> {
             if !self.initialized {
                 return Err(BridgeFailure(
-                    "AKEN-R1 session nonce arrived before initialization",
+                    "Qp session nonce arrived before initialization",
                 ));
             }
             if nonce.len() != 32 {
-                return Err(BridgeFailure("AKEN-R1 session nonce length is invalid"));
+                return Err(BridgeFailure("Qp session nonce length is invalid"));
             }
-            if let Some(mut previous) = self.session_nonce.replace(nonce) {
-                wipe(&mut previous);
-            }
+            let supplied_nonce = SensitiveMemoryLease::new(nonce)
+                .map_err(|_| BridgeFailure("Qp session nonce lease is unavailable"))?;
+            let mut native_entropy = SensitiveMemoryLease::random(32)
+                .map_err(|_| BridgeFailure("Qp native session entropy is unavailable"))?;
+            let mut mixed = hmac_sha256_bytes(
+                native_entropy.as_slice(),
+                &[b"JavaShroud/Qp/session-current", supplied_nonce.as_slice()],
+            );
+            drop(supplied_nonce);
+            native_entropy.close();
+            let lease_result = SensitiveMemoryLease::new(mixed.to_vec());
+            mixed.fill(0);
+            let lease = lease_result
+                .map_err(|_| BridgeFailure("Qp session nonce lease is unavailable"))?;
+            self.session_epoch = self
+                .session_epoch
+                .checked_add(1)
+                .ok_or(BridgeFailure("Qp session epoch overflow"))?;
+            self.session_nonce = Some(lease);
             Ok(())
         }
 
         fn reset_runtime(&mut self) {
             self.target = None;
             self.initialized = false;
-            if let Some(mut nonce) = self.session_nonce.take() {
-                wipe(&mut nonce);
+            self.session_nonce.take();
+            self.session_epoch = 0;
+            if let Some(mut commitment) = self.artifact_commitment.take() {
+                commitment.fill(0);
+            }
+            if let Some(mut seed) = self.name_seed.take() {
+                seed.fill(0);
             }
             self.defense_surface_mask = 0;
             self.defense_profile = None;
@@ -464,7 +525,7 @@ mod jni_bridge {
     fn lock_state() -> Result<MutexGuard<'static, BridgeState>, BridgeFailure> {
         bridge_state()
             .lock()
-            .map_err(|_| BridgeFailure("AKEN-R1 bridge state is poisoned"))
+            .map_err(|_| BridgeFailure("Qp bridge state is poisoned"))
     }
 
     fn wipe(bytes: &mut [u8]) {
@@ -2271,6 +2332,51 @@ mod jni_bridge {
             Ok(value.map(|class_name| class_name.replace('.', "/")))
         }
 
+        fn throwable_message(
+            &mut self,
+            object: &Self::Object,
+        ) -> Result<Option<String>, VmHostError> {
+            if object.is_null() {
+                return Ok(None);
+            }
+            let class = unsafe { native_entry(self.env, GET_OBJECT_CLASS_INDEX) }
+                .ok_or(VmHostError::Failure)?;
+            let get_class: unsafe extern "system" fn(JNIEnv, JObject) -> JClass =
+                unsafe { core::mem::transmute(class) };
+            let object_class = unsafe { get_class(self.env, *object) };
+            if object_class.is_null() {
+                return Ok(None);
+            }
+            let method = unsafe {
+                self.method_id(
+                    object_class,
+                    "getMessage",
+                    "()Ljava/lang/String;",
+                    false,
+                )?
+            };
+            let entry = unsafe { native_entry(self.env, CALL_OBJECT_METHOD_A_INDEX) }
+                .ok_or(VmHostError::Failure)?;
+            let call: unsafe extern "system" fn(
+                JNIEnv,
+                JObject,
+                *const c_void,
+                *const JValue,
+            ) -> JObject = unsafe { core::mem::transmute(entry) };
+            let message = unsafe { call(self.env, *object, method, core::ptr::null()) };
+            if message.is_null() {
+                if unsafe { exception_pending(self.env) } {
+                    unsafe { clear_exception(self.env) };
+                    return Err(VmHostError::Failure);
+                }
+                return Ok(None);
+            }
+            let value = unsafe { copy_jstring(self.env, message) }
+                .map_err(|_| VmHostError::Failure)?;
+            unsafe { delete_local_ref(self.env, message) };
+            Ok(value)
+        }
+
         fn monitor_enter(&mut self, object: &Self::Object) -> Result<(), VmHostError> {
             let entry = unsafe { native_entry(self.env, MONITOR_ENTER_INDEX) }
                 .ok_or(VmHostError::Failure)?;
@@ -2344,11 +2450,11 @@ mod jni_bridge {
 
     fn target_from_platform(bytes: &[u8]) -> Result<SupportedTarget, BridgeFailure> {
         match core::str::from_utf8(bytes)
-            .map_err(|_| BridgeFailure("AKEN-R1 platform is not UTF-8"))?
+            .map_err(|_| BridgeFailure("Qp platform is not UTF-8"))?
         {
             "windows-x64" | "x86_64-pc-windows-gnu" => Ok(SupportedTarget::WindowsX64Gnu),
             "linux-x64" | "x86_64-unknown-linux-gnu.2.17" => Ok(SupportedTarget::LinuxX64Gnu217),
-            _ => Err(BridgeFailure("AKEN-R1 platform is unsupported")),
+            _ => Err(BridgeFailure("Qp platform is unsupported")),
         }
     }
 
@@ -2416,7 +2522,7 @@ mod jni_bridge {
         delete_local_ref(env, class);
     }
 
-    unsafe fn throw_named_exception(env: JNIEnv, class_name: &str) {
+    unsafe fn throw_named_exception(env: JNIEnv, class_name: &str, message: Option<&str>) {
         if env.is_null() {
             return;
         }
@@ -2432,10 +2538,14 @@ mod jni_bridge {
             clear_exception(env);
             return;
         };
-        let empty = b"\0";
+        let message = message.unwrap_or("");
+        let Ok(message) = std::ffi::CString::new(message) else {
+            delete_local_ref(env, class);
+            return;
+        };
         let function: unsafe extern "system" fn(JNIEnv, JClass, *const c_char) -> JInt =
             core::mem::transmute(entry);
-        let _ = function(env, class, empty.as_ptr().cast());
+        let _ = function(env, class, message.as_ptr());
         delete_local_ref(env, class);
     }
 
@@ -2520,8 +2630,16 @@ mod jni_bridge {
     }
 
     unsafe fn copy_string(env: JNIEnv, value: JString) -> Result<Vec<u8>, BridgeFailure> {
+        copy_string_bounded(env, value, 64)
+    }
+
+    unsafe fn copy_string_bounded(
+        env: JNIEnv,
+        value: JString,
+        max_length: usize,
+    ) -> Result<Vec<u8>, BridgeFailure> {
         if value.is_null() {
-            return Err(BridgeFailure("AKEN-R1 platform string is null"));
+            return Err(BridgeFailure("Qp platform string is null"));
         }
         let Some(length_entry) = native_entry(env, GET_STRING_UTF_LENGTH_INDEX) else {
             return Err(BridgeFailure("JNI GetStringUTFLength is unavailable"));
@@ -2539,8 +2657,8 @@ mod jni_bridge {
         let release_chars: unsafe extern "system" fn(JNIEnv, JString, *const c_char) =
             core::mem::transmute(release_entry);
         let size = length(env, value);
-        if !(0..=64).contains(&size) {
-            return Err(BridgeFailure("AKEN-R1 platform string length is invalid"));
+        if size < 0 || size as usize > max_length {
+            return Err(BridgeFailure("Qp platform string length is invalid"));
         }
         let chars = get_chars(env, value, core::ptr::null_mut());
         if chars.is_null() {
@@ -2557,7 +2675,7 @@ mod jni_bridge {
         max_length: usize,
     ) -> Result<WipedBytes, BridgeFailure> {
         if value.is_null() {
-            return Err(BridgeFailure("AKEN-R1 byte array is null"));
+            return Err(BridgeFailure("Qp byte array is null"));
         }
         let Some(length_entry) = native_entry(env, GET_ARRAY_LENGTH_INDEX) else {
             return Err(BridgeFailure("JNI GetArrayLength is unavailable"));
@@ -2576,7 +2694,7 @@ mod jni_bridge {
             core::mem::transmute(release_entry);
         let size = length(env, value);
         if size < 0 || size as usize > max_length {
-            return Err(BridgeFailure("AKEN-R1 byte array length exceeds its bound"));
+            return Err(BridgeFailure("Qp byte array length exceeds its bound"));
         }
         let elements = get_elements(env, value, core::ptr::null_mut());
         if elements.is_null() && size != 0 {
@@ -2605,7 +2723,7 @@ mod jni_bridge {
             if expected == 0 {
                 return Ok(Vec::new());
             }
-            return Err(BridgeFailure("AKEN-R1 VM arguments are null"));
+            return Err(BridgeFailure("Qp VM arguments are null"));
         }
         let Some(length_entry) = native_entry(env, GET_ARRAY_LENGTH_INDEX) else {
             return Err(BridgeFailure("JNI GetArrayLength is unavailable"));
@@ -2621,7 +2739,7 @@ mod jni_bridge {
         if actual < 0 || actual as usize != expected || exception_pending(env) {
             clear_exception(env);
             return Err(BridgeFailure(
-                "AKEN-R1 VM argument count does not match method descriptor",
+                "Qp VM argument count does not match method descriptor",
             ));
         }
 
@@ -2631,11 +2749,11 @@ mod jni_bridge {
             let object = get_element(env, args, index as JSize);
             if exception_pending(env) {
                 clear_exception(env);
-                return Err(BridgeFailure("AKEN-R1 VM argument extraction failed"));
+                return Err(BridgeFailure("Qp VM argument extraction failed"));
             }
             if !metadata.is_static && index == 0 {
                 if object.is_null() {
-                    return Err(BridgeFailure("AKEN-R1 VM receiver is null"));
+                    return Err(BridgeFailure("Qp VM receiver is null"));
                 }
                 values.push(VmValue::Object(object));
                 continue;
@@ -2644,7 +2762,7 @@ mod jni_bridge {
             let tag = *metadata
                 .argument_tags
                 .get(tag_index)
-                .ok_or(BridgeFailure("AKEN-R1 VM argument metadata is malformed"))?;
+                .ok_or(BridgeFailure("Qp VM argument metadata is malformed"))?;
             match tag {
                 b'L' | b'[' => {
                     values.push(if object.is_null() {
@@ -2656,16 +2774,16 @@ mod jni_bridge {
                 b'Z' | b'B' | b'C' | b'S' | b'I' | b'J' | b'F' | b'D' => {
                     if object.is_null() {
                         return Err(BridgeFailure(
-                            "AKEN-R1 primitive VM argument must not be null",
+                            "Qp primitive VM argument must not be null",
                         ));
                     }
                     let value = host.unbox(object, tag).map_err(|_| {
-                        BridgeFailure("AKEN-R1 boxed primitive argument type mismatch")
+                        BridgeFailure("Qp boxed primitive argument type mismatch")
                     })?;
                     values.push(value);
                 }
                 _ => {
-                    return Err(BridgeFailure("AKEN-R1 VM argument descriptor is invalid"));
+                    return Err(BridgeFailure("Qp VM argument descriptor is invalid"));
                 }
             }
         }
@@ -2872,13 +2990,15 @@ mod jni_bridge {
         ))?;
         let profile = state.defense_profile.unwrap_or(DefenseProfile::Balanced);
         let surface_mask = [state.defense_surface_mask];
+        let epoch = state.session_epoch.to_be_bytes();
         let mut scoped_key = hmac_sha256_bytes(
-            nonce,
+            nonce.as_slice(),
             &[
                 DEFENSE_SHARE_DOMAIN,
                 target.triple().as_bytes(),
                 profile.label(),
                 &surface_mask,
+                &epoch,
                 specialization::SPECIALIZATION_DIGEST.as_ref(),
                 specialization::VM_LAYOUT_DIGEST.as_ref(),
             ],
@@ -2890,6 +3010,7 @@ mod jni_bridge {
                 target.triple().as_bytes(),
                 profile.label(),
                 &surface_mask,
+                &epoch,
                 binding,
                 material,
             ],
@@ -2901,11 +3022,11 @@ mod jni_bridge {
     fn target_from_state() -> Result<SupportedTarget, BridgeFailure> {
         let state = lock_state()?;
         if !state.initialized {
-            return Err(BridgeFailure("AKEN-R1 native bridge is not initialized"));
+            return Err(BridgeFailure("Qp native bridge is not initialized"));
         }
         state
             .target
-            .ok_or(BridgeFailure("AKEN-R1 native bridge target is missing"))
+            .ok_or(BridgeFailure("Qp native bridge target is missing"))
     }
 
     unsafe fn unpack_packed_page_request(
@@ -2939,13 +3060,13 @@ mod jni_bridge {
         {
             let state = lock_state()?;
             if state.session_nonce.is_none() {
-                return Err(BridgeFailure("AKEN-R1 session leaf is missing"));
+                return Err(BridgeFailure("Qp session leaf is missing"));
             }
         }
         let (handle, page_index, proof) = unpack_packed_page_request(env, packed)?;
         let request =
             PageRequest::new(&handle, page_index, &proof, kind)
-                .map_err(|_| BridgeFailure("AKEN-R1 page request is malformed"))?;
+                .map_err(|_| BridgeFailure("Qp page request is malformed"))?;
         let state = lock_state()?;
         state
             .router
@@ -2962,7 +3083,7 @@ mod jni_bridge {
         {
             let state = lock_state()?;
             if state.session_nonce.is_none() {
-                return Err(BridgeFailure("AKEN-R1 session leaf is missing"));
+                return Err(BridgeFailure("Qp session leaf is missing"));
             }
         }
         let (handle, page_index, proof) = unpack_packed_page_request(env, packed)?;
@@ -2972,7 +3093,7 @@ mod jni_bridge {
             &proof,
             PageKind::Vm,
         )
-        .map_err(|_| BridgeFailure("AKEN-R1 page request is malformed"))?;
+        .map_err(|_| BridgeFailure("Qp page request is malformed"))?;
         let state = lock_state()?;
         state
             .router
@@ -2989,12 +3110,12 @@ mod jni_bridge {
                 BridgeFailure("AKEN typed page route is unavailable")
             }
             RouterError::AuthenticationFailed => {
-                BridgeFailure("AKEN-R1 page authentication failed")
+                BridgeFailure("Qp page authentication failed")
             }
             RouterError::Wire(reason) => BridgeFailure(Box::leak(
-                format!("AKEN-R1 page decode failed: {reason}").into_boxed_str(),
+                format!("Qp page decode failed: {reason}").into_boxed_str(),
             )),
-            _ => BridgeFailure("AKEN-R1 page request is malformed"),
+            _ => BridgeFailure("Qp page request is malformed"),
         }
     }
 
@@ -3154,6 +3275,11 @@ mod jni_bridge {
         if !state.router.is_empty() {
             return Err(BridgeFailure("AKEN current catalog was already installed"));
         }
+        let mut artifact_commitment = [0u8; DIGEST_SIZE];
+        artifact_commitment.copy_from_slice(&directory.runtime.artifact_commitment);
+        let mut name_seed = [0u8; qp_crypto::QP_NAME_SEED_SIZE];
+        name_seed.copy_from_slice(&directory.name_seed);
+        state.install_token_binding(artifact_commitment, name_seed)?;
         let installed = state
             .router
             .install_catalog_descriptor_bound(&directory, &stored)
@@ -3183,7 +3309,7 @@ mod jni_bridge {
     fn native_nonce_inner(env: JNIEnv, nonce: JByteArray) -> Result<JBoolean, BridgeFailure> {
         let nonce = unsafe { copy_byte_array(env, nonce, 32) }?;
         if nonce.as_bytes().len() != 32 {
-            return Err(BridgeFailure("AKEN-R1 session nonce must be 32 bytes"));
+            return Err(BridgeFailure("Qp session nonce must be 32 bytes"));
         }
         let mut state = lock_state()?;
         state.install_nonce(nonce.into_inner())?;
@@ -3277,6 +3403,235 @@ mod jni_bridge {
             "AKEN unified defense output allocation failed",
         ));
         wipe(&mut share);
+        result
+    }
+
+    const TARGET_TOKEN_VERSION: u8 = 3;
+    const TARGET_TOKEN_HEADER_SIZE: usize = 4 + 1 + QP_NAME_SEED_SIZE + 4 + DIGEST_SIZE;
+    const TARGET_TOKEN_NONCE_SIZE: usize = 12;
+    const TARGET_TOKEN_TAG_SIZE: usize = 16;
+    const MAX_TARGET_TOKEN_BYTES: usize = 64 * 1024;
+    const MAX_TARGET_TOKEN_TEXT_BYTES: usize = 512;
+
+    fn target_token_domain(
+        name_seed: &[u8; QP_NAME_SEED_SIZE],
+        commitment: &[u8; DIGEST_SIZE],
+        lane: u8,
+    ) -> Result<[u8; 16], BridgeFailure> {
+        let schedule = QpNameSchedule::new(name_seed, commitment, QP_SCHEDULE_VERSION)
+            .map_err(|_| BridgeFailure("Qp target token schedule is invalid"))?;
+        schedule
+            .derive_domain(ROLE_TOKEN, lane, 0)
+            .map_err(|_| BridgeFailure("Qp target token domain derivation failed"))
+    }
+
+    fn update_token_u32(hasher: &mut Sha256, value: u32) {
+        hasher.update(&value.to_be_bytes());
+    }
+
+    fn update_token_field(hasher: &mut Sha256, value: &[u8]) -> Result<(), BridgeFailure> {
+        let length = u32::try_from(value.len())
+            .map_err(|_| BridgeFailure("Qp target token field is too large"))?;
+        update_token_u32(hasher, length);
+        hasher.update(value);
+        Ok(())
+    }
+
+    fn target_token_key(
+        artifact_commitment: &[u8; DIGEST_SIZE],
+        name_seed: &[u8; QP_NAME_SEED_SIZE],
+        caller_owner: &[u8],
+        indy_name: &[u8],
+        method_type: &[u8],
+        site_index: u32,
+    ) -> Result<Vec<u8>, BridgeFailure> {
+        let mut info = Vec::with_capacity(
+            16usize
+                .checked_add(caller_owner.len())
+                .and_then(|value| value.checked_add(indy_name.len()))
+                .and_then(|value| value.checked_add(method_type.len()))
+                .ok_or(BridgeFailure("Qp target token key info is too large"))?,
+        );
+        for field in [caller_owner, indy_name, method_type] {
+            let length = u32::try_from(field.len())
+                .map_err(|_| BridgeFailure("Qp target token field is too large"))?;
+            info.extend_from_slice(&length.to_be_bytes());
+            info.extend_from_slice(field);
+        }
+        info.extend_from_slice(&site_index.to_be_bytes());
+        let domain = target_token_domain(name_seed, artifact_commitment, LANE_TOKEN_KEY)?;
+        let result = hkdf_sha256(artifact_commitment, &domain, &info, 16)
+            .map_err(|_| BridgeFailure("Qp target token key derivation failed"));
+        info.fill(0);
+        let mut domain = domain;
+        domain.fill(0);
+        result
+    }
+
+    fn target_token_aad(
+        artifact_commitment: &[u8; DIGEST_SIZE],
+        name_seed: &[u8; QP_NAME_SEED_SIZE],
+        caller_owner: &[u8],
+        indy_name: &[u8],
+        method_type: &[u8],
+        site_index: u32,
+    ) -> Result<[u8; DIGEST_SIZE], BridgeFailure> {
+        let domain = target_token_domain(name_seed, artifact_commitment, LANE_TOKEN_AAD)?;
+        let mut hasher = Sha256::new();
+        hasher.update(&domain);
+        update_token_field(&mut hasher, caller_owner)?;
+        update_token_field(&mut hasher, indy_name)?;
+        update_token_field(&mut hasher, method_type)?;
+        update_token_u32(&mut hasher, site_index);
+        hasher.update(artifact_commitment);
+        update_token_u32(&mut hasher, TARGET_TOKEN_VERSION as u32);
+        let mut domain = domain;
+        domain.fill(0);
+        Ok(hasher.finalize().into_bytes())
+    }
+
+    fn read_token_u32(bytes: &[u8]) -> Result<u32, BridgeFailure> {
+        if bytes.len() != 4 {
+            return Err(BridgeFailure("Qp target token integer is malformed"));
+        }
+        Ok(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn validate_target_token_text(value: &[u8]) -> Result<(), BridgeFailure> {
+        if value.is_empty()
+            || value.len() > MAX_TARGET_TOKEN_TEXT_BYTES
+            || value.iter().any(|byte| *byte == 0 || *byte < 0x20 || *byte == 0x7f)
+        {
+            return Err(BridgeFailure("Qp target token context is invalid"));
+        }
+        Ok(())
+    }
+
+    fn validate_target_token_plaintext(plaintext: &[u8]) -> Result<(), BridgeFailure> {
+        let mut fields = plaintext.split(|byte| *byte == 0);
+        let owner = fields.next().ok_or(BridgeFailure("Qp target token payload is invalid"))?;
+        let name = fields.next().ok_or(BridgeFailure("Qp target token payload is invalid"))?;
+        let descriptor = fields.next().ok_or(BridgeFailure("Qp target token payload is invalid"))?;
+        let tag = fields.next().ok_or(BridgeFailure("Qp target token payload is invalid"))?;
+        let interface = fields.next().ok_or(BridgeFailure("Qp target token payload is invalid"))?;
+        if fields.next().is_some()
+            || owner.is_empty()
+            || name.is_empty()
+            || descriptor.is_empty()
+            || tag.is_empty()
+            || interface.len() != 1
+            || !matches!(interface[0], b'0' | b'1')
+            || !matches!(tag, b"5" | b"6" | b"7" | b"9")
+        {
+            return Err(BridgeFailure("Qp target token payload is invalid"));
+        }
+        Ok(())
+    }
+
+    fn native_open_target_token_inner(
+        env: JNIEnv,
+        token: JByteArray,
+        caller_owner: JString,
+        indy_name: JString,
+        method_type: JString,
+    ) -> Result<JByteArray, BridgeFailure> {
+        let token = unsafe { copy_byte_array(env, token, MAX_TARGET_TOKEN_BYTES) }?;
+        let caller_owner = WipedBytes(unsafe {
+            copy_string_bounded(env, caller_owner, MAX_TARGET_TOKEN_TEXT_BYTES)
+        }?);
+        let indy_name = WipedBytes(unsafe {
+            copy_string_bounded(env, indy_name, MAX_TARGET_TOKEN_TEXT_BYTES)
+        }?);
+        let method_type = WipedBytes(unsafe {
+            copy_string_bounded(env, method_type, MAX_TARGET_TOKEN_TEXT_BYTES)
+        }?);
+        validate_target_token_text(caller_owner.as_bytes())?;
+        validate_target_token_text(indy_name.as_bytes())?;
+        validate_target_token_text(method_type.as_bytes())?;
+
+        let (expected_commitment, expected_seed) = {
+            let state = lock_state()?;
+            if !state.initialized || state.session_nonce.is_none() {
+                return Err(BridgeFailure("Qp target token session binding is missing"));
+            }
+            (
+                state
+                    .artifact_commitment
+                    .ok_or(BridgeFailure("Qp target token artifact binding is missing"))?,
+                state
+                    .name_seed
+                    .ok_or(BridgeFailure("Qp target token name binding is missing"))?,
+            )
+        };
+        let raw = token.as_bytes();
+        if raw.len() <= TARGET_TOKEN_HEADER_SIZE + TARGET_TOKEN_NONCE_SIZE + TARGET_TOKEN_TAG_SIZE
+            || raw.len() > MAX_TARGET_TOKEN_BYTES
+            || raw[4] != TARGET_TOKEN_VERSION
+        {
+            return Err(BridgeFailure("Qp target token envelope is invalid"));
+        }
+        let mut token_seed = [0u8; QP_NAME_SEED_SIZE];
+        token_seed.copy_from_slice(&raw[5..5 + QP_NAME_SEED_SIZE]);
+        if !constant_time_eq(&token_seed, &expected_seed) {
+            token_seed.fill(0);
+            return Err(BridgeFailure("Qp target token name binding mismatch"));
+        }
+        let site_index = read_token_u32(&raw[21..25])?;
+        let mut token_commitment = [0u8; DIGEST_SIZE];
+        token_commitment.copy_from_slice(&raw[25..57]);
+        if !constant_time_eq(&token_commitment, &expected_commitment) {
+            token_seed.fill(0);
+            token_commitment.fill(0);
+            return Err(BridgeFailure("Qp target token artifact binding mismatch"));
+        }
+        let schedule = QpNameSchedule::new(&token_seed, &token_commitment, QP_SCHEDULE_VERSION)
+            .map_err(|_| BridgeFailure("Qp target token schedule is invalid"))?;
+        let mut expected_magic = schedule
+            .derive_magic(ROLE_TOKEN, 0, 0)
+            .map_err(|_| BridgeFailure("Qp target token magic derivation failed"))?;
+        let magic_matches = constant_time_eq(&raw[..4], &expected_magic);
+        expected_magic.fill(0);
+        if !magic_matches {
+            token_seed.fill(0);
+            token_commitment.fill(0);
+            return Err(BridgeFailure("Qp target token magic is invalid"));
+        }
+        let nonce_start = TARGET_TOKEN_HEADER_SIZE;
+        let sealed_start = nonce_start + TARGET_TOKEN_NONCE_SIZE;
+        let nonce = &raw[nonce_start..sealed_start];
+        let caller = caller_owner.as_bytes();
+        let indy = indy_name.as_bytes();
+        let descriptor = method_type.as_bytes();
+        let key = target_token_key(
+            &token_commitment,
+            &token_seed,
+            caller,
+            indy,
+            descriptor,
+            site_index,
+        )?;
+        let aad = target_token_aad(
+            &token_commitment,
+            &token_seed,
+            caller,
+            indy,
+            descriptor,
+            site_index,
+        )?;
+        let plaintext_result = aes128_gcm_decrypt(&key, nonce, &aad, &raw[sealed_start..]);
+        let mut key = key;
+        key.fill(0);
+        let mut aad = aad;
+        aad.fill(0);
+        let plaintext = plaintext_result
+            .map_err(|_| BridgeFailure("Qp target token authentication failed"))?;
+        let lease = SensitiveMemoryLease::new(plaintext)
+            .map_err(|_| BridgeFailure("Qp target token plaintext lease is invalid"))?;
+        validate_target_token_plaintext(lease.as_slice())?;
+        let result = unsafe { new_byte_array(env, lease.as_slice()) }
+            .ok_or(BridgeFailure("Qp target token output allocation failed"));
+        token_seed.fill(0);
+        token_commitment.fill(0);
         result
     }
 
@@ -3374,6 +3729,23 @@ mod jni_bridge {
         }
     }
 
+    unsafe extern "system" fn native_open_target_token(
+        env: JNIEnv,
+        _class: JClass,
+        token: JByteArray,
+        caller_owner: JString,
+        indy_name: JString,
+        method_type: JString,
+    ) -> JByteArray {
+        match native_open_target_token_inner(env, token, caller_owner, indy_name, method_type) {
+            Ok(result) => result,
+            Err(failure) => {
+                throw_new(env, failure.0.as_bytes());
+                core::ptr::null_mut()
+            }
+        }
+    }
+
     unsafe extern "system" fn native_execute_vm_page(
         env: JNIEnv,
         _class: JClass,
@@ -3388,7 +3760,7 @@ mod jni_bridge {
         // reflection calls while retaining a captured pending throwable until
         // the VM host is dropped below.
         if !push_local_frame(env, 4096) {
-            throw_new(env, b"AKEN-R1 JNI local frame unavailable\0");
+            throw_new(env, b"Qp JNI local frame unavailable\0");
             return core::ptr::null_mut();
         }
         let result = match open_page_route_vm(env, _entry_token, packed) {
@@ -3425,12 +3797,12 @@ mod jni_bridge {
                                 )
                                 .unwrap_or(core::ptr::null_mut())
                             }
-                            Err(VmError::UncaughtException(class_name)) => {
-                                unsafe { throw_named_exception(env, &class_name) };
+                            Err(VmError::UncaughtException { class_name, message }) => {
+                                unsafe { throw_named_exception(env, &class_name, message.as_deref()) };
                                 core::ptr::null_mut()
                             }
                             Err(_) => {
-                                throw_new(env, b"AKEN-R1 VM execution failed\0");
+                                throw_new(env, b"Qp VM execution failed\0");
                                 core::ptr::null_mut()
                             }
                         }
@@ -3463,12 +3835,18 @@ mod jni_bridge {
         packed: JByteArray,
     ) -> JString {
         match open_page_route(env, 0, packed, PageKind::String) {
-            Ok(opened) => match std::ffi::CString::new(opened.payload()) {
+            Ok(opened) => match SensitiveMemoryLease::new(opened.into_payload()) {
+                Ok(lease) => match std::ffi::CString::new(lease.as_slice()) {
                 Ok(text) => {
                     new_string_utf(env, text.as_bytes_with_nul()).unwrap_or(core::ptr::null_mut())
                 }
                 Err(_) => {
-                    throw_new(env, b"AKEN-R1 string page is not UTF-8\0");
+                    throw_new(env, b"Qp string page is not UTF-8\0");
+                    core::ptr::null_mut()
+                }
+                },
+                Err(_) => {
+                    throw_new(env, b"Qp string page lease is invalid\0");
                     core::ptr::null_mut()
                 }
             },
@@ -3485,7 +3863,13 @@ mod jni_bridge {
         packed: JByteArray,
     ) -> JByteArray {
         match open_page_route(env, 0, packed, PageKind::Class) {
-            Ok(opened) => new_byte_array(env, opened.payload()).unwrap_or(core::ptr::null_mut()),
+            Ok(opened) => match SensitiveMemoryLease::new(opened.into_payload()) {
+                Ok(lease) => new_byte_array(env, lease.as_slice()).unwrap_or(core::ptr::null_mut()),
+                Err(_) => {
+                    throw_new(env, b"Qp class page lease is invalid\0");
+                    core::ptr::null_mut()
+                }
+            },
             Err(failure) => {
                 throw_new(env, failure.0.as_bytes());
                 core::ptr::null_mut()
@@ -3504,7 +3888,7 @@ mod jni_bridge {
         }
     }
 
-    fn registered_methods() -> [JniNativeMethod; 11] {
+    fn registered_methods() -> [JniNativeMethod; 12] {
         [
             JniNativeMethod {
                 name: b"nativeInit\0".as_ptr().cast(),
@@ -3563,6 +3947,13 @@ mod jni_bridge {
                 signature: b"([BLjava/lang/String;)[B\0".as_ptr().cast(),
                 fn_ptr: native_transform_defense as *mut c_void,
             },
+            JniNativeMethod {
+                name: b"nativeOpenTargetToken\0".as_ptr().cast(),
+                signature: b"([BLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)[B\0"
+                    .as_ptr()
+                    .cast(),
+                fn_ptr: native_open_target_token as *mut c_void,
+            },
         ]
     }
 
@@ -3582,7 +3973,7 @@ mod jni_bridge {
         ) -> JInt = core::mem::transmute(entry);
         if function(env, class, methods.as_ptr(), methods.len() as JInt) != JNI_OK {
             clear_exception(env);
-            return Err(BridgeFailure("AKEN-R1 JNI native registration failed"));
+            return Err(BridgeFailure("Qp JNI native registration failed"));
         }
         Ok(())
     }
@@ -3621,7 +4012,7 @@ mod jni_bridge {
         }
         let Some(key) = new_string_utf(env, name) else {
             delete_local_ref(env, system);
-            return Err(BridgeFailure("AKEN-R1 property name is invalid"));
+            return Err(BridgeFailure("Qp property name is invalid"));
         };
         let args = [JValue { l: key }];
         let value = call_static_object_method_a(env, system, method.unwrap(), jvalue_ptr(&args));
@@ -3765,7 +4156,7 @@ mod jni_bridge {
         let copied = std::ffi::CStr::from_ptr(chars)
             .to_str()
             .map(str::to_owned)
-            .map_err(|_| BridgeFailure("AKEN-R1 system property is not UTF-8"));
+            .map_err(|_| BridgeFailure("Qp system property is not UTF-8"));
         if let Some(release) = native_entry(env, RELEASE_STRING_UTF_CHARS_INDEX) {
             let release_fn: unsafe extern "system" fn(JNIEnv, JString, *const c_char) =
                 core::mem::transmute(release);
@@ -3823,7 +4214,7 @@ mod jni_bridge {
             remapped_names.push(owned);
         }
         let base = registered_methods();
-        let methods: [JniNativeMethod; 11] = core::array::from_fn(|index| JniNativeMethod {
+        let methods: [JniNativeMethod; 12] = core::array::from_fn(|index| JniNativeMethod {
             name: remapped_names[index].as_ptr(),
             signature: base[index].signature,
             fn_ptr: base[index].fn_ptr,
@@ -3888,7 +4279,7 @@ mod jni_bridge {
         use std::collections::BTreeSet;
         use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
-        const EXPECTED_ROUTES: [(&str, &str); 11] = [
+    const EXPECTED_ROUTES: [(&str, &str); 12] = [
             ("nativeInit", "(Ljava/lang/String;)I"),
             ("nativeHeartbeat", "()I"),
             ("nativeInstallSessionNonce", "([B)Z"),
@@ -3909,6 +4300,10 @@ mod jni_bridge {
                 "(Ljava/lang/String;Ljava/lang/String;)I",
             ),
             ("nativeTransformDefense", "([BLjava/lang/String;)[B"),
+            (
+                "nativeOpenTargetToken",
+                "([BLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)[B",
+            ),
         ];
 
         static REGISTER_CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -3967,7 +4362,7 @@ mod jni_bridge {
         }
 
         #[test]
-        fn registration_table_is_exactly_the_eleven_typed_r1_methods() {
+        fn registration_table_is_exactly_the_current_typed_methods() {
             let methods = registered_methods();
             assert_eq!(methods.len(), EXPECTED_ROUTES.len());
             assert_eq!(
@@ -3987,7 +4382,7 @@ mod jni_bridge {
         }
 
         #[test]
-        fn register_natives_receives_all_eleven_typed_methods_in_one_call() {
+        fn register_natives_receives_all_current_typed_methods_in_one_call() {
             REGISTER_CALLS.store(0, Ordering::SeqCst);
             REGISTERED_COUNT.store(-1, Ordering::SeqCst);
             REGISTERED_ROUTE_MASK.store(0, Ordering::SeqCst);
@@ -4011,6 +4406,80 @@ mod jni_bridge {
                 REGISTERED_ROUTE_MASK.load(Ordering::SeqCst),
                 (1usize << EXPECTED_ROUTES.len()) - 1,
             );
+        }
+
+        #[test]
+        fn target_token_native_crypto_round_trip_is_bound_to_context() {
+            let name_seed = qp_crypto::TEST_NAME_SEED;
+            let commitment = qp_crypto::TEST_COMMITMENT;
+            let caller = b"fixture/Caller";
+            let indy = b"target";
+            let method_type = b"(Ljava/lang/String;)I";
+            let site_index = 7u32;
+            let key = target_token_key(
+                &commitment,
+                &name_seed,
+                caller,
+                indy,
+                method_type,
+                site_index,
+            )
+            .expect("token key");
+            let aad = target_token_aad(
+                &commitment,
+                &name_seed,
+                caller,
+                indy,
+                method_type,
+                site_index,
+            )
+            .expect("token aad");
+            let nonce = [0x42u8; TARGET_TOKEN_NONCE_SIZE];
+            let plaintext = [b"java/lang/String\0length\0()I\0".as_slice(), b"5\00".as_slice()].concat();
+            let sealed = qp_crypto::aes128_gcm_encrypt(&key, &nonce, &aad, &plaintext)
+                .expect("token seal");
+            let opened = aes128_gcm_decrypt(&key, &nonce, &aad, &sealed).expect("token open");
+            assert_eq!(opened, plaintext);
+            validate_target_token_plaintext(&opened).expect("target payload");
+
+            let mut wrong_aad = aad;
+            wrong_aad[0] ^= 1;
+            assert_eq!(
+                aes128_gcm_decrypt(&key, &nonce, &wrong_aad, &sealed),
+                Err(qp_crypto::CryptoError::AuthenticationFailed)
+            );
+        }
+
+        #[test]
+        fn target_token_specialization_binding_rejects_catalog_drift() {
+            let mut state = BridgeState::default();
+            let commitment = [0x31u8; DIGEST_SIZE];
+            let name_seed = [0x52u8; qp_crypto::QP_NAME_SEED_SIZE];
+            state
+                .install_token_binding(commitment, name_seed)
+                .expect("initial specialization binding");
+            state
+                .install_token_binding(commitment, name_seed)
+                .expect("matching catalog binding");
+
+            let mut wrong_commitment = commitment;
+            wrong_commitment[0] ^= 1;
+            assert_eq!(
+                state.install_token_binding(wrong_commitment, name_seed),
+                Err(BridgeFailure("Qp target token artifact binding changed"))
+            );
+            let mut wrong_seed = name_seed;
+            wrong_seed[0] ^= 1;
+            assert_eq!(
+                state.install_token_binding(commitment, wrong_seed),
+                Err(BridgeFailure("Qp target token name binding changed"))
+            );
+            assert_eq!(state.artifact_commitment, Some(commitment));
+            assert_eq!(state.name_seed, Some(name_seed));
+
+            state.reset_runtime();
+            assert!(state.artifact_commitment.is_none());
+            assert!(state.name_seed.is_none());
         }
 
         #[test]

@@ -4,25 +4,21 @@ import java.lang.invoke.CallSite;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
-import java.security.MessageDigest;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Base64;
-import javax.crypto.Cipher;
-import javax.crypto.Mac;
-import javax.crypto.spec.GCMParameterSpec;
-import javax.crypto.spec.SecretKeySpec;
 
-/** Runtime bootstrap that resolves opaque indy target tokens. Java 8 compatible. */
+/**
+ * Runtime bootstrap for opaque invokedynamic targets.
+ *
+ * Cryptographic token parsing and key derivation are owned by the Native
+ * bridge. This class only validates the authenticated target description and
+ * performs the JVM lookup required to link the call site.
+ */
 public final class QpBootstrap {
-    private static final byte[] RETIRED_MAGIC = new byte[] {0x49, 0x54, 0x4b, 0x31};
     private static final int MAGIC_SIZE = 4;
-    private static final byte VERSION = 4;
-    private static final int NAME_SEED_SIZE = 16;
-    private static final byte INFO_PREFIX = 0x51;
-    private static final byte SCHEDULE_VERSION = 1;
-    private static final byte ROLE_TOKEN = 0x14;
-    private static final byte LANE_TOKEN_AAD = 9;
-    private static final byte LANE_TOKEN_KEY = 10;
+    private static final int VERSION = 3;
+    private static final int MAX_TOKEN_BYTES = 64 * 1024;
 
     private QpBootstrap() {}
 
@@ -55,234 +51,97 @@ public final class QpBootstrap {
         }
     }
 
+    /** Resolve one token through the authenticated Native terminal. */
     public static MethodHandle resolveHandle(
         MethodHandles.Lookup lookup,
         String indyName,
         MethodType type,
         String token
     ) throws Exception {
-        byte[] key = null;
         byte[] raw = null;
         byte[] plaintext = null;
-        byte[] aad = null;
         try {
-            raw = Base64.getUrlDecoder().decode(token);
-            if (raw.length <= MAGIC_SIZE + 1 + NAME_SEED_SIZE + 4 + 32 + 12 + 16) {
-                throw new SecurityException("indy target token is truncated");
-            }
-            boolean retired = true;
-            for (int i = 0; i < MAGIC_SIZE; i++) {
-                if (raw[i] != RETIRED_MAGIC[i]) {
-                    retired = false;
-                    break;
-                }
-            }
-            if (retired) throw new SecurityException("indy target token is invalid");
-            if (raw[MAGIC_SIZE] != VERSION) {
-                throw new SecurityException("indy target token version is unsupported");
-            }
-            int pos = MAGIC_SIZE + 1;
-            int nameSeedOff = pos;
-            pos += NAME_SEED_SIZE;
-            int siteIndex = readU32be(raw, pos);
-            pos += 4;
-            int digestOff = pos;
-            pos += 32;
-            byte[] nonce = Arrays.copyOfRange(raw, pos, pos + 12);
-            pos += 12;
-            byte[] sealed = Arrays.copyOfRange(raw, pos, raw.length);
+            raw = decodeToken(token);
             String callerOwner = lookup.lookupClass().getName().replace('.', '/');
-            key = siteKey(raw, nameSeedOff, digestOff, callerOwner, indyName, type.toMethodDescriptorString(), siteIndex);
-            aad = buildAad(callerOwner, indyName, type, siteIndex, raw, nameSeedOff, digestOff);
-            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new GCMParameterSpec(128, nonce));
-            cipher.updateAAD(aad);
-            plaintext = cipher.doFinal(sealed);
-            String[] parts = new String(plaintext, "UTF-8").split("\u0000", -1);
-            if (parts.length != 5) throw new SecurityException("indy target token payload is invalid");
-            Class<?> owner = Class.forName(parts[0].replace('/', '.'));
-            MethodType methodType = MethodType.fromMethodDescriptorString(parts[2], owner.getClassLoader());
-            int tag = Integer.parseInt(parts[3]);
-            switch (tag) {
-                case 6:
-                    return lookup.findStatic(owner, parts[1], methodType);
-                case 5:
-                    return lookup.findVirtual(owner, parts[1], methodType);
-                case 9:
-                    return lookup.findVirtual(owner, parts[1], methodType);
-                case 7:
-                    return lookup.findSpecial(owner, parts[1], methodType, lookup.lookupClass());
-                default:
-                    throw new SecurityException("indy target handle tag is unsupported");
-            }
-        } catch (SecurityException ex) {
-            throw ex;
-        } catch (Exception ex) {
-            throw new SecurityException("indy target token authentication failed");
+            plaintext = QpBridge.openTargetToken(
+                raw,
+                callerOwner,
+                indyName,
+                type.toMethodDescriptorString()
+            );
+            return resolveAuthenticatedTarget(lookup, plaintext);
+        } catch (SecurityException error) {
+            throw error;
+        } catch (Exception error) {
+            throw new SecurityException("indy target token authentication failed", error);
         } finally {
-            if (key != null) Arrays.fill(key, (byte) 0);
             if (raw != null) Arrays.fill(raw, (byte) 0);
             if (plaintext != null) Arrays.fill(plaintext, (byte) 0);
-            if (aad != null) Arrays.fill(aad, (byte) 0);
+        }
+    }
+
+    private static MethodHandle resolveAuthenticatedTarget(
+        MethodHandles.Lookup lookup,
+        byte[] plaintext
+    ) throws Exception {
+        if (plaintext == null || plaintext.length == 0 || plaintext.length > 512) {
+            throw new SecurityException("indy target token payload is invalid");
+        }
+        String[] parts = new String(plaintext, StandardCharsets.UTF_8).split("\\u0000", -1);
+        if (parts.length != 5 || parts[0].length() == 0 || parts[1].length() == 0 || parts[2].length() == 0) {
+            throw new SecurityException("indy target token payload is invalid");
+        }
+        Class<?> owner = Class.forName(parts[0].replace('/', '.'));
+        MethodType methodType = MethodType.fromMethodDescriptorString(parts[2], owner.getClassLoader());
+        int tag;
+        try {
+            tag = Integer.parseInt(parts[3]);
+        } catch (NumberFormatException error) {
+            throw new SecurityException("indy target handle tag is invalid", error);
+        }
+        if (!("0".equals(parts[4]) || "1".equals(parts[4]))) {
+            throw new SecurityException("indy target interface flag is invalid");
+        }
+        switch (tag) {
+            case 6:
+                return lookup.findStatic(owner, parts[1], methodType);
+            case 5:
+                return lookup.findVirtual(owner, parts[1], methodType);
+            case 9:
+                return lookup.findVirtual(owner, parts[1], methodType);
+            case 7:
+                return lookup.findSpecial(owner, parts[1], methodType, lookup.lookupClass());
+            default:
+                throw new SecurityException("indy target handle tag is unsupported");
+        }
+    }
+
+    private static byte[] decodeToken(String token) {
+        if (token == null || token.length() < 8) {
+            throw new SecurityException("indy target token is invalid");
+        }
+        try {
+            byte[] raw = Base64.getUrlDecoder().decode(token);
+            if (raw.length > MAX_TOKEN_BYTES || raw.length <= MAGIC_SIZE + 1 || raw[MAGIC_SIZE] != VERSION) {
+                Arrays.fill(raw, (byte) 0);
+                throw new SecurityException("indy target token is invalid");
+            }
+            return raw;
+        } catch (IllegalArgumentException error) {
+            throw new SecurityException("indy target token is invalid", error);
         }
     }
 
     private static boolean isToken(String value) {
-        if (value == null || value.length() < 24) return false;
+        if (value == null || value.length() < 8) return false;
+        byte[] raw = null;
         try {
-            byte[] raw = Base64.getUrlDecoder().decode(value);
-            if (raw.length <= MAGIC_SIZE + 1) return false;
-            boolean retired = true;
-            for (int i = 0; i < MAGIC_SIZE; i++) {
-                if (raw[i] != RETIRED_MAGIC[i]) {
-                    retired = false;
-                    break;
-                }
-            }
-            if (retired) return false;
-            return raw[MAGIC_SIZE] == VERSION;
+            raw = Base64.getUrlDecoder().decode(value);
+            return raw.length > MAGIC_SIZE + 1 && raw.length <= MAX_TOKEN_BYTES && raw[MAGIC_SIZE] == VERSION;
         } catch (RuntimeException ignored) {
             return false;
-        }
-    }
-
-    private static byte[] deriveDomain(byte[] nameSeed, byte[] commitment, byte lane) throws Exception {
-        byte[] info = new byte[] { INFO_PREFIX, SCHEDULE_VERSION, ROLE_TOKEN, lane, 0, 0, 0, 0 };
-        try {
-            return hkdfSha256(nameSeed, commitment, info, 16);
         } finally {
-            Arrays.fill(info, (byte) 0);
+            if (raw != null) Arrays.fill(raw, (byte) 0);
         }
-    }
-
-    private static byte[] siteKey(
-        byte[] raw,
-        int nameSeedOff,
-        int digestOff,
-        String callerOwner,
-        String indyName,
-        String methodType,
-        int siteIndex
-    ) throws Exception {
-        byte[] callerOwnerUtf8 = callerOwner.getBytes("UTF-8");
-        byte[] indyNameUtf8 = indyName.getBytes("UTF-8");
-        byte[] methodTypeUtf8 = methodType.getBytes("UTF-8");
-        byte[] info = new byte[16 + callerOwnerUtf8.length + indyNameUtf8.length + methodTypeUtf8.length];
-        int offset = 0;
-        offset = writeLenPrefixed(info, offset, callerOwnerUtf8);
-        offset = writeLenPrefixed(info, offset, indyNameUtf8);
-        offset = writeLenPrefixed(info, offset, methodTypeUtf8);
-        info[offset] = (byte) (siteIndex >>> 24);
-        info[offset + 1] = (byte) (siteIndex >>> 16);
-        info[offset + 2] = (byte) (siteIndex >>> 8);
-        info[offset + 3] = (byte) siteIndex;
-        byte[] ikm = Arrays.copyOfRange(raw, digestOff, digestOff + 32);
-        byte[] nameSeed = Arrays.copyOfRange(raw, nameSeedOff, nameSeedOff + NAME_SEED_SIZE);
-        byte[] keyDomain = null;
-        try {
-            keyDomain = deriveDomain(nameSeed, ikm, LANE_TOKEN_KEY);
-            return hkdfSha256(ikm, keyDomain, info, 16);
-        } finally {
-            Arrays.fill(info, (byte) 0);
-            Arrays.fill(ikm, (byte) 0);
-            Arrays.fill(nameSeed, (byte) 0);
-            if (keyDomain != null) Arrays.fill(keyDomain, (byte) 0);
-        }
-    }
-
-    private static byte[] hkdfSha256(byte[] ikm, byte[] salt, byte[] info, int length) throws Exception {
-        byte[] prk = hmacSha256(salt.length == 0 ? new byte[32] : salt, ikm);
-        byte[] output = new byte[length];
-        byte[] previous = new byte[0];
-        int produced = 0;
-        int counter = 1;
-        try {
-            while (produced < length) {
-                byte[] next = hmacSha256Concat(prk, previous, info, (byte) counter);
-                Arrays.fill(previous, (byte) 0);
-                previous = next;
-                int take = Math.min(previous.length, length - produced);
-                System.arraycopy(previous, 0, output, produced, take);
-                produced += take;
-                counter++;
-            }
-            return output;
-        } finally {
-            Arrays.fill(prk, (byte) 0);
-            Arrays.fill(previous, (byte) 0);
-        }
-    }
-
-    private static byte[] hmacSha256(byte[] key, byte[] data) throws Exception {
-        Mac mac = Mac.getInstance("HmacSHA256");
-        mac.init(new SecretKeySpec(key, "HmacSHA256"));
-        return mac.doFinal(data);
-    }
-
-    private static byte[] hmacSha256Concat(byte[] key, byte[] previous, byte[] info, byte counter) throws Exception {
-        Mac mac = Mac.getInstance("HmacSHA256");
-        mac.init(new SecretKeySpec(key, "HmacSHA256"));
-        mac.update(previous);
-        mac.update(info);
-        mac.update(counter);
-        return mac.doFinal();
-    }
-
-    private static int writeLenPrefixed(byte[] dest, int offset, byte[] utf8) {
-        dest[offset] = (byte) (utf8.length >>> 24);
-        dest[offset + 1] = (byte) (utf8.length >>> 16);
-        dest[offset + 2] = (byte) (utf8.length >>> 8);
-        dest[offset + 3] = (byte) utf8.length;
-        System.arraycopy(utf8, 0, dest, offset + 4, utf8.length);
-        return offset + 4 + utf8.length;
-    }
-
-    private static byte[] buildAad(
-        String callerOwner,
-        String indyName,
-        MethodType type,
-        int siteIndex,
-        byte[] raw,
-        int nameSeedOff,
-        int digestOff
-    ) throws Exception {
-        byte[] callerOwnerUtf8 = callerOwner.getBytes("UTF-8");
-        byte[] indyNameUtf8 = indyName.getBytes("UTF-8");
-        byte[] methodTypeUtf8 = type.toMethodDescriptorString().getBytes("UTF-8");
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        byte[] nameSeed = Arrays.copyOfRange(raw, nameSeedOff, nameSeedOff + NAME_SEED_SIZE);
-        byte[] commitment = Arrays.copyOfRange(raw, digestOff, digestOff + 32);
-        byte[] aadDomain = deriveDomain(nameSeed, commitment, LANE_TOKEN_AAD);
-        try {
-            digest.update(aadDomain);
-        } finally {
-            Arrays.fill(nameSeed, (byte) 0);
-            Arrays.fill(commitment, (byte) 0);
-            Arrays.fill(aadDomain, (byte) 0);
-        }
-        updateU32be(digest, callerOwnerUtf8.length);
-        digest.update(callerOwnerUtf8);
-        updateU32be(digest, indyNameUtf8.length);
-        digest.update(indyNameUtf8);
-        updateU32be(digest, methodTypeUtf8.length);
-        digest.update(methodTypeUtf8);
-        updateU32be(digest, siteIndex);
-        digest.update(raw, digestOff, 32);
-        updateU32be(digest, VERSION & 0xFF);
-        return digest.digest();
-    }
-
-    private static int readU32be(byte[] src, int offset) {
-        return ((src[offset] & 0xFF) << 24)
-            | ((src[offset + 1] & 0xFF) << 16)
-            | ((src[offset + 2] & 0xFF) << 8)
-            | (src[offset + 3] & 0xFF);
-    }
-
-    private static void updateU32be(MessageDigest digest, int value) {
-        digest.update((byte) (value >>> 24));
-        digest.update((byte) (value >>> 16));
-        digest.update((byte) (value >>> 8));
-        digest.update((byte) value);
     }
 }

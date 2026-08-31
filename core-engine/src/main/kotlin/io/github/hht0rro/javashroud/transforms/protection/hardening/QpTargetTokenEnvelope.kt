@@ -19,7 +19,7 @@ internal object QpTargetTokenEnvelope {
     const val KEY_SIZE = 16
     const val NONCE_SIZE = 12
     const val TAG_SIZE = 16
-    private const val VERSION: Int = 4
+    private const val VERSION: Int = ProtectionFormat.CURRENT
     private const val SITE_INDEX_SIZE = 4
     private const val ARTIFACT_DIGEST_SIZE = 32
     private val RETIRED_MAGIC = byteArrayOf(0x49, 0x54, 0x4b, 0x31)
@@ -45,7 +45,7 @@ internal object QpTargetTokenEnvelope {
         val indyName: String,
         val indyMethodType: String,
         val siteIndex: Int,
-        val protocolVersion: Int = 4,
+        val protocolVersion: Int = ProtectionFormat.CURRENT,
     ) {
         fun aad(nameSeed: ByteArray = io.github.hht0rro.javashroud.transforms.protection.qp.currentNameSeed()): ByteArray {
             require(artifactDigest.size == ARTIFACT_DIGEST_SIZE) { "indy token artifact digest must be 32 bytes" }

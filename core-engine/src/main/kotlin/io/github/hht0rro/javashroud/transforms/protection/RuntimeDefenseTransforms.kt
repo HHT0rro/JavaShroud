@@ -14,6 +14,7 @@ import org.objectweb.asm.tree.InvokeDynamicInsnNode
 import org.objectweb.asm.tree.LdcInsnNode
 import org.objectweb.asm.tree.MethodInsnNode
 import io.github.hht0rro.javashroud.transforms.protection.hardening.QpTargetTokenEnvelope
+import io.github.hht0rro.javashroud.transforms.protection.hardening.ProtectionFormat
 import java.security.SecureRandom
 
 // --- Phase 3: Runtime Defense Transforms ---
@@ -149,7 +150,7 @@ private fun callsiteTargetToken(
         indyName = indyName,
         indyMethodType = indyMethodType,
         siteIndex = siteIndex,
-        protocolVersion = 4,
+        protocolVersion = ProtectionFormat.CURRENT,
     )
     return QpTargetTokenEnvelope.seal(
         target = QpTargetTokenEnvelope.Target(
