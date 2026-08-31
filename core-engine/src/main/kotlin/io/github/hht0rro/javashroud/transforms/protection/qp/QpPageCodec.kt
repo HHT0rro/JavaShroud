@@ -8,7 +8,7 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * AES-256-GCM codec for one independently keyed AKEN v4 page.
+ * AES-256-GCM codec for one independently keyed Qp current format page.
  *
  * A page carries a fixed logical header inside a per-build physical frame.
  * The frame, all public bindings, and the header are authenticated together;
@@ -47,7 +47,7 @@ object QpPageCodec {
         CANONICAL_CODEC_VARIANT,
         -> CANONICAL_CODEC_VARIANT
 
-        else -> throw IllegalArgumentException("unsupported AKEN codec variant: $variant")
+        else -> throw IllegalArgumentException("unsupported Qp codec variant: $variant")
     }
 
     fun encode(
@@ -65,14 +65,14 @@ object QpPageCodec {
         /** Build-selected page nonce for a bound native terminal. */
         nonceOverride: ByteArray,
     ): ByteArray {
-        require(dek.size == 32) { "AKEN DEK must be 32 bytes" }
-        require(commitment.size == 32) { "AKEN artifact commitment must be 32 bytes" }
-        require(identity.isNotEmpty()) { "AKEN logical identity must not be empty" }
-        require(pageIndex >= 0) { "AKEN page index must be non-negative" }
-        require(fingerprint.size == 32) { "AKEN evaluator fingerprint must be 32 bytes" }
-        require(locator.size == QpHandle.LOCATOR_TOKEN_SIZE) { "AKEN locator token must be 16 bytes" }
-        require(nonceOverride.size == NONCE_SIZE) { "AKEN bound page nonce must be 12 bytes" }
-        require(plain.size <= Int.MAX_VALUE - GCM_TAG_SIZE) { "AKEN plaintext is too large" }
+        require(dek.size == 32) { "Qp DEK must be 32 bytes" }
+        require(commitment.size == 32) { "Qp artifact commitment must be 32 bytes" }
+        require(identity.isNotEmpty()) { "Qp logical identity must not be empty" }
+        require(pageIndex >= 0) { "Qp page index must be non-negative" }
+        require(fingerprint.size == 32) { "Qp evaluator fingerprint must be 32 bytes" }
+        require(locator.size == QpHandle.LOCATOR_TOKEN_SIZE) { "Qp locator token must be 16 bytes" }
+        require(nonceOverride.size == NONCE_SIZE) { "Qp bound page nonce must be 12 bytes" }
+        require(plain.size <= Int.MAX_VALUE - GCM_TAG_SIZE) { "Qp plaintext is too large" }
 
         var nonce: ByteArray? = null
         var header: ByteArray? = null
@@ -135,7 +135,7 @@ object QpPageCodec {
             cipher.updateAAD(aad)
             body = cipher.doFinal(plain)
             check(body.size == plain.size + GCM_TAG_SIZE) {
-                "AKEN AES-GCM output length did not match the declared page length"
+                "Qp AES-GCM output length did not match the declared page length"
             }
 
             return frame(layout, prefix, header, body, suffix)
@@ -311,7 +311,7 @@ object QpPageCodec {
         }
         suffix.copyInto(encoded, offset)
         offset += suffix.size
-        check(offset == encoded.size) { "AKEN frame length mismatch" }
+        check(offset == encoded.size) { "Qp frame length mismatch" }
         return encoded
     }
 
@@ -340,7 +340,7 @@ object QpPageCodec {
             framedLength(header) +
             framedLength(prefix) +
             framedLength(suffix)
-        require(total <= Int.MAX_VALUE) { "AKEN AAD is too large" }
+        require(total <= Int.MAX_VALUE) { "Qp AAD is too large" }
 
         val aad = ByteArray(total.toInt())
         var offset = 0
@@ -361,7 +361,7 @@ object QpPageCodec {
         offset = writeFramed(aad, offset, header)
         offset = writeFramed(aad, offset, prefix)
         offset = writeFramed(aad, offset, suffix)
-        check(offset == aad.size) { "AKEN AAD framing length mismatch" }
+        check(offset == aad.size) { "Qp AAD framing length mismatch" }
         return aad
     }
 

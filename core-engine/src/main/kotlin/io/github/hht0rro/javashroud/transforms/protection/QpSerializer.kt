@@ -21,13 +21,13 @@ internal data class QpEntryMetadata(
     val nativeVmProfileId: Int = 0,
 ) {
     init {
-        require(methodIdentity.length == 64 && methodIdentity.all(::isLowerHexDigit)) { "VBC4 method identity must be 256-bit lowercase hex" }
-        require(ownerIdentity.length == 64 && ownerIdentity.all(::isLowerHexDigit)) { "VBC4 owner identity must be 256-bit lowercase hex" }
-        require(argumentTags.length <= 0xFFFF && argumentTags.all { it in QP_ARGUMENT_TAGS }) { "VBC4 argument tag vector is invalid" }
-        require(returnDescriptor.length == 1 && returnDescriptor[0] in QP_RETURN_TAGS) { "VBC4 return tag is invalid" }
+        require(methodIdentity.length == 64 && methodIdentity.all(::isLowerHexDigit)) { "Qp method identity must be 256-bit lowercase hex" }
+        require(ownerIdentity.length == 64 && ownerIdentity.all(::isLowerHexDigit)) { "Qp owner identity must be 256-bit lowercase hex" }
+        require(argumentTags.length <= 0xFFFF && argumentTags.all { it in QP_ARGUMENT_TAGS }) { "Qp argument tag vector is invalid" }
+        require(returnDescriptor.length == 1 && returnDescriptor[0] in QP_RETURN_TAGS) { "Qp return tag is invalid" }
     }
 
-    private val dispatchProfileTag: Int = vbc4DispatchProfileTag(entryToken, resourcePath, methodLocalProfile, isStatic, nativeVmProfileId)
+    private val dispatchProfileTag: Int = dispatchProfileTag(entryToken, resourcePath, methodLocalProfile, isStatic, nativeVmProfileId)
 
     fun encode(): String = listOf(
         entryToken.toULong().toString(16),
@@ -54,13 +54,13 @@ private val QP_CP_STRING_TAG_DOMAIN = "javashroud-qp-cp-string-tag-v3".toByteArr
 
 private fun isLowerHexDigit(value: Char): Boolean = value in '0'..'9' || value in 'a'..'f'
 
-internal fun vbc4ArgumentTagVector(descriptor: String): String = buildString {
+internal fun nativeArgumentTagVector(descriptor: String): String = buildString {
     for (argument in Type.getArgumentTypes(descriptor)) {
         append(if (argument.sort == Type.ARRAY) '[' else if (argument.sort == Type.OBJECT) 'L' else argument.descriptor[0])
     }
 }
 
-internal fun vbc4ReturnTag(descriptor: String): String {
+internal fun nativeReturnTag(descriptor: String): String {
     val type = Type.getReturnType(descriptor)
     return when (type.sort) {
         Type.ARRAY -> "["
@@ -76,11 +76,11 @@ internal fun QpBuildContext.deriveQpIdentity(owner: String, name: String, descri
         mac.init(SecretKeySpec(material, "HmacSHA256"))
         mac.update("javashroud-qp-method-identity-v2".toByteArray(Charsets.US_ASCII))
         mac.update(0.toByte())
-        mac.update(vbc4ModifiedUtf8Bytes(owner))
+        mac.update(modifiedUtf8Bytes(owner))
         mac.update(0.toByte())
-        mac.update(vbc4ModifiedUtf8Bytes(name))
+        mac.update(modifiedUtf8Bytes(name))
         mac.update(0.toByte())
-        mac.update(vbc4ModifiedUtf8Bytes(descriptor))
+        mac.update(modifiedUtf8Bytes(descriptor))
         mac.doFinal().toHexLower()
     } finally {
         java.util.Arrays.fill(material, 0)
@@ -94,14 +94,14 @@ internal fun QpBuildContext.deriveQpOwnerIdentity(owner: String): String {
         mac.init(SecretKeySpec(material, "HmacSHA256"))
         mac.update("javashroud-qp-owner-identity-v2".toByteArray(Charsets.US_ASCII))
         mac.update(0.toByte())
-        mac.update(vbc4ModifiedUtf8Bytes(owner))
+        mac.update(modifiedUtf8Bytes(owner))
         mac.doFinal().toHexLower()
     } finally {
         java.util.Arrays.fill(material, 0)
     }
 }
 
-private fun vbc4DispatchProfileTag(entryToken: Long, resourcePath: String, methodLocalProfile: Int, isStatic: Boolean, nativeVmProfileId: Int): Int {
+private fun dispatchProfileTag(entryToken: Long, resourcePath: String, methodLocalProfile: Int, isStatic: Boolean, nativeVmProfileId: Int): Int {
     var x = (entryToken xor (entryToken ushr 32)).toInt()
     val callFlags = if (isStatic) 1 else 0
     x = x xor methodLocalProfile xor (callFlags * 0x45D9F3B) xor (nativeVmProfileId * 0x27D4EB2D)
@@ -118,7 +118,7 @@ private fun vbc4DispatchProfileTag(entryToken: Long, resourcePath: String, metho
 }
 
 
-private fun vbc4RegisterRowMixWord(seed: Int, blockId: Int, rowIndex: Int, slot: Int, fieldIndex: Int): Int {
+private fun registerRowMixWord(seed: Int, blockId: Int, rowIndex: Int, slot: Int, fieldIndex: Int): Int {
     var state = seed xor (blockId * 0x045D9F3B.toInt()) xor (rowIndex * 0x7FEB352D.toInt()) xor
         (slot * 0x846CA68B.toInt()) xor (fieldIndex * 0x2C1B3C6D.toInt())
     state = state xor (state ushr 16)
@@ -128,19 +128,19 @@ private fun vbc4RegisterRowMixWord(seed: Int, blockId: Int, rowIndex: Int, slot:
     return state xor (state ushr 16)
 }
 
-internal fun vbc4MixedOperandRowToken(seed: Int, blockId: Int, rowIndex: Int, shape: Int): Int {
+internal fun mixedOperandRowToken(seed: Int, blockId: Int, rowIndex: Int, shape: Int): Int {
     require(shape in 0..2) { "mixed operand row shape must be 0, 1, or 2" }
-    val payload = (vbc4RegisterRowMixWord(seed, blockId, rowIndex, shape, 0x5E) xor
+    val payload = (registerRowMixWord(seed, blockId, rowIndex, shape, 0x5E) xor
         (shape * 0x045D9F3B)) and 0x3FFF
     return ((shape and 0x3) shl 14) or payload
 }
 
 /**
- * VBC4 bytecode serializer.
+ * Qp bytecode serializer.
  *
  * The Kotlin side is compile-time only: it captures JVM bytecode, builds a
  * logical register program for native validation/diversity, and emits an
- * encrypted VBC4 resource consumed exclusively by the C VM.
+ * encrypted Qp resource consumed exclusively by the C VM.
  */
 internal class QpSerializer(
     private val buildSeed: Int = 0,
@@ -156,10 +156,10 @@ internal class QpSerializer(
     private val serializationBuildContext: QpBuildContext = buildContext
     private val structureEntropyDigest: ByteArray = structureEntropy.copyOf()
     private val effectiveBuildSeed: Int = deriveQpStructureSeed(buildContext, buildSeed, entryMetadata, structureEntropy)
-    private val vbc4MasterKey: ByteArray = QpInnerMaterial.copyCryptoDomainMaterial(buildContext)
-    private val vbc4LayoutDigest: ByteArray = QpInnerMaterial.copyStateBindingLayoutDigest(buildContext)
-    private val opcodeDialect: QpDialectDescriptor = QpDialectDescriptor.fromKeyMaterial(vbc4MasterKey, vbc4LayoutDigest)
-    private val opcodeDialectSalt: Int = vbc4OpcodeDialectSalt(effectiveBuildSeed, stateBinding, entryMetadata) xor readMacInt(structureEntropyDigest)
+    private val serializationMasterKey: ByteArray = QpInnerMaterial.copyCryptoDomainMaterial(buildContext)
+    private val serializationLayoutDigest: ByteArray = QpInnerMaterial.copyStateBindingLayoutDigest(buildContext)
+    private val opcodeDialect: QpDialectDescriptor = QpDialectDescriptor.fromKeyMaterial(serializationMasterKey, serializationLayoutDigest)
+    private val opcodeDialectSalt: Int = opcodeDialectSalt(effectiveBuildSeed, stateBinding, entryMetadata) xor readMacInt(structureEntropyDigest)
     private val structureSalt: Int = readMacInt(structureEntropyDigest)
     private var sensitiveMaterialCleared: Boolean = false
 
@@ -219,25 +219,25 @@ internal class QpSerializer(
         val methodEncodingSha256: String,
     )
 
-    /** Return commitments captured from the final logical rows and VBC4 bytes. */
+    /** Return commitments captured from the final logical rows and Qp bytes. */
     internal fun productionEvidence(): ProductionMethodEvidence = finalProductionEvidence
-        ?: error("VBC4 production evidence requested before serialization completed")
+        ?: error("Qp production evidence requested before serialization completed")
 
     internal fun logicalProgramForTest(metadataCpIndex: Int = 0): VmLogicalProgram =
-        QpCryptoScope.use(vbc4MasterKey, vbc4LayoutDigest, stateBinding) {
+        QpCryptoScope.use(serializationMasterKey, serializationLayoutDigest, stateBinding) {
             lowerToLogicalProgram(metadataCpIndex)
         }
 
     fun serialize(): ByteArray {
-        check(!sensitiveMaterialCleared) { "VBC4 serializer is one-shot" }
+        check(!sensitiveMaterialCleared) { "Qp serializer is one-shot" }
         return try {
-            QpCryptoScope.use(vbc4MasterKey, vbc4LayoutDigest, stateBinding) {
+            QpCryptoScope.use(serializationMasterKey, serializationLayoutDigest, stateBinding) {
                 serializeWithActiveKey()
             }
         } finally {
             try {
-                java.util.Arrays.fill(vbc4MasterKey, 0)
-                java.util.Arrays.fill(vbc4LayoutDigest, 0)
+                java.util.Arrays.fill(serializationMasterKey, 0)
+                java.util.Arrays.fill(serializationLayoutDigest, 0)
                 java.util.Arrays.fill(structureEntropyDigest, 0)
                 constantPool.forEach { entry ->
                     if (entry is SealedStringPoolEntry) java.util.Arrays.fill(entry.encoded, 0)
@@ -251,7 +251,7 @@ internal class QpSerializer(
     private fun serializeWithActiveKey(): ByteArray {
         if (currentOffset !in 1..0xFFFF) {
             throw UnsupportedOperationException(
-                "VBC4 method instruction count is outside the u16 CFG range: $currentOffset",
+                "Qp method instruction count is outside the u16 CFG range: $currentOffset",
             )
         }
         resolveLabelReferences()
@@ -275,18 +275,18 @@ internal class QpSerializer(
             QP_FLAG_POLYMORPHIC_CP or
             QP_FLAG_BLOCK_DISPATCH or nestedVmFlag or registerRowEnvelopeFlag or mixedOperandEnvelopeFlag
         val exceptionShape = intBytes(exceptionEntries.size)
-        val nonce = vbc4Nonce(effectiveBuildSeed, flags, constantPoolPlain, exceptionShape, logicalProgram.blocks.size)
+        val nonce = frameNonce(effectiveBuildSeed, flags, constantPoolPlain, exceptionShape, logicalProgram.blocks.size)
         val cryptoSeed = effectiveBuildSeed
-        val wrappedSeed = vbc4WrappedSeed(cryptoSeed, nonce, stateBinding)
+        val wrappedSeed = frameWrappedSeed(cryptoSeed, nonce, stateBinding)
         val exceptionPlain = serializeExceptions(cryptoSeed, cpIndexMap, decoyExceptionTypeCpIndexes)
         // Per-entry CP encryption: each constant pool entry encrypted independently
         val cpEntryPlainBuffers = serializeConstantPoolEntries(cpIndexMap)
         val cpEntryStoredSections = cpEntryPlainBuffers.map(::compressCpEntrySection)
         val cpEntryEncryptedBuffers = cpEntryStoredSections.mapIndexed { idx, section ->
-            vbc4Crypt(section.bytes, cryptoSeed, nonce, QP_SECTION_CONSTANT_POOL_ENTRY, idx)
+            frameCrypt(section.bytes, cryptoSeed, nonce, QP_SECTION_CONSTANT_POOL_ENTRY, idx)
         }
         val exceptionStored = zstdCompressSection(exceptionPlain)
-        val exceptionEncrypted = vbc4Crypt(exceptionStored, cryptoSeed, nonce, QP_SECTION_EXCEPTIONS, 0)
+        val exceptionEncrypted = frameCrypt(exceptionStored, cryptoSeed, nonce, QP_SECTION_EXCEPTIONS, 0)
 
         val out = java.io.ByteArrayOutputStream()
         val magic = io.github.hht0rro.javashroud.transforms.protection.qp.derivedVmMagic()
@@ -297,10 +297,10 @@ internal class QpSerializer(
         }
         out.write(nonce)
         check(opcodeDialect.commitment.size == QP_DIALECT_COMMITMENT_BYTES) {
-            "VBC4 dialect commitment must be 256-bit"
+            "Qp dialect commitment must be 256-bit"
         }
         out.write(opcodeDialect.commitment)
-        writeU4(out, vbc4KeyId(cryptoSeed, nonce))
+        writeU4(out, frameKeyId(cryptoSeed, nonce))
         out.write(wrappedSeed)
         writeU2(out, flags)
         writeU2(out, logicalProgram.blocks.size.coerceAtLeast(1))
@@ -315,7 +315,7 @@ internal class QpSerializer(
             cpSectionOut.write(encEntry)
         }
         val cpSectionPlain = cpSectionOut.toByteArray()
-        val cpSectionBytes = vbc4Crypt(cpSectionPlain, cryptoSeed, nonce, QP_SECTION_CONSTANT_POOL, 0)
+        val cpSectionBytes = frameCrypt(cpSectionPlain, cryptoSeed, nonce, QP_SECTION_CONSTANT_POOL, 0)
         writeU4(out, cpSectionBytes.size)
         out.write(cpSectionBytes)
         // Write block index for multi-block programs in seed-diversified physical storage order.
@@ -325,12 +325,12 @@ internal class QpSerializer(
         for (blk in storageBlocks) {
             writeU2(out, blk.blockId)
             writeU4(out, blk.entryToken)
-            writeU4(out, vbc4BlockDispatchToken(cryptoSeed, blk.blockId, nextBlockById.getValue(blk.blockId), logicalProgram.blocks.size))
+            writeU4(out, frameBlockDispatchToken(cryptoSeed, blk.blockId, nextBlockById.getValue(blk.blockId), logicalProgram.blocks.size))
         }
         storageBlocks.forEach { blk ->
             val blockPlain = serializeSingleBlock(blk, logicalProgram.registerCount, nestedVm, registerRowEnvelope, mixedOperandEnvelope, blk.blockId)
             val blockStored = zstdCompressSection(blockPlain)
-            val blockEncrypted = vbc4Crypt(blockStored, cryptoSeed, nonce, QP_SECTION_INSTRUCTIONS, blk.blockId)
+            val blockEncrypted = frameCrypt(blockStored, cryptoSeed, nonce, QP_SECTION_INSTRUCTIONS, blk.blockId)
             writeU4(out, blockPlain.size)
             writeU4(out, blockStored.size)
             writeU4(out, blockEncrypted.size)
@@ -343,12 +343,12 @@ internal class QpSerializer(
         // Authenticated size jitter: deterministic, MAC-covered random padding so two
         // methods (or builds) do not cluster by resource size. Padding lives inside the
         // MAC region, so tampering it fails verification; the native parser skips it.
-        val padLength = vbc4PadLength(cryptoSeed, nonce)
-        val padBytes = vbc4Crypt(ByteArray(padLength), cryptoSeed, nonce, QP_SECTION_PADDING, 0)
+        val padLength = framePadLength(cryptoSeed, nonce)
+        val padBytes = frameCrypt(ByteArray(padLength), cryptoSeed, nonce, QP_SECTION_PADDING, 0)
         writeU4(out, padLength)
         out.write(padBytes)
         val payload = out.toByteArray()
-        out.write(vbc4Hmac(payload, cryptoSeed, nonce))
+        out.write(frameHmac(payload, cryptoSeed, nonce))
         val serializedQp = out.toByteArray()
         finalProductionEvidence = productionEvidenceFor(logicalProgram, serializedQp)
         return serializedQp
@@ -458,7 +458,7 @@ internal class QpSerializer(
             for (group in blockGroups) {
                 val maskIndex = globalMaskIndex
                 val primary = VmRegisterInstruction(
-                    opcode = group.maskedOpcodeBase xor vbc4OpcodeMask(effectiveBuildSeed, maskIndex),
+                    opcode = group.maskedOpcodeBase xor opcodeMask(effectiveBuildSeed, maskIndex),
                     flags = group.primaryFlags,
                     dst = group.primaryDst,
                     srcA = group.primarySrcA,
@@ -475,7 +475,7 @@ internal class QpSerializer(
             }
             VmLogicalBlock(
                 blockId,
-                vbc4EntryToken(effectiveBuildSeed, blockId),
+                frameEntryToken(effectiveBuildSeed, blockId),
                 rows,
             )
         }
@@ -579,16 +579,16 @@ internal class QpSerializer(
         return ids
     }
 
-    private fun vbc4BlockDispatchToken(seed: Int, blockId: Int, nextBlockId: Int, blockCount: Int): Int {
+    private fun frameBlockDispatchToken(seed: Int, blockId: Int, nextBlockId: Int, blockCount: Int): Int {
         val mask = seed.rotateLeft((blockId * 5 + 7) and 31) xor
             (blockId * 0x45D9F3B) xor
             (blockCount * 0x119DE1F3)
-        val state = vbc4BlockDispatchState(seed, blockId, nextBlockId, blockCount)
+        val state = frameBlockDispatchState(seed, blockId, nextBlockId, blockCount)
         val payload = ((state and 0xFFFF) shl 16) or (nextBlockId and 0xFFFF)
         return payload xor mask
     }
 
-    private fun vbc4BlockDispatchState(seed: Int, blockId: Int, nextBlockId: Int, blockCount: Int): Int {
+    private fun frameBlockDispatchState(seed: Int, blockId: Int, nextBlockId: Int, blockCount: Int): Int {
         val mixed = seed.rotateLeft((blockId * 3 + 11) and 31) xor
             (blockId * 0x632BE59B) xor
             (nextBlockId * 0x85157AF5.toInt()) xor
@@ -600,7 +600,7 @@ internal class QpSerializer(
     /**
      * Split the linear logical-group stream into multiple VM blocks. The serializer
      * stores blocks in seed-diversified physical order and writes a masked block-dispatch
-     * edge for each logical block. The native VBC4 parser validates that opaque chain
+     * edge for each logical block. The native Qp parser validates that opaque chain
      * and uses it to reassemble execution order before interpretation.
      * Correctness is preserved by treating blocks as storage/layout partitions only:
      * every group keeps its original absolute bytecode offset and branch targets remain
@@ -773,7 +773,7 @@ internal class QpSerializer(
                     opcode = QP_REG_OPERAND_CONT,
                     flags = QP_REG_FLAG_CONTINUATION,
                     dst = extraIndex,
-                    srcA = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, instruction.offset),
+                    srcA = encodeCfgIndex(effectiveBuildSeed, currentOffset, instruction.offset),
                     srcB = 0,
                     operand = operands[extraIndex],
                 )
@@ -785,7 +785,7 @@ internal class QpSerializer(
             maskedOpcodeBase = opcodeDialect.encodeOpcode(canonicalVmOpcode(baseOpcode)),
             primaryFlags = flags,
             primaryDst = operands.size and 0xFFFF,
-            primarySrcA = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, instruction.offset),
+            primarySrcA = encodeCfgIndex(effectiveBuildSeed, currentOffset, instruction.offset),
             primarySrcB = if (isSuperOperator) instruction.opcode else 0,
             primaryOperand = operands.firstOrNull() ?: 0,
             continuations = continuations,
@@ -805,7 +805,7 @@ internal class QpSerializer(
         return LogicalGroup(
             maskedOpcodeBase = opcodeDialect.encodeOpcode(QP_SUPER_CMP_BRANCH),
             primaryFlags = QP_REG_FLAG_EXECUTABLE or QP_REG_FLAG_SUPER or QP_REG_FLAG_FOLDED,
-            primaryDst = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, first.offset),
+            primaryDst = encodeCfgIndex(effectiveBuildSeed, currentOffset, first.offset),
             primarySrcA = domainSuperOperandOpcode(first.opcode, instructionIndex, 0),
             primarySrcB = domainSuperOperandOpcode(second.opcode, instructionIndex, 1),
             primaryOperand = branchTarget,
@@ -826,7 +826,7 @@ internal class QpSerializer(
         return LogicalGroup(
             maskedOpcodeBase = opcodeDialect.encodeOpcode(QP_SUPER_INT_ARITH),
             primaryFlags = QP_REG_FLAG_EXECUTABLE or QP_REG_FLAG_SUPER or QP_REG_FLAG_FOLDED,
-            primaryDst = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, first.offset),
+            primaryDst = encodeCfgIndex(effectiveBuildSeed, currentOffset, first.offset),
             primarySrcA = domainSuperOperandOpcode(first.opcode, instructionIndex, 0),
             primarySrcB = domainSuperOperandOpcode(second.opcode, instructionIndex, 1),
             primaryOperand = constOperand,
@@ -845,15 +845,15 @@ internal class QpSerializer(
     private fun requireSupportedVmOpcode(opcode: Int, offset: Int, role: String) {
         if (opcode == VmOpcodes.VM_UNSUPPORTED) {
             throw UnsupportedOperationException(
-                "VBC4 serializer produced unsupported $role opcode for identity=${entryMetadata.methodIdentity.take(16)} at offset=$offset",
+                "Qp serializer produced unsupported $role opcode for identity=${entryMetadata.methodIdentity.take(16)} at offset=$offset",
             )
         }
     }
 
     private fun registerOperands(instruction: VmInstruction): List<Int> = instruction.operands.mapIndexed { operandIndex, operand ->
         when (operand) {
-            is Int -> if (vbc4OperandIsInstructionTarget(instruction.opcode, operandIndex)) {
-                val encoded = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, operand)
+            is Int -> if (operandIsInstructionTarget(instruction.opcode, operandIndex)) {
+                val encoded = encodeCfgIndex(effectiveBuildSeed, currentOffset, operand)
                 encoded
             } else operand
             is Float -> java.lang.Float.floatToIntBits(operand)
@@ -899,7 +899,7 @@ internal class QpSerializer(
                 val semanticShare = if ((insn.flags and QP_REG_FLAG_SEMANTIC_SPLIT) != 0) {
                     block.instructions.getOrNull(rowIndex + 1)?.also { share ->
                         check(share.opcode == QP_REG_SEMANTIC_SHARE && share.flags == QP_REG_FLAG_SEMANTIC_SHARE) {
-                            "VBC4 semantic split row is missing its authenticated share"
+                            "Qp semantic split row is missing its authenticated share"
                         }
                     }
                 } else {
@@ -908,7 +908,7 @@ internal class QpSerializer(
                 val consumesMaskSlot = (insn.flags and (QP_REG_FLAG_CONTINUATION or QP_REG_FLAG_SEMANTIC_SHARE)) == 0
                 val currentMaskIndex = maskIndex
                 val maskedOpcode = if (consumesMaskSlot) {
-                    (insn.opcode xor (semanticShare?.dst ?: 0)) xor vbc4OpcodeMask(effectiveBuildSeed, currentMaskIndex)
+                    (insn.opcode xor (semanticShare?.dst ?: 0)) xor opcodeMask(effectiveBuildSeed, currentMaskIndex)
                 } else {
                     insn.opcode xor (semanticShare?.dst ?: 0)
                 }
@@ -937,7 +937,7 @@ internal class QpSerializer(
                         metadataRemapped = true
                         cpIndexMap[logicalOperand]
                     }
-                    vbc4OpcodeUsesZeroBasedCpOperand(cpOpcode) && logicalOperand in cpIndexMap.indices -> cpIndexMap[logicalOperand]
+                    opcodeUsesZeroBasedCpOperand(cpOpcode) && logicalOperand in cpIndexMap.indices -> cpIndexMap[logicalOperand]
                     else -> logicalOperand
                 }
                 insn.copy(operand = newOperand xor (semanticShare?.operand ?: 0))
@@ -946,12 +946,13 @@ internal class QpSerializer(
         }
         val identityMap = cpIndexMap.withIndex().all { it.index == it.value }
         check(metadataRemapped || identityMap) {
-            "VBC4 metadata CP was not remapped (masked=$lastDecoded encodedMeta=$encodedMeta)"
+            "Qp metadata CP was not remapped (masked=$lastDecoded encodedMeta=$encodedMeta)"
         }
         return program.copy(blocks = remappedBlocks)
     }
 
-    private fun vbc4OpcodeUsesZeroBasedCpOperand(opcode: Int): Boolean = when (canonicalVmOpcode(opcode)) {
+    private fun opcodeUsesZeroBasedCpOperand(opcode: Int): Boolean = when (canonicalVmOpcode(opcode)) {
+        VmOpcodes.VM_LCONST, VmOpcodes.VM_DCONST,
         VmOpcodes.VM_LDC_INT, VmOpcodes.VM_LDC_LONG, VmOpcodes.VM_LDC_FLOAT, VmOpcodes.VM_LDC_DOUBLE,
         VmOpcodes.VM_LDC_STRING, VmOpcodes.VM_LDC_TYPE, VmOpcodes.VM_LDC_HANDLE, VmOpcodes.VM_LDC_CONDY,
         VmOpcodes.VM_GETSTATIC, VmOpcodes.VM_PUTSTATIC, VmOpcodes.VM_GETFIELD, VmOpcodes.VM_PUTFIELD,
@@ -1009,7 +1010,7 @@ internal class QpSerializer(
             is Long -> { out.write(0x03); writeU8(out, entry) }
             is Float -> { out.write(0x04); writeU4(out, java.lang.Float.floatToIntBits(entry)) }
             is Double -> { out.write(0x05); writeU8(out, java.lang.Double.doubleToLongBits(entry)) }
-            else -> error("Unsupported VBC4 constant-pool entry type: ${entry::class.java.name}")
+            else -> error("Unsupported Qp constant-pool entry type: ${entry::class.java.name}")
         }
     }
 
@@ -1022,7 +1023,7 @@ internal class QpSerializer(
         is Long -> 9
         is Float -> 5
         is Double -> 9
-        else -> error("Unsupported VBC4 constant-pool entry type: ${entry::class.java.name}")
+        else -> error("Unsupported Qp constant-pool entry type: ${entry::class.java.name}")
     }
 
     private fun polymorphicOpcode(opcode: Int, instructionIndex: Int): Int {
@@ -1066,18 +1067,18 @@ internal class QpSerializer(
     /**
      * Generate dialect value for register row envelope.
      */
-    private fun vbc4RegisterRowDialect(blockId: Int, rowCount: Int): Int {
-        return vbc4RegisterRowMix(effectiveBuildSeed, blockId, rowCount, 0x23, 0x4D)
+    private fun registerRowDialect(blockId: Int, rowCount: Int): Int {
+        return registerRowMix(effectiveBuildSeed, blockId, rowCount, 0x23, 0x4D)
     }
 
     /**
      * Generate field order permutation for a register row.
      */
-    private fun vbc4RegisterRowFieldOrder(blockId: Int, rowIndex: Int): IntArray {
+    private fun registerRowFieldOrder(blockId: Int, rowIndex: Int): IntArray {
         val order = intArrayOf(0, 1, 2, 3, 4, 5)
         for (i in 5 downTo 0) {
             val j = Integer.remainderUnsigned(
-                vbc4RegisterRowMix(effectiveBuildSeed, blockId, rowIndex, i, 0x71),
+                registerRowMix(effectiveBuildSeed, blockId, rowIndex, i, 0x71),
                 i + 1,
             )
             val tmp = order[i]
@@ -1090,15 +1091,15 @@ internal class QpSerializer(
     /**
      * Generate mask for register row field.
      */
-    private fun vbc4RegisterRowMask(blockId: Int, rowIndex: Int, slot: Int, fieldIndex: Int): Int {
-        return vbc4RegisterRowMix(effectiveBuildSeed, blockId, rowIndex, slot, fieldIndex)
+    private fun registerRowMask(blockId: Int, rowIndex: Int, slot: Int, fieldIndex: Int): Int {
+        return registerRowMix(effectiveBuildSeed, blockId, rowIndex, slot, fieldIndex)
     }
 
     /**
      * Multi-round mixing function for register row envelope.
      */
-    private fun vbc4RegisterRowMix(seed: Int, blockId: Int, rowIndex: Int, slot: Int, fieldIndex: Int): Int {
-        return vbc4RegisterRowMixWord(seed, blockId, rowIndex, slot, fieldIndex)
+    private fun registerRowMix(seed: Int, blockId: Int, rowIndex: Int, slot: Int, fieldIndex: Int): Int {
+        return registerRowMixWord(seed, blockId, rowIndex, slot, fieldIndex)
     }
 
     /**
@@ -1109,7 +1110,7 @@ internal class QpSerializer(
         val compactRegs = compactNonNestedRegisterRows(block, registerCount)
         writeU2(out, encodeNonNestedRegisterCount(registerCount, compactRegs))
         writeU2(out, block.instructions.size)
-        val dialect = vbc4RegisterRowDialect(blockId, block.instructions.size)
+        val dialect = registerRowDialect(blockId, block.instructions.size)
         writeU4(out, dialect)
         block.instructions.forEachIndexed { rowIndex, instruction ->
             writeEnvelopeRegisterRow(out, blockId, rowIndex, instruction, compactRegs)
@@ -1136,9 +1137,9 @@ internal class QpSerializer(
             instruction.srcB and 0xFFFF,
             instruction.operand,
         )
-        val order = vbc4RegisterRowFieldOrder(blockId, rowIndex)
+        val order = registerRowFieldOrder(blockId, rowIndex)
         order.forEachIndexed { slot, fieldIndex ->
-            val mask = vbc4RegisterRowMask(blockId, rowIndex, slot, fieldIndex)
+            val mask = registerRowMask(blockId, rowIndex, slot, fieldIndex)
             val value = fields[fieldIndex] xor mask
             if (fieldIndex == 5) {
                 writeU4(out, value)
@@ -1154,7 +1155,7 @@ internal class QpSerializer(
         structureSelector("mixed-operand-row", rowIndex, blockId, instruction.opcode, instruction.flags, instruction.operand, 3) % 3
 
     private fun mixedOperandRowToken(blockId: Int, rowIndex: Int, shape: Int): Int =
-        vbc4MixedOperandRowToken(effectiveBuildSeed, blockId, rowIndex, shape)
+        mixedOperandRowToken(effectiveBuildSeed, blockId, rowIndex, shape)
 
     private fun writeMixedOperandRow(
         out: java.io.ByteArrayOutputStream,
@@ -1182,10 +1183,10 @@ internal class QpSerializer(
             }
             1 -> writeEnvelopeRegisterRow(out, blockId, rowIndex, instruction, compactRegs)
             else -> {
-                val operandMask = vbc4RegisterRowMask(blockId, rowIndex, 0x42, 5)
+                val operandMask = registerRowMask(blockId, rowIndex, 0x42, 5)
                 writeU4(out, instruction.operand xor operandMask)
                 fun maskedReg(slot: Int, field: Int, value: Int): Int =
-                    value xor (vbc4RegisterRowMask(blockId, rowIndex, slot, field) and 0xFFFF)
+                    value xor (registerRowMask(blockId, rowIndex, slot, field) and 0xFFFF)
                 if (compactRegs) {
                     writeU1(out, maskedReg(0x43, 4, instruction.srcB))
                     writeU1(out, maskedReg(0x44, 3, instruction.srcA))
@@ -1195,8 +1196,8 @@ internal class QpSerializer(
                     writeU2(out, maskedReg(0x44, 3, instruction.srcA))
                     writeU2(out, maskedReg(0x45, 2, instruction.dst))
                 }
-                writeU2(out, instruction.flags xor (vbc4RegisterRowMask(blockId, rowIndex, 0x46, 1) and 0xFFFF))
-                writeU2(out, instruction.opcode xor (vbc4RegisterRowMask(blockId, rowIndex, 0x47, 0) and 0xFFFF))
+                writeU2(out, instruction.flags xor (registerRowMask(blockId, rowIndex, 0x46, 1) and 0xFFFF))
+                writeU2(out, instruction.opcode xor (registerRowMask(blockId, rowIndex, 0x47, 0) and 0xFFFF))
             }
         }
     }
@@ -1206,7 +1207,7 @@ internal class QpSerializer(
         val compactRegs = compactNonNestedRegisterRows(block, registerCount)
         writeU2(out, encodeNonNestedRegisterCount(registerCount, compactRegs))
         writeU2(out, block.instructions.size)
-        val dialect = vbc4RegisterRowDialect(blockId, block.instructions.size) xor vbc4RegisterRowMix(effectiveBuildSeed, blockId, block.instructions.size, 0x61, 0x4F)
+        val dialect = registerRowDialect(blockId, block.instructions.size) xor registerRowMix(effectiveBuildSeed, blockId, block.instructions.size, 0x61, 0x4F)
         writeU4(out, dialect)
         block.instructions.forEachIndexed { rowIndex, instruction ->
             writeMixedOperandRow(out, blockId, rowIndex, instruction, compactRegs)
@@ -1255,18 +1256,18 @@ internal class QpSerializer(
 
     private fun encodeNonNestedRegisterCount(registerCount: Int, compactRegs: Boolean): Int {
         require(registerCount in 1..QP_REGISTER_COUNT_MASK) {
-            "VBC4 logical register count is outside the current block-header range"
+            "Qp logical register count is outside the current block-header range"
         }
         return registerCount or if (compactRegs) 0 else QP_WIDE_REGISTER_COUNT_FLAG
     }
 
     private fun serializeNestedBlock(block: VmLogicalBlock, registerCount: Int): ByteArray {
         val profile = entryMetadata.methodLocalProfile
-        require(profile != 0) { "Nested VBC4 block requires a method-local profile" }
+        require(profile != 0) { "Nested Qp block requires a method-local profile" }
         require(block.instructions.size * QP_NESTED_MICROS_PER_ROW <= 0xFFFF) {
-            "Nested VBC4 micro stream is too large for one block"
+            "Nested Qp micro stream is too large for one block"
         }
-        val dialect = vbc4NestedDialect(effectiveBuildSeed, profile, block.blockId, block.instructions.size)
+        val dialect = nestedDialect(effectiveBuildSeed, profile, block.blockId, block.instructions.size)
         val out = java.io.ByteArrayOutputStream()
         writeU2(out, registerCount)
         writeU2(out, QP_NESTED_MAGIC)
@@ -1283,10 +1284,10 @@ internal class QpSerializer(
                 instruction.srcB and 0xFFFF,
                 instruction.operand,
             )
-            val fieldOrder = vbc4NestedFieldOrder(effectiveBuildSeed, profile, block.blockId, rowIndex, dialect)
+            val fieldOrder = nestedFieldOrder(effectiveBuildSeed, profile, block.blockId, rowIndex, dialect)
             fieldOrder.forEachIndexed { slot, field ->
-                val mix = vbc4NestedMix(effectiveBuildSeed, profile, block.blockId, rowIndex, slot, dialect)
-                val valueMask = vbc4NestedMix(effectiveBuildSeed, profile, block.blockId, rowIndex, slot + 0x51, dialect)
+                val mix = nestedMix(effectiveBuildSeed, profile, block.blockId, rowIndex, slot, dialect)
+                val valueMask = nestedMix(effectiveBuildSeed, profile, block.blockId, rowIndex, slot + 0x51, dialect)
                 writeU2(out, QP_NESTED_FIELD_OPCODE_BASE or (mix and 0x0FFF))
                 writeU2(out, field xor ((mix ushr 16) and 0xFFFF))
                 if (field == 5) {
@@ -1295,10 +1296,10 @@ internal class QpSerializer(
                     writeU2(out, (fields[field] xor valueMask) and 0xFFFF)
                 }
             }
-            val commitMix = vbc4NestedMix(effectiveBuildSeed, profile, block.blockId, rowIndex, QP_NESTED_COMMIT_SLOT, dialect)
+            val commitMix = nestedMix(effectiveBuildSeed, profile, block.blockId, rowIndex, QP_NESTED_COMMIT_SLOT, dialect)
             writeU2(out, QP_NESTED_COMMIT_OPCODE_BASE or (commitMix and 0x0FFF))
             writeU2(out, rowIndex xor ((commitMix ushr 16) and 0xFFFF))
-            writeU4(out, vbc4NestedRowChecksum(effectiveBuildSeed, profile, block.blockId, rowIndex, dialect, fields))
+            writeU4(out, nestedRowChecksum(effectiveBuildSeed, profile, block.blockId, rowIndex, dialect, fields))
         }
         return out.toByteArray()
     }
@@ -1329,7 +1330,7 @@ internal class QpSerializer(
 
     private fun writeStackInstructionStream(out: java.io.ByteArrayOutputStream, opcodeMaskBase: Int) {
         require(opcodeMaskBase >= 0)
-        // VBC4 executes the register stream. Stack opcodes are no longer serialized as
+        // Qp executes the register stream. Stack opcodes are no longer serialized as
         // an executable fallback; the native parser rejects any non-zero stack stream.
         writeU2(out, 0)
     }
@@ -1349,7 +1350,7 @@ internal class QpSerializer(
         }
     }
 
-    private fun vbc4OperandIsInstructionTarget(opcode: Int, operandIndex: Int): Boolean = when (canonicalVmOpcode(opcode)) {
+    private fun operandIsInstructionTarget(opcode: Int, operandIndex: Int): Boolean = when (canonicalVmOpcode(opcode)) {
         VmOpcodes.VM_GOTO, VmOpcodes.VM_JSR,
         VmOpcodes.VM_IFEQ, VmOpcodes.VM_IFNE, VmOpcodes.VM_IFLT, VmOpcodes.VM_IFGE, VmOpcodes.VM_IFGT, VmOpcodes.VM_IFLE,
         VmOpcodes.VM_IF_ICMPEQ, VmOpcodes.VM_IF_ICMPNE, VmOpcodes.VM_IF_ICMPLT, VmOpcodes.VM_IF_ICMPGE,
@@ -1375,9 +1376,9 @@ internal class QpSerializer(
         val out = java.io.ByteArrayOutputStream()
         val entries = exceptionEntries.map { entry ->
             SerializedExceptionEntry(
-                start = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, requireLabelOffset(entry.start, "start")),
-                end = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, requireLabelOffset(entry.end, "end")),
-                handler = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, requireLabelOffset(entry.handler, "handler")),
+                start = encodeCfgIndex(effectiveBuildSeed, currentOffset, requireLabelOffset(entry.start, "start")),
+                end = encodeCfgIndex(effectiveBuildSeed, currentOffset, requireLabelOffset(entry.end, "end")),
+                handler = encodeCfgIndex(effectiveBuildSeed, currentOffset, requireLabelOffset(entry.handler, "handler")),
                 typeCpIndex = remapExceptionTypeCpIndex(entry.typeCpIndex, cpIndexMap),
             )
         }.toMutableList()
@@ -1392,9 +1393,9 @@ internal class QpSerializer(
             val end = start + 1 + structureSelector("decoy-exception-end", decoyIndex, cryptoSeed, start) % remaining
             val handler = structureSelector("decoy-exception-handler", decoyIndex, cryptoSeed, start, end) % instructionCount
             val decoy = SerializedExceptionEntry(
-                start = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, start),
-                end = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, end),
-                handler = vbc4CfgEncodeIndex(effectiveBuildSeed, currentOffset, handler),
+                start = encodeCfgIndex(effectiveBuildSeed, currentOffset, start),
+                end = encodeCfgIndex(effectiveBuildSeed, currentOffset, end),
+                handler = encodeCfgIndex(effectiveBuildSeed, currentOffset, handler),
                 typeCpIndex = remapExceptionTypeCpIndex(logicalTypeCpIndex, cpIndexMap),
             )
             val insertionPoint = structureSelector("decoy-exception-order", decoyIndex, cryptoSeed) % (entries.size + 1)
@@ -1403,11 +1404,11 @@ internal class QpSerializer(
 
         writeU2(out, entries.size)
         for ((index, entry) in entries.withIndex()) {
-            val token = vbc4ExceptionToken(cryptoSeed, index)
-            val start = entry.start xor vbc4ExceptionMask(cryptoSeed, index, 0, token)
-            val end = entry.end xor vbc4ExceptionMask(cryptoSeed, index, 1, token)
-            val handler = entry.handler xor vbc4ExceptionMask(cryptoSeed, index, 2, token)
-            val typeCp = entry.typeCpIndex xor vbc4ExceptionMask(cryptoSeed, index, 3, token)
+            val token = exceptionToken(cryptoSeed, index)
+            val start = entry.start xor exceptionMask(cryptoSeed, index, 0, token)
+            val end = entry.end xor exceptionMask(cryptoSeed, index, 1, token)
+            val handler = entry.handler xor exceptionMask(cryptoSeed, index, 2, token)
+            val typeCp = entry.typeCpIndex xor exceptionMask(cryptoSeed, index, 3, token)
             writeU4(out, token)
             writeU2(out, start)
             writeU2(out, end)
@@ -1418,7 +1419,7 @@ internal class QpSerializer(
     }
 
     private fun requireLabelOffset(label: Label, role: String): Int =
-        labelToOffset[label] ?: throw IllegalStateException("Unresolved VBC4 exception table $role label")
+        labelToOffset[label] ?: throw IllegalStateException("Unresolved Qp exception table $role label")
 
     private fun addConstant(value: Any): Int {
         constantPoolIndex[value]?.let { return it }
@@ -1439,18 +1440,18 @@ internal class QpSerializer(
         var ciphertext = ByteArray(0)
         var tag = ByteArray(0)
         return try {
-            plain = vbc4ModifiedUtf8Bytes(value)
-            require(plain.size <= 0xFFFF) { "VBC4 string constant exceeds u16 length" }
+            plain = modifiedUtf8Bytes(value)
+            require(plain.size <= 0xFFFF) { "Qp string constant exceeds u16 length" }
             SecureRandom().nextBytes(nonce)
             buildKey = serializationBuildContext.deriveVmBuildKey()
-            keyMaterial = vbc4CpStringMac(buildKey, QP_CP_STRING_KEY_DOMAIN, nonce)
-            ivMaterial = vbc4CpStringMac(buildKey, QP_CP_STRING_IV_DOMAIN, nonce)
+            keyMaterial = cpStringMac(buildKey, QP_CP_STRING_KEY_DOMAIN, nonce)
+            ivMaterial = cpStringMac(buildKey, QP_CP_STRING_IV_DOMAIN, nonce)
             key = keyMaterial.copyOfRange(0, 16)
             iv = ivMaterial.copyOfRange(0, 16)
             val cipher = Cipher.getInstance("AES/CTR/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
             ciphertext = cipher.doFinal(plain)
-            tag = vbc4CpStringMac(buildKey, QP_CP_STRING_TAG_DOMAIN, nonce, ciphertext)
+            tag = cpStringMac(buildKey, QP_CP_STRING_TAG_DOMAIN, nonce, ciphertext)
             val out = java.io.ByteArrayOutputStream(16 + 2 + ciphertext.size + tag.size)
             out.write(nonce)
             writeU2(out, ciphertext.size)
@@ -1492,7 +1493,7 @@ internal class QpSerializer(
     }
 
     private fun unsupportedOpcode(kind: String, opcode: Int): Nothing {
-        throw UnsupportedOperationException("VBC4 serializer does not support $kind opcode $opcode")
+        throw UnsupportedOperationException("Qp serializer does not support $kind opcode $opcode")
     }
 
     private fun emitLabel(label: Label) {
@@ -1824,7 +1825,7 @@ internal class QpSerializer(
                 }
                 val constant = value.getBootstrapMethodArgument(0) as? String
                     ?: throw UnsupportedOperationException("unsupported ConstantDynamic string argument")
-                listOf("condy", "str", bsm.owner, bsm.name, bsm.desc, vbc4ModifiedUtf8Bytes(constant).joinToString("") { "%02x".format(it.toInt() and 0xFF) }).joinToString("|")
+                listOf("condy", "str", bsm.owner, bsm.name, bsm.desc, modifiedUtf8Bytes(constant).joinToString("") { "%02x".format(it.toInt() and 0xFF) }).joinToString("|")
             }
             "I" -> {
                 require(bsm.tag == Opcodes.H_INVOKESTATIC && bsm.name == "\$_c_int" &&
@@ -1892,7 +1893,7 @@ internal class QpSerializer(
     override fun visitMaxs(maxStack: Int, maxLocals: Int) {
         if (currentOffset >= 0xFFFF) {
             throw UnsupportedOperationException(
-                "VBC4 method exceeds the u16 CFG instruction limit before VM_MAXS",
+                "Qp method exceeds the u16 CFG instruction limit before VM_MAXS",
             )
         }
         emit(VmOpcodes.VM_MAXS, maxStack, maxLocals)
@@ -2301,7 +2302,7 @@ private val VM_BRANCH_OPCODES = setOf(
     VmOpcodes.VM_IRETURN, VmOpcodes.VM_LRETURN, VmOpcodes.VM_FRETURN, VmOpcodes.VM_DRETURN, VmOpcodes.VM_ARETURN, VmOpcodes.VM_RETURN, VmOpcodes.VM_ATHROW,
 )
 
-// --- VBC4 format helpers ---
+// --- Qp format helpers ---
 
         private const val QP_FLAG_ENCRYPTED_CP = 0x0001
 private const val QP_FLAG_BLOCK_ENCRYPTED = 0x0002
@@ -2387,7 +2388,7 @@ private object QpCryptoScope {
         layoutDigest: ByteArray,
         stateBinding: ByteArray,
     ): ByteArray {
-        require(stateBinding.size <= 4 * 1024) { "VBC4 state binding exceeds the current format limit" }
+        require(stateBinding.size <= 4 * 1024) { "Qp state binding exceeds the current format limit" }
         val digest = java.security.MessageDigest.getInstance("SHA-256")
         digest.update(
             byteArrayOf(
@@ -2405,7 +2406,7 @@ private object QpCryptoScope {
 
     fun deriveScopedKey(label: ByteArray, seed: Int, vararg parts: ByteArray): ByteArray {
         val sessionMaterial = activeSessionMaterial.get()
-            ?: error("VBC4 crypto operation outside QpCryptoScope")
+            ?: error("Qp crypto operation outside QpCryptoScope")
         val mac = Mac.getInstance("HmacSHA256")
         mac.init(SecretKeySpec(sessionMaterial, "HmacSHA256"))
         mac.update(intBytes(seed))
@@ -2418,9 +2419,9 @@ private object QpCryptoScope {
 private fun activeQpScopedKey(label: ByteArray, seed: Int, vararg parts: ByteArray): ByteArray =
     QpCryptoScope.deriveScopedKey(label, seed, *parts)
 
-private fun vbc4Crypt(data: ByteArray, seed: Int, nonce: ByteArray, section: Int, blockId: Int): ByteArray {
-    val key = vbc4AesKey(seed, nonce, section, blockId)
-    val iv = vbc4AesIv(seed, nonce, section, blockId)
+private fun frameCrypt(data: ByteArray, seed: Int, nonce: ByteArray, section: Int, blockId: Int): ByteArray {
+    val key = frameAesKey(seed, nonce, section, blockId)
+    val iv = frameAesIv(seed, nonce, section, blockId)
     return try {
         val cipher = Cipher.getInstance("AES/CTR/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
@@ -2448,7 +2449,7 @@ private fun compressCpEntrySection(bytes: ByteArray): QpStoredSection {
     }
 }
 
-private fun vbc4AesKey(seed: Int, nonce: ByteArray, section: Int, blockId: Int): ByteArray =
+private fun frameAesKey(seed: Int, nonce: ByteArray, section: Int, blockId: Int): ByteArray =
     withQpHmacMaterial(
         byteArrayOf(0x2c, 0x38, 0x39, 0x6e, 0x77, 0x3b, 0x3f, 0x29, 0x77, 0x31, 0x3f, 0x23),
         seed,
@@ -2457,7 +2458,7 @@ private fun vbc4AesKey(seed: Int, nonce: ByteArray, section: Int, blockId: Int):
         intBytes(blockId),
     ) { material -> material.copyOfRange(0, 16) }
 
-private fun vbc4AesIv(seed: Int, nonce: ByteArray, section: Int, blockId: Int): ByteArray =
+private fun frameAesIv(seed: Int, nonce: ByteArray, section: Int, blockId: Int): ByteArray =
     withQpHmacMaterial(
         byteArrayOf(0x2c, 0x38, 0x39, 0x6e, 0x77, 0x3b, 0x3f, 0x29, 0x77, 0x33, 0x2c),
         seed,
@@ -2466,7 +2467,7 @@ private fun vbc4AesIv(seed: Int, nonce: ByteArray, section: Int, blockId: Int): 
         intBytes(blockId),
     ) { material -> material.copyOfRange(0, 16) }
 
-private fun vbc4MaskWord(seed: Int, section: Int, blockId: Int, offset: Int): Int =
+private fun maskWord(seed: Int, section: Int, blockId: Int, offset: Int): Int =
     withQpHmacMaterial(
         "qp-opcode".toByteArray(Charsets.US_ASCII),
         seed,
@@ -2475,7 +2476,7 @@ private fun vbc4MaskWord(seed: Int, section: Int, blockId: Int, offset: Int): In
         intBytes(offset),
     ) { material -> material[0].toInt() and 0xFF }
 
-private fun vbc4OpcodeDialectSalt(seed: Int, stateBinding: String, entryMetadata: QpEntryMetadata): Int {
+private fun opcodeDialectSalt(seed: Int, stateBinding: String, entryMetadata: QpEntryMetadata): Int {
     val digest = java.security.MessageDigest.getInstance("SHA-256")
     digest.update("qp-opcode-dialect".toByteArray(Charsets.US_ASCII))
     digest.update(intBytes(seed))
@@ -2484,13 +2485,13 @@ private fun vbc4OpcodeDialectSalt(seed: Int, stateBinding: String, entryMetadata
     return readMacInt(digest.digest())
 }
 
-private fun vbc4NestedDialect(seed: Int, profile: Int, blockId: Int, rowCount: Int): Int =
-    vbc4NestedMix(seed, profile, blockId, rowCount, 0x23, seed.rotateLeft(9) xor profile.rotateLeft(3))
+private fun nestedDialect(seed: Int, profile: Int, blockId: Int, rowCount: Int): Int =
+    nestedMix(seed, profile, blockId, rowCount, 0x23, seed.rotateLeft(9) xor profile.rotateLeft(3))
 
-private fun vbc4NestedFieldOrder(seed: Int, profile: Int, blockId: Int, rowIndex: Int, dialect: Int): IntArray {
+private fun nestedFieldOrder(seed: Int, profile: Int, blockId: Int, rowIndex: Int, dialect: Int): IntArray {
     val order = IntArray(QP_NESTED_FIELD_COUNT) { it }
     for (index in order.lastIndex downTo 1) {
-        val mix = vbc4NestedMix(seed, profile, blockId, rowIndex, index + 0x31, dialect)
+        val mix = nestedMix(seed, profile, blockId, rowIndex, index + 0x31, dialect)
         val swapIndex = (mix and 0x7FFFFFFF) % (index + 1)
         val tmp = order[index]
         order[index] = order[swapIndex]
@@ -2499,7 +2500,7 @@ private fun vbc4NestedFieldOrder(seed: Int, profile: Int, blockId: Int, rowIndex
     return order
 }
 
-private fun vbc4NestedRowChecksum(
+private fun nestedRowChecksum(
     seed: Int,
     profile: Int,
     blockId: Int,
@@ -2507,14 +2508,14 @@ private fun vbc4NestedRowChecksum(
     dialect: Int,
     fields: IntArray,
 ): Int {
-    var x = vbc4NestedMix(seed, profile, blockId, rowIndex, QP_NESTED_COMMIT_SLOT, dialect)
+    var x = nestedMix(seed, profile, blockId, rowIndex, QP_NESTED_COMMIT_SLOT, dialect)
     fields.forEachIndexed { index, field ->
-        x = vbc4NestedMix(x xor field, profile, blockId, rowIndex, index + 0x91, dialect)
+        x = nestedMix(x xor field, profile, blockId, rowIndex, index + 0x91, dialect)
     }
     return x
 }
 
-private fun vbc4NestedMix(seed: Int, profile: Int, blockId: Int, rowIndex: Int, slot: Int, dialect: Int): Int {
+private fun nestedMix(seed: Int, profile: Int, blockId: Int, rowIndex: Int, slot: Int, dialect: Int): Int {
     var x = seed
     x = x xor profile xor dialect xor (blockId * 0x45D9F3B) xor
         (rowIndex * 0x7FEB352D) xor (slot * 0x846CA68B.toInt())
@@ -2550,52 +2551,52 @@ private fun deriveQpStructureSeed(
 private fun randomQpStructureEntropy(): ByteArray =
     ByteArray(32).also { SecureRandom().nextBytes(it) }
 
-private fun vbc4EntryToken(seed: Int, blockId: Int): Int =
+private fun frameEntryToken(seed: Int, blockId: Int): Int =
     withQpHmacMaterial(
         "qp-entry-token".toByteArray(Charsets.US_ASCII),
         seed,
         intBytes(blockId),
     ) { material -> readMacInt(material) }
 
-private fun vbc4OpcodeMask(seed: Int, index: Int): Int = vbc4MaskWord(seed, 7, index, index) and 0xFF
+private fun opcodeMask(seed: Int, index: Int): Int = maskWord(seed, 7, index, index) and 0xFF
 
 /**
- * VBC4 control-flow targets are stored as build-secret affine block ids rather
+ * Qp control-flow targets are stored as build-secret affine block ids rather
  * than raw JVM instruction indexes. The native runtime reconstructs the dense
  * execution program only after the runtime master material has been installed.
  */
-internal fun vbc4CfgEncodeIndex(seed: Int, instructionCount: Int, instructionIndex: Int): Int {
-    require(instructionCount in 1..0xFFFF) { "VBC4 CFG instruction count is out of range" }
-    require(instructionIndex in 0..instructionCount) { "VBC4 CFG instruction index is out of range" }
-    val multiplier = vbc4CfgMultiplier(seed, instructionCount)
-    val offset = vbc4CfgOffset(seed, instructionCount)
+internal fun encodeCfgIndex(seed: Int, instructionCount: Int, instructionIndex: Int): Int {
+    require(instructionCount in 1..0xFFFF) { "Qp CFG instruction count is out of range" }
+    require(instructionIndex in 0..instructionCount) { "Qp CFG instruction index is out of range" }
+    val multiplier = cfgMultiplier(seed, instructionCount)
+    val offset = cfgOffset(seed, instructionCount)
     return ((instructionIndex.toLong() * multiplier.toLong() + offset.toLong()) and QP_CFG_MASK.toLong()).toInt()
 }
 
-internal fun vbc4CfgDecodeIndex(seed: Int, instructionCount: Int, encodedIndex: Int): Int {
-    require(instructionCount in 1..0xFFFF) { "VBC4 CFG instruction count is out of range" }
-    require(encodedIndex in 0..QP_CFG_MASK) { "VBC4 CFG encoded index is out of range" }
-    val multiplier = vbc4CfgMultiplier(seed, instructionCount)
-    val inverse = vbc4ModInverse(multiplier, QP_CFG_MODULUS)
-    val normalized = (encodedIndex - vbc4CfgOffset(seed, instructionCount)) and QP_CFG_MASK
+internal fun decodeCfgIndex(seed: Int, instructionCount: Int, encodedIndex: Int): Int {
+    require(instructionCount in 1..0xFFFF) { "Qp CFG instruction count is out of range" }
+    require(encodedIndex in 0..QP_CFG_MASK) { "Qp CFG encoded index is out of range" }
+    val multiplier = cfgMultiplier(seed, instructionCount)
+    val inverse = modInverse(multiplier, QP_CFG_MODULUS)
+    val normalized = (encodedIndex - cfgOffset(seed, instructionCount)) and QP_CFG_MASK
     val decoded = (normalized.toLong() * inverse.toLong() and QP_CFG_MASK.toLong()).toInt()
-    require(decoded <= instructionCount) { "VBC4 CFG encoded index does not map into the method" }
+    require(decoded <= instructionCount) { "Qp CFG encoded index does not map into the method" }
     return decoded
 }
 
 private const val QP_CFG_MODULUS = 0x10000
 private const val QP_CFG_MASK = QP_CFG_MODULUS - 1
 
-private fun vbc4CfgMultiplier(seed: Int, instructionCount: Int): Int {
+private fun cfgMultiplier(seed: Int, instructionCount: Int): Int {
     // Every odd multiplier is invertible over the complete u16 domain. Keeping
     // all 65,536 values avoids collisions for instruction indexes 65521..65535.
     return ((seed xor instructionCount.rotateLeft(7) xor 0x6D2B79F5) and QP_CFG_MASK) or 1
 }
 
-private fun vbc4CfgOffset(seed: Int, instructionCount: Int): Int =
+private fun cfgOffset(seed: Int, instructionCount: Int): Int =
     (seed.rotateLeft(13) xor instructionCount * 0x45D9F3B xor 0x27D4EB2D) and QP_CFG_MASK
 
-private fun vbc4ModInverse(value: Int, modulus: Int): Int {
+private fun modInverse(value: Int, modulus: Int): Int {
     var t = 0L
     var nextT = 1L
     var r = modulus.toLong()
@@ -2609,18 +2610,18 @@ private fun vbc4ModInverse(value: Int, modulus: Int): Int {
         r = nextR
         nextR = oldR - quotient * nextR
     }
-    require(r == 1L) { "VBC4 CFG multiplier is not invertible" }
+    require(r == 1L) { "Qp CFG multiplier is not invertible" }
     return Math.floorMod(t, modulus.toLong()).toInt()
 }
 
-private fun vbc4ExceptionToken(seed: Int, index: Int): Int =
+private fun exceptionToken(seed: Int, index: Int): Int =
     withQpHmacMaterial(
         "qp-exception-token".toByteArray(Charsets.US_ASCII),
         seed,
         intBytes(index),
     ) { material -> readMacInt(material) }
 
-private fun vbc4ExceptionMask(seed: Int, index: Int, field: Int, token: Int): Int =
+private fun exceptionMask(seed: Int, index: Int, field: Int, token: Int): Int =
     withQpHmacMaterial(
         "qp-exception-mask".toByteArray(Charsets.US_ASCII),
         seed,
@@ -2631,7 +2632,7 @@ private fun vbc4ExceptionMask(seed: Int, index: Int, field: Int, token: Int): In
         readMacInt(material) and 0xFFFF
     }
 
-private fun vbc4Nonce(seed: Int, flags: Int, constantPoolPlain: ByteArray, exceptionPlain: ByteArray, blockCount: Int): ByteArray =
+private fun frameNonce(seed: Int, flags: Int, constantPoolPlain: ByteArray, exceptionPlain: ByteArray, blockCount: Int): ByteArray =
     withQpHmacMaterial(
         "qp-nonce".toByteArray(Charsets.US_ASCII),
         seed,
@@ -2641,10 +2642,10 @@ private fun vbc4Nonce(seed: Int, flags: Int, constantPoolPlain: ByteArray, excep
         exceptionPlain,
     ) { material -> material.copyOfRange(0, 16) }
 
-private fun vbc4WrappedSeed(seed: Int, nonce: ByteArray, stateBinding: String = ""): ByteArray {
+private fun frameWrappedSeed(seed: Int, nonce: ByteArray, stateBinding: String = ""): ByteArray {
     val bindingBytes = stateBinding.toByteArray(Charsets.UTF_8)
-    val mask = vbc4Hmac("qp-seed-wrap".toByteArray(Charsets.US_ASCII), 0, nonce, bindingBytes)
-    val token = vbc4Hmac("qp-seed-token".toByteArray(Charsets.US_ASCII), seed, nonce, bindingBytes)
+    val mask = frameHmac("qp-seed-wrap".toByteArray(Charsets.US_ASCII), 0, nonce, bindingBytes)
+    val token = frameHmac("qp-seed-token".toByteArray(Charsets.US_ASCII), seed, nonce, bindingBytes)
     return try {
         val seedBytes = intBytes(seed)
         val wrapped = ByteArray(16)
@@ -2657,18 +2658,18 @@ private fun vbc4WrappedSeed(seed: Int, nonce: ByteArray, stateBinding: String = 
     }
 }
 
-private fun vbc4PadLength(seed: Int, nonce: ByteArray): Int =
+private fun framePadLength(seed: Int, nonce: ByteArray): Int =
     withQpHmacMaterial("qp-pad-length".toByteArray(Charsets.US_ASCII), seed, nonce) { material ->
         8 + ((material[0].toInt() and 0x3F))
     }
 
-private fun vbc4KeyId(seed: Int, nonce: ByteArray): Int =
+private fun frameKeyId(seed: Int, nonce: ByteArray): Int =
     withQpHmacMaterial("qp-key-id".toByteArray(Charsets.US_ASCII), seed, nonce) { material ->
         readMacInt(material)
     }
 
 private inline fun <T> withQpHmacMaterial(data: ByteArray, seed: Int, vararg parts: ByteArray, block: (ByteArray) -> T): T {
-    val material = vbc4Hmac(data, seed, *parts)
+    val material = frameHmac(data, seed, *parts)
     return try {
         block(material)
     } finally {
@@ -2682,7 +2683,7 @@ private fun readMacInt(bytes: ByteArray): Int =
         ((bytes[2].toInt() and 0xFF) shl 8) or
         (bytes[3].toInt() and 0xFF)
 
-private fun vbc4Hmac(data: ByteArray, seed: Int, vararg parts: ByteArray): ByteArray {
+private fun frameHmac(data: ByteArray, seed: Int, vararg parts: ByteArray): ByteArray {
     val scopedKey = activeQpScopedKey(data, seed, *parts)
     return try {
         val mac = Mac.getInstance("HmacSHA256")
@@ -2696,7 +2697,7 @@ private fun vbc4Hmac(data: ByteArray, seed: Int, vararg parts: ByteArray): ByteA
     }
 }
 
-private fun vbc4CpStringMac(key: ByteArray, vararg parts: ByteArray): ByteArray {
+private fun cpStringMac(key: ByteArray, vararg parts: ByteArray): ByteArray {
     val mac = Mac.getInstance("HmacSHA256")
     mac.init(SecretKeySpec(key, "HmacSHA256"))
     parts.forEach(mac::update)
@@ -2704,12 +2705,12 @@ private fun vbc4CpStringMac(key: ByteArray, vararg parts: ByteArray): ByteArray 
 }
 
 /** JNI NewStringUTF consumes modified UTF-8 rather than standard UTF-8. */
-private fun vbc4ModifiedUtf8Bytes(value: String): ByteArray {
+private fun modifiedUtf8Bytes(value: String): ByteArray {
     var encodedLength = 0
     for (character in value) {
         val code = character.code
         val width = if (code in 1..0x7F) 1 else if (code <= 0x7FF) 2 else 3
-        require(encodedLength <= 0xFFFF - width) { "VBC4 string constant exceeds u16 length" }
+        require(encodedLength <= 0xFFFF - width) { "Qp string constant exceeds u16 length" }
         encodedLength += width
     }
     val encoded = ByteArray(encodedLength)

@@ -66,40 +66,40 @@ internal class QpPageEnvelope private constructor(
     private var wiped: Boolean = false
 
     init {
-        require(pageIndex >= 0) { "AKEN native page envelope index must be non-negative" }
+        require(pageIndex >= 0) { "Qp native page envelope index must be non-negative" }
         require(encodedHandleValue.size == QpHandle.ENCODED_HANDLE_SIZE) {
-            "AKEN native page envelope handle length is invalid"
+            "Qp native page envelope handle length is invalid"
         }
         require(locatorTokenValue.size == QpHandle.LOCATOR_TOKEN_SIZE) {
-            "AKEN native page envelope locator length is invalid"
+            "Qp native page envelope locator length is invalid"
         }
         require(evaluatorFingerprintValue.size == QpHandle.FINGERPRINT_SIZE) {
-            "AKEN native page envelope evaluator fingerprint length is invalid"
+            "Qp native page envelope evaluator fingerprint length is invalid"
         }
         require(artifactCommitmentValue.size == QpArtifactCommitment.DIGEST_SIZE) {
-            "AKEN native page envelope artifact commitment length is invalid"
+            "Qp native page envelope artifact commitment length is invalid"
         }
         require(descriptorBindingValue.size == BINDING_DIGEST_SIZE) {
-            "AKEN native page envelope descriptor binding length is invalid"
+            "Qp native page envelope descriptor binding length is invalid"
         }
         require(callSiteProofBindingValue.size == BINDING_DIGEST_SIZE) {
-            "AKEN native page envelope call-site binding length is invalid"
+            "Qp native page envelope call-site binding length is invalid"
         }
         require(routeBindingValue.size == BINDING_DIGEST_SIZE) {
-            "AKEN native page envelope route binding length is invalid"
+            "Qp native page envelope route binding length is invalid"
         }
         require(envelopeBindingValue.size == BINDING_DIGEST_SIZE) {
-            "AKEN native page envelope binding length is invalid"
+            "Qp native page envelope binding length is invalid"
         }
         when (formValue) {
             Form.InlineDescriptor -> {
                 require(inlineDescriptorValue != null && inlineDescriptorValue!!.isNotEmpty()) {
-                    "AKEN native inline page descriptor is missing"
+                    "Qp native inline page descriptor is missing"
                 }
             }
 
             Form.CompactLocator -> require(inlineDescriptorValue == null) {
-                "AKEN native compact page envelope must not retain descriptor bytes"
+                "Qp native compact page envelope must not retain descriptor bytes"
             }
         }
     }
@@ -319,7 +319,7 @@ internal class QpPageEnvelope private constructor(
             out.write(envelopeBindingValue)
             out.toByteArray().also { encoded ->
                 require(encoded.size <= MAX_ENCODED_SIZE) {
-                    "AKEN native page envelope exceeds bounded locator-record limit"
+                    "Qp native page envelope exceeds bounded locator-record limit"
                 }
             }
         }
@@ -352,7 +352,7 @@ internal class QpPageEnvelope private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN native page envelope has been wiped" }
+        check(!wiped) { "Qp native page envelope has been wiped" }
     }
 
     private fun verifyEncodedBinding() {
@@ -373,13 +373,13 @@ internal class QpPageEnvelope private constructor(
                 inlineDescriptor = inlineDescriptorValue,
             )
             require(MessageDigest.isEqual(envelopeBindingValue, checkNotNull(expected))) {
-                "AKEN native page envelope binding is invalid"
+                "Qp native page envelope binding is invalid"
             }
 
             if (formValue == Form.InlineDescriptor) {
                 val descriptor = QpPageDescriptor.decode(checkNotNull(inlineDescriptorValue))
                 require(matchesDescriptor(descriptor)) {
-                    "AKEN native inline page descriptor binding is invalid"
+                    "Qp native inline page descriptor binding is invalid"
                 }
             }
         } finally {
@@ -460,7 +460,7 @@ internal class QpPageEnvelope private constructor(
             rawCallSiteProof: ByteArray,
         ): QpPageEnvelope {
             require(rawCallSiteProof.isNotEmpty() && rawCallSiteProof.size <= MAX_CALL_SITE_PROOF_SIZE) {
-                "AKEN native page envelope call-site proof length is invalid"
+                "Qp native page envelope call-site proof length is invalid"
             }
 
             var captured: CapturedDescriptorBinding? = null
@@ -521,15 +521,15 @@ internal class QpPageEnvelope private constructor(
         @JvmSynthetic
         fun decode(encoded: ByteArray): QpPageEnvelope {
             require(encoded.isNotEmpty() && encoded.size <= MAX_ENCODED_SIZE) {
-                "AKEN native page envelope encoding length is invalid"
+                "Qp native page envelope encoding length is invalid"
             }
             val reader = EnvelopeReader(encoded)
-            val form = Form.fromId(reader.readUnsignedByte("AKEN native page envelope form"))
-                ?: throw IllegalArgumentException("unknown AKEN native page envelope form")
-            val entryToken = reader.readLong("AKEN native page envelope entry token")
-            val resourceKind = QpResourceKind.fromId(reader.readUnsignedByte("AKEN native page envelope resource kind"))
-                ?: throw IllegalArgumentException("unknown AKEN native page envelope resource kind")
-            val pageIndex = reader.readInt("AKEN native page envelope page index")
+            val form = Form.fromId(reader.readUnsignedByte("Qp native page envelope form"))
+                ?: throw IllegalArgumentException("unknown Qp native page envelope form")
+            val entryToken = reader.readLong("Qp native page envelope entry token")
+            val resourceKind = QpResourceKind.fromId(reader.readUnsignedByte("Qp native page envelope resource kind"))
+                ?: throw IllegalArgumentException("unknown Qp native page envelope resource kind")
+            val pageIndex = reader.readInt("Qp native page envelope page index")
             var encodedHandle: ByteArray? = null
             var locatorToken: ByteArray? = null
             var evaluatorFingerprint: ByteArray? = null
@@ -542,29 +542,29 @@ internal class QpPageEnvelope private constructor(
             var result: QpPageEnvelope? = null
             var completed = false
             try {
-                require(pageIndex >= 0) { "AKEN native page envelope page index is invalid" }
-                encodedHandle = reader.readFixed(QpHandle.ENCODED_HANDLE_SIZE, "AKEN native page envelope handle")
-                locatorToken = reader.readFixed(QpHandle.LOCATOR_TOKEN_SIZE, "AKEN native page envelope locator")
+                require(pageIndex >= 0) { "Qp native page envelope page index is invalid" }
+                encodedHandle = reader.readFixed(QpHandle.ENCODED_HANDLE_SIZE, "Qp native page envelope handle")
+                locatorToken = reader.readFixed(QpHandle.LOCATOR_TOKEN_SIZE, "Qp native page envelope locator")
                 evaluatorFingerprint = reader.readFixed(
                     QpHandle.FINGERPRINT_SIZE,
-                    "AKEN native page envelope evaluator fingerprint",
+                    "Qp native page envelope evaluator fingerprint",
                 )
                 artifactCommitment = reader.readFixed(
                     QpArtifactCommitment.DIGEST_SIZE,
-                    "AKEN native page envelope artifact commitment",
+                    "Qp native page envelope artifact commitment",
                 )
-                descriptorBinding = reader.readFixed(BINDING_DIGEST_SIZE, "AKEN native page envelope descriptor binding")
-                callSiteProofBinding = reader.readFixed(BINDING_DIGEST_SIZE, "AKEN native page envelope call-site binding")
-                routeBinding = reader.readFixed(BINDING_DIGEST_SIZE, "AKEN native page envelope route binding")
+                descriptorBinding = reader.readFixed(BINDING_DIGEST_SIZE, "Qp native page envelope descriptor binding")
+                callSiteProofBinding = reader.readFixed(BINDING_DIGEST_SIZE, "Qp native page envelope call-site binding")
+                routeBinding = reader.readFixed(BINDING_DIGEST_SIZE, "Qp native page envelope route binding")
                 if (form == Form.InlineDescriptor) {
                     inlineDescriptor = reader.readFramed(
                         maximumLength = MAX_ENCODED_SIZE - FIXED_WIRE_SIZE - Int.SIZE_BYTES,
-                        label = "AKEN native inline page descriptor",
+                        label = "Qp native inline page descriptor",
                         allowEmpty = false,
                     )
                 }
-                envelopeBinding = reader.readFixed(BINDING_DIGEST_SIZE, "AKEN native page envelope binding")
-                reader.requireFullyRead("AKEN native page envelope")
+                envelopeBinding = reader.readFixed(BINDING_DIGEST_SIZE, "Qp native page envelope binding")
+                reader.requireFullyRead("Qp native page envelope")
                 result = QpPageEnvelope(
                     entryToken = entryToken,
                     resourceKind = resourceKind,
@@ -618,10 +618,10 @@ internal class QpPageEnvelope private constructor(
             var routeDigest: ByteArray? = null
             try {
                 require(descriptor.resourceKind == handle.resourceKind) {
-                    "AKEN native page envelope descriptor kind does not match handle"
+                    "Qp native page envelope descriptor kind does not match handle"
                 }
                 require(descriptor.pageIndex == handle.pageIndex) {
-                    "AKEN native page envelope descriptor index does not match handle"
+                    "Qp native page envelope descriptor index does not match handle"
                 }
                 suppliedHandle = handle.encoded
                 suppliedLocator = handle.locatorToken
@@ -643,7 +643,7 @@ internal class QpPageEnvelope private constructor(
                     callSiteProof,
                 )
                 require(identityMatches && callSiteMatches) {
-                    "AKEN native page envelope request does not bind the current descriptor"
+                    "Qp native page envelope request does not bind the current descriptor"
                 }
 
                 descriptorDigest = descriptorBinding(checkNotNull(descriptorEncoding))
@@ -731,12 +731,12 @@ internal class QpPageEnvelope private constructor(
         }
 
         private fun encodedSizeFor(form: Form, inlineDescriptorLength: Int): Int {
-            require(inlineDescriptorLength >= 0) { "AKEN native page envelope descriptor length is invalid" }
+            require(inlineDescriptorLength >= 0) { "Qp native page envelope descriptor length is invalid" }
             val size = when (form) {
                 Form.InlineDescriptor -> FIXED_WIRE_SIZE.toLong() + Int.SIZE_BYTES + inlineDescriptorLength.toLong()
                 Form.CompactLocator -> FIXED_WIRE_SIZE.toLong()
             }
-            require(size <= Int.MAX_VALUE.toLong()) { "AKEN native page envelope size overflows" }
+            require(size <= Int.MAX_VALUE.toLong()) { "Qp native page envelope size overflows" }
             return size.toInt()
         }
 
@@ -804,7 +804,7 @@ private class EnvelopeReader(private val bytes: ByteArray) {
     }
 
     fun readFixed(length: Int, label: String): ByteArray {
-        require(length >= 0) { "AKEN native page envelope fixed length is invalid" }
+        require(length >= 0) { "Qp native page envelope fixed length is invalid" }
         requireRemaining(length, label)
         return bytes.copyOfRange(offset, offset + length).also { offset += length }
     }

@@ -19,7 +19,7 @@ class QpEvaluatorPlan private constructor(
 
     init {
         require(fingerprintValue.size == QpHandle.FINGERPRINT_SIZE) {
-            "AKEN runtime evaluator fingerprint length is invalid"
+            "Qp runtime evaluator fingerprint length is invalid"
         }
     }
 
@@ -102,7 +102,7 @@ class QpEvaluatorPlan private constructor(
 
         fun decode(encoded: ByteArray): QpEvaluatorPlan {
             require(encoded.isNotEmpty() && encoded.size <= MAX_PLAN_ENCODING_SIZE) {
-                "AKEN runtime evaluator plan encoding length is invalid"
+                "Qp runtime evaluator plan encoding length is invalid"
             }
             return decodeBound(QpRuntimeDescriptorReader(encoded))
         }
@@ -113,14 +113,14 @@ class QpEvaluatorPlan private constructor(
             return try {
                 opaque = reader.readFramed(
                     MAX_PLAN_ENCODING_SIZE - QpHandle.FINGERPRINT_SIZE - 5,
-                    "AKEN bound evaluator",
+                    "Qp bound evaluator",
                     allowEmpty = false,
                 )
                 fingerprint = reader.readFixed(
                     QpHandle.FINGERPRINT_SIZE,
-                    "AKEN runtime evaluator fingerprint",
+                    "Qp runtime evaluator fingerprint",
                 )
-                reader.requireFullyRead("AKEN runtime bound evaluator plan")
+                reader.requireFullyRead("Qp runtime bound evaluator plan")
                 createBound(
                     QpBoundPlan.fromOpaque(checkNotNull(opaque)),
                     checkNotNull(fingerprint),
@@ -134,10 +134,10 @@ class QpEvaluatorPlan private constructor(
 }
 
 /**
- * Runtime-neutral metadata for exactly one high-value AKEN v4 page.
+ * Runtime-neutral metadata for exactly one high-value Qp current format page.
  *
  * It combines one opaque handle binding, the corresponding logical identity,
- * one route, one integrity/call-site proof, and one AKEN-7 graph. It offers no
+ * one route, one integrity/call-site proof, and one legacy fragment graph. It offers no
  * directory, traversal, or arbitrary-resource decoding surface.
  */
 class QpPageDescriptor private constructor(
@@ -186,7 +186,7 @@ class QpPageDescriptor private constructor(
             writeRuntimeFramed(out, evaluator)
             out.toByteArray().also {
                 require(it.size <= MAX_DESCRIPTOR_ENCODING_SIZE) {
-                    "AKEN runtime page descriptor encoding is too large"
+                    "Qp runtime page descriptor encoding is too large"
                 }
             }
         } finally {
@@ -219,25 +219,25 @@ class QpPageDescriptor private constructor(
 
         fun decode(encoded: ByteArray): QpPageDescriptor {
             require(encoded.isNotEmpty() && encoded.size <= MAX_DESCRIPTOR_ENCODING_SIZE) {
-                "AKEN runtime page descriptor encoding length is invalid"
+                "Qp runtime page descriptor encoding length is invalid"
             }
             val reader = QpRuntimeDescriptorReader(encoded)
             var routeBytes: ByteArray? = null
             var proofBytes: ByteArray? = null
             var evaluatorBytes: ByteArray? = null
             return try {
-                routeBytes = reader.readFramed(MAX_ROUTE_ENCODING_SIZE, "AKEN runtime page route", allowEmpty = false)
+                routeBytes = reader.readFramed(MAX_ROUTE_ENCODING_SIZE, "Qp runtime page route", allowEmpty = false)
                 val route = QpRouteMetadata.decode(checkNotNull(routeBytes))
-                proofBytes = reader.readFramed(MAX_PROOF_ENCODING_SIZE, "AKEN runtime page proof", allowEmpty = false)
+                proofBytes = reader.readFramed(MAX_PROOF_ENCODING_SIZE, "Qp runtime page proof", allowEmpty = false)
                 val proof = QpProofMetadata.decode(checkNotNull(proofBytes))
-                val targetPageSize = reader.readInt("AKEN runtime target page size")
+                val targetPageSize = reader.readInt("Qp runtime target page size")
                 evaluatorBytes = reader.readFramed(
                     MAX_EVALUATOR_PLAN_ENCODING_SIZE,
-                    "AKEN runtime evaluator plan",
+                    "Qp runtime evaluator plan",
                     allowEmpty = false,
                 )
                 val evaluatorPlan = QpEvaluatorPlan.decode(checkNotNull(evaluatorBytes))
-                reader.requireFullyRead("AKEN runtime page descriptor")
+                reader.requireFullyRead("Qp runtime page descriptor")
                 fromMetadata(route.leafIdentity, route, proof, targetPageSize, evaluatorPlan)
             } finally {
                 routeBytes?.let { Arrays.fill(it, 0) }
@@ -267,10 +267,10 @@ class QpPageDescriptor private constructor(
             targetPageSize: Int,
             evaluatorPlan: QpEvaluatorPlan,
         ) {
-            require(route.leafIdentity == identity) { "AKEN runtime route does not bind the current page" }
-            require(proof.leafIdentity == identity) { "AKEN runtime proof does not bind the current page" }
-            require(route.codecVariant == proof.codecVariant) { "AKEN runtime route/proof codec mismatch" }
-            require(route.layoutVariant == proof.layoutVariant) { "AKEN runtime route/proof layout mismatch" }
+            require(route.leafIdentity == identity) { "Qp runtime route does not bind the current page" }
+            require(proof.leafIdentity == identity) { "Qp runtime proof does not bind the current page" }
+            require(route.codecVariant == proof.codecVariant) { "Qp runtime route/proof codec mismatch" }
+            require(route.layoutVariant == proof.layoutVariant) { "Qp runtime route/proof layout mismatch" }
 
             var logicalIdentity: ByteArray? = null
             var handleEncoding: ByteArray? = null
@@ -284,7 +284,7 @@ class QpPageDescriptor private constructor(
                 expectedFingerprint = identity.evaluatorFingerprint
                 graphFingerprint = evaluatorPlan.fingerprint
                 require(Arrays.equals(expectedFingerprint, graphFingerprint)) {
-                    "AKEN runtime evaluator fingerprint does not match the page handle"
+                    "Qp runtime evaluator fingerprint does not match the page handle"
                 }
                 require(
                     evaluatorPlan.matchesDescriptorBinding(
@@ -297,7 +297,7 @@ class QpPageDescriptor private constructor(
                         handleEncoding = checkNotNull(handleEncoding),
                         locatorToken = checkNotNull(locatorToken),
                     ),
-                ) { "AKEN runtime evaluator graph binding is invalid" }
+                ) { "Qp runtime evaluator graph binding is invalid" }
             } finally {
                 logicalIdentity?.let { Arrays.fill(it, 0) }
                 handleEncoding?.let { Arrays.fill(it, 0) }
@@ -377,7 +377,7 @@ private class QpRuntimeDescriptorReader(private val bytes: ByteArray) {
     }
 
     fun readFixed(length: Int, label: String): ByteArray {
-        require(length >= 0) { "AKEN runtime fixed length must be non-negative" }
+        require(length >= 0) { "Qp runtime fixed length must be non-negative" }
         requireRemaining(length, label)
         return bytes.copyOfRange(offset, offset + length).also { offset += length }
     }

@@ -6,7 +6,7 @@ import java.util.Base64
 
 /**
  * Build-only ownership wrapper for the plaintext and call-site proof of one
- * already-registered AKEN page.
+ * already-registered Qp page.
  *
  * The constructor takes defensive copies.  [QpPageMaterializer] consumes and
  * wipes those copies, then wipes the owning [QpBuildPlan].  This type has no
@@ -27,13 +27,13 @@ internal class QpPageMaterializationInput private constructor(
     private var wiped: Boolean = false
 
     init {
-        require(plaintextValue.isNotEmpty()) { "AKEN materialization plaintext must not be empty" }
+        require(plaintextValue.isNotEmpty()) { "Qp materialization plaintext must not be empty" }
         require(callSiteProofValue.isNotEmpty() && callSiteProofValue.size <= MAX_CALL_SITE_PROOF_SIZE) {
-            "AKEN materialization call-site proof length is invalid"
+            "Qp materialization call-site proof length is invalid"
         }
-        require(resourceOffset >= 0) { "AKEN materialization resource offset must be non-negative" }
+        require(resourceOffset >= 0) { "Qp materialization resource offset must be non-negative" }
         require(logicalBindingPath.isNotBlank() && '\u0000' !in logicalBindingPath && '\\' !in logicalBindingPath) {
-            "AKEN materialization logical binding path is invalid"
+            "Qp materialization logical binding path is invalid"
         }
     }
 
@@ -62,7 +62,7 @@ internal class QpPageMaterializationInput private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN materialization input has been wiped" }
+        check(!wiped) { "Qp materialization input has been wiped" }
     }
 
     companion object {
@@ -106,7 +106,7 @@ internal class QpMaterializedPage private constructor(
     internal val descriptorForBuild: QpPageDescriptor
         get() {
             requireLive()
-            return descriptorValue ?: error("AKEN materialized page descriptor has been wiped")
+            return descriptorValue ?: error("Qp materialized page descriptor has been wiped")
         }
 
     internal val encodedLength: Int
@@ -134,7 +134,7 @@ internal class QpMaterializedPage private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN materialized page has been wiped" }
+        check(!wiped) { "Qp materialized page has been wiped" }
     }
 
     companion object {
@@ -170,7 +170,7 @@ internal class QpPageMaterialization private constructor(
 
     internal fun copyMeshRootForBuild(): ByteArray {
         requireLive()
-        return (meshValue ?: error("AKEN materialization mesh has been wiped")).root
+        return (meshValue ?: error("Qp materialization mesh has been wiped")).root
     }
 
     /**
@@ -232,7 +232,7 @@ internal class QpPageMaterialization private constructor(
     }
 
     /**
-     * Build-only final writer verification for a materialized AKEN output.
+     * Build-only final writer verification for a materialized Qp output.
      *
      * The caller supplies the exact final JAR-entry byte view. This method first
      * verifies the one-pass canonical commitment using its declared zero ranges,
@@ -304,7 +304,7 @@ internal class QpPageMaterialization private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN page materialization has been wiped" }
+        check(!wiped) { "Qp page materialization has been wiped" }
     }
 
     private fun proofMatchesMesh(
@@ -328,7 +328,7 @@ internal class QpPageMaterialization private constructor(
 }
 
 /**
- * Converts registered AKEN pages into page-local AEAD payloads, one full-payload
+ * Converts registered Qp pages into page-local AEAD payloads, one full-payload
  * Merkle mesh, and one non-enumerable descriptor/proof record per page.
  *
  * This consumes [plan]: both every input's owned plaintext copy and the whole
@@ -352,13 +352,13 @@ internal object QpPageMaterializer {
         var completed = false
         try {
             for (input in inputs) inputList += input
-            require(inputList.isNotEmpty()) { "AKEN page materialization requires at least one input" }
+            require(inputList.isNotEmpty()) { "Qp page materialization requires at least one input" }
             artifactCommitment = plan.artifactCanonicalCommitment
             val registeredPages = HashSet<String>()
             inputList.forEach { input ->
                 val pageKey = pageKey(input.page)
                 require(registeredPages.add(pageKey)) {
-                    "AKEN page materialization contains the same registered page more than once"
+                    "Qp page materialization contains the same registered page more than once"
                 }
                 drafts += draftFor(plan, input)
             }
@@ -370,7 +370,7 @@ internal object QpPageMaterializer {
                 val proofLeafEncoding = draft.copyLeafEncoding()
                 val proof = try {
                     checkNotNull(mesh).proofFor(proofLeafEncoding)
-                        ?: error("AKEN materialization mesh is missing its generated leaf proof")
+                        ?: error("Qp materialization mesh is missing its generated leaf proof")
                 } finally {
                     Arrays.fill(proofLeafEncoding, 0)
                 }
@@ -400,7 +400,7 @@ internal object QpPageMaterializer {
                 val payload = draft.copyEncodedPayload()
                 try {
                     check(!outputPages.containsKey(key)) {
-                        "AKEN materialization generated a duplicate leaf binding"
+                        "Qp materialization generated a duplicate leaf binding"
                     }
                     outputPages[key] = QpMaterializedPage.create(descriptor, payload)
                 } finally {
@@ -558,13 +558,13 @@ internal object QpPageMaterializer {
         val routeLocatorToken = route.locatorToken
         try {
             require(MessageDigest.isEqual(descriptorLogicalIdentity, draftLogicalIdentity)) {
-                "AKEN materialized descriptor does not bind the logical identity used for AEAD"
+                "Qp materialized descriptor does not bind the logical identity used for AEAD"
             }
             require(route.leafIdentity == draft.leafIdentity) {
-                "AKEN materialized route does not bind the current leaf"
+                "Qp materialized route does not bind the current leaf"
             }
             require(descriptorProof.leafIdentity == draft.leafIdentity) {
-                "AKEN materialized proof does not bind the current leaf"
+                "Qp materialized proof does not bind the current leaf"
             }
             require(
                 route.resourcePath == draft.route.resourcePath &&
@@ -572,32 +572,32 @@ internal object QpPageMaterializer {
                     route.storedLength == draft.route.storedLength &&
                     route.logicalBindingPath == draft.route.logicalBindingPath,
             ) {
-                "AKEN materialized descriptor route does not bind the emitted payload range"
+                "Qp materialized descriptor route does not bind the emitted payload range"
             }
             require(route.codecVariant == draft.codecVariant && route.layoutVariant == draft.layoutVariant) {
-                "AKEN materialized route variants do not match the AEAD page context"
+                "Qp materialized route variants do not match the AEAD page context"
             }
             require(
                 descriptorProof.codecVariant == draft.codecVariant &&
                     descriptorProof.layoutVariant == draft.layoutVariant,
             ) {
-                "AKEN materialized proof variants do not match the AEAD page context"
+                "Qp materialized proof variants do not match the AEAD page context"
             }
             require(MessageDigest.isEqual(descriptorCallSiteProof, expectedCallSiteProof)) {
-                "AKEN materialized proof does not bind the generated call-site proof"
+                "Qp materialized proof does not bind the generated call-site proof"
             }
             require(
                 descriptor.matches(draft.handle) &&
                     descriptor.matches(descriptorHandle) &&
                     route.matches(draft.handle),
             ) {
-                "AKEN materialized descriptor does not bind the generated handle"
+                "Qp materialized descriptor does not bind the generated handle"
             }
             require(MessageDigest.isEqual(proofCommitment, artifactCommitment)) {
-                "AKEN materialized proof commitment does not match the build plan"
+                "Qp materialized proof commitment does not match the build plan"
             }
             require(MessageDigest.isEqual(evaluatorFingerprint, routeFingerprint)) {
-                "AKEN materialized evaluator fingerprint does not match the routed page"
+                "Qp materialized evaluator fingerprint does not match the routed page"
             }
             require(
                 evaluatorPlan.matchesDescriptorBinding(
@@ -611,16 +611,16 @@ internal object QpPageMaterializer {
                     locatorToken = routeLocatorToken,
                 ),
             ) {
-                "AKEN materialized evaluator graph does not match the route/AAD binding"
+                "Qp materialized evaluator graph does not match the route/AAD binding"
             }
             require(proofMatchesExpectedMesh(descriptorProof, draft.leafIdentity, artifactCommitment, proof)) {
-                "AKEN materialized descriptor proof does not match the generated Merkle path"
+                "Qp materialized descriptor proof does not match the generated Merkle path"
             }
             require(plan.verifyEncodedPayloadForMaterialization(draft.handle, payload)) {
-                "AKEN materialized payload did not authenticate against its page-local AEAD binding"
+                "Qp materialized payload did not authenticate against its page-local AEAD binding"
             }
             require(mesh.verify(proof, leafEncoding, payload)) {
-                "AKEN materialized payload did not verify against its full-payload Merkle proof"
+                "Qp materialized payload did not verify against its full-payload Merkle proof"
             }
         } finally {
             Arrays.fill(leafEncoding, 0)
@@ -650,7 +650,7 @@ internal object QpPageMaterializer {
             try {
                 val route = draft.route
                 require(route.storedLength == payload.size) {
-                    "AKEN materialized route length does not match its encrypted payload"
+                    "Qp materialized route length does not match its encrypted payload"
                 }
                 ranges += PhysicalRange(
                     resourcePath = route.resourcePath,
@@ -668,7 +668,7 @@ internal object QpPageMaterializer {
             val prior = previous
             if (prior != null && prior.resourcePath == current.resourcePath) {
                 require(current.resourceOffset.toLong() >= prior.endExclusive) {
-                    "AKEN materialized routes overlap in physical resource '${current.resourcePath}'"
+                    "Qp materialized routes overlap in physical resource '${current.resourcePath}'"
                 }
             }
             previous = current
@@ -698,7 +698,7 @@ internal object QpPageMaterializer {
 
     /**
      * New production descriptors carry one opaque page-bound terminal.  The
-     * compatibility AKEN-7 fragment graph remains build-only and is never
+     * compatibility legacy fragment fragment graph remains build-only and is never
      * serialized into a newly materialized artifact.
      */
     private fun runtimeEvaluatorPlanFor(

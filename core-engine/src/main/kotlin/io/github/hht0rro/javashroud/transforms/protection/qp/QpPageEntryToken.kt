@@ -4,11 +4,11 @@ import java.security.MessageDigest
 import java.util.Arrays
 
 /**
- * Public, deterministic locator key derivation for typed non-VBC4 AKEN page
+ * Public, deterministic locator key derivation for typed non-Qp VM Qp page
  * bridges.  It is a route binding only: it derives no DEK and carries no
  * authority outside the exact kind/page/handle tuple.
  *
- * VBC4 keeps its existing explicit method entry token because VM dispatch is
+ * Qp VM keeps its existing explicit method entry token because VM dispatch is
  * keyed by that method identity.  String, encrypted-class, and native-chunk
  * bridges receive only a handle, page index, and call-site proof, so they use
  * this artifact-local key to select exactly one compiled locator record.
@@ -44,9 +44,9 @@ internal object QpPageEntryToken {
     }
 
     /**
-     * Compiler-record binding material for one non-VBC4 typed route.  It is
-     * public integrity data and stays separate from the VBC4 state-layout
-     * digest carried by legacy-compatible VBC4 records on the same wire format.
+     * Compiler-record binding material for one non-Qp VM typed route.  It is
+     * public integrity data and stays separate from the Qp VM state-layout
+     * digest carried by legacy-compatible Qp VM records on the same wire format.
      */
     fun pageBinding(
         resourceKind: QpResourceKind,
@@ -55,7 +55,7 @@ internal object QpPageEntryToken {
         routeEncoding: ByteArray,
     ): ByteArray {
         requireTypedRequest(resourceKind, pageIndex, encodedHandle)
-        require(routeEncoding.isNotEmpty()) { "AKEN typed page route binding is empty" }
+        require(routeEncoding.isNotEmpty()) { "Qp typed page route binding is empty" }
         return MessageDigest.getInstance("SHA-256").apply {
             update(PAGE_BINDING_DOMAIN)
             update(resourceKind.id.toByte())
@@ -73,11 +73,11 @@ internal object QpPageEntryToken {
         encodedHandle: ByteArray,
     ) {
         require(resourceKind != QpResourceKind.QpMethod) {
-            "AKEN typed page entry-token derivation does not apply to VBC4"
+            "Qp typed page entry-token derivation does not apply to Qp VM"
         }
-        require(pageIndex >= 0) { "AKEN typed page entry-token page index is invalid" }
+        require(pageIndex >= 0) { "Qp typed page entry-token page index is invalid" }
         require(encodedHandle.size == QpHandle.ENCODED_HANDLE_SIZE) {
-            "AKEN typed page entry-token handle length is invalid"
+            "Qp typed page entry-token handle length is invalid"
         }
     }
 

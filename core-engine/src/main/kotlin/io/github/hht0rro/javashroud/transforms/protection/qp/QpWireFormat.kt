@@ -5,7 +5,7 @@ import java.security.MessageDigest
 import java.util.Arrays
 
 /**
- * The single AKEN-R1 runtime frame grammar shared with the Rust runtime.
+ * The single Qp runtime frame grammar shared with the Rust runtime.
  *
  * Payload bytes are opaque to this package. The parser validates only the
  * bounded frame envelope, and [open] does not copy or expose payload bytes
@@ -38,7 +38,7 @@ object QpWireFormat {
         }
     }
 
-    /** Encodes the current R1 frame; no retired format is accepted or emitted. */
+    /** Encodes the current frame; no retired format is accepted or emitted. */
     fun encode(binding: ByteArray, payload: ByteArray): ByteArray {
         requireBinding(binding)
         requirePayload(payload)
@@ -67,7 +67,7 @@ object QpWireFormat {
     }
 
     /**
-     * Strictly opens one current R1 frame. Structural fields are located first,
+     * Strictly opens one current frame. Structural fields are located first,
      * but payload bytes are not copied or interpreted until authentication has
      * succeeded.
      */
@@ -93,7 +93,7 @@ object QpWireFormat {
             if (!digestMatches || !tagMatches) {
                 throw QpWireException(
                     QpWireException.Code.AUTHENTICATION_FAILED,
-                    "AKEN-R1 runtime frame authentication failed",
+                    "Qp runtime frame authentication failed",
                 )
             }
             return QpAuthenticatedFrame(
@@ -112,7 +112,7 @@ object QpWireFormat {
         if (frame.size > MAX_FRAME_SIZE) {
             throw QpWireException(
                 QpWireException.Code.FRAME_TOO_LARGE,
-                "AKEN-R1 runtime frame is too large: ${frame.size} > $MAX_FRAME_SIZE",
+                "Qp runtime frame is too large: ${frame.size} > $MAX_FRAME_SIZE",
             )
         }
         val cursor = QpCursor(frame)
@@ -133,14 +133,14 @@ object QpWireFormat {
         if (version != VERSION) {
             throw QpWireException(
                 QpWireException.Code.UNSUPPORTED_VERSION,
-                "AKEN-R1 runtime frame version is unsupported: $version",
+                "Qp runtime frame version is unsupported: $version",
             )
         }
         val payloadLength = cursor.readU32Be()
         if (payloadLength > MAX_PAYLOAD_SIZE.toLong()) {
             throw QpWireException(
                 QpWireException.Code.FRAME_TOO_LARGE,
-                "AKEN-R1 runtime payload is too large: $payloadLength > $MAX_PAYLOAD_SIZE",
+                "Qp runtime payload is too large: $payloadLength > $MAX_PAYLOAD_SIZE",
             )
         }
         val digestOffset = cursor.position
@@ -162,13 +162,13 @@ object QpWireFormat {
         if (binding.isEmpty()) {
             throw QpWireException(
                 QpWireException.Code.INVALID_INPUT,
-                "AKEN-R1 runtime binding must not be empty",
+                "Qp runtime binding must not be empty",
             )
         }
         if (binding.size > MAX_BINDING_SIZE) {
             throw QpWireException(
                 QpWireException.Code.FRAME_TOO_LARGE,
-                "AKEN-R1 runtime binding is too large: ${binding.size} > $MAX_BINDING_SIZE",
+                "Qp runtime binding is too large: ${binding.size} > $MAX_BINDING_SIZE",
             )
         }
     }
@@ -177,7 +177,7 @@ object QpWireFormat {
         if (payload.size > MAX_PAYLOAD_SIZE) {
             throw QpWireException(
                 QpWireException.Code.FRAME_TOO_LARGE,
-                "AKEN-R1 runtime payload is too large: ${payload.size} > $MAX_PAYLOAD_SIZE",
+                "Qp runtime payload is too large: ${payload.size} > $MAX_PAYLOAD_SIZE",
             )
         }
     }
@@ -186,7 +186,7 @@ object QpWireFormat {
         if (bindingDigest.size != DIGEST_SIZE) {
             throw QpWireException(
                 QpWireException.Code.INVALID_INPUT,
-                "AKEN-R1 runtime binding digest must be $DIGEST_SIZE bytes",
+                "Qp runtime binding digest must be $DIGEST_SIZE bytes",
             )
         }
     }
@@ -199,7 +199,7 @@ object QpWireFormat {
     ): ByteArray {
         requireDigest(bindingDigest)
         require(payloadOffset >= 0 && payloadLength >= 0 && payloadOffset <= frame.size - payloadLength) {
-            "AKEN-R1 runtime payload range is invalid"
+            "Qp runtime payload range is invalid"
         }
         val digest = MessageDigest.getInstance("SHA-256")
         val domain = derivedFrameAuthDomain()
@@ -226,7 +226,7 @@ object QpWireFormat {
     }
 
     private fun updateU32(digest: MessageDigest, value: Long) {
-        require(value in 0..0xFFFF_FFFFL) { "AKEN-R1 framed length exceeds u32" }
+        require(value in 0..0xFFFF_FFFFL) { "Qp framed length exceeds u32" }
         digest.update(
             byteArrayOf(
                 (value ushr 24).toByte(),
@@ -251,7 +251,7 @@ class RuntimeBindingDigest private constructor(bytes: ByteArray) {
 
     init {
         require(value.size == QpWireFormat.DIGEST_SIZE) {
-            "AKEN-R1 runtime binding digest must be ${QpWireFormat.DIGEST_SIZE} bytes"
+            "Qp runtime binding digest must be ${QpWireFormat.DIGEST_SIZE} bytes"
         }
     }
 
@@ -272,13 +272,13 @@ class RuntimeBindingDigest private constructor(bytes: ByteArray) {
             if (binding.isEmpty()) {
                 throw QpWireException(
                     QpWireException.Code.INVALID_INPUT,
-                    "AKEN-R1 runtime binding must not be empty",
+                    "Qp runtime binding must not be empty",
                 )
             }
             if (binding.size > QpWireFormat.MAX_BINDING_SIZE) {
                 throw QpWireException(
                     QpWireException.Code.FRAME_TOO_LARGE,
-                    "AKEN-R1 runtime binding is too large: ${binding.size} > ${QpWireFormat.MAX_BINDING_SIZE}",
+                    "Qp runtime binding is too large: ${binding.size} > ${QpWireFormat.MAX_BINDING_SIZE}",
                 )
             }
             val digest = MessageDigest.getInstance("SHA-256")
@@ -302,7 +302,7 @@ class RuntimeBindingDigest private constructor(bytes: ByteArray) {
     }
 }
 
-/** Authenticated R1 payload; all returned byte arrays are defensive copies. */
+/** Authenticated current payload; all returned byte arrays are defensive copies. */
 class QpAuthenticatedFrame internal constructor(
     bindingDigest: RuntimeBindingDigest,
     payload: ByteArray,
@@ -321,7 +321,7 @@ class QpAuthenticatedFrame internal constructor(
         get() = copyPayload()
 
     fun copyPayload(): ByteArray {
-        check(!wiped) { "AKEN-R1 authenticated payload has been wiped" }
+        check(!wiped) { "Qp authenticated payload has been wiped" }
         return payloadValue.copyOf()
     }
 
@@ -343,7 +343,7 @@ private class WipableByteArrayOutputStream(initialSize: Int) : ByteArrayOutputSt
     }
 }
 
-/** Bounds-checked reader used by every Kotlin R1 wire parser. */
+/** Bounds-checked reader used by every Kotlin wire parser. */
 class QpCursor(private val bytes: ByteArray) {
     var position: Int = 0
         private set
@@ -375,12 +375,12 @@ class QpCursor(private val bytes: ByteArray) {
     fun readBytes(length: Int): ByteArray = readFixed(length)
 
     fun readFrame(maxLength: Int): ByteArray {
-        require(maxLength >= 0) { "AKEN-R1 frame maximum length is invalid" }
+        require(maxLength >= 0) { "Qp frame maximum length is invalid" }
         val length = readU32Be()
         if (length > maxLength.toLong()) {
             throw QpWireException(
                 QpWireException.Code.FRAME_TOO_LARGE,
-                "AKEN-R1 framed field is too large: $length > $maxLength",
+                "Qp framed field is too large: $length > $maxLength",
             )
         }
         return readFixed(length.toInt())
@@ -395,7 +395,7 @@ class QpCursor(private val bytes: ByteArray) {
         if (remaining != 0) {
             throw QpWireException(
                 QpWireException.Code.TRAILING_BYTES,
-                "AKEN-R1 runtime frame has $remaining trailing bytes",
+                "Qp runtime frame has $remaining trailing bytes",
             )
         }
     }
@@ -404,20 +404,20 @@ class QpCursor(private val bytes: ByteArray) {
         if (length < 0 || position > bytes.size || length > bytes.size - position) {
             throw QpWireException(
                 QpWireException.Code.TRUNCATED,
-                "AKEN-R1 wire input is truncated at $position: requested $length, remaining $remaining",
+                "Qp wire input is truncated at $position: requested $length, remaining $remaining",
             )
         }
     }
 }
 
-/** Explicit bounded writer used for the fixed R1 frame. */
+/** Explicit bounded writer used for the fixed frame. */
 class QpFrameWriter(private val maxSize: Int) : AutoCloseable {
     private val bytes = WipableByteArrayOutputStream(minOf(maxSize.coerceAtLeast(0), 1024))
     @Volatile
     private var closed = false
 
     init {
-        require(maxSize >= 0) { "AKEN-R1 writer maximum size is invalid" }
+        require(maxSize >= 0) { "Qp writer maximum size is invalid" }
     }
 
     val position: Int
@@ -425,14 +425,14 @@ class QpFrameWriter(private val maxSize: Int) : AutoCloseable {
 
     fun writeU8(value: Int) {
         requireOpen()
-        require(value in 0..0xFF) { "AKEN-R1 u8 value is invalid" }
+        require(value in 0..0xFF) { "Qp u8 value is invalid" }
         ensureCapacity(1)
         bytes.write(value)
     }
 
     fun writeU16Be(value: Int) {
         requireOpen()
-        require(value in 0..0xFFFF) { "AKEN-R1 u16 value is invalid" }
+        require(value in 0..0xFFFF) { "Qp u16 value is invalid" }
         ensureCapacity(2)
         bytes.write((value ushr 8) and 0xFF)
         bytes.write(value and 0xFF)
@@ -440,7 +440,7 @@ class QpFrameWriter(private val maxSize: Int) : AutoCloseable {
 
     fun writeU32Be(value: Long) {
         requireOpen()
-        require(value in 0..0xFFFF_FFFFL) { "AKEN-R1 u32 value is invalid" }
+        require(value in 0..0xFFFF_FFFFL) { "Qp u32 value is invalid" }
         ensureCapacity(4)
         bytes.write((value ushr 24).toInt() and 0xFF)
         bytes.write((value ushr 16).toInt() and 0xFF)
@@ -460,7 +460,7 @@ class QpFrameWriter(private val maxSize: Int) : AutoCloseable {
         if (total > Int.MAX_VALUE.toLong()) {
             throw QpWireException(
                 QpWireException.Code.LENGTH_OVERFLOW,
-                "AKEN-R1 framed field length overflows JVM bounds",
+                "Qp framed field length overflows JVM bounds",
             )
         }
         ensureCapacity(total.toInt())
@@ -483,7 +483,7 @@ class QpFrameWriter(private val maxSize: Int) : AutoCloseable {
     }
 
     private fun requireOpen() {
-        check(!closed) { "AKEN-R1 writer has been closed" }
+        check(!closed) { "Qp writer has been closed" }
     }
 
     private fun ensureCapacity(additional: Int) {
@@ -492,7 +492,7 @@ class QpFrameWriter(private val maxSize: Int) : AutoCloseable {
             val requested = bytes.size().toLong() + additional.toLong()
             throw QpWireException(
                 QpWireException.Code.FRAME_TOO_LARGE,
-                "AKEN-R1 writer exceeds its bound: $requested > $maxSize",
+                "Qp writer exceeds its bound: $requested > $maxSize",
             )
         }
     }

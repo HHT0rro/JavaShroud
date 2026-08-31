@@ -2,7 +2,7 @@ package io.github.hht0rro.javashroud.transforms.protection.qp
 
 import java.security.SecureRandom
 
-/** Randomized AKEN v4 target page sizes for each protected resource family. */
+/** Randomized Qp current format target page sizes for each protected resource family. */
 class QpPageSizePolicy private constructor(
     sizesByKind: Map<QpResourceKind, IntArray>,
 ) {
@@ -10,10 +10,10 @@ class QpPageSizePolicy private constructor(
 
     init {
         require(sizes.keys.containsAll(QpResourceKind.entries)) {
-            "AKEN page size policy must cover every resource kind"
+            "Qp page size policy must cover every resource kind"
         }
         require(sizes.values.all { values -> values.isNotEmpty() && values.all { it > 0 } }) {
-            "AKEN page sizes must be positive"
+            "Qp page sizes must be positive"
         }
     }
 

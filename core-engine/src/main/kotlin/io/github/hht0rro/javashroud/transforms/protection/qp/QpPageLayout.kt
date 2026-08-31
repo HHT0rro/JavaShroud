@@ -5,9 +5,9 @@ import java.util.Arrays
 import java.util.Base64
 
 /**
- * Build-specific physical framing for one AKEN v4 encrypted page.
+ * Build-specific physical framing for one Qp current format encrypted page.
  *
- * The logical AKEN header stays fixed-size so native and Java emitters can share
+ * The logical Qp header stays fixed-size so native and Java emitters can share
  * a compact codec contract. The header is nevertheless placed in a randomized
  * physical frame: every build chooses prefix/suffix lengths, a header position,
  * and an opaque routing marker. The complete descriptor is authenticated by the
@@ -27,16 +27,16 @@ class QpPageLayout private constructor(
 
     init {
         require(FAMILY_PATTERN.matches(familyValue)) {
-            "AKEN layout family must match " + FAMILY_PATTERN.pattern
+            "Qp layout family must match " + FAMILY_PATTERN.pattern
         }
         require(prefixLength in MIN_PREFIX_LENGTH..MAX_PREFIX_LENGTH) {
-            "AKEN prefix length is outside the supported frame range"
+            "Qp prefix length is outside the supported frame range"
         }
         require(suffixLength in MIN_SUFFIX_LENGTH..MAX_SUFFIX_LENGTH) {
-            "AKEN suffix length is outside the supported frame range"
+            "Qp suffix length is outside the supported frame range"
         }
         require(markerValue.size == ROUTING_MARKER_SIZE) {
-            "AKEN layout routing marker has an invalid length"
+            "Qp layout routing marker has an invalid length"
         }
     }
 
@@ -76,7 +76,7 @@ class QpPageLayout private constructor(
     fun headerOffset(totalLength: Int): Int {
         requireLive()
         require(totalLength >= minimumEncodedLength()) {
-            "AKEN encoded page is shorter than its configured frame"
+            "Qp encoded page is shorter than its configured frame"
         }
         return if (headerAfterBodyValue) {
             totalLength - suffixLength - QpPageCodec.LOGICAL_HEADER_SIZE
@@ -99,13 +99,13 @@ class QpPageLayout private constructor(
     fun encodedLength(ciphertextWithTagLength: Int): Int {
         requireLive()
         require(ciphertextWithTagLength >= QpPageCodec.GCM_TAG_SIZE) {
-            "AKEN ciphertext must include a GCM tag"
+            "Qp ciphertext must include a GCM tag"
         }
         val total = prefixLength.toLong() +
             QpPageCodec.LOGICAL_HEADER_SIZE.toLong() +
             ciphertextWithTagLength.toLong() +
             suffixLength.toLong()
-        require(total <= Int.MAX_VALUE) { "AKEN encoded page is too large" }
+        require(total <= Int.MAX_VALUE) { "Qp encoded page is too large" }
         return total.toInt()
     }
 
@@ -130,7 +130,7 @@ class QpPageLayout private constructor(
     private fun minimumEncodedLength(): Int = encodedLength(QpPageCodec.GCM_TAG_SIZE)
 
     private fun requireLive() {
-        check(!wiped) { "AKEN page layout has been wiped" }
+        check(!wiped) { "Qp page layout has been wiped" }
     }
 
     companion object {
@@ -175,21 +175,21 @@ class QpPageLayout private constructor(
         fun fromVariant(variant: String): QpPageLayout {
             val parts = variant.split(':')
             require(parts.size == 6 && parts[0] == FORMAT_PREFIX) {
-                "AKEN layout variant has an invalid format"
+                "Qp layout variant has an invalid format"
             }
             val prefix = parts[2].toIntOrNull()
-                ?: throw IllegalArgumentException("AKEN layout prefix is invalid")
+                ?: throw IllegalArgumentException("Qp layout prefix is invalid")
             val suffix = parts[3].toIntOrNull()
-                ?: throw IllegalArgumentException("AKEN layout suffix is invalid")
+                ?: throw IllegalArgumentException("Qp layout suffix is invalid")
             val headerAfterBody = when (parts[4]) {
                 POSITION_HEAD -> false
                 POSITION_TAIL -> true
-                else -> throw IllegalArgumentException("AKEN layout header position is invalid")
+                else -> throw IllegalArgumentException("Qp layout header position is invalid")
             }
             val marker = try {
                 Base64.getUrlDecoder().decode(parts[5])
             } catch (error: IllegalArgumentException) {
-                throw IllegalArgumentException("AKEN layout routing marker is invalid", error)
+                throw IllegalArgumentException("Qp layout routing marker is invalid", error)
             }
             return try {
                 QpPageLayout(
@@ -207,7 +207,7 @@ class QpPageLayout private constructor(
         private fun normalizeFamily(family: String): String {
             val normalized = family.trim().lowercase()
             require(FAMILY_PATTERN.matches(normalized)) {
-                "AKEN layout family must match " + FAMILY_PATTERN.pattern
+                "Qp layout family must match " + FAMILY_PATTERN.pattern
             }
             return normalized
         }

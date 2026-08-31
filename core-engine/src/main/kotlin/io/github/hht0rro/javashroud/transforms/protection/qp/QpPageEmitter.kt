@@ -6,14 +6,14 @@ import java.util.Base64
 import kotlin.jvm.JvmSynthetic
 
 /**
- * Build-only ownership wrapper for one already-registered VBC4 AKEN page.
+ * Build-only ownership wrapper for one already-registered Qp VM Qp page.
  *
  * The request keeps defensive copies of its plaintext, logical identity, and
  * call-site proof until [QpPageEmitter] consumes it. It never exposes a
  * DEK, a page decoder, or a runtime resource lookup surface. The supplied
  * identity must exactly match the registered page identity, while distinct
  * [QpBuildPlan.Page.pageIndex] values remain independent pages of the same
- * logical VBC4 method.
+ * logical Qp VM method.
  */
 internal class QpPageEmissionRequest private constructor(
     internal val page: QpBuildPlan.Page,
@@ -34,20 +34,20 @@ internal class QpPageEmissionRequest private constructor(
 
     init {
         require(page.resourceKind == QpResourceKind.QpMethod) {
-            "AKEN VBC4 page emission requires a QpMethod page"
+            "Qp current-format page emission requires a QpMethod page"
         }
-        require(logicalIdentityValue.isNotEmpty()) { "AKEN VBC4 logical identity must not be empty" }
-        require(plaintextValue.isNotEmpty()) { "AKEN VBC4 page plaintext must not be empty" }
+        require(logicalIdentityValue.isNotEmpty()) { "Qp current-format logical identity must not be empty" }
+        require(plaintextValue.isNotEmpty()) { "Qp current-format page plaintext must not be empty" }
         require(callSiteProofValue.isNotEmpty() && callSiteProofValue.size <= MAX_CALL_SITE_PROOF_SIZE) {
-            "AKEN VBC4 call-site proof length is invalid"
+            "Qp current-format call-site proof length is invalid"
         }
         require(resourcePath.isNotBlank() && '\u0000' !in resourcePath) {
-            "AKEN VBC4 resource path is invalid"
+            "Qp current-format resource path is invalid"
         }
         require(logicalBindingPath.isNotBlank() && '\u0000' !in logicalBindingPath && '\\' !in logicalBindingPath) {
-            "AKEN VBC4 logical binding path is invalid"
+            "Qp current-format logical binding path is invalid"
         }
-        require(resourceOffset >= 0) { "AKEN VBC4 resource offset must be non-negative" }
+        require(resourceOffset >= 0) { "Qp current-format resource offset must be non-negative" }
         verifyPageBinding()
     }
 
@@ -96,7 +96,7 @@ internal class QpPageEmissionRequest private constructor(
         val registeredIdentity = page.logicalIdentity
         try {
             require(MessageDigest.isEqual(registeredIdentity, logicalIdentityValue)) {
-                "AKEN VBC4 request identity does not match its registered page"
+                "Qp current-format request identity does not match its registered page"
             }
         } finally {
             Arrays.fill(registeredIdentity, 0)
@@ -104,7 +104,7 @@ internal class QpPageEmissionRequest private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN VBC4 page emission request has been wiped" }
+        check(!wiped) { "Qp current-format page emission request has been wiped" }
     }
 
     companion object {
@@ -133,7 +133,7 @@ internal class QpPageEmissionRequest private constructor(
 }
 
 /**
- * One build-only, independently materialized VBC4 page resource.
+ * One build-only, independently materialized Qp VM page resource.
  *
  * Stored payload, descriptor, handle components, logical identity, and
  * call-site proof are private mutable storage solely so [wipe] can clear them.
@@ -167,24 +167,24 @@ internal class QpPageEmission private constructor(
     private var wiped: Boolean = false
 
     init {
-        require(resourcePath.isNotBlank() && '\u0000' !in resourcePath) { "AKEN VBC4 output path is invalid" }
-        require(resourceOffset >= 0) { "AKEN VBC4 output offset must be non-negative" }
+        require(resourcePath.isNotBlank() && '\u0000' !in resourcePath) { "Qp current-format output path is invalid" }
+        require(resourceOffset >= 0) { "Qp current-format output offset must be non-negative" }
         require(storedLength > 0 && storedLength == encryptedPayloadValue.size) {
-            "AKEN VBC4 output payload length is invalid"
+            "Qp current-format output payload length is invalid"
         }
-        require(pageIndex >= 0) { "AKEN VBC4 output page index must be non-negative" }
-        require(descriptorBytesValue.isNotEmpty()) { "AKEN VBC4 descriptor bytes must not be empty" }
+        require(pageIndex >= 0) { "Qp current-format output page index must be non-negative" }
+        require(descriptorBytesValue.isNotEmpty()) { "Qp current-format descriptor bytes must not be empty" }
         require(handleEncodingValue.size == QpHandle.ENCODED_HANDLE_SIZE) {
-            "AKEN VBC4 output handle encoding length is invalid"
+            "Qp current-format output handle encoding length is invalid"
         }
         require(locatorTokenValue.size == QpHandle.LOCATOR_TOKEN_SIZE) {
-            "AKEN VBC4 output locator token length is invalid"
+            "Qp current-format output locator token length is invalid"
         }
         require(evaluatorFingerprintValue.size == QpHandle.FINGERPRINT_SIZE) {
-            "AKEN VBC4 output evaluator fingerprint length is invalid"
+            "Qp current-format output evaluator fingerprint length is invalid"
         }
-        require(logicalIdentityValue.isNotEmpty()) { "AKEN VBC4 output logical identity must not be empty" }
-        require(callSiteProofValue.isNotEmpty()) { "AKEN VBC4 output call-site proof must not be empty" }
+        require(logicalIdentityValue.isNotEmpty()) { "Qp current-format output logical identity must not be empty" }
+        require(callSiteProofValue.isNotEmpty()) { "Qp current-format output call-site proof must not be empty" }
     }
 
     val isWiped: Boolean
@@ -200,7 +200,7 @@ internal class QpPageEmission private constructor(
         return descriptorBytesValue.copyOf()
     }
 
-    /** Produces a new opaque handle for this exact VBC4 page only. */
+    /** Produces a new opaque handle for this exact Qp VM page only. */
     internal fun copyHandleForBuild(): QpHandle {
         requireLive()
         return QpHandle.create(
@@ -244,7 +244,7 @@ internal class QpPageEmission private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN VBC4 page emission has been wiped" }
+        check(!wiped) { "Qp current-format page emission has been wiped" }
     }
 
     companion object {
@@ -254,7 +254,7 @@ internal class QpPageEmission private constructor(
         ): QpPageEmission {
             val descriptor = page.descriptorForBuild
             require(descriptor.resourceKind == QpResourceKind.QpMethod) {
-                "AKEN VBC4 emitter received a non-VBC4 materialized page"
+                "Qp current-format emitter received a non-Qp VM materialized page"
             }
 
             var descriptorBytes: ByteArray? = null
@@ -268,22 +268,22 @@ internal class QpPageEmission private constructor(
             try {
                 val route = descriptor.route
                 require(route.resourceKind == QpResourceKind.QpMethod) {
-                    "AKEN VBC4 route does not bind a VBC4 page"
+                    "Qp current-format route does not bind a Qp VM page"
                 }
                 require(route.pageIndex == descriptor.pageIndex) {
-                    "AKEN VBC4 route page index does not match descriptor"
+                    "Qp current-format route page index does not match descriptor"
                 }
 
                 descriptorBytes = descriptor.encode()
                 encryptedPayload = page.copyEncodedPayloadForBuild()
                 require(encryptedPayload.size == route.storedLength) {
-                    "AKEN VBC4 materialized payload length does not match its route"
+                    "Qp current-format materialized payload length does not match its route"
                 }
                 logicalIdentity = descriptor.logicalIdentity
                 callSiteProof = descriptor.proof.callSiteProof
                 handle = descriptor.handle
                 require(descriptor.matches(handle) && route.matches(handle)) {
-                    "AKEN VBC4 descriptor handle binding is invalid"
+                    "Qp current-format descriptor handle binding is invalid"
                 }
                 handleEncoding = handle.encoded
                 locatorToken = handle.locatorToken
@@ -318,7 +318,7 @@ internal class QpPageEmission private constructor(
 }
 
 /**
- * Build-only owner for a VBC4 page-emission batch.
+ * Build-only owner for a Qp VM page-emission batch.
  *
  * The returned list exists only for the immediately following artifact writer;
  * it is not a runtime catalog. Closing the owner wipes every page record and
@@ -336,9 +336,9 @@ internal class QpPageEmissionSet private constructor(
 
     init {
         require(meshRootValue.size == QpArtifactCommitment.DIGEST_SIZE) {
-            "AKEN VBC4 mesh root length is invalid"
+            "Qp current-format mesh root length is invalid"
         }
-        require(pagesValue.isNotEmpty()) { "AKEN VBC4 emission set requires at least one page" }
+        require(pagesValue.isNotEmpty()) { "Qp current-format emission set requires at least one page" }
     }
 
     val isWiped: Boolean
@@ -367,7 +367,7 @@ internal class QpPageEmissionSet private constructor(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN VBC4 page emission set has been wiped" }
+        check(!wiped) { "Qp current-format page emission set has been wiped" }
     }
 
     companion object {
@@ -380,9 +380,9 @@ internal class QpPageEmissionSet private constructor(
 
 /**
  * Converts already-registered [QpResourceKind.QpMethod] pages into
- * independently routed VBC4 page resources.
+ * independently routed Qp VM page resources.
  *
- * This is an intentionally narrow build bridge, not a VBC4 runtime decoder:
+ * This is an intentionally narrow build bridge, not a Qp VM runtime decoder:
  * it delegates AEAD emission and mesh construction to [QpPageMaterializer],
  * copies only the final page-local writer artifacts, and then wipes the input
  * requests, materialization owner, and build plan on every outcome.
@@ -406,37 +406,37 @@ internal object QpPageEmitter {
             // owner cleanup path below.
             for (request in requests) {
                 require(request.page.resourceKind == QpResourceKind.QpMethod) {
-                    "AKEN VBC4 emitter received a non-VBC4 page request"
+                    "Qp current-format emitter received a non-Qp VM page request"
                 }
                 requestList += request
             }
-            require(requestList.isNotEmpty()) { "AKEN VBC4 page emission requires at least one request" }
+            require(requestList.isNotEmpty()) { "Qp current-format page emission requires at least one request" }
 
             requestList.forEach { request ->
                 inputList += request.toMaterializationInput()
             }
-            // Page indices are local to a logical VBC4 method.  Different
+            // Page indices are local to a logical Qp VM method.  Different
             // methods may therefore both have page zero; use the opaque page
             // handle as the build-only correlation key rather than turning the
             // batch into a single global page-index namespace.
             val requestsByHandle = requestList.associateBy(::requestHandleBinding)
             require(requestsByHandle.size == requestList.size) {
-                "AKEN VBC4 page emission contains duplicate page handle bindings"
+                "Qp current-format page emission contains duplicate page handle bindings"
             }
 
             materialization = QpPageMaterializer.materializeAndWipe(plan, inputList)
             val materializedPages = materialization.pagesForBuild()
             require(materializedPages.size == requestList.size) {
-                "AKEN VBC4 materialization page count does not match its requests"
+                "Qp current-format materialization page count does not match its requests"
             }
             require(materializedPages.all(materialization::verifyPageForBuild)) {
-                "AKEN VBC4 materialization did not verify its generated page binding"
+                "Qp current-format materialization did not verify its generated page binding"
             }
 
             meshRoot = materialization.copyMeshRootForBuild()
             materializedPages.forEach { materialized ->
                 val request = requestsByHandle[materializedHandleBinding(materialized)]
-                    ?: error("AKEN VBC4 materialization emitted an unknown page handle binding")
+                    ?: error("Qp current-format materialization emitted an unknown page handle binding")
                 emittedPages += QpPageEmission.fromMaterialized(
                     page = materialized,
                     entryToken = request.entryToken,
