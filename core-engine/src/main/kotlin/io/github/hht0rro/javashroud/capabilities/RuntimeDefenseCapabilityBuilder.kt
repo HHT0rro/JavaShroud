@@ -14,6 +14,7 @@ internal fun runtimeDefenseCapabilityBindings(): List<CapabilityBinding> = listO
         risk = "medium",
         requiresOptIn = true,
         defaultEnabled = false,
+        requiredPassIds = listOf("jni-microkernel-loader"),
         compatibilityNotes = "Changes callsite linking and runtime dispatch paths; generated helper/callsite surfaces target Java 11+ runtime behavior. Verify performance, debugging, framework proxy, and older runtime scenarios.",
         params = listOf(
             ParamSchema(

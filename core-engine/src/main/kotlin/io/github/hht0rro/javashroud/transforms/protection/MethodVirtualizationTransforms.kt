@@ -32,8 +32,8 @@ private const val VM_INT_INT_DISPATCH_DESCRIPTOR = "(JI)I"
 private const val VM_INT_VOID_DISPATCH_DESCRIPTOR = "(JI)V"
 private const val JNI_MICROKERNEL_DISPATCH_OWNER = "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge"
 private const val JNI_MICROKERNEL_VM_DISPATCH_METHOD = "executeVmResource"
-private const val JNI_MICROKERNEL_AKEN_VM_PAGE_DISPATCH_METHOD = "executeQpVmPage"
-private const val AKEN_VM_PAGE_DISPATCH_DESCRIPTOR = "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
+private const val JNI_MICROKERNEL_VM_PAGE_DISPATCH_METHOD = "executeQpVmPage"
+private const val QP_VM_PAGE_DISPATCH_DESCRIPTOR = "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
 private const val QP_DISPATCH_LAYOUT = "qp-native"
 private val QP_ALLOWED_PARAMS = setOf(
     "seed",
@@ -79,6 +79,28 @@ private fun isClassLoaderOrResourceBoundaryMethod(owner: String, name: String, d
     if (owner == "java/lang/ClassLoader" && name in setOf("defineClass", "findClass", "loadClass", "getResource", "getResourceAsStream")) return true
     if (owner == "java/lang/Class" && name in setOf("getClassLoader", "getResource", "getResourceAsStream")) return true
     return owner.endsWith("ClassLoader") && name in setOf("defineClass", "findClass", "loadClass", "getResource", "getResourceAsStream")
+}
+
+/**
+ * Classes materialized through an isolated ClassLoader must remain ordinary JVM
+ * classes.  Injecting a Qp-dependent <clinit> into such a class makes
+ * parentless defineClass callers fail before the class's own code can run.
+ */
+internal fun isolatedDefineClassTargets(artifact: BytecodeArtifact): Set<String> = buildSet {
+    artifact.classArtifacts.forEach { classArtifact ->
+        val node = ClassNode()
+        runCatching { ClassReader(classArtifact.bytes).accept(node, ClassReader.SKIP_FRAMES) }
+            .getOrNull() ?: return@forEach
+        node.methods.orEmpty().forEach { method ->
+            val instructions = method.instructions?.toArray()?.toList().orEmpty()
+            if (instructions.none {
+                    it is MethodInsnNode && isClassLoaderOrResourceBoundaryMethod(it.owner, it.name, it.desc)
+                }) return@forEach
+            instructions.filterIsInstance<LdcInsnNode>()
+                .mapNotNull { (it.cst as? Type)?.takeIf { type -> type.sort == Type.OBJECT }?.internalName }
+                .forEach(::add)
+        }
+    }
 }
 
 private fun isSecurityManagerBoundaryMethod(name: String, descriptor: String): Boolean =
@@ -163,23 +185,23 @@ private fun jvmBoundaryBootstrapKeys(classNode: ClassNode): Set<String> = classN
 private fun rejectUnsupportedQpParams(params: Map<String, Any>) {
     val unsupported = params.keys.filter { it !in QP_ALLOWED_PARAMS }
     if (unsupported.isNotEmpty()) {
-        throw IllegalArgumentException("method-virtualization accepts only current VBC4 parameters; unsupported: ${unsupported.joinToString(", ")}")
+        throw IllegalArgumentException("method-virtualization accepts only current native VM parameters; unsupported: ${unsupported.joinToString(", ")}")
     }
     val vmDiversityLevel = params["vmDiversityLevel"] as? String
     require(vmDiversityLevel == null || vmDiversityLevel == "tigress-like") {
-        "method-virtualization vmDiversityLevel '$vmDiversityLevel' is not supported in VBC4; use tigress-like or omit it"
+        "method-virtualization vmDiversityLevel '$vmDiversityLevel' is not supported in native VM; use tigress-like or omit it"
     }
     val vmStrength = params["vmStrength"] as? String
     require(vmStrength == null || vmStrength == "max") {
-        "method-virtualization vmStrength '$vmStrength' is not supported in VBC4; strength is fixed to max"
+        "method-virtualization vmStrength '$vmStrength' is not supported in native VM; strength is fixed to max"
     }
     val fusionLevel = params["fusionLevel"] as? String
     require(fusionLevel == null || fusionLevel == "maximum") {
-        "method-virtualization fusionLevel '$fusionLevel' is not supported in VBC4; fusion is fixed to maximum"
+        "method-virtualization fusionLevel '$fusionLevel' is not supported in native VM; fusion is fixed to maximum"
     }
     val stateBoundEncoding = params["stateBoundEncoding"] as? Boolean
     require(stateBoundEncoding == null || stateBoundEncoding) {
-        "method-virtualization stateBoundEncoding=false is not supported in VBC4; state-bound encoding is fixed on"
+        "method-virtualization stateBoundEncoding=false is not supported in native VM; state-bound encoding is fixed on"
     }
     val fixedTrueParams = listOf(
         "vbc4StateBoundEncoding",
@@ -195,7 +217,7 @@ private fun rejectUnsupportedQpParams(params: Map<String, Any>) {
     for (key in fixedTrueParams) {
         val value = params[key] as? Boolean
         require(value == null || value) {
-            "method-virtualization $key=false is not supported in VBC4; max-strength native-only diversity is fixed on"
+            "method-virtualization $key=false is not supported in native VM; max-strength native-only diversity is fixed on"
         }
     }
 }
@@ -208,7 +230,7 @@ private fun rejectUnsupportedQpParams(params: Map<String, Any>) {
  * - Operand stack / register simulator
  * - Per-method handler morphing metadata
  *
- * Each build emits a native-only VBC4 resource with fixed max-strength behavior.
+ * Each build emits a native-only native VM resource with fixed max-strength behavior.
  */
 fun applyMethodVirtualization(
     artifact: BytecodeArtifact,
@@ -285,9 +307,11 @@ fun applyMethodVirtualization(
     var classCount = 0
     var methodCount = 0
     var broadVirtualizedMethodCount = 0
+    val isolatedTargets = isolatedDefineClassTargets(artifact)
 
     val updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
         if (!matchedClassNames.contains(classArtifact.summary.internalName)) return@map classArtifact
+        if (classArtifact.summary.internalName in isolatedTargets) return@map classArtifact
         if (nativeOnlyInterpreter && classArtifact.summary.accessFlags and Opcodes.ACC_INTERFACE != 0) return@map classArtifact
 
         if (isStackTraceSensitiveForVirtualization(classArtifact.bytes)) return@map classArtifact
@@ -308,7 +332,7 @@ fun applyMethodVirtualization(
             .map { it.name + it.descriptor }
             .toMutableSet()
         var classModified = false
-        val akenMethodCandidatesForClass = mutableListOf<QpMethodCandidate>()
+        val nativeMethodCandidatesForClass = mutableListOf<QpMethodCandidate>()
 
         val cv = object : ClassVisitor(Opcodes.ASM9, cw) {
             override fun visitMethod(
@@ -502,11 +526,11 @@ fun applyMethodVirtualization(
                             stateBinding = stateBinding,
                             entryMetadata = QpEntryMetadata(
                                 entryToken = entryToken,
-                                returnDescriptor = vbc4ReturnTag(guestOriginalDescriptor),
+                                returnDescriptor = nativeReturnTag(guestOriginalDescriptor),
                                 methodLocalProfile = methodLocalProfile,
                                 methodIdentity = buildContext.deriveQpIdentity(className, vmMethodName, vmDescriptor),
                                 ownerIdentity = buildContext.deriveQpOwnerIdentity(className),
-                                argumentTags = vbc4ArgumentTagVector(guestOriginalDescriptor),
+                                argumentTags = nativeArgumentTagVector(guestOriginalDescriptor),
                                 resourcePath = resourcePath,
                                 isStatic = guestOriginalAccess and Opcodes.ACC_STATIC != 0,
                             ),
@@ -553,7 +577,7 @@ fun applyMethodVirtualization(
                             )
                             try {
                                 try {
-                                    akenMethodCandidatesForClass += QpMethodCandidate.create(
+                                    nativeMethodCandidatesForClass += QpMethodCandidate.create(
                                         entryToken = entryToken,
                                         logicalMethod = QpMethodIdentity.create(
                                             dispatchClassToken = dispatchClassToken,
@@ -575,10 +599,10 @@ fun applyMethodVirtualization(
                                     opcodeMapping, handlerOrder, QP_DISPATCH_LAYOUT, random, resourcePath,
                                     entryToken = entryToken,
                                     dispatchOwner = JNI_MICROKERNEL_DISPATCH_OWNER,
-                                    dispatchMethod = JNI_MICROKERNEL_AKEN_VM_PAGE_DISPATCH_METHOD,
-                                    dispatchDescriptor = AKEN_VM_PAGE_DISPATCH_DESCRIPTOR,
-                                    akenEncodedHandle = pageZeroEncodedHandle,
-                                    akenCallSiteProof = pageZeroCallSiteProof,
+                                    dispatchMethod = JNI_MICROKERNEL_VM_PAGE_DISPATCH_METHOD,
+                                    dispatchDescriptor = QP_VM_PAGE_DISPATCH_DESCRIPTOR,
+                                    pageEncodedHandle = pageZeroEncodedHandle,
+                                    pageCallSiteProof = pageZeroCallSiteProof,
                                 )
                             } finally {
                                 java.util.Arrays.fill(pageZeroEncodedHandle, 0)
@@ -602,24 +626,24 @@ fun applyMethodVirtualization(
         try {
             cr.accept(cv, ClassReader.SKIP_FRAMES)
         } catch (error: Exception) {
-            akenMethodCandidatesForClass.forEach { it.wipe() }
-            akenMethodCandidatesForClass.clear()
+            nativeMethodCandidatesForClass.forEach { it.wipe() }
+            nativeMethodCandidatesForClass.clear()
             if (strictRuleScope || strictVirtualization) throw error
             return@map classArtifact
         }
         if (!classModified) {
-            akenMethodCandidatesForClass.forEach { it.wipe() }
-            akenMethodCandidatesForClass.clear()
+            nativeMethodCandidatesForClass.forEach { it.wipe() }
+            nativeMethodCandidatesForClass.clear()
             return@map classArtifact
         }
         val reanalyzedArtifact = reanalyzedClassArtifact(classArtifact, cw.toByteArray())
         try {
-            if (akenMethodCandidatesForClass.isNotEmpty()) {
-                buildContext.registerQpMethodCandidates(akenMethodCandidatesForClass)
+            if (nativeMethodCandidatesForClass.isNotEmpty()) {
+                buildContext.registerQpMethodCandidates(nativeMethodCandidatesForClass)
             }
         } finally {
-            akenMethodCandidatesForClass.forEach { it.wipe() }
-            akenMethodCandidatesForClass.clear()
+            nativeMethodCandidatesForClass.forEach { it.wipe() }
+            nativeMethodCandidatesForClass.clear()
         }
         classCount++
         reanalyzedArtifact
@@ -2756,7 +2780,7 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
     }
 
     override fun visitMaxs(maxStack: Int, maxLocals: Int) {
-        if (maxLocals > 0xFF) markNativeVmUnsupported("maxLocals exceeds VBC4 local index limit: $maxLocals")
+        if (maxLocals > 0xFF) markNativeVmUnsupported("maxLocals exceeds native VM local index limit: $maxLocals")
         // Order-independent category-2 safety: if the method both produces long/double
         // values and uses DUP2/POP2, the single-slot VM could miscompute category-2 stack
         // manipulation. Mark unsupported (forwarder) rather than risk silent wrong output.
@@ -2827,8 +2851,8 @@ internal fun generateVmDispatcher(
     dispatchOwner: String = JNI_MICROKERNEL_DISPATCH_OWNER,
     dispatchMethod: String = JNI_MICROKERNEL_VM_DISPATCH_METHOD,
     dispatchDescriptor: String = VM_LEGACY_DISPATCH_DESCRIPTOR,
-    akenEncodedHandle: ByteArray? = null,
-    akenCallSiteProof: ByteArray? = null,
+    pageEncodedHandle: ByteArray? = null,
+    pageCallSiteProof: ByteArray? = null,
 ) {
     mv.visitCode()
 
@@ -2843,23 +2867,23 @@ internal fun generateVmDispatcher(
     // corrupts it (JVM VerifyError: Bad local variable type).
     val parameterSlotCount = argTypes.sumOf { it.size } + if (isStatic) 0 else 1
     val localBase = parameterSlotCount + 1 // after params + this + 1 gap slot
-    val usesQpPageDispatch = dispatchDescriptor == AKEN_VM_PAGE_DISPATCH_DESCRIPTOR
+    val usesQpPageDispatch = dispatchDescriptor == QP_VM_PAGE_DISPATCH_DESCRIPTOR
     val usesTokenOnlyDispatch = dispatchDescriptor == VM_TOKEN_DISPATCH_DESCRIPTOR
     val usesVoidSpecializedDispatch = dispatchDescriptor == VM_VOID_DISPATCH_DESCRIPTOR || dispatchDescriptor == VM_INT_VOID_DISPATCH_DESCRIPTOR
     val usesPrimitiveIntDispatch = dispatchDescriptor == VM_INT_DISPATCH_DESCRIPTOR || dispatchDescriptor == VM_INT_INT_DISPATCH_DESCRIPTOR
-    require((akenEncodedHandle == null) == (akenCallSiteProof == null)) {
-        "AKEN VM dispatcher requires both page-zero handle and call-site proof"
+    require((pageEncodedHandle == null) == (pageCallSiteProof == null)) {
+        "Qp VM dispatcher requires both page-zero handle and call-site proof"
     }
     if (usesQpPageDispatch) {
-        require(akenEncodedHandle?.size == QpHandle.ENCODED_HANDLE_SIZE) {
-            "AKEN VM dispatcher page-zero handle has an invalid length"
+        require(pageEncodedHandle?.size == QpHandle.ENCODED_HANDLE_SIZE) {
+            "Qp VM dispatcher page-zero handle has an invalid length"
         }
-        require(akenCallSiteProof != null && akenCallSiteProof.isNotEmpty() && akenCallSiteProof.size <= 4096) {
-            "AKEN VM dispatcher call-site proof has an invalid length"
+        require(pageCallSiteProof != null && pageCallSiteProof.isNotEmpty() && pageCallSiteProof.size <= 4096) {
+            "Qp VM dispatcher call-site proof has an invalid length"
         }
     } else {
-        require(akenEncodedHandle == null && akenCallSiteProof == null) {
-            "non-AKEN VM dispatcher cannot carry page-zero binding material"
+        require(pageEncodedHandle == null && pageCallSiteProof == null) {
+            "non-Qp VM dispatcher cannot carry page-zero binding material"
         }
     }
     if (!usesQpPageDispatch && !usesTokenOnlyDispatch && !usesVoidSpecializedDispatch && !usesPrimitiveIntDispatch) {
@@ -2885,9 +2909,9 @@ internal fun generateVmDispatcher(
     }
 
     if (usesQpPageDispatch) {
-        emitObfuscatedByteArray(mv, checkNotNull(akenEncodedHandle), random)
+        emitObfuscatedByteArray(mv, checkNotNull(pageEncodedHandle), random)
         mv.visitInsn(Opcodes.ICONST_0)
-        emitObfuscatedByteArray(mv, checkNotNull(akenCallSiteProof), random)
+        emitObfuscatedByteArray(mv, checkNotNull(pageCallSiteProof), random)
     }
 
     if (usesVoidSpecializedDispatch) {

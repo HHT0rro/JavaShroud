@@ -55,8 +55,10 @@ private fun applyUnifiedDefense(
     val distributedProbeCount = ((params["distributedProbeCount"] as? Number)?.toInt() ?: 2).coerceIn(1, 4)
 
     var transformedClassCount = 0
+    val isolatedTargets = isolatedDefineClassTargets(artifact)
     val updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
         if (classArtifact.summary.internalName !in matchedClassNames) return@map classArtifact
+        if (classArtifact.summary.internalName in isolatedTargets) return@map classArtifact
 
         val classNode = try {
             ClassNode().also { ClassReader(classArtifact.bytes).accept(it, ClassReader.SKIP_DEBUG) }

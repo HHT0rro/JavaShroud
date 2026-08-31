@@ -222,6 +222,24 @@ private fun resolverProfileOrderingConstraints(
         .filterNot { constraint -> (constraint.before to constraint.after) in overriddenLegacyPairs }
         .toMutableList()
 
+    // Resolver/CFG profiles deliberately keep their resolver callsites ahead of
+    // method virtualization.  The normal profile uses the opposite direction
+    // so VM capture happens before custom Java invokedynamic sites are added;
+    // retain one acyclic ordering for both profiles instead of creating a
+    // method -> indy -> CFG -> method cycle.
+    if ("method-virtualization" in selectedPassIds) {
+        constraints.removeAll { constraint ->
+            (constraint.before == "method-virtualization" &&
+                constraint.after in setOf(
+                    "string-encryption",
+                    "invoke-dynamic-indirection",
+                    "callsite-rotation-protection",
+                )) ||
+                (constraint.before == "method-virtualization" &&
+                    constraint.after == "string-encryption")
+        }
+    }
+
     fun add(before: String, after: String, reason: String) {
         if (before !in selectedPassIds || after !in selectedPassIds) return
         if (constraints.any { it.before == before && it.after == after }) return
@@ -237,6 +255,11 @@ private fun resolverProfileOrderingConstraints(
     add("rename-methods", "invoke-dynamic-indirection", "Descriptor and Object[] rewrites must complete before invokedynamic callsite conversion.")
     add("invoke-dynamic-indirection", "control-flow-obfuscation", "Invokedynamic resolver callsites must be established before CFG and handler rewriting.")
     add("rename-methods", "control-flow-obfuscation", "Descriptor and Object[] rewrites must complete before CFG and handler rewriting.")
+    if ("method-virtualization" in selectedPassIds) {
+        add("string-encryption", "method-virtualization", "Resolver-backed StringPage callsites must be captured before Qp VM lowering.")
+        add("invoke-dynamic-indirection", "method-virtualization", "Resolver-backed invokedynamic callsites must be captured before Qp VM lowering.")
+        add("callsite-rotation-protection", "method-virtualization", "Resolver-backed callsite rotation must be captured before Qp VM lowering.")
+    }
     return constraints
 }
 

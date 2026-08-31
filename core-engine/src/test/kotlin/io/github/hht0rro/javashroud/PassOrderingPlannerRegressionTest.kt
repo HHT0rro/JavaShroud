@@ -20,7 +20,7 @@ class PassOrderingPlannerRegressionTest {
         )
 
         assertTrue(result.accepted, "Planner should accept virtualization plus callsite rotation pipeline: ${result.diagnostics}")
-        assertBefore(result.orderedPasses, "jni-microkernel-loader", "method-virtualization")
+        assertBefore(result.orderedPasses, "method-virtualization", "jni-microkernel-loader")
         assertBefore(result.orderedPasses, "method-virtualization", "callsite-rotation-protection")
     }
     @Test
@@ -64,7 +64,7 @@ class PassOrderingPlannerRegressionTest {
 
         assertTrue(result.accepted, "Planner should accept the current native routes: ${result.diagnostics}")
         assertBefore(result.orderedPasses, "string-encryption", "field-string-encryption")
-        assertBefore(result.orderedPasses, "string-encryption", "method-virtualization")
+        assertBefore(result.orderedPasses, "method-virtualization", "string-encryption")
         assertBefore(result.orderedPasses, "method-virtualization", "jni-microkernel-loader")
     }
 
@@ -95,8 +95,10 @@ class PassOrderingPlannerRegressionTest {
         assertBefore(result.orderedPasses, "rename-methods", "method-virtualization")
         assertBefore(result.orderedPasses, "rename-fields", "method-virtualization")
         assertBefore(result.orderedPasses, "string-encryption", "field-string-encryption")
-        assertBefore(result.orderedPasses, "string-encryption", "method-virtualization")
+        assertBefore(result.orderedPasses, "method-virtualization", "string-encryption")
         assertBefore(result.orderedPasses, "method-virtualization", "jni-microkernel-loader")
+        assertBefore(result.orderedPasses, "method-virtualization", "os-anti-debug")
+        assertBefore(result.orderedPasses, "method-virtualization", "os-anti-vm")
         assertBefore(result.orderedPasses, "jni-microkernel-loader", "os-anti-debug")
         assertBefore(result.orderedPasses, "jni-microkernel-loader", "os-anti-vm")
     }
