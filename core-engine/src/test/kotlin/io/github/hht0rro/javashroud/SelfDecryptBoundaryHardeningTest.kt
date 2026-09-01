@@ -19,7 +19,7 @@ class SelfDecryptBoundaryHardeningTest {
             "nativeInitializeDefense",
             "nativeProbeDefense",
             "nativeTransformDefense",
-            "nativeOpenTargetToken",
+            "nativeInvokeSite",
         )) {
             assertTrue(entry in kernelHelper, "Current JNI helper must declare $entry")
             assertTrue(entry in ffi, "Rust FFI must register $entry")
@@ -34,7 +34,9 @@ class SelfDecryptBoundaryHardeningTest {
         val defenseInject = source("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/UnifiedDefenseTransforms.kt")
         assertTrue("expectDefenseForProtectedPath" in defenseInject, "os-anti injection must arm protected-data gates")
         assertTrue("RegisterNatives" in ffi, "Current runtime must use typed RegisterNatives registration")
-        assertTrue("openTargetToken" in bootstrap, "indy token resolution must use the native terminal")
+        assertTrue("QpBridge.linkTargetSite" in bootstrap, "indy token resolution must use the opaque native site linker")
+        assertFalse("resolveHandle" in bootstrap, "indy bootstrap must not expose a Java target-handle oracle")
+        assertFalse("Class.forName" in bootstrap, "indy bootstrap must not resolve plaintext target owners")
         assertFalse("javax.crypto" in bootstrap, "indy bootstrap must not carry a Java crypto oracle")
         assertFalse("SecretKeySpec" in bootstrap, "indy bootstrap must not assemble token keys in Java")
         assertFalse("hkdfSha256" in bootstrap, "indy bootstrap must not derive token keys in Java")

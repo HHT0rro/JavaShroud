@@ -250,7 +250,7 @@ class QpProtectedJarLoadTest {
             Triple("nativeInitializeDefense", "(Ljava/lang/String;Ljava/lang/String;)I", "nDefenseInit"),
             Triple("nativeProbeDefense", "(Ljava/lang/String;Ljava/lang/String;)I", "nDefenseProbe"),
             Triple("nativeTransformDefense", "([BLjava/lang/String;)[B", "nDefenseTransform"),
-            Triple("nativeOpenTargetToken", "([BLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)[B", "nTargetToken"),
+            Triple("nativeInvokeSite", "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[B[Ljava/lang/Object;Z)Ljava/lang/Object;", "nInvokeSite"),
         )
     }
 }

@@ -1,5 +1,8 @@
 package io.github.hht0rro.javashroud;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
+
 /**
  * WSL/Linux probe that loads the locked glibc 2.17 cdylib and exercises the
  * source-named JNI initialization boundary after {@code j.l} recovery.
@@ -29,7 +32,14 @@ public final class LinuxNativeLoadProbe {
 
     static native byte[] nativeTransformDefense(byte[] material, String binding);
 
-    static native byte[] nativeOpenTargetToken(byte[] token, String callerOwner, String indyName, String methodType);
+    static native Object nativeInvokeSite(
+        MethodHandles.Lookup lookup,
+        String indyName,
+        MethodType methodType,
+        byte[] token,
+        Object[] arguments,
+        boolean linkBootstrap
+    );
 
     public static void main(String[] args) {
         if (args.length != 1) {
@@ -75,7 +85,7 @@ public final class LinuxNativeLoadProbe {
                 {"nativeInitializeDefense", "(Ljava/lang/String;Ljava/lang/String;)I", "nativeInitializeDefense"},
                 {"nativeProbeDefense", "(Ljava/lang/String;Ljava/lang/String;)I", "nativeProbeDefense"},
                 {"nativeTransformDefense", "([BLjava/lang/String;)[B", "nativeTransformDefense"},
-                {"nativeOpenTargetToken", "([BLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)[B", "nativeOpenTargetToken"},
+                {"nativeInvokeSite", "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[B[Ljava/lang/Object;Z)Ljava/lang/Object;", "nativeInvokeSite"},
         };
         StringBuilder result = new StringBuilder();
         for (String[] method : methods) {

@@ -23,6 +23,7 @@ public final class QpCallsiteBridge {
     private static final MethodHandle THREAD_DISPATCH;
     private static final MethodHandle ONESHOT_DISPATCH;
     private static final MethodHandle TICK_MUTABLE;
+    private static final MethodHandle OPAQUE_DISPATCH;
 
     static {
         try {
@@ -47,6 +48,18 @@ public final class QpCallsiteBridge {
                 QpCallsiteBridge.class,
                 "tickMutable",
                 MethodType.methodType(void.class, int.class)
+            );
+            OPAQUE_DISPATCH = lookup.findStatic(
+                QpCallsiteBridge.class,
+                "opaqueDispatch",
+                MethodType.methodType(
+                    Object.class,
+                    MethodHandles.Lookup.class,
+                    String.class,
+                    MethodType.class,
+                    byte[].class,
+                    Object[].class
+                )
             );
         } catch (Exception ex) {
             throw new ExceptionInInitializerError(ex);
@@ -128,6 +141,16 @@ public final class QpCallsiteBridge {
         MutableCallSite.syncAll(new MutableCallSite[] {site});
     }
 
+    public static Object opaqueDispatch(
+        MethodHandles.Lookup lookup,
+        String name,
+        MethodType type,
+        byte[] token,
+        Object[] args
+    ) throws Throwable {
+        return QpBridge.invokeTargetSite(lookup, name, type, token, args);
+    }
+
     private static CallSite bindMutable(MethodHandle target, MethodType type) {
         int id = NEXT_ID.incrementAndGet();
         MutableCallSite site = new MutableCallSite(type);
@@ -196,8 +219,18 @@ public final class QpCallsiteBridge {
         String ownerOrToken
     ) throws Exception {
         if (ownerOrToken != null && ownerOrToken.length() >= 24) {
+            byte[] token = null;
             try {
-                return QpBootstrap.resolveHandle(lookup, name, type, ownerOrToken).asType(type);
+                token = QpBootstrap.decodeToken(ownerOrToken);
+                MethodHandle target = MethodHandles.insertArguments(
+                    OPAQUE_DISPATCH,
+                    0,
+                    lookup,
+                    name,
+                    type,
+                    token
+                );
+                return target.asCollector(Object[].class, type.parameterCount()).asType(type);
             } catch (SecurityException ex) {
                 throw ex;
             } catch (Exception ex) {

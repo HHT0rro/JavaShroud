@@ -4,6 +4,7 @@ import io.github.hht0rro.javashroud.analysis.analyzeClassBytes
 import io.github.hht0rro.javashroud.artifact.classArtifactIndex
 import io.github.hht0rro.javashroud.artifact.classSummaryIndex
 import io.github.hht0rro.javashroud.artifact.resourceCount
+import io.github.hht0rro.javashroud.bytecode.computeFramesWriter
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
@@ -45,8 +46,8 @@ import java.util.Arrays
 
 private const val LEGACY_SEALED_NATIVE_INDEX_RESOURCE = "META-INF/.r/0.dat"
 private const val LEGACY_SEALED_NATIVE_BINDINGS_RESOURCE = "META-INF/.r/bindings.dat"
-private const val AKEN_NATIVE_MAX_LIBRARY_BYTES = 256 * 1024 * 1024
-private const val AKEN_NATIVE_BINDINGS_MAX_BYTES = 4 * 1024 * 1024
+private const val QP_NATIVE_MAX_LIBRARY_BYTES = 256 * 1024 * 1024
+private const val QP_NATIVE_BINDINGS_MAX_BYTES = 4 * 1024 * 1024
 private const val PROTECTION_HELPER_PACKAGE = "io/github/hht0rro/javashroud/transforms/protection"
 private const val QP_HELPER_PACKAGE = "$PROTECTION_HELPER_PACKAGE/qp"
 
@@ -90,7 +91,7 @@ object RuntimeArtifactSealing {
     /**
      * Reserves deterministic class-local descriptor routes in every pre-seal
      * allocator namespace. The descriptor itself is emitted immediately before
-     * page materialization, but its route must already be unavailable to VBC4,
+     * page materialization, but its route must already be unavailable to Qp VM,
      * StringPage, ClassPage, and NativeChunk payload containers.
      */
     private fun reserveQpClassPageDescriptorRoutesIfNeeded(
@@ -109,17 +110,17 @@ object RuntimeArtifactSealing {
             }
         }
         require(descriptorPaths.size == internalNames.size) {
-            "AKEN ClassPage descriptor routes collide across logical classes"
+            "Qp ClassPage descriptor routes collide across logical classes"
         }
         descriptorPaths.forEach { path ->
             require(occupiedEntryPaths.add(path)) {
-                "AKEN ClassPage descriptor route collides with the pre-seal artifact namespace: $path"
+                "Qp ClassPage descriptor route collides with the pre-seal artifact namespace: $path"
             }
         }
     }
 
     /**
-     * Reserves artifact-specific future VBC4 page-container names before native
+     * Reserves artifact-specific future Qp VM page-container names before native
      * recompilation. This stage deliberately emits no resource and receives only
      * scoped candidate references; page programs, handles, proofs, and evaluator
      * state remain owned by the later build-only page planner.
@@ -325,7 +326,7 @@ object RuntimeArtifactSealing {
     }
 
     /**
-     * Materializes the build-only AKEN VBC4, typed StringPage, encrypted
+     * Materializes the build-only Qp current-format, typed StringPage, encrypted
      * ClassPage, and native shell/handler chunk resources before native
      * recompilation so the compiler can receive exact current-page records. The returned artifact owns encrypted page-entry
      * bytes; the active build context retains only the adjacent finalization
@@ -371,7 +372,7 @@ object RuntimeArtifactSealing {
                         .qpFinalizationLayoutOrNull()
                         ?.hasEntryForBuild(route.futureContainerPath) == true
                     require(route.futureContainerPath !in reservedEntryNames || isPublishedPageContainer) {
-                        "AKEN VBC4 pre-seal route collides with the sealing input namespace"
+                        "Qp current-format pre-seal route collides with the sealing input namespace"
                     }
                     reservedEntryNames += route.futureContainerPath
                 }
@@ -384,7 +385,7 @@ object RuntimeArtifactSealing {
                         .qpFinalizationLayoutOrNull()
                         ?.hasEntryForBuild(route.futureResourcePath) == true
                     require(route.futureResourcePath !in reservedEntryNames || isPublishedStringPage) {
-                        "AKEN StringPage pre-seal route collides with the sealing input namespace"
+                        "Qp StringPage pre-seal route collides with the sealing input namespace"
                     }
                     reservedEntryNames += route.futureResourcePath
                 }
@@ -397,7 +398,7 @@ object RuntimeArtifactSealing {
                         .qpFinalizationLayoutOrNull()
                         ?.hasEntryForBuild(route.futureResourcePath) == true
                     require(route.futureResourcePath !in reservedEntryNames || isPublishedClassPage) {
-                        "AKEN ClassPage pre-seal route collides with the sealing input namespace"
+                        "Qp ClassPage pre-seal route collides with the sealing input namespace"
                     }
                     reservedEntryNames += route.futureResourcePath
                 }
@@ -410,12 +411,12 @@ object RuntimeArtifactSealing {
                         .qpFinalizationLayoutOrNull()
                         ?.hasEntryForBuild(route.futureResourcePath) == true
                     require(route.futureResourcePath !in reservedEntryNames || isPublishedNativeChunk) {
-                        "AKEN NativeChunk pre-seal route collides with the sealing input namespace"
+                        "Qp NativeChunk pre-seal route collides with the sealing input namespace"
                     }
                     reservedEntryNames += route.futureResourcePath
                 }
             }
-        val akenNativeLocatorResource = if (artifact.jarEntries.any { entry -> isR1NativeKernelResource(entry.name) }) {
+        val nativeLocatorResource = if (artifact.jarEntries.any { entry -> isCurrentNativeKernelResource(entry.name) }) {
             uniqueSealedResourceName(
                 seed = seed,
                 kind = "a",
@@ -428,7 +429,7 @@ object RuntimeArtifactSealing {
             null
         }
         var sealedNativeBindingsResource: String? = null
-        var akenNativeBindingsLocatorResource: String? = null
+        var nativeBindingsLocatorResource: String? = null
         val sealedNativeIndexResource = uniqueSealedResourceName(
             seed = seed,
             kind = "i",
@@ -446,8 +447,8 @@ object RuntimeArtifactSealing {
             RETIRED_CATALOG_PREFIX to qpCatalogPrefix(),
             RETIRED_DIRECTORY_FILE to qpDirectoryFileName(),
         )
-        akenNativeLocatorResource?.let { sealedPath ->
-            helperStringRewriteMap[AKEN_NATIVE_LOCATOR_LOGICAL_RESOURCE] = sealedPath
+        nativeLocatorResource?.let { sealedPath ->
+            helperStringRewriteMap[QP_NATIVE_LOCATOR_LOGICAL_RESOURCE] = sealedPath
             helperStringRewriteMap[qpResourceDir() + "/native.locator"] = sealedPath
         }
         if (helperClassRenameMap.isNotEmpty()) {
@@ -462,8 +463,8 @@ object RuntimeArtifactSealing {
             val bindingResource = checkNotNull(sealedNativeBindingsResource)
             reservedEntryNames += bindingResource
             helperStringRewriteMap[LEGACY_SEALED_NATIVE_BINDINGS_RESOURCE] = bindingResource
-            if (akenNativeLocatorResource != null) {
-                akenNativeBindingsLocatorResource = uniqueSealedResourceName(
+            if (nativeLocatorResource != null) {
+                nativeBindingsLocatorResource = uniqueSealedResourceName(
                     seed = seed,
                     kind = "q",
                     originalName = "qp-native-bindings-locator",
@@ -471,9 +472,9 @@ object RuntimeArtifactSealing {
                     preferredName = sealedResourceName(seed, "q", "qp-native-bindings-locator", 0),
                     reservedEntryNames = reservedEntryNames,
                 )
-                val locatorPath = checkNotNull(akenNativeBindingsLocatorResource)
+                val locatorPath = checkNotNull(nativeBindingsLocatorResource)
                 reservedEntryNames += locatorPath
-                helperStringRewriteMap[AKEN_NATIVE_BINDINGS_LOCATOR_LOGICAL_RESOURCE] = locatorPath
+                helperStringRewriteMap[QP_NATIVE_BINDINGS_LOCATOR_LOGICAL_RESOURCE] = locatorPath
                 helperStringRewriteMap[qpResourceDir() + "/native.bindings.locator"] = locatorPath
             }
         }
@@ -483,7 +484,7 @@ object RuntimeArtifactSealing {
         val fieldRenameBindings = parseFieldRenameBindings(artifact.jarEntries)
         val sealedNativeResourceRenameMap = linkedMapOf<String, String>()
         artifact.jarEntries.forEachIndexed { index, entry ->
-            if (isR1NativeKernelResource(entry.name)) {
+            if (isCurrentNativeKernelResource(entry.name)) {
                 val nativeSpec = nativeSpecFor(entry.name)
                 val sealedName = uniqueSealedNativeResourceName(
                     seed = seed,
@@ -499,13 +500,13 @@ object RuntimeArtifactSealing {
 
         val renamedJarEntries = artifact.jarEntries.mapIndexedNotNull { index, entry ->
             when {
-                isR1NativeKernelResource(entry.name) -> {
+                isCurrentNativeKernelResource(entry.name) -> {
                     val nativeSpec = nativeSpecFor(entry.name)
                     val sealedName = sealedNativeResourceRenameMap.getValue(entry.name)
                     sealedNativeSpecs += nativeSpec.copy(resourceName = sealedName)
                     val decoded = QpResourceCodec.decode(entry.bytes)
-                    require(decoded != null || entry.bytes.isRawR1NativeImage()) {
-                        "AKEN-R1 native resource wrapper failed authentication: ${entry.name}"
+                    require(decoded != null || entry.bytes.isRawNativeImage()) {
+                        "Qp native resource wrapper failed authentication: ${entry.name}"
                     }
                     entry.copy(name = sealedName, bytes = decoded ?: entry.bytes)
                 }
@@ -567,18 +568,18 @@ object RuntimeArtifactSealing {
                 }
             }
             if (sealedNativeSpecs.isNotEmpty()) {
-                val locatorPath = checkNotNull(akenNativeLocatorResource)
+                val locatorPath = checkNotNull(nativeLocatorResource)
                 val nativeEntryCounts = runtimeEntries.groupingBy(JarEntryData::name).eachCount()
                 val nativeBytesByPath = runtimeEntries.associate { entry -> entry.name to entry.bytes }
                 val locatorEntries = sealedNativeSpecs.map { spec ->
                     require(nativeEntryCounts[spec.resourceName] == 1) {
-                        "AKEN-R1 final native target must be emitted exactly once: ${spec.resourceName}"
+                        "Qp final native target must be emitted exactly once: ${spec.resourceName}"
                     }
                     val nativeBytes = checkNotNull(nativeBytesByPath[spec.resourceName]) {
-                        "AKEN native locator target was not emitted: ${spec.resourceName}"
+                        "Qp native locator target was not emitted: ${spec.resourceName}"
                     }
-                    require(nativeBytes.isNotEmpty() && nativeBytes.size <= AKEN_NATIVE_MAX_LIBRARY_BYTES) {
-                        "AKEN-R1 final native artifact length is invalid: ${spec.resourceName}"
+                    require(nativeBytes.isNotEmpty() && nativeBytes.size <= QP_NATIVE_MAX_LIBRARY_BYTES) {
+                        "Qp final native artifact length is invalid: ${spec.resourceName}"
                     }
                     QpLocator.entry(
                         platform = spec.platform,
@@ -587,18 +588,18 @@ object RuntimeArtifactSealing {
                         storedBytes = nativeBytes,
                     )
                 }
-                val bindingsLocatorEntry = akenNativeBindingsLocatorResource?.let {
+                val bindingsLocatorEntry = nativeBindingsLocatorResource?.let {
                     val bindingPath = checkNotNull(sealedNativeBindingsResource) {
-                        "AKEN native bindings locator requires a final bindings resource"
+                        "Qp native bindings locator requires a final bindings resource"
                     }
                     require(nativeEntryCounts[bindingPath] == 1) {
-                        "AKEN-R1 final native bindings target must be emitted exactly once: $bindingPath"
+                        "Qp final native bindings target must be emitted exactly once: $bindingPath"
                     }
                     val bindingBytes = checkNotNull(nativeBytesByPath[bindingPath]) {
-                        "AKEN native bindings locator target was not emitted: $bindingPath"
+                        "Qp native bindings locator target was not emitted: $bindingPath"
                     }
-                    require(bindingBytes.isNotEmpty() && bindingBytes.size <= AKEN_NATIVE_BINDINGS_MAX_BYTES) {
-                        "AKEN-R1 final native bindings length is invalid: $bindingPath"
+                    require(bindingBytes.isNotEmpty() && bindingBytes.size <= QP_NATIVE_BINDINGS_MAX_BYTES) {
+                        "Qp final native bindings length is invalid: $bindingPath"
                     }
                     QpLocator.bindingsEntry(
                         resourcePath = bindingPath,
@@ -623,7 +624,7 @@ object RuntimeArtifactSealing {
                 val actualDigestBytes = finalArtifactBindingDigest.asBytes()
                 try {
                     require(MessageDigest.isEqual(expectedDigestBytes, actualDigestBytes)) {
-                        "AKEN-R1 final native binding changed during sealing"
+                        "Qp final native binding changed during sealing"
                     }
                 } finally {
                     Arrays.fill(expectedDigestBytes, 0)
@@ -663,9 +664,9 @@ object RuntimeArtifactSealing {
         // jar-layout digest, QpResourceCodec, or any boot material.
         //
         // No root-shard ranges are supplied yet because the current legacy
-        // output has not reserved AKEN root-shard byte ranges.  The metadata
+        // output has not reserved Qp root-shard byte ranges.  The metadata
         // layer nonetheless owns the canonical final-entry representation now,
-        // so a later AKEN emitter can reserve shards and call the same API
+        // so a later Qp emitter can reserve shards and call the same API
         // without reviving a boot/root-key path.
         publishQpArtifactCommitment(sealedArtifact)
         val wrappedArtifact = HardenedArtifactFinalizer.wrapIndyTargets(sealedArtifact)
@@ -679,11 +680,11 @@ object RuntimeArtifactSealing {
 }
 
 /**
- * Build-only transition hook for the AKEN v4 sealing pipeline.
+ * Build-only transition hook for the Qp current format sealing pipeline.
  *
  * It is intentionally internal and returns no artifact metadata: current
  * legacy runtime readers must remain behaviorally unchanged until the native
- * AKEN handle path emits per-page route/proof records.  When an AKEN plan has
+ * Qp handle path emits per-page route/proof records.  When a Qp plan has
  * already been initialized by that later phase, its commitment is required to
  * match this final representation; this catches accidental early-plan use.
  */
@@ -701,7 +702,7 @@ internal fun publishQpArtifactCommitment(artifact: BytecodeArtifact): QpArtifact
         val computedCommitment = commitment.bytes
         try {
             check(Arrays.equals(plannedCommitment, computedCommitment)) {
-                "AKEN v4 build plan commitment does not match final sealed artifact"
+                "Qp current format build plan commitment does not match final sealed artifact"
             }
         } finally {
             Arrays.fill(plannedCommitment, 0)
@@ -714,7 +715,7 @@ internal fun publishQpArtifactCommitment(artifact: BytecodeArtifact): QpArtifact
 private fun catalogNativeBindingFromLocator(locatorEntries: List<QpLocatorEntry>): FinalRuntimeBinding {
     QpLocator.catalogBindingInputs(locatorEntries).use { inputs ->
         val context = currentQpBuildContextOrNull()
-            ?: error("AKEN catalog native binding requires a live VBC4 build context")
+            ?: error("Qp catalog native binding requires a live Qp VM build context")
         val specializationDigest = context.copyNativeSpecializationDigest(inputs.platform)
         try {
             return FinalRuntimeBinding(
@@ -787,7 +788,7 @@ private fun sealedRuntimeHelperRenameMap(
         .toMutableSet()
     val renameMap = linkedMapOf<String, String>()
     SEALED_RUNTIME_HELPERS.forEachIndexed { index, helperName ->
-        // VBC4 pages can carry opaque invokedynamic terminal records whose
+        // Qp VM pages can carry opaque invokedynamic terminal records whose
         // bootstrap target embeds this owner.  Until those encrypted page
         // constants are rewritten in the same sealing transaction, retain the
         // helper owner so the native-backed terminal remains resolvable.
@@ -858,6 +859,7 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
         "nativeInitializeDefense",
         "nativeProbeDefense",
         "nativeTransformDefense",
+        "nativeInvokeSite",
     )
     val derivedQpNativeNames = run {
         val schedule = activeQpNameSchedule()
@@ -910,7 +912,7 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     addMethod(flowControlException, "getState", "()I")
     addField(flowControlException, "state", "I")
 
-    // AKEN v4 binds only the typed current-page/native-loader surface.  Do
+    // Qp current format binds only the typed current-page/native-loader surface.  Do
     // not write legacy boot, generic resource decoder, or central VM dispatch
     // names into a sealed binding map for a new artifact.
     val jniHelper = "$QP_HELPER_PACKAGE/QpBridge"
@@ -920,6 +922,16 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     addMethod(jniHelper, "openQpString", "([BI[B)Ljava/lang/String;")
     addMethod(jniHelper, "readQpClassPage", "([BI[B)[B")
     addMethod(jniHelper, "consumeQpNativeChunk", "([BI[B)V")
+    addMethod(
+        jniHelper,
+        "linkTargetSite",
+        "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[B[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;",
+    )
+    addMethod(
+        jniHelper,
+        "invokeTargetSite",
+        "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[B[Ljava/lang/Object;)Ljava/lang/Object;",
+    )
     addMethod(jniHelper, "nativeInit", "(Ljava/lang/String;)I")
     addMethod(jniHelper, "nativeHeartbeat", "()I")
     addMethod(jniHelper, "nativeInstallSessionNonce", "([B)Z")
@@ -935,6 +947,11 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     addMethod(jniHelper, "nativeInitializeDefense", "(Ljava/lang/String;Ljava/lang/String;)I")
     addMethod(jniHelper, "nativeProbeDefense", "(Ljava/lang/String;Ljava/lang/String;)I")
     addMethod(jniHelper, "nativeTransformDefense", "([BLjava/lang/String;)[B")
+    addMethod(
+        jniHelper,
+        "nativeInvokeSite",
+        "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[B[Ljava/lang/Object;Z)Ljava/lang/Object;",
+    )
     addMethod(jniHelper, "createSamLambda", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;")
 
     val bootstrap = "$PROTECTION_HELPER_PACKAGE/BootstrapEncryptionHelper"
@@ -975,7 +992,7 @@ private fun sealedHelperStringRewriteMap(seed: Long, helperClassRenameMap: Map<S
     if ("$PROTECTION_HELPER_PACKAGE/FlowControlException" in helperClassRenameMap) {
         rewriteMap["Flow control"] = sealedSemanticText(seed, "flow-control")
     }
-    rewriteMap["__nvmr1__"] = sealedSemanticText(seed, "native-vm-result-marker")
+    rewriteMap["__native_vm_result__"] = sealedSemanticText(seed, "native-vm-result-marker")
     rewriteMap["native:abi-missing:nativeExecuteVmResource"] = sealedSemanticText(seed, "native-vm-abi-error")
     return rewriteMap
 }
@@ -1000,6 +1017,7 @@ private fun sealedHelperMethodStringRewriteMap(helperMemberRenamePlan: SealedHel
         "nativeInitializeDefense",
         "nativeProbeDefense",
         "nativeTransformDefense",
+        "nativeInvokeSite",
     )
     val rewriteMap = linkedMapOf<String, String>()
     for ((ref, sealedName) in helperMemberRenamePlan.methodRenames) {
@@ -1029,23 +1047,23 @@ private fun sealedHelperMethodStringRewriteMap(helperMemberRenamePlan: SealedHel
 private fun validateQpNativeInputs(entries: Iterable<JarEntryData>) {
     entries.forEach { entry ->
         when {
-            isR1NativeKernelResource(entry.name) -> {
+            isCurrentNativeKernelResource(entry.name) -> {
                 val spec = nativeSpecFor(entry.name)
-                require(entry.bytes.isNotEmpty() && entry.bytes.size <= AKEN_NATIVE_MAX_LIBRARY_BYTES) {
-                    "AKEN-R1 native input length is invalid: ${entry.name}"
+                require(entry.bytes.isNotEmpty() && entry.bytes.size <= QP_NATIVE_MAX_LIBRARY_BYTES) {
+                    "Qp native input length is invalid: ${entry.name}"
                 }
                 require(spec.platform == "windows-x64" || spec.platform == "linux-x64") {
-                    "AKEN-R1 native input platform is unsupported: ${spec.platform}"
+                    "Qp native input platform is unsupported: ${spec.platform}"
                 }
             }
             isRetiredNativeKernelResource(entry.name) -> {
-                error("AKEN-R1 rejects retired C/Zig/Mach-O native resource: ${entry.name}")
+                error("Qp rejects retired C/Zig/Mach-O native resource: ${entry.name}")
             }
         }
     }
 }
 
-private fun isR1NativeKernelResource(entryName: String): Boolean {
+private fun isCurrentNativeKernelResource(entryName: String): Boolean {
     val normalized = entryName.replace('\\', '/').lowercase()
     if (!normalized.startsWith("meta-inf/") || normalized.startsWith("meta-inf/jsrt/")) {
         return false
@@ -1062,7 +1080,7 @@ private fun isRetiredNativeKernelResource(entryName: String): Boolean {
     val lowerName = entryName.lowercase()
     if (!lowerName.startsWith("meta-inf/")) return false
     val dynamicSuffix = lowerName.endsWith(".dll") || lowerName.endsWith(".so") || lowerName.endsWith(".dylib")
-    return dynamicSuffix && !isR1NativeKernelResource(entryName)
+    return dynamicSuffix && !isCurrentNativeKernelResource(entryName)
 }
 
 private fun nativeSpecFor(entryName: String): SealedNativeSpec {
@@ -1073,7 +1091,7 @@ private fun nativeSpecFor(entryName: String): SealedNativeSpec {
             candidate.preSealResourcePath == entryName ||
                 normalized.endsWith("/${candidate.platform.lowercase()}/${candidate.outputName.lowercase()}")
         }
-        ?: error("AKEN-R1 rejects unsupported native resource: $entryName")
+        ?: error("Qp rejects unsupported native resource: $entryName")
     return SealedNativeSpec(
         platform = route.platform,
         resourceName = entryName,
@@ -1081,7 +1099,7 @@ private fun nativeSpecFor(entryName: String): SealedNativeSpec {
     )
 }
 
-private fun ByteArray.isRawR1NativeImage(): Boolean =
+private fun ByteArray.isRawNativeImage(): Boolean =
     size >= 4 && (
         (this[0] == 'M'.code.toByte() && this[1] == 'Z'.code.toByte()) ||
             (this[0] == 0x7F.toByte() && this[1] == 'E'.code.toByte() &&
@@ -1365,7 +1383,7 @@ private fun pureSameOwnerForwarderTarget(
 
 private fun sealedBindingKey(value: String): String {
     /*
-     * AKEN v4 binding identity is public relocation material, not a secret.
+     * Qp current format binding identity is public relocation material, not a secret.
      * Keep the exact domain and UTF-8 byte sequence in parity with the Java
      * runtime mirror and js_sealed_binding_key().
      */
@@ -1536,7 +1554,7 @@ private fun remapHelperReferences(
             /*
              * openQpString is intentionally package-private in the source
              * helper so the unsealed Java closure has no broad public page API.
-             * After AKEN relocation, however, QpTextBridge and the
+             * After Qp relocation, however, QpTextBridge and the
              * application call site live in different sealed packages.  Keep
              * the typed terminal narrow, but promote only this relocated bridge
              * to public so the authenticated call site remains linkable.  The
@@ -1599,7 +1617,11 @@ private fun remapHelperReferences(
                     }
             }
             if (helperMemberModified) {
-                val helperWriter = ClassWriter(0)
+                // Sealing may change helper visibility after the last ordinary
+                // helper pass. Recompute frames here; retaining the old frame
+                // table can widen a multi-catch handler to Object and make the
+                // final Java artifact fail verification at invokespecial.
+                val helperWriter = computeFramesWriter()
                 classNode.accept(helperWriter)
                 updatedBytes = helperWriter.toByteArray()
                 modified = true

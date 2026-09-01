@@ -36,7 +36,7 @@ import java.security.SecureRandom;
  * Pure Java - no Kotlin runtime dependency.
  *
  * Attempts to load a bundled native kernel from the JAR resources.
- * In pure VBC4-only mode this helper is strictly fail-closed:
+ * In pure native-VM-only mode this helper is strictly fail-closed:
  * native bootstrap and load logic remain, and native ABI failures reject execution.
  */
 public final class QpBridge {
@@ -56,8 +56,8 @@ public final class QpBridge {
     private static volatile boolean defenseRequired;
     private static volatile int loadState = LOAD_UNTRIED;
     private static volatile String loadMessage = "";
-    private static volatile int akenLoadState = LOAD_UNTRIED;
-    private static volatile String akenLoadMessage = "";
+    private static volatile int nativeLoadState = LOAD_UNTRIED;
+    private static volatile String nativeLoadMessage = "";
     private static volatile boolean diversifiedVmEnabled;
     private static volatile String vmSelfCheck = "";
     private static volatile boolean nativeSelfCheckFailed;
@@ -96,7 +96,7 @@ public final class QpBridge {
 
     private QpBridge() { }
 
-    /* ---- JNI R1 methods (implemented by the bundled Rust runtime) ---- */
+    /* ---- JNI current methods (implemented by the bundled Rust runtime) ---- */
 
     static native int nativeInit(String platform);
     static native int nativeHeartbeat();
@@ -109,46 +109,96 @@ public final class QpBridge {
     public static native int nativeInitializeDefense(String surface, String profile);
     public static native int nativeProbeDefense(String surface, String point);
     public static native byte[] nativeTransformDefense(byte[] material, String binding);
-    static native byte[] nativeOpenTargetToken(
-        byte[] token,
-        String callerOwner,
+    static native Object nativeInvokeSite(
+        MethodHandles.Lookup lookup,
         String indyName,
-        String methodType
+        MethodType methodType,
+        byte[] token,
+        Object[] arguments,
+        boolean linkBootstrap
     );
 
     /**
-     * Native-only token terminal used by the invokedynamic bootstrap.  The
-     * caller receives an authenticated, bounded description and never owns a
-     * token key or cipher context.
+     * Link an invokedynamic site without returning its bootstrap or business
+     * MethodHandles to Java.
      */
-    public static byte[] openTargetToken(
-        byte[] token,
-        String callerOwner,
+    static CallSite linkTargetSite(
+        MethodHandles.Lookup lookup,
         String indyName,
-        String methodType
+        MethodType methodType,
+        byte[] token,
+        Object[] arguments
     ) {
-        if (token == null || token.length == 0 || token.length > 64 * 1024 ||
-            callerOwner == null || callerOwner.length() == 0 || callerOwner.length() > 512 ||
-            indyName == null || indyName.length() == 0 || indyName.length() > 512 ||
-            methodType == null || methodType.length() == 0 || methodType.length() > 512) {
-            throw new SecurityException("indy target token request is invalid");
-        }
+        requireTargetSiteRequest(lookup, indyName, methodType, token, arguments);
         ensureQpNativeKernel();
         byte[] copy = Arrays.copyOf(token, token.length);
+        Object[] argumentCopy = copyOpaqueArguments(arguments);
         try {
-            byte[] result = nativeOpenTargetToken(copy, callerOwner, indyName, methodType);
-            if (result == null || result.length == 0 || result.length > 512) {
-                throw new SecurityException("indy target token terminal returned invalid data");
+            Object result = nativeInvokeSite(lookup, indyName, methodType, copy, argumentCopy, true);
+            if (!(result instanceof CallSite) || !((CallSite) result).type().equals(methodType)) {
+                throw new SecurityException("indy target site linking failed closed");
             }
-            return result;
+            return (CallSite) result;
         } catch (UnsatisfiedLinkError error) {
-            throw new SecurityException("indy target token Native terminal is unavailable", error);
+            throw new SecurityException("indy target Native linker is unavailable", error);
         } finally {
             Arrays.fill(copy, (byte) 0);
+            clearOpaqueArguments(argumentCopy);
         }
     }
 
-    /* ---- AKEN R1 typed page bridge ---- */
+    /** Invoke one opaque business target without materializing its handle in Java. */
+    static Object invokeTargetSite(
+        MethodHandles.Lookup lookup,
+        String indyName,
+        MethodType methodType,
+        byte[] token,
+        Object[] arguments
+    ) throws Throwable {
+        requireTargetSiteRequest(lookup, indyName, methodType, token, arguments);
+        ensureQpNativeKernel();
+        byte[] copy = Arrays.copyOf(token, token.length);
+        Object[] argumentCopy = Arrays.copyOf(arguments, arguments.length);
+        try {
+            return nativeInvokeSite(lookup, indyName, methodType, copy, argumentCopy, false);
+        } catch (UnsatisfiedLinkError error) {
+            throw new SecurityException("indy target Native invocation is unavailable", error);
+        } finally {
+            Arrays.fill(copy, (byte) 0);
+            Arrays.fill(argumentCopy, null);
+        }
+    }
+
+    private static void requireTargetSiteRequest(
+        MethodHandles.Lookup lookup,
+        String indyName,
+        MethodType methodType,
+        byte[] token,
+        Object[] arguments
+    ) {
+        if (lookup == null || indyName == null || indyName.length() == 0 || indyName.length() > 512 ||
+            methodType == null || token == null || token.length == 0 || token.length > 64 * 1024 ||
+            arguments == null || arguments.length > 4096) {
+            throw new SecurityException("indy target site request is invalid");
+        }
+    }
+
+    private static Object[] copyOpaqueArguments(Object[] arguments) {
+        Object[] copy = Arrays.copyOf(arguments, arguments.length);
+        for (int i = 0; i < copy.length; i++) {
+            if (copy[i] instanceof byte[]) copy[i] = Arrays.copyOf((byte[]) copy[i], ((byte[]) copy[i]).length);
+        }
+        return copy;
+    }
+
+    private static void clearOpaqueArguments(Object[] arguments) {
+        for (Object argument : arguments) {
+            if (argument instanceof byte[]) Arrays.fill((byte[]) argument, (byte) 0);
+        }
+        Arrays.fill(arguments, null);
+    }
+
+    /* ---- Qp current typed page bridge ---- */
 
     public static Object executeQpVmPage(long entryToken, byte[] encodedHandle, int pageIndex, byte[] callSiteProof, Object[] args) {
         requireQpPageRequest(encodedHandle, pageIndex, callSiteProof, "VM");
@@ -161,7 +211,7 @@ public final class QpBridge {
              * before returning to this call site. */
             return nativeExecuteVmPage(entryToken, packQpPageRequest(encodedHandle, pageIndex, callSiteProof), args);
         } catch (UnsatisfiedLinkError error) {
-            throw new SecurityException("AKEN VM page bridge is not registered for the sealed helper", error);
+            throw new SecurityException("Qp VM page bridge is not registered for the sealed helper", error);
         }
     }
 
@@ -170,7 +220,7 @@ public final class QpBridge {
         ensureQpNativeKernel();
         requireDefenseForProtectedPath();
         String result = nativeOpenStringPage(packQpPageRequest(encodedHandle, pageIndex, callSiteProof));
-        if (result == null) throw new SecurityException("AKEN string page access failed closed");
+        if (result == null) throw new SecurityException("Qp string page access failed closed");
         return result;
     }
 
@@ -206,14 +256,14 @@ public final class QpBridge {
 
     private static void requireQpPageRequest(byte[] encodedHandle, int pageIndex, byte[] callSiteProof, String purpose) {
         if (encodedHandle == null || encodedHandle.length != 24 || pageIndex < 0 || callSiteProof == null || callSiteProof.length == 0 || callSiteProof.length > 4096) {
-            throw new SecurityException("AKEN " + purpose + " page request is invalid");
+            throw new SecurityException("Qp " + purpose + " page request is invalid");
         }
     }
 
     private static void ensureQpNativeKernel() {
-        if (akenLoadState == LOAD_UNTRIED) loadQpNativeKernel();
-        if (akenLoadState != LOAD_READY) {
-            throw new SecurityException("AKEN page access requires the sealed native kernel (" + akenLoadMessage + ")");
+        if (nativeLoadState == LOAD_UNTRIED) loadQpNativeKernel();
+        if (nativeLoadState != LOAD_READY) {
+            throw new SecurityException("Qp page access requires the sealed native kernel (" + nativeLoadMessage + ")");
         }
         if (kernelState < KERNEL_NATIVE_READY) {
             kernelState = KERNEL_NATIVE_READY;
@@ -222,28 +272,28 @@ public final class QpBridge {
 
     /** Load only the authenticated Qp Rust JNI artifact. */
     private static synchronized void loadQpNativeKernel() {
-        if (akenLoadState != LOAD_UNTRIED) return;
-        akenLoadState = LOAD_LOADING;
+        if (nativeLoadState != LOAD_UNTRIED) return;
+        nativeLoadState = LOAD_LOADING;
         try {
             String platformTarget = detectPlatform();
             if (platformTarget == null) {
-                akenLoadMessage = "qp:native-unavailable";
-                akenLoadState = LOAD_FAILED;
+                nativeLoadMessage = "qp:native-unavailable";
+                nativeLoadState = LOAD_FAILED;
                 return;
             }
             if (!tryLoadQpBundledNative(platformTarget)) {
-                if (akenLoadMessage == null || akenLoadMessage.length() == 0) {
-                    akenLoadMessage = "qp:bundled-native-unavailable";
+                if (nativeLoadMessage == null || nativeLoadMessage.length() == 0) {
+                    nativeLoadMessage = "qp:bundled-native-unavailable";
                 }
-                akenLoadState = LOAD_FAILED;
+                nativeLoadState = LOAD_FAILED;
                 return;
             }
-            akenLoadState = LOAD_READY;
+            nativeLoadState = LOAD_READY;
             nativeSelfCheckFailed = false;
             runDiversifiedVmSelfExercise();
         } catch (Throwable error) {
-            akenLoadMessage = debugNativeLoadMessage("qp:native-exception", error);
-            akenLoadState = LOAD_FAILED;
+            nativeLoadMessage = debugNativeLoadMessage("qp:native-exception", error);
+            nativeLoadState = LOAD_FAILED;
         }
     }
 
@@ -253,7 +303,7 @@ public final class QpBridge {
             locator = readQpLocator(platformTarget);
         } catch (SecurityException error) {
             String detail = error.getMessage();
-            akenLoadMessage = "qp:native-locator-invalid:" + platformTarget +
+            nativeLoadMessage = "qp:native-locator-invalid:" + platformTarget +
                 (detail == null || detail.length() == 0 ? "" : ":" + detail);
             return false;
         }
@@ -272,23 +322,23 @@ public final class QpBridge {
         boolean loaded = false;
         try (InputStream in = resourceStream(locator.resourcePath)) {
             if (in == null) {
-                akenLoadMessage = "qp:native-resource-missing:" + platformTarget;
+                nativeLoadMessage = "qp:native-resource-missing:" + platformTarget;
                 return false;
             }
             nativeBytes = readAllBounded(in, locator.storedLength);
             if (nativeBytes.length != locator.storedLength || hasQpRejectedLegacyHeader(nativeBytes)) {
-                akenLoadMessage = "qp:native-resource-invalid:" + platformTarget;
+                nativeLoadMessage = "qp:native-resource-invalid:" + platformTarget;
                 return false;
             }
-            validateR1NativeImage(platformTarget, nativeBytes);
+            validateNativeImage(platformTarget, nativeBytes);
             actualDigest = sha256(nativeBytes);
             if (!MessageDigest.isEqual(locator.sha256, actualDigest)) {
-                akenLoadMessage = "qp:native-resource-digest-mismatch:" + platformTarget;
+                nativeLoadMessage = "qp:native-resource-digest-mismatch:" + platformTarget;
                 return false;
             }
             String bindingText = sealedNativeBindingText(locator);
             if (bindingText == null || bindingText.length() == 0) {
-                akenLoadMessage = "qp:native-bindings-invalid:" + platformTarget;
+                nativeLoadMessage = "qp:native-bindings-invalid:" + platformTarget;
                 return false;
             }
             for (File extractDirectory : nativeExtractDirectories()) {
@@ -304,17 +354,17 @@ public final class QpBridge {
                 publishSealedNativeBindings(bindingText);
                 sealedNativeBindingsPublished = true;
                 if (!extractedNativeMatchesLocator(tempLib, locator)) {
-                    akenLoadMessage = "qp:native-extract-digest-mismatch:" + platformTarget;
+                    nativeLoadMessage = "qp:native-extract-digest-mismatch:" + platformTarget;
                     return false;
                 }
                 System.load(tempLib.getAbsolutePath());
                 if (!extractedNativeMatchesLocator(tempLib, locator)) {
-                    akenLoadMessage = "qp:native-loaded-digest-mismatch:" + platformTarget;
+                    nativeLoadMessage = "qp:native-loaded-digest-mismatch:" + platformTarget;
                     return false;
                 }
                 int initResult = initializeNativeKernel(platformTarget);
                 if (initResult < 0) {
-                    akenLoadMessage = "qp:native-init-failed:" + initResult;
+                    nativeLoadMessage = "qp:native-init-failed:" + initResult;
                     return false;
                 }
                 installQpSessionNonce();
@@ -322,17 +372,17 @@ public final class QpBridge {
                 if (!verifyQpNativeAbiAfterLoad()) {
                     return false;
                 }
-                akenLoadMessage = "qp:native:bundled:" + platformTarget + ":" + initResult;
+                nativeLoadMessage = "qp:native:bundled:" + platformTarget + ":" + initResult;
                 loaded = true;
                 return true;
             }
-            akenLoadMessage = "qp:native-extract-unavailable:" + platformTarget;
+            nativeLoadMessage = "qp:native-extract-unavailable:" + platformTarget;
             return false;
         } catch (UnsatisfiedLinkError error) {
-            akenLoadMessage = debugNativeLoadMessage("qp:native-load-error", error);
+            nativeLoadMessage = debugNativeLoadMessage("qp:native-load-error", error);
             return false;
         } catch (Throwable error) {
-            akenLoadMessage = debugNativeLoadMessage("qp:native-init-error", error);
+            nativeLoadMessage = debugNativeLoadMessage("qp:native-init-error", error);
             return false;
         } finally {
             if (nativeBytes != null) Arrays.fill(nativeBytes, (byte) 0);
@@ -354,7 +404,7 @@ public final class QpBridge {
         byte[] proof = new byte[] { 1 };
         try {
             if (nativeHeartbeat() < 0) {
-                akenLoadMessage = "qp:abi-failed:nativeHeartbeat";
+                nativeLoadMessage = "qp:abi-failed:nativeHeartbeat";
                 return false;
             }
             byte[] packed = packQpPageRequest(handle, 0, proof);
@@ -379,17 +429,17 @@ public final class QpBridge {
                 // Registered typed route reached native code.
             }
             if (nativeInitializeDefense("abi-probe", "balanced") != 0) {
-                akenLoadMessage = "qp:abi-failed:nativeInitializeDefense";
+                nativeLoadMessage = "qp:abi-failed:nativeInitializeDefense";
                 return false;
             }
             if (nativeProbeDefense("abi-probe", "abi") != 0) {
-                akenLoadMessage = "qp:abi-failed:nativeProbeDefense";
+                nativeLoadMessage = "qp:abi-failed:nativeProbeDefense";
                 return false;
             }
             byte[] defenseShare = nativeTransformDefense(new byte[] { 1 }, "abi");
             try {
                 if (defenseShare == null || defenseShare.length != 32) {
-                    akenLoadMessage = "qp:abi-failed:nativeTransformDefense";
+                    nativeLoadMessage = "qp:abi-failed:nativeTransformDefense";
                     return false;
                 }
             } finally {
@@ -397,10 +447,10 @@ public final class QpBridge {
             }
             return true;
         } catch (UnsatisfiedLinkError error) {
-            akenLoadMessage = "qp:abi-missing:typed-page-bridge";
+            nativeLoadMessage = "qp:abi-missing:typed-page-bridge";
             return false;
         } catch (Throwable error) {
-            akenLoadMessage = "qp:abi-probe-failed:" + error.getClass().getName();
+            nativeLoadMessage = "qp:abi-probe-failed:" + error.getClass().getName();
             return false;
         } finally {
             Arrays.fill(handle, (byte) 0);
@@ -408,7 +458,7 @@ public final class QpBridge {
         }
     }
 
-    private static void validateR1NativeImage(String platformTarget, byte[] bytes) {
+    private static void validateNativeImage(String platformTarget, byte[] bytes) {
         if (bytes == null || bytes.length < 64 || hasQpRejectedLegacyHeader(bytes)) {
             throw new SecurityException("Qp native image is invalid");
         }
@@ -472,7 +522,7 @@ public final class QpBridge {
             "nativeInitializeDefense",
             "nativeProbeDefense",
             "nativeTransformDefense",
-            "nativeOpenTargetToken",
+            "nativeInvokeSite",
         };
         for (String marker : requiredMarkers) {
             if (!containsAscii(bytes, marker)) {
@@ -520,7 +570,7 @@ public final class QpBridge {
     }
 
     private static byte[] requireQpPageResult(byte[] result, String purpose) {
-        if (result == null) throw new SecurityException("AKEN " + purpose + " page access failed closed");
+        if (result == null) throw new SecurityException("Qp " + purpose + " page access failed closed");
         return result;
     }
 
@@ -540,26 +590,26 @@ public final class QpBridge {
         boolean completed = false;
         try {
             raw = readQpLocatorBytes();
-            if (raw == null) throw new SecurityException("AKEN native locator is missing");
+            if (raw == null) throw new SecurityException("Qp native locator is missing");
             if (raw.length < QP_NATIVE_LOCATOR_HEADER_BYTES + QP_NATIVE_LOCATOR_COMMITMENT_BYTES ||
                 hasQpRejectedLegacyHeader(raw) || !hasQpLocatorMagic(raw) ||
                 (raw[4] & 0xFF) != QP_NATIVE_LOCATOR_VERSION || (raw[5] & 0xFF) != 0) {
-                throw new SecurityException("AKEN native locator binary header is invalid");
+                throw new SecurityException("Qp native locator binary header is invalid");
             }
             int payloadLength = raw.length - QP_NATIVE_LOCATOR_COMMITMENT_BYTES;
-            expectedCommitment = akenNativeLocatorCommitment(raw, payloadLength);
+            expectedCommitment = nativeLocatorCommitment(raw, payloadLength);
             storedCommitment = Arrays.copyOfRange(raw, payloadLength, raw.length);
             if (!MessageDigest.isEqual(expectedCommitment, storedCommitment)) {
-                throw new SecurityException("AKEN native locator commitment is invalid");
+                throw new SecurityException("Qp native locator commitment is invalid");
             }
             int recordCount = readQpLocatorU16(raw, 6, payloadLength);
             if (recordCount < 1 || recordCount > QP_NATIVE_LOCATOR_MAX_RECORDS) {
-                throw new SecurityException("AKEN native locator record count is invalid");
+                throw new SecurityException("Qp native locator record count is invalid");
             }
 
-            int expectedPlatformId = akenNativePlatformId(expectedPlatform);
+            int expectedPlatformId = nativePlatformId(expectedPlatform);
             if (expectedPlatformId == 0) {
-                throw new SecurityException("AKEN native locator requested platform is invalid");
+                throw new SecurityException("Qp native locator requested platform is invalid");
             }
             int offset = QP_NATIVE_LOCATOR_HEADER_BYTES;
             int lastPlatformId = 0;
@@ -569,7 +619,7 @@ public final class QpBridge {
             LinkedHashSet<String> seenRoutes = new LinkedHashSet<>();
             for (int recordIndex = 0; recordIndex < recordCount; recordIndex++) {
                 if (offset < 0 || offset > payloadLength - QP_NATIVE_LOCATOR_RECORD_FIXED_BYTES) {
-                    throw new SecurityException("AKEN native locator record is truncated");
+                    throw new SecurityException("Qp native locator record is truncated");
                 }
                 int kind = raw[offset++] & 0xFF;
                 int platformId = raw[offset++] & 0xFF;
@@ -580,7 +630,7 @@ public final class QpBridge {
                 if (routeLength < 1 || routeLength > QP_NATIVE_LOCATOR_MAX_ROUTE_BYTES ||
                     offset > payloadLength - QP_NATIVE_SHA256_LENGTH ||
                     routeLength > payloadLength - offset - QP_NATIVE_SHA256_LENGTH) {
-                    throw new SecurityException("AKEN native locator route length is invalid");
+                    throw new SecurityException("Qp native locator route length is invalid");
                 }
                 byte[] digest = Arrays.copyOfRange(raw, offset, offset + QP_NATIVE_SHA256_LENGTH);
                 offset += QP_NATIVE_SHA256_LENGTH;
@@ -597,26 +647,26 @@ public final class QpBridge {
                         digest
                     );
                     if (!isQpNativeRouteBytes(routeBytes)) {
-                        throw new SecurityException("AKEN native locator route encoding is invalid");
+                        throw new SecurityException("Qp native locator route encoding is invalid");
                     }
                     String resourcePath = new String(routeBytes, StandardCharsets.US_ASCII);
                     if (!isQpNativeResourcePath(resourcePath) || !seenRoutes.add(resourcePath)) {
-                        throw new SecurityException("AKEN native locator route is invalid or duplicated");
+                        throw new SecurityException("Qp native locator route is invalid or duplicated");
                     }
 
                     if (kind == QP_NATIVE_LOCATOR_KIND_LIBRARY) {
                         if (bindingSeen || platformId <= lastPlatformId || platformId > 2 ||
                             storedLength > QP_NATIVE_MAX_LIBRARY_BYTES) {
-                            throw new SecurityException("AKEN native locator platform record is invalid");
+                            throw new SecurityException("Qp native locator platform record is invalid");
                         }
                         lastPlatformId = platformId;
-                        String fileSuffix = akenNativeSuffix(platformId);
+                        String fileSuffix = nativeSuffix(platformId);
                         if (fileSuffix == null || !resourcePath.endsWith(fileSuffix)) {
-                            throw new SecurityException("AKEN native locator suffix binding is invalid");
+                            throw new SecurityException("Qp native locator suffix binding is invalid");
                         }
                         if (platformId == expectedPlatformId) {
                             if (selected != null) {
-                                throw new SecurityException("AKEN native locator has duplicate active platform");
+                                throw new SecurityException("Qp native locator has duplicate active platform");
                             }
                             selected = new QpNativeLibrary(resourcePath, fileSuffix, storedLength, digest);
                             digestTransferred = true;
@@ -624,7 +674,7 @@ public final class QpBridge {
                     } else if (kind == QP_NATIVE_LOCATOR_KIND_BINDINGS) {
                         if (platformId != 0 || bindingSeen || recordIndex != recordCount - 1 ||
                             storedLength > QP_NATIVE_BINDINGS_MAX_BYTES) {
-                            throw new SecurityException("AKEN native bindings locator record is invalid");
+                            throw new SecurityException("Qp native bindings locator record is invalid");
                         }
                         bindingSeen = true;
                         bindingResourcePath = resourcePath;
@@ -632,7 +682,7 @@ public final class QpBridge {
                         bindingSha256 = digest;
                         digestTransferred = true;
                     } else {
-                        throw new SecurityException("AKEN native locator record kind is invalid");
+                        throw new SecurityException("Qp native locator record kind is invalid");
                     }
                 } finally {
                     Arrays.fill(maskedRoute, (byte) 0);
@@ -640,10 +690,10 @@ public final class QpBridge {
                     if (!digestTransferred) Arrays.fill(digest, (byte) 0);
                 }
             }
-            if (offset != payloadLength) throw new SecurityException("AKEN native locator has trailing bytes");
-            if (selected == null) throw new SecurityException("AKEN native locator has no active platform route");
+            if (offset != payloadLength) throw new SecurityException("Qp native locator has trailing bytes");
+            if (selected == null) throw new SecurityException("Qp native locator has no active platform route");
             if (!bindingSeen || bindingResourcePath == null || bindingSha256 == null) {
-                throw new SecurityException("AKEN native locator has no final binding route");
+                throw new SecurityException("Qp native locator has no final binding route");
             }
             selected.bindingResourcePath = bindingResourcePath;
             selected.bindingStoredLength = bindingStoredLength;
@@ -654,7 +704,7 @@ public final class QpBridge {
         } catch (SecurityException error) {
             throw error;
         } catch (Exception error) {
-            throw new SecurityException("AKEN native locator is unreadable", error);
+            throw new SecurityException("Qp native locator is unreadable", error);
         } finally {
             if (raw != null) Arrays.fill(raw, (byte) 0);
             if (expectedCommitment != null) Arrays.fill(expectedCommitment, (byte) 0);
@@ -672,13 +722,13 @@ public final class QpBridge {
             (bytes[3] & 0xFF) == QP_NATIVE_LOCATOR_MAGIC_3;
     }
 
-    private static int akenNativePlatformId(String platform) {
+    private static int nativePlatformId(String platform) {
         if ("x86_64-pc-windows-gnu".equals(platform) || "windows-x64".equals(platform)) return 1;
         if ("x86_64-unknown-linux-gnu.2.17".equals(platform) || "linux-x64".equals(platform)) return 2;
         return 0;
     }
 
-    private static String akenNativeSuffix(int platformId) {
+    private static String nativeSuffix(int platformId) {
         if (platformId == 1) return ".dll";
         if (platformId == 2) return ".so";
         return null;
@@ -695,7 +745,7 @@ public final class QpBridge {
         if (normalizedPath.startsWith("meta-inf/.r/") ||
             normalizedPath.startsWith("meta-inf/js-native/") || normalizedPath.startsWith("meta-inf/native-src/") ||
             normalizedPath.startsWith("meta-inf/jsrt/") ||
-            !hasCurrentR1ResourceSuffix(normalizedPath)) {
+            !hasCurrentNativeResourceSuffix(normalizedPath)) {
             return false;
         }
         String tail = resourcePath.substring(QP_NATIVE_RESOURCE_ROOT.length());
@@ -729,7 +779,7 @@ public final class QpBridge {
             lower.startsWith(new String(new char[] {'z', 'i', 'g'}));
     }
 
-    private static boolean hasCurrentR1ResourceSuffix(String normalizedPath) {
+    private static boolean hasCurrentNativeResourceSuffix(String normalizedPath) {
         return normalizedPath.endsWith(".dll") || normalizedPath.endsWith(".so") ||
             normalizedPath.endsWith(".properties") || normalizedPath.endsWith(".xml") ||
             normalizedPath.endsWith(".json") || normalizedPath.endsWith(".yml") ||
@@ -739,26 +789,26 @@ public final class QpBridge {
 
     private static int readQpLocatorU16(byte[] bytes, int offset, int limit) {
         if (bytes == null || offset < 0 || limit < 0 || offset > limit - 2 || limit > bytes.length) {
-            throw new SecurityException("AKEN native locator u16 is truncated");
+            throw new SecurityException("Qp native locator u16 is truncated");
         }
         return ((bytes[offset] & 0xFF) << 8) | (bytes[offset + 1] & 0xFF);
     }
 
     private static int readQpLocatorPositiveU32(byte[] bytes, int offset, int limit) {
         if (bytes == null || offset < 0 || limit < 0 || offset > limit - 4 || limit > bytes.length) {
-            throw new SecurityException("AKEN native locator u32 is truncated");
+            throw new SecurityException("Qp native locator u32 is truncated");
         }
         long value = ((long) (bytes[offset] & 0xFF) << 24) |
             ((long) (bytes[offset + 1] & 0xFF) << 16) |
             ((long) (bytes[offset + 2] & 0xFF) << 8) |
             (long) (bytes[offset + 3] & 0xFF);
         if (value <= 0L || value > Integer.MAX_VALUE) {
-            throw new SecurityException("AKEN native locator length is invalid");
+            throw new SecurityException("Qp native locator length is invalid");
         }
         return (int) value;
     }
 
-    private static byte[] akenNativeLocatorCommitment(byte[] payload, int payloadLength) {
+    private static byte[] nativeLocatorCommitment(byte[] payload, int payloadLength) {
         byte[] domain = null;
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -767,7 +817,7 @@ public final class QpBridge {
             digest.update(payload, 0, payloadLength);
             return digest.digest();
         } catch (Exception error) {
-            throw new SecurityException("AKEN native locator commitment is unavailable", error);
+            throw new SecurityException("Qp native locator commitment is unavailable", error);
         } finally {
             if (domain != null) Arrays.fill(domain, (byte) 0);
         }
@@ -808,7 +858,7 @@ public final class QpBridge {
             return route;
         } catch (Exception error) {
             Arrays.fill(route, (byte) 0);
-            throw new SecurityException("AKEN native locator route mask is unavailable", error);
+            throw new SecurityException("Qp native locator route mask is unavailable", error);
         } finally {
             if (domain != null) Arrays.fill(domain, (byte) 0);
         }
@@ -850,29 +900,29 @@ public final class QpBridge {
             (bytes[3] & 0xFF) == fourth;
     }
 
-    /* Retained Java entrypoints fail closed; R1 exposes no generic resource ABI. */
+    /* Retained Java entrypoints fail closed; the current runtime exposes no generic resource ABI. */
     public static Object executeVmResource(long entryToken, String resourcePath, Object[] args) {
-        throw new SecurityException("generic VM resource execution is not part of the R1 runtime");
+        throw new SecurityException("generic VM resource execution is not part of the current runtime");
     }
 
     public static Object executeVmResource(long entryToken, Object[] args) {
-        throw new SecurityException("generic VM resource execution is not part of the R1 runtime");
+        throw new SecurityException("generic VM resource execution is not part of the current runtime");
     }
 
     public static void executeVmResourceVoid(long entryToken) {
-        throw new SecurityException("generic VM resource execution is not part of the R1 runtime");
+        throw new SecurityException("generic VM resource execution is not part of the current runtime");
     }
 
     public static int executeVmResourceInt(long entryToken) {
-        throw new SecurityException("generic VM resource execution is not part of the R1 runtime");
+        throw new SecurityException("generic VM resource execution is not part of the current runtime");
     }
 
     public static int executeVmResourceIntInt(long entryToken, int arg0) {
-        throw new SecurityException("generic VM resource execution is not part of the R1 runtime");
+        throw new SecurityException("generic VM resource execution is not part of the current runtime");
     }
 
     public static void executeVmResourceIntVoid(long entryToken, int arg0) {
-        throw new SecurityException("generic VM resource execution is not part of the R1 runtime");
+        throw new SecurityException("generic VM resource execution is not part of the current runtime");
     }
 
     public static Runnable createRunnableLambda(String owner, String name, String descriptor, int implTag, Object[] captured) {
@@ -1527,7 +1577,7 @@ public final class QpBridge {
     }
 
     public static boolean isNativeLoaded() {
-        return loadState == LOAD_READY || akenLoadState == LOAD_READY;
+        return loadState == LOAD_READY || nativeLoadState == LOAD_READY;
     }
 
     /* ---- Kernel loading ---- */
@@ -1542,7 +1592,7 @@ public final class QpBridge {
             runDiversifiedVmSelfExercise();
             return;
         }
-        if (loadState == LOAD_LOADING || akenLoadState == LOAD_LOADING) return;
+        if (loadState == LOAD_LOADING || nativeLoadState == LOAD_LOADING) return;
         loadState = LOAD_LOADING;
         try {
             String platformTarget = detectPlatform();
@@ -1558,15 +1608,15 @@ public final class QpBridge {
                 return;
             }
             loadQpNativeKernel();
-            if (akenLoadState == LOAD_READY) {
+            if (nativeLoadState == LOAD_READY) {
                 loadState = LOAD_UNTRIED;
                 loadMessage = "";
                 runDiversifiedVmSelfExercise();
                 return;
             }
-            loadMessage = akenLoadMessage == null || akenLoadMessage.length() == 0
+            loadMessage = nativeLoadMessage == null || nativeLoadMessage.length() == 0
                 ? "qp:bundled-native-unavailable"
-                : akenLoadMessage;
+                : nativeLoadMessage;
             loadState = LOAD_FAILED;
             runDiversifiedVmSelfExercise();
         } catch (Throwable e) {
@@ -1598,7 +1648,7 @@ public final class QpBridge {
 
     /** True only after the authenticated native defense state reached DEFENSE_READY. */
     public static boolean isKernelIntegrityReady() {
-        return kernelState == KERNEL_DEFENSE_READY && akenLoadState == LOAD_READY && !nativeSelfCheckFailed;
+        return kernelState == KERNEL_DEFENSE_READY && nativeLoadState == LOAD_READY && !nativeSelfCheckFailed;
     }
 
     /** Arm protected-data gates even if initialize() is later skipped or nopped. */
@@ -1615,7 +1665,7 @@ public final class QpBridge {
     }
 
     public static synchronized void markDefenseReady() {
-        if (akenLoadState != LOAD_READY || nativeSelfCheckFailed) {
+        if (nativeLoadState != LOAD_READY || nativeSelfCheckFailed) {
             kernelState = KERNEL_FAILED;
             defenseRequired = true;
             throw new SecurityException("Unified defense native readiness is incomplete");
@@ -1641,7 +1691,7 @@ public final class QpBridge {
     }
 
     /*
-     * Diversified virtualization is native-only in VBC4 mode. The Java helper
+     * Diversified virtualization is native-only in native VM mode. The Java helper
      * records whether the mode was requested and relies on ABI/boot-token gates
      * after native load instead of running any Java VM fallback path.
      */
@@ -1689,7 +1739,7 @@ public final class QpBridge {
         }
     }
 
-    /* ---- Locked R1 host targets ---- */
+    /* ---- Locked current host targets ---- */
     private static String detectPlatform() {
         return detectPlatform(System.getProperty("os.name", ""), System.getProperty("os.arch", ""));
     }
@@ -1726,7 +1776,7 @@ public final class QpBridge {
         byte[] startupNonce = createVmStartupNonce();
         try {
             if (!nativeInstallSessionNonce(startupNonce)) {
-                throw new SecurityException("AKEN runtime session nonce installation failed");
+                throw new SecurityException("Qp runtime session nonce installation failed");
             }
         } finally {
             Arrays.fill(startupNonce, (byte) 0);
@@ -1740,7 +1790,7 @@ public final class QpBridge {
         try {
             int installed = nativeInstallCatalog(bundle.directory, bundle.pages);
             if (installed <= 0) {
-                throw new SecurityException("AKEN current catalog installed no pages");
+                throw new SecurityException("Qp current catalog installed no pages");
             }
         } finally {
             bundle.clear();
@@ -1771,15 +1821,15 @@ public final class QpBridge {
                 if (relative.length() == 0) continue;
                 validateCatalogRelativePath(relative);
                 if (relative.indexOf('/') < 0) {
-                    if (directory != null) throw new SecurityException("AKEN catalog directory is duplicated");
+                    if (directory != null) throw new SecurityException("Qp catalog directory is duplicated");
                     try (InputStream source = resourceStream(QP_CATALOG_RESOURCE_ROOT + relative)) {
-                        if (source == null) throw new SecurityException("AKEN catalog directory is missing");
+                        if (source == null) throw new SecurityException("Qp catalog directory is missing");
                         directory = readAllBounded(source, 64 * 1024 * 1024);
                     }
                     continue;
                 }
                 try (InputStream source = resourceStream(relative)) {
-                    if (source == null) throw new SecurityException("AKEN catalog page is missing: " + relative);
+                    if (source == null) throw new SecurityException("Qp catalog page is missing: " + relative);
                     if (count == paths.length) {
                         paths = java.util.Arrays.copyOf(paths, paths.length * 2);
                         blobs = java.util.Arrays.copyOf(blobs, blobs.length * 2);
@@ -1793,7 +1843,7 @@ public final class QpBridge {
                 }
             }
             if (directory == null || count == 0) {
-                throw new SecurityException("AKEN current catalog is incomplete");
+                throw new SecurityException("Qp current catalog is incomplete");
             }
             byte[] framed = new byte[framedSize];
             int pos = writeBe32(framed, 0, count);
@@ -1813,12 +1863,12 @@ public final class QpBridge {
             }
             if (pos != framed.length) {
                 Arrays.fill(framed, (byte) 0);
-                throw new SecurityException("AKEN current catalog bundle length mismatch");
+                throw new SecurityException("Qp current catalog bundle length mismatch");
             }
             return new CatalogBundle(directory, framed);
         } catch (IOException error) {
             if (directory != null) Arrays.fill(directory, (byte) 0);
-            throw new SecurityException("AKEN current catalog is unreadable", error);
+            throw new SecurityException("Qp current catalog is unreadable", error);
         }
     }
 
@@ -1834,7 +1884,7 @@ public final class QpBridge {
         if (relative.length() == 0 || relative.length() > 4096 ||
             relative.indexOf('\\') >= 0 || relative.indexOf('\0') >= 0 ||
             relative.startsWith("/") || relative.contains("..")) {
-            throw new SecurityException("AKEN catalog path is invalid");
+            throw new SecurityException("Qp catalog path is invalid");
         }
     }
 
@@ -1914,7 +1964,7 @@ public final class QpBridge {
 
     private static void publishSealedNativeBindings(String bindingText) {
         if (bindingText == null || bindingText.length() == 0) {
-            throw new SecurityException("AKEN native bindings are unavailable");
+            throw new SecurityException("Qp native bindings are unavailable");
         }
         try {
             publishSealedNativeLoaderOwner();
@@ -1925,7 +1975,7 @@ public final class QpBridge {
             for (String line : lines) {
                 String[] parts = line.trim().split("\\|", -1);
                 if (parts.length != 3) {
-                    throw new SecurityException("AKEN native bindings record is malformed");
+                    throw new SecurityException("Qp native bindings record is malformed");
                 }
                 if ("B".equals(parts[0])) {
                     if (bindings.length() > 0) bindings.append('\n');
@@ -1937,7 +1987,7 @@ public final class QpBridge {
                     if (fieldBindings.length() > 0) fieldBindings.append('\n');
                     fieldBindings.append(parts[1]).append('=').append(parts[2]);
                 } else {
-                    throw new SecurityException("AKEN native bindings record type is invalid");
+                    throw new SecurityException("Qp native bindings record type is invalid");
                 }
             }
             if (bindings.length() > 0) {
@@ -1952,7 +2002,7 @@ public final class QpBridge {
         } catch (SecurityException error) {
             throw error;
         } catch (Throwable error) {
-            throw new SecurityException("AKEN native bindings are unavailable", error);
+            throw new SecurityException("Qp native bindings are unavailable", error);
         }
     }
 
@@ -2017,7 +2067,7 @@ public final class QpBridge {
     private static String sealedNativeBindingText(QpNativeLibrary locator) {
         String resourcePath = locator == null ? null : locator.bindingResourcePath;
         if (resourcePath == null || !isQpNativeResourcePath(resourcePath)) {
-            throw new SecurityException("AKEN native bindings resource path is unavailable");
+            throw new SecurityException("Qp native bindings resource path is unavailable");
         }
         try (InputStream in = resourceStream(resourcePath)) {
             if (in == null) return null;
@@ -2025,7 +2075,7 @@ public final class QpBridge {
             try {
                 if (locator != null) verifyQpNativeBinding(locator, raw);
                 if (raw.length == 0 || hasQpRejectedLegacyHeader(raw) || !isAscii(raw)) {
-                    throw new SecurityException("AKEN native bindings are not raw relocation metadata");
+                    throw new SecurityException("Qp native bindings are not raw relocation metadata");
                 }
                 return new String(raw, StandardCharsets.UTF_8);
             } finally {
@@ -2034,7 +2084,7 @@ public final class QpBridge {
         } catch (SecurityException error) {
             throw error;
         } catch (Exception error) {
-            throw new SecurityException("AKEN native bindings are unavailable", error);
+            throw new SecurityException("Qp native bindings are unavailable", error);
         }
     }
 
@@ -2042,12 +2092,12 @@ public final class QpBridge {
         if (locator.bindingResourcePath == null ||
             !isQpNativeResourcePath(locator.bindingResourcePath) ||
             locator.bindingSha256 == null || raw.length != locator.bindingStoredLength) {
-            throw new SecurityException("AKEN native binding locator does not match the sealed resource");
+            throw new SecurityException("Qp native binding locator does not match the sealed resource");
         }
         byte[] actualDigest = sha256(raw);
         try {
             if (!MessageDigest.isEqual(locator.bindingSha256, actualDigest)) {
-                throw new SecurityException("AKEN native binding digest mismatch");
+                throw new SecurityException("Qp native binding digest mismatch");
             }
         } finally {
             Arrays.fill(actualDigest, (byte) 0);
@@ -2055,19 +2105,19 @@ public final class QpBridge {
     }
 
     public static byte[] decodeRuntimeResourceForNative(byte[] raw) {
-        throw new SecurityException("generic runtime-resource decoding is not part of the R1 runtime");
+        throw new SecurityException("generic runtime-resource decoding is not part of the current runtime");
     }
 
     public static byte[] decodeRuntimeResourceEnvelope(byte[] raw) {
-        throw new SecurityException("generic runtime-resource decoding is not part of the R1 runtime");
+        throw new SecurityException("generic runtime-resource decoding is not part of the current runtime");
     }
 
     public static byte[] deriveClassEncryptionKey(byte[] keyId, byte[] salt, int length) {
-        throw new SecurityException("class-encryption key derivation is not part of the R1 Java helper");
+        throw new SecurityException("class-encryption key derivation is not part of the current Java helper");
     }
 
     public static byte[] decryptClassBytes(byte[] keyId, byte[] salt, byte[] nonce, byte[] ciphertext, byte[] aad, int keyLength) {
-        throw new SecurityException("class-encryption decryption is not part of the R1 Java helper");
+        throw new SecurityException("class-encryption decryption is not part of the current Java helper");
     }
 
     private static boolean extractedNativeMatchesLocator(File extracted, QpNativeLibrary locator) {

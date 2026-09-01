@@ -285,6 +285,7 @@ mod jni_bridge {
     const SET_STATIC_LONG_FIELD_INDEX: usize = 160;
     const SET_STATIC_FLOAT_FIELD_INDEX: usize = 161;
     const SET_STATIC_DOUBLE_FIELD_INDEX: usize = 162;
+    const NEW_STRING_INDEX: usize = 163;
     const NEW_STRING_UTF_INDEX: usize = 167;
     const NEW_BYTE_ARRAY_INDEX: usize = 176;
     const SET_BYTE_ARRAY_REGION_INDEX: usize = 208;
@@ -3507,7 +3508,15 @@ mod jni_bridge {
         Ok(())
     }
 
-    fn validate_target_token_plaintext(plaintext: &[u8]) -> Result<(), BridgeFailure> {
+    #[derive(Clone, Copy)]
+    struct TargetDescription<'a> {
+        owner: &'a [u8],
+        name: &'a [u8],
+        descriptor: &'a [u8],
+        tag: u8,
+    }
+
+    fn parse_target_description(plaintext: &[u8]) -> Result<TargetDescription<'_>, BridgeFailure> {
         let mut fields = plaintext.split(|byte| *byte == 0);
         let owner = fields.next().ok_or(BridgeFailure("Qp target token payload is invalid"))?;
         let name = fields.next().ok_or(BridgeFailure("Qp target token payload is invalid"))?;
@@ -3525,26 +3534,20 @@ mod jni_bridge {
         {
             return Err(BridgeFailure("Qp target token payload is invalid"));
         }
-        Ok(())
+        Ok(TargetDescription {
+            owner,
+            name,
+            descriptor,
+            tag: tag[0],
+        })
     }
 
-    fn native_open_target_token_inner(
-        env: JNIEnv,
-        token: JByteArray,
-        caller_owner: JString,
-        indy_name: JString,
-        method_type: JString,
-    ) -> Result<JByteArray, BridgeFailure> {
-        let token = unsafe { copy_byte_array(env, token, MAX_TARGET_TOKEN_BYTES) }?;
-        let caller_owner = WipedBytes(unsafe {
-            copy_string_bounded(env, caller_owner, MAX_TARGET_TOKEN_TEXT_BYTES)
-        }?);
-        let indy_name = WipedBytes(unsafe {
-            copy_string_bounded(env, indy_name, MAX_TARGET_TOKEN_TEXT_BYTES)
-        }?);
-        let method_type = WipedBytes(unsafe {
-            copy_string_bounded(env, method_type, MAX_TARGET_TOKEN_TEXT_BYTES)
-        }?);
+    fn open_target_token(
+        token: &WipedBytes,
+        caller_owner: &WipedBytes,
+        indy_name: &WipedBytes,
+        method_type: &WipedBytes,
+    ) -> Result<SensitiveMemoryLease, BridgeFailure> {
         validate_target_token_text(caller_owner.as_bytes())?;
         validate_target_token_text(indy_name.as_bytes())?;
         validate_target_token_text(method_type.as_bytes())?;
@@ -3627,12 +3630,374 @@ mod jni_bridge {
             .map_err(|_| BridgeFailure("Qp target token authentication failed"))?;
         let lease = SensitiveMemoryLease::new(plaintext)
             .map_err(|_| BridgeFailure("Qp target token plaintext lease is invalid"))?;
-        validate_target_token_plaintext(lease.as_slice())?;
-        let result = unsafe { new_byte_array(env, lease.as_slice()) }
-            .ok_or(BridgeFailure("Qp target token output allocation failed"));
+        parse_target_description(lease.as_slice())?;
         token_seed.fill(0);
         token_commitment.fill(0);
-        result
+        Ok(lease)
+    }
+
+    unsafe fn get_method_id(
+        env: JNIEnv,
+        class: JClass,
+        name: &[u8],
+        signature: &[u8],
+    ) -> Option<*const c_void> {
+        let entry = native_entry(env, GET_METHOD_ID_INDEX)?;
+        let function: unsafe extern "system" fn(
+            JNIEnv,
+            JClass,
+            *const c_char,
+            *const c_char,
+        ) -> *const c_void = core::mem::transmute(entry);
+        let method = function(env, class, name.as_ptr().cast(), signature.as_ptr().cast());
+        (!method.is_null()).then_some(method)
+    }
+
+    unsafe fn call_object_method_a(
+        env: JNIEnv,
+        receiver: JObject,
+        method: *const c_void,
+        args: *const JValue,
+    ) -> JObject {
+        let Some(entry) = native_entry(env, CALL_OBJECT_METHOD_A_INDEX) else {
+            return core::ptr::null_mut();
+        };
+        let function: unsafe extern "system" fn(
+            JNIEnv,
+            JObject,
+            *const c_void,
+            *const JValue,
+        ) -> JObject = core::mem::transmute(entry);
+        function(env, receiver, method, args)
+    }
+
+    unsafe fn new_utf8_string(env: JNIEnv, bytes: &[u8]) -> Result<JString, BridgeFailure> {
+        let text = core::str::from_utf8(bytes)
+            .map_err(|_| BridgeFailure("Qp target token text is not UTF-8"))?;
+        let utf16 = text.encode_utf16().collect::<Vec<_>>();
+        let entry = native_entry(env, NEW_STRING_INDEX)
+            .ok_or(BridgeFailure("JNI NewString is unavailable"))?;
+        let function: unsafe extern "system" fn(JNIEnv, *const JChar, JSize) -> JString =
+            core::mem::transmute(entry);
+        let value = function(env, utf16.as_ptr(), utf16.len() as JSize);
+        if value.is_null() {
+            return Err(BridgeFailure("Qp target token string allocation failed"));
+        }
+        Ok(value)
+    }
+
+    unsafe fn lookup_target_context(
+        env: JNIEnv,
+        lookup: JObject,
+        indy_name: JString,
+        method_type: JObject,
+    ) -> Result<(JClass, WipedBytes, WipedBytes, WipedBytes), BridgeFailure> {
+        if lookup.is_null() || indy_name.is_null() || method_type.is_null() {
+            return Err(BridgeFailure("Qp target site context is invalid"));
+        }
+        let lookup_class = find_class(env, b"java/lang/invoke/MethodHandles$Lookup\0")
+            .ok_or(BridgeFailure("MethodHandles.Lookup is unavailable"))?;
+        let lookup_class_method = get_method_id(
+            env,
+            lookup_class,
+            b"lookupClass\0",
+            b"()Ljava/lang/Class;\0",
+        )
+        .ok_or(BridgeFailure("Lookup.lookupClass is unavailable"))?;
+        let caller_class = call_object_method_a(env, lookup, lookup_class_method, core::ptr::null());
+        if caller_class.is_null() || exception_pending(env) {
+            return Err(BridgeFailure("Qp target site caller lookup failed"));
+        }
+        let class_class = find_class(env, b"java/lang/Class\0")
+            .ok_or(BridgeFailure("java.lang.Class is unavailable"))?;
+        let class_name_method = get_method_id(
+            env,
+            class_class,
+            b"getName\0",
+            b"()Ljava/lang/String;\0",
+        )
+        .ok_or(BridgeFailure("Class.getName is unavailable"))?;
+        let caller_name = call_object_method_a(env, caller_class, class_name_method, core::ptr::null());
+        if caller_name.is_null() || exception_pending(env) {
+            return Err(BridgeFailure("Qp target site caller name is unavailable"));
+        }
+        let mut caller_owner = WipedBytes(copy_string_bounded(
+            env,
+            caller_name,
+            MAX_TARGET_TOKEN_TEXT_BYTES,
+        )?);
+        for byte in &mut caller_owner.0 {
+            if *byte == b'.' {
+                *byte = b'/';
+            }
+        }
+        let method_type_class = find_class(env, b"java/lang/invoke/MethodType\0")
+            .ok_or(BridgeFailure("MethodType is unavailable"))?;
+        let descriptor_method = get_method_id(
+            env,
+            method_type_class,
+            b"toMethodDescriptorString\0",
+            b"()Ljava/lang/String;\0",
+        )
+        .ok_or(BridgeFailure("MethodType descriptor access is unavailable"))?;
+        let descriptor = call_object_method_a(env, method_type, descriptor_method, core::ptr::null());
+        if descriptor.is_null() || exception_pending(env) {
+            return Err(BridgeFailure("Qp target site method type is unavailable"));
+        }
+        let indy_name = WipedBytes(copy_string_bounded(
+            env,
+            indy_name,
+            MAX_TARGET_TOKEN_TEXT_BYTES,
+        )?);
+        let method_type = WipedBytes(copy_string_bounded(
+            env,
+            descriptor,
+            MAX_TARGET_TOKEN_TEXT_BYTES,
+        )?);
+        validate_target_token_text(caller_owner.as_bytes())?;
+        validate_target_token_text(indy_name.as_bytes())?;
+        validate_target_token_text(method_type.as_bytes())?;
+        Ok((caller_class, caller_owner, indy_name, method_type))
+    }
+
+    unsafe fn resolve_target_handle(
+        env: JNIEnv,
+        lookup: JObject,
+        caller_class: JClass,
+        lease: &SensitiveMemoryLease,
+    ) -> Result<JObject, BridgeFailure> {
+        let target = parse_target_description(lease.as_slice())?;
+        let lookup_class = find_class(env, b"java/lang/invoke/MethodHandles$Lookup\0")
+            .ok_or(BridgeFailure("MethodHandles.Lookup is unavailable"))?;
+        let mut owner_name = target.owner.to_vec();
+        for byte in &mut owner_name {
+            if *byte == b'/' {
+                *byte = b'.';
+            }
+        }
+        let owner_name = new_utf8_string(env, &owner_name)?;
+        let find_class_method = get_method_id(
+            env,
+            lookup_class,
+            b"findClass\0",
+            b"(Ljava/lang/String;)Ljava/lang/Class;\0",
+        )
+        .ok_or(BridgeFailure("Lookup.findClass is unavailable"))?;
+        let owner_args = [JValue { l: owner_name }];
+        let owner = call_object_method_a(env, lookup, find_class_method, jvalue_ptr(&owner_args));
+        if owner.is_null() || exception_pending(env) {
+            return Err(BridgeFailure("Qp target owner lookup failed"));
+        }
+        let class_class = find_class(env, b"java/lang/Class\0")
+            .ok_or(BridgeFailure("java.lang.Class is unavailable"))?;
+        let loader_method = get_method_id(
+            env,
+            class_class,
+            b"getClassLoader\0",
+            b"()Ljava/lang/ClassLoader;\0",
+        )
+        .ok_or(BridgeFailure("Class.getClassLoader is unavailable"))?;
+        let loader = call_object_method_a(env, owner, loader_method, core::ptr::null());
+        if exception_pending(env) {
+            return Err(BridgeFailure("Qp target class loader is unavailable"));
+        }
+        let method_type_class = find_class(env, b"java/lang/invoke/MethodType\0")
+            .ok_or(BridgeFailure("MethodType is unavailable"))?;
+        let method_type_factory = get_static_method_id(
+            env,
+            method_type_class,
+            b"fromMethodDescriptorString\0",
+            b"(Ljava/lang/String;Ljava/lang/ClassLoader;)Ljava/lang/invoke/MethodType;\0",
+        )
+        .ok_or(BridgeFailure("MethodType factory is unavailable"))?;
+        let descriptor = new_utf8_string(env, target.descriptor)?;
+        let type_args = [JValue { l: descriptor }, JValue { l: loader }];
+        let target_type = call_static_object_method_a(
+            env,
+            method_type_class,
+            method_type_factory,
+            jvalue_ptr(&type_args),
+        )
+        .ok_or(BridgeFailure("Qp target method type creation failed"))?;
+        if exception_pending(env) {
+            return Err(BridgeFailure("Qp target method type creation failed"));
+        }
+        let method_name = new_utf8_string(env, target.name)?;
+        let (lookup_method_name, lookup_signature, lookup_args) = match target.tag {
+            b'6' => (
+                b"findStatic\0" as &[u8],
+                b"(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;\0" as &[u8],
+                vec![JValue { l: owner }, JValue { l: method_name }, JValue { l: target_type }],
+            ),
+            b'5' | b'9' => (
+                b"findVirtual\0" as &[u8],
+                b"(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/MethodHandle;\0" as &[u8],
+                vec![JValue { l: owner }, JValue { l: method_name }, JValue { l: target_type }],
+            ),
+            b'7' => (
+                b"findSpecial\0" as &[u8],
+                b"(Ljava/lang/Class;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/Class;)Ljava/lang/invoke/MethodHandle;\0" as &[u8],
+                vec![
+                    JValue { l: owner },
+                    JValue { l: method_name },
+                    JValue { l: target_type },
+                    JValue { l: caller_class },
+                ],
+            ),
+            _ => return Err(BridgeFailure("Qp target handle tag is unsupported")),
+        };
+        let lookup_method = get_method_id(env, lookup_class, lookup_method_name, lookup_signature)
+            .ok_or(BridgeFailure("Qp target lookup method is unavailable"))?;
+        let handle = call_object_method_a(env, lookup, lookup_method, jvalue_ptr(&lookup_args));
+        if handle.is_null() || exception_pending(env) {
+            return Err(BridgeFailure("Qp target handle lookup failed"));
+        }
+        Ok(handle)
+    }
+
+    unsafe fn invoke_method_handle(
+        env: JNIEnv,
+        handle: JObject,
+        arguments: JObjectArray,
+    ) -> Result<JObject, BridgeFailure> {
+        let method_handle_class = find_class(env, b"java/lang/invoke/MethodHandle\0")
+            .ok_or(BridgeFailure("MethodHandle is unavailable"))?;
+        let invoke = get_method_id(
+            env,
+            method_handle_class,
+            b"invokeWithArguments\0",
+            b"([Ljava/lang/Object;)Ljava/lang/Object;\0",
+        )
+        .ok_or(BridgeFailure("MethodHandle invocation is unavailable"))?;
+        let invoke_args = [JValue { l: arguments }];
+        let result = call_object_method_a(env, handle, invoke, jvalue_ptr(&invoke_args));
+        if exception_pending(env) {
+            return Err(BridgeFailure("Qp target invocation failed"));
+        }
+        Ok(result)
+    }
+
+    unsafe fn bootstrap_arguments(
+        env: JNIEnv,
+        lookup: JObject,
+        indy_name: JString,
+        method_type: JObject,
+        encoded: JObjectArray,
+        caller_class: JClass,
+        caller_owner: &WipedBytes,
+        indy_name_bytes: &WipedBytes,
+        method_type_bytes: &WipedBytes,
+    ) -> Result<JObjectArray, BridgeFailure> {
+        let length_entry = native_entry(env, GET_ARRAY_LENGTH_INDEX)
+            .ok_or(BridgeFailure("JNI GetArrayLength is unavailable"))?;
+        let length_fn: unsafe extern "system" fn(JNIEnv, JObject) -> JSize =
+            core::mem::transmute(length_entry);
+        let length = length_fn(env, encoded);
+        if length < 0 || length as usize > 4096 {
+            return Err(BridgeFailure("Qp bootstrap argument count is invalid"));
+        }
+        let object_class = find_class(env, b"java/lang/Object\0")
+            .ok_or(BridgeFailure("java.lang.Object is unavailable"))?;
+        let new_array_entry = native_entry(env, NEW_OBJECT_ARRAY_INDEX)
+            .ok_or(BridgeFailure("JNI NewObjectArray is unavailable"))?;
+        let new_array: unsafe extern "system" fn(JNIEnv, JSize, JClass, JObject) -> JObjectArray =
+            core::mem::transmute(new_array_entry);
+        let arguments = new_array(env, length + 3, object_class, core::ptr::null_mut());
+        if arguments.is_null() {
+            return Err(BridgeFailure("Qp bootstrap argument allocation failed"));
+        }
+        let set_entry = native_entry(env, SET_OBJECT_ARRAY_ELEMENT_INDEX)
+            .ok_or(BridgeFailure("JNI SetObjectArrayElement is unavailable"))?;
+        let set: unsafe extern "system" fn(JNIEnv, JObjectArray, JSize, JObject) =
+            core::mem::transmute(set_entry);
+        set(env, arguments, 0, lookup);
+        set(env, arguments, 1, indy_name);
+        set(env, arguments, 2, method_type);
+        let get_entry = native_entry(env, GET_OBJECT_ARRAY_ELEMENT_INDEX)
+            .ok_or(BridgeFailure("JNI GetObjectArrayElement is unavailable"))?;
+        let get: unsafe extern "system" fn(JNIEnv, JObjectArray, JSize) -> JObject =
+            core::mem::transmute(get_entry);
+        let byte_array_class = find_class(env, b"[B\0")
+            .ok_or(BridgeFailure("byte array class is unavailable"))?;
+        let instance_entry = native_entry(env, IS_INSTANCE_OF_INDEX)
+            .ok_or(BridgeFailure("JNI IsInstanceOf is unavailable"))?;
+        let is_instance: unsafe extern "system" fn(JNIEnv, JObject, JClass) -> JBoolean =
+            core::mem::transmute(instance_entry);
+        for index in 0..length {
+            let value = get(env, encoded, index);
+            if exception_pending(env) {
+                return Err(BridgeFailure("Qp bootstrap argument extraction failed"));
+            }
+            let resolved = if !value.is_null() && is_instance(env, value, byte_array_class) != 0 {
+                let token = copy_byte_array(env, value, MAX_TARGET_TOKEN_BYTES)?;
+                let lease = open_target_token(
+                    &token,
+                    caller_owner,
+                    indy_name_bytes,
+                    method_type_bytes,
+                )?;
+                resolve_target_handle(env, lookup, caller_class, &lease)?
+            } else {
+                value
+            };
+            set(env, arguments, index + 3, resolved);
+            if exception_pending(env) {
+                return Err(BridgeFailure("Qp bootstrap argument installation failed"));
+            }
+        }
+        Ok(arguments)
+    }
+
+    unsafe fn native_invoke_site_inner(
+        env: JNIEnv,
+        lookup: JObject,
+        indy_name: JString,
+        method_type: JObject,
+        token: JByteArray,
+        arguments: JObjectArray,
+        link_bootstrap: JBoolean,
+    ) -> Result<JObject, BridgeFailure> {
+        if arguments.is_null() || !matches!(link_bootstrap, 0 | 1) {
+            return Err(BridgeFailure("Qp target site request is invalid"));
+        }
+        let (caller_class, caller_owner, indy_name_bytes, method_type_bytes) =
+            lookup_target_context(env, lookup, indy_name, method_type)?;
+        let token = copy_byte_array(env, token, MAX_TARGET_TOKEN_BYTES)?;
+        let lease = open_target_token(
+            &token,
+            &caller_owner,
+            &indy_name_bytes,
+            &method_type_bytes,
+        )?;
+        let handle = resolve_target_handle(env, lookup, caller_class, &lease)?;
+        if link_bootstrap == 0 {
+            return invoke_method_handle(env, handle, arguments);
+        }
+        let invoke_arguments = bootstrap_arguments(
+            env,
+            lookup,
+            indy_name,
+            method_type,
+            arguments,
+            caller_class,
+            &caller_owner,
+            &indy_name_bytes,
+            &method_type_bytes,
+        )?;
+        let result = invoke_method_handle(env, handle, invoke_arguments)?;
+        if result.is_null() {
+            return Err(BridgeFailure("Qp bootstrap returned no CallSite"));
+        }
+        let call_site_class = find_class(env, b"java/lang/invoke/CallSite\0")
+            .ok_or(BridgeFailure("CallSite is unavailable"))?;
+        let instance_entry = native_entry(env, IS_INSTANCE_OF_INDEX)
+            .ok_or(BridgeFailure("JNI IsInstanceOf is unavailable"))?;
+        let is_instance: unsafe extern "system" fn(JNIEnv, JObject, JClass) -> JBoolean =
+            core::mem::transmute(instance_entry);
+        if is_instance(env, result, call_site_class) == 0 {
+            return Err(BridgeFailure("Qp bootstrap returned an invalid site"));
+        }
+        Ok(result)
     }
 
     unsafe extern "system" fn native_init(env: JNIEnv, _class: JClass, platform: JString) -> JInt {
@@ -3729,18 +4094,34 @@ mod jni_bridge {
         }
     }
 
-    unsafe extern "system" fn native_open_target_token(
+    unsafe extern "system" fn native_invoke_site(
         env: JNIEnv,
         _class: JClass,
-        token: JByteArray,
-        caller_owner: JString,
+        lookup: JObject,
         indy_name: JString,
-        method_type: JString,
-    ) -> JByteArray {
-        match native_open_target_token_inner(env, token, caller_owner, indy_name, method_type) {
+        method_type: JObject,
+        token: JByteArray,
+        arguments: JObjectArray,
+        link_bootstrap: JBoolean,
+    ) -> JObject {
+        match native_invoke_site_inner(
+            env,
+            lookup,
+            indy_name,
+            method_type,
+            token,
+            arguments,
+            link_bootstrap,
+        ) {
             Ok(result) => result,
             Err(failure) => {
-                throw_new(env, failure.0.as_bytes());
+                // A target throwable is already pending when invocation fails.
+                // Preserve that JVM exception rather than replacing it with a
+                // generic bridge error, while still translating native-side
+                // validation failures to the fail-closed SecurityException.
+                if !exception_pending(env) {
+                    throw_new(env, failure.0.as_bytes());
+                }
                 core::ptr::null_mut()
             }
         }
@@ -3948,11 +4329,9 @@ mod jni_bridge {
                 fn_ptr: native_transform_defense as *mut c_void,
             },
             JniNativeMethod {
-                name: b"nativeOpenTargetToken\0".as_ptr().cast(),
-                signature: b"([BLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)[B\0"
-                    .as_ptr()
-                    .cast(),
-                fn_ptr: native_open_target_token as *mut c_void,
+                name: b"nativeInvokeSite\0".as_ptr().cast(),
+                signature: b"(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[B[Ljava/lang/Object;Z)Ljava/lang/Object;\0".as_ptr().cast(),
+                fn_ptr: native_invoke_site as *mut c_void,
             },
         ]
     }
@@ -4279,7 +4658,7 @@ mod jni_bridge {
         use std::collections::BTreeSet;
         use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
-    const EXPECTED_ROUTES: [(&str, &str); 12] = [
+        const EXPECTED_ROUTES: [(&str, &str); 12] = [
             ("nativeInit", "(Ljava/lang/String;)I"),
             ("nativeHeartbeat", "()I"),
             ("nativeInstallSessionNonce", "([B)Z"),
@@ -4301,8 +4680,8 @@ mod jni_bridge {
             ),
             ("nativeTransformDefense", "([BLjava/lang/String;)[B"),
             (
-                "nativeOpenTargetToken",
-                "([BLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)[B",
+                "nativeInvokeSite",
+                "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[B[Ljava/lang/Object;Z)Ljava/lang/Object;",
             ),
         ];
 
@@ -4440,7 +4819,7 @@ mod jni_bridge {
                 .expect("token seal");
             let opened = aes128_gcm_decrypt(&key, &nonce, &aad, &sealed).expect("token open");
             assert_eq!(opened, plaintext);
-            validate_target_token_plaintext(&opened).expect("target payload");
+            parse_target_description(&opened).expect("target payload");
 
             let mut wrong_aad = aad;
             wrong_aad[0] ^= 1;

@@ -27,8 +27,8 @@ pub const TYPED_NATIVE_METHODS: [(&str, &str); TYPED_NATIVE_METHOD_COUNT] = [
     ),
     ("nativeTransformDefense", "([BLjava/lang/String;)[B"),
     (
-        "nativeOpenTargetToken",
-        "([BLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)[B",
+        "nativeInvokeSite",
+        "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[B[Ljava/lang/Object;Z)Ljava/lang/Object;",
     ),
 ];
 

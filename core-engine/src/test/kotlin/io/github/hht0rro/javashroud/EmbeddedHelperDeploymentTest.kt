@@ -125,7 +125,7 @@ class EmbeddedHelperDeploymentTest {
             "nativeInitializeDefense(Ljava/lang/String;Ljava/lang/String;)I",
             "nativeProbeDefense(Ljava/lang/String;Ljava/lang/String;)I",
             "nativeTransformDefense([BLjava/lang/String;)[B",
-            "nativeOpenTargetToken([BLjava/lang/String;Ljava/lang/String;Ljava/lang/String;)[B",
+            "nativeInvokeSite(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[B[Ljava/lang/Object;Z)Ljava/lang/Object;",
         )
         assertEquals(requiredNativeMethods, nativeMethods, "Emitted helper must expose the current typed JNI registrations")
 
@@ -187,13 +187,13 @@ class EmbeddedHelperDeploymentTest {
 
         assertFalse(
             EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(incomplete),
-            "R1 artifacts must expose the complete typed qp_r1 export set.",
+            "Native artifacts must expose the complete typed qp_r1 export set.",
         )
     }
 
     @Test
     fun native_exports_and_jni_lifecycle_satisfy_the_native_abi_probe() {
-        val r1Bytes = listOf(
+        val nativeBytes = listOf(
             "JNI_OnLoad",
             "JNI_OnUnload",
             "qp_r1_runtime_binding_digest",
@@ -201,12 +201,12 @@ class EmbeddedHelperDeploymentTest {
         ).joinToString("-").toByteArray(Charsets.US_ASCII)
 
         assertTrue(
-            EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(r1Bytes),
-            "Rust R1 artifacts must carry the typed qp_r1 exports and JNI lifecycle.",
+            EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(nativeBytes),
+            "Rust artifacts must carry the typed qp_r1 exports and JNI lifecycle.",
         )
         assertFalse(
             EmbeddedHelperDeployment.nativeLibraryContainsRequiredJniVmAbi(
-                (r1Bytes.decodeToString() + "-nativeExecuteVmResource").toByteArray(Charsets.US_ASCII),
+                (nativeBytes.decodeToString() + "-nativeExecuteVmResource").toByteArray(Charsets.US_ASCII),
             ),
             "legacy generic native routes must remain rejected.",
         )
@@ -216,12 +216,12 @@ class EmbeddedHelperDeploymentTest {
     fun jni_microkernel_helper_validates_native_images_before_system_load() {
         val helperSource = Files.readString(resolveWorkspacePath("core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.java"))
 
-        assertTrue(helperSource.contains("validateR1NativeImage(platformTarget, nativeBytes)"), "R1 images must be validated before extraction.")
-        assertTrue(helperSource.contains("System.load(tempLib.getAbsolutePath())"), "Bundled native loading must use the authenticated extracted R1 image.")
+        assertTrue(helperSource.contains("validateNativeImage(platformTarget, nativeBytes)"), "Native images must be validated before extraction.")
+        assertTrue(helperSource.contains("System.load(tempLib.getAbsolutePath())"), "Bundled native loading must use the authenticated extracted image.")
         assertFalse(helperSource.contains("System.loadLibrary("), "A bundled verification failure must not fall back to a system-path library.")
-        assertFalse(helperSource.contains("decodeSealedNativeResource"), "R1 Java must not decode a retired native wrapper.")
-        assertFalse(helperSource.contains("nativeExecuteVmResource"), "R1 Java must not retain the generic native VM route.")
-        assertFalse(helperSource.contains("nativeInstallBootMaterial"), "R1 Java must not retain boot-material JNI calls.")
+        assertFalse(helperSource.contains("decodeSealedNativeResource"), "Java helper must not decode a retired native wrapper.")
+        assertFalse(helperSource.contains("nativeExecuteVmResource"), "Java helper must not retain the generic native VM route.")
+        assertFalse(helperSource.contains("nativeInstallBootMaterial"), "Java helper must not retain boot-material JNI calls.")
     }
 
     @Test
@@ -229,9 +229,9 @@ class EmbeddedHelperDeploymentTest {
         val helperSource = Files.readString(resolveWorkspacePath("core-engine/src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.java"))
 
         assertTrue(helperSource.contains("public static byte[] deriveClassEncryptionKey"))
-        assertTrue(helperSource.contains("class-encryption key derivation is not part of the R1 Java helper"))
+        assertTrue(helperSource.contains("class-encryption key derivation is not part of the current Java helper"))
         assertTrue(helperSource.contains("public static byte[] decryptClassBytes"))
-        assertTrue(helperSource.contains("class-encryption decryption is not part of the R1 Java helper"))
+        assertTrue(helperSource.contains("class-encryption decryption is not part of the current Java helper"))
         assertFalse(helperSource.contains("nativeDeriveClassEncryptionKey"))
         assertFalse(helperSource.contains("nativeDecryptClassBytes"))
         assertFalse(helperSource.contains("loadBootSecret"))
@@ -252,7 +252,7 @@ class EmbeddedHelperDeploymentTest {
 
         assertTrue(
             bundleSource.contains(retainedFilter),
-            "Native bundling must remove pre-existing native resources before adding R1 Rust runtimes.",
+            "Native bundling must remove pre-existing native resources before adding Rust runtimes.",
         )
         assertTrue(
             bundleSource.contains(rejectedNativeEntries) && bundleSource.contains(legacyBootCleanup),
