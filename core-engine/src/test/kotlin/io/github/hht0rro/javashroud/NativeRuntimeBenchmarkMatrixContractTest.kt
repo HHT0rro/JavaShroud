@@ -8,7 +8,7 @@ import kotlin.test.assertTrue
 
 class NativeRuntimeBenchmarkMatrixContractTest {
     @Test
-    fun rust_r1_benchmark_contract_is_bounded_authenticated_software_only_and_workspace_locked() {
+    fun rust_native_benchmark_contract_is_bounded_authenticated_software_only_and_workspace_locked() {
         val rustRoot = rustRoot()
         val workspace = Files.readString(rustRoot.resolve("Cargo.toml"))
         val cryptoManifest = Files.readString(rustRoot.resolve("crates/qp-crypto/Cargo.toml"))
@@ -31,7 +31,7 @@ class NativeRuntimeBenchmarkMatrixContractTest {
                 "crates/qp-shell",
             ),
             workspaceMembers(workspace),
-            "current R1 workspace members",
+            "current workspace members",
         )
         for (marker in listOf(
             "[workspace.metadata.qp]",
@@ -42,7 +42,7 @@ class NativeRuntimeBenchmarkMatrixContractTest {
             "linux_glibc_floor = \"2.17\"",
             "unsafe_code = \"deny\"",
         )) {
-            assertContains(workspace, marker, "R1 workspace")
+            assertContains(workspace, marker, "workspace")
         }
 
         assertContains(cryptoManifest, "name = \"qp-crypto\"", "qp-crypto manifest")
@@ -54,7 +54,7 @@ class NativeRuntimeBenchmarkMatrixContractTest {
         for (testName in listOf(
             "authentication_tag_is_framed_and_constant_time",
             "ghash_and_capability_gate_match_known_answers",
-            "public_helpers_enforce_the_kotlin_r1_bounds",
+            "public_helpers_enforce_the_current_bounds",
         )) {
             assertRustTest(crypto, testName)
         }
@@ -85,7 +85,7 @@ class NativeRuntimeBenchmarkMatrixContractTest {
             "hardware_aes: false",
             "hardware_ghash: false",
         )) {
-            assertContains(crypto, marker, "software-only R1 crypto policy")
+            assertContains(crypto, marker, "software-only current crypto policy")
         }
         val decrypt = crypto.substringAfter("pub fn aes256_gcm_decrypt(")
         assertOrder(decrypt, "let authenticated =", "let mut plaintext", "GCM authentication before decryption")
@@ -94,16 +94,16 @@ class NativeRuntimeBenchmarkMatrixContractTest {
             "pub const QP_MAX_FRAME_SIZE",
             "pub const QP_MAX_SECTION_SIZE",
             "pub struct ParserLimits",
-            "parser limit exceeds the R1 bound",
+            "parser limit exceeds the current bound",
             "if frame.len() > self.limits.max_frame_size",
             "let expected_mac =",
-            "vbc4_hmac_fields(",
+            "frame_hmac_fields(",
             "if !ct_eq(&expected_mac",
             "let result = self.parse_sections(",
             "zstd::decompress(",
             "WipedBytes",
         )) {
-            assertContains(vm, marker, "R1 VM benchmark contract")
+            assertContains(vm, marker, "current VM benchmark contract")
         }
         assertOrder(
             vm.substringAfter("fn parse_authenticated("),
@@ -111,7 +111,7 @@ class NativeRuntimeBenchmarkMatrixContractTest {
             "let result = self.parse_sections(",
             "VM authentication before section parse/decompression",
         )
-        assertContains(executor, "frame.wipe();", "R1 VM execution wipe contract")
+        assertContains(executor, "frame.wipe();", "current VM execution wipe contract")
     }
 
     private fun workspaceMembers(manifest: String): List<String> {
@@ -119,7 +119,7 @@ class NativeRuntimeBenchmarkMatrixContractTest {
             .find(manifest)
             ?.groupValues
             ?.get(1)
-            ?: error("current R1 workspace members are missing")
+            ?: error("current workspace members are missing")
         return Regex("(?m)^\\s*\"([^\"]+)\"\\s*,?\\s*$")
             .findAll(block)
             .map { it.groupValues[1] }

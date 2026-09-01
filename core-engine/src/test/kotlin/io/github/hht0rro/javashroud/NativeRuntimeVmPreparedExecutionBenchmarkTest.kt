@@ -7,7 +7,7 @@ import kotlin.test.assertTrue
 
 class NativeRuntimeVmPreparedExecutionBenchmarkTest {
     @Test
-    fun rust_r1_vm_and_shell_loader_contracts_are_bounded_authenticated_safe_and_format_strict() {
+    fun rust_native_vm_and_shell_loader_contracts_are_bounded_authenticated_safe_and_format_strict() {
         val rustRoot = rustRoot()
         val vmManifest = Files.readString(rustRoot.resolve("crates/qp-vm/Cargo.toml"))
         val vm = Files.readString(rustRoot.resolve("crates/qp-vm/src/lib.rs"))
@@ -63,17 +63,17 @@ class NativeRuntimeVmPreparedExecutionBenchmarkTest {
             "pub const QP_MAX_BLOCKS",
             "pub const QP_MAX_INSTRUCTIONS",
             "pub struct ParserLimits",
-            "parser limit exceeds the R1 bound",
+            "parser limit exceeds the current bound",
             "if frame.len() > self.limits.max_frame_size",
             "if block_count == 0 || block_count > self.limits.max_blocks",
             "let expected_mac =",
-            "vbc4_hmac_fields(",
+            "frame_hmac_fields(",
             "if !ct_eq(&expected_mac",
             "let result = self.parse_sections(",
             "zstd::decompress(",
             "WipedBytes",
         )) {
-            assertContains(vm, marker, "R1 VM bounds/authentication/decompression contract")
+            assertContains(vm, marker, "current VM bounds/authentication/decompression contract")
         }
         val authenticatedVm = vm.substringAfter("fn parse_authenticated(")
         assertOrder(
@@ -82,9 +82,9 @@ class NativeRuntimeVmPreparedExecutionBenchmarkTest {
             "let result = self.parse_sections(",
             "VM authentication before section parse/decompression",
         )
-        assertContains(executor, "if depth >= self.limits.max_recursion", "R1 VM execution depth bound")
-        assertContains(executor, "frame.wipe();", "R1 VM execution wipe contract")
-        assertContains(vm, "operand_count >", "R1 VM operand bound")
+        assertContains(executor, "if depth >= self.limits.max_recursion", "current VM execution depth bound")
+        assertContains(executor, "frame.wipe();", "current VM execution wipe contract")
+        assertContains(vm, "operand_count >", "current VM operand bound")
         for (marker in listOf(
             "const BLOCK_RAW: u32 = 0;",
             "const BLOCK_RLE: u32 = 1;",
@@ -95,7 +95,7 @@ class NativeRuntimeVmPreparedExecutionBenchmarkTest {
             "impl Drop for WipedVec",
             "self.0.fill(0);",
         )) {
-            assertContains(zstd, marker, "R1 VM zstd contract")
+            assertContains(zstd, marker, "current VM zstd contract")
         }
 
         for (marker in listOf(
@@ -113,7 +113,7 @@ class NativeRuntimeVmPreparedExecutionBenchmarkTest {
             "UnsupportedFormat",
             "impl Drop for LoadedArtifact",
         )) {
-            assertContains(loader, marker, "qp-shell loader safe R1 format contract")
+            assertContains(loader, marker, "qp-shell loader safe current format contract")
         }
         for (marker in listOf(
             "PE_MACHINE_AMD64",
