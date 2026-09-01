@@ -223,7 +223,7 @@ internal fun qpNativeSegmentIdentityPageKey(
 }
 
 private val NATIVE_CHUNK_IDENTITY_KEY_DOMAIN =
-    "AKEN-v4-native-chunk-route-key-v1".toByteArray(Charsets.US_ASCII)
+    "javashroud-qp-native-chunk-route-key-v1".toByteArray(Charsets.US_ASCII)
 
 private fun updateFramed(digest: MessageDigest, value: ByteArray) {
     updateInt(digest, value.size)

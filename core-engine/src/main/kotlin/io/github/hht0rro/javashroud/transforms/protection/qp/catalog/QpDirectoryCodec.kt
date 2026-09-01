@@ -975,7 +975,7 @@ private class QpDirectoryWriter(private val maximum: Int) : AutoCloseable {
     }
 }
 
-private const val RECORD_BINDING_DOMAIN_TEXT = "JavaShroud/AKEN-R2/ArtifactDirectory/RecordBinding"
+private const val RECORD_BINDING_DOMAIN_TEXT = "JavaShroud/QP/ArtifactDirectory/RecordBinding/v2"
 private val RECORD_BINDING_DOMAIN = RECORD_BINDING_DOMAIN_TEXT.toByteArray(StandardCharsets.US_ASCII)
 private val ROOT_BINDING_DOMAIN =
-    "JavaShroud/AKEN-R2/ArtifactDirectory/RootBinding".toByteArray(StandardCharsets.US_ASCII)
+    "JavaShroud/QP/ArtifactDirectory/RootBinding/v2".toByteArray(StandardCharsets.US_ASCII)

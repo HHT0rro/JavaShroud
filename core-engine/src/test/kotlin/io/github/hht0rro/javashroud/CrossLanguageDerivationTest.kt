@@ -42,8 +42,8 @@ class CrossLanguageDerivationTest {
     }
 
     @Test
-    fun build_label_constant_is_the_native_jse_class_label() {
-        assertEquals("javashroud-vbc4-jse-class-v1", QP_DERIVE_LABEL_CLASS_ENCRYPTION)
+    fun build_label_constant_uses_the_current_qp_class_encryption_domain() {
+        assertEquals("javashroud-qp-class-encryption-v1", QP_DERIVE_LABEL_CLASS_ENCRYPTION)
     }
 
     @Test

@@ -10,7 +10,7 @@ import java.security.MessageDigest
 import java.util.Arrays
 
 /**
- * Raw, non-secret locator for the current AKEN-R1 Rust runtime artifact.
+ * Raw, non-secret locator for the current Qp Rust runtime artifact.
  *
  * The locator is deliberately separate from retired JSBI/JSRP resources: it
  * identifies exactly one Rust artifact per supported platform and binds it to
@@ -18,13 +18,13 @@ import java.util.Arrays
  * length, and SHA-256 digest. It does not contain a DEK, boot material, key
  * slot, or a general resource directory.
  */
-internal const val AKEN_NATIVE_LOCATOR_LOGICAL_RESOURCE = "META-INF/jsrt/native.locator"
-internal const val AKEN_NATIVE_BINDINGS_LOCATOR_LOGICAL_RESOURCE = "META-INF/jsrt/native.bindings.locator"
-internal const val AKEN_NATIVE_RESOURCE_ROOT = "META-INF/"
-internal const val AKEN_R1_NATIVE_RESOURCE_ROOT = "META-INF/jsrt/"
-internal const val AKEN_NATIVE_LOCATOR_VERSION = 2
-internal const val AKEN_R1_PAYLOAD_PROFILE = "qp-rust-ffi-v1"
-internal val AKEN_NATIVE_LOCATOR_MAGIC_BYTES = byteArrayOf(0xD7.toByte(), 0xA4.toByte(), 0x91.toByte(), 0xE3.toByte())
+internal const val QP_NATIVE_LOCATOR_LOGICAL_RESOURCE = "META-INF/jsrt/native.locator"
+internal const val QP_NATIVE_BINDINGS_LOCATOR_LOGICAL_RESOURCE = "META-INF/jsrt/native.bindings.locator"
+internal const val QP_NATIVE_RESOURCE_ROOT = "META-INF/"
+internal const val QP_RETIRED_NATIVE_RESOURCE_ROOT = "META-INF/jsrt/"
+internal const val QP_NATIVE_LOCATOR_VERSION = 2
+internal const val QP_PAYLOAD_PROFILE = "qp-rust-ffi-v1"
+internal val QP_NATIVE_LOCATOR_MAGIC_BYTES = byteArrayOf(0xD7.toByte(), 0xA4.toByte(), 0x91.toByte(), 0xE3.toByte())
 
 internal class QpLocatorEntry(
     val platform: String,
@@ -36,21 +36,21 @@ internal class QpLocatorEntry(
     private val digestValue = sha256.copyOf()
 
     init {
-        require(platform in AKEN_NATIVE_PLATFORM_SUFFIXES) { "unsupported AKEN native platform: $platform" }
-        require(fileSuffix == AKEN_NATIVE_PLATFORM_SUFFIXES.getValue(platform)) {
-            "invalid AKEN native suffix for $platform"
+        require(platform in QP_NATIVE_PLATFORM_SUFFIXES) { "unsupported Qp native platform: $platform" }
+        require(fileSuffix == QP_NATIVE_PLATFORM_SUFFIXES.getValue(platform)) {
+            "invalid Qp native suffix for $platform"
         }
-        require(isQpLocatorResourcePath(resourcePath)) { "invalid AKEN native resource path" }
-        require(resourcePath.length <= AKEN_NATIVE_FINAL_BINDING_ROUTE_CHARS) {
-            "AKEN native resource route is too long for the R1 binding"
+        require(isQpLocatorResourcePath(resourcePath)) { "invalid Qp native resource path" }
+        require(resourcePath.length <= QP_NATIVE_FINAL_BINDING_ROUTE_CHARS) {
+            "Qp native resource route is too long for the current binding"
         }
         require(resourcePath.endsWith(fileSuffix)) {
-            "AKEN native resource route does not match its locked suffix"
+            "Qp native resource route does not match its locked suffix"
         }
-        require(storedLength in 1..AKEN_NATIVE_MAX_LIBRARY_BYTES) {
-            "AKEN native resource length is outside the R1 bound"
+        require(storedLength in 1..QP_NATIVE_MAX_LIBRARY_BYTES) {
+            "Qp native resource length is outside the current bound"
         }
-        require(digestValue.size == AKEN_NATIVE_SHA256_SIZE) { "AKEN native resource SHA-256 must be 32 bytes" }
+        require(digestValue.size == QP_NATIVE_SHA256_SIZE) { "Qp native resource SHA-256 must be 32 bytes" }
     }
 
     fun copyDigest(): ByteArray = digestValue.copyOf()
@@ -69,14 +69,14 @@ internal class QpBindingsLocatorEntry(
     private val digestValue = sha256.copyOf()
 
     init {
-        require(isQpLocatorResourcePath(resourcePath)) { "invalid AKEN native bindings resource path" }
-        require(resourcePath.length <= AKEN_NATIVE_FINAL_BINDING_ROUTE_CHARS) {
-            "AKEN native bindings route is too long for the R1 binding"
+        require(isQpLocatorResourcePath(resourcePath)) { "invalid Qp native bindings resource path" }
+        require(resourcePath.length <= QP_NATIVE_FINAL_BINDING_ROUTE_CHARS) {
+            "Qp native bindings route is too long for the current binding"
         }
-        require(storedLength in 1..AKEN_NATIVE_BINDINGS_MAX_BYTES) {
-            "AKEN native bindings resource length is outside the R1 bound"
+        require(storedLength in 1..QP_NATIVE_BINDINGS_MAX_BYTES) {
+            "Qp native bindings resource length is outside the current bound"
         }
-        require(digestValue.size == AKEN_NATIVE_SHA256_SIZE) { "AKEN native bindings SHA-256 must be 32 bytes" }
+        require(digestValue.size == QP_NATIVE_SHA256_SIZE) { "Qp native bindings SHA-256 must be 32 bytes" }
     }
 
     fun copyDigest(): ByteArray = digestValue.copyOf()
@@ -95,11 +95,11 @@ internal data class CatalogNativeBindingInputs(
     val platform: String,
 ) : AutoCloseable {
     init {
-        require(nativeSha256.size == AKEN_NATIVE_SHA256_SIZE && nativeSha256.any { it != 0.toByte() }) {
-            "AKEN catalog native SHA-256 is empty or all-zero"
+        require(nativeSha256.size == QP_NATIVE_SHA256_SIZE && nativeSha256.any { it != 0.toByte() }) {
+            "Qp catalog native SHA-256 is empty or all-zero"
         }
-        require(abiDigest.size == AKEN_NATIVE_SHA256_SIZE && abiDigest.any { it != 0.toByte() }) {
-            "AKEN catalog ABI digest is empty or all-zero"
+        require(abiDigest.size == QP_NATIVE_SHA256_SIZE && abiDigest.any { it != 0.toByte() }) {
+            "Qp catalog ABI digest is empty or all-zero"
         }
     }
 
@@ -150,7 +150,7 @@ internal object QpLocator {
                     nativeSha256 = nativeSha256.copyOf(),
                     abiDigest = abiDigest.copyOf(),
                     targetTriple = targetTriple,
-                    payloadProfile = AKEN_R1_PAYLOAD_PROFILE,
+                    payloadProfile = QP_PAYLOAD_PROFILE,
                     platform = primary.platform,
                 )
             } finally {
@@ -176,7 +176,7 @@ internal object QpLocator {
                 val expectedDigestBytes = expected.asBytes()
                 try {
                     require(MessageDigest.isEqual(actualDigestBytes, expectedDigestBytes)) {
-                        "AKEN-R1 final native binding digest changed before locator encoding"
+                        "Qp final native binding digest changed before locator encoding"
                     }
                 } finally {
                     Arrays.fill(expectedDigestBytes, 0)
@@ -191,16 +191,16 @@ internal object QpLocator {
         var payload: ByteArray? = null
         var commitment: ByteArray? = null
         try {
-            body.write(AKEN_NATIVE_LOCATOR_MAGIC_BYTES)
-            body.write(AKEN_NATIVE_LOCATOR_VERSION)
+            body.write(QP_NATIVE_LOCATOR_MAGIC_BYTES)
+            body.write(QP_NATIVE_LOCATOR_VERSION)
             body.write(0) // flags: the current format has no optional parsing lanes.
             writeU16(body, recordCount)
             ordered.forEach { entry ->
                 entry.withDigest { digest ->
                     writeRecord(
                         out = body,
-                        kind = AKEN_NATIVE_LOCATOR_KIND_LIBRARY,
-                        platformId = AKEN_NATIVE_PLATFORM_IDS.getValue(entry.platform),
+                        kind = QP_NATIVE_LOCATOR_KIND_LIBRARY,
+                        platformId = QP_NATIVE_PLATFORM_IDS.getValue(entry.platform),
                         resourcePath = entry.resourcePath,
                         storedLength = entry.storedLength,
                         digest = digest,
@@ -211,7 +211,7 @@ internal object QpLocator {
                 entry.withDigest { digest ->
                     writeRecord(
                         out = body,
-                        kind = AKEN_NATIVE_LOCATOR_KIND_BINDINGS,
+                        kind = QP_NATIVE_LOCATOR_KIND_BINDINGS,
                         platformId = 0,
                         resourcePath = entry.resourcePath,
                         storedLength = entry.storedLength,
@@ -233,7 +233,7 @@ internal object QpLocator {
     }
 
     /**
-     * Computes the R1 binding over the exact final native rows.  This is
+     * Computes the current binding over the exact final native rows.  This is
      * build-only integrity material: the current v2 locator keeps its existing
      * Java-compatible wire shape, while sealing still proves that all paths,
      * lengths, suffixes, and final SHA-256 values were fixed together.
@@ -248,15 +248,15 @@ internal object QpLocator {
         val writer = QpFrameWriter(QpWireFormat.MAX_BINDING_SIZE)
         var binding: ByteArray? = null
         try {
-            writer.writeBytes(FINAL_NATIVE_BINDING_MAGIC)
+            writer.writeBytes(FINAL_NATIVE_BINDING_DOMAIN)
             writer.writeU8(QpWireFormat.VERSION)
             writer.writeU16Be(recordCount)
             ordered.forEach { entry ->
                 entry.withDigest { digest ->
                     writeFinalBindingRecord(
                         writer = writer,
-                        kind = AKEN_NATIVE_LOCATOR_KIND_LIBRARY,
-                        platformId = AKEN_NATIVE_PLATFORM_IDS.getValue(entry.platform),
+                        kind = QP_NATIVE_LOCATOR_KIND_LIBRARY,
+                        platformId = QP_NATIVE_PLATFORM_IDS.getValue(entry.platform),
                         resourcePath = entry.resourcePath,
                         fileSuffix = entry.fileSuffix,
                         storedLength = entry.storedLength,
@@ -268,7 +268,7 @@ internal object QpLocator {
                 entry.withDigest { digest ->
                     writeFinalBindingRecord(
                         writer = writer,
-                        kind = AKEN_NATIVE_LOCATOR_KIND_BINDINGS,
+                        kind = QP_NATIVE_LOCATOR_KIND_BINDINGS,
                         platformId = 0,
                         resourcePath = entry.resourcePath,
                         fileSuffix = "",
@@ -305,7 +305,7 @@ internal object QpLocator {
         artifactEntries.forEach { entry ->
             if (entry.name !in expectedPaths) return@forEach
             require(finalByPath.put(entry.name, entry) == null) {
-                "AKEN-R1 final native route is emitted more than once: ${entry.name}"
+                "Qp final native route is emitted more than once: ${entry.name}"
             }
         }
         val reboundLibraries = ArrayList<QpLocatorEntry>(expectedLibraries.size)
@@ -313,10 +313,10 @@ internal object QpLocator {
         try {
             expectedLibraries.forEach { expected ->
                 val actual = checkNotNull(finalByPath[expected.resourcePath]) {
-                    "AKEN-R1 final native route is missing: ${expected.resourcePath}"
+                    "Qp final native route is missing: ${expected.resourcePath}"
                 }
                 require(actual.bytes.size == expected.storedLength) {
-                    "AKEN-R1 final native length changed: ${expected.resourcePath}"
+                    "Qp final native length changed: ${expected.resourcePath}"
                 }
                 val rebound = entry(
                     platform = expected.platform,
@@ -330,16 +330,16 @@ internal object QpLocator {
                     }
                 }
                 require(digestMatches) {
-                    "AKEN-R1 final native bytes changed: ${expected.resourcePath}"
+                    "Qp final native bytes changed: ${expected.resourcePath}"
                 }
                 reboundLibraries += rebound
             }
             bindingsEntry?.let { expected ->
                 val actual = checkNotNull(finalByPath[expected.resourcePath]) {
-                    "AKEN-R1 final bindings route is missing: ${expected.resourcePath}"
+                    "Qp final bindings route is missing: ${expected.resourcePath}"
                 }
                 require(actual.bytes.size == expected.storedLength) {
-                    "AKEN-R1 final bindings length changed: ${expected.resourcePath}"
+                    "Qp final bindings length changed: ${expected.resourcePath}"
                 }
                 val rebound = bindingsEntry(
                     resourcePath = expected.resourcePath,
@@ -351,7 +351,7 @@ internal object QpLocator {
                     }
                 }
                 require(digestMatches) {
-                    "AKEN-R1 final bindings bytes changed: ${expected.resourcePath}"
+                    "Qp final bindings bytes changed: ${expected.resourcePath}"
                 }
                 reboundBindings = rebound
             }
@@ -363,17 +363,17 @@ internal object QpLocator {
     }
 
     private fun orderedEntries(entries: Iterable<QpLocatorEntry>): List<QpLocatorEntry> {
-        val collected = ArrayList<QpLocatorEntry>(AKEN_NATIVE_LOCATOR_MAX_RECORDS)
+        val collected = ArrayList<QpLocatorEntry>(QP_NATIVE_LOCATOR_MAX_RECORDS)
         entries.forEach { entry ->
-            require(collected.size < AKEN_NATIVE_LOCATOR_MAX_RECORDS) {
-                "AKEN native locator has too many platform entries"
+            require(collected.size < QP_NATIVE_LOCATOR_MAX_RECORDS) {
+                "Qp native locator has too many platform entries"
             }
             collected += entry
         }
-        val ordered = collected.sortedBy { AKEN_NATIVE_PLATFORM_IDS[it.platform] ?: Int.MAX_VALUE }
-        require(ordered.isNotEmpty()) { "AKEN native locator requires at least one platform entry" }
+        val ordered = collected.sortedBy { QP_NATIVE_PLATFORM_IDS[it.platform] ?: Int.MAX_VALUE }
+        require(ordered.isNotEmpty()) { "Qp native locator requires at least one platform entry" }
         require(ordered.map { it.platform }.distinct().size == ordered.size) {
-            "AKEN native locator contains duplicate platforms"
+            "Qp native locator contains duplicate platforms"
         }
         return ordered
     }
@@ -383,15 +383,15 @@ internal object QpLocator {
         bindingsEntry: QpBindingsLocatorEntry?,
     ) {
         val routes = buildSet {
-            ordered.forEach { require(add(it.resourcePath)) { "AKEN native locator contains duplicate routes" } }
-            bindingsEntry?.let { require(add(it.resourcePath)) { "AKEN native locator contains duplicate routes" } }
+            ordered.forEach { require(add(it.resourcePath)) { "Qp native locator contains duplicate routes" } }
+            bindingsEntry?.let { require(add(it.resourcePath)) { "Qp native locator contains duplicate routes" } }
         }
         require(routes.size == ordered.size + if (bindingsEntry == null) 0 else 1) {
-            "AKEN native locator contains duplicate routes"
+            "Qp native locator contains duplicate routes"
         }
         val recordCount = ordered.size + if (bindingsEntry == null) 0 else 1
-        require(recordCount in 1..AKEN_NATIVE_LOCATOR_MAX_RECORDS) {
-            "AKEN native locator record count is invalid"
+        require(recordCount in 1..QP_NATIVE_LOCATOR_MAX_RECORDS) {
+            "Qp native locator record count is invalid"
         }
     }
 
@@ -416,7 +416,7 @@ internal object QpLocator {
             writer.writeFrame(suffix)
             writer.writeU32Be(storedLength.toLong())
             writer.writeBytes(digest)
-            if (kind == AKEN_NATIVE_LOCATOR_KIND_LIBRARY) {
+            if (kind == QP_NATIVE_LOCATOR_KIND_LIBRARY) {
                 val platform = platformForId(platformId)
                 target = targetTripleForPlatform(platform).toByteArray(StandardCharsets.US_ASCII)
                 specialization = nativeSpecializationDigest(
@@ -454,8 +454,8 @@ internal object QpLocator {
         val route = resourcePath.toByteArray(StandardCharsets.US_ASCII)
         var maskedRoute = ByteArray(0)
         try {
-            require(route.size in 1..AKEN_NATIVE_LOCATOR_MAX_ROUTE_BYTES) {
-                "AKEN native locator route length is invalid"
+            require(route.size in 1..QP_NATIVE_LOCATOR_MAX_ROUTE_BYTES) {
+                "Qp native locator route length is invalid"
             }
             maskedRoute = maskRoute(route, kind, platformId, storedLength, digest)
             out.write(kind)
@@ -471,46 +471,46 @@ internal object QpLocator {
     }
 }
 
-private const val AKEN_NATIVE_SHA256_SIZE = 32
-private const val AKEN_NATIVE_MAX_LIBRARY_BYTES = 256 * 1024 * 1024
-private const val AKEN_NATIVE_BINDINGS_MAX_BYTES = 4 * 1024 * 1024
-private const val AKEN_NATIVE_LOCATOR_KIND_LIBRARY = 1
-private const val AKEN_NATIVE_LOCATOR_KIND_BINDINGS = 2
-private const val AKEN_NATIVE_LOCATOR_MAX_RECORDS = 3
-private const val AKEN_NATIVE_LOCATOR_MAX_ROUTE_BYTES = 2048
-private const val AKEN_NATIVE_FINAL_BINDING_ROUTE_CHARS = 256
+private const val QP_NATIVE_SHA256_SIZE = 32
+private const val QP_NATIVE_MAX_LIBRARY_BYTES = 256 * 1024 * 1024
+private const val QP_NATIVE_BINDINGS_MAX_BYTES = 4 * 1024 * 1024
+private const val QP_NATIVE_LOCATOR_KIND_LIBRARY = 1
+private const val QP_NATIVE_LOCATOR_KIND_BINDINGS = 2
+private const val QP_NATIVE_LOCATOR_MAX_RECORDS = 3
+private const val QP_NATIVE_LOCATOR_MAX_ROUTE_BYTES = 2048
+private const val QP_NATIVE_FINAL_BINDING_ROUTE_CHARS = 256
 private const val FINAL_NATIVE_METADATA_VERSION = 1
 private const val FINAL_NATIVE_BINDINGS_METADATA_VERSION = 0
 
-private val AKEN_NATIVE_LOCATOR_COMMITMENT_DOMAIN =
+private val QP_NATIVE_LOCATOR_COMMITMENT_DOMAIN =
     "javashroud-qp-native-locator-commitment-v2".toByteArray(StandardCharsets.US_ASCII)
-private val AKEN_NATIVE_LOCATOR_ROUTE_MASK_DOMAIN =
+private val QP_NATIVE_LOCATOR_ROUTE_MASK_DOMAIN =
     "javashroud-qp-native-locator-route-mask-v2".toByteArray(StandardCharsets.US_ASCII)
-private val FINAL_NATIVE_BINDING_MAGIC =
-    "AKEN-R1-FINAL-NATIVE".toByteArray(StandardCharsets.US_ASCII)
+private val FINAL_NATIVE_BINDING_DOMAIN =
+    "javashroud-qp-final-native-binding-v1".toByteArray(StandardCharsets.US_ASCII)
 private val FINAL_NATIVE_SPECIALIZATION_DOMAIN =
-    "AKEN-R1-final-native-specialization-v1".toByteArray(StandardCharsets.US_ASCII)
+    "javashroud-qp-final-native-specialization-v1".toByteArray(StandardCharsets.US_ASCII)
 private val FINAL_NATIVE_ABI_DOMAIN =
-    "AKEN-R1-final-native-abi-v1".toByteArray(StandardCharsets.US_ASCII)
-private val R1_NATIVE_ABI_EXPORTS = listOf(
+    "javashroud-qp-final-native-abi-v1".toByteArray(StandardCharsets.US_ASCII)
+private val NATIVE_ABI_EXPORTS = listOf(
     "JNI_OnLoad",
     "JNI_OnUnload",
     "qp_r1_runtime_binding_digest",
     "qp_r1_open_frame",
 )
 
-private val AKEN_NATIVE_PLATFORM_SUFFIXES = mapOf(
+private val QP_NATIVE_PLATFORM_SUFFIXES = mapOf(
     "windows-x64" to ".dll",
     "linux-x64" to ".so",
 )
 
-private val AKEN_NATIVE_PLATFORM_IDS = mapOf(
+private val QP_NATIVE_PLATFORM_IDS = mapOf(
     "windows-x64" to 1,
     "linux-x64" to 2,
 )
 
 internal fun isQpLocatorResourcePath(path: String): Boolean {
-    if (!path.startsWith(AKEN_NATIVE_RESOURCE_ROOT) || path.length == AKEN_NATIVE_RESOURCE_ROOT.length) return false
+    if (!path.startsWith(QP_NATIVE_RESOURCE_ROOT) || path.length == QP_NATIVE_RESOURCE_ROOT.length) return false
     if (path.any { it == '\u0000' || it == '\\' || it == '|' || it == '\r' || it == '\n' }) return false
     val lowerPath = path.lowercase()
     if (lowerPath.contains("macos") || lowerPath.contains("darwin") || lowerPath.contains("macho") ||
@@ -520,9 +520,9 @@ internal fun isQpLocatorResourcePath(path: String): Boolean {
         lowerPath.startsWith("meta-inf/native-src/") ||
         lowerPath.startsWith("meta-inf/jsrt/") ||
         lowerPath.contains("/js_kernel_") || lowerPath.contains("/zig") ||
-        !hasCurrentR1ResourceSuffix(lowerPath)
+        !hasCurrentNativeResourceSuffix(lowerPath)
     ) return false
-    val tail = path.removePrefix(AKEN_NATIVE_RESOURCE_ROOT)
+    val tail = path.removePrefix(QP_NATIVE_RESOURCE_ROOT)
     return tail.split('/').all { segment ->
         segment.isNotEmpty() && segment != "." && segment != ".." &&
             segment.all { character ->
@@ -534,7 +534,7 @@ internal fun isQpLocatorResourcePath(path: String): Boolean {
     }
 }
 
-private fun hasCurrentR1ResourceSuffix(lowerPath: String): Boolean =
+private fun hasCurrentNativeResourceSuffix(lowerPath: String): Boolean =
     lowerPath.endsWith(".dll") || lowerPath.endsWith(".so") ||
         lowerPath.endsWith(".properties") || lowerPath.endsWith(".xml") ||
         lowerPath.endsWith(".json") || lowerPath.endsWith(".yml") ||
@@ -544,7 +544,7 @@ private fun hasCurrentR1ResourceSuffix(lowerPath: String): Boolean =
 private fun platformForId(platformId: Int): String = when (platformId) {
     1 -> "windows-x64"
     2 -> "linux-x64"
-    else -> error("AKEN-R1 native platform id is invalid: $platformId")
+    else -> error("Qp native platform id is invalid: $platformId")
 }
 
 private fun targetTripleForPlatform(platform: String): String =
@@ -569,7 +569,7 @@ private fun nativeAbiDigest(target: ByteArray, finalBytesDigest: ByteArray): Byt
     MessageDigest.getInstance("SHA-256").apply {
         update(FINAL_NATIVE_ABI_DOMAIN)
         updateFramed(target)
-        R1_NATIVE_ABI_EXPORTS.forEach { export ->
+        NATIVE_ABI_EXPORTS.forEach { export ->
             val bytes = export.toByteArray(StandardCharsets.US_ASCII)
             try {
                 updateFramed(bytes)
@@ -588,13 +588,13 @@ private class WipableByteArrayOutputStream : ByteArrayOutputStream() {
 }
 
 private fun writeU16(out: ByteArrayOutputStream, value: Int) {
-    require(value in 0..0xFFFF) { "AKEN native locator u16 value is invalid" }
+    require(value in 0..0xFFFF) { "Qp native locator u16 value is invalid" }
     out.write(value ushr 8)
     out.write(value)
 }
 
 private fun writeU32(out: ByteArrayOutputStream, value: Int) {
-    require(value > 0) { "AKEN native locator u32 value is invalid" }
+    require(value > 0) { "Qp native locator u32 value is invalid" }
     out.write(value ushr 24)
     out.write(value ushr 16)
     out.write(value ushr 8)
@@ -613,7 +613,7 @@ private fun maskRoute(
     var blockIndex = 0
     while (offset < masked.size) {
         val block = MessageDigest.getInstance("SHA-256").apply {
-            update(AKEN_NATIVE_LOCATOR_ROUTE_MASK_DOMAIN)
+            update(QP_NATIVE_LOCATOR_ROUTE_MASK_DOMAIN)
             update(kind.toByte())
             update(platformId.toByte())
             updateInt(storedLength)
@@ -634,7 +634,7 @@ private fun maskRoute(
 }
 
 private fun locatorCommitment(payload: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").apply {
-    update(AKEN_NATIVE_LOCATOR_COMMITMENT_DOMAIN)
+    update(QP_NATIVE_LOCATOR_COMMITMENT_DOMAIN)
     update(payload)
 }.digest()
 
@@ -646,7 +646,7 @@ private fun MessageDigest.updateInt(value: Int) {
 }
 
 private fun MessageDigest.updateFramed(value: ByteArray) {
-    require(value.size.toLong() <= 0xFFFF_FFFFL) { "AKEN-R1 native binding field is too large" }
+    require(value.size.toLong() <= 0xFFFF_FFFFL) { "Qp native binding field is too large" }
     updateInt(value.size)
     update(value)
 }

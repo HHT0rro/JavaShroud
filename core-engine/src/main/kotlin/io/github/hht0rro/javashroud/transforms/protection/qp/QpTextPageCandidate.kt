@@ -223,7 +223,7 @@ internal fun qpTextPageIdentityPageKey(
 }
 
 private val STRING_PAGE_IDENTITY_KEY_DOMAIN =
-    "AKEN-v4-string-page-route-key-v1".toByteArray(Charsets.US_ASCII)
+    "javashroud-qp-string-page-route-key-v1".toByteArray(Charsets.US_ASCII)
 
 private fun updateFramed(digest: MessageDigest, value: ByteArray) {
     updateInt(digest, value.size)

@@ -38,9 +38,9 @@ internal object QpNativeHandlerDescriptor {
         0x6B,
     )
     private val TERMINAL_BINDING_DOMAIN =
-        "AKEN-v4-native-handler-terminal-binding-v1".toByteArray(Charsets.US_ASCII)
+        "javashroud-qp-native-handler-terminal-binding-v1".toByteArray(Charsets.US_ASCII)
     private val ACTION_TAG_DOMAIN =
-        "AKEN-v4-native-handler-action-tag-v1".toByteArray(Charsets.US_ASCII)
+        "javashroud-qp-native-handler-action-tag-v1".toByteArray(Charsets.US_ASCII)
 
     init {
         check(ACTION_TAG_OFFSET + IDENTITY_SIZE == ENCODED_SIZE) {

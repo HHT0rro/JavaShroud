@@ -40,18 +40,18 @@ data class StringEncryptionConfig(
 )
 
 private const val STRING_HELPER_OWNER = "io/github/hht0rro/javashroud/transforms/protection/qp/QpTextBridge"
-private const val STRING_HELPER_AKEN_DECODE_DESC = "([B)Ljava/lang/String;"
-private const val STRING_HELPER_AKEN_BSM_DESC =
+private const val STRING_HELPER_NATIVE_DECODE_DESC = "([B)Ljava/lang/String;"
+private const val STRING_HELPER_NATIVE_BSM_DESC =
     "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;" +
         "Ljava/lang/invoke/MethodHandle;)Ljava/lang/invoke/CallSite;"
-private val STRING_HELPER_AKEN_BSM_NAMES = arrayOf("q0", "m7", "x3", "v8")
+private val STRING_HELPER_NATIVE_BSM_NAMES = arrayOf("q0", "m7", "x3", "v8")
 private const val STRING_HELPER_TOKEN_DESC = "(Ljava/lang/String;)[B"
 private const val STRING_HELPER_TOKEN_BSM_DESC =
     "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;" +
         "Ljava/lang/String;)Ljava/lang/invoke/CallSite;"
 private val STRING_HELPER_TOKEN_BSM_NAMES = arrayOf("u0", "u1", "u2", "u3")
 private const val SHROUD_ENCRYPT_DESC = "Lio/github/hht0rro/javashroud/bytecode/ShroudEncrypt;"
-private const val AKEN_STRING_PAGE_NONCE_SIZE = 16
+private const val QP_STRING_PAGE_NONCE_SIZE = 16
 
 private enum class QpIntPushShape {
     Canonical,
@@ -76,25 +76,25 @@ private data class QpStringCallsiteShape(
     val tokenEmission: QpTokenEmission,
 )
 
-private val AKEN_STRING_PAGE_IDENTITY_DOMAIN =
-    "AKEN-v4-string-page-logical-identity-v1".toByteArray(Charsets.US_ASCII)
-private val AKEN_STRING_PAGE_HANDLE_DOMAIN =
-    "AKEN-v4-string-page-handle-v1".toByteArray(Charsets.US_ASCII)
-private val AKEN_STRING_PAGE_PROOF_DOMAIN =
-    "AKEN-v4-string-page-call-site-proof-v1".toByteArray(Charsets.US_ASCII)
-private val AKEN_STRING_PAGE_PATH_DOMAIN =
-    "AKEN-v4-string-page-logical-path-v1".toByteArray(Charsets.US_ASCII)
-private val AKEN_STRING_PAGE_INDEX_DOMAIN =
-    "AKEN-v4-string-page-index-v2".toByteArray(Charsets.US_ASCII)
-private val AKEN_STRING_PAGE_TEMPLATE_DOMAIN =
-    "AKEN-v4-string-page-callsite-template-v2".toByteArray(Charsets.US_ASCII)
-private val AKEN_STRING_PAGE_PATH_ROOTS = arrayOf(
+private val QP_STRING_PAGE_IDENTITY_DOMAIN =
+    "javashroud-qp-string-page-logical-identity-v1".toByteArray(Charsets.US_ASCII)
+private val QP_STRING_PAGE_HANDLE_DOMAIN =
+    "javashroud-qp-string-page-handle-v1".toByteArray(Charsets.US_ASCII)
+private val QP_STRING_PAGE_PROOF_DOMAIN =
+    "javashroud-qp-string-page-call-site-proof-v1".toByteArray(Charsets.US_ASCII)
+private val QP_STRING_PAGE_PATH_DOMAIN =
+    "javashroud-qp-string-page-logical-path-v1".toByteArray(Charsets.US_ASCII)
+private val QP_STRING_PAGE_INDEX_DOMAIN =
+    "javashroud-qp-string-page-index-v2".toByteArray(Charsets.US_ASCII)
+private val QP_STRING_PAGE_TEMPLATE_DOMAIN =
+    "javashroud-qp-string-page-callsite-template-v2".toByteArray(Charsets.US_ASCII)
+private val QP_STRING_PAGE_PATH_ROOTS = arrayOf(
     "META-INF/.a4/s",
     "META-INF/.r4/p",
     "assets/.a4/s",
     "META-INF/.j4/r",
 )
-private val AKEN_STRING_PAGE_PATH_SUFFIXES = arrayOf(".bin", ".dat", ".p", ".r")
+private val QP_STRING_PAGE_PATH_SUFFIXES = arrayOf(".bin", ".dat", ".p", ".r")
 
 /**
  * Replaces string LDC constants with native-backed authenticated decode callsites.
@@ -130,7 +130,7 @@ fun encryptClassStrings(
                 val value = ldc.cst as? String ?: continue
                 if (value.isEmpty() || !shouldEncryptString(value, config, annotated)) continue
 
-                val buildNonce = ByteArray(AKEN_STRING_PAGE_NONCE_SIZE).also(random::nextBytes)
+                val buildNonce = ByteArray(QP_STRING_PAGE_NONCE_SIZE).also(random::nextBytes)
                 var logicalIdentity: ByteArray? = null
                 var plaintext: ByteArray? = null
                 var encodedHandle: ByteArray? = null
@@ -419,19 +419,19 @@ private fun buildQpStringPageDecodeCallsite(
         add(
             InvokeDynamicInsnNode(
                 "a${shape.bootstrapSlot}",
-                STRING_HELPER_AKEN_DECODE_DESC,
+                STRING_HELPER_NATIVE_DECODE_DESC,
                 Handle(
                     Opcodes.H_INVOKESTATIC,
                     STRING_HELPER_OWNER,
-                    STRING_HELPER_AKEN_BSM_NAMES[shape.bootstrapSlot],
-                    STRING_HELPER_AKEN_BSM_DESC,
+                    STRING_HELPER_NATIVE_BSM_NAMES[shape.bootstrapSlot],
+                    STRING_HELPER_NATIVE_BSM_DESC,
                     false,
                 ),
                 Handle(
                     Opcodes.H_INVOKESTATIC,
                     STRING_HELPER_OWNER,
                     "invokeQpStringTerminal",
-                    STRING_HELPER_AKEN_DECODE_DESC,
+                    STRING_HELPER_NATIVE_DECODE_DESC,
                     false,
                 ),
             ),
@@ -442,7 +442,7 @@ private fun buildQpStringPageDecodeCallsite(
                 Opcodes.INVOKESTATIC,
                 STRING_HELPER_OWNER,
                 "invokeQpStringTerminal",
-                STRING_HELPER_AKEN_DECODE_DESC,
+                STRING_HELPER_NATIVE_DECODE_DESC,
                 false,
             ),
         )
@@ -522,11 +522,11 @@ private fun InsnList.addInt(value: Int, shape: QpIntPushShape = QpIntPushShape.C
             else -> add(LdcInsnNode(value))
         }
         QpIntPushShape.Bipush -> {
-            require(value in Byte.MIN_VALUE..Byte.MAX_VALUE) { "AKEN callsite BIPUSH value is out of range" }
+            require(value in Byte.MIN_VALUE..Byte.MAX_VALUE) { "Qp callsite BIPUSH value is out of range" }
             add(IntInsnNode(Opcodes.BIPUSH, value))
         }
         QpIntPushShape.Sipush -> {
-            require(value in Short.MIN_VALUE..Short.MAX_VALUE) { "AKEN callsite SIPUSH value is out of range" }
+            require(value in Short.MIN_VALUE..Short.MAX_VALUE) { "Qp callsite SIPUSH value is out of range" }
             add(IntInsnNode(Opcodes.SIPUSH, value))
         }
         QpIntPushShape.Ldc -> add(LdcInsnNode(value))
@@ -534,8 +534,8 @@ private fun InsnList.addInt(value: Int, shape: QpIntPushShape = QpIntPushShape.C
 }
 
 private fun packQpStringToken(encodedHandle: ByteArray, pageIndex: Int, callSiteProof: ByteArray): ByteArray {
-    require(encodedHandle.size == 24) { "AKEN string handle must be 24 bytes" }
-    require(callSiteProof.isNotEmpty() && callSiteProof.size <= 4096) { "AKEN string proof size is invalid" }
+    require(encodedHandle.size == 24) { "Qp string handle must be 24 bytes" }
+    require(callSiteProof.isNotEmpty() && callSiteProof.size <= 4096) { "Qp string proof size is invalid" }
     val packed = ByteArray(24 + 4 + callSiteProof.size)
     encodedHandle.copyInto(packed)
     packed[24] = (pageIndex ushr 24).toByte()
@@ -550,7 +550,7 @@ private fun deriveQpStringPageIndex(
     logicalIdentity: ByteArray,
     buildNonce: ByteArray,
 ): Int {
-    val digest = digestQpBinding(AKEN_STRING_PAGE_INDEX_DOMAIN, logicalIdentity, buildNonce)
+    val digest = digestQpBinding(QP_STRING_PAGE_INDEX_DOMAIN, logicalIdentity, buildNonce)
     return try {
         // Typed StringPages are not dispatcher page-zero bindings. Keep the
         // index bounded and non-zero while still binding it into the proof,
@@ -568,7 +568,7 @@ private fun selectQpStringCallsiteShape(
     methodLiteralOrdinal: Int,
 ): QpStringCallsiteShape {
     val digest = digestQpBinding(
-        AKEN_STRING_PAGE_TEMPLATE_DOMAIN,
+        QP_STRING_PAGE_TEMPLATE_DOMAIN,
         logicalIdentity,
         intBytes(classLiteralOrdinal),
         intBytes(methodLiteralOrdinal),
@@ -590,7 +590,7 @@ private fun selectQpStringCallsiteShape(
             // Alternate direct and indy terminals while the shape digest
             // randomizes the surrounding encodings and bootstrap alias.
             useInvokeDynamic = (classLiteralOrdinal and 1) != 0,
-            bootstrapSlot = (second ushr 1) and (STRING_HELPER_AKEN_BSM_NAMES.lastIndex),
+            bootstrapSlot = (second ushr 1) and (STRING_HELPER_NATIVE_BSM_NAMES.lastIndex),
             tokenEmission = QpTokenEmission.entries[
                 (classLiteralOrdinal + (digest[2].toInt() and 0xFF)) % QpTokenEmission.entries.size
             ],
@@ -608,7 +608,7 @@ private fun deriveQpStringPageIdentity(
     methodLiteralOrdinal: Int,
     buildNonce: ByteArray,
 ): ByteArray = MessageDigest.getInstance("SHA-256").apply {
-    update(AKEN_STRING_PAGE_IDENTITY_DOMAIN)
+    update(QP_STRING_PAGE_IDENTITY_DOMAIN)
     updateQpString(classInternalName)
     updateQpString(methodName)
     updateQpString(methodDescriptor)
@@ -621,7 +621,7 @@ private fun deriveQpStringPageHandle(
     logicalIdentity: ByteArray,
     buildNonce: ByteArray,
 ): ByteArray {
-    val digest = digestQpBinding(AKEN_STRING_PAGE_HANDLE_DOMAIN, logicalIdentity, buildNonce)
+    val digest = digestQpBinding(QP_STRING_PAGE_HANDLE_DOMAIN, logicalIdentity, buildNonce)
     return try {
         digest.copyOf(QpHandle.ENCODED_HANDLE_SIZE)
     } finally {
@@ -639,7 +639,7 @@ private fun deriveQpStringPageCallSiteProof(
     val pathBytes = logicalBindingPath.toByteArray(Charsets.UTF_8)
     return try {
         digestQpBinding(
-            AKEN_STRING_PAGE_PROOF_DOMAIN,
+            QP_STRING_PAGE_PROOF_DOMAIN,
             logicalIdentity,
             encodedHandle,
             pageBytes,
@@ -655,12 +655,12 @@ private fun qpTextPageLogicalBindingPath(
     logicalIdentity: ByteArray,
     encodedHandle: ByteArray,
 ): String {
-    val digest = digestQpBinding(AKEN_STRING_PAGE_PATH_DOMAIN, logicalIdentity, encodedHandle)
+    val digest = digestQpBinding(QP_STRING_PAGE_PATH_DOMAIN, logicalIdentity, encodedHandle)
     return try {
         val token = Base64.getUrlEncoder().withoutPadding().encodeToString(digest)
-        val root = AKEN_STRING_PAGE_PATH_ROOTS[(digest[0].toInt() and 0xFF) % AKEN_STRING_PAGE_PATH_ROOTS.size]
+        val root = QP_STRING_PAGE_PATH_ROOTS[(digest[0].toInt() and 0xFF) % QP_STRING_PAGE_PATH_ROOTS.size]
         val prefixLength = 2 + ((digest[1].toInt() and 0xFF) % 3)
-        val suffix = AKEN_STRING_PAGE_PATH_SUFFIXES[(digest[2].toInt() and 0xFF) % AKEN_STRING_PAGE_PATH_SUFFIXES.size]
+        val suffix = QP_STRING_PAGE_PATH_SUFFIXES[(digest[2].toInt() and 0xFF) % QP_STRING_PAGE_PATH_SUFFIXES.size]
         "$root/${token.substring(0, prefixLength)}/${token.substring(prefixLength)}$suffix"
     } finally {
         Arrays.fill(digest, 0)

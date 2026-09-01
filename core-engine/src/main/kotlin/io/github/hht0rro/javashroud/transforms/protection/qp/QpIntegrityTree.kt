@@ -147,9 +147,10 @@ class QpIntegrityTree private constructor(
 
     companion object {
         private const val HASH_SIZE = 32
-        private val LEAF_DOMAIN = "AKEN-v4-integrity-leaf".toByteArray(StandardCharsets.US_ASCII)
-        private val NODE_DOMAIN = "AKEN-v4-integrity-node".toByteArray(StandardCharsets.US_ASCII)
-        private val CANONICAL_DOMAIN = "AKEN-v4-artifact-canonical".toByteArray(StandardCharsets.US_ASCII)
+        private val LEAF_DOMAIN = "javashroud-qp-integrity-leaf-v1".toByteArray(StandardCharsets.US_ASCII)
+        private val NODE_DOMAIN = "javashroud-qp-integrity-node-v1".toByteArray(StandardCharsets.US_ASCII)
+        private val CANONICAL_DOMAIN =
+            "javashroud-qp-artifact-canonical-v1".toByteArray(StandardCharsets.US_ASCII)
 
         fun build(leaves: List<Leaf>): QpIntegrityTree {
             require(leaves.isNotEmpty()) { "Qp integrity mesh requires at least one leaf" }

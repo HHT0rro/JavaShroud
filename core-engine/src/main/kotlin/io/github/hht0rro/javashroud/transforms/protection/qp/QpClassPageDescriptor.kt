@@ -299,8 +299,10 @@ internal class QpClassPageDescriptorPage private constructor(
     }
 }
 
-private val DESCRIPTOR_ROUTE_DOMAIN = "AKEN-v4-class-page-descriptor-route-v1".toByteArray(Charsets.US_ASCII)
-private val DESCRIPTOR_MARKER_DOMAIN = "AKEN-v4-class-page-descriptor-marker-v1".toByteArray(Charsets.US_ASCII)
+private val DESCRIPTOR_ROUTE_DOMAIN =
+    "javashroud-qp-class-page-descriptor-route-v1".toByteArray(Charsets.US_ASCII)
+private val DESCRIPTOR_MARKER_DOMAIN =
+    "javashroud-qp-class-page-descriptor-marker-v1".toByteArray(Charsets.US_ASCII)
 private val DESCRIPTOR_ROUTE_ROOTS = arrayOf(
     "META-INF/.a4/c",
     "META-INF/.r4/p",

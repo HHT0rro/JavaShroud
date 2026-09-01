@@ -25,7 +25,7 @@ object QpNativeCompilerPass {
     private val rustToolchainIdentityCache = ConcurrentHashMap<String, String>()
     private const val DEFAULT_NATIVE_COMPILE_PARALLELISM = 2
 
-    private const val NATIVE_CACHE_MAGIC = "JSR1-RUST-CACHE1"
+    private const val NATIVE_CACHE_MAGIC = "QP-RUST-CACHE-V2"
     private const val NATIVE_CACHE_VERSION = 2
     private const val NATIVE_CACHE_HEADER_SIZE = 16 + 4 + 32 + 8 + 32
     private const val MAX_NATIVE_ARTIFACT_BYTES = 256L * 1024L * 1024L
@@ -39,7 +39,7 @@ object QpNativeCompilerPass {
     private const val RUST_WORKSPACE_DIR = "src/main/rust"
     private const val RUST_FFI_PACKAGE = "qp-ffi"
     private const val RUST_FFI_LIBRARY = "qp_ffi"
-    private const val RUST_SPECIALIZATION_DOMAIN = "JavaShroud/AKEN-R2/RustSpecialization/v2"
+    private const val RUST_SPECIALIZATION_DOMAIN = "JavaShroud/QP/RustSpecialization/v2"
     private val RUST_RELEASE_EXPORTS = setOf(
         "JNI_OnLoad",
         "JNI_OnUnload",
@@ -885,7 +885,7 @@ object QpNativeCompilerPass {
     }
 
     private fun rustFlagsForCompile(target: String, specializationHex: String): String = buildString {
-        append("-C metadata=jsr1_").append(specializationHex.take(16))
+        append("-C metadata=qp_").append(specializationHex.take(16))
         if (target == RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET) {
             RUST_RELEASE_EXPORTS.sorted().forEach { export ->
                 append(" -C link-arg=/EXPORT:").append(export)

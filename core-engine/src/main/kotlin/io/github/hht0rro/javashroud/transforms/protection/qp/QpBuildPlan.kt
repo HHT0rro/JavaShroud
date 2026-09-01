@@ -557,7 +557,7 @@ class QpBuildPlan private constructor(
     }
 
     companion object {
-        private val REGISTRATION_DOMAIN = "AKEN-v4-registration".toByteArray(Charsets.US_ASCII)
+        private val REGISTRATION_DOMAIN = "javashroud-qp-registration-v1".toByteArray(Charsets.US_ASCII)
 
         fun create(
             commitment: ByteArray,

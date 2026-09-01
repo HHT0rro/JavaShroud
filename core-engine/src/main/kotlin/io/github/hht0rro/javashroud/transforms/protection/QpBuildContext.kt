@@ -1204,7 +1204,7 @@ private fun longBytes(value: Long): ByteArray = ByteArray(Long.SIZE_BYTES) { ind
     ((value ushr ((Long.SIZE_BYTES - 1 - index) * 8)) and 0xFF).toByte()
 }
 
-internal const val QP_DERIVE_LABEL_CLASS_ENCRYPTION = "javashroud-vbc4-jse-class-v1"
+internal const val QP_DERIVE_LABEL_CLASS_ENCRYPTION = "javashroud-qp-class-encryption-v1"
 
 /**
  * HKDF-SHA256 (RFC 5869): extract-then-expand. Shared by every build-local key

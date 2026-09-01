@@ -15,9 +15,9 @@ import java.util.Arrays
  */
 internal object QpPageEntryToken {
     private val ENTRY_TOKEN_DOMAIN =
-        "AKEN-v4-typed-page-entry-token-v1".toByteArray(Charsets.US_ASCII)
+        "javashroud-qp-typed-page-entry-token-v1".toByteArray(Charsets.US_ASCII)
     private val PAGE_BINDING_DOMAIN =
-        "AKEN-v4-typed-page-route-binding-v1".toByteArray(Charsets.US_ASCII)
+        "javashroud-qp-typed-page-route-binding-v1".toByteArray(Charsets.US_ASCII)
 
     fun derive(
         resourceKind: QpResourceKind,

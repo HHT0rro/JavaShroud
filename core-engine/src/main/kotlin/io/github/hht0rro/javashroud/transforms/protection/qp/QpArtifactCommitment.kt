@@ -297,8 +297,10 @@ class QpArtifactCommitment private constructor(
         private const val CANONICALIZATION_VERSION = 2
         private const val ROOT_SHARD_FRAMING_ID = 1
         private const val ZERO_BLOCK_SIZE = 1024
-        private val DOMAIN = "AKEN-v4-artifact-canonical-commitment".toByteArray(StandardCharsets.US_ASCII)
-        private val ROOT_SHARD_DOMAIN = "AKEN-v4-root-shard-material".toByteArray(StandardCharsets.US_ASCII)
+        private val DOMAIN =
+            "javashroud-qp-artifact-canonical-commitment-v1".toByteArray(StandardCharsets.US_ASCII)
+        private val ROOT_SHARD_DOMAIN =
+            "javashroud-qp-root-shard-material-v1".toByteArray(StandardCharsets.US_ASCII)
 
         /**
          * Compute the one-pass canonical commitment from final writer-equivalent

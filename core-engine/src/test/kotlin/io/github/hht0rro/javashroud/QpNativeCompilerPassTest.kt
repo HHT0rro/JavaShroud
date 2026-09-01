@@ -58,7 +58,7 @@ class QpNativeCompilerPassTest {
             RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET,
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
         )
-        assertTrue(flags.contains("-C metadata=jsr1_0123456789abcdef"))
+        assertTrue(flags.contains("-C metadata=qp_0123456789abcdef"))
         for (export in listOf("JNI_OnLoad", "JNI_OnUnload", "qp_r1_open_frame", "qp_r1_runtime_binding_digest")) {
             assertTrue(flags.contains("-C link-arg=/EXPORT:$export"))
         }

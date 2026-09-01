@@ -21,7 +21,7 @@ object QpResourceCodec {
     private const val headerSize = 27
     private const val metadataSize = 96
     private const val macLength = 32
-    private val partitionedAuthDomain = "jsrp-auth-v3".toByteArray(Charsets.US_ASCII)
+    private val partitionedAuthDomain = "javashroud-qp-resource-auth-v3".toByteArray(Charsets.US_ASCII)
 
     fun encode(
         bytes: ByteArray,
@@ -135,7 +135,7 @@ object QpResourceCodec {
                 plainLength = bytes.size,
                 storedLength = storedBytes.size,
                 bodyLength = storedBytes.size,
-                keyId = readBe32(hmacSha256WithKey(key, "jsrp-key-id-v3".toByteArray(Charsets.US_ASCII), nonce), 0),
+                keyId = readBe32(hmacSha256WithKey(key, "javashroud-qp-resource-key-id-v3".toByteArray(Charsets.US_ASCII), nonce), 0),
                 seed = seed,
                 plainHash = plainHash,
                 storedHash = storedHash,
@@ -214,7 +214,7 @@ object QpResourceCodec {
         val cipher = Cipher.getInstance("AES/CTR/NoPadding")
         val key = hmacSha256WithKey(
             runtimeKey,
-            "jsrp-aes-key".toByteArray(Charsets.US_ASCII),
+            "javashroud-qp-resource-aes-key-v1".toByteArray(Charsets.US_ASCII),
             nonce,
             kindBytes,
             variantBytes,
@@ -222,7 +222,7 @@ object QpResourceCodec {
         ).copyOfRange(0, 16)
         val iv = hmacSha256WithKey(
             runtimeKey,
-            "jsrp-aes-iv".toByteArray(Charsets.US_ASCII),
+            "javashroud-qp-resource-aes-iv-v1".toByteArray(Charsets.US_ASCII),
             nonce,
             kindBytes,
             variantBytes,

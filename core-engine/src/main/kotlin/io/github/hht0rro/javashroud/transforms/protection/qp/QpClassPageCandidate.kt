@@ -223,7 +223,7 @@ internal fun qpClassPageIdentityPageKey(
 }
 
 private val CLASS_PAGE_IDENTITY_KEY_DOMAIN =
-    "AKEN-v4-encrypted-class-page-route-key-v1".toByteArray(Charsets.US_ASCII)
+    "javashroud-qp-encrypted-class-page-route-key-v1".toByteArray(Charsets.US_ASCII)
 
 private fun updateFramed(digest: MessageDigest, value: ByteArray) {
     updateInt(digest, value.size)

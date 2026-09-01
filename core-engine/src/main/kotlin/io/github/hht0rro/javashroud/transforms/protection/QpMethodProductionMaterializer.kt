@@ -18,7 +18,7 @@ import java.security.SecureRandom
 import java.util.Arrays
 
 /**
- * Build-only production hand-off from registered VBC4, typed StringPage,
+ * Build-only production hand-off from registered Qp VM, typed StringPage,
  * encrypted ClassPage, and NativeChunk candidates to the native recompilation
  * stage.
  *
@@ -44,7 +44,7 @@ internal object QpMethodProductionMaterializer {
         }
         if (context.qpFinalizationLayoutOrNull() != null) return artifact
 
-        val vbc4Reservation = if (hasQpCandidates) {
+        val nativeReservation = if (hasQpCandidates) {
             context.requireQpPreSealRouteReservation()
         } else {
             null
@@ -79,13 +79,13 @@ internal object QpMethodProductionMaterializer {
         try {
             if (hasQpCandidates) {
                 context.withQpMethodCandidatesForBuild { candidates ->
-                    checkNotNull(vbc4Reservation).withRoutesForBuild { routes ->
+                    checkNotNull(nativeReservation).withRoutesForBuild { routes ->
                         candidates.sortedBy { it.entryToken }.forEach { candidate ->
                             val route = routes.singleOrNull { candidateRoute ->
                                 candidateRoute.entryToken == candidate.entryToken &&
                                     candidateRoute.logicalVmResourcePath == candidate.logicalMethod.logicalVmResourcePath
                             } ?: error(
-                                "AKEN VBC4 pre-seal route is missing for entry token " + candidate.entryToken,
+                                "Qp current-format pre-seal route is missing for entry token " + candidate.entryToken,
                             )
                             batches += QpPendingPagePlanner.partitionAndWipe(
                                 candidate = candidate,
@@ -116,7 +116,7 @@ internal object QpMethodProductionMaterializer {
                                     candidateRoute.identityPageKey == identityPageKey &&
                                         candidateRoute.logicalBindingPath == candidate.logicalBindingPath
                                 } ?: error(
-                                    "AKEN StringPage pre-seal route is missing for candidate " + identityPageKey,
+                                    "Qp StringPage pre-seal route is missing for candidate " + identityPageKey,
                                 )
                                 stringPages += candidate.toPendingPage(route)
                             }
@@ -135,7 +135,7 @@ internal object QpMethodProductionMaterializer {
                                     candidateRoute.identityPageKey == identityPageKey &&
                                         candidateRoute.logicalBindingPath == candidate.logicalBindingPath
                                 } ?: error(
-                                    "AKEN ClassPage pre-seal route is missing for candidate " + identityPageKey,
+                                    "Qp ClassPage pre-seal route is missing for candidate " + identityPageKey,
                                 )
                                 classPages += candidate.toPendingPage(route)
                             }
@@ -154,7 +154,7 @@ internal object QpMethodProductionMaterializer {
                                     candidateRoute.identityPageKey == identityPageKey &&
                                         candidateRoute.logicalBindingPath == candidate.logicalBindingPath
                                 } ?: error(
-                                    "AKEN NativeChunk pre-seal route is missing for candidate " + identityPageKey,
+                                    "Qp NativeChunk pre-seal route is missing for candidate " + identityPageKey,
                                 )
                                 nativeChunks += candidate.toPendingPage(route)
                             }
@@ -168,7 +168,7 @@ internal object QpMethodProductionMaterializer {
                     classPages.isNotEmpty() ||
                     nativeChunks.isNotEmpty(),
             ) {
-                "AKEN production materialization found no page candidates"
+                "Qp production materialization found no page candidates"
             }
             consumeBatchesAndMaterialize(
                 context = context,
@@ -191,7 +191,7 @@ internal object QpMethodProductionMaterializer {
                     pageEntries += JarEntryData(entry.name, bytes)
                 }
             require(pageEntries.isNotEmpty()) {
-                "AKEN production materialization emitted no new page entries"
+                "Qp production materialization emitted no new page entries"
             }
             val output = artifactWithClassDescriptors.copy(
                 jarEntries = artifactWithClassDescriptors.jarEntries + pageEntries,
@@ -258,7 +258,7 @@ internal object QpMethodProductionMaterializer {
                         pendingClassPages = pendingClassPages,
                         pendingNativeChunks = pendingNativeChunks,
                         fixedEntries = fixedEntries,
-                        vbc4StateBindingLayoutDigest = stateBindingLayoutDigest,
+                        pageStateBindingLayoutDigest = stateBindingLayoutDigest,
                     )
                 } finally {
                     Arrays.fill(stateBindingLayoutDigest, 0)
@@ -288,7 +288,7 @@ internal object QpMethodProductionMaterializer {
 
     /**
      * Emits deterministic per-class descriptor resources before the canonical
-     * AKEN commitment is reserved. These resources are class-local inputs to
+     * Qp commitment is reserved. These resources are class-local inputs to
      * the typed runtime loader, not a central catalog: each contains only its
      * own page handles and proofs.
      */
@@ -324,7 +324,7 @@ internal object QpMethodProductionMaterializer {
                 candidates.forEach { candidate ->
                     val pageKey = candidate.identityPageKeyForBuild()
                     require(candidatesByPageKey.put(pageKey, candidate) == null) {
-                        "AKEN ClassPage descriptor emission found duplicate candidate identity"
+                        "Qp ClassPage descriptor emission found duplicate candidate identity"
                     }
                 }
                 context.withQpClassPageDescriptorSourcesForBuild { sources ->
@@ -335,7 +335,7 @@ internal object QpMethodProductionMaterializer {
                             val descriptorPath =
                                 QpClassPageDescriptor.resourcePathForInternalNameForBuild(internalName)
                             require(occupiedEntryPaths.add(descriptorPath)) {
-                                "AKEN ClassPage descriptor route collides with the materialization namespace: " +
+                                "Qp ClassPage descriptor route collides with the materialization namespace: " +
                                     descriptorPath
                             }
                             val descriptorPages = ArrayList<QpClassPageDescriptorPage>(classSources.size)
@@ -347,11 +347,11 @@ internal object QpMethodProductionMaterializer {
                                         val pageKey = source.identityPageKeyForBuild()
                                         val candidate = candidatesByPageKey[pageKey]
                                             ?: error(
-                                                "AKEN ClassPage descriptor source has no registered candidate for " +
+                                                "Qp ClassPage descriptor source has no registered candidate for " +
                                                     internalName,
                                             )
                                         require(candidate.pageIndex == source.pageIndex) {
-                                            "AKEN ClassPage descriptor source page index drifted from its candidate"
+                                            "Qp ClassPage descriptor source page index drifted from its candidate"
                                         }
                                         var handle: ByteArray? = null
                                         var proof: ByteArray? = null
@@ -373,7 +373,7 @@ internal object QpMethodProductionMaterializer {
                                     pages = descriptorPages,
                                 )
                                 require(descriptor.resourcePathForBuild() == descriptorPath) {
-                                    "AKEN ClassPage descriptor route drifted from its deterministic binding"
+                                    "Qp ClassPage descriptor route drifted from its deterministic binding"
                                 }
                                 descriptorEntries += JarEntryData(
                                     name = descriptorPath,
@@ -387,7 +387,7 @@ internal object QpMethodProductionMaterializer {
                 }
             }
             require(descriptorEntries.isNotEmpty()) {
-                "AKEN ClassPage descriptor sources did not emit any descriptor resources"
+                "Qp ClassPage descriptor sources did not emit any descriptor resources"
             }
             transferred = true
             return artifact.copy(
@@ -420,14 +420,14 @@ internal object QpMethodProductionMaterializer {
         val entriesByName = LinkedHashMap<String, JarEntryData>()
         artifact.jarEntries.forEach { entry ->
             require(entriesByName.put(entry.name, entry) == null) {
-                "AKEN ClassPage descriptor verification found duplicate artifact entries"
+                "Qp ClassPage descriptor verification found duplicate artifact entries"
             }
         }
         context.withQpClassPageDescriptorSourcesForBuild { sources ->
             layout.withClassPageBindingsForBuild { bindings ->
                 val bindingsByPageKey = bindings.associateBy { binding -> binding.identityPageKeyForBuild() }
                 require(bindingsByPageKey.size == bindings.size) {
-                    "AKEN ClassPage descriptor verification found duplicate final bindings"
+                    "Qp ClassPage descriptor verification found duplicate final bindings"
                 }
                 val matchedSourceKeys = linkedSetOf<String>()
                 sources
@@ -437,33 +437,33 @@ internal object QpMethodProductionMaterializer {
                         val descriptorPath =
                             QpClassPageDescriptor.resourcePathForInternalNameForBuild(internalName)
                         val entry = entriesByName[descriptorPath]
-                            ?: error("AKEN ClassPage descriptor resource is missing: " + descriptorPath)
+                            ?: error("Qp ClassPage descriptor resource is missing: " + descriptorPath)
                         val encoded = entry.bytes.copyOf()
                         var descriptor: QpClassPageDescriptor? = null
                         try {
                             descriptor = QpClassPageDescriptor.decodeForBuild(encoded)
                             require(descriptor.internalName == internalName) {
-                                "AKEN ClassPage descriptor internal name drifted from its source"
+                                "Qp ClassPage descriptor internal name drifted from its source"
                             }
                             descriptor.withPagesForBuild { descriptorPages ->
                                 val expectedSources = classSources.sortedBy { source -> source.pageIndex }
                                 require(descriptorPages.size == expectedSources.size) {
-                                    "AKEN ClassPage descriptor page count drifted from final bindings"
+                                    "Qp ClassPage descriptor page count drifted from final bindings"
                                 }
                                 expectedSources.forEach { source ->
                                     val pageKey = source.identityPageKeyForBuild()
                                     val binding = bindingsByPageKey[pageKey]
                                         ?: error(
-                                            "AKEN ClassPage descriptor source has no finalized binding for " +
+                                            "Qp ClassPage descriptor source has no finalized binding for " +
                                                 internalName,
                                         )
                                     require(source.matchesBindingForBuild(binding)) {
-                                        "AKEN ClassPage descriptor source drifted from its finalized binding"
+                                        "Qp ClassPage descriptor source drifted from its finalized binding"
                                     }
                                     val descriptorPage = descriptorPages.singleOrNull { page ->
                                         page.pageIndex == source.pageIndex
                                     } ?: error(
-                                        "AKEN ClassPage descriptor is missing page " +
+                                        "Qp ClassPage descriptor is missing page " +
                                             source.pageIndex +
                                             " for " +
                                             internalName,
@@ -481,7 +481,7 @@ internal object QpMethodProductionMaterializer {
                                             MessageDigest.isEqual(descriptorHandle, bindingHandle) &&
                                                 MessageDigest.isEqual(descriptorProof, bindingProof),
                                         ) {
-                                            "AKEN ClassPage descriptor page binding drifted from final materialization"
+                                            "Qp ClassPage descriptor page binding drifted from final materialization"
                                         }
                                     } finally {
                                         descriptorHandle?.let { Arrays.fill(it, 0) }
@@ -498,16 +498,16 @@ internal object QpMethodProductionMaterializer {
                         }
                     }
                 require(matchedSourceKeys.size == sources.size) {
-                    "AKEN ClassPage descriptor verification did not match every class-local source"
+                    "Qp ClassPage descriptor verification did not match every class-local source"
                 }
             }
         }
     }
 }
 
-/** Build-only, deterministic proof material for one generated VBC4 page call site. */
+/** Build-only, deterministic proof material for one generated Qp VM page call site. */
 internal object QpCallSiteProof {
-    private val DOMAIN = "AKEN-v4-vbc4-call-site-proof-v1".toByteArray(Charsets.US_ASCII)
+    private val DOMAIN = "javashroud-qp-vm-call-site-proof-v1".toByteArray(Charsets.US_ASCII)
 
     fun derive(
         seed: Long,

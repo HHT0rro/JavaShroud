@@ -148,8 +148,8 @@ fun applyJniMicrokernelLoader(
     val vmMode = if (diversifiedVirtualization) "vm-diverse" else "vm-off"
 
     val nativeKeyRandom = SecureRandom()
-    val akenBuildContext = currentQpBuildContextOrNull()
-    val nativeChunkOwner = akenBuildContext?.let {
+    val qpBuildContext = currentQpBuildContextOrNull()
+    val nativeChunkOwner = qpBuildContext?.let {
         selectQpNativeLoaderHandlerOwner(
             artifact = artifact,
             matchedClassNames = matchedClassNames,
@@ -168,9 +168,11 @@ fun applyJniMicrokernelLoader(
     var nativeChunkInjected = false
 
     var classCount = 0
+    val isolatedTargets = isolatedDefineClassTargets(artifact)
 
     val updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
         if (!matchedClassNames.contains(classArtifact.summary.internalName)) return@map classArtifact
+        if (classArtifact.summary.internalName in isolatedTargets) return@map classArtifact
         if (isJniLoaderTimingSensitiveClass(classArtifact.bytes)) return@map classArtifact
 
         val classNode = ClassNode()
@@ -284,9 +286,9 @@ fun applyJniMicrokernelLoader(
     return try {
         nativeChunkBinding?.let { binding ->
             require(nativeChunkInjected) {
-                "AKEN native loader handler candidate was not attached to its bootstrap class"
+                "Qp native loader handler candidate was not attached to its bootstrap class"
             }
-            checkNotNull(akenBuildContext).registerQpNativeSegmentCandidates(
+            checkNotNull(qpBuildContext).registerQpNativeSegmentCandidates(
                 listOf(binding.candidateForRegistration()),
             )
         }
@@ -323,12 +325,12 @@ private fun emitJniMicrokernelLoad(mv: MethodVisitor, kernelComponents: String, 
     )
 }
 
-private const val AKEN_NATIVE_LOADER_HANDLER_PAGE_INDEX = 0
-private const val AKEN_NATIVE_LOADER_HANDLER_NONCE_SIZE = 32
-private const val AKEN_NATIVE_LOADER_HANDLER_HELPER_OWNER =
+private const val QP_NATIVE_LOADER_HANDLER_PAGE_INDEX = 0
+private const val QP_NATIVE_LOADER_HANDLER_NONCE_SIZE = 32
+private const val QP_NATIVE_LOADER_HANDLER_HELPER_OWNER =
     "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge"
-private const val AKEN_NATIVE_LOADER_HANDLER_CONSUME_DESC = "([BI[B)V"
-private const val AKEN_NATIVE_LOADER_HANDLER_HEX = "0123456789abcdef"
+private const val QP_NATIVE_LOADER_HANDLER_CONSUME_DESC = "([BI[B)V"
+private const val QP_NATIVE_LOADER_HANDLER_HEX = "0123456789abcdef"
 
 private class QpNativeLoaderHandlerBinding(
     val ownerInternalName: String,
@@ -341,20 +343,20 @@ private class QpNativeLoaderHandlerBinding(
     fun emitConsume(mv: MethodVisitor) {
         requireLive()
         emitQpNativeLoaderHandlerByteArray(mv, encodedHandle)
-        emitQpNativeLoaderHandlerInt(mv, AKEN_NATIVE_LOADER_HANDLER_PAGE_INDEX)
+        emitQpNativeLoaderHandlerInt(mv, QP_NATIVE_LOADER_HANDLER_PAGE_INDEX)
         emitQpNativeLoaderHandlerByteArray(mv, callSiteProof)
         mv.visitMethodInsn(
             Opcodes.INVOKESTATIC,
-            AKEN_NATIVE_LOADER_HANDLER_HELPER_OWNER,
+            QP_NATIVE_LOADER_HANDLER_HELPER_OWNER,
             "consumeQpNativeChunk",
-            AKEN_NATIVE_LOADER_HANDLER_CONSUME_DESC,
+            QP_NATIVE_LOADER_HANDLER_CONSUME_DESC,
             false,
         )
     }
 
     fun candidateForRegistration(): QpNativeSegmentCandidate {
         requireLive()
-        return checkNotNull(candidate) { "AKEN native loader handler candidate is unavailable" }
+        return checkNotNull(candidate) { "Qp native loader handler candidate is unavailable" }
     }
 
     fun wipe() {
@@ -369,16 +371,18 @@ private class QpNativeLoaderHandlerBinding(
     }
 
     private fun requireLive() {
-        check(!wiped) { "AKEN native loader handler binding has been wiped" }
+        check(!wiped) { "Qp native loader handler binding has been wiped" }
     }
 }
 
 private fun selectQpNativeLoaderHandlerOwner(
     artifact: BytecodeArtifact,
     matchedClassNames: Collection<String>,
-): String? = artifact.classArtifacts
+): String? {
+    val isolatedTargets = isolatedDefineClassTargets(artifact)
+    return artifact.classArtifacts
     .asSequence()
-    .filter { classArtifact -> classArtifact.summary.internalName in matchedClassNames }
+    .filter { classArtifact -> classArtifact.summary.internalName in matchedClassNames && classArtifact.summary.internalName !in isolatedTargets }
     .mapNotNull { classArtifact ->
         if (isJniLoaderTimingSensitiveClass(classArtifact.bytes)) return@mapNotNull null
         val classNode = ClassNode()
@@ -399,6 +403,7 @@ private fun selectQpNativeLoaderHandlerOwner(
     }
     .sorted()
     .firstOrNull()
+}
 
 private fun createQpNativeLoaderHandlerBinding(
     ownerInternalName: String,
@@ -408,7 +413,7 @@ private fun createQpNativeLoaderHandlerBinding(
     vmMode: String,
     random: SecureRandom,
 ): QpNativeLoaderHandlerBinding {
-    val nonce = ByteArray(AKEN_NATIVE_LOADER_HANDLER_NONCE_SIZE).also(random::nextBytes)
+    val nonce = ByteArray(QP_NATIVE_LOADER_HANDLER_NONCE_SIZE).also(random::nextBytes)
     val ownerBytes = ownerInternalName.toByteArray(Charsets.UTF_8)
     val componentsBytes = kernelComponents.toByteArray(Charsets.UTF_8)
     val runtimeTargetBytes = runtimeTargetPlatform.toByteArray(Charsets.UTF_8)
@@ -422,7 +427,7 @@ private fun createQpNativeLoaderHandlerBinding(
     var candidate: QpNativeSegmentCandidate? = null
     try {
         identity = deriveQpNativeLoaderHandlerDigest(
-            domain = "AKEN-v4-native-loader-handler-identity-v1",
+            domain = "javashroud-qp-native-loader-handler-identity-v1",
             ownerBytes,
             componentsBytes,
             runtimeTargetBytes,
@@ -431,12 +436,12 @@ private fun createQpNativeLoaderHandlerBinding(
             nonce,
         )
         encodedHandle = ByteArray(QpHandle.ENCODED_HANDLE_SIZE).also(random::nextBytes)
-        logicalBindingPath = akenNativeLoaderHandlerLogicalBindingPath(checkNotNull(identity))
+        logicalBindingPath = nativeLoaderHandlerLogicalBindingPath(checkNotNull(identity))
         callSiteProof = deriveQpNativeLoaderHandlerDigest(
-            domain = "AKEN-v4-native-loader-handler-proof-v1",
+            domain = "javashroud-qp-native-loader-handler-proof-v1",
             checkNotNull(identity),
             checkNotNull(encodedHandle),
-            akenNativeLoaderHandlerIntBytes(AKEN_NATIVE_LOADER_HANDLER_PAGE_INDEX),
+            nativeLoaderHandlerIntBytes(QP_NATIVE_LOADER_HANDLER_PAGE_INDEX),
             logicalBindingPath.toByteArray(Charsets.UTF_8),
         )
         descriptor = expandQpNativeLoaderHandlerDescriptor(
@@ -448,7 +453,7 @@ private fun createQpNativeLoaderHandlerBinding(
         candidate = QpNativeSegmentCandidate.create(
             logicalIdentity = checkNotNull(identity),
             plaintext = checkNotNull(descriptor),
-            pageIndex = AKEN_NATIVE_LOADER_HANDLER_PAGE_INDEX,
+            pageIndex = QP_NATIVE_LOADER_HANDLER_PAGE_INDEX,
             callSiteProof = checkNotNull(callSiteProof),
             encodedHandle = checkNotNull(encodedHandle),
             logicalBindingPath = checkNotNull(logicalBindingPath),
@@ -509,7 +514,7 @@ private fun updateQpNativeLoaderHandlerDigest(
     digest: MessageDigest,
     bytes: ByteArray,
 ) {
-    val lengthBytes = akenNativeLoaderHandlerIntBytes(bytes.size)
+    val lengthBytes = nativeLoaderHandlerIntBytes(bytes.size)
     try {
         digest.update(lengthBytes)
         digest.update(bytes)
@@ -518,13 +523,13 @@ private fun updateQpNativeLoaderHandlerDigest(
     }
 }
 
-private fun akenNativeLoaderHandlerLogicalBindingPath(identity: ByteArray): String {
-    require(identity.size >= 12) { "AKEN native loader handler identity is too short" }
+private fun nativeLoaderHandlerLogicalBindingPath(identity: ByteArray): String {
+    require(identity.size >= 12) { "Qp native loader handler identity is too short" }
     val segment = buildString(24) {
         for (index in 0 until 12) {
             val value = identity[index].toInt() and 0xFF
-            append(AKEN_NATIVE_LOADER_HANDLER_HEX[value ushr 4])
-            append(AKEN_NATIVE_LOADER_HANDLER_HEX[value and 0x0F])
+            append(QP_NATIVE_LOADER_HANDLER_HEX[value ushr 4])
+            append(QP_NATIVE_LOADER_HANDLER_HEX[value and 0x0F])
         }
     }
     return "META-INF/.logical/native/loader/$segment.bin"
@@ -562,7 +567,7 @@ private fun emitQpNativeLoaderHandlerInt(
     }
 }
 
-private fun akenNativeLoaderHandlerIntBytes(value: Int): ByteArray = byteArrayOf(
+private fun nativeLoaderHandlerIntBytes(value: Int): ByteArray = byteArrayOf(
     (value ushr 24).toByte(),
     (value ushr 16).toByte(),
     (value ushr 8).toByte(),
@@ -624,10 +629,10 @@ fun applyDiversifiedVmToClasses(
                             stateBinding = vmStateBinding(entryToken, resourcePath),
                             entryMetadata = QpEntryMetadata(
                                 entryToken = entryToken,
-                                returnDescriptor = vbc4ReturnTag(descriptor),
+                                returnDescriptor = nativeReturnTag(descriptor),
                                 methodIdentity = buildContext.deriveQpIdentity(className, name, descriptor),
                                 ownerIdentity = buildContext.deriveQpOwnerIdentity(className),
-                                argumentTags = vbc4ArgumentTagVector(descriptor),
+                                argumentTags = nativeArgumentTagVector(descriptor),
                                 resourcePath = resourcePath,
                                 isStatic = access and org.objectweb.asm.Opcodes.ACC_STATIC != 0,
                             ),
