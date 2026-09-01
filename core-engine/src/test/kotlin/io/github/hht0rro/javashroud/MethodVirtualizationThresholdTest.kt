@@ -87,6 +87,30 @@ class MethodVirtualizationThresholdTest {
     }
 
     @Test
+    fun method_virtualization_rejects_unknown_controls() {
+        val artifact = artifactFor(simpleClassBytes(), "example/VmThreshold")
+        val rules = ruleMatchesFor("example/VmThreshold")
+
+        val retired = assertFailsWith<IllegalArgumentException> {
+            applyMethodVirtualization(
+                artifact = artifact,
+                ruleMatches = rules,
+                params = mapOf("retiredControl" to true),
+            )
+        }
+        assertTrue(retired.message.orEmpty().contains("unsupported"))
+
+        val fixed = assertFailsWith<IllegalArgumentException> {
+            applyMethodVirtualization(
+                artifact = artifact,
+                ruleMatches = rules,
+                params = mapOf("qpStateBoundEncoding" to false),
+            )
+        }
+        assertTrue(fixed.message.orEmpty().contains("fixed on"))
+    }
+
+    @Test
     fun method_virtualization_critical_plus_selects_more_than_critical_auto() {
         val artifact = artifactFor(selectionClassBytes(), "example/VmSelection")
 

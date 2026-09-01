@@ -386,13 +386,8 @@ class SchemaCapabilitiesTest {
         assertEquals("max", packingLevel!!.defaultValue?.asText(), "nativePackingLevel should default to max")
         assertEquals(listOf("off", "standard", "max", "max-hardening"), packingLevel.options)
         assertFalse(packingLevel.hidden, "nativePackingLevel should be visible")
-        assertTrue(
-            packingLevel.description.contains("Rust cdylib") &&
-                packingLevel.description.contains("META-INF/jsrt") &&
-                packingLevel.description.contains("R1 ABI"),
-            "nativePackingLevel must describe direct AKEN-R1 Rust artifact behavior",
-        )
-        assertTrue(jniModule.params.none { it.key == "bootKeyDelivery" }, "AKEN v4 must remove the legacy bootKeyDelivery parameter")
+        assertEquals("Qp Rust cdylib hardening level.", packingLevel.description)
+        assertTrue(jniModule.params.none { it.key == "bootKeyDelivery" }, "Qp current format must remove the legacy bootKeyDelivery parameter")
 
         assertTrue(
             jniModule.params.none { it.key == "codeSectionEncryption" },
@@ -401,20 +396,20 @@ class SchemaCapabilitiesTest {
     }
 
     @Test
-    fun method_virtualization_schema_exposes_only_vbc4_user_controls() {
+    fun method_virtualization_schema_exposes_only_native_user_controls() {
         val module = buildEngineSchemaPayload().modules.single { it.id == "method-virtualization" }
         val paramKeys = module.params.map { it.key }
 
         assertEquals(
-            listOf("seed", "methodSelection", "maxInstructions", "maxBroadVirtualizedMethods", "highValueMethods", "highValueMethodDeny", "vbc4StateBoundEncoding", "vbc4HandlerMorphing", "vbc4StrengthMax", "vbc4InterpreterDiversity", "vbc4HashedJniSymbols", "vbc4ExecutableRegisterIr", "vbc4SuperOperators", "vbc4IntegrityKeyBinding", "vbc4EphemeralRootMaterial"),
+            listOf("seed", "methodSelection", "maxInstructions", "maxBroadVirtualizedMethods", "highValueMethods", "highValueMethodDeny", "qpStateBoundEncoding", "qpHandlerMorphing", "qpStrengthMax", "qpInterpreterDiversity", "qpHashedJniSymbols", "qpExecutableRegisterIr", "qpSuperOperators", "qpIntegrityKeyBinding", "qpEphemeralRootMaterial"),
             paramKeys,
-            "method-virtualization must expose only VBC4 controls plus hidden high-value selectors and fixed high-strength defaults",
+            "method-virtualization must expose only native VM controls plus hidden high-value selectors and fixed high-strength defaults",
         )
         assertEquals("critical-plus", module.params.single { it.key == "methodSelection" }.defaultValue?.asText(), "VM should default to critical-plus auto-selection")
         assertEquals(0, module.params.single { it.key == "maxInstructions" }.defaultValue?.asInt(), "VM instruction threshold should default to unlimited")
         assertEquals(0, module.params.single { it.key == "maxBroadVirtualizedMethods" }.defaultValue?.asInt(), "Broad class method count should default to unlimited")
         assertTrue(module.params.filter { it.key in setOf("highValueMethods", "highValueMethodDeny") }.all { it.hidden && it.type == "string" }, "High-value selector allow/deny lists must stay hidden string controls")
-        assertTrue(module.params.filter { it.key.startsWith("qp") }.all { it.hidden && it.defaultValue?.asBoolean() == true }, "VBC4 high-strength invariants must be hidden fixed defaults")
+        assertTrue(module.params.filter { it.key.startsWith("qp") }.all { it.hidden && it.defaultValue?.asBoolean() == true }, "Native VM high-strength invariants must be hidden fixed defaults")
         assertFalse(paramKeys.any { it in setOf("vmStrength", "fusionLevel", "stateBoundEncoding", "handlerMorphing", "vmDialect", "vmDiversityLevel") }, "Legacy/low-strength VM controls must not be exposed")
     }
 

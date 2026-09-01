@@ -47,15 +47,15 @@ private val QP_ALLOWED_PARAMS = setOf(
     "vmStrength",
     "fusionLevel",
     "stateBoundEncoding",
-    "vbc4StateBoundEncoding",
-    "vbc4HandlerMorphing",
-    "vbc4StrengthMax",
-    "vbc4InterpreterDiversity",
-    "vbc4HashedJniSymbols",
-    "vbc4ExecutableRegisterIr",
-    "vbc4SuperOperators",
-    "vbc4IntegrityKeyBinding",
-    "vbc4EphemeralRootMaterial",
+    "qpStateBoundEncoding",
+    "qpHandlerMorphing",
+    "qpStrengthMax",
+    "qpInterpreterDiversity",
+    "qpHashedJniSymbols",
+    "qpExecutableRegisterIr",
+    "qpSuperOperators",
+    "qpIntegrityKeyBinding",
+    "qpEphemeralRootMaterial",
     "__nativeOnlyInterpreter",
 )
 
@@ -204,15 +204,15 @@ private fun rejectUnsupportedQpParams(params: Map<String, Any>) {
         "method-virtualization stateBoundEncoding=false is not supported in native VM; state-bound encoding is fixed on"
     }
     val fixedTrueParams = listOf(
-        "vbc4StateBoundEncoding",
-        "vbc4HandlerMorphing",
-        "vbc4StrengthMax",
-        "vbc4InterpreterDiversity",
-        "vbc4HashedJniSymbols",
-        "vbc4ExecutableRegisterIr",
-        "vbc4SuperOperators",
-        "vbc4IntegrityKeyBinding",
-        "vbc4EphemeralRootMaterial",
+        "qpStateBoundEncoding",
+        "qpHandlerMorphing",
+        "qpStrengthMax",
+        "qpInterpreterDiversity",
+        "qpHashedJniSymbols",
+        "qpExecutableRegisterIr",
+        "qpSuperOperators",
+        "qpIntegrityKeyBinding",
+        "qpEphemeralRootMaterial",
     )
     for (key in fixedTrueParams) {
         val value = params[key] as? Boolean
