@@ -30,7 +30,7 @@ class NativeCompiledStructureDivergenceTest {
                     sourceDigest = sourceDigest,
                     toolchainIdentity = "rustc=1.78.0|cargo=1.78.0",
                     seed = 0x4455_6600L,
-                    vbc4BuildContext = context,
+                    qpBuildContext = context,
                     protectedSectionKey = protectedSectionKey,
                     specializationDigest = specializationDigest,
                 )
@@ -61,7 +61,7 @@ class NativeCompiledStructureDivergenceTest {
                 sourceDigest = source,
                 toolchainIdentity = "rustc=1.78.0|cargo=1.78.0",
                 seed = 0x4455_6600L,
-                vbc4BuildContext = context,
+                qpBuildContext = context,
                 protectedSectionKey = protectedSectionKey,
                 specializationDigest = specializationDigest,
             )

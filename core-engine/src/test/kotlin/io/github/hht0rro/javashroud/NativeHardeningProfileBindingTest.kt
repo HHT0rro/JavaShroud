@@ -48,7 +48,7 @@ class NativeHardeningProfileBindingTest {
                 sourceDigest = sourceDigest,
                 toolchainIdentity = "rustc=1.78.0|cargo=1.78.0",
                 seed = 7L,
-                vbc4BuildContext = context,
+                qpBuildContext = context,
                 protectedSectionKey = protectedSectionKey,
                 specializationDigest = specializationDigest,
             )
@@ -59,7 +59,7 @@ class NativeHardeningProfileBindingTest {
                 sourceDigest = sourceDigest,
                 toolchainIdentity = "rustc=1.78.0|cargo=1.78.0",
                 seed = 7L,
-                vbc4BuildContext = context,
+                qpBuildContext = context,
                 protectedSectionKey = protectedSectionKey,
                 specializationDigest = specializationDigest,
             )
@@ -84,7 +84,7 @@ class NativeHardeningProfileBindingTest {
         sourceDigest = sourceDigest,
         toolchainIdentity = "rustc=1.78.0|cargo=1.78.0",
         seed = 7L,
-        vbc4BuildContext = context,
+        qpBuildContext = context,
         protectedSectionKey = protectedSectionKey,
         specializationDigest = specializationDigest,
     )

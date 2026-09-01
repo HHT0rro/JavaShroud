@@ -265,7 +265,7 @@ object QpNativeCompilerPass {
                     sourceDigest = sourceDigest,
                     toolchainIdentity = toolchainIdentity,
                     seed = seed,
-                    vbc4BuildContext = context,
+                    qpBuildContext = context,
                     protectedSectionKey = specializationNonce,
                     nativeProtectionLevel = request.nativeProtectionLevel,
                     nativePackingLevel = request.nativePackingLevel.configValue,
@@ -1234,7 +1234,7 @@ object QpNativeCompilerPass {
         sourceDigest: ByteArray,
         toolchainIdentity: String,
         seed: Long,
-        vbc4BuildContext: QpBuildContext,
+        qpBuildContext: QpBuildContext,
         protectedSectionKey: ByteArray,
         nativeProtectionLevel: String = "standard",
         nativePackingLevel: String = "max",
@@ -1264,9 +1264,9 @@ object QpNativeCompilerPass {
         digest.update(specializationDigest)
         digest.updateUtf8(toolchainIdentity)
         digest.updateLong(seed)
-        digest.updateLong(vbc4BuildContext.nativeSeed)
-        digest.update(vbc4BuildContext.jarLayoutDigest)
-        digest.updateInt(vbc4BuildContext.nativeVmProfile.authenticatedId)
+        digest.updateLong(qpBuildContext.nativeSeed)
+        digest.update(qpBuildContext.jarLayoutDigest)
+        digest.updateInt(qpBuildContext.nativeVmProfile.authenticatedId)
         require(targetTokenCommitment.size == 32) { "Qp token commitment must be 32 bytes" }
         require(targetTokenNameSeed.size == 16) { "Qp token name seed must be 16 bytes" }
         digest.update(targetTokenCommitment)

@@ -95,7 +95,7 @@ class QpNativeCompilerPassTest {
             sourceDigest = source,
             toolchainIdentity = "rustc=1.78.0|cargo=1.78.0",
             seed = 7L,
-            vbc4BuildContext = context,
+            qpBuildContext = context,
             protectedSectionKey = ByteArray(32) { 1 },
             specializationDigest = ByteArray(32) { 2 },
         )
@@ -106,7 +106,7 @@ class QpNativeCompilerPassTest {
             sourceDigest = source,
             toolchainIdentity = "rustc=1.78.0|cargo=1.78.0",
             seed = 7L,
-            vbc4BuildContext = context,
+            qpBuildContext = context,
             protectedSectionKey = ByteArray(32) { 1 },
             specializationDigest = ByteArray(32) { 3 },
         )
@@ -128,7 +128,7 @@ class QpNativeCompilerPassTest {
                 sourceDigest = source,
                 toolchainIdentity = "rustc=1.78.0|cargo=1.78.0",
                 seed = 7L,
-                vbc4BuildContext = first,
+                qpBuildContext = first,
                 protectedSectionKey = nonce,
                 specializationDigest = specialization,
             )
@@ -139,7 +139,7 @@ class QpNativeCompilerPassTest {
                 sourceDigest = source,
                 toolchainIdentity = "rustc=1.78.0|cargo=1.78.0",
                 seed = 7L,
-                vbc4BuildContext = second,
+                qpBuildContext = second,
                 protectedSectionKey = nonce,
                 specializationDigest = specialization,
             )
@@ -165,7 +165,7 @@ class QpNativeCompilerPassTest {
             sourceDigest = source,
             toolchainIdentity = "rustc=1.78.0|cargo=1.78.0",
             seed = 7L,
-            vbc4BuildContext = context,
+            qpBuildContext = context,
             protectedSectionKey = protectedSection,
             specializationDigest = specialization,
             targetTokenCommitment = commitment,
@@ -178,7 +178,7 @@ class QpNativeCompilerPassTest {
             sourceDigest = source,
             toolchainIdentity = "rustc=1.78.0|cargo=1.78.0",
             seed = 7L,
-            vbc4BuildContext = context,
+            qpBuildContext = context,
             protectedSectionKey = protectedSection,
             specializationDigest = specialization,
             targetTokenCommitment = commitment.copyOf().also { it[0] = 10 },
@@ -191,7 +191,7 @@ class QpNativeCompilerPassTest {
             sourceDigest = source,
             toolchainIdentity = "rustc=1.78.0|cargo=1.78.0",
             seed = 7L,
-            vbc4BuildContext = context,
+            qpBuildContext = context,
             protectedSectionKey = protectedSection,
             specializationDigest = specialization,
             targetTokenCommitment = commitment,
@@ -214,8 +214,8 @@ class QpNativeCompilerPassTest {
             "zig cc",
             "update(context.masterKey)",
             "update(context.runtimeResourceKey)",
-            "update(vbc4BuildContext.masterKey)",
-            "update(vbc4BuildContext.runtimeResourceKey)",
+            "update(qpBuildContext.masterKey)",
+            "update(qpBuildContext.runtimeResourceKey)",
         )) {
             assertFalse(source.contains(forbidden), "Rust orchestrator retains retired C/secret path: $forbidden")
         }
