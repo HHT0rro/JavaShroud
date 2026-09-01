@@ -1262,6 +1262,8 @@ pub struct PageLayout {
     marker: [u8; 8],
 }
 
+const PAGE_LAYOUT_VARIANT_PREFIX: &str = "qp-page-layout";
+
 impl PageLayout {
     pub fn new(
         family: &str,
@@ -1296,7 +1298,7 @@ impl PageLayout {
             });
         }
         let parts: Vec<&str> = variant.split(':').collect();
-        if parts.len() != 6 || parts[0] != "aken4-frame1" {
+        if parts.len() != 6 || parts[0] != PAGE_LAYOUT_VARIANT_PREFIX {
             return Err(PageError::InvalidVariant("layout"));
         }
         let prefix_length = parts[2]
@@ -1350,7 +1352,8 @@ impl PageLayout {
             "head"
         };
         format!(
-            "aken4-frame1:{}:{}:{}:{}:{}",
+            "{}:{}:{}:{}:{}:{}",
+            PAGE_LAYOUT_VARIANT_PREFIX,
             self.family,
             self.prefix_length,
             self.suffix_length,
@@ -4810,6 +4813,17 @@ mod tests {
 
     fn layout() -> PageLayout {
         PageLayout::new("unit", 12, 8, false, &[9, 8, 7, 6, 5, 4, 3, 2]).expect("layout")
+    }
+
+    #[test]
+    fn page_layout_uses_neutral_marker_and_rejects_retired_marker() {
+        let variant = "qp-page-layout:unit:12:8:head:CQgHBgUEAwI";
+        let parsed = PageLayout::from_variant(variant).expect("current layout variant");
+        assert_eq!(parsed.variant(), variant);
+        assert!(PageLayout::from_variant(
+            "aken4-frame1:unit:12:8:head:CQgHBgUEAwI"
+        )
+        .is_err());
     }
 
     fn page_fixture() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, PageLayout) {

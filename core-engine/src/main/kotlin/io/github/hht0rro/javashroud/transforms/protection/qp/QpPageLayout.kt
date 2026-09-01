@@ -134,7 +134,7 @@ class QpPageLayout private constructor(
     }
 
     companion object {
-        private const val FORMAT_PREFIX = "aken4-frame1"
+        private const val FORMAT_PREFIX = "qp-page-layout"
         private const val POSITION_HEAD = "head"
         private const val POSITION_TAIL = "tail"
         private const val ROUTING_MARKER_SIZE = 8
