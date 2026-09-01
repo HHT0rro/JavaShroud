@@ -27,7 +27,7 @@ import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * Shared VBC4 build context for one obfuscation run.
+ * Shared Qp VM build context for one obfuscation run.
  *
  * Method resources are serialized before the native microkernel is recompiled,
  * so both phases must derive the same build-local root key from the same run
@@ -48,16 +48,16 @@ internal data class QpBuildContext(
 ) {
     private var signedDebugMapDraft: io.github.hht0rro.javashroud.transforms.protection.hardening.SignedDebugMap.Draft? = null
     private val nativeSpecializationDigests = LinkedHashMap<String, ByteArray>()
-    /** Build-only AKEN v4 page/evaluator plan; never serialized into runtime output. */
+    /** Build-only current-format Qp page/evaluator plan; never serialized into runtime output. */
     private var qpBuildPlan: QpBuildPlan? = null
     /**
-     * Build-only VBC4 method snapshots captured by the current transform.
+     * Build-only Qp VM method snapshots captured by the current transform.
      * These are logical sources for a later page planner, not final routes,
      * descriptors, native records, or a runtime catalog.
      */
     private val qpMethodCandidates = LinkedHashMap<Long, QpMethodCandidate>()
     /**
-     * Build-only pre-seal VBC4 layout. It owns final page geometry and native
+     * Build-only pre-seal Qp VM layout. It owns final page geometry and native
      * current-page compiler records until recompilation/final sealing consumes
      * them; it is not a runtime page directory.
      */
@@ -98,9 +98,9 @@ internal data class QpBuildContext(
 
     init {
         require(nameSeed.size == io.github.hht0rro.javashroud.transforms.protection.qp.QpNameSchedule.NAME_SEED_SIZE) { "nameSeed must be 16 bytes" }
-        require(masterKey.size == QP_MASTER_KEY_SIZE) { "VBC4 master key must be 32 bytes" }
-        require(jarLayoutDigest.size == QP_LAYOUT_DIGEST_SIZE) { "VBC4 layout digest must be 32 bytes" }
-        require(runtimeResourceKey.size == QP_RUNTIME_RESOURCE_KEY_SIZE) { "VBC4 runtime resource key must be 32 bytes" }
+        require(masterKey.size == QP_MASTER_KEY_SIZE) { "Qp VM master key must be 32 bytes" }
+        require(jarLayoutDigest.size == QP_LAYOUT_DIGEST_SIZE) { "Qp VM layout digest must be 32 bytes" }
+        require(runtimeResourceKey.size == QP_RUNTIME_RESOURCE_KEY_SIZE) { "Qp VM runtime resource key must be 32 bytes" }
     }
 
     fun copyMasterKey(): ByteArray = masterKey.copyOf()
@@ -136,7 +136,7 @@ internal data class QpBuildContext(
     }
 
     /**
-     * Return the scoped AKEN v4 plan, creating it lazily from the artifact
+     * Return the scoped current-format Qp plan, creating it lazily from the artifact
      * commitment. The plan is build-only and is wiped with this context.
      *
      * A build context may represent only one canonical artifact. Reusing a live
@@ -146,13 +146,13 @@ internal data class QpBuildContext(
      */
     @Synchronized
     fun initializeQpBuildPlan(commitment: ByteArray): QpBuildPlan {
-        require(commitment.size == QP_LAYOUT_DIGEST_SIZE) { "AKEN artifact commitment must be 32 bytes" }
+        require(commitment.size == QP_LAYOUT_DIGEST_SIZE) { "Qp artifact commitment must be 32 bytes" }
         val existing = qpBuildPlan
         if (existing != null && !existing.isWiped()) {
             val plannedCommitment = existing.artifactCanonicalCommitment
             try {
                 require(java.security.MessageDigest.isEqual(plannedCommitment, commitment)) {
-                    "AKEN v4 build plan is already bound to a different artifact commitment"
+                    "Qp current-format build plan is already bound to a different artifact commitment"
                 }
             } finally {
                 java.util.Arrays.fill(plannedCommitment, 0)
@@ -167,42 +167,42 @@ internal data class QpBuildContext(
 
     @Synchronized
     fun requireQpBuildPlan(): QpBuildPlan = qpBuildPlanOrNull()
-        ?: error("AKEN v4 build plan is not initialized")
+        ?: error("Qp current-format build plan is not initialized")
 
     /**
-     * Atomically snapshots real VBC4 method programs for a later AKEN page
+     * Atomically snapshots real Qp VM method programs for a later Qp page
      * planner. Callers retain ownership of [candidates]; this context copies
      * them and never exposes its internal instances to a callback.
      *
-     * Candidates must be registered before an AKEN build plan exists. A plan is
+     * Candidates must be registered before an Qp build plan exists. A plan is
      * bound to final artifact material, whereas candidates still carry only
      * logical method inputs and must not be mistaken for finalized page state.
      */
     @Synchronized
     fun registerQpMethodCandidates(candidates: Iterable<QpMethodCandidate>) {
         require(qpBuildPlan?.isWiped() != false) {
-            "AKEN VBC4 method candidates must be registered before page-plan initialization"
+            "Qp current-format method candidates must be registered before page-plan initialization"
         }
         require(qpFinalizationLayout?.isWiped != false) {
-            "AKEN VBC4 method candidates cannot be registered after finalization layout publication"
+            "Qp current-format method candidates cannot be registered after finalization layout publication"
         }
         val incoming = candidates.toList()
-        require(incoming.isNotEmpty()) { "AKEN VBC4 method candidate batch must not be empty" }
-        require(incoming.none { it.isWiped }) { "cannot register a wiped AKEN VBC4 method candidate" }
+        require(incoming.isNotEmpty()) { "Qp current-format method candidate batch must not be empty" }
+        require(incoming.none { it.isWiped }) { "cannot register a wiped Qp current-format method candidate" }
 
         val incomingTokens = incoming.map { it.entryToken }
         require(incomingTokens.distinct().size == incomingTokens.size) {
-            "AKEN VBC4 method candidate batch contains duplicate entry tokens"
+            "Qp current-format method candidate batch contains duplicate entry tokens"
         }
         val incomingPaths = incoming.map { it.logicalMethod.logicalVmResourcePath }
         require(incomingPaths.distinct().size == incomingPaths.size) {
-            "AKEN VBC4 method candidate batch contains duplicate logical resource paths"
+            "Qp current-format method candidate batch contains duplicate logical resource paths"
         }
         require(incomingTokens.none { it in qpMethodCandidates }) {
-            "AKEN VBC4 method candidate entry token is already registered"
+            "Qp current-format method candidate entry token is already registered"
         }
         require(incomingPaths.none { path -> qpMethodCandidates.values.any { it.logicalMethod.logicalVmResourcePath == path } }) {
-            "AKEN VBC4 method candidate logical resource path is already registered"
+            "Qp current-format method candidate logical resource path is already registered"
         }
 
         val snapshots = ArrayList<QpMethodCandidate>(incoming.size)
@@ -210,7 +210,7 @@ internal data class QpBuildContext(
             incoming.forEach { candidate -> snapshots += candidate.copyForBuild() }
             snapshots.forEach { candidate ->
                 check(qpMethodCandidates.put(candidate.entryToken, candidate) == null) {
-                    "AKEN VBC4 method candidate entry token is already registered"
+                    "Qp current-format method candidate entry token is already registered"
                 }
             }
         } catch (error: Throwable) {
@@ -231,7 +231,7 @@ internal data class QpBuildContext(
      */
     fun <T> withQpMethodCandidatesForBuild(block: (List<QpMethodCandidate>) -> T): T {
         val snapshots = synchronized(this) {
-            check(qpMethodCandidates.isNotEmpty()) { "AKEN VBC4 method candidates are not initialized" }
+            check(qpMethodCandidates.isNotEmpty()) { "Qp current-format method candidates are not initialized" }
             qpMethodCandidates.values.map { it.copyForBuild() }
         }
         try {
@@ -242,7 +242,7 @@ internal data class QpBuildContext(
     }
 
     /**
-     * Gives the pre-seal routing stage a scoped projection of registered VBC4
+     * Gives the pre-seal routing stage a scoped projection of registered Qp VM
      * candidates. The projection contains only the entry token and logical VM
      * resource path, never the serialized program or another planner input.
      */
@@ -251,12 +251,12 @@ internal data class QpBuildContext(
     ): T {
         val snapshots = synchronized(this) {
             check(qpBuildPlan?.isWiped() != false) {
-                "AKEN VBC4 route candidates must be projected before page-plan initialization"
+                "Qp current-format route candidates must be projected before page-plan initialization"
             }
             check(qpFinalizationLayout?.isWiped != false) {
-                "AKEN VBC4 route candidates cannot be projected after finalization layout publication"
+                "Qp current-format route candidates cannot be projected after finalization layout publication"
             }
-            check(qpMethodCandidates.isNotEmpty()) { "AKEN VBC4 method candidates are not initialized" }
+            check(qpMethodCandidates.isNotEmpty()) { "Qp current-format method candidates are not initialized" }
             qpMethodCandidates.values
                 .sortedBy { candidate -> candidate.entryToken }
                 .map { candidate ->
@@ -274,7 +274,7 @@ internal data class QpBuildContext(
     }
 
     /**
-     * Reserves the future page-container namespace for the registered VBC4
+     * Reserves the future page-container namespace for the registered Qp VM
      * methods. The reservation is build-only and is owned by this context until
      * the context is wiped; callers must not retain or wipe the returned owner.
      *
@@ -288,17 +288,17 @@ internal data class QpBuildContext(
         allocator: QpPreSealRouteAllocator,
     ): QpPreSealRouteReservation {
         require(qpBuildPlan?.isWiped() != false) {
-            "AKEN VBC4 pre-seal routes must be reserved before page-plan initialization"
+            "Qp current-format pre-seal routes must be reserved before page-plan initialization"
         }
         require(qpFinalizationLayout?.isWiped != false) {
-            "AKEN VBC4 pre-seal routes cannot be reserved after finalization layout publication"
+            "Qp current-format pre-seal routes cannot be reserved after finalization layout publication"
         }
         check(qpMethodCandidates.isNotEmpty()) {
-            "AKEN VBC4 method candidates are not initialized"
+            "Qp current-format method candidates are not initialized"
         }
         val existing = qpPreSealRouteReservation
         require(existing == null || existing.isWiped) {
-            "AKEN VBC4 pre-seal route reservation is already published"
+            "Qp current-format pre-seal route reservation is already published"
         }
         val reservation = withQpRouteCandidateRefsForBuild { refs ->
             QpPreSealRouteReservation.reserve(
@@ -319,7 +319,7 @@ internal data class QpBuildContext(
     fun requireQpPreSealRouteReservation(): QpPreSealRouteReservation =
         qpPreSealRouteReservation
             ?.takeUnless { it.isWiped }
-            ?: error("AKEN VBC4 pre-seal route reservation is not initialized")
+            ?: error("Qp current-format pre-seal route reservation is not initialized")
 
     @Synchronized
     fun hasQpMethodCandidates(): Boolean = qpMethodCandidates.isNotEmpty()
@@ -333,25 +333,25 @@ internal data class QpBuildContext(
     @Synchronized
     fun registerQpTextPageCandidates(candidates: Iterable<QpTextPageCandidate>) {
         require(qpBuildPlan?.isWiped() != false) {
-            "AKEN StringPage candidates must be registered before page-plan initialization"
+            "Qp StringPage candidates must be registered before page-plan initialization"
         }
         require(qpFinalizationLayout?.isWiped != false) {
-            "AKEN StringPage candidates cannot be registered after finalization layout publication"
+            "Qp StringPage candidates cannot be registered after finalization layout publication"
         }
         val reservation = qpTextRouteReservation
         require(reservation == null || reservation.isWiped) {
-            "AKEN StringPage candidates cannot be registered after pre-seal route reservation"
+            "Qp StringPage candidates cannot be registered after pre-seal route reservation"
         }
         val incoming = candidates.toList()
-        require(incoming.isNotEmpty()) { "AKEN StringPage candidate batch must not be empty" }
-        require(incoming.none { it.isWiped }) { "cannot register a wiped AKEN StringPage candidate" }
+        require(incoming.isNotEmpty()) { "Qp StringPage candidate batch must not be empty" }
+        require(incoming.none { it.isWiped }) { "cannot register a wiped Qp StringPage candidate" }
 
         val incomingKeys = incoming.map { it.identityPageKeyForBuild() }
         require(incomingKeys.distinct().size == incomingKeys.size) {
-            "AKEN StringPage candidate batch contains duplicate logical page identities"
+            "Qp StringPage candidate batch contains duplicate logical page identities"
         }
         require(incomingKeys.none { it in qpTextPageCandidates }) {
-            "AKEN StringPage candidate logical page identity is already registered"
+            "Qp StringPage candidate logical page identity is already registered"
         }
 
         val snapshots = ArrayList<Pair<String, QpTextPageCandidate>>(incoming.size)
@@ -361,7 +361,7 @@ internal data class QpBuildContext(
             }
             snapshots.forEach { (identityPageKey, candidate) ->
                 check(qpTextPageCandidates.put(identityPageKey, candidate) == null) {
-                    "AKEN StringPage candidate logical page identity is already registered"
+                    "Qp StringPage candidate logical page identity is already registered"
                 }
             }
         } catch (error: Throwable) {
@@ -381,7 +381,7 @@ internal data class QpBuildContext(
      */
     fun <T> withQpTextPageCandidatesForBuild(block: (List<QpTextPageCandidate>) -> T): T {
         val snapshots = synchronized(this) {
-            check(qpTextPageCandidates.isNotEmpty()) { "AKEN StringPage candidates are not initialized" }
+            check(qpTextPageCandidates.isNotEmpty()) { "Qp StringPage candidates are not initialized" }
             qpTextPageCandidates.values
                 .sortedBy { it.identityPageKeyForBuild() }
                 .map { it.copyForBuild() }
@@ -403,12 +403,12 @@ internal data class QpBuildContext(
     ): T {
         val snapshots = synchronized(this) {
             check(qpBuildPlan?.isWiped() != false) {
-                "AKEN StringPage route candidates must be projected before page-plan initialization"
+                "Qp StringPage route candidates must be projected before page-plan initialization"
             }
             check(qpFinalizationLayout?.isWiped != false) {
-                "AKEN StringPage route candidates cannot be projected after finalization layout publication"
+                "Qp StringPage route candidates cannot be projected after finalization layout publication"
             }
-            check(qpTextPageCandidates.isNotEmpty()) { "AKEN StringPage candidates are not initialized" }
+            check(qpTextPageCandidates.isNotEmpty()) { "Qp StringPage candidates are not initialized" }
             qpTextPageCandidates.values
                 .sortedBy { it.identityPageKeyForBuild() }
                 .map { candidate ->
@@ -428,7 +428,7 @@ internal data class QpBuildContext(
     /**
      * Reserves one future resource path per registered StringPage. The route
      * reservation stays build-only and may be created only once before the
-     * common AKEN page plan is initialized.
+     * common Qp page plan is initialized.
      */
     @Synchronized
     fun reserveQpTextRoutes(
@@ -436,17 +436,17 @@ internal data class QpBuildContext(
         allocator: QpTextRouteAllocator,
     ): QpTextRouteReservation {
         require(qpBuildPlan?.isWiped() != false) {
-            "AKEN StringPage pre-seal routes must be reserved before page-plan initialization"
+            "Qp StringPage pre-seal routes must be reserved before page-plan initialization"
         }
         require(qpFinalizationLayout?.isWiped != false) {
-            "AKEN StringPage pre-seal routes cannot be reserved after finalization layout publication"
+            "Qp StringPage pre-seal routes cannot be reserved after finalization layout publication"
         }
         check(qpTextPageCandidates.isNotEmpty()) {
-            "AKEN StringPage candidates are not initialized"
+            "Qp StringPage candidates are not initialized"
         }
         val existing = qpTextRouteReservation
         require(existing == null || existing.isWiped) {
-            "AKEN StringPage pre-seal route reservation is already published"
+            "Qp StringPage pre-seal route reservation is already published"
         }
         val created = withQpTextRouteCandidateRefsForBuild { refs ->
             QpTextRouteReservation.reserve(
@@ -467,7 +467,7 @@ internal data class QpBuildContext(
     fun requireQpTextRouteReservation(): QpTextRouteReservation =
         qpTextRouteReservation
             ?.takeUnless { it.isWiped }
-            ?: error("AKEN StringPage pre-seal route reservation is not initialized")
+            ?: error("Qp StringPage pre-seal route reservation is not initialized")
 
     @Synchronized
     fun hasQpTextPageCandidates(): Boolean = qpTextPageCandidates.isNotEmpty()
@@ -509,25 +509,25 @@ internal data class QpBuildContext(
         candidates: Iterable<QpClassPageCandidate>,
     ) {
         require(qpBuildPlan?.isWiped() != false) {
-            "AKEN ClassPage candidates must be registered before page-plan initialization"
+            "Qp ClassPage candidates must be registered before page-plan initialization"
         }
         require(qpFinalizationLayout?.isWiped != false) {
-            "AKEN ClassPage candidates cannot be registered after finalization layout publication"
+            "Qp ClassPage candidates cannot be registered after finalization layout publication"
         }
         val reservation = qpClassRouteReservation
         require(reservation == null || reservation.isWiped) {
-            "AKEN ClassPage candidates cannot be registered after pre-seal route reservation"
+            "Qp ClassPage candidates cannot be registered after pre-seal route reservation"
         }
         val incoming = candidates.toList()
-        require(incoming.isNotEmpty()) { "AKEN ClassPage candidate batch must not be empty" }
-        require(incoming.none { it.isWiped }) { "cannot register a wiped AKEN ClassPage candidate" }
+        require(incoming.isNotEmpty()) { "Qp ClassPage candidate batch must not be empty" }
+        require(incoming.none { it.isWiped }) { "cannot register a wiped Qp ClassPage candidate" }
 
         val incomingKeys = incoming.map { it.identityPageKeyForBuild() }
         require(incomingKeys.distinct().size == incomingKeys.size) {
-            "AKEN ClassPage candidate batch contains duplicate logical page identities"
+            "Qp ClassPage candidate batch contains duplicate logical page identities"
         }
         require(incomingKeys.none { it in qpClassPageCandidates }) {
-            "AKEN ClassPage candidate logical page identity is already registered"
+            "Qp ClassPage candidate logical page identity is already registered"
         }
 
         val snapshots = ArrayList<Pair<String, QpClassPageCandidate>>(incoming.size)
@@ -536,20 +536,20 @@ internal data class QpBuildContext(
         try {
             descriptorSources = internalName?.let { name ->
                 require(!qpClassPageDescriptorSources.containsKey(name)) {
-                    "AKEN ClassPage descriptor sources are already registered for $name"
+                    "Qp ClassPage descriptor sources are already registered for $name"
                 }
                 val sources = incoming
                     .map { candidate -> QpClassPageDescriptorSource.fromCandidate(name, candidate) }
                     .sortedBy { source -> source.pageIndex }
                 try {
                     require(sources.map { source -> source.pageIndex } == sources.indices.toList()) {
-                        "AKEN ClassPage descriptor sources must use contiguous zero-based page indices"
+                        "Qp ClassPage descriptor sources must use contiguous zero-based page indices"
                     }
                     require(
                         sources.map { source -> source.identityPageKeyForBuild() }.toSet() ==
                             incomingKeys.toSet(),
                     ) {
-                        "AKEN ClassPage descriptor sources drift from registered page candidates"
+                        "Qp ClassPage descriptor sources drift from registered page candidates"
                     }
                     sources
                 } catch (error: Throwable) {
@@ -562,7 +562,7 @@ internal data class QpBuildContext(
             }
             snapshots.forEach { (identityPageKey, candidate) ->
                 check(qpClassPageCandidates.put(identityPageKey, candidate) == null) {
-                    "AKEN ClassPage candidate logical page identity is already registered"
+                    "Qp ClassPage candidate logical page identity is already registered"
                 }
             }
             if (internalName != null) {
@@ -572,7 +572,7 @@ internal data class QpBuildContext(
                         checkNotNull(descriptorSources),
                     ) == null,
                 ) {
-                    "AKEN ClassPage descriptor sources are already registered for $internalName"
+                    "Qp ClassPage descriptor sources are already registered for $internalName"
                 }
                 sourcesTransferred = true
             }
@@ -597,7 +597,7 @@ internal data class QpBuildContext(
     /** Supplies deep, scoped ClassPage candidate copies to the later materializer. */
     fun <T> withQpClassPageCandidatesForBuild(block: (List<QpClassPageCandidate>) -> T): T {
         val snapshots = synchronized(this) {
-            check(qpClassPageCandidates.isNotEmpty()) { "AKEN ClassPage candidates are not initialized" }
+            check(qpClassPageCandidates.isNotEmpty()) { "Qp ClassPage candidates are not initialized" }
             qpClassPageCandidates.values
                 .sortedBy { it.identityPageKeyForBuild() }
                 .map { it.copyForBuild() }
@@ -619,7 +619,7 @@ internal data class QpBuildContext(
     ): T {
         val snapshots = synchronized(this) {
             check(qpClassPageDescriptorSources.isNotEmpty()) {
-                "AKEN ClassPage descriptor sources are not initialized"
+                "Qp ClassPage descriptor sources are not initialized"
             }
             qpClassPageDescriptorSources
                 .asSequence()
@@ -648,12 +648,12 @@ internal data class QpBuildContext(
     ): T {
         val snapshots = synchronized(this) {
             check(qpBuildPlan?.isWiped() != false) {
-                "AKEN ClassPage route candidates must be projected before page-plan initialization"
+                "Qp ClassPage route candidates must be projected before page-plan initialization"
             }
             check(qpFinalizationLayout?.isWiped != false) {
-                "AKEN ClassPage route candidates cannot be projected after finalization layout publication"
+                "Qp ClassPage route candidates cannot be projected after finalization layout publication"
             }
-            check(qpClassPageCandidates.isNotEmpty()) { "AKEN ClassPage candidates are not initialized" }
+            check(qpClassPageCandidates.isNotEmpty()) { "Qp ClassPage candidates are not initialized" }
             qpClassPageCandidates.values
                 .sortedBy { it.identityPageKeyForBuild() }
                 .map { candidate ->
@@ -672,7 +672,7 @@ internal data class QpBuildContext(
 
     /**
      * Reserves one final physical resource path per registered ClassPage before
-     * the common AKEN page plan is initialized.
+     * the common Qp page plan is initialized.
      */
     @Synchronized
     fun reserveQpClassRoutes(
@@ -680,17 +680,17 @@ internal data class QpBuildContext(
         allocator: QpClassRouteAllocator,
     ): QpClassRouteReservation {
         require(qpBuildPlan?.isWiped() != false) {
-            "AKEN ClassPage pre-seal routes must be reserved before page-plan initialization"
+            "Qp ClassPage pre-seal routes must be reserved before page-plan initialization"
         }
         require(qpFinalizationLayout?.isWiped != false) {
-            "AKEN ClassPage pre-seal routes cannot be reserved after finalization layout publication"
+            "Qp ClassPage pre-seal routes cannot be reserved after finalization layout publication"
         }
         check(qpClassPageCandidates.isNotEmpty()) {
-            "AKEN ClassPage candidates are not initialized"
+            "Qp ClassPage candidates are not initialized"
         }
         val existing = qpClassRouteReservation
         require(existing == null || existing.isWiped) {
-            "AKEN ClassPage pre-seal route reservation is already published"
+            "Qp ClassPage pre-seal route reservation is already published"
         }
         val created = withQpClassRouteCandidateRefsForBuild { refs ->
             QpClassRouteReservation.reserve(
@@ -711,7 +711,7 @@ internal data class QpBuildContext(
     fun requireQpClassRouteReservation(): QpClassRouteReservation =
         qpClassRouteReservation
             ?.takeUnless { it.isWiped }
-            ?: error("AKEN ClassPage pre-seal route reservation is not initialized")
+            ?: error("Qp ClassPage pre-seal route reservation is not initialized")
 
     @Synchronized
     fun hasQpClassPageCandidates(): Boolean = qpClassPageCandidates.isNotEmpty()
@@ -728,25 +728,25 @@ internal data class QpBuildContext(
     @Synchronized
     fun registerQpNativeSegmentCandidates(candidates: Iterable<QpNativeSegmentCandidate>) {
         require(qpBuildPlan?.isWiped() != false) {
-            "AKEN NativeChunk candidates must be registered before page-plan initialization"
+            "Qp NativeChunk candidates must be registered before page-plan initialization"
         }
         require(qpFinalizationLayout?.isWiped != false) {
-            "AKEN NativeChunk candidates cannot be registered after finalization layout publication"
+            "Qp NativeChunk candidates cannot be registered after finalization layout publication"
         }
         val reservation = qpNativeRouteReservation
         require(reservation == null || reservation.isWiped) {
-            "AKEN NativeChunk candidates cannot be registered after pre-seal route reservation"
+            "Qp NativeChunk candidates cannot be registered after pre-seal route reservation"
         }
         val incoming = candidates.toList()
-        require(incoming.isNotEmpty()) { "AKEN NativeChunk candidate batch must not be empty" }
-        require(incoming.none { it.isWiped }) { "cannot register a wiped AKEN NativeChunk candidate" }
+        require(incoming.isNotEmpty()) { "Qp NativeChunk candidate batch must not be empty" }
+        require(incoming.none { it.isWiped }) { "cannot register a wiped Qp NativeChunk candidate" }
 
         val incomingKeys = incoming.map { it.identityPageKeyForBuild() }
         require(incomingKeys.distinct().size == incomingKeys.size) {
-            "AKEN NativeChunk candidate batch contains duplicate logical page identities"
+            "Qp NativeChunk candidate batch contains duplicate logical page identities"
         }
         require(incomingKeys.none { it in qpNativeSegmentCandidates }) {
-            "AKEN NativeChunk candidate logical page identity is already registered"
+            "Qp NativeChunk candidate logical page identity is already registered"
         }
 
         val snapshots = ArrayList<Pair<String, QpNativeSegmentCandidate>>(incoming.size)
@@ -756,7 +756,7 @@ internal data class QpBuildContext(
             }
             snapshots.forEach { (identityPageKey, candidate) ->
                 check(qpNativeSegmentCandidates.put(identityPageKey, candidate) == null) {
-                    "AKEN NativeChunk candidate logical page identity is already registered"
+                    "Qp NativeChunk candidate logical page identity is already registered"
                 }
             }
         } catch (error: Throwable) {
@@ -773,7 +773,7 @@ internal data class QpBuildContext(
     /** Supplies deep, scoped NativeChunk copies to the later materializer. */
     fun <T> withQpNativeSegmentCandidatesForBuild(block: (List<QpNativeSegmentCandidate>) -> T): T {
         val snapshots = synchronized(this) {
-            check(qpNativeSegmentCandidates.isNotEmpty()) { "AKEN NativeChunk candidates are not initialized" }
+            check(qpNativeSegmentCandidates.isNotEmpty()) { "Qp NativeChunk candidates are not initialized" }
             qpNativeSegmentCandidates.values
                 .sortedBy { it.identityPageKeyForBuild() }
                 .map { it.copyForBuild() }
@@ -795,12 +795,12 @@ internal data class QpBuildContext(
     ): T {
         val snapshots = synchronized(this) {
             check(qpBuildPlan?.isWiped() != false) {
-                "AKEN NativeChunk route candidates must be projected before page-plan initialization"
+                "Qp NativeChunk route candidates must be projected before page-plan initialization"
             }
             check(qpFinalizationLayout?.isWiped != false) {
-                "AKEN NativeChunk route candidates cannot be projected after finalization layout publication"
+                "Qp NativeChunk route candidates cannot be projected after finalization layout publication"
             }
-            check(qpNativeSegmentCandidates.isNotEmpty()) { "AKEN NativeChunk candidates are not initialized" }
+            check(qpNativeSegmentCandidates.isNotEmpty()) { "Qp NativeChunk candidates are not initialized" }
             qpNativeSegmentCandidates.values
                 .sortedBy { it.identityPageKeyForBuild() }
                 .map { candidate ->
@@ -819,7 +819,7 @@ internal data class QpBuildContext(
 
     /**
      * Reserves one final physical resource path per registered NativeChunk
-     * before the common AKEN page plan is initialized.
+     * before the common Qp page plan is initialized.
      */
     @Synchronized
     fun reserveQpNativeRoutes(
@@ -827,17 +827,17 @@ internal data class QpBuildContext(
         allocator: QpNativeRouteAllocator,
     ): QpNativeRouteReservation {
         require(qpBuildPlan?.isWiped() != false) {
-            "AKEN NativeChunk pre-seal routes must be reserved before page-plan initialization"
+            "Qp NativeChunk pre-seal routes must be reserved before page-plan initialization"
         }
         require(qpFinalizationLayout?.isWiped != false) {
-            "AKEN NativeChunk pre-seal routes cannot be reserved after finalization layout publication"
+            "Qp NativeChunk pre-seal routes cannot be reserved after finalization layout publication"
         }
         check(qpNativeSegmentCandidates.isNotEmpty()) {
-            "AKEN NativeChunk candidates are not initialized"
+            "Qp NativeChunk candidates are not initialized"
         }
         val existing = qpNativeRouteReservation
         require(existing == null || existing.isWiped) {
-            "AKEN NativeChunk pre-seal route reservation is already published"
+            "Qp NativeChunk pre-seal route reservation is already published"
         }
         val created = withQpNativeRouteCandidateRefsForBuild { refs ->
             QpNativeRouteReservation.reserve(
@@ -858,26 +858,26 @@ internal data class QpBuildContext(
     fun requireQpNativeRouteReservation(): QpNativeRouteReservation =
         qpNativeRouteReservation
             ?.takeUnless { it.isWiped }
-            ?: error("AKEN NativeChunk pre-seal route reservation is not initialized")
+            ?: error("Qp NativeChunk pre-seal route reservation is not initialized")
 
     @Synchronized
     fun hasQpNativeSegmentCandidates(): Boolean = qpNativeSegmentCandidates.isNotEmpty()
 
     /**
      * Publishes the one build-only page layout produced by consuming the scoped
-     * AKEN plan. A live plan and a finalized layout must never coexist: the
+     * Qp plan. A live plan and a finalized layout must never coexist: the
      * former contains build authority, while the latter contains only encrypted
      * page/output records for native compilation and final-writer verification.
      */
     @Synchronized
     fun publishQpFinalizationLayout(layout: QpFinalizationLayout) {
-        require(!layout.isWiped) { "cannot publish a wiped AKEN VBC4 finalization layout" }
+        require(!layout.isWiped) { "cannot publish a wiped Qp current-format finalization layout" }
         require(qpBuildPlan?.isWiped() != false) {
-            "AKEN VBC4 finalization requires the scoped build plan to be consumed first"
+            "Qp current-format finalization requires the scoped build plan to be consumed first"
         }
         val existing = qpFinalizationLayout
         require(existing == null || existing.isWiped) {
-            "AKEN VBC4 finalization layout is already published for this build context"
+            "Qp current-format finalization layout is already published for this build context"
         }
         qpFinalizationLayout = layout
     }
@@ -889,7 +889,7 @@ internal data class QpBuildContext(
     @Synchronized
     fun requireQpFinalizationLayout(): QpFinalizationLayout =
         qpFinalizationLayoutOrNull()
-            ?: error("AKEN VBC4 finalization layout is not initialized")
+            ?: error("Qp current-format finalization layout is not initialized")
 
     /**
      * Narrow native compiler bridge. The callback receives fresh bounded
@@ -935,14 +935,14 @@ internal data class QpBuildContext(
         }
     }
 
-    /** Build-local VBC4 inner key hierarchy; no public compatibility root is used. */
+    /** Build-local Qp VM inner key hierarchy; no public compatibility root is used. */
     fun deriveVmBuildKey(): ByteArray = QpInnerMaterial.deriveVmBuildKey(this)
 
     /** Stable per-method leaf; [methodIdentity] is the canonical call-gate binding. */
     fun deriveVmMethodKey(methodIdentity: ByteArray, methodNonce: ByteArray): ByteArray {
-        require(methodIdentity.isNotEmpty()) { "VBC4 VM method identity must not be empty" }
+        require(methodIdentity.isNotEmpty()) { "Qp VM VM method identity must not be empty" }
         require(methodNonce.size == QP_VM_METHOD_NONCE_SIZE) {
-            "VBC4 VM method nonce must be $QP_VM_METHOD_NONCE_SIZE bytes"
+            "Qp VM VM method nonce must be $QP_VM_METHOD_NONCE_SIZE bytes"
         }
         val buildKey = deriveVmBuildKey()
         return try {
@@ -957,14 +957,14 @@ internal data class QpBuildContext(
         }
     }
 
-    /** Per-process/per-method runtime leaf. It is never used for stored VBC4 MACs. */
+    /** Per-process/per-method runtime leaf. It is never used for stored Qp VM MACs. */
     fun deriveVmRuntimeSessionLeaf(
         startupNonce: ByteArray,
         methodIdentity: ByteArray,
         methodNonce: ByteArray,
     ): ByteArray {
         require(startupNonce.size == QP_VM_STARTUP_NONCE_SIZE) {
-            "VBC4 VM startup nonce must be $QP_VM_STARTUP_NONCE_SIZE bytes"
+            "Qp VM VM startup nonce must be $QP_VM_STARTUP_NONCE_SIZE bytes"
         }
         val methodKey = deriveVmMethodKey(methodIdentity, methodNonce)
         return try {
@@ -996,7 +996,7 @@ internal data class QpBuildContext(
         // Candidate sources and pre-seal route reservations are intentionally
         // not copied across scopes; either copy could outlive the candidate
         // namespace and plaintext ownership it binds.
-        // AKEN plan state is intentionally not copied: each scoped build gets
+        // Qp plan state is intentionally not copied: each scoped build gets
         // an independent page/evaluator graph and wipes it on scope exit.
     }
 
@@ -1049,7 +1049,7 @@ internal data class NativeVmBuildProfile(
 
     companion object {
         fun fromBuildMaterial(nativeSeed: Long, jarLayoutDigest: ByteArray): NativeVmBuildProfile {
-            require(jarLayoutDigest.size == QP_LAYOUT_DIGEST_SIZE) { "VBC4 layout digest must be 32 bytes" }
+            require(jarLayoutDigest.size == QP_LAYOUT_DIGEST_SIZE) { "Qp VM layout digest must be 32 bytes" }
             val digest = MessageDigest.getInstance("SHA-256")
             digest.update("javashroud-native-vm-profile-v1".toByteArray(Charsets.US_ASCII))
             digest.update(longBytes(nativeSeed))
@@ -1090,7 +1090,7 @@ private val explicitRunContext = ThreadLocal<QpBuildContext?>()
  */
 internal object QpBuildContexts {
     fun requireCurrent(): QpBuildContext = explicitRunContext.get()
-        ?: error("VBC4 build context is not initialized")
+        ?: error("Qp VM build context is not initialized")
 }
 
 internal fun <T> withQpBuildContext(context: QpBuildContext, block: () -> T): T {

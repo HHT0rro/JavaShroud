@@ -8,7 +8,7 @@ import kotlin.test.assertTrue
 
 class QpQpBuildContextBindingTest {
     @Test
-    fun aken_build_plan_is_bound_to_exactly_one_artifact_commitment() {
+    fun native_build_plan_is_bound_to_exactly_one_artifact_commitment() {
         val masterKey = ByteArray(32) { index -> (index * 7 + 1).toByte() }
         val layoutDigest = ByteArray(32) { index -> (index * 11 + 3).toByte() }
         val commitment = ByteArray(32) { index -> (index * 13 + 5).toByte() }

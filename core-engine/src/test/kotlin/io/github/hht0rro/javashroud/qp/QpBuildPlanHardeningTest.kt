@@ -31,7 +31,7 @@ class QpBuildPlanHardeningTest {
                 identity = "fixture:string:page".encodeToByteArray(),
                 pageIndex = 8,
             )
-            val plaintext = "AKEN page payload".encodeToByteArray()
+            val plaintext = "Qp page payload".encodeToByteArray()
             val encoded = plan.encodeForMaterialization(page.handle, plaintext)
             val layout = page.pageLayout
             val alternateLayout = alternate.pageLayout
