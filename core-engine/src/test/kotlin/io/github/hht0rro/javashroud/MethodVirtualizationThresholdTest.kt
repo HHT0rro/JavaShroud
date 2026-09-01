@@ -45,11 +45,6 @@ import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class MethodVirtualizationThresholdTest {
-    private companion object {
-        const val QP_FLAGS_OFFSET_FOR_TEST = 42
-        const val QP_NESTED_VM_FLAG_FOR_TEST = 0x1000
-    }
-
     private fun applyMethodVirtualization(
         artifact: BytecodeArtifact,
         ruleMatches: List<RuleMatch>,
@@ -61,46 +56,6 @@ class MethodVirtualizationThresholdTest {
             applyMethodVirtualizationTransform(artifact = artifact, ruleMatches = ruleMatches, params = params)
         }
     }
-
-    private fun decodedQpResourceFlags(entries: List<JarEntryData>, context: QpBuildContext): List<Int> =
-        withQpBuildContext(context) {
-            val decodedByName = entries
-                .filter { it.isVmResourceName() }
-                .mapNotNull { entry -> QpResourceCodec.decode(entry.bytes)?.let { entry.name to it } }
-                .toMap()
-            val rawResources = decodedByName.values.filter(::isRawQpResource)
-            val slicedResources = decodedByName.values.mapNotNull { bytes -> reassembleSlicedQp(bytes, decodedByName) }
-            (rawResources + slicedResources).map { readU2At(it, QP_FLAGS_OFFSET_FOR_TEST) }
-        }
-
-    private fun reassembleSlicedQp(manifestBytes: ByteArray, decodedByName: Map<String, ByteArray>): ByteArray? {
-        val lines = runCatching { manifestBytes.decodeToString().trim().lines() }.getOrNull() ?: return null
-        val header = lines.firstOrNull()?.split('|') ?: return null
-        if (header.size < 4 || header[0] != "VBC4S" || header[1] != "1") return null
-        val totalSize = header[2].toIntOrNull() ?: return null
-        val out = ByteArray(totalSize)
-        for (line in lines.drop(1)) {
-            val parts = line.split('|')
-            if (parts.size < 5) return null
-            val offset = parts[1].toIntOrNull() ?: return null
-            val length = parts[2].toIntOrNull() ?: return null
-            val shard = decodedByName[parts[4]] ?: return null
-            if (shard.size != length || offset < 0 || offset + length > out.size) return null
-            shard.copyInto(out, offset)
-        }
-        return out.takeIf(::isRawQpResource)
-    }
-
-    private fun isRawQpResource(bytes: ByteArray): Boolean =
-        bytes.size > QP_FLAGS_OFFSET_FOR_TEST + 1 &&
-            bytes[0] == 'V'.code.toByte() &&
-            bytes[1] == 'B'.code.toByte() &&
-            bytes[2] == 'C'.code.toByte() &&
-            bytes[3] == '4'.code.toByte() &&
-            readU2At(bytes, 4) == 4
-
-    private fun readU2At(bytes: ByteArray, offset: Int): Int =
-        ((bytes[offset].toInt() and 0xFF) shl 8) or (bytes[offset + 1].toInt() and 0xFF)
 
     @Test
     fun method_virtualization_skips_methods_above_instruction_threshold() {
@@ -219,9 +174,9 @@ class MethodVirtualizationThresholdTest {
         }
 
         val serializerSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/QpSerializer.kt"))
-        assertTrue(serializerSource.contains("serializeNestedBlock"), "Nested VBC4 resources must be written through a second-level micro-op stream")
-        assertTrue(serializerSource.contains("QP_NESTED_MAGIC"), "Nested VBC4 resources must carry a native-validated micro-stream envelope")
-        assertTrue(serializerSource.contains("vbc4NestedFieldOrder"), "Nested micro-op fields must be per-build permuted rather than plain register rows")
+        assertTrue(serializerSource.contains("serializeNestedBlock"), "Nested VM resources must be written through a second-level micro-op stream")
+        assertTrue(serializerSource.contains("QP_NESTED_MAGIC"), "Nested VM resources must carry a native-validated micro-stream envelope")
+        assertTrue(serializerSource.contains("nestedFieldOrder"), "Nested micro-op fields must be per-build permuted rather than plain register rows")
     }
 
     @Test
@@ -266,7 +221,7 @@ class MethodVirtualizationThresholdTest {
             params = mapOf("maxInstructions" to 100, "seed" to 42, "methodSelection" to "all-compatible", "strictVirtualization" to true, "maxBroadVirtualizedMethods" to 0),
         )
 
-        assertEquals(3, result.transformedMemberCount, "all-compatible strict mode must keep GETSTATIC/CHECKCAST/INSTANCEOF shapes in the VBC4 candidate set")
+        assertEquals(3, result.transformedMemberCount, "all-compatible strict mode must keep GETSTATIC/CHECKCAST/INSTANCEOF shapes in the native VM candidate set")
     }
 
     @Test
@@ -579,7 +534,7 @@ class MethodVirtualizationThresholdTest {
     fun method_virtualization_uses_independent_csprng_for_method_keys() {
         val source = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/MethodVirtualizationTransforms.kt"))
         val nativeKernelSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeKernelTransforms.kt"))
-        assertTrue(source.contains("method-virtualization-key-stream-v1"), "Method key material must use a CSPRNG stream personalized by VBC4 context, not the user-seeded structural RNG")
+        assertTrue(source.contains("method-virtualization-key-stream-v1"), "Method key material must use a CSPRNG stream personalized by the native VM context, not the user-seeded structural RNG")
         assertTrue(source.contains("VmEntropyPlan.method(keyRandom"), "Per-method VM entropy must come from the build-local CSPRNG")
         assertTrue(!source.lines().any { it.contains("= methodKeySeed(random)") }, "Per-method VM seeds must not be reproducible from the user-visible seed")
         assertTrue(!source.contains("xor className.hashCode()") && !source.contains("xor methodName.hashCode()"), "Method seeds must not be derived from known class or method names")
@@ -687,8 +642,8 @@ class MethodVirtualizationThresholdTest {
         )
 
         val vmResources = result.artifact.jarEntries.map { it.name }.filter { it.isVmResourceName() }
-        assertTrue(result.transformedMemberCount > 0, "VBC4 fixed handler morphing must allow VM virtualization")
-        assertTrue(vmResources.isEmpty(), "Current method virtualization must stage AKEN candidates instead of legacy standalone VM resources")
+        assertTrue(result.transformedMemberCount > 0, "Fixed handler morphing must allow VM virtualization")
+        assertTrue(vmResources.isEmpty(), "Current method virtualization must stage Qp candidates instead of legacy standalone VM resources")
     }
 
     @Test
@@ -718,12 +673,12 @@ class MethodVirtualizationThresholdTest {
                 "executeQpVmPage",
                 "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;",
             ),
-            "VM dispatcher stubs must use the authenticated current AKEN page ABI.",
+            "VM dispatcher stubs must use the authenticated current Qp page ABI.",
         )
     }
 
     @Test
-    fun dispatcher_stubs_use_authenticated_current_aken_page_abi() {
+    fun dispatcher_stubs_use_authenticated_current_native_page_abi() {
         val artifact = artifactFor(voidSpecializedClassBytes(), "example/VmSpecialized")
 
         val result = applyMethodVirtualization(
@@ -748,7 +703,7 @@ class MethodVirtualizationThresholdTest {
                     "executeQpVmPage",
                     currentDescriptor,
                 ),
-                "$name$descriptor must use the current authenticated AKEN Object[] bridge.",
+                "$name$descriptor must use the current authenticated Qp Object[] bridge.",
             )
         }
     }
@@ -911,7 +866,7 @@ class MethodVirtualizationThresholdTest {
         val classBytes = result.artifact.classArtifactIndex.getValue("example/VmThreshold").bytes
         val morphStores = countVarOpcodeInMethod(classBytes, "value", "()I", Opcodes.ISTORE)
 
-        assertTrue(morphStores > 0, "VBC4 fixed handler morphing must emit a morph block with opaque integer ops. morphStores=$morphStores")
+        assertTrue(morphStores > 0, "Fixed handler morphing must emit a morph block with opaque integer ops. morphStores=$morphStores")
     }
 
     private fun simpleClassBytes(): ByteArray {

@@ -900,19 +900,6 @@ internal data class QpBuildContext(
     fun <T> withQpLocatorRecordsForBuild(block: (List<ByteArray>) -> T): T =
         requireQpFinalizationLayout().withNativeLocatorRecordsForBuild(block)
 
-    fun vmManifestProtocol(): QpManifestProtocol {
-        if (!maxHardening) return QpManifestProtocol(magic = "VBC4S", version = "1")
-        val token = deriveSubKey("javashroud-qp-manifest-token-v2", 8, jarLayoutDigest)
-        return try {
-            QpManifestProtocol(
-                magic = "H" + token.joinToString("") { byte -> "%02x".format(byte.toInt() and 0xFF) },
-                version = "2",
-            )
-        } finally {
-            java.util.Arrays.fill(token, 0)
-        }
-    }
-
     /**
      * Derive a build-local sub key from the per-build runtime resource root key
      * using HKDF-SHA256 (RFC 5869). The runtime resource key is the IKM, [label]
@@ -1061,14 +1048,6 @@ internal data class NativeVmBuildProfile(
             )
         }
     }
-}
-
-internal data class QpManifestProtocol(
-    val magic: String,
-    val version: String,
-) {
-    val prefix: String
-        get() = "$magic|$version|"
 }
 
 internal const val QP_MASTER_KEY_SIZE = 32

@@ -1,21 +1,13 @@
 ﻿package io.github.hht0rro.javashroud
 
-import io.github.hht0rro.javashroud.model.analysis.MatchedMember
-import io.github.hht0rro.javashroud.model.analysis.MemberKind
-import io.github.hht0rro.javashroud.model.analysis.MemberSummary
-import io.github.hht0rro.javashroud.model.analysis.RuleMatch
-import io.github.hht0rro.javashroud.model.analysis.TargetSelector
-import io.github.hht0rro.javashroud.model.config.RuleSpec
-import io.github.hht0rro.javashroud.transforms.protection.QpResourceCodec
 import io.github.hht0rro.javashroud.transforms.protection.QP_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.QP_MASTER_KEY_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.NativeVmBuildProfile
 import io.github.hht0rro.javashroud.transforms.protection.QpEntryMetadata
 import io.github.hht0rro.javashroud.transforms.protection.QpSerializer
-import io.github.hht0rro.javashroud.transforms.protection.vbc4CfgDecodeIndex
-import io.github.hht0rro.javashroud.transforms.protection.vbc4CfgEncodeIndex
-import io.github.hht0rro.javashroud.transforms.protection.applyMethodVirtualization
+import io.github.hht0rro.javashroud.transforms.protection.decodeCfgIndex
+import io.github.hht0rro.javashroud.transforms.protection.encodeCfgIndex
 import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
 import org.objectweb.asm.Opcodes
 import java.nio.file.Files
@@ -48,8 +40,8 @@ class VmStructureDivergenceTest {
         val first = serializedLayout(0x1100_0001)
         val second = serializedLayout(0x2200_0002)
 
-        assertFalse(first.payload.contentEquals(second.payload), "same guest program must not serialize to reusable VMBC bytes across build seeds")
-        assertTrue(first.blockCount > 1 && second.blockCount > 1, "fixture must exercise multi-block VMBC layout")
+        assertFalse(first.payload.contentEquals(second.payload), "same guest program must not serialize to reusable native VM bytes across build seeds")
+        assertTrue(first.blockCount > 1 && second.blockCount > 1, "fixture must exercise multi-block native VM layout")
         assertTrue(
             first.blockIds != second.blockIds || first.dispatchTokens != second.dispatchTokens,
             "block order or dispatch tokens must differ across build seeds",
@@ -61,7 +53,7 @@ class VmStructureDivergenceTest {
         val first = serializedLayout(0x3300_0003)
         val second = serializedLayout(0x3300_0003)
 
-        assertFalse(first.payload.contentEquals(second.payload), "same seed/context must not reproduce exact VMBC bytes")
+        assertFalse(first.payload.contentEquals(second.payload), "same seed/context must not reproduce exact native VM bytes")
         assertTrue(
             first.blockIds != second.blockIds || first.dispatchTokens != second.dispatchTokens,
             "same seed/context must not reproduce block order and dispatch metadata",
@@ -71,7 +63,7 @@ class VmStructureDivergenceTest {
     @Test
     fun repeated_same_seed_same_context_builds_have_high_uniqueness() {
         val snapshots = (0 until 16).map { serializedLayout(0x3300_0003, contextSeed = 0x3300_0003) }
-        assertTrue(snapshots.map { sha256Hex(it.payload) }.toSet().size >= 14, "VMBC payloads should be mostly unique across same-seed builds")
+        assertTrue(snapshots.map { sha256Hex(it.payload) }.toSet().size >= 14, "native VM payloads should be mostly unique across same-seed builds")
         assertTrue(snapshots.map { it.blockIds.joinToString(",") }.toSet().size >= 2, "block storage order should vary across same-seed builds")
         assertTrue(snapshots.map { it.dispatchTokens.joinToString(",") }.toSet().size >= 14, "dispatch tokens should be mostly unique across same-seed builds")
     }
@@ -79,19 +71,19 @@ class VmStructureDivergenceTest {
     @Test
     fun branch_switch_and_try_methods_keep_partitioned_layout() {
         val snapshots = (0 until 12).map { controlFlowLayout(0x4100_0000 + it) }
-        assertTrue(snapshots.all { it.blockCount > 1 }, "control-flow methods must not collapse to a stable single VBC4 block")
+        assertTrue(snapshots.all { it.blockCount > 1 }, "control-flow methods must not collapse to a stable single native VM block")
         assertTrue(snapshots.any { it.blockIds != it.blockIds.sorted() }, "control-flow methods should still allow shuffled storage order")
     }
 
     @Test
-    fun same_build_seed_uses_vbc4_build_context_for_structure_derivation() {
+    fun same_build_seed_uses_native_build_context_for_structure_derivation() {
         val first = serializedLayout(seed = 0x4400_0004, contextSeed = 0x5500_0005)
         val second = serializedLayout(seed = 0x4400_0004, contextSeed = 0x6600_0006)
 
-        assertFalse(first.payload.contentEquals(second.payload), "same guest program and seed must still bind VMBC bytes to per-build VBC4 context")
+        assertFalse(first.payload.contentEquals(second.payload), "same guest program and seed must still bind VM bytecode to the per-build native context")
         assertTrue(
             first.blockIds != second.blockIds || first.dispatchTokens != second.dispatchTokens,
-            "VBC4 build context must participate in block order or dispatch metadata derivation",
+            "Native build context must participate in block order or dispatch metadata derivation",
         )
     }
 
@@ -136,14 +128,14 @@ class VmStructureDivergenceTest {
         val instructionCount = 257
         val firstSeed = 0x1357_2468
         val secondSeed = 0x2468_1357
-        val first = (0..instructionCount).map { vbc4CfgEncodeIndex(firstSeed, instructionCount, it) }
-        val second = (0..instructionCount).map { vbc4CfgEncodeIndex(secondSeed, instructionCount, it) }
+        val first = (0..instructionCount).map { encodeCfgIndex(firstSeed, instructionCount, it) }
+        val second = (0..instructionCount).map { encodeCfgIndex(secondSeed, instructionCount, it) }
 
         assertEquals(first.size, first.toSet().size, "CFG storage ids must be bijective inside one method")
         assertTrue(first != (0..instructionCount).toList(), "CFG storage ids must not expose raw JVM instruction indexes")
         assertTrue(first != second, "CFG storage ids must diverge across build seeds")
         first.forEachIndexed { index, encoded ->
-            assertEquals(index, vbc4CfgDecodeIndex(firstSeed, instructionCount, encoded), "native-equivalent inverse must recover every target")
+            assertEquals(index, decodeCfgIndex(firstSeed, instructionCount, encoded), "native-equivalent inverse must recover every target")
         }
     }
 
@@ -156,17 +148,12 @@ class VmStructureDivergenceTest {
         assertTrue(
             first.blockIds != second.blockIds ||
                 first.dispatchTokens != second.dispatchTokens ||
-                first.nestedDigest != second.nestedDigest ||
-                first.resourceNames != second.resourceNames ||
-                first.resourceDigests != second.resourceDigests ||
-                first.manifestHeaders != second.manifestHeaders,
+                first.nestedDigest != second.nestedDigest,
             "full-chain structure must not reproduce for same seed/context",
         )
-        assertTrue(first.blockIds != different.blockIds || first.dispatchTokens != different.dispatchTokens, "flattened block layout or dispatch tokens must diverge across VBC4 contexts")
+        assertTrue(first.blockIds != different.blockIds || first.dispatchTokens != different.dispatchTokens, "flattened block layout or dispatch tokens must diverge across native VM contexts")
         assertTrue(first.nestedFlags != 0, "full-chain fixture must enable nested VM layer")
-        assertTrue(first.nestedDigest != different.nestedDigest, "nested VM envelope must diverge across VBC4 contexts")
-        assertTrue(first.resourceNames != different.resourceNames || first.resourceDigests != different.resourceDigests, "outlined resources and shared dispatch mesh must diverge across VBC4 contexts")
-        assertTrue(first.manifestHeaders != different.manifestHeaders, "outlined manifest mesh metadata must diverge across VBC4 contexts")
+        assertTrue(first.nestedDigest != different.nestedDigest, "nested VM envelope must diverge across native VM contexts")
     }
 
     @Test
@@ -289,118 +276,13 @@ class VmStructureDivergenceTest {
 
     private fun fullChainSnapshot(seed: Int, contextSeed: Int): FullChainSnapshot {
         val layout = serializedLayout(seed = seed, contextSeed = contextSeed, nestedProfile = 0x1357_2468)
-        val context = fixedContext(contextSeed)
-        val resources = encodedOutlinedResources(context = context, seed = seed)
-        val decoded = withQpBuildContext(context) {
-            resources.mapNotNull { entry -> QpResourceCodec.decode(entry.bytes)?.let { entry.name to it } }.toMap()
-        }
-        val manifestHeaders = decoded.values
-            .mapNotNull { bytes -> bytes.decodeToString().trim().lines().firstOrNull()?.takeIf { it.startsWith("VBC4S|1|") } }
-            .sorted()
         return FullChainSnapshot(
             blockIds = layout.blockIds,
             dispatchTokens = layout.dispatchTokens,
             nestedFlags = layout.flags and QP_FLAG_NESTED_VM_TEST,
             nestedDigest = sha256Hex(layout.payload),
-            resourceNames = resources.map { it.name },
-            resourceDigests = resources.map { sha256Hex(it.bytes) },
-            manifestHeaders = manifestHeaders,
         )
     }
-
-    private fun encodedOutlinedResources(context: QpBuildContext, seed: Int) = withQpBuildContext(context) {
-        val result = applyMethodVirtualization(
-            artifact = outliningArtifact(),
-            ruleMatches = outliningRuleMatches(),
-            params = mapOf("maxInstructions" to Int.MAX_VALUE, "seed" to seed),
-        )
-        assertEquals(3, result.transformedMemberCount, "full-chain fixture must virtualize every selected method")
-        result.artifact.jarEntries
-            .filter { entry -> entry.name.isVmResourceName() }
-            .sortedBy { it.name }
-    }
-
-    private fun outliningArtifact() = testAttachedArtifact(
-        classArtifacts = listOf(
-            testClassArtifact(
-                internalName = "e2e/FullChainStructureRoot",
-                bytes = outliningFixtureClassBytes(),
-                methodSummaries = listOf(
-                    MemberSummary(MemberKind.METHOD, "seed", "(I)I", Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC),
-                    MemberSummary(MemberKind.METHOD, "fold", "(I)I", Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC),
-                    MemberSummary(MemberKind.METHOD, "verify", "()I", Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC),
-                ),
-            ),
-        ),
-    )
-
-    private fun outliningRuleMatches(): List<RuleMatch> = listOf(
-        "seed" to "(I)I",
-        "fold" to "(I)I",
-        "verify" to "()I",
-    ).map { (name, descriptor) ->
-        RuleMatch(
-            rule = RuleSpec(target = "e2e/FullChainStructureRoot#$name:$descriptor", action = "method-virtualization"),
-            selector = TargetSelector(
-                classPattern = "e2e/FullChainStructureRoot",
-                memberPattern = name,
-                memberDescriptorPattern = descriptor,
-            ),
-            matchedClassNames = listOf("e2e/FullChainStructureRoot"),
-            matchedMembers = listOf(MatchedMember("e2e/FullChainStructureRoot", MemberKind.METHOD, name, descriptor)),
-        )
-    }
-
-    private fun outliningFixtureClassBytes(): ByteArray {
-        val cw = org.objectweb.asm.ClassWriter(org.objectweb.asm.ClassWriter.COMPUTE_FRAMES or org.objectweb.asm.ClassWriter.COMPUTE_MAXS)
-        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_FINAL, "e2e/FullChainStructureRoot", null, "java/lang/Object", null)
-        cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null).apply {
-            visitCode()
-            visitVarInsn(Opcodes.ALOAD, 0)
-            visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
-            visitInsn(Opcodes.RETURN)
-            visitMaxs(1, 1)
-            visitEnd()
-        }
-        cw.visitMethod(Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC, "seed", "(I)I", null, null).apply {
-            visitCode()
-            visitVarInsn(Opcodes.ILOAD, 0)
-            visitIntInsn(Opcodes.BIPUSH, 7)
-            visitInsn(Opcodes.IADD)
-            visitInsn(Opcodes.IRETURN)
-            visitMaxs(2, 1)
-            visitEnd()
-        }
-        cw.visitMethod(Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC, "fold", "(I)I", null, null).apply {
-            visitCode()
-            visitVarInsn(Opcodes.ILOAD, 0)
-            visitMethodInsn(Opcodes.INVOKESTATIC, "e2e/FullChainStructureRoot", "seed", "(I)I", false)
-            visitVarInsn(Opcodes.ILOAD, 0)
-            visitInsn(Opcodes.ICONST_1)
-            visitInsn(Opcodes.IADD)
-            visitMethodInsn(Opcodes.INVOKESTATIC, "e2e/FullChainStructureRoot", "seed", "(I)I", false)
-            visitInsn(Opcodes.IADD)
-            visitInsn(Opcodes.IRETURN)
-            visitMaxs(3, 1)
-            visitEnd()
-        }
-        cw.visitMethod(Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC, "verify", "()I", null, null).apply {
-            visitCode()
-            visitInsn(Opcodes.ICONST_5)
-            visitMethodInsn(Opcodes.INVOKESTATIC, "e2e/FullChainStructureRoot", "fold", "(I)I", false)
-            visitInsn(Opcodes.ICONST_2)
-            visitMethodInsn(Opcodes.INVOKESTATIC, "e2e/FullChainStructureRoot", "seed", "(I)I", false)
-            visitInsn(Opcodes.IADD)
-            visitInsn(Opcodes.IRETURN)
-            visitMaxs(2, 0)
-            visitEnd()
-        }
-        cw.visitEnd()
-        return cw.toByteArray()
-    }
-
-    private fun String.isVmResourceName(): Boolean =
-        startsWith("META-INF/") && !endsWith(".class") && !endsWith("/") && length > "META-INF/".length + 10
 
     private fun sha256Hex(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
         .digest(bytes)
@@ -421,9 +303,6 @@ class VmStructureDivergenceTest {
         val dispatchTokens: List<Int>,
         val nestedFlags: Int,
         val nestedDigest: String,
-        val resourceNames: List<String>,
-        val resourceDigests: List<String>,
-        val manifestHeaders: List<String>,
     )
 
     private data class LayoutSnapshot(

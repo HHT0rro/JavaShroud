@@ -1,11 +1,5 @@
 package io.github.hht0rro.javashroud
 
-import io.github.hht0rro.javashroud.model.analysis.MatchedMember
-import io.github.hht0rro.javashroud.model.analysis.MemberKind
-import io.github.hht0rro.javashroud.model.analysis.MemberSummary
-import io.github.hht0rro.javashroud.model.analysis.RuleMatch
-import io.github.hht0rro.javashroud.model.analysis.TargetSelector
-import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpBridge
 import io.github.hht0rro.javashroud.transforms.protection.QpResourceCodec
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceKind
@@ -13,13 +7,10 @@ import io.github.hht0rro.javashroud.transforms.protection.QP_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.QP_MASTER_KEY_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
 import java.util.Arrays
-import io.github.hht0rro.javashroud.transforms.protection.applyMethodVirtualization
 import io.github.hht0rro.javashroud.transforms.protection.requireQpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
-import org.objectweb.asm.Opcodes
 import java.nio.file.Files
 import java.nio.file.Path
-import java.security.MessageDigest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
@@ -81,159 +72,8 @@ class AttackRegressionTest {
         val vm = Files.readString(Path.of("src/main/rust/crates/qp-vm/src/lib.rs"))
         val ffi = Files.readString(Path.of("src/main/rust/crates/qp-ffi/src/lib.rs"))
         assertTrue(vm.contains("AuthenticationFailed") || vm.contains("parse_authenticated"), "Rust VM must authenticate before execute")
-        assertTrue(ffi.contains("AKEN VM page route is unavailable") || ffi.contains("TypedPageRouter"), "Rust JNI must fail closed")
+        assertTrue(ffi.contains("Qp VM page route is unavailable") || ffi.contains("TypedPageRouter"), "Rust JNI must fail closed")
     }
-
-    @Test
-    fun sliced_vm_resources_reject_tampered_manifest_missing_shard_and_shard_digest_mismatch() = withQpBuildContext(fixedContext(5)) {
-        val encodedResources = attackVmResources()
-        val decodedResources = encodedResources.mapNotNull { entry ->
-            QpResourceCodec.decode(entry.bytes)?.let { entry.name to it }
-        }.toMap()
-        val manifest = decodedResources.entries.firstOrNull { it.value.decodeToString().startsWith("VBC4S|1|") }
-        assertTrue(manifest != null, "attack fixture must emit at least one sliced VM manifest")
-        assertTrue(slicedManifestIsComplete(manifest.value, decodedResources), "valid generated sliced manifest must reassemble")
-
-        val manifestLines = manifest.value.decodeToString().trim().lines()
-        val firstShardPath = manifestLines.drop(1).first().split('|')[4]
-
-        val tamperedManifest = manifestLines.toMutableList().also { lines ->
-            val parts = lines[1].split('|').toMutableList()
-            parts[3] = parts[3].replaceRange(0, 1, if (parts[3][0] == '0') "1" else "0")
-            lines[1] = parts.joinToString("|")
-        }.joinToString(separator = "\n", postfix = "\n").toByteArray(Charsets.UTF_8)
-        assertEquals(false, slicedManifestIsComplete(tamperedManifest, decodedResources), "tampered manifest digest must fail closed")
-
-        assertEquals(
-            false,
-            slicedManifestIsComplete(manifest.value, decodedResources - firstShardPath),
-            "missing shard resource must fail closed",
-        )
-
-        val tamperedShardResources = decodedResources.toMutableMap()
-        tamperedShardResources[firstShardPath] = tamperedShardResources.getValue(firstShardPath).copyOf().also { shard ->
-            shard[shard.lastIndex] = (shard.last().toInt() xor 0x5A).toByte()
-        }
-        assertEquals(false, slicedManifestIsComplete(manifest.value, tamperedShardResources), "shard digest mismatch must fail closed")
-
-        val encodedManifest = encodedResources.first { it.name == manifest.key }
-        val tamperedEncodedManifest = encodedManifest.bytes.copyOf().also { bytes ->
-            bytes[bytes.lastIndex - 1] = (bytes[bytes.lastIndex - 1].toInt() xor 0x5A).toByte()
-        }
-        assertEquals(null, QpResourceCodec.decode(tamperedEncodedManifest), "encoded manifest byte tampering must fail closed")
-    }
-
-    private fun attackVmResources() = applyMethodVirtualization(
-        artifact = testAttachedArtifact(
-            classArtifacts = listOf(
-                testClassArtifact(
-                    internalName = "attack/SlicedVmAttackRoot",
-                    bytes = attackFixtureClassBytes(),
-                    methodSummaries = listOf(
-                        MemberSummary(MemberKind.METHOD, "seed", "(I)I", Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC),
-                        MemberSummary(MemberKind.METHOD, "fold", "(I)I", Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC),
-                        MemberSummary(MemberKind.METHOD, "verify", "()I", Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC),
-                    ),
-                ),
-            ),
-        ),
-        ruleMatches = listOf(
-            "seed" to "(I)I",
-            "fold" to "(I)I",
-            "verify" to "()I",
-        ).map { (name, descriptor) ->
-            RuleMatch(
-                rule = RuleSpec(target = "attack/SlicedVmAttackRoot#$name:$descriptor", action = "method-virtualization"),
-                selector = TargetSelector(
-                    classPattern = "attack/SlicedVmAttackRoot",
-                    memberPattern = name,
-                    memberDescriptorPattern = descriptor,
-                ),
-                matchedClassNames = listOf("attack/SlicedVmAttackRoot"),
-                matchedMembers = listOf(MatchedMember("attack/SlicedVmAttackRoot", MemberKind.METHOD, name, descriptor)),
-            )
-        },
-        params = mapOf("maxInstructions" to Int.MAX_VALUE, "seed" to 91),
-    ).artifact.jarEntries.filter { entry -> entry.name.isVmResourceName() }
-
-    private fun slicedManifestIsComplete(manifestBytes: ByteArray, resources: Map<String, ByteArray>): Boolean {
-        val lines = manifestBytes.decodeToString().trim().lines()
-        val header = lines.firstOrNull()?.split('|') ?: return false
-        if (header.size != 7 || header[0] != "VBC4S" || header[1] != "1") return false
-        val totalSize = header[2].toIntOrNull() ?: return false
-        val shardCount = header[3].toIntOrNull() ?: return false
-        if (totalSize <= 0 || shardCount <= 0 || lines.size != shardCount + 1) return false
-        val covered = BooleanArray(totalSize)
-        val seenIndexes = mutableSetOf<Int>()
-        for (line in lines.drop(1)) {
-            val parts = line.split('|')
-            if (parts.size != 8) return false
-            val index = parts[0].toIntOrNull() ?: return false
-            val offset = parts[1].toIntOrNull() ?: return false
-            val length = parts[2].toIntOrNull() ?: return false
-            val expectedDigest = parts[3]
-            val shardBytes = resources[parts[4]] ?: return false
-            if (!seenIndexes.add(index) || length != shardBytes.size || offset < 0 || offset + length > totalSize) return false
-            if (sha256Hex(shardBytes) != expectedDigest) return false
-            for (cursor in offset until offset + length) {
-                if (covered[cursor]) return false
-                covered[cursor] = true
-            }
-        }
-        return seenIndexes.size == shardCount && covered.all { it }
-    }
-
-    private fun attackFixtureClassBytes(): ByteArray {
-        val cw = org.objectweb.asm.ClassWriter(org.objectweb.asm.ClassWriter.COMPUTE_FRAMES or org.objectweb.asm.ClassWriter.COMPUTE_MAXS)
-        cw.visit(Opcodes.V17, Opcodes.ACC_PUBLIC or Opcodes.ACC_FINAL, "attack/SlicedVmAttackRoot", null, "java/lang/Object", null)
-        cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null).apply {
-            visitCode()
-            visitVarInsn(Opcodes.ALOAD, 0)
-            visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
-            visitInsn(Opcodes.RETURN)
-            visitMaxs(1, 1)
-            visitEnd()
-        }
-        cw.visitMethod(Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC, "seed", "(I)I", null, null).apply {
-            visitCode()
-            visitVarInsn(Opcodes.ILOAD, 0)
-            visitIntInsn(Opcodes.BIPUSH, 9)
-            visitInsn(Opcodes.IADD)
-            visitInsn(Opcodes.IRETURN)
-            visitMaxs(2, 1)
-            visitEnd()
-        }
-        cw.visitMethod(Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC, "fold", "(I)I", null, null).apply {
-            visitCode()
-            visitVarInsn(Opcodes.ILOAD, 0)
-            visitMethodInsn(Opcodes.INVOKESTATIC, "attack/SlicedVmAttackRoot", "seed", "(I)I", false)
-            visitVarInsn(Opcodes.ILOAD, 0)
-            visitInsn(Opcodes.ICONST_2)
-            visitInsn(Opcodes.IADD)
-            visitMethodInsn(Opcodes.INVOKESTATIC, "attack/SlicedVmAttackRoot", "seed", "(I)I", false)
-            visitInsn(Opcodes.IADD)
-            visitInsn(Opcodes.IRETURN)
-            visitMaxs(3, 1)
-            visitEnd()
-        }
-        cw.visitMethod(Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC, "verify", "()I", null, null).apply {
-            visitCode()
-            visitInsn(Opcodes.ICONST_4)
-            visitMethodInsn(Opcodes.INVOKESTATIC, "attack/SlicedVmAttackRoot", "fold", "(I)I", false)
-            visitInsn(Opcodes.IRETURN)
-            visitMaxs(1, 0)
-            visitEnd()
-        }
-        cw.visitEnd()
-        return cw.toByteArray()
-    }
-
-    private fun sha256Hex(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
-        .digest(bytes)
-        .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xFF) }
-
-    private fun String.isVmResourceName(): Boolean =
-        startsWith("META-INF/") && !endsWith(".class") && !endsWith("/") && length > "META-INF/".length + 10
 
     private fun fixedContext(seed: Int, runtimeResourceKey: ByteArray? = null): QpBuildContext {
         val masterKey = ByteArray(QP_MASTER_KEY_SIZE) { index -> (seed * 19 + index * 7).toByte() }
