@@ -8,7 +8,7 @@ import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodHandleInfo;
 
 /**
- * Thin AKEN StringPage terminal.
+ * Thin Qp StringPage terminal.
  *
  * <p>The authenticated page is materialized as the returned JVM {@link String}
  * inside the native bridge.  No page plaintext byte array crosses into Java and
@@ -59,17 +59,17 @@ public final class QpTextBridge {
 
     public static byte[] materializeQpStringToken(String packed) {
         if (packed == null || packed.isEmpty()) {
-            throw new SecurityException("AKEN string token is invalid");
+            throw new SecurityException("Qp string token is invalid");
         }
         final byte[] token;
         try {
             token = java.util.Base64.getUrlDecoder().decode(packed);
         } catch (RuntimeException error) {
-            throw new SecurityException("AKEN string token is invalid", error);
+            throw new SecurityException("Qp string token is invalid", error);
         }
         if (token.length < 24 + 4 + 1 || token.length > 24 + 4 + 4096) {
             java.util.Arrays.fill(token, (byte) 0);
-            throw new SecurityException("AKEN string token is invalid");
+            throw new SecurityException("Qp string token is invalid");
         }
         return token;
     }
@@ -82,7 +82,7 @@ public final class QpTextBridge {
     ) {
         if (lookup == null || invokedName == null || invokedName.isEmpty() ||
             invokedType == null || !invokedType.equals(MethodType.methodType(byte[].class))) {
-            throw new SecurityException("AKEN string token bootstrap binding is invalid");
+            throw new SecurityException("Qp string token bootstrap binding is invalid");
         }
         byte[] token = materializeQpStringToken(packed);
         return new ConstantCallSite(MethodHandles.constant(byte[].class, token));
@@ -95,9 +95,9 @@ public final class QpTextBridge {
         MethodHandle target
     ) {
         if (lookup == null || invokedName == null || invokedName.isEmpty() || target == null ||
-            invokedType == null || !invokedType.equals(akenStringCallSiteType()) ||
+            invokedType == null || !invokedType.equals(nativeStringCallSiteType()) ||
             !target.type().equals(invokedType)) {
-            throw new SecurityException("AKEN string bootstrap binding is invalid");
+            throw new SecurityException("Qp string bootstrap binding is invalid");
         }
         /*
          * Do not trust an arbitrary same-signature MethodHandle supplied by a
@@ -110,14 +110,14 @@ public final class QpTextBridge {
         try {
             info = MethodHandles.lookup().revealDirect(target);
         } catch (IllegalArgumentException | SecurityException error) {
-            throw new SecurityException("AKEN string bootstrap target provenance is invalid", error);
+            throw new SecurityException("Qp string bootstrap target provenance is invalid", error);
         }
         Class<?> helperClass = MethodHandles.lookup().lookupClass();
         if (info.getReferenceKind() != MethodHandleInfo.REF_invokeStatic ||
             info.getDeclaringClass() != helperClass ||
             !info.getMethodType().equals(invokedType) ||
             !isStringTerminalMethodName(helperClass, info.getName())) {
-            throw new SecurityException("AKEN string bootstrap target provenance is invalid");
+            throw new SecurityException("Qp string bootstrap target provenance is invalid");
         }
         return new ConstantCallSite(target);
     }
@@ -139,7 +139,7 @@ public final class QpTextBridge {
         return terminalName != null && terminalName.equals(name);
     }
 
-    private static MethodType akenStringCallSiteType() {
+    private static MethodType nativeStringCallSiteType() {
         return MethodType.methodType(String.class, byte[].class);
     }
 
@@ -152,7 +152,7 @@ public final class QpTextBridge {
      */
     static String invokeQpStringTerminal(byte[] token) {
         if (token == null || token.length < 24 + 4 + 1) {
-            throw new SecurityException("AKEN string page request is invalid");
+            throw new SecurityException("Qp string page request is invalid");
         }
         byte[] encodedHandle = java.util.Arrays.copyOfRange(token, 0, 24);
         int pageIndex = ((token[24] & 0xFF) << 24)
@@ -173,18 +173,18 @@ public final class QpTextBridge {
         try {
             String decoded = QpBridge.openQpString(encodedHandle, pageIndex, callSiteProof);
             if (decoded == null) {
-                throw new SecurityException("AKEN string page access failed closed");
+                throw new SecurityException("Qp string page access failed closed");
             }
             return decoded;
         } catch (UnsatisfiedLinkError error) {
-            throw new SecurityException("AKEN string page native terminal is not registered for the sealed helper", error);
+            throw new SecurityException("Qp string page native terminal is not registered for the sealed helper", error);
         }
     }
 
     private static void requireQpStringPageRequest(byte[] encodedHandle, int pageIndex, byte[] callSiteProof) {
         if (encodedHandle == null || encodedHandle.length != 24 || pageIndex < 0 ||
             callSiteProof == null || callSiteProof.length == 0 || callSiteProof.length > 4096) {
-            throw new SecurityException("AKEN string page request is invalid");
+            throw new SecurityException("Qp string page request is invalid");
         }
     }
 }

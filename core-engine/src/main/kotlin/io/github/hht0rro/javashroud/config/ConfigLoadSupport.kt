@@ -32,7 +32,7 @@ fun validateConfig(config: ObfuscationConfig, configPath: Path): ObfuscationConf
             )
         },
     )
-    rejectRemovedQpV4Parameters(normalizedConfig.passes)
+    rejectRemovedCurrentFormatParameters(normalizedConfig.passes)
     rejectRetiredCurrentFormatPassIds(
         passes = normalizedConfig.passes,
         globalRules = normalizedConfig.ruleSet.rules,
@@ -94,7 +94,7 @@ fun validateConfig(config: ObfuscationConfig, configPath: Path): ObfuscationConf
     )
 }
 
-internal fun rejectRemovedQpV4Parameters(passes: List<PassSpec>) {
+internal fun rejectRemovedCurrentFormatParameters(passes: List<PassSpec>) {
     if (passes.any { pass ->
             pass.id == JNI_MICROKERNEL_LOADER_ID && pass.params.containsKey(REMOVED_BOOT_KEY_DELIVERY_PARAM)
         }) {
@@ -149,7 +149,7 @@ private const val PASS_ORDERING_PLANNER_ID = "pass-ordering-planner"
 private const val JNI_MICROKERNEL_LOADER_ID = "jni-microkernel-loader"
 private const val REMOVED_BOOT_KEY_DELIVERY_PARAM = "bootKeyDelivery"
 private const val REMOVED_BOOT_KEY_DELIVERY_MESSAGE =
-    "jni-microkernel-loader bootKeyDelivery 已由 AKEN v4 移除；删除该配置项后重新构建。"
+    "jni-microkernel-loader bootKeyDelivery 已由当前格式移除；删除该配置项后重新构建。"
 
 private fun validateKnownPassIds(passes: List<PassSpec>, configPath: Path) {
     val knownPassIds = buildEngineSchemaPayload().modules.map { it.id }.toSet()

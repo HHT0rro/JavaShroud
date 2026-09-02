@@ -44,12 +44,12 @@ internal fun attachQpCatalogEmitter(
             inputs.forEach { input ->
                 val container = builtEntries.firstOrNull { it.name == input.resourcePath }?.copyBytesForBuild()
                     ?: artifact.jarEntries.firstOrNull { it.name == input.resourcePath }?.bytes?.copyOf()
-                    ?: error("AKEN catalog is missing page container ${input.resourcePath}")
+                    ?: error("Qp catalog is missing page container ${input.resourcePath}")
                 try {
                     val start = input.resourceOffset
                     val length = input.storedLength
                     require(start >= 0 && length > 0 && start <= container.size - length) {
-                        "AKEN catalog page range is invalid for ${input.resourcePath}: offset=$start length=$length size=${container.size}"
+                        "Qp catalog page range is invalid for ${input.resourcePath}: offset=$start length=$length size=${container.size}"
                     }
                     val packedOffset = packed.size()
                     packed.write(container, start, length)

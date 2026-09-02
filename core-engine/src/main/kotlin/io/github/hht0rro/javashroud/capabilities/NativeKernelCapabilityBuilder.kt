@@ -25,7 +25,7 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
         targeting = nativeKernelClassTargeting,
         id = "jni-microkernel-loader",
         name = "JNI Microkernel Loader",
-        description = "Build and embed the current AKEN-R1 Rust native runtime for protected string, page, VM, and unified-defense routes.",
+        description = "Build and embed the current Qp Rust native runtime for protected string, page, VM, and unified-defense routes.",
         tagIds = listOf("native-kernel"),
         stability = "experimental",
         risk = "high",
@@ -76,7 +76,7 @@ internal fun nativeKernelCapabilityBindings(): List<CapabilityBinding> = listOf(
                 type = "enum",
                 defaultValue = JsonNodeFactory.instance.textNode("max"),
                 options = listOf("off", "standard", "max", "max-hardening"),
-                description = "AKEN-R1 Rust cdylib hardening level.",
+        description = "Qp Rust cdylib hardening level.",
             ),
             ParamSchema(
                 key = "seed",

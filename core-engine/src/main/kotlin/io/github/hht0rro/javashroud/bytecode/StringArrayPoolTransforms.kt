@@ -14,8 +14,8 @@ import org.objectweb.asm.tree.InsnNode
 
 private const val STRING_ENCRYPTION_HELPER_OWNER =
     "io/github/hht0rro/javashroud/transforms/protection/qp/QpTextBridge"
-private const val AKEN_STRING_PAGE_DECODE_NAME = "invokeQpStringTerminal"
-private const val AKEN_STRING_PAGE_DECODE_DESC = "([B)Ljava/lang/String;"
+private const val QP_STRING_PAGE_DECODE_NAME = "invokeQpStringTerminal"
+private const val QP_STRING_PAGE_DECODE_DESC = "([B)Ljava/lang/String;"
 
 /**
  * String array pool transform.
@@ -125,9 +125,9 @@ private fun containsQpStringPageDecodeCallsite(classNode: ClassNode): Boolean =
         insns.any { insn ->
             insn is MethodInsnNode &&
                 insn.opcode == Opcodes.INVOKESTATIC &&
-                insn.desc == AKEN_STRING_PAGE_DECODE_DESC &&
+                insn.desc == QP_STRING_PAGE_DECODE_DESC &&
                 (
-                    (insn.owner == STRING_ENCRYPTION_HELPER_OWNER && insn.name == AKEN_STRING_PAGE_DECODE_NAME) ||
+                    (insn.owner == STRING_ENCRYPTION_HELPER_OWNER && insn.name == QP_STRING_PAGE_DECODE_NAME) ||
                         insn.owner.startsWith("r/") || insn.owner.startsWith("jsh/")
                     )
         }

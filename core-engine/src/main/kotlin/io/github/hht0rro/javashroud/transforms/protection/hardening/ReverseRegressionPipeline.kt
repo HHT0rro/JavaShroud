@@ -22,7 +22,7 @@ internal object ReverseRegressionPipeline {
         "vm-page-regrouping",
         "vm-parser",
         "string-literalization-probe",
-        "itk-token-probe",
+        "target-token-probe",
         "exception-clone-detector",
         "cfg-fixed-template-detector",
         "native-catalog-cleanup-probe",
@@ -35,7 +35,7 @@ internal object ReverseRegressionPipeline {
         "vm-page-regrouping" to listOf("native-secrets", "qp-fixed-material"),
         "vm-parser" to listOf("qp-evaluator-direct-recovery", "native-secrets", "qp-fixed-material"),
         "string-literalization-probe" to listOf("string-key-triple", "string-static-triple"),
-        "itk-token-probe" to listOf("itk-aad-used", "itk-key-lane-absent", "indy-target-opacity"),
+        "target-token-probe" to listOf("target-token-aad-used", "java-key-lane-absent", "indy-target-opacity"),
         "exception-clone-detector" to listOf("exception-body-clone"),
         "cfg-fixed-template-detector" to listOf("cfg-fixed-template"),
         "native-catalog-cleanup-probe" to listOf(

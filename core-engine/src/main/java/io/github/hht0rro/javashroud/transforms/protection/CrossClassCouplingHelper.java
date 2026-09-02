@@ -4,7 +4,7 @@ import io.github.hht0rro.javashroud.transforms.protection.qp.QpBridge;
 /**
  * Compatibility marker for old helper-deployment selections.
  *
- * AKEN production pages do not register fragments here and this class never
+ * Qp production pages do not register fragments here and this class never
  * retains key material.  The only usable page-open ABI is the typed,
  * handle/proof-bound route on {@link QpBridge}.
  */

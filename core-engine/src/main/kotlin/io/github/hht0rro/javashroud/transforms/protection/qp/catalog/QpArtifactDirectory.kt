@@ -7,9 +7,9 @@ import java.security.MessageDigest
 import java.util.Arrays
 
 internal const val QP_DIGEST_SIZE: Int = 32
-internal const val R1_ENCODED_HANDLE_SIZE: Int = 24
-internal const val R1_LOCATOR_TOKEN_SIZE: Int = 16
-internal const val QP_PAGE_KEY_SIZE: Int = 1 + Int.SIZE_BYTES + R1_ENCODED_HANDLE_SIZE + R1_LOCATOR_TOKEN_SIZE
+internal const val ENCODED_HANDLE_SIZE: Int = 24
+internal const val LOCATOR_TOKEN_SIZE: Int = 16
+internal const val QP_PAGE_KEY_SIZE: Int = 1 + Int.SIZE_BYTES + ENCODED_HANDLE_SIZE + LOCATOR_TOKEN_SIZE
 
 /**
  * The six fields that identify the runtime expected to consume one directory.
@@ -420,10 +420,10 @@ class PageKey private constructor(
         }
 
     val encodedHandle: ByteArray
-        get() = copyFixedKeyPart(1 + Int.SIZE_BYTES, R1_ENCODED_HANDLE_SIZE)
+        get() = copyFixedKeyPart(1 + Int.SIZE_BYTES, ENCODED_HANDLE_SIZE)
 
     val locatorToken: ByteArray
-        get() = copyFixedKeyPart(1 + Int.SIZE_BYTES + R1_ENCODED_HANDLE_SIZE, R1_LOCATOR_TOKEN_SIZE)
+        get() = copyFixedKeyPart(1 + Int.SIZE_BYTES + ENCODED_HANDLE_SIZE, LOCATOR_TOKEN_SIZE)
 
     fun asBytes(): ByteArray {
         requireLive("page key")
@@ -1228,7 +1228,7 @@ private fun encodePageKey(
             "page index must be non-negative",
         )
     }
-    if (encodedHandle.size != R1_ENCODED_HANDLE_SIZE || locatorToken.size != R1_LOCATOR_TOKEN_SIZE) {
+    if (encodedHandle.size != ENCODED_HANDLE_SIZE || locatorToken.size != LOCATOR_TOKEN_SIZE) {
         QpDirectoryException.fail(
             QpDirectoryException.Code.INVALID_INPUT,
             "page key handle or locator length is invalid",
@@ -1238,7 +1238,7 @@ private fun encodePageKey(
     output[0] = resourceKind.id.toByte()
     writeU32Into(output, 1, pageIndex.toLong())
     encodedHandle.copyInto(output, 1 + Int.SIZE_BYTES)
-    locatorToken.copyInto(output, 1 + Int.SIZE_BYTES + R1_ENCODED_HANDLE_SIZE)
+    locatorToken.copyInto(output, 1 + Int.SIZE_BYTES + ENCODED_HANDLE_SIZE)
     return output
 }
 
@@ -1256,6 +1256,3 @@ private fun compareUnsigned(left: ByteArray, right: ByteArray): Int {
     }
     return left.size.compareTo(right.size)
 }
-
-private val R1_RUNTIME_BINDING_DOMAIN =
-    "JavaShroud/AKEN-R2/ArtifactDirectory/RuntimeBindingDigest".toByteArray(StandardCharsets.US_ASCII)

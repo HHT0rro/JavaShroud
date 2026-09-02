@@ -238,8 +238,8 @@ object EmbeddedHelperDeployment {
             "defenseRequired",
             "loadState",
             "loadMessage",
-            "akenLoadState",
-            "akenLoadMessage",
+            "nativeLoadState",
+            "nativeLoadMessage",
             "diversifiedVmEnabled",
             "vmSelfCheck",
             "nativeSelfCheckFailed",
@@ -702,7 +702,7 @@ object EmbeddedHelperDeployment {
 
     private val NATIVE_RESOURCE_ROOT: String
         get() = io.github.hht0rro.javashroud.transforms.protection.qp.qpResourceDir()
-    private val REQUIRED_R1_NATIVE_ABI_EXPORTS = listOf(
+    private val REQUIRED_NATIVE_ABI_EXPORTS = listOf(
         "JNI_OnLoad",
         "JNI_OnUnload",
         "qp_r1_runtime_binding_digest",
@@ -773,7 +773,7 @@ object EmbeddedHelperDeployment {
     internal fun nativeLibraryContainsRequiredJniVmAbi(bytes: ByteArray): Boolean =
         bytes.isNotEmpty() &&
             REJECTED_LEGACY_NATIVE_ABI_MARKERS.none { marker -> bytes.containsAscii(marker) } &&
-            REQUIRED_R1_NATIVE_ABI_EXPORTS.all { export -> bytes.containsAscii(export) }
+            REQUIRED_NATIVE_ABI_EXPORTS.all { export -> bytes.containsAscii(export) }
 
     /**
      * This is a build-time preflight, not a Java fallback gate. Host validation

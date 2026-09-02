@@ -5,7 +5,7 @@ import io.github.hht0rro.javashroud.analysis.effectiveRuleSetForPass
 import io.github.hht0rro.javashroud.analysis.eligibleClassNamesForAction
 import io.github.hht0rro.javashroud.analysis.eligibleMembersForAction
 import io.github.hht0rro.javashroud.capabilities.buildEngineSchemaPayload
-import io.github.hht0rro.javashroud.config.rejectRemovedQpV4Parameters
+import io.github.hht0rro.javashroud.config.rejectRemovedCurrentFormatParameters
 import io.github.hht0rro.javashroud.analysis.loadBytecodeArtifact
 import io.github.hht0rro.javashroud.artifact.writeBytecodeArtifact
 import io.github.hht0rro.javashroud.model.analysis.MemberKind
@@ -128,9 +128,9 @@ internal fun executeKernelRun(
     config: ObfuscationConfig,
     configPath: Path,
     emit: (EngineEvent) -> Unit = {},
-    vbc4BuildContextOverride: QpBuildContext? = null,
+    qpBuildContextOverride: QpBuildContext? = null,
 ): EngineRunResult {
-    rejectRemovedQpV4Parameters(config.passes)
+    rejectRemovedCurrentFormatParameters(config.passes)
     val bootstrapEvents = buildBootstrapEvents(configPath)
     bootstrapEvents.forEach(emit)
     val preparation = prepareKernelRun(config = config, artifact = loadBytecodeArtifact(config))
@@ -185,7 +185,7 @@ internal fun executeKernelRun(
             planningResult = planningResult.copy(orderedPasses = enabledPassIds),
             enabledPassIds = enabledPassIds,
             emit = emit,
-            vbc4BuildContextOverride = vbc4BuildContextOverride,
+            qpBuildContextOverride = qpBuildContextOverride,
         )
     }
     val knownBrokenPassWarnings = buildKnownBrokenPassWarnings(enabledPassIds)
@@ -201,7 +201,7 @@ internal fun executeKernelRun(
         preparation = preparation,
         reorderedPasses = reorderedPasses,
         emit = emit,
-        vbc4BuildContextOverride = vbc4BuildContextOverride,
+        qpBuildContextOverride = qpBuildContextOverride,
     )
 }
 
@@ -213,7 +213,7 @@ internal fun executeKernelRunWithFallbackOrder(
     planningResult: io.github.hht0rro.javashroud.transforms.protection.PlanningResult,
     enabledPassIds: List<String>,
     emit: (EngineEvent) -> Unit = {},
-    vbc4BuildContextOverride: QpBuildContext? = null,
+    qpBuildContextOverride: QpBuildContext? = null,
 ): EngineRunResult {
     val passMap = registeredPasses.associateBy { it.spec.id }
     val reorderedPasses = planningResult.orderedPasses.mapNotNull { passMap[it] }
@@ -222,7 +222,7 @@ internal fun executeKernelRunWithFallbackOrder(
         preparation = preparation,
         reorderedPasses = reorderedPasses,
         emit = emit,
-        vbc4BuildContextOverride = vbc4BuildContextOverride,
+        qpBuildContextOverride = qpBuildContextOverride,
     )
 }
 
@@ -231,14 +231,14 @@ internal fun executeWithOrderedPasses(
     preparation: KernelPreparation,
     reorderedPasses: List<RegisteredPass>,
     emit: (EngineEvent) -> Unit = {},
-    vbc4BuildContextOverride: QpBuildContext? = null,
+    qpBuildContextOverride: QpBuildContext? = null,
 ): EngineRunResult {
     val outputJarPath = resolveOutputJarPath(config)
     Files.deleteIfExists(CandidateProductionBuildEvidence.evidencePath(outputJarPath))
-    val ownsQpBuildContext = vbc4BuildContextOverride == null
-    val vbc4BuildContext = vbc4BuildContextOverride ?: buildQpBuildContext(config, preparation.artifact)
+    val ownsQpBuildContext = qpBuildContextOverride == null
+    val qpBuildContext = qpBuildContextOverride ?: buildQpBuildContext(config, preparation.artifact)
     return try {
-        withQpBuildContext(vbc4BuildContext) {
+        withQpBuildContext(qpBuildContext) {
             val knownBrokenPassWarnings = buildKnownBrokenPassWarnings(reorderedPasses.filter { it.spec.enabled }.map { it.spec.id })
             knownBrokenPassWarnings.forEach(emit)
             val passExecution = executeRegisteredPasses(
@@ -256,23 +256,23 @@ internal fun executeWithOrderedPasses(
             )
             io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.reserveQpPreSealRoutesIfNeeded(
                 artifact = artifactWithHelpers,
-                seed = vbc4BuildContext.nativeSeed,
+                seed = qpBuildContext.nativeSeed,
             )
             io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.reserveQpTextRoutesIfNeeded(
                 artifact = artifactWithHelpers,
-                seed = vbc4BuildContext.nativeSeed,
+                seed = qpBuildContext.nativeSeed,
             )
             io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.reserveQpClassRoutesIfNeeded(
                 artifact = artifactWithHelpers,
-                seed = vbc4BuildContext.nativeSeed,
+                seed = qpBuildContext.nativeSeed,
             )
             io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.reserveQpNativeRoutesIfNeeded(
                 artifact = artifactWithHelpers,
-                seed = vbc4BuildContext.nativeSeed,
+                seed = qpBuildContext.nativeSeed,
             )
             val artifactWithQpPages = io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing.materializeQpPagesForNativeCompilation(
                 artifact = artifactWithHelpers,
-                seed = vbc4BuildContext.nativeSeed,
+                seed = qpBuildContext.nativeSeed,
             )
             val artifactWithNative = io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment.bundleNativeLibrariesIfAvailable(
                 artifact = artifactWithQpPages,
@@ -335,7 +335,7 @@ internal fun executeWithOrderedPasses(
             EngineRunResult(events = emptyList())
         }
     } finally {
-        if (ownsQpBuildContext) vbc4BuildContext.wipe()
+        if (ownsQpBuildContext) qpBuildContext.wipe()
         RuntimeGarbageCollector.collect(apply = true)
     }
 }

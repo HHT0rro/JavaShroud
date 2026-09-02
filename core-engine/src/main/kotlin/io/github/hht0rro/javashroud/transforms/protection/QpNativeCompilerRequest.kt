@@ -1,7 +1,7 @@
 package io.github.hht0rro.javashroud.transforms.protection
 
 /**
- * Build-only description of the locked AKEN-R1 Rust compilation routes selected
+ * Build-only description of the locked Qp Rust compilation routes selected
  * for one `jni-microkernel-loader` invocation.
  *
  * This contract deliberately stops at the pre-seal JAR entry names. It models
@@ -34,7 +34,7 @@ internal class QpNativeCompilerRequest private constructor(
     companion object {
         private val supportedNativeProtectionLevels = setOf("standard", "aggressive")
 
-        /** Resolve only the two locked AKEN-R1 Rust routes in caller order. */
+        /** Resolve only the two locked Qp Rust routes in caller order. */
         internal fun forTargets(
             nativeProtectionLevel: String,
             nativePackingLevel: QpPackingLevel,
@@ -70,7 +70,7 @@ internal class QpNativeCompilerRequest private constructor(
             }
             return QpNativeCompilerRequest(
                 nativeProtectionLevel = nativeProtectionLevel,
-                nativePackingProfile = NativeRecompilationPackingProfile.forLevel(nativePackingLevel.toR1()),
+                nativePackingProfile = NativeRecompilationPackingProfile.forLevel(nativePackingLevel.toNative()),
                 routes = requestedPlatforms.map { platform ->
                     if (NativeRecompilationRoute.isKnownPlatform(platform)) {
                         NativeRecompilationRoute.forPlatform(platform)
@@ -90,7 +90,7 @@ internal class NativeRecompilationPackingProfile private constructor(
 ) {
     init {
         require(level.hardened == outputForm.hardened) {
-            "AKEN-R1 packing level does not match its direct Rust output policy"
+            "Qp packing level does not match its direct Rust output policy"
         }
     }
 
@@ -159,7 +159,7 @@ internal class NativeRecompilationRoute private constructor(
                 RustToolchainProvisioner.RUNTIME_TARGET_LINUX,
                 RustToolchainProvisioner.LINUX_RUNTIME_TARGET -> RustToolchainProvisioner.RUNTIME_TARGET_LINUX
                 else -> throw IllegalArgumentException(
-                    "AKEN-R1 Rust target platform is unsupported: $value; " +
+                    "Qp Rust target platform is unsupported: $value; " +
                         "only Windows x64 and Linux x64 glibc 2.17 are accepted",
                 )
             }
@@ -169,7 +169,7 @@ internal class NativeRecompilationRoute private constructor(
 
         internal fun forPlatform(platform: String): NativeRecompilationRoute =
             requireNotNull(routesByPlatform[platform]) {
-                "AKEN-R1 Rust target platform is unsupported: $platform"
+                "Qp Rust target platform is unsupported: $platform"
             }
 
         /** Preserve diagnostic failure categories for the raw compatibility adapter. */
@@ -178,7 +178,7 @@ internal class NativeRecompilationRoute private constructor(
             rustTarget = "unsupported",
             outputName = "rejected.unsupported",
             loadSuffix = ".unsupported",
-            shellLoaderProfile = "r1-rejected-route",
+            shellLoaderProfile = "rejected-route",
         )
 
         private fun route(
@@ -195,12 +195,12 @@ internal class NativeRecompilationRoute private constructor(
                 RustToolchainProvisioner.RUNTIME_TARGET_WINDOWS,
                 RustToolchainProvisioner.RUNTIME_TARGET_LINUX,
             )) {
-                "unsupported AKEN-R1 Rust route platform: $platform"
+                "unsupported Qp Rust route platform: $platform"
             }
             require(rustTarget == when (platform) {
                 RustToolchainProvisioner.RUNTIME_TARGET_WINDOWS -> RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET
                 RustToolchainProvisioner.RUNTIME_TARGET_LINUX -> RustToolchainProvisioner.LINUX_RUNTIME_TARGET
-                else -> error("unsupported AKEN-R1 Rust route platform: $platform")
+                else -> error("unsupported Qp Rust route platform: $platform")
             }) {
                 "Rust target does not match route platform: $platform/$rustTarget"
             }

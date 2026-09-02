@@ -132,7 +132,7 @@ internal class CandidateProductionBuildEvidence private constructor(
         check(nativeSnapshot.isNotEmpty()) { "max candidate produced no production native evidence records" }
         nativeSnapshot.forEach { native ->
             check(native.parserProfileId == parserProfileId) {
-                "native parser profile does not match the VBC4 build context for ${native.platform}"
+                "native parser profile does not match the Qp VM build context for ${native.platform}"
             }
         }
 
@@ -149,7 +149,7 @@ internal class CandidateProductionBuildEvidence private constructor(
                     input.resourceKind == QpResourceKind.QpMethod && input.pageIndex == 0
                 }
                 check(pageZeroInputs.map { input -> input.entryToken }.toSet().size == pageZeroInputs.size) {
-                    "final AKEN VBC4 layout contains duplicate page-zero entry tokens"
+                    "final Qp current-format layout contains duplicate page-zero entry tokens"
                 }
                 pageZeroInputs.associate { input ->
                     input.entryToken to FinalMethodPage(
@@ -159,18 +159,18 @@ internal class CandidateProductionBuildEvidence private constructor(
                     )
                 }
             }
-            ?: error("max candidate produced no final AKEN VBC4 page layout")
+            ?: error("max candidate produced no final Qp current-format page layout")
         val finalMethods = methodSnapshot.map { method ->
             val finalPage = finalPageZeroByToken[method.entryToken]
-                ?: error("final AKEN VBC4 layout is missing method evidence token ${method.entryToken.toULong().toString(16)}")
+                ?: error("final Qp current-format layout is missing method evidence token ${method.entryToken.toULong().toString(16)}")
             val finalEntry = finalResources[finalPage.resourcePath]
                 ?: finalResources[qpPageBundlePath()]
                 ?: error("final candidate is missing method evidence resource ${finalPage.resourcePath}")
             check(finalPage.resourceOffset >= 0 && finalPage.storedLength > 0) {
-                "final AKEN VBC4 method evidence route has invalid bounds for ${method.entryToken.toULong().toString(16)}"
+                "final Qp current-format method evidence route has invalid bounds for ${method.entryToken.toULong().toString(16)}"
             }
             check(finalPage.resourceOffset.toLong() + finalPage.storedLength.toLong() <= finalEntry.bytes.size.toLong()) {
-                "final AKEN VBC4 method evidence route exceeds ${finalPage.resourcePath}"
+                "final Qp current-format method evidence route exceeds ${finalPage.resourcePath}"
             }
             val finalDigest = sha256Hex(finalEntry.bytes)
             linkedMapOf(

@@ -484,7 +484,7 @@ internal class MaxBuildSecurityPlan private constructor(
             entropySource = SecureRandomMaxEntropySource(),
         )
 
-        /** Production bridge used while constructing one VBC4 build context. */
+        /** Production bridge used while constructing one Qp VM build context. */
         internal fun <T> withProductionBuildLeaf(
             inputDigest: ByteArray,
             configurationDigest: ByteArray,

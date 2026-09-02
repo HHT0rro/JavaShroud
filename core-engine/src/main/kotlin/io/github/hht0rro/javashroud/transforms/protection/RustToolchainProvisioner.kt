@@ -20,7 +20,7 @@ import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
 
 /**
- * Resolves and deploys the one Rust toolchain used by the AKEN-R1 runtime.
+ * Resolves and deploys the one Rust toolchain used by the Qp runtime.
  *
  * The deployment path is deliberately archive based. Every archive, extracted
  * path, executable, and compiler version is checked before a cache directory
@@ -68,10 +68,10 @@ object RustToolchainProvisioner {
     ) {
         init {
             require(host in setOf(RUNTIME_TARGET_WINDOWS, RUNTIME_TARGET_LINUX)) {
-                "Rust archive host is outside the AKEN-R1 whitelist: $host"
+                "Rust archive host is outside the Qp whitelist: $host"
             }
             require(target in setOf(RUNTIME_TARGET_WINDOWS, RUNTIME_TARGET_LINUX)) {
-                "Rust archive target is outside the AKEN-R1 whitelist: $target"
+                "Rust archive target is outside the Qp whitelist: $target"
             }
             require(kind in setOf("rust", "cargo", "rustfmt", "clippy")) {
                 "unsupported locked Rust archive kind: $kind"
@@ -114,38 +114,38 @@ object RustToolchainProvisioner {
     ) {
         init {
             require(formatVersion == 1) { "unsupported Rust toolchain lock format: $formatVersion" }
-            require(channel == LOCKED_CHANNEL) { "AKEN-R1 requires Rust $LOCKED_CHANNEL, got $channel" }
+            require(channel == LOCKED_CHANNEL) { "Qp requires Rust $LOCKED_CHANNEL, got $channel" }
             require(channel.matches(Regex("[0-9]+\\.[0-9]+\\.[0-9]+"))) {
                 "Rust toolchain channel must be an exact semantic version"
             }
-            require(profile == LOCKED_PROFILE) { "AKEN-R1 requires the minimal Rust profile" }
+            require(profile == LOCKED_PROFILE) { "Qp requires the minimal Rust profile" }
             require(components.distinct() == components) { "Rust toolchain components must be unique" }
             require(components.toSet() == setOf("rustfmt", "clippy")) {
-                "AKEN-R1 requires exactly rustfmt and clippy components"
+                "Qp requires exactly rustfmt and clippy components"
             }
             require(targets.map(RuntimeTarget::id).distinct().size == targets.size) {
                 "Rust runtime targets must be unique"
             }
             require(targets.map(RuntimeTarget::id).toSet() == setOf(RUNTIME_TARGET_WINDOWS, RUNTIME_TARGET_LINUX)) {
-                "AKEN-R1 requires exactly the Windows x64 and Linux x64 runtime routes"
+                "Qp requires exactly the Windows x64 and Linux x64 runtime routes"
             }
             require(targets.first { it.id == RUNTIME_TARGET_WINDOWS }.rustupTarget == WINDOWS_RUSTUP_TARGET) {
-                "AKEN-R1 Windows target drifted from x86_64-pc-windows-gnu"
+                "Qp Windows target drifted from x86_64-pc-windows-gnu"
             }
             require(targets.first { it.id == RUNTIME_TARGET_LINUX }.rustupTarget == LINUX_RUSTUP_TARGET) {
-                "AKEN-R1 Linux rustup target drifted"
+                "Qp Linux rustup target drifted"
             }
             require(targets.first { it.id == RUNTIME_TARGET_WINDOWS }.artifactSuffix == ".dll") {
-                "AKEN-R1 Windows artifacts must use .dll"
+                "Qp Windows artifacts must use .dll"
             }
             require(targets.first { it.id == RUNTIME_TARGET_WINDOWS }.glibcFloor == null) {
-                "AKEN-R1 Windows artifacts must not carry a glibc floor"
+                "Qp Windows artifacts must not carry a glibc floor"
             }
             require(targets.first { it.id == RUNTIME_TARGET_LINUX }.artifactSuffix == ".so") {
-                "AKEN-R1 Linux artifacts must use .so"
+                "Qp Linux artifacts must use .so"
             }
             require(targets.first { it.id == RUNTIME_TARGET_LINUX }.glibcFloor == LINUX_GLIBC_FLOOR) {
-                "AKEN-R1 Linux artifacts must declare glibc 2.17"
+                "Qp Linux artifacts must declare glibc 2.17"
             }
             require(maxArchiveBytes > 0L && maxArchiveBytes <= 4L * 1024L * 1024L * 1024L) {
                 "Rust archive bound is outside the supported range"
@@ -176,7 +176,7 @@ object RustToolchainProvisioner {
                 it.id == normalized ||
                     (it.id == RUNTIME_TARGET_WINDOWS && normalized == it.rustupTarget) ||
                     (it.id == RUNTIME_TARGET_LINUX && normalized == LINUX_RUNTIME_TARGET)
-            } ?: throw RustToolchainException("unsupported AKEN-R1 Rust target: $value")
+            } ?: throw RustToolchainException("unsupported Qp Rust target: $value")
         }
 
         fun archivesFor(host: HostPlatform, target: RuntimeTarget): List<ArchiveSpec> {
@@ -301,7 +301,7 @@ object RustToolchainProvisioner {
         val arch = osArch.trim().lowercase(Locale.ROOT)
         return when {
             os.contains("mac") || os.contains("darwin") -> {
-                throw RustToolchainException("AKEN-R1 rejects macOS hosts and Mach-O builds: $osName/$osArch")
+                throw RustToolchainException("Qp rejects macOS hosts and Mach-O builds: $osName/$osArch")
             }
             os.startsWith("windows") -> {
                 requireSupportedArchitecture(arch)
@@ -311,7 +311,7 @@ object RustToolchainProvisioner {
                 requireSupportedArchitecture(arch)
                 HostPlatform.LINUX_X64
             }
-            else -> throw RustToolchainException("AKEN-R1 Rust host is unsupported: $osName/$osArch")
+            else -> throw RustToolchainException("Qp Rust host is unsupported: $osName/$osArch")
         }
     }
 
@@ -485,12 +485,12 @@ object RustToolchainProvisioner {
             val result = try {
                 commandRunner(listOf(path.toString(), "--version"))
             } catch (error: Exception) {
-                report("warn", "AKEN-R1 $command probe failed: ${error.message.orEmpty()}")
+                report("warn", "Qp $command probe failed: ${error.message.orEmpty()}")
                 return false
             }
             val output = commandOutput(result)
             if (result.exitCode != 0 || !validator(output)) {
-                report("warn", "AKEN-R1 $command is not locked to Rust $LOCKED_CHANNEL")
+                report("warn", "Qp $command is not locked to Rust $LOCKED_CHANNEL")
                 return false
             }
             return true
@@ -522,7 +522,7 @@ object RustToolchainProvisioner {
                     },
                 )
             } catch (error: Exception) {
-                report("error", "AKEN-R1 Rust toolchain download failed: ${error.message.orEmpty()}")
+                report("error", "Qp Rust toolchain download failed: ${error.message.orEmpty()}")
                 return ResolutionResult(null, messages)
             }
             rustc = installed.rustcPath
@@ -536,7 +536,7 @@ object RustToolchainProvisioner {
         }
 
         if (rustc == null || cargo == null) {
-            report("warn", "AKEN-R1 Rust toolchain is incomplete: rustc and cargo are both required")
+            report("warn", "Qp Rust toolchain is incomplete: rustc and cargo are both required")
             return ResolutionResult(null, messages)
         }
         if (!isLockedPair()) return ResolutionResult(null, messages)
@@ -557,7 +557,7 @@ object RustToolchainProvisioner {
                     },
                 )
             } catch (error: Exception) {
-                report("error", "AKEN-R1 Zig/cargo-zigbuild download failed: ${error.message.orEmpty()}")
+                report("error", "Qp Zig/cargo-zigbuild download failed: ${error.message.orEmpty()}")
                 return ResolutionResult(null, messages)
             }
         } else {
@@ -681,7 +681,7 @@ object RustToolchainProvisioner {
             }
             current = current.parent
         }
-        throw RustToolchainException("AKEN-R1 native-toolchain.lock is missing")
+        throw RustToolchainException("Qp native-toolchain.lock is missing")
     }
 
     private fun downloadAndVerify(
@@ -1153,7 +1153,7 @@ object RustToolchainProvisioner {
 
     private fun requireSupportedArchitecture(arch: String) {
         if (arch !in setOf("amd64", "x86_64", "x64")) {
-            throw RustToolchainException("AKEN-R1 Rust runtime requires x86_64; host architecture was $arch")
+            throw RustToolchainException("Qp Rust runtime requires x86_64; host architecture was $arch")
         }
     }
 

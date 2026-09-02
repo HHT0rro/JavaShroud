@@ -21,7 +21,7 @@ import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
 import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
 
 /**
- * Downloads the locked Zig 0.13.0 + cargo-zigbuild 0.18.0 pair used by AKEN-R1.
+ * Downloads the locked Zig 0.13.0 + cargo-zigbuild 0.18.0 pair used by Qp.
  * Clean user machines do not need a preinstalled compiler; the first native
  * recompile fetches and caches the archives under ~/.javashroud/toolchains.
  */

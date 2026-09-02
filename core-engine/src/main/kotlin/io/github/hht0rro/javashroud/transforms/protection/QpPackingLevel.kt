@@ -2,7 +2,7 @@ package io.github.hht0rro.javashroud.transforms.protection
 
 import java.util.Locale
 
-/** Configuration identity for the direct AKEN-R1 Rust cdylib route. */
+/** Configuration identity for the direct Qp Rust cdylib route. */
 internal enum class QpPackingLevel(
     val configValue: String,
     val hardened: Boolean,

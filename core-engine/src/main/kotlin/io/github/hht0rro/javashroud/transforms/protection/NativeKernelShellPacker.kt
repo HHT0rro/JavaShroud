@@ -7,16 +7,16 @@ package io.github.hht0rro.javashroud.transforms.protection
  */
 @Deprecated("Use QpPackingLevel")
 internal object NativeKernelShellPacker {
-    enum class Level(private val r1Level: QpPackingLevel) {
+    enum class Level(private val nativeLevel: QpPackingLevel) {
         OFF(QpPackingLevel.OFF),
         STANDARD(QpPackingLevel.STANDARD),
         MAX(QpPackingLevel.MAX),
         MAX_HARDENING(QpPackingLevel.MAX_HARDENING);
 
         val configValue: String
-            get() = r1Level.configValue
+            get() = nativeLevel.configValue
 
-        internal fun toR1(): QpPackingLevel = r1Level
+        internal fun toNative(): QpPackingLevel = nativeLevel
 
         companion object {
             fun parse(value: String): Level = valueOf(QpPackingLevel.parse(value).name)

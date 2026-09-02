@@ -148,7 +148,7 @@ object QpNativeCompilerPass {
             onMessage(message)
         }
         try {
-            requireR1Request(request)
+            requireSupportedNativeRequest(request)
         } catch (error: Exception) {
             report(rustMessage("error", error.message.orEmpty()))
             return RecompilationDiagnostics(emptyList(), messages)
@@ -213,7 +213,7 @@ object QpNativeCompilerPass {
         evidenceRandom: Random?,
         report: (NativeToolchainProvisioner.ResolutionMessage) -> Unit,
     ): List<RecompiledNative> {
-        requireR1Request(request)
+        requireSupportedNativeRequest(request)
         val context = QpBuildContexts.requireCurrent()
         require(!cfgEvidenceExports || evidenceRandom != null) {
             "CFG evidence compilation requires an explicit deterministic random stream"
@@ -606,7 +606,7 @@ object QpNativeCompilerPass {
     ): NativeToolchainProvisioner.ResolutionMessage =
         NativeToolchainProvisioner.ResolutionMessage(level, message, progress)
 
-    private fun requireR1Request(request: QpNativeCompilerRequest) {
+    private fun requireSupportedNativeRequest(request: QpNativeCompilerRequest) {
         val unsupported = request.routes.filterNot { route -> route.platform in RUST_TARGETS }
         require(unsupported.isEmpty()) {
             "Qp rejects macOS, Mach-O, .dylib, and legacy native routes: ${unsupported.joinToString { it.platform }}"
@@ -879,7 +879,7 @@ object QpNativeCompilerPass {
             put("CARGO_TARGET_DIR", targetDir.toString())
             put("RUSTFLAGS", rustFlagsForCompile(target, specializationHex))
             prependPath(toolchain.extraPathEntries)
-            if (cfgEvidenceExports) put("QP_R1_CFG_EVIDENCE", "1") else remove("QP_R1_CFG_EVIDENCE")
+            if (cfgEvidenceExports) put("QP_CFG_EVIDENCE", "1") else remove("QP_CFG_EVIDENCE")
         }
         return runRustProcess(processBuilder, target)
     }

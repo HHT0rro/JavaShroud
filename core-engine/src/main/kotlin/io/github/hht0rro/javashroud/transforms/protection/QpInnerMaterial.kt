@@ -3,9 +3,9 @@ package io.github.hht0rro.javashroud.transforms.protection
 import java.util.Arrays
 
 /**
- * Build-scoped material for the VBC4 inner frame codec.
+ * Build-scoped material for the Qp VM inner frame codec.
  *
- * The outer AKEN page remains the runtime confidentiality boundary, while
+ * The outer Qp page remains the runtime confidentiality boundary, while
  * these values bind the deterministic inner grammar to one build artifact.
  * Domain labels are HKDF separation labels only; they are never key material.
  */
