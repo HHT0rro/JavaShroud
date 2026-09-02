@@ -1366,16 +1366,10 @@ fn dynamic_descriptor(reference: &str) -> Option<&str> {
     let mut fields = reference.split('|');
     match fields.next()? {
         "mhstatic" => fields.next().and_then(|_| fields.next()),
-        // The current-format lambda recipe is encoded as:
-        //
-        //   lambda|<factory-name>|<factory-descriptor>|<impl-tag>|...
-        //
-        // The VM invokes the generated factory with the captured arguments,
-        // so its descriptor (field 2) is the descriptor that determines how
-        // many values must be popped from the VM operand stack.  Treating
-        // field 1 as a member reference (the old generic fallback) produced
-        // a synthetic VerifyError before the host could link the SAM lambda.
-        "lambda" => fields.next().and_then(|_| fields.next()),
+        // LambdaMetafactory carries a business implementation handle and is
+        // intentionally JVM-owned. A legacy recipe must never reach the
+        // Native host, so reject it before stack arity or member parsing.
+        "lambda" => None,
         "concat" => fields.next(),
         "sam" | "sam-lambda" => fields
             .nth(1)
@@ -1646,17 +1640,10 @@ mod tests {
     use crate::ProgramBuilder;
 
     #[test]
-    fn lambda_recipe_uses_factory_descriptor_for_stack_arity() {
+    fn lambda_recipe_is_rejected_before_host_dispatch() {
         let reference =
             "lambda|run|(Lexample/Exec;)Ljava/lang/Runnable;|5|example/Exec|doAdd|()V|()V|()V|0;;";
-        assert_eq!(
-            dynamic_descriptor(reference),
-            Some("(Lexample/Exec;)Ljava/lang/Runnable;")
-        );
-        assert_eq!(
-            descriptor_arity(dynamic_descriptor(reference).unwrap()),
-            Some(1)
-        );
+        assert_eq!(dynamic_descriptor(reference), None);
     }
 
     #[test]

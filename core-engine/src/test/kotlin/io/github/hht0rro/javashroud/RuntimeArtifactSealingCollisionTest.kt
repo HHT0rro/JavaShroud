@@ -26,7 +26,7 @@ import java.nio.file.Path
 
 class RuntimeArtifactSealingCollisionTest {
     @Test
-    fun `final runtime sealing preserves the native SAM bridge name`() {
+    fun `final runtime sealing does not preserve a generic SAM bridge`() {
         val helperName = "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge"
         val helperBytes = loadClassBytes("$helperName.class")
         val helperArtifact = ClassArtifact(
@@ -41,11 +41,9 @@ class RuntimeArtifactSealingCollisionTest {
         val sealedHelper = sealed.classArtifacts.single { it.summary.internalName.startsWith("jsh/") }
         val node = ClassNode()
         org.objectweb.asm.ClassReader(sealedHelper.bytes).accept(node, org.objectweb.asm.ClassReader.SKIP_FRAMES)
-        val bridgeDescriptor = "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;"
-
         assertTrue(
-            node.methods.any { it.name == "createSamLambda" && it.desc == bridgeDescriptor },
-            "The native VM resolves createSamLambda by its fixed JNI method name after final sealing.",
+            node.methods.none { it.name == "createRunnableLambda" || it.name == "createSamLambda" || it.name == "resolveVmMethodHandle" },
+            "Sealed helpers must not retain generic Java target entrypoints.",
         )
     }
 

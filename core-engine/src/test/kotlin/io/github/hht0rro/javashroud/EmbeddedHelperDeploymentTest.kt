@@ -42,9 +42,6 @@ class EmbeddedHelperDeploymentTest {
         for (entryName in listOf(
             "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.class",
             "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge${"$"}QpNativeLibrary.class",
-            "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge${"$"}TypeParseResult.class",
-            "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge${"$"}SamLambdaOptions.class",
-            "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge${"$"}SamInvocationHandler.class",
         )) {
             assertTrue(entryName in entries, "Qp JNI helper dependency must be embedded: $entryName")
         }

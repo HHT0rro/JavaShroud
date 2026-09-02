@@ -71,9 +71,6 @@ private val SEALED_RUNTIME_HELPERS = listOf(
     "$QP_HELPER_PACKAGE/QpBridge",
     "$QP_HELPER_PACKAGE/QpBridge${"$"}QpNativeLibrary",
     "$QP_HELPER_PACKAGE/QpBridge${"$"}CatalogBundle",
-    "$QP_HELPER_PACKAGE/QpBridge${"$"}TypeParseResult",
-    "$QP_HELPER_PACKAGE/QpBridge${"$"}SamLambdaOptions",
-    "$QP_HELPER_PACKAGE/QpBridge${"$"}SamInvocationHandler",
 )
 
 /**
@@ -885,8 +882,7 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
         if (name.startsWith("native") && name !in derivedQpNativeNames.keys) return
         if (
             owner == "$QP_HELPER_PACKAGE/QpBridge" &&
-            (name == "createSamLambda" ||
-                name == "takeExpectedShellBindingCommitment" || name == "takeBootSecretForNativeShell")
+            (name == "takeExpectedShellBindingCommitment" || name == "takeBootSecretForNativeShell")
         ) return
         val sealedMethodName = derivedQpNativeNames[name]
             ?: sealedMemberName(seed, owner, name, descriptor, "m")
@@ -952,8 +948,6 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
         "nativeInvokeSite",
         "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[B[Ljava/lang/Object;Z)Ljava/lang/Object;",
     )
-    addMethod(jniHelper, "createSamLambda", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;")
-
     val bootstrap = "$PROTECTION_HELPER_PACKAGE/BootstrapEncryptionHelper"
     addMethod(bootstrap, "decryptBytes", "(Ljava/lang/String;Ljava/lang/String;)[B")
     addMethod(bootstrap, "encryptedBootstrap", "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;")

@@ -39,17 +39,14 @@ object EmbeddedHelperDeployment {
     private const val QP_PKG = "$PKG/qp"
     private const val HELPER_RESOURCE_ROOT = "META-INF/javashroud-helpers"
     /**
-     * The Qp v4 helper set deliberately omits legacy boot/resource decoder
-     * nested classes.  The outer helper is regenerated below with only the
-     * typed current-page surface and its relocation/lambda support closure.
+     * The current helper set omits legacy boot/resource decoder nested classes.
+     * The outer helper is regenerated below with only the typed current-page
+     * surface and its relocation support closure.
      */
     private val qpRuntimeHelpers = listOf(
         "$QP_PKG/QpBridge",
         "$QP_PKG/QpBridge${"$"}QpNativeLibrary",
         "$QP_PKG/QpBridge${"$"}CatalogBundle",
-        "$QP_PKG/QpBridge${"$"}TypeParseResult",
-        "$QP_PKG/QpBridge${"$"}SamLambdaOptions",
-        "$QP_PKG/QpBridge${"$"}SamInvocationHandler",
         // The final target-token wrapper uses QpBootstrap even when the
         // invoke-dynamic-indirection pass is disabled. Keep it in the same
         // helper closure so sealing relocates the bootstrap and QpBridge in
@@ -94,9 +91,6 @@ object EmbeddedHelperDeployment {
             "$QP_PKG/QpBridge${"$"}SealedNativeLibrary" to { loadClasspathHelperByName("QpBridge${"$"}SealedNativeLibrary") },
             "$QP_PKG/QpBridge${"$"}QpNativeLibrary" to { loadClasspathHelperByName("QpBridge${"$"}QpNativeLibrary") },
             "$QP_PKG/QpBridge${"$"}CatalogBundle" to { loadClasspathHelperByName("QpBridge${"$"}CatalogBundle") },
-            "$QP_PKG/QpBridge${"$"}TypeParseResult" to { loadClasspathHelperByName("QpBridge${"$"}TypeParseResult") },
-            "$QP_PKG/QpBridge${"$"}SamLambdaOptions" to { loadClasspathHelperByName("QpBridge${"$"}SamLambdaOptions") },
-            "$QP_PKG/QpBridge${"$"}SamInvocationHandler" to { loadClasspathHelperByName("QpBridge${"$"}SamInvocationHandler") },
         )
     }
 
@@ -218,9 +212,6 @@ object EmbeddedHelperDeployment {
         val allowedNested = setOf(
             "$owner${"$"}QpNativeLibrary",
             "$owner${"$"}CatalogBundle",
-            "$owner${"$"}TypeParseResult",
-            "$owner${"$"}SamLambdaOptions",
-            "$owner${"$"}SamInvocationHandler",
         )
         val allowedFields = setOf(
             "LOAD_FAILED",
@@ -265,12 +256,6 @@ object EmbeddedHelperDeployment {
             "QP_NATIVE_MAX_LIBRARY_BYTES",
             "QP_NATIVE_SHA256_LENGTH",
             "QP_NATIVE_BINDINGS_MAX_BYTES",
-            "LAMBDA_FLAG_SERIALIZABLE",
-            "LAMBDA_FLAG_MARKERS",
-            "LAMBDA_FLAG_BRIDGES",
-            "LAMBDA_SUPPORTED_FLAGS",
-            "SAM_LAMBDA_CACHE",
-            "SAM_BRIDGE_INTERFACE_CACHE",
         )
         val removedNames = setOf(
             // Qp keeps only the native loader handshake (nativeInit,
@@ -435,29 +420,12 @@ object EmbeddedHelperDeployment {
             }
 
             override fun visitEnd() {
-                emitQpOnlyJniHelperClinit(writer, owner)
                 emitQpOnlyJniHelperLoadMethods(writer, owner)
                 super.visitEnd()
             }
         }
         reader.accept(visitor, 0)
         return writer.toByteArray()
-    }
-
-    private fun emitQpOnlyJniHelperClinit(writer: ClassWriter, owner: String) {
-        val mv = writer.visitMethod(Opcodes.ACC_STATIC, "<clinit>", "()V", null, null)
-        mv.visitCode()
-        mv.visitTypeInsn(Opcodes.NEW, "java/util/concurrent/ConcurrentHashMap")
-        mv.visitInsn(Opcodes.DUP)
-        mv.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/util/concurrent/ConcurrentHashMap", "<init>", "()V", false)
-        mv.visitFieldInsn(Opcodes.PUTSTATIC, owner, "SAM_LAMBDA_CACHE", "Ljava/util/concurrent/ConcurrentMap;")
-        mv.visitTypeInsn(Opcodes.NEW, "java/util/concurrent/ConcurrentHashMap")
-        mv.visitInsn(Opcodes.DUP)
-        mv.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/util/concurrent/ConcurrentHashMap", "<init>", "()V", false)
-        mv.visitFieldInsn(Opcodes.PUTSTATIC, owner, "SAM_BRIDGE_INTERFACE_CACHE", "Ljava/util/concurrent/ConcurrentMap;")
-        mv.visitInsn(Opcodes.RETURN)
-        mv.visitMaxs(2, 0)
-        mv.visitEnd()
     }
 
     private fun emitQpOnlyJniHelperLoadMethods(writer: ClassWriter, owner: String) {

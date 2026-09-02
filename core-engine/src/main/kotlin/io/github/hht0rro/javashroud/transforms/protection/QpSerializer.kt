@@ -1707,12 +1707,9 @@ internal class QpSerializer(
                 staticTarget.desc,
             ).joinToString("|")
         }
-        val samRecipe = extractSamLambdaMetafactoryRecipe(normalized)
-        if (samRecipe != null) {
-            return encodeSamLambdaMetafactoryConstant(
-                name = normalized.name,
-                descriptor = normalized.descriptor,
-                recipe = samRecipe,
+        if (normalized.bootstrapMethodHandle.owner == "java/lang/invoke/LambdaMetafactory") {
+            throw UnsupportedOperationException(
+                "LambdaMetafactory targets are JVM-owned and cannot enter the Qp VM",
             )
         }
         val bsmRef = "${normalized.bootstrapMethodHandle.owner}.${normalized.bootstrapMethodHandle.name}:${normalized.bootstrapMethodHandle.desc}"

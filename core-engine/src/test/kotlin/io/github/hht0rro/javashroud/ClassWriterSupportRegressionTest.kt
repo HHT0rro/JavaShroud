@@ -7,8 +7,8 @@ import org.objectweb.asm.ClassWriter
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
-import kotlin.test.assertNotNull
 import kotlin.test.assertFailsWith
+import kotlin.test.assertTrue
 
 class ClassWriterSupportRegressionTest {
     @Test
@@ -30,7 +30,7 @@ class ClassWriterSupportRegressionTest {
     }
 
     @Test
-    fun anti_decompiler_preserves_throwable_frames_in_embedded_jni_helper() {
+    fun anti_decompiler_does_not_reintroduce_generic_target_entrypoints_in_embedded_jni_helper() {
         val resourceName = "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.class"
         val original = requireNotNull(javaClass.classLoader.getResourceAsStream(resourceName)).use { it.readBytes() }
         val transformed = insertAntiDecompilerStructures(original)
@@ -38,9 +38,11 @@ class ClassWriterSupportRegressionTest {
         val loaded = VerifyingClassLoader(javaClass.classLoader).defineAndResolve(transformed)
 
         assertEquals("io.github.hht0rro.javashroud.transforms.protection.qp.QpBridge", loaded.name)
-        assertNotNull(loaded.getDeclaredMethod("createSamLambda", String::class.java, String::class.java, String::class.java,
-            String::class.java, String::class.java, Int::class.javaPrimitiveType, String::class.java, String::class.java,
-            String::class.java, Array<Any>::class.java))
+        assertTrue(loaded.declaredMethods.none { method ->
+            method.name == "createRunnableLambda" ||
+                method.name == "createSamLambda" ||
+                method.name == "resolveVmMethodHandle"
+        })
     }
 
     @Test
