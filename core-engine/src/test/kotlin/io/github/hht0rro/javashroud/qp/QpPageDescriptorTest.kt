@@ -23,7 +23,7 @@ class QpPageDescriptorTest {
     }
 
     @Test
-    fun descriptor_round_trips_one_page_and_rechecks_current_vbc4_evaluator_binding() {
+    fun descriptor_round_trips_one_page_and_rechecks_current_native_evaluator_binding() {
         val plan = QpBuildPlan.create(commitment, DeterministicSecureRandom(701))
         try {
             val page = plan.registerPage(
@@ -188,7 +188,7 @@ class QpPageDescriptorTest {
     }
 
     @Test
-    fun current_vbc4_evaluator_uses_variable_fragment_dialect_and_no_retired_lane_domains() {
+    fun current_native_evaluator_uses_variable_fragment_dialect_and_no_retired_lane_domains() {
         val plan = QpBuildPlan.create(commitment, DeterministicSecureRandom(1_013))
         try {
             val page = plan.registerPage(

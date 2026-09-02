@@ -162,7 +162,7 @@ class QpBuildPlanTypedPreassignedHandleTest {
     }
 
     @Test
-    fun vbc4_page_zero_preassigned_handle_remains_accepted() {
+    fun native_page_zero_preassigned_handle_remains_accepted() {
         val expectedHandle = handleFor(0x74)
         val plan = newPlan()
         try {

@@ -19,7 +19,7 @@ import org.objectweb.asm.Opcodes
 
 class HardenedNegativeTamperTest {
     @Test
-    fun itk_token_does_not_open_across_artifacts_or_sites() {
+    fun target_token_does_not_open_across_artifacts_or_sites() {
         val target = QpTargetTokenEnvelope.Target("com/example/T", "work", "(I)I", Opcodes.H_INVOKESTATIC, false)
         val artifactA = binding(digestFill = 3, owner = "com/foo/A", site = 1)
         val artifactB = binding(digestFill = 9, owner = "com/foo/A", site = 1)

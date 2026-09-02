@@ -82,7 +82,7 @@ class StringCachePolicyTest {
     }
 
     @Test
-    fun malformed_aken_page_request_fails_closed_before_native_dispatch() {
+    fun malformed_native_page_request_fails_closed_before_native_dispatch() {
         assertFailsWith<SecurityException> {
             QpTextBridge.invokeQpStringTerminal(ByteArray(23), 0, byteArrayOf(1))
         }

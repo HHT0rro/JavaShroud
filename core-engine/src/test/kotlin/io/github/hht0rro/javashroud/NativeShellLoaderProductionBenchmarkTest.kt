@@ -8,7 +8,7 @@ import kotlin.test.assertTrue
 
 class NativeShellLoaderProductionBenchmarkTest {
     @Test
-    fun r1_rust_runtime_contracts_are_bounded_authenticated_and_wiped() {
+    fun native_rust_runtime_contracts_are_bounded_authenticated_and_wiped() {
         val rustRoot = rustRoot()
         val workspace = Files.readString(rustRoot.resolve("Cargo.toml"))
         val crypto = Files.readString(rustRoot.resolve("crates/qp-crypto/src/lib.rs"))
@@ -40,9 +40,9 @@ class NativeShellLoaderProductionBenchmarkTest {
             .filter { it.startsWith("\"") }
             .map { it.removeSuffix(",").removeSurrounding("\"") }
             .toList()
-        assertEquals(expectedMembers, members, "Cargo workspace members must be the current R1 set")
-        assertContains(workspace, "runtime_abi = \"qp_ffi\"", "R1 workspace metadata")
-        assertContains(workspace, "unsafe_code = \"deny\"", "R1 workspace lint policy")
+        assertEquals(expectedMembers, members, "Cargo workspace members must be the current set")
+        assertContains(workspace, "runtime_abi = \"qp_ffi\"", "workspace metadata")
+        assertContains(workspace, "unsafe_code = \"deny\"", "workspace lint policy")
 
         assertContains(cryptoManifest, "name = \"qp-crypto\"", "qp-crypto manifest")
         assertContains(crypto, "#![forbid(unsafe_code)]", "qp-crypto")
@@ -59,7 +59,7 @@ class NativeShellLoaderProductionBenchmarkTest {
             "impl Drop for WipedVec",
             "expected_tag.fill(0);",
         )) {
-            assertContains(crypto, marker, "software-only crypto R1 contract")
+            assertContains(crypto, marker, "software-only crypto contract")
         }
         assertRustTests(
             crypto,
@@ -67,7 +67,7 @@ class NativeShellLoaderProductionBenchmarkTest {
             "aes256_gcm_matches_nist_vector_and_round_trips",
             "aes256_gcm_empty_vector_and_authentication_failures",
             "ghash_and_capability_gate_match_known_answers",
-            "public_helpers_enforce_the_kotlin_r1_bounds",
+            "public_helpers_enforce_the_current_bounds",
         )
 
         assertContains(resourceManifest, "name = \"qp-resource\"", "qp-resource manifest")
@@ -106,7 +106,7 @@ class NativeShellLoaderProductionBenchmarkTest {
         )
         assertRustTests(
             resource,
-            "directory_is_r1_only_sorted_and_binary_searchable",
+            "directory_is_current_sorted_and_binary_searchable",
             "directory_authentication_rejects_reordering_and_tampering",
             "raw_and_rle_zstd_frames_are_bounded_and_wiped",
             "compressed_zstd_block_decodes_without_c_or_sys_dependencies",
@@ -124,7 +124,7 @@ class NativeShellLoaderProductionBenchmarkTest {
             "pub const QP_MAX_SECTION_SIZE",
             "pub const QP_MAX_INSTRUCTIONS",
             "pub struct ParserLimits",
-            "parser limit exceeds the R1 bound",
+            "parser limit exceeds the current bound",
             "if frame.len() > self.limits.max_frame_size",
             "fn parse_authenticated(",
             "AuthenticationFailed",
@@ -174,8 +174,8 @@ class NativeShellLoaderProductionBenchmarkTest {
             "pub const MAX_PAYLOAD_SIZE",
             "pub const MAX_PAGE_FRAME_SIZE",
             "pub const MAX_PAGE_KEY_SIZE",
-            "pub fn encode_r1_frame(",
-            "pub fn open_r1_frame(",
+            "pub fn encode_current_frame(",
+            "pub fn open_current_frame(",
             "pub fn authenticate(&mut self",
             "self.encoded.fill(0);",
             "self.dek.fill(0);",
@@ -236,7 +236,7 @@ class NativeShellLoaderProductionBenchmarkTest {
     }
 
     @Test
-    fun native_shell_loader_r1_contract_rejects_unsafe_pe_elf_and_legacy_formats() {
+    fun native_shell_loader_contract_rejects_unsafe_pe_elf_and_legacy_formats() {
         val rustRoot = rustRoot()
         val shellManifest = Files.readString(rustRoot.resolve("crates/qp-shell/Cargo.toml"))
         val shell = Files.readString(rustRoot.resolve("crates/qp-shell/src/lib.rs"))
@@ -255,10 +255,10 @@ class NativeShellLoaderProductionBenchmarkTest {
             "pub const MAX_ARTIFACT_SIZE",
             "pub const MAX_SECTIONS",
             "pub const MAX_SEGMENTS",
-            "pub const R1_REQUIRED_EXPORTS",
+            "pub const REQUIRED_NATIVE_EXPORTS",
             "Pe64Image::parse(bytes)?",
             "Elf64Image::parse(bytes)?",
-            "plan.require_r1_exports()?",
+            "plan.require_native_exports()?",
             "EmptyArtifact",
             "TargetFormatMismatch",
             "MissingRequiredExport",
@@ -326,7 +326,7 @@ class NativeShellLoaderProductionBenchmarkTest {
         )
         assertRustTests(
             platform,
-            "only_the_two_r1_targets_are_accepted",
+            "only_the_two_supported_targets_are_accepted",
             "retired_artifact_names_fail_closed",
         )
 
@@ -344,7 +344,7 @@ class NativeShellLoaderProductionBenchmarkTest {
             "shell payload parsing must precede decompression only after authentication",
         )
         for (marker in listOf(
-            "pub const R1_PAYLOAD_MAGIC",
+            "pub const CURRENT_PAYLOAD_MAGIC",
             "pub const MAX_PAYLOAD_BYTES",
             "pub fn open_with<D: PayloadDecompressor>(",
             "PayloadDigestMismatch",

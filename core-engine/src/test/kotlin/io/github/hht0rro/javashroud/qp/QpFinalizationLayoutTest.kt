@@ -30,7 +30,7 @@ class QpFinalizationLayoutTest {
         helperBytes.fill(0)
 
         val identity0 = "fixture:qp-finalization:first".encodeToByteArray()
-        val plain0 = "first finalized VBC4 page".encodeToByteArray()
+        val plain0 = "first finalized native VM page".encodeToByteArray()
         val proof0 = ByteArray(41) { index -> (index * 17 + 3).toByte() }
         val page0 = try {
             QpPendingPage.create(
@@ -49,7 +49,7 @@ class QpFinalizationLayoutTest {
         }
         val secondOffset = page0.expectedStoredLength + 19
         val identity1 = "fixture:qp-finalization:second".encodeToByteArray()
-        val plain1 = "second finalized VBC4 page with a separate identity".encodeToByteArray()
+        val plain1 = "second finalized native VM page with a separate identity".encodeToByteArray()
         val proof1 = ByteArray(67) { index -> (index * 29 + 11).toByte() }
         val page1 = try {
             QpPendingPage.create(
@@ -83,7 +83,7 @@ class QpFinalizationLayoutTest {
             pendingPages = listOf(page0, page1),
             fixedEntries = fixedEntries,
             rootShardRanges = listOf(rootShard),
-            vbc4StateBindingLayoutDigest = ByteArray(32) { index -> (index * 29 + 5).toByte() },
+            pageStateBindingLayoutDigest = ByteArray(32) { index -> (index * 29 + 5).toByte() },
         )
         try {
             assertTrue(plan.isWiped())

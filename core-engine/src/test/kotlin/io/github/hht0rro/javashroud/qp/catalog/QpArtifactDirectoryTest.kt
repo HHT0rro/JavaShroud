@@ -11,7 +11,7 @@ import kotlin.test.assertTrue
 
 class QpArtifactDirectoryTest {
     @Test
-    fun rust_directory_parser_uses_the_current_jsr1dir_contract() {
+    fun rust_directory_parser_uses_the_current_directory_contract() {
         val rust = java.nio.file.Files.readString(
             java.nio.file.Path.of("src/main/rust/crates/qp-page/src/directory.rs"),
         )

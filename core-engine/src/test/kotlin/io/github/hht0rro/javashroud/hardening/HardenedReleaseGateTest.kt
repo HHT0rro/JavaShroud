@@ -119,7 +119,7 @@ class HardenedReleaseGateTest {
     }
 
     @Test
-    fun scan_rejects_vbc4_fixed_domain_labels() {
+    fun scan_rejects_fixed_domain_labels() {
         val writer = ClassWriter(0)
         writer.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC, "sample/VbcLeak", null, "java/lang/Object", null)
         val mv = writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "run", "()Ljava/lang/String;", null, null)
@@ -164,7 +164,7 @@ class HardenedReleaseGateTest {
     }
 
     @Test
-    fun packaged_native_runtime_omits_vbc4_ascii_domains() {
+    fun packaged_native_runtime_omits_internal_ascii_domains() {
         val native = javaClass.classLoader.getResourceAsStream("META-INF/jsrt/windows-x64/qp_ffi.dll")?.use { it.readBytes() }
             ?: javaClass.classLoader.getResourceAsStream("META-INF/jsrt/linux-x64/libqp_ffi.so")?.use { it.readBytes() }
             ?: return
@@ -544,7 +544,7 @@ class HardenedReleaseGateTest {
     }
 
     @Test
-    fun scan_rejects_itk_key_lanes_and_accepts_current_bootstrap_aad() {
+    fun scan_rejects_java_key_lanes_and_accepts_current_bootstrap_aad() {
         val laneBytes = byteArrayOf(
             0x4A, 0x53, 0x52, 0x30,
             0x4A, 0x53, 0x52, 0x31,
@@ -559,7 +559,7 @@ class HardenedReleaseGateTest {
         val jar = dir.resolve("out.jar")
         io.github.hht0rro.javashroud.artifact.writeBytecodeArtifact(jar, laneArtifact)
         val laneReport = ReleaseArtifactScan.scan(jar, laneArtifact, HardenedProtectionProfile.RELEASE_HARDENED, emptyList())
-        assertFalse(laneReport.findings.single { it.check == "itk-key-lane-absent" }.passed)
+        assertFalse(laneReport.findings.single { it.check == "java-key-lane-absent" }.passed)
         Files.walk(dir).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
 
         val helperBytes = javaClass.classLoader.getResourceAsStream(
@@ -582,8 +582,8 @@ class HardenedReleaseGateTest {
             HardenedProtectionProfile.RELEASE_HARDENED,
             emptyList(),
         )
-        assertTrue(helperReport.findings.single { it.check == "itk-key-lane-absent" }.passed)
-        assertTrue(helperReport.findings.single { it.check == "itk-aad-used" }.passed)
+        assertTrue(helperReport.findings.single { it.check == "java-key-lane-absent" }.passed)
+        assertTrue(helperReport.findings.single { it.check == "target-token-aad-used" }.passed)
         assertTrue(helperReport.findings.single { it.check == "runtime-binding-nonzero" }.passed)
         Files.walk(helperDir).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
     }

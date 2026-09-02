@@ -43,7 +43,7 @@ class QpPageMaterializationTest {
         )
         val inputA = inputFor(
             page = pageA,
-            plaintext = "first VBC4 materialized page".encodeToByteArray(),
+            plaintext = "first native VM materialized page".encodeToByteArray(),
             resourcePath = "META-INF/.qp/p/first.bin",
             resourceOffset = 0,
             callSiteProof = byteArrayOf(0x11, 0x12, 0x13),
@@ -387,7 +387,7 @@ class QpPageMaterializationTest {
 
                 override fun next(): QpPageMaterializationInput = when (nextCount++) {
                     0 -> input
-                    else -> throw IllegalStateException("fixture AKEN input iteration failure")
+                    else -> throw IllegalStateException("fixture Qp input iteration failure")
                 }
             }
         }

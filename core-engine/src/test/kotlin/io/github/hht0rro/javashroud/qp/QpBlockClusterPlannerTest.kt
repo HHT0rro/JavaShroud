@@ -44,7 +44,7 @@ class QpBlockClusterPlannerTest {
     }
 
     @Test
-    fun target_selector_is_page_local_and_rejects_values_outside_the_vbc4_set() {
+    fun target_selector_is_page_local_and_rejects_values_outside_the_native_set() {
         val program = framedQp(
             blockIds = listOf(7, 8, 9),
             encodedPayloadLengths = listOf(588, 588, 188),

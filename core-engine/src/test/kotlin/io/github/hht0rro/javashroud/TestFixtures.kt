@@ -16,10 +16,10 @@ import io.github.hht0rro.javashroud.model.config.RuleSpec
 import java.nio.file.Files
 import java.nio.file.Path
 
-/** Retained call-site adapter: AKEN-R1 does not install process boot material. */
+/** Retained call-site adapter: the current runtime does not install process boot material. */
 internal inline fun <T> withTestBootSecret(block: () -> T): T = block()
 
-/** Retained call-site adapter: AKEN-R1 starts child JVMs without shell secrets. */
+/** Retained call-site adapter: the current runtime starts child JVMs without shell secrets. */
 internal fun ProcessBuilder.withTestBootSecret(): ProcessBuilder = this
 
 internal fun testConfig(

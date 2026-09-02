@@ -16,7 +16,7 @@ import kotlin.test.assertTrue
 
 class QpPageEmitterTest {
     @Test
-    fun emits_independent_pages_for_one_vbc4_method_and_wipes_every_owner() {
+    fun emits_independent_pages_for_one_native_method_and_wipes_every_owner() {
         val commitment = ByteArray(QpArtifactCommitment.DIGEST_SIZE) { index ->
             (index * 31 + 9).toByte()
         }
@@ -37,7 +37,7 @@ class QpPageEmitterTest {
             page = page0,
             entryToken = expectedEntryToken,
             identity = expectedIdentity,
-            plaintext = "first VBC4 page".encodeToByteArray(),
+            plaintext = "first native VM page".encodeToByteArray(),
             resourcePath = "META-INF/.qp/qp/method-0.bin",
             callSiteProof = expectedProofs[0],
         )
@@ -45,7 +45,7 @@ class QpPageEmitterTest {
             page = page1,
             entryToken = expectedEntryToken,
             identity = expectedIdentity,
-            plaintext = "second VBC4 page".encodeToByteArray(),
+            plaintext = "second native VM page".encodeToByteArray(),
             resourcePath = "META-INF/.qp/qp/method-1.bin",
             callSiteProof = expectedProofs[1],
         )

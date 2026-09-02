@@ -136,7 +136,7 @@ class QpMethodProductionMaterializerTest {
                 assertEquals(
                     2,
                     pageEntries.size,
-                    "each independently reserved VBC4 method must retain a live route until all candidates are planned",
+                    "each independently reserved native VM method must retain a live route until all candidates are planned",
                 )
                 assertTrue(
                     pageEntries.all { pageEntry -> materialized.jarEntries.any { entry -> entry.name == pageEntry.name } },

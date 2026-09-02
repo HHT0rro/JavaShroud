@@ -13,7 +13,7 @@ import org.objectweb.asm.Opcodes
 
 class QpVmDispatcherGenerationTest {
     @Test
-    fun page_zero_dispatcher_uses_the_typed_aken_bridge_and_obfuscated_byte_arrays() {
+    fun page_zero_dispatcher_uses_the_typed_native_bridge_and_obfuscated_byte_arrays() {
         val classBytes = generatedQpDispatcher()
         assertNotNull(DefiningClassLoader(javaClass.classLoader).define(classBytes))
 
@@ -60,7 +60,7 @@ class QpVmDispatcherGenerationTest {
         }, ClassReader.EXPAND_FRAMES)
 
         assertTrue(typedQpInvocation, "expected the page-zero dispatcher to call executeQpVmPage")
-        assertFalse(legacyVmInvocation, "AKEN page-zero dispatcher must not use a legacy VM resource bridge")
+        assertFalse(legacyVmInvocation, "Qp page-zero dispatcher must not use a legacy VM resource bridge")
         assertTrue(byteArrayAllocations >= 2, "expected independent byte-array construction for handle and proof")
         assertTrue(iconstZeroCount >= 1, "expected an explicit page-zero argument")
     }
@@ -96,8 +96,8 @@ class QpVmDispatcherGenerationTest {
             entryToken = 0x1020_3040_5060_7080L,
             dispatchMethod = "executeQpVmPage",
             dispatchDescriptor = "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;",
-            akenEncodedHandle = ByteArray(24) { index -> (index * 17 + 3).toByte() },
-            akenCallSiteProof = ByteArray(32) { index -> (index * 29 + 7).toByte() },
+            pageEncodedHandle = ByteArray(24) { index -> (index * 17 + 3).toByte() },
+            pageCallSiteProof = ByteArray(32) { index -> (index * 29 + 7).toByte() },
         )
         writer.visitEnd()
         return writer.toByteArray()

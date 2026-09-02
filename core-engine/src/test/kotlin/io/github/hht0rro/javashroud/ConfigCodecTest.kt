@@ -479,8 +479,8 @@ class ConfigCodecTest {
     }
 
     @Test
-    fun validateConfig_rejects_removed_aken_v4_boot_key_delivery_with_migration_message() {
-        val inputJar = Files.createTempFile("javashroud-config-qp-v4-removed-param", ".jar")
+    fun validateConfig_rejects_removed_boot_key_delivery_with_migration_message() {
+        val inputJar = Files.createTempFile("javashroud-config-current-format-removed-param", ".jar")
         try {
             val error = assertFailsWith<IllegalArgumentException> {
                 validateConfig(
@@ -502,7 +502,7 @@ class ConfigCodecTest {
             }
 
             assertEquals(
-                "jni-microkernel-loader bootKeyDelivery 已由 AKEN v4 移除；删除该配置项后重新构建。",
+                "jni-microkernel-loader bootKeyDelivery 已由当前格式移除；删除该配置项后重新构建。",
                 error.message,
             )
         } finally {

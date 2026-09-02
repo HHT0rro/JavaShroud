@@ -27,7 +27,7 @@ class PerfBaselineProbeTest {
             )
         }
 
-        assertTrue(metrics.all { it.vmResourceBytes > 0 }, "probe must record VMBC resource sizes")
+        assertTrue(metrics.all { it.vmResourceBytes > 0 }, "probe must record native VM resource sizes")
         assertTrue(metrics.all { it.serializerNanos > 0 }, "probe must record serializer timing")
         val json = metrics.toJson()
         val baselineDir = repoRoot().resolve("plan").resolve("baseline")

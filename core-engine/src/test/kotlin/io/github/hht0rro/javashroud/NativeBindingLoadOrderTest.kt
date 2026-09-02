@@ -8,7 +8,7 @@ import kotlin.test.assertTrue
 
 class NativeBindingLoadOrderTest {
     @Test
-    fun r1_native_is_validated_and_bindings_are_published_before_jni_onload_then_rolled_back_on_failure() {
+    fun native_image_is_validated_and_bindings_are_published_before_jni_onload_then_rolled_back_on_failure() {
         val source = Files.readString(
             Path.of("src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.java"),
         )
@@ -16,7 +16,7 @@ class NativeBindingLoadOrderTest {
         val methodEnd = source.indexOf("private static boolean verifyQpNativeAbiAfterLoad", methodStart)
         val method = source.substring(methodStart, methodEnd)
 
-        assertTrue(method.indexOf("validateR1NativeImage(platformTarget, nativeBytes)") < method.indexOf("nativeExtractDirectories()"))
+        assertTrue(method.indexOf("validateNativeImage(platformTarget, nativeBytes)") < method.indexOf("nativeExtractDirectories()"))
         assertTrue(method.indexOf("String bindingText = sealedNativeBindingText(locator)") < method.indexOf("nativeExtractDirectories()"))
         assertTrue(method.indexOf("publishSealedNativeBindings(bindingText);") < method.indexOf("extractedNativeMatchesLocator(tempLib, locator)"))
         assertTrue(method.indexOf("qp:native-extract-digest-mismatch") < method.indexOf("System.load(tempLib.getAbsolutePath());"))
@@ -34,7 +34,7 @@ class NativeBindingLoadOrderTest {
     }
 
     @Test
-    fun aken_raw_loader_does_not_reintroduce_legacy_boot_material() {
+    fun native_raw_loader_does_not_reintroduce_legacy_boot_material() {
         val helperSource = Files.readString(
             Path.of("src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.java"),
         )
@@ -47,7 +47,7 @@ class NativeBindingLoadOrderTest {
                 !loader.contains("prepareJavaBootMaterialForLoad") &&
                 !loader.contains("publishNativeShellBootSecret") &&
                 !loader.contains("nativeInstallBootEnvelope"),
-            "The AKEN raw loader must load only the typed native artifact and must not publish legacy boot material.",
+            "The Qp raw loader must load only the typed native artifact and must not publish legacy boot material.",
         )
 
         val ffi = Files.readString(Path.of("src/main/rust/crates/qp-ffi/src/lib.rs"))
@@ -58,13 +58,13 @@ class NativeBindingLoadOrderTest {
     }
 
     @Test
-    fun string_encryption_uses_typed_aken_bridge_and_native_fail_closed_order() {
+    fun string_encryption_uses_typed_native_bridge_and_fail_closed_order() {
         val source = Files.readString(
             Path.of("src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpTextBridge.java"),
         )
         assertTrue(source.contains("QpBridge.openQpString(encodedHandle, pageIndex, callSiteProof)"))
         assertTrue(source.indexOf("requireQpStringPageRequest") < source.indexOf("openQpString(encodedHandle, pageIndex, callSiteProof)"))
-        assertTrue(source.contains("AKEN string page native terminal is not registered for the sealed helper"))
+        assertTrue(source.contains("Qp string page native terminal is not registered for the sealed helper"))
         assertTrue(!source.contains("nativeDecodeString(payload"))
         assertTrue(!source.contains("QpBridge.loadKernel"))
 
@@ -77,7 +77,7 @@ class NativeBindingLoadOrderTest {
         val bridge = kernelSource.substring(bridgeStart, bridgeEnd)
         assertTrue(bridge.indexOf("requireQpPageRequest") < bridge.indexOf("ensureQpNativeKernel()"))
         assertTrue(bridge.indexOf("ensureQpNativeKernel()") < bridge.indexOf("nativeOpenStringPage"))
-        assertTrue(kernelSource.contains("requires the sealed native kernel ("), "AKEN page access must fail closed without a decoder fallback.")
+        assertTrue(kernelSource.contains("requires the sealed native kernel ("), "Qp page access must fail closed without a decoder fallback.")
         assertTrue(source.contains("catch (UnsatisfiedLinkError error)"))
     }
 
@@ -90,7 +90,7 @@ class NativeBindingLoadOrderTest {
     }
 
     @Test
-    fun relocated_open_aken_string_bridge_is_promoted_only_at_sealing_boundary() {
+    fun relocated_open_native_string_bridge_is_promoted_only_at_sealing_boundary() {
         val helperSource = Files.readString(
             Path.of("src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.java"),
         )

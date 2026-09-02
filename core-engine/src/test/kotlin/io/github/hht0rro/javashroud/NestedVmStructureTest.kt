@@ -8,7 +8,7 @@ import io.github.hht0rro.javashroud.transforms.protection.QpEntryMetadata
 import io.github.hht0rro.javashroud.transforms.protection.QpSerializer
 import io.github.hht0rro.javashroud.transforms.protection.deriveQpIdentity
 import io.github.hht0rro.javashroud.transforms.protection.deriveQpOwnerIdentity
-import io.github.hht0rro.javashroud.transforms.protection.vbc4ArgumentTagVector
+import io.github.hht0rro.javashroud.transforms.protection.nativeArgumentTagVector
 import org.objectweb.asm.Opcodes
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -41,7 +41,7 @@ class NestedVmStructureTest {
     }
 
     @Test
-    fun nested_micro_stream_opcode_table_changes_across_vbc4_contexts_and_profiles() {
+    fun nested_micro_stream_opcode_table_changes_across_native_contexts_and_profiles() {
         val base = nestedBlock(seed = 0x2468_1357, contextSeed = 0x0102_0304, profile = 0x1020_3040)
         val differentContext = nestedBlock(seed = 0x2468_1357, contextSeed = 0x0506_0708, profile = 0x1020_3040)
         val differentProfile = nestedBlock(seed = 0x2468_1357, contextSeed = 0x0102_0304, profile = 0x5060_7080)
@@ -98,7 +98,7 @@ class NestedVmStructureTest {
                 methodLocalProfile = profile,
                 methodIdentity = context.deriveQpIdentity("example/NestedVm", "verifyLicense", "()I"),
                 ownerIdentity = context.deriveQpOwnerIdentity("example/NestedVm"),
-                argumentTags = vbc4ArgumentTagVector("()I"),
+                argumentTags = nativeArgumentTagVector("()I"),
                 resourcePath = "META-INF/.r/nested.bin",
                 isStatic = true,
             )

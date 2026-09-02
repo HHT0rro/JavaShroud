@@ -22,7 +22,7 @@ class QpPendingTextPageTest {
     @Test
     fun pending_string_page_preserves_its_preassigned_handle_proof_frame_and_route_through_materialization() {
         val identity = "fixture:pending-string:identity".encodeToByteArray()
-        val plaintext = "AKEN StringPage: UTF-8 ☃".encodeToByteArray()
+        val plaintext = "Qp StringPage: UTF-8 ☃".encodeToByteArray()
         val proof = ByteArray(41) { index -> (index * 17 + 5).toByte() }
         val handle = ByteArray(QpHandle.ENCODED_HANDLE_SIZE) { index -> (index * 23 + 9).toByte() }
         val expectedIdentity = identity.copyOf()

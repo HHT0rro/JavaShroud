@@ -8,7 +8,7 @@ import kotlin.test.assertTrue
 
 class NativeParserDiagnosticsTest {
     @Test
-    fun rust_vbc4_parser_keeps_deidentified_fail_closed_diagnostics() {
+    fun rust_native_parser_keeps_deidentified_fail_closed_diagnostics() {
         assertFalse(Files.exists(resolveSource("src/main/native/js_vm_core.c")))
         val vm = Files.readString(resolveSource("src/main/rust/crates/qp-vm/src/lib.rs"))
         val ffi = Files.readString(resolveSource("src/main/rust/crates/qp-ffi/src/lib.rs"))

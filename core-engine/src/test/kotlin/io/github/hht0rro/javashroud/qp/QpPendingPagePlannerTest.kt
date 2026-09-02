@@ -22,7 +22,7 @@ import kotlin.test.assertTrue
 
 class QpPendingPagePlannerTest {
     @Test
-    fun partitions_one_vbc4_method_into_contiguous_container_pages_and_wipes_every_owner() {
+    fun partitions_one_native_method_into_contiguous_container_pages_and_wipes_every_owner() {
         val program = framedQp(
             blockIds = listOf(10, 20, 30, 40, 50),
             encryptedPayloadLengths = listOf(288, 168, 588, 88, 188),
@@ -106,7 +106,7 @@ class QpPendingPagePlannerTest {
     }
 
     @Test
-    fun rejects_a_route_for_another_vbc4_method_and_wipes_the_candidate() {
+    fun rejects_a_route_for_another_native_method_and_wipes_the_candidate() {
         val program = framedQp(
             blockIds = listOf(1),
             encryptedPayloadLengths = listOf(100),
@@ -199,7 +199,7 @@ class QpPendingPagePlannerTest {
                     commitment = commitment,
                     pendingPages = pages,
                     fixedEntries = emptyList(),
-                    vbc4StateBindingLayoutDigest = ByteArray(32) { index -> (index * 31 + 9).toByte() },
+                    pageStateBindingLayoutDigest = ByteArray(32) { index -> (index * 31 + 9).toByte() },
                 )
                 assertTrue(plan.isWiped())
             }
@@ -281,7 +281,7 @@ class QpPendingPagePlannerTest {
                     commitment = commitment,
                     pendingPages = pages,
                     fixedEntries = emptyList(),
-                    vbc4StateBindingLayoutDigest = ByteArray(32) { index -> (index * 37 + 11).toByte() },
+                    pageStateBindingLayoutDigest = ByteArray(32) { index -> (index * 37 + 11).toByte() },
                 )
                 assertTrue(plan.isWiped())
             }
@@ -406,7 +406,7 @@ class QpPendingPagePlannerTest {
 
     private fun descriptorFromNativeLocatorRecord(record: ByteArray): QpPageDescriptor {
         require(record.size >= Long.SIZE_BYTES + 1 + Int.SIZE_BYTES + Int.SIZE_BYTES + 64) {
-            "AKEN native locator record is too short for the current descriptor"
+            "Qp native locator record is too short for the current descriptor"
         }
         // Current compiler records begin directly with the entry token; do not
         // reintroduce the retired leading record-version byte.
@@ -414,7 +414,7 @@ class QpPendingPagePlannerTest {
 
         fun readFrame(label: String): ByteArray {
             require(cursor + Int.SIZE_BYTES <= record.size) {
-                "AKEN native locator $label frame length is truncated"
+            "Qp native locator $label frame length is truncated"
             }
             val length =
                 ((record[cursor++].toInt() and 0xFF) shl 24) or
@@ -422,7 +422,7 @@ class QpPendingPagePlannerTest {
                     ((record[cursor++].toInt() and 0xFF) shl 8) or
                     (record[cursor++].toInt() and 0xFF)
             require(length >= 0 && length <= record.size - cursor) {
-                "AKEN native locator $label frame length is invalid"
+            "Qp native locator $label frame length is invalid"
             }
             val endExclusive = cursor + length
             return record.copyOfRange(cursor, endExclusive).also {
@@ -442,23 +442,23 @@ class QpPendingPagePlannerTest {
             descriptorBytes = readFrame("descriptor")
             route = readFrame("route")
             require(handle.size == QpHandle.ENCODED_HANDLE_SIZE && envelope.isNotEmpty() && descriptorBytes.isNotEmpty() && route.isNotEmpty()) {
-                "AKEN native locator current record frames are invalid"
+            "Qp native locator current record frames are invalid"
             }
             require(cursor + 64 == record.size) {
-                "AKEN native locator current record tail length is invalid"
+            "Qp native locator current record tail length is invalid"
             }
             stateBindingLayoutDigest = record.copyOfRange(cursor, cursor + 32)
             cursor += 32
             recordBinding = record.copyOfRange(cursor, cursor + 32)
             cursor += 32
             require(cursor == record.size) {
-                "AKEN native locator record has trailing bytes"
+            "Qp native locator record has trailing bytes"
             }
             val descriptor = QpPageDescriptor.decode(checkNotNull(descriptorBytes))
             val descriptorRoute = descriptor.route.encode()
             try {
                 require(descriptorRoute.contentEquals(route)) {
-                    "AKEN native locator route must equal the descriptor's embedded current route"
+                    "Qp native locator route must equal the descriptor's embedded current route"
                 }
             } finally {
                 Arrays.fill(descriptorRoute, 0)

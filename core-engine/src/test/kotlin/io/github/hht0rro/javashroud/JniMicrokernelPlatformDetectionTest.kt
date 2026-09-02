@@ -13,7 +13,7 @@ class JniMicrokernelPlatformDetectionTest {
     ).apply { isAccessible = true }
 
     @Test
-    fun `platform detection returns only locked R1 target triples`() {
+    fun `platform detection returns only locked native target triples`() {
         for (arch in listOf("amd64", "x86_64", "x64")) {
             assertEquals("x86_64-pc-windows-gnu", detect("Windows 11", arch))
             assertEquals("x86_64-unknown-linux-gnu.2.17", detect("Linux", arch))

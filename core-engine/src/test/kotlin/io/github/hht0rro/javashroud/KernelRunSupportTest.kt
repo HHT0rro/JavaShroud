@@ -316,8 +316,8 @@ class KernelRunSupportTest {
     }
 
     @Test
-    fun engineKernelRun_rejects_removed_aken_v4_boot_key_delivery_before_bootstrap_or_artifact_io() {
-        val tempDir = Files.createTempDirectory("javashroud-kernel-qp-v4-removed-param")
+    fun engineKernelRun_rejects_removed_boot_key_delivery_before_bootstrap_or_artifact_io() {
+        val tempDir = Files.createTempDirectory("javashroud-kernel-current-format-removed-param")
         try {
             val inputJar = tempDir.resolve("must-not-be-read.jar")
             val outputJar = tempDir.resolve("must-not-be-written.jar")
@@ -343,7 +343,7 @@ class KernelRunSupportTest {
             }
 
             assertEquals(
-                "jni-microkernel-loader bootKeyDelivery 已由 AKEN v4 移除；删除该配置项后重新构建。",
+                "jni-microkernel-loader bootKeyDelivery 已由当前格式移除；删除该配置项后重新构建。",
                 error.message,
             )
             assertTrue(Files.notExists(inputJar), "The rejected configuration must not load its input artifact")

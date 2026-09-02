@@ -26,7 +26,7 @@ class QpProtocolLabelParityTest {
         val serializer = source("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/QpSerializer.kt")
         val rustVm = source("src/main/rust/crates/qp-vm/src/lib.rs")
         assertTrue(
-            serializer.contains("out.write(vbc4Hmac(payload, cryptoSeed, nonce))"),
+            serializer.contains("out.write(frameHmac(payload, cryptoSeed, nonce))"),
             "Kotlin serializer must append the 32-byte HMAC directly",
         )
         assertTrue(rustVm.contains("QP_AUTH_TAG_SIZE: usize = 32"))

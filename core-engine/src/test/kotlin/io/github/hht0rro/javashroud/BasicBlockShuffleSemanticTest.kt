@@ -11,8 +11,8 @@ import io.github.hht0rro.javashroud.transforms.protection.QP_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.QP_MASTER_KEY_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.QpSerializer
-import io.github.hht0rro.javashroud.transforms.protection.vbc4CfgDecodeIndex
-import io.github.hht0rro.javashroud.transforms.protection.vbc4CfgEncodeIndex
+import io.github.hht0rro.javashroud.transforms.protection.decodeCfgIndex
+import io.github.hht0rro.javashroud.transforms.protection.encodeCfgIndex
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.MethodVisitor
@@ -43,12 +43,12 @@ class BasicBlockShuffleSemanticTest {
             12 to 71,  // exception handler
         )
         val storedEdges = logicalEdges.map { (from, to) ->
-            vbc4CfgEncodeIndex(seed, instructionCount, from) to vbc4CfgEncodeIndex(seed, instructionCount, to)
+            encodeCfgIndex(seed, instructionCount, from) to encodeCfgIndex(seed, instructionCount, to)
         }
 
-        assertNotEquals(logicalEdges, storedEdges, "stored VBC4 CFG must not retain raw instruction ids")
+        assertNotEquals(logicalEdges, storedEdges, "stored native VM CFG must not retain raw instruction ids")
         val reconstructed = storedEdges.map { (from, to) ->
-            vbc4CfgDecodeIndex(seed, instructionCount, from) to vbc4CfgDecodeIndex(seed, instructionCount, to)
+            decodeCfgIndex(seed, instructionCount, from) to decodeCfgIndex(seed, instructionCount, to)
         }
         assertEquals(logicalEdges, reconstructed, "runtime reconstruction must preserve branch/switch/exception semantics")
     }
@@ -58,13 +58,13 @@ class BasicBlockShuffleSemanticTest {
         val seed = 0x31C0_55AA
         val instructionCount = 0xFFFF
         val encoded = IntArray(instructionCount + 1) { index ->
-            vbc4CfgEncodeIndex(seed, instructionCount, index)
+            encodeCfgIndex(seed, instructionCount, index)
         }
 
         assertEquals(0x10000, encoded.toSet().size)
         assertTrue(encoded.all { it in 0..0xFFFF })
         for (index in encoded.indices) {
-            assertEquals(index, vbc4CfgDecodeIndex(seed, instructionCount, encoded[index]))
+            assertEquals(index, decodeCfgIndex(seed, instructionCount, encoded[index]))
         }
     }
 
@@ -80,7 +80,7 @@ class BasicBlockShuffleSemanticTest {
     }
 
     @Test
-    fun native_vbc4_reconstruction_preserves_if_loops_switch_and_try_catch() {
+    fun native_reconstruction_preserves_if_loops_switch_and_try_catch() {
         if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) return
 
         val workDir = Files.createTempDirectory("javashroud-block-shuffle")
@@ -98,7 +98,7 @@ class BasicBlockShuffleSemanticTest {
             runEngine(inputJar, outputJar)
             assertTrue(
                 methodInvokesNativeVmDispatcher(outputJar, "compute", "(I)I"),
-                "compute(I)I must execute through the native VBC4 dispatcher",
+                "compute(I)I must execute through the native VM dispatcher",
             )
             val transformed = runJavaProcessWithTimeout(
                 ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()),
@@ -109,7 +109,7 @@ class BasicBlockShuffleSemanticTest {
             assertEquals(
                 baseline.output.trim(),
                 transformed.output.trim(),
-                "Native VBC4 CFG reconstruction changed if/for/while/switch/try-catch semantics",
+                "Native VM CFG reconstruction changed if/for/while/switch/try-catch semantics",
             )
         } finally {
             deleteTree(workDir)
@@ -157,9 +157,9 @@ class BasicBlockShuffleSemanticTest {
             val sourcePath = sourceDir.resolve("BlockShuffleRoot.java")
             Files.writeString(sourcePath, FIXTURE_SOURCE)
             val compiler = javax.tools.ToolProvider.getSystemJavaCompiler()
-                ?: error("JDK compiler is required for native VBC4 CFG fixture")
+                ?: error("JDK compiler is required for the native VM CFG fixture")
             val compileExit = compiler.run(null, null, null, "-d", classesDir.toString(), sourcePath.toString())
-            assertEquals(0, compileExit, "Native VBC4 CFG fixture source must compile")
+            assertEquals(0, compileExit, "Native VM CFG fixture source must compile")
 
             Files.newOutputStream(target).use { output ->
                 JarOutputStream(output).use { jar ->

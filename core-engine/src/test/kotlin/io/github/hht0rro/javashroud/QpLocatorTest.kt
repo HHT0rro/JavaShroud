@@ -3,8 +3,8 @@ package io.github.hht0rro.javashroud
 import io.github.hht0rro.javashroud.analysis.analyzeClassBytes
 import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
 import io.github.hht0rro.javashroud.model.artifact.JarEntryData
-import io.github.hht0rro.javashroud.transforms.protection.AKEN_NATIVE_BINDINGS_LOCATOR_LOGICAL_RESOURCE
-import io.github.hht0rro.javashroud.transforms.protection.AKEN_NATIVE_LOCATOR_LOGICAL_RESOURCE
+import io.github.hht0rro.javashroud.transforms.protection.QP_NATIVE_BINDINGS_LOCATOR_LOGICAL_RESOURCE
+import io.github.hht0rro.javashroud.transforms.protection.QP_NATIVE_LOCATOR_LOGICAL_RESOURCE
 import io.github.hht0rro.javashroud.transforms.protection.QpLocator
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing
 import io.github.hht0rro.javashroud.transforms.protection.QP_LAYOUT_DIGEST_SIZE
@@ -38,7 +38,7 @@ class QpLocatorTest {
         assertFalse(locatorEntry.bytes.containsAscii("AKEN_NATIVE_BINDINGS_V1"))
         assertFalse(locatorEntry.bytes.containsAscii("META-INF/"), "binary locator routes must not remain plain ASCII")
         assertFalse(locatorEntry.bytes.containsAscii("windows-x64"), "binary locator must not expose platform text")
-        assertFalse(locatorEntry.name == AKEN_NATIVE_LOCATOR_LOGICAL_RESOURCE)
+        assertFalse(locatorEntry.name == QP_NATIVE_LOCATOR_LOGICAL_RESOURCE)
         assertFalse(locatorEntry.name.startsWith("META-INF/jsrt/"))
 
         val parsed = parseLocator(locatorEntry.bytes)
@@ -56,7 +56,7 @@ class QpLocatorTest {
             assertEquals(nativeEntry.bytes.size, row.storedLength)
             assertTrue(
                 MessageDigest.getInstance("SHA-256").digest(nativeEntry.bytes).contentEquals(row.sha256),
-                "AKEN locator digest must match the final native bytes",
+                "Qp locator digest must match the final native bytes",
             )
         }
 
@@ -65,7 +65,7 @@ class QpLocatorTest {
         assertEquals(bindingEntry.bytes.size, binding.storedLength)
         assertTrue(
             MessageDigest.getInstance("SHA-256").digest(bindingEntry.bytes).contentEquals(binding.sha256),
-            "AKEN bindings locator digest must match the final bindings bytes",
+            "Qp bindings locator digest must match the final bindings bytes",
         )
 
         assertTrue(
@@ -73,11 +73,11 @@ class QpLocatorTest {
             "The rewritten helper must retain only the final randomized locator route",
         )
         assertFalse(
-            sealed.classArtifacts.any { artifact -> artifact.bytes.containsAscii(AKEN_NATIVE_LOCATOR_LOGICAL_RESOURCE) },
+            sealed.classArtifacts.any { artifact -> artifact.bytes.containsAscii(QP_NATIVE_LOCATOR_LOGICAL_RESOURCE) },
             "The logical locator path must not survive helper sealing",
         )
         assertFalse(
-            sealed.classArtifacts.any { artifact -> artifact.bytes.containsAscii(AKEN_NATIVE_BINDINGS_LOCATOR_LOGICAL_RESOURCE) },
+            sealed.classArtifacts.any { artifact -> artifact.bytes.containsAscii(QP_NATIVE_BINDINGS_LOCATOR_LOGICAL_RESOURCE) },
             "The logical bindings locator path must not survive helper sealing",
         )
     }
@@ -115,7 +115,7 @@ class QpLocatorTest {
     }
 
     @Test
-    fun locator_accepts_only_locked_r1_platforms_and_binds_final_rows() {
+    fun locator_accepts_only_locked_native_platforms_and_binds_final_rows() {
         val windows = QpLocator.entry(
             platform = "windows-x64",
             resourcePath = "META-INF/final.dll",
@@ -267,10 +267,10 @@ class QpLocatorTest {
         sealed.jarEntries.single { entry -> entry.bytes.isBinaryLocator() }
 
     private fun parseLocator(bytes: ByteArray): ParsedLocator {
-        require(bytes.size >= HEADER_BYTES + COMMITMENT_BYTES) { "binary AKEN locator is truncated" }
-        assertTrue(bytes.copyOfRange(0, MAGIC.size).contentEquals(MAGIC), "AKEN locator magic must be D7 A4 91 E3")
-        assertEquals(VERSION, bytes[4].toInt() and 0xFF, "AKEN locator version must be v2")
-        assertEquals(0, bytes[5].toInt() and 0xFF, "AKEN locator flags must be zero")
+        require(bytes.size >= HEADER_BYTES + COMMITMENT_BYTES) { "binary Qp locator is truncated" }
+        assertTrue(bytes.copyOfRange(0, MAGIC.size).contentEquals(MAGIC), "Qp locator magic must be D7 A4 91 E3")
+        assertEquals(VERSION, bytes[4].toInt() and 0xFF, "Qp locator version must be v2")
+        assertEquals(0, bytes[5].toInt() and 0xFF, "Qp locator flags must be zero")
 
         val payloadLength = bytes.size - COMMITMENT_BYTES
         val expectedCommitment = MessageDigest.getInstance("SHA-256").apply {
@@ -280,28 +280,28 @@ class QpLocatorTest {
         try {
             assertTrue(
                 expectedCommitment.contentEquals(bytes.copyOfRange(payloadLength, bytes.size)),
-                "AKEN locator commitment must cover the exact binary payload",
+                "Qp locator commitment must cover the exact binary payload",
             )
         } finally {
             Arrays.fill(expectedCommitment, 0)
         }
 
         val recordCount = readU16(bytes, 6)
-        assertTrue(recordCount in 1..MAX_RECORDS, "AKEN locator record count must be bounded")
+        assertTrue(recordCount in 1..MAX_RECORDS, "Qp locator record count must be bounded")
         var offset = HEADER_BYTES
         val libraries = linkedMapOf<String, LocatorRow>()
         var binding: LocatorRow? = null
         val seenRoutes = mutableSetOf<String>()
         repeat(recordCount) { recordIndex ->
-            assertTrue(offset <= payloadLength - RECORD_FIXED_BYTES, "AKEN locator record must be complete")
+            assertTrue(offset <= payloadLength - RECORD_FIXED_BYTES, "Qp locator record must be complete")
             val kind = bytes[offset++].toInt() and 0xFF
             val platformId = bytes[offset++].toInt() and 0xFF
             val routeLength = readU16(bytes, offset)
             offset += 2
             val storedLength = readU32(bytes, offset)
             offset += 4
-            assertTrue(routeLength in 1..MAX_ROUTE_BYTES, "AKEN locator route length must be bounded")
-            assertTrue(offset + SHA256_BYTES + routeLength <= payloadLength, "AKEN locator route must fit payload")
+            assertTrue(routeLength in 1..MAX_ROUTE_BYTES, "Qp locator route length must be bounded")
+            assertTrue(offset + SHA256_BYTES + routeLength <= payloadLength, "Qp locator route must fit payload")
             val digest = bytes.copyOfRange(offset, offset + SHA256_BYTES)
             offset += SHA256_BYTES
             val maskedRoute = bytes.copyOfRange(offset, offset + routeLength)
@@ -310,14 +310,14 @@ class QpLocatorTest {
             val routeBytes = unmaskRoute(maskedRoute, kind, platformId, storedLength, digest)
             try {
                 val resourcePath = routeBytes.toString(StandardCharsets.US_ASCII)
-                assertTrue(resourcePath.startsWith("META-INF/"), "AKEN locator route must stay under META-INF/")
-                assertTrue(seenRoutes.add(resourcePath), "AKEN locator routes must be unique")
+                assertTrue(resourcePath.startsWith("META-INF/"), "Qp locator route must stay under META-INF/")
+                assertTrue(seenRoutes.add(resourcePath), "Qp locator routes must be unique")
                 when (kind) {
                     KIND_LIBRARY -> {
                         val platform = platformForId(platformId)
-                        assertTrue(platform !in libraries, "AKEN locator platforms must be unique")
+                        assertTrue(platform !in libraries, "Qp locator platforms must be unique")
                         val suffix = expectedSuffix(platform)
-                        assertTrue(resourcePath.endsWith(suffix), "AKEN locator route suffix must match platform")
+                        assertTrue(resourcePath.endsWith(suffix), "Qp locator route suffix must match platform")
                         libraries[platform] = LocatorRow(
                             kind = kind,
                             platformId = platformId,
@@ -328,9 +328,9 @@ class QpLocatorTest {
                         )
                     }
                     KIND_BINDINGS -> {
-                        assertEquals(0, platformId, "AKEN bindings record must have platform id zero")
-                        assertEquals(recordCount - 1, recordIndex, "AKEN bindings record must be terminal")
-                        assertTrue(binding == null, "AKEN bindings record must be unique")
+                        assertEquals(0, platformId, "Qp bindings record must have platform id zero")
+                        assertEquals(recordCount - 1, recordIndex, "Qp bindings record must be terminal")
+                        assertTrue(binding == null, "Qp bindings record must be unique")
                         binding = LocatorRow(
                             kind = kind,
                             platformId = platformId,
@@ -340,7 +340,7 @@ class QpLocatorTest {
                             sha256 = digest.copyOf(),
                         )
                     }
-                    else -> error("unexpected AKEN locator record kind: $kind")
+                    else -> error("unexpected Qp locator record kind: $kind")
                 }
             } finally {
                 Arrays.fill(routeBytes, 0)
@@ -348,7 +348,7 @@ class QpLocatorTest {
                 Arrays.fill(digest, 0)
             }
         }
-        assertEquals(payloadLength, offset, "AKEN locator must not contain trailing payload bytes")
+        assertEquals(payloadLength, offset, "Qp locator must not contain trailing payload bytes")
         return ParsedLocator(libraries, binding)
     }
 
@@ -398,7 +398,7 @@ class QpLocatorTest {
             ((bytes[offset + 1].toLong() and 0xFF) shl 16) or
             ((bytes[offset + 2].toLong() and 0xFF) shl 8) or
             (bytes[offset + 3].toLong() and 0xFF)
-        require(value in 1..Int.MAX_VALUE) { "AKEN locator stored length must be positive" }
+        require(value in 1..Int.MAX_VALUE) { "Qp locator stored length must be positive" }
         return value.toInt()
     }
 
@@ -435,7 +435,7 @@ class QpLocatorTest {
     private fun platformForId(platformId: Int): String = when (platformId) {
         1 -> "windows-x64"
         2 -> "linux-x64"
-        else -> error("unexpected AKEN-R1 locator platform id: $platformId")
+        else -> error("unexpected native locator platform id: $platformId")
     }
 
     private companion object {

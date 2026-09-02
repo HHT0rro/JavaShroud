@@ -7,7 +7,7 @@ import kotlin.test.assertFailsWith
 
 class NativeKernelShellPackerTest {
     @Test
-    fun r1_packing_policy_has_only_locked_configuration_values() {
+    fun native_packing_policy_has_only_locked_configuration_values() {
         assertEquals(
             listOf("off", "standard", "max", "max-hardening"),
             QpPackingLevel.entries.map { it.configValue },

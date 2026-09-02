@@ -7,7 +7,7 @@ import kotlin.test.assertTrue
 
 class NativeRuntimeZstdContextTest {
     @Test
-    fun rust_r1_crypto_contracts_are_bounded_authenticated_and_wipe_only() {
+    fun rust_native_crypto_contracts_are_bounded_authenticated_and_wipe_only() {
         val rustRoot = resolveRustRoot()
         val workspaceManifest = Files.readString(rustRoot.resolve("Cargo.toml"))
         val manifest = Files.readString(rustRoot.resolve("crates/qp-crypto/Cargo.toml"))
@@ -22,7 +22,7 @@ class NativeRuntimeZstdContextTest {
             "aes256_gcm_matches_nist_vector_and_round_trips",
             "aes256_gcm_empty_vector_and_authentication_failures",
             "ghash_and_capability_gate_match_known_answers",
-            "public_helpers_enforce_the_kotlin_r1_bounds",
+            "public_helpers_enforce_the_current_bounds",
         )) {
             assertRustTest(source, testName)
         }
@@ -51,7 +51,7 @@ class NativeRuntimeZstdContextTest {
             "hardware_aes: false",
             "hardware_ghash: false",
         )) {
-            assertContains(source, marker, "qp-crypto R1 contract")
+            assertContains(source, marker, "qp-crypto contract")
         }
 
         val decrypt = source.substringAfter("pub fn aes256_gcm_decrypt(").substringBefore("fn ensure_software_backend(")
@@ -65,7 +65,7 @@ class NativeRuntimeZstdContextTest {
     }
 
     @Test
-    fun rust_r1_zstd_contracts_are_bounded_and_wipe_only() {
+    fun rust_native_zstd_contracts_are_bounded_and_wipe_only() {
         val rustRoot = resolveRustRoot()
         val resourceManifest = Files.readString(rustRoot.resolve("crates/qp-resource/Cargo.toml"))
         val resourceSource = Files.readString(rustRoot.resolve("crates/qp-resource/src/lib.rs"))
@@ -107,7 +107,7 @@ class NativeRuntimeZstdContextTest {
             "decoded.fill(0);",
             "self.window.fill(0);",
         )) {
-            assertContains(resourceSource, marker, "qp-resource Zstd R1 contract")
+            assertContains(resourceSource, marker, "qp-resource Zstd contract")
         }
 
         assertContains(vmManifest, "name = \"qp-vm\"", "qp-vm manifest")
@@ -125,7 +125,7 @@ class NativeRuntimeZstdContextTest {
             "impl Drop for WipedVec",
             "self.0.fill(0);",
         )) {
-            assertContains(vmSource, marker, "qp-vm Zstd R1 contract")
+            assertContains(vmSource, marker, "qp-vm Zstd contract")
         }
         assertRustTest(vmSource, "raw_and_rle_frames_are_bounded")
         assertRustTest(vmSource, "malformed_or_trailing_frames_fail")

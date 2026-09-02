@@ -16,7 +16,7 @@ import kotlin.test.assertTrue
 
 class QpClassPageSealingReservationTest {
     @Test
-    fun production_sealing_reserves_class_page_routes_in_the_same_namespace_as_vbc4_routes() {
+    fun production_sealing_reserves_class_page_routes_in_the_same_namespace_as_native_routes() {
         val context = QpBuildContext(
             masterKey = ByteArray(32) { index -> (index * 7 + 1).toByte() },
             nativeSeed = 0x414B_454E_0000_0073L,
@@ -26,8 +26,8 @@ class QpClassPageSealingReservationTest {
         val stringPlaintext = "production class route".encodeToByteArray()
         val stringProof = ByteArray(32) { index -> (index * 17 + 7).toByte() }
         val stringHandle = ByteArray(QpHandle.ENCODED_HANDLE_SIZE) { index -> (index * 19 + 9).toByte() }
-        val vbc4Identity = ByteArray(32) { index -> (index * 23 + 11).toByte() }
-        val vbc4Program = ByteArray(96) { index -> (index * 29 + 13).toByte() }
+        val vmIdentity = ByteArray(32) { index -> (index * 23 + 11).toByte() }
+        val vmProgram = ByteArray(96) { index -> (index * 29 + 13).toByte() }
         val stringCandidate = QpClassPageCandidate.create(
             logicalIdentity = stringIdentity,
             plaintext = stringPlaintext,
@@ -37,7 +37,7 @@ class QpClassPageSealingReservationTest {
             logicalBindingPath = "META-INF/.logical/class/production.bin",
             targetPageSize = 512,
         )
-        val vbc4Candidate = QpMethodCandidate.create(
+        val vmCandidate = QpMethodCandidate.create(
             entryToken = 0x414B_454E_0000_0074L,
             logicalMethod = QpMethodIdentity.create(
                 dispatchClassToken = "fixture/Sealing",
@@ -45,8 +45,8 @@ class QpClassPageSealingReservationTest {
                 descriptor = "()V",
                 logicalVmResourcePath = "META-INF/qp/production.bin",
             ),
-            logicalIdentity = vbc4Identity,
-            serializedProgram = vbc4Program,
+            logicalIdentity = vmIdentity,
+            serializedProgram = vmProgram,
         )
         try {
             withQpBuildContext(context) {
@@ -55,22 +55,22 @@ class QpClassPageSealingReservationTest {
                     internalName = "fixture/SealingClass",
                     candidates = listOf(stringCandidate),
                 )
-                scoped.registerQpMethodCandidates(listOf(vbc4Candidate))
+                scoped.registerQpMethodCandidates(listOf(vmCandidate))
                 stringCandidate.wipe()
-                vbc4Candidate.wipe()
+                vmCandidate.wipe()
                 Arrays.fill(stringIdentity, 0)
                 Arrays.fill(stringPlaintext, 0)
                 Arrays.fill(stringProof, 0)
                 Arrays.fill(stringHandle, 0)
-                Arrays.fill(vbc4Identity, 0)
-                Arrays.fill(vbc4Program, 0)
+                Arrays.fill(vmIdentity, 0)
+                Arrays.fill(vmProgram, 0)
 
                 val artifact = testAttachedArtifact(
                     classArtifacts = emptyList(),
                     jarEntries = listOf(JarEntryData("META-INF/existing.bin", byteArrayOf(1, 2, 3))),
                 )
 
-                // Call ClassPage reservation first to prove the VBC4 path also
+                // Call ClassPage reservation first to prove the native VM path also
                 // consumes any already-published ClassPage route namespace.
                 assertTrue(RuntimeArtifactSealing.reserveQpClassRoutesIfNeeded(artifact, scoped.nativeSeed))
                 assertTrue(RuntimeArtifactSealing.reserveQpPreSealRoutesIfNeeded(artifact, scoped.nativeSeed))
@@ -82,13 +82,13 @@ class QpClassPageSealingReservationTest {
                     assertEquals(1, routes.size)
                     stringPaths += routes.single().futureResourcePath
                 }
-                val vbc4Paths = mutableListOf<String>()
+                val vmPaths = mutableListOf<String>()
                 scoped.requireQpPreSealRouteReservation().withRoutesForBuild { routes ->
                     assertEquals(1, routes.size)
-                    vbc4Paths += routes.single().futureContainerPath
+                    vmPaths += routes.single().futureContainerPath
                 }
 
-                val allPaths = stringPaths + vbc4Paths
+                val allPaths = stringPaths + vmPaths
                 val descriptorPath =
                     QpClassPageDescriptor.resourcePathForInternalNameForBuild("fixture/SealingClass")
                 assertEquals(allPaths.size, allPaths.distinct().size)
@@ -97,14 +97,14 @@ class QpClassPageSealingReservationTest {
             }
         } finally {
             stringCandidate.wipe()
-            vbc4Candidate.wipe()
+            vmCandidate.wipe()
             context.wipe()
             Arrays.fill(stringIdentity, 0)
             Arrays.fill(stringPlaintext, 0)
             Arrays.fill(stringProof, 0)
             Arrays.fill(stringHandle, 0)
-            Arrays.fill(vbc4Identity, 0)
-            Arrays.fill(vbc4Program, 0)
+            Arrays.fill(vmIdentity, 0)
+            Arrays.fill(vmProgram, 0)
         }
     }
 

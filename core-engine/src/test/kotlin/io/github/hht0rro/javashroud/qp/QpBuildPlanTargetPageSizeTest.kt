@@ -11,7 +11,7 @@ import kotlin.test.assertFailsWith
 
 class QpBuildPlanTargetPageSizeTest {
     @Test
-    fun rejects_invalid_vbc4_target_overrides_without_reserving_the_page_identity() {
+    fun rejects_invalid_native_target_overrides_without_reserving_the_page_identity() {
         val commitment = ByteArray(32) { index -> (index * 17 + 3).toByte() }
         val identity = "fixture:qp:qp-target-override".encodeToByteArray()
         val plan = try {
@@ -45,9 +45,9 @@ class QpBuildPlanTargetPageSizeTest {
     }
 
     @Test
-    fun rejects_invalid_pending_vbc4_page_targets_before_page_ownership_is_created() {
+    fun rejects_invalid_pending_native_page_targets_before_page_ownership_is_created() {
         val identity = "fixture:qp:pending-target".encodeToByteArray()
-        val plaintext = "pending VBC4 page".encodeToByteArray()
+        val plaintext = "pending native VM page".encodeToByteArray()
         val proof = byteArrayOf(7, 11, 19, 23)
         try {
             listOf(511, 2049, 128).forEach { unsupportedTarget ->

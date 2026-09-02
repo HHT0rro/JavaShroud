@@ -18,7 +18,7 @@ import kotlin.test.assertTrue
 
 class RustToolchainProvisionerTest {
     @Test
-    fun locked_targets_have_only_the_r1_windows_and_linux_routes() {
+    fun locked_targets_have_only_the_native_windows_and_linux_routes() {
         assertEquals("1.78.0", RustToolchainProvisioner.lock.channel)
         assertEquals(
             listOf("windows-x64", "linux-x64"),

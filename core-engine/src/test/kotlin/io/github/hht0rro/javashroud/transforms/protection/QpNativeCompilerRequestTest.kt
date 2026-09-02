@@ -79,7 +79,7 @@ class QpNativeCompilerRequestTest {
     }
 
     @Test
-    fun all_r1_profiles_emit_direct_rust_cdylibs_without_shell_forms() {
+    fun all_native_profiles_emit_direct_rust_cdylibs_without_shell_forms() {
         QpPackingLevel.entries.forEach { level ->
             val request = QpNativeCompilerRequest.forTargets(
                 nativeProtectionLevel = "standard",

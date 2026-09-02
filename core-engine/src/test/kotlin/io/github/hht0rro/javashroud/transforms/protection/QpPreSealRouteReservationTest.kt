@@ -16,7 +16,7 @@ import kotlin.test.assertTrue
 
 class QpPreSealRouteReservationTest {
     @Test
-    fun production_sealing_stage_reserves_scoped_aken_page_container_routes() {
+    fun production_sealing_stage_reserves_scoped_native_page_container_routes() {
         val context = QpBuildContext(
             masterKey = ByteArray(32) { index -> (index * 7 + 3).toByte() },
             nativeSeed = 0x4A4B_454E_0000_0011L,

@@ -100,7 +100,7 @@ class QpNativeChunkLoaderProductionRegistrationTest {
                 assertEquals(
                     result.artifact.jarEntries.size + 1,
                     materialized.jarEntries.size,
-                    "the registered handler must materialize as one encrypted AKEN page entry",
+                    "the registered handler must materialize as one encrypted Qp page entry",
                 )
                 scoped.withQpLocatorRecordsForBuild { records ->
                     assertEquals(1, records.size, "native compiler input must contain exactly the bootstrap handler record")
@@ -141,7 +141,7 @@ class QpNativeChunkLoaderProductionRegistrationTest {
                 clinit.instructions.toArray().any { instruction ->
                     instruction is MethodInsnNode && instruction.name == "consumeQpNativeChunk"
                 },
-                "a direct transform without an AKEN build context must not emit an unbound native chunk call",
+                "a direct transform without a Qp build context must not emit an unbound native chunk call",
             )
         } finally {
             Arrays.fill(original, 0)

@@ -16,7 +16,7 @@ import kotlin.test.assertTrue
 
 class QpLocatorCompileInputTest {
     @Test
-    fun vbc4_emission_compiles_to_one_exact_native_current_page_record_and_wipes() {
+    fun native_emission_compiles_to_one_exact_native_current_page_record_and_wipes() {
         val artifactCommitment = ByteArray(QpArtifactCommitment.DIGEST_SIZE) { index ->
             (0xA7 xor (index * 13)).toByte()
         }
@@ -52,7 +52,7 @@ class QpLocatorCompileInputTest {
 
             compileInput = QpLocatorCompileInput.fromQpEmission(
                 emission = emission,
-                vbc4StateBindingLayoutDigest = ByteArray(32) { index -> (index * 23 + 7).toByte() },
+                pageStateBindingLayoutDigest = ByteArray(32) { index -> (index * 23 + 7).toByte() },
             )
             val input = checkNotNull(compileInput)
             handleBytes = emission.copyHandleForBuild().let { handle ->

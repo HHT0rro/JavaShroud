@@ -7,7 +7,7 @@ import kotlin.test.assertFailsWith
 
 class RustOnlyToolchainBoundaryTest {
     @Test
-    fun r1_accepts_only_locked_windows_and_linux_runtime_targets() {
+    fun native_accepts_only_locked_windows_and_linux_runtime_targets() {
         assertEquals(
             "x86_64-pc-windows-gnu",
             RustToolchainProvisioner.target("windows-x64").rustupTarget,

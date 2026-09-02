@@ -14,7 +14,7 @@ import kotlin.test.assertTrue
 
 class QpStringPageSealingReservationTest {
     @Test
-    fun production_sealing_reserves_string_page_routes_in_the_same_namespace_as_vbc4_routes() {
+    fun production_sealing_reserves_string_page_routes_in_the_same_namespace_as_native_routes() {
         val context = QpBuildContext(
             masterKey = ByteArray(32) { index -> (index * 7 + 1).toByte() },
             nativeSeed = 0x414B_454E_0000_0073L,
@@ -24,8 +24,8 @@ class QpStringPageSealingReservationTest {
         val stringPlaintext = "production string route".encodeToByteArray()
         val stringProof = ByteArray(32) { index -> (index * 17 + 7).toByte() }
         val stringHandle = ByteArray(QpHandle.ENCODED_HANDLE_SIZE) { index -> (index * 19 + 9).toByte() }
-        val vbc4Identity = ByteArray(32) { index -> (index * 23 + 11).toByte() }
-        val vbc4Program = ByteArray(96) { index -> (index * 29 + 13).toByte() }
+        val vmIdentity = ByteArray(32) { index -> (index * 23 + 11).toByte() }
+        val vmProgram = ByteArray(96) { index -> (index * 29 + 13).toByte() }
         val stringCandidate = QpTextPageCandidate.create(
             logicalIdentity = stringIdentity,
             plaintext = stringPlaintext,
@@ -35,7 +35,7 @@ class QpStringPageSealingReservationTest {
             logicalBindingPath = "META-INF/.logical/string/production.bin",
             targetPageSize = 128,
         )
-        val vbc4Candidate = QpMethodCandidate.create(
+        val vmCandidate = QpMethodCandidate.create(
             entryToken = 0x414B_454E_0000_0074L,
             logicalMethod = QpMethodIdentity.create(
                 dispatchClassToken = "fixture/Sealing",
@@ -43,29 +43,29 @@ class QpStringPageSealingReservationTest {
                 descriptor = "()V",
                 logicalVmResourcePath = "META-INF/qp/production.bin",
             ),
-            logicalIdentity = vbc4Identity,
-            serializedProgram = vbc4Program,
+            logicalIdentity = vmIdentity,
+            serializedProgram = vmProgram,
         )
         try {
             withQpBuildContext(context) {
                 val scoped = requireQpBuildContext()
                 scoped.registerQpTextPageCandidates(listOf(stringCandidate))
-                scoped.registerQpMethodCandidates(listOf(vbc4Candidate))
+                scoped.registerQpMethodCandidates(listOf(vmCandidate))
                 stringCandidate.wipe()
-                vbc4Candidate.wipe()
+                vmCandidate.wipe()
                 Arrays.fill(stringIdentity, 0)
                 Arrays.fill(stringPlaintext, 0)
                 Arrays.fill(stringProof, 0)
                 Arrays.fill(stringHandle, 0)
-                Arrays.fill(vbc4Identity, 0)
-                Arrays.fill(vbc4Program, 0)
+                Arrays.fill(vmIdentity, 0)
+                Arrays.fill(vmProgram, 0)
 
                 val artifact = testAttachedArtifact(
                     classArtifacts = emptyList(),
                     jarEntries = listOf(JarEntryData("META-INF/existing.bin", byteArrayOf(1, 2, 3))),
                 )
 
-                // Call StringPage reservation first to prove the VBC4 path also
+                // Call StringPage reservation first to prove the native VM path also
                 // consumes any already-published StringPage route namespace.
                 assertTrue(RuntimeArtifactSealing.reserveQpTextRoutesIfNeeded(artifact, scoped.nativeSeed))
                 assertTrue(RuntimeArtifactSealing.reserveQpPreSealRoutesIfNeeded(artifact, scoped.nativeSeed))
@@ -77,26 +77,26 @@ class QpStringPageSealingReservationTest {
                     assertEquals(1, routes.size)
                     stringPaths += routes.single().futureResourcePath
                 }
-                val vbc4Paths = mutableListOf<String>()
+                val vmPaths = mutableListOf<String>()
                 scoped.requireQpPreSealRouteReservation().withRoutesForBuild { routes ->
                     assertEquals(1, routes.size)
-                    vbc4Paths += routes.single().futureContainerPath
+                    vmPaths += routes.single().futureContainerPath
                 }
 
-                val allPaths = stringPaths + vbc4Paths
+                val allPaths = stringPaths + vmPaths
                 assertEquals(allPaths.size, allPaths.distinct().size)
                 assertFalse("META-INF/existing.bin" in allPaths)
             }
         } finally {
             stringCandidate.wipe()
-            vbc4Candidate.wipe()
+            vmCandidate.wipe()
             context.wipe()
             Arrays.fill(stringIdentity, 0)
             Arrays.fill(stringPlaintext, 0)
             Arrays.fill(stringProof, 0)
             Arrays.fill(stringHandle, 0)
-            Arrays.fill(vbc4Identity, 0)
-            Arrays.fill(vbc4Program, 0)
+            Arrays.fill(vmIdentity, 0)
+            Arrays.fill(vmProgram, 0)
         }
     }
 }

@@ -54,7 +54,7 @@ class QpNativePageLocatorIncludeTest {
                 commitment = commitment,
                 pendingPages = listOf(page),
                 fixedEntries = emptyList(),
-                vbc4StateBindingLayoutDigest = QpInnerMaterial.copyStateBindingLayoutDigest(context),
+                pageStateBindingLayoutDigest = QpInnerMaterial.copyStateBindingLayoutDigest(context),
             )
             context.publishQpFinalizationLayout(layout)
             records = context.withQpLocatorRecordsForBuild { current ->

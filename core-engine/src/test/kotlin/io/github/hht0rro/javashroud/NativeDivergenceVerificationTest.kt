@@ -12,7 +12,7 @@ import kotlin.test.assertTrue
 class NativeDivergenceVerificationTest {
 
     @Test
-    fun r1_workspace_is_locked_rust_only_and_has_no_retired_native_sources() {
+    fun workspace_is_locked_rust_only_and_has_no_retired_native_sources() {
         val workspace = rustWorkspace()
         assertTrue(Files.isRegularFile(workspace.resolve("Cargo.toml")))
         assertTrue(Files.isRegularFile(workspace.resolve("Cargo.lock")))
@@ -26,11 +26,11 @@ class NativeDivergenceVerificationTest {
                 }
                 .count()
         }
-        assertEquals(0L, retiredFiles, "R1 compilation input must not contain retired C/Zig/Mach-O sources")
+        assertEquals(0L, retiredFiles, "Native compilation input must not contain retired C/Zig/Mach-O sources")
     }
 
     @Test
-    fun r1_exposes_only_the_locked_runtime_targets() {
+    fun native_exposes_only_the_locked_runtime_targets() {
         assertEquals(
             mapOf(
                 RustToolchainProvisioner.RUNTIME_TARGET_WINDOWS to RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET,
@@ -42,7 +42,7 @@ class NativeDivergenceVerificationTest {
     }
 
     @Test
-    fun r1_cargo_commands_are_locked_and_target_directory_is_explicit() {
+    fun native_cargo_commands_are_locked_and_target_directory_is_explicit() {
         val windows = QpNativeCompilerPass.rustCargoCommandForTest(
             Path.of("cargo"),
             RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET,
@@ -81,5 +81,5 @@ class NativeDivergenceVerificationTest {
         Path.of("core-engine/src/main/rust"),
     ).map { it.toAbsolutePath().normalize() }
         .firstOrNull { Files.isRegularFile(it.resolve("Cargo.toml")) && Files.isRegularFile(it.resolve("Cargo.lock")) }
-        ?: error("R1 Rust workspace is not present")
+        ?: error("Native Rust workspace is not present")
 }

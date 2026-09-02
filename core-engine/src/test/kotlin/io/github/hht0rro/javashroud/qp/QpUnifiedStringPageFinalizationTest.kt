@@ -15,29 +15,29 @@ import kotlin.test.assertTrue
 
 class QpUnifiedStringPageFinalizationTest {
     @Test
-    fun vbc4_and_string_pages_share_one_finalization_mesh_and_native_record_owner() {
-        val vbc4Identity = "fixture:unified-finalization:qp".encodeToByteArray()
-        val vbc4Plaintext = "qp page in a unified AKEN materialization".encodeToByteArray()
-        val vbc4Proof = ByteArray(37) { index -> (index * 11 + 3).toByte() }
+    fun native_and_string_pages_share_one_finalization_mesh_and_native_record_owner() {
+        val vmIdentity = "fixture:unified-finalization:qp".encodeToByteArray()
+        val vmPlaintext = "qp page in a unified Qp materialization".encodeToByteArray()
+        val vmProof = ByteArray(37) { index -> (index * 11 + 3).toByte() }
         val stringIdentity = "fixture:unified-finalization:string".encodeToByteArray()
-        val stringPlaintext = "typed string page in the same AKEN materialization".encodeToByteArray()
+        val stringPlaintext = "typed string page in the same Qp materialization".encodeToByteArray()
         val stringProof = ByteArray(43) { index -> (index * 13 + 5).toByte() }
         val stringHandle = ByteArray(QpHandle.ENCODED_HANDLE_SIZE) { index -> (index * 17 + 7).toByte() }
 
-        val vbc4Page = try {
+        val vmPage = try {
             QpPendingPage.create(
                 entryToken = 0x414B_454E_0000_3001L,
-                logicalIdentity = vbc4Identity,
-                plaintext = vbc4Plaintext,
+                logicalIdentity = vmIdentity,
+                plaintext = vmPlaintext,
                 resourcePath = "META-INF/.qp/qp/unified.bin",
                 pageIndex = 0,
-                callSiteProof = vbc4Proof,
+                callSiteProof = vmProof,
                 random = SecureRandom(),
             )
         } finally {
-            Arrays.fill(vbc4Identity, 0)
-            Arrays.fill(vbc4Plaintext, 0)
-            Arrays.fill(vbc4Proof, 0)
+            Arrays.fill(vmIdentity, 0)
+            Arrays.fill(vmPlaintext, 0)
+            Arrays.fill(vmProof, 0)
         }
         val stringPage = try {
             QpPendingTextPage.create(
@@ -59,7 +59,7 @@ class QpUnifiedStringPageFinalizationTest {
         var layout: QpFinalizationLayout? = null
         try {
             val commitment = QpFinalizationLayout.reserve(
-                pendingPages = listOf(vbc4Page),
+                pendingPages = listOf(vmPage),
                 pendingStringPages = listOf(stringPage),
                 fixedEntries = emptyList(),
             )
@@ -73,13 +73,13 @@ class QpUnifiedStringPageFinalizationTest {
             layout = QpFinalizationLayout.materializeAndWipe(
                 plan = plan,
                 commitment = commitment,
-                pendingPages = listOf(vbc4Page),
+                pendingPages = listOf(vmPage),
                 pendingStringPages = listOf(stringPage),
                 fixedEntries = emptyList(),
-                vbc4StateBindingLayoutDigest = ByteArray(32) { index -> (index * 19 + 9).toByte() },
+                pageStateBindingLayoutDigest = ByteArray(32) { index -> (index * 19 + 9).toByte() },
             )
             assertTrue(plan.isWiped())
-            assertTrue(vbc4Page.isWiped)
+            assertTrue(vmPage.isWiped)
             assertTrue(stringPage.isWiped)
 
             val finalized = checkNotNull(layout)
@@ -106,7 +106,7 @@ class QpUnifiedStringPageFinalizationTest {
             assertFalse(finalized.verifyWriterEquivalentArtifactForBuild(tamperedStringPage))
         } finally {
             layout?.wipe()
-            vbc4Page.wipe()
+            vmPage.wipe()
             stringPage.wipe()
         }
     }

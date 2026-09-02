@@ -8,7 +8,7 @@ import kotlin.test.assertTrue
 
 class NativeHelperHardeningTest {
     @Test
-    fun c_native_runtime_is_retired_and_rust_owns_the_r1_surface() {
+    fun c_native_runtime_is_retired_and_rust_owns_the_native_surface() {
         assertFalse(Files.exists(sourcePath("src/main/native")), "C native product tree must be deleted")
         assertFalse(Files.exists(sourcePath("src/test/native")), "C native probe tree must be deleted")
         val ffi = Files.readString(sourcePath("src/main/rust/crates/qp-ffi/src/lib.rs"))

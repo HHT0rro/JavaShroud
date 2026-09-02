@@ -17,12 +17,12 @@ import kotlin.test.assertTrue
 
 class QpResourceCodecTest {
     @Test
-    fun vbc4_zstd_codec_emits_real_zstd_frame_and_roundtrips() {
+    fun native_zstd_codec_emits_real_zstd_frame_and_roundtrips() {
         val plain = ByteArray(512) { 0x2A.toByte() }
 
         val encoded = QpCompressionCodec.compress(plain)
 
-        assertTrue(encoded.size < plain.size, "VBC4 Zstd codec must emit a smaller real Zstd frame for compressible input")
+        assertTrue(encoded.size < plain.size, "Native VM Zstd codec must emit a smaller real Zstd frame for compressible input")
         assertContentEquals(byteArrayOf(0x28, 0xB5.toByte(), 0x2F, 0xFD.toByte()), encoded.copyOfRange(0, 4), "encoded payload must start with the standard Zstd frame magic")
         assertContentEquals(plain, QpCompressionCodec.decompress(encoded, plain.size), "encoded Zstd frame must decode to the original payload")
         assertEquals(null, QpCompressionCodec.decompress(encoded, plain.size + 1), "decoded length mismatch must fail closed")
@@ -38,7 +38,7 @@ class QpResourceCodecTest {
             layerCount = 3,
         )
 
-        assertTrue(!encoded.startsWithAscii("VBC5"), "encoded resource must not expose raw VBC5 magic before sealing")
+        assertTrue(!encoded.startsWithAscii("VBC5"), "encoded resource must not expose the retired magic before sealing")
         assertEquals(8, encoded[4].toInt() and 0xFF, "runtime resources must use only the partitioned JSRP v8 envelope")
         assertEquals(96, readLe16ForTest(encoded, 21), "public v3 header must expose only encrypted metadata length")
         assertEquals(32, readLe16ForTest(encoded, 23), "public v3 header must expose only MAC length")

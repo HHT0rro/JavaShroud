@@ -10,7 +10,7 @@ import org.objectweb.asm.ClassReader
 import org.objectweb.asm.tree.ClassNode
 
 /**
- * AKEN v4 gate: Java helper bytecode contains no generated, linearly
+ * Current-format gate: Java helper bytecode contains no generated, linearly
  * recomposable key shares, and deployment no longer emits a boot-root producer.
  */
 class RootKeyLiteralTest {
@@ -31,18 +31,18 @@ class RootKeyLiteralTest {
         val crypto = Files.readString(resolveSource("src/main/rust/crates/qp-crypto/src/lib.rs"))
         assertFalse(deployment.contains("emitShareMethod"), "deployment must not emit byte-array share literals")
         assertFalse(deployment.contains("emitPartitionKeyDispatch"), "deployment must not emit Java key reconstruction code")
-        assertFalse(deployment.contains("BootMaterialEnvelope"), "AKEN deployment must not emit a JSBM boot-material producer")
-        assertFalse(deployment.contains("BootKekSidecar"), "AKEN deployment must not emit a JSBK sidecar producer")
+        assertFalse(deployment.contains("BootMaterialEnvelope"), "Qp deployment must not emit a JSBM boot-material producer")
+        assertFalse(deployment.contains("BootKekSidecar"), "Qp deployment must not emit a JSBK sidecar producer")
         assertTrue(
             helper.contains("nativeOpenStringPage") &&
                 helper.contains("nativeReadClassPage") &&
                 helper.contains("nativeConsumeNativeSegment"),
-            "helper must expose purpose-split AKEN page routes",
+            "helper must expose purpose-split Qp page routes",
         )
-        assertFalse(coupling.contains("reconstructKey"), "AKEN compatibility helper must not recover a page key")
-        assertFalse(coupling.contains("nativeReconstructKey"), "AKEN compatibility helper must not expose a key-returning native ABI")
-        assertFalse(coupling.contains("CopyOnWriteArrayList"), "AKEN compatibility helper must not retain a global fragment registry")
-        assertTrue(coupling.contains("requireBoundNative"), "AKEN compatibility helper must fail closed through the bound native route")
+        assertFalse(coupling.contains("reconstructKey"), "Qp compatibility helper must not recover a page key")
+        assertFalse(coupling.contains("nativeReconstructKey"), "Qp compatibility helper must not expose a key-returning native ABI")
+        assertFalse(coupling.contains("CopyOnWriteArrayList"), "Qp compatibility helper must not retain a global fragment registry")
+        assertTrue(coupling.contains("requireBoundNative"), "Qp compatibility helper must fail closed through the bound native route")
         assertFalse(crypto.contains("js_aes256_expand_lanes"), "bound AES terminal must not materialize a full round-key array")
         assertTrue(crypto.contains("aes256_gcm_decrypt"), "Rust AES-GCM opener must remain the only decrypt terminal")
     }

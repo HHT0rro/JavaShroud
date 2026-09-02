@@ -7,13 +7,13 @@ import kotlin.test.assertTrue
 
 class NativeRuntimeCryptoKatTest {
     @Test
-    fun r1_rust_crypto_contract_is_bounded_authenticated_wipe_only_and_software_only() {
+    fun native_rust_crypto_contract_is_bounded_authenticated_wipe_only_and_software_only() {
         val rustRoot = rustRoot()
         val workspace = Files.readString(rustRoot.resolve("Cargo.toml"))
         val manifest = Files.readString(rustRoot.resolve("crates/qp-crypto/Cargo.toml"))
         val source = Files.readString(rustRoot.resolve("crates/qp-crypto/src/lib.rs"))
 
-        assertTrue(workspace.contains("\"crates/qp-crypto\""), "R1 workspace must include qp-crypto")
+        assertTrue(workspace.contains("\"crates/qp-crypto\""), "Native workspace must include qp-crypto")
         assertTrue(manifest.contains("name = \"qp-crypto\""), "qp-crypto manifest must be current")
         assertTrue(Files.isRegularFile(rustRoot.resolve("crates/qp-crypto/src/types.rs")), "qp-crypto must own Digest/Binding types")
 
@@ -47,7 +47,7 @@ class NativeRuntimeCryptoKatTest {
             "hardware_aes: false",
             "hardware_ghash: false",
         )) {
-            assertTrue(source.contains(contract), "R1 crypto contract is missing: $contract")
+            assertTrue(source.contains(contract), "Native crypto contract is missing: $contract")
         }
 
         assertRustTests(
@@ -57,7 +57,7 @@ class NativeRuntimeCryptoKatTest {
                 "aes256_gcm_matches_nist_vector_and_round_trips",
                 "aes256_gcm_empty_vector_and_authentication_failures",
                 "ghash_and_capability_gate_match_known_answers",
-                "public_helpers_enforce_the_kotlin_r1_bounds",
+                "public_helpers_enforce_the_current_bounds",
             ),
         )
     }

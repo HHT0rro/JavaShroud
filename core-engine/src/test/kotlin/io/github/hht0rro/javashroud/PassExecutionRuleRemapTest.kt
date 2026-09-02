@@ -78,7 +78,7 @@ class PassExecutionRuleRemapTest {
         val classBytes = virtualized.context.artifact.classArtifactIndex.getValue(renamedClassName).bytes
 
         assertEquals(1, virtualized.transformedMemberCount, "Selected-only method selector must survive class renaming")
-        assertTrue(methodCallsVmDispatcher(classBytes, "value", "()I"), "Renamed class should still have its selected method lowered to VBC4")
+        assertTrue(methodCallsVmDispatcher(classBytes, "value", "()I"), "Renamed class should still have its selected method lowered to the native VM")
         assertEquals(
             "$renamedClassName#value:()I",
             virtualized.context.config.passSelections.single().rules.single().target,

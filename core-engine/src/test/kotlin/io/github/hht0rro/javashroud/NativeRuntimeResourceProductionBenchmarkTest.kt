@@ -7,7 +7,7 @@ import kotlin.test.assertTrue
 
 class NativeRuntimeResourceProductionBenchmarkTest {
     @Test
-    fun rust_r1_resource_cache_page_and_lifecycle_contracts_are_bounded_authenticated_and_wiped() {
+    fun rust_native_resource_cache_page_and_lifecycle_contracts_are_bounded_authenticated_and_wiped() {
         val rustRoot = rustRoot()
         val resourceManifest = Files.readString(rustRoot.resolve("crates/qp-resource/Cargo.toml"))
         val resource = Files.readString(rustRoot.resolve("crates/qp-resource/src/lib.rs"))
@@ -28,7 +28,7 @@ class NativeRuntimeResourceProductionBenchmarkTest {
         assertNoUnsafe(runtime, "qp-runtime")
 
         for (testName in listOf(
-            "directory_is_r1_only_sorted_and_binary_searchable",
+            "directory_is_current_sorted_and_binary_searchable",
             "directory_authentication_rejects_reordering_and_tampering",
             "raw_and_rle_zstd_frames_are_bounded_and_wiped",
             "malformed_trailing_and_window_frames_fail_closed",
@@ -77,7 +77,7 @@ class NativeRuntimeResourceProductionBenchmarkTest {
             "GenerationState::Unloaded",
             "pub fn wait_for_unload(",
         )) {
-            assertContains(resource, marker, "R1 resource generation/decompression contract")
+            assertContains(resource, marker, "resource generation/decompression contract")
         }
         val resourceDecode = resource.substringAfter("fn decode_resource_inner(")
         assertOrder(resourceDecode, "require_auth_key(auth_key)?;", "let view = parse_frame(encoded)?;", "resource key validation before parse")
@@ -97,7 +97,7 @@ class NativeRuntimeResourceProductionBenchmarkTest {
             "resources.wipe_and_clear();",
             "pub fn is_wiped(",
         )) {
-            assertContains(lifecycle, marker, "R1 cache/lifecycle contract")
+            assertContains(lifecycle, marker, "cache/lifecycle contract")
         }
 
         for (marker in listOf(
@@ -105,13 +105,13 @@ class NativeRuntimeResourceProductionBenchmarkTest {
             "pub const MAX_PAGE_PLAINTEXT_SIZE",
             "pub fn encode_page(",
             "pub fn decode_page(",
-            "pub fn open_r1_frame(",
+            "pub fn open_current_frame(",
             "fn gcm_decrypt(",
             "let authenticated = constant_time_eq(",
             "if !authenticated",
             "pub fn wipe(&mut self)",
         )) {
-            assertContains(page, marker, "R1 page authentication/bounds/wipe contract")
+            assertContains(page, marker, "page authentication/bounds/wipe contract")
         }
         val pageDecrypt = page.substringAfter("fn gcm_decrypt(")
         assertOrder(pageDecrypt, "let authenticated = constant_time_eq(", "let plain = ctr_crypt(", "page authentication before plaintext")
