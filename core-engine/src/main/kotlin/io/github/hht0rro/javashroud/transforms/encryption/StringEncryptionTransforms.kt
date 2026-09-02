@@ -31,9 +31,10 @@ fun encryptStrings(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, par
         else -> throw IllegalArgumentException("string-encryption decoderBackend must be a string")
     }
     var classCount = 0
+    val isolatedTargets = io.github.hht0rro.javashroud.transforms.protection.isolatedDefineClassTargets(artifact)
 
     val updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
-        if (matchedClassNames.contains(classArtifact.summary.internalName)) {
+        if (matchedClassNames.contains(classArtifact.summary.internalName) && classArtifact.summary.internalName !in isolatedTargets) {
             val encryptedBytes = encryptClass(classArtifact.bytes)
             if (!encryptedBytes.contentEquals(classArtifact.bytes)) {
                 classCount++

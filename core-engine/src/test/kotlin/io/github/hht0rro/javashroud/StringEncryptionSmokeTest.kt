@@ -23,7 +23,7 @@ import kotlin.test.assertTrue
 class StringEncryptionSmokeTest {
 
     @Test
-    fun encryptClassStrings_replaces_ldc_strings_with_native_aken_callsite() {
+    fun encryptClassStrings_replaces_ldc_strings_with_native_callsite() {
         val classBytes = buildTestClassWithStrings("Hello", "World")
         val context = defaultQpBuildContext()
         try {
@@ -65,8 +65,8 @@ class StringEncryptionSmokeTest {
 
             val reader = ClassReader(encrypted)
             var foundSyntheticStringArray = false
-            var akenHelperInvokeCount = 0
-            var akenHelperInvokeDynamicCount = 0
+            var nativeHelperInvokeCount = 0
+            var nativeHelperInvokeDynamicCount = 0
             val bootstrapNames = setOf("q0", "m7", "x3", "v8")
             var foundLegacyHelperInvoke = false
             var foundOriginalLiteral = false
@@ -87,7 +87,7 @@ class StringEncryptionSmokeTest {
                         override fun visitMethodInsn(opcode: Int, owner: String, name: String, descriptor: String, isInterface: Boolean) {
                             if (opcode != Opcodes.INVOKESTATIC || owner != "io/github/hht0rro/javashroud/transforms/protection/qp/QpTextBridge") return
                             if (name == "invokeQpStringTerminal" && descriptor == "([B)Ljava/lang/String;") {
-                                akenHelperInvokeCount++
+                                nativeHelperInvokeCount++
                             }
                             if (name == "cachedDecodeString" || descriptor == "([BIIJJ)Ljava/lang/String;") {
                                 foundLegacyHelperInvoke = true
@@ -113,15 +113,15 @@ class StringEncryptionSmokeTest {
                                 val target = bootstrapMethodArguments[0] as org.objectweb.asm.Handle
                                 assertEquals("invokeQpStringTerminal", target.name)
                                 assertEquals("([B)Ljava/lang/String;", target.desc)
-                                akenHelperInvokeDynamicCount++
+                                nativeHelperInvokeDynamicCount++
                             }
                         }
                     }
                 }
             }, 0)
             assertFalse(foundSyntheticStringArray, "String encryption must not add reflection-visible fields to business classes")
-            assertEquals(1, akenHelperInvokeCount, "One literal should use the direct typed AKEN StringPage helper")
-            assertEquals(1, akenHelperInvokeDynamicCount, "One literal should use the indy typed AKEN StringPage helper")
+            assertEquals(1, nativeHelperInvokeCount, "One literal should use the direct typed Qp StringPage helper")
+            assertEquals(1, nativeHelperInvokeDynamicCount, "One literal should use the indy typed Qp StringPage helper")
             assertFalse(foundLegacyHelperInvoke, "Production call sites must not use the legacy inline string payload decoder")
             assertFalse(foundOriginalLiteral, "Original literals should be removed from LDC sites")
         } finally {
@@ -249,7 +249,7 @@ class StringEncryptionSmokeTest {
     }
 
     @Test
-    fun string_array_pool_does_not_rewrite_classes_with_typed_aken_string_pages() {
+    fun string_array_pool_does_not_rewrite_classes_with_typed_native_string_pages() {
         val context = defaultQpBuildContext()
         try {
             val encrypted = withQpBuildContext(context) {
@@ -262,7 +262,7 @@ class StringEncryptionSmokeTest {
             val pooled = poolClassStrings(encrypted)
             assertTrue(
                 pooled.contentEquals(encrypted),
-                "String array pooling must leave a class with a typed AKEN page callsite unchanged.",
+                "String array pooling must leave a class with a typed Qp page callsite unchanged.",
             )
         } finally {
             context.wipe()
