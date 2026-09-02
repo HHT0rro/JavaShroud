@@ -6,6 +6,7 @@ import io.github.hht0rro.javashroud.testAttachedArtifact
 import io.github.hht0rro.javashroud.testClassArtifact
 import io.github.hht0rro.javashroud.testConfig
 import io.github.hht0rro.javashroud.transforms.protection.hardening.HardenedArtifactFinalizer
+import io.github.hht0rro.javashroud.transforms.protection.hardening.QpTargetRewriter
 import io.github.hht0rro.javashroud.transforms.protection.hardening.QpTargetTokenEnvelope
 import io.github.hht0rro.javashroud.transforms.protection.hardening.ProtectionFormat
 import io.github.hht0rro.javashroud.transforms.protection.hardening.ReleaseArtifactScan
@@ -29,6 +30,24 @@ import org.objectweb.asm.tree.ClassNode
 import org.objectweb.asm.tree.InvokeDynamicInsnNode
 
 class HardenedReleaseGateTest {
+    @Test
+    fun bootstrap_detection_uses_the_current_bootstrap_signature_without_retired_resolver() {
+        val internalName = QpTargetRewriter.BOOTSTRAP_OWNER
+        val bytes = requireNotNull(javaClass.getResourceAsStream("/$internalName.class")).use { it.readBytes() }
+        val classArtifact = testClassArtifact(internalName = internalName, bytes = bytes)
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(classArtifact),
+            jarEntries = listOf(JarEntryData("$internalName.class", bytes)),
+        )
+
+        val target = QpTargetRewriter.bootstrapTargetOrNull(artifact)
+
+        assertEquals(
+            QpTargetRewriter.BootstrapTarget(internalName, QpTargetRewriter.BOOTSTRAP_NAME),
+            target,
+        )
+    }
+
     @Test
     fun default_profile_is_release_hardened() {
         assertEquals(HardenedProtectionProfile.RELEASE_HARDENED, testConfig().protectionProfile)

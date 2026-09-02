@@ -21,9 +21,6 @@ internal object QpTargetRewriter {
 
     internal data class BootstrapTarget(val owner: String, val name: String)
 
-    private const val RESOLVE_HANDLE_NAME = "resolveHandle"
-    private const val RESOLVE_HANDLE_DESC =
-        "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;)Ljava/lang/invoke/MethodHandle;"
 
     /**
      * Return the class that owns the current target-token bootstrap. Runtime
@@ -34,7 +31,6 @@ internal object QpTargetRewriter {
     internal fun bootstrapTargetOrNull(artifact: BytecodeArtifact): BootstrapTarget? {
         for (classArtifact in artifact.classArtifacts) {
             var hasBootstrap = false
-            var hasResolveHandle = false
             try {
                 ClassReader(classArtifact.bytes).accept(object : org.objectweb.asm.ClassVisitor(Opcodes.ASM9) {
                     override fun visitMethod(
@@ -51,21 +47,13 @@ internal object QpTargetRewriter {
                         ) {
                             hasBootstrap = true
                         }
-                        if (
-                            access and Opcodes.ACC_STATIC != 0 &&
-                                name == RESOLVE_HANDLE_NAME &&
-                                descriptor == RESOLVE_HANDLE_DESC
-                        ) {
-                            hasResolveHandle = true
-                        }
                         return null
                     }
                 }, ClassReader.SKIP_CODE or ClassReader.SKIP_DEBUG or ClassReader.SKIP_FRAMES)
             } catch (_: RuntimeException) {
                 hasBootstrap = false
-                hasResolveHandle = false
             }
-            if (hasBootstrap && hasResolveHandle) {
+            if (hasBootstrap) {
                 return BootstrapTarget(classArtifact.summary.internalName, BOOTSTRAP_NAME)
             }
         }
