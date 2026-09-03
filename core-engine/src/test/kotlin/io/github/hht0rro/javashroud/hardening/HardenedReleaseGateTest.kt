@@ -664,9 +664,9 @@ class HardenedReleaseGateTest {
     }
 
     @Test
-    fun legacy_catalog_magic_is_rejected() {
-        assertTrue("JSC1" in ProtectionFormat.FORBIDDEN_RELEASE_MAGICS)
-        assertTrue("JSR1" in ProtectionFormat.FORBIDDEN_RELEASE_MAGICS)
+    fun retired_format_signatures_remain_release_rejections() {
+        assertTrue(ProtectionFormat.RETIRED_FRAME_MAGIC_HEX in ProtectionFormat.FORBIDDEN_RELEASE_MAGIC_HEX)
+        assertTrue(ProtectionFormat.RETIRED_DIRECTORY_MAGIC_HEX in ProtectionFormat.FORBIDDEN_RELEASE_MAGIC_HEX)
     }
 
     @Test
@@ -741,7 +741,7 @@ class HardenedReleaseGateTest {
             jarEntries = listOf(
                 JarEntryData("sample/Host.class", classBytes),
                 JarEntryData(METHOD_RENAME_BINDINGS_RESOURCE, "sample/Host|run|()V|a\n".toByteArray()),
-                JarEntryData("META-INF/.r/boot.dat", "JSBM".toByteArray()),
+                JarEntryData("META-INF/.r/boot.dat", byteArrayOf(0x4A, 0x53, 0x42, 0x4D)),
             ),
         )
         val finalized = HardenedArtifactFinalizer.finalizeForWrite(artifact, testConfig())

@@ -76,6 +76,9 @@ internal object ReleaseArtifactScan {
     )
     private val NATIVE_DIAGNOSTIC_NAME_MARKERS = listOf("debug-export", "test-only-export")
     private val NATIVE_CORE_NAME_MARKERS = listOf("stage1", "full-core", "microcode-corpus")
+    private val FORBIDDEN_RELEASE_MAGIC_BYTES: List<ByteArray> by lazy {
+        ProtectionFormat.FORBIDDEN_RELEASE_MAGIC_HEX.map(::decodeHex)
+    }
 
     fun scan(
         outputJarPath: Path,
@@ -198,7 +201,7 @@ internal object ReleaseArtifactScan {
 
     private fun scanLegacyMagics(artifact: BytecodeArtifact): ReleaseArtifactScanReport.Finding {
         val hit = artifact.jarEntries.firstOrNull { entry ->
-            ProtectionFormat.FORBIDDEN_RELEASE_MAGICS.any { magic -> startsWithAscii(entry.bytes, magic) }
+            FORBIDDEN_RELEASE_MAGIC_BYTES.any { magic -> startsWithBytes(entry.bytes, magic) }
         }
         return ReleaseArtifactScanReport.Finding(
             "legacy-magic",
@@ -1484,9 +1487,13 @@ internal object ReleaseArtifactScan {
         return false
     }
 
-    private fun startsWithAscii(bytes: ByteArray, value: String): Boolean {
-        val target = value.toByteArray(Charsets.US_ASCII)
-        if (target.isEmpty() || bytes.size < target.size) return false
-        return target.indices.all { index -> bytes[index] == target[index] }
+    private fun startsWithBytes(bytes: ByteArray, target: ByteArray): Boolean =
+        target.isNotEmpty() && bytes.size >= target.size && target.indices.all { index -> bytes[index] == target[index] }
+
+    private fun decodeHex(value: String): ByteArray {
+        require(value.length % 2 == 0) { "hex signature length must be even" }
+        return ByteArray(value.length / 2) { index ->
+            value.substring(index * 2, index * 2 + 2).toInt(16).toByte()
+        }
     }
 }

@@ -83,7 +83,10 @@ class HardenedNegativeTamperTest {
             classArtifacts = listOf(classArtifact),
             jarEntries = listOf(
                 JarEntryData("sample/LegacyHost.class", classBytes),
-                JarEntryData("META-INF/jsrt/catalog/directory.jsr1", "JSR1DIR".toByteArray()),
+                JarEntryData(
+                    "META-INF/.r/boot.dat",
+                    byteArrayOf(0x4A, 0x53, 0x52, 0x31, 0x44, 0x49, 0x52),
+                ),
             ),
         )
         val dir = Files.createTempDirectory("js-neg-magic")
