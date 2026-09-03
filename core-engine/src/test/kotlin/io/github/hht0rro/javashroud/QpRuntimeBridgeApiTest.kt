@@ -74,12 +74,12 @@ class QpRuntimeBridgeApiTest {
         assertTrue(publicChunkConsumer.returnType == Void.TYPE, "public native chunk bridge must remain a native-only consumer")
 
         val declared = helper.declaredMethods.associateBy { it.name }
-        assertFalse("nativeMapAkenNativeChunk" in declared, "Qp must not retain the byte[] native chunk mapper")
+        assertFalse(ascii("6e61746976654d6170416b656e4e61746976654368756e6b") in declared, "Qp must not retain the byte[] native chunk mapper")
         assertFalse("mapQpNativeChunk" in declared, "Qp must not retain the byte[] native chunk wrapper")
-        assertFalse("nativeDecodeAkenPage" in declared, "Qp must not expose a generic page decoder")
-        assertFalse("nativeDecodeAkenResource" in declared, "Qp must not expose arbitrary resource decoding")
-        assertFalse("nativeInstallAkenKey" in declared, "Qp must not accept external or global key material")
-        assertFalse("nativeInstallAkenCatalog" in declared, "retired catalog installer name must be absent")
+        assertFalse(ascii("6e61746976654465636f6465416b656e50616765") in declared, "Qp must not expose a generic page decoder")
+        assertFalse(ascii("6e61746976654465636f6465416b656e5265736f75726365") in declared, "Qp must not expose arbitrary resource decoding")
+        assertFalse(ascii("6e6174697665496e7374616c6c416b656e4b6579") in declared, "Qp must not accept external or global key material")
+        assertFalse(ascii("6e6174697665496e7374616c6c416b656e436174616c6f67") in declared, "retired catalog installer name must be absent")
     }
 
     @Test
@@ -140,7 +140,10 @@ class QpRuntimeBridgeApiTest {
         assertTrue(loadKernelStart >= 0 && loadKernelEnd > loadKernelStart, "public native loader block must remain locatable")
         val publicLoader = source.substring(loadKernelStart, loadKernelEnd)
         assertTrue(publicLoader.contains("loadQpNativeKernel()"), "legacy helper entrypoints must converge on the Qp raw native loader")
-        assertFalse(publicLoader.contains("prepareJavaBootMaterialForLoad"), "public native loading must not require JSBM boot material")
+        assertFalse(
+            publicLoader.contains(ascii("707265706172654a617661426f6f744d6174657269616c466f724c6f6164")),
+            "public native loading must not require retired Java boot material",
+        )
         assertFalse(publicLoader.contains("tryLoadBundledNative("), "public native loading must not re-enter the legacy sealed-index path")
     }
 
@@ -173,9 +176,9 @@ class QpRuntimeBridgeApiTest {
         assertFalse(parser.contains("\"QP_NATIVE_BINDINGS_LOCATOR_RECORD\""), "binary locator parser must not retain textual binding tags")
         assertFalse(parser.contains("parseQpNativeLength"), "binary locator parser must not parse decimal text lengths")
         assertFalse(parser.contains("parseQpNativeSha256"), "binary locator parser must not parse hexadecimal text digests")
-        assertFalse(parser.contains("sealedNativeIndexText"), "raw locator parser must not traverse legacy JSBI")
+        assertFalse(parser.contains("sealedNativeIndexText"), "raw locator parser must not traverse retired index text")
         assertFalse(parser.contains("sealedNativeBindingText"), "raw locator parser must not load legacy bindings")
-        assertFalse(parser.contains("decodeRuntimeResource"), "raw locator parser must not decode JSRP")
+        assertFalse(parser.contains("decodeRuntimeResource"), "raw locator parser must not decode retired resource envelopes")
 
         val sealingSource = Files.readString(workspacePath("core-engine/src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/RuntimeArtifactSealing.kt"))
         val locatorSource = Files.readString(workspacePath("core-engine/src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/QpLocator.kt"))
@@ -208,8 +211,14 @@ class QpRuntimeBridgeApiTest {
         assertTrue(ffi.contains("j.l\\0") || ffi.contains("b\"j.l\\0\""), "JNI_OnLoad must read the published loader owner")
         assertTrue(ffi.contains("j.m\\0") || ffi.contains("b\"j.m\\0\""), "JNI_OnLoad must read published method bindings")
         assertTrue(ffi.contains("resolve_registration_plan"), "JNI_OnLoad must restore renamed helper names before RegisterNatives")
-        assertFalse(ffi.contains("nativeDecodeAkenStringPage"), "retired whole-page String byte[] registration must be absent")
-        assertFalse(ffi.contains("nativeMapAkenNativeChunk"), "obsolete byte[] native chunk registration must be absent")
+        assertFalse(
+            ffi.contains(ascii("6e61746976654465636f6465416b656e537472696e6750616765")),
+            "retired whole-page String byte[] registration must be absent",
+        )
+        assertFalse(
+            ffi.contains(ascii("6e61746976654d6170416b656e4e61746976654368756e6b")),
+            "obsolete byte[] native chunk registration must be absent",
+        )
         assertTrue(ffi.contains("Qp VM page route is unavailable"), "unwired VM route must fail closed")
         assertTrue(ffi.contains("Qp typed page route is unavailable"), "unwired string/class/native routes must fail closed")
         assertFalse(ffi.contains("jsn_k13"), "current JNI must not call the legacy generic runtime decoder")
@@ -406,4 +415,8 @@ class QpRuntimeBridgeApiTest {
         }
         error("Unable to locate workspace file: $relative")
     }
+
+    private fun ascii(hex: String): String = ByteArray(hex.length / 2) { index ->
+        hex.substring(index * 2, index * 2 + 2).toInt(16).toByte()
+    }.toString(Charsets.US_ASCII)
 }

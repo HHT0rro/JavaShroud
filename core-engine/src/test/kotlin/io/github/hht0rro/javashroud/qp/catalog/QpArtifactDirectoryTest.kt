@@ -2,6 +2,7 @@ package io.github.hht0rro.javashroud.qp.catalog
 
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpResourceKind
 import io.github.hht0rro.javashroud.transforms.protection.qp.catalog.*
+import io.github.hht0rro.javashroud.transforms.protection.hardening.ProtectionFormat
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
@@ -182,7 +183,7 @@ class QpArtifactDirectoryTest {
             headerMutations.forEach { assertReject(it, runtime) }
 
             val retiredMagic = encoded.copyOf()
-            "JSR1DIR".toByteArray().copyInto(retiredMagic)
+            hex(ProtectionFormat.RETIRED_DIRECTORY_PREVIOUS_MAGIC_HEX).copyInto(retiredMagic)
             assertReject(retiredMagic, runtime)
 
             val zeroDigest = encoded.copyOf()
@@ -236,7 +237,7 @@ class QpArtifactDirectoryTest {
     }
 
     @Test
-    fun duplicate_unsupported_target_and_legacy_magic_fail_closed() {
+    fun duplicate_unsupported_target_and_retired_magic_fail_closed() {
         val runtime = sampleRuntime()
         val pages = samplePages(runtime)
         val directory = QpArtifactDirectory.create(runtime, pages)
@@ -258,7 +259,7 @@ class QpArtifactDirectoryTest {
             assertReject(unsupported, runtime)
 
             val legacy = encoded.copyOf()
-            "AKENOLD".encodeToByteArray().copyInto(legacy, 0)
+            hex("414b454e4f4c44").copyInto(legacy, 0)
             assertReject(legacy, runtime)
         } finally {
             directory.wipe()

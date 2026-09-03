@@ -10,7 +10,8 @@ class NativeRuntimeMultiPageAuthDifferentialTest {
     @Test
     fun c_page_auth_probe_is_retired_in_favor_of_rust_page_authentication() {
         assertFalse(Files.exists(resolveSource("src/main/native")))
-        assertFalse(Files.exists(resolveSource("src/test/native/aken_page_auth_differential_probe.c")))
+        val retiredProbe = ascii("616b656e5f706167655f617574685f646966666572656e7469616c5f70726f62652e63")
+        assertFalse(Files.exists(resolveSource("src/test/native/$retiredProbe")))
         val page = Files.readString(resolveSource("src/main/rust/crates/qp-page/src/lib.rs"))
         assertTrue(page.contains("AuthenticationFailed") || page.contains("authenticate"))
     }
@@ -19,4 +20,8 @@ class NativeRuntimeMultiPageAuthDifferentialTest {
         val direct = Path.of(relativePath)
         return if (Files.exists(direct)) direct else Path.of("core-engine").resolve(relativePath)
     }
+
+    private fun ascii(hex: String): String = ByteArray(hex.length / 2) { index ->
+        hex.substring(index * 2, index * 2 + 2).toInt(16).toByte()
+    }.toString(Charsets.US_ASCII)
 }

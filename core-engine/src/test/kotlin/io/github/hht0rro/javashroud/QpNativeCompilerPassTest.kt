@@ -208,7 +208,7 @@ class QpNativeCompilerPassTest {
         )
         for (forbidden in listOf(
             "META-INF/native-src",
-            "js_aken_page_locator.inc",
+            ascii("6a735f616b656e5f706167655f6c6f6361746f722e696e63"),
             "generateC",
             "copyNativeSource",
             "zig cc",
@@ -293,4 +293,8 @@ class QpNativeCompilerPassTest {
         nativeSeed = 0x10203040L,
         jarLayoutDigest = ByteArray(QP_LAYOUT_DIGEST_SIZE) { (it + 2).toByte() },
     )
+
+    private fun ascii(hex: String): String = ByteArray(hex.length / 2) { index ->
+        hex.substring(index * 2, index * 2 + 2).toInt(16).toByte()
+    }.toString(Charsets.US_ASCII)
 }

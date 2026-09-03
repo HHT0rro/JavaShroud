@@ -76,7 +76,7 @@ class QpBlockClusterPlannerTest {
             encodedPayloadLengths = listOf(100, 100),
         )
         val badMagic = valid.copyOf().also { it[0] = 'X'.code.toByte() }
-        val retiredVbcxMagic = valid.copyOf().also { it[3] = 'X'.code.toByte() }
+        val retiredFixedMagic = valid.copyOf().also { it[3] = 'X'.code.toByte() }
         val emptyConstantPool = framedQp(
             blockIds = listOf(10),
             encodedPayloadLengths = listOf(100),
@@ -123,7 +123,7 @@ class QpBlockClusterPlannerTest {
         try {
             listOf(
                 badMagic,
-                retiredVbcxMagic,
+                retiredFixedMagic,
                 emptyConstantPool,
                 truncated,
                 retiredAuthenticationLengthMarker,

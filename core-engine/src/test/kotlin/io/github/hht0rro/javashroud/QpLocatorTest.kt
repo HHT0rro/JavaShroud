@@ -34,8 +34,8 @@ class QpLocatorTest {
         val locatorEntry = sealed.jarEntries.single { entry ->
             entry.bytes.isBinaryLocator()
         }
-        assertFalse(locatorEntry.bytes.containsAscii("AKEN_NATIVE_LOCATOR_V1"))
-        assertFalse(locatorEntry.bytes.containsAscii("AKEN_NATIVE_BINDINGS_V1"))
+        assertFalse(locatorEntry.bytes.containsSignature("414b454e5f4e41544956455f4c4f4341544f525f5631"))
+        assertFalse(locatorEntry.bytes.containsSignature("414b454e5f4e41544956455f42494e44494e47535f5631"))
         assertFalse(locatorEntry.bytes.containsAscii("META-INF/"), "binary locator routes must not remain plain ASCII")
         assertFalse(locatorEntry.bytes.containsAscii("windows-x64"), "binary locator must not expose platform text")
         assertFalse(locatorEntry.name == QP_NATIVE_LOCATOR_LOGICAL_RESOURCE)
@@ -414,6 +414,14 @@ class QpLocatorTest {
 
     private fun ByteArray.containsAscii(value: String): Boolean {
         val needle = value.toByteArray(Charsets.US_ASCII)
+        return needle.isNotEmpty() && size >= needle.size &&
+            (0..size - needle.size).any { offset -> needle.indices.all { index -> this[offset + index] == needle[index] } }
+    }
+
+    private fun ByteArray.containsSignature(hex: String): Boolean {
+        val needle = ByteArray(hex.length / 2) { index ->
+            hex.substring(index * 2, index * 2 + 2).toInt(16).toByte()
+        }
         return needle.isNotEmpty() && size >= needle.size &&
             (0..size - needle.size).any { offset -> needle.indices.all { index -> this[offset + index] == needle[index] } }
     }

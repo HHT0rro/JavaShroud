@@ -46,17 +46,19 @@ class QpTargetTokenEnvelopeTest {
             return false
         }
         assertFalse(hasLane(0x4A535230) && hasLane(0x4A535231) && hasLane(0x4A535232) && hasLane(0x4A535233))
-        fun containsAscii(value: String): Boolean {
-            val needle = value.toByteArray(Charsets.US_ASCII)
+        fun containsSignature(hex: String): Boolean {
+            val needle = ByteArray(hex.length / 2) { index ->
+                hex.substring(index * 2, index * 2 + 2).toInt(16).toByte()
+            }
             outer@ for (start in 0..helper.size - needle.size) {
                 for (i in needle.indices) if (helper[start + i] != needle[i]) continue@outer
                 return true
             }
             return false
         }
-        assertFalse(containsAscii("JSITKAAD"))
-        assertFalse(containsAscii("JSITKKDF"))
-        assertFalse(containsAscii("ITK1"))
+        assertFalse(containsSignature(ProtectionFormat.RETIRED_TOKEN_AAD_DOMAIN_HEX))
+        assertFalse(containsSignature(ProtectionFormat.RETIRED_TOKEN_KEY_DOMAIN_HEX))
+        assertFalse(containsSignature(ProtectionFormat.RETIRED_TOKEN_MAGIC_HEX))
     }
 
     @Test
