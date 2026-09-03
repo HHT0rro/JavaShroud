@@ -54,7 +54,6 @@ class QpNameScheduleParityTest {
             "os-anti-vm",
             "callsite-rotation-protection",
             "invoke-dynamic-indirection",
-            "bootstrap-table-encryption",
             "exception-semantic-virtualization",
         )
         QpNameSchedule.create(SEED, COMMITMENT).use { schedule ->

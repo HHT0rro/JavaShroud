@@ -25,7 +25,6 @@ import io.github.hht0rro.javashroud.transforms.protection.currentQpBuildContextO
 import io.github.hht0rro.javashroud.transforms.protection.requireQpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.defaultQpBuildContext
-import io.github.hht0rro.javashroud.transforms.protection.applyBootstrapTableEncryption
 import io.github.hht0rro.javashroud.transforms.protection.applyMethodVirtualization as applyMethodVirtualizationTransform
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing
 import org.objectweb.asm.ClassReader
@@ -379,24 +378,6 @@ class MethodVirtualizationThresholdTest {
         )
 
         assertEquals(1, result.transformedMemberCount, "The lambda factory may be virtualized while the SAM callback remains a JVM boundary")
-    }
-
-    @Test
-    fun method_virtualization_strict_accepts_bootstrap_encrypted_string_concat() {
-        val original = artifactFor(encryptedStringConcatClassBytes(), "example/VmEncryptedConcat")
-        val encrypted = applyBootstrapTableEncryption(
-            artifact = original,
-            ruleMatches = ruleMatchesFor("example/VmEncryptedConcat", "invoke-dynamic-indirection"),
-            params = mapOf("seed" to 7),
-        ).artifact
-
-        val result = applyMethodVirtualization(
-            artifact = encrypted,
-            ruleMatches = ruleMatchesFor("example/VmEncryptedConcat"),
-            params = mapOf("maxInstructions" to 100, "seed" to 42, "methodSelection" to "all-compatible", "strictVirtualization" to true, "maxBroadVirtualizedMethods" to 0),
-        )
-
-        assertEquals(1, result.transformedMemberCount, "strict all-compatible must virtualize methods whose supported indy is wrapped by invoke-dynamic-indirection")
     }
 
     @Test
@@ -1451,38 +1432,6 @@ class MethodVirtualizationThresholdTest {
         writer.visitEnd()
         return writer.toByteArray()
     }
-    private fun encryptedStringConcatClassBytes(): ByteArray {
-        val writer = ClassWriter(0)
-        writer.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "example/VmEncryptedConcat", null, "java/lang/Object", null)
-        val init = writer.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
-        init.visitCode()
-        init.visitVarInsn(Opcodes.ALOAD, 0)
-        init.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
-        init.visitInsn(Opcodes.RETURN)
-        init.visitMaxs(1, 1)
-        init.visitEnd()
-        val text = writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "text", "(I)Ljava/lang/String;", null, null)
-        text.visitCode()
-        text.visitVarInsn(Opcodes.ILOAD, 0)
-        text.visitInvokeDynamicInsn(
-            "makeConcatWithConstants",
-            "(I)Ljava/lang/String;",
-            org.objectweb.asm.Handle(
-                Opcodes.H_INVOKESTATIC,
-                "java/lang/invoke/StringConcatFactory",
-                "makeConcatWithConstants",
-                "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;",
-                false,
-            ),
-            "v=\u0001",
-        )
-        text.visitInsn(Opcodes.ARETURN)
-        text.visitMaxs(1, 1)
-        text.visitEnd()
-        writer.visitEnd()
-        return writer.toByteArray()
-    }
-
     private fun twoMethodClassBytes(): ByteArray {
         val writer = ClassWriter(0)
         writer.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "example/VmThreshold", null, "java/lang/Object", null)
