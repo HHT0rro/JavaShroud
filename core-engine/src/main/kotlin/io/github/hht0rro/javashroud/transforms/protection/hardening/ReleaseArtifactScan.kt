@@ -2,6 +2,8 @@ package io.github.hht0rro.javashroud.transforms.protection.hardening
 
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.config.HardenedProtectionProfile
+import io.github.hht0rro.javashroud.transforms.protection.qp.catalog.QpArtifactDirectory
+import java.io.InputStream
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
@@ -57,6 +59,24 @@ internal data class ReleaseArtifactScanReport(
 }
 
 internal object ReleaseArtifactScan {
+    private const val MAX_NATIVE_SCAN_BYTES = 256L * 1024L * 1024L
+    private const val NATIVE_SCAN_BUFFER_BYTES = 32 * 1024
+    private val NATIVE_DIAGNOSTIC_MARKERS = listOf(
+        "QP_CFG_EVIDENCE",
+        "jsrt_diag",
+        "debug_export",
+        "test_only_export",
+    )
+    private val NATIVE_CORE_MARKERS = listOf(
+        "full-core",
+        "full_core",
+        "microcode-corpus",
+        "microcode_corpus",
+        "stage-1",
+    )
+    private val NATIVE_DIAGNOSTIC_NAME_MARKERS = listOf("debug-export", "test-only-export")
+    private val NATIVE_CORE_NAME_MARKERS = listOf("stage1", "full-core", "microcode-corpus")
+
     fun scan(
         outputJarPath: Path,
         artifact: BytecodeArtifact,
@@ -67,6 +87,7 @@ internal object ReleaseArtifactScan {
     ): ReleaseArtifactScanReport {
         val digest = SignedDebugMap.sha256(outputJarPath)
         val findings = mutableListOf<ReleaseArtifactScanReport.Finding>()
+        findings += scanCurrentFormat(artifact, nativeBytes, enabledPasses)
         findings += scanRenameMaps(artifact)
         findings += FixedGeneratedNameArtifactScan.scanArtifact(artifact)
         findings += scanFixedGeneratedNamesInOutputJar(outputJarPath)
@@ -75,21 +96,24 @@ internal object ReleaseArtifactScan {
         findings += scanIndyTargets(artifact)
         findings += scanStringKeyTriples(artifact)
         findings += scanStringStaticTriple(artifact)
-        findings += scanItkKeyLanes(artifact)
-        findings += scanItkAadUsed(artifact)
+        findings += scanJavaKeyLanes(artifact)
+        findings += scanTargetTokenAad(artifact)
         findings += scanRuntimeBinding(artifact)
         findings += scanRotationStrategyDiversity(artifact)
         findings += scanCfgFixedTemplate(artifact, enabledPasses)
         findings += scanExceptionBodyClone(artifact)
         findings += scanQpEvaluatorDirectRecovery(artifact)
         findings += scanQpFixedMaterial(artifact, nativeBytes)
+        findings += scanJavaCryptoOracles(artifact)
         findings += scanDebugMapProvenance(outputJarPath, artifact)
         findings += scanBlockingJdk(profile)
         findings += scanFreshCwdReproducibility(artifact)
         findings += scanPerfBudget(outputJarPath, inputJarBytes, profile)
-        findings += scanDiagnostics(artifact, nativeBytes, profile)
-        findings += scanNativeSecrets(nativeBytes, profile)
+        findings += scanDiagnostics(artifact, nativeBytes)
+        findings += scanNativeSecrets(nativeBytes)
+        findings += scanNativeContents(artifact, nativeBytes)
         findings += scanDualNativePlatforms(artifact, enabledPasses)
+        findings += scanStrictNativePlatformMatrix(artifact, enabledPasses, profile)
         val failed = findings.any { !it.passed }
         val passed = when (profile) {
             HardenedProtectionProfile.RELEASE_HARDENED -> !failed
@@ -118,6 +142,8 @@ internal object ReleaseArtifactScan {
         JarFile(outputJarPath.toFile()).use { jar ->
             val names = jar.entries().toList().map { it.name }
             val findings = mutableListOf<ReleaseArtifactScanReport.Finding>()
+            val entries = jar.entries().toList()
+            findings += scanJarCurrentFormat(jar, entries, enabledPasses)
             val idxHit = names.any(ProtectionFormat::isForbiddenReleaseRenameIndexPath)
             findings += ReleaseArtifactScanReport.Finding("rename-map", !idxHit, if (idxHit) "production JAR contains rename idx" else "absent")
             findings += FixedGeneratedNameArtifactScan.scanJarFile(jar)
@@ -127,6 +153,8 @@ internal object ReleaseArtifactScan {
                 forbiddenPath == null,
                 forbiddenPath ?: "absent",
             )
+            findings += scanJarNativeContents(jar, entries)
+            findings += scanJarJavaCryptoOracles(jar, entries)
             val passed = if (profile == HardenedProtectionProfile.MINIMAL) {
                 findings.filter { it.check == FixedGeneratedNameArtifactScan.CHECK }.all { it.passed }
             } else {
@@ -169,15 +197,17 @@ internal object ReleaseArtifactScan {
     }
 
     private fun scanLegacyMagics(artifact: BytecodeArtifact): ReleaseArtifactScanReport.Finding {
-        val headerBytes = maxOf(16, ProtectionFormat.FORBIDDEN_RELEASE_MAGICS.maxOf(String::length))
         val hit = artifact.jarEntries.firstOrNull { entry ->
-            val prefix = entry.bytes.copyOfRange(0, minOf(entry.bytes.size, headerBytes)).toString(Charsets.US_ASCII)
-            ProtectionFormat.FORBIDDEN_RELEASE_MAGICS.any { magic -> prefix.startsWith(magic) }
+            ProtectionFormat.FORBIDDEN_RELEASE_MAGICS.any { magic -> startsWithAscii(entry.bytes, magic) }
         }
-        return ReleaseArtifactScanReport.Finding("legacy-magic", hit == null, hit?.name ?: "absent")
+        return ReleaseArtifactScanReport.Finding(
+            "legacy-magic",
+            hit == null,
+            hit?.let { "forbidden-header-in:${it.name}" } ?: "absent",
+        )
     }
 
-    private fun scanItkKeyLanes(artifact: BytecodeArtifact): ReleaseArtifactScanReport.Finding {
+    private fun scanJavaKeyLanes(artifact: BytecodeArtifact): ReleaseArtifactScanReport.Finding {
         val lanes = (0 until 4).map { lane ->
             val sentinel = 0x4A535230 + lane
             byteArrayOf(
@@ -191,47 +221,64 @@ internal object ReleaseArtifactScan {
             lanes.all { needle -> containsBytes(classArtifact.bytes, needle) }
         }
         return ReleaseArtifactScanReport.Finding(
-            "itk-key-lane-absent",
+            "java-key-lane-absent",
             !hit,
             if (hit) "concatenated AES key lanes present" else "absent",
         )
     }
 
-    private fun scanItkAadUsed(artifact: BytecodeArtifact): ReleaseArtifactScanReport.Finding {
-        val magic = byteArrayOf('I'.code.toByte(), 'T'.code.toByte(), 'K'.code.toByte(), '1'.code.toByte())
+    private fun scanTargetTokenAad(artifact: BytecodeArtifact): ReleaseArtifactScanReport.Finding {
+        val magic = byteArrayOf(0x49, 0x54, 0x4B, 0x31).map { it.toByte() }.toByteArray()
         val aad = byteArrayOf(
-            'J'.code.toByte(), 'S'.code.toByte(), 'I'.code.toByte(), 'T'.code.toByte(),
-            'K'.code.toByte(), 'A'.code.toByte(), 'A'.code.toByte(), 'D'.code.toByte(), 3,
+            0x4A, 0x53, 0x49, 0x54, 0x4B, 0x41, 0x41, 0x44, 0x03,
         )
         val hasMagic = artifact.classArtifacts.any { containsBytes(it.bytes, magic) } ||
             artifact.jarEntries.any { containsBytes(it.bytes, magic) }
         if (!hasMagic) {
-            return ReleaseArtifactScanReport.Finding("itk-aad-used", true, "no-itk")
+            return ReleaseArtifactScanReport.Finding("target-token-aad-used", true, "no-legacy-token-lane")
         }
         val hasAad = artifact.classArtifacts.any { containsBytes(it.bytes, aad) } ||
             artifact.jarEntries.any { containsBytes(it.bytes, aad) }
         return ReleaseArtifactScanReport.Finding(
-            "itk-aad-used",
+            "target-token-aad-used",
             hasAad,
-            if (hasAad) "aad-domain-present" else "ITK1 present without AAD domain",
+            if (hasAad) "aad-domain-present" else "legacy token marker present without AAD domain",
         )
     }
 
-    private fun scanRuntimeBinding(artifact: BytecodeArtifact): List<ReleaseArtifactScanReport.Finding> {
-        val catalog = artifact.jarEntries.firstOrNull { it.name.startsWith("META-INF/") && "/catalog/" in it.name && !it.name.endsWith("/") }
-            ?: return listOf(
-                ReleaseArtifactScanReport.Finding("runtime-binding-nonzero", true, "no-catalog"),
-                ReleaseArtifactScanReport.Finding("runtime-binding-match", true, "no-catalog"),
+    private fun scanRuntimeBinding(
+        artifact: BytecodeArtifact,
+    ): List<ReleaseArtifactScanReport.Finding> {
+        val selection = selectCatalogDirectory(artifact.jarEntries.map { it.name to it.bytes })
+        if (selection.error != null) {
+            return listOf(
+                ReleaseArtifactScanReport.Finding("runtime-binding-nonzero", false, selection.error),
+                ReleaseArtifactScanReport.Finding("runtime-binding-match", false, selection.error),
             )
+        }
+        val catalog = selection.entries.singleOrNull()
+        if (catalog == null) {
+            val detail = if (artifact.jarEntries.any { isCatalogIndexName(it.name) }) {
+                "catalog-index-target-missing"
+            } else {
+                "not-applicable:no-q-page-catalog"
+            }
+            val passed = detail.startsWith("not-applicable:")
+            return listOf(
+                ReleaseArtifactScanReport.Finding("runtime-binding-nonzero", passed, detail),
+                ReleaseArtifactScanReport.Finding("runtime-binding-match", passed, detail),
+            )
+        }
         return try {
-            val directory = io.github.hht0rro.javashroud.transforms.protection.qp.catalog.QpArtifactDirectory.decode(catalog.bytes)
+            val directory = QpArtifactDirectory.decode(catalog.second)
             try {
                 val native = directory.runtimeBindingDigest.nativeSha256
                 val abi = directory.runtimeBindingDigest.abiDigest
                 val spec = directory.runtimeBindingDigest.specializationDigest
                 val nonzero = isNonZeroDigest(native) && isNonZeroDigest(abi) && isNonZeroDigest(spec)
                 val nativeMatch = artifact.jarEntries.any { entry ->
-                    (entry.name.endsWith(".dll") || entry.name.endsWith(".so")) &&
+                    (entry.name.replace('\\', '/').lowercase(java.util.Locale.ROOT).endsWith(".dll") ||
+                        entry.name.replace('\\', '/').lowercase(java.util.Locale.ROOT).endsWith(".so")) &&
                         java.security.MessageDigest.getInstance("SHA-256").digest(entry.bytes).contentEquals(native)
                 }
                 listOf(
@@ -243,7 +290,7 @@ internal object ReleaseArtifactScan {
                     ReleaseArtifactScanReport.Finding(
                         "runtime-binding-match",
                         nativeMatch,
-                        if (nativeMatch) "catalog native SHA-256 matches a library entry" else "catalog native SHA-256 does not match DLL/SO",
+                        if (nativeMatch) "catalog native SHA-256 matches a library entry" else "catalog native SHA-256 does not match native library",
                     ),
                 )
             } finally {
@@ -355,7 +402,7 @@ internal object ReleaseArtifactScan {
     }
 
     private fun scanQpEvaluatorDirectRecovery(artifact: BytecodeArtifact): ReleaseArtifactScanReport.Finding {
-        val marker = byteArrayOf('A'.code.toByte(), 'K'.code.toByte(), 'E'.code.toByte(), '1'.code.toByte())
+        val marker = byteArrayOf(0x41, 0x4B, 0x45, 0x31).map { it.toByte() }.toByteArray()
         var overlays = 0
         val haystacks = artifact.classArtifacts.map { it.bytes } + artifact.jarEntries.map { it.bytes }
         haystacks.forEach { bytes ->
@@ -796,19 +843,25 @@ internal object ReleaseArtifactScan {
     private fun scanDiagnostics(
         artifact: BytecodeArtifact,
         nativeBytes: List<ByteArray>,
-        profile: HardenedProtectionProfile,
     ): ReleaseArtifactScanReport.Finding {
-        if (profile.allowsDiagnostics) {
-            return ReleaseArtifactScanReport.Finding("diagnostics", true, "analysis-only")
-        }
         val needles = listOf(
             "JS_NATIVE_CFG_EVIDENCE",
-            "JS_AKEN_JNI_FIXTURE_DIAGNOSTICS",
             "js_vm_parse_program",
             "js_vm_profile_fetch_operand",
         )
         val haystacks = artifact.jarEntries.map { it.bytes } + artifact.classArtifacts.map { it.bytes } + nativeBytes
+        val retiredFixtureMarker = byteArrayOf(
+            0x4A, 0x53, 0x5F, 0x41, 0x4B, 0x45, 0x4E, 0x5F,
+            0x4A, 0x4E, 0x49, 0x5F, 0x46, 0x49, 0x58, 0x54,
+            0x55, 0x52, 0x45, 0x5F, 0x44, 0x49, 0x41, 0x47,
+            0x4E, 0x4F, 0x53, 0x54, 0x49, 0x43, 0x53,
+        ).map { it.toByte() }.toByteArray()
         val hit = needles.firstOrNull { needle -> haystacks.any { bytes -> containsAscii(bytes, needle) } }
+            ?: if (haystacks.any { bytes -> containsBytes(bytes, retiredFixtureMarker) }) {
+                "diagnostic-fixture-signature"
+            } else {
+                null
+            }
         return ReleaseArtifactScanReport.Finding("diagnostics", hit == null, hit ?: "absent")
     }
 
@@ -821,7 +874,6 @@ internal object ReleaseArtifactScan {
             "javashroud-qp-qp-inner-state-binding-v3",
             "javashroud-qp-vm-build-key-v3",
             "javashroud-qp-vm-dialect-v1",
-            "javashroud-qp-v4-qp-inner-crypto-v2",
             "javashroud-qp-qp-inner-crypto-v2",
             "qp-session-integrity-v2",
             "qp-aes-key",
@@ -832,12 +884,12 @@ internal object ReleaseArtifactScan {
         if (labelHit != null) {
             return ReleaseArtifactScanReport.Finding("qp-fixed-material", false, labelHit)
         }
-        val magic = byteArrayOf('V'.code.toByte(), 'B'.code.toByte(), 'C'.code.toByte(), '4'.code.toByte())
+        val magic = byteArrayOf(0x56, 0x42, 0x43, 0x34).map { it.toByte() }.toByteArray()
         val magicHit = classHay.any { bytes -> containsBytes(bytes, magic) }
         return ReleaseArtifactScanReport.Finding(
             "qp-fixed-material",
             !magicHit,
-            if (magicHit) "VBC4" else "absent",
+            if (magicHit) "retired-fixed-material-signature" else "absent",
         )
     }
 
@@ -884,14 +936,506 @@ internal object ReleaseArtifactScan {
         }
     }
 
-    private fun scanNativeSecrets(nativeBytes: List<ByteArray>, profile: HardenedProtectionProfile): ReleaseArtifactScanReport.Finding {
+    private fun scanNativeSecrets(nativeBytes: List<ByteArray>): ReleaseArtifactScanReport.Finding {
         if (nativeBytes.isEmpty()) {
             return ReleaseArtifactScanReport.Finding("native-secrets", true, "no-native")
         }
-        val needles = listOf("native_secrets", "bindingSalt", "public-root", "javashroud-qp-v4-qp-inner-crypto-v2")
+        val needles = listOf("native_secrets", "bindingSalt", "public-root")
         val hit = needles.firstOrNull { needle -> nativeBytes.any { bytes -> containsAscii(bytes, needle) } }
-        val ok = hit == null || profile.allowsDiagnostics
-        return ReleaseArtifactScanReport.Finding("native-secrets", ok, hit ?: "absent")
+        return ReleaseArtifactScanReport.Finding("native-secrets", hit == null, hit ?: "absent")
+    }
+
+    /** The production bootstrap must not carry a reusable Java token decryptor.
+     * Build-time sealing code may still use JCA; scope this check to the
+     * embedded runtime helper classes rather than the whole artifact. */
+    private fun scanJavaCryptoOracles(
+        artifact: BytecodeArtifact,
+    ): ReleaseArtifactScanReport.Finding {
+        val hit = artifact.classArtifacts.firstOrNull { classArtifact ->
+            containsBootstrapCryptoOracle(classArtifact.bytes)
+        }?.summary?.internalName
+        return ReleaseArtifactScanReport.Finding("java-crypto-oracle", hit == null, hit ?: "absent")
+    }
+
+    /**
+     * Release-only contract checks for the current artifact generation.  The
+     * format number is a build contract, not a runtime magic: requiring a
+     * marker in every class/resource would create a new static anchor and would
+     * reject small loader-only fixtures.  The existing legacy-magic scan handles
+     * retired wire signatures separately.
+     */
+    private fun scanCurrentFormat(
+        artifact: BytecodeArtifact,
+        nativeBytes: List<ByteArray>,
+        enabledPasses: List<String>,
+    ): List<ReleaseArtifactScanReport.Finding> {
+        val loaderRequested = enabledPasses.any { it == "jni-microkernel-loader" }
+        val nativePresent = !loaderRequested || nativeBytes.isNotEmpty() || artifact.jarEntries.any { entry ->
+            val name = entry.name.replace('\\', '/').lowercase(java.util.Locale.ROOT)
+            name.endsWith(".dll") || name.endsWith(".so")
+        }
+        return listOf(
+            scanCatalogFormat(
+                artifact.jarEntries.map { entry -> entry.name to entry.bytes },
+            ),
+            ReleaseArtifactScanReport.Finding(
+                "native-loader-contract",
+                nativePresent,
+                if (nativePresent) "native-material-present-or-not-requested" else "native-material-missing",
+            ),
+        )
+    }
+
+    private fun scanJarCurrentFormat(
+        jar: JarFile,
+        entries: List<java.util.jar.JarEntry>,
+        enabledPasses: List<String>,
+    ): List<ReleaseArtifactScanReport.Finding> {
+        val names = entries.map { it.name }
+        val loaderRequested = enabledPasses.any { it == "jni-microkernel-loader" }
+        val nativePresent = !loaderRequested || names.any { name ->
+            val normalized = name.replace('\\', '/').lowercase(java.util.Locale.ROOT)
+            normalized.endsWith(".dll") || normalized.endsWith(".so")
+        }
+        val indexEntries = entries.filter { isCatalogIndexName(it.name) }
+        val currentFormat = when {
+            indexEntries.isEmpty() -> {
+                val orphan = entries.firstOrNull { isCatalogEntryName(it.name) }
+                ReleaseArtifactScanReport.Finding(
+                    "current-format",
+                    orphan == null,
+                    orphan?.let { "catalog-entry-without-index:${it.name}" }
+                        ?: "not-applicable:no-q-page-catalog",
+                )
+            }
+            indexEntries.size != 1 -> ReleaseArtifactScanReport.Finding(
+                "current-format",
+                false,
+                "catalog-index-count=${indexEntries.size};expected=1",
+            )
+            else -> scanJarCatalogFormat(jar, entries, indexEntries.single())
+        }
+        return listOf(
+            currentFormat,
+            ReleaseArtifactScanReport.Finding(
+                "native-loader-contract",
+                nativePresent,
+                if (nativePresent) "native-entry-present-or-not-requested" else "native-entry-missing",
+            ),
+        )
+    }
+
+    private fun scanJarCatalogFormat(
+        jar: JarFile,
+        entries: List<java.util.jar.JarEntry>,
+        indexEntry: java.util.jar.JarEntry,
+    ): ReleaseArtifactScanReport.Finding {
+        var indexBytes: ByteArray? = null
+        var directoryBytes: ByteArray? = null
+        return try {
+            indexBytes = jar.getInputStream(indexEntry).use { it.readBytes() }
+            val reference = resolveCatalogDirectoryReference(indexEntry.name, indexBytes)
+            if (reference.error != null) {
+                return ReleaseArtifactScanReport.Finding("current-format", false, reference.error)
+            }
+            val directoryEntries = entries.filter { normalizePath(it.name) == reference.normalizedPath }
+            if (directoryEntries.size != 1) {
+                return ReleaseArtifactScanReport.Finding(
+                    "current-format",
+                    false,
+                    "directory-entry-count=${directoryEntries.size};expected=1",
+                )
+            }
+            val directoryEntry = directoryEntries.single()
+            directoryBytes = jar.getInputStream(directoryEntry).use { it.readBytes() }
+            scanCatalogFormat(listOf(indexEntry.name to indexBytes, directoryEntry.name to directoryBytes))
+        } catch (error: Throwable) {
+            ReleaseArtifactScanReport.Finding(
+                "current-format",
+                false,
+                "catalog-read-failed:${error.javaClass.simpleName}",
+            )
+        } finally {
+            indexBytes?.fill(0)
+            directoryBytes?.fill(0)
+        }
+    }
+
+    private fun scanCatalogFormat(
+        entries: List<Pair<String, ByteArray>>,
+    ): ReleaseArtifactScanReport.Finding {
+        val selection = selectCatalogDirectory(entries)
+        if (selection.error != null) {
+            return ReleaseArtifactScanReport.Finding("current-format", false, selection.error)
+        }
+        if (selection.entries.isEmpty()) {
+            val hasIndex = entries.any { isCatalogIndexName(it.first) }
+            val orphan = entries.firstOrNull { isCatalogEntryName(it.first) }
+            return ReleaseArtifactScanReport.Finding(
+                "current-format",
+                !hasIndex && orphan == null,
+                when {
+                    hasIndex -> "catalog-index-target-missing"
+                    orphan != null -> "catalog-entry-without-index:${orphan.first}"
+                    else -> "not-applicable:no-q-page-catalog"
+                },
+            )
+        }
+        if (selection.entries.size != 1) {
+            return ReleaseArtifactScanReport.Finding(
+                "current-format",
+                false,
+                "directory-entry-count=${selection.entries.size};expected=1",
+            )
+        }
+        val (name, bytes) = selection.entries.single()
+        var directory: QpArtifactDirectory? = null
+        val failure = try {
+            directory = QpArtifactDirectory.decode(bytes)
+            null
+        } catch (error: Throwable) {
+            "$name:decode-failed:${error.javaClass.simpleName}"
+        } finally {
+            directory?.wipe()
+        }
+        return ReleaseArtifactScanReport.Finding(
+            "current-format",
+            failure == null,
+            failure ?: "directory=$name;parser-accepted-current-format",
+        )
+    }
+
+    private data class CatalogSelection(
+        val entries: List<Pair<String, ByteArray>>,
+        val error: String? = null,
+    )
+
+    private data class CatalogDirectoryReference(
+        val normalizedPath: String? = null,
+        val error: String? = null,
+    )
+
+    /** Select the directory named by the on-disk catalog index; never treat the page bundle as a directory. */
+    private fun selectCatalogDirectory(entries: List<Pair<String, ByteArray>>): CatalogSelection {
+        val indexes = entries.filter { isCatalogIndexName(it.first) }
+        if (indexes.isEmpty()) return CatalogSelection(emptyList())
+        if (indexes.size != 1) {
+            return CatalogSelection(emptyList(), "catalog-index-count=${indexes.size};expected=1")
+        }
+        val index = indexes.single()
+        val reference = resolveCatalogDirectoryReference(index.first, index.second)
+        if (reference.error != null) return CatalogSelection(emptyList(), reference.error)
+        val candidate = checkNotNull(reference.normalizedPath)
+        val matches = entries.filter { normalizePath(it.first) == candidate }
+        return CatalogSelection(matches)
+    }
+
+    private fun resolveCatalogDirectoryReference(
+        indexName: String,
+        indexBytes: ByteArray,
+    ): CatalogDirectoryReference {
+        val lines = try {
+            String(indexBytes, StandardCharsets.US_ASCII)
+                .lineSequence()
+                .map(String::trim)
+                .filter(String::isNotEmpty)
+                .toList()
+        } catch (error: Throwable) {
+            return CatalogDirectoryReference(error = "catalog-index-decode-failed:${error.javaClass.simpleName}")
+        }
+        val invalid = lines.firstOrNull { line ->
+            line.length > 4096 ||
+                line.any { char -> char.code < 0x20 || char == '\\' } ||
+                line.startsWith('/') ||
+                ".." in line
+        }
+        if (invalid != null) return CatalogDirectoryReference(error = "catalog-index-path-invalid")
+        val directories = lines.filter { '/' !in it }
+        if (directories.size != 1) {
+            return CatalogDirectoryReference(error = "catalog-index-directory-count=${directories.size};expected=1")
+        }
+        val indexParent = normalizePath(indexName).substringBeforeLast('/')
+        return CatalogDirectoryReference(
+            normalizedPath = "$indexParent/catalog/${normalizePath(directories.single())}",
+        )
+    }
+
+    private fun normalizePath(name: String): String =
+        name.replace('\\', '/').lowercase(java.util.Locale.ROOT)
+
+    private fun isCatalogIndexName(name: String): Boolean =
+        normalizePath(name).endsWith("/catalog.index")
+
+    private fun isCatalogEntryName(name: String): Boolean {
+        val normalized = normalizePath(name)
+        return normalized.startsWith("meta-inf/") && "/catalog/" in normalized && !normalized.endsWith('/')
+    }
+
+    private data class NativeMarkerHit(val source: String, val marker: String)
+
+    private data class NativeMarkerScan(
+        val diagnostic: NativeMarkerHit? = null,
+        val core: NativeMarkerHit? = null,
+        val scannedSources: Int = 0,
+        val error: String? = null,
+    )
+
+    /** Scan both caller-provided native bytes and the bytes that will actually be written to the JAR. */
+    private fun scanNativeContents(
+        artifact: BytecodeArtifact,
+        nativeBytes: List<ByteArray>,
+    ): List<ReleaseArtifactScanReport.Finding> {
+        var diagnostic: NativeMarkerHit? = null
+        var core: NativeMarkerHit? = null
+        var scanned = 0
+        nativeBytes.forEachIndexed { index, bytes ->
+            if (bytes.size.toLong() > MAX_NATIVE_SCAN_BYTES) {
+                return nativeMarkerFindings(
+                    NativeMarkerScan(error = "native-bytes-too-large:$index:${bytes.size}"),
+                )
+            }
+            scanned++
+            if (diagnostic == null) {
+                NATIVE_DIAGNOSTIC_MARKERS.firstOrNull { containsAscii(bytes, it) }
+                    ?.let { diagnostic = NativeMarkerHit("nativeBytes[$index]", it) }
+            }
+            if (core == null) {
+                NATIVE_CORE_MARKERS.firstOrNull { containsAscii(bytes, it) }
+                    ?.let { core = NativeMarkerHit("nativeBytes[$index]", it) }
+            }
+        }
+        artifact.jarEntries.filter { isNativeEntryName(it.name) }.forEach { entry ->
+            if (entry.bytes.size.toLong() > MAX_NATIVE_SCAN_BYTES) {
+                return nativeMarkerFindings(
+                    NativeMarkerScan(error = "native-entry-too-large:${entry.name}:${entry.bytes.size}"),
+                )
+            }
+            scanned++
+            val normalizedName = normalizePath(entry.name)
+            if (diagnostic == null) {
+                NATIVE_DIAGNOSTIC_NAME_MARKERS.firstOrNull(normalizedName::contains)
+                    ?.let { diagnostic = NativeMarkerHit(entry.name, it) }
+            }
+            if (core == null) {
+                NATIVE_CORE_NAME_MARKERS.firstOrNull(normalizedName::contains)
+                    ?.let { core = NativeMarkerHit(entry.name, it) }
+            }
+            if (diagnostic == null) {
+                NATIVE_DIAGNOSTIC_MARKERS.firstOrNull { containsAscii(entry.bytes, it) }
+                    ?.let { diagnostic = NativeMarkerHit(entry.name, it) }
+            }
+            if (core == null) {
+                NATIVE_CORE_MARKERS.firstOrNull { containsAscii(entry.bytes, it) }
+                    ?.let { core = NativeMarkerHit(entry.name, it) }
+            }
+        }
+        return nativeMarkerFindings(NativeMarkerScan(diagnostic, core, scanned))
+    }
+
+    /** Standalone scan reads Native entries from the final JAR instead of trusting their file names. */
+    private fun scanJarNativeContents(
+        jar: JarFile,
+        entries: List<java.util.jar.JarEntry>,
+    ): List<ReleaseArtifactScanReport.Finding> {
+        var diagnostic: NativeMarkerHit? = null
+        var core: NativeMarkerHit? = null
+        var scanned = 0
+        for (entry in entries.filter { !it.isDirectory && isNativeEntryName(it.name) }) {
+            val normalizedName = normalizePath(entry.name)
+            if (diagnostic == null) {
+                NATIVE_DIAGNOSTIC_NAME_MARKERS.firstOrNull(normalizedName::contains)
+                    ?.let { diagnostic = NativeMarkerHit(entry.name, it) }
+            }
+            if (core == null) {
+                NATIVE_CORE_NAME_MARKERS.firstOrNull(normalizedName::contains)
+                    ?.let { core = NativeMarkerHit(entry.name, it) }
+            }
+            if (entry.size > MAX_NATIVE_SCAN_BYTES) {
+                return nativeMarkerFindings(
+                    NativeMarkerScan(error = "native-entry-too-large:${entry.name}:${entry.size}"),
+                )
+            }
+            val result = try {
+                jar.getInputStream(entry).use(::scanNativeStream)
+            } catch (error: Throwable) {
+                return nativeMarkerFindings(
+                    NativeMarkerScan(error = "native-entry-read-failed:${entry.name}:${error.javaClass.simpleName}"),
+                )
+            }
+            if (result.error != null) {
+                return nativeMarkerFindings(
+                    NativeMarkerScan(error = "${result.error}:${entry.name}"),
+                )
+            }
+            scanned++
+            if (diagnostic == null && result.diagnostic != null) {
+                diagnostic = NativeMarkerHit(entry.name, result.diagnostic.marker)
+            }
+            if (core == null && result.core != null) {
+                core = NativeMarkerHit(entry.name, result.core.marker)
+            }
+        }
+        return nativeMarkerFindings(NativeMarkerScan(diagnostic, core, scanned))
+    }
+
+    private fun scanNativeStream(input: InputStream): NativeMarkerScan {
+        val markers = (NATIVE_DIAGNOSTIC_MARKERS + NATIVE_CORE_MARKERS).distinct()
+        val overlapLength = (markers.maxOfOrNull(String::length) ?: 1) - 1
+        val buffer = ByteArray(NATIVE_SCAN_BUFFER_BYTES)
+        var carry = ByteArray(0)
+        var total = 0L
+        var diagnostic: NativeMarkerHit? = null
+        var core: NativeMarkerHit? = null
+        try {
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                if (read == 0) continue
+                total += read
+                if (total > MAX_NATIVE_SCAN_BYTES) {
+                    return NativeMarkerScan(error = "native-entry-exceeds-scan-limit")
+                }
+                val window = ByteArray(carry.size + read)
+                try {
+                    carry.copyInto(window)
+                    buffer.copyInto(window, carry.size, 0, read)
+                    if (diagnostic == null) {
+                        NATIVE_DIAGNOSTIC_MARKERS.firstOrNull { containsAscii(window, it) }
+                            ?.let { diagnostic = NativeMarkerHit("stream", it) }
+                    }
+                    if (core == null) {
+                        NATIVE_CORE_MARKERS.firstOrNull { containsAscii(window, it) }
+                            ?.let { core = NativeMarkerHit("stream", it) }
+                    }
+                    carry.fill(0)
+                    val retained = minOf(overlapLength, window.size)
+                    carry = window.copyOfRange(window.size - retained, window.size)
+                } finally {
+                    window.fill(0)
+                }
+            }
+            return NativeMarkerScan(diagnostic, core, scannedSources = 1)
+        } finally {
+            buffer.fill(0)
+            carry.fill(0)
+        }
+    }
+
+    private fun nativeMarkerFindings(scan: NativeMarkerScan): List<ReleaseArtifactScanReport.Finding> {
+        if (scan.error != null) {
+            return listOf(
+                ReleaseArtifactScanReport.Finding("native-export-surface", false, scan.error),
+                ReleaseArtifactScanReport.Finding(
+                    "native-core-image",
+                    false,
+                    "${scan.error};runtime-memory-absence-unverified",
+                ),
+            )
+        }
+        val diagnostic = scan.diagnostic
+        val core = scan.core
+        val sourceDetail = if (scan.scannedSources == 0) "not-applicable:no-native-content" else "scanned=${scan.scannedSources}"
+        return listOf(
+            ReleaseArtifactScanReport.Finding(
+                "native-export-surface",
+                diagnostic == null,
+                diagnostic?.let { "marker=${it.marker};source=${it.source}" }
+                    ?: "$sourceDetail;diagnostic-surface-absent",
+            ),
+            ReleaseArtifactScanReport.Finding(
+                "native-core-image",
+                core == null,
+                core?.let { "forbidden-static-marker=${it.marker};source=${it.source};runtime-memory-absence-unverified" }
+                    ?: "$sourceDetail;runtime-memory-absence-unverified",
+            ),
+        )
+    }
+
+    private fun isNativeEntryName(name: String): Boolean {
+        val normalized = normalizePath(name)
+        return normalized.endsWith(".dll") || normalized.endsWith(".so") || normalized.endsWith(".dylib")
+    }
+
+    private fun scanJarJavaCryptoOracles(
+        jar: JarFile,
+        entries: List<java.util.jar.JarEntry>,
+    ): ReleaseArtifactScanReport.Finding {
+        for (entry in entries.filter { !it.isDirectory && it.name.endsWith(".class") }) {
+            val bytes = try {
+                jar.getInputStream(entry).use { it.readBytes() }
+            } catch (error: Throwable) {
+                return ReleaseArtifactScanReport.Finding(
+                    "java-crypto-oracle",
+                    false,
+                    "read-failed:${entry.name}:${error.javaClass.simpleName}",
+                )
+            }
+            try {
+                if (containsBootstrapCryptoOracle(bytes)) {
+                    return ReleaseArtifactScanReport.Finding(
+                        "java-crypto-oracle",
+                        false,
+                        entry.name,
+                    )
+                }
+            } finally {
+                bytes.fill(0)
+            }
+        }
+        return ReleaseArtifactScanReport.Finding("java-crypto-oracle", true, "absent")
+    }
+
+    private fun containsBootstrapCryptoOracle(bytes: ByteArray): Boolean =
+        containsAscii(bytes, "AES/CBC/PKCS5Padding") &&
+            containsAscii(bytes, "SecretKeySpec") &&
+            containsAscii(bytes, "Invalid encrypted bootstrap payload")
+
+    private fun scanStrictNativePlatformMatrix(
+        artifact: BytecodeArtifact,
+        enabledPasses: List<String>,
+        profile: HardenedProtectionProfile,
+    ): ReleaseArtifactScanReport.Finding {
+        if (enabledPasses.none { it == "jni-microkernel-loader" }) {
+            return ReleaseArtifactScanReport.Finding("native-platform-matrix", true, "not-required")
+        }
+        val nativeEntries = artifact.jarEntries.filter { entry ->
+            val name = normalizePath(entry.name)
+            name.endsWith(".dll") || name.endsWith(".so") || name.endsWith(".dylib")
+        }
+        val unsupported = nativeEntries.firstOrNull { entry ->
+            val name = normalizePath(entry.name)
+            name.endsWith(".dylib") || name.contains("macos") || name.contains("darwin")
+        }
+        val windows = nativeEntries.any { entry ->
+            normalizePath(entry.name).endsWith(".dll") &&
+                entry.bytes.size >= 2 &&
+                entry.bytes[0] == 'M'.code.toByte() &&
+                entry.bytes[1] == 'Z'.code.toByte()
+        }
+        val linux = nativeEntries.any { entry ->
+            normalizePath(entry.name).endsWith(".so") &&
+                entry.bytes.size >= 4 &&
+                entry.bytes[0] == 0x7F.toByte() &&
+                entry.bytes[1] == 'E'.code.toByte() &&
+                entry.bytes[2] == 'L'.code.toByte() &&
+                entry.bytes[3] == 'F'.code.toByte()
+        }
+        val passed = unsupported == null && when (profile) {
+            HardenedProtectionProfile.RELEASE_HARDENED -> windows && linux
+            HardenedProtectionProfile.ANALYSIS_ONLY -> windows || linux
+            HardenedProtectionProfile.MINIMAL -> true
+        }
+        return ReleaseArtifactScanReport.Finding(
+            "native-platform-matrix",
+            passed,
+            when {
+                unsupported != null -> "unsupported=${unsupported.name}"
+                windows && linux -> "windows+linux"
+                windows -> "windows-only"
+                linux -> "linux-only"
+                else -> "native-entry-missing"
+            },
+        )
     }
 
     private fun scanDualNativePlatforms(
@@ -938,5 +1482,11 @@ internal object ReleaseArtifactScan {
             return true
         }
         return false
+    }
+
+    private fun startsWithAscii(bytes: ByteArray, value: String): Boolean {
+        val target = value.toByteArray(Charsets.US_ASCII)
+        if (target.isEmpty() || bytes.size < target.size) return false
+        return target.indices.all { index -> bytes[index] == target[index] }
     }
 }

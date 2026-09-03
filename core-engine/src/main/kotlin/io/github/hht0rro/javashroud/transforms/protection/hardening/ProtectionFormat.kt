@@ -2,6 +2,7 @@ package io.github.hht0rro.javashroud.transforms.protection.hardening
 
 /** Current protected-artifact format. Forbidden output signatures fail closed at the release gate. */
 internal object ProtectionFormat {
+    /** Current protected-artifact wire format. Older formats are retired. */
     const val CURRENT: Int = 3
     val CURRENT_LABEL: String = CURRENT.toString()
     const val DEBUG_MAP_VERSION: Int = 3
@@ -29,17 +30,18 @@ internal object ProtectionFormat {
      * never remove, relocate, or otherwise clean up a matching input entry.
      */
     fun isForbiddenReleaseResourcePath(entryName: String): Boolean {
-        val normalized = entryName.replace('\\', '/').lowercase()
+        val normalized = entryName.replace('\\', '/').lowercase(java.util.Locale.ROOT)
         if (normalized == "meta-inf/jsrt" || normalized.startsWith("meta-inf/jsrt/")) {
             return true
         }
-        val basename = entryName.substringAfterLast('/')
+        val basename = normalized.substringAfterLast('/')
         return basename in FORBIDDEN_RELEASE_RESOURCE_BASENAMES ||
             basename in FORBIDDEN_RELEASE_RENAME_INDEX_BASENAMES
     }
 
     fun isForbiddenReleaseRenameIndexPath(entryName: String): Boolean =
-        entryName.substringAfterLast('/') in FORBIDDEN_RELEASE_RENAME_INDEX_BASENAMES
+        entryName.replace('\\', '/').lowercase(java.util.Locale.ROOT).substringAfterLast('/') in
+            FORBIDDEN_RELEASE_RENAME_INDEX_BASENAMES
 
     val FORBIDDEN_RELEASE_MAGICS: List<String> = listOf(
         "boot.dat",

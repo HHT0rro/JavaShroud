@@ -56,6 +56,214 @@ class HardenedReleaseGateTest {
     }
 
     @Test
+    fun catalog_index_must_point_to_one_current_directory() {
+        val classBytes = emptyClass("sample/CatalogHost")
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(testClassArtifact(internalName = "sample/CatalogHost", bytes = classBytes)),
+            jarEntries = listOf(
+                JarEntryData("sample/CatalogHost.class", classBytes),
+                JarEntryData(
+                    "META-INF/qpunit/catalog.index",
+                    "META-INF/qpunit/catalog/pages.bin\ndirectory.bin\n".toByteArray(Charsets.US_ASCII),
+                ),
+                JarEntryData("META-INF/qpunit/catalog/directory.bin", byteArrayOf(3, 1, 4)),
+            ),
+        )
+        val dir = Files.createTempDirectory("js-hard-catalog")
+        try {
+            val jar = dir.resolve("out.jar")
+            io.github.hht0rro.javashroud.artifact.writeBytecodeArtifact(jar, artifact)
+
+            val report = ReleaseArtifactScan.scan(
+                jar,
+                artifact,
+                HardenedProtectionProfile.RELEASE_HARDENED,
+                emptyList(),
+            )
+            val standalone = ReleaseArtifactScan.scanJarFile(
+                jar,
+                HardenedProtectionProfile.RELEASE_HARDENED,
+                emptyList(),
+            )
+
+            assertFalse(report.findings.single { it.check == "current-format" }.passed)
+            assertFalse(report.findings.single { it.check == "runtime-binding-nonzero" }.passed)
+            assertFalse(standalone.findings.single { it.check == "current-format" }.passed)
+        } finally {
+            Files.walk(dir).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+        }
+    }
+
+    @Test
+    fun loader_only_artifact_does_not_claim_a_missing_page_catalog() {
+        val classBytes = emptyClass("sample/LoaderOnly")
+        val windows = byteArrayOf('M'.code.toByte(), 'Z'.code.toByte(), 0, 0)
+        val linux = byteArrayOf(0x7F, 'E'.code.toByte(), 'L'.code.toByte(), 'F'.code.toByte())
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(testClassArtifact(internalName = "sample/LoaderOnly", bytes = classBytes)),
+            jarEntries = listOf(
+                JarEntryData("sample/LoaderOnly.class", classBytes),
+                JarEntryData("META-INF/qpunit/windows/qp_ffi.dll", windows),
+                JarEntryData("META-INF/qpunit/linux/libqp_ffi.so", linux),
+            ),
+        )
+        val dir = Files.createTempDirectory("js-hard-loader-only")
+        try {
+            val jar = dir.resolve("out.jar")
+            io.github.hht0rro.javashroud.artifact.writeBytecodeArtifact(jar, artifact)
+            val report = ReleaseArtifactScan.scan(
+                jar,
+                artifact,
+                HardenedProtectionProfile.RELEASE_HARDENED,
+                listOf("jni-microkernel-loader"),
+                nativeBytes = listOf(windows, linux),
+            )
+
+            val format = report.findings.single { it.check == "current-format" }
+            assertTrue(format.passed, format.detail)
+            assertEquals("not-applicable:no-q-page-catalog", format.detail)
+            assertTrue(report.findings.single { it.check == "runtime-binding-nonzero" }.passed)
+            assertTrue(report.findings.single { it.check == "runtime-binding-match" }.passed)
+            assertTrue(report.findings.single { it.check == "native-platform-matrix" }.passed)
+        } finally {
+            Files.walk(dir).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+        }
+    }
+
+    @Test
+    fun static_oracle_findings_are_not_suppressed_by_analysis_profile() {
+        val classBytes = emptyClass("sample/BootstrapLeak") +
+            "AES/CBC/PKCS5Padding\u0000SecretKeySpec\u0000Invalid encrypted bootstrap payload".toByteArray()
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(testClassArtifact(internalName = "sample/BootstrapLeak", bytes = classBytes)),
+        )
+        val dir = Files.createTempDirectory("js-hard-static-oracle")
+        try {
+            val jar = dir.resolve("out.jar")
+            io.github.hht0rro.javashroud.artifact.writeBytecodeArtifact(jar, artifact)
+            val report = ReleaseArtifactScan.scan(
+                jar,
+                artifact,
+                HardenedProtectionProfile.ANALYSIS_ONLY,
+                emptyList(),
+                nativeBytes = listOf("QP_CFG_EVIDENCE microcode-corpus".toByteArray()),
+            )
+
+            assertFalse(report.findings.single { it.check == "java-crypto-oracle" }.passed)
+            assertFalse(report.findings.single { it.check == "native-export-surface" }.passed)
+            assertFalse(report.findings.single { it.check == "native-core-image" }.passed)
+        } finally {
+            Files.walk(dir).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+        }
+    }
+
+    @Test
+    fun final_jar_native_contents_are_scanned_when_caller_omits_native_bytes() {
+        val classBytes = emptyClass("sample/NativeContent")
+        val native = byteArrayOf('M'.code.toByte(), 'Z'.code.toByte(), 0, 0) +
+            ByteArray(32 * 1024 - 9) +
+            "QP_CFG_EVIDENCE\u0000microcode-corpus".toByteArray(Charsets.US_ASCII)
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(testClassArtifact(internalName = "sample/NativeContent", bytes = classBytes)),
+            jarEntries = listOf(
+                JarEntryData("sample/NativeContent.class", classBytes),
+                JarEntryData("META-INF/qpunit/windows/runtime.dll", native),
+            ),
+        )
+        val dir = Files.createTempDirectory("js-hard-native-content")
+        try {
+            val jar = dir.resolve("out.jar")
+            io.github.hht0rro.javashroud.artifact.writeBytecodeArtifact(jar, artifact)
+            val report = ReleaseArtifactScan.scan(
+                jar,
+                artifact,
+                HardenedProtectionProfile.ANALYSIS_ONLY,
+                emptyList(),
+            )
+            val standalone = ReleaseArtifactScan.scanJarFile(
+                jar,
+                HardenedProtectionProfile.ANALYSIS_ONLY,
+                emptyList(),
+            )
+
+            assertFalse(report.findings.single { it.check == "native-export-surface" }.passed)
+            assertFalse(report.findings.single { it.check == "native-core-image" }.passed)
+            assertFalse(standalone.findings.single { it.check == "native-export-surface" }.passed)
+            assertFalse(standalone.findings.single { it.check == "native-core-image" }.passed)
+        } finally {
+            Files.walk(dir).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+        }
+    }
+
+    @Test
+    fun stable_qp_native_abi_is_not_treated_as_a_diagnostic_export() {
+        val classBytes = emptyClass("sample/PublicAbi")
+        val native = byteArrayOf('M'.code.toByte(), 'Z'.code.toByte(), 0, 0) +
+            "qp_r1_open_frame\u0000qp_r1_runtime_binding_digest".toByteArray(Charsets.US_ASCII)
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(testClassArtifact(internalName = "sample/PublicAbi", bytes = classBytes)),
+            jarEntries = listOf(
+                JarEntryData("sample/PublicAbi.class", classBytes),
+                JarEntryData("META-INF/qpunit/windows/runtime.dll", native),
+            ),
+        )
+        val dir = Files.createTempDirectory("js-hard-public-abi")
+        try {
+            val jar = dir.resolve("out.jar")
+            io.github.hht0rro.javashroud.artifact.writeBytecodeArtifact(jar, artifact)
+            val report = ReleaseArtifactScan.scan(
+                jar,
+                artifact,
+                HardenedProtectionProfile.ANALYSIS_ONLY,
+                emptyList(),
+            )
+            val standalone = ReleaseArtifactScan.scanJarFile(
+                jar,
+                HardenedProtectionProfile.ANALYSIS_ONLY,
+                emptyList(),
+            )
+
+            assertTrue(report.findings.single { it.check == "native-export-surface" }.passed)
+            assertTrue(standalone.findings.single { it.check == "native-export-surface" }.passed)
+        } finally {
+            Files.walk(dir).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+        }
+    }
+
+    @Test
+    fun catalog_entries_without_an_index_fail_closed() {
+        val classBytes = emptyClass("sample/OrphanCatalog")
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(testClassArtifact(internalName = "sample/OrphanCatalog", bytes = classBytes)),
+            jarEntries = listOf(
+                JarEntryData("sample/OrphanCatalog.class", classBytes),
+                JarEntryData("META-INF/qpunit/catalog/orphan.bin", byteArrayOf(1, 2, 3)),
+            ),
+        )
+        val dir = Files.createTempDirectory("js-hard-orphan-catalog")
+        try {
+            val jar = dir.resolve("out.jar")
+            io.github.hht0rro.javashroud.artifact.writeBytecodeArtifact(jar, artifact)
+            val report = ReleaseArtifactScan.scan(
+                jar,
+                artifact,
+                HardenedProtectionProfile.RELEASE_HARDENED,
+                emptyList(),
+            )
+            val standalone = ReleaseArtifactScan.scanJarFile(
+                jar,
+                HardenedProtectionProfile.RELEASE_HARDENED,
+                emptyList(),
+            )
+
+            assertFalse(report.findings.single { it.check == "current-format" }.passed)
+            assertFalse(standalone.findings.single { it.check == "current-format" }.passed)
+        } finally {
+            Files.walk(dir).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+        }
+    }
+
+    @Test
     fun perf_budget_matches_hardened_plan_ceilings() {
         assertEquals(2.0, io.github.hht0rro.javashroud.model.config.HardenedPerfBudget.STARTUP_MULTIPLIER)
         assertEquals(2.0, io.github.hht0rro.javashroud.model.config.HardenedPerfBudget.ARTIFACT_SIZE_MULTIPLIER)
@@ -493,6 +701,7 @@ class HardenedReleaseGateTest {
             )
             assertTrue(missingReport.findings.single { it.check == "native-dual-platform" }.passed)
             assertEquals("host-only-windows", missingReport.findings.single { it.check == "native-dual-platform" }.detail)
+            assertFalse(missingReport.findings.single { it.check == "native-platform-matrix" }.passed)
 
             val empty = testAttachedArtifact(
                 classArtifacts = listOf(testClassArtifact(internalName = "sample/Host", bytes = classBytes)),
@@ -517,6 +726,7 @@ class HardenedReleaseGateTest {
                 listOf("jni-microkernel-loader"),
             )
             assertTrue(bothReport.findings.single { it.check == "native-dual-platform" }.passed)
+            assertTrue(bothReport.findings.single { it.check == "native-platform-matrix" }.passed)
         } finally {
             Files.walk(dir).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
         }
