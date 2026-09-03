@@ -149,6 +149,7 @@ mod jni_bridge {
     use qp_vm::{
         InvokeKind, ObjectOperations, VmError, VmExecutor, VmHostError, VmProgram, VmValue,
     };
+    use std::collections::BTreeMap;
     use std::os::raw::{c_char, c_void};
     use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -340,6 +341,7 @@ mod jni_bridge {
     const DEFENSE_VM_SURFACE: u8 = 1 << 1;
     const DEFENSE_ABI_PROBE_SURFACE: u8 = 1 << 2;
     const DEFENSE_SHARE_DOMAIN: &[u8] = b"JavaShroud/QP/UnifiedDefense/v2";
+    const MAX_TARGET_HANDLE_CACHE_ENTRIES: usize = 4096;
 
     #[derive(Default)]
     struct BridgeState {
@@ -353,6 +355,7 @@ mod jni_bridge {
         defense_profile: Option<DefenseProfile>,
         registered: bool,
         registered_class: Option<usize>,
+        target_handle_cache: BTreeMap<[u8; DIGEST_SIZE], usize>,
         router: TypedPageRouter,
     }
 
@@ -446,7 +449,14 @@ mod jni_bridge {
             }
             self.defense_surface_mask = 0;
             self.defense_profile = None;
+            self.target_handle_cache.clear();
             self.router.clear();
+        }
+
+        fn take_target_handle_refs(&mut self) -> Vec<usize> {
+            core::mem::take(&mut self.target_handle_cache)
+                .into_values()
+                .collect()
         }
 
         fn clear(&mut self) {
@@ -3195,8 +3205,16 @@ mod jni_bridge {
         if nonce.as_bytes().len() != 32 {
             return Err(BridgeFailure("Qp session nonce must be 32 bytes"));
         }
-        let mut state = lock_state()?;
-        state.install_nonce(nonce.into_inner())?;
+        let stale_handles = {
+            let mut state = lock_state()?;
+            state.install_nonce(nonce.into_inner())?;
+            // A new session epoch must not retain handles created under the
+            // previous epoch. Drop the global references outside the mutex.
+            state.take_target_handle_refs()
+        };
+        for handle in stale_handles {
+            unsafe { delete_global_ref(env, handle as JObject) };
+        }
         Ok(1)
     }
 
@@ -3319,6 +3337,55 @@ mod jni_bridge {
         update_token_u32(hasher, length);
         hasher.update(value);
         Ok(())
+    }
+
+    fn target_handle_cache_key(
+        token: &[u8],
+        caller_owner: &[u8],
+        indy_name: &[u8],
+        method_type: &[u8],
+        session_epoch: u64,
+    ) -> Result<[u8; DIGEST_SIZE], BridgeFailure> {
+        let mut hasher = Sha256::new();
+        hasher.update(b"JavaShroud/QP/target-handle-cache/current");
+        update_token_field(&mut hasher, token)?;
+        update_token_field(&mut hasher, caller_owner)?;
+        update_token_field(&mut hasher, indy_name)?;
+        update_token_field(&mut hasher, method_type)?;
+        hasher.update(&session_epoch.to_be_bytes());
+        hasher.update(specialization::SPECIALIZATION_DIGEST.as_ref());
+        Ok(hasher.finalize().into_bytes())
+    }
+
+    fn cached_target_handle(key: &[u8; DIGEST_SIZE]) -> Result<Option<JObject>, BridgeFailure> {
+        let state = lock_state()?;
+        Ok(state
+            .target_handle_cache
+            .get(key)
+            .copied()
+            .map(|handle| handle as JObject))
+    }
+
+    unsafe fn cache_target_handle(
+        env: JNIEnv,
+        key: [u8; DIGEST_SIZE],
+        handle: JObject,
+    ) -> Result<JObject, BridgeFailure> {
+        let global = new_global_ref(env, handle)
+            .ok_or(BridgeFailure("Qp target handle cache allocation failed"))?;
+        let mut state = lock_state()?;
+        if let Some(existing) = state.target_handle_cache.get(&key).copied() {
+            drop(state);
+            delete_global_ref(env, global);
+            return Ok(existing as JObject);
+        }
+        if state.target_handle_cache.len() >= MAX_TARGET_HANDLE_CACHE_ENTRIES {
+            drop(state);
+            delete_global_ref(env, global);
+            return Ok(handle);
+        }
+        state.target_handle_cache.insert(key, global as usize);
+        Ok(global)
     }
 
     fn target_token_key(
@@ -3846,13 +3913,33 @@ mod jni_bridge {
         let (caller_class, caller_owner, indy_name_bytes, method_type_bytes) =
             lookup_target_context(env, lookup, indy_name, method_type)?;
         let token = copy_byte_array(env, token, MAX_TARGET_TOKEN_BYTES)?;
-        let lease = open_target_token(
-            &token,
-            &caller_owner,
-            &indy_name_bytes,
-            &method_type_bytes,
+        let session_epoch = {
+            let state = lock_state()?;
+            if !state.initialized || state.session_nonce.is_none() {
+                return Err(BridgeFailure("Qp target token session binding is missing"));
+            }
+            state.session_epoch
+        };
+        let cache_key = target_handle_cache_key(
+            token.as_bytes(),
+            caller_owner.as_bytes(),
+            indy_name_bytes.as_bytes(),
+            method_type_bytes.as_bytes(),
+            session_epoch,
         )?;
-        let handle = resolve_target_handle(env, lookup, caller_class, &lease)?;
+        let handle = match cached_target_handle(&cache_key)? {
+            Some(handle) => handle,
+            None => {
+                let lease = open_target_token(
+                    &token,
+                    &caller_owner,
+                    &indy_name_bytes,
+                    &method_type_bytes,
+                )?;
+                let handle = resolve_target_handle(env, lookup, caller_class, &lease)?;
+                cache_target_handle(env, cache_key, handle)?
+            }
+        };
         if link_bootstrap == 0 {
             return invoke_method_handle(env, handle, arguments);
         }
@@ -4527,6 +4614,12 @@ mod jni_bridge {
                 let class = class as JObject;
                 unregister_natives(env, class);
                 delete_global_ref(env, class);
+            }
+            let target_handles = lock_state()
+                .map(|mut state| state.take_target_handle_refs())
+                .unwrap_or_default();
+            for handle in target_handles {
+                delete_global_ref(env, handle as JObject);
             }
             clear_exception(env);
         }
