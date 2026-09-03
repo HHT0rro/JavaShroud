@@ -2739,13 +2739,45 @@ mod jni_bridge {
         false
     }
 
+    #[cfg(target_arch = "x86_64")]
+    fn cpuid_hypervisor_vendor() -> Option<[u8; 12]> {
+        let leaf = unsafe { core::arch::x86_64::__cpuid(0x4000_0000) };
+        let mut vendor = [0u8; 12];
+        vendor[..4].copy_from_slice(&leaf.ebx.to_le_bytes());
+        vendor[4..8].copy_from_slice(&leaf.ecx.to_le_bytes());
+        vendor[8..].copy_from_slice(&leaf.edx.to_le_bytes());
+        vendor.iter().any(|byte| *byte != 0).then_some(vendor)
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    fn cpuid_hypervisor_vendor() -> Option<[u8; 12]> {
+        None
+    }
+
+    fn known_guest_hypervisor(vendor: &[u8; 12]) -> bool {
+        // Hyper-V/VBS exposes the hypervisor bit on ordinary physical Windows
+        // hosts, so that bit alone is not evidence that the process is a guest.
+        // Only vendor fingerprints that identify a guest hypervisor are treated
+        // as a hard anti-VM signal here.
+        vendor.starts_with(b"VMwareVMware")
+            || vendor.starts_with(b"VBoxVBoxVBox")
+            || vendor.starts_with(b"KVMKVMKVM")
+            || vendor.starts_with(b"XenVMMXenVMM")
+            || vendor.starts_with(b"prl hyperv")
+    }
+
     fn detect_virtual_machine() -> Result<bool, BridgeFailure> {
         // The CPUID hypervisor bit is a high-confidence signal.  Firmware/DMI
         // strings are intentionally only weak evidence and require a second,
         // independent source below so a normal machine with one BIOS string is
         // not rejected.
         if cpuid_hypervisor_present() {
-            return Ok(true);
+            // Windows enables Hyper-V/VBS on physical hosts. Require a known
+            // guest vendor instead of rejecting every process with the generic
+            // CPUID hypervisor bit set.
+            return Ok(cpuid_hypervisor_vendor()
+                .as_ref()
+                .is_some_and(known_guest_hypervisor));
         }
 
         #[cfg(target_os = "linux")]
