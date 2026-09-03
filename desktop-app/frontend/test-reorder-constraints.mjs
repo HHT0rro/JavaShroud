@@ -158,17 +158,6 @@ test('deterministic output for same input', () => {
   assert.deepEqual(r2.map(p => p.id), r3.map(p => p.id), 'deterministic r2 vs r3');
 });
 
-// 10. Planner before loader and delayed decryption
-// 11. Invoke dynamic before bootstrap table encryption
-test('invoke-dynamic before bootstrap-table-encryption', () => {
-  const passes = ['bootstrap-table-encryption', 'invoke-dynamic-indirection'].map(makePass);
-  const constraints = [
-    { before: 'invoke-dynamic-indirection', after: 'bootstrap-table-encryption', reason: '', hard: true },
-  ];
-  const result = reorderByConstraints(passes, constraints);
-  assert.deepEqual(result.map(p => p.id), ['invoke-dynamic-indirection', 'bootstrap-table-encryption']);
-});
-
 // 13. Native and runtime defense passes without constraints preserve order
 test('native passes without constraints preserve order', () => {
   const passes = ['jni-microkernel-loader', 'os-anti-debug', 'os-anti-vm', 'method-virtualization'].map(makePass);

@@ -80,6 +80,7 @@ class CurrentFormatPassRetirementTest {
             get() = RETIRED_CURRENT_FORMAT_PASS_IDS
 
         val EXPECTED_RETIRED_PASS_IDS = setOf(
+            "bootstrap-table-encryption",
             "environment-bound-keys",
             "method-body-delayed-decryption",
             "class-encryption-loader",

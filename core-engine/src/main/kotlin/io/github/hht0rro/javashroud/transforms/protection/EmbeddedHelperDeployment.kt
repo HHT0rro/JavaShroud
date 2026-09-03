@@ -67,7 +67,6 @@ object EmbeddedHelperDeployment {
         "string-encryption" to listOf("$QP_PKG/QpTextBridge"),
         "callsite-rotation-protection" to listOf("$QP_PKG/QpCallsiteBridge", "$QP_PKG/QpBootstrap", "$QP_PKG/QpBridge"),
         "invoke-dynamic-indirection" to listOf("$QP_PKG/QpBootstrap", "$QP_PKG/QpBridge"),
-        "bootstrap-table-encryption" to listOf("$QP_PKG/QpBootstrap", "$QP_PKG/QpBridge"),
         "exception-semantic-virtualization" to listOf(
             "$PKG/ExceptionVirtualizationHelper",
             "$PKG/FlowControlException",
@@ -80,7 +79,6 @@ object EmbeddedHelperDeployment {
     private val helperGenerators: Map<String, () -> ByteArray> by lazy {
         mapOf(
             "$QP_PKG/QpTextBridge" to { loadClasspathHelperByName("QpTextBridge") },
-            "$PKG/BootstrapEncryptionHelper" to { loadClasspathHelperByName("BootstrapEncryptionHelper") },
             "$QP_PKG/QpCallsiteBridge" to { loadClasspathHelperByName("QpCallsiteBridge") },
             "$QP_PKG/QpBootstrap" to { loadClasspathHelperByName("QpBootstrap") },
             "$PKG/ExceptionVirtualizationHelper" to ::generateExceptionVirtualizationHelper,

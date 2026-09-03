@@ -62,7 +62,6 @@ private val AUTO_SEALED_HELPER_PASSES = setOf(
 
 private val SEALED_RUNTIME_HELPERS = listOf(
     "$QP_HELPER_PACKAGE/QpTextBridge",
-    "$PROTECTION_HELPER_PACKAGE/BootstrapEncryptionHelper",
     "$PROTECTION_HELPER_PACKAGE/ExceptionVirtualizationHelper",
     "$PROTECTION_HELPER_PACKAGE/FlowControlException",
     "$QP_HELPER_PACKAGE/QpCallsiteBridge",
@@ -948,10 +947,6 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
         "nativeInvokeSite",
         "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[B[Ljava/lang/Object;Z)Ljava/lang/Object;",
     )
-    val bootstrap = "$PROTECTION_HELPER_PACKAGE/BootstrapEncryptionHelper"
-    addMethod(bootstrap, "decryptBytes", "(Ljava/lang/String;Ljava/lang/String;)[B")
-    addMethod(bootstrap, "encryptedBootstrap", "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;")
-
     val stringEncryption = "$QP_HELPER_PACKAGE/QpTextBridge"
     addMethod(stringEncryption, "invokeQpStringTerminal", "([B)Ljava/lang/String;")
     addMethod(stringEncryption, "invokeQpStringTerminal", "([B)Ljava/lang/String;")

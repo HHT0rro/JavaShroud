@@ -103,6 +103,7 @@ internal fun rejectRemovedCurrentFormatParameters(passes: List<PassSpec>) {
 }
 
 internal val RETIRED_CURRENT_FORMAT_PASS_IDS = setOf(
+    "bootstrap-table-encryption",
     "environment-bound-keys",
     "method-body-delayed-decryption",
     "class-encryption-loader",
