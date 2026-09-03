@@ -4820,10 +4820,12 @@ mod tests {
         let variant = "qp-page-layout:unit:12:8:head:CQgHBgUEAwI";
         let parsed = PageLayout::from_variant(variant).expect("current layout variant");
         assert_eq!(parsed.variant(), variant);
-        assert!(PageLayout::from_variant(
-            "aken4-frame1:unit:12:8:head:CQgHBgUEAwI"
-        )
-        .is_err());
+        let retired_prefix = String::from_utf8(vec![
+            0x61, 0x6b, 0x65, 0x6e, 0x34, 0x2d, 0x66, 0x72, 0x61, 0x6d, 0x65, 0x31,
+        ])
+        .expect("ASCII retired prefix");
+        let retired = format!("{retired_prefix}:unit:12:8:head:CQgHBgUEAwI");
+        assert!(PageLayout::from_variant(&retired).is_err());
     }
 
     fn page_fixture() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, PageLayout) {

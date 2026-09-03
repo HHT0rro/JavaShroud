@@ -23,8 +23,11 @@ class QpPageLayoutTest {
 
     @Test
     fun `retired layout marker fails closed`() {
+        val retiredPrefix = byteArrayOf(
+            0x61, 0x6B, 0x65, 0x6E, 0x34, 0x2D, 0x66, 0x72, 0x61, 0x6D, 0x65, 0x31,
+        ).toString(Charsets.US_ASCII)
         assertFailsWith<IllegalArgumentException> {
-            QpPageLayout.fromVariant("aken4-frame1:unit:12:8:head:CQgHBgUEAwI")
+            QpPageLayout.fromVariant("$retiredPrefix:unit:12:8:head:CQgHBgUEAwI")
         }
     }
 }

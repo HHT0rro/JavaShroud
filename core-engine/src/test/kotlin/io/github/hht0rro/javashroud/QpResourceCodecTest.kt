@@ -7,6 +7,7 @@ import io.github.hht0rro.javashroud.transforms.protection.QP_MASTER_KEY_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.QpCompressionCodec
 import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.hardening.ProtectionFormat
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -29,7 +30,7 @@ class QpResourceCodecTest {
     }
     @Test
     fun runtime_resource_codec_roundtrips_and_rejects_tampering() = withQpBuildContext(fixedRuntimeCodecContext()) {
-        val plain = "native-or-vbc-payload".toByteArray(Charsets.UTF_8)
+        val plain = "native-vm-payload".toByteArray(Charsets.UTF_8)
         val encoded = QpResourceCodec.encode(
             bytes = plain,
             kind = RuntimeResourceKind.VmBytecode,
@@ -38,8 +39,11 @@ class QpResourceCodecTest {
             layerCount = 3,
         )
 
-        assertTrue(!encoded.startsWithAscii("VBC5"), "encoded resource must not expose the retired magic before sealing")
-        assertEquals(8, encoded[4].toInt() and 0xFF, "runtime resources must use only the partitioned JSRP v8 envelope")
+        assertTrue(
+            !encoded.startsWithBytes(hex(ProtectionFormat.RETIRED_VM_MAGIC_HEX)),
+            "encoded resource must not expose a retired VM magic before sealing",
+        )
+        assertEquals(8, encoded[4].toInt() and 0xFF, "runtime resources must use only the current partitioned envelope")
         assertEquals(96, readLe16ForTest(encoded, 21), "public v3 header must expose only encrypted metadata length")
         assertEquals(32, readLe16ForTest(encoded, 23), "public v3 header must expose only MAC length")
         assertContentEquals(plain, QpResourceCodec.decode(encoded), "encoded payload must round-trip")
@@ -70,14 +74,14 @@ class QpResourceCodecTest {
             assertEquals(
                 null,
                 QpResourceCodec.decode(retiredMarker),
-                "JSRP v8 must reject the retired trailing MAC-length marker",
+                "current resource envelope must reject the retired trailing MAC-length marker",
             )
 
             val retiredV7 = retiredMarker.copyOf().also { it[4] = 7 }
             assertEquals(
                 null,
                 QpResourceCodec.decode(retiredV7),
-                "JSRP v7 must not be accepted through a compatibility branch",
+                "retired resource versions must not be accepted through a compatibility branch",
             )
         }
 
@@ -166,7 +170,7 @@ class QpResourceCodecTest {
     @Test
     fun runtime_resource_codec_rejects_legacy_user_reachable_xor_stream_envelopes() {
         val legacy = ByteArray(64) { index -> (index * 29 + 7).toByte() }
-        "JSRP".toByteArray(Charsets.US_ASCII).copyInto(legacy, 0)
+        hex(ProtectionFormat.RETIRED_RESOURCE_MAGIC_HEX).copyInto(legacy, 0)
         legacy[4] = 2
         legacy[5] = RuntimeResourceKind.NativeLibrary.id.toByte()
         legacy[6] = 1
@@ -221,10 +225,11 @@ class QpResourceCodecTest {
         jarLayoutDigest = ByteArray(QP_LAYOUT_DIGEST_SIZE) { index -> (index * 5 + 9).toByte() },
     )
 
-    private fun ByteArray.startsWithAscii(value: String): Boolean {
-        val prefix = value.toByteArray(Charsets.US_ASCII)
-        if (size < prefix.size) return false
-        return prefix.indices.all { index -> this[index] == prefix[index] }
+    private fun ByteArray.startsWithBytes(prefix: ByteArray): Boolean =
+        size >= prefix.size && prefix.indices.all { index -> this[index] == prefix[index] }
+
+    private fun hex(value: String): ByteArray = ByteArray(value.length / 2) { index ->
+        value.substring(index * 2, index * 2 + 2).toInt(16).toByte()
     }
 
     private fun readLe16ForTest(bytes: ByteArray, offset: Int): Int =

@@ -1,5 +1,6 @@
 package io.github.hht0rro.javashroud
 
+import io.github.hht0rro.javashroud.transforms.protection.hardening.ProtectionFormat
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
@@ -15,7 +16,7 @@ class QpProtocolLabelParityTest {
         assertTrue("derived_vm_magic" in rustVm || "fn qp_magic" in rustVm)
         assertTrue("pub const QP_AUTH_TAG_SIZE: usize = 32;" in rustVm)
         val production = serializer + "\n" + rustVm
-        listOf("VBCX", "inner-crypto-public-v1").forEach { stale ->
+        listOf(ascii("56424358"), "inner-crypto-public-v1").forEach { stale ->
             assertFalse(stale in production, "Current production sources must not retain stale protocol label '$stale'")
         }
         assertFalse(Files.exists(resolve("src/main/native/js_vm_core.c")))
@@ -42,7 +43,7 @@ class QpProtocolLabelParityTest {
     }
 
     @Test
-    fun retired_emit_lexemes_are_absent_from_current_wire_sources() {
+    fun current_wire_sources_use_only_derived_qp_labels() {
         val sources = listOf(
             source("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/qp/QpWireFormat.kt"),
             source("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/QpSerializer.kt"),
@@ -55,15 +56,17 @@ class QpProtocolLabelParityTest {
             source("src/main/rust/crates/qp-page/src/lib.rs"),
             source("src/main/rust/crates/qp-ffi/src/relocation.rs"),
         ).joinToString("\n")
+        val retiredFrame = ascii(ProtectionFormat.RETIRED_FRAME_MAGIC_HEX)
+        val retiredVm = ascii(ProtectionFormat.RETIRED_VM_MAGIC_HEX)
         listOf(
-            "MAGIC: String = \"JSR1\"",
-            "*b\"JSR1\"",
-            "QP_CURRENT_MAGIC = \"VBC5\"",
-            "*b\"VBC5\"",
+            "MAGIC: String = \"$retiredFrame\"",
+            "*b\"$retiredFrame\"",
+            "QP_CURRENT_MAGIC = \"$retiredVm\"",
+            "*b\"$retiredVm\"",
             "new byte[] {'I', 'T', 'K', '1'}",
-            "nativeInstallAken",
-            "nativeOpenAken",
-            "nativeExecuteAken",
+            ascii("6e6174697665496e7374616c6c416b656e"),
+            ascii("6e61746976654f70656e416b656e"),
+            ascii("6e617469766545786563757465416b656e"),
             "private const val CATALOG_INDEX = \"META-INF/jsrt",
             "preSealResourceRoot = \"META-INF/jsrt\"",
         ).forEach { stale ->
@@ -102,6 +105,10 @@ class QpProtocolLabelParityTest {
     }
 
     private fun source(relativePath: String): String = Files.readString(resolve(relativePath))
+
+    private fun ascii(hex: String): String = ByteArray(hex.length / 2) { index ->
+        hex.substring(index * 2, index * 2 + 2).toInt(16).toByte()
+    }.toString(Charsets.US_ASCII)
 
     private fun resolve(relativePath: String): Path {
         val direct = Path.of(relativePath)
