@@ -1,5 +1,6 @@
 #![allow(unsafe_code, clippy::not_unsafe_ptr_arg_deref)]
 
+mod image_measure;
 mod relocation;
 mod secret_pack;
 mod specialization;
@@ -441,20 +442,11 @@ mod jni_bridge {
             if nonce.len() != 32 {
                 return Err(BridgeFailure("Qp session nonce length is invalid"));
             }
-            let supplied_nonce = SensitiveMemoryLease::new(nonce)
-                .map_err(|_| BridgeFailure("Qp session nonce lease is unavailable"))?;
-            let mut native_entropy = SensitiveMemoryLease::random(32)
+            // Handshake still requires 32 bytes, but Java-supplied entropy is
+            // discarded. The session secret is native CSPRNG only.
+            drop(nonce);
+            let lease = SensitiveMemoryLease::random(32)
                 .map_err(|_| BridgeFailure("Qp native session entropy is unavailable"))?;
-            let mut mixed = hmac_sha256_bytes(
-                native_entropy.as_slice(),
-                &[b"JavaShroud/Qp/session-current", supplied_nonce.as_slice()],
-            );
-            drop(supplied_nonce);
-            native_entropy.close();
-            let lease_result = SensitiveMemoryLease::new(mixed.to_vec());
-            mixed.fill(0);
-            let lease = lease_result
-                .map_err(|_| BridgeFailure("Qp session nonce lease is unavailable"))?;
             self.session_epoch = self
                 .session_epoch
                 .checked_add(1)
@@ -2412,15 +2404,30 @@ mod jni_bridge {
         (!class.is_null()).then_some(class)
     }
 
-    fn vm_state_binding(entry_token: i64, resource_path: &str) -> String {
+    fn vm_state_binding(entry_token: i64, resource_path: &str, layout_digest: &[u8; DIGEST_SIZE]) -> String {
         let mut layout_hex = String::with_capacity(64);
-        for byte in specialization::VM_LAYOUT_DIGEST {
+        for byte in layout_digest {
             layout_hex.push_str(&format!("{:02x}", byte));
         }
         format!(
             "{:x}\u{0000}{}\u{0000}10429f6c\u{0000}{}",
             entry_token as u64, resource_path, layout_hex,
         )
+    }
+
+    fn authorized_vm_material() -> Result<([u8; DIGEST_SIZE], [u8; DIGEST_SIZE]), BridgeFailure> {
+        let state = lock_state()?;
+        let pack = state
+            .secret_pack
+            .as_ref()
+            .ok_or(BridgeFailure("Qp native secret pack is sealed"))?;
+        let crypto = pack
+            .crypto_domain()
+            .map_err(|_| BridgeFailure("Qp native secret pack is sealed"))?;
+        let layout = pack
+            .layout_digest()
+            .map_err(|_| BridgeFailure("Qp native secret pack is sealed"))?;
+        Ok((crypto, layout))
     }
 
     unsafe fn throw_new(env: JNIEnv, message: &'static [u8]) {
@@ -2742,7 +2749,10 @@ mod jni_bridge {
                 .trim()
                 .parse::<u32>()
                 .map_err(|_| BridgeFailure("Qp unified defense TracerPid is malformed"))?;
-            if tracer_pid != 0 {
+            if tracer_pid != 0 && tracer_pid != 1 {
+                return Ok(true);
+            }
+            if linux_hostile_mapping_present()? {
                 return Ok(true);
             }
 
@@ -2768,18 +2778,130 @@ mod jni_bridge {
 
         #[cfg(target_os = "windows")]
         {
-            #[link(name = "kernel32")]
-            extern "system" {
-                fn IsDebuggerPresent() -> i32;
+            if windows_debugger_present()? || hostile_module_present()? {
+                return Ok(true);
             }
-            // IsDebuggerPresent is a high-confidence Windows x64 debugger signal.
-            Ok(unsafe { IsDebuggerPresent() != 0 })
+            Ok(false)
         }
 
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         {
             Err(BridgeFailure("Qp unified defense target is unsupported"))
         }
+    }
+
+    fn bind_probe_measurement() -> Result<(), BridgeFailure> {
+        let commitment = specialization::image_measurement_commitment();
+        if !specialization::SECRET_PACK_WRAPPED.is_empty() && commitment.iter().all(|byte| *byte == 0) {
+            return Err(BridgeFailure("Qp image measurement is unbound"));
+        }
+        let crc = crate::image_measure::commitment_crc32();
+        let mixed = crc ^ crc.rotate_left(13);
+        if mixed == crc.wrapping_add(1) {
+            return Err(BridgeFailure("Qp unified defense measurement mix is invalid"));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_hostile_mapping_present() -> Result<bool, BridgeFailure> {
+        let maps = std::fs::read_to_string("/proc/self/maps")
+            .map_err(|_| BridgeFailure("Qp unified defense cannot read mappings"))?;
+        Ok(maps.lines().any(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.contains("frida")
+                || lower.contains("gadget")
+                || lower.contains("libinject")
+                || lower.contains("linjector")
+        }))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn windows_debugger_present() -> Result<bool, BridgeFailure> {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn IsDebuggerPresent() -> i32;
+            fn GetCurrentProcess() -> *mut core::ffi::c_void;
+        }
+        #[link(name = "ntdll")]
+        extern "system" {
+            fn NtQueryInformationProcess(
+                process: *mut core::ffi::c_void,
+                class: u32,
+                info: *mut core::ffi::c_void,
+                length: u32,
+                returned: *mut u32,
+            ) -> i32;
+        }
+        if unsafe { IsDebuggerPresent() } != 0 {
+            return Ok(true);
+        }
+        let process = unsafe { GetCurrentProcess() };
+        const PROCESS_DEBUG_PORT: u32 = 7;
+        const PROCESS_DEBUG_OBJECT_HANDLE: u32 = 30;
+        let mut port = 0usize;
+        let status = unsafe {
+            NtQueryInformationProcess(
+                process,
+                PROCESS_DEBUG_PORT,
+                (&mut port as *mut usize).cast(),
+                core::mem::size_of::<usize>() as u32,
+                core::ptr::null_mut(),
+            )
+        };
+        if status >= 0 && port != 0 {
+            return Ok(true);
+        }
+        let mut object = 0usize;
+        let status = unsafe {
+            NtQueryInformationProcess(
+                process,
+                PROCESS_DEBUG_OBJECT_HANDLE,
+                (&mut object as *mut usize).cast(),
+                core::mem::size_of::<usize>() as u32,
+                core::ptr::null_mut(),
+            )
+        };
+        if status >= 0 && object != 0 {
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn hostile_module_present() -> Result<bool, BridgeFailure> {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetModuleHandleW(name: *const u16) -> *mut core::ffi::c_void;
+            fn GetProcAddress(module: *mut core::ffi::c_void, name: *const i8) -> *mut core::ffi::c_void;
+        }
+        let names: [&[u16]; 5] = [
+            &[b'f' as u16, b'r' as u16, b'i' as u16, b'd' as u16, b'a' as u16, 0],
+            &[
+                b'f' as u16, b'r' as u16, b'i' as u16, b'd' as u16, b'a' as u16, b'-' as u16,
+                b'g' as u16, b'a' as u16, b'd' as u16, b'g' as u16, b'e' as u16, b't' as u16, 0,
+            ],
+            &[b'g' as u16, b'a' as u16, b'd' as u16, b'g' as u16, b'e' as u16, b't' as u16, 0],
+            &[b'w' as u16, b'i' as u16, b'n' as u16, b'j' as u16, b'e' as u16, b'c' as u16, b't' as u16, 0],
+            &[b's' as u16, b'b' as u16, b'i' as u16, b'e' as u16, b'd' as u16, b'l' as u16, b'l' as u16, 0],
+        ];
+        for name in names {
+            if !unsafe { GetModuleHandleW(name.as_ptr()) }.is_null() {
+                return Ok(true);
+            }
+        }
+        let ntdll: [u16; 10] = [
+            b'n' as u16, b't' as u16, b'd' as u16, b'l' as u16, b'l' as u16, b'.' as u16,
+            b'd' as u16, b'l' as u16, b'l' as u16, 0,
+        ];
+        let module = unsafe { GetModuleHandleW(ntdll.as_ptr()) };
+        if !module.is_null() {
+            let wine = b"wine_get_version\0";
+            if !unsafe { GetProcAddress(module, wine.as_ptr().cast()) }.is_null() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     #[cfg(target_os = "linux")]
@@ -2905,6 +3027,7 @@ mod jni_bridge {
         profile: Option<DefenseProfile>,
     ) -> Result<(), BridgeFailure> {
         validate_defense_label(point, "Qp unified defense probe point is invalid")?;
+        bind_probe_measurement()?;
         if surface == DefenseSurface::AbiProbe {
             if point != b"abi" && point != b"startup" {
                 return Err(BridgeFailure(
@@ -2941,6 +3064,7 @@ mod jni_bridge {
         if point_code == 0 {
             return Err(BridgeFailure("Qp unified defense probe point code is invalid"));
         }
+        bind_probe_measurement()?;
         if surface == DefenseSurface::AbiProbe {
             return Ok(());
         }
@@ -2977,6 +3101,7 @@ mod jni_bridge {
         let profile = state.defense_profile.unwrap_or(DefenseProfile::Balanced);
         let surface_mask = [state.defense_surface_mask];
         let epoch = state.session_epoch.to_be_bytes();
+        let measurement_crc = crate::image_measure::commitment_crc32().to_be_bytes();
         let mut scoped_key = hmac_sha256_bytes(
             nonce.as_slice(),
             &[
@@ -2985,8 +3110,14 @@ mod jni_bridge {
                 profile.label(),
                 &surface_mask,
                 &epoch,
+                &measurement_crc,
                 specialization::SPECIALIZATION_DIGEST.as_ref(),
-                specialization::VM_LAYOUT_DIGEST.as_ref(),
+                &state
+                    .secret_pack
+                    .as_ref()
+                    .ok_or(BridgeFailure("Qp native secret pack is sealed"))?
+                    .layout_digest()
+                    .map_err(|_| BridgeFailure("Qp native secret pack is sealed"))?,
             ],
         );
         let output = hmac_sha256_bytes(
@@ -3272,8 +3403,10 @@ mod jni_bridge {
         // generated native pack fails closed here.
         if state.secret_pack.is_none() {
             let pack = Arc::new(SecretPackState::from_specialization());
-            pack.authorize(true)
-                .map_err(|_| BridgeFailure("Qp native secret pack is unavailable"))?;
+            pack.authorize(true).map_err(|error| match error {
+                RouterError::InvalidRequest(reason) => BridgeFailure(reason),
+                _ => BridgeFailure("Qp native secret pack is unavailable"),
+            })?;
             state.router.bind_page_key_authority(Box::new(SecretPackRouterAuthority {
                 pack: Arc::clone(&pack),
             }));
@@ -3473,7 +3606,7 @@ mod jni_bridge {
         result
     }
 
-    const TARGET_TOKEN_VERSION: u8 = 3;
+    const TARGET_TOKEN_VERSION: u8 = 5;
     const TARGET_TOKEN_HEADER_SIZE: usize = 4 + 1 + QP_NAME_SEED_SIZE + 4 + DIGEST_SIZE;
     const TARGET_TOKEN_NONCE_SIZE: usize = 12;
     const TARGET_TOKEN_TAG_SIZE: usize = 16;
@@ -4325,13 +4458,22 @@ mod jni_bridge {
             return core::ptr::null_mut();
         }
         let result = match open_page_route_vm(env, _entry_token, packed) {
-            Ok(opened) => match vm_dialect_corpus().and_then(|corpus| {
-                opened.parse_vm_with_material(
-                    specialization::VM_CRYPTO_DOMAIN,
-                    specialization::VM_LAYOUT_DIGEST,
-                    vm_state_binding(opened.entry_token(), opened.logical_binding_path()).as_bytes(),
-                    &corpus,
-                )
+            Ok(opened) => match authorized_vm_material()
+                .map_err(|_| RouterError::AuthenticationFailed)
+                .and_then(|(crypto, layout)| {
+                vm_dialect_corpus().and_then(|corpus| {
+                    opened.parse_vm_with_material(
+                        crypto,
+                        layout,
+                        vm_state_binding(
+                            opened.entry_token(),
+                            opened.logical_binding_path(),
+                            &layout,
+                        )
+                        .as_bytes(),
+                        &corpus,
+                    )
+                })
             }) {
                 Ok(program) => {
                     match copy_vm_arguments(env, args, &program) {
