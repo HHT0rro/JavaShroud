@@ -3,7 +3,7 @@ package io.github.hht0rro.javashroud.transforms.protection.hardening
 /** Current protected-artifact format. Forbidden output signatures fail closed at the release gate. */
 internal object ProtectionFormat {
     /** Current protected-artifact wire format. Older formats are retired. */
-    const val CURRENT: Int = 5
+    const val CURRENT: Int = 6
     val CURRENT_LABEL: String = CURRENT.toString()
     const val DEBUG_MAP_VERSION: Int = 5
     const val DEBUG_MAP_MAGIC = "JSDM"

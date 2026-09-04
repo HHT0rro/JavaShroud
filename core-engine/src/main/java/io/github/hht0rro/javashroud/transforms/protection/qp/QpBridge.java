@@ -45,6 +45,16 @@ public final class QpBridge {
     private static volatile int nativeLoadState = LOAD_UNTRIED;
     private static volatile String nativeLoadMessage = "";
     private static volatile boolean diversifiedVmEnabled;
+    /** Short platform key of the loaded native library; selects the sealed pack resource. */
+    private static volatile String loadedNativePlatformKey;
+
+    /** Maps a Rust target triple to the catalog pack platform key. */
+    private static String shortPlatformKey(String platformTarget) {
+        if (platformTarget == null) return "";
+        if ("x86_64-pc-windows-gnu".equals(platformTarget)) return "windows-x64";
+        if ("x86_64-unknown-linux-gnu.2.17".equals(platformTarget)) return "linux-x64";
+        return platformTarget.trim();
+    }
     /* 0 = not requested, 1 = native ready, 2 = native unavailable. */
     private static volatile int vmSelfCheckCode;
     private static volatile boolean nativeSelfCheckFailed;
@@ -81,7 +91,7 @@ public final class QpBridge {
     static native int nativeInit(String platform);
     static native int nativeHeartbeat();
     static native boolean nativeInstallSessionNonce(byte[] startupNonce);
-    static native int nativeInstallCatalog(byte[] directory, byte[] bundle);
+    static native int nativeInstallCatalog(byte[] directory, byte[] bundle, byte[] pack);
     static native Object nativeExecuteVmPage(long entryToken, byte[] packedRequest, Object[] args);
     static native String nativeOpenStringPage(byte[] packedRequest);
     static native byte[] nativeReadClassPage(byte[] packedRequest);
@@ -351,6 +361,7 @@ public final class QpBridge {
                     return false;
                 }
                 installQpSessionNonce();
+                loadedNativePlatformKey = shortPlatformKey(platformTarget);
                 installQpCatalog();
                 if (!verifyQpNativeAbiAfterLoad()) {
                     return false;
@@ -1185,9 +1196,14 @@ public final class QpBridge {
         CatalogBundle bundle = readQpCatalogBundle();
         if (bundle == null) return;
         try {
-            int installed = nativeInstallCatalog(bundle.directory, bundle.pages);
-            if (installed <= 0) {
-                throw new SecurityException("Qp current catalog installed no pages");
+            byte[] pack = bundle.pack != null ? bundle.pack : new byte[0];
+            try {
+                int installed = nativeInstallCatalog(bundle.directory, bundle.pages, pack);
+                if (installed <= 0) {
+                    throw new SecurityException("Qp current catalog installed no pages");
+                }
+            } finally {
+                if (bundle.pack != null) Arrays.fill(pack, (byte) 0);
             }
         } finally {
             bundle.clear();
@@ -1212,9 +1228,26 @@ public final class QpBridge {
             byte[] indexBytes = readAllBounded(in, 256 * 1024);
             String index = new String(indexBytes, StandardCharsets.US_ASCII);
             Arrays.fill(indexBytes, (byte) 0);
+            byte[] pack = null;
             String[] entries = index.split("\\r?\\n", -1);
             for (String raw : entries) {
-                String relative = raw.trim();
+                String line = raw.trim();
+                if (line.length() == 0) continue;
+                if (line.startsWith("pack|")) {
+                    int second = line.indexOf('|', 5);
+                    if (second < 0) throw new SecurityException("Qp catalog pack entry is invalid");
+                    String packPlatform = line.substring(5, second);
+                    String packRelative = line.substring(second + 1);
+                    validateCatalogRelativePath(packRelative);
+                    if (pack != null) throw new SecurityException("Qp catalog pack is duplicated");
+                    if (!packPlatform.equals(loadedNativePlatformKey)) continue;
+                    try (InputStream source = resourceStream(packRelative)) {
+                        if (source == null) throw new SecurityException("Qp catalog pack is missing: " + packRelative);
+                        pack = readAllBounded(source, 16 * 1024 * 1024);
+                    }
+                    continue;
+                }
+                String relative = line.trim();
                 if (relative.length() == 0) continue;
                 validateCatalogRelativePath(relative);
                 if (relative.indexOf('/') < 0) {
@@ -1262,7 +1295,7 @@ public final class QpBridge {
                 Arrays.fill(framed, (byte) 0);
                 throw new SecurityException("Qp current catalog bundle length mismatch");
             }
-            return new CatalogBundle(directory, framed);
+            return new CatalogBundle(directory, framed, pack);
         } catch (IOException error) {
             if (directory != null) Arrays.fill(directory, (byte) 0);
             throw new SecurityException("Qp current catalog is unreadable", error);
@@ -1288,15 +1321,19 @@ public final class QpBridge {
     private static final class CatalogBundle {
         private byte[] directory;
         private byte[] pages;
-        private CatalogBundle(byte[] directory, byte[] pages) {
+        private byte[] pack;
+        private CatalogBundle(byte[] directory, byte[] pages, byte[] pack) {
             this.directory = directory;
             this.pages = pages;
+            this.pack = pack;
         }
         private void clear() {
             if (directory != null) Arrays.fill(directory, (byte) 0);
             if (pages != null) Arrays.fill(pages, (byte) 0);
+            if (pack != null) Arrays.fill(pack, (byte) 0);
             directory = null;
             pages = null;
+            pack = null;
         }
     }
 

@@ -230,6 +230,7 @@ object EmbeddedHelperDeployment {
             "nativeLoadState",
             "nativeLoadMessage",
             "diversifiedVmEnabled",
+            "loadedNativePlatformKey",
             "vmSelfCheckCode",
             "nativeSelfCheckFailed",
             "sealedNativeBindingsPublished",

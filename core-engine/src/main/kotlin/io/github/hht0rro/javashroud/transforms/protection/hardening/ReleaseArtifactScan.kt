@@ -1252,13 +1252,19 @@ internal object ReleaseArtifactScan {
             return CatalogDirectoryReference(error = "catalog-index-decode-failed:${error.javaClass.simpleName}")
         }
         val invalid = lines.firstOrNull { line ->
-            line.length > 4096 ||
-                line.any { char -> char.code < 0x20 || char == '\\' } ||
-                line.startsWith('/') ||
-                ".." in line
+            if (line.startsWith("pack|")) {
+                // Sealed pack resource references: platform-key|relative-path.
+                val second = line.indexOf('|', 5)
+                second < 0 || line.length > 4096 || line.any { char -> char.code < 0x20 || char == '\\' }
+            } else {
+                line.length > 4096 ||
+                    line.any { char -> char.code < 0x20 || char == '\\' } ||
+                    line.startsWith('/') ||
+                    ".." in line
+            }
         }
         if (invalid != null) return CatalogDirectoryReference(error = "catalog-index-path-invalid")
-        val directories = lines.filter { '/' !in it }
+        val directories = lines.filter { '/' !in it && !it.startsWith("pack|") }
         if (directories.size != 1) {
             return CatalogDirectoryReference(error = "catalog-index-directory-count=${directories.size};expected=1")
         }

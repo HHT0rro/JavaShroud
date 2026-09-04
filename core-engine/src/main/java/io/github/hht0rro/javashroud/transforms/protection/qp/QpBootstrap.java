@@ -15,7 +15,7 @@ import java.util.Base64;
  */
 public final class QpBootstrap {
     private static final int MAGIC_SIZE = 4;
-    private static final int VERSION = 5;
+    private static final int VERSION = 6;
     private static final int MAX_TOKEN_BYTES = 64 * 1024;
 
     private QpBootstrap() {}

@@ -934,7 +934,7 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     addMethod(jniHelper, "nativeInit", "(Ljava/lang/String;)I")
     addMethod(jniHelper, "nativeHeartbeat", "()I")
     addMethod(jniHelper, "nativeInstallSessionNonce", "([B)Z")
-    addMethod(jniHelper, "nativeInstallCatalog", "([B[B)I")
+    addMethod(jniHelper, "nativeInstallCatalog", "([B[B[B)I")
     addMethod(jniHelper, "nativeExecuteVmPage", "(J[B[Ljava/lang/Object;)Ljava/lang/Object;")
     addMethod(jniHelper, "nativeOpenStringPage", "([B)Ljava/lang/String;")
     addMethod(jniHelper, "nativeReadClassPage", "([B)[B")
