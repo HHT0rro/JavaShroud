@@ -102,6 +102,7 @@ class QpProtocolLabelParityTest {
         assertFalse("protocolVersion = 3" in rotation)
         assertTrue("private static final int VERSION = ${ProtectionFormat.CURRENT};" in bootstrap)
         assertTrue("const TARGET_TOKEN_VERSION: u8 = ${ProtectionFormat.CURRENT};" in ffi)
+        assertFalse("b\\j.m\\0" in ffi, "native must not read the retired method-binding mailbox")
         assertTrue("qpResourceDir() + \"/native.locator\"" in sealing)
         assertTrue("qpResourceDir() + \"/native.bindings.locator\"" in sealing)
         assertTrue("if (name.startsWith(\"a_bsm\"))" in virtualization)
