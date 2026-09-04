@@ -551,15 +551,24 @@ object RuntimeArtifactSealing {
                     bytes = encodeSealedNativeIndex(sealedNativeSpecs, seed, maxHardening),
                 )
                 sealedNativeBindingsResource?.let { bindingResource ->
+                    val buildContext = checkNotNull(currentQpBuildContextOrNull()) {
+                        "Qp sealed bindings require the active build context"
+                    }
+                    val cryptoDomain = io.github.hht0rro.javashroud.transforms.protection.QpInnerMaterial
+                        .copyCryptoDomainMaterial(buildContext)
+                    val bindingPlain = encodeSealedNativeBindings(
+                        helperClassRenameMap = helperClassRenameMap,
+                        helperMemberRenamePlan = helperMemberRenamePlan,
+                        applicationMethodBindings = applicationMethodBindings,
+                        applicationFieldBindings = applicationFieldBindings,
+                        seed = seed,
+                    )
+                    val bindingSealed = sealNativeBindingBytes(cryptoDomain, bindingPlain)
+                    Arrays.fill(cryptoDomain, 0)
+                    Arrays.fill(bindingPlain, 0)
                     runtimeEntries += JarEntryData(
                         name = bindingResource,
-                        bytes = encodeSealedNativeBindings(
-                            helperClassRenameMap = helperClassRenameMap,
-                            helperMemberRenamePlan = helperMemberRenamePlan,
-                            applicationMethodBindings = applicationMethodBindings,
-                            applicationFieldBindings = applicationFieldBindings,
-                            seed = seed,
-                        ),
+                        bytes = bindingSealed,
                     )
                 }
             }
@@ -1236,6 +1245,32 @@ private fun encodeSealedNativeBindings(
     lines += applicationFieldBindings
         .map { (ref, renamedName) -> listOf("F", sealedBindingKey("${ref.owner}#${ref.name}#${ref.descriptor}"), renamedName).joinToString("|") }
     return encodeSealedNativeBindingLines(lines, seed)
+}
+
+private val NATIVE_BINDINGS_SEAL_DOMAIN = "javashroud-qp-bindings-v6".toByteArray(Charsets.US_ASCII)
+
+/**
+ * Seals the relocation-binding text as `nonce(12) || ct||tag` under
+ * `HKDF(cryptoDomain, "javashroud-qp-bindings-v6")`. Only the native runtime
+ * can open it, so the original symbol map never ships in plaintext.
+ */
+internal fun sealNativeBindingBytes(cryptoDomain: ByteArray, plain: ByteArray): ByteArray {
+    require(cryptoDomain.size == 32) { "Qp sealed bindings crypto domain must be 32 bytes" }
+    val key = hkdfSha256(ikm = cryptoDomain, salt = NATIVE_BINDINGS_SEAL_DOMAIN, info = ByteArray(0), length = 32)
+    try {
+        val nonce = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
+        val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(
+            javax.crypto.Cipher.ENCRYPT_MODE,
+            javax.crypto.spec.SecretKeySpec(key, "AES"),
+            javax.crypto.spec.GCMParameterSpec(128, nonce),
+        )
+        cipher.updateAAD(NATIVE_BINDINGS_SEAL_DOMAIN)
+        val sealed = cipher.doFinal(plain)
+        return nonce + sealed
+    } finally {
+        Arrays.fill(key, 0)
+    }
 }
 
 internal fun encodeSealedNativeBindingLines(lines: List<String>, seed: Long): ByteArray {
