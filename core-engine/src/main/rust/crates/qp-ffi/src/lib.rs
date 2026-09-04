@@ -17,7 +17,7 @@ use qp_crypto::{
     RuntimeBindingDigest, Sha256, DIGEST_SIZE, LANE_TOKEN_AAD, LANE_TOKEN_KEY,
     MAX_BINDING_SIZE, MAX_PAYLOAD_SIZE, QP_NAME_SEED_SIZE, QP_SCHEDULE_VERSION, ROLE_TOKEN,
 };
-use qp_page::{ArtifactDirectory, MAX_FRAME_SIZE};
+use qp_page::{open_sealed_directory_parts, ArtifactDirectory, MAX_FRAME_SIZE};
 use qp_runtime::{
     OpenedPage, PageKind, PageRequest, RouterError, Runtime, RuntimeError, TypedPageRouter,
 };
@@ -3368,15 +3368,6 @@ mod jni_bridge {
             unsafe { copy_byte_array(env, directory_bytes, MAX_CATALOG_DIRECTORY_SIZE) }?;
         let bundle_bytes = unsafe { copy_byte_array(env, bundle_bytes, MAX_CATALOG_BUNDLE_SIZE) }?;
         let pack_bytes = unsafe { copy_byte_array(env, pack_bytes, MAX_CATALOG_BUNDLE_SIZE)? };
-        let directory = ArtifactDirectory::decode(directory_bytes.as_bytes())
-            .map_err(|_| BridgeFailure("Qp current catalog directory authentication failed"))?;
-        qp_crypto::install_name_schedule(
-            &directory.name_seed,
-            &directory.runtime.artifact_commitment,
-            qp_crypto::QP_SCHEDULE_VERSION,
-        )
-        .map_err(|_| BridgeFailure("Qp current catalog name schedule is invalid"))?;
-        let stored = parse_catalog_bundle(bundle_bytes.as_bytes(), &directory)?;
         let mut state = lock_state()?;
         if !state.initialized || state.session_nonce.is_none() {
             return Err(BridgeFailure(
@@ -3386,23 +3377,12 @@ mod jni_bridge {
         let target = state
             .target
             .ok_or(BridgeFailure("Qp current catalog target is missing"))?;
-        if directory.runtime.target_triple != target.triple() {
-            return Err(BridgeFailure(
-                "Qp current catalog target binding mismatch",
-            ));
-        }
         if !state.router.is_empty() {
             return Err(BridgeFailure("Qp current catalog was already installed"));
         }
-        let mut artifact_commitment = [0u8; DIGEST_SIZE];
-        artifact_commitment.copy_from_slice(&directory.runtime.artifact_commitment);
-        let mut name_seed = [0u8; qp_crypto::QP_NAME_SEED_SIZE];
-        name_seed.copy_from_slice(&directory.name_seed);
-        state.install_token_binding(artifact_commitment, name_seed)?;
-        // The catalog and session are authenticated: the artifact-specific
-        // secret pack may now recombine. The authority refuses to arm when
-        // the specialization carries no secret slots, so a catalog without a
-        // generated native pack fails closed here.
+        // Two-phase install: authorize the secret pack first so the sealed
+        // directory blob can be opened with its crypto domain; the page graph
+        // stays opaque to anyone without a live session.
         if state.secret_pack.is_none() {
             let pack = Arc::new(SecretPackState::from_specialization());
             pack.authorize(true, state.session_nonce.is_some(), pack_bytes.as_bytes())
@@ -3415,6 +3395,43 @@ mod jni_bridge {
             }));
             state.secret_pack = Some(pack);
         }
+        let crypto_domain = state
+            .secret_pack
+            .as_ref()
+            .ok_or(BridgeFailure("Qp native secret pack is unavailable"))?
+            .crypto_domain()
+            .map_err(|_| BridgeFailure("Qp native secret pack is unavailable"))?;
+        let (shell_name_seed, shell_native_sha256, directory_plain) =
+            open_sealed_directory_parts(directory_bytes.as_bytes(), &crypto_domain)
+                .map_err(|_| BridgeFailure("Qp current catalog directory authentication failed"))?;
+        let directory = ArtifactDirectory::decode(&directory_plain)
+            .map_err(|_| BridgeFailure("Qp current catalog directory authentication failed"))?;
+        let mut directory_plain = directory_plain;
+        directory_plain.fill(0);
+        if !constant_time_eq(&shell_name_seed, &directory.name_seed)
+            || !constant_time_eq(&shell_native_sha256, &directory.runtime.native_sha256)
+        {
+            return Err(BridgeFailure(
+                "Qp current catalog directory authentication failed",
+            ));
+        }
+        if directory.runtime.target_triple != target.triple() {
+            return Err(BridgeFailure(
+                "Qp current catalog target binding mismatch",
+            ));
+        }
+        qp_crypto::install_name_schedule(
+            &directory.name_seed,
+            &directory.runtime.artifact_commitment,
+            qp_crypto::QP_SCHEDULE_VERSION,
+        )
+        .map_err(|_| BridgeFailure("Qp current catalog name schedule is invalid"))?;
+        let stored = parse_catalog_bundle(bundle_bytes.as_bytes(), &directory)?;
+        let mut artifact_commitment = [0u8; DIGEST_SIZE];
+        artifact_commitment.copy_from_slice(&directory.runtime.artifact_commitment);
+        let mut name_seed = [0u8; qp_crypto::QP_NAME_SEED_SIZE];
+        name_seed.copy_from_slice(&directory.name_seed);
+        state.install_token_binding(artifact_commitment, name_seed)?;
         let installed = state
             .router
             .install_catalog_descriptor_bound(&directory, &stored)

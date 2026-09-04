@@ -15,6 +15,77 @@ const MAX_PROFILE_BYTES: usize = 256;
 
 pub const TEST_NAME_SEED: [u8; QP_NAME_SEED_SIZE] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
+const GCM_TAG_SIZE: usize = 16;
+const SEALED_DIRECTORY_MAGIC: u8 = 0x6B;
+const SEALED_DIRECTORY_VERSION: u8 = 1;
+const SEALED_DIRECTORY_NONCE_SIZE: usize = 12;
+const SEALED_DIRECTORY_DOMAIN: &[u8] = b"javashroud-qp-directory-v6";
+
+fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_be_bytes([bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]])
+}
+
+fn sealed_directory_key(crypto_domain: &[u8; DIGEST_SIZE], name_seed: &[u8; QP_NAME_SEED_SIZE]) -> Result<[u8; DIGEST_SIZE], PageError> {
+    let mut key = [0u8; DIGEST_SIZE];
+    let derived = qp_crypto::hkdf_sha256(crypto_domain, SEALED_DIRECTORY_DOMAIN, name_seed, DIGEST_SIZE)
+        .map_err(|_| PageError::InvalidInput("sealed directory key derivation failed"))?;
+    key.copy_from_slice(&derived);
+    Ok(key)
+}
+
+/// Seals a serialized directory: the records become one AES-256-GCM blob whose
+/// key is derived from the pack's crypto domain, so page layout stays opaque
+/// until the secret pack has been authorized in a live session.
+pub fn seal_directory(
+    plaintext: &[u8],
+    name_seed: &[u8; QP_NAME_SEED_SIZE],
+    crypto_domain: &[u8; DIGEST_SIZE],
+    nonce: &[u8; SEALED_DIRECTORY_NONCE_SIZE],
+) -> Result<Vec<u8>, PageError> {
+    let key = sealed_directory_key(crypto_domain, name_seed)?;
+    let mut header = Vec::with_capacity(4 + QP_NAME_SEED_SIZE + SEALED_DIRECTORY_NONCE_SIZE + 4);
+    header.push(SEALED_DIRECTORY_MAGIC);
+    header.push(SEALED_DIRECTORY_VERSION);
+    header.push(0);
+    header.push(0);
+    header.extend_from_slice(name_seed);
+    header.extend_from_slice(nonce);
+    write_u32(&mut header, (plaintext.len() + GCM_TAG_SIZE) as u32);
+    let sealed = qp_crypto::aes256_gcm_encrypt(&key, nonce, &header, plaintext)
+        .map_err(|_| PageError::InvalidInput("sealed directory encryption failed"))?;
+    let mut output = header;
+    output.extend_from_slice(&sealed);
+    Ok(output)
+}
+
+/// Returns the inner name seed, the shell-carried native SHA-256, and the
+/// decrypted directory bytes; full parsing is left to [`decode_directory`] so
+/// error semantics stay unchanged.
+pub fn open_sealed_directory_parts(
+    bytes: &[u8],
+    crypto_domain: &[u8; DIGEST_SIZE],
+) -> Result<([u8; QP_NAME_SEED_SIZE], [u8; DIGEST_SIZE], Vec<u8>), PageError> {
+    const HEADER_SIZE: usize = 4 + QP_NAME_SEED_SIZE + SEALED_DIRECTORY_NONCE_SIZE + 4 + DIGEST_SIZE;
+    if bytes.len() < HEADER_SIZE + GCM_TAG_SIZE {
+        return Err(PageError::InvalidInput("sealed directory is truncated"));
+    }
+    if bytes[0] != SEALED_DIRECTORY_MAGIC || bytes[1] != SEALED_DIRECTORY_VERSION || bytes[2] != 0 || bytes[3] != 0 {
+        return Err(PageError::InvalidInput("sealed directory header is invalid"));
+    }
+    let mut name_seed = [0u8; QP_NAME_SEED_SIZE];
+    name_seed.copy_from_slice(&bytes[4..4 + QP_NAME_SEED_SIZE]);
+    let blob_len = read_u32(bytes, 4 + QP_NAME_SEED_SIZE + SEALED_DIRECTORY_NONCE_SIZE) as usize;
+    if bytes.len() != HEADER_SIZE + blob_len {
+        return Err(PageError::InvalidInput("sealed directory length mismatch"));
+    }
+    let mut native_sha256 = [0u8; DIGEST_SIZE];
+    native_sha256.copy_from_slice(&bytes[36..36 + DIGEST_SIZE]);
+    let key = sealed_directory_key(crypto_domain, &name_seed)?;
+    let plaintext = qp_crypto::aes256_gcm_decrypt(&key, &bytes[20..20 + SEALED_DIRECTORY_NONCE_SIZE], &bytes[..HEADER_SIZE], &bytes[HEADER_SIZE..])
+        .map_err(|_| PageError::InvalidInput("sealed directory authentication failed"))?;
+    Ok((name_seed, native_sha256, plaintext))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirectoryRuntimeBinding {
     pub artifact_commitment: [u8; DIGEST_SIZE],

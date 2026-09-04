@@ -11,8 +11,9 @@
 mod directory;
 mod frame;
 pub use directory::{
-    decode_directory, encode_directory, ArtifactDirectory, ArtifactDirectoryEntry,
-    DirectoryRuntimeBinding, PAGE_KEY_SIZE, RETIRED_DIRECTORY_MAGIC, TEST_NAME_SEED,
+    decode_directory, encode_directory, open_sealed_directory_parts, seal_directory,
+    ArtifactDirectory, ArtifactDirectoryEntry, DirectoryRuntimeBinding, PAGE_KEY_SIZE,
+    RETIRED_DIRECTORY_MAGIC, TEST_NAME_SEED,
 };
 pub use frame::{
     AuthenticatedFrame as EnvelopeFrame, FrameWriter, ProtocolError, RuntimeEnvelope,
