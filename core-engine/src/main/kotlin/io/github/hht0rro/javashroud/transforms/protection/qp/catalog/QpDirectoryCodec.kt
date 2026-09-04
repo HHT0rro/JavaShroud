@@ -8,6 +8,65 @@ import java.security.MessageDigest
 import java.util.Arrays
 
 /** Current-only serializer for one authenticated Qp artifact directory. */
+/**
+ * v6 sealed-directory envelope: an AES-256-GCM blob keyed from the pack's
+ * crypto domain, so page layout stays opaque until a live session authorizes
+ * the secret pack. Header (68 bytes): magic 0x6B | version 1 | two zero bytes
+ * | 16-byte name seed | 12-byte nonce | u32 blob length | 32-byte native
+ * SHA-256 (non-secret, kept outside for release-scan binding checks). The
+ * whole header is the GCM AAD.
+ */
+object QpDirectorySeal {
+    private val DOMAIN = "javashroud-qp-directory-v6".toByteArray(Charsets.US_ASCII)
+    private const val HEADER_SIZE = 68
+    const val NAME_SEED_SIZE = 16
+    const val NONCE_SIZE = 12
+    const val NATIVE_SHA256_OFFSET = 36
+
+    fun seal(
+        plaintext: ByteArray,
+        nameSeed: ByteArray,
+        cryptoDomain: ByteArray,
+        nonce: ByteArray,
+        nativeSha256: ByteArray,
+    ): ByteArray {
+        require(nameSeed.size == NAME_SEED_SIZE) { "sealed directory name seed must be 16 bytes" }
+        require(cryptoDomain.size == 32) { "sealed directory crypto domain must be 32 bytes" }
+        require(nonce.size == NONCE_SIZE) { "sealed directory nonce must be 12 bytes" }
+        require(nativeSha256.size == 32) { "sealed directory native digest must be 32 bytes" }
+        val key = io.github.hht0rro.javashroud.transforms.protection.hkdfSha256(
+            ikm = cryptoDomain,
+            salt = DOMAIN,
+            info = nameSeed,
+            length = 32,
+        )
+        try {
+            val header = ByteArray(HEADER_SIZE)
+            header[0] = 0x6B
+            header[1] = 1
+            nameSeed.copyInto(header, 4)
+            nonce.copyInto(header, 20)
+            val blobLength = plaintext.size + 16
+            header[32] = (blobLength ushr 24).toByte()
+            header[33] = (blobLength ushr 16).toByte()
+            header[34] = (blobLength ushr 8).toByte()
+            header[35] = blobLength.toByte()
+            nativeSha256.copyInto(header, NATIVE_SHA256_OFFSET)
+            val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(
+                javax.crypto.Cipher.ENCRYPT_MODE,
+                javax.crypto.spec.SecretKeySpec(key, "AES"),
+                javax.crypto.spec.GCMParameterSpec(128, nonce),
+            )
+            cipher.updateAAD(header)
+            val sealed = cipher.doFinal(plaintext)
+            return header + sealed
+        } finally {
+            java.util.Arrays.fill(key, 0)
+        }
+    }
+}
+
 object QpDirectorySerializer {
     const val FORMAT_VERSION: Int = io.github.hht0rro.javashroud.transforms.protection.hardening.ProtectionFormat.CURRENT
     const val DIGEST_SIZE: Int = QP_DIGEST_SIZE
