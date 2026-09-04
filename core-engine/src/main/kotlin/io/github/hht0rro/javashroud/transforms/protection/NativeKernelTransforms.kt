@@ -313,16 +313,45 @@ private fun diversifiedConstant(value: Int, seed: Int): Int {
 }
 
 private fun emitJniMicrokernelLoad(mv: MethodVisitor, kernelComponents: String, targetPlatform: String, vmMode: String) {
-    mv.visitLdcInsn(kernelComponents)
-    mv.visitLdcInsn(targetPlatform)
-    mv.visitLdcInsn(vmMode)
+    mv.visitLdcInsn(kernelComponentCode(kernelComponents))
+    mv.visitLdcInsn(targetPlatformCode(targetPlatform))
+    mv.visitLdcInsn(vmModeCode(vmMode))
     mv.visitMethodInsn(
         Opcodes.INVOKESTATIC,
         "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge",
         "loadKernel",
-        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+        "(III)V",
         false,
     )
+}
+
+private fun kernelComponentCode(value: String): Int = when (value.trim()) {
+    "loader" -> 1
+    "decrypt" -> 2
+    "vm" -> 3
+    "guards" -> 4
+    "all" -> 5
+    else -> error("unsupported Qp kernel component route: $value")
+}
+
+private fun targetPlatformCode(value: String): Int {
+    var mask = 0
+    for (candidate in value.split(',')) {
+        when (candidate.trim()) {
+            "auto" -> return 0
+            "all" -> mask = mask or 3
+            "windows-x64", "x86_64-pc-windows-gnu" -> mask = mask or 1
+            "linux-x64", "x86_64-unknown-linux-gnu.2.17" -> mask = mask or 2
+            else -> error("unsupported Qp target platform route: $value")
+        }
+    }
+    return mask.takeIf { it != 0 } ?: error("empty Qp target platform route")
+}
+
+private fun vmModeCode(value: String): Int = when (value.trim()) {
+    "vm-off" -> 0
+    "vm-diverse" -> 1
+    else -> error("unsupported Qp VM mode route: $value")
 }
 
 private const val QP_NATIVE_LOADER_HANDLER_PAGE_INDEX = 0

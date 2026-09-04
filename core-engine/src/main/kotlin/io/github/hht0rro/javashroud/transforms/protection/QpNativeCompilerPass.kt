@@ -7,7 +7,11 @@ import java.nio.file.Path
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 import java.security.SecureRandom
+import java.util.Arrays
 import java.util.Random
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
+import io.github.hht0rro.javashroud.transforms.protection.qp.IMAGE_MEASUREMENT_MAGIC
 import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -250,7 +254,12 @@ object QpNativeCompilerPass {
             // later pass can still verify against the same slots.
             context.withNativeVmSecretPackForSpecialization { pack ->
                 secretPackLiterals = io.github.hht0rro.javashroud.transforms.protection.qp.NativeSecretPackLiterals
-                    .prepare(pack, evidenceRandom ?: nativeBuildSecureRandom(seed, context))
+                    .prepare(
+                        pack,
+                        evidenceRandom ?: nativeBuildSecureRandom(seed, context),
+                        cryptoDomain,
+                        layoutDigest,
+                    )
             }
             val packCommitment = secretPackLiterals?.commitment() ?: ByteArray(0)
             // Hardened builds carry per-artifact secret material and never
@@ -503,6 +512,22 @@ object QpNativeCompilerPass {
         if (bytes.isEmpty() || bytes.size.toLong() > MAX_NATIVE_ARTIFACT_BYTES) {
             bytes.fill(0)
             return@withRustCompileLock NativeArtifactBuildResult(false, "Rust artifact is empty or exceeds the bounded size", null, false)
+        }
+        val wrapKey = task.secretPack?.wrapKey
+        try {
+            if (wrapKey != null) {
+                patchImageMeasurementCommitment(bytes, wrapKey)
+            }
+        } catch (error: Exception) {
+            bytes.fill(0)
+            return@withRustCompileLock NativeArtifactBuildResult(
+                false,
+                "Qp image measurement commitment could not be bound: ${error.message}",
+                null,
+                false,
+            )
+        } finally {
+            wrapKey?.fill(0)
         }
         NativeArtifactBuildResult(true, compileResult.output, bytes, false)
     }
@@ -817,12 +842,8 @@ object QpNativeCompilerPass {
             append("pub const PACKING_LEVEL: &str = \"")
             append(task.packingLevel)
             append("\";\n")
-            append("pub const VM_CRYPTO_DOMAIN: [u8; 32] = [")
-            append(bytesLiteral(task.cryptoDomain))
-            append("];\n")
-            append("pub const VM_LAYOUT_DIGEST: [u8; 32] = [")
-            append(bytesLiteral(task.layoutDigest))
-            append("];\n")
+            append("pub const VM_CRYPTO_DOMAIN: [u8; 32] = [0; 32];\n")
+            append("pub const VM_LAYOUT_DIGEST: [u8; 32] = [0; 32];\n")
             append("pub const TARGET_TOKEN_COMMITMENT: [u8; 32] = [")
             append(bytesLiteral(task.targetTokenCommitment))
             append("];\n")
@@ -838,14 +859,15 @@ object QpNativeCompilerPass {
     }
 
     /**
-     * Emits the per-artifact secret-pack section. Slot seeds appear only as
-     * randomized XOR shard groups combined by private functions; no plaintext
-     * key, contiguous secret array, or KDF domain label is written.
+     * Emits the per-artifact secret-pack section. Slot seeds, VM crypto domain,
+     * and layout digest are AEAD-wrapped. The wrap key is reconstructed from
+     * MBA immediates; no XOR shard combiner is written.
      */
     private fun StringBuilder.appendSecretPackSection(pack: io.github.hht0rro.javashroud.transforms.protection.qp.NativeSecretPackLiterals?) {
         fun bytesLiteral(values: ByteArray) = values.joinToString(", ") { byte ->
             "0x" + ((byte.toInt() and 0xFF).toString(16).padStart(2, '0'))
         }
+        fun u32Lit(value: Int) = "0x" + java.lang.Integer.toUnsignedString(value, 16) + "u32"
         val identity = pack?.nativeIdentity ?: ByteArray(32)
         val slotCount = pack?.slotCount ?: 0
         append("pub const SECRET_PACK_NATIVE_IDENTITY: [u8; 32] = [")
@@ -854,49 +876,100 @@ object QpNativeCompilerPass {
         append("pub const SECRET_PACK_SLOT_COUNT: usize = ")
         append(slotCount)
         append(";\n")
-        if (pack == null || slotCount == 0) {
+        append("#[repr(C)]\n")
+        append("pub struct ImageMeasurementSlot {\n")
+        append("    pub magic: [u8; 8],\n")
+        append("    pub commitment: [u8; 32],\n")
+        append("}\n")
+        append("#[used]\n")
+        append("#[link_section = \".jsms\"]\n")
+        append("pub static IMAGE_MEASUREMENT: ImageMeasurementSlot = ImageMeasurementSlot {\n")
+        append("    magic: [")
+        append(bytesLiteral(IMAGE_MEASUREMENT_MAGIC))
+        append("],\n")
+        append("    commitment: [0; 32],\n")
+        append("};\n")
+        append("#[inline(never)]\n")
+        append("pub fn image_measurement_commitment() -> [u8; 32] {\n")
+        append("    unsafe { core::ptr::read_volatile(&IMAGE_MEASUREMENT.commitment) }\n")
+        append("}\n")
+        if (pack == null) {
+            append("pub const SECRET_PACK_NONCE: [u8; 12] = [0; 12];\n")
+            append("pub static SECRET_PACK_WRAPPED: [u8; 0] = [];\n")
+            append("pub fn qp_sp_reconstruct_wrap_key() -> [u8; 32] { [0; 32] }\n")
             append("pub fn qp_secret_pack_seed(_slot: usize) -> Option<[u8; 32]> { None }\n")
             appendDialectCorpusSection()
             return
         }
-        append("fn qp_sp_xor32(out: &mut [u8; 32], other: &[u8; 32]) {\n")
-        append("    for index in 0..32 {\n        out[index] ^= other[index];\n    }\n}\n")
-        for (slotIndex in 0 until pack.slotCount) {
-            val slotId = pack.slotIdAt(slotIndex)
-            val shardCount = pack.shardCountAt(slotIndex)
-            for (shardIndex in 0 until shardCount) {
-                append("static QP_SP_S")
-                append(slotIndex)
-                append('_')
-                append(shardIndex)
-                append(": [u8; 32] = [")
-                append(bytesLiteral(pack.shardAt(slotIndex, shardIndex)))
-                append("];\n")
-            }
-            append("fn qp_sp_combine_")
-            append(slotIndex)
-            append("() -> [u8; 32] {\n    let mut combined = QP_SP_S")
-            append(slotIndex)
-            append("_0;\n")
-            for (shardIndex in 1 until shardCount) {
-                append("    qp_sp_xor32(&mut combined, &QP_SP_S")
-                append(slotIndex)
-                append('_')
-                append(shardIndex)
+        val nonce = pack.nonce
+        val wrapped = pack.wrapped
+        try {
+            append("pub const SECRET_PACK_NONCE: [u8; 12] = [")
+            append(bytesLiteral(nonce))
+            append("];\n")
+            append("pub static SECRET_PACK_WRAPPED: [u8; ")
+            append(wrapped.size)
+            append("] = [")
+            append(bytesLiteral(wrapped))
+            append("];\n")
+            append("#[inline(never)]\n")
+            append("pub fn qp_sp_reconstruct_wrap_key() -> [u8; 32] {\n")
+            pack.mbaWords.forEachIndexed { index, word ->
+                append("    let w")
+                append(index)
+                append(" = (")
+                append(u32Lit(word.multiplier))
+                append(").wrapping_mul(")
+                append(u32Lit(word.factor))
+                append(").wrapping_add(")
+                append(u32Lit(word.addend))
                 append(");\n")
             }
-            append("    combined\n}\n")
+            append("    let mix = w0.wrapping_mul(w3).wrapping_add(w7 ^ w1);\n")
+            append("    let decoy = w4.wrapping_sub(w4).wrapping_add(w5.wrapping_mul(0));\n")
+            append("    let _ = mix.wrapping_add(decoy);\n")
+            append("    let mut key = [0u8; 32];\n")
+            reconstructionOrder(pack.mbaWords).forEach { index ->
+                append("    key[")
+                append(index * 4)
+                append("..")
+                append(index * 4 + 4)
+                append("].copy_from_slice(&w")
+                append(index)
+                append(".to_be_bytes());\n")
+            }
+            append("    key\n}\n")
+            append("pub fn qp_secret_pack_seed(_slot: usize) -> Option<[u8; 32]> { None }\n")
+            appendDialectCorpusSection()
+        } finally {
+            Arrays.fill(nonce, 0)
+            Arrays.fill(wrapped, 0)
+            Arrays.fill(identity, 0)
         }
-        append("pub fn qp_secret_pack_seed(slot: usize) -> Option<[u8; 32]> {\n    match slot {\n")
-        for (slotIndex in 0 until pack.slotCount) {
-            append("        ")
-            append(pack.slotIdAt(slotIndex))
-            append(" => Some(qp_sp_combine_")
-            append(slotIndex)
-            append("()),\n")
+    }
+
+    private fun reconstructionOrder(words: List<io.github.hht0rro.javashroud.transforms.protection.qp.MbaWord>): IntArray {
+        val order = IntArray(8) { it }
+        if (words.size < 8) return order
+        val seed = words[0].addend xor words[7].multiplier
+        for (index in 7 downTo 1) {
+            val swap = Integer.remainderUnsigned(seed xor (index * 0x9E3779B9.toInt()), index + 1)
+            val tmp = order[index]
+            order[index] = order[swap]
+            order[swap] = tmp
         }
-        append("        _ => None,\n    }\n}\n")
-        appendDialectCorpusSection()
+        return order
+    }
+
+    private fun patchImageMeasurementCommitment(bytes: ByteArray, wrapKey: ByteArray) {
+        val found = io.github.hht0rro.javashroud.transforms.protection.qp.NativeImageMeasurement.locateMeasurementSlot(bytes)
+        val commitmentStart = found + IMAGE_MEASUREMENT_MAGIC.size
+        val digest = io.github.hht0rro.javashroud.transforms.protection.qp.NativeImageMeasurement.digest(bytes)
+        val commitment = io.github.hht0rro.javashroud.transforms.protection.qp.NativeImageMeasurement.hmacCommitment(wrapKey, digest)
+        require(commitment.size == 32)
+        System.arraycopy(commitment, 0, bytes, commitmentStart, 32)
+        Arrays.fill(digest, 0)
+        Arrays.fill(commitment, 0)
     }
 
     /**
@@ -1170,8 +1243,12 @@ object QpNativeCompilerPass {
         when (platform) {
             RustToolchainProvisioner.RUNTIME_TARGET_WINDOWS -> {
                 validatePe64Artifact(bytes)
-                require(readPeExportNames(bytes).containsAll(RUST_RELEASE_EXPORTS)) {
+                val exportNames = readPeExportNames(bytes)
+                require(exportNames.containsAll(RUST_RELEASE_EXPORTS)) {
                     "Rust Windows artifact export surface is missing the current Qp JNI ABI"
+                }
+                require(exportNames.none { it.startsWith("Java_") }) {
+                    "Rust Windows artifact must not export Java_* business methods"
                 }
             }
             RustToolchainProvisioner.RUNTIME_TARGET_LINUX -> validateElf64Artifact(bytes)

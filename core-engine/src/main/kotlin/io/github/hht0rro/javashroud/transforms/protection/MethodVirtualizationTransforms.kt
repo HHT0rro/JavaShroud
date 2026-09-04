@@ -2473,7 +2473,14 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         MethodSelectionMode.Safe -> safeForBroadVirtualization(access, name, descriptor)
         MethodSelectionMode.CriticalAuto -> criticalForBroadVirtualization(access, name, descriptor)
         MethodSelectionMode.CriticalPlus -> criticalPlusForBroadVirtualization(access, name, descriptor)
-        MethodSelectionMode.AllCompatible -> nativeVmCompatible
+        // Broad all-compatible selection still honors the semantic skip list.
+        // Explicit method rules are handled separately by the caller and remain
+        // strict. Sending benchmark roots and tiny counter/string helpers through
+        // the page VM adds a large per-call cost without protecting valuable
+        // application logic; these methods retain their JVM implementation while
+        // all other VM-compatible methods remain selected.
+        MethodSelectionMode.AllCompatible ->
+            !skipForBroadVirtualization(access, name, descriptor) && nativeVmCompatible
     }
 
     internal fun highValueSelected(className: String, name: String, descriptor: String, includeList: List<MethodSelectorPattern>): Boolean {
