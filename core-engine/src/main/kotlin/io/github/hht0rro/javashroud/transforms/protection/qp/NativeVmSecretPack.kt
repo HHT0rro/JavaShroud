@@ -24,12 +24,12 @@ import javax.crypto.spec.SecretKeySpec
 internal const val QP_SECRET_PACK_MAX_SLOTS: Int = 4096
 internal const val QP_SECRET_PACK_SEED_SIZE: Int = 32
 
-private val SECRET_PACK_ROOT_DOMAIN = "javashroud-qp-secret-pack-root-v5".toByteArray(Charsets.US_ASCII)
-private val SECRET_PACK_SLOT_DOMAIN = "javashroud-qp-secret-slot-v5".toByteArray(Charsets.US_ASCII)
-private val SECRET_PACK_COMMITMENT_DOMAIN = "javashroud-qp-secret-commitment-v5".toByteArray(Charsets.US_ASCII)
-private val SECRET_PACK_PAGE_KEY_DOMAIN = "javashroud-qp-page-key-v5".toByteArray(Charsets.US_ASCII)
-private val SECRET_PACK_NATIVE_IDENTITY_DOMAIN = "javashroud-qp-native-identity-v5".toByteArray(Charsets.US_ASCII)
-internal val SECRET_PACK_WRAP_AAD = "javashroud-qp-secret-wrap-v5".toByteArray(Charsets.US_ASCII)
+private val SECRET_PACK_ROOT_DOMAIN = "javashroud-qp-secret-pack-root-v6".toByteArray(Charsets.US_ASCII)
+private val SECRET_PACK_SLOT_DOMAIN = "javashroud-qp-secret-slot-v6".toByteArray(Charsets.US_ASCII)
+private val SECRET_PACK_COMMITMENT_DOMAIN = "javashroud-qp-secret-commitment-v6".toByteArray(Charsets.US_ASCII)
+private val SECRET_PACK_PAGE_KEY_DOMAIN = "javashroud-qp-page-key-v6".toByteArray(Charsets.US_ASCII)
+private val SECRET_PACK_NATIVE_IDENTITY_DOMAIN = "javashroud-qp-native-identity-v6".toByteArray(Charsets.US_ASCII)
+internal val SECRET_PACK_WRAP_AAD = "javashroud-qp-secret-wrap-v6".toByteArray(Charsets.US_ASCII)
 internal val IMAGE_MEASUREMENT_MAGIC: ByteArray = byteArrayOf(
     'J'.code.toByte(),
     'S'.code.toByte(),
@@ -37,7 +37,7 @@ internal val IMAGE_MEASUREMENT_MAGIC: ByteArray = byteArrayOf(
     'M'.code.toByte(),
     0x01,
     'v'.code.toByte(),
-    '5'.code.toByte(),
+    '6'.code.toByte(),
     0,
 )
 
@@ -77,6 +77,7 @@ internal class NativeVmPageSlot internal constructor(
  */
 internal class NativeVmSecretPack private constructor(
     private val slotsValue: List<NativeVmPageSlot>,
+    private val slotKindsValue: Map<Int, Int>,
     private val nativeIdentityValue: ByteArray,
 ) : AutoCloseable {
     @Volatile
@@ -97,6 +98,14 @@ internal class NativeVmSecretPack private constructor(
             return nativeIdentityValue.copyOf()
         }
 
+    /** Resource kind a slot was first derived for; sealing shards requires it. */
+    internal fun kindOfSlot(slotId: Int): Int {
+        requireLive()
+        return requireNotNull(slotKindsValue[slotId]) {
+            "Qp secret slot $slotId has no bound resource kind"
+        }
+    }
+
     internal fun slotsForSpecialization(): List<NativeVmPageSlot> {
         requireLive()
         return slotsValue
@@ -116,12 +125,17 @@ internal class NativeVmSecretPack private constructor(
     }
 
     internal companion object {
-        internal fun create(slots: List<Pair<Int, ByteArray>>, nativeIdentity: ByteArray): NativeVmSecretPack {
+        internal fun create(
+            slots: List<Pair<Int, ByteArray>>,
+            slotKinds: Map<Int, Int>,
+            nativeIdentity: ByteArray,
+        ): NativeVmSecretPack {
             require(nativeIdentity.size == QP_SECRET_PACK_SEED_SIZE) {
                 "Qp native identity must be ${QP_SECRET_PACK_SEED_SIZE} bytes"
             }
             return NativeVmSecretPack(
                 slotsValue = slots.map { (slotId, seed) -> NativeVmPageSlot(slotId, seed) },
+                slotKindsValue = slotKinds.toMap(),
                 nativeIdentityValue = nativeIdentity.copyOf(),
             )
         }
@@ -136,6 +150,7 @@ internal class NativeVmSecretPackDraft private constructor(
     private val packRoot: ByteArray,
 ) {
     private val slotSeeds = LinkedHashMap<Int, ByteArray>()
+    private val slotKinds = HashMap<Int, Int>()
     private var nativeIdentityValue: ByteArray = ByteArray(0)
 
     @Volatile
@@ -196,6 +211,7 @@ internal class NativeVmSecretPackDraft private constructor(
         val seed = synchronized(this) {
             slotSeeds[slotId] ?: throw IllegalArgumentException("Qp secret slot is not registered")
         }
+        synchronized(this) { slotKinds.putIfAbsent(slotId, resourceKind.id) }
         require(encodedHandle.size == QpHandle.ENCODED_HANDLE_SIZE) {
             "Qp secret page key handle size is invalid"
         }
@@ -268,6 +284,7 @@ internal class NativeVmSecretPackDraft private constructor(
         requireLive()
         return NativeVmSecretPack.create(
             slots = slotSeeds.map { (slotId, seed) -> slotId to seed.copyOf() },
+            slotKinds = slotKinds,
             nativeIdentity = nativeIdentityValue,
         )
     }
@@ -303,54 +320,130 @@ internal class NativeVmSecretPackDraft private constructor(
 internal data class MbaWord(val multiplier: Int, val factor: Int, val addend: Int)
 
 /**
- * Compile-only AEAD projection of one sealed [NativeVmSecretPack].
+ * Compile-only AEAD projection of one sealed [NativeVmSecretPack] (v6).
  *
- * Slot seeds, VM crypto domain, and layout digest are sealed with a random
- * wrap key. The wrap key is emitted only as eight MBA immediates so the
- * generated source never contains a contiguous 32-byte secret array.
+ * The pack is split into five independently wrapped shards — a root shard
+ * (identity, slot count, VM crypto domain, layout digest) plus one shard per
+ * resource kind. Shard wrap keys are `HMAC(cmKey, image commitment)`: the
+ * commitment is only known after the compiled native artifact has been
+ * measured and patched, so sealing happens post-compile and the sealed blob
+ * ships as catalog data instead of a native source constant. Runtime shard
+ * keys mix the commitment through a volatile read and can therefore never be
+ * constant-folded into a contiguous static window.
  */
 internal class NativeSecretPackLiterals private constructor(
     private val nativeIdentityValue: ByteArray,
-    private val wrapKeyValue: ByteArray,
-    private val nonceValue: ByteArray,
-    private val wrappedValue: ByteArray,
-    private val mbaWordsValue: List<MbaWord>,
+    private val shardsValue: List<ShardMaterial>,
     private val slotIdsValue: IntArray,
-    private val commitmentValue: ByteArray,
+    private val packCommitmentValue: ByteArray,
 ) {
+    /** One shard: static half key, MBA projection, and plaintext until sealed. */
+    internal class ShardMaterial(
+        val kind: Int,
+        val cmKey: ByteArray,
+        val plaintext: ByteArray,
+        val mbaWords: List<MbaWord>,
+    )
+
     val slotCount: Int
         get() = slotIdsValue.size
 
     val nativeIdentity: ByteArray
         get() = nativeIdentityValue.copyOf()
 
-    val wrapKey: ByteArray
-        get() = wrapKeyValue.copyOf()
-
-    val nonce: ByteArray
-        get() = nonceValue.copyOf()
-
-    val wrapped: ByteArray
-        get() = wrappedValue.copyOf()
-
     val mbaWords: List<MbaWord>
-        get() = mbaWordsValue
+        get() = shardsValue[MEASUREMENT_SHARD_INDEX].mbaWords
 
-    fun slotIdAt(index: Int): Int = slotIdsValue[index]
+    /** MBA projection of every shard, in emission order (root first). */
+    fun shardMbaWords(): List<List<MbaWord>> =
+        shardsValue.map { shard -> shard.mbaWords }
 
-    fun commitment(): ByteArray = commitmentValue.copyOf()
+    /** Static half of the QpMethod shard; keys the image measurement commitment. */
+    internal val measurementKey: ByteArray
+        get() = shardsValue[MEASUREMENT_SHARD_INDEX].cmKey.copyOf()
+
+    /** Build-known domain-separated commitment mixed into the specialization digest. */
+    fun commitment(): ByteArray = packCommitmentValue.copyOf()
+
+    private val sealedBlobs = LinkedHashMap<String, ByteArray>()
+
+    @Volatile
+    private var wiped = false
+
+    /**
+     * Seals every shard under `HMAC(cmKey, imageCommitment)` and caches the
+     * packed blob for one compiled platform artifact. Idempotent per platform.
+     */
+    @Synchronized
+    fun sealForPlatform(platform: String, imageCommitment: ByteArray): ByteArray {
+        requireLive()
+        require(imageCommitment.size == QP_SECRET_PACK_SEED_SIZE) {
+            "Qp image commitment must be ${QP_SECRET_PACK_SEED_SIZE} bytes"
+        }
+        sealedBlobs[platform]?.let { return it.copyOf() }
+        val random = java.security.SecureRandom()
+        val mac = Mac.getInstance("HmacSHA256")
+        val out = java.io.ByteArrayOutputStream()
+        try {
+            out.write(SEALED_PACK_MAGIC)
+            out.write(u16be(shardsValue.size))
+            for (shard in shardsValue) {
+                mac.init(SecretKeySpec(shard.cmKey, "HmacSHA256"))
+                val shardKey = mac.doFinal(imageCommitment)
+                val nonce = ByteArray(QpPageCodec.NONCE_SIZE)
+                random.nextBytes(nonce)
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(
+                    Cipher.ENCRYPT_MODE,
+                    SecretKeySpec(shardKey, "AES"),
+                    GCMParameterSpec(QpPageCodec.GCM_TAG_SIZE * 8, nonce),
+                )
+                cipher.updateAAD(SECRET_PACK_WRAP_AAD)
+                val sealed = cipher.doFinal(shard.plaintext)
+                out.write(byteArrayOf(shard.kind.toByte(), 0))
+                out.write(u16be(nonce.size))
+                out.write(u32be(sealed.size))
+                out.write(nonce)
+                out.write(sealed)
+                Arrays.fill(shardKey, 0)
+                Arrays.fill(sealed, 0)
+            }
+            val blob = out.toByteArray()
+            sealedBlobs[platform] = blob
+            return blob.copyOf()
+        } finally {
+            out.reset()
+        }
+    }
+
+    /** Sealed blob per compiled platform; empty until [sealForPlatform] ran. */
+    @Synchronized
+    fun blobByPlatform(): Map<String, ByteArray> =
+        sealedBlobs.mapValues { (_, blob) -> blob.copyOf() }
 
     fun wipe() {
+        if (wiped) return
+        shardsValue.forEach { shard ->
+            Arrays.fill(shard.cmKey, 0)
+            Arrays.fill(shard.plaintext, 0)
+        }
         Arrays.fill(nativeIdentityValue, 0)
-        Arrays.fill(wrapKeyValue, 0)
-        Arrays.fill(nonceValue, 0)
-        Arrays.fill(wrappedValue, 0)
-        Arrays.fill(commitmentValue, 0)
+        sealedBlobs.values.forEach { Arrays.fill(it, 0) }
+        sealedBlobs.clear()
+        Arrays.fill(packCommitmentValue, 0)
+        wiped = true
+    }
+
+    private fun requireLive() {
+        check(!wiped) { "Qp native secret pack literals have been wiped" }
     }
 
     internal companion object {
         private val SECRET_PACK_LITERAL_COMMITMENT_DOMAIN =
-            "javashroud-qp-secret-pack-commitment-v5".toByteArray(Charsets.US_ASCII)
+            "javashroud-qp-secret-pack-commitment-v6".toByteArray(Charsets.US_ASCII)
+        private val SEALED_PACK_MAGIC = byteArrayOf(0x6A, 0)
+        private const val MEASUREMENT_SHARD_INDEX = 1
+        private const val SHARD_KIND_ROOT = 0
 
         internal fun prepare(
             pack: NativeVmSecretPack,
@@ -360,47 +453,62 @@ internal class NativeSecretPackLiterals private constructor(
         ): NativeSecretPackLiterals {
             require(cryptoDomain.size == QP_SECRET_PACK_SEED_SIZE) { "Qp crypto domain must be 32 bytes" }
             require(layoutDigest.size == QP_SECRET_PACK_SEED_SIZE) { "Qp layout digest must be 32 bytes" }
-            val wrapKey = ByteArray(QP_SECRET_PACK_SEED_SIZE)
-            val nonce = ByteArray(QpPageCodec.NONCE_SIZE)
-            random.nextBytes(wrapKey)
-            random.nextBytes(nonce)
+            val slots = pack.slotsForSpecialization()
             val slotIds = IntArray(pack.slotCount)
-            val seeds = ArrayList<ByteArray>(pack.slotCount)
-            val plaintext = ArrayList<Byte>()
+            val byKind = LinkedHashMap<Int, MutableList<Pair<Int, ByteArray>>>()
             try {
                 val identity = pack.nativeIdentity
-                identity.forEach { plaintext += it }
-                u32be(pack.slotCount).forEach { plaintext += it }
-                for (index in 0 until pack.slotCount) {
-                    val slot = pack.slotsForSpecialization()[index]
-                    slotIds[index] = slot.slotId
+                for ((index, slot) in slots.withIndex()) {
+                    val slotId = slot.slotId
+                    slotIds[index] = slotId
                     val seed = slot.copySeedForSpecialization()
-                    seeds += seed
-                    u32be(slot.slotId).forEach { plaintext += it }
-                    seed.forEach { plaintext += it }
+                    byKind.getOrPut(pack.kindOfSlot(slotId)) { ArrayList() } += slotId to seed
                 }
-                cryptoDomain.forEach { plaintext += it }
-                layoutDigest.forEach { plaintext += it }
-                val plainBytes = plaintext.toByteArray()
-                val wrapped = try {
-                    val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-                    cipher.init(
-                        Cipher.ENCRYPT_MODE,
-                        SecretKeySpec(wrapKey, "AES"),
-                        GCMParameterSpec(QpPageCodec.GCM_TAG_SIZE * 8, nonce),
+                // Fixed shard order: root, QpMethod, StringPage, EncryptedClassPage, NativeChunk.
+                val rootPlain = ArrayList<Byte>(QP_SECRET_PACK_SEED_SIZE * 4)
+                identity.forEach { rootPlain += it }
+                u32be(pack.slotCount).forEach { rootPlain += it }
+                cryptoDomain.forEach { rootPlain += it }
+                layoutDigest.forEach { rootPlain += it }
+                val shards = ArrayList<ShardMaterial>(5)
+                shards += ShardMaterial(
+                    kind = SHARD_KIND_ROOT,
+                    cmKey = newCmKey(random),
+                    plaintext = rootPlain.toByteArray(),
+                    mbaWords = emptyList(),
+                )
+                for (kind in 1..4) {
+                    val entries = byKind[kind].orEmpty().sortedBy { it.first }
+                    val plain = ArrayList<Byte>(5 + entries.size * (4 + QP_SECRET_PACK_SEED_SIZE))
+                    plain += kind.toByte()
+                    u32be(entries.size).forEach { plain += it }
+                    for ((slotId, seed) in entries) {
+                        u32be(slotId).forEach { plain += it }
+                        seed.forEach { plain += it }
+                    }
+                    shards += ShardMaterial(
+                        kind = kind,
+                        cmKey = newCmKey(random),
+                        plaintext = plain.toByteArray(),
+                        mbaWords = emptyList(),
                     )
-                    cipher.updateAAD(SECRET_PACK_WRAP_AAD)
-                    cipher.doFinal(plainBytes)
-                } finally {
-                    Arrays.fill(plainBytes, 0)
+                }
+                for (index in shards.indices) {
+                    val shard = shards[index]
+                    shards[index] = ShardMaterial(
+                        kind = shard.kind,
+                        cmKey = shard.cmKey,
+                        plaintext = shard.plaintext,
+                        mbaWords = mbaWordsFor(shard.cmKey, random),
+                    )
                 }
                 val digest = java.security.MessageDigest.getInstance("SHA-256")
                 digest.update(SECRET_PACK_LITERAL_COMMITMENT_DOMAIN)
                 digest.update(identity)
                 digest.update(u32be(pack.slotCount))
-                for (index in 0 until pack.slotCount) {
-                    digest.update(u32be(slotIds[index]))
-                    digest.update(seeds[index])
+                for ((slotId, seed) in byKind.values.flatten().sortedBy { it.first }) {
+                    digest.update(u32be(slotId))
+                    digest.update(seed)
                 }
                 digest.update(cryptoDomain)
                 digest.update(layoutDigest)
@@ -408,30 +516,29 @@ internal class NativeSecretPackLiterals private constructor(
                 Arrays.fill(identity, 0)
                 return NativeSecretPackLiterals(
                     nativeIdentityValue = pack.nativeIdentity,
-                    wrapKeyValue = wrapKey,
-                    nonceValue = nonce,
-                    wrappedValue = wrapped,
-                    mbaWordsValue = mbaWordsFor(wrapKey, random),
+                    shardsValue = shards,
                     slotIdsValue = slotIds,
-                    commitmentValue = commitment,
+                    packCommitmentValue = commitment,
                 )
-            } catch (error: Throwable) {
-                Arrays.fill(wrapKey, 0)
-                Arrays.fill(nonce, 0)
-                throw error
             } finally {
-                seeds.forEach { Arrays.fill(it, 0) }
+                byKind.values.forEach { entries -> entries.forEach { (_, seed) -> Arrays.fill(seed, 0) } }
             }
         }
 
-        private fun mbaWordsFor(wrapKey: ByteArray, random: java.util.Random): List<MbaWord> {
+        private fun newCmKey(random: java.util.Random): ByteArray {
+            val key = ByteArray(QP_SECRET_PACK_SEED_SIZE)
+            random.nextBytes(key)
+            return key
+        }
+
+        private fun mbaWordsFor(cmKey: ByteArray, random: java.util.Random): List<MbaWord> {
             val words = ArrayList<MbaWord>(8)
             for (index in 0 until 8) {
                 val offset = index * 4
-                val word = ((wrapKey[offset].toInt() and 0xFF) shl 24) or
-                    ((wrapKey[offset + 1].toInt() and 0xFF) shl 16) or
-                    ((wrapKey[offset + 2].toInt() and 0xFF) shl 8) or
-                    (wrapKey[offset + 3].toInt() and 0xFF)
+                val word = ((cmKey[offset].toInt() and 0xFF) shl 24) or
+                    ((cmKey[offset + 1].toInt() and 0xFF) shl 16) or
+                    ((cmKey[offset + 2].toInt() and 0xFF) shl 8) or
+                    (cmKey[offset + 3].toInt() and 0xFF)
                 var multiplier = random.nextInt()
                 if (multiplier == 0) multiplier = 1
                 var factor = random.nextInt()
@@ -443,6 +550,11 @@ internal class NativeSecretPackLiterals private constructor(
         }
     }
 }
+
+private fun u16be(value: Int): ByteArray = byteArrayOf(
+    ((value ushr 8) and 0xFF).toByte(),
+    (value and 0xFF).toByte(),
+)
 
 private fun u32be(value: Int): ByteArray = byteArrayOf(
     ((value ushr 24) and 0xFF).toByte(),

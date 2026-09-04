@@ -358,6 +358,13 @@ object QpNativeCompilerPass {
                 }
                 return emptyList()
             }
+            if (secretPackLiterals != null) {
+                val sealedPackBlobs = secretPackLiterals.blobByPlatform()
+                require(sealedPackBlobs.keys == tasks.associate { it.platform to Unit }.keys) {
+                    "Qp sealed secret pack blob was not sealed for every compiled platform"
+                }
+                context.publishNativeSealedPackBlobs(sealedPackBlobs)
+            }
             context.publishNativeSpecializationDigests(
                 results.associate { it.platform to it.specializationDigest.copyOf() },
             )
@@ -513,10 +520,12 @@ object QpNativeCompilerPass {
             bytes.fill(0)
             return@withRustCompileLock NativeArtifactBuildResult(false, "Rust artifact is empty or exceeds the bounded size", null, false)
         }
-        val wrapKey = task.secretPack?.wrapKey
+        val measurementKey = task.secretPack?.measurementKey
+        var commitment: ByteArray? = null
         try {
-            if (wrapKey != null) {
-                patchImageMeasurementCommitment(bytes, wrapKey)
+            if (measurementKey != null) {
+                commitment = patchImageMeasurementCommitment(bytes, measurementKey)
+                task.secretPack.sealForPlatform(task.platform, commitment)
             }
         } catch (error: Exception) {
             bytes.fill(0)
@@ -527,7 +536,8 @@ object QpNativeCompilerPass {
                 false,
             )
         } finally {
-            wrapKey?.fill(0)
+            commitment?.fill(0)
+            measurementKey?.fill(0)
         }
         NativeArtifactBuildResult(true, compileResult.output, bytes, false)
     }
@@ -876,6 +886,10 @@ object QpNativeCompilerPass {
         append("pub const SECRET_PACK_SLOT_COUNT: usize = ")
         append(slotCount)
         append(";\n")
+        append("pub const SECRET_PACK_KIND_COUNT: usize = 5;\n")
+        append("pub const SECRET_PACK_SHARD_COUNT: usize = ")
+        append(pack?.shardMbaWords()?.size ?: 0)
+        append(";\n")
         append("#[repr(C)]\n")
         append("pub struct ImageMeasurementSlot {\n")
         append("    pub magic: [u8; 8],\n")
@@ -894,56 +908,52 @@ object QpNativeCompilerPass {
         append("    unsafe { core::ptr::read_volatile(&IMAGE_MEASUREMENT.commitment) }\n")
         append("}\n")
         if (pack == null) {
-            append("pub const SECRET_PACK_NONCE: [u8; 12] = [0; 12];\n")
-            append("pub static SECRET_PACK_WRAPPED: [u8; 0] = [];\n")
-            append("pub fn qp_sp_reconstruct_wrap_key() -> [u8; 32] { [0; 32] }\n")
+            append("pub fn qp_sp_reconstruct_shard_key(_shard: usize) -> [u8; 32] { [0; 32] }\n")
             append("pub fn qp_secret_pack_seed(_slot: usize) -> Option<[u8; 32]> { None }\n")
             appendDialectCorpusSection()
             return
         }
-        val nonce = pack.nonce
-        val wrapped = pack.wrapped
         try {
-            append("pub const SECRET_PACK_NONCE: [u8; 12] = [")
-            append(bytesLiteral(nonce))
-            append("];\n")
-            append("pub static SECRET_PACK_WRAPPED: [u8; ")
-            append(wrapped.size)
-            append("] = [")
-            append(bytesLiteral(wrapped))
-            append("];\n")
+            val shardWords = pack.shardMbaWords()
             append("#[inline(never)]\n")
-            append("pub fn qp_sp_reconstruct_wrap_key() -> [u8; 32] {\n")
-            pack.mbaWords.forEachIndexed { index, word ->
-                append("    let w")
-                append(index)
-                append(" = (")
-                append(u32Lit(word.multiplier))
-                append(").wrapping_mul(")
-                append(u32Lit(word.factor))
-                append(").wrapping_add(")
-                append(u32Lit(word.addend))
-                append(");\n")
+            append("pub fn qp_sp_reconstruct_shard_key(shard: usize) -> [u8; 32] {\n")
+            append("    match shard {\n")
+            shardWords.forEachIndexed { shardIndex, words ->
+                append("        ")
+                append(shardIndex)
+                append(" => {\n")
+                words.forEachIndexed { index, word ->
+                    append("            let w")
+                    append(index)
+                    append(" = (")
+                    append(u32Lit(word.multiplier))
+                    append(").wrapping_mul(")
+                    append(u32Lit(word.factor))
+                    append(").wrapping_add(")
+                    append(u32Lit(word.addend))
+                    append(");\n")
+                }
+                append("            let mix = w0.wrapping_mul(w3).wrapping_add(w7 ^ w1);\n")
+                append("            let decoy = w4.wrapping_sub(w4).wrapping_add(w5.wrapping_mul(0));\n")
+                append("            let _ = mix.wrapping_add(decoy);\n")
+                append("            let mut key = [0u8; 32];\n")
+                reconstructionOrder(words).forEach { index ->
+                    append("            key[")
+                    append(index * 4)
+                    append("..")
+                    append(index * 4 + 4)
+                    append("].copy_from_slice(&w")
+                    append(index)
+                    append(".to_be_bytes());\n")
+                }
+                append("            key\n        }\n")
             }
-            append("    let mix = w0.wrapping_mul(w3).wrapping_add(w7 ^ w1);\n")
-            append("    let decoy = w4.wrapping_sub(w4).wrapping_add(w5.wrapping_mul(0));\n")
-            append("    let _ = mix.wrapping_add(decoy);\n")
-            append("    let mut key = [0u8; 32];\n")
-            reconstructionOrder(pack.mbaWords).forEach { index ->
-                append("    key[")
-                append(index * 4)
-                append("..")
-                append(index * 4 + 4)
-                append("].copy_from_slice(&w")
-                append(index)
-                append(".to_be_bytes());\n")
-            }
-            append("    key\n}\n")
+            append("        _ => [0; 32],\n")
+            append("    }\n")
+            append("}\n")
             append("pub fn qp_secret_pack_seed(_slot: usize) -> Option<[u8; 32]> { None }\n")
             appendDialectCorpusSection()
         } finally {
-            Arrays.fill(nonce, 0)
-            Arrays.fill(wrapped, 0)
             Arrays.fill(identity, 0)
         }
     }
@@ -961,15 +971,15 @@ object QpNativeCompilerPass {
         return order
     }
 
-    private fun patchImageMeasurementCommitment(bytes: ByteArray, wrapKey: ByteArray) {
+    private fun patchImageMeasurementCommitment(bytes: ByteArray, measurementKey: ByteArray): ByteArray {
         val found = io.github.hht0rro.javashroud.transforms.protection.qp.NativeImageMeasurement.locateMeasurementSlot(bytes)
         val commitmentStart = found + IMAGE_MEASUREMENT_MAGIC.size
         val digest = io.github.hht0rro.javashroud.transforms.protection.qp.NativeImageMeasurement.digest(bytes)
-        val commitment = io.github.hht0rro.javashroud.transforms.protection.qp.NativeImageMeasurement.hmacCommitment(wrapKey, digest)
+        val commitment = io.github.hht0rro.javashroud.transforms.protection.qp.NativeImageMeasurement.hmacCommitment(measurementKey, digest)
         require(commitment.size == 32)
         System.arraycopy(commitment, 0, bytes, commitmentStart, 32)
         Arrays.fill(digest, 0)
-        Arrays.fill(commitment, 0)
+        return commitment
     }
 
     /**

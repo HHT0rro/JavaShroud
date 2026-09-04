@@ -145,6 +145,30 @@ internal data class QpBuildContext(
         return digest.copyOf()
     }
 
+    private val nativeSealedPackBlobs = LinkedHashMap<String, ByteArray>()
+
+    /** Sealed per-platform secret-pack blobs produced by the native compiler pass. */
+    @Synchronized
+    fun publishNativeSealedPackBlobs(blobs: Map<String, ByteArray>) {
+        require(blobs.isNotEmpty()) { "sealed secret pack blob map must not be empty" }
+        nativeSealedPackBlobs.values.forEach { java.util.Arrays.fill(it, 0) }
+        nativeSealedPackBlobs.clear()
+        for ((platform, blob) in blobs) {
+            require(blob.isNotEmpty()) { "sealed secret pack blob for $platform is empty" }
+            nativeSealedPackBlobs[platform] = blob.copyOf()
+        }
+    }
+
+    @Synchronized
+    fun copyNativeSealedPackBlob(platform: String): ByteArray {
+        val blob = nativeSealedPackBlobs[platform]
+            ?: error("sealed secret pack blob for $platform is not published")
+        return blob.copyOf()
+    }
+
+    @Synchronized
+    fun nativeSealedPackPlatforms(): Set<String> = nativeSealedPackBlobs.keys.toSet()
+
     /**
      * Return the scoped current-format Qp plan, creating it lazily from the artifact
      * commitment. The plan is build-only and is wiped with this context.
@@ -1036,6 +1060,8 @@ internal data class QpBuildContext(
         signedDebugMapDraft = null
         nativeSpecializationDigests.values.forEach { java.util.Arrays.fill(it, 0) }
         nativeSpecializationDigests.clear()
+        nativeSealedPackBlobs.values.forEach { java.util.Arrays.fill(it, 0) }
+        nativeSealedPackBlobs.clear()
         qpMethodCandidates.values.forEach { it.wipe() }
         qpMethodCandidates.clear()
         qpTextPageCandidates.values.forEach { it.wipe() }

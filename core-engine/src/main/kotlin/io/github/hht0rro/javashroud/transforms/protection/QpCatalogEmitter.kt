@@ -80,7 +80,24 @@ internal fun attachQpCatalogEmitter(
             val directory = QpDirectorySerializer.encode(runtime, pages)
             extras += JarEntryData(catalogPrefix + directoryFile, directory)
             extras += JarEntryData(bundlePath, packed.toByteArray())
-            val index = bundlePath + "\n" + directoryFile + "\n"
+            val context = currentQpBuildContextOrNull()
+            val packPlatforms = context?.nativeSealedPackPlatforms().orEmpty().sorted()
+            val packLines = ArrayList<String>(packPlatforms.size)
+            for (platform in packPlatforms) {
+                val blob = context!!.copyNativeSealedPackBlob(platform)
+                val packFile = "pk" + MessageDigest.getInstance("SHA-256")
+                    .digest((bundlePath + "|" + platform).toByteArray(Charsets.US_ASCII))
+                    .joinToString("") { "%02x".format(it) }
+                    .take(12)
+                extras += JarEntryData(catalogPrefix + packFile, blob.copyOf())
+                packLines += "pack|$platform|$catalogPrefix$packFile"
+                Arrays.fill(blob, 0)
+            }
+            val index = buildString {
+                append(bundlePath).append('\n')
+                append(directoryFile).append('\n')
+                packLines.forEach { line -> append(line).append('\n') }
+            }
             extras += JarEntryData(catalogIndex, index.toByteArray(Charsets.US_ASCII))
             droppedContainers += originalContainers
             pages.forEach { it.wipe() }
