@@ -12,7 +12,7 @@ pub const TYPED_NATIVE_METHODS: [(&str, &str); TYPED_NATIVE_METHOD_COUNT] = [
     ("nativeInstallCatalog", "([B[B[B)I"),
     (
         "nativeExecuteVmPage",
-        "(J[B[Ljava/lang/Object;)Ljava/lang/Object;",
+        "(Ljava/lang/String;[B[Ljava/lang/Object;)Ljava/lang/Object;",
     ),
     ("nativeOpenStringPage", "([B)Ljava/lang/String;"),
     ("nativeReadClassPage", "([B)[B"),

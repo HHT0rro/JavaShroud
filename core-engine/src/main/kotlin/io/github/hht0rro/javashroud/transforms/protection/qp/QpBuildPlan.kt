@@ -23,7 +23,7 @@ import kotlin.jvm.JvmSynthetic
  */
 class QpBuildPlan private constructor(
     private val commitment: ByteArray,
-    private val secretPack: NativeVmSecretPackDraft,
+    internal val secretPack: NativeVmSecretPackDraft,
     private val random: SecureRandom,
     val pageSizePolicy: QpPageSizePolicy,
 ) : AutoCloseable {

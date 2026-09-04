@@ -642,7 +642,11 @@ fun applyDiversifiedVmToClasses(
                 return object : org.objectweb.asm.MethodVisitor(org.objectweb.asm.Opcodes.ASM9, bodyCapture) {
                     override fun visitEnd() {
                         super.visitEnd()
-                        if (bodyCapture.instructionCount == 0 || bodyCapture.hasInvokeDynamic) {
+                        if (bodyCapture.instructionCount == 0 || bodyCapture.hasInvokeDynamic ||
+                            bodyCapture.isDispatchStub
+                        ) {
+                            // Already a native VM dispatcher stub; re-virtualizing it would
+                            // nest the sealed entry token behind a legacy raw-token dispatch.
                             bodyCapture.replayTo(superMv)
                             return
                         }

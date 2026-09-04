@@ -367,6 +367,7 @@ mod jni_bridge {
         target: Option<SupportedTarget>,
         initialized: bool,
         session_nonce: Option<SensitiveMemoryLease>,
+        vm_entry_token_cache: std::collections::HashMap<Vec<u8>, i64>,
         session_epoch: u64,
         artifact_commitment: Option<[u8; DIGEST_SIZE]>,
         name_seed: Option<[u8; qp_crypto::QP_NAME_SEED_SIZE]>,
@@ -4478,7 +4479,7 @@ mod jni_bridge {
     unsafe extern "system" fn native_execute_vm_page(
         env: JNIEnv,
         _class: JClass,
-        _entry_token: JLong,
+        sealed_entry_token: JString,
         packed: JByteArray,
         args: JObjectArray,
     ) -> JObject {
@@ -4492,7 +4493,27 @@ mod jni_bridge {
             throw_new(env, b"Qp JNI local frame unavailable\0");
             return core::ptr::null_mut();
         }
-        let result = match open_page_route_vm(env, _entry_token, packed) {
+        let sealed_bytes = if sealed_entry_token.is_null() {
+            Vec::new()
+        } else {
+            match copy_string(env, sealed_entry_token) {
+                Ok(bytes) => bytes,
+                Err(failure) => {
+                    pop_local_frame(env, core::ptr::null_mut());
+                    throw_new(env, failure.0.as_bytes());
+                    return core::ptr::null_mut();
+                }
+            }
+        };
+        let entry_token = match unwrap_vm_entry_token_checked(&sealed_bytes) {
+            Ok(token) => token,
+            Err(failure) => {
+                pop_local_frame(env, core::ptr::null_mut());
+                throw_new(env, failure.0.as_bytes());
+                return core::ptr::null_mut();
+            }
+        };
+        let result = match open_page_route_vm(env, entry_token, packed) {
             Ok(opened) => match authorized_vm_material()
                 .map_err(|_| RouterError::AuthenticationFailed)
                 .and_then(|(crypto, layout)| {
@@ -4653,7 +4674,7 @@ mod jni_bridge {
             },
             JniNativeMethod {
                 name: b"nativeExecuteVmPage\0".as_ptr().cast(),
-                signature: b"(J[B[Ljava/lang/Object;)Ljava/lang/Object;\0"
+                signature: b"(Ljava/lang/String;[B[Ljava/lang/Object;)Ljava/lang/Object;\0"
                     .as_ptr()
                     .cast(),
                 fn_ptr: native_execute_vm_page as *mut c_void,
@@ -4919,6 +4940,40 @@ mod jni_bridge {
         copied.map(Some)
     }
 
+    /// Sealed VM entry tokens are unwrapped once per token and cached for the
+    /// bridge session; the plaintext entry token never crosses into Java.
+    fn unwrap_vm_entry_token_checked(sealed: &[u8]) -> Result<i64, BridgeFailure> {
+        if sealed.is_empty() {
+            return Err(BridgeFailure("Qp VM entry token is missing"));
+        }
+        {
+            let state = lock_state()?;
+            if let Some(token) = state.vm_entry_token_cache.get(sealed) {
+                return Ok(*token);
+            }
+        }
+        let crypto_domain = {
+            let state = lock_state()?;
+            state
+                .secret_pack
+                .as_ref()
+                .ok_or_else(|| {
+                    eprintln!("jsh-token: pack unavailable for unwrap");
+                    BridgeFailure("Qp native secret pack is unavailable")
+                })?
+                .crypto_domain()
+                .map_err(|_| BridgeFailure("Qp native secret pack is unavailable"))?
+        };
+        let token = crate::secret_pack::unwrap_vm_entry_token(&crypto_domain, sealed)
+            .map_err(|error| {
+                eprintln!("jsh-token: unwrap failed len={} full={}", sealed.len(), String::from_utf8_lossy(sealed));
+                BridgeFailure("Qp VM entry token is invalid")
+            })?;
+        let mut state = lock_state()?;
+        state.vm_entry_token_cache.insert(sealed.to_vec(), token);
+        Ok(token)
+    }
+
     unsafe fn resolve_registration_plan(
         env: JNIEnv,
     ) -> Result<crate::relocation::RegistrationPlan, BridgeFailure> {
@@ -4966,6 +5021,12 @@ mod jni_bridge {
                     pack: Arc::clone(&pack),
                 }));
             state.secret_pack = Some(pack);
+        }
+        if let Ok(domain) = state.secret_pack.as_ref().expect("armed").crypto_domain() {
+            eprintln!(
+                "jsh-bootstrap: runtime domain={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                domain[0], domain[1], domain[2], domain[3], domain[4], domain[5], domain[6], domain[7]
+            );
         }
         Ok(())
     }
@@ -5107,7 +5168,7 @@ mod jni_bridge {
             ("nativeInstallCatalog", "([B[B[B)I"),
             (
                 "nativeExecuteVmPage",
-                "(J[B[Ljava/lang/Object;)Ljava/lang/Object;",
+                "(Ljava/lang/String;[B[Ljava/lang/Object;)Ljava/lang/Object;",
             ),
             ("nativeOpenStringPage", "([B)Ljava/lang/String;"),
             ("nativeReadClassPage", "([B)[B"),

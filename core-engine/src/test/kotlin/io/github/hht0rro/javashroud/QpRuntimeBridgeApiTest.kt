@@ -21,7 +21,7 @@ class QpRuntimeBridgeApiTest {
             "nativeInstallSessionNonce" to arrayOf(ByteArray::class.java),
             "nativeInstallCatalog" to arrayOf(ByteArray::class.java, ByteArray::class.java, ByteArray::class.java),
             "nativeExecuteVmPage" to arrayOf(
-                Long::class.javaPrimitiveType!!,
+                String::class.java,
                 ByteArray::class.java,
                 Array<Any>::class.java,
             ),

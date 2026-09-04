@@ -153,6 +153,8 @@ internal data class QpBuildContext(
         require(blobs.isNotEmpty()) { "sealed secret pack blob map must not be empty" }
         nativeSealedPackBlobs.values.forEach { java.util.Arrays.fill(it, 0) }
         nativeSealedPackBlobs.clear()
+        frozenPackCryptoDomain?.let { java.util.Arrays.fill(it, 0) }
+        frozenPackCryptoDomain = null
         for ((platform, blob) in blobs) {
             require(blob.isNotEmpty()) { "sealed secret pack blob for $platform is empty" }
             nativeSealedPackBlobs[platform] = blob.copyOf()
@@ -199,6 +201,30 @@ internal data class QpBuildContext(
 
     /** Build-only secret-pack authority; created on first use, wiped with this context. */
     @Synchronized
+    /** Whether this build carries a native secret-pack draft (survives plan wipe). */
+    fun hasNativeVmSecretPackDraft(): Boolean = nativeVmSecretPackDraft != null
+
+    @Volatile
+    private var frozenPackCryptoDomain: ByteArray? = null
+
+    /**
+     * Freezes the pack crypto domain on first use. The layout-derived domain
+     * drifts while pages reserve layout; every consumer that must agree with
+     * the sealed pack (entry-token seals, bindings seal, directory seal, and
+     * the pack plaintext itself) reads this frozen copy instead.
+     */
+    @Synchronized
+    fun freezeOrCopyPackCryptoDomain(): ByteArray {
+        frozenPackCryptoDomain?.let { return it.copyOf() }
+        val fresh = io.github.hht0rro.javashroud.transforms.protection.QpInnerMaterial
+            .copyCryptoDomainMaterial(this)
+        frozenPackCryptoDomain = fresh.copyOf()
+        return fresh
+    }
+
+    @Synchronized
+    fun copyFrozenPackCryptoDomainOrNull(): ByteArray? = frozenPackCryptoDomain?.copyOf()
+
     fun requireNativeVmSecretPackDraft(): NativeVmSecretPackDraft {
         val existing = nativeVmSecretPackDraft
         if (existing != null) {

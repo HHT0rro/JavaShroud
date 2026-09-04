@@ -80,8 +80,9 @@ internal fun attachQpCatalogEmitter(
             val buildContext = checkNotNull(currentQpBuildContextOrNull())
             val directoryPlain = QpDirectorySerializer.encode(runtime, pages)
             val nameSeed = io.github.hht0rro.javashroud.transforms.protection.qp.currentNameSeed()
-            val cryptoDomain = io.github.hht0rro.javashroud.transforms.protection.QpInnerMaterial
-                .copyCryptoDomainMaterial(buildContext)
+            val cryptoDomain = buildContext.copyFrozenPackCryptoDomainOrNull()
+                ?: io.github.hht0rro.javashroud.transforms.protection.QpInnerMaterial
+                    .copyCryptoDomainMaterial(buildContext)
             val sealNonce = ByteArray(12).also { java.security.SecureRandom().nextBytes(it) }
             val directory = io.github.hht0rro.javashroud.transforms.protection.qp.catalog.QpDirectorySeal
                 .seal(directoryPlain, nameSeed, cryptoDomain, sealNonce, nativeBinding.nativeSha256)

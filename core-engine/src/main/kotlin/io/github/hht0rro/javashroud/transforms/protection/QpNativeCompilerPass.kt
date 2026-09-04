@@ -243,7 +243,8 @@ object QpNativeCompilerPass {
             }
             sourceDigest = digestRustWorkspace(rustWorkspace)
             val toolchainIdentity = rustToolchainIdentity(toolchain)
-            cryptoDomain = QpInnerMaterial.copyCryptoDomainMaterial(context)
+            cryptoDomain = context.copyFrozenPackCryptoDomainOrNull()
+                ?: QpInnerMaterial.copyCryptoDomainMaterial(context)
             layoutDigest = QpInnerMaterial.copyStateBindingLayoutDigest(context)
             targetTokenCommitment = context.qpFinalizationLayoutOrNull()?.copyArtifactCommitmentForBuild()
                 ?: context.qpBuildPlanOrNull()?.artifactCanonicalCommitment

@@ -554,8 +554,9 @@ object RuntimeArtifactSealing {
                     val buildContext = checkNotNull(currentQpBuildContextOrNull()) {
                         "Qp sealed bindings require the active build context"
                     }
-                    val cryptoDomain = io.github.hht0rro.javashroud.transforms.protection.QpInnerMaterial
-                        .copyCryptoDomainMaterial(buildContext)
+                    val cryptoDomain = buildContext.copyFrozenPackCryptoDomainOrNull()
+                        ?: io.github.hht0rro.javashroud.transforms.protection.QpInnerMaterial
+                            .copyCryptoDomainMaterial(buildContext)
                     val bindingPlain = encodeSealedNativeBindings(
                         helperClassRenameMap = helperClassRenameMap,
                         helperMemberRenamePlan = helperMemberRenamePlan,
@@ -944,7 +945,7 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     addMethod(jniHelper, "nativeHeartbeat", "()I")
     addMethod(jniHelper, "nativeInstallSessionNonce", "([B)Z")
     addMethod(jniHelper, "nativeInstallCatalog", "([B[B[B)I")
-    addMethod(jniHelper, "nativeExecuteVmPage", "(J[B[Ljava/lang/Object;)Ljava/lang/Object;")
+    addMethod(jniHelper, "nativeExecuteVmPage", "(Ljava/lang/String;[B[Ljava/lang/Object;)Ljava/lang/Object;")
     addMethod(jniHelper, "nativeOpenStringPage", "([B)Ljava/lang/String;")
     addMethod(jniHelper, "nativeReadClassPage", "([B)[B")
     addMethod(jniHelper, "nativeConsumeNativeSegment", "([B)V")

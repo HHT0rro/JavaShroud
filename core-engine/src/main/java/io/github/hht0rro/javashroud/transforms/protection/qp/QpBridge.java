@@ -92,7 +92,7 @@ public final class QpBridge {
     static native int nativeHeartbeat();
     static native boolean nativeInstallSessionNonce(byte[] startupNonce);
     static native int nativeInstallCatalog(byte[] directory, byte[] bundle, byte[] pack);
-    static native Object nativeExecuteVmPage(long entryToken, byte[] packedRequest, Object[] args);
+    static native Object nativeExecuteVmPage(String sealedEntryToken, byte[] packedRequest, Object[] args);
     static native String nativeOpenStringPage(byte[] packedRequest);
     static native byte[] nativeReadClassPage(byte[] packedRequest);
     static native void nativeConsumeNativeSegment(byte[] packedRequest);
@@ -193,8 +193,11 @@ public final class QpBridge {
 
     /* ---- Qp current typed page bridge ---- */
 
-    public static Object executeQpVmPage(long entryToken, byte[] encodedHandle, int pageIndex, byte[] callSiteProof, Object[] args) {
+    public static Object executeQpVmPage(String sealedEntryToken, byte[] encodedHandle, int pageIndex, byte[] callSiteProof, Object[] args) {
         requireQpPageRequest(encodedHandle, pageIndex, callSiteProof, "VM");
+        if (sealedEntryToken == null || sealedEntryToken.isEmpty()) {
+            throw new SecurityException("Qp VM entry token is missing");
+        }
         ensureQpNativeKernel();
         requireDefenseForProtectedPath();
         try {
@@ -202,7 +205,7 @@ public final class QpBridge {
              * reference-returning method whose value is null. The native bridge
              * reports every unsuccessful execution by throwing SecurityException
              * before returning to this call site. */
-            return nativeExecuteVmPage(entryToken, packQpPageRequest(encodedHandle, pageIndex, callSiteProof), args);
+            return nativeExecuteVmPage(sealedEntryToken, packQpPageRequest(encodedHandle, pageIndex, callSiteProof), args);
         } catch (UnsatisfiedLinkError error) {
             throw new SecurityException("Qp VM page bridge is not registered for the sealed helper", error);
         }
@@ -407,7 +410,7 @@ public final class QpBridge {
             }
             byte[] packed = packQpPageRequest(handle, 0, proof);
             try {
-                nativeExecuteVmPage(0L, packed, null);
+                nativeExecuteVmPage(null, packed, null);
             } catch (SecurityException expectedRouteFailure) {
                 // The current native bridge is intentionally fail-closed until page routing lands.
             }

@@ -11,6 +11,9 @@ import io.github.hht0rro.javashroud.transforms.reanalyzedClassArtifact
 import io.github.hht0rro.javashroud.transforms.unchangedTransformResult
 import io.github.hht0rro.javashroud.transforms.updatedArtifactTransformResult
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpHandle
+import io.github.hht0rro.javashroud.transforms.protection.currentQpBuildContextOrNull
+import io.github.hht0rro.javashroud.transforms.protection.hkdfSha256
+import io.github.hht0rro.javashroud.transforms.protection.QpInnerMaterial
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpMethodIdentity
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpMethodCandidate
 import org.objectweb.asm.*
@@ -34,6 +37,7 @@ private const val JNI_MICROKERNEL_DISPATCH_OWNER = "io/github/hht0rro/javashroud
 private const val JNI_MICROKERNEL_VM_DISPATCH_METHOD = "executeVmResource"
 private const val JNI_MICROKERNEL_VM_PAGE_DISPATCH_METHOD = "executeQpVmPage"
 private const val QP_VM_PAGE_DISPATCH_DESCRIPTOR = "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
+private const val QP_VM_PAGE_DISPATCH_SEALED_DESCRIPTOR = "(Ljava/lang/String;[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
 private const val QP_DISPATCH_LAYOUT = "qp-native"
 private val QP_ALLOWED_PARAMS = setOf(
     "seed",
@@ -601,6 +605,7 @@ fun applyMethodVirtualization(
                                     dispatchOwner = JNI_MICROKERNEL_DISPATCH_OWNER,
                                     dispatchMethod = JNI_MICROKERNEL_VM_PAGE_DISPATCH_METHOD,
                                     dispatchDescriptor = QP_VM_PAGE_DISPATCH_DESCRIPTOR,
+                                    sealedEntryToken = sealedVmEntryToken(entryToken, random),
                                     pageEncodedHandle = pageZeroEncodedHandle,
                                     pageCallSiteProof = pageZeroCallSiteProof,
                                 )
@@ -735,6 +740,51 @@ private fun intBytes(value: Int): ByteArray = byteArrayOf(
     ((value ushr 8) and 0xFF).toByte(),
     (value and 0xFF).toByte(),
 )
+
+/**
+ * Seals the VM entry token for classfile storage: base64url(nonce12 || ct||tag)
+ * under `HKDF(cryptoDomain, "javashroud-qp-entry-token-v6")`. Returns null when
+ * the build carries no native secret pack (non-shipping builds keep the legacy
+ * raw-token dispatch). The plaintext token never enters the constant pool.
+ */
+internal fun sealedVmEntryToken(entryToken: Long, random: SecureRandom): String? {
+    // Page dispatch only exists on the native pipeline; the runtime pack is
+    // the only holder of the unsealing key, so seal unconditionally here.
+    val context = currentQpBuildContextOrNull() ?: return null
+    val cryptoDomain = context.freezeOrCopyPackCryptoDomain()
+    println("jsh-seal-dom: " + cryptoDomain.joinToString("") { "%02x".format(it) }.take(16))
+    println(
+        "jsh-seal-ctx: domain=" + cryptoDomain.joinToString("") { "%02x".format(it) }.take(16) +
+            " ctx=" + System.identityHashCode(context),
+    )
+    try {
+        val key = hkdfSha256(ikm = cryptoDomain, salt = QP_VM_ENTRY_TOKEN_DOMAIN, info = ByteArray(0), length = 32)
+        try {
+            val nonce = ByteArray(12).also(random::nextBytes)
+            val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(
+                javax.crypto.Cipher.ENCRYPT_MODE,
+                javax.crypto.spec.SecretKeySpec(key, "AES"),
+                javax.crypto.spec.GCMParameterSpec(128, nonce),
+            )
+            cipher.updateAAD(QP_VM_ENTRY_TOKEN_DOMAIN)
+            val sealed = cipher.doFinal(java.nio.ByteBuffer.allocate(8).putLong(entryToken).array())
+            val out = ByteArray(12 + sealed.size)
+            nonce.copyInto(out)
+            sealed.copyInto(out, 12)
+            java.util.Arrays.fill(key, 0)
+            val encoded = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(out)
+            println("jsh-seal-build: " + encoded)
+            return encoded
+        } finally {
+            java.util.Arrays.fill(key, 0)
+        }
+    } finally {
+        java.util.Arrays.fill(cryptoDomain, 0)
+    }
+}
+
+private val QP_VM_ENTRY_TOKEN_DOMAIN = "javashroud-qp-entry-token-v6".toByteArray(Charsets.US_ASCII)
 
 internal fun vmStateBinding(entryToken: Long, resourcePath: String): String {
     val jarLayoutDigest = QpInnerMaterial.copyStateBindingLayoutDigest(requireQpBuildContext())
@@ -1103,6 +1153,10 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         private set
 
     var hasInvokeDynamic = false
+        private set
+
+    /** True when the body already dispatches into the native VM bridge. */
+    var isDispatchStub = false
         private set
 
     var hasUnsupportedInvokeDynamic = false
@@ -2742,6 +2796,11 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
     override fun visitMethodInsn(opcode: Int, owner: String, name: String, descriptor: String, isInterface: Boolean) {
         instructionCount++
         hasMethodCall = true
+        if (opcode == Opcodes.INVOKESTATIC &&
+            (name == "executeQpVmPage" || name.startsWith("executeVmResource"))
+        ) {
+            isDispatchStub = true
+        }
         if (isHighValueCall(owner, name)) hasHighValueCall = true
         if (isConsoleStreamMethod(owner, name)) touchesConsoleIoBoundary = true
         if (opcode != Opcodes.INVOKEVIRTUAL && opcode != Opcodes.INVOKESPECIAL && opcode != Opcodes.INVOKESTATIC && opcode != Opcodes.INVOKEINTERFACE) markNativeVmUnsupported("unsupported method instruction opcode=$opcode owner=$owner name=$name desc=$descriptor")
@@ -2860,6 +2919,7 @@ internal fun generateVmDispatcher(
     dispatchDescriptor: String = VM_LEGACY_DISPATCH_DESCRIPTOR,
     pageEncodedHandle: ByteArray? = null,
     pageCallSiteProof: ByteArray? = null,
+    sealedEntryToken: String? = null,
 ) {
     mv.visitCode()
 
@@ -2875,6 +2935,12 @@ internal fun generateVmDispatcher(
     val parameterSlotCount = argTypes.sumOf { it.size } + if (isStatic) 0 else 1
     val localBase = parameterSlotCount + 1 // after params + this + 1 gap slot
     val usesQpPageDispatch = dispatchDescriptor == QP_VM_PAGE_DISPATCH_DESCRIPTOR
+    val usesSealedTokenDispatch = usesQpPageDispatch && sealedEntryToken != null
+    val effectiveDispatchDescriptor = if (usesSealedTokenDispatch) {
+        QP_VM_PAGE_DISPATCH_SEALED_DESCRIPTOR
+    } else {
+        dispatchDescriptor
+    }
     val usesTokenOnlyDispatch = dispatchDescriptor == VM_TOKEN_DISPATCH_DESCRIPTOR
     val usesVoidSpecializedDispatch = dispatchDescriptor == VM_VOID_DISPATCH_DESCRIPTOR || dispatchDescriptor == VM_INT_VOID_DISPATCH_DESCRIPTOR
     val usesPrimitiveIntDispatch = dispatchDescriptor == VM_INT_DISPATCH_DESCRIPTOR || dispatchDescriptor == VM_INT_INT_DISPATCH_DESCRIPTOR
@@ -2910,7 +2976,11 @@ internal fun generateVmDispatcher(
         emitDispatcherMorphBlock(mv, opcodeMapping, handlerOrder, dispatchLayout, localBase + if (usesQpPageDispatch || usesTokenOnlyDispatch || usesVoidSpecializedDispatch || usesPrimitiveIntDispatch) 0 else 1, random)
     }
     emitDeadCodeShadowDispatch(mv, localBase + if (usesQpPageDispatch || usesTokenOnlyDispatch || usesVoidSpecializedDispatch || usesPrimitiveIntDispatch) 8 else 9, random, usesPrimitiveIntDispatch)
-    mv.visitLdcInsn(entryToken)
+    if (sealedEntryToken != null) {
+        mv.visitLdcInsn(sealedEntryToken)
+    } else {
+        mv.visitLdcInsn(entryToken)
+    }
     if (!usesQpPageDispatch && !usesTokenOnlyDispatch && !usesVoidSpecializedDispatch && !usesPrimitiveIntDispatch) {
         mv.visitVarInsn(Opcodes.ALOAD, localBase)
     }
@@ -2955,7 +3025,7 @@ internal fun generateVmDispatcher(
         Opcodes.INVOKESTATIC,
         dispatchOwner,
         dispatchMethod,
-        dispatchDescriptor,
+        effectiveDispatchDescriptor,
         false,
     )
 

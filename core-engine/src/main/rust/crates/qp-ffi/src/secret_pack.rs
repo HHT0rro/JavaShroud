@@ -18,6 +18,7 @@ const PAGE_KEY_DOMAIN: &[u8] = b"javashroud-qp-page-key-v6";
 const COMMITMENT_DOMAIN: &[u8] = b"javashroud-qp-secret-commitment-v6";
 const WRAP_AAD: &[u8] = b"javashroud-qp-secret-wrap-v6";
 const SHARD_KIND_ROOT: u8 = 0;
+const ENTRY_TOKEN_DOMAIN: &[u8] = b"javashroud-qp-entry-token-v6";
 const KEY_SIZE: usize = 32;
 const NONCE_SIZE: usize = 12;
 
@@ -357,6 +358,32 @@ fn parse_shard(
     Ok(())
 }
 
+/// v6 sealed VM entry token: `nonce(12) || ct||tag`, AES-256-GCM under
+/// `HKDF(cryptoDomain, "javashroud-qp-entry-token-v6")`, AAD = domain.
+pub fn unwrap_vm_entry_token(
+    crypto_domain: &[u8; KEY_SIZE],
+    sealed: &[u8],
+) -> Result<i64, RouterError> {
+    if sealed.len() < 12 + 16 {
+        return Err(RouterError::AuthenticationFailed);
+    }
+    let key = hkdf_sha256(crypto_domain, ENTRY_TOKEN_DOMAIN, &[], KEY_SIZE)
+        .map_err(|_| RouterError::AuthenticationFailed)?;
+    eprintln!(
+        "jsh-token-key: {}",
+        key.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+    );
+    let plaintext = aes256_gcm_decrypt(&key, &sealed[..12], ENTRY_TOKEN_DOMAIN, &sealed[12..])
+        .map_err(|_| RouterError::AuthenticationFailed)?;
+    if plaintext.len() != 8 {
+        return Err(RouterError::AuthenticationFailed);
+    }
+    let mut raw = [0u8; 8];
+    raw.copy_from_slice(&plaintext);
+    Ok(i64::from_be_bytes(raw))
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,28 +447,6 @@ mod entry_token_tests {
     use super::*;
     use qp_crypto::aes256_gcm_encrypt;
 
-    const ENTRY_TOKEN_DOMAIN: &[u8] = b"javashroud-qp-entry-token-v6";
-
-    /// v6 sealed VM entry token: `nonce(12) || ct||tag`, AES-256-GCM under
-    /// `HKDF(cryptoDomain, "javashroud-qp-entry-token-v6")`, AAD = domain.
-    pub fn unwrap_vm_entry_token(
-        crypto_domain: &[u8; KEY_SIZE],
-        sealed: &[u8],
-    ) -> Result<i64, RouterError> {
-        if sealed.len() < 12 + 16 {
-            return Err(RouterError::AuthenticationFailed);
-        }
-        let key = hkdf_sha256(crypto_domain, ENTRY_TOKEN_DOMAIN, &[], KEY_SIZE)
-            .map_err(|_| RouterError::AuthenticationFailed)?;
-        let plaintext = aes256_gcm_decrypt(&key, &sealed[..12], ENTRY_TOKEN_DOMAIN, &sealed[12..])
-            .map_err(|_| RouterError::AuthenticationFailed)?;
-        if plaintext.len() != 8 {
-            return Err(RouterError::AuthenticationFailed);
-        }
-        let mut raw = [0u8; 8];
-        raw.copy_from_slice(&plaintext);
-        Ok(i64::from_be_bytes(raw))
-    }
 
     #[test]
     fn vm_entry_token_round_trips_and_rejects_tampering() {
