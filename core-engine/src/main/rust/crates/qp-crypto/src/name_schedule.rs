@@ -33,7 +33,7 @@ pub const LANE_TOKEN_AAD: u8 = 9;
 pub const LANE_TOKEN_KEY: u8 = 10;
 pub const LANE_RESOURCE_AUTH: u8 = 11;
 
-pub const FORMAT_VERSION: u8 = 5;
+pub const FORMAT_VERSION: u8 = 6;
 
 pub const TEST_NAME_SEED: [u8; QP_NAME_SEED_SIZE] =
     [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];

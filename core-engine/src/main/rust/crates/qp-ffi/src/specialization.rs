@@ -25,8 +25,12 @@ pub const SECRET_PACK_NATIVE_IDENTITY: [u8; 32] = [0; 32];
 /// Number of secret-pack slots emitted by the artifact specialization build.
 pub const SECRET_PACK_SLOT_COUNT: usize = 0;
 
-pub const SECRET_PACK_NONCE: [u8; 12] = [0; 12];
-pub static SECRET_PACK_WRAPPED: [u8; 0] = [];
+/// Number of independently wrapped secret-pack shards: one root shard plus one
+/// shard per resource kind (index 0 is unused; kinds are 1-based).
+pub const SECRET_PACK_KIND_COUNT: usize = 5;
+
+/// Number of sealed shards carried by the artifact's catalog pack resource.
+pub const SECRET_PACK_SHARD_COUNT: usize = 0;
 
 #[repr(C)]
 pub struct ImageMeasurementSlot {
@@ -37,7 +41,7 @@ pub struct ImageMeasurementSlot {
 #[used]
 #[link_section = ".jsms"]
 pub static IMAGE_MEASUREMENT: ImageMeasurementSlot = ImageMeasurementSlot {
-    magic: *b"JSIM\x01v5\0",
+    magic: *b"JSIM\x01v6\0",
     commitment: [0; 32],
 };
 
@@ -46,15 +50,11 @@ pub fn image_measurement_commitment() -> [u8; 32] {
     unsafe { core::ptr::read_volatile(&IMAGE_MEASUREMENT.commitment) }
 }
 
-pub fn qp_sp_reconstruct_wrap_key() -> [u8; 32] {
+/// Reconstructs the static half of one shard's wrap key from per-build MBA
+/// immediates. Shard keys are finished at runtime by mixing the image
+/// commitment, so this static half alone decrypts nothing.
+pub fn qp_sp_reconstruct_shard_key(_shard: usize) -> [u8; 32] {
     [0; 32]
-}
-
-/// Returns the recombined seed for one slot index. The default specialization
-/// never carries secret material and always returns `None`. Generated artifacts
-/// recover seeds through the AEAD wrap instead of this function.
-pub fn qp_secret_pack_seed(_slot: usize) -> Option<[u8; 32]> {
-    None
 }
 
 /// XOR mask over the serialized per-build VM semantic opcode corpus.

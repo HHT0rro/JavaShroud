@@ -56,7 +56,7 @@ fn slot_magic() -> [u8; 8] {
         b'M' ^ 0xC3,
         0x01 ^ 0x0F,
         b'v' ^ 0xF0,
-        b'5' ^ 0x69,
+        b'6' ^ 0x69,
         0 ^ 0x96,
     ];
     let mut magic = [0u8; 8];

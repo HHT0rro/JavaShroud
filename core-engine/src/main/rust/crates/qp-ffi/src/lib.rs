@@ -2792,7 +2792,7 @@ mod jni_bridge {
 
     fn bind_probe_measurement() -> Result<(), BridgeFailure> {
         let commitment = specialization::image_measurement_commitment();
-        if !specialization::SECRET_PACK_WRAPPED.is_empty() && commitment.iter().all(|byte| *byte == 0) {
+        if specialization::SECRET_PACK_SHARD_COUNT != 0 && commitment.iter().all(|byte| *byte == 0) {
             return Err(BridgeFailure("Qp image measurement is unbound"));
         }
         let crc = crate::image_measure::commitment_crc32();
@@ -3362,10 +3362,12 @@ mod jni_bridge {
         env: JNIEnv,
         directory_bytes: JByteArray,
         bundle_bytes: JByteArray,
+        pack_bytes: JByteArray,
     ) -> Result<JInt, BridgeFailure> {
         let directory_bytes =
             unsafe { copy_byte_array(env, directory_bytes, MAX_CATALOG_DIRECTORY_SIZE) }?;
         let bundle_bytes = unsafe { copy_byte_array(env, bundle_bytes, MAX_CATALOG_BUNDLE_SIZE) }?;
+        let pack_bytes = unsafe { copy_byte_array(env, pack_bytes, MAX_CATALOG_BUNDLE_SIZE)? };
         let directory = ArtifactDirectory::decode(directory_bytes.as_bytes())
             .map_err(|_| BridgeFailure("Qp current catalog directory authentication failed"))?;
         qp_crypto::install_name_schedule(
@@ -3403,10 +3405,11 @@ mod jni_bridge {
         // generated native pack fails closed here.
         if state.secret_pack.is_none() {
             let pack = Arc::new(SecretPackState::from_specialization());
-            pack.authorize(true).map_err(|error| match error {
-                RouterError::InvalidRequest(reason) => BridgeFailure(reason),
-                _ => BridgeFailure("Qp native secret pack is unavailable"),
-            })?;
+            pack.authorize(true, state.session_nonce.is_some(), pack_bytes.as_bytes())
+                .map_err(|error| match error {
+                    RouterError::InvalidRequest(reason) => BridgeFailure(reason),
+                    _ => BridgeFailure("Qp native secret pack is unavailable"),
+                })?;
             state.router.bind_page_key_authority(Box::new(SecretPackRouterAuthority {
                 pack: Arc::clone(&pack),
             }));
@@ -3606,7 +3609,7 @@ mod jni_bridge {
         result
     }
 
-    const TARGET_TOKEN_VERSION: u8 = 5;
+    const TARGET_TOKEN_VERSION: u8 = 6;
     const TARGET_TOKEN_HEADER_SIZE: usize = 4 + 1 + QP_NAME_SEED_SIZE + 4 + DIGEST_SIZE;
     const TARGET_TOKEN_NONCE_SIZE: usize = 12;
     const TARGET_TOKEN_TAG_SIZE: usize = 16;
@@ -4307,8 +4310,9 @@ mod jni_bridge {
         _class: JClass,
         directory: JByteArray,
         bundle: JByteArray,
+        pack: JByteArray,
     ) -> JInt {
-        match native_install_catalog_inner(env, directory, bundle) {
+        match native_install_catalog_inner(env, directory, bundle, pack) {
             Ok(result) => result,
             Err(failure) => {
                 throw_new(env, failure.0.as_bytes());
@@ -4613,7 +4617,7 @@ mod jni_bridge {
             },
             JniNativeMethod {
                 name: b"nativeInstallCatalog\0".as_ptr().cast(),
-                signature: b"([B[B)I\0".as_ptr().cast(),
+                signature: b"([B[B[B)I\0".as_ptr().cast(),
                 fn_ptr: native_install_catalog as *mut c_void,
             },
             JniNativeMethod {
@@ -5009,7 +5013,7 @@ mod jni_bridge {
             ("nativeInit", "(Ljava/lang/String;)I"),
             ("nativeHeartbeat", "()I"),
             ("nativeInstallSessionNonce", "([B)Z"),
-            ("nativeInstallCatalog", "([B[B)I"),
+            ("nativeInstallCatalog", "([B[B[B)I"),
             (
                 "nativeExecuteVmPage",
                 "(J[B[Ljava/lang/Object;)Ljava/lang/Object;",

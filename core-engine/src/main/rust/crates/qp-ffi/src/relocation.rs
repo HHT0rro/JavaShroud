@@ -9,7 +9,7 @@ pub const TYPED_NATIVE_METHODS: [(&str, &str); TYPED_NATIVE_METHOD_COUNT] = [
     ("nativeInit", "(Ljava/lang/String;)I"),
     ("nativeHeartbeat", "()I"),
     ("nativeInstallSessionNonce", "([B)Z"),
-    ("nativeInstallCatalog", "([B[B)I"),
+    ("nativeInstallCatalog", "([B[B[B)I"),
     (
         "nativeExecuteVmPage",
         "(J[B[Ljava/lang/Object;)Ljava/lang/Object;",
