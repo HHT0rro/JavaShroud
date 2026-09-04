@@ -307,10 +307,10 @@ public final class QpBridge {
         byte[] nativeBytes = null;
         byte[] actualDigest = null;
         File tempLib = null;
+        loadedNativePlatformKey = shortPlatformKey(platformTarget);
         String previousLoaderOwner = System.getProperty(sealedLoaderPropertyName());
-        String previousClassBindings = System.getProperty(sealedBindingPropertyName());
-        String previousMethodBindings = System.getProperty(sealedMethodBindingPropertyName());
-        String previousFieldBindings = System.getProperty(sealedFieldBindingPropertyName());
+        String previousPackProperty = System.getProperty(sealedPackPropertyName());
+        String previousBindingsProperty = System.getProperty(sealedBindingsPropertyName());
         boolean previousBindingsPublished = sealedNativeBindingsPublished;
         boolean loaded = false;
         try (InputStream in = resourceStream(locator.resourcePath)) {
@@ -329,8 +329,8 @@ public final class QpBridge {
                 nativeLoadMessage = "qp:native-resource-digest-mismatch:" + platformTarget;
                 return false;
             }
-            String bindingText = sealedNativeBindingText(locator);
-            if (bindingText == null || bindingText.length() == 0) {
+            byte[] sealedBindings = sealedNativeBindingBytes(locator);
+            if (sealedBindings == null || sealedBindings.length == 0) {
                 nativeLoadMessage = "qp:native-bindings-invalid:" + platformTarget;
                 return false;
             }
@@ -344,7 +344,13 @@ public final class QpBridge {
                 tempLib.setReadable(true, true);
                 tempLib.setWritable(true, true);
                 tempLib.setExecutable(true, true);
-                publishSealedNativeBindings(bindingText);
+                byte[] sealedPack = sealedQpPackBytes();
+                try {
+                    publishSealedNativeBootstrap(sealedPack, sealedBindings);
+                } finally {
+                    Arrays.fill(sealedPack, (byte) 0);
+                    if (sealedBindings != null) Arrays.fill(sealedBindings, (byte) 0);
+                }
                 sealedNativeBindingsPublished = true;
                 if (!extractedNativeMatchesLocator(tempLib, locator)) {
                     nativeLoadMessage = "qp:native-extract-digest-mismatch:" + platformTarget;
@@ -361,7 +367,6 @@ public final class QpBridge {
                     return false;
                 }
                 installQpSessionNonce();
-                loadedNativePlatformKey = shortPlatformKey(platformTarget);
                 installQpCatalog();
                 if (!verifyQpNativeAbiAfterLoad()) {
                     return false;
@@ -386,9 +391,8 @@ public final class QpBridge {
             if (!loaded) {
                 sealedNativeBindingsPublished = previousBindingsPublished;
                 restoreLoaderProperty(previousLoaderOwner);
-                restoreProperty(sealedBindingPropertyName(), previousClassBindings);
-                restoreProperty(sealedMethodBindingPropertyName(), previousMethodBindings);
-                restoreProperty(sealedFieldBindingPropertyName(), previousFieldBindings);
+                restoreProperty(sealedPackPropertyName(), previousPackProperty);
+                restoreProperty(sealedBindingsPropertyName(), previousBindingsProperty);
             }
         }
     }
@@ -1396,48 +1400,43 @@ public final class QpBridge {
         return loader == null ? null : loader.getResourceAsStream(resourcePath);
     }
 
-    private static void publishSealedNativeBindings(String bindingText) {
-        if (bindingText == null || bindingText.length() == 0) {
-            throw new SecurityException("Qp native bindings are unavailable");
+    private static String sealedPackPropertyName() {
+        return new String(new char[]{'j', '.', 'p'});
+    }
+
+    private static String sealedBindingsPropertyName() {
+        return new String(new char[]{'j', '.', 'n'});
+    }
+
+    /**
+     * Publishes the opaque native bootstrap channel. Both values are
+     * ciphertext: the sealed pack and the sealed relocation bindings travel
+     * base64-encoded and are only openable inside the native runtime after
+     * the pack has been authorized against a live session. No plaintext
+     * relocation map ever crosses into JVM properties.
+     */
+    private static void publishSealedNativeBootstrap(byte[] sealedPack, byte[] sealedBindings) {
+        if (sealedPack == null || sealedPack.length == 0 ||
+            sealedBindings == null || sealedBindings.length == 0) {
+            throw new SecurityException("Qp native bootstrap channel is unavailable");
         }
         try {
             publishSealedNativeLoaderOwner();
-            StringBuilder bindings = new StringBuilder();
-            StringBuilder methodBindings = new StringBuilder();
-            StringBuilder fieldBindings = new StringBuilder();
-            String[] lines = bindingText.split("\n");
-            for (String line : lines) {
-                String[] parts = line.trim().split("\\|", -1);
-                if (parts.length != 3) {
-                    throw new SecurityException("Qp native bindings record is malformed");
-                }
-                if ("B".equals(parts[0])) {
-                    if (bindings.length() > 0) bindings.append('\n');
-                    bindings.append(parts[1]).append('=').append(parts[2]);
-                } else if ("M".equals(parts[0])) {
-                    if (methodBindings.length() > 0) methodBindings.append('\n');
-                    methodBindings.append(parts[1]).append('=').append(parts[2]);
-                } else if ("F".equals(parts[0])) {
-                    if (fieldBindings.length() > 0) fieldBindings.append('\n');
-                    fieldBindings.append(parts[1]).append('=').append(parts[2]);
-                } else {
-                    throw new SecurityException("Qp native bindings record type is invalid");
-                }
-            }
-            if (bindings.length() > 0) {
-                System.setProperty(sealedBindingPropertyName(), mergeBindingProperties(System.getProperty(sealedBindingPropertyName()), bindings.toString()));
-            }
-            if (methodBindings.length() > 0) {
-                System.setProperty(sealedMethodBindingPropertyName(), mergeBindingProperties(System.getProperty(sealedMethodBindingPropertyName()), methodBindings.toString()));
-            }
-            if (fieldBindings.length() > 0) {
-                System.setProperty(sealedFieldBindingPropertyName(), mergeBindingProperties(System.getProperty(sealedFieldBindingPropertyName()), fieldBindings.toString()));
-            }
+            System.setProperty(sealedPackPropertyName(), base64UrlEncode(sealedPack));
+            System.setProperty(sealedBindingsPropertyName(), base64UrlEncode(sealedBindings));
         } catch (SecurityException error) {
             throw error;
         } catch (Throwable error) {
-            throw new SecurityException("Qp native bindings are unavailable", error);
+            throw new SecurityException("Qp native bootstrap channel is unavailable", error);
         }
+    }
+
+    private static String base64UrlEncode(byte[] value) {
+        return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(value);
+    }
+
+    private static String sealedLoaderPropertyName() {
+        return new String(new char[]{'j', '.', 'l'});
     }
 
     private static void publishSealedNativeLoaderOwner() {
@@ -1459,46 +1458,11 @@ public final class QpBridge {
         }
     }
 
-    private static String mergeBindingProperties(String existing, String additions) {
-        if (existing == null || existing.length() == 0) return additions;
-        if (additions == null || additions.length() == 0) return existing;
-        java.util.LinkedHashMap<String, String> merged = new java.util.LinkedHashMap<>();
-        appendBindingProperties(merged, existing);
-        appendBindingProperties(merged, additions);
-        StringBuilder out = new StringBuilder();
-        for (java.util.Map.Entry<String, String> entry : merged.entrySet()) {
-            if (out.length() > 0) out.append('\n');
-            out.append(entry.getKey()).append('=').append(entry.getValue());
-        }
-        return out.toString();
-    }
-
-    private static void appendBindingProperties(java.util.LinkedHashMap<String, String> target, String text) {
-        String[] lines = text.split("\n");
-        for (String line : lines) {
-            int separator = line.indexOf('=');
-            if (separator <= 0) continue;
-            target.put(line.substring(0, separator), line.substring(separator + 1));
-        }
-    }
-
-    private static String sealedLoaderPropertyName() {
-        return new String(new char[]{'j', '.', 'l'});
-    }
-
-    private static String sealedBindingPropertyName() {
-        return new String(new char[]{'j', '.', 'b'});
-    }
-
-    private static String sealedMethodBindingPropertyName() {
-        return new String(new char[]{'j', '.', 'm'});
-    }
-
-    private static String sealedFieldBindingPropertyName() {
-        return new String(new char[]{'j', '.', 'f'});
-    }
-
-    private static String sealedNativeBindingText(QpNativeLibrary locator) {
+    /**
+     * Reads the sealed relocation-binding ciphertext. The locator digest is
+     * checked against these bytes; only the native runtime can open them.
+     */
+    private static byte[] sealedNativeBindingBytes(QpNativeLibrary locator) {
         String resourcePath = locator == null ? null : locator.bindingResourcePath;
         if (resourcePath == null || !isQpNativeResourcePath(resourcePath)) {
             throw new SecurityException("Qp native bindings resource path is unavailable");
@@ -1508,17 +1472,57 @@ public final class QpBridge {
             byte[] raw = readAllBounded(in, QP_NATIVE_BINDINGS_MAX_BYTES);
             try {
                 if (locator != null) verifyQpNativeBinding(locator, raw);
-                if (raw.length == 0 || hasQpRejectedLegacyHeader(raw) || !isAscii(raw)) {
-                    throw new SecurityException("Qp native bindings are not raw relocation metadata");
+                if (raw.length == 0 || hasQpRejectedLegacyHeader(raw)) {
+                    throw new SecurityException("Qp native bindings resource is invalid");
                 }
-                return new String(raw, StandardCharsets.UTF_8);
+                byte[] owned = raw;
+                raw = null;
+                return owned;
             } finally {
-                Arrays.fill(raw, (byte) 0);
+                if (raw != null) Arrays.fill(raw, (byte) 0);
             }
         } catch (SecurityException error) {
             throw error;
         } catch (Exception error) {
             throw new SecurityException("Qp native bindings are unavailable", error);
+        }
+    }
+
+    /**
+     * Reads this platform's sealed pack resource named by the catalog index.
+     * The returned bytes are ciphertext; keys live only in the native runtime.
+     */
+    private static byte[] sealedQpPackBytes() {
+        InputStream indexStream = resourceStream(QP_CATALOG_INDEX_RESOURCE);
+        if (indexStream == null) {
+            throw new SecurityException("Qp sealed pack resource is unavailable");
+        }
+        try (InputStream in = indexStream) {
+            byte[] indexBytes = readAllBounded(in, 256 * 1024);
+            String index = new String(indexBytes, StandardCharsets.US_ASCII);
+            Arrays.fill(indexBytes, (byte) 0);
+            String platformKey = loadedNativePlatformKey == null ? "" : loadedNativePlatformKey;
+            for (String raw : index.split("\r?\n", -1)) {
+                String line = raw.trim();
+                if (!line.startsWith("pack|")) continue;
+                int second = line.indexOf('|', 5);
+                if (second < 0) throw new SecurityException("Qp catalog pack entry is invalid");
+                String packPlatform = line.substring(5, second);
+                String packRelative = line.substring(second + 1);
+                validateCatalogRelativePath(packRelative);
+                if (!packPlatform.equals(platformKey)) continue;
+                try (InputStream source = resourceStream(packRelative)) {
+                    if (source == null) {
+                        throw new SecurityException("Qp sealed pack resource is missing: " + packRelative);
+                    }
+                    return readAllBounded(source, 16 * 1024 * 1024);
+                }
+            }
+            throw new SecurityException("Qp sealed pack resource is unavailable");
+        } catch (SecurityException error) {
+            throw error;
+        } catch (Exception error) {
+            throw new SecurityException("Qp sealed pack resource is unavailable", error);
         }
     }
 
