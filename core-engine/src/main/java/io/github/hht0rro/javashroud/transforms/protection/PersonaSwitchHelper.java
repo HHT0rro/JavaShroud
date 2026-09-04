@@ -2,7 +2,7 @@ package io.github.hht0rro.javashroud.transforms.protection;
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpBridge;
 
 public final class PersonaSwitchHelper {
-    static { QpBridge.loadKernel("loader", "auto", "vm-diverse"); }
+    static { QpBridge.loadKernel(1, 0, 1); }
     private PersonaSwitchHelper() { }
     static native int nativeSelectPersona(String className, String methodName, String descriptor, int personaCount, String strategy);
     public static int selectPersona(String className, String methodName, String descriptor, int personaCount, String strategy) {

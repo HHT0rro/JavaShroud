@@ -2,7 +2,7 @@ package io.github.hht0rro.javashroud.transforms.protection;
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpBridge;
 
 public final class InterfaceProxyHelper {
-    static { QpBridge.loadKernel("loader", "auto", "vm-diverse"); }
+    static { QpBridge.loadKernel(1, 0, 1); }
     private InterfaceProxyHelper() { }
     static native void nativeDispatch(Object target, String methodName, String descriptor);
     public static void dispatch(Object target, String methodName, String descriptor) {

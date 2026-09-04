@@ -9,7 +9,7 @@ import io.github.hht0rro.javashroud.transforms.protection.qp.QpBridge;
  * handle/proof-bound route on {@link QpBridge}.
  */
 public final class CrossClassCouplingHelper {
-    static { QpBridge.loadKernel("loader", "auto", "vm-diverse"); }
+    static { QpBridge.loadKernel(1, 0, 1); }
 
     private CrossClassCouplingHelper() { }
 

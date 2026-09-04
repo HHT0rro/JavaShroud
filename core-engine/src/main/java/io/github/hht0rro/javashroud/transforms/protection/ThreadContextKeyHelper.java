@@ -2,7 +2,7 @@ package io.github.hht0rro.javashroud.transforms.protection;
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpBridge;
 
 public final class ThreadContextKeyHelper {
-    static { QpBridge.loadKernel("loader", "auto", "vm-diverse"); }
+    static { QpBridge.loadKernel(1, 0, 1); }
     private static volatile String contextSource = "thread-hash";
     private ThreadContextKeyHelper() { }
     static native void nativeInitializeContextKeys(String contextSource);

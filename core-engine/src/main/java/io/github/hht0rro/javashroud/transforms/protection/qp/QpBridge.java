@@ -266,7 +266,7 @@ public final class QpBridge {
             }
             if (!tryLoadQpBundledNative(platformTarget)) {
                 if (nativeLoadMessage == null || nativeLoadMessage.length() == 0) {
-                    nativeLoadMessage = "qp:bundled-native-unavailable";
+                    nativeLoadMessage = "qp:bundled-native-unavailable:" + platformTarget;
                 }
                 nativeLoadState = LOAD_FAILED;
                 return;
@@ -433,7 +433,9 @@ public final class QpBridge {
             nativeLoadMessage = "qp:abi-missing:typed-page-bridge";
             return false;
         } catch (Throwable error) {
-            nativeLoadMessage = "qp:abi-failed:" + error.getClass().getName();
+            String detail = error.getMessage();
+            nativeLoadMessage = "qp:abi-failed:" + error.getClass().getName()
+                + (detail == null || detail.isEmpty() ? "" : ":" + detail);
             return false;
         } finally {
             Arrays.fill(handle, (byte) 0);

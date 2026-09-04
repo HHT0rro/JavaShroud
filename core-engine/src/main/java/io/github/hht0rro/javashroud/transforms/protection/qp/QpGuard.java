@@ -1,6 +1,5 @@
 package io.github.hht0rro.javashroud.transforms.protection.qp;
 
-import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 
 /**
@@ -23,38 +22,46 @@ public final class QpGuard {
     private static final int DEBUG_SURFACE = 1;
     private static final int VM_SURFACE = 1 << 1;
     private static final int SHARE_LENGTH = 32;
+    private static final int SURFACE_OS_ANTI_DEBUG = 1;
+    private static final int SURFACE_OS_ANTI_VM = 2;
+    private static final int PROFILE_BALANCED = 1;
+    private static final int PROFILE_HARDENED = 2;
+    private static final int POINT_STARTUP = 1;
+    private static final int POINT_DATA_ACCESS = 2;
 
     private static volatile int state = UNINITIALIZED;
     private static volatile int armedSurfaces;
 
     private QpGuard() { }
 
-    public static void initialize(String surface, String profile) {
-        final int surfaceBit = surfaceBit(surface);
-        final String normalizedProfile = normalizeProfile(profile);
+    /** Numeric route used by generated classes; labels stay in the Native ABI. */
+    public static void initialize(int surfaceCode, int profileCode) {
+        final int surfaceBit = surfaceBit(surfaceCode);
+        if (profileCode != PROFILE_BALANCED && profileCode != PROFILE_HARDENED) {
+            throw new SecurityException("unified defense profile is invalid");
+        }
         synchronized (QpGuard.class) {
             if (state == FAILED || state == TAMPERED || state == SUSPECT) {
                 throw new SecurityException("unified defense kernel is not usable");
             }
             if ((armedSurfaces & surfaceBit) != 0) {
-                // The protected-data gate performs the authenticated probe before
-                // release. Repeating the full native share exchange for every
-                // application class only delays worker startup.
                 QpBridge.requireHealthyKernel();
                 return;
             }
             try {
                 QpBridge.markDefenseBindingsVerified();
                 state = BINDINGS_VERIFIED;
-                QpBridge.loadKernel("guards", "auto", "vm-diverse");
+                QpBridge.loadKernel(4, 0, 1);
                 if (!QpBridge.isNativeLoaded()) {
-                    throw new SecurityException("unified defense kernel native image is unavailable");
+                    throw new SecurityException(
+                        "unified defense kernel native image is unavailable (" + QpBridge.getLoadStatus() + ")"
+                    );
                 }
                 state = NATIVE_READY;
-                if (QpBridge.nativeInitializeDefense(surface, normalizedProfile) != 0) {
+                if (QpBridge.nativeInitializeDefenseCode(surfaceCode, profileCode) != 0) {
                     throw new SecurityException("unified defense kernel initialization was rejected");
                 }
-                verifyShortLivedShare(surface, "startup");
+                verifyShortLivedShare(surfaceCode, POINT_STARTUP);
                 armedSurfaces |= surfaceBit;
                 QpBridge.markDefenseReady();
                 state = DEFENSE_READY;
@@ -73,9 +80,14 @@ public final class QpGuard {
         }
     }
 
-    public static void probe(String surface, String point) {
-        final int surfaceBit = surfaceBit(surface);
-        final String normalizedPoint = normalizePoint(point);
+    /** Numeric probe route used by generated method-entry and data gates. */
+    public static void probe(int surfaceCode, int pointCode) {
+        final int surfaceBit = surfaceBit(surfaceCode);
+        if (pointCode == 0) {
+            SecurityException failure = new SecurityException("unified defense probe point is invalid");
+            fail(failure);
+            throw failure;
+        }
         if (state != DEFENSE_READY || (armedSurfaces & surfaceBit) == 0) {
             SecurityException failure = new SecurityException("unified defense probe ran before authenticated initialization");
             fail(failure);
@@ -83,10 +95,10 @@ public final class QpGuard {
         }
         try {
             QpBridge.requireHealthyKernel();
-            if (QpBridge.nativeProbeDefense(surface, normalizedPoint) != 0) {
+            if (QpBridge.nativeProbeDefenseCode(surfaceCode, pointCode) != 0) {
                 throw new SecurityException("unified defense probe detected tampering");
             }
-            verifyShortLivedShare(surface, normalizedPoint);
+            verifyShortLivedShare(surfaceCode, pointCode);
         } catch (SecurityException error) {
             fail(error);
             throw error;
@@ -101,17 +113,16 @@ public final class QpGuard {
      * Produces only an authenticated, short-lived native intermediate share.
      * It is deliberately not a generic decryptor and it never returns a DEK.
      */
-    public static byte[] transform(byte[] material, String binding) {
+    public static byte[] transform(byte[] material, int bindingCode) {
         if (material == null || material.length == 0 || material.length > 4096) {
             throw new SecurityException("unified defense material is invalid");
         }
-        String normalizedBinding = normalizePoint(binding);
-        if (state != DEFENSE_READY) {
+        if (state != DEFENSE_READY || bindingCode == 0) {
             throw new SecurityException("unified defense transform ran before authenticated initialization");
         }
         byte[] copy = material.clone();
         try {
-            byte[] result = QpBridge.nativeTransformDefense(copy, normalizedBinding);
+            byte[] result = QpBridge.nativeTransformDefenseCode(copy, bindingCode);
             if (result == null || result.length != SHARE_LENGTH) {
                 throw new SecurityException("unified defense native transform returned an invalid share");
             }
@@ -138,17 +149,25 @@ public final class QpGuard {
             return;
         }
         if ((armedSurfaces & DEBUG_SURFACE) != 0) {
-            probe("os-anti-debug", "data-access");
+            probe(SURFACE_OS_ANTI_DEBUG, POINT_DATA_ACCESS);
         }
         if ((armedSurfaces & VM_SURFACE) != 0) {
-            probe("os-anti-vm", "data-access");
+            probe(SURFACE_OS_ANTI_VM, POINT_DATA_ACCESS);
         }
     }
 
-    private static void verifyShortLivedShare(String surface, String point) {
-        byte[] material = (surface + '\u0000' + point).getBytes(StandardCharsets.UTF_8);
+    private static void verifyShortLivedShare(int surfaceCode, int pointCode) {
+        byte[] material = new byte[8];
+        material[0] = (byte) (surfaceCode >>> 24);
+        material[1] = (byte) (surfaceCode >>> 16);
+        material[2] = (byte) (surfaceCode >>> 8);
+        material[3] = (byte) surfaceCode;
+        material[4] = (byte) (pointCode >>> 24);
+        material[5] = (byte) (pointCode >>> 16);
+        material[6] = (byte) (pointCode >>> 8);
+        material[7] = (byte) pointCode;
         try {
-            byte[] share = QpBridge.nativeTransformDefense(material, point);
+            byte[] share = QpBridge.nativeTransformDefenseCode(material, pointCode);
             if (share == null || share.length != SHARE_LENGTH) {
                 throw new SecurityException("unified defense authentication share is invalid");
             }
@@ -158,31 +177,10 @@ public final class QpGuard {
         }
     }
 
-    private static int surfaceBit(String surface) {
-        if ("os-anti-debug".equals(surface)) return DEBUG_SURFACE;
-        if ("os-anti-vm".equals(surface)) return VM_SURFACE;
+    private static int surfaceBit(int surfaceCode) {
+        if (surfaceCode == SURFACE_OS_ANTI_DEBUG) return DEBUG_SURFACE;
+        if (surfaceCode == SURFACE_OS_ANTI_VM) return VM_SURFACE;
         throw new SecurityException("unified defense surface is invalid");
-    }
-
-    private static String normalizeProfile(String profile) {
-        String value = profile == null ? "hardened" : profile.trim();
-        if ("balanced".equals(value) || "hardened".equals(value)) return value;
-        throw new SecurityException("unified defense profile is invalid");
-    }
-
-    private static String normalizePoint(String point) {
-        if (point == null) throw new SecurityException("unified defense probe point is invalid");
-        String value = point.trim();
-        if (value.length() == 0 || value.length() > 64) {
-            throw new SecurityException("unified defense probe point is invalid");
-        }
-        for (int index = 0; index < value.length(); index++) {
-            char character = value.charAt(index);
-            if (character <= 0x20 || character == 0x7F || character == '\u0000') {
-                throw new SecurityException("unified defense probe point is invalid");
-            }
-        }
-        return value;
     }
 
     private static void fail(SecurityException error) {
