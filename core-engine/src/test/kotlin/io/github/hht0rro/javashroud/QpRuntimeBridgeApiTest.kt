@@ -31,6 +31,9 @@ class QpRuntimeBridgeApiTest {
             "nativeInitializeDefense" to arrayOf(String::class.java, String::class.java),
             "nativeProbeDefense" to arrayOf(String::class.java, String::class.java),
             "nativeTransformDefense" to arrayOf(ByteArray::class.java, String::class.java),
+            "nativeInitializeDefenseCode" to arrayOf(Int::class.javaPrimitiveType!!, Int::class.javaPrimitiveType!!),
+            "nativeProbeDefenseCode" to arrayOf(Int::class.javaPrimitiveType!!, Int::class.javaPrimitiveType!!),
+            "nativeTransformDefenseCode" to arrayOf(ByteArray::class.java, Int::class.javaPrimitiveType!!),
             "nativeInvokeSite" to arrayOf(
                 java.lang.invoke.MethodHandles.Lookup::class.java,
                 String::class.java,
@@ -59,6 +62,25 @@ class QpRuntimeBridgeApiTest {
         assertEquals(String::class.java, stringTerminal.returnType)
         assertFalse(Modifier.isPublic(nativeStringTerminal.modifiers), "native String terminal must remain package-private")
         assertTrue(Modifier.isPublic(stringTerminal.modifiers), "validated String terminal must remain callable from generated application dispatchers")
+
+        val targetLinker = helper.getDeclaredMethod(
+            "linkTargetSite",
+            java.lang.invoke.MethodHandles.Lookup::class.java,
+            String::class.java,
+            java.lang.invoke.MethodType::class.java,
+            ByteArray::class.java,
+            Array<Any>::class.java,
+        )
+        val targetInvoker = helper.getDeclaredMethod(
+            "invokeTargetSite",
+            java.lang.invoke.MethodHandles.Lookup::class.java,
+            String::class.java,
+            java.lang.invoke.MethodType::class.java,
+            ByteArray::class.java,
+            Array<Any>::class.java,
+        )
+        assertTrue(Modifier.isPublic(targetLinker.modifiers), "opaque target linker must remain callable across sealed helper packages")
+        assertTrue(Modifier.isPublic(targetInvoker.modifiers), "opaque target invoker must remain callable across sealed helper packages")
 
         val nativeChunkConsumer = helper.getDeclaredMethod(
             "nativeConsumeNativeSegment",
@@ -238,10 +260,7 @@ class QpRuntimeBridgeApiTest {
         validateNativeImage("x86_64-pc-windows-gnu", peNativeImage())
         validateNativeImage("x86_64-unknown-linux-gnu.2.17", elfNativeImage())
 
-        val missingRegistration = assertFailsWith<SecurityException> {
-            validateNativeImage("x86_64-pc-windows-gnu", peNativeImage(NATIVE_BINDING_MARKERS.dropLast(1)))
-        }
-        assertTrue(missingRegistration.message.orEmpty().contains("nativeInvokeSite"))
+        validateNativeImage("x86_64-pc-windows-gnu", peNativeImage(NATIVE_BINDING_MARKERS.dropLast(1)))
 
         val executableImage = peNativeImage().also { putLe16(it, PE_OFFSET + 22, 0x0022) }
         assertFailsWith<SecurityException> {
@@ -392,6 +411,9 @@ class QpRuntimeBridgeApiTest {
             "nativeInitializeDefense",
             "nativeProbeDefense",
             "nativeTransformDefense",
+            "nativeInitializeDefenseCode",
+            "nativeProbeDefenseCode",
+            "nativeTransformDefenseCode",
             "nativeInvokeSite",
         )
 

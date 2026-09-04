@@ -116,6 +116,7 @@ internal object ReleaseArtifactScan {
         findings += scanPerfBudget(outputJarPath, inputJarBytes, profile)
         findings += scanDiagnostics(artifact, nativeBytes)
         findings += scanNativeSecrets(nativeBytes)
+        findings += scanPublicToolSurface(artifact, nativeBytes)
         findings += scanNativeContents(artifact, nativeBytes)
         findings += scanDualNativePlatforms(artifact, enabledPasses)
         findings += scanStrictNativePlatformMatrix(artifact, enabledPasses, profile, requiredNativePlatforms)
@@ -164,6 +165,7 @@ internal object ReleaseArtifactScan {
                 forbiddenPath ?: "absent",
             )
             findings += scanJarNativeContents(jar, entries)
+            findings += scanJarPublicToolSurface(jar, entries)
             findings += scanJarJavaCryptoOracles(jar, entries)
             findings += scanJarNativePlatformMatrix(jar, entries, enabledPasses, profile, requiredNativePlatforms)
             val passed = if (profile == HardenedProtectionProfile.MINIMAL) {
@@ -918,6 +920,9 @@ internal object ReleaseArtifactScan {
             "qp-session-integrity-v2",
             "qp-aes-key",
             "qp-aes-iv",
+            "javashroud-qp-page-key-v4",
+            "javashroud-qp-secret-pack-root-v4",
+            "javashroud-qp-secret-commitment-v4",
         )
         val classHay = artifact.classArtifacts.map { it.bytes } + artifact.jarEntries.map { it.bytes }
         val labelHit = labels.firstOrNull { needle -> (classHay + nativeBytes).any { bytes -> containsAscii(bytes, needle) } }
@@ -980,9 +985,72 @@ internal object ReleaseArtifactScan {
         if (nativeBytes.isEmpty()) {
             return ReleaseArtifactScanReport.Finding("native-secrets", true, "no-native")
         }
-        val needles = listOf("native_secrets", "bindingSalt", "public-root")
+        val needles = listOf(
+            "native_secrets",
+            "bindingSalt",
+            "public-root",
+            "QP_SP_S",
+            "qp_sp_combine",
+            "native0.Loader",
+            "Hidden0",
+            "javashroud-qp-page-key-v4",
+            "Java_com_",
+            "Java_io_github_hht0rro",
+            "expand 32-byte k",
+            ".rustup/toolchains",
+            "rustc/src/",
+        )
         val hit = needles.firstOrNull { needle -> nativeBytes.any { bytes -> containsAscii(bytes, needle) } }
         return ReleaseArtifactScanReport.Finding("native-secrets", hit == null, hit ?: "absent")
+    }
+
+    private fun scanPublicToolSurface(
+        artifact: BytecodeArtifact,
+        nativeBytes: List<ByteArray>,
+    ): List<ReleaseArtifactScanReport.Finding> {
+        val javaStar = (nativeBytes + artifact.jarEntries.map { it.bytes }).firstOrNull { bytes ->
+            containsAscii(bytes, "Java_com_") || containsAscii(bytes, "Java_io_github_hht0rro")
+        }
+        val jnicClass = artifact.classArtifacts.firstOrNull { classArtifact ->
+            val name = classArtifact.summary.internalName
+            name.endsWith("native0/Loader") || name.endsWith("Hidden0") || name.contains("native0/Loader")
+        }?.summary?.internalName
+        val jnicNative = nativeBytes.firstOrNull { containsAscii(it, "native0.Loader") || containsAscii(it, "Hidden0") }
+        val locatorPresent = artifact.jarEntries.any { entry ->
+            normalizePath(entry.name).endsWith("native.locator")
+        }
+        val mzEntries = artifact.jarEntries.filter { entry ->
+            isUnsealedMzPath(entry.name) &&
+                entry.bytes.size >= 2 &&
+                entry.bytes[0] == 'M'.code.toByte() &&
+                entry.bytes[1] == 'Z'.code.toByte()
+        }
+        val unsealedMz = mzEntries.size == 1 && !locatorPresent
+        val rustcPath = (nativeBytes + artifact.jarEntries.map { it.bytes }).firstOrNull { bytes ->
+            containsAscii(bytes, ".rustup/toolchains") || containsAscii(bytes, "rustc/src/")
+        }
+        return listOf(
+            ReleaseArtifactScanReport.Finding(
+                "java-star-export",
+                javaStar == null,
+                if (javaStar == null) "absent" else "Java_* business export",
+            ),
+            ReleaseArtifactScanReport.Finding(
+                "jnic-loader",
+                jnicClass == null && jnicNative == null,
+                jnicClass ?: if (jnicNative != null) "native0.Loader" else "absent",
+            ),
+            ReleaseArtifactScanReport.Finding(
+                "unsealed-mz",
+                !unsealedMz,
+                if (unsealedMz) "single-raw-mz-without-locator" else "absent",
+            ),
+            ReleaseArtifactScanReport.Finding(
+                "rustc-path",
+                rustcPath == null,
+                if (rustcPath == null) "absent" else "rustc-path-fragment",
+            ),
+        )
     }
 
     /** The production bootstrap must not carry a reusable Java token decryptor.
@@ -1394,6 +1462,59 @@ internal object ReleaseArtifactScan {
     private fun isNativeEntryName(name: String): Boolean {
         val normalized = normalizePath(name)
         return normalized.endsWith(".dll") || normalized.endsWith(".so") || normalized.endsWith(".dylib")
+    }
+
+    /** Detranspiler `--mode standard` looks for a lone top-level PE, not META-INF sealed natives. */
+    private fun isUnsealedMzPath(name: String): Boolean {
+        val normalized = normalizePath(name)
+        return '/' !in normalized && normalized.endsWith(".dll")
+    }
+
+    private fun scanJarPublicToolSurface(
+        jar: JarFile,
+        entries: List<java.util.jar.JarEntry>,
+    ): List<ReleaseArtifactScanReport.Finding> {
+        val locatorPresent = entries.any { entry ->
+            !entry.isDirectory && normalizePath(entry.name).endsWith("native.locator")
+        }
+        var javaStar = false
+        var jnic = false
+        var rustcPath = false
+        var mzCount = 0
+        for (entry in entries.filter { !it.isDirectory }) {
+            val bytes = try {
+                jar.getInputStream(entry).use { it.readBytes() }
+            } catch (_: Throwable) {
+                continue
+            }
+            try {
+                if (isUnsealedMzPath(entry.name) &&
+                    bytes.size >= 2 &&
+                    bytes[0] == 'M'.code.toByte() &&
+                    bytes[1] == 'Z'.code.toByte()
+                ) {
+                    mzCount++
+                }
+                if (containsAscii(bytes, "Java_com_") || containsAscii(bytes, "Java_io_github_hht0rro")) {
+                    javaStar = true
+                }
+                if (containsAscii(bytes, "native0.Loader") || containsAscii(bytes, "Hidden0")) {
+                    jnic = true
+                }
+                if (containsAscii(bytes, ".rustup/toolchains") || containsAscii(bytes, "rustc/src/")) {
+                    rustcPath = true
+                }
+            } finally {
+                bytes.fill(0)
+            }
+        }
+        val unsealedMz = mzCount == 1 && !locatorPresent
+        return listOf(
+            ReleaseArtifactScanReport.Finding("java-star-export", !javaStar, if (javaStar) "Java_* business export" else "absent"),
+            ReleaseArtifactScanReport.Finding("jnic-loader", !jnic, if (jnic) "native0.Loader" else "absent"),
+            ReleaseArtifactScanReport.Finding("unsealed-mz", !unsealedMz, if (unsealedMz) "single-raw-mz-without-locator" else "absent"),
+            ReleaseArtifactScanReport.Finding("rustc-path", !rustcPath, if (rustcPath) "rustc-path-fragment" else "absent"),
+        )
     }
 
     private fun scanJarJavaCryptoOracles(

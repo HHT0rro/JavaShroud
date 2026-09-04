@@ -2,6 +2,7 @@ package io.github.hht0rro.javashroud.qp
 
 import io.github.hht0rro.javashroud.transforms.protection.concatBytes
 import io.github.hht0rro.javashroud.transforms.protection.hkdfSha256
+import io.github.hht0rro.javashroud.transforms.protection.qp.NativeSecretPackLiterals
 import io.github.hht0rro.javashroud.transforms.protection.qp.NativeVmSecretPackDraft
 import io.github.hht0rro.javashroud.transforms.protection.qp.NativeVmSecretPack
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpResourceKind
@@ -37,7 +38,7 @@ class NativeVmSecretPackTest {
         nativeIdentity: ByteArray,
     ): ByteArray = hkdfSha256(
         ikm = seed,
-        salt = "javashroud-qp-page-key-v4".encodeToByteArray(),
+        salt = "javashroud-qp-page-key-v5".encodeToByteArray(),
         info = concatBytes(
             arrayOf(
                 preNativeCommitment,
@@ -56,7 +57,7 @@ class NativeVmSecretPackTest {
     private fun commitmentLikeNative(seed: ByteArray, pageKey: ByteArray): ByteArray {
         val commitmentKey = hkdfSha256(
             ikm = seed,
-            salt = "javashroud-qp-secret-commitment-v4".encodeToByteArray(),
+            salt = "javashroud-qp-secret-commitment-v5".encodeToByteArray(),
             info = ByteArray(0),
             length = 32,
         )
@@ -251,6 +252,92 @@ class NativeVmSecretPackTest {
         } finally {
             draft.wipe()
         }
+    }
+
+    @Test
+    fun image_digest_ignores_commitment_slot_and_binds_the_rest() {
+        val bytes = samplePeWithMeasurement()
+        val first = io.github.hht0rro.javashroud.transforms.protection.qp.NativeImageMeasurement.digest(bytes)
+        bytes[0x208] = 0x5A
+        val second = io.github.hht0rro.javashroud.transforms.protection.qp.NativeImageMeasurement.digest(bytes)
+        assertContentEquals(first, second)
+        bytes[0x230] = (bytes[0x230].toInt() xor 0x01).toByte()
+        val third = io.github.hht0rro.javashroud.transforms.protection.qp.NativeImageMeasurement.digest(bytes)
+        assertFalse(first.contentEquals(third))
+    }
+
+    @Test
+    fun aead_wrap_hides_slot_seeds_and_mba_reconstructs_the_wrap_key() {
+        val draft = testSecretPackDraft()
+        try {
+            draft.registerSlot()
+            val sealed = draft.sealedCopyForSpecialization()
+            val literals = NativeSecretPackLiterals.prepare(
+                pack = sealed,
+                random = java.util.Random(7),
+                cryptoDomain = ByteArray(32) { 0x11 },
+                layoutDigest = ByteArray(32) { 0x22 },
+            )
+            try {
+                assertTrue(literals.wrapped.isNotEmpty())
+                assertEquals(12, literals.nonce.size)
+                assertEquals(8, literals.mbaWords.size)
+                val reconstructed = ByteArray(32)
+                literals.mbaWords.forEachIndexed { index, word ->
+                    val value = word.multiplier * word.factor + word.addend
+                    reconstructed[index * 4] = (value ushr 24).toByte()
+                    reconstructed[index * 4 + 1] = (value ushr 16).toByte()
+                    reconstructed[index * 4 + 2] = (value ushr 8).toByte()
+                    reconstructed[index * 4 + 3] = value.toByte()
+                }
+                assertContentEquals(literals.wrapKey, reconstructed)
+                val source = literals.wrapped.joinToString(",")
+                assertFalse(source.contains("QP_SP_S"))
+            } finally {
+                literals.wipe()
+                sealed.wipe()
+            }
+        } finally {
+            draft.wipe()
+        }
+    }
+
+    private fun samplePeWithMeasurement(): ByteArray {
+        val bytes = ByteArray(0x400)
+        bytes[0] = 'M'.code.toByte()
+        bytes[1] = 'Z'.code.toByte()
+        bytes[0x3C] = 0x80.toByte()
+        bytes[0x80] = 'P'.code.toByte()
+        bytes[0x81] = 'E'.code.toByte()
+        bytes[0x84] = 0x64
+        bytes[0x85] = 0x86.toByte()
+        bytes[0x86] = 1
+        bytes[0x94] = 0xF0.toByte()
+        bytes[0x98] = 0x0B
+        bytes[0x99] = 0x02
+        bytes[0x80 + 24 + 108] = 16
+        val relocDir = 0x80 + 24 + 112 + 5 * 8
+        bytes[relocDir] = 0x80.toByte()
+        bytes[relocDir + 1] = 0x02
+        bytes[relocDir + 4] = 8
+        val iatDir = 0x80 + 24 + 112 + 12 * 8
+        bytes[iatDir] = 0x88.toByte()
+        bytes[iatDir + 1] = 0x02
+        bytes[iatDir + 4] = 8
+        val section = 0x80 + 24 + 0xF0
+        bytes[section + 8] = 0x80.toByte()
+        bytes[section + 9] = 0x02
+        bytes[section + 12] = 0x00
+        bytes[section + 13] = 0x02
+        bytes[section + 16] = 0x80.toByte()
+        bytes[section + 17] = 0x02
+        bytes[section + 20] = 0x00
+        bytes[section + 21] = 0x02
+        val magic = io.github.hht0rro.javashroud.transforms.protection.qp.IMAGE_MEASUREMENT_MAGIC
+        magic.copyInto(bytes, 0x200)
+        bytes[0x280] = 0x11
+        bytes[0x288] = 0x22
+        return bytes
     }
 
     /** Re-derives one slot seed the way the draft does, for parity assertions. */

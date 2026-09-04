@@ -698,6 +698,7 @@ class HardenedReleaseGateTest {
                 missingLinux,
                 HardenedProtectionProfile.RELEASE_HARDENED,
                 listOf("jni-microkernel-loader"),
+                requiredNativePlatforms = setOf("windows-x64", "linux-x64"),
             )
             assertTrue(missingReport.findings.single { it.check == "native-dual-platform" }.passed)
             assertEquals("host-only-windows", missingReport.findings.single { it.check == "native-dual-platform" }.detail)
@@ -714,6 +715,7 @@ class HardenedReleaseGateTest {
                 empty,
                 HardenedProtectionProfile.RELEASE_HARDENED,
                 listOf("jni-microkernel-loader"),
+                requiredNativePlatforms = setOf("windows-x64", "linux-x64"),
             )
             assertFalse(emptyReport.findings.single { it.check == "native-dual-platform" }.passed)
 
@@ -724,6 +726,7 @@ class HardenedReleaseGateTest {
                 both,
                 HardenedProtectionProfile.RELEASE_HARDENED,
                 listOf("jni-microkernel-loader"),
+                requiredNativePlatforms = setOf("windows-x64", "linux-x64"),
             )
             assertTrue(bothReport.findings.single { it.check == "native-dual-platform" }.passed)
             assertTrue(bothReport.findings.single { it.check == "native-platform-matrix" }.passed)
@@ -770,6 +773,28 @@ class HardenedReleaseGateTest {
         assertFalse(report.findings.single { it.check == "indy-target-opacity" }.passed)
         assertFailsWith<SecurityException> { report.requirePass() }
         Files.walk(dir).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+    }
+
+    @Test
+    fun scan_allows_standard_jvm_lambda_bootstrap_handles() {
+        val classBytes = classWithLambdaBootstrapHandle()
+        val artifact = testAttachedArtifact(
+            classArtifacts = listOf(testClassArtifact(internalName = "sample/LambdaBoundary", bytes = classBytes)),
+        )
+        val dir = Files.createTempDirectory("js-hard-lambda-boundary")
+        try {
+            val jar = dir.resolve("lambda.jar")
+            io.github.hht0rro.javashroud.artifact.writeBytecodeArtifact(jar, artifact)
+            val report = ReleaseArtifactScan.scan(
+                jar,
+                artifact,
+                HardenedProtectionProfile.ANALYSIS_ONLY,
+                emptyList(),
+            )
+            assertTrue(report.findings.single { it.check == "indy-target-opacity" }.passed)
+        } finally {
+            Files.walk(dir).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+        }
     }
 
     @Test
@@ -888,6 +913,78 @@ class HardenedReleaseGateTest {
             io.github.hht0rro.javashroud.artifact.writeBytecodeArtifact(jar, artifact)
             val report = ReleaseArtifactScan.scan(jar, artifact, HardenedProtectionProfile.RELEASE_HARDENED, emptyList())
             assertFalse(report.findings.single { it.check == "qp-evaluator-direct-recovery" }.passed)
+        } finally {
+            Files.walk(dir).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+        }
+    }
+
+    @Test
+    fun scan_rejects_xor_secret_shards_and_jnic_loader_names() {
+        val dir = Files.createTempDirectory("js-hard-xor")
+        try {
+            val classBytes = emptyClass("sample/XorHost")
+            val artifact = testAttachedArtifact(
+                classArtifacts = listOf(testClassArtifact(internalName = "sample/XorHost", bytes = classBytes)),
+            )
+            val jar = dir.resolve("xor.jar")
+            io.github.hht0rro.javashroud.artifact.writeBytecodeArtifact(jar, artifact)
+            val xorNative = "QP_SP_S0_0".toByteArray(Charsets.US_ASCII) + ByteArray(32)
+            val xorReport = ReleaseArtifactScan.scan(
+                jar,
+                artifact,
+                HardenedProtectionProfile.RELEASE_HARDENED,
+                emptyList(),
+                nativeBytes = listOf(xorNative),
+            )
+            assertFalse(xorReport.findings.single { it.check == "native-secrets" }.passed)
+
+            val jnicNative = "native0.Loader".toByteArray(Charsets.US_ASCII)
+            val jnicReport = ReleaseArtifactScan.scan(
+                jar,
+                artifact,
+                HardenedProtectionProfile.RELEASE_HARDENED,
+                emptyList(),
+                nativeBytes = listOf(jnicNative),
+            )
+            assertFalse(jnicReport.findings.single { it.check == "native-secrets" }.passed)
+            assertFalse(jnicReport.findings.single { it.check == "jnic-loader" }.passed)
+
+            val exportNative = "Java_com_example_App_secret".toByteArray(Charsets.US_ASCII)
+            val exportReport = ReleaseArtifactScan.scan(
+                jar,
+                artifact,
+                HardenedProtectionProfile.RELEASE_HARDENED,
+                emptyList(),
+                nativeBytes = listOf(exportNative),
+            )
+            assertFalse(exportReport.findings.single { it.check == "java-star-export" }.passed)
+            assertFalse(exportReport.findings.single { it.check == "native-secrets" }.passed)
+
+            val rustcNative = ".rustup/toolchains/stable-x86_64".toByteArray(Charsets.US_ASCII)
+            val rustcReport = ReleaseArtifactScan.scan(
+                jar,
+                artifact,
+                HardenedProtectionProfile.RELEASE_HARDENED,
+                emptyList(),
+                nativeBytes = listOf(rustcNative),
+            )
+            assertFalse(rustcReport.findings.single { it.check == "rustc-path" }.passed)
+
+            val mzArtifact = testAttachedArtifact(
+                classArtifacts = listOf(testClassArtifact(internalName = "sample/XorHost", bytes = classBytes)),
+                jarEntries = listOf(
+                    JarEntryData("payload.dll", byteArrayOf('M'.code.toByte(), 'Z'.code.toByte(), 0x90.toByte(), 0x00)),
+                ),
+            )
+            val mzJar = dir.resolve("mz.jar")
+            io.github.hht0rro.javashroud.artifact.writeBytecodeArtifact(mzJar, mzArtifact)
+            val mzReport = ReleaseArtifactScan.scan(
+                mzJar,
+                mzArtifact,
+                HardenedProtectionProfile.RELEASE_HARDENED,
+                emptyList(),
+            )
+            assertFalse(mzReport.findings.single { it.check == "unsealed-mz" }.passed)
         } finally {
             Files.walk(dir).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
         }
@@ -1090,6 +1187,39 @@ class HardenedReleaseGateTest {
         mv.visitInsn(Opcodes.IRETURN)
         mv.visitMaxs(1, 0)
         mv.visitEnd()
+        writer.visitEnd()
+        return writer.toByteArray()
+    }
+
+    private fun classWithLambdaBootstrapHandle(): ByteArray {
+        val writer = ClassWriter(0)
+        writer.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC, "sample/LambdaBoundary", null, "java/lang/Object", null)
+        val mv = writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "run", "()Ljava/lang/Runnable;", null, null)
+        mv.visitCode()
+        mv.visitInvokeDynamicInsn(
+            "run",
+            "()Ljava/lang/Runnable;",
+            Handle(
+                Opcodes.H_INVOKESTATIC,
+                "java/lang/invoke/LambdaMetafactory",
+                "metafactory",
+                "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;" +
+                    "Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)" +
+                    "Ljava/lang/invoke/CallSite;",
+                false,
+            ),
+            org.objectweb.asm.Type.getMethodType("()V"),
+            Handle(Opcodes.H_INVOKESTATIC, "sample/LambdaBoundary", "body", "()V", false),
+            org.objectweb.asm.Type.getMethodType("()V"),
+        )
+        mv.visitInsn(Opcodes.ARETURN)
+        mv.visitMaxs(1, 0)
+        mv.visitEnd()
+        val body = writer.visitMethod(Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC, "body", "()V", null, null)
+        body.visitCode()
+        body.visitInsn(Opcodes.RETURN)
+        body.visitMaxs(0, 0)
+        body.visitEnd()
         writer.visitEnd()
         return writer.toByteArray()
     }
