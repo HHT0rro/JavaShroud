@@ -41,8 +41,6 @@ pub const MAX_VARIANT_SIZE: usize = 256;
 pub const MAX_MERKLE_DEPTH: usize = 64;
 pub const MAX_ROUTE_ENCODING_SIZE: usize = 128 * 1024;
 pub const MAX_PROOF_ENCODING_SIZE: usize = 160 * 1024;
-pub const MAX_EVALUATOR_OPAQUE_SIZE: usize = 131_035;
-pub const MAX_EVALUATOR_PLAN_ENCODING_SIZE: usize = 128 * 1024;
 pub const MAX_DESCRIPTOR_ENCODING_SIZE: usize = 384 * 1024;
 pub const MAX_ENVELOPE_SIZE: usize = 4096;
 pub const MAX_AAD_SIZE: usize = 80 * 1024;
@@ -66,7 +64,7 @@ pub const OFFSET_CIPHERTEXT_LENGTH: usize = 197;
 pub const CANONICAL_CODEC_VARIANT: &str = "aes-256-gcm";
 
 pub const RETIRED_FRAME_MAGIC: [u8; 4] = qp_crypto::RETIRED_FRAME_MAGIC;
-pub const CURRENT_FRAME_VERSION: u8 = 2;
+pub const CURRENT_FRAME_VERSION: u8 = 3;
 pub const CURRENT_FRAME_AUTH_TAG_SIZE: usize = DIGEST_SIZE;
 pub const CURRENT_FRAME_HEADER_SIZE: usize = 4 + 1 + 4 + DIGEST_SIZE;
 pub const CURRENT_FRAME_MIN_SIZE: usize = CURRENT_FRAME_HEADER_SIZE + CURRENT_FRAME_AUTH_TAG_SIZE;
@@ -3077,104 +3075,11 @@ impl Drop for PageProof {
 
 pub type QpProofMetadata = PageProof;
 
-#[derive(Eq, PartialEq)]
-pub struct EvaluatorPlan {
-    opaque: Vec<u8>,
-    fingerprint: Digest,
-}
+/// Current compact descriptor layout version. Every older encoding fails on
+/// the leading version byte.
+pub const CURRENT_DESCRIPTOR_VERSION: u8 = 3;
 
-impl EvaluatorPlan {
-    pub fn new(opaque: &[u8], fingerprint: &[u8]) -> Result<Self, PageError> {
-        if opaque.is_empty() || opaque.len() > MAX_EVALUATOR_OPAQUE_SIZE {
-            return Err(PageError::LengthTooLarge {
-                field: "opaque evaluator",
-                length: opaque.len(),
-                maximum: MAX_EVALUATOR_OPAQUE_SIZE,
-            });
-        }
-        Ok(Self {
-            opaque: opaque.to_vec(),
-            fingerprint: copy_fixed(fingerprint, "evaluator fingerprint")?,
-        })
-    }
-
-    pub fn from_opaque(opaque: &[u8], fingerprint: &[u8]) -> Result<Self, PageError> {
-        Self::new(opaque, fingerprint)
-    }
-
-    pub fn opaque(&self) -> &[u8] {
-        &self.opaque
-    }
-
-    pub fn copy_opaque_for_native(&self) -> Vec<u8> {
-        self.opaque.clone()
-    }
-
-    pub fn fingerprint(&self) -> Digest {
-        self.fingerprint
-    }
-
-    pub fn encode(&self) -> Vec<u8> {
-        let mut writer = Writer::new(MAX_EVALUATOR_PLAN_ENCODING_SIZE);
-        writer
-            .write_frame(&self.opaque, "opaque evaluator")
-            .expect("validated opaque evaluator");
-        writer
-            .write(&self.fingerprint)
-            .expect("validated evaluator fingerprint");
-        writer.finish()
-    }
-
-    pub fn decode(encoded: &[u8]) -> Result<Self, PageError> {
-        if encoded.is_empty() || encoded.len() > MAX_EVALUATOR_PLAN_ENCODING_SIZE {
-            return Err(PageError::LengthTooLarge {
-                field: "evaluator plan",
-                length: encoded.len(),
-                maximum: MAX_EVALUATOR_PLAN_ENCODING_SIZE,
-            });
-        }
-        let mut cursor = Cursor::new(encoded);
-        let opaque = cursor.read_frame(MAX_EVALUATOR_OPAQUE_SIZE, false, "opaque evaluator")?;
-        let fingerprint = cursor.read_fixed(FINGERPRINT_SIZE)?;
-        cursor.require_empty()?;
-        Self::new(&opaque, &fingerprint)
-    }
-
-    pub fn binding_digest(&self) -> Digest {
-        let encoded = self.encode();
-        let digest = hash_domain_framed(HEADER_BINDING_DOMAIN, &[&encoded]);
-        let mut encoded = encoded;
-        encoded.fill(0);
-        digest
-    }
-}
-
-impl Clone for EvaluatorPlan {
-    fn clone(&self) -> Self {
-        Self {
-            opaque: self.opaque.clone(),
-            fingerprint: self.fingerprint,
-        }
-    }
-}
-
-impl fmt::Debug for EvaluatorPlan {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("EvaluatorPlan")
-            .field("opaque_length", &self.opaque.len())
-            .field("fingerprint_length", &FINGERPRINT_SIZE)
-            .finish()
-    }
-}
-
-impl Drop for EvaluatorPlan {
-    fn drop(&mut self) {
-        self.opaque.fill(0);
-        self.fingerprint.fill(0);
-    }
-}
-
-pub type QpEvaluatorPlan = EvaluatorPlan;
+pub const MAX_SECRET_SLOT: u32 = 0xFFF;
 
 #[derive(Eq, PartialEq)]
 pub struct PageDescriptor {
@@ -3182,7 +3087,7 @@ pub struct PageDescriptor {
     route: PageRoute,
     proof: PageProof,
     target_page_size: i32,
-    evaluator: EvaluatorPlan,
+    secret_slot: u32,
 }
 
 impl PageDescriptor {
@@ -3190,10 +3095,10 @@ impl PageDescriptor {
         route: PageRoute,
         proof: PageProof,
         target_page_size: i32,
-        evaluator: EvaluatorPlan,
+        secret_slot: u32,
     ) -> Result<Self, PageError> {
         let leaf_identity = route.leaf_identity().clone();
-        Self::from_metadata(leaf_identity, route, proof, target_page_size, evaluator)
+        Self::from_metadata(leaf_identity, route, proof, target_page_size, secret_slot)
     }
 
     pub fn create(
@@ -3202,10 +3107,10 @@ impl PageDescriptor {
         route: PageRoute,
         proof: PageProof,
         target_page_size: i32,
-        evaluator: EvaluatorPlan,
+        secret_slot: u32,
     ) -> Result<Self, PageError> {
         let identity = LeafIdentity::from_handle(handle, logical_identity)?;
-        Self::from_metadata(identity, route, proof, target_page_size, evaluator)
+        Self::from_metadata(identity, route, proof, target_page_size, secret_slot)
     }
 
     pub fn from_metadata(
@@ -3213,10 +3118,13 @@ impl PageDescriptor {
         route: PageRoute,
         proof: PageProof,
         target_page_size: i32,
-        evaluator: EvaluatorPlan,
+        secret_slot: u32,
     ) -> Result<Self, PageError> {
         if target_page_size <= 0 || target_page_size as usize > MAX_PAGE_FRAME_SIZE {
             return Err(PageError::InvalidInput("target page size is invalid"));
+        }
+        if secret_slot > MAX_SECRET_SLOT {
+            return Err(PageError::InvalidInput("secret slot is invalid"));
         }
         if route.leaf_identity() != &leaf_identity {
             return Err(PageError::BindingMismatch("route leaf identity"));
@@ -3229,18 +3137,12 @@ impl PageDescriptor {
         {
             return Err(PageError::BindingMismatch("route/proof codec or layout"));
         }
-        if !constant_time_eq(
-            &leaf_identity.evaluator_fingerprint(),
-            &evaluator.fingerprint(),
-        ) {
-            return Err(PageError::BindingMismatch("evaluator fingerprint"));
-        }
         Ok(Self {
             leaf_identity,
             route,
             proof,
             target_page_size,
-            evaluator,
+            secret_slot,
         })
     }
 
@@ -3253,17 +3155,21 @@ impl PageDescriptor {
             });
         }
         let mut cursor = Cursor::new(encoded);
+        let version = cursor.read_u8()?;
+        if version != CURRENT_DESCRIPTOR_VERSION {
+            return Err(PageError::InvalidInput(
+                "descriptor version is not current",
+            ));
+        }
         let route_bytes = cursor.read_frame(MAX_ROUTE_ENCODING_SIZE, false, "route")?;
         let route = PageRoute::decode(&route_bytes)?;
         let proof_bytes = cursor.read_frame(MAX_PROOF_ENCODING_SIZE, false, "proof")?;
         let proof = PageProof::decode(&proof_bytes)?;
         let target_page_size = cursor.read_i32_be()?;
-        let evaluator_bytes =
-            cursor.read_frame(MAX_EVALUATOR_PLAN_ENCODING_SIZE, false, "evaluator plan")?;
-        let evaluator = EvaluatorPlan::decode(&evaluator_bytes)?;
+        let secret_slot = u32::from(cursor.read_u32_be()?);
         cursor.require_empty()?;
         let identity = route.leaf_identity().clone();
-        Self::from_metadata(identity, route, proof, target_page_size, evaluator)
+        Self::from_metadata(identity, route, proof, target_page_size, secret_slot)
     }
 
     pub fn resource_kind(&self) -> PageKind {
@@ -3298,8 +3204,9 @@ impl PageDescriptor {
         self.target_page_size
     }
 
-    pub fn evaluator_plan(&self) -> &EvaluatorPlan {
-        &self.evaluator
+    /// Native secret-pack slot owning this page's key derivation material.
+    pub fn secret_slot(&self) -> u32 {
+        self.secret_slot
     }
 
     pub fn handle(&self) -> Result<PageHandle, PageError> {
@@ -3322,7 +3229,7 @@ impl PageDescriptor {
             self.route.clone(),
             self.proof.clone(),
             self.target_page_size,
-            self.evaluator.clone(),
+            self.secret_slot,
         )
         .map(|_| ())
     }
@@ -3330,8 +3237,10 @@ impl PageDescriptor {
     pub fn encode(&self) -> Vec<u8> {
         let route = self.route.encode();
         let proof = self.proof.encode();
-        let evaluator = self.evaluator.encode();
         let mut writer = Writer::new(MAX_DESCRIPTOR_ENCODING_SIZE);
+        writer
+            .write_u8(CURRENT_DESCRIPTOR_VERSION)
+            .expect("descriptor version");
         writer
             .write_frame(&route, "route")
             .expect("validated descriptor route");
@@ -3342,14 +3251,12 @@ impl PageDescriptor {
             .write_i32(self.target_page_size)
             .expect("validated target size");
         writer
-            .write_frame(&evaluator, "evaluator plan")
-            .expect("validated descriptor evaluator");
+            .write(&self.secret_slot.to_be_bytes())
+            .expect("validated secret slot");
         let mut route = route;
         let mut proof = proof;
-        let mut evaluator = evaluator;
         route.fill(0);
         proof.fill(0);
-        evaluator.fill(0);
         writer.finish()
     }
 
@@ -3369,7 +3276,7 @@ impl Clone for PageDescriptor {
             route: self.route.clone(),
             proof: self.proof.clone(),
             target_page_size: self.target_page_size,
-            evaluator: self.evaluator.clone(),
+            secret_slot: self.secret_slot,
         }
     }
 }
@@ -3648,15 +3555,15 @@ impl QpWireFormat {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[repr(u8)]
 pub enum EnvelopeForm {
-    InlineDescriptor = 1,
-    CompactLocator = 2,
+    /// The only current form. Older inline (1) and legacy compact (2)
+    /// envelope encodings are rejected at parse.
+    CompactLocator = 3,
 }
 
 impl EnvelopeForm {
     pub fn from_id(id: u8) -> Result<Self, PageError> {
         match id {
-            1 => Ok(Self::InlineDescriptor),
-            2 => Ok(Self::CompactLocator),
+            3 => Ok(Self::CompactLocator),
             other => Err(PageError::InvalidForm(other)),
         }
     }
@@ -3680,7 +3587,6 @@ const ENVELOPE_FIXED_WIRE_SIZE: usize = 1
     + DIGEST_SIZE
     + DIGEST_SIZE
     + DIGEST_SIZE;
-const MAX_INLINE_DESCRIPTOR_SIZE: usize = MAX_ENVELOPE_SIZE - ENVELOPE_FIXED_WIRE_SIZE - 4;
 
 pub fn descriptor_binding(descriptor_encoding: &[u8]) -> Digest {
     hash_domain_framed(DESCRIPTOR_BINDING_DOMAIN, &[descriptor_encoding])
@@ -3720,7 +3626,6 @@ fn envelope_binding(
     descriptor_binding_value: &[u8],
     call_site_binding_value: &[u8],
     route_binding_value: &[u8],
-    inline_descriptor: Option<&[u8]>,
 ) -> Result<Digest, PageError> {
     let handle = copy_fixed::<ENCODED_HANDLE_SIZE>(encoded_handle, "encoded handle")?;
     let locator = copy_fixed::<LOCATOR_TOKEN_SIZE>(locator_token, "locator token")?;
@@ -3732,21 +3637,6 @@ fn envelope_binding(
     let route = copy_fixed::<DIGEST_SIZE>(route_binding_value, "route binding")?;
     if page_index < 0 {
         return Err(PageError::InvalidPageIndex(page_index));
-    }
-    if form == EnvelopeForm::InlineDescriptor {
-        let inline =
-            inline_descriptor.ok_or(PageError::InvalidInput("inline descriptor missing"))?;
-        if inline.is_empty() || inline.len() > MAX_INLINE_DESCRIPTOR_SIZE {
-            return Err(PageError::LengthTooLarge {
-                field: "inline descriptor",
-                length: inline.len(),
-                maximum: MAX_INLINE_DESCRIPTOR_SIZE,
-            });
-        }
-    } else if inline_descriptor.is_some() {
-        return Err(PageError::InvalidInput(
-            "compact envelope has inline descriptor",
-        ));
     }
     let mut hasher = Sha256::new();
     hasher.update(ENVELOPE_BINDING_DOMAIN);
@@ -3764,9 +3654,6 @@ fn envelope_binding(
         route.as_slice(),
     ] {
         update_framed_hash(&mut hasher, field)?;
-    }
-    if form == EnvelopeForm::InlineDescriptor {
-        update_framed_hash(&mut hasher, inline_descriptor.expect("inline checked"))?;
     }
     Ok(hasher.finalize())
 }
@@ -3794,7 +3681,6 @@ pub fn compute_envelope_binding(
     descriptor_binding_value: &[u8],
     call_site_binding_value: &[u8],
     route_binding_value: &[u8],
-    inline_descriptor: Option<&[u8]>,
 ) -> Result<Digest, PageError> {
     envelope_binding(
         form,
@@ -3808,7 +3694,6 @@ pub fn compute_envelope_binding(
         descriptor_binding_value,
         call_site_binding_value,
         route_binding_value,
-        inline_descriptor,
     )
 }
 
@@ -3825,7 +3710,6 @@ pub struct PageEnvelope {
     descriptor_binding: Digest,
     call_site_proof_binding: Digest,
     route_binding: Digest,
-    inline_descriptor: Option<Vec<u8>>,
     envelope_binding: Digest,
     wiped: bool,
 }
@@ -3860,17 +3744,7 @@ impl PageEnvelope {
         let descriptor_digest = descriptor_binding(&descriptor_encoding);
         let proof_digest = call_site_proof_binding(raw_call_site_proof)?;
         let locator_digest = route_binding(&route_encoding, &handle.locator_token())?;
-        let inline =
-            if ENVELOPE_FIXED_WIRE_SIZE + 4 + descriptor_encoding.len() <= MAX_ENVELOPE_SIZE {
-                Some(descriptor_encoding.clone())
-            } else {
-                None
-            };
-        let form = if inline.is_some() {
-            EnvelopeForm::InlineDescriptor
-        } else {
-            EnvelopeForm::CompactLocator
-        };
+        let form = EnvelopeForm::CompactLocator;
         let envelope_digest = envelope_binding(
             form,
             entry_token,
@@ -3883,7 +3757,6 @@ impl PageEnvelope {
             &descriptor_digest,
             &proof_digest,
             &locator_digest,
-            inline.as_deref(),
         )?;
         let result = Self {
             entry_token,
@@ -3897,7 +3770,6 @@ impl PageEnvelope {
             descriptor_binding: descriptor_digest,
             call_site_proof_binding: proof_digest,
             route_binding: locator_digest,
-            inline_descriptor: inline,
             envelope_binding: envelope_digest,
             wiped: false,
         };
@@ -3945,14 +3817,14 @@ impl PageEnvelope {
             copy_fixed::<DIGEST_SIZE>(&cursor.read_fixed(DIGEST_SIZE)?, "call-site binding")?;
         let route_digest =
             copy_fixed::<DIGEST_SIZE>(&cursor.read_fixed(DIGEST_SIZE)?, "route binding")?;
-        let inline = if form == EnvelopeForm::InlineDescriptor {
-            Some(cursor.read_frame(MAX_INLINE_DESCRIPTOR_SIZE, false, "inline descriptor")?)
-        } else {
-            None
-        };
         let envelope_digest =
             copy_fixed::<DIGEST_SIZE>(&cursor.read_fixed(DIGEST_SIZE)?, "envelope binding")?;
         cursor.require_empty()?;
+        if encoded.len() != ENVELOPE_FIXED_WIRE_SIZE {
+            return Err(PageError::InvalidInput(
+                "envelope compact record length is invalid",
+            ));
+        }
         let result = Self {
             entry_token,
             kind,
@@ -3965,7 +3837,6 @@ impl PageEnvelope {
             descriptor_binding: descriptor_digest,
             call_site_proof_binding: proof_digest,
             route_binding: route_digest,
-            inline_descriptor: inline,
             envelope_binding: envelope_digest,
             wiped: false,
         };
@@ -3986,20 +3857,9 @@ impl PageEnvelope {
             &self.descriptor_binding,
             &self.call_site_proof_binding,
             &self.route_binding,
-            self.inline_descriptor.as_deref(),
         )?;
         if !constant_time_eq(&expected, &self.envelope_binding) {
             return Err(PageError::AuthenticationFailed);
-        }
-        if self.form == EnvelopeForm::InlineDescriptor {
-            let descriptor = PageDescriptor::decode(
-                self.inline_descriptor
-                    .as_deref()
-                    .ok_or(PageError::InvalidInput("inline descriptor missing"))?,
-            )?;
-            if !self.matches_descriptor(&descriptor) {
-                return Err(PageError::BindingMismatch("inline descriptor"));
-            }
         }
         Ok(())
     }
@@ -4018,14 +3878,6 @@ impl PageEnvelope {
         writer.write(&self.descriptor_binding)?;
         writer.write(&self.call_site_proof_binding)?;
         writer.write(&self.route_binding)?;
-        if self.form == EnvelopeForm::InlineDescriptor {
-            writer.write_frame(
-                self.inline_descriptor
-                    .as_deref()
-                    .ok_or(PageError::InvalidInput("inline descriptor missing"))?,
-                "inline descriptor",
-            )?;
-        }
         writer.write(&self.envelope_binding)?;
         Ok(writer.finish())
     }
@@ -4048,10 +3900,6 @@ impl PageEnvelope {
 
     pub fn form(&self) -> EnvelopeForm {
         self.form
-    }
-
-    pub fn has_inline_descriptor(&self) -> bool {
-        self.form == EnvelopeForm::InlineDescriptor
     }
 
     pub fn encoded_size(&self) -> Result<usize, PageError> {
@@ -4109,13 +3957,6 @@ impl PageEnvelope {
             return Err(PageError::InvalidState("envelope has been wiped"));
         }
         Ok(self.route_binding)
-    }
-
-    pub fn inline_descriptor(&self) -> Result<Option<Vec<u8>>, PageError> {
-        if self.is_wiped() {
-            return Err(PageError::InvalidState("envelope has been wiped"));
-        }
-        Ok(self.inline_descriptor.clone())
     }
 
     pub fn matches_typed_bridge_request(
@@ -4210,11 +4051,7 @@ impl PageEnvelope {
         self.descriptor_binding.fill(0);
         self.call_site_proof_binding.fill(0);
         self.route_binding.fill(0);
-        if let Some(descriptor) = &mut self.inline_descriptor {
-            descriptor.fill(0);
-        }
         self.envelope_binding.fill(0);
-        self.inline_descriptor = None;
         self.wiped = true;
     }
 }
@@ -4233,7 +4070,6 @@ impl Clone for PageEnvelope {
             descriptor_binding: self.descriptor_binding,
             call_site_proof_binding: self.call_site_proof_binding,
             route_binding: self.route_binding,
-            inline_descriptor: self.inline_descriptor.clone(),
             envelope_binding: self.envelope_binding,
             wiped: self.wiped,
         }
@@ -4247,7 +4083,6 @@ impl fmt::Debug for PageEnvelope {
             .field("kind", &self.kind)
             .field("page_index", &self.page_index)
             .field("form", &self.form)
-            .field("has_inline_descriptor", &self.has_inline_descriptor())
             .finish()
     }
 }
@@ -4889,8 +4724,7 @@ mod tests {
             &layout_variant,
         )
         .expect("proof");
-        let evaluator = EvaluatorPlan::new(b"opaque-evaluator", &fingerprint).expect("evaluator");
-        let descriptor = PageDescriptor::new(route, proof, 1024, evaluator).expect("descriptor");
+        let descriptor = PageDescriptor::new(route, proof, 1024, 7).expect("descriptor");
         (handle, descriptor)
     }
 
@@ -5160,9 +4994,12 @@ mod tests {
         )
         .is_err());
         let reordered = encoded.clone();
-        let route_len =
-            u32::from_be_bytes(reordered[..4].try_into().expect("route length")) as usize;
-        let proof_start = 4 + route_len;
+        // Current compact layout: version byte, framed route, framed proof.
+        assert_eq!(reordered[0], CURRENT_DESCRIPTOR_VERSION);
+        let route_len = u32::from_be_bytes(
+            reordered[1..5].try_into().expect("route length"),
+        ) as usize;
+        let proof_start = 5 + route_len;
         let proof_len = u32::from_be_bytes(
             reordered[proof_start..proof_start + 4]
                 .try_into()
@@ -5176,7 +5013,7 @@ mod tests {
     }
 
     #[test]
-    fn envelope_authenticates_inline_and_compact_forms() {
+    fn envelope_authenticates_compact_form_and_rejects_legacy() {
         let (handle, descriptor) = descriptor_fixture();
         let envelope = PageEnvelope::create(
             0x0102_0304_0506_0708,
@@ -5185,8 +5022,9 @@ mod tests {
             b"call-site-proof",
         )
         .expect("envelope");
-        assert_eq!(envelope.form(), EnvelopeForm::InlineDescriptor);
+        assert_eq!(envelope.form(), EnvelopeForm::CompactLocator);
         let encoded = envelope.encode().expect("envelope encode");
+        assert_eq!(encoded.len(), ENVELOPE_FIXED_WIRE_SIZE);
         assert_eq!(encoded.len(), envelope.encoded_size().expect("size"));
         let decoded = PageEnvelope::decode(&encoded).expect("envelope decode");
         assert!(decoded.matches_current_page(
@@ -5204,30 +5042,30 @@ mod tests {
         assert!(PageEnvelope::decode(&encoded[..encoded.len() - 1]).is_err());
         assert!(PageEnvelope::decode(&[encoded.clone(), encoded.clone()].concat()).is_err());
 
-        let opaque = vec![0x77; 10_000];
-        let evaluator =
-            EvaluatorPlan::new(&opaque, &handle.evaluator_fingerprint()).expect("large evaluator");
-        let compact = PageDescriptor::from_metadata(
+        // Legacy inline (form 1) and retired compact (form 2) envelope
+        // encodings fail closed at parse on the leading form byte.
+        let mut legacy_inline = encoded.clone();
+        legacy_inline[0] = 1;
+        assert!(PageEnvelope::decode(&legacy_inline).is_err());
+        let mut legacy_compact = encoded.clone();
+        legacy_compact[0] = 2;
+        assert!(PageEnvelope::decode(&legacy_compact).is_err());
+
+        // A secret slot change rebinds the descriptor, so the original
+        // envelope no longer matches.
+        let reslotted = PageDescriptor::from_metadata(
             descriptor.leaf_identity().clone(),
             descriptor.route().clone(),
             descriptor.proof().clone(),
             descriptor.target_page_size(),
-            evaluator,
+            descriptor.secret_slot() + 1,
         )
-        .expect("compact descriptor");
-        let compact_envelope = PageEnvelope::create(9, &handle, &compact, b"call-site-proof")
-            .expect("compact envelope");
-        assert_eq!(compact_envelope.form(), EnvelopeForm::CompactLocator);
-        assert!(!compact_envelope.has_inline_descriptor());
-        let compact_bytes = compact_envelope.encode().expect("compact encode");
-        assert_eq!(
-            PageEnvelope::decode(&compact_bytes)
-                .expect("compact decode")
-                .form(),
-            EnvelopeForm::CompactLocator
-        );
-        assert!(compact_envelope.matches_descriptor(&compact));
-        assert!(!compact_envelope.matches_descriptor(&descriptor));
+        .expect("reslotted descriptor");
+        let reslotted_envelope = PageEnvelope::create(9, &handle, &reslotted, b"call-site-proof")
+            .expect("reslotted envelope");
+        assert_eq!(reslotted_envelope.form(), EnvelopeForm::CompactLocator);
+        assert!(reslotted_envelope.matches_descriptor(&reslotted));
+        assert!(!reslotted_envelope.matches_descriptor(&descriptor));
     }
 
     #[test]

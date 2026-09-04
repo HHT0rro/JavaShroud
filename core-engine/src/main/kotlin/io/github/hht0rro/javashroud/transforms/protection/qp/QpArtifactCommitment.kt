@@ -622,7 +622,7 @@ class QpLeafIdentity private constructor(
         return try {
             encoded = handle.encoded
             locator = handle.locatorToken
-            fingerprint = handle.evaluatorPlanFingerprint
+            fingerprint = handle.keyCommitmentFingerprint
             handle.resourceKind == resourceKind &&
                 handle.pageIndex == pageIndex &&
                 Arrays.equals(encoded, handleEncodingValue) &&
@@ -666,7 +666,7 @@ class QpLeafIdentity private constructor(
             return try {
                 encoded = handle.encoded
                 locator = handle.locatorToken
-                fingerprint = handle.evaluatorPlanFingerprint
+                fingerprint = handle.keyCommitmentFingerprint
                 of(
                     resourceKind = handle.resourceKind,
                     pageIndex = handle.pageIndex,

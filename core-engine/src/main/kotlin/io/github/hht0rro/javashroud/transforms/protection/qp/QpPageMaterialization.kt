@@ -453,19 +453,19 @@ internal object QpPageMaterializer {
                                 layoutVariant = page.layoutVariant,
                                 logicalBindingPath = input.logicalBindingPath,
                             )
-                            return PageDraft(
-                                handle = handle,
-                                leafIdentity = leafIdentity,
-                                logicalIdentity = logicalIdentity,
-                                leafEncoding = leafEncoding,
-                                encodedPayload = payload,
-                                route = route,
-                                targetPageSize = page.targetSize,
-                                evaluatorPlan = runtimeEvaluatorPlanFor(page, route, callSiteProof),
-                                codecVariant = page.codecVariant,
-                                layoutVariant = page.layoutVariant,
-                                callSiteProof = callSiteProof,
-                            )
+            return PageDraft(
+                handle = handle,
+                leafIdentity = leafIdentity,
+                logicalIdentity = logicalIdentity,
+                leafEncoding = leafEncoding,
+                encodedPayload = payload,
+                route = route,
+                targetPageSize = page.targetSize,
+                secretSlot = page.secretSlot,
+                codecVariant = page.codecVariant,
+                layoutVariant = page.layoutVariant,
+                callSiteProof = callSiteProof,
+            )
                         } finally {
                             Arrays.fill(callSiteProof, 0)
                         }
@@ -495,7 +495,7 @@ internal object QpPageMaterializer {
                 route = draft.route,
                 proof = metadata,
                 targetPageSize = draft.targetPageSize,
-                evaluatorPlan = draft.evaluatorPlan,
+                secretSlot = draft.secretSlot,
             )
         } finally {
             Arrays.fill(logicalIdentity, 0)
@@ -551,9 +551,6 @@ internal object QpPageMaterializer {
         val proofCommitment = descriptorProof.artifactCanonicalCommitment
         val descriptorCallSiteProof = descriptorProof.callSiteProof
         val expectedCallSiteProof = draft.copyCallSiteProof()
-        val evaluatorPlan = descriptor.evaluatorPlan
-        val evaluatorFingerprint = evaluatorPlan.fingerprint
-        val routeFingerprint = route.evaluatorFingerprint
         val routeHandleEncoding = route.handleEncoding
         val routeLocatorToken = route.locatorToken
         try {
@@ -596,23 +593,6 @@ internal object QpPageMaterializer {
             require(MessageDigest.isEqual(proofCommitment, artifactCommitment)) {
                 "Qp materialized proof commitment does not match the build plan"
             }
-            require(MessageDigest.isEqual(evaluatorFingerprint, routeFingerprint)) {
-                "Qp materialized evaluator fingerprint does not match the routed page"
-            }
-            require(
-                evaluatorPlan.matchesDescriptorBinding(
-                    resourceKind = route.resourceKind,
-                    logicalIdentity = descriptorLogicalIdentity,
-                    pageIndex = route.pageIndex,
-                    targetPageSize = descriptor.targetPageSize,
-                    route = route,
-                    proof = descriptorProof,
-                    handleEncoding = routeHandleEncoding,
-                    locatorToken = routeLocatorToken,
-                ),
-            ) {
-                "Qp materialized evaluator graph does not match the route/AAD binding"
-            }
             require(proofMatchesExpectedMesh(descriptorProof, draft.leafIdentity, artifactCommitment, proof)) {
                 "Qp materialized descriptor proof does not match the generated Merkle path"
             }
@@ -630,8 +610,6 @@ internal object QpPageMaterializer {
             Arrays.fill(proofCommitment, 0)
             Arrays.fill(descriptorCallSiteProof, 0)
             Arrays.fill(expectedCallSiteProof, 0)
-            Arrays.fill(evaluatorFingerprint, 0)
-            Arrays.fill(routeFingerprint, 0)
             Arrays.fill(routeHandleEncoding, 0)
             Arrays.fill(routeLocatorToken, 0)
             descriptorHandle.wipe()
@@ -697,26 +675,9 @@ internal object QpPageMaterializer {
     }
 
     /**
-     * New production descriptors carry one opaque page-bound terminal.  The
-     * compatibility legacy fragment fragment graph remains build-only and is never
-     * serialized into a newly materialized artifact.
+     * New production descriptors carry the native secret-pack slot only. No
+     * evaluator terminal, fragment graph, or key material leaves the build.
      */
-    private fun runtimeEvaluatorPlanFor(
-        page: QpBuildPlan.Page,
-        route: QpRouteMetadata,
-        callSiteProof: ByteArray,
-    ): QpEvaluatorPlan {
-        val evaluator = page.evaluatorPlan
-        val fingerprint = evaluator.fingerprint
-        var boundPlan: QpBoundPlan? = null
-        try {
-            boundPlan = evaluator.boundPlanForRuntime(route, callSiteProof)
-            return QpEvaluatorPlan.createBound(checkNotNull(boundPlan), fingerprint)
-        } finally {
-            Arrays.fill(fingerprint, 0)
-        }
-    }
-
     private fun pageKey(page: QpBuildPlan.Page): String {
         val encoded = page.handle.encoded
         return try {
@@ -734,7 +695,7 @@ internal object QpPageMaterializer {
         encodedPayload: ByteArray,
         val route: QpRouteMetadata,
         val targetPageSize: Int,
-        val evaluatorPlan: QpEvaluatorPlan,
+        val secretSlot: Int,
         val codecVariant: String,
         val layoutVariant: String,
         callSiteProof: ByteArray,

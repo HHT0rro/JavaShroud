@@ -98,7 +98,7 @@ internal class QpNameSchedule private constructor(
     }
 
     companion object {
-        const val CURRENT_VERSION: Int = 1
+        const val CURRENT_VERSION: Int = 2
         const val NAME_SEED_SIZE: Int = 16
         const val COMMITMENT_SIZE: Int = 32
         private const val INFO_PREFIX: Byte = 0x51

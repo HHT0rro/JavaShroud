@@ -1,6 +1,7 @@
 #![allow(unsafe_code, clippy::not_unsafe_ptr_arg_deref)]
 
 mod relocation;
+mod secret_pack;
 mod specialization;
 mod sensitive_memory;
 
@@ -19,6 +20,23 @@ use qp_page::{ArtifactDirectory, MAX_FRAME_SIZE};
 use qp_runtime::{
     OpenedPage, PageKind, PageRequest, RouterError, Runtime, RuntimeError, TypedPageRouter,
 };
+use secret_pack::SecretPackState;
+use std::sync::Arc;
+
+/// Router-facing authority delegating to the shared secret pack so the
+/// bridge can revoke recombined material without dropping the boxed trait.
+struct SecretPackRouterAuthority {
+    pack: Arc<SecretPackState>,
+}
+
+impl qp_runtime::PageKeyAuthority for SecretPackRouterAuthority {
+    fn derive_page_key(
+        &self,
+        request: &qp_runtime::PageKeyRequest<'_>,
+    ) -> Result<qp_runtime::PageKeyMaterial, RouterError> {
+        self.pack.derive_page_key(request)
+    }
+}
 
 const MAX_TARGET_LENGTH: usize = 64;
 
@@ -357,9 +375,18 @@ mod jni_bridge {
         registered_class: Option<usize>,
         target_handle_cache: BTreeMap<[u8; DIGEST_SIZE], usize>,
         router: TypedPageRouter,
+        secret_pack: Option<Arc<SecretPackState>>,
     }
 
     impl BridgeState {
+        /// Wipes the recombined secret pack, if any. Used by defense
+        /// violation paths and state resets.
+        fn revoke_secret_pack(&self) {
+            if let Some(pack) = self.secret_pack.as_ref() {
+                pack.revoke();
+            }
+        }
+
         fn install_token_binding(
             &mut self,
             commitment: [u8; DIGEST_SIZE],
@@ -451,6 +478,10 @@ mod jni_bridge {
             self.defense_profile = None;
             self.target_handle_cache.clear();
             self.router.clear();
+            if let Some(pack) = self.secret_pack.as_ref() {
+                pack.revoke();
+            }
+            self.secret_pack = None;
         }
 
         fn take_target_handle_refs(&mut self) -> Vec<usize> {
@@ -490,6 +521,14 @@ mod jni_bridge {
             }
         }
 
+        fn from_code(value: JInt) -> Result<Self, BridgeFailure> {
+            match value {
+                1 => Ok(Self::Balanced),
+                2 => Ok(Self::Hardened),
+                _ => Err(BridgeFailure("Qp unified defense profile code is invalid")),
+            }
+        }
+
         fn label(self) -> &'static [u8] {
             match self {
                 Self::Balanced => b"balanced",
@@ -515,6 +554,15 @@ mod jni_bridge {
             }
         }
 
+        fn from_code(value: JInt) -> Result<Self, BridgeFailure> {
+            match value {
+                1 => Ok(Self::OsAntiDebug),
+                2 => Ok(Self::OsAntiVm),
+                3 => Ok(Self::AbiProbe),
+                _ => Err(BridgeFailure("Qp unified defense surface code is invalid")),
+            }
+        }
+
         fn mask(self) -> u8 {
             match self {
                 Self::OsAntiDebug => DEFENSE_DEBUG_SURFACE,
@@ -537,6 +585,22 @@ mod jni_bridge {
         bridge_state()
             .lock()
             .map_err(|_| BridgeFailure("Qp bridge state is poisoned"))
+    }
+
+    /// Defense violations wipe the recombined secret pack; later page opens
+    /// fail closed until a fresh bridge session rebuilds it.
+    fn revoke_global_secret_pack() {
+        if let Ok(state) = lock_state() {
+            state.revoke_secret_pack();
+        }
+    }
+
+    /// Reconstructs the artifact's VM dialect corpus from the generated
+    /// specialization. Builds without a corpus fail closed.
+    fn vm_dialect_corpus() -> Result<qp_vm::VmDialectCorpus, RouterError> {
+        let opcodes = specialization::vm_dialect_semantic_opcodes();
+        qp_vm::VmDialectCorpus::from_opcodes(&opcodes)
+            .map_err(|_| RouterError::AuthenticationFailed)
     }
 
     fn wipe(bytes: &mut [u8]) {
@@ -2861,6 +2925,34 @@ mod jni_bridge {
         if detected
             && !(surface == DefenseSurface::OsAntiVm && profile == Some(DefenseProfile::Balanced))
         {
+            revoke_global_secret_pack();
+            return Err(BridgeFailure(
+                "Qp unified defense detected a protected-host violation",
+            ));
+        }
+        Ok(())
+    }
+
+    fn probe_defense_surface_code(
+        surface: DefenseSurface,
+        point_code: JInt,
+        profile: Option<DefenseProfile>,
+    ) -> Result<(), BridgeFailure> {
+        if point_code == 0 {
+            return Err(BridgeFailure("Qp unified defense probe point code is invalid"));
+        }
+        if surface == DefenseSurface::AbiProbe {
+            return Ok(());
+        }
+        let detected = match surface {
+            DefenseSurface::OsAntiDebug => detect_debugger()?,
+            DefenseSurface::OsAntiVm => detect_virtual_machine()?,
+            DefenseSurface::AbiProbe => false,
+        };
+        if detected
+            && !(surface == DefenseSurface::OsAntiVm && profile == Some(DefenseProfile::Balanced))
+        {
+            revoke_global_secret_pack();
             return Err(BridgeFailure(
                 "Qp unified defense detected a protected-host violation",
             ));
@@ -3174,6 +3266,19 @@ mod jni_bridge {
         let mut name_seed = [0u8; qp_crypto::QP_NAME_SEED_SIZE];
         name_seed.copy_from_slice(&directory.name_seed);
         state.install_token_binding(artifact_commitment, name_seed)?;
+        // The catalog and session are authenticated: the artifact-specific
+        // secret pack may now recombine. The authority refuses to arm when
+        // the specialization carries no secret slots, so a catalog without a
+        // generated native pack fails closed here.
+        if state.secret_pack.is_none() {
+            let pack = Arc::new(SecretPackState::from_specialization());
+            pack.authorize(true)
+                .map_err(|_| BridgeFailure("Qp native secret pack is unavailable"))?;
+            state.router.bind_page_key_authority(Box::new(SecretPackRouterAuthority {
+                pack: Arc::clone(&pack),
+            }));
+            state.secret_pack = Some(pack);
+        }
         let installed = state
             .router
             .install_catalog_descriptor_bound(&directory, &stored)
@@ -3218,15 +3323,10 @@ mod jni_bridge {
         Ok(1)
     }
 
-    fn native_initialize_defense_inner(
-        env: JNIEnv,
-        surface: JString,
-        profile: JString,
+    fn initialize_defense_values(
+        surface: DefenseSurface,
+        profile: DefenseProfile,
     ) -> Result<JInt, BridgeFailure> {
-        let surface = unsafe { copy_string(env, surface) }?;
-        let profile = unsafe { copy_string(env, profile) }?;
-        let surface = DefenseSurface::parse(&surface)?;
-        let profile = DefenseProfile::parse(&profile)?;
         {
             let state = lock_state()?;
             if !state.initialized {
@@ -3258,6 +3358,26 @@ mod jni_bridge {
         Ok(QP_R1_OK)
     }
 
+    fn native_initialize_defense_inner(
+        env: JNIEnv,
+        surface: JString,
+        profile: JString,
+    ) -> Result<JInt, BridgeFailure> {
+        let surface = unsafe { copy_string(env, surface) }?;
+        let profile = unsafe { copy_string(env, profile) }?;
+        initialize_defense_values(DefenseSurface::parse(&surface)?, DefenseProfile::parse(&profile)?)
+    }
+
+    fn native_initialize_defense_code_inner(
+        surface_code: JInt,
+        profile_code: JInt,
+    ) -> Result<JInt, BridgeFailure> {
+        initialize_defense_values(
+            DefenseSurface::from_code(surface_code)?,
+            DefenseProfile::from_code(profile_code)?,
+        )
+    }
+
     fn native_probe_defense_inner(
         env: JNIEnv,
         surface: JString,
@@ -3286,6 +3406,30 @@ mod jni_bridge {
         Ok(QP_R1_OK)
     }
 
+    fn native_probe_defense_code_inner(
+        surface_code: JInt,
+        point_code: JInt,
+    ) -> Result<JInt, BridgeFailure> {
+        let surface = DefenseSurface::from_code(surface_code)?;
+        {
+            let state = lock_state()?;
+            if !state.initialized || state.session_nonce.is_none() {
+                return Err(BridgeFailure(
+                    "Qp unified defense bridge state is incomplete",
+                ));
+            }
+            if state.defense_surface_mask & surface.mask() == 0 {
+                return Err(BridgeFailure("Qp unified defense surface is not armed"));
+            }
+        }
+        let profile = {
+            let state = lock_state()?;
+            state.defense_profile
+        };
+        probe_defense_surface_code(surface, point_code, profile)?;
+        Ok(QP_R1_OK)
+    }
+
     fn native_transform_defense_inner(
         env: JNIEnv,
         material: JByteArray,
@@ -3297,6 +3441,27 @@ mod jni_bridge {
         }
         let binding = unsafe { copy_string(env, binding) }?;
         validate_defense_label(&binding, "Qp unified defense binding is invalid")?;
+        let mut share = {
+            let state = lock_state()?;
+            defense_share(&state, material.as_bytes(), &binding)?
+        };
+        let result = unsafe { new_byte_array(env, &share) }.ok_or(BridgeFailure(
+            "Qp unified defense output allocation failed",
+        ));
+        wipe(&mut share);
+        result
+    }
+
+    fn native_transform_defense_code_inner(
+        env: JNIEnv,
+        material: JByteArray,
+        binding_code: JInt,
+    ) -> Result<JByteArray, BridgeFailure> {
+        let material = unsafe { copy_byte_array(env, material, 4096) }?;
+        if material.as_bytes().is_empty() || binding_code == 0 {
+            return Err(BridgeFailure("Qp unified defense coded material is invalid"));
+        }
+        let binding = binding_code.to_be_bytes();
         let mut share = {
             let state = lock_state()?;
             defense_share(&state, material.as_bytes(), &binding)?
@@ -4034,6 +4199,21 @@ mod jni_bridge {
         }
     }
 
+    unsafe extern "system" fn native_initialize_defense_code(
+        _env: JNIEnv,
+        _class: JClass,
+        surface_code: JInt,
+        profile_code: JInt,
+    ) -> JInt {
+        match native_initialize_defense_code_inner(surface_code, profile_code) {
+            Ok(result) => result,
+            Err(failure) => {
+                throw_new(_env, failure.0.as_bytes());
+                JNI_ERR
+            }
+        }
+    }
+
     unsafe extern "system" fn native_probe_defense(
         env: JNIEnv,
         _class: JClass,
@@ -4049,6 +4229,21 @@ mod jni_bridge {
         }
     }
 
+    unsafe extern "system" fn native_probe_defense_code(
+        env: JNIEnv,
+        _class: JClass,
+        surface_code: JInt,
+        point_code: JInt,
+    ) -> JInt {
+        match native_probe_defense_code_inner(surface_code, point_code) {
+            Ok(result) => result,
+            Err(failure) => {
+                throw_new(env, failure.0.as_bytes());
+                JNI_ERR
+            }
+        }
+    }
+
     unsafe extern "system" fn native_transform_defense(
         env: JNIEnv,
         _class: JClass,
@@ -4056,6 +4251,21 @@ mod jni_bridge {
         binding: JString,
     ) -> JByteArray {
         match native_transform_defense_inner(env, material, binding) {
+            Ok(result) => result,
+            Err(failure) => {
+                throw_new(env, failure.0.as_bytes());
+                core::ptr::null_mut()
+            }
+        }
+    }
+
+    unsafe extern "system" fn native_transform_defense_code(
+        env: JNIEnv,
+        _class: JClass,
+        material: JByteArray,
+        binding_code: JInt,
+    ) -> JByteArray {
+        match native_transform_defense_code_inner(env, material, binding_code) {
             Ok(result) => result,
             Err(failure) => {
                 throw_new(env, failure.0.as_bytes());
@@ -4115,11 +4325,14 @@ mod jni_bridge {
             return core::ptr::null_mut();
         }
         let result = match open_page_route_vm(env, _entry_token, packed) {
-            Ok(opened) => match opened.parse_vm_with_material(
-                specialization::VM_CRYPTO_DOMAIN,
-                specialization::VM_LAYOUT_DIGEST,
-                vm_state_binding(opened.entry_token(), opened.logical_binding_path()).as_bytes(),
-            ) {
+            Ok(opened) => match vm_dialect_corpus().and_then(|corpus| {
+                opened.parse_vm_with_material(
+                    specialization::VM_CRYPTO_DOMAIN,
+                    specialization::VM_LAYOUT_DIGEST,
+                    vm_state_binding(opened.entry_token(), opened.logical_binding_path()).as_bytes(),
+                    &corpus,
+                )
+            }) {
                 Ok(program) => {
                     match copy_vm_arguments(env, args, &program) {
                     Ok(arguments) => {
@@ -4239,7 +4452,7 @@ mod jni_bridge {
         }
     }
 
-    fn registered_methods() -> [JniNativeMethod; 12] {
+    fn registered_methods() -> [JniNativeMethod; 15] {
         [
             JniNativeMethod {
                 name: b"nativeInit\0".as_ptr().cast(),
@@ -4302,6 +4515,21 @@ mod jni_bridge {
                 name: b"nativeInvokeSite\0".as_ptr().cast(),
                 signature: b"(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[B[Ljava/lang/Object;Z)Ljava/lang/Object;\0".as_ptr().cast(),
                 fn_ptr: native_invoke_site as *mut c_void,
+            },
+            JniNativeMethod {
+                name: b"nativeInitializeDefenseCode\0".as_ptr().cast(),
+                signature: b"(II)I\0".as_ptr().cast(),
+                fn_ptr: native_initialize_defense_code as *mut c_void,
+            },
+            JniNativeMethod {
+                name: b"nativeProbeDefenseCode\0".as_ptr().cast(),
+                signature: b"(II)I\0".as_ptr().cast(),
+                fn_ptr: native_probe_defense_code as *mut c_void,
+            },
+            JniNativeMethod {
+                name: b"nativeTransformDefenseCode\0".as_ptr().cast(),
+                signature: b"([BI)[B\0".as_ptr().cast(),
+                fn_ptr: native_transform_defense_code as *mut c_void,
             },
         ]
     }
@@ -4563,7 +4791,8 @@ mod jni_bridge {
             remapped_names.push(owned);
         }
         let base = registered_methods();
-        let methods: [JniNativeMethod; 12] = core::array::from_fn(|index| JniNativeMethod {
+        let methods: [JniNativeMethod; crate::relocation::TYPED_NATIVE_METHOD_COUNT] =
+            core::array::from_fn(|index| JniNativeMethod {
             name: remapped_names[index].as_ptr(),
             signature: base[index].signature,
             fn_ptr: base[index].fn_ptr,
@@ -4634,7 +4863,7 @@ mod jni_bridge {
         use std::collections::BTreeSet;
         use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 
-        const EXPECTED_ROUTES: [(&str, &str); 12] = [
+        const EXPECTED_ROUTES: [(&str, &str); 15] = [
             ("nativeInit", "(Ljava/lang/String;)I"),
             ("nativeHeartbeat", "()I"),
             ("nativeInstallSessionNonce", "([B)Z"),
@@ -4659,6 +4888,9 @@ mod jni_bridge {
                 "nativeInvokeSite",
                 "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[B[Ljava/lang/Object;Z)Ljava/lang/Object;",
             ),
+            ("nativeInitializeDefenseCode", "(II)I"),
+            ("nativeProbeDefenseCode", "(II)I"),
+            ("nativeTransformDefenseCode", "([BI)[B"),
         ];
 
         static REGISTER_CALLS: AtomicUsize = AtomicUsize::new(0);

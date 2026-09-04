@@ -98,6 +98,10 @@ internal class QpDialectDescriptor private constructor(
 
         internal fun fromStream(stream: ByteArray): QpDialectDescriptor {
             require(stream.size >= 256) { "VM dialect stream is truncated" }
+            // The fused superoperator semantic id is stream-derived on both the
+            // Kotlin serializer and the native parser, so no fixed fused anchor
+            // exists in any artifact.
+            val fusedSemantic = 0x100 or (stream[0].toInt() and 0x7F)
             val live = LIVE_OPCODES.copyOf()
             var offset = 0
             for (i in live.size - 1 downTo 1) {
@@ -116,22 +120,31 @@ internal class QpDialectDescriptor private constructor(
                 encode[semantic] = encoded
                 decode[encoded] = semantic
             }
-            encode[FUSED_IADD_DUP] = FUSED_IADD_DUP xor (stream[0].toInt() and 0x7F) or 0x100
-            decode[encode[FUSED_IADD_DUP]] = FUSED_IADD_DUP
+            encode[fusedSemantic] = fusedSemantic
+            decode[fusedSemantic] = fusedSemantic
             val handlerOrder = IntArray(live.size) { live[it] }
             val operandMix = stream[32].toInt() and 0xFF
             val dispatchFamily = stream[33].toInt() and 3
-            val fusedOpcode = encode[FUSED_IADD_DUP]
+            val fusedOpcode = fusedSemantic
             val commitment = MessageDigest.getInstance("SHA-256").apply {
                 update(DOMAIN)
                 live.forEach { opcode ->
                     update(((opcode ushr 8) and 0xFF).toByte())
                     update((opcode and 0xFF).toByte())
                 }
+                update(((fusedSemantic ushr 8) and 0xFF).toByte())
+                update((fusedSemantic and 0xFF).toByte())
                 update(operandMix.toByte())
                 update(dispatchFamily.toByte())
             }.digest()
             return QpDialectDescriptor(encode, decode, handlerOrder, operandMix, dispatchFamily, fusedOpcode, commitment)
         }
+
+        /**
+         * Semantic opcode corpus for the generated native specialization. The
+         * corpus is emitted only as XOR-masked shard material; the plain table
+         * never appears in a compiled artifact.
+         */
+        internal fun semanticOpcodesForSpecialization(): IntArray = LIVE_OPCODES.copyOf()
     }
 }

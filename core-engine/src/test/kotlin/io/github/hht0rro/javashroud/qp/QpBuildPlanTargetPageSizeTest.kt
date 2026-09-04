@@ -15,7 +15,7 @@ class QpBuildPlanTargetPageSizeTest {
         val commitment = ByteArray(32) { index -> (index * 17 + 3).toByte() }
         val identity = "fixture:qp:qp-target-override".encodeToByteArray()
         val plan = try {
-            QpBuildPlan.create(commitment, FirstChoiceSecureRandom())
+            QpBuildPlan.create(commitment, testSecretPackDraft(), FirstChoiceSecureRandom())
         } finally {
             Arrays.fill(commitment, 0)
         }

@@ -7,7 +7,6 @@ import io.github.hht0rro.javashroud.transforms.protection.qp.QpLeafIdentity
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpPageEnvelope
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpResourceKind
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpRouteMetadata
-import io.github.hht0rro.javashroud.transforms.protection.qp.QpEvaluatorPlan
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpPageDescriptor
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpProofMetadata
 import java.util.Arrays
@@ -16,20 +15,19 @@ import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
-import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class QpPageEnvelopeTest {
     @Test
-    fun inline_envelope_round_trips_strictly_and_binds_only_its_current_page() {
+    fun compact_envelope_round_trips_strictly_and_binds_only_its_current_page() {
         val fixture = fixture(seed = 1_213, callSiteProof = byteArrayOf(0x11, 0x22, 0x33, 0x44))
         var envelope: QpPageEnvelope? = null
         var parsed: QpPageEnvelope? = null
         var encoded: ByteArray? = null
         var tampered: ByteArray? = null
         var trailing: ByteArray? = null
+        var legacyForm: ByteArray? = null
         var handleEncoding: ByteArray? = null
-        var inline: ByteArray? = null
         var expectedDescriptor: ByteArray? = null
         try {
             envelope = QpPageEnvelope.create(
@@ -38,7 +36,6 @@ class QpPageEnvelopeTest {
                 descriptor = fixture.descriptor,
                 rawCallSiteProof = fixture.callSiteProof,
             )
-            assertTrue(envelope.hasInlineDescriptor)
             assertTrue(envelope.encodedSize <= QpPageEnvelope.MAX_ENCODED_SIZE)
             assertTrue(envelope.matchesDescriptor(fixture.descriptor))
 
@@ -57,7 +54,6 @@ class QpPageEnvelopeTest {
             assertEquals(envelope.encodedSize, encoded.size)
             assertTrue(encoded.size <= QpPageEnvelope.MAX_ENCODED_SIZE)
             parsed = QpPageEnvelope.decode(encoded)
-            assertTrue(parsed.hasInlineDescriptor)
             assertTrue(parsed.matchesDescriptor(fixture.descriptor))
             assertTrue(
                 parsed.matchesTypedBridgeRequest(
@@ -77,9 +73,11 @@ class QpPageEnvelopeTest {
                 "the native locator envelope cannot replace the typed JNI raw proof argument",
             )
 
-            inline = parsed.copyInlineDescriptorEncodingForCurrentPage()
+            // The compact locator carries only fixed-size bindings; the
+            // descriptor encoding itself never travels inline.
             expectedDescriptor = fixture.descriptor.encode()
-            assertContentEquals(expectedDescriptor, checkNotNull(inline))
+            assertEquals(ENVELOPE_FIXED_SIZE, encoded.size)
+            assertTrue(encoded.size < expectedDescriptor.size)
 
             val mutableCopy = parsed.copyEncodedHandleForCurrentPage()
             val retainedCopy = parsed.copyEncodedHandleForCurrentPage()
@@ -114,6 +112,14 @@ class QpPageEnvelopeTest {
             trailing = encoded + 0x66
             assertFailsWith<IllegalArgumentException> { QpPageEnvelope.decode(trailing) }
 
+            // Legacy inline (1) and retired compact (2) forms fail closed.
+            legacyForm = encoded.copyOf().also { it[0] = 1 }
+            assertFailsWith<IllegalArgumentException> { QpPageEnvelope.decode(legacyForm) }
+            legacyForm = encoded.copyOf().also { it[0] = 2 }
+            assertFailsWith<IllegalArgumentException> { QpPageEnvelope.decode(legacyForm) }
+            legacyForm = encoded.copyOf().also { it[0] = 4 }
+            assertFailsWith<IllegalArgumentException> { QpPageEnvelope.decode(legacyForm) }
+
             val wrongProof = fixture.callSiteProof.copyOf()
             try {
                 wrongProof[0] = (wrongProof[0].toInt() xor 0x17).toByte()
@@ -147,47 +153,36 @@ class QpPageEnvelopeTest {
             encoded?.let { Arrays.fill(it, 0) }
             tampered?.let { Arrays.fill(it, 0) }
             trailing?.let { Arrays.fill(it, 0) }
+            legacyForm?.let { Arrays.fill(it, 0) }
             handleEncoding?.let { Arrays.fill(it, 0) }
-            inline?.let { Arrays.fill(it, 0) }
             expectedDescriptor?.let { Arrays.fill(it, 0) }
             fixture.wipe()
         }
     }
 
     @Test
-    fun maximum_legal_call_site_proof_uses_compact_descriptor_binding_and_stays_within_bounded_locator_record_limit() {
+    fun maximum_legal_call_site_proof_stays_within_the_bounded_locator_record() {
         val proof = ByteArray(4096) { index -> (index * 31 + 7).toByte() }
         val fixture = fixture(seed = 1_307, callSiteProof = proof)
         Arrays.fill(proof, 0)
         var envelope: QpPageEnvelope? = null
         var parsed: QpPageEnvelope? = null
         var encoded: ByteArray? = null
-        var rawDescriptor: ByteArray? = null
         var handleEncoding: ByteArray? = null
         var artifactCommitment: ByteArray? = null
         try {
-            rawDescriptor = fixture.descriptor.encode()
-            assertTrue(
-                rawDescriptor.size > QpPageEnvelope.MAX_ENCODED_SIZE,
-                "the existing descriptor encoding exceeds the typed JNI proof slot at the legal 4096-byte proof maximum",
-            )
-
             envelope = QpPageEnvelope.create(
                 entryToken = -0x0102_0304_0506_0708L,
                 handle = fixture.handle,
                 descriptor = fixture.descriptor,
                 rawCallSiteProof = fixture.callSiteProof,
             )
-            assertFalse(envelope.hasInlineDescriptor)
-            assertNull(envelope.copyInlineDescriptorEncodingForCurrentPage())
             encoded = envelope.encode()
             assertEquals(envelope.encodedSize, encoded.size)
+            assertEquals(ENVELOPE_FIXED_SIZE, encoded.size)
             assertTrue(encoded.size <= QpPageEnvelope.MAX_ENCODED_SIZE)
-            assertTrue(encoded.size < rawDescriptor.size)
 
             parsed = QpPageEnvelope.decode(encoded)
-            assertFalse(parsed.hasInlineDescriptor)
-            assertNull(parsed.copyInlineDescriptorEncodingForCurrentPage())
             handleEncoding = fixture.handle.encoded
             assertTrue(
                 parsed.matchesCurrentPage(
@@ -226,7 +221,6 @@ class QpPageEnvelopeTest {
             parsed?.wipe()
             envelope?.wipe()
             encoded?.let { Arrays.fill(it, 0) }
-            rawDescriptor?.let { Arrays.fill(it, 0) }
             handleEncoding?.let { Arrays.fill(it, 0) }
             artifactCommitment?.let { Arrays.fill(it, 0) }
             fixture.wipe()
@@ -235,7 +229,7 @@ class QpPageEnvelopeTest {
 
     private fun fixture(seed: Int, callSiteProof: ByteArray): Fixture {
         val commitment = ByteArray(QpArtifactCommitment.DIGEST_SIZE) { index -> (seed + index * 19).toByte() }
-        val plan = QpBuildPlan.create(commitment, DeterministicSecureRandom(seed))
+        val plan = QpBuildPlan.create(commitment, testSecretPackDraft(), DeterministicSecureRandom(seed))
         var page: QpBuildPlan.Page? = null
         var copiedProof: ByteArray? = null
         try {
@@ -262,22 +256,13 @@ class QpPageEnvelopeTest {
                 codecVariant = page.codecVariant,
                 layoutVariant = page.layoutVariant,
             )
-            val fingerprint = page.evaluatorPlan.fingerprint
-            val evaluatorPlan = try {
-                QpEvaluatorPlan.createBound(
-                    page.evaluatorPlan.boundPlanForRuntime(route, proof.callSiteProof),
-                    fingerprint,
-                )
-            } finally {
-                fingerprint.fill(0)
-            }
             val descriptor = QpPageDescriptor.create(
                 handle = page.handle,
                 logicalIdentity = page.logicalIdentity,
                 route = route,
                 proof = proof,
                 targetPageSize = page.targetSize,
-                evaluatorPlan = evaluatorPlan,
+                secretSlot = page.secretSlot,
             )
             return Fixture(page.handle, descriptor, checkNotNull(copiedProof), plan).also {
                 page = null
@@ -350,5 +335,11 @@ class QpPageEnvelopeTest {
             state = state * 1_103_515_245 + 12_345
             return state
         }
+    }
+
+    private companion object {
+        /** form + entry token + kind + index + handle + locator + commitment + 5 bindings. */
+        private const val ENVELOPE_FIXED_SIZE: Int =
+            1 + Long.SIZE_BYTES + 1 + Int.SIZE_BYTES + 24 + 16 + 32 + 32 + 32 + 32 + 32 + 32
     }
 }

@@ -2,7 +2,6 @@ package io.github.hht0rro.javashroud.qp
 
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpArtifactCommitment
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpArtifactEntry
-import io.github.hht0rro.javashroud.transforms.protection.qp.QpBoundPlan
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpBuildPlan
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpCanonicalExclusionKind
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpCanonicalExclusionRange
@@ -12,7 +11,6 @@ import io.github.hht0rro.javashroud.transforms.protection.qp.QpPageMaterializati
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpPageMaterializer
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpResourceKind
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpPageDescriptor
-import io.github.hht0rro.javashroud.transforms.protection.qp.QpEvaluatorPlan
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpProofMetadata
 import java.security.SecureRandom
 import java.util.Arrays
@@ -30,7 +28,7 @@ class QpPageMaterializationTest {
 
     @Test
     fun materializes_independent_pages_and_consumes_the_build_authority() {
-        val plan = QpBuildPlan.create(commitment, DeterministicSecureRandom(1_101))
+        val plan = QpBuildPlan.create(commitment, testSecretPackDraft(), DeterministicSecureRandom(1_101))
         val pageA = plan.registerPage(
             kind = QpResourceKind.QpMethod,
             identity = "fixture:materialization:method-a".encodeToByteArray(),
@@ -95,7 +93,7 @@ class QpPageMaterializationTest {
     fun writerEquivalentCanonicalReservationAllowsOnePassAadBindingAndStillRejectsPayloadTamper() {
         val payloadPath = "META-INF/.qp/p/one-pass.bin"
         val plaintext = "canonical one-pass materialized page".encodeToByteArray()
-        val probePlan = QpBuildPlan.create(commitment, DeterministicSecureRandom(1_151))
+        val probePlan = QpBuildPlan.create(commitment, testSecretPackDraft(), DeterministicSecureRandom(1_151))
         val probePage = probePlan.registerPage(
             kind = QpResourceKind.QpMethod,
             identity = "fixture:materialization:one-pass".encodeToByteArray(),
@@ -127,7 +125,7 @@ class QpPageMaterializationTest {
             ),
         )
         val commitmentBytes = canonicalCommitment.bytes
-        val plan = QpBuildPlan.create(commitmentBytes, DeterministicSecureRandom(1_151))
+        val plan = QpBuildPlan.create(commitmentBytes, testSecretPackDraft(), DeterministicSecureRandom(1_151))
         commitmentBytes.fill(0)
         val page = plan.registerPage(
             kind = QpResourceKind.QpMethod,
@@ -177,7 +175,7 @@ class QpPageMaterializationTest {
     fun finalWriterEquivalentArtifactVerifierBindsCanonicalRoutePayloadAndMesh() {
         val payloadPath = "META-INF/.qp/p/final-writer.bin"
         val plaintext = "final writer-equivalent page".encodeToByteArray()
-        val probePlan = QpBuildPlan.create(commitment, DeterministicSecureRandom(1_177))
+        val probePlan = QpBuildPlan.create(commitment, testSecretPackDraft(), DeterministicSecureRandom(1_177))
         val probePage = probePlan.registerPage(
             kind = QpResourceKind.StringPage,
             identity = "fixture:materialization:final-writer".encodeToByteArray(),
@@ -205,7 +203,7 @@ class QpPageMaterializationTest {
             ),
         )
         val commitmentBytes = canonicalCommitment.bytes
-        val plan = QpBuildPlan.create(commitmentBytes, DeterministicSecureRandom(1_177))
+        val plan = QpBuildPlan.create(commitmentBytes, testSecretPackDraft(), DeterministicSecureRandom(1_177))
         commitmentBytes.fill(0)
         val page = plan.registerPage(
             kind = QpResourceKind.StringPage,
@@ -294,20 +292,22 @@ class QpPageMaterializationTest {
     }
 
     @Test
-    fun production_materialization_uses_v2_opaque_bound_plan_without_legacy_fragment_surface() {
+    fun production_materialization_emits_compact_locator_without_evaluator_or_key_surface() {
         val output = onePageMaterialization(seed = 1_231)
         try {
             val descriptor = output.pagesForBuild().single().descriptorForBuild
-            val evaluator = descriptor.evaluatorPlan
-            val encoded = evaluator.encode()
-            val tampered = encoded.copyOf()
+            val encoded = descriptor.encode()
             try {
-                assertEquals(0, encoded[0].toInt() and 0xFF)
-                tampered[5] = (tampered[5].toInt() xor 0x01).toByte()
-                assertFailsWith<IllegalArgumentException> { QpEvaluatorPlan.decode(tampered) }
+                // Compact locator: version 3, route, proof, size, slot. The
+                // retired evaluator terminal decoded a zero leading byte.
+                assertEquals(3, encoded[0].toInt() and 0xFF)
+                val text = encoded.toString(Charsets.ISO_8859_1)
+                assertTrue("AKE1" !in text)
+                assertFailsWith<IllegalArgumentException> {
+                    QpPageDescriptor.decode(encoded.copyOf().also { it[0] = 0 })
+                }
             } finally {
                 Arrays.fill(encoded, 0)
-                Arrays.fill(tampered, 0)
             }
         } finally {
             output.wipe()
@@ -330,7 +330,7 @@ class QpPageMaterializationTest {
 
     @Test
     fun physical_resource_range_overlap_is_rejected_and_still_wipes_inputs_and_plan() {
-        val plan = QpBuildPlan.create(commitment, DeterministicSecureRandom(1_409))
+        val plan = QpBuildPlan.create(commitment, testSecretPackDraft(), DeterministicSecureRandom(1_409))
         val first = plan.registerPage(
             kind = QpResourceKind.EncryptedClassPage,
             identity = "fixture:materialization:overlap:first".encodeToByteArray(),
@@ -366,7 +366,7 @@ class QpPageMaterializationTest {
 
     @Test
     fun input_iteration_failure_still_wipes_consumed_inputs_and_build_authority() {
-        val plan = QpBuildPlan.create(commitment, DeterministicSecureRandom(1_451))
+        val plan = QpBuildPlan.create(commitment, testSecretPackDraft(), DeterministicSecureRandom(1_451))
         val page = plan.registerPage(
             kind = QpResourceKind.NativeChunk,
             identity = "fixture:materialization:iterator-failure".encodeToByteArray(),
@@ -401,7 +401,7 @@ class QpPageMaterializationTest {
 
     @Test
     fun invalid_route_after_page_encoding_still_wipes_input_and_build_authority() {
-        val plan = QpBuildPlan.create(commitment, DeterministicSecureRandom(1_467))
+        val plan = QpBuildPlan.create(commitment, testSecretPackDraft(), DeterministicSecureRandom(1_467))
         val page = plan.registerPage(
             kind = QpResourceKind.EncryptedClassPage,
             identity = "fixture:materialization:invalid-route".encodeToByteArray(),
@@ -423,7 +423,7 @@ class QpPageMaterializationTest {
     }
 
     private fun onePageMaterialization(seed: Int): QpPageMaterialization {
-        val plan = QpBuildPlan.create(commitment, DeterministicSecureRandom(seed))
+        val plan = QpBuildPlan.create(commitment, testSecretPackDraft(), DeterministicSecureRandom(seed))
         val page = plan.registerPage(
             kind = QpResourceKind.QpMethod,
             identity = "fixture:materialization:one:$seed".encodeToByteArray(),
@@ -488,7 +488,7 @@ class QpPageMaterializationTest {
                 route = descriptor.route,
                 proof = badProof,
                 targetPageSize = descriptor.targetPageSize,
-                evaluatorPlan = descriptor.evaluatorPlan,
+                secretSlot = descriptor.secretSlot,
             )
         } finally {
             Arrays.fill(artifactCommitment, 0)

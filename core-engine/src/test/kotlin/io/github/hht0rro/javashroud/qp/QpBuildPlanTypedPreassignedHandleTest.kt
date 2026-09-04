@@ -188,7 +188,7 @@ class QpBuildPlanTypedPreassignedHandleTest {
     private fun newPlan(): QpBuildPlan {
         val commitment = ByteArray(QpArtifactCommitment.DIGEST_SIZE) { index -> (index * 17 + 11).toByte() }
         return try {
-            QpBuildPlan.create(commitment, SecureRandom())
+            QpBuildPlan.create(commitment, testSecretPackDraft(), SecureRandom())
         } finally {
             Arrays.fill(commitment, 0)
         }

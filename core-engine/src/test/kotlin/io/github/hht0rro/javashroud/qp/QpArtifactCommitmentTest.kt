@@ -46,7 +46,7 @@ class QpArtifactCommitmentTest {
         assertContentEquals(first.bytes, sameExceptShard.bytes)
         assertFalse(first.bytes.contentEquals(changedOutsideShard.bytes))
 
-        val plan = QpBuildPlan.create(first.bytes)
+        val plan = QpBuildPlan.create(first.bytes, testSecretPackDraft())
         try {
             assertContentEquals(first.bytes, plan.artifactCanonicalCommitment)
         } finally {
@@ -264,7 +264,7 @@ class QpArtifactCommitmentTest {
 
     @Test
     fun perHandleRouteAndProofRoundTripWithoutDekOrCatalog() {
-        val plan = QpBuildPlan.create(ByteArray(QpArtifactCommitment.DIGEST_SIZE) { it.toByte() })
+        val plan = QpBuildPlan.create(ByteArray(QpArtifactCommitment.DIGEST_SIZE) { it.toByte() }, testSecretPackDraft())
         try {
             val page = plan.registerPage(
                 kind = QpResourceKind.QpMethod,

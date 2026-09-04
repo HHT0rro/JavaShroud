@@ -62,8 +62,8 @@ class QpArtifactDirectoryTest {
         val directory = QpArtifactDirectory.create(runtime, listOf(page))
         try {
             val encoded = directory.encode()
-            assertEquals(3, encoded[0].toInt() and 0xFF)
-            assertEquals(1, encoded[1].toInt() and 0xFF)
+            assertEquals(4, encoded[0].toInt() and 0xFF)
+            assertEquals(2, encoded[1].toInt() and 0xFF)
             val decoded = QpDirectoryParser.decode(encoded, runtime)
             try {
                 assertEquals(directory.size, decoded.size)

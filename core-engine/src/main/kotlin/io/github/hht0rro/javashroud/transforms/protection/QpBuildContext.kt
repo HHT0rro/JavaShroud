@@ -2,6 +2,10 @@ package io.github.hht0rro.javashroud.transforms.protection
 
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
+import io.github.hht0rro.javashroud.transforms.protection.concatBytes
+import io.github.hht0rro.javashroud.transforms.protection.hkdfSha256
+import io.github.hht0rro.javashroud.transforms.protection.qp.NativeVmSecretPack
+import io.github.hht0rro.javashroud.transforms.protection.qp.NativeVmSecretPackDraft
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpBuildPlan
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpClassPageCandidate
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpClassPageDescriptorSource
@@ -50,6 +54,12 @@ internal data class QpBuildContext(
     private val nativeSpecializationDigests = LinkedHashMap<String, ByteArray>()
     /** Build-only current-format Qp page/evaluator plan; never serialized into runtime output. */
     private var qpBuildPlan: QpBuildPlan? = null
+    /**
+     * Build-only native VM secret pack. Slot seeds feed the artifact-specific
+     * specialization source only; they are never serialized into a descriptor,
+     * catalog, or resource and never copied across scopes.
+     */
+    private var nativeVmSecretPackDraft: NativeVmSecretPackDraft? = null
     /**
      * Build-only Qp VM method snapshots captured by the current transform.
      * These are logical sources for a later page planner, not final routes,
@@ -159,7 +169,35 @@ internal data class QpBuildContext(
             }
             return existing
         }
-        return QpBuildPlan.create(commitment = commitment).also { qpBuildPlan = it }
+        return QpBuildPlan.create(commitment = commitment, secretPack = requireNativeVmSecretPackDraft())
+            .also { qpBuildPlan = it }
+    }
+
+    /** Build-only secret-pack authority; created on first use, wiped with this context. */
+    @Synchronized
+    fun requireNativeVmSecretPackDraft(): NativeVmSecretPackDraft {
+        val existing = nativeVmSecretPackDraft
+        if (existing != null) {
+            return existing
+        }
+        val ikm = deriveSubKey("javashroud-qp-native-secret-pack-ikm-v4", QP_MASTER_KEY_SIZE)
+        return try {
+            NativeVmSecretPackDraft.create(NativeVmSecretPackDraft.Companion.derivePackRoot(ikm))
+        } finally {
+            java.util.Arrays.fill(ikm, 0)
+        }.also { nativeVmSecretPackDraft = it }
+    }
+
+    /** One sealed copy for the specialization writer; the caller must wipe it. */
+    @Synchronized
+    fun withNativeVmSecretPackForSpecialization(block: (NativeVmSecretPack) -> Unit) {
+        val draft = requireNativeVmSecretPackDraft()
+        val sealed = draft.sealedCopyForSpecialization()
+        try {
+            block(sealed)
+        } finally {
+            sealed.wipe()
+        }
     }
 
     @Synchronized
@@ -983,8 +1021,9 @@ internal data class QpBuildContext(
         // Candidate sources and pre-seal route reservations are intentionally
         // not copied across scopes; either copy could outlive the candidate
         // namespace and plaintext ownership it binds.
-        // Qp plan state is intentionally not copied: each scoped build gets
-        // an independent page/evaluator graph and wipes it on scope exit.
+        // Qp plan state and the native secret pack are intentionally not
+        // copied: each scoped build gets an independent page graph and secret
+        // slots, and both are wiped on scope exit.
     }
 
     @Synchronized
@@ -1009,6 +1048,8 @@ internal data class QpBuildContext(
         qpNativeSegmentCandidates.clear()
         qpBuildPlan?.wipe()
         qpBuildPlan = null
+        nativeVmSecretPackDraft?.wipe()
+        nativeVmSecretPackDraft = null
         qpFinalizationLayout?.wipe()
         qpFinalizationLayout = null
         qpPreSealRouteReservation?.wipe()

@@ -74,7 +74,7 @@ class QpFinalizationLayoutTest {
             rootShardRanges = listOf(rootShard),
         )
         val commitmentBytes = commitment.copyBytes()
-        val plan = QpBuildPlan.create(commitmentBytes, SecureRandom())
+        val plan = QpBuildPlan.create(commitmentBytes, testSecretPackDraft(), SecureRandom())
         Arrays.fill(commitmentBytes, 0)
 
         val layout = QpFinalizationLayout.materializeAndWipe(

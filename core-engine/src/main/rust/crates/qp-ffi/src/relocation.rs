@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 pub const ORIGINAL_HELPER_OWNER: &str =
     "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge";
 
-pub const TYPED_NATIVE_METHOD_COUNT: usize = 12;
+pub const TYPED_NATIVE_METHOD_COUNT: usize = 15;
 pub const TYPED_NATIVE_METHODS: [(&str, &str); TYPED_NATIVE_METHOD_COUNT] = [
     ("nativeInit", "(Ljava/lang/String;)I"),
     ("nativeHeartbeat", "()I"),
@@ -30,6 +30,9 @@ pub const TYPED_NATIVE_METHODS: [(&str, &str); TYPED_NATIVE_METHOD_COUNT] = [
         "nativeInvokeSite",
         "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[B[Ljava/lang/Object;Z)Ljava/lang/Object;",
     ),
+    ("nativeInitializeDefenseCode", "(II)I"),
+    ("nativeProbeDefenseCode", "(II)I"),
+    ("nativeTransformDefenseCode", "([BI)[B"),
 ];
 
 const BINDING_DOMAIN: &[u8] = b"QP-BINDING-V1|";
@@ -165,6 +168,6 @@ mod tests {
         let plan = resolve_registration(Some("a/b/SealedHelper"), &methods).expect("plan");
         assert_eq!(plan.owner, "a/b/SealedHelper");
         assert_eq!(plan.methods[0].0, "m_0");
-        assert_eq!(plan.methods[TYPED_NATIVE_METHOD_COUNT - 1].0, "m_11");
+        assert_eq!(plan.methods[TYPED_NATIVE_METHOD_COUNT - 1].0, "m_14");
     }
 }

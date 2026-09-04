@@ -19,7 +19,7 @@ class QpBuildPlanHardeningTest {
 
     @Test
     fun page_round_trip_binds_every_codec_input_and_tamper_fails_closed() {
-        val plan = QpBuildPlan.create(commitment, DeterministicSecureRandom(17))
+        val plan = QpBuildPlan.create(commitment, testSecretPackDraft(), DeterministicSecureRandom(17))
         try {
             val page = plan.registerPage(
                 kind = QpResourceKind.QpMethod,
@@ -35,7 +35,7 @@ class QpBuildPlanHardeningTest {
             val encoded = plan.encodeForMaterialization(page.handle, plaintext)
             val layout = page.pageLayout
             val alternateLayout = alternate.pageLayout
-            val fingerprint = page.evaluatorPlan.fingerprint
+            val fingerprint = page.handle.keyCommitmentFingerprint
             val locator = page.handle.locatorToken
             val identity = page.logicalIdentity
             val wrongCommitment = commitment.copyOf().also { it[0] = (it[0].toInt() xor 0x2A).toByte() }
@@ -251,18 +251,18 @@ class QpBuildPlanHardeningTest {
 
     @Test
     fun current_native_evaluator_is_fingerprint_bound_polymorphic_and_defensive() {
-        val plan = QpBuildPlan.create(commitment, DeterministicSecureRandom(23))
+        val plan = QpBuildPlan.create(commitment, testSecretPackDraft(), DeterministicSecureRandom(23))
         try {
             val page = plan.registerPage(
                 QpResourceKind.EncryptedClassPage,
                 "fixture:class".encodeToByteArray(),
                 3,
             )
-            val evaluator = page.evaluatorPlan
-            assertContentEquals(evaluator.fingerprint, page.handle.evaluatorPlanFingerprint)
+            val keyCommitment = page.handle.keyCommitmentFingerprint
+            assertTrue(keyCommitment.any { it != 0.toByte() })
 
             val returnedIdentity = page.logicalIdentity
-            val returnedFingerprint = evaluator.fingerprint
+            val returnedFingerprint = page.handle.keyCommitmentFingerprint
             val returnedHandle = page.handle.encoded
             val returnedLocator = page.handle.locatorToken
             try {
@@ -286,19 +286,21 @@ class QpBuildPlanHardeningTest {
             assertFailsWith<IllegalArgumentException> {
                 plan.registerPage(QpResourceKind.EncryptedClassPage, "fixture:class".encodeToByteArray(), 3)
             }
-            val publicMethodNames = QpBuildPlan.EvaluatorPlan::class.java.methods.map { it.name.lowercase() }
+            // The evaluator plan type is retired entirely: no nested evaluator
+            // type and no evaluator/fragment/DEK accessor may exist.
+            assertFalse(
+                QpBuildPlan::class.java.declaredClasses.any { nested ->
+                    nested.simpleName.contains("Evaluator") || nested.simpleName.contains("Fragment")
+                },
+            )
+            val publicMethodNames = QpBuildPlan::class.java.methods.map { it.name.lowercase() }
             assertFalse(
                 publicMethodNames.any { name ->
                     name.contains("fragment") ||
                         name.contains("terminal") ||
-                        name.contains("execution") ||
+                        name.contains("evaluator") ||
                         name.contains("recover") ||
                         name.contains("dek")
-                },
-            )
-            assertFalse(
-                QpBuildPlan::class.java.declaredClasses.any { nested ->
-                    nested.simpleName == "EvaluatorFragment"
                 },
             )
         } finally {
@@ -310,10 +312,10 @@ class QpBuildPlanHardeningTest {
         val fingerprints = LinkedHashSet<String>()
         val targetSizes = LinkedHashSet<Int>()
         repeat(10) { seed ->
-            val build = QpBuildPlan.create(commitment, DeterministicSecureRandom(seed + 101))
+            val build = QpBuildPlan.create(commitment, testSecretPackDraft(), DeterministicSecureRandom(seed + 101))
             try {
                 val page = build.registerPage(QpResourceKind.StringPage, "fixture:poly".encodeToByteArray(), 1)
-                val fingerprint = page.evaluatorPlan.fingerprint
+                val fingerprint = page.handle.keyCommitmentFingerprint
                 val encoding = page.handle.encoded
                 val locator = page.handle.locatorToken
                 try {
@@ -338,7 +340,7 @@ class QpBuildPlanHardeningTest {
 
     @Test
     fun build_only_page_api_has_no_java_decoder_or_dek_lease_and_wipes_after_close() {
-        val plan = QpBuildPlan.create(commitment, DeterministicSecureRandom(41))
+        val plan = QpBuildPlan.create(commitment, testSecretPackDraft(), DeterministicSecureRandom(41))
         val page = plan.registerPage(QpResourceKind.NativeChunk, "fixture:native".encodeToByteArray(), 2)
         val handle = page.handle
         val payload = plan.encodeForMaterialization(handle, byteArrayOf(1))

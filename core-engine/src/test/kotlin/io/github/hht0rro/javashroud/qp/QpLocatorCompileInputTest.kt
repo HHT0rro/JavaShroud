@@ -24,7 +24,7 @@ class QpLocatorCompileInputTest {
         val expectedEntryToken = 0x4A4B_454E_0000_0BEEuL.toLong()
         val originalPlaintext = "qp page compiler locator input".encodeToByteArray()
         val rawProof = ByteArray(65) { index -> (index * 29 + 7).toByte() }
-        val plan = QpBuildPlan.create(artifactCommitment, SecureRandom())
+        val plan = QpBuildPlan.create(artifactCommitment, testSecretPackDraft(), SecureRandom())
         artifactCommitment.fill(0)
         val page = plan.registerPage(QpResourceKind.QpMethod, logicalIdentity, pageIndex = 0)
         logicalIdentity.fill(0)

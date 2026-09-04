@@ -1,12 +1,10 @@
 package io.github.hht0rro.javashroud.qp
 
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpArtifactCommitment
-import io.github.hht0rro.javashroud.transforms.protection.qp.QpBoundPlan
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpBuildPlan
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpLeafIdentity
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpResourceKind
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpRouteMetadata
-import io.github.hht0rro.javashroud.transforms.protection.qp.QpEvaluatorPlan
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpPageDescriptor
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpProofMetadata
 import java.security.SecureRandom
@@ -14,7 +12,6 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
-import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class QpPageDescriptorTest {
@@ -23,8 +20,8 @@ class QpPageDescriptorTest {
     }
 
     @Test
-    fun descriptor_round_trips_one_page_and_rechecks_current_native_evaluator_binding() {
-        val plan = QpBuildPlan.create(commitment, DeterministicSecureRandom(701))
+    fun descriptor_round_trips_one_compact_locator_without_key_material() {
+        val plan = QpBuildPlan.create(commitment, testSecretPackDraft(), DeterministicSecureRandom(701))
         try {
             val page = plan.registerPage(
                 kind = QpResourceKind.QpMethod,
@@ -38,22 +35,32 @@ class QpPageDescriptorTest {
                 assertEquals(page.resourceKind, decoded.resourceKind)
                 assertEquals(page.pageIndex, decoded.pageIndex)
                 assertEquals(page.targetSize, decoded.targetPageSize)
+                assertEquals(page.secretSlot, decoded.secretSlot)
                 assertContentEquals(page.logicalIdentity, decoded.logicalIdentity)
                 assertEquals(descriptor.route.resourcePath, decoded.route.resourcePath)
                 assertEquals(descriptor.route.resourceOffset, decoded.route.resourceOffset)
                 assertEquals(descriptor.route.storedLength, decoded.route.storedLength)
                 assertEquals(descriptor.route.logicalBindingPath, decoded.route.logicalBindingPath)
                 assertContentEquals(descriptor.proof.callSiteProof, decoded.proof.callSiteProof)
-                assertContentEquals(descriptor.evaluatorPlan.fingerprint, decoded.evaluatorPlan.fingerprint)
-                val boundOpaque = decoded.evaluatorPlan.copyBoundDecryptorForNative()
-                try {
-                    assertTrue(boundOpaque != null && boundOpaque.isNotEmpty())
-                    assertFalse(opaquePartitionsThirtyTwoByteDek(boundOpaque!!), "descriptor must not carry a 32-byte DEK overlay")
-                } finally {
-                    boundOpaque?.fill(0)
-                }
+                assertContentEquals(
+                    page.handle.keyCommitmentFingerprint,
+                    decoded.handle.keyCommitmentFingerprint,
+                )
                 assertTrue(decoded.matches(page.handle))
                 assertTrue(decoded.matches(decoded.handle))
+                // The compact encoding is small and carries no evaluator or
+                // DEK material: version, framed route, framed proof, size, slot.
+                assertEquals(3, encoded[0].toInt() and 0xFF)
+                val routeLen = routeLength(encoded)
+                val proofStart = 5 + routeLen
+                val proofLen = ((encoded[proofStart].toInt() and 0xFF) shl 24) or
+                    ((encoded[proofStart + 1].toInt() and 0xFF) shl 16) or
+                    ((encoded[proofStart + 2].toInt() and 0xFF) shl 8) or
+                    (encoded[proofStart + 3].toInt() and 0xFF)
+                assertEquals(
+                    encoded.size,
+                    1 + 4 + routeLen + 4 + proofLen + 4 + 4,
+                )
             } finally {
                 encoded.fill(0)
             }
@@ -63,8 +70,8 @@ class QpPageDescriptorTest {
     }
 
     @Test
-    fun descriptor_is_defensive_and_rejects_mismatched_page_or_graph_metadata() {
-        val plan = QpBuildPlan.create(commitment, DeterministicSecureRandom(811))
+    fun descriptor_is_defensive_and_rejects_mismatched_page_or_slot_metadata() {
+        val plan = QpBuildPlan.create(commitment, testSecretPackDraft(), DeterministicSecureRandom(811))
         try {
             val page = plan.registerPage(
                 kind = QpResourceKind.StringPage,
@@ -80,29 +87,12 @@ class QpPageDescriptorTest {
 
             val identityCopy = descriptor.logicalIdentity
             val expectedIdentity = identityCopy.copyOf()
-            val opaqueCopy = checkNotNull(descriptor.evaluatorPlan.copyBoundDecryptorForNative())
-            val expectedOpaque = opaqueCopy.copyOf()
-            val handleCopy = descriptor.route.handleEncoding
-            val expectedHandle = handleCopy.copyOf()
             try {
                 identityCopy.fill(0x31.toByte())
-                opaqueCopy.fill(0x32.toByte())
-                handleCopy.fill(0x33.toByte())
                 assertContentEquals(expectedIdentity, descriptor.logicalIdentity)
-                val currentOpaque = checkNotNull(descriptor.evaluatorPlan.copyBoundDecryptorForNative())
-                try {
-                    assertContentEquals(expectedOpaque, currentOpaque)
-                } finally {
-                    currentOpaque.fill(0)
-                }
-                assertContentEquals(expectedHandle, descriptor.route.handleEncoding)
             } finally {
                 identityCopy.fill(0)
                 expectedIdentity.fill(0)
-                opaqueCopy.fill(0)
-                expectedOpaque.fill(0)
-                handleCopy.fill(0)
-                expectedHandle.fill(0)
             }
 
             val mismatchedRoute = QpRouteMetadata.fromHandle(
@@ -121,32 +111,19 @@ class QpPageDescriptorTest {
                     route = mismatchedRoute,
                     proof = proofFor(plan, page),
                     targetPageSize = page.targetSize,
-                    evaluatorPlan = descriptor.evaluatorPlan,
+                    secretSlot = page.secretSlot,
                 )
             }
 
-            val graph = descriptor.evaluatorPlan
-            val badFingerprint = graph.fingerprint
-            val boundOpaque = checkNotNull(graph.copyBoundDecryptorForNative())
-            try {
-                badFingerprint[0] = (badFingerprint[0].toInt() xor 0x5A).toByte()
-                val mismatchedGraph = QpEvaluatorPlan.createBound(
-                    QpBoundPlan.fromOpaque(boundOpaque),
-                    badFingerprint,
+            assertFailsWith<IllegalArgumentException> {
+                QpPageDescriptor.create(
+                    handle = page.handle,
+                    logicalIdentity = page.logicalIdentity,
+                    route = routeFor(page),
+                    proof = proofFor(plan, page),
+                    targetPageSize = page.targetSize,
+                    secretSlot = -1,
                 )
-                assertFailsWith<IllegalArgumentException> {
-                    QpPageDescriptor.create(
-                        handle = page.handle,
-                        logicalIdentity = page.logicalIdentity,
-                        route = routeFor(page),
-                        proof = proofFor(plan, page),
-                        targetPageSize = page.targetSize,
-                        evaluatorPlan = mismatchedGraph,
-                    )
-                }
-            } finally {
-                boundOpaque.fill(0)
-                badFingerprint.fill(0)
             }
         } finally {
             plan.wipe()
@@ -155,7 +132,7 @@ class QpPageDescriptorTest {
 
     @Test
     fun descriptor_parse_rejects_invalid_version_lengths_and_trailing_bytes() {
-        val plan = QpBuildPlan.create(commitment, DeterministicSecureRandom(919))
+        val plan = QpBuildPlan.create(commitment, testSecretPackDraft(), DeterministicSecureRandom(919))
         try {
             val page = plan.registerPage(
                 kind = QpResourceKind.NativeChunk,
@@ -164,6 +141,7 @@ class QpPageDescriptorTest {
             )
             val encoded = descriptorFor(plan, page).encode()
             val badVersion = encoded.copyOf().also { it[0] = 99.toByte() }
+            val retiredInlineVersion = encoded.copyOf().also { it[0] = 2.toByte() }
             val badRouteLength = encoded.copyOf().also {
                 it[1] = 0x7F
                 it[2] = 0xFF.toByte()
@@ -173,42 +151,17 @@ class QpPageDescriptorTest {
             val trailing = encoded.copyOf(encoded.size + 1).also { it[it.lastIndex] = 0x7E }
             try {
                 assertFailsWith<IllegalArgumentException> { QpPageDescriptor.decode(badVersion) }
+                assertFailsWith<IllegalArgumentException> { QpPageDescriptor.decode(retiredInlineVersion) }
                 assertFailsWith<IllegalArgumentException> { QpPageDescriptor.decode(badRouteLength) }
                 assertFailsWith<IllegalArgumentException> { QpPageDescriptor.decode(trailing) }
             } finally {
                 encoded.fill(0)
                 badVersion.fill(0)
+                retiredInlineVersion.fill(0)
                 badRouteLength.fill(0)
                 trailing.fill(0)
             }
 
-        } finally {
-            plan.wipe()
-        }
-    }
-
-    @Test
-    fun current_native_evaluator_uses_variable_fragment_dialect_and_no_retired_lane_domains() {
-        val plan = QpBuildPlan.create(commitment, DeterministicSecureRandom(1_013))
-        try {
-            val page = plan.registerPage(
-                kind = QpResourceKind.QpMethod,
-                identity = "fixture:runtime:current-evaluator".encodeToByteArray(),
-                pageIndex = 0,
-            )
-            val descriptor = descriptorFor(plan, page)
-            val opaque = checkNotNull(descriptor.evaluatorPlan.copyBoundDecryptorForNative())
-            try {
-                assertContentEquals("AKE1".encodeToByteArray(), opaque.copyOfRange(0, 4))
-                val fragmentCount = opaque[5].toInt() and 0xFF
-                assertTrue(fragmentCount in 4..12)
-                val text = opaque.toString(Charsets.ISO_8859_1)
-                assertTrue("qp-evaluator-dialect" !in text)
-                assertTrue("bound-page-lane" !in text)
-                assertTrue("bound-page-plan" !in text)
-            } finally {
-                opaque.fill(0)
-            }
         } finally {
             plan.wipe()
         }
@@ -223,7 +176,7 @@ class QpPageDescriptorTest {
             route = route,
             proof = proof,
             targetPageSize = page.targetSize,
-            evaluatorPlan = runtimePlanFor(page, route, proof),
+            secretSlot = page.secretSlot,
         )
     }
 
@@ -253,55 +206,11 @@ class QpPageDescriptorTest {
         )
     }
 
-    private fun runtimePlanFor(
-        page: QpBuildPlan.Page,
-        route: QpRouteMetadata,
-        proof: QpProofMetadata,
-    ): QpEvaluatorPlan {
-        val callSiteProof = proof.callSiteProof
-        val fingerprint = page.evaluatorPlan.fingerprint
-        return try {
-            QpEvaluatorPlan.createBound(
-                page.evaluatorPlan.boundPlanForRuntime(route, callSiteProof),
-                fingerprint,
-            )
-        } finally {
-            callSiteProof.fill(0)
-            fingerprint.fill(0)
-        }
-    }
-
-    private fun opaquePartitionsThirtyTwoByteDek(opaque: ByteArray): Boolean {
-        if (opaque.size < 8 || opaque[0] != 'A'.code.toByte() || opaque[1] != 'K'.code.toByte()) return false
-        val fragmentCount = opaque[5].toInt() and 0xFF
-        if (fragmentCount !in 4..12) return false
-        val covered = BooleanArray(32)
-        var cursor = 6 + 12 + 16 + 32 + 32 + 32
-        repeat(fragmentCount) {
-            if (cursor + 5 > opaque.size) return false
-            val offset = opaque[cursor].toInt() and 0xFF
-            val length = opaque[cursor + 1].toInt() and 0xFF
-            cursor += 5
-            if (length == 0 || offset + length > 32) return false
-            for (index in offset until offset + length) {
-                if (covered[index]) return false
-                covered[index] = true
-            }
-            if (cursor + 4 > opaque.size) return false
-            val tokenLen = ((opaque[cursor].toInt() and 0xFF) shl 24) or
-                ((opaque[cursor + 1].toInt() and 0xFF) shl 16) or
-                ((opaque[cursor + 2].toInt() and 0xFF) shl 8) or
-                (opaque[cursor + 3].toInt() and 0xFF)
-            cursor += 4 + tokenLen + 16
-            if (cursor + 4 > opaque.size) return false
-            val encodedLen = ((opaque[cursor].toInt() and 0xFF) shl 24) or
-                ((opaque[cursor + 1].toInt() and 0xFF) shl 16) or
-                ((opaque[cursor + 2].toInt() and 0xFF) shl 8) or
-                (opaque[cursor + 3].toInt() and 0xFF)
-            cursor += 4 + encodedLen + 16
-        }
-        return covered.all { it }
-    }
+    private fun routeLength(encoded: ByteArray): Int =
+        ((encoded[1].toInt() and 0xFF) shl 24) or
+            ((encoded[2].toInt() and 0xFF) shl 16) or
+            ((encoded[3].toInt() and 0xFF) shl 8) or
+            (encoded[4].toInt() and 0xFF)
 
     private class DeterministicSecureRandom(seed: Int) : SecureRandom() {
         private var state = seed

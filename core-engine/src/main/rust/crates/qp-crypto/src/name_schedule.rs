@@ -2,7 +2,7 @@
 
 use crate::{hmac_sha256, DIGEST_SIZE};
 
-pub const QP_SCHEDULE_VERSION: u8 = 1;
+pub const QP_SCHEDULE_VERSION: u8 = 2;
 pub const QP_NAME_SEED_SIZE: usize = 16;
 pub const QP_COMMITMENT_SIZE: usize = 32;
 pub const QP_INFO_PREFIX: u8 = 0x51;
@@ -33,7 +33,7 @@ pub const LANE_TOKEN_AAD: u8 = 9;
 pub const LANE_TOKEN_KEY: u8 = 10;
 pub const LANE_RESOURCE_AUTH: u8 = 11;
 
-pub const FORMAT_VERSION: u8 = 3;
+pub const FORMAT_VERSION: u8 = 4;
 
 pub const TEST_NAME_SEED: [u8; QP_NAME_SEED_SIZE] =
     [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
@@ -325,42 +325,42 @@ mod tests {
                 .derive_magic(ROLE_FRAME, 0, 0)
                 .expect("frame")
                 .as_slice(),
-            &hex("d1f721e6")
+            &hex("c444fd0b")
         );
         assert_eq!(
             schedule
                 .derive_domain(ROLE_CRYPTO, 1, 0)
                 .expect("crypto")
                 .as_slice(),
-            &hex("a81c73d9a32fa0864cfcc581a2677be9")
+            &hex("b77c46797eeebbe0fe19d82e58a2b24b")
         );
         assert_eq!(
             schedule
                 .derive_domain(ROLE_DIRECTORY, 0, 0)
                 .expect("directory")
                 .as_slice(),
-            &hex("8fd9253ce4e59bbc8bde45fa1e0183ec")
+            &hex("26e3cd817882d394bc071f2669c467d3")
         );
         assert_eq!(
             schedule
                 .derive_domain(ROLE_TOKEN, 2, 0)
                 .expect("token")
                 .as_slice(),
-            &hex("022b8da11a632a4f0d6dd4578cb116ce")
+            &hex("94c8b4b1d7e6b18090cafc75658c27c7")
         );
         assert_eq!(
             schedule.derive_resource_root(0, 0).expect("root"),
-            "QLnn7ip5JEyQ"
+            "2BVHBcHeWtGD"
         );
         assert_eq!(
             schedule.derive_jni_name(0, 0).expect("jni"),
-            "qwzscyvibik"
+            "qchmbfhvjdx"
         );
         assert_eq!(
             schedule
                 .derive_page_path_token(ROLE_RESOURCE, 7, 0)
                 .expect("page"),
-            "MLqj6Imenia8"
+            "d-rmCtejnK9C"
         );
     }
 

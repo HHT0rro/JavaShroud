@@ -10,22 +10,22 @@ class QpNameScheduleParityTest {
     @Test
     fun kotlin_matches_shared_hkdf_vectors() {
         QpNameSchedule.create(SEED, COMMITMENT).use { schedule ->
-            assertContentEquals(hex("d1f721e6"), schedule.deriveMagic(QpNameSchedule.ROLE_FRAME))
+            assertContentEquals(hex("c444fd0b"), schedule.deriveMagic(QpNameSchedule.ROLE_FRAME))
             assertContentEquals(
-                hex("a81c73d9a32fa0864cfcc581a2677be9"),
+                hex("b77c46797eeebbe0fe19d82e58a2b24b"),
                 schedule.deriveDomain(QpNameSchedule.ROLE_CRYPTO, 1),
             )
             assertContentEquals(
-                hex("8fd9253ce4e59bbc8bde45fa1e0183ec"),
+                hex("26e3cd817882d394bc071f2669c467d3"),
                 schedule.deriveDomain(QpNameSchedule.ROLE_DIRECTORY),
             )
             assertContentEquals(
-                hex("022b8da11a632a4f0d6dd4578cb116ce"),
+                hex("94c8b4b1d7e6b18090cafc75658c27c7"),
                 schedule.deriveDomain(QpNameSchedule.ROLE_TOKEN, 2),
             )
-            assertEquals("QLnn7ip5JEyQ", schedule.deriveResourceRoot())
-            assertEquals("qwzscyvibik", schedule.deriveJniName())
-            assertEquals("MLqj6Imenia8", schedule.derivePagePathToken(QpNameSchedule.ROLE_RESOURCE, 7))
+            assertEquals("2BVHBcHeWtGD", schedule.deriveResourceRoot())
+            assertEquals("qchmbfhvjdx", schedule.deriveJniName())
+            assertEquals("d-rmCtejnK9C", schedule.derivePagePathToken(QpNameSchedule.ROLE_RESOURCE, 7))
             val jni = schedule.deriveJniName()
             assertEquals('q', jni[0])
             assertEquals(true, jni.substring(1).all { it in 'a'..'z' })

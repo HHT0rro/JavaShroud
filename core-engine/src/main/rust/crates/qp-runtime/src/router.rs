@@ -1,5 +1,5 @@
 use crate::page::{PageKind, PageRequest};
-use qp_crypto::{constant_time_eq, Sha256};
+use qp_crypto::constant_time_eq;
 use qp_page::{BorrowedPageLease, PageCipherSchedule, PageEnvelope, PageError as WirePageError};
 use std::collections::HashMap;
 use std::fmt;
@@ -16,7 +16,7 @@ pub struct AttachedPage {
     /// The descriptor remains artifact-bound and immutable after installation;
     /// its child owners wipe evaluator/proof material on drop.
     descriptor: qp_page::PageDescriptor,
-    schedule_template: EvaluatorScheduleTemplate,
+    key_material: PageKeyMaterial,
 }
 
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
@@ -32,84 +32,72 @@ impl Drop for AttachedPage {
     }
 }
 
-/// Parsed, authenticated evaluator material that contains no reconstructed
-/// page key.  Fragment masks are precomputed once when the catalog is sealed;
-/// each open still materializes a transient page schedule and wipes it through
-/// `PageLease` after authenticated decryption.
-struct EvaluatorScheduleTemplate {
-    dialect_byte: u8,
-    plan_nonce: Vec<u8>,
-    static_binding: Vec<u8>,
-    dialect_commitment: Vec<u8>,
-    fragments: Vec<EvaluatorScheduleFragment>,
-    fragment_order: Vec<usize>,
-}
+/// Transient page-key material derived once per installed page. It is wiped
+/// when the attached page leaves the router and materialized into a short-
+/// lived cipher schedule on every authenticated open.
+pub struct PageKeyMaterial([u8; 32]);
 
-struct EvaluatorScheduleFragment {
-    offset: usize,
-    family: u8,
-    opcode: u8,
-    register: u8,
-    token: Vec<u8>,
-    salt: Vec<u8>,
-    encoded: Vec<u8>,
-}
-
-impl Drop for EvaluatorScheduleTemplate {
-    fn drop(&mut self) {
-        self.plan_nonce.fill(0);
-        self.static_binding.fill(0);
-        self.dialect_commitment.fill(0);
-        self.fragments.clear();
+impl PageKeyMaterial {
+    pub fn from_material(material: &[u8; 32]) -> Self {
+        Self(*material)
     }
-}
 
-impl Drop for EvaluatorScheduleFragment {
-    fn drop(&mut self) {
-        self.token.fill(0);
-        self.salt.fill(0);
-        self.encoded.fill(0);
-    }
-}
-
-impl EvaluatorScheduleTemplate {
     fn materialize(&self) -> Result<PageCipherSchedule, RouterError> {
-        let mut hasher = Sha256::new();
-        hasher.update(&eval_domain(7));
-        hasher.update(&self.static_binding);
-        hasher.update(&self.dialect_commitment);
-        hasher.update(&self.plan_nonce);
-        hasher.update(&[self.dialect_byte]);
-        for &index in &self.fragment_order {
-            let fragment = &self.fragments[index];
-            update_i32(&mut hasher, fragment.offset as u32);
-            update_i32(&mut hasher, fragment.family as u32);
-            update_i32(&mut hasher, fragment.opcode as u32);
-            update_i32(&mut hasher, fragment.register as u32);
-            update_frame(&mut hasher, &fragment.token);
-            hasher.update(&fragment.salt);
-            update_frame(&mut hasher, &fragment.encoded);
-        }
-        let digest = hasher.finalize();
         let mut material = TransientMaterial([0u8; 32]);
-        material.0.copy_from_slice(digest.as_ref());
+        material.0.copy_from_slice(&self.0);
         PageCipherSchedule::from_material(&material.0)
             .map_err(|_| RouterError::AuthenticationFailed)
     }
 }
 
-fn eval_domain(role: u8) -> [u8; 9] {
-    let mut domain = [0u8; 9];
-    domain[..8].copy_from_slice(&[0xA1, 0xE1, 0x09, 0xC3, 0x77, 0x2B, 0xD4, 0x18]);
-    domain[8] = role;
-    domain
+impl Drop for PageKeyMaterial {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
 }
 
-#[derive(Default)]
+/// All inputs of the structured binary page-key derivation. Every field is
+/// reconstructible from the installed descriptor, envelope, and page frame
+/// header; no secret travels in the request itself.
+pub struct PageKeyRequest<'a> {
+    pub secret_slot: u32,
+    pub kind_id: u8,
+    pub page_index: i32,
+    pub encoded_handle: &'a [u8],
+    pub locator_token: &'a [u8],
+    pub page_nonce: &'a [u8],
+    pub artifact_commitment: &'a [u8],
+    /// Secret-pack commitment over the derived key; the authority must verify
+    /// it in constant time before returning key material.
+    pub expected_key_commitment: &'a [u8],
+}
+
+/// Native-side secret authority. The production implementation reconstructs
+/// the per-artifact specialization secret pack after the defense probes pass;
+/// isolated tests may install a synthetic authority.
+pub trait PageKeyAuthority: Send + Sync {
+    fn derive_page_key(&self, request: &PageKeyRequest<'_>) -> Result<PageKeyMaterial, RouterError>;
+}
+
+struct TransientMaterial([u8; 32]);
+
+impl Drop for TransientMaterial {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
 pub struct TypedPageRouter {
     pages: Vec<AttachedPage>,
     route_index: HashMap<RouteIndexKey, usize>,
     vm_route_index: HashMap<i64, Vec<usize>>,
+    authority: Option<Box<dyn PageKeyAuthority>>,
+}
+
+impl Default for TypedPageRouter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -148,11 +136,13 @@ impl OpenedPage {
         crypto_domain: [u8; 32],
         layout_digest: [u8; 32],
         state_binding: &[u8],
+        dialect_corpus: &qp_vm::VmDialectCorpus,
     ) -> Result<qp_vm::VmProgram, RouterError> {
         if self.kind != PageKind::Vm {
             return Err(RouterError::RouteUnavailable { kind: self.kind });
         }
-        let material = qp_vm::VmKeyMaterial::new(crypto_domain, layout_digest);
+        let material = qp_vm::VmKeyMaterial::new(crypto_domain, layout_digest)
+            .with_dialect_corpus(dialect_corpus.clone());
         let parser = qp_vm::VmParser::new(&material, state_binding)
             .map_err(|error| RouterError::Wire(error.to_string()))?;
         parser
@@ -207,7 +197,62 @@ impl TypedPageRouter {
             pages: Vec::new(),
             route_index: HashMap::new(),
             vm_route_index: HashMap::new(),
+            authority: None,
         }
+    }
+
+    /// Installs the native secret authority exactly once, before any page is
+    /// attached. A router without an authority refuses every install.
+    pub fn bind_page_key_authority(&mut self, authority: Box<dyn PageKeyAuthority>) {
+        assert!(self.pages.is_empty(), "page key authority must be bound before installs");
+        assert!(self.authority.is_none(), "page key authority is already bound");
+        self.authority = Some(authority);
+    }
+
+    fn authority(&self) -> Result<&dyn PageKeyAuthority, RouterError> {
+        self.authority
+            .as_deref()
+            .ok_or(RouterError::AuthenticationFailed)
+    }
+
+    /// Derives one page key from the native secret authority. The structured
+    /// derivation inputs are read from the descriptor and the page frame
+    /// header; the authority verifies the key commitment before returning
+    /// material.
+    fn derive_attached_key_material(
+        &self,
+        descriptor: &qp_page::PageDescriptor,
+        encoded: &[u8],
+    ) -> Result<PageKeyMaterial, RouterError> {
+        let authority = self.authority()?;
+        let layout = qp_page::PageLayout::from_variant(descriptor.route().layout_variant())
+            .map_err(|_| RouterError::AuthenticationFailed)?;
+        let header_offset = layout
+            .header_offset(encoded.len())
+            .map_err(|_| RouterError::AuthenticationFailed)?;
+        let header_end = header_offset + qp_page::LOGICAL_HEADER_SIZE;
+        if header_end > encoded.len() {
+            return Err(RouterError::AuthenticationFailed);
+        }
+        let header = qp_page::PageHeader::decode(&encoded[header_offset..header_end])
+            .map_err(|_| RouterError::AuthenticationFailed)?;
+        let handle = descriptor.handle().map_err(|_| RouterError::AuthenticationFailed)?;
+        let handle_encoded = handle.encoded();
+        let handle_locator = handle.locator_token();
+        let page_nonce = header.nonce();
+        let header_commitment = header.evaluator_fingerprint();
+        let artifact_commitment = descriptor.proof().artifact_commitment();
+        let request = PageKeyRequest {
+            secret_slot: descriptor.secret_slot(),
+            kind_id: descriptor.resource_kind().id(),
+            page_index: descriptor.page_index(),
+            encoded_handle: handle_encoded.as_slice(),
+            locator_token: handle_locator.as_slice(),
+            page_nonce: page_nonce.as_slice(),
+            artifact_commitment: artifact_commitment.as_slice(),
+            expected_key_commitment: header_commitment.as_slice(),
+        };
+        authority.derive_page_key(&request)
     }
 
     pub fn len(&self) -> usize {
@@ -255,12 +300,12 @@ impl TypedPageRouter {
         if !envelope.matches_descriptor(&parsed_descriptor) {
             return Err(RouterError::AuthenticationFailed);
         }
-        let schedule_template = compile_descriptor_schedule(&parsed_descriptor)?;
+        let key_material = self.derive_attached_key_material(&parsed_descriptor, &encoded)?;
         self.install_descriptor_bound_parsed(
             envelope,
             encoded,
             parsed_descriptor,
-            schedule_template,
+            key_material,
             key,
         )
     }
@@ -270,7 +315,7 @@ impl TypedPageRouter {
         envelope: PageEnvelope,
         encoded: Vec<u8>,
         descriptor: qp_page::PageDescriptor,
-        schedule_template: EvaluatorScheduleTemplate,
+        key_material: PageKeyMaterial,
         key: RouteIndexKey,
     ) -> Result<(), RouterError> {
         if self.pages.len() >= MAX_ATTACHED_PAGES {
@@ -287,7 +332,7 @@ impl TypedPageRouter {
             envelope,
             encoded,
             descriptor,
-            schedule_template,
+            key_material,
         });
         self.route_index.insert(key, page_position);
         if is_vm {
@@ -438,7 +483,7 @@ impl TypedPageRouter {
         &self,
         attached: &'a AttachedPage,
     ) -> Result<(Vec<u8>, &'a str), RouterError> {
-        let schedule = attached.schedule_template.materialize()?;
+        let schedule = attached.key_material.materialize()?;
         // The catalog owns `attached.encoded` for the lifetime of the router.
         // Borrow it for authentication instead of cloning every ciphertext on
         // each hot-path page open; only the transient schedule and plaintext
@@ -491,12 +536,12 @@ impl TypedPageRouter {
                 kind_id: envelope.kind().id(),
                 encoded_handle,
             };
-            let schedule_template = compile_descriptor_schedule(&descriptor)?;
+            let key_material = self.derive_attached_key_material(&descriptor, &encoded)?;
             self.install_descriptor_bound_parsed(
                 envelope,
                 encoded,
                 descriptor,
-                schedule_template,
+                key_material,
                 key,
             )?;
             installed = installed.checked_add(1).ok_or(RouterError::TooManyPages)?;
@@ -589,202 +634,117 @@ impl Drop for TypedPageRouter {
     }
 }
 
-/// Evaluate one artifact-specific VM descriptor into a transient page
-/// material buffer. The wire grammar is intentionally variable: every page
-/// chooses its own dialect byte, fragment count, offsets, opcodes, registers,
-/// tokens and fragment lengths. Authentication is completed before any
-/// fragment is decoded.
-fn compile_descriptor_schedule(
-    descriptor: &qp_page::PageDescriptor,
-) -> Result<EvaluatorScheduleTemplate, RouterError> {
-    const MARKER: &[u8; 4] = b"AKE1";
-    const NONCE_SIZE: usize = 12;
-    const PLAN_NONCE_SIZE: usize = 16;
-    const DIGEST_SIZE: usize = 32;
-    const DIALECT_SIZE: usize = 32;
-    const TAG_SIZE: usize = 16;
-    const MIN_FRAGMENTS: usize = 4;
-    const MAX_FRAGMENTS: usize = 12;
-
-    let opaque = descriptor.evaluator_plan().opaque();
-    let body_end = opaque
-        .len()
-        .checked_sub(DIGEST_SIZE)
-        .ok_or(RouterError::AuthenticationFailed)?;
-    if opaque.len() < 4 + 2 + NONCE_SIZE + PLAN_NONCE_SIZE + DIGEST_SIZE * 3 + DIGEST_SIZE {
-        return Err(RouterError::AuthenticationFailed);
-    }
-    let supplied_plan_tag = &opaque[body_end..];
-    let expected_plan_tag = sha256_with_domain(&eval_domain(6), &opaque[..body_end]);
-    if !constant_time_eq(&expected_plan_tag, supplied_plan_tag) {
-        return Err(RouterError::AuthenticationFailed);
-    }
-
-    let mut cursor = 0usize;
-    let read = |cursor: &mut usize, length: usize| -> Result<&[u8], RouterError> {
-        if *cursor > body_end.saturating_sub(length) {
-            return Err(RouterError::AuthenticationFailed);
-        }
-        let start = *cursor;
-        *cursor += length;
-        Ok(&opaque[start..start + length])
-    };
-    if read(&mut cursor, MARKER.len())? != MARKER {
-        return Err(RouterError::AuthenticationFailed);
-    }
-    let dialect_byte = read(&mut cursor, 1)?[0];
-    let fragment_count = read(&mut cursor, 1)?[0] as usize;
-    if !(MIN_FRAGMENTS..=MAX_FRAGMENTS).contains(&fragment_count) {
-        return Err(RouterError::AuthenticationFailed);
-    }
-    let _page_nonce = read(&mut cursor, NONCE_SIZE)?;
-    let plan_nonce = read(&mut cursor, PLAN_NONCE_SIZE)?;
-    let static_binding = read(&mut cursor, DIGEST_SIZE)?.to_vec();
-    let _final_binding = read(&mut cursor, DIGEST_SIZE)?;
-    let dialect_commitment = read(&mut cursor, DIALECT_SIZE)?.to_vec();
-
-    let expected_dialect = {
-        let mut hasher = Sha256::new();
-        hasher.update(&eval_domain(5));
-        hasher.update(&static_binding);
-        hasher.update(plan_nonce);
-        hasher.update(&[dialect_byte]);
-        hasher.finalize().into_bytes()
-    };
-    if !constant_time_eq(&expected_dialect, &dialect_commitment) {
-        return Err(RouterError::AuthenticationFailed);
-    }
-
-    let mut fragments = Vec::with_capacity(fragment_count);
-    let mut seen_offsets = [false; 256];
-    for _ in 0..fragment_count {
-        let offset = read(&mut cursor, 1)?[0] as usize;
-        let length = read(&mut cursor, 1)?[0] as usize;
-        let family = read(&mut cursor, 1)?[0];
-        let opcode = read(&mut cursor, 1)?[0];
-        let register = read(&mut cursor, 1)?[0];
-        if !(17..=48).contains(&length) || seen_offsets[offset] {
-            return Err(RouterError::AuthenticationFailed);
-        }
-        seen_offsets[offset] = true;
-        let token_len = read_u32(opaque, &mut cursor, body_end)? as usize;
-        if !(17..=48).contains(&token_len) {
-            return Err(RouterError::AuthenticationFailed);
-        }
-        let token = read(&mut cursor, token_len)?;
-        let salt = read(&mut cursor, 16)?;
-        let encoded_len = read_u32(opaque, &mut cursor, body_end)? as usize;
-        if encoded_len != length {
-            return Err(RouterError::AuthenticationFailed);
-        }
-        let encoded = read(&mut cursor, encoded_len)?;
-        let supplied_tag = read(&mut cursor, TAG_SIZE)?;
-
-        let mut tag_hasher = Sha256::new();
-        tag_hasher.update(&eval_domain(4));
-        tag_hasher.update(&static_binding);
-        tag_hasher.update(&dialect_commitment);
-        update_i32(&mut tag_hasher, offset as u32);
-        update_i32(&mut tag_hasher, length as u32);
-        update_i32(&mut tag_hasher, family as u32);
-        update_i32(&mut tag_hasher, opcode as u32);
-        update_i32(&mut tag_hasher, register as u32);
-        update_frame(&mut tag_hasher, token);
-        update_frame(&mut tag_hasher, salt);
-        update_frame(&mut tag_hasher, encoded);
-        let expected_tag = tag_hasher.finalize();
-        if !constant_time_eq(&expected_tag.as_ref()[..TAG_SIZE], supplied_tag) {
-            return Err(RouterError::AuthenticationFailed);
-        }
-        fragments.push(EvaluatorScheduleFragment {
-            offset,
-            family,
-            opcode,
-            register,
-            token: token.to_vec(),
-            salt: salt.to_vec(),
-            encoded: encoded.to_vec(),
-        });
-    }
-    if cursor != body_end {
-        return Err(RouterError::AuthenticationFailed);
-    }
-    let mut fragment_order: Vec<usize> = (0..fragments.len()).collect();
-    fragment_order.sort_by_key(|&index| {
-        let fragment = &fragments[index];
-        (
-            (fragment.opcode as u32)
-                .wrapping_add((dialect_byte as u32).wrapping_mul(13))
-                .wrapping_add((fragment.register as u32).wrapping_mul(7))
-                & 0xFF,
-            fragment.offset,
-        )
-    });
-    Ok(EvaluatorScheduleTemplate {
-        dialect_byte,
-        plan_nonce: plan_nonce.to_vec(),
-        static_binding,
-        dialect_commitment,
-        fragments,
-        fragment_order,
-    })
-}
-
-struct TransientMaterial([u8; 32]);
-
-impl Drop for TransientMaterial {
-    fn drop(&mut self) {
-        self.0.fill(0);
-    }
-}
-
-fn read_u32(bytes: &[u8], cursor: &mut usize, limit: usize) -> Result<u32, RouterError> {
-    if *cursor > limit.saturating_sub(4) {
-        return Err(RouterError::AuthenticationFailed);
-    }
-    let value = u32::from_be_bytes([
-        bytes[*cursor],
-        bytes[*cursor + 1],
-        bytes[*cursor + 2],
-        bytes[*cursor + 3],
-    ]);
-    *cursor += 4;
-    Ok(value)
-}
-
-fn update_i32(hasher: &mut Sha256, value: u32) {
-    hasher.update(&value.to_be_bytes());
-}
-
-fn update_frame(hasher: &mut Sha256, value: &[u8]) {
-    update_i32(hasher, value.len() as u32);
-    hasher.update(value);
-}
-
-fn sha256_with_domain(domain: &[u8], value: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(domain);
-    hasher.update(value);
-    hasher.finalize().into_bytes()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::page::{PageRequest, PAGE_HANDLE_SIZE};
+    use qp_crypto::{hkdf_sha256, hmac_sha256_bytes};
     use qp_page::{
-        encode_page, EvaluatorPlan, LeafIdentity, PageDescriptor, PageEnvelope, PageHandle,
-        PageKind as WireKind, PageLayout, PageProof, PageRoute, CANONICAL_CODEC_VARIANT,
-        DIGEST_SIZE, ENCODED_HANDLE_SIZE, FINGERPRINT_SIZE, LOCATOR_TOKEN_SIZE, NONCE_SIZE,
+        encode_page, LeafIdentity, PageDescriptor, PageEnvelope, PageHandle, PageKind as WireKind,
+        PageLayout, PageProof, PageRoute, CANONICAL_CODEC_VARIANT, DIGEST_SIZE,
+        ENCODED_HANDLE_SIZE, FINGERPRINT_SIZE, NONCE_SIZE,
     };
 
-    fn attached_string_page() -> (
-        PageEnvelope,
-        Vec<u8>,
-        [u8; 32],
-        [u8; PAGE_HANDLE_SIZE],
-        Vec<u8>,
-    ) {
+    /// Synthetic authority mirroring the production derivation: structured
+    /// binary inputs, HKDF page key, constant-time commitment verification.
+    struct TestAuthority {
+        seed: [u8; 32],
+        commitment_key: [u8; 32],
+        native_identity: [u8; 32],
+        authorized: bool,
+    }
+
+    impl TestAuthority {
+        const COMMITMENT_DOMAIN: &[u8] = b"javashroud-test-commitment-v4";
+        const PAGE_KEY_DOMAIN: &[u8] = b"javashroud-test-page-key-v4";
+
+        fn new(seed: [u8; 32]) -> Self {
+            let commitment_key = hkdf_sha256(&seed, Self::COMMITMENT_DOMAIN, &[], 32)
+                .expect("test commitment key");
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&commitment_key[..32]);
+            Self {
+                seed,
+                commitment_key: key,
+                native_identity: [0x5A; 32],
+                authorized: true,
+            }
+        }
+
+        fn material_for(&self, fixture: &AttachedFixture) -> [u8; 32] {
+            let request = PageKeyRequest {
+                secret_slot: 0,
+                kind_id: fixture.kind.id(),
+                page_index: fixture.page_index,
+                encoded_handle: &fixture.encoded_handle,
+                locator_token: &fixture.locator,
+                page_nonce: &fixture.page_nonce,
+                artifact_commitment: &[0x10; DIGEST_SIZE],
+                expected_key_commitment: &fixture.commitment,
+            };
+            self.derive(&request).expect("test page key")
+        }
+
+        /// Same derivation the production authority performs.
+        fn derive(&self, request: &PageKeyRequest<'_>) -> Result<[u8; 32], RouterError> {
+            if !self.authorized {
+                return Err(RouterError::AuthenticationFailed);
+            }
+            let mut info = Vec::new();
+            info.extend_from_slice(request.artifact_commitment);
+            info.extend_from_slice(&request.secret_slot.to_be_bytes());
+            info.push(request.kind_id);
+            info.extend_from_slice(&(request.page_index as u32).to_be_bytes());
+            info.extend_from_slice(request.encoded_handle);
+            info.extend_from_slice(request.locator_token);
+            info.extend_from_slice(request.page_nonce);
+            info.extend_from_slice(&self.native_identity);
+            let key = hkdf_sha256(&self.seed, Self::PAGE_KEY_DOMAIN, &info, 32)
+                .map_err(|_| RouterError::AuthenticationFailed)?;
+            let mut material = [0u8; 32];
+            material.copy_from_slice(&key[..32]);
+            Ok(material)
+        }
+    }
+
+    impl PageKeyAuthority for TestAuthority {
+        fn derive_page_key(
+            &self,
+            request: &PageKeyRequest<'_>,
+        ) -> Result<PageKeyMaterial, RouterError> {
+            let key = self.derive(request)?;
+            let expected = hmac_sha256_bytes(&self.commitment_key, &[&key]);
+            if !constant_time_eq(&expected, request.expected_key_commitment) {
+                return Err(RouterError::AuthenticationFailed);
+            }
+            Ok(PageKeyMaterial::from_material(&key))
+        }
+    }
+
+    fn clone_authority(authority: &TestAuthority) -> TestAuthority {
+        TestAuthority {
+            seed: authority.seed,
+            commitment_key: authority.commitment_key,
+            native_identity: authority.native_identity,
+            authorized: authority.authorized,
+        }
+    }
+
+    struct AttachedFixture {
+        envelope: PageEnvelope,
+        encoded: Vec<u8>,
+        descriptor_bytes: Vec<u8>,
+        encoded_handle: [u8; PAGE_HANDLE_SIZE],
+        locator: [u8; 16],
+        proof_bytes: Vec<u8>,
+        authority: TestAuthority,
+        page_nonce: [u8; NONCE_SIZE],
+        kind: WireKind,
+        page_index: i32,
+        commitment: [u8; FINGERPRINT_SIZE],
+    }
+
+    fn attached_string_page() -> AttachedFixture {
         attached_typed_page(WireKind::StringPage, 3, 0x11, b"hello-native")
     }
 
@@ -793,17 +753,26 @@ mod tests {
         page_index: i32,
         handle_fill: u8,
         payload: &[u8],
-    ) -> (
-        PageEnvelope,
-        Vec<u8>,
-        [u8; 32],
-        [u8; PAGE_HANDLE_SIZE],
-        Vec<u8>,
-    ) {
-        let fingerprint = [0x22; FINGERPRINT_SIZE];
+    ) -> AttachedFixture {
+        let authority = TestAuthority::new([0x77; 32]);
         let encoded_handle = [handle_fill; ENCODED_HANDLE_SIZE];
-        let locator = [0x12u8.wrapping_add(handle_fill); LOCATOR_TOKEN_SIZE];
-        let handle = PageHandle::new(kind, page_index, encoded_handle, locator, fingerprint)
+        let locator = [0x12u8.wrapping_add(handle_fill); 16];
+        let page_nonce = [0x50u8; NONCE_SIZE];
+        let page_material = {
+            let request = PageKeyRequest {
+                secret_slot: 0,
+                kind_id: kind.id(),
+                page_index,
+                encoded_handle: &encoded_handle,
+                locator_token: &locator,
+                page_nonce: &page_nonce,
+                artifact_commitment: &[0x10; DIGEST_SIZE],
+                expected_key_commitment: &[0u8; 32],
+            };
+            authority.derive(&request).expect("test page key")
+        };
+        let page_commitment = hmac_sha256_bytes(&authority.commitment_key, &[&page_material]);
+        let handle = PageHandle::new(kind, page_index, encoded_handle, locator, page_commitment)
             .expect("handle");
         let identity = format!("logical-page-{page_index}");
         let leaf = LeafIdentity::from_handle(&handle, identity.as_bytes()).expect("leaf");
@@ -837,13 +806,10 @@ mod tests {
             &layout_variant,
         )
         .expect("proof");
-        let (evaluator_opaque, page_material) = current_evaluator_opaque();
-        let evaluator = EvaluatorPlan::new(&evaluator_opaque, &fingerprint).expect("evaluator");
-        let mut evaluator_opaque = evaluator_opaque;
-        evaluator_opaque.fill(0);
-        let descriptor = PageDescriptor::new(route, proof, 1024, evaluator).expect("descriptor");
+        let descriptor = PageDescriptor::new(route, proof, 1024, 0).expect("descriptor");
         let envelope =
             PageEnvelope::create(0, &handle, &descriptor, &proof_bytes).expect("envelope");
+        let descriptor_bytes = descriptor.encode();
         let encoded = encode_page(
             payload,
             &page_material,
@@ -851,106 +817,60 @@ mod tests {
             identity.as_bytes(),
             page_index,
             kind,
-            &fingerprint,
+            &page_commitment,
             CANONICAL_CODEC_VARIANT,
             &layout,
             &locator,
-            &[0x50; NONCE_SIZE],
+            &page_nonce,
             &[0x61; 12],
             &[0x62; 8],
         )
         .expect("encode");
-        (envelope, encoded, page_material, encoded_handle, proof_bytes)
+        AttachedFixture {
+            envelope,
+            encoded,
+            descriptor_bytes,
+            encoded_handle,
+            locator,
+            proof_bytes,
+            authority,
+            page_nonce,
+            kind,
+            page_index,
+            commitment: page_commitment,
+        }
     }
 
-    fn current_evaluator_opaque() -> (Vec<u8>, [u8; 32]) {
-        let dialect = 0x42u8;
-        let plan_nonce = [0x51u8; 16];
-        let static_binding = [0x32u8; 32];
-        let mut dialect_hasher = Sha256::new();
-        dialect_hasher.update(&eval_domain(5));
-        dialect_hasher.update(&static_binding);
-        dialect_hasher.update(&plan_nonce);
-        dialect_hasher.update(&[dialect]);
-        let dialect_commitment = dialect_hasher.finalize().into_bytes();
-        let mut body = Vec::new();
-        body.extend_from_slice(b"AKE1");
-        body.push(dialect);
-        body.push(4);
-        body.extend_from_slice(&[0x41; 12]);
-        body.extend_from_slice(&plan_nonce);
-        body.extend_from_slice(&static_binding);
-        body.extend_from_slice(&[0x33; 32]);
-        body.extend_from_slice(&dialect_commitment);
-        let mut schedule = Vec::new();
-        for ordinal in 0..4usize {
-            let offset = ordinal;
-            let family = (ordinal + 1) as u8;
-            let opcode = (0x80 + ordinal) as u8;
-            let register = (3 + ordinal) as u8;
-            let token = vec![0x61u8.wrapping_add(ordinal as u8); 17];
-            let salt = vec![0x71u8.wrapping_add(ordinal as u8); 16];
-            let encoded = vec![0x81u8.wrapping_add(ordinal as u8); 17];
-            let length = encoded.len();
-            let mut tag_hasher = Sha256::new();
-            tag_hasher.update(&eval_domain(4));
-            tag_hasher.update(&static_binding);
-            tag_hasher.update(&dialect_commitment);
-            update_i32(&mut tag_hasher, offset as u32);
-            update_i32(&mut tag_hasher, length as u32);
-            update_i32(&mut tag_hasher, family as u32);
-            update_i32(&mut tag_hasher, opcode as u32);
-            update_i32(&mut tag_hasher, register as u32);
-            update_frame(&mut tag_hasher, &token);
-            update_frame(&mut tag_hasher, &salt);
-            update_frame(&mut tag_hasher, &encoded);
-            let tag = tag_hasher.finalize();
-            body.extend_from_slice(&[offset as u8, length as u8, family, opcode, register]);
-            update_u32(&mut body, token.len() as u32);
-            body.extend_from_slice(&token);
-            body.extend_from_slice(&salt);
-            update_u32(&mut body, encoded.len() as u32);
-            body.extend_from_slice(&encoded);
-            body.extend_from_slice(&tag.as_ref()[..16]);
-            schedule.push((offset, family, opcode, register, token, salt, encoded));
-        }
-        let plan_tag = sha256_with_domain(&eval_domain(6), &body);
-        body.extend_from_slice(&plan_tag);
-        let mut hasher = Sha256::new();
-        hasher.update(&eval_domain(7));
-        hasher.update(&static_binding);
-        hasher.update(&dialect_commitment);
-        hasher.update(&plan_nonce);
-        hasher.update(&[dialect]);
-        let mut order: Vec<usize> = (0..schedule.len()).collect();
-        order.sort_by_key(|&index| {
-            let item = &schedule[index];
-            (
-                (item.2 as u32)
-                    .wrapping_add((dialect as u32).wrapping_mul(13))
-                    .wrapping_add((item.3 as u32).wrapping_mul(7))
-                    & 0xFF,
-                item.0,
+    struct InstalledRouter {
+        router: TypedPageRouter,
+        encoded_handle: [u8; PAGE_HANDLE_SIZE],
+        proof_bytes: Vec<u8>,
+    }
+
+    fn installed_router() -> InstalledRouter {
+        let fixture = attached_string_page();
+        let mut router = TypedPageRouter::new();
+        router.bind_page_key_authority(Box::new(clone_authority(&fixture.authority)));
+        router
+            .install_descriptor_bound(
+                fixture.envelope,
+                fixture.encoded.clone(),
+                fixture.descriptor_bytes.clone(),
             )
-        });
-        for index in order {
-            let item = &schedule[index];
-            update_i32(&mut hasher, item.0 as u32);
-            update_i32(&mut hasher, item.1 as u32);
-            update_i32(&mut hasher, item.2 as u32);
-            update_i32(&mut hasher, item.3 as u32);
-            update_frame(&mut hasher, &item.4);
-            hasher.update(&item.5);
-            update_frame(&mut hasher, &item.6);
+            .expect("descriptor-bound install");
+        InstalledRouter {
+            router,
+            encoded_handle: fixture.encoded_handle,
+            proof_bytes: fixture.proof_bytes,
         }
-        let digest = hasher.finalize();
-        let mut material = [0u8; 32];
-        material.copy_from_slice(digest.as_ref());
-        (body, material)
     }
 
-    fn update_u32(output: &mut Vec<u8>, value: u32) {
-        output.extend_from_slice(&value.to_be_bytes());
+    fn string_request(
+        installed: &InstalledRouter,
+        proof: &[u8],
+    ) -> PageRequest {
+        PageRequest::new(&installed.encoded_handle, 3, proof, PageKind::String)
+            .expect("request")
     }
 
     #[test]
@@ -972,18 +892,51 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_bound_install_requires_ciphertext_and_descriptor() {
-        let (envelope, _encoded, _dek, _handle, _proof) = attached_string_page();
+    fn install_fails_closed_without_a_bound_authority() {
+        let fixture = attached_string_page();
         let mut router = TypedPageRouter::new();
         assert_eq!(
-            router.install_descriptor_bound(envelope, Vec::new(), b"descriptor".to_vec()),
+            router.install_descriptor_bound(
+                fixture.envelope,
+                fixture.encoded.clone(),
+                fixture.descriptor_bytes.clone()
+            ),
+            Err(RouterError::AuthenticationFailed)
+        );
+    }
+
+    #[test]
+    fn descriptor_bound_install_requires_ciphertext_and_descriptor() {
+        let fixture = attached_string_page();
+        let mut router = TypedPageRouter::new();
+        router.bind_page_key_authority(Box::new(clone_authority(&fixture.authority)));
+        let envelope = PageEnvelope::create(
+            0,
+            &PageHandle::new(
+                WireKind::StringPage,
+                3,
+                fixture.encoded_handle,
+                fixture.locator,
+                fixture.commitment,
+            )
+            .expect("handle"),
+            &{
+                let descriptor =
+                    PageDescriptor::decode(&fixture.descriptor_bytes).expect("descriptor");
+                descriptor
+            },
+            &fixture.proof_bytes,
+        )
+        .expect("envelope");
+        assert_eq!(
+            router.install_descriptor_bound(envelope, Vec::new(), fixture.descriptor_bytes.clone()),
             Err(RouterError::InvalidRequest(
                 "attached page is missing ciphertext"
             ))
         );
-        let (envelope, encoded, _dek, _handle, _proof) = attached_string_page();
+        let fixture2 = attached_string_page();
         assert_eq!(
-            router.install_descriptor_bound(envelope, encoded, Vec::new()),
+            router.install_descriptor_bound(fixture2.envelope, fixture2.encoded, Vec::new()),
             Err(RouterError::InvalidRequest(
                 "attached page is missing descriptor"
             ))
@@ -992,52 +945,64 @@ mod tests {
 
     #[test]
     fn descriptor_bound_install_retains_only_authenticated_descriptor_bytes() {
-        let (envelope, encoded, _dek, _handle, _proof) = attached_string_page();
-        let descriptor = envelope
-            .inline_descriptor()
-            .expect("inline descriptor")
-            .expect("descriptor bytes");
-        let mut router = TypedPageRouter::new();
-        router
-            .install_descriptor_bound(envelope, encoded, descriptor)
-            .expect("descriptor-bound install");
-        assert_eq!(router.len(), 1);
+        let installed = installed_router();
+        assert_eq!(installed.router.len(), 1);
     }
 
     #[test]
-    fn current_evaluator_schedule_round_trips_an_authenticated_page() {
-        let (envelope, encoded, _material, handle, proof) = attached_string_page();
-        let descriptor = envelope
-            .inline_descriptor()
-            .expect("inline descriptor")
-            .expect("descriptor bytes");
-        let mut router = TypedPageRouter::new();
-        router
-            .install_descriptor_bound(envelope, encoded, descriptor)
-            .expect("descriptor-bound install");
-        let request = PageRequest::new(&handle, 3, &proof, PageKind::String).expect("request");
-        let opened = router
-            .open(0, &request)
-            .expect("open current evaluator page");
+    fn current_schedule_round_trips_an_authenticated_page() {
+        let installed = installed_router();
+        let request = string_request(&installed, &installed.proof_bytes);
+        let opened = installed.router.open(0, &request).expect("open current page");
         assert_eq!(opened.payload(), b"hello-native");
     }
 
     #[test]
     fn descriptor_bound_open_rejects_wrong_raw_call_site_proof() {
-        let (envelope, encoded, _material, handle, proof) = attached_string_page();
-        let descriptor = envelope
-            .inline_descriptor()
-            .expect("inline descriptor")
-            .expect("descriptor bytes");
-        let mut router = TypedPageRouter::new();
-        router
-            .install_descriptor_bound(envelope, encoded, descriptor)
-            .expect("descriptor-bound install");
-        let mut wrong = proof.clone();
+        let installed = installed_router();
+        let mut wrong = installed.proof_bytes.clone();
         wrong[0] ^= 0x5a;
-        let request = PageRequest::new(&handle, 3, &wrong, PageKind::String).expect("request");
+        let request = string_request(&installed, &wrong);
         assert_eq!(
-            router.open(0, &request),
+            installed.router.open(0, &request),
+            Err(RouterError::AuthenticationFailed)
+        );
+    }
+
+    #[test]
+    fn unauthorized_authority_fails_closed() {
+        let fixture = attached_string_page();
+        let mut router = TypedPageRouter::new();
+        router.bind_page_key_authority(Box::new(TestAuthority {
+            authorized: false,
+            ..clone_authority(&fixture.authority)
+        }));
+        assert_eq!(
+            router.install_descriptor_bound(
+                fixture.envelope,
+                fixture.encoded,
+                fixture.descriptor_bytes
+            ),
+            Err(RouterError::AuthenticationFailed)
+        );
+    }
+
+    #[test]
+    fn wrong_slot_fails_closed() {
+        let fixture = attached_string_page();
+        // Re-encode the descriptor with a slot the authority does not know.
+        let mut reslotted_bytes = fixture.descriptor_bytes.clone();
+        let tail = reslotted_bytes.len();
+        // The slot is the trailing big-endian u32.
+        reslotted_bytes[tail - 1] = reslotted_bytes[tail - 1].wrapping_add(1);
+        let mut router = TypedPageRouter::new();
+        router.bind_page_key_authority(Box::new(clone_authority(&fixture.authority)));
+        assert_eq!(
+            router.install_descriptor_bound(
+                fixture.envelope,
+                fixture.encoded,
+                reslotted_bytes
+            ),
             Err(RouterError::AuthenticationFailed)
         );
     }

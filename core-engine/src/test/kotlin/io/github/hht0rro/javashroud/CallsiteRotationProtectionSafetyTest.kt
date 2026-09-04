@@ -12,6 +12,7 @@ import java.lang.invoke.MethodHandles
 import java.lang.invoke.MethodType
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassWriter
@@ -162,7 +163,7 @@ class CallsiteRotationProtectionSafetyTest {
     }
 
     @Test
-    fun rotation_strategies_invoke_resolved_virtual_target() {
+    fun rotation_strategies_fail_closed_without_an_authenticated_native_target() {
         val lookup = MethodHandles.lookup()
         val type = MethodType.methodType(Int::class.javaPrimitiveType, String::class.java)
         val caller = lookup.lookupClass().name.replace('.', '/')
@@ -179,11 +180,15 @@ class CallsiteRotationProtectionSafetyTest {
         )
         val strategies = listOf("mutable", "guarded", "table", "thread-slot", "oneshot", "epoch", "counter")
         for (strategy in strategies) {
-            val site = QpCallsiteBridge.createRotatingCallSite(lookup, "len", type, token, strategy)
-            val first = site.dynamicInvoker().invokeWithArguments("abcd") as Int
-            val second = site.dynamicInvoker().invokeWithArguments("xyz") as Int
-            assertEquals(4, first, strategy)
-            assertEquals(3, second, strategy)
+            val failure = assertFailsWith<SecurityException>(strategy) {
+                val site = QpCallsiteBridge.createRotatingCallSite(lookup, "len", type, token, strategy)
+                site.dynamicInvoker().invokeWithArguments("abcd")
+            }
+            val message = failure.message.orEmpty()
+            assertTrue(
+                message.contains("sealed native kernel") || message.contains("indy target token is invalid"),
+                "$strategy must fail closed without an authenticated Native target: $message",
+            )
         }
     }
 

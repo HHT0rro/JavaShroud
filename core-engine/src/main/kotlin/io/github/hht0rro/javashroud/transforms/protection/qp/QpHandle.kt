@@ -7,18 +7,20 @@ import java.util.Base64
  * Opaque locator for exactly one Qp page.
  *
  * It deliberately carries no catalog or traversal API. Callers can only give
- * this handle back to the build plan that minted it.
+ * this handle back to the build plan that minted it. The 32-byte commitment
+ * field binds the page's derived key: it is the secret-pack commitment over
+ * the page DEK and is verified by the native open path before decryption.
  */
 class QpHandle internal constructor(
     val resourceKind: QpResourceKind,
     val pageIndex: Int,
     encoded: ByteArray,
     locatorToken: ByteArray,
-    evaluatorFingerprint: ByteArray,
+    keyCommitmentFingerprint: ByteArray,
 ) {
     private var encodedValue = encoded.copyOf()
     private var locatorValue = locatorToken.copyOf()
-    private var fingerprintValue = evaluatorFingerprint.copyOf()
+    private var commitmentValue = keyCommitmentFingerprint.copyOf()
     private var wiped = false
 
     init {
@@ -29,8 +31,8 @@ class QpHandle internal constructor(
         require(locatorValue.size == LOCATOR_TOKEN_SIZE) {
             "Qp locator token has an invalid length"
         }
-        require(fingerprintValue.size == FINGERPRINT_SIZE) {
-            "Qp evaluator fingerprint has an invalid length"
+        require(commitmentValue.size == FINGERPRINT_SIZE) {
+            "Qp key commitment has an invalid length"
         }
     }
 
@@ -46,10 +48,11 @@ class QpHandle internal constructor(
             return locatorValue.copyOf()
         }
 
-    val evaluatorPlanFingerprint: ByteArray
+    /** Secret-pack commitment over this page's derived key. */
+    val keyCommitmentFingerprint: ByteArray
         get() {
             requireLive()
-            return fingerprintValue.copyOf()
+            return commitmentValue.copyOf()
         }
 
     internal fun encodedKey(): String {
@@ -66,10 +69,10 @@ class QpHandle internal constructor(
         if (wiped) return
         Arrays.fill(encodedValue, 0)
         Arrays.fill(locatorValue, 0)
-        Arrays.fill(fingerprintValue, 0)
+        Arrays.fill(commitmentValue, 0)
         encodedValue = ByteArray(0)
         locatorValue = ByteArray(0)
-        fingerprintValue = ByteArray(0)
+        commitmentValue = ByteArray(0)
         wiped = true
     }
 
@@ -103,13 +106,13 @@ class QpHandle internal constructor(
             pageIndex: Int,
             encoded: ByteArray,
             locatorToken: ByteArray,
-            evaluatorFingerprint: ByteArray,
+            keyCommitmentFingerprint: ByteArray,
         ): QpHandle = QpHandle(
             resourceKind = resourceKind,
             pageIndex = pageIndex,
             encoded = encoded,
             locatorToken = locatorToken,
-            evaluatorFingerprint = evaluatorFingerprint,
+            keyCommitmentFingerprint = keyCommitmentFingerprint,
         )
     }
 }

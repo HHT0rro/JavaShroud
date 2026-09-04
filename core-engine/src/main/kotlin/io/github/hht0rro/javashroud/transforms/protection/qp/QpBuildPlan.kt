@@ -11,81 +11,22 @@ import kotlin.jvm.JvmSynthetic
 /**
  * Build-only Qp current format planner.
  *
- * Every registered high-value page receives independent random page material,
- * an independent physical frame, and an artifact-specific opaque Qp VM
- * evaluator. The evaluator's randomized dialect, fragments, bindings, and
- * authenticated terminal schedule never expose a raw or contiguous page key.
- * This object deliberately provides no page enumeration, raw-key export, or
- * Java-visible generic decoder. Materialization can only emit a
- * page-local ciphertext or perform a boolean AEAD binding check whose transient
- * plaintext is zeroed before control returns.
+ * Every registered high-value page receives one native secret-pack slot, one
+ * independent physical frame, and a page key derived from structured binary
+ * inputs. The slot seed is owned by the build's [NativeVmSecretPackDraft]; it
+ * is emitted only into the artifact-specific native specialization and never
+ * serialized into a descriptor, catalog, or resource. This object deliberately
+ * provides no page enumeration, raw-key export, or Java-visible generic
+ * decoder. Materialization can only emit a page-local ciphertext or perform a
+ * boolean AEAD binding check whose transient plaintext is zeroed before
+ * control returns.
  */
 class QpBuildPlan private constructor(
     private val commitment: ByteArray,
+    private val secretPack: NativeVmSecretPackDraft,
     private val random: SecureRandom,
     val pageSizePolicy: QpPageSizePolicy,
 ) : AutoCloseable {
-
-    /** Current-format Qp VM evaluator plan for exactly one page. */
-    class EvaluatorPlan internal constructor(
-        fingerprint: ByteArray,
-        boundDecryptorCore: QpBoundCore,
-    ) {
-        private var fingerprintValue: ByteArray = fingerprint.copyOf()
-        private var boundDecryptorCoreValue: QpBoundCore? = boundDecryptorCore
-
-        @Volatile
-        private var wiped: Boolean = false
-
-        init {
-            require(fingerprintValue.size == QpHandle.FINGERPRINT_SIZE) {
-                "Qp evaluator fingerprint has an invalid length"
-            }
-        }
-
-        val fingerprint: ByteArray
-            get() {
-                requireLive()
-                return fingerprintValue.copyOf()
-            }
-
-        internal fun copyFingerprintForBuild(): ByteArray {
-            requireLive()
-            return fingerprintValue.copyOf()
-        }
-
-        /** Page-local nonce is owned by the bound Qp VM terminal seed. */
-        internal fun copyPageNonceForCodec(): ByteArray {
-            requireLive()
-            return (boundDecryptorCoreValue
-                ?: error("Qp bound decryptor core has been wiped"))
-                .copyPageNonceForCodec()
-        }
-
-        /** Finalize one typed native descriptor after route/proof materialization. */
-        internal fun boundPlanForRuntime(
-            route: QpRouteMetadata,
-            callSiteProof: ByteArray,
-        ): QpBoundPlan {
-            requireLive()
-            return (boundDecryptorCoreValue
-                ?: error("Qp bound decryptor core has been wiped"))
-                .finalizeForRuntime(route, callSiteProof)
-        }
-
-        internal fun wipe() {
-            if (wiped) return
-            boundDecryptorCoreValue?.wipe()
-            boundDecryptorCoreValue = null
-            Arrays.fill(fingerprintValue, 0)
-            fingerprintValue = ByteArray(0)
-            wiped = true
-        }
-
-        private fun requireLive() {
-            check(!wiped) { "Qp evaluator plan has been wiped" }
-        }
-    }
 
     /** Immutable-view metadata for one high-value page. */
     class Page internal constructor(
@@ -94,7 +35,9 @@ class QpBuildPlan private constructor(
         logicalIdentity: ByteArray,
         pageIndex: Int,
         targetSize: Int,
-        evaluatorPlan: EvaluatorPlan,
+        secretSlot: Int,
+        keyCommitment: ByteArray,
+        pageNonce: ByteArray,
         codecVariant: String,
         layout: QpPageLayout,
     ) {
@@ -103,7 +46,9 @@ class QpBuildPlan private constructor(
         private var logicalIdentityValue: ByteArray = logicalIdentity.copyOf()
         private val pageIndexValue: Int = pageIndex
         private val targetSizeValue: Int = targetSize
-        private var evaluatorPlanValue: EvaluatorPlan? = evaluatorPlan
+        private val secretSlotValue: Int = secretSlot
+        private var keyCommitmentValue: ByteArray = keyCommitment.copyOf()
+        private var pageNonceValue: ByteArray = pageNonce.copyOf()
         private val codecVariantValue: String = codecVariant
         private var layoutValue: QpPageLayout? = layout
 
@@ -140,10 +85,11 @@ class QpBuildPlan private constructor(
                 return targetSizeValue
             }
 
-        val evaluatorPlan: EvaluatorPlan
+        /** Native secret-pack slot that owns this page's key derivation material. */
+        val secretSlot: Int
             get() {
                 requireLive()
-                return evaluatorPlanValue ?: error("Qp page evaluator has been wiped")
+                return secretSlotValue
             }
 
         val codecVariant: String
@@ -168,12 +114,11 @@ class QpBuildPlan private constructor(
 
         internal fun <T> withCodecContext(block: (PageCodecContext) -> T): T {
             requireLive()
-            val evaluator = evaluatorPlanValue ?: error("Qp page evaluator has been wiped")
             val context = PageCodecContext(
                 identity = logicalIdentityValue.copyOf(),
-                fingerprint = evaluator.copyFingerprintForBuild(),
+                keyCommitment = keyCommitmentValue.copyOf(),
                 locator = (handleValue ?: error("Qp page handle has been wiped")).copyLocatorTokenForBuild(),
-                pageNonce = evaluator.copyPageNonceForCodec(),
+                pageNonce = pageNonceValue.copyOf(),
                 codecVariant = codecVariantValue,
                 layout = (layoutValue ?: error("Qp page layout has been wiped")).copyForBuild(),
             )
@@ -188,8 +133,10 @@ class QpBuildPlan private constructor(
             if (wiped) return
             Arrays.fill(logicalIdentityValue, 0)
             logicalIdentityValue = ByteArray(0)
-            evaluatorPlanValue?.wipe()
-            evaluatorPlanValue = null
+            Arrays.fill(keyCommitmentValue, 0)
+            keyCommitmentValue = ByteArray(0)
+            Arrays.fill(pageNonceValue, 0)
+            pageNonceValue = ByteArray(0)
             layoutValue?.wipe()
             layoutValue = null
             handleValue?.wipe()
@@ -244,7 +191,7 @@ class QpBuildPlan private constructor(
 
     internal class PageCodecContext(
         val identity: ByteArray,
-        val fingerprint: ByteArray,
+        val keyCommitment: ByteArray,
         val locator: ByteArray,
         val pageNonce: ByteArray,
         val codecVariant: String,
@@ -252,7 +199,7 @@ class QpBuildPlan private constructor(
     ) : AutoCloseable {
         override fun close() {
             Arrays.fill(identity, 0)
-            Arrays.fill(fingerprint, 0)
+            Arrays.fill(keyCommitment, 0)
             Arrays.fill(locator, 0)
             Arrays.fill(pageNonce, 0)
             layout.wipe()
@@ -326,15 +273,13 @@ class QpBuildPlan private constructor(
 
         val canonicalCodec = QpPageCodec.normalizeCodecVariant(codecVariant)
         var layout: QpPageLayout? = null
-        var evaluatorPlan: EvaluatorPlan? = null
         var handle: QpHandle? = null
         var page: Page? = null
         var dek: ByteArray? = null
         var encodedHandle: ByteArray? = null
         var locator: ByteArray? = null
         var pageNonce: ByteArray? = null
-        var fingerprint: ByteArray? = null
-        var boundDecryptorCore: QpBoundCore? = null
+        var keyCommitment: ByteArray? = null
         var success = false
 
         try {
@@ -344,40 +289,30 @@ class QpBuildPlan private constructor(
                 "Qp selected page target size is unsupported for resource kind"
             }
 
-            // The handle, locator and evaluator fingerprint are page-local
-            // binding inputs.  Qp VM compile creates the opaque randomized
-            // fragment program and authenticates the complete page material.
+            // The handle, locator and page nonce are page-local binding inputs
+            // of the structured key derivation. The secret slot owns the only
+            // derivation seed; it lives in the artifact's native specialization.
             encodedHandle = encodedHandleOverride?.copyOf()
                 ?: ByteArray(QpHandle.ENCODED_HANDLE_SIZE).also(random::nextBytes)
             locator = ByteArray(QpHandle.LOCATOR_TOKEN_SIZE).also(random::nextBytes)
             pageNonce = ByteArray(QpPageCodec.NONCE_SIZE).also(random::nextBytes)
-            fingerprint = ByteArray(QpHandle.FINGERPRINT_SIZE).also(random::nextBytes)
-
-            boundDecryptorCore = QpBoundCore.compile(
+            val secretSlot = secretPack.registerSlot()
+            dek = secretPack.pageKey(
+                slotId = secretSlot,
                 resourceKind = kind,
-                logicalIdentity = identityCopy,
                 pageIndex = pageIndex,
-                targetPageSize = targetSize,
-                codecVariant = canonicalCodec,
-                layoutVariant = layout.variant,
                 encodedHandle = checkNotNull(encodedHandle),
                 locatorToken = checkNotNull(locator),
-                evaluatorFingerprint = checkNotNull(fingerprint),
-                artifactCanonicalCommitment = commitment,
                 pageNonce = checkNotNull(pageNonce),
-                random = random,
+                preNativeCommitment = commitment,
             )
-            dek = checkNotNull(boundDecryptorCore).copyPageMaterialForBuild()
-            evaluatorPlan = EvaluatorPlan(
-                fingerprint = checkNotNull(fingerprint),
-                boundDecryptorCore = checkNotNull(boundDecryptorCore),
-            )
+            keyCommitment = secretPack.keyCommitment(secretSlot, checkNotNull(dek))
             handle = QpHandle.create(
                 resourceKind = kind,
                 pageIndex = pageIndex,
                 encoded = encodedHandle,
                 locatorToken = locator,
-                evaluatorFingerprint = fingerprint,
+                keyCommitmentFingerprint = keyCommitment,
             )
             page = Page(
                 handle = handle,
@@ -385,13 +320,17 @@ class QpBuildPlan private constructor(
                 logicalIdentity = identityCopy,
                 pageIndex = pageIndex,
                 targetSize = targetSize,
-                evaluatorPlan = evaluatorPlan,
+                secretSlot = secretSlot,
+                keyCommitment = checkNotNull(keyCommitment),
+                pageNonce = checkNotNull(pageNonce),
                 codecVariant = canonicalCodec,
                 layout = layout,
             )
+            // The page now owns the only nonce copy.
+            pageNonce = null
             val handleKey = handle.encodedKey()
             require(handleKey !in records) { "Qp page handle encoding is already registered" }
-            records[handleKey] = Record(page, dek)
+            records[handleKey] = Record(page, checkNotNull(dek))
             registrationKeys += registrationKey
             success = true
             return page
@@ -400,11 +339,10 @@ class QpBuildPlan private constructor(
             encodedHandle?.fill(0)
             locator?.fill(0)
             pageNonce?.fill(0)
-            fingerprint?.fill(0)
             if (!success) {
                 dek?.fill(0)
+                keyCommitment?.fill(0)
                 page?.wipe() ?: run {
-                    evaluatorPlan?.wipe() ?: boundDecryptorCore?.wipe()
                     layout?.wipe()
                     handle?.wipe()
                 }
@@ -429,7 +367,7 @@ class QpBuildPlan private constructor(
                         identity = context.identity,
                         pageIndex = acquired.record.page.pageIndex,
                         kind = acquired.record.page.resourceKind,
-                        fingerprint = context.fingerprint,
+                        fingerprint = context.keyCommitment,
                         codec = context.codecVariant,
                         layout = context.layout,
                         locator = context.locator,
@@ -470,7 +408,7 @@ class QpBuildPlan private constructor(
                         identity = context.identity,
                         pageIndex = acquired.record.page.pageIndex,
                         kind = acquired.record.page.resourceKind,
-                        fingerprint = context.fingerprint,
+                        fingerprint = context.keyCommitment,
                         codec = context.codecVariant,
                         layout = context.layout,
                         locator = context.locator,
@@ -553,20 +491,22 @@ class QpBuildPlan private constructor(
         digest.update((value ushr 24).toByte())
         digest.update((value ushr 16).toByte())
         digest.update((value ushr 8).toByte())
-        digest.update(value.toByte())
+        digest.update((value and 0xFF).toByte())
     }
 
     companion object {
         private val REGISTRATION_DOMAIN = "javashroud-qp-registration-v1".toByteArray(Charsets.US_ASCII)
 
-        fun create(
+        internal fun create(
             commitment: ByteArray,
+            secretPack: NativeVmSecretPackDraft,
             random: SecureRandom = SecureRandom(),
             pageSizePolicy: QpPageSizePolicy = QpPageSizePolicy.DEFAULT,
         ): QpBuildPlan {
             require(commitment.size == 32) { "Qp artifact commitment must be 32 bytes" }
             return QpBuildPlan(
                 commitment = commitment.copyOf(),
+                secretPack = secretPack,
                 random = random,
                 pageSizePolicy = pageSizePolicy,
             )

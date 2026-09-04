@@ -208,7 +208,7 @@ internal class QpPageEmission private constructor(
             pageIndex = pageIndex,
             encoded = handleEncodingValue,
             locatorToken = locatorTokenValue,
-            evaluatorFingerprint = evaluatorFingerprintValue,
+            keyCommitmentFingerprint = evaluatorFingerprintValue,
         )
     }
 
@@ -287,7 +287,7 @@ internal class QpPageEmission private constructor(
                 }
                 handleEncoding = handle.encoded
                 locatorToken = handle.locatorToken
-                evaluatorFingerprint = handle.evaluatorPlanFingerprint
+                evaluatorFingerprint = handle.keyCommitmentFingerprint
 
                 return QpPageEmission(
                     entryToken = entryToken,

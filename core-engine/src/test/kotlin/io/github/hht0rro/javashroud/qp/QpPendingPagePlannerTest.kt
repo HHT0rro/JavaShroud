@@ -190,7 +190,7 @@ class QpPendingPagePlannerTest {
                 )
                 val commitmentBytes = commitment.copyBytes()
                 val plan = try {
-                    QpBuildPlan.create(commitmentBytes, DeterministicSecureRandom(0x51C1))
+                    QpBuildPlan.create(commitmentBytes, testSecretPackDraft(), DeterministicSecureRandom(0x51C1))
                 } finally {
                     Arrays.fill(commitmentBytes, 0)
                 }
@@ -272,7 +272,7 @@ class QpPendingPagePlannerTest {
                 )
                 val commitmentBytes = commitment.copyBytes()
                 val plan = try {
-                    QpBuildPlan.create(commitmentBytes, FirstSizeSecureRandom())
+                    QpBuildPlan.create(commitmentBytes, testSecretPackDraft(), FirstSizeSecureRandom())
                 } finally {
                     Arrays.fill(commitmentBytes, 0)
                 }

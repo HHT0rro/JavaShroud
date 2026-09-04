@@ -27,7 +27,7 @@ class QpPageEmitterTest {
             byteArrayOf(0x11, 0x12, 0x13),
             byteArrayOf(0x21, 0x22, 0x23),
         )
-        val plan = QpBuildPlan.create(commitment, SecureRandom())
+        val plan = QpBuildPlan.create(commitment, testSecretPackDraft(), SecureRandom())
         commitment.fill(0)
         val page0 = plan.registerPage(QpResourceKind.QpMethod, methodIdentity, pageIndex = 0)
         val page1 = plan.registerPage(QpResourceKind.QpMethod, methodIdentity, pageIndex = 1)
@@ -135,7 +135,7 @@ class QpPageEmitterTest {
         val secondProof = byteArrayOf(0x41, 0x42, 0x43)
         val firstEntryToken = 0x4A4B_454E_0000_0201L
         val secondEntryToken = 0x4A4B_454E_0000_0202L
-        val plan = QpBuildPlan.create(commitment, SecureRandom())
+        val plan = QpBuildPlan.create(commitment, testSecretPackDraft(), SecureRandom())
         commitment.fill(0)
         val firstPage = plan.registerPage(QpResourceKind.QpMethod, firstIdentity, pageIndex = 0)
         val secondPage = plan.registerPage(QpResourceKind.QpMethod, secondIdentity, pageIndex = 0)

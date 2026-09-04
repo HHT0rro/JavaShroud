@@ -12,9 +12,11 @@ import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.NativeVmBuildProfile
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeKeyPartitions
 import io.github.hht0rro.javashroud.transforms.protection.QpSerializer
+import io.github.hht0rro.javashroud.transforms.protection.hardening.ProtectionFormat
 import io.github.hht0rro.javashroud.transforms.protection.qp.derivedVmMagic
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
+import org.objectweb.asm.Handle
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.Type
@@ -28,18 +30,22 @@ import kotlin.test.assertFailsWith
 import java.security.SecureRandom
 import kotlin.test.assertTrue
 
+private fun decodeHexSignature(value: String): ByteArray = ByteArray(value.length / 2) { index ->
+    value.substring(index * 2, index * 2 + 2).toInt(16).toByte()
+}
+
 /**
- * VBC4 VM lifecycle tests.
+ * Native VM lifecycle tests.
  *
  * The former Java interpreter roundtrip tests are intentionally removed in
- * VBC4-only mode. These tests verify compile-time serializer output and
+ * Native-only mode. These tests verify compile-time serializer output and
  * runtime helper injection behavior for the native-only path.
  */
 class VmInterpreterExecutionTest {
     private val objectMapper = ObjectMapper()
 
     @Test
-    fun vbc4_serializer_returns_expected_header_and_section_markers() {
+    fun native_serializer_returns_expected_header_and_section_markers() {
         val serializer = QpSerializer(buildSeed = 0x2468_1357, buildContext = fixedQpContext())
         serializer.visitCode()
         serializer.visitInsn(Opcodes.ICONST_1)
@@ -50,28 +56,28 @@ class VmInterpreterExecutionTest {
         val bytes = serializer.serialize()
 
         val currentMagic = derivedVmMagic()
-        val retiredVmMagic = "VBC5".toByteArray(Charsets.US_ASCII)
+        val retiredVmMagic = decodeHexSignature(ProtectionFormat.RETIRED_VM_MAGIC_HEX)
         try {
             assertTrue(bytes.copyOfRange(0, 4).contentEquals(currentMagic), "VM frame must use the current seed-derived magic")
-            assertFalse(bytes.copyOfRange(0, 4).contentEquals(retiredVmMagic), "VM frame must not use retired VBC5 magic")
+            assertFalse(bytes.copyOfRange(0, 4).contentEquals(retiredVmMagic), "VM frame must not use the retired magic")
         } finally {
             java.util.Arrays.fill(currentMagic, 0)
             java.util.Arrays.fill(retiredVmMagic, 0)
         }
         assertFalse(bytes.containsInt32BigEndian(0x2468_1357), "Build seed must not be stored in plaintext")
-        assertEquals(32, bytes.copyOfRange(20, 52).size, "VBC4 header must carry a dialect commitment")
-        assertTrue(bytes.copyOfRange(20, 52).any { it != 0.toByte() }, "VBC4 dialect commitment must not be an all-zero placeholder")
-        assertEquals(16, bytes.copyOfRange(56, 72).size, "VBC4 header must carry a wrapped seed token")
+        assertEquals(32, bytes.copyOfRange(20, 52).size, "Native VM header must carry a dialect commitment")
+        assertTrue(bytes.copyOfRange(20, 52).any { it != 0.toByte() }, "Native VM dialect commitment must not be an all-zero placeholder")
+        assertEquals(16, bytes.copyOfRange(56, 72).size, "Native VM header must carry a wrapped seed token")
         val flags = readU2(bytes, 72)
         assertTrue(flags and 0x0001 != 0, "Constant pool section must be encrypted")
         assertTrue(flags and 0x0002 != 0, "Instruction section must be block encrypted")
         assertTrue(flags and 0x0004 != 0, "Stream must contain MAC")
         assertTrue(flags and 0x0020 != 0, "Stream must carry authenticated encryption metadata")
-        assertEquals(32, bytes.copyOfRange(bytes.size - 32, bytes.size).size, "VBC4 frame ends in the fixed-size HMAC without a trailing length marker")
+        assertEquals(32, bytes.copyOfRange(bytes.size - 32, bytes.size).size, "Native VM frame ends in the fixed-size HMAC without a trailing length marker")
     }
 
     @Test
-    fun vbc4_multi_block_layout_splits_large_methods_into_several_blocks() {
+    fun native_multi_block_layout_splits_large_methods_into_several_blocks() {
         val serializer = QpSerializer(buildSeed = 0x0BADF00D, buildContext = fixedQpContext())
         serializer.visitCode()
         repeat(60) { i ->
@@ -90,7 +96,7 @@ class VmInterpreterExecutionTest {
     }
 
     @Test
-    fun vbc4_multi_block_layout_uses_entropy_even_for_same_seed() {
+    fun native_multi_block_layout_uses_entropy_even_for_same_seed() {
         fun emit(seed: Int): ByteArray {
             val serializer = QpSerializer(buildSeed = seed, buildContext = fixedQpContext())
             serializer.visitCode()
@@ -110,7 +116,7 @@ class VmInterpreterExecutionTest {
     }
 
     @Test
-    fun vbc4_multi_block_storage_order_is_seed_randomized() {
+    fun native_multi_block_storage_order_is_seed_randomized() {
         fun blockIds(seed: Int): List<Int> {
             val serializer = QpSerializer(buildSeed = seed, buildContext = fixedQpContext())
             serializer.visitCode()
@@ -135,7 +141,7 @@ class VmInterpreterExecutionTest {
     }
 
     @Test
-    fun vbc4_multi_block_index_carries_masked_dispatch_chain() {
+    fun native_multi_block_index_carries_masked_dispatch_chain() {
         val seed = 0x2468_1357
         val serializer = QpSerializer(
             buildSeed = seed,
@@ -157,7 +163,7 @@ class VmInterpreterExecutionTest {
         val blockCount = readU2(bytes, 74)
         val entries = readBlockIndexEntries(bytes, blockCount)
 
-        assertTrue(flags and 0x0800 != 0, "VBC4 must mark block-dispatch metadata as required")
+        assertTrue(flags and 0x0800 != 0, "Native VM must mark block-dispatch metadata as required")
         assertTrue(blockCount > 1, "Fixture must produce multiple blocks")
         assertTrue(entries.any { it.maskedNext != it.blockId + 1 }, "Dispatch edges must be masked rather than plaintext next ids")
         val dispatchSeed = effectiveBuildSeed(serializer)
@@ -171,7 +177,7 @@ class VmInterpreterExecutionTest {
     }
 
     @Test
-    fun vbc4_same_program_has_high_structural_variance_across_build_seeds() {
+    fun native_same_program_has_high_structural_variance_across_build_seeds() {
         fun emit(seed: Int): Pair<ByteArray, List<Int>> {
             val serializer = QpSerializer(buildSeed = seed, buildContext = fixedQpContext())
             serializer.visitCode()
@@ -198,13 +204,13 @@ class VmInterpreterExecutionTest {
         val uniqueBlockCounts = outputs.map { it.second.size }.toSet().size
         val uniqueStorageOrders = outputs.map { it.second }.toSet().size
 
-        assertEquals(outputs.size, uniquePayloads, "Same source VM program should produce unique VBC4 payloads across sampled build seeds")
+        assertEquals(outputs.size, uniquePayloads, "Same source VM program should produce unique native payloads across sampled build seeds")
         assertTrue(uniqueBlockCounts >= 2, "Same source VM program should vary logical block counts across seeds")
         assertTrue(uniqueStorageOrders >= outputs.size / 2, "Same source VM program should vary physical block storage order across seeds")
     }
 
     @Test
-    fun vbc4_extended_opcode_aliasing_covers_more_semantic_families() {
+    fun native_extended_opcode_aliasing_covers_more_semantic_families() {
         val serializerSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/QpSerializer.kt"))
         val nativeSource = Files.readString(Path.of("src/main/rust/crates/qp-vm/src/lib.rs"))
         // Arithmetic/bitwise, load-store, array, field, and branch families must all carry aliases.
@@ -218,7 +224,7 @@ class VmInterpreterExecutionTest {
     }
 
     @Test
-    fun vbc4_domain_super_operator_operands_are_alias_diversified() {
+    fun native_domain_super_operator_operands_are_alias_diversified() {
         fun foldedSources(seed: Int): Pair<Int, Int> {
             val serializer = QpSerializer(buildSeed = seed, buildContext = fixedQpContext())
             val domainOperand = QpSerializer::class.java.getDeclaredMethod(
@@ -238,7 +244,7 @@ class VmInterpreterExecutionTest {
     }
 
     @Test
-    fun vbc4_stack_instruction_opcodes_are_masked_per_build_seed() {
+    fun native_stack_instruction_opcodes_are_masked_per_build_seed() {
         val serializerA = QpSerializer(buildSeed = 0x11111111, buildContext = fixedQpContext())
         serializerA.visitCode()
         serializerA.visitInsn(Opcodes.ICONST_1)
@@ -256,7 +262,7 @@ class VmInterpreterExecutionTest {
         val bytesB = serializerB.serialize()
 
         // Different seeds should produce different binary output for the same program
-        assertFalse(bytesA.contentEquals(bytesB), "Different build seeds must produce different VBC4 encodings")
+        assertFalse(bytesA.contentEquals(bytesB), "Different build seeds must produce different native VM encodings")
         // The complete 32-byte MAC tag at EOF should differ too.
         assertFalse(
             bytesA.copyOfRange(bytesA.size - 32, bytesA.size).contentEquals(
@@ -267,25 +273,25 @@ class VmInterpreterExecutionTest {
     }
 
     @Test
-    fun vbc4_state_bound_serializer_uses_runtime_binding_in_seed_derivation() {
+    fun native_state_bound_serializer_uses_runtime_binding_in_seed_derivation() {
         val serializerSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/QpSerializer.kt"))
         val virtualizationSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/MethodVirtualizationTransforms.kt"))
         val nativeKernelSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeKernelTransforms.kt"))
 
-        assertTrue(serializerSource.contains("private val stateBinding: String"), "VBC4 serializer must accept runtime state binding material.")
-        assertTrue(serializerSource.contains("QP_FLAG_STATE_BOUND") && serializerSource.contains("vbc4WrappedSeed(cryptoSeed, nonce, stateBinding)"), "VBC4 serializer seed wrapping must always include binding material.")
+        assertTrue(serializerSource.contains("private val stateBinding: String"), "Native VM serializer must accept runtime state binding material.")
+        assertTrue(serializerSource.contains("QP_FLAG_STATE_BOUND") && serializerSource.contains("frameWrappedSeed(cryptoSeed, nonce, stateBinding)"), "Native VM serializer seed wrapping must always include binding material.")
         assertTrue(virtualizationSource.contains("QP_CLEAN_ENTRY_INTEGRITY_HEX") && virtualizationSource.contains("jarLayoutDigest"), "VM resource binding must include clean entry integrity and build layout digest material.")
         assertTrue(virtualizationSource.contains("vmStateBinding(entryToken, resourcePath)"), "VM resource serialization must bind the hashed runtime entry token and resource path.")
-        assertTrue(nativeKernelSource.contains("stateBinding = vmStateBinding(entryToken, resourcePath)"), "Helper VBC4 resource serialization must also bind the hashed runtime entry token and resource path.")
+        assertTrue(nativeKernelSource.contains("stateBinding = vmStateBinding(entryToken, resourcePath)"), "Helper VM resource serialization must also bind the hashed runtime entry token and resource path.")
     }
 
     @Test
-    fun vbc4_serializer_and_native_parser_support_opcode_level_polymorphism() {
+    fun native_serializer_and_native_parser_support_opcode_level_polymorphism() {
         val serializerSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/QpSerializer.kt"))
         val nativeSource = Files.readString(Path.of("src/main/rust/crates/qp-vm/src/lib.rs"))
 
         assertTrue(serializerSource.contains("VM_OPCODE_ALIASES"), "Serializer must define equivalent opcode aliases.")
-        assertTrue(serializerSource.contains("lowerToLogicalProgram(metadataCpIndex)"), "VBC4-only serialization must lower bytecode into the register program consumed by native dispatch.")
+        assertTrue(serializerSource.contains("lowerToLogicalProgram(metadataCpIndex)"), "Native-only serialization must lower bytecode into the register program consumed by native dispatch.")
         assertTrue(serializerSource.contains("polymorphicOpcode(instruction.opcode"), "Register instruction serialization must choose polymorphic opcode aliases.")
         assertTrue(serializerSource.contains("domainSuperOperandOpcode") && serializerSource.contains("polymorphicOpcode(opcode"), "Semantic/domain super-operators must diversify their embedded source opcodes instead of exposing stable canonical operands.")
         assertTrue(nativeSource.contains("fn canonical_opcode"), "Rust parser must canonicalize polymorphic opcode aliases before dispatch.")
@@ -338,7 +344,7 @@ class VmInterpreterExecutionTest {
             assertEquals(
                 baseline.output.trim(),
                 result.output.trim(),
-                "Native VBC4 must preserve long-running loops and nested virtualized ArithmeticException catch semantics",
+                "Native VM must preserve long-running loops and nested virtualized ArithmeticException catch semantics",
             )
         } finally {
             outputJar?.let { Files.deleteIfExists(it) }
@@ -365,7 +371,7 @@ class VmInterpreterExecutionTest {
             assertEquals(
                 baseline.output.trim(),
                 result.output.trim(),
-                "Native VBC4 must preserve const+bitwise/shift semantics through broadened super-operator fusion",
+                "Native VM must preserve const+bitwise/shift semantics through broadened super-operator fusion",
             )
         } finally {
             outputJar?.let { Files.deleteIfExists(it) }
@@ -393,7 +399,7 @@ class VmInterpreterExecutionTest {
             assertEquals(
                 baseline.output.trim(),
                 result.output.trim(),
-                "Native VBC4 must preserve compare-and-branch semantics through semantic predicate super-operator fusion",
+                "Native VM must preserve compare-and-branch semantics through semantic predicate super-operator fusion",
             )
         } finally {
             outputJar?.let { Files.deleteIfExists(it) }
@@ -619,7 +625,7 @@ class VmInterpreterExecutionTest {
             outputJar = runEngine(inputJar, passes)
             val result = runJavaProcessWithTimeout(ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()), timeoutSeconds = 120)
             assertEquals(0, result.exitCode, "Virtualized instance recursive fixture must exit cleanly without native reentry blowup. stdout=${result.output}")
-            assertEquals(baseline.output.trim(), result.output.trim(), "Native VBC4 must preserve private instance tail recursion semantics")
+            assertEquals(baseline.output.trim(), result.output.trim(), "Native VM must preserve private instance tail recursion semantics")
         } finally {
             outputJar?.let { Files.deleteIfExists(it) }
             Files.deleteIfExists(inputJar)
@@ -644,7 +650,7 @@ class VmInterpreterExecutionTest {
                 ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()),
             )
             assertEquals(0, result.exitCode, "Virtualized defineClass fixture must exit cleanly. stdout=${result.output}")
-            assertEquals(baseline.output.trim(), result.output.trim(), "Native VBC4 must preserve defineClass(byte[], offset, length) semantics")
+            assertEquals(baseline.output.trim(), result.output.trim(), "Native VM must preserve defineClass(byte[], offset, length) semantics")
         } finally {
             outputJar?.let { Files.deleteIfExists(it) }
             Files.deleteIfExists(inputJar)
@@ -669,7 +675,7 @@ class VmInterpreterExecutionTest {
                 ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()),
             )
             assertEquals(0, result.exitCode, "Virtualized constructor-stack fixture must exit cleanly. stdout=${result.output}")
-            assertEquals(baseline.output.trim(), result.output.trim(), "Native VBC4 must preserve uninitialized object duplication and multi-arg constructor semantics")
+            assertEquals(baseline.output.trim(), result.output.trim(), "Native VM must preserve uninitialized object duplication and multi-arg constructor semantics")
         } finally {
             outputJar?.let { Files.deleteIfExists(it) }
             Files.deleteIfExists(inputJar)
@@ -694,7 +700,7 @@ class VmInterpreterExecutionTest {
                 ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()),
             )
             assertEquals(0, result.exitCode, "Virtualized option parser fixture must exit cleanly. stdout=${result.output}")
-            assertEquals(baseline.output.trim(), result.output.trim(), "Native VBC4 must preserve looped option parsing and constructor tail semantics")
+            assertEquals(baseline.output.trim(), result.output.trim(), "Native VM must preserve looped option parsing and constructor tail semantics")
         } finally {
             outputJar?.let { Files.deleteIfExists(it) }
             Files.deleteIfExists(inputJar)
@@ -719,7 +725,7 @@ class VmInterpreterExecutionTest {
                 ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()),
             )
             assertEquals(0, result.exitCode, "Virtualized annotation fixture must exit cleanly. stdout=${result.output}")
-            assertEquals(baseline.output.trim(), result.output.trim(), "Native VBC4 must preserve method, default, and parameter annotation metadata")
+            assertEquals(baseline.output.trim(), result.output.trim(), "Native VM must preserve method, default, and parameter annotation metadata")
         } finally {
             outputJar?.let { Files.deleteIfExists(it) }
             Files.deleteIfExists(inputJar)
@@ -744,7 +750,7 @@ class VmInterpreterExecutionTest {
                 ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()),
             )
             assertEquals(0, result.exitCode, "Virtualized thread-pool fixture must exit cleanly. stdout=${result.output}")
-            assertEquals(baseline.output.trim(), result.output.trim(), "Native VBC4 must preserve Runnable lambda execution inside time-bounded executor flows")
+            assertEquals(baseline.output.trim(), result.output.trim(), "Native VM must preserve Runnable lambda execution inside time-bounded executor flows")
         } finally {
             outputJar?.let { Files.deleteIfExists(it) }
             Files.deleteIfExists(inputJar)
@@ -752,7 +758,7 @@ class VmInterpreterExecutionTest {
     }
 
     @Test
-    fun jni_vbc4_indy_string_bridge_survives_concurrent_sealed_helper_relocation() {
+    fun jni_native_indy_string_bridge_survives_concurrent_sealed_helper_relocation() {
         if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) return
         val passes = listOf(
             "string-encryption",
@@ -803,7 +809,7 @@ class VmInterpreterExecutionTest {
             )
             assertTrue(
                 methodInvokesNativeVmDispatcher(outputJar, "e2e/IndyStringBridgeRoot", "bridge", "(II)I"),
-                "The bridge method must execute through the native VBC4 dispatcher rather than only exercising the Java-side transformed output",
+                "The bridge method must execute through the native VM dispatcher rather than only exercising the Java-side transformed output",
             )
             val result = runJavaProcessWithTimeout(
                 ProcessBuilder("java", "-Xverify:all", "-jar", outputJar.toAbsolutePath().normalize().toString()),
@@ -816,7 +822,7 @@ class VmInterpreterExecutionTest {
             assertEquals(
                 baseline.output.trim(),
                 result.output.trim(),
-                "VBC4 invokedynamic string bridge must resolve the sealed helper on concurrent worker paths",
+                "Native VM invokedynamic string bridge must resolve the sealed helper on concurrent worker paths",
             )
             assertFalse(result.output.contains("NoSuchMethodError"), result.output)
             assertFalse(result.output.contains("native VM execution failed"), result.output)
@@ -890,7 +896,7 @@ class VmInterpreterExecutionTest {
                 ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()),
             )
             assertEquals(0, result.exitCode, "Virtualized Thread.sleep fixture must exit cleanly. stdout=${result.output}")
-            assertEquals(baseline.output.trim(), result.output.trim(), "Native VBC4 must preserve Thread.sleep call semantics")
+            assertEquals(baseline.output.trim(), result.output.trim(), "Native VM must preserve Thread.sleep call semantics")
         } finally {
             outputJar?.let { Files.deleteIfExists(it) }
             Files.deleteIfExists(inputJar)
@@ -941,7 +947,7 @@ class VmInterpreterExecutionTest {
                     val result = runJavaProcessWithTimeout(ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()))
                     results += profile to result
                     assertEquals(0, result.exitCode, "Profile $profile must execute cleanly. stdout=${result.output}")
-                    assertEquals(baseline.output.trim(), result.output.trim(), "Profile $profile must preserve native VBC4 behavior")
+                    assertEquals(baseline.output.trim(), result.output.trim(), "Profile $profile must preserve native VM behavior")
                 } finally {
                     context.wipe()
                 }
@@ -994,7 +1000,7 @@ class VmInterpreterExecutionTest {
                         io.github.hht0rro.javashroud.kernel.executeKernelRun(
                             config = io.github.hht0rro.javashroud.config.loadValidatedConfig(configPath),
                             configPath = configPath,
-                            vbc4BuildContextOverride = contextOverride,
+                            qpBuildContextOverride = contextOverride,
                         )
                     }
                 }
@@ -1069,6 +1075,30 @@ class VmInterpreterExecutionTest {
                                                 descriptor == "(JI)I" ||
                                                 descriptor == "(JI)V")
                                     ) found = true
+                                }
+
+                                override fun visitInvokeDynamicInsn(
+                                    name: String,
+                                    descriptor: String,
+                                    bootstrapMethodHandle: Handle,
+                                    vararg bootstrapMethodArguments: Any,
+                                ) {
+                                    // invoke-dynamic-indirection may wrap the
+                                    // generated QpBridge call after method
+                                    // virtualization. Preserve the native-only
+                                    // assertion across both dispatcher shapes.
+                                    if (descriptor in setOf(
+                                            "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;",
+                                            "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;",
+                                            "(J[Ljava/lang/Object;)Ljava/lang/Object;",
+                                            "(J)V",
+                                            "(J)I",
+                                            "(JI)I",
+                                            "(JI)V",
+                                        ) && bootstrapMethodHandle.owner != "java/lang/invoke/LambdaMetafactory"
+                                    ) {
+                                        found = true
+                                    }
                                 }
                             }
                         }

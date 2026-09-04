@@ -65,7 +65,7 @@ class QpNativeChunkFinalizationTest {
             )
             val commitmentBytes = commitment.copyBytes()
             val plan = try {
-                QpBuildPlan.create(commitmentBytes, SecureRandom())
+                QpBuildPlan.create(commitmentBytes, testSecretPackDraft(), SecureRandom())
             } finally {
                 Arrays.fill(commitmentBytes, 0)
             }

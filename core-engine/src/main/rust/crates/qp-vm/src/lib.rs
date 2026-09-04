@@ -6,6 +6,7 @@ mod dialect;
 pub mod executor;
 mod zstd;
 
+pub use dialect::VmDialectCorpus;
 pub use executor::{
     ExecutionLimits, InvokeKind, ObjectOperations, VmExecutor, VmHostError, VmValue,
 };
@@ -313,6 +314,7 @@ impl std::error::Error for VmError {}
 pub struct VmKeyMaterial {
     crypto_domain_material: [u8; 32],
     layout_digest: [u8; 32],
+    dialect_corpus: Option<dialect::VmDialectCorpus>,
 }
 
 impl VmKeyMaterial {
@@ -320,7 +322,21 @@ impl VmKeyMaterial {
         Self {
             crypto_domain_material,
             layout_digest,
+            dialect_corpus: None,
         }
+    }
+
+    /// Supplies the per-build semantic opcode corpus. Parsing fails closed
+    /// when the corpus is absent so no fixed fallback table can be anchored.
+    pub fn with_dialect_corpus(mut self, corpus: dialect::VmDialectCorpus) -> Self {
+        self.dialect_corpus = Some(corpus);
+        self
+    }
+
+    fn dialect_corpus(&self) -> Result<&dialect::VmDialectCorpus, VmError> {
+        self.dialect_corpus
+            .as_ref()
+            .ok_or(VmError::InvalidHeader("vm dialect corpus is missing"))
     }
 
     pub fn crypto_domain_material(&self) -> &[u8; 32] {
@@ -411,6 +427,7 @@ impl<'a> VmParser<'a> {
             dialect: dialect::VmDialect::from_material(
                 material.crypto_domain_material(),
                 material.layout_digest(),
+                material.dialect_corpus()?,
             )?,
         })
     }
@@ -2882,6 +2899,7 @@ pub fn encode_iconst7_frame(material: &VmKeyMaterial) -> Result<Vec<u8>, VmError
     let dialect = dialect::VmDialect::from_material(
         material.crypto_domain_material(),
         material.layout_digest(),
+        material.dialect_corpus()?,
     )?;
     let mut state_binding = iconst7_frame_state_binding(material);
     let session = frame_session_material(
@@ -3021,8 +3039,16 @@ mod parser_tests {
     use super::*;
     use crate::executor::NoObjectOperations;
 
+    /// Test-only corpus covering the full byte-wide semantic space; production
+    /// builds receive their corpus from the generated specialization instead.
+    fn test_corpus() -> dialect::VmDialectCorpus {
+        let opcodes: Vec<u16> = (0x00u16..=0xFF).collect();
+        dialect::VmDialectCorpus::from_opcodes(&opcodes).expect("corpus")
+    }
+
     fn valid_frame() -> (VmKeyMaterial, Vec<u8>, Vec<u8>) {
-        let material = VmKeyMaterial::new([0x11; 32], [0x22; 32]);
+        let material =
+            VmKeyMaterial::new([0x11; 32], [0x22; 32]).with_dialect_corpus(test_corpus());
         let body = encode_iconst7_frame(&material).expect("encode");
         let binding = iconst7_frame_state_binding(&material);
         (material, body, binding)
@@ -3041,8 +3067,9 @@ mod parser_tests {
 
     #[test]
     fn vm_dialect_differs_across_materials_and_round_trips() {
-        let first = dialect::VmDialect::from_material(&[0x11; 32], &[0x22; 32]).expect("first");
-        let second = dialect::VmDialect::from_material(&[0x33; 32], &[0x22; 32]).expect("second");
+        let corpus = test_corpus();
+        let first = dialect::VmDialect::from_material(&[0x11; 32], &[0x22; 32], &corpus).expect("first");
+        let second = dialect::VmDialect::from_material(&[0x33; 32], &[0x22; 32], &corpus).expect("second");
         assert_ne!(first.encode(ICONST), second.encode(ICONST));
         assert_ne!(first.commitment, second.commitment);
         assert_eq!(first.decode(first.encode(ICONST)), ICONST);
@@ -3056,7 +3083,8 @@ mod parser_tests {
     #[test]
     fn foreign_dialect_material_fails_closed_on_current_frame() {
         let (material, frame, binding) = valid_frame();
-        let foreign = VmKeyMaterial::new([0x44; 32], [0x22; 32]);
+        let foreign =
+            VmKeyMaterial::new([0x44; 32], [0x22; 32]).with_dialect_corpus(test_corpus());
         let parser = VmParser::new(&foreign, &binding).expect("parser");
         assert!(parser.parse(&frame).is_err());
         let _ = material;

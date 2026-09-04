@@ -16,7 +16,7 @@ pub use lifecycle::{
     MAX_VM_FRAMES, MAX_VM_FRAME_SIZE,
 };
 pub use page::{CallSiteProof, PageError, PageHandle, PageKind, PageRequest};
-pub use router::{OpenedPage, RouterError, TypedPageRouter};
+pub use router::{OpenedPage, PageKeyAuthority, PageKeyMaterial, PageKeyRequest, RouterError, TypedPageRouter};
 pub use shell::{ShellArtifact, ShellBinding, ShellError};
 pub use vm::{VmBoundary, VmError, VmResult};
 

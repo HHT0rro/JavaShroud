@@ -87,6 +87,7 @@ internal object ReleaseArtifactScan {
         enabledPasses: List<String>,
         nativeBytes: List<ByteArray> = emptyList(),
         inputJarBytes: Long = -1L,
+        requiredNativePlatforms: Set<String> = emptySet(),
     ): ReleaseArtifactScanReport {
         val digest = SignedDebugMap.sha256(outputJarPath)
         val findings = mutableListOf<ReleaseArtifactScanReport.Finding>()
@@ -106,6 +107,7 @@ internal object ReleaseArtifactScan {
         findings += scanCfgFixedTemplate(artifact, enabledPasses)
         findings += scanExceptionBodyClone(artifact)
         findings += scanQpEvaluatorDirectRecovery(artifact)
+        findings += scanRetiredEvaluatorDomainSalt(artifact, nativeBytes)
         findings += scanQpFixedMaterial(artifact, nativeBytes)
         findings += scanJavaCryptoOracles(artifact)
         findings += scanDebugMapProvenance(outputJarPath, artifact)
@@ -116,7 +118,7 @@ internal object ReleaseArtifactScan {
         findings += scanNativeSecrets(nativeBytes)
         findings += scanNativeContents(artifact, nativeBytes)
         findings += scanDualNativePlatforms(artifact, enabledPasses)
-        findings += scanStrictNativePlatformMatrix(artifact, enabledPasses, profile)
+        findings += scanStrictNativePlatformMatrix(artifact, enabledPasses, profile, requiredNativePlatforms)
         val failed = findings.any { !it.passed }
         val passed = when (profile) {
             HardenedProtectionProfile.RELEASE_HARDENED -> !failed
@@ -141,7 +143,12 @@ internal object ReleaseArtifactScan {
         return path
     }
 
-    fun scanJarFile(outputJarPath: Path, profile: HardenedProtectionProfile, enabledPasses: List<String>): ReleaseArtifactScanReport {
+    fun scanJarFile(
+        outputJarPath: Path,
+        profile: HardenedProtectionProfile,
+        enabledPasses: List<String>,
+        requiredNativePlatforms: Set<String> = emptySet(),
+    ): ReleaseArtifactScanReport {
         JarFile(outputJarPath.toFile()).use { jar ->
             val names = jar.entries().toList().map { it.name }
             val findings = mutableListOf<ReleaseArtifactScanReport.Finding>()
@@ -158,6 +165,7 @@ internal object ReleaseArtifactScan {
             )
             findings += scanJarNativeContents(jar, entries)
             findings += scanJarJavaCryptoOracles(jar, entries)
+            findings += scanJarNativePlatformMatrix(jar, entries, enabledPasses, profile, requiredNativePlatforms)
             val passed = if (profile == HardenedProtectionProfile.MINIMAL) {
                 findings.filter { it.check == FixedGeneratedNameArtifactScan.CHECK }.all { it.passed }
             } else {
@@ -430,8 +438,32 @@ internal object ReleaseArtifactScan {
         )
     }
 
-    private fun coversThirtyTwoByteDek(bytes: ByteArray, markerIndex: Int): Boolean {
-        if (markerIndex + 6 >= bytes.size) return false
+    /**
+     * Hardened-native profile check: the retired evaluator domain salt must
+     * not appear in any class, resource, or native byte. Any hit means legacy
+     * evaluator material survived into the artifact and the offline
+     * materialization chain may be reconstructible.
+     */
+    private fun scanRetiredEvaluatorDomainSalt(
+        artifact: BytecodeArtifact,
+        nativeBytes: List<ByteArray>,
+    ): ReleaseArtifactScanReport.Finding {
+        val salt = byteArrayOf(
+            0xA1.toByte(), 0xE1.toByte(), 0x09, 0xC3.toByte(),
+            0x77, 0x2B, 0xD4.toByte(), 0x18,
+        )
+        val haystacks = artifact.classArtifacts.map { it.bytes } +
+            artifact.jarEntries.map { it.bytes } +
+            nativeBytes
+        val hits = haystacks.count { bytes -> containsBytes(bytes, salt) }
+        return ReleaseArtifactScanReport.Finding(
+            "hardened-native-retired-evaluator-domain",
+            hits == 0,
+            if (hits == 0) "absent" else "retired-evaluator-domain-hits=$hits",
+        )
+    }
+
+    private fun coversThirtyTwoByteDek(bytes: ByteArray, markerIndex: Int): Boolean {        if (markerIndex + 6 >= bytes.size) return false
         val fragmentCount = bytes[markerIndex + 5].toInt() and 0xFF
         if (fragmentCount !in 4..12) return false
         val covered = BooleanArray(32)
@@ -719,6 +751,11 @@ internal object ReleaseArtifactScan {
             node.methods.orEmpty().forEach { method ->
                 method.instructions?.forEach { insn ->
                     val indy = insn as? InvokeDynamicInsnNode ?: return@forEach
+                    // Standard JVM lambdas intentionally keep their implementation
+                    // handle at the LambdaMetafactory boundary. They are not Qp
+                    // business targets and must not be mistaken for a leaked Qp
+                    // target description.
+                    if (indy.bsm?.owner == "java/lang/invoke/LambdaMetafactory") return@forEach
                     indy.bsmArgs.orEmpty().forEach { arg ->
                         val handle = arg as? Handle ?: return@forEach
                         if (QpTargetTokenEnvelope.isBusinessTargetHandle(handle)) leaked++
@@ -1397,48 +1434,108 @@ internal object ReleaseArtifactScan {
         artifact: BytecodeArtifact,
         enabledPasses: List<String>,
         profile: HardenedProtectionProfile,
+        requiredNativePlatforms: Set<String>,
     ): ReleaseArtifactScanReport.Finding {
         if (enabledPasses.none { it == "jni-microkernel-loader" }) {
             return ReleaseArtifactScanReport.Finding("native-platform-matrix", true, "not-required")
         }
-        val nativeEntries = artifact.jarEntries.filter { entry ->
-            val name = normalizePath(entry.name)
-            name.endsWith(".dll") || name.endsWith(".so") || name.endsWith(".dylib")
+        return scanNativePlatformMatrix(
+            entries = artifact.jarEntries.map { entry -> entry.name to entry.bytes },
+            profile = profile,
+            requiredNativePlatforms = requiredNativePlatforms,
+        )
+    }
+
+    private fun scanJarNativePlatformMatrix(
+        jar: JarFile,
+        entries: List<java.util.jar.JarEntry>,
+        enabledPasses: List<String>,
+        profile: HardenedProtectionProfile,
+        requiredNativePlatforms: Set<String>,
+    ): ReleaseArtifactScanReport.Finding {
+        if (enabledPasses.none { it == "jni-microkernel-loader" }) {
+            return ReleaseArtifactScanReport.Finding("native-platform-matrix", true, "not-required")
         }
+        val nativeEntries = entries.filter { !it.isDirectory && isNativeEntryName(it.name) }
+        val snapshots = ArrayList<Pair<String, ByteArray>>(nativeEntries.size)
+        try {
+            for (entry in nativeEntries) {
+                val header = ByteArray(4)
+                var offset = 0
+                jar.getInputStream(entry).use { input ->
+                    while (offset < header.size) {
+                        val read = input.read(header, offset, header.size - offset)
+                        if (read < 0) break
+                        if (read == 0) continue
+                        offset += read
+                    }
+                }
+                snapshots += entry.name to header
+            }
+            return scanNativePlatformMatrix(snapshots, profile, requiredNativePlatforms)
+        } catch (error: Throwable) {
+            return ReleaseArtifactScanReport.Finding(
+                "native-platform-matrix",
+                false,
+                "native-header-read-failed:${error.javaClass.simpleName}",
+            )
+        } finally {
+            snapshots.forEach { (_, bytes) -> bytes.fill(0) }
+        }
+    }
+
+    private fun scanNativePlatformMatrix(
+        entries: List<Pair<String, ByteArray>>,
+        profile: HardenedProtectionProfile,
+        requiredNativePlatforms: Set<String>,
+    ): ReleaseArtifactScanReport.Finding {
+        val nativeEntries = entries.filter { isNativeEntryName(it.first) }
         val unsupported = nativeEntries.firstOrNull { entry ->
-            val name = normalizePath(entry.name)
+            val name = normalizePath(entry.first)
             name.endsWith(".dylib") || name.contains("macos") || name.contains("darwin")
         }
         val windows = nativeEntries.any { entry ->
-            normalizePath(entry.name).endsWith(".dll") &&
-                entry.bytes.size >= 2 &&
-                entry.bytes[0] == 'M'.code.toByte() &&
-                entry.bytes[1] == 'Z'.code.toByte()
+            normalizePath(entry.first).endsWith(".dll") &&
+                entry.second.size >= 2 &&
+                entry.second[0] == 'M'.code.toByte() &&
+                entry.second[1] == 'Z'.code.toByte()
         }
         val linux = nativeEntries.any { entry ->
-            normalizePath(entry.name).endsWith(".so") &&
-                entry.bytes.size >= 4 &&
-                entry.bytes[0] == 0x7F.toByte() &&
-                entry.bytes[1] == 'E'.code.toByte() &&
-                entry.bytes[2] == 'L'.code.toByte() &&
-                entry.bytes[3] == 'F'.code.toByte()
+            normalizePath(entry.first).endsWith(".so") &&
+                entry.second.size >= 4 &&
+                entry.second[0] == 0x7F.toByte() &&
+                entry.second[1] == 'E'.code.toByte() &&
+                entry.second[2] == 'L'.code.toByte() &&
+                entry.second[3] == 'F'.code.toByte()
         }
-        val passed = unsupported == null && when (profile) {
-            HardenedProtectionProfile.RELEASE_HARDENED -> windows && linux
-            HardenedProtectionProfile.ANALYSIS_ONLY -> windows || linux
-            HardenedProtectionProfile.MINIMAL -> true
+        val expected = requiredNativePlatforms.map(String::trim).filter(String::isNotEmpty).toSet()
+        val unknownExpected = expected - setOf("windows-x64", "linux-x64")
+        val missing = buildList {
+            if ("windows-x64" in expected && !windows) add("windows-x64")
+            if ("linux-x64" in expected && !linux) add("linux-x64")
         }
+        val hasSupported = windows || linux
+        val passed = unsupported == null && unknownExpected.isEmpty() && missing.isEmpty() && hasSupported
         return ReleaseArtifactScanReport.Finding(
             "native-platform-matrix",
             passed,
             when {
-                unsupported != null -> "unsupported=${unsupported.name}"
+                unsupported != null -> "unsupported=${unsupported.first}"
+                unknownExpected.isNotEmpty() -> "unknown-required=${unknownExpected.joinToString(",")}"
+                missing.isNotEmpty() -> "missing=${missing.joinToString(",")}" + if (windows || linux) ";observed=" + observedPlatforms(windows, linux) else ""
                 windows && linux -> "windows+linux"
                 windows -> "windows-only"
                 linux -> "linux-only"
                 else -> "native-entry-missing"
             },
         )
+    }
+
+    private fun observedPlatforms(windows: Boolean, linux: Boolean): String = when {
+        windows && linux -> "windows+linux"
+        windows -> "windows"
+        linux -> "linux"
+        else -> "none"
     }
 
     private fun scanDualNativePlatforms(

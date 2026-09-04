@@ -1,154 +1,25 @@
 package io.github.hht0rro.javashroud.transforms.protection.qp
 
 import java.io.ByteArrayOutputStream
-import java.security.MessageDigest
 import java.util.Arrays
-
-/**
- * Current-format evaluator descriptor for one page-bound opaque evaluator.
- *
- * The runtime never receives a generic evaluator graph, fixed lane topology, or
- * recoverable DEK field.  The only serialized evaluator state is the
- * artifact-specific opaque binding produced by [QpBoundPlan].
- */
-class QpEvaluatorPlan private constructor(
-    private val boundDecryptorValue: QpBoundPlan,
-    fingerprint: ByteArray,
-) {
-    private val fingerprintValue = fingerprint.copyOf()
-
-    init {
-        require(fingerprintValue.size == QpHandle.FINGERPRINT_SIZE) {
-            "Qp runtime evaluator fingerprint length is invalid"
-        }
-    }
-
-    val fingerprint: ByteArray
-        get() = fingerprintValue.copyOf()
-
-    /** Copy only the current page's opaque native evaluator descriptor. */
-    internal fun copyBoundDecryptorForNative(): ByteArray =
-        boundDecryptorValue.copyOpaqueForNative()
-
-    fun encode(): ByteArray = ByteArrayOutputStream().use { out ->
-        val opaque = boundDecryptorValue.copyOpaqueForNative()
-        try {
-            writeRuntimeFramed(out, opaque)
-            out.write(fingerprintValue)
-        } finally {
-            Arrays.fill(opaque, 0)
-        }
-        out.toByteArray().also {
-            require(it.size <= MAX_PLAN_ENCODING_SIZE) {
-                "runtime evaluator plan encoding is too large"
-            }
-        }
-    }
-
-    override fun equals(other: Any?): Boolean =
-        other is QpEvaluatorPlan &&
-            boundDecryptorValue == other.boundDecryptorValue &&
-            Arrays.equals(fingerprintValue, other.fingerprintValue)
-
-    override fun hashCode(): Int =
-        31 * boundDecryptorValue.hashCode() + fingerprintValue.contentHashCode()
-
-    override fun toString(): String = "QpEvaluatorPlan(bound-page)"
-
-    /** Verify the complete page binding committed by this current-format plan. */
-    internal fun matchesDescriptorBinding(
-        resourceKind: QpResourceKind,
-        logicalIdentity: ByteArray,
-        pageIndex: Int,
-        targetPageSize: Int,
-        route: QpRouteMetadata,
-        proof: QpProofMetadata,
-        handleEncoding: ByteArray,
-        locatorToken: ByteArray,
-    ): Boolean {
-        var artifactCommitment: ByteArray? = null
-        var callSiteProof: ByteArray? = null
-        return try {
-            artifactCommitment = proof.artifactCanonicalCommitment
-            callSiteProof = proof.callSiteProof
-            boundDecryptorValue.matchesPageBinding(
-                resourceKind = resourceKind,
-                logicalIdentity = logicalIdentity,
-                pageIndex = pageIndex,
-                targetPageSize = targetPageSize,
-                codecVariant = route.codecVariant,
-                layoutVariant = route.layoutVariant,
-                handleEncoding = handleEncoding,
-                locatorToken = locatorToken,
-                evaluatorFingerprint = fingerprintValue,
-                artifactCanonicalCommitment = checkNotNull(artifactCommitment),
-                route = route,
-                callSiteProof = checkNotNull(callSiteProof),
-            )
-        } finally {
-            artifactCommitment?.let { Arrays.fill(it, 0) }
-            callSiteProof?.let { Arrays.fill(it, 0) }
-        }
-    }
-
-    companion object {
-        private const val MAX_PLAN_ENCODING_SIZE = 128 * 1024
-
-        /** Current-format production representation: one opaque page-bound evaluator. */
-        internal fun createBound(
-            boundDecryptor: QpBoundPlan,
-            fingerprint: ByteArray,
-        ): QpEvaluatorPlan = QpEvaluatorPlan(boundDecryptor, fingerprint)
-
-        fun decode(encoded: ByteArray): QpEvaluatorPlan {
-            require(encoded.isNotEmpty() && encoded.size <= MAX_PLAN_ENCODING_SIZE) {
-                "Qp runtime evaluator plan encoding length is invalid"
-            }
-            return decodeBound(QpRuntimeDescriptorReader(encoded))
-        }
-
-        private fun decodeBound(reader: QpRuntimeDescriptorReader): QpEvaluatorPlan {
-            var opaque: ByteArray? = null
-            var fingerprint: ByteArray? = null
-            return try {
-                opaque = reader.readFramed(
-                    MAX_PLAN_ENCODING_SIZE - QpHandle.FINGERPRINT_SIZE - 5,
-                    "Qp bound evaluator",
-                    allowEmpty = false,
-                )
-                fingerprint = reader.readFixed(
-                    QpHandle.FINGERPRINT_SIZE,
-                    "Qp runtime evaluator fingerprint",
-                )
-                reader.requireFullyRead("Qp runtime bound evaluator plan")
-                createBound(
-                    QpBoundPlan.fromOpaque(checkNotNull(opaque)),
-                    checkNotNull(fingerprint),
-                )
-            } finally {
-                opaque?.let { Arrays.fill(it, 0) }
-                fingerprint?.let { Arrays.fill(it, 0) }
-            }
-        }
-    }
-}
 
 /**
  * Runtime-neutral metadata for exactly one high-value Qp current format page.
  *
  * It combines one opaque handle binding, the corresponding logical identity,
- * one route, one integrity/call-site proof, and one legacy fragment graph. It offers no
- * directory, traversal, or arbitrary-resource decoding surface.
+ * one route, one integrity/call-site proof, and the native secret-pack slot
+ * that owns the page's key derivation material. It offers no directory,
+ * traversal, or arbitrary-resource decoding surface.
  */
 class QpPageDescriptor private constructor(
     private val leafIdentityValue: QpLeafIdentity,
     private val routeValue: QpRouteMetadata,
     private val proofValue: QpProofMetadata,
     val targetPageSize: Int,
-    private val evaluatorPlanValue: QpEvaluatorPlan,
+    val secretSlot: Int,
 ) {
     init {
-        validateBinding(leafIdentityValue, routeValue, proofValue, targetPageSize, evaluatorPlanValue)
+        validateBinding(leafIdentityValue, routeValue, proofValue, targetPageSize, secretSlot)
     }
 
     val resourceKind: QpResourceKind
@@ -170,20 +41,22 @@ class QpPageDescriptor private constructor(
     val proof: QpProofMetadata
         get() = proofValue
 
-    val evaluatorPlan: QpEvaluatorPlan
-        get() = evaluatorPlanValue
-
     fun matches(candidate: QpHandle): Boolean = leafIdentityValue.matches(candidate)
 
+    /**
+     * Compact current-format locator: version, route, proof, target size, and
+     * the native secret slot. No evaluator plan, DEK, or page material is
+     * serialized; older descriptor encodings fail on the leading version byte.
+     */
     fun encode(): ByteArray = ByteArrayOutputStream().use { out ->
         val route = routeValue.encode()
         val proof = proofValue.encode()
-        val evaluator = evaluatorPlanValue.encode()
         try {
+            out.write(CURRENT_DESCRIPTOR_VERSION)
             writeRuntimeFramed(out, route)
             writeRuntimeFramed(out, proof)
             writeRuntimeInt(out, targetPageSize)
-            writeRuntimeFramed(out, evaluator)
+            writeRuntimeInt(out, secretSlot)
             out.toByteArray().also {
                 require(it.size <= MAX_DESCRIPTOR_ENCODING_SIZE) {
                     "Qp runtime page descriptor encoding is too large"
@@ -192,7 +65,6 @@ class QpPageDescriptor private constructor(
         } finally {
             Arrays.fill(route, 0)
             Arrays.fill(proof, 0)
-            Arrays.fill(evaluator, 0)
         }
     }
 
@@ -203,7 +75,10 @@ class QpPageDescriptor private constructor(
         private const val MAX_DESCRIPTOR_ENCODING_SIZE = 384 * 1024
         private const val MAX_ROUTE_ENCODING_SIZE = 128 * 1024
         private const val MAX_PROOF_ENCODING_SIZE = 160 * 1024
-        private const val MAX_EVALUATOR_PLAN_ENCODING_SIZE = 128 * 1024
+        private val MAX_SECRET_SLOT: Int = QP_SECRET_PACK_MAX_SLOTS - 1
+
+        /** Current compact descriptor layout; older encodings are rejected fail-closed. */
+        internal const val CURRENT_DESCRIPTOR_VERSION: Int = 3
 
         fun create(
             handle: QpHandle,
@@ -211,10 +86,10 @@ class QpPageDescriptor private constructor(
             route: QpRouteMetadata,
             proof: QpProofMetadata,
             targetPageSize: Int,
-            evaluatorPlan: QpEvaluatorPlan,
+            secretSlot: Int,
         ): QpPageDescriptor {
             val identity = QpLeafIdentity.fromHandle(handle, logicalIdentity)
-            return fromMetadata(identity, route, proof, targetPageSize, evaluatorPlan)
+            return fromMetadata(identity, route, proof, targetPageSize, secretSlot)
         }
 
         fun decode(encoded: ByteArray): QpPageDescriptor {
@@ -224,25 +99,25 @@ class QpPageDescriptor private constructor(
             val reader = QpRuntimeDescriptorReader(encoded)
             var routeBytes: ByteArray? = null
             var proofBytes: ByteArray? = null
-            var evaluatorBytes: ByteArray? = null
             return try {
+                val version = reader.readUnsignedByte("Qp runtime page descriptor version")
+                require(version == CURRENT_DESCRIPTOR_VERSION) {
+                    "Qp runtime page descriptor version is not current"
+                }
                 routeBytes = reader.readFramed(MAX_ROUTE_ENCODING_SIZE, "Qp runtime page route", allowEmpty = false)
                 val route = QpRouteMetadata.decode(checkNotNull(routeBytes))
                 proofBytes = reader.readFramed(MAX_PROOF_ENCODING_SIZE, "Qp runtime page proof", allowEmpty = false)
                 val proof = QpProofMetadata.decode(checkNotNull(proofBytes))
                 val targetPageSize = reader.readInt("Qp runtime target page size")
-                evaluatorBytes = reader.readFramed(
-                    MAX_EVALUATOR_PLAN_ENCODING_SIZE,
-                    "Qp runtime evaluator plan",
-                    allowEmpty = false,
-                )
-                val evaluatorPlan = QpEvaluatorPlan.decode(checkNotNull(evaluatorBytes))
+                val secretSlot = reader.readInt("Qp runtime secret slot")
+                require(secretSlot in 0..MAX_SECRET_SLOT) {
+                    "Qp runtime secret slot is invalid"
+                }
                 reader.requireFullyRead("Qp runtime page descriptor")
-                fromMetadata(route.leafIdentity, route, proof, targetPageSize, evaluatorPlan)
+                fromMetadata(route.leafIdentity, route, proof, targetPageSize, secretSlot)
             } finally {
                 routeBytes?.let { Arrays.fill(it, 0) }
                 proofBytes?.let { Arrays.fill(it, 0) }
-                evaluatorBytes?.let { Arrays.fill(it, 0) }
             }
         }
 
@@ -251,13 +126,13 @@ class QpPageDescriptor private constructor(
             route: QpRouteMetadata,
             proof: QpProofMetadata,
             targetPageSize: Int,
-            evaluatorPlan: QpEvaluatorPlan,
+            secretSlot: Int,
         ): QpPageDescriptor = QpPageDescriptor(
             identity,
             route,
             proof,
             targetPageSize,
-            evaluatorPlan,
+            secretSlot,
         )
 
         private fun validateBinding(
@@ -265,46 +140,14 @@ class QpPageDescriptor private constructor(
             route: QpRouteMetadata,
             proof: QpProofMetadata,
             targetPageSize: Int,
-            evaluatorPlan: QpEvaluatorPlan,
+            secretSlot: Int,
         ) {
             require(route.leafIdentity == identity) { "Qp runtime route does not bind the current page" }
             require(proof.leafIdentity == identity) { "Qp runtime proof does not bind the current page" }
             require(route.codecVariant == proof.codecVariant) { "Qp runtime route/proof codec mismatch" }
             require(route.layoutVariant == proof.layoutVariant) { "Qp runtime route/proof layout mismatch" }
-
-            var logicalIdentity: ByteArray? = null
-            var handleEncoding: ByteArray? = null
-            var locatorToken: ByteArray? = null
-            var expectedFingerprint: ByteArray? = null
-            var graphFingerprint: ByteArray? = null
-            try {
-                logicalIdentity = identity.logicalIdentity
-                handleEncoding = identity.handleEncoding
-                locatorToken = identity.locatorToken
-                expectedFingerprint = identity.evaluatorFingerprint
-                graphFingerprint = evaluatorPlan.fingerprint
-                require(Arrays.equals(expectedFingerprint, graphFingerprint)) {
-                    "Qp runtime evaluator fingerprint does not match the page handle"
-                }
-                require(
-                    evaluatorPlan.matchesDescriptorBinding(
-                        resourceKind = identity.resourceKind,
-                        logicalIdentity = checkNotNull(logicalIdentity),
-                        pageIndex = identity.pageIndex,
-                        targetPageSize = targetPageSize,
-                        route = route,
-                        proof = proof,
-                        handleEncoding = checkNotNull(handleEncoding),
-                        locatorToken = checkNotNull(locatorToken),
-                    ),
-                ) { "Qp runtime evaluator graph binding is invalid" }
-            } finally {
-                logicalIdentity?.let { Arrays.fill(it, 0) }
-                handleEncoding?.let { Arrays.fill(it, 0) }
-                locatorToken?.let { Arrays.fill(it, 0) }
-                expectedFingerprint?.let { Arrays.fill(it, 0) }
-                graphFingerprint?.let { Arrays.fill(it, 0) }
-            }
+            require(targetPageSize > 0) { "Qp runtime target page size is invalid" }
+            require(secretSlot in 0..MAX_SECRET_SLOT) { "Qp runtime secret slot is invalid" }
         }
 
         private fun handleFromIdentity(identity: QpLeafIdentity): QpHandle {
@@ -331,8 +174,6 @@ class QpPageDescriptor private constructor(
     }
 }
 
-private const val MAX_LOGICAL_IDENTITY_SIZE = 64 * 1024
-
 private fun writeRuntimeInt(out: ByteArrayOutputStream, value: Int) {
     out.write((value ushr 24) and 0xFF)
     out.write((value ushr 16) and 0xFF)
@@ -343,18 +184,6 @@ private fun writeRuntimeInt(out: ByteArrayOutputStream, value: Int) {
 private fun writeRuntimeFramed(out: ByteArrayOutputStream, value: ByteArray) {
     writeRuntimeInt(out, value.size)
     out.write(value)
-}
-
-private fun updateRuntimeInt(digest: MessageDigest, value: Int) {
-    digest.update((value ushr 24).toByte())
-    digest.update((value ushr 16).toByte())
-    digest.update((value ushr 8).toByte())
-    digest.update(value.toByte())
-}
-
-private fun updateRuntimeFramed(digest: MessageDigest, value: ByteArray) {
-    updateRuntimeInt(digest, value.size)
-    digest.update(value)
 }
 
 private class QpRuntimeDescriptorReader(private val bytes: ByteArray) {

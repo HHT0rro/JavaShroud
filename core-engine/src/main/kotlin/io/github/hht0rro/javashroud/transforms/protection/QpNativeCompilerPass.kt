@@ -231,6 +231,7 @@ object QpNativeCompilerPass {
         var layoutDigest = ByteArray(0)
         var targetTokenCommitment = ByteArray(0)
         var targetTokenNameSeed = ByteArray(0)
+        var secretPackLiterals: io.github.hht0rro.javashroud.transforms.protection.qp.NativeSecretPackLiterals? = null
         try {
             copyRustWorkspace(workspace, rustWorkspace)
             check(Files.readString(rustWorkspace.resolve("crates/qp-ffi/src/lib.rs")).contains("fn JNI_OnLoad")) {
@@ -244,6 +245,17 @@ object QpNativeCompilerPass {
                 ?: context.qpBuildPlanOrNull()?.artifactCanonicalCommitment
                 ?: context.jarLayoutDigest.copyOf()
             targetTokenNameSeed = context.copyNameSeed()
+            // The pack copy is wiped together with the shard literals in the
+            // enclosing finally; the context draft outlives this compile so a
+            // later pass can still verify against the same slots.
+            context.withNativeVmSecretPackForSpecialization { pack ->
+                secretPackLiterals = io.github.hht0rro.javashroud.transforms.protection.qp.NativeSecretPackLiterals
+                    .prepare(pack, evidenceRandom ?: nativeBuildSecureRandom(seed, context))
+            }
+            val packCommitment = secretPackLiterals?.commitment() ?: ByteArray(0)
+            // Hardened builds carry per-artifact secret material and never
+            // touch the persistent native cache.
+            val cacheEnabled = request.nativePackingLevel != QpPackingLevel.MAX_HARDENING
             tasks = request.routes.map { route ->
                 val target = rustTargetForPlatform(route.platform)
                 val specializationDigest = rustSpecializationDigest(
@@ -256,6 +268,7 @@ object QpNativeCompilerPass {
                     specializationNonce = specializationNonce,
                     targetTokenCommitment = targetTokenCommitment,
                     targetTokenNameSeed = targetTokenNameSeed,
+                    secretPackCommitment = packCommitment,
                 )
                 val outputName = route.outputName
                 val cacheKey = nativeArtifactCacheKey(
@@ -292,6 +305,7 @@ object QpNativeCompilerPass {
                     layoutDigest = layoutDigest.copyOf(),
                     targetTokenCommitment = targetTokenCommitment.copyOf(),
                     targetTokenNameSeed = targetTokenNameSeed.copyOf(),
+                    secretPack = secretPackLiterals,
                 )
             }
             val compiled = compileNativeTasksBounded(
@@ -299,6 +313,7 @@ object QpNativeCompilerPass {
                 toolchain = toolchain,
                 rustWorkspace = rustWorkspace,
                 cfgEvidenceExports = cfgEvidenceExports,
+                cacheEnabled = cacheEnabled,
             )
             val results = ArrayList<RecompiledNative>(compiled.size)
             var failed = false
@@ -311,7 +326,7 @@ object QpNativeCompilerPass {
                 }
                 try {
                     validateRustArtifact(task.platform, task.outputName, bytes)
-                    if (!cfgEvidenceExports && !result.fromCache) {
+                    if (cacheEnabled && !cfgEvidenceExports && !result.fromCache) {
                         writeRustArtifactCache(task.cachePath, bytes, task.cacheKey, task.platform, task.outputName)
                     }
                     results += RecompiledNative(
@@ -352,6 +367,7 @@ object QpNativeCompilerPass {
             layoutDigest.fill(0)
             targetTokenCommitment.fill(0)
             targetTokenNameSeed.fill(0)
+            secretPackLiterals?.wipe()
         }
     }
 
@@ -371,6 +387,7 @@ object QpNativeCompilerPass {
         val layoutDigest: ByteArray,
         val targetTokenCommitment: ByteArray,
         val targetTokenNameSeed: ByteArray,
+        val secretPack: io.github.hht0rro.javashroud.transforms.protection.qp.NativeSecretPackLiterals?,
     )
 
     private data class NativeArtifactBuildResult(
@@ -385,6 +402,7 @@ object QpNativeCompilerPass {
         toolchain: RustToolchainProvisioner.RustToolchain,
         rustWorkspace: Path,
         cfgEvidenceExports: Boolean,
+        cacheEnabled: Boolean,
     ): List<Pair<NativeCompileTask, NativeArtifactBuildResult>> {
         if (compileTasks.isEmpty()) return emptyList()
         val parallelism = minOf(compileTasks.size, nativeCompileParallelism())
@@ -398,6 +416,7 @@ object QpNativeCompilerPass {
                     rustWorkspace = task.workspace,
                     task = task,
                     cfgEvidenceExports = cfgEvidenceExports,
+                    cacheEnabled = cacheEnabled,
                 )
             } catch (error: Exception) {
                 task to NativeArtifactBuildResult(false, error.message ?: error::class.java.simpleName, null, false)
@@ -440,8 +459,11 @@ object QpNativeCompilerPass {
         rustWorkspace: Path,
         task: NativeCompileTask,
         cfgEvidenceExports: Boolean,
+        cacheEnabled: Boolean,
     ): NativeArtifactBuildResult = withRustCompileLock(task.cachePath) {
-        if (!cfgEvidenceExports) {
+        // Hardened builds carry per-artifact secret-pack material and never
+        // read or write the persistent native cache.
+        if (cacheEnabled && !cfgEvidenceExports) {
             readRustArtifactCache(task.cachePath, task.cacheKey, task.platform, task.outputName)?.let { cachedBytes ->
                 return@withRustCompileLock NativeArtifactBuildResult(true, "cache-hit", cachedBytes, true)
             }
@@ -807,11 +829,115 @@ object QpNativeCompilerPass {
             append("pub const TARGET_TOKEN_NAME_SEED: [u8; 16] = [")
             append(bytesLiteral(task.targetTokenNameSeed))
             append("];\n")
+            appendSecretPackSection(task.secretPack)
         }
         require(!source.contains("masterKey", ignoreCase = true) && !source.contains("runtimeResourceKey", ignoreCase = true)) {
             "Qp specialization module must not contain secret field names"
         }
         Files.writeString(destination, source, StandardCharsets.US_ASCII)
+    }
+
+    /**
+     * Emits the per-artifact secret-pack section. Slot seeds appear only as
+     * randomized XOR shard groups combined by private functions; no plaintext
+     * key, contiguous secret array, or KDF domain label is written.
+     */
+    private fun StringBuilder.appendSecretPackSection(pack: io.github.hht0rro.javashroud.transforms.protection.qp.NativeSecretPackLiterals?) {
+        fun bytesLiteral(values: ByteArray) = values.joinToString(", ") { byte ->
+            "0x" + ((byte.toInt() and 0xFF).toString(16).padStart(2, '0'))
+        }
+        val identity = pack?.nativeIdentity ?: ByteArray(32)
+        val slotCount = pack?.slotCount ?: 0
+        append("pub const SECRET_PACK_NATIVE_IDENTITY: [u8; 32] = [")
+        append(bytesLiteral(identity))
+        append("];\n")
+        append("pub const SECRET_PACK_SLOT_COUNT: usize = ")
+        append(slotCount)
+        append(";\n")
+        if (pack == null || slotCount == 0) {
+            append("pub fn qp_secret_pack_seed(_slot: usize) -> Option<[u8; 32]> { None }\n")
+            appendDialectCorpusSection()
+            return
+        }
+        append("fn qp_sp_xor32(out: &mut [u8; 32], other: &[u8; 32]) {\n")
+        append("    for index in 0..32 {\n        out[index] ^= other[index];\n    }\n}\n")
+        for (slotIndex in 0 until pack.slotCount) {
+            val slotId = pack.slotIdAt(slotIndex)
+            val shardCount = pack.shardCountAt(slotIndex)
+            for (shardIndex in 0 until shardCount) {
+                append("static QP_SP_S")
+                append(slotIndex)
+                append('_')
+                append(shardIndex)
+                append(": [u8; 32] = [")
+                append(bytesLiteral(pack.shardAt(slotIndex, shardIndex)))
+                append("];\n")
+            }
+            append("fn qp_sp_combine_")
+            append(slotIndex)
+            append("() -> [u8; 32] {\n    let mut combined = QP_SP_S")
+            append(slotIndex)
+            append("_0;\n")
+            for (shardIndex in 1 until shardCount) {
+                append("    qp_sp_xor32(&mut combined, &QP_SP_S")
+                append(slotIndex)
+                append('_')
+                append(shardIndex)
+                append(");\n")
+            }
+            append("    combined\n}\n")
+        }
+        append("pub fn qp_secret_pack_seed(slot: usize) -> Option<[u8; 32]> {\n    match slot {\n")
+        for (slotIndex in 0 until pack.slotCount) {
+            append("        ")
+            append(pack.slotIdAt(slotIndex))
+            append(" => Some(qp_sp_combine_")
+            append(slotIndex)
+            append("()),\n")
+        }
+        append("        _ => None,\n    }\n}\n")
+        appendDialectCorpusSection()
+    }
+
+    /**
+     * Emits the per-build VM semantic opcode corpus as an XOR-masked byte
+     * serialization. The plain corpus table never appears in the generated
+     * source or in the compiled artifact.
+     */
+    private fun StringBuilder.appendDialectCorpusSection() {
+        fun bytesLiteral(values: ByteArray) = values.joinToString(", ") { byte ->
+            "0x" + ((byte.toInt() and 0xFF).toString(16).padStart(2, '0'))
+        }
+        val semantic = io.github.hht0rro.javashroud.transforms.protection.hardening.QpDialectDescriptor
+            .semanticOpcodesForSpecialization()
+        val mask = ByteArray(semantic.size * 2).also { bytes -> SecureRandom().nextBytes(bytes) }
+        val masked = ByteArray(semantic.size * 2)
+        semantic.forEachIndexed { index, opcode ->
+            masked[index * 2] =
+                (((opcode ushr 8) and 0xFF).toInt() xor mask[index * 2].toInt()).toByte()
+            masked[index * 2 + 1] =
+                ((opcode and 0xFF).toInt() xor mask[index * 2 + 1].toInt()).toByte()
+        }
+        append("pub const VM_DIALECT_SEMANTIC_MASK: [u8; ")
+        append(mask.size)
+        append("] = [")
+        append(bytesLiteral(mask))
+        append("];\n")
+        append("pub const VM_DIALECT_SEMANTIC_MASKED: [u8; ")
+        append(masked.size)
+        append("] = [")
+        append(bytesLiteral(masked))
+        append("];\n")
+        append(
+            "pub fn vm_dialect_semantic_opcodes() -> Vec<u16> {\n" +
+                "    let mut corpus = Vec::with_capacity(VM_DIALECT_SEMANTIC_MASKED.len() / 2);\n" +
+                "    for index in 0..corpus.capacity() {\n" +
+                "        let high = VM_DIALECT_SEMANTIC_MASKED[index * 2] ^ VM_DIALECT_SEMANTIC_MASK[index * 2];\n" +
+                "        let low = VM_DIALECT_SEMANTIC_MASKED[index * 2 + 1] ^ VM_DIALECT_SEMANTIC_MASK[index * 2 + 1];\n" +
+                "        corpus.push((u16::from(high) << 8) | u16::from(low));\n" +
+                "    }\n" +
+                "    corpus\n}\n",
+        )
     }
 
     private fun rustSpecializationDigest(
@@ -824,6 +950,7 @@ object QpNativeCompilerPass {
         specializationNonce: ByteArray,
         targetTokenCommitment: ByteArray,
         targetTokenNameSeed: ByteArray,
+        secretPackCommitment: ByteArray = ByteArray(0),
     ): ByteArray = MessageDigest.getInstance("SHA-256").apply {
         update(RUST_SPECIALIZATION_DOMAIN.toByteArray(StandardCharsets.US_ASCII))
         updateUtf8(targetPlatform)
@@ -841,6 +968,10 @@ object QpNativeCompilerPass {
         update(targetTokenNameSeed)
         update(sourceDigest)
         update(specializationNonce)
+        if (secretPackCommitment.isNotEmpty()) {
+            require(secretPackCommitment.size == 32) { "Qp secret pack commitment must be 32 bytes" }
+            update(secretPackCommitment)
+        }
     }.digest()
 
     private fun runRustCompile(

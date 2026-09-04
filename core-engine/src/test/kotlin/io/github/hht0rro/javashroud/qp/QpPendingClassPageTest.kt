@@ -243,7 +243,7 @@ class QpPendingClassPageTest {
     private fun newPlan(): QpBuildPlan {
         val commitment = ByteArray(QpArtifactCommitment.DIGEST_SIZE) { index -> (index * 29 + 3).toByte() }
         return try {
-            QpBuildPlan.create(commitment, SecureRandom())
+            QpBuildPlan.create(commitment, testSecretPackDraft(), SecureRandom())
         } finally {
             Arrays.fill(commitment, 0)
         }

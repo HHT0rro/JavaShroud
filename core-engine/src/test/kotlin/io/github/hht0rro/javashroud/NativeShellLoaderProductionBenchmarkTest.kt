@@ -178,7 +178,7 @@ class NativeShellLoaderProductionBenchmarkTest {
             "pub fn open_current_frame(",
             "pub fn authenticate(&mut self",
             "self.encoded.fill(0);",
-            "self.dek.fill(0);",
+            "self.key.fill(0);",
             "fn wipe_buffers(",
             "pub fn wipe(&mut self)",
         )) {
@@ -189,7 +189,7 @@ class NativeShellLoaderProductionBenchmarkTest {
             "page_round_trip_has_exact_header_offsets_and_strict_bounds",
             "page_header_and_locator_tamper_fail_before_plaintext",
             "descriptor_route_proof_and_evaluator_are_exact_and_bounded",
-            "envelope_authenticates_inline_and_compact_forms",
+            "envelope_authenticates_compact_form_and_rejects_legacy",
             "locator_binding_is_route_and_descriptor_bound",
             "page_keys_sort_and_reject_duplicates",
             "lease_only_exposes_authenticated_payload_and_transitions_once",
