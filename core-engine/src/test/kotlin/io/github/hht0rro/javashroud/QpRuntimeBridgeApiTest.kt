@@ -119,7 +119,7 @@ class QpRuntimeBridgeApiTest {
         assertTrue(source.contains("QP_NATIVE_RESOURCE_ROOT = \"META-INF/\""), "current locator routes must remain constrained to the final resource root")
         assertTrue(readiness.contains("readQpLocator"), "current readiness must authenticate the binary locator before extraction")
         assertTrue(readiness.contains("validateNativeImage"), "current readiness must validate the selected PE or ELF image and exports")
-        assertTrue(readiness.contains("publishSealedNativeBindings"), "current readiness must publish final relocation metadata before native registration")
+        assertTrue(readiness.contains("publishSealedNativeBootstrap"), "current readiness must publish the opaque bootstrap channel before native registration")
         assertTrue(source.contains("QP_CATALOG_INDEX_RESOURCE = \"META-INF/jsrt/catalog.index\""), "current readiness must locate the authenticated page catalog index")
         assertTrue(source.contains("installQpCatalog"), "current readiness must install the page catalog after native load")
         assertFalse(source.contains("directory.jsr1"), "catalog loader must not hard-code the retired directory file name")
@@ -231,7 +231,8 @@ class QpRuntimeBridgeApiTest {
         }
         assertTrue(relocation.contains("QP-BINDING-V1|"), "JNI_OnLoad must recover renamed helpers from published binding keys")
         assertTrue(ffi.contains("j.l\\0") || ffi.contains("b\"j.l\\0\""), "JNI_OnLoad must read the published loader owner")
-        assertTrue(ffi.contains("j.m\\0") || ffi.contains("b\"j.m\\0\""), "JNI_OnLoad must read published method bindings")
+        assertTrue(ffi.contains("j.p\\0") || ffi.contains("b\"j.p\\0\""), "JNI_OnLoad must read the sealed pack channel")
+        assertTrue(ffi.contains("j.n\\0") || ffi.contains("b\"j.n\\0\""), "JNI_OnLoad must read the sealed bindings channel")
         assertTrue(ffi.contains("resolve_registration_plan"), "JNI_OnLoad must restore renamed helper names before RegisterNatives")
         assertFalse(
             ffi.contains(ascii("6e61746976654465636f6465416b656e537472696e6750616765")),
