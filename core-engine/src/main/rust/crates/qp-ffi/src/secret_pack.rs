@@ -414,3 +414,53 @@ mod blob_tests {
         assert_eq!(shards[1].2.len(), 48);
     }
 }
+
+#[cfg(test)]
+mod entry_token_tests {
+    use super::*;
+    use qp_crypto::aes256_gcm_encrypt;
+
+    const ENTRY_TOKEN_DOMAIN: &[u8] = b"javashroud-qp-entry-token-v6";
+
+    /// v6 sealed VM entry token: `nonce(12) || ct||tag`, AES-256-GCM under
+    /// `HKDF(cryptoDomain, "javashroud-qp-entry-token-v6")`, AAD = domain.
+    pub fn unwrap_vm_entry_token(
+        crypto_domain: &[u8; KEY_SIZE],
+        sealed: &[u8],
+    ) -> Result<i64, RouterError> {
+        if sealed.len() < 12 + 16 {
+            return Err(RouterError::AuthenticationFailed);
+        }
+        let key = hkdf_sha256(crypto_domain, ENTRY_TOKEN_DOMAIN, &[], KEY_SIZE)
+            .map_err(|_| RouterError::AuthenticationFailed)?;
+        let plaintext = aes256_gcm_decrypt(&key, &sealed[..12], ENTRY_TOKEN_DOMAIN, &sealed[12..])
+            .map_err(|_| RouterError::AuthenticationFailed)?;
+        if plaintext.len() != 8 {
+            return Err(RouterError::AuthenticationFailed);
+        }
+        let mut raw = [0u8; 8];
+        raw.copy_from_slice(&plaintext);
+        Ok(i64::from_be_bytes(raw))
+    }
+
+    #[test]
+    fn vm_entry_token_round_trips_and_rejects_tampering() {
+        let crypto_domain = [0x77u8; KEY_SIZE];
+        let key = hkdf_sha256(&crypto_domain, ENTRY_TOKEN_DOMAIN, &[], KEY_SIZE).expect("key");
+        let nonce = [0x21u8; 12];
+        let token: i64 = 0x6f0754c88ca44c64;
+        let sealed_ct = aes256_gcm_encrypt(&key, &nonce, ENTRY_TOKEN_DOMAIN, &token.to_be_bytes())
+            .expect("seal");
+        let mut sealed = nonce.to_vec();
+        sealed.extend_from_slice(&sealed_ct);
+        assert_eq!(
+            unwrap_vm_entry_token(&crypto_domain, &sealed).expect("unwrap"),
+            token
+        );
+        let mut wrong_domain = crypto_domain;
+        wrong_domain[0] ^= 1;
+        assert!(unwrap_vm_entry_token(&wrong_domain, &sealed).is_err());
+        assert!(unwrap_vm_entry_token(&crypto_domain, &sealed[..sealed.len() - 1]).is_err());
+        assert!(unwrap_vm_entry_token(&crypto_domain, &[]).is_err());
+    }
+}
