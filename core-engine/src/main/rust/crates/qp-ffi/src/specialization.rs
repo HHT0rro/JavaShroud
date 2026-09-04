@@ -12,6 +12,7 @@ pub const SPECIALIZATION_DIGEST: [u8; 32] = [0; 32];
 pub const PAYLOAD_PROFILE: &str = "qp-rust-ffi-v1";
 pub const PROTECTION_LEVEL: &str = "standard";
 pub const PACKING_LEVEL: &str = "off";
+/// Live values are recovered from the AEAD wrap after catalog authorization.
 pub const VM_CRYPTO_DOMAIN: [u8; 32] = [0; 32];
 pub const VM_LAYOUT_DIGEST: [u8; 32] = [0; 32];
 pub const TARGET_TOKEN_COMMITMENT: [u8; 32] = [0; 32];
@@ -24,8 +25,34 @@ pub const SECRET_PACK_NATIVE_IDENTITY: [u8; 32] = [0; 32];
 /// Number of secret-pack slots emitted by the artifact specialization build.
 pub const SECRET_PACK_SLOT_COUNT: usize = 0;
 
+pub const SECRET_PACK_NONCE: [u8; 12] = [0; 12];
+pub static SECRET_PACK_WRAPPED: [u8; 0] = [];
+
+#[repr(C)]
+pub struct ImageMeasurementSlot {
+    pub magic: [u8; 8],
+    pub commitment: [u8; 32],
+}
+
+#[used]
+#[link_section = ".jsms"]
+pub static IMAGE_MEASUREMENT: ImageMeasurementSlot = ImageMeasurementSlot {
+    magic: *b"JSIM\x01v5\0",
+    commitment: [0; 32],
+};
+
+#[inline(never)]
+pub fn image_measurement_commitment() -> [u8; 32] {
+    unsafe { core::ptr::read_volatile(&IMAGE_MEASUREMENT.commitment) }
+}
+
+pub fn qp_sp_reconstruct_wrap_key() -> [u8; 32] {
+    [0; 32]
+}
+
 /// Returns the recombined seed for one slot index. The default specialization
-/// never carries secret material and always returns `None`.
+/// never carries secret material and always returns `None`. Generated artifacts
+/// recover seeds through the AEAD wrap instead of this function.
 pub fn qp_secret_pack_seed(_slot: usize) -> Option<[u8; 32]> {
     None
 }

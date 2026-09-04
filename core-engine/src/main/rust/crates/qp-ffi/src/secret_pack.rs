@@ -1,24 +1,25 @@
 //! Per-artifact native secret pack.
 //!
-//! The generated specialization embeds every page-key seed as randomized XOR
-//! shard groups. This module recombines those shards once, after the bridge
-//! has authenticated the catalog and session, and derives page keys from
-//! structured binary inputs only. There is no descriptor-carried evaluator,
-//! no public string concatenation, and no key material outside the shards and
-//! the short-lived derived keys. Defense violations revoke the recombined
-//! state and every later page open fails closed.
+//! Slot seeds, VM crypto domain, and layout digest are recovered from an
+//! AEAD wrap after catalog and session authentication. The wrap key is
+//! reconstructed from per-build MBA immediates and bound to the on-disk
+//! image measurement. Defense violations revoke the recombined state.
 
+use crate::image_measure;
 use crate::specialization;
-use qp_crypto::{constant_time_eq, hmac_sha256_bytes, hkdf_sha256};
+use qp_crypto::{aes256_gcm_decrypt, constant_time_eq, hmac_sha256_bytes, hkdf_sha256};
 use qp_runtime::{PageKeyAuthority, PageKeyMaterial, PageKeyRequest, RouterError};
 use std::sync::Mutex;
 
-const PAGE_KEY_DOMAIN: &[u8] = b"javashroud-qp-page-key-v4";
-const COMMITMENT_DOMAIN: &[u8] = b"javashroud-qp-secret-commitment-v4";
+const PAGE_KEY_DOMAIN: &[u8] = b"javashroud-qp-page-key-v5";
+const COMMITMENT_DOMAIN: &[u8] = b"javashroud-qp-secret-commitment-v5";
+const WRAP_AAD: &[u8] = b"javashroud-qp-secret-wrap-v5";
 const KEY_SIZE: usize = 32;
 
 struct Recombined {
     seeds: Vec<[u8; KEY_SIZE]>,
+    crypto_domain: [u8; KEY_SIZE],
+    layout_digest: [u8; KEY_SIZE],
 }
 
 impl Drop for Recombined {
@@ -26,6 +27,8 @@ impl Drop for Recombined {
         for seed in &mut self.seeds {
             seed.fill(0);
         }
+        self.crypto_domain.fill(0);
+        self.layout_digest.fill(0);
     }
 }
 
@@ -45,9 +48,8 @@ impl SecretPackState {
         }
     }
 
-    /// Recombines the shard groups exactly once. `authorized == false`, a
-    /// missing pack, a truncated pack, or an all-zero seed keeps the pack
-    /// sealed so every later page open fails closed.
+    /// Unwraps the AEAD pack exactly once. Measurement mismatch, an empty
+    /// wrap, or a truncated payload keeps the pack sealed.
     pub fn authorize(&self, authorized: bool) -> Result<(), RouterError> {
         let mut guard = self
             .state
@@ -56,19 +58,37 @@ impl SecretPackState {
         if guard.is_some() {
             return Ok(());
         }
-        if !authorized || specialization::SECRET_PACK_SLOT_COUNT == 0 {
-            return Err(RouterError::AuthenticationFailed);
+        if !authorized || specialization::SECRET_PACK_WRAPPED.is_empty() {
+            return Err(RouterError::InvalidRequest("secret wrap is empty"));
         }
-        let mut seeds = Vec::with_capacity(specialization::SECRET_PACK_SLOT_COUNT);
-        for slot in 0..specialization::SECRET_PACK_SLOT_COUNT {
-            let seed = specialization::qp_secret_pack_seed(slot)
-                .ok_or(RouterError::AuthenticationFailed)?;
-            if seed == [0u8; KEY_SIZE] {
-                return Err(RouterError::AuthenticationFailed);
+        let mut wrap_key = specialization::qp_sp_reconstruct_wrap_key();
+        if wrap_key == [0u8; KEY_SIZE] {
+            return Err(RouterError::InvalidRequest("secret wrap key is zero"));
+        }
+        let measured = image_measure::verify_wrap_key(&wrap_key);
+        if measured.is_err() {
+            wrap_key.fill(0);
+            return Err(RouterError::InvalidRequest("secret image measurement failed"));
+        }
+        let plaintext = match aes256_gcm_decrypt(
+            &wrap_key,
+            &specialization::SECRET_PACK_NONCE,
+            WRAP_AAD,
+            &specialization::SECRET_PACK_WRAPPED,
+        ) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                wrap_key.fill(0);
+                return Err(RouterError::InvalidRequest("secret wrap decrypt failed"));
             }
-            seeds.push(seed);
-        }
-        *guard = Some(Recombined { seeds });
+        };
+        wrap_key.fill(0);
+        let parsed = parse_plaintext(&plaintext, &self.native_identity)
+            .map_err(|_| RouterError::InvalidRequest("secret wrap plaintext is invalid"));
+        let mut owned = plaintext;
+        owned.fill(0);
+        let recombined = parsed?;
+        *guard = Some(recombined);
         Ok(())
     }
 
@@ -84,6 +104,24 @@ impl SecretPackState {
             .lock()
             .map(|guard| guard.is_some())
             .unwrap_or(false)
+    }
+
+    pub fn crypto_domain(&self) -> Result<[u8; KEY_SIZE], RouterError> {
+        let guard = self
+            .state
+            .lock()
+            .map_err(|_| RouterError::AuthenticationFailed)?;
+        let sealed = guard.as_ref().ok_or(RouterError::AuthenticationFailed)?;
+        Ok(sealed.crypto_domain)
+    }
+
+    pub fn layout_digest(&self) -> Result<[u8; KEY_SIZE], RouterError> {
+        let guard = self
+            .state
+            .lock()
+            .map_err(|_| RouterError::AuthenticationFailed)?;
+        let sealed = guard.as_ref().ok_or(RouterError::AuthenticationFailed)?;
+        Ok(sealed.layout_digest)
     }
 }
 
@@ -102,9 +140,6 @@ impl PageKeyAuthority for SecretPackState {
             return Err(RouterError::AuthenticationFailed);
         }
         let seed = &sealed.seeds[slot];
-        // Structured binary derivation inputs. The byte order must stay
-        // identical to the build-side secret pack: commitment, slot, kind,
-        // page index, handle, locator, page nonce, native identity.
         let mut info = Vec::with_capacity(
             request.artifact_commitment.len()
                 + 4
@@ -137,5 +172,96 @@ impl PageKeyAuthority for SecretPackState {
         material.copy_from_slice(&key[..KEY_SIZE]);
         key.clear();
         Ok(PageKeyMaterial::from_material(&material))
+    }
+}
+
+fn parse_plaintext(
+    plaintext: &[u8],
+    expected_identity: &[u8; KEY_SIZE],
+) -> Result<Recombined, RouterError> {
+    let minimum = KEY_SIZE + 4 + KEY_SIZE + KEY_SIZE;
+    if plaintext.len() < minimum {
+        return Err(RouterError::AuthenticationFailed);
+    }
+    let identity = plaintext
+        .get(..KEY_SIZE)
+        .ok_or(RouterError::AuthenticationFailed)?;
+    if !constant_time_eq(identity, expected_identity) {
+        return Err(RouterError::AuthenticationFailed);
+    }
+    let count_bytes: [u8; 4] = plaintext
+        .get(KEY_SIZE..KEY_SIZE + 4)
+        .ok_or(RouterError::AuthenticationFailed)?
+        .try_into()
+        .map_err(|_| RouterError::AuthenticationFailed)?;
+    let slot_count = u32::from_be_bytes(count_bytes) as usize;
+    if slot_count != specialization::SECRET_PACK_SLOT_COUNT {
+        return Err(RouterError::AuthenticationFailed);
+    }
+    let record_bytes = slot_count
+        .checked_mul(4 + KEY_SIZE)
+        .ok_or(RouterError::AuthenticationFailed)?;
+    let records_end = KEY_SIZE
+        .checked_add(4)
+        .and_then(|start| start.checked_add(record_bytes))
+        .ok_or(RouterError::AuthenticationFailed)?;
+    let expected_len = records_end
+        .checked_add(KEY_SIZE)
+        .and_then(|value| value.checked_add(KEY_SIZE))
+        .ok_or(RouterError::AuthenticationFailed)?;
+    if plaintext.len() != expected_len {
+        return Err(RouterError::AuthenticationFailed);
+    }
+    let mut seeds = vec![[0u8; KEY_SIZE]; slot_count];
+    let mut cursor = KEY_SIZE + 4;
+    for slot in 0..slot_count {
+        let slot_id_bytes: [u8; 4] = plaintext[cursor..cursor + 4]
+            .try_into()
+            .map_err(|_| RouterError::AuthenticationFailed)?;
+        let slot_id = u32::from_be_bytes(slot_id_bytes) as usize;
+        cursor += 4;
+        if slot_id >= slot_count {
+            return Err(RouterError::AuthenticationFailed);
+        }
+        let mut seed = [0u8; KEY_SIZE];
+        seed.copy_from_slice(&plaintext[cursor..cursor + KEY_SIZE]);
+        cursor += KEY_SIZE;
+        if seed == [0u8; KEY_SIZE] || seeds[slot_id] != [0u8; KEY_SIZE] {
+            seed.fill(0);
+            return Err(RouterError::AuthenticationFailed);
+        }
+        seeds[slot_id] = seed;
+        let _ = slot;
+    }
+    let mut crypto_domain = [0u8; KEY_SIZE];
+    crypto_domain.copy_from_slice(&plaintext[records_end..records_end + KEY_SIZE]);
+    let mut layout_digest = [0u8; KEY_SIZE];
+    layout_digest.copy_from_slice(&plaintext[records_end + KEY_SIZE..]);
+    if crypto_domain == [0u8; KEY_SIZE] || layout_digest == [0u8; KEY_SIZE] {
+        return Err(RouterError::AuthenticationFailed);
+    }
+    Ok(Recombined {
+        seeds,
+        crypto_domain,
+        layout_digest,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncated_plaintext_fails_closed() {
+        let identity = [0x11u8; KEY_SIZE];
+        assert!(parse_plaintext(&[0x11u8; 16], &identity).is_err());
+    }
+
+    #[test]
+    fn identity_mismatch_fails_closed() {
+        let identity = [0x11u8; KEY_SIZE];
+        let mut plaintext = vec![0u8; KEY_SIZE + 4 + KEY_SIZE + KEY_SIZE];
+        plaintext[..KEY_SIZE].fill(0x22);
+        assert!(parse_plaintext(&plaintext, &identity).is_err());
     }
 }
