@@ -76,6 +76,7 @@ fun applyCallsiteRotationProtection(
                 if (isReflectionSurfaceVirtualCall(call.owner, call.name)) continue
                 if (isClassLoadingBoundaryVirtualCall(call.owner, call.name)) continue
                 if (isConcurrencyBoundaryVirtualCall(call.owner, call.name)) continue
+                if (isHotPureJdkVirtualCall(call.owner, call.name)) continue
                 if (random.nextInt(100) >= 30) continue
                 val bsm = Handle(
                     Opcodes.H_INVOKESTATIC,
@@ -197,6 +198,20 @@ private fun isClassLoadingBoundaryVirtualCall(owner: String, name: String): Bool
 private fun isConcurrencyBoundaryVirtualCall(owner: String, name: String): Boolean =
     owner.startsWith("java/util/concurrent/") ||
         (owner == "java/lang/Thread" && name in setOf("start", "join", "interrupt"))
+
+private fun isHotPureJdkVirtualCall(owner: String, name: String): Boolean =
+    owner == "java/lang/String" && name in setOf(
+        "length",
+        "isEmpty",
+        "charAt",
+        "codePointAt",
+        "concat",
+    ) ||
+        owner in setOf(
+            "java/lang/StringBuilder",
+            "java/lang/StringBuffer",
+            "java/lang/AbstractStringBuilder",
+        ) && name in setOf("append", "toString", "length", "capacity", "setLength", "charAt")
 
 private val classResourceAndLoaderMethodNames = setOf(
     "getClassLoader",

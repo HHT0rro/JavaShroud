@@ -170,27 +170,44 @@ private fun emitDefenseInitialize(methodVisitor: MethodVisitor, surface: String,
         "()V",
         false,
     )
-    methodVisitor.visitLdcInsn(surface)
-    methodVisitor.visitLdcInsn(profile)
+    methodVisitor.visitLdcInsn(defenseSurfaceCode(surface))
+    methodVisitor.visitLdcInsn(defenseProfileCode(profile))
     methodVisitor.visitMethodInsn(
         Opcodes.INVOKESTATIC,
         DEFENSE_KERNEL_HELPER_OWNER,
         "initialize",
-        "(Ljava/lang/String;Ljava/lang/String;)V",
+        "(II)V",
         false,
     )
 }
 
 private fun emitDefenseProbe(methodVisitor: MethodVisitor, surface: String, point: String) {
-    methodVisitor.visitLdcInsn(surface)
-    methodVisitor.visitLdcInsn(point)
+    methodVisitor.visitLdcInsn(defenseSurfaceCode(surface))
+    methodVisitor.visitLdcInsn(defenseProbeCode(point))
     methodVisitor.visitMethodInsn(
         Opcodes.INVOKESTATIC,
         DEFENSE_KERNEL_HELPER_OWNER,
         "probe",
-        "(Ljava/lang/String;Ljava/lang/String;)V",
+        "(II)V",
         false,
     )
+}
+
+private fun defenseSurfaceCode(surface: String): Int = when (surface) {
+    "os-anti-debug" -> 1
+    "os-anti-vm" -> 2
+    else -> error("unsupported Qp defense surface: $surface")
+}
+
+private fun defenseProfileCode(profile: String): Int = when (profile) {
+    "balanced" -> 1
+    "hardened" -> 2
+    else -> error("unsupported Qp defense profile: $profile")
+}
+
+private fun defenseProbeCode(point: String): Int {
+    val value = point.removePrefix("m").toULongOrNull(16)?.toInt() ?: stableProbeOrder("", point, "probe").toInt()
+    return if (value == 0) 1 else value
 }
 
 private fun stableProbeOrder(owner: String, method: String, surface: String): ULong {

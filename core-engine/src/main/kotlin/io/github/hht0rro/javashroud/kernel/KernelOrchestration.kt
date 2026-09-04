@@ -24,6 +24,7 @@ import io.github.hht0rro.javashroud.passes.requireExecutablePass
 import io.github.hht0rro.javashroud.transforms.protection.buildQpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.CandidateProductionBuildEvidence
+import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
 import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.currentQpBuildContextOrNull
 import io.github.hht0rro.javashroud.transforms.protection.hardening.HardenedArtifactFinalizer
@@ -314,6 +315,7 @@ internal fun executeWithOrderedPasses(
                 enabledPasses = enabledPasses,
                 nativeBytes = nativeBytes,
                 inputJarBytes = inputJarBytes,
+                requiredNativePlatforms = requiredNativePlatforms(config),
             )
             ReleaseArtifactScan.writeReport(outputJarPath, scanReport)
             if (config.protectionProfile.requiresReleaseScan) {
@@ -341,6 +343,16 @@ internal fun executeWithOrderedPasses(
 }
 
 internal fun resolveOutputJarPath(config: ObfuscationConfig): Path = Path.of(config.outputJarPath).toAbsolutePath().normalize()
+
+private fun requiredNativePlatforms(config: ObfuscationConfig): Set<String> {
+    val loader = config.passes.firstOrNull { it.id == "jni-microkernel-loader" && it.enabled } ?: return emptySet()
+    val targetPlatform = loader.params["targetPlatform"]
+        ?.takeIf { it.isTextual }
+        ?.asText()
+        ?.takeIf { it.isNotBlank() }
+        ?: "auto"
+    return EmbeddedHelperDeployment.resolveNativeCompileTargetPlatforms(targetPlatform).toSet()
+}
 
 private const val EMBEDDED_HELPER_TARGET = "io/github/hht0rro/javashroud/transforms/protection/*"
 private const val JNI_MICROKERNEL_LOADER_ID = "jni-microkernel-loader"

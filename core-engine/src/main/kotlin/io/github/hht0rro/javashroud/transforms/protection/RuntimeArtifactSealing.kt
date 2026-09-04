@@ -856,6 +856,9 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
         "nativeProbeDefense",
         "nativeTransformDefense",
         "nativeInvokeSite",
+        "nativeInitializeDefenseCode",
+        "nativeProbeDefenseCode",
+        "nativeTransformDefenseCode",
     )
     val derivedQpNativeNames = run {
         val schedule = activeQpNameSchedule()
@@ -913,6 +916,7 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     val jniHelper = "$QP_HELPER_PACKAGE/QpBridge"
     addMethod(jniHelper, "loadKernel", "(Ljava/lang/String;Ljava/lang/String;)V")
     addMethod(jniHelper, "loadKernel", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V")
+    addMethod(jniHelper, "loadKernel", "(III)V")
     addMethod(jniHelper, "executeQpVmPage", "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;")
     addMethod(jniHelper, "openQpString", "([BI[B)Ljava/lang/String;")
     addMethod(jniHelper, "readQpClassPage", "([BI[B)[B")
@@ -942,6 +946,12 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     addMethod(jniHelper, "nativeInitializeDefense", "(Ljava/lang/String;Ljava/lang/String;)I")
     addMethod(jniHelper, "nativeProbeDefense", "(Ljava/lang/String;Ljava/lang/String;)I")
     addMethod(jniHelper, "nativeTransformDefense", "([BLjava/lang/String;)[B")
+    addMethod(jniHelper, "nativeInitializeDefenseCode", "(II)I")
+    addMethod(jniHelper, "nativeProbeDefenseCode", "(II)I")
+    addMethod(jniHelper, "nativeTransformDefenseCode", "([BI)[B")
+    val defenseHelper = "$QP_HELPER_PACKAGE/QpGuard"
+    addMethod(defenseHelper, "initialize", "(II)V")
+    addMethod(defenseHelper, "probe", "(II)V")
     addMethod(
         jniHelper,
         "nativeInvokeSite",
@@ -1007,6 +1017,9 @@ private fun sealedHelperMethodStringRewriteMap(helperMemberRenamePlan: SealedHel
         "nativeProbeDefense",
         "nativeTransformDefense",
         "nativeInvokeSite",
+        "nativeInitializeDefenseCode",
+        "nativeProbeDefenseCode",
+        "nativeTransformDefenseCode",
     )
     val rewriteMap = linkedMapOf<String, String>()
     for ((ref, sealedName) in helperMemberRenamePlan.methodRenames) {
@@ -1569,6 +1582,36 @@ private fun remapHelperReferences(
                             helperMemberModified = true
                         }
                     }
+            }
+            /*
+             * QpBootstrap and QpCallsiteBridge are relocated independently.
+             * Their calls into QpBridge therefore cross the randomized package
+             * boundary after sealing. Promote only the two opaque target
+             * transport methods required by those helpers; the JNI methods and
+             * all other implementation helpers remain hidden.
+             */
+            val crossPackageTargetMethods = listOf(
+                "linkTargetSite" to "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[B[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;",
+                "invokeTargetSite" to "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[B[Ljava/lang/Object;)Ljava/lang/Object;",
+            )
+            if (classNode.name == sealedJniOwner) {
+                crossPackageTargetMethods.forEach { (originalName, descriptor) ->
+                    val sealedName = helperMemberRenamePlan.methodName(
+                        originalJniOwner,
+                        originalName,
+                        descriptor,
+                    ) ?: return@forEach
+                    classNode.methods
+                        .filter { it.name == sealedName && it.desc == descriptor }
+                        .forEach { method ->
+                            val publicAccess =
+                                (method.access and (Opcodes.ACC_PRIVATE or Opcodes.ACC_PROTECTED).inv()) or Opcodes.ACC_PUBLIC
+                            if (method.access != publicAccess) {
+                                method.access = publicAccess
+                                helperMemberModified = true
+                            }
+                        }
+                }
             }
             /*
              * The StringPage terminal follows the same boundary rule.  Its
