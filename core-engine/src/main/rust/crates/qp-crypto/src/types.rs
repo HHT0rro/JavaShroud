@@ -1,7 +1,7 @@
 use core::fmt;
 
 pub const PROTOCOL_MAGIC_SIZE: usize = 4;
-pub const PROTOCOL_VERSION: u8 = 3;
+pub const PROTOCOL_VERSION: u8 = 4;
 pub const DIGEST_SIZE: usize = 32;
 pub const MAX_BINDING_SIZE: usize = 4096;
 pub const MAX_PAYLOAD_SIZE: usize = 16 * 1024 * 1024;

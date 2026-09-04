@@ -15,7 +15,7 @@ import java.util.Base64;
  */
 public final class QpBootstrap {
     private static final int MAGIC_SIZE = 4;
-    private static final int VERSION = 3;
+    private static final int VERSION = 5;
     private static final int MAX_TOKEN_BYTES = 64 * 1024;
 
     private QpBootstrap() {}
@@ -48,7 +48,13 @@ public final class QpBootstrap {
         }
     }
 
-    static byte[] decodeToken(String token) {
+    /**
+     * Validates and decodes an opaque token envelope for a relocated helper.
+     * The method is public because sealing may place QpBootstrap and
+     * QpCallsiteBridge in different runtime packages; it returns only the
+     * authenticated opaque bytes and never resolves a business target.
+     */
+    public static byte[] decodeToken(String token) {
         if (token == null || token.length() < 8) {
             throw new SecurityException("indy target token is invalid");
         }
