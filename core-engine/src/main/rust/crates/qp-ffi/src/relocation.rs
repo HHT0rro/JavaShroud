@@ -52,6 +52,97 @@ pub fn sealed_binding_key(value: &str) -> String {
     hex_lower(&digest.as_bytes()[..8])
 }
 
+const SEALED_BINDINGS_DOMAIN: &[u8] = b"javashroud-qp-bindings-v6";
+const SEALED_BINDINGS_NONCE: usize = 12;
+
+/// Decrypts the sealed relocation-binding resource: `nonce(12) || ct||tag`,
+/// AES-256-GCM under `HKDF(cryptoDomain, "javashroud-qp-bindings-v6")` with
+/// the domain as AAD. Only the native runtime holds the key material.
+pub fn decrypt_sealed_bindings(
+    crypto_domain: &[u8; 32],
+    sealed: &[u8],
+) -> Result<String, &'static str> {
+    use qp_crypto::{aes256_gcm_decrypt, hkdf_sha256};
+    if sealed.len() < SEALED_BINDINGS_NONCE + 16 {
+        return Err("Qp sealed bindings are truncated");
+    }
+    let key = hkdf_sha256(crypto_domain, SEALED_BINDINGS_DOMAIN, &[], 32)
+        .map_err(|_| "Qp sealed bindings key derivation failed")?;
+    let plaintext = aes256_gcm_decrypt(
+        &key,
+        &sealed[..SEALED_BINDINGS_NONCE],
+        SEALED_BINDINGS_DOMAIN,
+        &sealed[SEALED_BINDINGS_NONCE..],
+    )
+    .map_err(|_| "Qp sealed bindings authentication failed")?;
+    String::from_utf8(plaintext).map_err(|_| "Qp sealed bindings plaintext is invalid")
+}
+
+/// Extracts the method-binding map from the full B|M|F relocation text.
+pub fn method_binding_map(binding_text: &str) -> Result<BTreeMap<String, String>, &'static str> {
+    let mut method_lines = String::with_capacity(binding_text.len());
+    for raw in binding_text.split('\n') {
+        let line = raw.trim_end_matches('\r');
+        if let Some(rest) = line.strip_prefix("M|") {
+            // Records are pipe-framed (`M|key|value`); the map form is `key=value`.
+            if let Some(separator) = rest.find('|') {
+                if !method_lines.is_empty() {
+                    method_lines.push('\n');
+                }
+                method_lines.push_str(&rest[..separator]);
+                method_lines.push('=');
+                method_lines.push_str(&rest[separator + 1..]);
+            }
+        }
+    }
+    parse_binding_map(&method_lines)
+}
+
+/// Decodes the URL-alphabet, unpadded base64 used by the bootstrap properties.
+pub fn base64_url_decode(text: &str) -> Option<Vec<u8>> {
+    fn value(byte: u8) -> Option<u32> {
+        match byte {
+            b'A'..=b'Z' => Some((byte - b'A') as u32),
+            b'a'..=b'z' => Some((byte - b'a' + 26) as u32),
+            b'0'..=b'9' => Some((byte - b'0' + 52) as u32),
+            b'-' => Some(62),
+            b'_' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes = text.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let remainder = bytes.len() % 4;
+    if remainder == 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3 + 3);
+    let full = &bytes[..bytes.len() - remainder];
+    for chunk in full.chunks(4) {
+        let mut group = 0u32;
+        for byte in chunk {
+            group = (group << 6) | value(*byte)?;
+        }
+        out.push((group >> 16) as u8);
+        out.push((group >> 8) as u8);
+        out.push(group as u8);
+    }
+    if remainder > 0 {
+        let mut group = 0u32;
+        for byte in &bytes[bytes.len() - remainder..] {
+            group = (group << 6) | value(*byte)?;
+        }
+        group <<= 6 * (4 - remainder);
+        out.push((group >> 16) as u8);
+        if remainder == 3 {
+            out.push((group >> 8) as u8);
+        }
+    }
+    Some(out)
+}
+
 pub fn parse_binding_map(text: &str) -> Result<BTreeMap<String, String>, &'static str> {
     let mut map = BTreeMap::new();
     for raw in text.split('\n') {
@@ -169,5 +260,39 @@ mod tests {
         assert_eq!(plan.owner, "a/b/SealedHelper");
         assert_eq!(plan.methods[0].0, "m_0");
         assert_eq!(plan.methods[TYPED_NATIVE_METHOD_COUNT - 1].0, "m_14");
+    }
+}
+
+#[cfg(test)]
+mod sealed_tests {
+    use super::*;
+    use qp_crypto::{aes256_gcm_encrypt, hkdf_sha256};
+
+    #[test]
+    fn sealed_bindings_round_trip_and_m_filter() {
+        let domain = b"javashroud-qp-bindings-v6";
+        let crypto_domain = [0x5Au8; 32];
+        let plain = "B|k1|v1\nM|abc|renamed\nF|k2|v2\n";
+        let key = hkdf_sha256(&crypto_domain, domain, &[], 32).expect("key");
+        let nonce = [0x11u8; 12];
+        let sealed = aes256_gcm_encrypt(&key, &nonce, domain, plain.as_bytes()).expect("seal");
+        let mut blob = nonce.to_vec();
+        blob.extend_from_slice(&sealed);
+        let opened = decrypt_sealed_bindings(&crypto_domain, &blob).expect("open");
+        let map = method_binding_map(&opened).expect("map");
+        assert_eq!(map.get("abc").map(String::as_str), Some("renamed"));
+        assert_eq!(map.len(), 1);
+        let mut wrong = crypto_domain;
+        wrong[0] ^= 1;
+        assert!(decrypt_sealed_bindings(&wrong, &blob).is_err());
+    }
+
+    #[test]
+    fn base64_url_decode_matches_java_url_encoder() {
+        assert_eq!(base64_url_decode("aGVsbG8"), Some(b"hello".to_vec()));
+        assert_eq!(base64_url_decode("aGVsbG8h"), Some(b"hello!".to_vec()));
+        assert_eq!(base64_url_decode("-_8"), Some(vec![0xFB, 0xFF]));
+        assert_eq!(base64_url_decode("a"), None);
+        assert_eq!(base64_url_decode("a+b/"), None);
     }
 }

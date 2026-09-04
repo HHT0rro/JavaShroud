@@ -433,6 +433,20 @@ mod jni_bridge {
             Ok(())
         }
 
+        /// Arms the native-only session before `nativeInit`: used by the
+        /// JNI_OnLoad bootstrap so pack material can be unwrapped without any
+        /// Java-supplied entropy. A later `install_nonce` supersedes it.
+        fn arm_native_session(&mut self) -> Result<(), BridgeFailure> {
+            let lease = SensitiveMemoryLease::random(32)
+                .map_err(|_| BridgeFailure("Qp native session entropy is unavailable"))?;
+            self.session_epoch = self
+                .session_epoch
+                .checked_add(1)
+                .ok_or(BridgeFailure("Qp session epoch overflow"))?;
+            self.session_nonce = Some(lease);
+            Ok(())
+        }
+
         fn install_nonce(&mut self, nonce: Vec<u8>) -> Result<(), BridgeFailure> {
             if !self.initialized {
                 return Err(BridgeFailure(
@@ -4909,15 +4923,75 @@ mod jni_bridge {
         env: JNIEnv,
     ) -> Result<crate::relocation::RegistrationPlan, BridgeFailure> {
         let loader_owner = read_system_property(env, b"j.l\0")?;
-        let method_text = read_system_property(env, b"j.m\0")?;
-        let method_map = match method_text.as_deref() {
-            None => Default::default(),
-            Some(text) => {
-                crate::relocation::parse_binding_map(text).map_err(|error| BridgeFailure(error))?
-            }
-        };
+        bootstrap_secret_state(env)?;
+        let method_map = sealed_method_bindings(env)?;
         crate::relocation::resolve_registration(loader_owner.as_deref(), &method_map)
             .map_err(|error| BridgeFailure(error))
+    }
+
+    /// JNI_OnLoad self-bootstrap: the session is armed from native CSPRNG and
+    /// the sealed pack is unwrapped from the opaque property channel. The
+    /// property values are ciphertext the JVM side can never open, so the
+    /// relocation surface stays hidden offline.
+    unsafe fn bootstrap_secret_state(env: JNIEnv) -> Result<(), BridgeFailure> {
+        {
+            let state = lock_state()?;
+            if state.secret_pack.is_some() {
+                return Ok(());
+            }
+        }
+        if specialization::SECRET_PACK_SHARD_COUNT == 0 {
+            // Loader-only builds carry no pack and no sealed bindings.
+            return Ok(());
+        }
+        {
+            let mut state = lock_state()?;
+            state.arm_native_session()?;
+        }
+        let pack_text = read_system_property(env, b"j.p\0")?
+            .ok_or(BridgeFailure("Qp sealed pack property is missing"))?;
+        let pack_bytes = crate::relocation::base64_url_decode(&pack_text)
+            .ok_or(BridgeFailure("Qp sealed pack property is invalid"))?;
+        let pack = Arc::new(SecretPackState::from_specialization());
+        pack.authorize(true, true, &pack_bytes)
+            .map_err(|error| match error {
+                RouterError::InvalidRequest(reason) => BridgeFailure(reason),
+                _ => BridgeFailure("Qp native secret pack is unavailable"),
+            })?;
+        let mut state = lock_state()?;
+        if state.secret_pack.is_none() {
+            state
+                .router
+                .bind_page_key_authority(Box::new(SecretPackRouterAuthority {
+                    pack: Arc::clone(&pack),
+                }));
+            state.secret_pack = Some(pack);
+        }
+        Ok(())
+    }
+
+    unsafe fn sealed_method_bindings(
+        env: JNIEnv,
+    ) -> Result<BTreeMap<String, String>, BridgeFailure> {
+        if specialization::SECRET_PACK_SHARD_COUNT == 0 {
+            return Ok(Default::default());
+        }
+        let crypto_domain = {
+            let state = lock_state()?;
+            match state.secret_pack.as_ref() {
+                Some(pack) => pack
+                    .crypto_domain()
+                    .map_err(|_| BridgeFailure("Qp native secret pack is unavailable"))?,
+                None => return Ok(Default::default()),
+            }
+        };
+        let bindings_text = read_system_property(env, b"j.n\0")?
+            .ok_or(BridgeFailure("Qp sealed bindings property is missing"))?;
+        let sealed = crate::relocation::base64_url_decode(&bindings_text)
+            .ok_or(BridgeFailure("Qp sealed bindings property is invalid"))?;
+        let plain = crate::relocation::decrypt_sealed_bindings(&crypto_domain, &sealed)
+            .map_err(BridgeFailure)?;
+        crate::relocation::method_binding_map(&plain).map_err(BridgeFailure)
     }
 
     unsafe fn unregister_natives(env: JNIEnv, class: JClass) {
