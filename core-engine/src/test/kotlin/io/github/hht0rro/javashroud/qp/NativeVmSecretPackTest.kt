@@ -38,7 +38,7 @@ class NativeVmSecretPackTest {
         nativeIdentity: ByteArray,
     ): ByteArray = hkdfSha256(
         ikm = seed,
-        salt = "javashroud-qp-page-key-v5".encodeToByteArray(),
+        salt = "javashroud-qp-page-key-v6".encodeToByteArray(),
         info = concatBytes(
             arrayOf(
                 preNativeCommitment,
@@ -57,7 +57,7 @@ class NativeVmSecretPackTest {
     private fun commitmentLikeNative(seed: ByteArray, pageKey: ByteArray): ByteArray {
         val commitmentKey = hkdfSha256(
             ikm = seed,
-            salt = "javashroud-qp-secret-commitment-v5".encodeToByteArray(),
+            salt = "javashroud-qp-secret-commitment-v6".encodeToByteArray(),
             info = ByteArray(0),
             length = 32,
         )
@@ -267,10 +267,22 @@ class NativeVmSecretPackTest {
     }
 
     @Test
-    fun aead_wrap_hides_slot_seeds_and_mba_reconstructs_the_wrap_key() {
+    fun aead_wrap_shards_open_only_under_the_image_commitment() {
         val draft = testSecretPackDraft()
         try {
-            draft.registerSlot()
+            val slot = draft.registerSlot()
+            val handle = ByteArray(24) { it.toByte() }
+            val locator = ByteArray(16) { it.toByte() }
+            val pageNonce = ByteArray(12) { it.toByte() }
+            draft.pageKey(
+                slotId = slot,
+                resourceKind = QpResourceKind.QpMethod,
+                pageIndex = 0,
+                encodedHandle = handle,
+                locatorToken = locator,
+                pageNonce = pageNonce,
+                preNativeCommitment = ByteArray(32) { 0x40 },
+            )
             val sealed = draft.sealedCopyForSpecialization()
             val literals = NativeSecretPackLiterals.prepare(
                 pack = sealed,
@@ -279,20 +291,71 @@ class NativeVmSecretPackTest {
                 layoutDigest = ByteArray(32) { 0x22 },
             )
             try {
-                assertTrue(literals.wrapped.isNotEmpty())
-                assertEquals(12, literals.nonce.size)
                 assertEquals(8, literals.mbaWords.size)
-                val reconstructed = ByteArray(32)
+                // The MBA immediates must reconstruct the static half exactly.
+                val cm = ByteArray(32)
                 literals.mbaWords.forEachIndexed { index, word ->
                     val value = word.multiplier * word.factor + word.addend
-                    reconstructed[index * 4] = (value ushr 24).toByte()
-                    reconstructed[index * 4 + 1] = (value ushr 16).toByte()
-                    reconstructed[index * 4 + 2] = (value ushr 8).toByte()
-                    reconstructed[index * 4 + 3] = value.toByte()
+                    cm[index * 4] = (value ushr 24).toByte()
+                    cm[index * 4 + 1] = (value ushr 16).toByte()
+                    cm[index * 4 + 2] = (value ushr 8).toByte()
+                    cm[index * 4 + 3] = value.toByte()
                 }
-                assertContentEquals(literals.wrapKey, reconstructed)
-                val source = literals.wrapped.joinToString(",")
-                assertFalse(source.contains("QP_SP_S"))
+                assertContentEquals(literals.measurementKey, cm)
+
+                val imageCommitment = ByteArray(32) { (it * 5 + 1).toByte() }
+                val blob = literals.sealForPlatform("windows-x64", imageCommitment)
+                assertContentEquals(blob, literals.blobByPlatform().getValue("windows-x64"))
+                assertFalse(blob.decodeToString().contains("QP_SP_S"))
+
+                // Walk the shard container: magic 0x6A,0 || u16 count || shards.
+                val buf = java.nio.ByteBuffer.wrap(blob)
+                assertEquals(0x6A, buf.get().toInt() and 0xFF)
+                assertEquals(0, buf.get().toInt())
+                assertEquals(5, buf.short.toInt())
+                var methodWrapped: ByteArray? = null
+                var methodNonce: ByteArray? = null
+                repeat(5) {
+                    val kind = buf.get().toInt()
+                    buf.get()
+                    val nonceLength = buf.short.toInt()
+                    assertEquals(12, nonceLength)
+                    val length = buf.int
+                    val shardNonce = ByteArray(nonceLength).also { buf.get(it) }
+                    val wrappedShard = ByteArray(length).also { buf.get(it) }
+                    if (kind == 1) {
+                        methodWrapped = wrappedShard
+                        methodNonce = shardNonce
+                    }
+                }
+                assertTrue(buf.remaining() == 0)
+
+                // The method shard opens under HMAC(cm, image commitment).
+                val mac = Mac.getInstance("HmacSHA256")
+                mac.init(SecretKeySpec(cm, "HmacSHA256"))
+                val shardKey = mac.doFinal(imageCommitment)
+                val aad = "javashroud-qp-secret-wrap-v6".encodeToByteArray()
+                val openCipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+                openCipher.init(
+                    javax.crypto.Cipher.DECRYPT_MODE,
+                    SecretKeySpec(shardKey, "AES"),
+                    javax.crypto.spec.GCMParameterSpec(128, methodNonce),
+                )
+                openCipher.updateAAD(aad)
+                val plaintext = openCipher.doFinal(methodWrapped)
+                assertEquals(1, plaintext[0].toInt(), "method shard must echo its kind")
+                assertTrue(plaintext.size > 5, "method shard must carry its slot record")
+
+                // A different image commitment must fail the tag check.
+                val wrongKey = mac.doFinal(ByteArray(32) { 0x5A })
+                val badCipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+                badCipher.init(
+                    javax.crypto.Cipher.DECRYPT_MODE,
+                    SecretKeySpec(wrongKey, "AES"),
+                    javax.crypto.spec.GCMParameterSpec(128, methodNonce),
+                )
+                badCipher.updateAAD(aad)
+                assertFailsWith<Exception> { badCipher.doFinal(methodWrapped) }
             } finally {
                 literals.wipe()
                 sealed.wipe()

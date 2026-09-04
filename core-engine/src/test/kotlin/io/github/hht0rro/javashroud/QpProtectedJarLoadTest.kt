@@ -242,7 +242,7 @@ class QpProtectedJarLoadTest {
             Triple("nativeInit", "(Ljava/lang/String;)I", "nInit"),
             Triple("nativeHeartbeat", "()I", "nBeat"),
             Triple("nativeInstallSessionNonce", "([B)Z", "nNonce"),
-            Triple("nativeInstallCatalog", "([B[B)I", "nCatalog"),
+            Triple("nativeInstallCatalog", "([B[B[B)I", "nCatalog"),
             Triple("nativeExecuteVmPage", "(J[B[Ljava/lang/Object;)Ljava/lang/Object;", "nVm"),
             Triple("nativeOpenStringPage", "([B)Ljava/lang/String;", "nStr"),
             Triple("nativeReadClassPage", "([B)[B", "nCls"),
