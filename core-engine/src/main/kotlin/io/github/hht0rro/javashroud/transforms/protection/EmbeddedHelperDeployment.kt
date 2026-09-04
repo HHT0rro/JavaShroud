@@ -230,7 +230,7 @@ object EmbeddedHelperDeployment {
             "nativeLoadState",
             "nativeLoadMessage",
             "diversifiedVmEnabled",
-            "vmSelfCheck",
+            "vmSelfCheckCode",
             "nativeSelfCheckFailed",
             "sealedNativeBindingsPublished",
             "QP_NATIVE_LOCATOR_RESOURCE",
@@ -417,10 +417,7 @@ object EmbeddedHelperDeployment {
                 }
             }
 
-            override fun visitEnd() {
-                emitQpOnlyJniHelperLoadMethods(writer, owner)
-                super.visitEnd()
-            }
+            override fun visitEnd() = super.visitEnd()
         }
         reader.accept(visitor, 0)
         return writer.toByteArray()

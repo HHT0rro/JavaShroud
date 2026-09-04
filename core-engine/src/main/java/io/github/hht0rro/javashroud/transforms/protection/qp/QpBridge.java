@@ -45,7 +45,8 @@ public final class QpBridge {
     private static volatile int nativeLoadState = LOAD_UNTRIED;
     private static volatile String nativeLoadMessage = "";
     private static volatile boolean diversifiedVmEnabled;
-    private static volatile String vmSelfCheck = "";
+    /* 0 = not requested, 1 = native ready, 2 = native unavailable. */
+    private static volatile int vmSelfCheckCode;
     private static volatile boolean nativeSelfCheckFailed;
     private static volatile boolean sealedNativeBindingsPublished;
     private static final String QP_NATIVE_LOCATOR_RESOURCE = "META-INF/jsrt/native.locator";
@@ -88,6 +89,9 @@ public final class QpBridge {
     public static native int nativeInitializeDefense(String surface, String profile);
     public static native int nativeProbeDefense(String surface, String point);
     public static native byte[] nativeTransformDefense(byte[] material, String binding);
+    public static native int nativeInitializeDefenseCode(int surfaceCode, int profileCode);
+    public static native int nativeProbeDefenseCode(int surfaceCode, int pointCode);
+    public static native byte[] nativeTransformDefenseCode(byte[] material, int bindingCode);
     static native Object nativeInvokeSite(
         MethodHandles.Lookup lookup,
         String indyName,
@@ -101,7 +105,7 @@ public final class QpBridge {
      * Link an invokedynamic site without returning its bootstrap or business
      * MethodHandles to Java.
      */
-    static CallSite linkTargetSite(
+    public static CallSite linkTargetSite(
         MethodHandles.Lookup lookup,
         String indyName,
         MethodType methodType,
@@ -127,7 +131,7 @@ public final class QpBridge {
     }
 
     /** Invoke one opaque business target without materializing its handle in Java. */
-    static Object invokeTargetSite(
+    public static Object invokeTargetSite(
         MethodHandles.Lookup lookup,
         String indyName,
         MethodType methodType,
@@ -407,18 +411,18 @@ public final class QpBridge {
             } catch (SecurityException expectedRouteFailure) {
                 // Registered typed route reached native code.
             }
-            if (nativeInitializeDefense("abi-probe", "balanced") != 0) {
-                nativeLoadMessage = "qp:abi-failed:nativeInitializeDefense";
+            if (nativeInitializeDefenseCode(3, 1) != 0) {
+                nativeLoadMessage = "qp:abi-failed:route-1";
                 return false;
             }
-            if (nativeProbeDefense("abi-probe", "abi") != 0) {
-                nativeLoadMessage = "qp:abi-failed:nativeProbeDefense";
+            if (nativeProbeDefenseCode(3, 1) != 0) {
+                nativeLoadMessage = "qp:abi-failed:route-2";
                 return false;
             }
-            byte[] defenseShare = nativeTransformDefense(new byte[] { 1 }, "abi");
+            byte[] defenseShare = nativeTransformDefenseCode(new byte[] { 1 }, 1);
             try {
                 if (defenseShare == null || defenseShare.length != 32) {
-                    nativeLoadMessage = "qp:abi-failed:nativeTransformDefense";
+                    nativeLoadMessage = "qp:abi-failed:route-3";
                     return false;
                 }
             } finally {
@@ -429,7 +433,7 @@ public final class QpBridge {
             nativeLoadMessage = "qp:abi-missing:typed-page-bridge";
             return false;
         } catch (Throwable error) {
-            nativeLoadMessage = "qp:abi-probe-failed:" + error.getClass().getName();
+            nativeLoadMessage = "qp:abi-failed:" + error.getClass().getName();
             return false;
         } finally {
             Arrays.fill(handle, (byte) 0);
@@ -485,29 +489,13 @@ public final class QpBridge {
         } else {
             throw new SecurityException("Qp target is unsupported");
         }
-        String[] requiredMarkers = new String[] {
-            "JNI_OnLoad",
-            "JNI_OnUnload",
-            "qp_r1_runtime_binding_digest",
-            "qp_r1_open_frame",
-            "nativeInit",
-            "nativeHeartbeat",
-            "nativeInstallSessionNonce",
-            "nativeInstallCatalog",
-            "nativeExecuteVmPage",
-            "nativeOpenStringPage",
-            "nativeReadClassPage",
-            "nativeConsumeNativeSegment",
-            "nativeInitializeDefense",
-            "nativeProbeDefense",
-            "nativeTransformDefense",
-            "nativeInvokeSite",
-        };
-        for (String marker : requiredMarkers) {
-            if (!containsAscii(bytes, marker)) {
-                throw new SecurityException("Qp native image is missing binding " + marker);
-            }
-        }
+        /*
+         * JNI registration is verified by the typed calls below.  Keeping a
+         * table of Java method names here only creates a static oracle and is
+         * redundant once RegisterNatives has installed the current binding
+         * table.  The native image still has to pass the structural checks and
+         * the first heartbeat/page/defense transactions before it is accepted.
+         */
     }
 
     private static boolean containsAscii(byte[] bytes, String value) {
@@ -989,6 +977,46 @@ public final class QpBridge {
         }
     }
 
+    /**
+     * Generated protected classes use numeric route codes so loader policy
+     * labels do not appear in their constant pools. The source-level string
+     * overload remains for callers that use the public helper directly.
+     */
+    public static void loadKernel(int kernelComponentsCode, int targetPlatformCode, int vmModeCode) {
+        if (kernelComponentsCode < 1 || kernelComponentsCode > 5 ||
+            targetPlatformCode < 0 || targetPlatformCode > 3 ||
+            (vmModeCode != 0 && vmModeCode != 1)) {
+            throw new SecurityException("Qp native loader route is invalid");
+        }
+        // Production helper classes use this route. The code values are
+        // authenticated by the generated/native binding contract; no policy
+        // labels are reconstructed in the protected class constant pool.
+        diversifiedVmEnabled = vmModeCode == 1;
+        if (isNativeLoaded()) {
+            runDiversifiedVmSelfExercise();
+            return;
+        }
+        if (loadState == LOAD_LOADING || nativeLoadState == LOAD_LOADING) return;
+        loadState = LOAD_LOADING;
+        try {
+            loadQpNativeKernel();
+            if (nativeLoadState == LOAD_READY) {
+                loadState = LOAD_UNTRIED;
+                loadMessage = "";
+                runDiversifiedVmSelfExercise();
+                return;
+            }
+            loadMessage = nativeLoadMessage == null || nativeLoadMessage.length() == 0
+                ? "qp:bundled-native-unavailable"
+                : nativeLoadMessage;
+            loadState = LOAD_FAILED;
+            runDiversifiedVmSelfExercise();
+        } catch (Throwable error) {
+            loadMessage = debugNativeLoadMessage("qp:native-exception", error);
+            loadState = LOAD_FAILED;
+        }
+    }
+
     private static boolean targetPlatformAllowsCurrent(String targetPlatform, String platformTarget) {
         if (targetPlatform == null || platformTarget == null) return false;
         String requested = targetPlatform.trim();
@@ -1051,7 +1079,7 @@ public final class QpBridge {
 
     /** Status string for the diversified-VM load-time self-exercise. */
     public static String getVmSelfCheck() {
-        return vmSelfCheck;
+        return vmSelfCheckCode == 0 ? "" : Integer.toString(vmSelfCheckCode);
     }
 
     /*
@@ -1060,13 +1088,16 @@ public final class QpBridge {
      * after native load instead of running any Java VM fallback path.
      */
     private static void runDiversifiedVmSelfExercise() {
-        if (!diversifiedVmEnabled) return;
-        vmSelfCheck = isNativeLoaded() ? "native:vm-diverse:ok" : "native:vm-diverse:unavailable";
+        if (!diversifiedVmEnabled) {
+            vmSelfCheckCode = 0;
+            return;
+        }
+        vmSelfCheckCode = isNativeLoaded() ? 1 : 2;
     }
 
     /** Require the current unified defense state before accessing protected data. */
     public static void requireHealthyKernel() {
-        if (!isKernelIntegrityReady() || (vmSelfCheck != null && vmSelfCheck.contains("mismatch"))) {
+        if (!isKernelIntegrityReady() || vmSelfCheckCode == 3) {
             kernelState = KERNEL_TAMPERED;
             throw new SecurityException("Kernel integrity mismatch");
         }
