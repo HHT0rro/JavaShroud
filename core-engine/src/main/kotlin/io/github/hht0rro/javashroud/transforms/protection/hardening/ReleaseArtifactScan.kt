@@ -283,12 +283,22 @@ internal object ReleaseArtifactScan {
             )
         }
         return try {
-            val directory = QpArtifactDirectory.decode(catalog.second)
+            // v6 sealed shell: the native SHA-256 stays outside the blob for
+            // this binding check; abi/specialization digests are sealed.
+            val bytes = catalog.second
+            val sealed = bytes.size >= 68 && bytes[0] == 0x6B.toByte() && bytes[1] == 1.toByte()
+            val native: ByteArray = if (sealed) {
+                bytes.copyOfRange(36, 68)
+            } else {
+                val directory = QpArtifactDirectory.decode(bytes)
+                try {
+                    directory.runtimeBindingDigest.nativeSha256.copyOf()
+                } finally {
+                    directory.wipe()
+                }
+            }
             try {
-                val native = directory.runtimeBindingDigest.nativeSha256
-                val abi = directory.runtimeBindingDigest.abiDigest
-                val spec = directory.runtimeBindingDigest.specializationDigest
-                val nonzero = isNonZeroDigest(native) && isNonZeroDigest(abi) && isNonZeroDigest(spec)
+                val nonzero = isNonZeroDigest(native)
                 val nativeMatch = artifact.jarEntries.any { entry ->
                     (entry.name.replace('\\', '/').lowercase(java.util.Locale.ROOT).endsWith(".dll") ||
                         entry.name.replace('\\', '/').lowercase(java.util.Locale.ROOT).endsWith(".so")) &&
@@ -298,7 +308,7 @@ internal object ReleaseArtifactScan {
                     ReleaseArtifactScanReport.Finding(
                         "runtime-binding-nonzero",
                         nonzero,
-                        if (nonzero) "native/abi/specialization nonzero" else "zero digest in catalog",
+                        if (nonzero && sealed) "native nonzero;abi/specialization sealed" else if (nonzero) "native/abi/specialization nonzero" else "zero digest in catalog",
                     ),
                     ReleaseArtifactScanReport.Finding(
                         "runtime-binding-match",
@@ -307,7 +317,7 @@ internal object ReleaseArtifactScan {
                     ),
                 )
             } finally {
-                directory.wipe()
+                java.util.Arrays.fill(native, 0)
             }
         } catch (error: Throwable) {
             listOf(
@@ -1197,19 +1207,29 @@ internal object ReleaseArtifactScan {
             )
         }
         val (name, bytes) = selection.entries.single()
-        var directory: QpArtifactDirectory? = null
-        val failure = try {
-            directory = QpArtifactDirectory.decode(bytes)
+        // v6 directories ship sealed: the scan verifies the envelope shell only
+        // (records are opaque without a live-session pack key).
+        val sealedShellOk = bytes.size >= 36 + 16 &&
+            bytes[0] == 0x6B.toByte() &&
+            bytes[1] == 1.toByte() &&
+            bytes[2] == 0.toByte() &&
+            bytes[3] == 0.toByte() &&
+            bytes.any { it != 0.toByte() }
+        val failure = if (sealedShellOk) {
             null
-        } catch (error: Throwable) {
-            "$name:decode-failed:${error.javaClass.simpleName}"
-        } finally {
-            directory?.wipe()
+        } else {
+            try {
+                val directory = QpArtifactDirectory.decode(bytes)
+                directory.wipe()
+                null
+            } catch (error: Throwable) {
+                "$name:decode-failed:${error.javaClass.simpleName}"
+            }
         }
         return ReleaseArtifactScanReport.Finding(
             "current-format",
             failure == null,
-            failure ?: "directory=$name;parser-accepted-current-format",
+            failure ?: "directory=$name;sealed-shell-accepted-current-format",
         )
     }
 
