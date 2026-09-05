@@ -602,9 +602,23 @@ internal object NativeImageMeasurement {
             // reloc/IAT ranges stay in the digest. Only the commitment slot is
             // hashed as zeros so it can be patched after compile.
             zeroCommitmentSlot(working)
+            zeroShardMaskRegion(working)
             return java.security.MessageDigest.getInstance("SHA-256").digest(working)
         } finally {
             Arrays.fill(working, 0)
+        }
+    }
+
+    private fun zeroShardMaskRegion(bytes: ByteArray) {
+        // The .jsmk rows are patched with the commitment after this digest is
+        // taken; the runtime zeroes the same region, so both sides must hash
+        // it as zeros or the measurement will never verify.
+        val range = locateSectionRange(bytes, ".jsmk") ?: return
+        val offset = range.first
+        val size = range.second
+        if (offset < 0 || size <= 0 || offset + size > bytes.size) return
+        for (index in offset until offset + size) {
+            bytes[index] = 0
         }
     }
 
@@ -778,10 +792,25 @@ internal object NativeImageMeasurement {
     ): Boolean {
         if (shardCount <= 0) return true
         if (maskedRows.size != shardCount) return false
+        // The patch must land inside the .jsmk section: the runtime reads the
+        // array by symbol address, so a content match outside the section would
+        // modify unrelated bytes and leave the real keys unchained.
+        val section = locateSectionRange(bytes, ".jsmk") ?: return false
+        val secOffset = section.first
+        val secSize = section.second
+        if (secSize < shardCount * 32) return false
         for (row in maskedRows) {
-            val index = indexOfBytes(bytes, row) ?: return false
+            var found = -1
+            outer@ for (i in 0..secSize - 32) {
+                for (j in 0 until 32) {
+                    if (bytes[secOffset + i + j] != row[j]) continue@outer
+                }
+                found = secOffset + i
+                break
+            }
+            if (found < 0) return false
             for (j in 0 until 32) {
-                bytes[index + j] = ((bytes[index + j].toInt() xor commitment[j % 32].toInt()) and 0xFF).toByte()
+                bytes[found + j] = ((bytes[found + j].toInt() xor commitment[j % 32].toInt()) and 0xFF).toByte()
             }
         }
         return true

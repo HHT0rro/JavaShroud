@@ -549,9 +549,9 @@ object QpNativeCompilerPass {
                     error("Qp shard key mask rows are missing from the compiled image")
                 }
                 for (shard in 0 until shardCount) {
-                    println("jsh-key-build: " + task.secretPack.cmKeyAt(shard).joinToString("") { "%02x".format(it) })
                 }
                 maskedRows.forEach { Arrays.fill(it, 0) }
+                val cm1 = task.secretPack.cmKeyAt(1)
                 Arrays.fill(maskRMaster, 0)
             }
         } catch (error: Exception) {
@@ -955,7 +955,6 @@ object QpNativeCompilerPass {
                             "0x" + ((cmKey[j].toInt() xor mask[j].toInt()) and 0xFF).toString(16).padStart(2, '0')
                         }
                         append(hexBytes)
-                        if (shardIndex == 1) println("jsh-cm1-build: " + cmKey.joinToString("") { "%02x".format(it) }.take(16))
                         if (shardIndex != shardCount - 1) append(", ")
                     } finally {
                         Arrays.fill(cmKey, 0)
@@ -1008,7 +1007,6 @@ object QpNativeCompilerPass {
         val digest = io.github.hht0rro.javashroud.transforms.protection.qp.NativeImageMeasurement.digest(bytes)
         val commitment = io.github.hht0rro.javashroud.transforms.protection.qp.NativeImageMeasurement.hmacCommitment(measurementKey, digest)
         require(commitment.size == 32)
-        println("jsh-digest-build: " + digest.joinToString("") { "%02x".format(it) })
         System.arraycopy(commitment, 0, bytes, commitmentStart, 32)
         Arrays.fill(digest, 0)
         return commitment

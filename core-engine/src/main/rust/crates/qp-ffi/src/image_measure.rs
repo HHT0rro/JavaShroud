@@ -41,15 +41,7 @@ pub(crate) fn measure_bytes(bytes: &mut [u8]) -> Result<[u8; DIGEST_SIZE], Route
     // taken, and the runtime applies the same normalization before hashing.
     zero_commitment_slot(bytes)?;
     zero_shard_mask_region(bytes)?;
-    eprintln!(
-        "jsh-filedbg: len={} jsms={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} jsmk0={:02x}{:02x}{:02x}{:02x}",
-        bytes.len(),
-        bytes[1516544], bytes[1516545], bytes[1516546], bytes[1516547],
-        bytes[1516548], bytes[1516549], bytes[1516550], bytes[1516551],
-        bytes[1518080], bytes[1518081], bytes[1518082], bytes[1518083]
-    );
     let full = sha256(bytes);
-    eprintln!("jsh-digest-rt: {}", full.as_bytes().iter().map(|b| format!("{:02x}", b)).collect::<String>());
     Ok(*full.as_bytes())
 }
 
