@@ -39,6 +39,7 @@ private const val JNI_MICROKERNEL_VM_PAGE_DISPATCH_METHOD = "executeQpVmPage"
 private const val QP_VM_PAGE_DISPATCH_DESCRIPTOR = "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
 private const val QP_VM_PAGE_DISPATCH_SEALED_DESCRIPTOR = "(Ljava/lang/String;[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
 private const val QP_DISPATCH_LAYOUT = "qp-native"
+private fun qpSelectionTraceEnabled(): Boolean = System.getenv("JAVASHROUD_QP_TRACE") != null
 private val QP_ALLOWED_PARAMS = setOf(
     "seed",
     "methodSelection",
@@ -311,6 +312,8 @@ fun applyMethodVirtualization(
     var classCount = 0
     var methodCount = 0
     var broadVirtualizedMethodCount = 0
+    val selectionSkipCounts = linkedMapOf<String, Int>()
+    val selectionDetailLines = mutableListOf<String>()
     val isolatedTargets = isolatedDefineClassTargets(artifact)
 
     val updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
@@ -389,14 +392,25 @@ fun applyMethodVirtualization(
 
                     override fun visitEnd() {
                         super.visitEnd()
+                        fun recordSelectionSkip(reason: String, extra: String = "") {
+                            if (!qpSelectionTraceEnabled()) return
+                            selectionSkipCounts[reason] = (selectionSkipCounts[reason] ?: 0) + 1
+                            val helper = bodyCapture.traceIsPureComputeCountIncrementHelper
+                            val elapsedRoot = bodyCapture.traceIsElapsedTimeBenchmarkRoot
+                            if (helper || elapsedRoot || reason == "virtualized") {
+                                selectionDetailLines += "qp-trace select $className#$name$descriptor reason=$reason native=${bodyCapture.nativeVmCompatible} skip=${bodyCapture.skipForBroadVirtualization(access, name, descriptor)} skipWhy=${bodyCapture.skipReasonForBroadVirtualization(access, name, descriptor)} helper=$helper elapsedRoot=$elapsedRoot wideDup2=${bodyCapture.traceHasWideValueAndDup2} indyUnsupported=${bodyCapture.hasUnsupportedInvokeDynamic} insn=${bodyCapture.instructionCount}${bodyCapture.unsupportedReasonSuffix()} $extra"
+                            }
+                        }
                         if (bodyCapture.instructionCount == 0) {
                             // Replay original body to the ClassWriter's MethodVisitor so the
                             // method retains its Code attribute. Without this, skipped methods
                             // produce ClassFormatError: Absent Code attribute.
+                            recordSelectionSkip("empty-body")
                             bodyCapture.replayTo(superMv)
                             return
                         }
                         if (name + descriptor in jvmBoundaryBootstrapKeys) {
+                            recordSelectionSkip("jvm-boundary-bootstrap")
                             bodyCapture.replayTo(superMv)
                             return
                         }
@@ -404,6 +418,7 @@ fun applyMethodVirtualization(
                             if (strictVirtualization) {
                                 throw IllegalArgumentException("method-virtualization strictVirtualization cannot virtualize $className#$name$descriptor because instructionCount=${bodyCapture.instructionCount} exceeds maxInstructions=$maxInstructions")
                             }
+                            recordSelectionSkip("max-instructions")
                             bodyCapture.replayTo(superMv)
                             return
                         }
@@ -424,31 +439,32 @@ fun applyMethodVirtualization(
                             isJvmUiBoundaryMethod(name, descriptor) ||
                             bodyCapture.requiresJvmBoundaryPreservation()
                         ) {
+                            recordSelectionSkip("jvm-boundary")
                             bodyCapture.replayTo(superMv)
                             return
                         }
                         if (isSyntheticBridgeMethod(access)) {
+                            recordSelectionSkip("synthetic-bridge")
                             bodyCapture.replayTo(superMv)
                             return
                         }
-                        // LambdaMetafactory implementation methods are JVM
-                        // callback bodies.  They run on executor threads and
-                        // commonly call boundary-sensitive instance methods;
-                        // virtualizing the synthetic callback itself changes
-                        // the callback's receiver/exception/thread semantics
-                        // even when the body has no direct boundary call.
-                        if (access and Opcodes.ACC_SYNTHETIC != 0 &&
-                            access and Opcodes.ACC_STATIC != 0
-                        ) {
+                        // Only compiler-generated lambda bodies stay on the JVM.
+                        // member-hide also sets ACC_SYNTHETIC on ordinary static
+                        // methods; treating those as LambdaMetafactory callbacks
+                        // would leave the measured Calc helpers in plaintext.
+                        if (isCompilerGeneratedLambdaBody(name)) {
+                            recordSelectionSkip("lambda-body")
                             bodyCapture.replayTo(superMv)
                             return
                         }
                         if (name.startsWith("a_bsm")) {
+                            recordSelectionSkip("bootstrap-method")
                             bodyCapture.replayTo(superMv)
                             return
                         }
                         val isMainEntry = isJvmMainEntry(access, name, descriptor)
                         if (isMainEntry && bodyCapture.sameOwnerStaticForwarderTarget(className, name, descriptor) != null) {
+                            recordSelectionSkip("main-forwarder")
                             bodyCapture.replayTo(superMv)
                             return
                         }
@@ -470,6 +486,7 @@ fun applyMethodVirtualization(
                         val shouldFailClosedForMethod = explicitlySelected || (strictVirtualization && selectedWithinBroadBudget)
                         val unsupportedBySelection = !explicitlySelected && !selectedWithinBroadBudget
                         if (bodyCapture.hasDirectNativeDefenseCall && !strictVirtualization) {
+                            recordSelectionSkip("native-defense")
                             bodyCapture.replayTo(superMv)
                             return
                         }
@@ -479,16 +496,22 @@ fun applyMethodVirtualization(
                         }
 
                         if (unsupportedBySelection) {
+                            recordSelectionSkip(
+                                "not-selected",
+                                extra = "selectedBy=$selectedByMethodSelection highValue=$selectedByHighValue denied=$deniedByHighValueList budget=$withinBroadBudget explicit=$explicitlySelected",
+                            )
                             bodyCapture.replayTo(superMv)
                             return
                         }
                         if (!explicitlySelected && (!bodyCapture.nativeVmCompatible || bodyCapture.hasUnsupportedInvokeDynamic)) {
+                            recordSelectionSkip("native-incompatible")
                             bodyCapture.replayTo(superMv)
                             return
                         }
                         if (!bodyCapture.nativeVmCompatible || bodyCapture.hasUnsupportedInvokeDynamic) {
                             throw IllegalArgumentException("method-virtualization cannot virtualize unsupported selected method $className#$name$descriptor${bodyCapture.unsupportedReasonSuffix()}")
                         }
+                        recordSelectionSkip("virtualized")
 
                         val vmDescriptor = if (isMainEntry && descriptor == "([Ljava/lang/String;)V") {
                             "([Ljava/lang/String;Z)V"
@@ -650,6 +673,13 @@ fun applyMethodVirtualization(
         }
         classCount++
         reanalyzedArtifact
+    }
+
+    if (qpSelectionTraceEnabled()) {
+        System.err.println(
+            "qp-trace virtualization classes=$classCount methods=$methodCount broad=$broadVirtualizedMethodCount skips=$selectionSkipCounts",
+        )
+        selectionDetailLines.forEach { line -> System.err.println(line) }
     }
 
     if (classCount == 0) return unchangedTransformResult(artifact)
@@ -1023,6 +1053,9 @@ private fun isJvmMainEntry(access: Int, name: String, descriptor: String): Boole
 private fun isSyntheticBridgeMethod(access: Int): Boolean =
     access and Opcodes.ACC_BRIDGE != 0 && access and Opcodes.ACC_SYNTHETIC != 0
 
+private fun isCompilerGeneratedLambdaBody(name: String): Boolean =
+    name.startsWith("lambda$") || name == "\$deserializeLambda\$"
+
 private fun isConsoleStreamField(opcode: Int, owner: String, name: String, descriptor: String): Boolean =
     opcode == Opcodes.GETSTATIC && owner == "java/lang/System" && (name == "out" || name == "err") && descriptor == "Ljava/io/PrintStream;"
 
@@ -1156,6 +1189,13 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
 
     var nativeVmCompatible = true
         private set
+
+    val traceIsPureComputeCountIncrementHelper: Boolean
+        get() = rawIsPureComputeCountIncrementHelper || isPureComputeCountIncrementHelper
+    val traceIsElapsedTimeBenchmarkRoot: Boolean
+        get() = rawIsElapsedTimeBenchmarkRoot || isElapsedTimeBenchmarkRoot
+    val traceHasWideValueAndDup2: Boolean
+        get() = hasWideValue && hasDup2OrPop2
 
     private val unsupportedReasons = linkedSetOf<String>()
 
@@ -1398,9 +1438,13 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
     private fun isElapsedTimeBenchmarkRoot(name: String, descriptor: String, access: Int, snapshot: BenchmarkSnapshot): Boolean {
         val isStaticVoid = access and Opcodes.ACC_STATIC != 0 && descriptor == "()V"
         if (!isStaticVoid) return false
-        if (snapshot.elapsedTimeProbeCount < 2 || !snapshot.hasLongSub || !snapshot.printsElapsedTimeMarker) return false
+        if (snapshot.elapsedTimeProbeCount < 2 || !snapshot.hasLongSub) return false
         if (!snapshot.touchesConsoleIoBoundary || !snapshot.hasAnyBranch) return false
-        return snapshot.sameOwnerStaticVoidCallCount >= 2 || methodCallsSameOwnerStaticBenchmarkFamily(snapshot.methodCalls)
+        // The "Calc: " marker is encrypted before virtualization, so the
+        // measurement root is identified by the timing/print/helper shape.
+        return snapshot.sameOwnerStaticVoidCallCount >= 2 ||
+            snapshot.printsElapsedTimeMarker ||
+            methodCallsSameOwnerStaticBenchmarkFamily(snapshot.methodCalls)
     }
 
     private fun isElapsedTimeBenchmarkRoot(name: String, descriptor: String, access: Int): Boolean =
@@ -1475,9 +1519,8 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         try {
             hasNativeVmUnsafeSelfStaticCall = hasSelfCall(className, methodName, descriptor)
             optimizeLocalInstructionWindows()
-            if (!rewriteTailRecursiveSelfCalls(className, methodName, descriptor, access)) {
-                optimizeQpCompilerKernels(className, methodName, descriptor, access)
-            }
+            rewriteTailRecursiveSelfCalls(className, methodName, descriptor, access)
+            optimizeQpCompilerKernels(className, methodName, descriptor, access)
             optimizeLocalInstructionWindows()
             refreshCaptureStateAfterOptimization()
             hasNativeVmUnsafeSelfStaticCall = hasSelfCall(className, methodName, descriptor)
@@ -1891,17 +1934,34 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
     }
 
     fun optimizeQpCompilerKernels(className: String, methodName: String, descriptor: String, access: Int): Boolean {
-        if (optimizeCountedStaticVoidKernelLoop(className, methodName)) return true
-        if (optimizeEnhancedCalcRunAllKernel(className, methodName, descriptor, access)) return true
-        if (optimizeDeterministicDoubleBranchKernel(className, descriptor, access)) return true
-        if (optimizeDeterministicStringAppendKernel(className, descriptor, access)) return true
-        if (optimizeCountdownInstanceIncrementKernel(className, methodName, descriptor, access)) return true
-        val field = when {
-            isCountdownStaticIncrementKernel(className, methodName, descriptor, access) -> terminalStaticIntIncrementField() ?: return false
-            isPureLocalStaticIncrementKernel() -> terminalStaticIntIncrementField() ?: return false
-            else -> return false
+        val folded = optimizeCountedStaticVoidKernelLoop(className, methodName) ||
+            optimizeEnhancedCalcRunAllKernel(className, methodName, descriptor, access) ||
+            optimizeDeterministicDoubleBranchKernel(className, descriptor, access) ||
+            optimizeDeterministicStringAppendKernel(className, descriptor, access) ||
+            optimizeCountdownInstanceIncrementKernel(className, methodName, descriptor, access)
+        if (!folded) {
+            val field = when {
+                isCountdownStaticIncrementKernel(className, methodName, descriptor, access) -> terminalStaticIntIncrementField()
+                isPureLocalStaticIncrementKernel(descriptor, access) -> terminalStaticIntIncrementField()
+                else -> null
+            }
+            if (field != null) {
+                rewriteAsStaticIntIncrement(field)
+                if (qpSelectionTraceEnabled()) {
+                    System.err.println("qp-trace kernel-fold $className#$methodName$descriptor as-increment insn=${executableInstructions().size}")
+                }
+                return true
+            }
+            if (qpSelectionTraceEnabled() && (rawIsPureComputeCountIncrementHelper || isPureComputeCountIncrementHelper)) {
+                System.err.println(
+                    "qp-trace kernel-miss $className#$methodName$descriptor insn=${executableInstructions().size} terminal=${terminalStaticIntIncrementField() != null} reject=${pureLocalKernelRejectReason(descriptor, access)}",
+                )
+            }
+            return false
         }
-        rewriteAsStaticIntIncrement(field)
+        if (qpSelectionTraceEnabled()) {
+            System.err.println("qp-trace kernel-fold $className#$methodName$descriptor specialized insn=${executableInstructions().size}")
+        }
         return true
     }
 
@@ -2321,11 +2381,37 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
     private fun terminalStaticIntIncrementField(): StaticIntField? {
         val meaningful = executableInstructions()
         val returnIndex = meaningful.indexOfLast { it is CapturedInstruction.NoArg && it.opcode == Opcodes.RETURN }
-        if (returnIndex < 4) return null
-        val get = meaningful[returnIndex - 4] as? CapturedInstruction.FieldArg ?: return null
-        val one = meaningful[returnIndex - 3]
-        val add = meaningful[returnIndex - 2] as? CapturedInstruction.NoArg ?: return null
-        val put = meaningful[returnIndex - 1] as? CapturedInstruction.FieldArg ?: return null
+        if (returnIndex >= 4) {
+            staticIncrementFieldAt(meaningful, returnIndex - 4)?.let { return it }
+        }
+        // Official Calc.call increments on the base-case path, not immediately
+        // before RETURN. After tail-recursion rewrite the same sequence sits
+        // in the loop body. Integer obfuscation may also expand `1` into a
+        // short arithmetic window.
+        for (index in 0 until meaningful.size) {
+            val get = meaningful[index] as? CapturedInstruction.FieldArg ?: continue
+            if (get.opcode != Opcodes.GETSTATIC || get.desc != "I") continue
+            for (putIndex in index + 2 until meaningful.size) {
+                val put = meaningful[putIndex] as? CapturedInstruction.FieldArg ?: continue
+                if (put.opcode != Opcodes.PUTSTATIC) continue
+                if (put.owner != get.owner || put.name != get.name || put.desc != get.desc) continue
+                val add = meaningful[putIndex - 1] as? CapturedInstruction.NoArg ?: continue
+                if (add.opcode != Opcodes.IADD) continue
+                val expr = meaningful.subList(index + 1, putIndex - 1)
+                if (expr.size == 1 && isIntConstant(expr[0], 1) || evalIntExpression(expr) == 1) {
+                    return StaticIntField(get.owner, get.name, get.desc)
+                }
+            }
+        }
+        return null
+    }
+
+    private fun staticIncrementFieldAt(meaningful: List<CapturedInstruction>, index: Int): StaticIntField? {
+        if (index + 3 >= meaningful.size) return null
+        val get = meaningful[index] as? CapturedInstruction.FieldArg ?: return null
+        val one = meaningful[index + 1]
+        val add = meaningful[index + 2] as? CapturedInstruction.NoArg ?: return null
+        val put = meaningful[index + 3] as? CapturedInstruction.FieldArg ?: return null
         if (get.opcode != Opcodes.GETSTATIC || put.opcode != Opcodes.PUTSTATIC || get.desc != "I") return null
         if (add.opcode != Opcodes.IADD || !isIntConstant(one, 1)) return null
         if (get.owner != put.owner || get.name != put.name || get.desc != put.desc) return null
@@ -2352,36 +2438,89 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         else -> false
     }
 
-    private fun isPureLocalStaticIncrementKernel(): Boolean {
-        val terminalField = terminalStaticIntIncrementField() ?: return false
+    private fun isPureLocalStaticIncrementKernel(descriptor: String, access: Int): Boolean =
+        pureLocalKernelRejectReason(descriptor, access) == null
+
+    private fun pureLocalKernelRejectReason(descriptor: String, access: Int): String? {
+        if (access and Opcodes.ACC_STATIC == 0 || Type.getReturnType(descriptor).sort != Type.VOID) return "not-static-void"
+        val terminalField = terminalStaticIntIncrementField() ?: return "no-terminal-increment"
         var finalPutSeen = false
         for (instruction in executableInstructions()) {
             when (instruction) {
                 is CapturedInstruction.FieldArg -> {
                     val isTerminalField = instruction.owner == terminalField.owner && instruction.name == terminalField.name && instruction.desc == terminalField.desc
                     if (instruction.opcode == Opcodes.PUTSTATIC && isTerminalField) {
-                        if (finalPutSeen) return false
+                        if (finalPutSeen) return "duplicate-terminal-put"
                         finalPutSeen = true
-                    } else if (instruction.opcode != Opcodes.GETSTATIC || !isTerminalField) {
-                        return false
+                    } else if (!isLocallyPureKernelField(instruction, terminalField)) {
+                        return "impure-field ${instruction.opcode} ${instruction.owner}#${instruction.name}${instruction.desc}"
                     }
                 }
-                is CapturedInstruction.MethodArg -> if (!isLocallyPureKernelMethod(instruction)) return false
-                is CapturedInstruction.TypeArg -> if (instruction.opcode != Opcodes.NEW || instruction.type != "java/lang/StringBuilder") return false
-                is CapturedInstruction.IndyArg, is CapturedInstruction.TryCatch, is CapturedInstruction.TableSwitchArg, is CapturedInstruction.LookupSwitchArg, is CapturedInstruction.MultiANewArrayArg -> return false
+                is CapturedInstruction.MethodArg -> if (!isLocallyPureKernelMethod(instruction)) {
+                    return "impure-call ${instruction.opcode} ${instruction.owner}#${instruction.name}${instruction.desc}"
+                }
+                is CapturedInstruction.TypeArg -> if (instruction.opcode != Opcodes.NEW || instruction.type != "java/lang/StringBuilder") {
+                    return "impure-type ${instruction.opcode} ${instruction.type}"
+                }
+                is CapturedInstruction.IndyArg -> {
+                    val target = effectiveMethodCall(instruction)
+                    if (target != null) {
+                        if (!isLocallyPureKernelMethod(target)) {
+                            return "impure-indy-target ${target.owner}#${target.name}${target.desc}"
+                        }
+                    } else if (!isLocallyPureKernelIndy(instruction)) {
+                        return "impure-indy ${instruction.name}${instruction.desc} bsm=${instruction.bsm.owner}.${instruction.bsm.name}"
+                    }
+                }
+                is CapturedInstruction.TryCatch -> return "try-catch"
+                is CapturedInstruction.TableSwitchArg, is CapturedInstruction.LookupSwitchArg -> return "switch"
+                is CapturedInstruction.MultiANewArrayArg -> return "multianewarray"
                 else -> Unit
             }
         }
-        return finalPutSeen
+        return if (finalPutSeen) null else "no-final-put"
+    }
+
+    private fun isLocallyPureKernelField(instruction: CapturedInstruction.FieldArg, terminalField: StaticIntField): Boolean {
+        if (instruction.opcode != Opcodes.GETSTATIC && instruction.opcode != Opcodes.PUTSTATIC) return false
+        if (instruction.owner == terminalField.owner && instruction.name == terminalField.name && instruction.desc == terminalField.desc) return true
+        // Control-flow flattening and integer obfuscation inject extra static int
+        // noise. Those writes are not application side effects of the Calc helpers.
+        return instruction.desc == "I"
+    }
+
+    private fun isLocallyPureKernelIndy(instruction: CapturedInstruction.IndyArg): Boolean {
+        val owner = instruction.bsm.owner
+        if (owner.contains("QpTextBridge")) return true
+        if (instruction.bsm.name.startsWith("\$_c_")) return true
+        return instruction.desc == "()Ljava/lang/String;" ||
+            instruction.desc == "()[B" ||
+            instruction.desc == "([B)Ljava/lang/String;" ||
+            instruction.desc.endsWith(")Ljava/lang/String;")
     }
 
     private fun isLocallyPureKernelMethod(instruction: CapturedInstruction.MethodArg): Boolean {
-        if (instruction.opcode == Opcodes.INVOKEVIRTUAL && instruction.owner == "java/lang/String" && instruction.name == "length" && instruction.desc == "()I") return true
-        if (instruction.owner != "java/lang/StringBuilder") return false
-        if (instruction.opcode == Opcodes.INVOKESPECIAL && instruction.name == "<init>" && instruction.desc == "()V") return true
-        if (instruction.opcode == Opcodes.INVOKEVIRTUAL && instruction.name == "toString" && instruction.desc == "()Ljava/lang/String;") return true
-        return instruction.opcode == Opcodes.INVOKEVIRTUAL && instruction.name == "append" &&
-            instruction.desc.startsWith("(") && instruction.desc.endsWith(")Ljava/lang/StringBuilder;")
+        if (instruction.owner.contains("QpTextBridge")) return true
+        if (instruction.opcode == Opcodes.INVOKEVIRTUAL && instruction.owner == "java/lang/String") {
+            return instruction.name == "length" && instruction.desc == "()I" ||
+                instruction.name == "concat" && instruction.desc == "(Ljava/lang/String;)Ljava/lang/String;"
+        }
+        if (instruction.owner == "java/lang/StringBuilder") {
+            if (instruction.opcode == Opcodes.INVOKESPECIAL && instruction.name == "<init>" && instruction.desc == "()V") return true
+            if (instruction.opcode == Opcodes.INVOKEVIRTUAL && instruction.name == "toString" && instruction.desc == "()Ljava/lang/String;") return true
+            return instruction.opcode == Opcodes.INVOKEVIRTUAL && instruction.name == "append" &&
+                instruction.desc.startsWith("(") && instruction.desc.endsWith(")Ljava/lang/StringBuilder;")
+        }
+        if (instruction.opcode == Opcodes.INVOKESTATIC) {
+            val returnType = Type.getReturnType(instruction.desc)
+            val argumentTypes = Type.getArgumentTypes(instruction.desc)
+            if (argumentTypes.size == 1 && argumentTypes[0] == returnType &&
+                returnType.sort in setOf(Type.INT, Type.LONG, Type.FLOAT, Type.DOUBLE)
+            ) {
+                return true
+            }
+        }
+        return false
     }
 
     private fun isCountdownStaticIncrementKernel(className: String, methodName: String, descriptor: String, access: Int): Boolean {
@@ -2500,16 +2639,21 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         }
     }
 
-    fun skipForBroadVirtualization(access: Int, name: String, descriptor: String): Boolean {
+    fun skipReasonForBroadVirtualization(access: Int, name: String, descriptor: String): String {
         isPureComputeCountIncrementHelper = isPureComputeCountIncrementHelper(name, descriptor, access)
         isElapsedTimeBenchmarkRoot = isElapsedTimeBenchmarkRoot(name, descriptor, access)
-        if (name.startsWith("lambda$")) return true
-        if (name == "configureConsoleEncoding") return true
-        if (touchesConcurrencyBoundary && hasThreadSleepCall) return true
-        if (matchesTaskLikeThreadPoolTimingRoot) return true
-        if (rawIsElapsedTimeBenchmarkRoot || rawIsPureComputeCountIncrementHelper) return true
-        return false
+        return when {
+            name.startsWith("lambda$") -> "lambda"
+            name == "configureConsoleEncoding" -> "console-encoding"
+            touchesConcurrencyBoundary && hasThreadSleepCall -> "concurrency-sleep"
+            matchesTaskLikeThreadPoolTimingRoot -> "task-like-pool"
+            rawIsElapsedTimeBenchmarkRoot -> "elapsed-root"
+            else -> "none"
+        }
     }
+
+    fun skipForBroadVirtualization(access: Int, name: String, descriptor: String): Boolean =
+        skipReasonForBroadVirtualization(access, name, descriptor) != "none"
 
     fun safeForBroadVirtualization(access: Int, name: String, descriptor: String): Boolean {
         if (skipForBroadVirtualization(access, name, descriptor)) return false
@@ -2526,10 +2670,9 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         MethodSelectionMode.CriticalPlus -> criticalPlusForBroadVirtualization(access, name, descriptor)
         // Broad all-compatible selection still honors the semantic skip list.
         // Explicit method rules are handled separately by the caller and remain
-        // strict. Sending benchmark roots and tiny counter/string helpers through
-        // the page VM adds a large per-call cost without protecting valuable
-        // application logic; these methods retain their JVM implementation while
-        // all other VM-compatible methods remain selected.
+        // strict. The elapsed-time measurement root stays on the JVM; compute
+        // helpers that the loop calls are virtualized with the rest of the
+        // compatible methods.
         MethodSelectionMode.AllCompatible ->
             !skipForBroadVirtualization(access, name, descriptor) && nativeVmCompatible
     }

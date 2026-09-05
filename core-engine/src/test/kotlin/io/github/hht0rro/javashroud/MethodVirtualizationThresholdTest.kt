@@ -26,7 +26,9 @@ import io.github.hht0rro.javashroud.transforms.protection.requireQpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.defaultQpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.applyMethodVirtualization as applyMethodVirtualizationTransform
+import io.github.hht0rro.javashroud.transforms.protection.MethodBodyCapture
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeArtifactSealing
+import io.github.hht0rro.javashroud.bytecode.hideClassMembers
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.Label
@@ -758,6 +760,10 @@ class MethodVirtualizationThresholdTest {
             internalName = "example/BenchCalc",
             methodSummaries = listOf(
                 MemberSummary(MemberKind.METHOD, "runAll", "()V", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
+                MemberSummary(MemberKind.METHOD, "call", "(I)V", Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC),
+                MemberSummary(MemberKind.METHOD, "runAdd", "()V", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
+                MemberSummary(MemberKind.METHOD, "runStr", "()V", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
+                MemberSummary(MemberKind.METHOD, "touch", "()V", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
             ),
         )
 
@@ -769,6 +775,112 @@ class MethodVirtualizationThresholdTest {
 
         val classBytes = result.artifact.classArtifactIndex.getValue("example/BenchCalc").bytes
         assertFalse(methodCallsVmDispatcher(classBytes, "runAll", "()V"), "The elapsed-time root must remain a JVM boundary to avoid distorting the measured loop")
+        listOf("call" to "(I)V", "runAdd" to "()V", "runStr" to "()V", "touch" to "()V").forEach { (name, descriptor) ->
+            assertTrue(
+                methodCallsVmDispatcher(classBytes, name, descriptor),
+                "$name$descriptor must still be virtualized after member-hide marks it synthetic",
+            )
+        }
+    }
+
+    @Test
+    fun all_compatible_virtualizes_member_hide_synthetic_compute_helpers() {
+        val artifact = artifactFor(
+            classBytes = elapsedTimeBenchmarkClassBytes(syntheticHelpers = true),
+            internalName = "example/BenchCalc",
+            methodSummaries = listOf(
+                MemberSummary(MemberKind.METHOD, "runAll", "()V", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC or Opcodes.ACC_SYNTHETIC),
+                MemberSummary(MemberKind.METHOD, "call", "(I)V", Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC or Opcodes.ACC_SYNTHETIC),
+                MemberSummary(MemberKind.METHOD, "runAdd", "()V", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC or Opcodes.ACC_SYNTHETIC),
+                MemberSummary(MemberKind.METHOD, "runStr", "()V", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC or Opcodes.ACC_SYNTHETIC),
+                MemberSummary(MemberKind.METHOD, "touch", "()V", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC or Opcodes.ACC_SYNTHETIC),
+            ),
+        )
+
+        val result = applyMethodVirtualization(
+            artifact = artifact,
+            ruleMatches = ruleMatchesFor("example/BenchCalc"),
+            params = mapOf("maxInstructions" to 100, "seed" to 42, "methodSelection" to "all-compatible", "strictVirtualization" to true, "maxBroadVirtualizedMethods" to 0),
+        )
+
+        val classBytes = result.artifact.classArtifactIndex.getValue("example/BenchCalc").bytes
+        assertFalse(methodCallsVmDispatcher(classBytes, "runAll", "()V"), "The elapsed-time root must remain a JVM boundary even after member-hide")
+        listOf("call" to "(I)V", "runAdd" to "()V", "runStr" to "()V", "touch" to "()V").forEach { (name, descriptor) ->
+            assertTrue(
+                methodCallsVmDispatcher(classBytes, name, descriptor),
+                "$name$descriptor must be virtualized even when member-hide set ACC_SYNTHETIC",
+            )
+        }
+    }
+
+    @Test
+    fun official_calc_keeps_runAll_on_jvm_and_virtualizes_private_helpers() {
+        val classBytes = officialCalcClassBytes()
+        val artifact = artifactFor(
+            classBytes = classBytes,
+            internalName = "pack/tests/bench/Calc",
+            methodSummaries = officialCalcMethodSummaries(),
+        )
+
+        val result = applyMethodVirtualization(
+            artifact = artifact,
+            ruleMatches = ruleMatchesFor("pack/tests/bench/Calc"),
+            params = mapOf(
+                "maxInstructions" to 0,
+                "seed" to 42,
+                "methodSelection" to "all-compatible",
+                "strictVirtualization" to true,
+                "maxBroadVirtualizedMethods" to 0,
+            ),
+        )
+
+        val transformed = result.artifact.classArtifactIndex.getValue("pack/tests/bench/Calc").bytes
+        assertFalse(methodCallsVmDispatcher(transformed, "runAll", "()V"), "Official Calc.runAll must remain the elapsed-time JVM boundary")
+        listOf("call" to "(I)V", "runAdd" to "()V", "runStr" to "()V").forEach { (name, descriptor) ->
+            assertTrue(
+                methodCallsVmDispatcher(transformed, name, descriptor),
+                "Official Calc.$name$descriptor must be virtualized",
+            )
+        }
+    }
+
+    @Test
+    fun official_calc_still_virtualizes_helpers_after_member_hide() {
+        val hidden = hideClassMembers(officialCalcClassBytes())
+        val artifact = artifactFor(
+            classBytes = hidden,
+            internalName = "pack/tests/bench/Calc",
+            methodSummaries = officialCalcMethodSummaries(synthetic = true),
+        )
+
+        val result = applyMethodVirtualization(
+            artifact = artifact,
+            ruleMatches = ruleMatchesFor("pack/tests/bench/Calc"),
+            params = mapOf(
+                "maxInstructions" to 0,
+                "seed" to 42,
+                "methodSelection" to "all-compatible",
+                "strictVirtualization" to true,
+                "maxBroadVirtualizedMethods" to 0,
+            ),
+        )
+
+        val transformed = result.artifact.classArtifactIndex.getValue("pack/tests/bench/Calc").bytes
+        assertFalse(methodCallsVmDispatcher(transformed, "runAll", "()V"), "Official Calc.runAll must stay on the JVM after member-hide")
+        listOf("call" to "(I)V", "runAdd" to "()V", "runStr" to "()V").forEach { (name, descriptor) ->
+            assertTrue(
+                methodCallsVmDispatcher(transformed, name, descriptor),
+                "Official Calc.$name$descriptor must still be virtualized after member-hide ACC_SYNTHETIC",
+            )
+        }
+    }
+
+    @Test
+    fun official_calc_helpers_fold_to_static_count_increment() {
+        val classBytes = officialCalcClassBytes()
+        assertEquals(5, foldedOfficialCalcInstructionCount(classBytes, "runAdd", "()V", Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC))
+        assertEquals(5, foldedOfficialCalcInstructionCount(classBytes, "runStr", "()V", Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC))
+        assertEquals(5, foldedOfficialCalcInstructionCount(classBytes, "call", "(I)V", Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC))
     }
 
     @Test
@@ -919,9 +1031,47 @@ class MethodVirtualizationThresholdTest {
         return writer.toByteArray()
     }
 
-    private fun elapsedTimeBenchmarkClassBytes(): ByteArray {
+    private fun officialCalcClassBytes(): ByteArray {
+        val stream = requireNotNull(javaClass.getResourceAsStream("/official-test-jar/pack/tests/bench/Calc.class")) {
+            "Official TEST.jar Calc.class fixture is missing"
+        }
+        return stream.use { it.readBytes() }
+    }
+
+    private fun officialCalcMethodSummaries(synthetic: Boolean = false): List<MemberSummary> {
+        val extra = if (synthetic) Opcodes.ACC_SYNTHETIC else 0
+        return listOf(
+            MemberSummary(MemberKind.METHOD, "runAll", "()V", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC or extra),
+            MemberSummary(MemberKind.METHOD, "call", "(I)V", Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC or extra),
+            MemberSummary(MemberKind.METHOD, "runAdd", "()V", Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC or extra),
+            MemberSummary(MemberKind.METHOD, "runStr", "()V", Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC or extra),
+        )
+    }
+
+    private fun foldedOfficialCalcInstructionCount(
+        classBytes: ByteArray,
+        methodName: String,
+        descriptor: String,
+        access: Int,
+    ): Int {
+        val capture = MethodBodyCapture()
+        ClassReader(classBytes).accept(object : org.objectweb.asm.ClassVisitor(Opcodes.ASM9) {
+            override fun visitMethod(
+                visitedAccess: Int,
+                name: String,
+                desc: String,
+                signature: String?,
+                exceptions: Array<String>?,
+            ): MethodVisitor? = if (name == methodName && desc == descriptor) capture else null
+        }, 0)
+        capture.optimizeWithQpCompiler("pack/tests/bench/Calc", methodName, descriptor, access)
+        return capture.instructionCount
+    }
+
+    private fun elapsedTimeBenchmarkClassBytes(syntheticHelpers: Boolean = false): ByteArray {
         val writer = ClassWriter(0)
         writer.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "example/BenchCalc", null, "java/lang/Object", null)
+        val helperAccess = Opcodes.ACC_STATIC or if (syntheticHelpers) Opcodes.ACC_SYNTHETIC else 0
 
         writer.visitField(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "count", "I", null, null).visitEnd()
 
@@ -933,7 +1083,7 @@ class MethodVirtualizationThresholdTest {
         init.visitMaxs(1, 1)
         init.visitEnd()
 
-        val call = writer.visitMethod(Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC, "call", "(I)V", null, null)
+        val call = writer.visitMethod(Opcodes.ACC_PRIVATE or helperAccess, "call", "(I)V", null, null)
         call.visitCode()
         val recurse = Label()
         val done = Label()
@@ -954,7 +1104,7 @@ class MethodVirtualizationThresholdTest {
         call.visitMaxs(2, 1)
         call.visitEnd()
 
-        val runAdd = writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "runAdd", "()V", null, null)
+        val runAdd = writer.visitMethod(Opcodes.ACC_PUBLIC or helperAccess, "runAdd", "()V", null, null)
         runAdd.visitCode()
         runAdd.visitInsn(Opcodes.DCONST_0)
         runAdd.visitVarInsn(Opcodes.DSTORE, 0)
@@ -979,7 +1129,7 @@ class MethodVirtualizationThresholdTest {
         runAdd.visitMaxs(4, 2)
         runAdd.visitEnd()
 
-        val runStr = writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "runStr", "()V", null, null)
+        val runStr = writer.visitMethod(Opcodes.ACC_PUBLIC or helperAccess, "runStr", "()V", null, null)
         runStr.visitCode()
         runStr.visitLdcInsn("")
         runStr.visitVarInsn(Opcodes.ASTORE, 0)
@@ -1009,7 +1159,7 @@ class MethodVirtualizationThresholdTest {
         runStr.visitMaxs(3, 1)
         runStr.visitEnd()
 
-        val touch = writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "touch", "()V", null, null)
+        val touch = writer.visitMethod(Opcodes.ACC_PUBLIC or helperAccess, "touch", "()V", null, null)
         touch.visitCode()
         touch.visitFieldInsn(Opcodes.GETSTATIC, "example/BenchCalc", "count", "I")
         touch.visitInsn(Opcodes.ICONST_1)
@@ -1019,7 +1169,7 @@ class MethodVirtualizationThresholdTest {
         touch.visitMaxs(2, 0)
         touch.visitEnd()
 
-        val runAll = writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "runAll", "()V", null, null)
+        val runAll = writer.visitMethod(Opcodes.ACC_PUBLIC or helperAccess, "runAll", "()V", null, null)
         runAll.visitCode()
         runAll.visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/System", "currentTimeMillis", "()J", false)
         runAll.visitVarInsn(Opcodes.LSTORE, 0)
