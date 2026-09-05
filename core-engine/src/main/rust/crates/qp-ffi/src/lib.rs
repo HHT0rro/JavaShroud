@@ -4497,7 +4497,16 @@ mod jni_bridge {
             Vec::new()
         } else {
             match copy_string(env, sealed_entry_token) {
-                Ok(bytes) => bytes,
+                // The dispatcher embeds the token as base64url text; decode it
+                // before handing binary material to the AEAD unwrap.
+                Ok(text) => match String::from_utf8(text) {
+                    Ok(text) => crate::relocation::base64_url_decode(text.as_str()).unwrap_or_default(),
+                    Err(_) => {
+                        pop_local_frame(env, core::ptr::null_mut());
+                        throw_new(env, b"Qp VM entry token is invalid ");
+                        return core::ptr::null_mut();
+                    }
+                },
                 Err(failure) => {
                     pop_local_frame(env, core::ptr::null_mut());
                     throw_new(env, failure.0.as_bytes());
@@ -4957,18 +4966,12 @@ mod jni_bridge {
             state
                 .secret_pack
                 .as_ref()
-                .ok_or_else(|| {
-                    eprintln!("jsh-token: pack unavailable for unwrap");
-                    BridgeFailure("Qp native secret pack is unavailable")
-                })?
+                .ok_or(BridgeFailure("Qp native secret pack is unavailable"))?
                 .crypto_domain()
                 .map_err(|_| BridgeFailure("Qp native secret pack is unavailable"))?
         };
         let token = crate::secret_pack::unwrap_vm_entry_token(&crypto_domain, sealed)
-            .map_err(|error| {
-                eprintln!("jsh-token: unwrap failed len={} full={}", sealed.len(), String::from_utf8_lossy(sealed));
-                BridgeFailure("Qp VM entry token is invalid")
-            })?;
+            .map_err(|_| BridgeFailure("Qp VM entry token is invalid"))?;
         let mut state = lock_state()?;
         state.vm_entry_token_cache.insert(sealed.to_vec(), token);
         Ok(token)
@@ -5021,12 +5024,6 @@ mod jni_bridge {
                     pack: Arc::clone(&pack),
                 }));
             state.secret_pack = Some(pack);
-        }
-        if let Ok(domain) = state.secret_pack.as_ref().expect("armed").crypto_domain() {
-            eprintln!(
-                "jsh-bootstrap: runtime domain={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                domain[0], domain[1], domain[2], domain[3], domain[4], domain[5], domain[6], domain[7]
-            );
         }
         Ok(())
     }

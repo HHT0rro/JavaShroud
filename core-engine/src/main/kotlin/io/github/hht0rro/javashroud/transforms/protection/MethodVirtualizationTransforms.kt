@@ -752,10 +752,6 @@ internal fun sealedVmEntryToken(entryToken: Long, random: SecureRandom): String?
     // the only holder of the unsealing key, so seal unconditionally here.
     val context = currentQpBuildContextOrNull() ?: return null
     val cryptoDomain = context.freezeOrCopyPackCryptoDomain()
-    println("jsh-seal-dom: " + cryptoDomain.joinToString("") { "%02x".format(it) }.take(16))
-    println(
-        "jsh-seal-ctx: domain=" + cryptoDomain.joinToString("") { "%02x".format(it) }.take(16) +
-            " ctx=" + System.identityHashCode(context),
     )
     try {
         val key = hkdfSha256(ikm = cryptoDomain, salt = QP_VM_ENTRY_TOKEN_DOMAIN, info = ByteArray(0), length = 32)
@@ -774,7 +770,6 @@ internal fun sealedVmEntryToken(entryToken: Long, random: SecureRandom): String?
             sealed.copyInto(out, 12)
             java.util.Arrays.fill(key, 0)
             val encoded = java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(out)
-            println("jsh-seal-build: " + encoded)
             return encoded
         } finally {
             java.util.Arrays.fill(key, 0)

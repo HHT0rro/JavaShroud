@@ -369,10 +369,6 @@ pub fn unwrap_vm_entry_token(
     }
     let key = hkdf_sha256(crypto_domain, ENTRY_TOKEN_DOMAIN, &[], KEY_SIZE)
         .map_err(|_| RouterError::AuthenticationFailed)?;
-    eprintln!(
-        "jsh-token-key: {}",
-        key.iter().map(|b| format!("{:02x}", b)).collect::<String>()
-    );
     let plaintext = aes256_gcm_decrypt(&key, &sealed[..12], ENTRY_TOKEN_DOMAIN, &sealed[12..])
         .map_err(|_| RouterError::AuthenticationFailed)?;
     if plaintext.len() != 8 {
