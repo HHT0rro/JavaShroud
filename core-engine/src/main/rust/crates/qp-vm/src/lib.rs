@@ -1286,9 +1286,6 @@ fn mark_self_invokes(program: &mut VmProgram, build_key: &[u8; 32]) {
         return;
     }
     for (index, instruction) in program.instructions.iter().enumerate() {
-        if instruction.opcode != INVOKESTATIC {
-            continue;
-        }
         let operands = &program.operands[instruction.operand_range.clone()];
         let Some(reference_index) = operands.first().and_then(|value| usize::try_from(*value).ok()) else {
             continue;
@@ -1296,7 +1293,12 @@ fn mark_self_invokes(program: &mut VmProgram, build_key: &[u8; 32]) {
         let Some(reference) = program.constants.get(reference_index).and_then(VmConstant::as_string) else {
             continue;
         };
-        let Some(identity) = method_identity_from_reference(build_key, reference) else {
+        let identity = match instruction.opcode {
+            INVOKESTATIC => method_identity_from_reference(build_key, reference),
+            INVOKEDYNAMIC => method_identity_from_mhstatic(build_key, reference),
+            _ => None,
+        };
+        let Some(identity) = identity else {
             continue;
         };
         if ct_eq(&identity, &program.metadata.method_identity) {
@@ -1308,6 +1310,23 @@ fn mark_self_invokes(program: &mut VmProgram, build_key: &[u8; 32]) {
 fn method_identity_from_reference(build_key: &[u8; 32], reference: &str) -> Option<[u8; 32]> {
     let (owner_and_name, descriptor) = reference.rsplit_once(':')?;
     let (owner, name) = owner_and_name.rsplit_once('.')?;
+    method_identity_bytes(build_key, owner, name, descriptor)
+}
+
+fn method_identity_from_mhstatic(build_key: &[u8; 32], reference: &str) -> Option<[u8; 32]> {
+    let mut fields = reference.split('|');
+    if fields.next()? != "mhstatic" {
+        return None;
+    }
+    let _call_name = fields.next()?;
+    let _call_descriptor = fields.next()?;
+    let owner = fields.next()?;
+    let name = fields.next()?;
+    let descriptor = fields.next()?;
+    method_identity_bytes(build_key, owner, name, descriptor)
+}
+
+fn method_identity_bytes(build_key: &[u8; 32], owner: &str, name: &str, descriptor: &str) -> Option<[u8; 32]> {
     Some(hmac_bytes(
         build_key,
         &[

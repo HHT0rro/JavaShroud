@@ -1243,7 +1243,9 @@ impl<H: ObjectOperations> VmExecutor<H> {
             let receiver = pop(frame)?;
             Some(as_object(receiver)?)
         };
-        let result = if opcode == opcode::INVOKESTATIC && program.is_self_invoke(pc) {
+        let result = if matches!(opcode, opcode::INVOKESTATIC | opcode::INVOKEDYNAMIC)
+            && program.is_self_invoke(pc)
+        {
             match self.execute_at_depth(program, &arguments, depth + 1) {
                 Ok(value) => Ok(value),
                 Err(VmError::UncaughtException { class_name, message: _ }) => Err(Thrown {

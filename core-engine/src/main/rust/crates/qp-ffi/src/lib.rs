@@ -776,6 +776,8 @@ mod jni_bridge {
         helper_class: Option<JClass>,
         owned: Vec<JObject>,
         pending_exception: Option<(String, JObject)>,
+        class_cache: BTreeMap<String, JClass>,
+        member_cache: BTreeMap<(usize, String), *const c_void>,
     }
 
     impl JniObjectOperations {
@@ -785,6 +787,8 @@ mod jni_bridge {
                 helper_class,
                 owned: Vec::new(),
                 pending_exception: None,
+                class_cache: BTreeMap::new(),
+                member_cache: BTreeMap::new(),
             }
         }
 
@@ -808,11 +812,17 @@ mod jni_bridge {
             std::ffi::CString::new(owner).map_err(|_| VmHostError::Failure)
         }
 
-        unsafe fn find_class_checked(&self, owner: &str) -> Result<JClass, VmHostError> {
+        unsafe fn find_class_checked(&mut self, owner: &str) -> Result<JClass, VmHostError> {
+            if let Some(class) = self.class_cache.get(owner) {
+                return Ok(*class);
+            }
             {
                 let state = lock_state().map_err(|_| VmHostError::Failure)?;
                 if let Some(class) = state.jni_class_cache.get(owner) {
-                    return Ok(*class as JClass);
+                    let class = *class as JClass;
+                    drop(state);
+                    self.class_cache.insert(owner.to_owned(), class);
+                    return Ok(class);
                 }
             }
             let owner_c = self.class_name(owner)?;
@@ -825,11 +835,14 @@ mod jni_bridge {
                 let existing = *existing as JClass;
                 drop(state);
                 delete_global_ref(self.env, global);
+                self.class_cache.insert(owner.to_owned(), existing);
                 return Ok(existing);
             }
             state
                 .jni_class_cache
                 .insert(owner.to_owned(), global as usize);
+            drop(state);
+            self.class_cache.insert(owner.to_owned(), global);
             Ok(global)
         }
 
@@ -844,35 +857,47 @@ mod jni_bridge {
             key
         }
 
-        fn cached_member_id(class: JClass, key: &str) -> Result<Option<*const c_void>, VmHostError> {
+        fn cached_member_id(&mut self, class: JClass, key: &str) -> Result<Option<*const c_void>, VmHostError> {
+            let local_key = (class as usize, key.to_owned());
+            if let Some(id) = self.member_cache.get(&local_key) {
+                return Ok(Some(*id));
+            }
             let state = lock_state().map_err(|_| VmHostError::Failure)?;
-            Ok(state
+            if let Some(id) = state
                 .jni_member_cache
                 .get(&(class as usize))
                 .and_then(|members| members.get(key).copied())
-                .map(|id| id as *const c_void))
+            {
+                let id = id as *const c_void;
+                drop(state);
+                self.member_cache.insert(local_key, id);
+                return Ok(Some(id));
+            }
+            Ok(None)
         }
 
-        fn remember_member_id(class: JClass, key: String, id: *const c_void) -> Result<*const c_void, VmHostError> {
+        fn remember_member_id(&mut self, class: JClass, key: String, id: *const c_void) -> Result<*const c_void, VmHostError> {
             let mut state = lock_state().map_err(|_| VmHostError::Failure)?;
             state
                 .jni_member_cache
                 .entry(class as usize)
                 .or_default()
-                .entry(key)
+                .entry(key.clone())
                 .or_insert(id as usize);
+            drop(state);
+            self.member_cache.insert((class as usize, key), id);
             Ok(id)
         }
 
         unsafe fn method_id(
-            &self,
+            &mut self,
             class: JClass,
             name: &str,
             descriptor: &str,
             static_method: bool,
         ) -> Result<*const c_void, VmHostError> {
             let cache_key = Self::member_cache_key(name, descriptor, static_method, false);
-            if let Some(existing) = Self::cached_member_id(class, &cache_key)? {
+            if let Some(existing) = self.cached_member_id(class, &cache_key)? {
                 return Ok(existing);
             }
             let name = std::ffi::CString::new(name).map_err(|_| VmHostError::Failure)?;
@@ -898,7 +923,7 @@ mod jni_bridge {
                 clear_exception(self.env);
                 return Err(VmHostError::Failure);
             }
-            Self::remember_member_id(class, cache_key, method)
+            self.remember_member_id(class, cache_key, method)
         }
 
         unsafe fn call_method(
@@ -1144,14 +1169,14 @@ mod jni_bridge {
         }
 
         unsafe fn field_id(
-            &self,
+            &mut self,
             class: JClass,
             name: &str,
             descriptor: &str,
             static_field: bool,
         ) -> Result<*const c_void, VmHostError> {
             let cache_key = Self::member_cache_key(name, descriptor, static_field, true);
-            if let Some(existing) = Self::cached_member_id(class, &cache_key)? {
+            if let Some(existing) = self.cached_member_id(class, &cache_key)? {
                 return Ok(existing);
             }
             let name = std::ffi::CString::new(name).map_err(|_| VmHostError::Failure)?;
@@ -1177,7 +1202,7 @@ mod jni_bridge {
                 clear_exception(self.env);
                 return Err(VmHostError::Failure);
             }
-            Self::remember_member_id(class, cache_key, field)
+            self.remember_member_id(class, cache_key, field)
         }
 
         unsafe fn get_field_value(
