@@ -1293,7 +1293,7 @@ fn mark_self_invokes(program: &mut VmProgram, build_key: &[u8; 32]) {
         let Some(reference) = program.constants.get(reference_index).and_then(VmConstant::as_string) else {
             continue;
         };
-        let identity = match instruction.opcode {
+        let identity = match canonical_opcode(instruction.opcode) {
             INVOKESTATIC => method_identity_from_reference(build_key, reference),
             INVOKEDYNAMIC => method_identity_from_mhstatic(build_key, reference),
             _ => None,
