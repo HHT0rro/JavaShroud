@@ -1246,6 +1246,7 @@ impl<H: ObjectOperations> VmExecutor<H> {
         let result = if matches!(opcode, opcode::INVOKESTATIC | opcode::INVOKEDYNAMIC)
             && program.is_self_invoke(pc)
         {
+            crate::record_self_invoke();
             match self.execute_at_depth(program, &arguments, depth + 1) {
                 Ok(value) => Ok(value),
                 Err(VmError::UncaughtException { class_name, message: _ }) => Err(Thrown {
@@ -1258,6 +1259,7 @@ impl<H: ObjectOperations> VmExecutor<H> {
                 Err(_) => Err(thrown("java/lang/VerifyError", VmValue::Null)),
             }
         } else {
+            crate::record_host_invoke();
             match self
                 .host
                 .invoke(kind, reference, receiver_object.as_ref(), &arguments)

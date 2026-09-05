@@ -172,7 +172,40 @@ mod jni_bridge {
     };
     use std::collections::BTreeMap;
     use std::os::raw::{c_char, c_void};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    fn qp_trace_enabled() -> bool {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var_os("JAVASHROUD_QP_TRACE").is_some())
+    }
+
+    static VM_PAGE_HITS: AtomicU64 = AtomicU64::new(0);
+    static VM_PAGE_MISSES: AtomicU64 = AtomicU64::new(0);
+    static VM_PAGE_CALLS: AtomicU64 = AtomicU64::new(0);
+    static STRING_PAGE_HITS: AtomicU64 = AtomicU64::new(0);
+    static STRING_PAGE_MISSES: AtomicU64 = AtomicU64::new(0);
+
+    fn qp_trace_tick(label: &str, extra: impl FnOnce() -> String) {
+        if !qp_trace_enabled() {
+            return;
+        }
+        let calls = VM_PAGE_CALLS.load(Ordering::Relaxed);
+        if calls <= 8 || calls == 32 || calls == 128 || calls == 1024 || calls % 50_000 == 0 {
+            let (self_invokes, host_invokes) = qp_vm::invoke_trace_counts();
+            eprintln!(
+                "qp-trace {label} vm_calls={} vm_hits={} vm_misses={} string_hits={} string_misses={} self_invokes={} host_invokes={} {}",
+                calls,
+                VM_PAGE_HITS.load(Ordering::Relaxed),
+                VM_PAGE_MISSES.load(Ordering::Relaxed),
+                STRING_PAGE_HITS.load(Ordering::Relaxed),
+                STRING_PAGE_MISSES.load(Ordering::Relaxed),
+                self_invokes,
+                host_invokes,
+                extra()
+            );
+        }
+    }
 
     type JInt = i32;
     type JLong = i64;
@@ -722,6 +755,7 @@ mod jni_bridge {
         if !reentrant {
             let state = lock_state()?;
             if let Some(program) = state.vm_programs.get(&entry_token) {
+                VM_PAGE_HITS.fetch_add(1, Ordering::Relaxed);
                 return Ok(program.clone());
             }
         }
@@ -743,6 +777,18 @@ mod jni_bridge {
                 .map(std::sync::Arc::new)
                 .map_err(router_failure)
         })?;
+        VM_PAGE_MISSES.fetch_add(1, Ordering::Relaxed);
+        if qp_trace_enabled() {
+            let sites = program.self_invoke_sites();
+            eprintln!(
+                "qp-trace parse token={} reentrant={} instructions={} self_sites={} static={}",
+                entry_token,
+                reentrant,
+                program.instructions().len(),
+                sites,
+                program.metadata().is_static
+            );
+        }
         if !reentrant {
             let mut state = lock_state()?;
             state
@@ -5018,7 +5064,19 @@ mod jni_bridge {
             }
         };
         let program = match cached_vm_program(env, entry_token, packed) {
-            Ok(program) => program,
+            Ok(program) => {
+                let calls = VM_PAGE_CALLS.fetch_add(1, Ordering::Relaxed) + 1;
+                qp_trace_tick("execute", || {
+                    format!(
+                        "token={} instructions={} self_sites={}",
+                        entry_token,
+                        program.instructions().len(),
+                        program.self_invoke_sites()
+                    )
+                });
+                let _ = calls;
+                program
+            }
             Err(failure) => {
                 pop_local_frame(env, core::ptr::null_mut());
                 throw_new(env, failure.0.as_bytes());
@@ -5091,11 +5149,13 @@ mod jni_bridge {
                 }
             };
             if let Some(existing) = state.string_pages.get(&packed_bytes) {
+                STRING_PAGE_HITS.fetch_add(1, Ordering::Relaxed);
                 let existing = *existing as JString;
                 drop(state);
                 return new_local_ref(env, existing).unwrap_or(core::ptr::null_mut());
             }
         }
+        STRING_PAGE_MISSES.fetch_add(1, Ordering::Relaxed);
         let opened = match open_page_route(env, 0, packed, PageKind::String) {
             Ok(opened) => opened,
             Err(failure) => {

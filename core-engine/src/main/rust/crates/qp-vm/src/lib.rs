@@ -184,6 +184,31 @@ use crypto::{
 };
 use opcode::*;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+
+fn qp_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("JAVASHROUD_QP_TRACE").is_some())
+}
+
+static HOST_INVOKE_COUNT: AtomicU64 = AtomicU64::new(0);
+static SELF_INVOKE_COUNT: AtomicU64 = AtomicU64::new(0);
+
+pub fn record_host_invoke() {
+    HOST_INVOKE_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn record_self_invoke() {
+    SELF_INVOKE_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn invoke_trace_counts() -> (u64, u64) {
+    (
+        SELF_INVOKE_COUNT.load(Ordering::Relaxed),
+        HOST_INVOKE_COUNT.load(Ordering::Relaxed),
+    )
+}
 use std::ops::Range;
 
 pub fn qp_magic() -> [u8; 4] {
@@ -1183,6 +1208,10 @@ impl VmProgram {
         self.self_invoke.get(index).copied() == Some(1)
     }
 
+    pub fn self_invoke_sites(&self) -> usize {
+        self.self_invoke.iter().filter(|flag| **flag == 1).count()
+    }
+
     fn wipe(&mut self) {
         for constant in &mut self.constants {
             constant.wipe();
@@ -1283,8 +1312,21 @@ fn mark_self_invokes(program: &mut VmProgram, build_key: &[u8; 32]) {
     program.self_invoke.clear();
     program.self_invoke.resize(program.instructions.len(), 0);
     if !program.metadata.is_static || program.metadata.method_identity.iter().all(|byte| *byte == 0) {
+        if qp_trace_enabled() {
+            eprintln!(
+                "qp-trace mark skip static={} identity_zero={} instructions={}",
+                program.metadata.is_static,
+                program.metadata.method_identity.iter().all(|byte| *byte == 0),
+                program.instructions.len()
+            );
+        }
         return;
     }
+    let mut invoke_static = 0usize;
+    let mut invoke_dynamic = 0usize;
+    let mut parsed = 0usize;
+    let mut matched = 0usize;
+    let mut samples = Vec::new();
     for (index, instruction) in program.instructions.iter().enumerate() {
         let operands = &program.operands[instruction.operand_range.clone()];
         let Some(reference_index) = operands.first().and_then(|value| usize::try_from(*value).ok()) else {
@@ -1293,17 +1335,51 @@ fn mark_self_invokes(program: &mut VmProgram, build_key: &[u8; 32]) {
         let Some(reference) = program.constants.get(reference_index).and_then(VmConstant::as_string) else {
             continue;
         };
-        let identity = match canonical_opcode(instruction.opcode) {
-            INVOKESTATIC => method_identity_from_reference(build_key, reference),
-            INVOKEDYNAMIC => method_identity_from_mhstatic(build_key, reference),
+        let canonical = canonical_opcode(instruction.opcode);
+        let identity = match canonical {
+            INVOKESTATIC => {
+                invoke_static += 1;
+                method_identity_from_reference(build_key, reference)
+            }
+            INVOKEDYNAMIC => {
+                invoke_dynamic += 1;
+                method_identity_from_mhstatic(build_key, reference)
+            }
             _ => None,
         };
         let Some(identity) = identity else {
+            if qp_trace_enabled() && samples.len() < 8 && matches!(canonical, INVOKESTATIC | INVOKEDYNAMIC) {
+                samples.push(format!(
+                    "unparsed op={:#06x} canon={:#06x} ref={}",
+                    instruction.opcode, canonical, reference
+                ));
+            }
             continue;
         };
+        parsed += 1;
         if ct_eq(&identity, &program.metadata.method_identity) {
             program.self_invoke[index] = 1;
+            matched += 1;
+            if qp_trace_enabled() && samples.len() < 8 {
+                samples.push(format!("match op={:#06x} ref={}", instruction.opcode, reference));
+            }
+        } else if qp_trace_enabled() && samples.len() < 8 {
+            samples.push(format!(
+                "mismatch op={:#06x} canon={:#06x} ref={}",
+                instruction.opcode, canonical, reference
+            ));
         }
+    }
+    if qp_trace_enabled() && (matched > 0 || samples.iter().any(|sample| sample.starts_with("mismatch") || sample.starts_with("unparsed"))) {
+        eprintln!(
+            "qp-trace mark instructions={} static={} dynamic={} parsed={} matched={} samples={:?}",
+            program.instructions.len(),
+            invoke_static,
+            invoke_dynamic,
+            parsed,
+            matched,
+            samples
+        );
     }
 }
 
