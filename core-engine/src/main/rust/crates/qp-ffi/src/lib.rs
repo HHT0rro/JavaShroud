@@ -380,6 +380,7 @@ mod jni_bridge {
         secret_pack: Option<Arc<SecretPackState>>,
         vm_dialect: Option<Arc<qp_vm::VmDialect>>,
         vm_entry_tokens: BTreeMap<Vec<u8>, i64>,
+        vm_programs: BTreeMap<i64, std::sync::Arc<qp_vm::VmProgram>>,
     }
 
     impl Default for BridgeState {
@@ -400,6 +401,7 @@ mod jni_bridge {
                 secret_pack: None,
                 vm_dialect: None,
                 vm_entry_tokens: BTreeMap::new(),
+                vm_programs: BTreeMap::new(),
             }
         }
     }
@@ -415,6 +417,7 @@ mod jni_bridge {
             self.router.clear();
             self.vm_dialect = None;
             self.vm_entry_tokens.clear();
+            self.vm_programs.clear();
         }
 
         fn install_token_binding(
@@ -515,6 +518,7 @@ mod jni_bridge {
             self.router.clear();
             self.vm_dialect = None;
             self.vm_entry_tokens.clear();
+            self.vm_programs.clear();
             if let Some(pack) = self.secret_pack.as_ref() {
                 pack.revoke();
             }
@@ -678,6 +682,51 @@ mod jni_bridge {
         }
         state.vm_dialect = Some(dialect.clone());
         Ok(dialect)
+    }
+
+    thread_local! {
+        static IN_FLIGHT_VM_PAGES: std::cell::RefCell<std::collections::HashSet<i64>> =
+            std::cell::RefCell::new(std::collections::HashSet::new());
+    }
+
+    fn cached_vm_program(
+        env: JNIEnv,
+        entry_token: JLong,
+        packed: JByteArray,
+    ) -> Result<std::sync::Arc<qp_vm::VmProgram>, BridgeFailure> {
+        let reentrant = IN_FLIGHT_VM_PAGES.with(|pages| pages.borrow().contains(&entry_token));
+        if !reentrant {
+            let state = lock_state()?;
+            if let Some(program) = state.vm_programs.get(&entry_token) {
+                return Ok(program.clone());
+            }
+        }
+        let opened = unsafe { open_page_route_vm(env, entry_token, packed) }?;
+        let dialect = cached_vm_dialect()?;
+        let program = with_live_root_material(|crypto, layout| {
+            opened
+                .parse_vm_with_material(
+                    *crypto,
+                    *layout,
+                    vm_state_binding(
+                        opened.entry_token(),
+                        opened.logical_binding_path(),
+                        layout,
+                    )
+                    .as_bytes(),
+                    &dialect,
+                )
+                .map(std::sync::Arc::new)
+                .map_err(router_failure)
+        })?;
+        if !reentrant {
+            let mut state = lock_state()?;
+            state
+                .vm_programs
+                .entry(entry_token)
+                .or_insert_with(|| program.clone());
+        }
+        Ok(program)
     }
 
     fn wipe(bytes: &mut [u8]) {
@@ -4848,76 +4897,56 @@ mod jni_bridge {
                 return core::ptr::null_mut();
             }
         };
-        let dialect = match cached_vm_dialect() {
-            Ok(dialect) => dialect,
+        let program = match cached_vm_program(env, entry_token, packed) {
+            Ok(program) => program,
             Err(failure) => {
-                throw_new(env, failure.0.as_bytes());
                 pop_local_frame(env, core::ptr::null_mut());
+                throw_new(env, failure.0.as_bytes());
                 return core::ptr::null_mut();
             }
         };
-        let result = match open_page_route_vm(env, entry_token, packed) {
-            Ok(opened) => match with_live_root_material(|crypto, layout| {
-                opened
-                    .parse_vm_with_material(
-                        *crypto,
-                        *layout,
-                        vm_state_binding(
-                            opened.entry_token(),
-                            opened.logical_binding_path(),
-                            layout,
-                        )
-                        .as_bytes(),
-                        &dialect,
-                    )
-                    .map_err(router_failure)
-            }) {
-                Ok(program) => match copy_vm_arguments(env, args, &program) {
-                    Ok(arguments) => {
-                        let helper_class = lock_state()
-                            .ok()
-                            .and_then(|state| state.registered_class.map(|class| class as JObject));
-                        let mut executor =
-                            VmExecutor::new(JniObjectOperations::new(env, helper_class));
-                        let execution = executor.execute(&program, &arguments);
-                        let mut host = executor.into_host();
-                        match execution {
-                            Ok(value) => {
-                                if let VmValue::Object(object) = &value {
-                                    host.release(*object);
-                                }
-                                box_vm_value_with_tag(
-                                    env,
-                                    value,
-                                    Some(program.metadata().return_tag),
-                                )
-                                .unwrap_or(core::ptr::null_mut())
-                            }
-                            Err(VmError::UncaughtException { class_name, message }) => {
-                                unsafe { throw_named_exception(env, &class_name, message.as_deref()) };
-                                core::ptr::null_mut()
-                            }
-                            Err(_) => {
-                                throw_new(env, b"Qp VM execution failed ");
-                                core::ptr::null_mut()
-                            }
+        let entered = IN_FLIGHT_VM_PAGES.with(|pages| pages.borrow_mut().insert(entry_token));
+        let result = match copy_vm_arguments(env, args, program.as_ref()) {
+            Ok(arguments) => {
+                let helper_class = lock_state()
+                    .ok()
+                    .and_then(|state| state.registered_class.map(|class| class as JObject));
+                let mut executor =
+                    VmExecutor::new(JniObjectOperations::new(env, helper_class));
+                let execution = executor.execute(program.as_ref(), &arguments);
+                let mut host = executor.into_host();
+                match execution {
+                    Ok(value) => {
+                        if let VmValue::Object(object) = &value {
+                            host.release(*object);
                         }
+                        box_vm_value_with_tag(
+                            env,
+                            value,
+                            Some(program.metadata().return_tag),
+                        )
+                        .unwrap_or(core::ptr::null_mut())
                     }
-                    Err(error) => {
-                        throw_new(env, error.0.as_bytes());
+                    Err(VmError::UncaughtException { class_name, message }) => {
+                        unsafe { throw_named_exception(env, &class_name, message.as_deref()) };
                         core::ptr::null_mut()
                     }
-                },
-                Err(error) => {
-                    throw_new(env, error.0.as_bytes());
-                    core::ptr::null_mut()
+                    Err(_) => {
+                        throw_new(env, b"Qp VM execution failed ");
+                        core::ptr::null_mut()
+                    }
                 }
-            },
-            Err(failure) => {
-                throw_new(env, failure.0.as_bytes());
+            }
+            Err(error) => {
+                throw_new(env, error.0.as_bytes());
                 core::ptr::null_mut()
             }
         };
+        if entered {
+            IN_FLIGHT_VM_PAGES.with(|pages| {
+                pages.borrow_mut().remove(&entry_token);
+            });
+        }
         pop_local_frame(env, result)
     }
 
