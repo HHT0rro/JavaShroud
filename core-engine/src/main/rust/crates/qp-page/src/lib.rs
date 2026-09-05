@@ -65,7 +65,9 @@ pub const OFFSET_CIPHERTEXT_LENGTH: usize = 197;
 pub const CANONICAL_CODEC_VARIANT: &str = "aes-256-gcm";
 
 pub const RETIRED_FRAME_MAGIC: [u8; 4] = qp_crypto::RETIRED_FRAME_MAGIC;
-pub const CURRENT_FRAME_VERSION: u8 = 3;
+/// Single source of truth for the runtime frame version is qp-crypto; this
+/// alias keeps the page-side gate from drifting behind an envelope bump.
+pub const CURRENT_FRAME_VERSION: u8 = qp_crypto::PROTOCOL_VERSION;
 pub const CURRENT_FRAME_AUTH_TAG_SIZE: usize = DIGEST_SIZE;
 pub const CURRENT_FRAME_HEADER_SIZE: usize = 4 + 1 + 4 + DIGEST_SIZE;
 pub const CURRENT_FRAME_MIN_SIZE: usize = CURRENT_FRAME_HEADER_SIZE + CURRENT_FRAME_AUTH_TAG_SIZE;
