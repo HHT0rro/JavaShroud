@@ -234,7 +234,6 @@ impl<O> Drop for Thrown<O> {
 struct ExecutionFrame<O> {
     locals: Vec<VmValue<O>>,
     stack: Vec<VmValue<O>>,
-    operand_scratch: Vec<i32>,
 }
 
 impl<O> ExecutionFrame<O> {
@@ -242,7 +241,6 @@ impl<O> ExecutionFrame<O> {
         Self {
             locals: (0..local_count).map(|_| VmValue::Null).collect(),
             stack: Vec::with_capacity(stack_capacity),
-            operand_scratch: Vec::new(),
         }
     }
 
@@ -254,8 +252,6 @@ impl<O> ExecutionFrame<O> {
             *value = VmValue::Null;
         }
         self.stack.clear();
-        self.operand_scratch.fill(0);
-        self.operand_scratch.clear();
     }
 }
 
@@ -373,13 +369,9 @@ impl<H: ObjectOperations> VmExecutor<H> {
             steps += 1;
             let fault_pc = pc;
             let instruction = &program.instructions()[pc];
-            let mut operands = program.instruction_operands(instruction).to_vec();
-            frame.operand_scratch.clear();
-            frame.operand_scratch.extend_from_slice(&operands);
+            let operands = program.instruction_operands(instruction);
             let operation =
-                self.execute_instruction(program, frame, instruction, &mut operands, pc, depth);
-            operands.fill(0);
-            frame.operand_scratch.fill(0);
+                self.execute_instruction(program, frame, instruction, operands, pc, depth);
             match operation {
                 Ok(Control::Next(next)) => pc = next,
                 Ok(Control::Return(value)) => return Ok(value),
@@ -418,7 +410,7 @@ impl<H: ObjectOperations> VmExecutor<H> {
         program: &VmProgram,
         frame: &mut ExecutionFrame<H::Object>,
         instruction: &Instruction,
-        operands: &mut [i32],
+        operands: &[i32],
         pc: usize,
         depth: usize,
     ) -> Result<Control<H::Object>, Thrown<H::Object>> {
