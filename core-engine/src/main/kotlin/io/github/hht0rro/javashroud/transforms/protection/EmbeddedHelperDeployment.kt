@@ -47,6 +47,7 @@ object EmbeddedHelperDeployment {
         "$QP_PKG/QpBridge",
         "$QP_PKG/QpBridge${"$"}QpNativeLibrary",
         "$QP_PKG/QpBridge${"$"}CatalogBundle",
+        "$QP_PKG/QpBridge${"$"}CatalogIndexRecord",
         // The final target-token wrapper uses QpBootstrap even when the
         // invoke-dynamic-indirection pass is disabled. Keep it in the same
         // helper closure so sealing relocates the bootstrap and QpBridge in
@@ -89,6 +90,7 @@ object EmbeddedHelperDeployment {
             "$QP_PKG/QpBridge${"$"}SealedNativeLibrary" to { loadClasspathHelperByName("QpBridge${"$"}SealedNativeLibrary") },
             "$QP_PKG/QpBridge${"$"}QpNativeLibrary" to { loadClasspathHelperByName("QpBridge${"$"}QpNativeLibrary") },
             "$QP_PKG/QpBridge${"$"}CatalogBundle" to { loadClasspathHelperByName("QpBridge${"$"}CatalogBundle") },
+            "$QP_PKG/QpBridge${"$"}CatalogIndexRecord" to { loadClasspathHelperByName("QpBridge${"$"}CatalogIndexRecord") },
         )
     }
 

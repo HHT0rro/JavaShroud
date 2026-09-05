@@ -42,6 +42,8 @@ class EmbeddedHelperDeploymentTest {
         for (entryName in listOf(
             "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.class",
             "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge${"$"}QpNativeLibrary.class",
+            "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge${"$"}CatalogBundle.class",
+            "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge${"$"}CatalogIndexRecord.class",
         )) {
             assertTrue(entryName in entries, "Qp JNI helper dependency must be embedded: $entryName")
         }
@@ -122,6 +124,9 @@ class EmbeddedHelperDeploymentTest {
             "nativeInitializeDefense(Ljava/lang/String;Ljava/lang/String;)I",
             "nativeProbeDefense(Ljava/lang/String;Ljava/lang/String;)I",
             "nativeTransformDefense([BLjava/lang/String;)[B",
+            "nativeInitializeDefenseCode(II)I",
+            "nativeProbeDefenseCode(II)I",
+            "nativeTransformDefenseCode([BI)[B",
             "nativeInvokeSite(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[B[Ljava/lang/Object;Z)Ljava/lang/Object;",
         )
         assertEquals(requiredNativeMethods, nativeMethods, "Emitted helper must expose the current typed JNI registrations")

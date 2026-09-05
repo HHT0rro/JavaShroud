@@ -125,6 +125,7 @@ class QpRuntimeBridgeApiTest {
         assertFalse(source.contains("directory.jsr1"), "catalog loader must not hard-code the retired directory file name")
         assertFalse(source.contains("pack|"), "catalog loader must not parse a readable pack path map")
         assertTrue(source.contains("decodeCatalogIndex"), "current catalog index must use opaque records")
+        assertTrue(source.contains("class CatalogIndexRecord"), "opaque catalog records must remain a nested helper class")
         assertTrue(source.contains("readQpCatalogBundle"), "current load must read the catalog bundle from original page containers")
         assertTrue(readiness.contains("System.load("), "current readiness must load only the authenticated bundled artifact")
         assertTrue(readiness.contains("initializeNativeKernel("), "current readiness must prove nativeInit registration")
