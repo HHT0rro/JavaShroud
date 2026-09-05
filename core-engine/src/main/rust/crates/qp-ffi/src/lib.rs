@@ -381,6 +381,8 @@ mod jni_bridge {
         vm_dialect: Option<Arc<qp_vm::VmDialect>>,
         vm_entry_tokens: BTreeMap<Vec<u8>, i64>,
         vm_programs: BTreeMap<i64, std::sync::Arc<qp_vm::VmProgram>>,
+        jni_class_cache: BTreeMap<String, usize>,
+        jni_member_cache: BTreeMap<usize, BTreeMap<String, usize>>,
     }
 
     impl Default for BridgeState {
@@ -402,6 +404,8 @@ mod jni_bridge {
                 vm_dialect: None,
                 vm_entry_tokens: BTreeMap::new(),
                 vm_programs: BTreeMap::new(),
+                jni_class_cache: BTreeMap::new(),
+                jni_member_cache: BTreeMap::new(),
             }
         }
     }
@@ -515,6 +519,8 @@ mod jni_bridge {
             self.defense_surface_mask = 0;
             self.defense_profile = None;
             self.target_handle_cache.clear();
+            self.jni_class_cache.clear();
+            self.jni_member_cache.clear();
             self.router.clear();
             self.vm_dialect = None;
             self.vm_entry_tokens.clear();
@@ -527,6 +533,13 @@ mod jni_bridge {
 
         fn take_target_handle_refs(&mut self) -> Vec<usize> {
             core::mem::take(&mut self.target_handle_cache)
+                .into_values()
+                .collect()
+        }
+
+        fn take_jni_class_refs(&mut self) -> Vec<usize> {
+            self.jni_member_cache.clear();
+            core::mem::take(&mut self.jni_class_cache)
                 .into_values()
                 .collect()
         }
@@ -796,10 +809,59 @@ mod jni_bridge {
         }
 
         unsafe fn find_class_checked(&self, owner: &str) -> Result<JClass, VmHostError> {
-            let owner = self.class_name(owner)?;
-            let class = find_class(self.env, owner.as_bytes_with_nul())
+            {
+                let state = lock_state().map_err(|_| VmHostError::Failure)?;
+                if let Some(class) = state.jni_class_cache.get(owner) {
+                    return Ok(*class as JClass);
+                }
+            }
+            let owner_c = self.class_name(owner)?;
+            let class = find_class(self.env, owner_c.as_bytes_with_nul())
                 .ok_or_else(|| VmHostError::Failure)?;
-            Ok(class)
+            let global = new_global_ref(self.env, class).ok_or(VmHostError::Failure)?;
+            delete_local_ref(self.env, class);
+            let mut state = lock_state().map_err(|_| VmHostError::Failure)?;
+            if let Some(existing) = state.jni_class_cache.get(owner) {
+                let existing = *existing as JClass;
+                drop(state);
+                delete_global_ref(self.env, global);
+                return Ok(existing);
+            }
+            state
+                .jni_class_cache
+                .insert(owner.to_owned(), global as usize);
+            Ok(global)
+        }
+
+        fn member_cache_key(name: &str, descriptor: &str, static_member: bool, field: bool) -> String {
+            let mut key = String::with_capacity(name.len() + descriptor.len() + 4);
+            key.push_str(name);
+            key.push(' ');
+            key.push_str(descriptor);
+            key.push(' ');
+            key.push(if field { 'F' } else { 'M' });
+            key.push(if static_member { 'S' } else { 'I' });
+            key
+        }
+
+        fn cached_member_id(class: JClass, key: &str) -> Result<Option<*const c_void>, VmHostError> {
+            let state = lock_state().map_err(|_| VmHostError::Failure)?;
+            Ok(state
+                .jni_member_cache
+                .get(&(class as usize))
+                .and_then(|members| members.get(key).copied())
+                .map(|id| id as *const c_void))
+        }
+
+        fn remember_member_id(class: JClass, key: String, id: *const c_void) -> Result<*const c_void, VmHostError> {
+            let mut state = lock_state().map_err(|_| VmHostError::Failure)?;
+            state
+                .jni_member_cache
+                .entry(class as usize)
+                .or_default()
+                .entry(key)
+                .or_insert(id as usize);
+            Ok(id)
         }
 
         unsafe fn method_id(
@@ -809,6 +871,10 @@ mod jni_bridge {
             descriptor: &str,
             static_method: bool,
         ) -> Result<*const c_void, VmHostError> {
+            let cache_key = Self::member_cache_key(name, descriptor, static_method, false);
+            if let Some(existing) = Self::cached_member_id(class, &cache_key)? {
+                return Ok(existing);
+            }
             let name = std::ffi::CString::new(name).map_err(|_| VmHostError::Failure)?;
             let descriptor =
                 std::ffi::CString::new(descriptor).map_err(|_| VmHostError::Failure)?;
@@ -832,7 +898,7 @@ mod jni_bridge {
                 clear_exception(self.env);
                 return Err(VmHostError::Failure);
             }
-            Ok(method)
+            Self::remember_member_id(class, cache_key, method)
         }
 
         unsafe fn call_method(
@@ -1084,6 +1150,10 @@ mod jni_bridge {
             descriptor: &str,
             static_field: bool,
         ) -> Result<*const c_void, VmHostError> {
+            let cache_key = Self::member_cache_key(name, descriptor, static_field, true);
+            if let Some(existing) = Self::cached_member_id(class, &cache_key)? {
+                return Ok(existing);
+            }
             let name = std::ffi::CString::new(name).map_err(|_| VmHostError::Failure)?;
             let descriptor =
                 std::ffi::CString::new(descriptor).map_err(|_| VmHostError::Failure)?;
@@ -1107,7 +1177,7 @@ mod jni_bridge {
                 clear_exception(self.env);
                 return Err(VmHostError::Failure);
             }
-            Ok(field)
+            Self::remember_member_id(class, cache_key, field)
         }
 
         unsafe fn get_field_value(
@@ -3853,7 +3923,9 @@ mod jni_bridge {
             state.install_nonce(nonce.into_inner())?;
             // A new session epoch must not retain handles created under the
             // previous epoch. Drop the global references outside the mutex.
-            state.take_target_handle_refs()
+            let mut handles = state.take_target_handle_refs();
+            handles.extend(state.take_jni_class_refs());
+            handles
         };
         for handle in stale_handles {
             unsafe { delete_global_ref(env, handle as JObject) };
@@ -5493,7 +5565,11 @@ mod jni_bridge {
                 delete_global_ref(env, class);
             }
             let target_handles = lock_state()
-                .map(|mut state| state.take_target_handle_refs())
+                .map(|mut state| {
+                    let mut handles = state.take_target_handle_refs();
+                    handles.extend(state.take_jni_class_refs());
+                    handles
+                })
                 .unwrap_or_default();
             for handle in target_handles {
                 delete_global_ref(env, handle as JObject);
