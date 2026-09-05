@@ -595,6 +595,25 @@ mod jni_bridge {
             .map_err(|_| BridgeFailure("Qp bridge state is poisoned"))
     }
 
+    fn loaded_java_vm() -> &'static std::sync::atomic::AtomicPtr<*const JniInvokeInterface> {
+        static VM: std::sync::atomic::AtomicPtr<*const JniInvokeInterface> =
+            std::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
+        &VM
+    }
+
+    fn remember_java_vm(vm: JavaVM) {
+        loaded_java_vm().store(vm, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn current_java_vm() -> Option<JavaVM> {
+        let vm = loaded_java_vm().load(std::sync::atomic::Ordering::SeqCst);
+        if vm.is_null() {
+            None
+        } else {
+            Some(vm)
+        }
+    }
+
     /// Defense violations wipe the recombined secret pack; later page opens
     /// fail closed until a fresh bridge session rebuilds it.
     fn revoke_global_secret_pack() {
@@ -2412,6 +2431,59 @@ mod jni_bridge {
         Some(function(vm, env_out, JNI_VERSION_1_8))
     }
 
+    /// Distinguishes "the JVM can speak JVMTI" from "an agent already holds a
+    /// JVMTI environment". Stock JDKs support JVMTI; only a live GetEnv success
+    /// for JVMTI_VERSION_1_2 without JNI_EDETACHED/JNI_EVERSION is a hit.
+    fn jvmti_agent_attached() -> Result<bool, BridgeFailure> {
+        const JVMTI_VERSION_1_2: JInt = 0x30010200;
+        let Some(vm) = current_java_vm() else {
+            return Ok(false);
+        };
+        let mut env_out = core::ptr::null_mut();
+        let Some(code) = (unsafe { invoke_get_env_version(vm, &mut env_out, JVMTI_VERSION_1_2) }) else {
+            return Ok(false);
+        };
+        let jvmti_env_present = code == JNI_OK && !env_out.is_null();
+        if !jvmti_env_present {
+            return Ok(false);
+        }
+        // Stock JDKs can return a JVMTI env from GetEnv. Treat it as an attack
+        // only when a debug/agent capability is also live: JDWP listen status
+        // or a hostile debug/instrument module already enumerated elsewhere.
+        Ok(jdwp_listen_status_enabled())
+    }
+
+    fn jdwp_listen_status_enabled() -> bool {
+        std::env::var("JAVA_TOOL_OPTIONS")
+            .ok()
+            .into_iter()
+            .chain(std::env::var("_JAVA_OPTIONS").ok())
+            .chain(std::env::var("JDK_JAVA_OPTIONS").ok())
+            .any(|value| {
+                let lower = value.to_ascii_lowercase();
+                lower.contains("jdwp")
+                    || lower.contains("transport=dt_socket")
+                    || lower.contains("server=y")
+            })
+    }
+
+    unsafe fn invoke_get_env_version(
+        vm: JavaVM,
+        env_out: &mut *mut c_void,
+        version: JInt,
+    ) -> Option<JInt> {
+        if vm.is_null() || (*vm).is_null() {
+            return None;
+        }
+        let entry = (**vm).entries[GET_ENV_INDEX];
+        if entry.is_null() {
+            return None;
+        }
+        let function: unsafe extern "system" fn(JavaVM, *mut *mut c_void, JInt) -> JInt =
+            core::mem::transmute(entry);
+        Some(function(vm, env_out, version))
+    }
+
     unsafe fn find_class(env: JNIEnv, name: &[u8]) -> Option<JClass> {
         let entry = native_entry(env, FIND_CLASS_INDEX)?;
         let function: unsafe extern "system" fn(JNIEnv, *const c_char) -> JClass =
@@ -2795,7 +2867,10 @@ mod jni_bridge {
                             || value.contains("-agentlib:")
                             || value.contains("-agentpath:")
                     });
-            Ok(agent_argument_present || injected_option_present)
+            if agent_argument_present || injected_option_present {
+                return Ok(true);
+            }
+            Ok(jvmti_agent_attached()?)
         }
 
         #[cfg(target_os = "windows")]
@@ -2803,7 +2878,7 @@ mod jni_bridge {
             if windows_debugger_present()? || hostile_module_present()? {
                 return Ok(true);
             }
-            Ok(false)
+            Ok(jvmti_agent_attached()?)
         }
 
         #[cfg(not(any(target_os = "linux", target_os = "windows")))]
@@ -2963,6 +3038,82 @@ mod jni_bridge {
         if !module.is_null() {
             let wine = b"wine_get_version\0";
             if !unsafe { GetProcAddress(module, wine.as_ptr().cast()) }.is_null() {
+                return Ok(true);
+            }
+        }
+        if windows_hostile_module_path_present()? {
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn windows_hostile_module_path_present() -> Result<bool, BridgeFailure> {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetCurrentProcess() -> *mut core::ffi::c_void;
+            fn K32EnumProcessModules(
+                process: *mut core::ffi::c_void,
+                modules: *mut *mut core::ffi::c_void,
+                cb: u32,
+                needed: *mut u32,
+            ) -> i32;
+            fn K32GetModuleFileNameExW(
+                process: *mut core::ffi::c_void,
+                module: *mut core::ffi::c_void,
+                filename: *mut u16,
+                size: u32,
+            ) -> u32;
+        }
+        let process = unsafe { GetCurrentProcess() };
+        let mut needed = 0u32;
+        let _ = unsafe { K32EnumProcessModules(process, core::ptr::null_mut(), 0, &mut needed) };
+        let count = (needed as usize / core::mem::size_of::<*mut core::ffi::c_void>()).min(512);
+        if count == 0 {
+            return Ok(false);
+        }
+        let mut modules = vec![core::ptr::null_mut(); count];
+        let mut needed = 0u32;
+        let ok = unsafe {
+            K32EnumProcessModules(
+                process,
+                modules.as_mut_ptr(),
+                (modules.len() * core::mem::size_of::<*mut core::ffi::c_void>()) as u32,
+                &mut needed,
+            )
+        };
+        if ok == 0 {
+            return Ok(false);
+        }
+        let mut path = [0u16; 260];
+        for module in modules.into_iter().take(count) {
+            if module.is_null() {
+                continue;
+            }
+            path.fill(0);
+            let written = unsafe {
+                K32GetModuleFileNameExW(process, module, path.as_mut_ptr(), path.len() as u32)
+            };
+            if written == 0 {
+                continue;
+            }
+            let lower = String::from_utf16_lossy(&path[..written as usize]).to_ascii_lowercase();
+            let bytes = lower.as_bytes();
+            let mut cut = 0usize;
+            for (index, byte) in bytes.iter().copied().enumerate() {
+                if byte == b'/' || byte == b'\\' {
+                    cut = index + 1;
+                }
+            }
+            let file_name = &lower[cut..];
+            if file_name.contains("frida")
+                || file_name.contains("gadget")
+                || file_name.contains("winject")
+                || file_name == "sbiedll.dll"
+                || file_name == "jdwp.dll"
+                || file_name == "instrument.dll"
+                || file_name == "jvmti.dll"
+            {
                 return Ok(true);
             }
         }
@@ -3527,6 +3678,12 @@ mod jni_bridge {
     fn native_heartbeat_inner() -> Result<JInt, BridgeFailure> {
         let _ = target_from_state()?;
         enforce_runtime_watchdog()?;
+        let state = lock_state()?;
+        if let Some(pack) = state.secret_pack.as_ref() {
+            if !pack.is_authorized() {
+                return Err(BridgeFailure("Qp native secret pack is sealed"));
+            }
+        }
         Ok(QP_R1_OK)
     }
 
@@ -5134,6 +5291,7 @@ mod jni_bridge {
 
     #[no_mangle]
     pub unsafe extern "system" fn JNI_OnLoad(vm: JavaVM, _reserved: *mut c_void) -> JInt {
+        remember_java_vm(vm);
         let mut raw_env = core::ptr::null_mut();
         if invoke_get_env(vm, &mut raw_env) != Some(JNI_OK) || raw_env.is_null() {
             return JNI_ERR;
