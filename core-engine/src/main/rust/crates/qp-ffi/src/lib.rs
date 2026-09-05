@@ -231,6 +231,7 @@ mod jni_bridge {
     const PUSH_LOCAL_FRAME_INDEX: usize = 19;
     const POP_LOCAL_FRAME_INDEX: usize = 20;
     const DELETE_LOCAL_REF_INDEX: usize = 23;
+    const NEW_LOCAL_REF_INDEX: usize = 25;
     const EXCEPTION_CLEAR_INDEX: usize = 17;
     const ALLOC_OBJECT_INDEX: usize = 27;
     const IS_SAME_OBJECT_INDEX: usize = 24;
@@ -381,6 +382,7 @@ mod jni_bridge {
         vm_dialect: Option<Arc<qp_vm::VmDialect>>,
         vm_entry_tokens: BTreeMap<Vec<u8>, i64>,
         vm_programs: BTreeMap<i64, std::sync::Arc<qp_vm::VmProgram>>,
+        string_pages: BTreeMap<Vec<u8>, usize>,
         jni_class_cache: BTreeMap<String, usize>,
         jni_member_cache: BTreeMap<usize, BTreeMap<String, usize>>,
     }
@@ -404,6 +406,7 @@ mod jni_bridge {
                 vm_dialect: None,
                 vm_entry_tokens: BTreeMap::new(),
                 vm_programs: BTreeMap::new(),
+                string_pages: BTreeMap::new(),
                 jni_class_cache: BTreeMap::new(),
                 jni_member_cache: BTreeMap::new(),
             }
@@ -422,6 +425,7 @@ mod jni_bridge {
             self.vm_dialect = None;
             self.vm_entry_tokens.clear();
             self.vm_programs.clear();
+            self.string_pages.clear();
         }
 
         fn install_token_binding(
@@ -525,6 +529,7 @@ mod jni_bridge {
             self.vm_dialect = None;
             self.vm_entry_tokens.clear();
             self.vm_programs.clear();
+            self.string_pages.clear();
             if let Some(pack) = self.secret_pack.as_ref() {
                 pack.revoke();
             }
@@ -540,6 +545,12 @@ mod jni_bridge {
         fn take_jni_class_refs(&mut self) -> Vec<usize> {
             self.jni_member_cache.clear();
             core::mem::take(&mut self.jni_class_cache)
+                .into_values()
+                .collect()
+        }
+
+        fn take_string_page_refs(&mut self) -> Vec<usize> {
+            core::mem::take(&mut self.string_pages)
                 .into_values()
                 .collect()
         }
@@ -2828,6 +2839,17 @@ mod jni_bridge {
         function(env, reference);
     }
 
+    unsafe fn new_local_ref(env: JNIEnv, reference: JObject) -> Option<JObject> {
+        if reference.is_null() {
+            return None;
+        }
+        let entry = native_entry(env, NEW_LOCAL_REF_INDEX)?;
+        let function: unsafe extern "system" fn(JNIEnv, JObject) -> JObject =
+            core::mem::transmute(entry);
+        let local = function(env, reference);
+        (!local.is_null()).then_some(local)
+    }
+
     unsafe fn new_global_ref(env: JNIEnv, reference: JObject) -> Option<JObject> {
         if reference.is_null() {
             return None;
@@ -3950,6 +3972,7 @@ mod jni_bridge {
             // previous epoch. Drop the global references outside the mutex.
             let mut handles = state.take_target_handle_refs();
             handles.extend(state.take_jni_class_refs());
+            handles.extend(state.take_string_page_refs());
             handles
         };
         for handle in stale_handles {
@@ -5052,27 +5075,72 @@ mod jni_bridge {
         _class: JClass,
         packed: JByteArray,
     ) -> JString {
-        match open_page_route(env, 0, packed, PageKind::String) {
-            Ok(opened) => match opened.with_payload(|bytes| SensitiveMemoryLease::new(bytes.to_vec())) {
-                Ok(lease) => match std::ffi::CString::new(lease.as_slice()) {
-                Ok(text) => {
-                    new_string_utf(env, text.as_bytes_with_nul()).unwrap_or(core::ptr::null_mut())
-                }
-                Err(_) => {
-                    throw_new(env, b"Qp string page is not UTF-8\0");
-                    core::ptr::null_mut()
-                }
-                },
-                Err(_) => {
-                    throw_new(env, b"Qp string page lease is invalid\0");
-                    core::ptr::null_mut()
-                }
-            },
+        let packed_bytes = match copy_byte_array(env, packed, 24 + 4 + 4096) {
+            Ok(bytes) => bytes.into_inner(),
             Err(failure) => {
                 throw_new(env, failure.0.as_bytes());
-                core::ptr::null_mut()
+                return core::ptr::null_mut();
+            }
+        };
+        {
+            let state = match lock_state() {
+                Ok(state) => state,
+                Err(failure) => {
+                    throw_new(env, failure.0.as_bytes());
+                    return core::ptr::null_mut();
+                }
+            };
+            if let Some(existing) = state.string_pages.get(&packed_bytes) {
+                let existing = *existing as JString;
+                drop(state);
+                return new_local_ref(env, existing).unwrap_or(core::ptr::null_mut());
             }
         }
+        let opened = match open_page_route(env, 0, packed, PageKind::String) {
+            Ok(opened) => opened,
+            Err(failure) => {
+                throw_new(env, failure.0.as_bytes());
+                return core::ptr::null_mut();
+            }
+        };
+        let local = match opened.with_payload(|bytes| SensitiveMemoryLease::new(bytes.to_vec())) {
+            Ok(lease) => match std::ffi::CString::new(lease.as_slice()) {
+                Ok(text) => match new_string_utf(env, text.as_bytes_with_nul()) {
+                    Some(value) => value,
+                    None => core::ptr::null_mut(),
+                },
+                Err(_) => {
+                    throw_new(env, b"Qp string page is not UTF-8 ");
+                    return core::ptr::null_mut();
+                }
+            },
+            Err(_) => {
+                throw_new(env, b"Qp string page lease is invalid ");
+                return core::ptr::null_mut();
+            }
+        };
+        if local.is_null() {
+            return core::ptr::null_mut();
+        }
+        let global = match new_global_ref(env, local) {
+            Some(value) => value,
+            None => return local,
+        };
+        {
+            let mut state = match lock_state() {
+                Ok(state) => state,
+                Err(_) => return local,
+            };
+            if let Some(existing) = state.string_pages.get(&packed_bytes) {
+                let existing = *existing as JString;
+                drop(state);
+                delete_global_ref(env, global);
+                delete_local_ref(env, local);
+                return new_local_ref(env, existing).unwrap_or(core::ptr::null_mut());
+            }
+            state.string_pages.insert(packed_bytes, global as usize);
+        }
+        local
     }
 
     unsafe extern "system" fn native_read_class_page(
@@ -5593,6 +5661,7 @@ mod jni_bridge {
                 .map(|mut state| {
                     let mut handles = state.take_target_handle_refs();
                     handles.extend(state.take_jni_class_refs());
+                    handles.extend(state.take_string_page_refs());
                     handles
                 })
                 .unwrap_or_default();
@@ -5835,6 +5904,7 @@ mod jni_bridge {
             assert_eq!(NEW_GLOBAL_REF_INDEX, 21);
             assert_eq!(DELETE_GLOBAL_REF_INDEX, 22);
             assert_eq!(DELETE_LOCAL_REF_INDEX, 23);
+            assert_eq!(NEW_LOCAL_REF_INDEX, 25);
             assert_eq!(GET_STRING_UTF_LENGTH_INDEX, 168);
             assert_eq!(GET_STRING_UTF_CHARS_INDEX, 169);
             assert_eq!(RELEASE_STRING_UTF_CHARS_INDEX, 170);
