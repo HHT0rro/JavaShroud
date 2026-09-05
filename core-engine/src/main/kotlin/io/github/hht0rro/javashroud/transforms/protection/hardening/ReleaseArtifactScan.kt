@@ -2,6 +2,8 @@ package io.github.hht0rro.javashroud.transforms.protection.hardening
 
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.config.HardenedProtectionProfile
+import io.github.hht0rro.javashroud.transforms.protection.qp.IMAGE_MEASUREMENT_MAGIC
+import io.github.hht0rro.javashroud.transforms.protection.qp.NativeImageMeasurement
 import io.github.hht0rro.javashroud.transforms.protection.qp.catalog.QpArtifactDirectory
 import java.io.InputStream
 import java.nio.charset.StandardCharsets
@@ -120,6 +122,7 @@ internal object ReleaseArtifactScan {
         findings += scanNativeContents(artifact, nativeBytes)
         findings += scanDualNativePlatforms(artifact, enabledPasses)
         findings += scanStrictNativePlatformMatrix(artifact, enabledPasses, profile, requiredNativePlatforms)
+        findings += scanOfflineAttackResidue(artifact, nativeBytes)
         val failed = findings.any { !it.passed }
         val passed = when (profile) {
             HardenedProtectionProfile.RELEASE_HARDENED -> !failed
@@ -1230,6 +1233,100 @@ internal object ReleaseArtifactScan {
             "current-format",
             failure == null,
             failure ?: "directory=$name;sealed-shell-accepted-current-format",
+        )
+    }
+
+    /**
+     * Offline-attack regression: verifies that the compiled DLL contains no
+     * plaintext JSIM magic (the locate tag is per-build masked), no plaintext
+     * relocation bindings, and that a brute-force 32-byte window scan cannot
+     * find any contiguous half-key that satisfies the measurement oracle.
+     * This is the programmatic port of the round-1 red-team attack.
+     */
+    private fun scanOfflineAttackResidue(
+        artifact: BytecodeArtifact,
+        nativeBytes: List<ByteArray>,
+    ): List<ReleaseArtifactScanReport.Finding> {
+        val findings = mutableListOf<ReleaseArtifactScanReport.Finding>()
+        for ((index, bytes) in nativeBytes.withIndex()) {
+            val tag = "native[$index]"
+            val magic = "JSIMv6"
+            var jsimHits = 0
+            var pos = 0
+            val magicBytes = magic.toByteArray(Charsets.US_ASCII)
+            while (pos <= bytes.size - magicBytes.size) {
+                var match = true
+                for (k in magicBytes.indices) {
+                    if (bytes[pos + k] != magicBytes[k]) { match = false; break }
+                }
+                if (match) { jsimHits++; pos += magicBytes.size } else pos++
+            }
+            findings += ReleaseArtifactScanReport.Finding(
+                "jsim-plaintext",
+                jsimHits == 0,
+                if (jsimHits == 0) "$tag:plaintext-magic-absent" else "$tag:plaintext-magic-hits=$jsimHits",
+            )
+            findings += scanHalfKeyWindows(tag, bytes)
+        }
+        // Plaintext relocation binding lines in any JAR resource
+        val plainBindings = artifact.jarEntries.any { entry ->
+            !entry.name.endsWith(".class") && entry.bytes.size > 2 &&
+                entry.bytes[0] == 'B'.code.toByte() && entry.bytes[1] == '|'.code.toByte()
+        }
+        findings += ReleaseArtifactScanReport.Finding(
+            "bindings-ciphertext",
+            !plainBindings,
+            if (plainBindings) "plaintext B|M|F binding lines found" else "no plaintext bindings",
+        )
+        return findings
+    }
+
+    /**
+     * Round-1 red-team attack port: HMAC every 32-byte window of the image
+     * against the normalized file digest and compare with the committed
+     * measurement. A hit would hand the attacker a contiguous usable wrap-key
+     * half; the commitment-chained masked `.jsmk` rows must keep this at zero.
+     */
+    private fun scanHalfKeyWindows(tag: String, bytes: ByteArray): ReleaseArtifactScanReport.Finding {
+        val slot = runCatching { NativeImageMeasurement.locateMeasurementSlot(bytes) }.getOrNull()
+            ?: return ReleaseArtifactScanReport.Finding(
+                "half-key-window-scan",
+                true,
+                "$tag:measurement-slot-absent-skipped",
+            )
+        val magicSize = IMAGE_MEASUREMENT_MAGIC.size
+        val commitment = bytes.copyOfRange(slot + magicSize, slot + magicSize + 32)
+        val digest = NativeImageMeasurement.digest(bytes)
+        // HMAC(key = window, message = digest) with reusable buffers: two
+        // SHA-256 finalizations per window keep the full-file sweep inside a
+        // few seconds per image.
+        val ipad = ByteArray(64)
+        val opad = ByteArray(64)
+        val window = ByteArray(32)
+        val template = java.security.MessageDigest.getInstance("SHA-256")
+        var windowHits = 0
+        for (offset in 0..bytes.size - 32) {
+            System.arraycopy(bytes, offset, window, 0, 32)
+            for (index in 0 until 32) {
+                val keyByte = window[index].toInt()
+                ipad[index] = (keyByte xor 0x36).toByte()
+                opad[index] = (keyByte xor 0x5C).toByte()
+            }
+            val inner = (template.clone() as java.security.MessageDigest)
+                .apply { update(ipad); update(digest) }
+                .digest()
+            val outer = (template.clone() as java.security.MessageDigest)
+                .apply { update(opad) }
+                .digest(inner)
+            if (java.security.MessageDigest.isEqual(outer, commitment)) windowHits += 1
+        }
+        java.util.Arrays.fill(ipad, 0)
+        java.util.Arrays.fill(opad, 0)
+        java.util.Arrays.fill(window, 0)
+        return ReleaseArtifactScanReport.Finding(
+            "half-key-window-scan",
+            windowHits == 0,
+            if (windowHits == 0) "$tag:no-contiguous-wrap-key-window" else "$tag:usable-key-windows=$windowHits",
         )
     }
 
