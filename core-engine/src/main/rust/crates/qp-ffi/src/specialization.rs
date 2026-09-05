@@ -32,6 +32,25 @@ pub const SECRET_PACK_KIND_COUNT: usize = 5;
 /// Number of sealed shards carried by the artifact's catalog pack resource.
 pub const SECRET_PACK_SHARD_COUNT: usize = 0;
 
+/// Per-shard mask master; shard masks derive as rotate/xor variants of it.
+pub const SHARD_MASK_R: [u8; 32] = [0; 32];
+
+/// Commitment-chained shard key halves. The effective shard key is
+/// `MASKED[i] ^ R_i ^ image_commitment` where the commitment is only fully
+/// formed after the compiled image has been measured and patched, and is read
+/// through a volatile load, so no contiguous shard key exists in the file.
+#[used]
+#[link_section = ".jsmk"]
+pub static SHARD_KEYS_MASKED: [u8; 32 * SECRET_PACK_SHARD_COUNT] = [0; 32 * SECRET_PACK_SHARD_COUNT];
+
+fn shard_mask_r(shard: usize) -> [u8; 32] {
+    let mut mask = [0u8; 32];
+    for (index, byte) in mask.iter_mut().enumerate() {
+        *byte = SHARD_MASK_R[(index + 7 * shard + 3) % 32] ^ (shard as u8);
+    }
+    mask
+}
+
 #[repr(C)]
 pub struct ImageMeasurementSlot {
     pub magic: [u8; 8],
@@ -50,11 +69,21 @@ pub fn image_measurement_commitment() -> [u8; 32] {
     unsafe { core::ptr::read_volatile(&IMAGE_MEASUREMENT.commitment) }
 }
 
-/// Reconstructs the static half of one shard's wrap key from per-build MBA
-/// immediates. Shard keys are finished at runtime by mixing the image
-/// commitment, so this static half alone decrypts nothing.
-pub fn qp_sp_reconstruct_shard_key(_shard: usize) -> [u8; 32] {
-    [0; 32]
+/// Reconstructs the effective static half of one shard's wrap key. Shard keys
+/// are finished at runtime by mixing the image commitment through a volatile
+/// read, so they can never be constant-folded into a contiguous static window.
+pub fn qp_sp_reconstruct_shard_key(shard: usize) -> [u8; 32] {
+    if shard >= SECRET_PACK_SHARD_COUNT {
+        return [0; 32];
+    }
+    let commitment = image_measurement_commitment();
+    let mask = shard_mask_r(shard);
+    let base = shard * 32;
+    let mut key = [0u8; 32];
+    for index in 0..32 {
+        key[index] = SHARD_KEYS_MASKED[base + index] ^ mask[index] ^ commitment[index % 32];
+    }
+    key
 }
 
 /// XOR mask over the serialized per-build VM semantic opcode corpus.

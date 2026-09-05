@@ -4982,7 +4982,10 @@ mod jni_bridge {
     ) -> Result<crate::relocation::RegistrationPlan, BridgeFailure> {
         let loader_owner = read_system_property(env, b"j.l\0")?;
         bootstrap_secret_state(env)?;
-        let method_map = sealed_method_bindings(env)?;
+        let method_map = sealed_method_bindings(env).map_err(|failure| {
+            eprintln!("jsh-dbg: bindings {}", failure.0);
+            failure
+        })?;
         crate::relocation::resolve_registration(loader_owner.as_deref(), &method_map)
             .map_err(|error| BridgeFailure(error))
     }
@@ -5007,14 +5010,20 @@ mod jni_bridge {
             state.arm_native_session()?;
         }
         let pack_text = read_system_property(env, b"j.p\0")?
-            .ok_or(BridgeFailure("Qp sealed pack property is missing"))?;
+            .ok_or_else(|| {
+                eprintln!("jsh-dbg: j.p missing");
+                BridgeFailure("Qp sealed pack property is missing")
+            })?;
         let pack_bytes = crate::relocation::base64_url_decode(&pack_text)
             .ok_or(BridgeFailure("Qp sealed pack property is invalid"))?;
         let pack = Arc::new(SecretPackState::from_specialization());
         pack.authorize(true, true, &pack_bytes)
-            .map_err(|error| match error {
-                RouterError::InvalidRequest(reason) => BridgeFailure(reason),
-                _ => BridgeFailure("Qp native secret pack is unavailable"),
+            .map_err(|error| {
+                eprintln!("jsh-dbg: authorize {:?}", error);
+                match error {
+                    RouterError::InvalidRequest(reason) => BridgeFailure(reason),
+                    _ => BridgeFailure("Qp native secret pack is unavailable"),
+                }
             })?;
         let mut state = lock_state()?;
         if state.secret_pack.is_none() {

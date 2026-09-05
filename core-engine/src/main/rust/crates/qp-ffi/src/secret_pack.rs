@@ -90,6 +90,7 @@ impl SecretPackState {
         // measurement shard's static half; it can confirm a guessed key but no
         // longer decrypts anything by itself.
         let mut measurement_key = specialization::qp_sp_reconstruct_shard_key(1);
+        eprintln!("jsh-dbg: cm1rt {}", measurement_key.iter().map(|b| format!("{:02x}", b)).collect::<String>());
         if measurement_key == [0u8; KEY_SIZE] {
             return Err(RouterError::InvalidRequest("secret wrap key is zero"));
         }
@@ -109,6 +110,7 @@ impl SecretPackState {
         for (index, shard) in shards.iter().enumerate() {
             let (kind, nonce, wrapped) = shard;
             let mut static_key = specialization::qp_sp_reconstruct_shard_key(index);
+        eprintln!("jsh-dbg: key[{}] = {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}", index, static_key[0], static_key[1], static_key[2], static_key[3], static_key[4], static_key[5], static_key[6], static_key[7]);
             if static_key == [0u8; KEY_SIZE] {
                 static_key.fill(0);
                 return Err(RouterError::InvalidRequest("secret wrap key is zero"));

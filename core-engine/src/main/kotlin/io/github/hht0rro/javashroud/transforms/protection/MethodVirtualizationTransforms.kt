@@ -752,7 +752,6 @@ internal fun sealedVmEntryToken(entryToken: Long, random: SecureRandom): String?
     // the only holder of the unsealing key, so seal unconditionally here.
     val context = currentQpBuildContextOrNull() ?: return null
     val cryptoDomain = context.freezeOrCopyPackCryptoDomain()
-    )
     try {
         val key = hkdfSha256(ikm = cryptoDomain, salt = QP_VM_ENTRY_TOKEN_DOMAIN, info = ByteArray(0), length = 32)
         try {

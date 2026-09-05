@@ -336,6 +336,7 @@ internal class NativeSecretPackLiterals private constructor(
     private val shardsValue: List<ShardMaterial>,
     private val slotIdsValue: IntArray,
     private val packCommitmentValue: ByteArray,
+    private val maskRMasterValue: ByteArray,
 ) {
     /** One shard: static half key, MBA projection, and plaintext until sealed. */
     internal class ShardMaterial(
@@ -357,6 +358,15 @@ internal class NativeSecretPackLiterals private constructor(
     /** MBA projection of every shard, in emission order (root first). */
     fun shardMbaWords(): List<List<MbaWord>> =
         shardsValue.map { shard -> shard.mbaWords }
+
+    /** Effective shard count including the root shard. */
+    fun shardCount(): Int = shardsValue.size
+
+    /** Static mask master shared by every shard mask derivation. */
+    fun maskRMaster(): ByteArray = maskRMasterValue.copyOf()
+
+    /** Static half key of shard [index], in emission order (root first). */
+    fun cmKeyAt(index: Int): ByteArray = shardsValue[index].cmKey.copyOf()
 
     /** Static half of the QpMethod shard; keys the image measurement commitment. */
     internal val measurementKey: ByteArray
@@ -431,6 +441,7 @@ internal class NativeSecretPackLiterals private constructor(
         sealedBlobs.values.forEach { Arrays.fill(it, 0) }
         sealedBlobs.clear()
         Arrays.fill(packCommitmentValue, 0)
+        Arrays.fill(maskRMasterValue, 0)
         wiped = true
     }
 
@@ -444,6 +455,9 @@ internal class NativeSecretPackLiterals private constructor(
         private val SEALED_PACK_MAGIC = byteArrayOf(0x6A, 0)
         private const val MEASUREMENT_SHARD_INDEX = 1
         private const val SHARD_KIND_ROOT = 0
+
+        /** Method slots per shard bucket; bounds the blast radius of one shard. */
+        private const val METHOD_BUCKET_SLOTS = 16
 
         internal fun prepare(
             pack: NativeVmSecretPack,
@@ -464,13 +478,15 @@ internal class NativeSecretPackLiterals private constructor(
                     val seed = slot.copySeedForSpecialization()
                     byKind.getOrPut(pack.kindOfSlot(slotId)) { ArrayList() } += slotId to seed
                 }
-                // Fixed shard order: root, QpMethod, StringPage, EncryptedClassPage, NativeChunk.
+                // Fixed shard order: root, then method buckets (16 slots each,
+                // capping the blast radius of any single shard break), then the
+                // remaining kinds one shard each.
                 val rootPlain = ArrayList<Byte>(QP_SECRET_PACK_SEED_SIZE * 4)
                 identity.forEach { rootPlain += it }
                 u32be(pack.slotCount).forEach { rootPlain += it }
                 cryptoDomain.forEach { rootPlain += it }
                 layoutDigest.forEach { rootPlain += it }
-                val shards = ArrayList<ShardMaterial>(5)
+                val shards = ArrayList<ShardMaterial>()
                 shards += ShardMaterial(
                     kind = SHARD_KIND_ROOT,
                     cmKey = newCmKey(random),
@@ -479,19 +495,26 @@ internal class NativeSecretPackLiterals private constructor(
                 )
                 for (kind in 1..4) {
                     val entries = byKind[kind].orEmpty().sortedBy { it.first }
-                    val plain = ArrayList<Byte>(5 + entries.size * (4 + QP_SECRET_PACK_SEED_SIZE))
-                    plain += kind.toByte()
-                    u32be(entries.size).forEach { plain += it }
-                    for ((slotId, seed) in entries) {
-                        u32be(slotId).forEach { plain += it }
-                        seed.forEach { plain += it }
+                    val buckets = if (kind == QpResourceKind.QpMethod.id) {
+                        entries.chunked(METHOD_BUCKET_SLOTS)
+                    } else {
+                        listOf(entries)
                     }
-                    shards += ShardMaterial(
-                        kind = kind,
-                        cmKey = newCmKey(random),
-                        plaintext = plain.toByteArray(),
-                        mbaWords = emptyList(),
-                    )
+                    for (bucket in buckets) {
+                        val plain = ArrayList<Byte>(5 + bucket.size * (4 + QP_SECRET_PACK_SEED_SIZE))
+                        plain += kind.toByte()
+                        u32be(bucket.size).forEach { plain += it }
+                        for ((slotId, seed) in bucket) {
+                            u32be(slotId).forEach { plain += it }
+                            seed.forEach { plain += it }
+                        }
+                        shards += ShardMaterial(
+                            kind = kind,
+                            cmKey = newCmKey(random),
+                            plaintext = plain.toByteArray(),
+                            mbaWords = emptyList(),
+                        )
+                    }
                 }
                 for (index in shards.indices) {
                     val shard = shards[index]
@@ -514,11 +537,14 @@ internal class NativeSecretPackLiterals private constructor(
                 digest.update(layoutDigest)
                 val commitment = digest.digest()
                 Arrays.fill(identity, 0)
+                val maskRMaster = ByteArray(QP_SECRET_PACK_SEED_SIZE)
+                random.nextBytes(maskRMaster)
                 return NativeSecretPackLiterals(
                     nativeIdentityValue = pack.nativeIdentity,
                     shardsValue = shards,
                     slotIdsValue = slotIds,
                     packCommitmentValue = commitment,
+                    maskRMasterValue = maskRMaster,
                 )
             } finally {
                 byKind.values.forEach { entries -> entries.forEach { (_, seed) -> Arrays.fill(seed, 0) } }
@@ -666,6 +692,118 @@ internal object NativeImageMeasurement {
         for (offset in 0 until 32) {
             bytes[commitmentStart + offset] = 0
         }
+    }
+
+    /**
+     * Locates a named PE/ELF section, returning its raw file offset and size.
+     * Used for the .jsmk shard-key mask region, which is patched with the
+     * image commitment after the measurement slot has been filled.
+     */
+    internal fun locateSectionRange(bytes: ByteArray, name: String): Pair<Int, Int>? {
+        if (isPe64(bytes)) return locatePeSectionRange(bytes, name)
+        if (isElf64(bytes)) return locateElfSectionRange(bytes, name)
+        return null
+    }
+
+    private fun locatePeSectionRange(bytes: ByteArray, name: String): Pair<Int, Int>? {
+        val peOffset = readU32(bytes, 0x3C)
+        val optionalSize = readU16(bytes, peOffset + 20)
+        val sectionCount = readU16(bytes, peOffset + 6)
+        if (optionalSize < 112 || sectionCount !in 1..96) return null
+        val sectionTable = peOffset + 24 + optionalSize
+        val expected = ByteArray(8)
+        name.toByteArray(Charsets.US_ASCII).copyInto(expected, endIndex = minOf(name.length, 8))
+        for (index in 0 until sectionCount) {
+            val section = sectionTable + index * 40
+            if (section + 40 > bytes.size) return null
+            var match = true
+            for (offset in 0 until 8) {
+                if (bytes[section + offset] != expected[offset]) {
+                    match = false
+                    break
+                }
+            }
+            if (!match) continue
+            val rawSize = readU32(bytes, section + 16)
+            val rawOffset = readU32(bytes, section + 20)
+            if (rawOffset < 0 || rawSize <= 0 || rawOffset + rawSize > bytes.size) continue
+            return rawOffset to rawSize
+        }
+        return null
+    }
+
+    private fun locateElfSectionRange(bytes: ByteArray, name: String): Pair<Int, Int>? {
+        val sectionOffset = readU64Long(bytes, 0x28)
+        val sectionEntrySize = readU16(bytes, 0x3A)
+        val sectionCount = readU16(bytes, 0x3C)
+        val nameIndex = readU16(bytes, 0x3E)
+        if (sectionOffset <= 0 || sectionEntrySize < 64 || sectionCount !in 1..1024) return null
+        if (nameIndex !in 0 until sectionCount) return null
+        val nameSection = sectionOffset + nameIndex.toLong() * sectionEntrySize.toLong()
+        if (nameSection + 64 > bytes.size) return null
+        val nameTableOffset = readU64Long(bytes, nameSection.toInt() + 24)
+        val nameTableSize = readU64Long(bytes, nameSection.toInt() + 32)
+        if (nameTableOffset <= 0 || nameTableSize <= 0) return null
+        val needle = name.toByteArray(Charsets.US_ASCII)
+        for (index in 0 until sectionCount) {
+            val section = sectionOffset + index.toLong() * sectionEntrySize.toLong()
+            if (section + 64 > bytes.size) return null
+            val nameOff = readU32(bytes, section.toInt()).toLong() and 0xFFFFFFFFL
+            if (!elfNameEquals(bytes, nameTableOffset, nameTableSize, nameOff, needle)) continue
+            val fileOffset = readU64Long(bytes, section.toInt() + 24)
+            val size = readU64Long(bytes, section.toInt() + 32)
+            if (fileOffset <= 0 || size <= 0 || fileOffset + size > bytes.size) continue
+            return fileOffset.toInt() to size.toInt()
+        }
+        return null
+    }
+
+    /**
+     * Commitment-chains the shard key halves: each 32-byte row of the .jsmk
+     * region is XORed with the patched image commitment, so the effective
+     * shard key only exists after a volatile runtime read.
+     */
+    /**
+     * Commitment-chains the shard key halves by content: each pre-mask row
+     * (cm ^ R) is located in the image and XORed in place with the patched
+     * image commitment. Section-header location is deliberately avoided -
+     * linkers may home or alias custom sections, and the runtime reads the
+     * array by symbol address, so the patch must follow the content.
+     */
+    internal fun patchShardKeyMask(
+        bytes: ByteArray,
+        commitment: ByteArray,
+        shardCount: Int,
+        maskedRows: List<ByteArray>,
+    ): Boolean {
+        if (shardCount <= 0) return true
+        if (maskedRows.size != shardCount) return false
+        for (row in maskedRows) {
+            val index = indexOfBytes(bytes, row) ?: return false
+            for (j in 0 until 32) {
+                bytes[index + j] = ((bytes[index + j].toInt() xor commitment[j % 32].toInt()) and 0xFF).toByte()
+            }
+        }
+        return true
+    }
+
+    private fun indexOfBytes(bytes: ByteArray, needle: ByteArray): Int? {
+        if (needle.isEmpty() || bytes.size < needle.size) return null
+        outer@ for (i in 0..bytes.size - needle.size) {
+            for (j in needle.indices) {
+                if (bytes[i + j] != needle[j]) continue@outer
+            }
+            return i
+        }
+        return null
+    }
+    /** Derives the per-shard mask; must byte-match the runtime shard_mask_r. */
+    internal fun shardMask(maskRMaster: ByteArray, shard: Int): ByteArray {
+        val mask = ByteArray(32)
+        for (j in 0 until 32) {
+            mask[j] = (maskRMaster[(j + 7 * shard + 3) % 32].toInt() xor shard).toByte()
+        }
+        return mask
     }
 
     private fun locateJsmsSection(bytes: ByteArray): Int? {

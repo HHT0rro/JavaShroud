@@ -36,10 +36,128 @@ pub fn commitment_crc32() -> u32 {
 
 pub(crate) fn measure_bytes(bytes: &mut [u8]) -> Result<[u8; DIGEST_SIZE], RouterError> {
     // The wrap binds the on-disk file. Reloc/IAT bytes are stable on disk, so
-    // they stay in the digest; only the commitment slot is hashed as zeros.
+    // they stay in the digest. The commitment slot and the .jsmk shard-key
+    // mask region are hashed as zeros: both are patched after the digest is
+    // taken, and the runtime applies the same normalization before hashing.
     zero_commitment_slot(bytes)?;
-    Ok(*sha256(bytes).as_bytes())
+    zero_shard_mask_region(bytes)?;
+    eprintln!(
+        "jsh-filedbg: len={} jsms={:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}{:02x} jsmk0={:02x}{:02x}{:02x}{:02x}",
+        bytes.len(),
+        bytes[1516544], bytes[1516545], bytes[1516546], bytes[1516547],
+        bytes[1516548], bytes[1516549], bytes[1516550], bytes[1516551],
+        bytes[1518080], bytes[1518081], bytes[1518082], bytes[1518083]
+    );
+    let full = sha256(bytes);
+    eprintln!("jsh-digest-rt: {}", full.as_bytes().iter().map(|b| format!("{:02x}", b)).collect::<String>());
+    Ok(*full.as_bytes())
 }
+
+/// Zeroes the `.jsmk` masked shard-key region (when present) so post-measure
+/// patching of that region cannot change the image digest.
+fn zero_shard_mask_region(bytes: &mut [u8]) -> Result<(), RouterError> {
+    // A missing or unrecognizable .jsmk region simply means there is nothing
+    // to normalize; both build and runtime skip identically.
+    if let Ok(Some((offset, size))) = locate_named_section_range(bytes, b".jsmk") {
+        bytes[offset..offset + size].fill(0);
+    }
+    Ok(())
+}
+
+/// Locates a named section's raw file range; `None` when the section is absent.
+fn locate_named_section_range(bytes: &[u8], name: &[u8]) -> Result<Option<(usize, usize)>, RouterError> {
+    if is_pe64(bytes) {
+        return locate_pe_section_range(bytes, name);
+    }
+    if is_elf64(bytes) {
+        return locate_elf_section_range(bytes, name);
+    }
+    Err(RouterError::AuthenticationFailed)
+}
+
+fn locate_pe_section_range(bytes: &[u8], name: &[u8]) -> Result<Option<(usize, usize)>, RouterError> {
+    let pe_offset = read_u32(bytes, 0x3C) as usize;
+    let optional_size = read_u16(bytes, pe_offset + 20) as usize;
+    let section_count = read_u16(bytes, pe_offset + 6) as usize;
+    if optional_size < 112 || !(1..=96).contains(&section_count) {
+        return Ok(None);
+    }
+    let section_table = pe_offset + 24 + optional_size;
+    let mut expected = [0u8; 8];
+    let copied = core::cmp::min(name.len(), 8);
+    expected[..copied].copy_from_slice(&name[..copied]);
+    for index in 0..section_count {
+        let section = section_table.checked_add(index.saturating_mul(40)).ok_or(RouterError::AuthenticationFailed)?;
+        if section + 40 > bytes.len() {
+            return Ok(None);
+        }
+        if bytes[section..section + 8] != expected {
+            continue;
+        }
+        let raw_size = read_u32(bytes, section + 16) as usize;
+        let raw_offset = read_u32(bytes, section + 20) as usize;
+        if raw_size == 0 || raw_offset.saturating_add(raw_size) > bytes.len() {
+            return Ok(None);
+        }
+        return Ok(Some((raw_offset, raw_size)));
+    }
+    Ok(None)
+}
+
+fn locate_elf_section_range(bytes: &[u8], name: &[u8]) -> Result<Option<(usize, usize)>, RouterError> {
+    let section_offset = read_u64(bytes, 0x28) as usize;
+    let section_entry_size = read_u16(bytes, 0x3A) as usize;
+    let section_count = read_u16(bytes, 0x3C) as usize;
+    let name_index = read_u16(bytes, 0x3E) as usize;
+    if section_offset == 0 || section_entry_size < 64 || !(1..=1024).contains(&section_count) {
+        return Ok(None);
+    }
+    if name_index >= section_count {
+        return Ok(None);
+    }
+    let name_section = section_offset.checked_add(name_index.saturating_mul(section_entry_size)).ok_or(RouterError::AuthenticationFailed)?;
+    if name_section + 64 > bytes.len() {
+        return Ok(None);
+    }
+    let name_table_offset = read_u64(bytes, name_section + 24) as usize;
+    let name_table_size = read_u64(bytes, name_section + 32) as usize;
+    if name_table_offset == 0 || name_table_size == 0 {
+        return Ok(None);
+    }
+    for index in 0..section_count {
+        let section = section_offset.checked_add(index.saturating_mul(section_entry_size)).ok_or(RouterError::AuthenticationFailed)?;
+        if section + 64 > bytes.len() {
+            return Ok(None);
+        }
+        let name_off = read_u32(bytes, section) as usize;
+        if !elf_name_matches(bytes, name_table_offset, name_table_size, name_off, name) {
+            continue;
+        }
+        let file_offset = read_u64(bytes, section + 24) as usize;
+        let size = read_u64(bytes, section + 32) as usize;
+        if file_offset == 0 || size == 0 || file_offset.saturating_add(size) > bytes.len() {
+            return Ok(None);
+        }
+        return Ok(Some((file_offset, size)));
+    }
+    Ok(None)
+}
+
+fn elf_name_matches(bytes: &[u8], table_offset: usize, table_size: usize, name_off: usize, needle: &[u8]) -> bool {
+    if name_off >= table_size {
+        return false;
+    }
+    let start = match table_offset.checked_add(name_off) {
+        Some(value) => value,
+        None => return false,
+    };
+    if start.saturating_add(needle.len()).saturating_add(1) > bytes.len() {
+        return false;
+    }
+    bytes[start..start + needle.len()] == *needle && bytes[start + needle.len()] == 0
+}
+
+
 
 fn zero_commitment_slot(bytes: &mut [u8]) -> Result<(), RouterError> {
     let slot = locate_commitment_slot(bytes)?;

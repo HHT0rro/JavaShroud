@@ -527,6 +527,32 @@ object QpNativeCompilerPass {
             if (measurementKey != null) {
                 commitment = patchImageMeasurementCommitment(bytes, measurementKey)
                 task.secretPack.sealForPlatform(task.platform, commitment)
+                // Commitment-chain the shard key halves by content: locate each
+                // pre-mask row (cm ^ R) in the image and XOR the patched image
+                // commitment in place, then verify the runtime reconstruction.
+                val shardCount = task.secretPack.shardCount()
+                val maskRMaster = task.secretPack.maskRMaster()
+                val maskedRows = ArrayList<ByteArray>(shardCount)
+                for (shard in 0 until shardCount) {
+                    val cm = task.secretPack.cmKeyAt(shard)
+                    val mask = io.github.hht0rro.javashroud.transforms.protection.qp.NativeImageMeasurement
+                        .shardMask(maskRMaster, shard)
+                    val row = ByteArray(32)
+                    for (j in 0 until 32) row[j] = (cm[j].toInt() xor mask[j].toInt()).toByte()
+                    maskedRows.add(row)
+                    Arrays.fill(cm, 0)
+                    Arrays.fill(mask, 0)
+                }
+                if (!io.github.hht0rro.javashroud.transforms.protection.qp.NativeImageMeasurement
+                    .patchShardKeyMask(bytes, checkNotNull(commitment), shardCount, maskedRows)
+                ) {
+                    error("Qp shard key mask rows are missing from the compiled image")
+                }
+                for (shard in 0 until shardCount) {
+                    println("jsh-key-build: " + task.secretPack.cmKeyAt(shard).joinToString("") { "%02x".format(it) })
+                }
+                maskedRows.forEach { Arrays.fill(it, 0) }
+                Arrays.fill(maskRMaster, 0)
             }
         } catch (error: Exception) {
             bytes.fill(0)
@@ -908,55 +934,59 @@ object QpNativeCompilerPass {
         append("pub fn image_measurement_commitment() -> [u8; 32] {\n")
         append("    unsafe { core::ptr::read_volatile(&IMAGE_MEASUREMENT.commitment) }\n")
         append("}\n")
-        if (pack == null) {
-            append("pub fn qp_sp_reconstruct_shard_key(_shard: usize) -> [u8; 32] { [0; 32] }\n")
-            append("pub fn qp_secret_pack_seed(_slot: usize) -> Option<[u8; 32]> { None }\n")
-            appendDialectCorpusSection()
-            return
-        }
-        try {
-            val shardWords = pack.shardMbaWords()
-            append("#[inline(never)]\n")
-            append("pub fn qp_sp_reconstruct_shard_key(shard: usize) -> [u8; 32] {\n")
-            append("    match shard {\n")
-            shardWords.forEachIndexed { shardIndex, words ->
-                append("        ")
-                append(shardIndex)
-                append(" => {\n")
-                words.forEachIndexed { index, word ->
-                    append("            let w")
-                    append(index)
-                    append(" = (")
-                    append(u32Lit(word.multiplier))
-                    append(").wrapping_mul(")
-                    append(u32Lit(word.factor))
-                    append(").wrapping_add(")
-                    append(u32Lit(word.addend))
-                    append(");\n")
+        // Commitment-chained shard key halves: the file stores cm ^ R ^ C
+        // (C patched post-compile), so no contiguous shard key exists on disk.
+        val maskRMaster = pack?.maskRMaster()
+        val shardCount = pack?.shardCount() ?: 0
+        append("pub const SHARD_MASK_R: [u8; 32] = [")
+        append(bytesLiteral(maskRMaster ?: ByteArray(32)))
+        append("];\n")
+        append("#[used]\n")
+        append("#[link_section = \".jsmk\"]\n")
+        append("pub static SHARD_KEYS_MASKED: [u8; 32 * SECRET_PACK_SHARD_COUNT] = [")
+        if (pack != null) {
+            try {
+                for (shardIndex in 0 until shardCount) {
+                    val cmKey = pack.cmKeyAt(shardIndex)
+                    val mask = io.github.hht0rro.javashroud.transforms.protection.qp.NativeImageMeasurement
+                        .shardMask(maskRMaster!!, shardIndex)
+                    try {
+                        val hexBytes = (0 until 32).joinToString(", ") { j ->
+                            "0x" + ((cmKey[j].toInt() xor mask[j].toInt()) and 0xFF).toString(16).padStart(2, '0')
+                        }
+                        append(hexBytes)
+                        if (shardIndex == 1) println("jsh-cm1-build: " + cmKey.joinToString("") { "%02x".format(it) }.take(16))
+                        if (shardIndex != shardCount - 1) append(", ")
+                    } finally {
+                        Arrays.fill(cmKey, 0)
+                        Arrays.fill(mask, 0)
+                    }
                 }
-                append("            let mix = w0.wrapping_mul(w3).wrapping_add(w7 ^ w1);\n")
-                append("            let decoy = w4.wrapping_sub(w4).wrapping_add(w5.wrapping_mul(0));\n")
-                append("            let _ = mix.wrapping_add(decoy);\n")
-                append("            let mut key = [0u8; 32];\n")
-                reconstructionOrder(words).forEach { index ->
-                    append("            key[")
-                    append(index * 4)
-                    append("..")
-                    append(index * 4 + 4)
-                    append("].copy_from_slice(&w")
-                    append(index)
-                    append(".to_be_bytes());\n")
-                }
-                append("            key\n        }\n")
+            } finally {
+                Arrays.fill(maskRMaster, 0)
             }
-            append("        _ => [0; 32],\n")
-            append("    }\n")
-            append("}\n")
-            append("pub fn qp_secret_pack_seed(_slot: usize) -> Option<[u8; 32]> { None }\n")
-            appendDialectCorpusSection()
-        } finally {
-            Arrays.fill(identity, 0)
         }
+        append("];\n")
+        append("#[inline(never)]\n")
+            append("fn shard_mask_r(shard: usize) -> [u8; 32] {\n")
+            append("    let mut mask = [0u8; 32];\n")
+            append("    for (index, byte) in mask.iter_mut().enumerate() {\n")
+            append("        *byte = SHARD_MASK_R[(index + 7 * shard + 3) % 32] ^ (shard as u8);\n")
+            append("    }\n")
+            append("    mask\n")
+            append("}pub fn qp_sp_reconstruct_shard_key(shard: usize) -> [u8; 32] {\n")
+            append("    if shard >= SECRET_PACK_SHARD_COUNT { return [0; 32]; }\n")
+            append("    let commitment = image_measurement_commitment();\n")
+            append("    let mask = shard_mask_r(shard);\n")
+            append("    let base = shard * 32;\n")
+            append("    let mut key = [0u8; 32];\n")
+            append("    for index in 0..32 {\n")
+            append("        key[index] = SHARD_KEYS_MASKED[base + index] ^ mask[index] ^ commitment[index % 32];\n")
+            append("    }\n")
+            append("    key\n")
+            append("}")
+        append("pub fn qp_secret_pack_seed(_slot: usize) -> Option<[u8; 32]> { None }\n")
+        appendDialectCorpusSection()
     }
 
     private fun reconstructionOrder(words: List<io.github.hht0rro.javashroud.transforms.protection.qp.MbaWord>): IntArray {
@@ -978,6 +1008,7 @@ object QpNativeCompilerPass {
         val digest = io.github.hht0rro.javashroud.transforms.protection.qp.NativeImageMeasurement.digest(bytes)
         val commitment = io.github.hht0rro.javashroud.transforms.protection.qp.NativeImageMeasurement.hmacCommitment(measurementKey, digest)
         require(commitment.size == 32)
+        println("jsh-digest-build: " + digest.joinToString("") { "%02x".format(it) })
         System.arraycopy(commitment, 0, bytes, commitmentStart, 32)
         Arrays.fill(digest, 0)
         return commitment
