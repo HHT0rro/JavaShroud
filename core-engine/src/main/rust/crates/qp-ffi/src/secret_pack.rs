@@ -136,12 +136,17 @@ struct AuthorizedPack {
     /// `(kind, slot) -> shard index` so method-bucket shards unwrap one bucket,
     /// not every method seed.
     slot_home: Vec<(u8, u16, u16)>,
+    /// Session-only kind seeds, populated at authorize and wiped on revoke.
+    /// Cold dumps still see ciphertext shards; this window exists only while
+    /// the pack is authorized so Calc does not AES-unwrap a shard per page.
+    kind_seeds: Vec<((u8, u16), WipedArray32)>,
 }
 
 impl Drop for AuthorizedPack {
     fn drop(&mut self) {
         self.shards.clear();
         self.slot_home.clear();
+        self.kind_seeds.clear();
     }
 }
 
@@ -245,8 +250,12 @@ impl SecretPackState {
         }
         // Integrity check: every shard must unwrap and the slot census must
         // match the root record. Plaintext is wiped before this returns.
-        let slot_home = self.verify_pack_integrity(&shards)?;
-        *guard = Some(AuthorizedPack { shards, slot_home });
+        let (slot_home, kind_seeds) = self.verify_pack_integrity(&shards)?;
+        *guard = Some(AuthorizedPack {
+            shards,
+            slot_home,
+            kind_seeds,
+        });
         self.bump_epoch();
         Ok(())
     }
@@ -254,8 +263,9 @@ impl SecretPackState {
     fn verify_pack_integrity(
         &self,
         shards: &[SealedShard],
-    ) -> Result<Vec<(u8, u16, u16)>, RouterError> {
+    ) -> Result<(Vec<(u8, u16, u16)>, Vec<((u8, u16), WipedArray32)>), RouterError> {
         let mut slot_home = Vec::new();
+        let mut kind_seeds = Vec::new();
         let mut total_slots: Option<usize> = None;
         let mut armed = 0usize;
         for (index, shard) in shards.iter().enumerate() {
@@ -288,6 +298,10 @@ impl SecretPackState {
                     .ok_or(RouterError::InvalidRequest(
                         "secret wrap plaintext is invalid",
                     ))?;
+                for &(kind, slot, _) in &homes {
+                    let seed = extract_kind_slot(plaintext.as_slice(), kind, slot as usize)?;
+                    kind_seeds.push(((kind, slot), seed));
+                }
                 slot_home.extend(homes);
             }
         }
@@ -308,7 +322,7 @@ impl SecretPackState {
                 "secret wrap plaintext is invalid",
             ));
         }
-        Ok(slot_home)
+        Ok((slot_home, kind_seeds))
     }
 
     /// Wipes the retained ciphertext and advances the revoke epoch so any
@@ -390,15 +404,24 @@ impl SecretPackState {
                 return Err(RouterError::AuthenticationFailed);
             }
             let pack = guard.as_ref().ok_or(RouterError::AuthenticationFailed)?;
-            let shard_index = pack
-                .slot_home
+            let cached = pack
+                .kind_seeds
                 .iter()
-                .find(|(kind, slot_id, _)| *kind == kind_id && *slot_id as usize == slot)
-                .map(|(_, _, shard_index)| *shard_index as usize)
-                .ok_or(RouterError::AuthenticationFailed)?;
-            let kind = pack.shards[shard_index].kind;
-            let plaintext = unwrap_shard(shard_index, &pack.shards[shard_index])?;
-            extract_kind_slot(plaintext.as_slice(), kind, slot)?
+                .find(|((kind, slot_id), _)| *kind == kind_id && *slot_id as usize == slot)
+                .map(|(_, seed)| WipedArray32::new(*seed.as_ref()));
+            if let Some(seed) = cached {
+                seed
+            } else {
+                let shard_index = pack
+                    .slot_home
+                    .iter()
+                    .find(|(kind, slot_id, _)| *kind == kind_id && *slot_id as usize == slot)
+                    .map(|(_, _, shard_index)| *shard_index as usize)
+                    .ok_or(RouterError::AuthenticationFailed)?;
+                let kind = pack.shards[shard_index].kind;
+                let plaintext = unwrap_shard(shard_index, &pack.shards[shard_index])?;
+                extract_kind_slot(plaintext.as_slice(), kind, slot)?
+            }
         };
         if self.revocation_epoch() != epoch {
             return Err(RouterError::AuthenticationFailed);
