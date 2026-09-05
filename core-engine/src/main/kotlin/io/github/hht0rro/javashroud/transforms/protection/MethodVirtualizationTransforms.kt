@@ -172,78 +172,31 @@ private fun unsafeSyntheticHandlerKeys(classBytes: ByteArray): Set<String> {
 
 private fun elapsedTimeBenchmarkHelperKeys(classNode: ClassNode): Set<String> {
     val methods = classNode.methods.orEmpty()
-    val roots = methods.filter { method ->
+    val captures = methods.mapNotNull { method ->
+        if (method.instructions == null) return@mapNotNull null
+        val capture = MethodBodyCapture()
+        method.accept(capture)
+        capture.refreshRawBenchmarkCaptureState(method.name, method.desc, method.access)
+        method to capture
+    }
+    val roots = captures.filter { (method, capture) ->
         method.access and Opcodes.ACC_STATIC != 0 &&
             method.name != "<clinit>" &&
             method.desc == "()V" &&
-            method.instructions != null &&
-            isElapsedTimeBenchmarkRootMethod(classNode.name, method)
+            capture.isRawElapsedTimeBenchmarkRoot
     }
     if (roots.isEmpty()) return emptySet()
     val keys = linkedSetOf<String>()
-    for (root in roots) {
+    for ((root, capture) in roots) {
         keys += root.name + root.desc
-        for (instruction in root.instructions) {
-            val call = instruction as? MethodInsnNode ?: continue
-            if (call.opcode != Opcodes.INVOKESTATIC) continue
-            if (call.owner != classNode.name) continue
-            if (call.name == "<init>" || call.name == "<clinit>" || call.name == root.name) continue
-            val helper = methods.firstOrNull { candidate -> candidate.name == call.name && candidate.desc == call.desc }
+        for (call in capture.elapsedTimeHelperCalls(classNode.name, root.name)) {
+            val helper = methods.firstOrNull { candidate -> candidate.name == call.first && candidate.desc == call.second }
                 ?: continue
             if (helper.access and Opcodes.ACC_STATIC == 0) continue
-            keys += call.name + call.desc
+            keys += call.first + call.second
         }
     }
     return keys
-}
-
-private fun isElapsedTimeBenchmarkRootMethod(owner: String, method: org.objectweb.asm.tree.MethodNode): Boolean {
-    var elapsedTimeProbeCount = 0
-    var hasLongSub = false
-    var printsElapsedTimeMarker = false
-    var touchesConsoleIoBoundary = false
-    var hasAnyBranch = false
-    var sameOwnerStaticCallCount = 0
-    for (instruction in method.instructions) {
-        when (instruction) {
-            is MethodInsnNode -> {
-                if (isElapsedTimeProbeCall(instruction.owner, instruction.name, instruction.desc)) {
-                    elapsedTimeProbeCount += 1
-                }
-                if (isConsoleStreamMethod(instruction.owner, instruction.name)) {
-                    touchesConsoleIoBoundary = true
-                }
-                if (instruction.opcode == Opcodes.INVOKESTATIC &&
-                    instruction.owner == owner &&
-                    instruction.name != method.name
-                ) {
-                    sameOwnerStaticCallCount += 1
-                }
-            }
-            is org.objectweb.asm.tree.FieldInsnNode -> {
-                if (isConsoleStreamField(instruction.opcode, instruction.owner, instruction.name, instruction.desc)) {
-                    touchesConsoleIoBoundary = true
-                }
-            }
-            is org.objectweb.asm.tree.LdcInsnNode -> {
-                val value = instruction.cst
-                if (value is String && (value == "Calc: " || value == "Calc:")) {
-                    printsElapsedTimeMarker = true
-                }
-            }
-            is org.objectweb.asm.tree.InsnNode -> {
-                if (instruction.opcode == Opcodes.LSUB) hasLongSub = true
-            }
-            is org.objectweb.asm.tree.JumpInsnNode,
-            is org.objectweb.asm.tree.TableSwitchInsnNode,
-            is org.objectweb.asm.tree.LookupSwitchInsnNode -> {
-                hasAnyBranch = true
-            }
-        }
-    }
-    if (elapsedTimeProbeCount < 2 || !hasLongSub || !printsElapsedTimeMarker) return false
-    if (!touchesConsoleIoBoundary || !hasAnyBranch) return false
-    return sameOwnerStaticCallCount >= 2
 }
 
 private fun jvmBoundaryBootstrapKeys(classNode: ClassNode): Set<String> = classNode.methods
@@ -1372,7 +1325,8 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
             },
             touchesConsoleIoBoundary = touchesConsoleIoBoundary,
             elapsedTimeProbeCount = methodCalls.count { instruction ->
-                isElapsedTimeProbeCall(instruction.owner, instruction.name, instruction.desc)
+                isElapsedTimeProbeCall(instruction.owner, instruction.name, instruction.desc) ||
+                    (instruction.opcode == Opcodes.INVOKESTATIC && instruction.desc == "()J")
             },
             hasLongSub = instructions.any { instruction ->
                 instruction is CapturedInstruction.NoArg && instruction.opcode == Opcodes.LSUB
@@ -1481,9 +1435,15 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
     private fun isElapsedTimeBenchmarkRoot(name: String, descriptor: String, access: Int, snapshot: BenchmarkSnapshot): Boolean {
         val isStaticVoid = access and Opcodes.ACC_STATIC != 0 && descriptor == "()V"
         if (!isStaticVoid) return false
-        if (snapshot.elapsedTimeProbeCount < 2 || !snapshot.hasLongSub || !snapshot.printsElapsedTimeMarker) return false
+        val hasTimingMarker = snapshot.printsElapsedTimeMarker || snapshot.constructsRuntimeException
+        if (snapshot.elapsedTimeProbeCount < 2 || !snapshot.hasLongSub || !hasTimingMarker) return false
         if (!snapshot.touchesConsoleIoBoundary || !snapshot.hasAnyBranch) return false
-        return snapshot.sameOwnerStaticVoidCallCount >= 2 || methodCallsSameOwnerStaticBenchmarkFamily(snapshot.methodCalls)
+        val sameOwnerStaticCalls = snapshot.methodCalls.count { instruction ->
+            instruction.opcode == Opcodes.INVOKESTATIC
+        }
+        return snapshot.sameOwnerStaticVoidCallCount >= 2 ||
+            sameOwnerStaticCalls >= 2 ||
+            methodCallsSameOwnerStaticBenchmarkFamily(snapshot.methodCalls)
     }
 
     private fun isElapsedTimeBenchmarkRoot(name: String, descriptor: String, access: Int): Boolean =
@@ -1547,6 +1507,19 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         rawSameOwnerStaticVoidCallCount = snapshot.sameOwnerStaticVoidCallCount
         rawIsPureComputeCountIncrementHelper = isPureComputeCountIncrementHelper(name, descriptor, access, snapshot)
         rawIsElapsedTimeBenchmarkRoot = isElapsedTimeBenchmarkRoot(name, descriptor, access, snapshot)
+    }
+
+    val isRawElapsedTimeBenchmarkRoot: Boolean
+        get() = rawIsElapsedTimeBenchmarkRoot
+
+    fun elapsedTimeHelperCalls(owner: String, rootName: String): List<Pair<String, String>> {
+        val snapshot = benchmarkSnapshot(capturedInstructions.toList(), rootName, "()V")
+        return snapshot.methodCalls.mapNotNull { call ->
+            if (call.opcode != Opcodes.INVOKESTATIC) return@mapNotNull null
+            if (call.owner != owner) return@mapNotNull null
+            if (call.name == "<init>" || call.name == "<clinit>" || call.name == rootName) return@mapNotNull null
+            call.name to call.desc
+        }
     }
     fun optimizeWithQpCompiler(className: String, methodName: String, descriptor: String, access: Int) {
         val original = capturedInstructions.toList()
