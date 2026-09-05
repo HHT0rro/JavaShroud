@@ -140,6 +140,8 @@ struct AuthorizedPack {
     /// Cold dumps still see ciphertext shards; this window exists only while
     /// the pack is authorized so Calc does not AES-unwrap a shard per page.
     kind_seeds: Vec<((u8, u16), WipedArray32)>,
+    crypto_domain: WipedArray32,
+    layout_digest: WipedArray32,
 }
 
 impl Drop for AuthorizedPack {
@@ -250,11 +252,14 @@ impl SecretPackState {
         }
         // Integrity check: every shard must unwrap and the slot census must
         // match the root record. Plaintext is wiped before this returns.
-        let (slot_home, kind_seeds) = self.verify_pack_integrity(&shards)?;
+        let (slot_home, kind_seeds, crypto_domain, layout_digest) =
+            self.verify_pack_integrity(&shards)?;
         *guard = Some(AuthorizedPack {
             shards,
             slot_home,
             kind_seeds,
+            crypto_domain,
+            layout_digest,
         });
         self.bump_epoch();
         Ok(())
@@ -263,11 +268,21 @@ impl SecretPackState {
     fn verify_pack_integrity(
         &self,
         shards: &[SealedShard],
-    ) -> Result<(Vec<(u8, u16, u16)>, Vec<((u8, u16), WipedArray32)>), RouterError> {
+    ) -> Result<
+        (
+            Vec<(u8, u16, u16)>,
+            Vec<((u8, u16), WipedArray32)>,
+            WipedArray32,
+            WipedArray32,
+        ),
+        RouterError,
+    > {
         let mut slot_home = Vec::new();
         let mut kind_seeds = Vec::new();
         let mut total_slots: Option<usize> = None;
         let mut armed = 0usize;
+        let mut crypto_domain = WipedArray32::new([0u8; KEY_SIZE]);
+        let mut layout_digest = WipedArray32::new([0u8; KEY_SIZE]);
         for (index, shard) in shards.iter().enumerate() {
             let plaintext = unwrap_shard(index, shard)?;
             if shard.kind == SHARD_KIND_ROOT {
@@ -280,6 +295,8 @@ impl SecretPackState {
                     parse_root_record(plaintext.as_slice(), &self.native_identity).map_err(
                         |_| RouterError::InvalidRequest("secret wrap plaintext is invalid"),
                     )?;
+                crypto_domain.copy_from_slice(crypto.as_ref());
+                layout_digest.copy_from_slice(layout.as_ref());
                 drop(crypto);
                 drop(layout);
                 total_slots = Some(total);
@@ -322,7 +339,7 @@ impl SecretPackState {
                 "secret wrap plaintext is invalid",
             ));
         }
-        Ok((slot_home, kind_seeds))
+        Ok((slot_home, kind_seeds, crypto_domain, layout_digest))
     }
 
     /// Wipes the retained ciphertext and advances the revoke epoch so any
@@ -349,7 +366,7 @@ impl SecretPackState {
         F: FnOnce(&[u8; KEY_SIZE], &[u8; KEY_SIZE]) -> Result<T, RouterError>,
     {
         let epoch = self.revocation_epoch();
-        let (crypto, layout, _total) = {
+        let (crypto, layout) = {
             let guard = self
                 .state
                 .lock()
@@ -358,13 +375,10 @@ impl SecretPackState {
                 return Err(RouterError::AuthenticationFailed);
             }
             let pack = guard.as_ref().ok_or(RouterError::AuthenticationFailed)?;
-            let root_index = pack
-                .shards
-                .iter()
-                .position(|shard| shard.kind == SHARD_KIND_ROOT)
-                .ok_or(RouterError::AuthenticationFailed)?;
-            let plaintext = unwrap_shard(root_index, &pack.shards[root_index])?;
-            parse_root_record(plaintext.as_slice(), &self.native_identity)?
+            (
+                WipedArray32::new(*pack.crypto_domain.as_ref()),
+                WipedArray32::new(*pack.layout_digest.as_ref()),
+            )
         };
         if self.revocation_epoch() != epoch {
             return Err(RouterError::AuthenticationFailed);
