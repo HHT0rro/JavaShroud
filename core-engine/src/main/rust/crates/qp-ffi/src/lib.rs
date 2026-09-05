@@ -3462,7 +3462,7 @@ mod jni_bridge {
         let request =
             PageRequest::new(&handle, page_index, &proof, kind)
                 .map_err(|_| BridgeFailure("Qp page request is malformed"))?;
-        let state = lock_state()?;
+        let mut state = lock_state()?;
         state
             .router
             .open(entry_token, &request)
@@ -3489,7 +3489,7 @@ mod jni_bridge {
             PageKind::Vm,
         )
         .map_err(|_| BridgeFailure("Qp page request is malformed"))?;
-        let state = lock_state()?;
+        let mut state = lock_state()?;
         state
             .router
             .open_vm_pages(entry_token, &request)

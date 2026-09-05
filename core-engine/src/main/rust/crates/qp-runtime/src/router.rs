@@ -41,6 +41,10 @@ impl PageKeyMaterial {
         Self(*material)
     }
 
+    fn duplicate(&self) -> Self {
+        Self(self.0)
+    }
+
     fn materialize(&self) -> Result<PageCipherSchedule, RouterError> {
         let mut material = TransientMaterial([0u8; 32]);
         material.0.copy_from_slice(&self.0);
@@ -91,6 +95,10 @@ pub struct TypedPageRouter {
     route_index: HashMap<RouteIndexKey, usize>,
     vm_route_index: HashMap<i64, Vec<usize>>,
     authority: Option<Box<dyn PageKeyAuthority>>,
+    /// Session-only derived page keys. F2 still refuses to store keys on
+    /// AttachedPage; this map is wiped by clear()/revoke so a cold dump of
+    /// an idle router after revoke has no material.
+    derived_keys: HashMap<usize, PageKeyMaterial>,
 }
 
 impl Default for TypedPageRouter {
@@ -191,6 +199,7 @@ impl TypedPageRouter {
             route_index: HashMap::new(),
             vm_route_index: HashMap::new(),
             authority: None,
+            derived_keys: HashMap::new(),
         }
     }
 
@@ -340,7 +349,7 @@ impl TypedPageRouter {
         Ok(())
     }
 
-    pub fn open(&self, entry_token: i64, request: &PageRequest) -> Result<OpenedPage, RouterError> {
+    pub fn open(&mut self, entry_token: i64, request: &PageRequest) -> Result<OpenedPage, RouterError> {
         let page_index = i32::try_from(request.page_index())
             .map_err(|_| RouterError::InvalidRequest("page index does not fit the wire type"))?;
         let encoded_handle = request.handle().as_bytes();
@@ -354,19 +363,21 @@ impl TypedPageRouter {
                 kind: request.kind(),
             });
         };
-        let attached = self
-            .pages
-            .get(page_position)
-            .ok_or(RouterError::AuthenticationFailed)?;
-        if !matches_attached_request(attached, entry_token, encoded_handle, page_index, proof) {
-            return Err(RouterError::AuthenticationFailed);
+        {
+            let attached = self
+                .pages
+                .get(page_position)
+                .ok_or(RouterError::AuthenticationFailed)?;
+            if !matches_attached_request(attached, entry_token, encoded_handle, page_index, proof) {
+                return Err(RouterError::AuthenticationFailed);
+            }
         }
-        let (payload, logical_binding_path) = self.open_attached_page(attached)?;
+        let (payload, logical_binding_path) = self.open_attached_page(page_position)?;
         Ok(OpenedPage {
             kind: request.kind(),
             payload,
             entry_token,
-            logical_binding_path: logical_binding_path.to_string(),
+            logical_binding_path,
         })
     }
 
@@ -378,7 +389,7 @@ impl TypedPageRouter {
     /// request (normally page zero) before the complete contiguous route is
     /// opened.
     pub fn open_vm_pages(
-        &self,
+        &mut self,
         entry_token: i64,
         request: &PageRequest,
     ) -> Result<OpenedPage, RouterError> {
@@ -387,9 +398,11 @@ impl TypedPageRouter {
                 kind: request.kind(),
             });
         }
-        let Some(slots) = self.vm_route_index.get(&entry_token) else {
-            return Err(RouterError::RouteUnavailable { kind: PageKind::Vm });
-        };
+        let slots = self
+            .vm_route_index
+            .get(&entry_token)
+            .cloned()
+            .ok_or(RouterError::RouteUnavailable { kind: PageKind::Vm })?;
         if slots.is_empty() {
             return Err(RouterError::RouteUnavailable { kind: PageKind::Vm });
         }
@@ -410,7 +423,7 @@ impl TypedPageRouter {
         }
 
         let mut total_encoded = 0usize;
-        let mut logical_binding_path: Option<&str> = None;
+        let mut logical_binding_path: Option<String> = None;
         for (expected_index, &slot) in slots.iter().enumerate() {
             let page = self
                 .pages
@@ -419,9 +432,9 @@ impl TypedPageRouter {
             if page.envelope.page_index() != expected_index as i32 {
                 return Err(RouterError::AuthenticationFailed);
             }
-            let current_path = page.descriptor.route().logical_binding_path();
-            if let Some(expected_path) = logical_binding_path {
-                if expected_path != current_path {
+            let current_path = page.descriptor.route().logical_binding_path().to_string();
+            if let Some(expected_path) = logical_binding_path.as_ref() {
+                if expected_path != &current_path {
                     return Err(RouterError::AuthenticationFailed);
                 }
             } else {
@@ -432,15 +445,10 @@ impl TypedPageRouter {
                 .ok_or(RouterError::AuthenticationFailed)?;
         }
         let logical_binding_path = logical_binding_path
-            .ok_or(RouterError::AuthenticationFailed)?
-            .to_string();
+            .ok_or(RouterError::AuthenticationFailed)?;
 
         if slots.len() == 1 {
-            let page = self
-                .pages
-                .get(slots[0])
-                .ok_or(RouterError::AuthenticationFailed)?;
-            let (payload, _) = self.open_attached_page(page)?;
+            let (payload, _) = self.open_attached_page(slots[0])?;
             return Ok(OpenedPage {
                 kind: PageKind::Vm,
                 payload,
@@ -450,12 +458,8 @@ impl TypedPageRouter {
         }
 
         let mut payload = SensitiveBytes::new(Vec::with_capacity(total_encoded));
-        for &slot in slots {
-            let page = self
-                .pages
-                .get(slot)
-                .ok_or(RouterError::AuthenticationFailed)?;
-            let mut part = self.open_attached_page(page)?.0;
+        for slot in slots {
+            let mut part = self.open_attached_page(slot)?.0;
             payload.append(&mut part);
         }
         Ok(OpenedPage {
@@ -466,18 +470,30 @@ impl TypedPageRouter {
         })
     }
 
-    fn open_attached_page<'a>(
-        &self,
-        attached: &'a AttachedPage,
-    ) -> Result<(SensitiveBytes, &'a str), RouterError> {
-        let key_material =
-            self.derive_attached_key_material(&attached.descriptor, &attached.encoded)?;
+    fn open_attached_page(
+        &mut self,
+        page_position: usize,
+    ) -> Result<(SensitiveBytes, String), RouterError> {
+        let key_material = if let Some(material) = self.derived_keys.get(&page_position) {
+            material.duplicate()
+        } else {
+            let attached = self
+                .pages
+                .get(page_position)
+                .ok_or(RouterError::AuthenticationFailed)?;
+            let derived = self.derive_attached_key_material(&attached.descriptor, &attached.encoded)?;
+            derived
+        };
+        if !self.derived_keys.contains_key(&page_position) {
+            self.derived_keys
+                .insert(page_position, key_material.duplicate());
+        }
+        let attached = self
+            .pages
+            .get(page_position)
+            .ok_or(RouterError::AuthenticationFailed)?;
         let schedule = key_material.materialize()?;
         drop(key_material);
-        // The catalog owns `attached.encoded` for the lifetime of the router.
-        // Borrow it for authentication instead of cloning every ciphertext on
-        // each hot-path page open; only the transient schedule and plaintext
-        // are owned by the lease.
         let mut lease = BorrowedPageLease::open(attached.encoded.as_slice(), schedule);
         if let Err(error) = lease.authenticate_with_descriptor(&attached.descriptor) {
             return Err(RouterError::Wire(error.to_string()));
@@ -487,7 +503,7 @@ impl TypedPageRouter {
             .map_err(|_| RouterError::AuthenticationFailed)?;
         Ok((
             SensitiveBytes::new(payload),
-            attached.descriptor.route().logical_binding_path(),
+            attached.descriptor.route().logical_binding_path().to_string(),
         ))
     }
 
@@ -575,6 +591,7 @@ impl TypedPageRouter {
         self.route_index.clear();
         self.vm_route_index.clear();
         self.authority = None;
+        self.derived_keys.clear();
     }
 }
 
@@ -863,7 +880,7 @@ mod tests {
 
     #[test]
     fn empty_router_fails_closed_without_a_java_fallback() {
-        let router = TypedPageRouter::new();
+        let mut router = TypedPageRouter::new();
         let request = PageRequest::new(
             &[0x11; PAGE_HANDLE_SIZE],
             3,
@@ -964,7 +981,7 @@ mod tests {
 
     #[test]
     fn current_schedule_round_trips_an_authenticated_page() {
-        let installed = installed_router();
+        let mut installed = installed_router();
         let request = string_request(&installed, &installed.proof_bytes);
         let opened = installed.router.open(0, &request).expect("open current page");
         opened.with_payload(|bytes| assert_eq!(bytes, b"hello-native"));
@@ -972,7 +989,7 @@ mod tests {
 
     #[test]
     fn descriptor_bound_open_rejects_wrong_raw_call_site_proof() {
-        let installed = installed_router();
+        let mut installed = installed_router();
         let mut wrong = installed.proof_bytes.clone();
         wrong[0] ^= 0x5a;
         let request = string_request(&installed, &wrong);
