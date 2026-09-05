@@ -70,6 +70,7 @@ private val SEALED_RUNTIME_HELPERS = listOf(
     "$QP_HELPER_PACKAGE/QpBridge",
     "$QP_HELPER_PACKAGE/QpBridge${"$"}QpNativeLibrary",
     "$QP_HELPER_PACKAGE/QpBridge${"$"}CatalogBundle",
+    "$QP_HELPER_PACKAGE/QpBridge${"$"}CatalogIndexRecord",
 )
 
 /**
