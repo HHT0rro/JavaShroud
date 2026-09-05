@@ -2831,7 +2831,7 @@ mod jni_bridge {
         Ok(())
     }
 
-    fn detect_debugger() -> Result<bool, BridgeFailure> {
+    fn detect_debugger(scan_modules: bool) -> Result<bool, BridgeFailure> {
         #[cfg(target_os = "linux")]
         {
             let status = std::fs::read_to_string("/proc/self/status")
@@ -2848,7 +2848,7 @@ mod jni_bridge {
             if tracer_pid != 0 && tracer_pid != 1 {
                 return Ok(true);
             }
-            if linux_hostile_mapping_present()? {
+            if scan_modules && linux_hostile_mapping_present()? {
                 return Ok(true);
             }
 
@@ -2877,7 +2877,10 @@ mod jni_bridge {
 
         #[cfg(target_os = "windows")]
         {
-            if windows_debugger_present()? || hostile_module_present()? {
+            if windows_debugger_present()? {
+                return Ok(true);
+            }
+            if scan_modules && hostile_module_present()? {
                 return Ok(true);
             }
             Ok(jvmti_agent_attached()?)
@@ -3255,7 +3258,7 @@ mod jni_bridge {
             return Ok(());
         }
         let detected = match surface {
-            DefenseSurface::OsAntiDebug => detect_debugger()?,
+            DefenseSurface::OsAntiDebug => detect_debugger(true)?,
             DefenseSurface::OsAntiVm => detect_virtual_machine()?,
             DefenseSurface::AbiProbe => false,
         };
@@ -3287,7 +3290,7 @@ mod jni_bridge {
             return Ok(());
         }
         let detected = match surface {
-            DefenseSurface::OsAntiDebug => detect_debugger()?,
+            DefenseSurface::OsAntiDebug => detect_debugger(true)?,
             DefenseSurface::OsAntiVm => detect_virtual_machine()?,
             DefenseSurface::AbiProbe => false,
         };
@@ -3692,8 +3695,25 @@ mod jni_bridge {
     /// Periodic and on-dispatch integrity gate. A debugger, hostile module,
     /// or JVMTI/JDWP surface revokes the pack so a subsequent dump cannot
     /// harvest an authorized session.
+    fn watchdog_module_scan_due() -> bool {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::{SystemTime, UNIX_EPOCH};
+        static LAST_SCAN_MS: AtomicU64 = AtomicU64::new(0);
+        const SCAN_INTERVAL_MS: u64 = 50;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+        let last = LAST_SCAN_MS.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < SCAN_INTERVAL_MS {
+            return false;
+        }
+        LAST_SCAN_MS.store(now, Ordering::Relaxed);
+        true
+    }
+
     fn enforce_runtime_watchdog() -> Result<(), BridgeFailure> {
-        match detect_debugger() {
+        match detect_debugger(watchdog_module_scan_due()) {
             Ok(true) => {
                 revoke_global_secret_pack();
                 Err(BridgeFailure("Qp runtime integrity probe failed"))
