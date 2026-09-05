@@ -383,10 +383,11 @@ mod jni_bridge {
         /// Revokes the secret pack and advances its epoch. Used by defense
         /// violation paths and state resets. Router pages stay until
         /// `reset_runtime`; later page-key callbacks fail closed on the new epoch.
-        fn revoke_secret_pack(&self) {
+        fn revoke_secret_pack(&mut self) {
             if let Some(pack) = self.secret_pack.as_ref() {
                 pack.revoke();
             }
+            self.router.clear();
         }
 
         fn install_token_binding(
@@ -597,7 +598,7 @@ mod jni_bridge {
     /// Defense violations wipe the recombined secret pack; later page opens
     /// fail closed until a fresh bridge session rebuilds it.
     fn revoke_global_secret_pack() {
-        if let Ok(state) = lock_state() {
+        if let Ok(mut state) = lock_state() {
             state.revoke_secret_pack();
         }
     }

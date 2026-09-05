@@ -16,7 +16,6 @@ pub struct AttachedPage {
     /// The descriptor remains artifact-bound and immutable after installation;
     /// its child owners wipe evaluator/proof material on drop.
     descriptor: qp_page::PageDescriptor,
-    key_material: PageKeyMaterial,
 }
 
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
@@ -32,9 +31,8 @@ impl Drop for AttachedPage {
     }
 }
 
-/// Transient page-key material derived once per installed page. It is wiped
-/// when the attached page leaves the router and materialized into a short-
-/// lived cipher schedule on every authenticated open.
+/// Transient page-key material derived for one open. It is wiped on drop and
+/// never stored on an attached page.
 pub struct PageKeyMaterial([u8; 32]);
 
 impl PageKeyMaterial {
@@ -300,14 +298,10 @@ impl TypedPageRouter {
         if !envelope.matches_descriptor(&parsed_descriptor) {
             return Err(RouterError::AuthenticationFailed);
         }
-        let key_material = self.derive_attached_key_material(&parsed_descriptor, &encoded)?;
-        self.install_descriptor_bound_parsed(
-            envelope,
-            encoded,
-            parsed_descriptor,
-            key_material,
-            key,
-        )
+        // Prove the authority can derive a committed page key, then drop it.
+        // The material is not retained on the attached page.
+        drop(self.derive_attached_key_material(&parsed_descriptor, &encoded)?);
+        self.install_descriptor_bound_parsed(envelope, encoded, parsed_descriptor, key)
     }
 
     fn install_descriptor_bound_parsed(
@@ -315,7 +309,6 @@ impl TypedPageRouter {
         envelope: PageEnvelope,
         encoded: Vec<u8>,
         descriptor: qp_page::PageDescriptor,
-        key_material: PageKeyMaterial,
         key: RouteIndexKey,
     ) -> Result<(), RouterError> {
         if self.pages.len() >= MAX_ATTACHED_PAGES {
@@ -332,7 +325,6 @@ impl TypedPageRouter {
             envelope,
             encoded,
             descriptor,
-            key_material,
         });
         self.route_index.insert(key, page_position);
         if is_vm {
@@ -483,7 +475,10 @@ impl TypedPageRouter {
         &self,
         attached: &'a AttachedPage,
     ) -> Result<(Vec<u8>, &'a str), RouterError> {
-        let schedule = attached.key_material.materialize()?;
+        let key_material =
+            self.derive_attached_key_material(&attached.descriptor, &attached.encoded)?;
+        let schedule = key_material.materialize()?;
+        drop(key_material);
         // The catalog owns `attached.encoded` for the lifetime of the router.
         // Borrow it for authentication instead of cloning every ciphertext on
         // each hot-path page open; only the transient schedule and plaintext
@@ -536,14 +531,8 @@ impl TypedPageRouter {
                 kind_id: envelope.kind().id(),
                 encoded_handle,
             };
-            let key_material = self.derive_attached_key_material(&descriptor, &encoded)?;
-            self.install_descriptor_bound_parsed(
-                envelope,
-                encoded,
-                descriptor,
-                key_material,
-                key,
-            )?;
+            drop(self.derive_attached_key_material(&descriptor, &encoded)?);
+            self.install_descriptor_bound_parsed(envelope, encoded, descriptor, key)?;
             installed = installed.checked_add(1).ok_or(RouterError::TooManyPages)?;
         }
         self.seal_vm_routes()?;
@@ -587,6 +576,7 @@ impl TypedPageRouter {
         self.pages.clear();
         self.route_index.clear();
         self.vm_route_index.clear();
+        self.authority = None;
     }
 }
 
@@ -947,6 +937,31 @@ mod tests {
     fn descriptor_bound_install_retains_only_authenticated_descriptor_bytes() {
         let installed = installed_router();
         assert_eq!(installed.router.len(), 1);
+        assert!(
+            installed.router.pages.iter().all(|page| {
+                // Attached pages keep ciphertext and the authenticated descriptor
+                // only; page keys are re-derived on open.
+                !page.encoded.is_empty()
+            })
+        );
+    }
+
+    #[test]
+    fn clear_unbinds_authority_so_later_opens_fail_closed() {
+        let mut installed = installed_router();
+        let request = string_request(&installed, &installed.proof_bytes);
+        installed.router.open(0, &request).expect("open before clear");
+        installed.router.clear();
+        assert!(installed.router.is_empty());
+        let fixture = attached_string_page();
+        assert_eq!(
+            installed.router.install_descriptor_bound(
+                fixture.envelope,
+                fixture.encoded,
+                fixture.descriptor_bytes
+            ),
+            Err(RouterError::AuthenticationFailed)
+        );
     }
 
     #[test]
