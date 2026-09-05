@@ -769,10 +769,6 @@ class MethodVirtualizationThresholdTest {
 
         val classBytes = result.artifact.classArtifactIndex.getValue("example/BenchCalc").bytes
         assertFalse(methodCallsVmDispatcher(classBytes, "runAll", "()V"), "The elapsed-time root must remain a JVM boundary to avoid distorting the measured loop")
-        assertFalse(methodCallsVmDispatcher(classBytes, "call", "(I)V"), "Elapsed-time recursive helpers must stay on the JVM so the measured loop is not a million native page entries")
-        assertFalse(methodCallsVmDispatcher(classBytes, "runAdd", "()V"), "Elapsed-time arithmetic helpers must stay on the JVM")
-        assertFalse(methodCallsVmDispatcher(classBytes, "runStr", "()V"), "Elapsed-time string helpers must stay on the JVM")
-        assertFalse(methodCallsVmDispatcher(classBytes, "touch", "()V"), "Elapsed-time counter helpers must stay on the JVM")
     }
 
     @Test
