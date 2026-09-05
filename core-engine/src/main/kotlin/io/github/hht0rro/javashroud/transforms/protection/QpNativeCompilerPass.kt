@@ -551,6 +551,16 @@ object QpNativeCompilerPass {
                 for (shard in 0 until shardCount) {
                 }
                 maskedRows.forEach { Arrays.fill(it, 0) }
+                // Commitment-chain the VM dialect corpus the same way: the
+                // .jsmd section only ever holds `corpus ^ R ^ stream(C)`, so
+                // the static bytes alone never recover the opcode table.
+                if (io.github.hht0rro.javashroud.transforms.protection.qp.NativeImageMeasurement
+                    .locateSectionRange(bytes, ".jsmd") != null &&
+                    !io.github.hht0rro.javashroud.transforms.protection.qp.NativeImageMeasurement
+                        .patchDialectMask(bytes, checkNotNull(commitment))
+                ) {
+                    error("Qp dialect mask section could not be commitment-chained")
+                }
                 val cm1 = task.secretPack.cmKeyAt(1)
                 Arrays.fill(maskRMaster, 0)
             }
@@ -1036,19 +1046,45 @@ object QpNativeCompilerPass {
         append("] = [")
         append(bytesLiteral(mask))
         append("];\n")
-        append("pub const VM_DIALECT_SEMANTIC_MASKED: [u8; ")
+        append("#[used]\n")
+        append("#[link_section = \".jsmd\"]\n")
+        append("pub static VM_DIALECT_SEMANTIC_MASKED: [u8; ")
         append(masked.size)
         append("] = [")
         append(bytesLiteral(masked))
         append("];\n")
         append(
-            "pub fn vm_dialect_semantic_opcodes() -> Vec<u16> {\n" +
-                "    let mut corpus = Vec::with_capacity(VM_DIALECT_SEMANTIC_MASKED.len() / 2);\n" +
+            // The static bytes only ever hold `corpus ^ R`; the runtime mixes
+            // the volatile image commitment through a counter-mode SHA-256
+            // stream, so XOR-adjacent arrays never recover the dialect table
+            // offline (the commitment itself is commitment-chained).
+            "fn qp_dialect_mask_stream(commitment: &[u8; 32], length: usize) -> Vec<u8> {\n" +
+                "    const INFO: &[u8] = b\"javashroud-qp-dialect-mask-v6\";\n" +
+                "    let mut out = Vec::with_capacity(length);\n" +
+                "    let mut counter: u32 = 0;\n" +
+                "    while out.len() < length {\n" +
+                "        let mut input = [0u8; 32 + 4 + INFO.len()];\n" +
+                "        input[..32].copy_from_slice(commitment);\n" +
+                "        input[32..36].copy_from_slice(&counter.to_be_bytes());\n" +
+                "        input[36..].copy_from_slice(INFO);\n" +
+                "        let digest = qp_crypto::sha256(&input).into_bytes();\n" +
+                "        let take = core::cmp::min(32, length - out.len());\n" +
+                "        out.extend_from_slice(&digest[..take]);\n" +
+                "        counter = counter.wrapping_add(1);\n" +
+                "    }\n" +
+                "    out\n}\n" +
+                "pub fn vm_dialect_semantic_opcodes() -> Vec<u16> {\n" +
+                "    let masked = &VM_DIALECT_SEMANTIC_MASKED;\n" +
+                "    let mask = &VM_DIALECT_SEMANTIC_MASK;\n" +
+                "    let commitment = image_measurement_commitment();\n" +
+                "    let mut stream = qp_dialect_mask_stream(&commitment, masked.len());\n" +
+                "    let mut corpus = Vec::with_capacity(masked.len() / 2);\n" +
                 "    for index in 0..corpus.capacity() {\n" +
-                "        let high = VM_DIALECT_SEMANTIC_MASKED[index * 2] ^ VM_DIALECT_SEMANTIC_MASK[index * 2];\n" +
-                "        let low = VM_DIALECT_SEMANTIC_MASKED[index * 2 + 1] ^ VM_DIALECT_SEMANTIC_MASK[index * 2 + 1];\n" +
+                "        let high = masked[index * 2] ^ mask[index * 2] ^ stream[index * 2];\n" +
+                "        let low = masked[index * 2 + 1] ^ mask[index * 2 + 1] ^ stream[index * 2 + 1];\n" +
                 "        corpus.push((u16::from(high) << 8) | u16::from(low));\n" +
                 "    }\n" +
+                "    stream.fill(0);\n" +
                 "    corpus\n}\n",
         )
     }

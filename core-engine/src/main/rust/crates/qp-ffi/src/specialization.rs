@@ -86,7 +86,9 @@ pub fn qp_sp_reconstruct_shard_key(shard: usize) -> [u8; 32] {
     key
 }
 
-/// XOR mask over the serialized per-build VM semantic opcode corpus.
+/// Random per-build half of the VM dialect mask; the other half is the
+/// counter-mode SHA-256 expansion of the volatile image commitment, so the
+/// adjacent static bytes never reconstruct the corpus offline.
 pub const VM_DIALECT_SEMANTIC_MASK: [u8; 0] = [];
 /// Masked serialization of the VM semantic opcode corpus (big-endian pairs).
 pub const VM_DIALECT_SEMANTIC_MASKED: [u8; 0] = [];

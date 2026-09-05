@@ -45,12 +45,16 @@ pub(crate) fn measure_bytes(bytes: &mut [u8]) -> Result<[u8; DIGEST_SIZE], Route
     Ok(*full.as_bytes())
 }
 
-/// Zeroes the `.jsmk` masked shard-key region (when present) so post-measure
-/// patching of that region cannot change the image digest.
+/// Zeroes the post-measure-patched regions (`.jsmk` shard-key mask rows and
+/// the `.jsmd` dialect-corpus mask) so patching them cannot change the image
+/// digest.
 fn zero_shard_mask_region(bytes: &mut [u8]) -> Result<(), RouterError> {
-    // A missing or unrecognizable .jsmk region simply means there is nothing
+    // A missing or unrecognizable region simply means there is nothing
     // to normalize; both build and runtime skip identically.
     if let Ok(Some((offset, size))) = locate_named_section_range(bytes, b".jsmk") {
+        bytes[offset..offset + size].fill(0);
+    }
+    if let Ok(Some((offset, size))) = locate_named_section_range(bytes, b".jsmd") {
         bytes[offset..offset + size].fill(0);
     }
     Ok(())
