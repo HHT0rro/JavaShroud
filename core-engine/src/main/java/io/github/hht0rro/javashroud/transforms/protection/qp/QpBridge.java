@@ -1233,40 +1233,41 @@ public final class QpBridge {
         int framedSize = 4;
         try (InputStream in = indexStream) {
             byte[] indexBytes = readAllBounded(in, 256 * 1024);
-            String index = new String(indexBytes, StandardCharsets.US_ASCII);
+            CatalogIndexRecord[] records = decodeCatalogIndex(indexBytes);
             Arrays.fill(indexBytes, (byte) 0);
             byte[] pack = null;
-            String[] entries = index.split("\\r?\\n", -1);
-            for (String raw : entries) {
-                String line = raw.trim();
-                if (line.length() == 0) continue;
-                if (line.startsWith("pack|")) {
-                    int second = line.indexOf('|', 5);
-                    if (second < 0) throw new SecurityException("Qp catalog pack entry is invalid");
-                    String packPlatform = line.substring(5, second);
-                    String packRelative = line.substring(second + 1);
+            for (int r = 0; r < records.length; r++) {
+                CatalogIndexRecord record = records[r];
+                if (record.kind == CATALOG_INDEX_KIND_PACK) {
+                    String packPlatform = catalogIndexPlatformKey(record.platform);
+                    if (packPlatform == null) throw new SecurityException("Qp catalog pack entry is invalid");
+                    String packRelative = QP_CATALOG_RESOURCE_ROOT + record.token;
                     validateCatalogRelativePath(packRelative);
                     if (pack != null) throw new SecurityException("Qp catalog pack is duplicated");
                     if (!packPlatform.equals(loadedNativePlatformKey)) continue;
                     try (InputStream source = resourceStream(packRelative)) {
-                        if (source == null) throw new SecurityException("Qp catalog pack is missing: " + packRelative);
+                        if (source == null) throw new SecurityException("Qp catalog pack is missing");
                         pack = readAllBounded(source, 16 * 1024 * 1024);
                     }
                     continue;
                 }
-                String relative = line.trim();
-                if (relative.length() == 0) continue;
-                validateCatalogRelativePath(relative);
-                if (relative.indexOf('/') < 0) {
+                if (record.kind == CATALOG_INDEX_KIND_DIRECTORY) {
                     if (directory != null) throw new SecurityException("Qp catalog directory is duplicated");
-                    try (InputStream source = resourceStream(QP_CATALOG_RESOURCE_ROOT + relative)) {
+                    String relative = QP_CATALOG_RESOURCE_ROOT + record.token;
+                    validateCatalogRelativePath(relative);
+                    try (InputStream source = resourceStream(relative)) {
                         if (source == null) throw new SecurityException("Qp catalog directory is missing");
                         directory = readAllBounded(source, 64 * 1024 * 1024);
                     }
                     continue;
                 }
+                if (record.kind != CATALOG_INDEX_KIND_BUNDLE) {
+                    throw new SecurityException("Qp catalog index record is invalid");
+                }
+                String relative = QP_CATALOG_RESOURCE_ROOT + record.token;
+                validateCatalogRelativePath(relative);
                 try (InputStream source = resourceStream(relative)) {
-                    if (source == null) throw new SecurityException("Qp catalog page is missing: " + relative);
+                    if (source == null) throw new SecurityException("Qp catalog page is missing");
                     if (count == paths.length) {
                         paths = java.util.Arrays.copyOf(paths, paths.length * 2);
                         blobs = java.util.Arrays.copyOf(blobs, blobs.length * 2);
@@ -1307,6 +1308,60 @@ public final class QpBridge {
             if (directory != null) Arrays.fill(directory, (byte) 0);
             throw new SecurityException("Qp current catalog is unreadable", error);
         }
+    }
+
+
+    private static final byte CATALOG_INDEX_MAGIC = 0x6C;
+    private static final byte CATALOG_INDEX_VERSION = 1;
+    private static final int CATALOG_INDEX_RECORD_SIZE = 40;
+    private static final byte CATALOG_INDEX_KIND_BUNDLE = 1;
+    private static final byte CATALOG_INDEX_KIND_DIRECTORY = 2;
+    private static final byte CATALOG_INDEX_KIND_PACK = 3;
+    private static final byte CATALOG_INDEX_PLATFORM_WINDOWS = 1;
+    private static final byte CATALOG_INDEX_PLATFORM_LINUX = 2;
+
+    private static final class CatalogIndexRecord {
+        private final byte kind;
+        private final byte platform;
+        private final String token;
+        private CatalogIndexRecord(byte kind, byte platform, String token) {
+            this.kind = kind;
+            this.platform = platform;
+            this.token = token;
+        }
+    }
+
+    private static String catalogIndexPlatformKey(byte platform) {
+        if (platform == CATALOG_INDEX_PLATFORM_WINDOWS) return "windows-x64";
+        if (platform == CATALOG_INDEX_PLATFORM_LINUX) return "linux-x64";
+        return null;
+    }
+
+    private static CatalogIndexRecord[] decodeCatalogIndex(byte[] bytes) {
+        if (bytes == null || bytes.length < 4 || bytes[0] != CATALOG_INDEX_MAGIC || bytes[1] != CATALOG_INDEX_VERSION) {
+            throw new SecurityException("Qp catalog index shell is invalid");
+        }
+        int count = ((bytes[2] & 0xFF) << 8) | (bytes[3] & 0xFF);
+        if (count <= 0 || bytes.length != 4 + count * CATALOG_INDEX_RECORD_SIZE) {
+            throw new SecurityException("Qp catalog index length is invalid");
+        }
+        CatalogIndexRecord[] records = new CatalogIndexRecord[count];
+        for (int index = 0; index < count; index++) {
+            int offset = 4 + index * CATALOG_INDEX_RECORD_SIZE;
+            if (bytes[offset + 2] != 0 || bytes[offset + 3] != 0) {
+                throw new SecurityException("Qp catalog index record is reserved");
+            }
+            int end = offset + 4;
+            while (end < offset + CATALOG_INDEX_RECORD_SIZE && bytes[end] != 0) {
+                end++;
+            }
+            String token = new String(bytes, offset + 4, end - (offset + 4), StandardCharsets.US_ASCII);
+            if (token.length() == 0 || token.indexOf('/') >= 0 || token.indexOf('\\') >= 0) {
+                throw new SecurityException("Qp catalog index token is invalid");
+            }
+            records[index] = new CatalogIndexRecord(bytes[offset], bytes[offset + 1], token);
+        }
+        return records;
     }
 
     private static int writeBe32(byte[] dest, int offset, int value) {
@@ -1502,21 +1557,20 @@ public final class QpBridge {
         }
         try (InputStream in = indexStream) {
             byte[] indexBytes = readAllBounded(in, 256 * 1024);
-            String index = new String(indexBytes, StandardCharsets.US_ASCII);
+            CatalogIndexRecord[] records = decodeCatalogIndex(indexBytes);
             Arrays.fill(indexBytes, (byte) 0);
             String platformKey = loadedNativePlatformKey == null ? "" : loadedNativePlatformKey;
-            for (String raw : index.split("\r?\n", -1)) {
-                String line = raw.trim();
-                if (!line.startsWith("pack|")) continue;
-                int second = line.indexOf('|', 5);
-                if (second < 0) throw new SecurityException("Qp catalog pack entry is invalid");
-                String packPlatform = line.substring(5, second);
-                String packRelative = line.substring(second + 1);
+            for (int r = 0; r < records.length; r++) {
+                CatalogIndexRecord record = records[r];
+                if (record.kind != CATALOG_INDEX_KIND_PACK) continue;
+                String packPlatform = catalogIndexPlatformKey(record.platform);
+                if (packPlatform == null) throw new SecurityException("Qp catalog pack entry is invalid");
+                String packRelative = QP_CATALOG_RESOURCE_ROOT + record.token;
                 validateCatalogRelativePath(packRelative);
                 if (!packPlatform.equals(platformKey)) continue;
                 try (InputStream source = resourceStream(packRelative)) {
                     if (source == null) {
-                        throw new SecurityException("Qp sealed pack resource is missing: " + packRelative);
+                        throw new SecurityException("Qp sealed pack resource is missing");
                     }
                     return readAllBounded(source, 16 * 1024 * 1024);
                 }

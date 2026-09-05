@@ -94,7 +94,7 @@ internal fun attachQpCatalogEmitter(
             extras += JarEntryData(bundlePath, packed.toByteArray())
             val context = currentQpBuildContextOrNull()
             val packPlatforms = context?.nativeSealedPackPlatforms().orEmpty().sorted()
-            val packLines = ArrayList<String>(packPlatforms.size)
+            val records = ArrayList<ByteArray>(packPlatforms.size)
             for (platform in packPlatforms) {
                 val blob = context!!.copyNativeSealedPackBlob(platform)
                 val packFile = "pk" + MessageDigest.getInstance("SHA-256")
@@ -102,15 +102,30 @@ internal fun attachQpCatalogEmitter(
                     .joinToString("") { "%02x".format(it) }
                     .take(12)
                 extras += JarEntryData(catalogPrefix + packFile, blob.copyOf())
-                packLines += "pack|$platform|$catalogPrefix$packFile"
+                records += catalogIndexRecord(
+                    kind = CATALOG_INDEX_KIND_PACK,
+                    platform = catalogIndexPlatform(platform),
+                    token = packFile,
+                )
                 Arrays.fill(blob, 0)
             }
-            val index = buildString {
-                append(bundlePath).append('\n')
-                append(directoryFile).append('\n')
-                packLines.forEach { line -> append(line).append('\n') }
-            }
-            extras += JarEntryData(catalogIndex, index.toByteArray(Charsets.US_ASCII))
+            extras += JarEntryData(
+                catalogIndex,
+                encodeCatalogIndex(
+                    listOf(
+                        catalogIndexRecord(
+                            kind = CATALOG_INDEX_KIND_BUNDLE,
+                            platform = CATALOG_INDEX_PLATFORM_NONE,
+                            token = bundlePath.removePrefix(catalogPrefix),
+                        ),
+                        catalogIndexRecord(
+                            kind = CATALOG_INDEX_KIND_DIRECTORY,
+                            platform = CATALOG_INDEX_PLATFORM_NONE,
+                            token = directoryFile,
+                        ),
+                    ) + records,
+                ),
+            )
             droppedContainers += originalContainers
             pages.forEach { it.wipe() }
         } finally {
@@ -130,4 +145,86 @@ internal fun attachQpCatalogEmitter(
             resourceCount = jarEntries.size,
         ),
     )
+}
+
+internal const val CATALOG_INDEX_MAGIC: Byte = 0x6C
+internal const val CATALOG_INDEX_VERSION: Byte = 1
+internal const val CATALOG_INDEX_RECORD_SIZE: Int = 40
+internal const val CATALOG_INDEX_KIND_BUNDLE: Byte = 1
+internal const val CATALOG_INDEX_KIND_DIRECTORY: Byte = 2
+internal const val CATALOG_INDEX_KIND_PACK: Byte = 3
+internal const val CATALOG_INDEX_PLATFORM_NONE: Byte = 0
+internal const val CATALOG_INDEX_PLATFORM_WINDOWS: Byte = 1
+internal const val CATALOG_INDEX_PLATFORM_LINUX: Byte = 2
+
+internal data class CatalogIndexRecord(
+    val kind: Byte,
+    val platform: Byte,
+    val token: String,
+)
+
+internal fun catalogIndexPlatform(platform: String): Byte = when (platform) {
+    "windows-x64" -> CATALOG_INDEX_PLATFORM_WINDOWS
+    "linux-x64" -> CATALOG_INDEX_PLATFORM_LINUX
+    else -> error("Qp catalog pack platform is unsupported: $platform")
+}
+
+internal fun catalogIndexPlatformKey(platform: Byte): String? = when (platform) {
+    CATALOG_INDEX_PLATFORM_NONE -> null
+    CATALOG_INDEX_PLATFORM_WINDOWS -> "windows-x64"
+    CATALOG_INDEX_PLATFORM_LINUX -> "linux-x64"
+    else -> null
+}
+
+internal fun catalogIndexRecord(kind: Byte, platform: Byte, token: String): ByteArray {
+    require(token.isNotEmpty() && token.length <= 36 && '/' !in token && '\\' !in token) {
+        "Qp catalog index token is invalid"
+    }
+    val record = ByteArray(CATALOG_INDEX_RECORD_SIZE)
+    record[0] = kind
+    record[1] = platform
+    val encoded = token.toByteArray(Charsets.US_ASCII)
+    encoded.copyInto(record, 4)
+    Arrays.fill(encoded, 0)
+    return record
+}
+
+internal fun encodeCatalogIndex(records: List<ByteArray>): ByteArray {
+    require(records.size in 1..0xFFFF)
+    val out = ByteArray(4 + records.size * CATALOG_INDEX_RECORD_SIZE)
+    out[0] = CATALOG_INDEX_MAGIC
+    out[1] = CATALOG_INDEX_VERSION
+    out[2] = ((records.size ushr 8) and 0xFF).toByte()
+    out[3] = (records.size and 0xFF).toByte()
+    records.forEachIndexed { index, record ->
+        require(record.size == CATALOG_INDEX_RECORD_SIZE)
+        record.copyInto(out, 4 + index * CATALOG_INDEX_RECORD_SIZE)
+    }
+    return out
+}
+
+internal fun decodeCatalogIndex(bytes: ByteArray): List<CatalogIndexRecord> {
+    if (bytes.size < 4 || bytes[0] != CATALOG_INDEX_MAGIC || bytes[1] != CATALOG_INDEX_VERSION) {
+        error("Qp catalog index shell is invalid")
+    }
+    val count = ((bytes[2].toInt() and 0xFF) shl 8) or (bytes[3].toInt() and 0xFF)
+    if (count <= 0 || bytes.size != 4 + count * CATALOG_INDEX_RECORD_SIZE) {
+        error("Qp catalog index length is invalid")
+    }
+    return (0 until count).map { index ->
+        val offset = 4 + index * CATALOG_INDEX_RECORD_SIZE
+        val kind = bytes[offset]
+        val platform = bytes[offset + 1]
+        if (bytes[offset + 2].toInt() != 0 || bytes[offset + 3].toInt() != 0) {
+            error("Qp catalog index record is reserved")
+        }
+        val tokenBytes = bytes.copyOfRange(offset + 4, offset + CATALOG_INDEX_RECORD_SIZE)
+        val end = tokenBytes.indexOfFirst { it == 0.toByte() }.let { if (it < 0) tokenBytes.size else it }
+        val token = String(tokenBytes, 0, end, Charsets.US_ASCII)
+        Arrays.fill(tokenBytes, 0)
+        if (token.isEmpty() || '/' in token || '\\' in token) {
+            error("Qp catalog index token is invalid")
+        }
+        CatalogIndexRecord(kind, platform, token)
+    }
 }

@@ -123,6 +123,8 @@ class QpRuntimeBridgeApiTest {
         assertTrue(source.contains("QP_CATALOG_INDEX_RESOURCE = \"META-INF/jsrt/catalog.index\""), "current readiness must locate the authenticated page catalog index")
         assertTrue(source.contains("installQpCatalog"), "current readiness must install the page catalog after native load")
         assertFalse(source.contains("directory.jsr1"), "catalog loader must not hard-code the retired directory file name")
+        assertFalse(source.contains("pack|"), "catalog loader must not parse a readable pack path map")
+        assertTrue(source.contains("decodeCatalogIndex"), "current catalog index must use opaque records")
         assertTrue(source.contains("readQpCatalogBundle"), "current load must read the catalog bundle from original page containers")
         assertTrue(readiness.contains("System.load("), "current readiness must load only the authenticated bundled artifact")
         assertTrue(readiness.contains("initializeNativeKernel("), "current readiness must prove nativeInit registration")

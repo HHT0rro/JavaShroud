@@ -210,6 +210,7 @@ object EmbeddedHelperDeployment {
         val allowedNested = setOf(
             "$owner${"$"}QpNativeLibrary",
             "$owner${"$"}CatalogBundle",
+            "$owner${"$"}CatalogIndexRecord",
         )
         val allowedFields = setOf(
             "LOAD_FAILED",
@@ -255,6 +256,16 @@ object EmbeddedHelperDeployment {
             "QP_NATIVE_MAX_LIBRARY_BYTES",
             "QP_NATIVE_SHA256_LENGTH",
             "QP_NATIVE_BINDINGS_MAX_BYTES",
+            "QP_CATALOG_INDEX_RESOURCE",
+            "QP_CATALOG_RESOURCE_ROOT",
+            "CATALOG_INDEX_MAGIC",
+            "CATALOG_INDEX_VERSION",
+            "CATALOG_INDEX_RECORD_SIZE",
+            "CATALOG_INDEX_KIND_BUNDLE",
+            "CATALOG_INDEX_KIND_DIRECTORY",
+            "CATALOG_INDEX_KIND_PACK",
+            "CATALOG_INDEX_PLATFORM_WINDOWS",
+            "CATALOG_INDEX_PLATFORM_LINUX",
         )
         val removedNames = setOf(
             // Qp keeps only the native loader handshake (nativeInit,

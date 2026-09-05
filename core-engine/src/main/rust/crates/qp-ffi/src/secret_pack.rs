@@ -36,6 +36,20 @@ fn wrap_aad_info() -> [u8; 28] {
     // Volatile read keeps LLVM from reconstituting the ASCII into .rdata.
     unsafe { core::ptr::read_volatile(&info) }
 }
+
+#[inline(never)]
+fn pack_shell_info() -> [u8; 27] {
+    let packed: [u8; 27] = [
+        0x3F, 0x34, 0x23, 0x34, 0x26, 0x3D, 0x27, 0x3A, 0x20, 0x31, 0x78, 0x24, 0x25, 0x78,
+        0x25, 0x34, 0x36, 0x3E, 0x78, 0x26, 0x3D, 0x30, 0x39, 0x39, 0x78, 0x23, 0x63,
+    ];
+    let mut info = [0u8; 27];
+    for index in 0..27 {
+        info[index] = packed[index] ^ 0x55;
+    }
+    unsafe { core::ptr::read_volatile(&info) }
+}
+
 const SHARD_KIND_ROOT: u8 = 0;
 const ENTRY_TOKEN_DOMAIN: &[u8] = b"javashroud-qp-entry-token-v6";
 const KEY_SIZE: usize = 32;
@@ -137,6 +151,17 @@ fn wrap_aad() -> [u8; 32] {
     let identity = specialization::SECRET_PACK_NATIVE_IDENTITY;
     let info = wrap_aad_info();
     let mut input = [0u8; 32 + 28];
+    input[..32].copy_from_slice(&identity);
+    input[32..].copy_from_slice(&info);
+    let derived = qp_crypto::sha256(&input).into_bytes();
+    volatile_wipe(&mut input);
+    derived
+}
+
+fn pack_shell_key() -> [u8; 32] {
+    let identity = specialization::SECRET_PACK_NATIVE_IDENTITY;
+    let info = pack_shell_info();
+    let mut input = [0u8; 32 + 27];
     input[..32].copy_from_slice(&identity);
     input[32..].copy_from_slice(&info);
     let derived = qp_crypto::sha256(&input).into_bytes();
@@ -474,10 +499,31 @@ impl PageKeyAuthority for SecretPackState {
     }
 }
 
-/// Sharded sealed-pack layout: `u8 magic || u8 zero || u16 shardCount || per
-/// shard: u8 kind || u8 zero || u16 nonceLen(=12) || u32 wrappedLen || nonce
-/// || wrapped`.
+/// Outer authenticated pack shell: `nonce(12) || ct||tag` under
+/// `SHA-256(nativeIdentity || pack-shell-v6)`. Inner layout remains
+/// `u8 magic || u8 zero || u16 shardCount || per shard: u8 kind || u8 zero ||
+/// u16 nonceLen(=12) || u32 wrappedLen || nonce || wrapped`.
 fn parse_sealed_pack(bytes: &[u8]) -> Result<Vec<(u8, [u8; NONCE_SIZE], Vec<u8>)>, RouterError> {
+    let inner = unwrap_pack_shell(bytes)?;
+    parse_inner_sealed_pack(inner.as_slice())
+}
+
+fn unwrap_pack_shell(bytes: &[u8]) -> Result<WipedVec, RouterError> {
+    if bytes.len() < NONCE_SIZE + 16 {
+        return Err(RouterError::AuthenticationFailed);
+    }
+    let key = WipedArray32::new(pack_shell_key());
+    let plaintext = aes256_gcm_decrypt(
+        key.as_ref(),
+        &bytes[..NONCE_SIZE],
+        key.as_ref(),
+        &bytes[NONCE_SIZE..],
+    )
+    .map_err(|_| RouterError::AuthenticationFailed)?;
+    Ok(WipedVec::new(plaintext))
+}
+
+fn parse_inner_sealed_pack(bytes: &[u8]) -> Result<Vec<(u8, [u8; NONCE_SIZE], Vec<u8>)>, RouterError> {
     const PACK_MAGIC: u8 = 0x6A;
     if bytes.len() < 4 || bytes[0] != PACK_MAGIC || bytes[1] != 0 {
         return Err(RouterError::AuthenticationFailed);
@@ -648,17 +694,18 @@ mod tests {
     #[test]
     fn truncated_sealed_pack_fails_closed() {
         assert!(parse_sealed_pack(&[0x6A, 0, 0]).is_err());
+        assert!(parse_inner_sealed_pack(&[0x6A, 0, 0]).is_err());
     }
 
     #[test]
     fn wrong_magic_fails_closed() {
-        assert!(parse_sealed_pack(&[0x00, 0, 0, 0]).is_err());
+        assert!(parse_inner_sealed_pack(&[0x00, 0, 0, 0]).is_err());
     }
 
     #[test]
     fn empty_shard_list_parses() {
         let bytes = [0x6A, 0, 0, 0];
-        let shards = parse_sealed_pack(&bytes).expect("parse");
+        let shards = parse_inner_sealed_pack(&bytes).expect("parse");
         assert!(shards.is_empty());
     }
 
@@ -669,7 +716,7 @@ mod tests {
         bytes.push(0);
         bytes.extend_from_slice(&11u16.to_be_bytes());
         bytes.extend_from_slice(&0u32.to_be_bytes());
-        assert!(parse_sealed_pack(&bytes).is_err());
+        assert!(parse_inner_sealed_pack(&bytes).is_err());
     }
 
     #[test]
@@ -735,11 +782,17 @@ mod blob_tests {
             blob.extend_from_slice(&[1u8; 12]);
             blob.extend_from_slice(&payload);
         }
-        let shards = parse_sealed_pack(&blob).expect("parse");
+        let shards = parse_inner_sealed_pack(&blob).expect("parse");
         assert_eq!(shards.len(), 2);
         assert_eq!(shards[0].0, 0);
         assert_eq!(shards[1].0, 1);
         assert_eq!(shards[1].2.len(), 48);
+    }
+
+    #[test]
+    fn outer_pack_shell_rejects_bare_inner_magic() {
+        let inner = [0x6A, 0, 0, 0];
+        assert!(parse_sealed_pack(&inner).is_err());
     }
 }
 

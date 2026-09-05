@@ -452,7 +452,9 @@ internal class NativeSecretPackLiterals private constructor(
                 Arrays.fill(shardKey, 0)
                 Arrays.fill(sealed, 0)
             }
-            val blob = out.toByteArray()
+            val inner = out.toByteArray()
+            val blob = wrapPackShell(inner, nativeIdentityValue, random)
+            Arrays.fill(inner, 0)
             sealedBlobs[platform] = blob
             return blob.copyOf()
         } finally {
@@ -487,6 +489,32 @@ internal class NativeSecretPackLiterals private constructor(
         private val SECRET_PACK_LITERAL_COMMITMENT_DOMAIN =
             "javashroud-qp-secret-pack-commitment-v6".toByteArray(Charsets.US_ASCII)
         private val SEALED_PACK_MAGIC = byteArrayOf(0x6A, 0)
+        private const val PACK_SHELL_INFO = "javashroud-qp-pack-shell-v6"
+
+        internal fun wrapPackShell(
+            inner: ByteArray,
+            nativeIdentity: ByteArray,
+            random: java.security.SecureRandom,
+        ): ByteArray {
+            val nonce = ByteArray(QpPageCodec.NONCE_SIZE)
+            random.nextBytes(nonce)
+            val key = java.security.MessageDigest.getInstance("SHA-256").digest(
+                nativeIdentity + PACK_SHELL_INFO.toByteArray(Charsets.US_ASCII),
+            )
+            return try {
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(
+                    Cipher.ENCRYPT_MODE,
+                    SecretKeySpec(key, "AES"),
+                    GCMParameterSpec(QpPageCodec.GCM_TAG_SIZE * 8, nonce),
+                )
+                cipher.updateAAD(key)
+                val sealed = cipher.doFinal(inner)
+                nonce + sealed
+            } finally {
+                Arrays.fill(key, 0)
+            }
+        }
         private const val MEASUREMENT_SHARD_INDEX = 1
         private const val SHARD_KIND_ROOT = 0
 

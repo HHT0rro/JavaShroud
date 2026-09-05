@@ -64,7 +64,20 @@ class HardenedReleaseGateTest {
                 JarEntryData("sample/CatalogHost.class", classBytes),
                 JarEntryData(
                     "META-INF/qpunit/catalog.index",
-                    "META-INF/qpunit/catalog/pages.bin\ndirectory.bin\n".toByteArray(Charsets.US_ASCII),
+                    io.github.hht0rro.javashroud.transforms.protection.encodeCatalogIndex(
+                        listOf(
+                            io.github.hht0rro.javashroud.transforms.protection.catalogIndexRecord(
+                                kind = io.github.hht0rro.javashroud.transforms.protection.CATALOG_INDEX_KIND_BUNDLE,
+                                platform = io.github.hht0rro.javashroud.transforms.protection.CATALOG_INDEX_PLATFORM_NONE,
+                                token = "pages.bin",
+                            ),
+                            io.github.hht0rro.javashroud.transforms.protection.catalogIndexRecord(
+                                kind = io.github.hht0rro.javashroud.transforms.protection.CATALOG_INDEX_KIND_DIRECTORY,
+                                platform = io.github.hht0rro.javashroud.transforms.protection.CATALOG_INDEX_PLATFORM_NONE,
+                                token = "directory.bin",
+                            ),
+                        ),
+                    ),
                 ),
                 JarEntryData("META-INF/qpunit/catalog/directory.bin", byteArrayOf(3, 1, 4)),
             ),

@@ -13,8 +13,6 @@ qp-crypto.workspace = true
 qp-page.workspace = true
 qp-runtime.workspace = true
 qp-vm.workspace = true
-
-[dev-dependencies]
 qp-shell.workspace = true
 
 [lints]

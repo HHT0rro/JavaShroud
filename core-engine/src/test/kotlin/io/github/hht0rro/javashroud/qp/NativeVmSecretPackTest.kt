@@ -307,9 +307,10 @@ class NativeVmSecretPackTest {
                 val blob = literals.sealForPlatform("windows-x64", imageCommitment)
                 assertContentEquals(blob, literals.blobByPlatform().getValue("windows-x64"))
                 assertFalse(blob.decodeToString().contains("QP_SP_S"))
+                assertFalse(blob.size >= 2 && blob[0] == 0x6A.toByte() && blob[1] == 0.toByte())
 
-                // Walk the shard container: magic 0x6A,0 || u16 count || shards.
-                val buf = java.nio.ByteBuffer.wrap(blob)
+                val inner = unwrapPackShellForTest(blob, sealed.nativeIdentity)
+                val buf = java.nio.ByteBuffer.wrap(inner)
                 assertEquals(0x6A, buf.get().toInt() and 0xFF)
                 assertEquals(0, buf.get().toInt())
                 assertEquals(5, buf.short.toInt())
@@ -363,6 +364,21 @@ class NativeVmSecretPackTest {
         } finally {
             draft.wipe()
         }
+    }
+
+    private fun unwrapPackShellForTest(blob: ByteArray, nativeIdentity: ByteArray): ByteArray {
+        require(blob.size >= 12 + 16)
+        val key = MessageDigest.getInstance("SHA-256").digest(
+            nativeIdentity + "javashroud-qp-pack-shell-v6".toByteArray(Charsets.US_ASCII),
+        )
+        val cipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(
+            javax.crypto.Cipher.DECRYPT_MODE,
+            SecretKeySpec(key, "AES"),
+            javax.crypto.spec.GCMParameterSpec(128, blob.copyOfRange(0, 12)),
+        )
+        cipher.updateAAD(key)
+        return cipher.doFinal(blob.copyOfRange(12, blob.size))
     }
 
     private fun samplePeWithMeasurement(): ByteArray {

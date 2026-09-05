@@ -1293,6 +1293,29 @@ internal object ReleaseArtifactScan {
             !plainBindings,
             if (plainBindings) "plaintext B|M|F binding lines found" else "no plaintext bindings",
         )
+        val asciiIndex = artifact.jarEntries.any { entry ->
+            isCatalogIndexName(entry.name) &&
+                (containsAscii(entry.bytes, "pack|") ||
+                    containsAscii(entry.bytes, "META-INF/") ||
+                    containsAscii(entry.bytes, "catalog/"))
+        }
+        findings += ReleaseArtifactScanReport.Finding(
+            "catalog-index-opaque",
+            !asciiIndex,
+            if (asciiIndex) "catalog.index still contains a readable path map" else "opaque-index-records",
+        )
+        val rawPackMagic = artifact.jarEntries.any { entry ->
+            val name = normalizePath(entry.name)
+            "/catalog/" in name &&
+                entry.bytes.size >= 4 &&
+                entry.bytes[0] == 0x6A.toByte() &&
+                entry.bytes[1] == 0.toByte()
+        }
+        findings += ReleaseArtifactScanReport.Finding(
+            "pack-shell-envelope",
+            !rawPackMagic,
+            if (rawPackMagic) "catalog pack still starts with inner 0x6A magic" else "pack-shell-present-or-absent",
+        )
         return findings
     }
 
@@ -1374,35 +1397,24 @@ internal object ReleaseArtifactScan {
         indexName: String,
         indexBytes: ByteArray,
     ): CatalogDirectoryReference {
-        val lines = try {
-            String(indexBytes, StandardCharsets.US_ASCII)
-                .lineSequence()
-                .map(String::trim)
-                .filter(String::isNotEmpty)
-                .toList()
+        val records = try {
+            io.github.hht0rro.javashroud.transforms.protection.decodeCatalogIndex(indexBytes)
         } catch (error: Throwable) {
             return CatalogDirectoryReference(error = "catalog-index-decode-failed:${error.javaClass.simpleName}")
         }
-        val invalid = lines.firstOrNull { line ->
-            if (line.startsWith("pack|")) {
-                // Sealed pack resource references: platform-key|relative-path.
-                val second = line.indexOf('|', 5)
-                second < 0 || line.length > 4096 || line.any { char -> char.code < 0x20 || char == '\\' }
-            } else {
-                line.length > 4096 ||
-                    line.any { char -> char.code < 0x20 || char == '\\' } ||
-                    line.startsWith('/') ||
-                    ".." in line
-            }
+        val directories = records.filter {
+            it.kind == io.github.hht0rro.javashroud.transforms.protection.CATALOG_INDEX_KIND_DIRECTORY
         }
-        if (invalid != null) return CatalogDirectoryReference(error = "catalog-index-path-invalid")
-        val directories = lines.filter { '/' !in it && !it.startsWith("pack|") }
         if (directories.size != 1) {
             return CatalogDirectoryReference(error = "catalog-index-directory-count=${directories.size};expected=1")
         }
+        val token = directories.single().token
+        if ('/' in token || '\\' in token || ".." in token) {
+            return CatalogDirectoryReference(error = "catalog-index-path-invalid")
+        }
         val indexParent = normalizePath(indexName).substringBeforeLast('/')
         return CatalogDirectoryReference(
-            normalizedPath = "$indexParent/catalog/${normalizePath(directories.single())}",
+            normalizedPath = "$indexParent/catalog/${normalizePath(token)}",
         )
     }
 
