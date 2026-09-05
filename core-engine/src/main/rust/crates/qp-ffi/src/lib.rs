@@ -379,6 +379,7 @@ mod jni_bridge {
         router: TypedPageRouter,
         secret_pack: Option<Arc<SecretPackState>>,
         vm_dialect: Option<Arc<qp_vm::VmDialect>>,
+        vm_programs: BTreeMap<i64, Arc<VmProgram>>,
     }
 
     impl Default for BridgeState {
@@ -398,6 +399,7 @@ mod jni_bridge {
                 router: TypedPageRouter::default(),
                 secret_pack: None,
                 vm_dialect: None,
+                vm_programs: BTreeMap::new(),
             }
         }
     }
@@ -412,6 +414,7 @@ mod jni_bridge {
             }
             self.router.clear();
             self.vm_dialect = None;
+            self.vm_programs.clear();
         }
 
         fn install_token_binding(
@@ -511,6 +514,7 @@ mod jni_bridge {
             self.target_handle_cache.clear();
             self.router.clear();
             self.vm_dialect = None;
+            self.vm_programs.clear();
             if let Some(pack) = self.secret_pack.as_ref() {
                 pack.revoke();
             }
@@ -675,6 +679,44 @@ mod jni_bridge {
         state.vm_dialect = Some(dialect.clone());
         Ok(dialect)
     }
+
+    fn cached_vm_program(
+        env: JNIEnv,
+        entry_token: JLong,
+        packed: JByteArray,
+    ) -> Result<Arc<VmProgram>, BridgeFailure> {
+        {
+            let state = lock_state()?;
+            if let Some(program) = state.vm_programs.get(&entry_token) {
+                return Ok(program.clone());
+            }
+        }
+        let opened = unsafe { open_page_route_vm(env, entry_token, packed) }?;
+        let dialect = cached_vm_dialect()?;
+        let program = with_live_root_material(|crypto, layout| {
+            opened
+                .parse_vm_with_material(
+                    *crypto,
+                    *layout,
+                    vm_state_binding(
+                        opened.entry_token(),
+                        opened.logical_binding_path(),
+                        layout,
+                    )
+                    .as_bytes(),
+                    &dialect,
+                )
+                .map(Arc::new)
+                .map_err(router_failure)
+        })?;
+        let mut state = lock_state()?;
+        if let Some(existing) = state.vm_programs.get(&entry_token) {
+            return Ok(existing.clone());
+        }
+        state.vm_programs.insert(entry_token, program.clone());
+        Ok(program)
+    }
+
 
     fn wipe(bytes: &mut [u8]) {
         for byte in bytes {
@@ -4833,52 +4875,27 @@ mod jni_bridge {
                 return core::ptr::null_mut();
             }
         };
-        let result = match open_page_route_vm(env, entry_token, packed) {
-            Ok(opened) => match cached_vm_dialect() {
-                Err(error) => {
-                    throw_new(env, error.0.as_bytes());
-                    core::ptr::null_mut()
-                }
-                Ok(dialect) => match with_live_root_material(|crypto, layout| {
-                    opened
-                        .parse_vm_with_material(
-                            *crypto,
-                            *layout,
-                            vm_state_binding(
-                                opened.entry_token(),
-                                opened.logical_binding_path(),
-                                layout,
-                            )
-                            .as_bytes(),
-                            &dialect,
-                        )
-                        .map_err(router_failure)
-                }) {
-                Ok(program) => {
-                    match copy_vm_arguments(env, args, &program) {
+        let result = match cached_vm_program(env, entry_token, packed) {
+            Ok(program) => {
+                let program_ref = program.as_ref();
+                match copy_vm_arguments(env, args, program_ref) {
                     Ok(arguments) => {
                         let helper_class = lock_state()
                             .ok()
                             .and_then(|state| state.registered_class.map(|class| class as JObject));
                         let mut executor =
                             VmExecutor::new(JniObjectOperations::new(env, helper_class));
-                        let execution = executor.execute(&program, &arguments);
+                        let execution = executor.execute(program_ref, &arguments);
                         let mut host = executor.into_host();
                         match execution {
                             Ok(value) => {
-                                // JNI local references created by the VM host
-                                // are owned by JniObjectOperations. Transfer
-                                // the returned object out of that ownership
-                                // set before the host drops, otherwise a
-                                // freshly-created CallSite/File/etc. is
-                                // deleted before Java receives it.
                                 if let VmValue::Object(object) = &value {
                                     host.release(*object);
                                 }
                                 box_vm_value_with_tag(
                                     env,
                                     value,
-                                    Some(program.metadata().return_tag),
+                                    Some(program_ref.metadata().return_tag),
                                 )
                                 .unwrap_or(core::ptr::null_mut())
                             }
@@ -4887,7 +4904,7 @@ mod jni_bridge {
                                 core::ptr::null_mut()
                             }
                             Err(_) => {
-                                throw_new(env, b"Qp VM execution failed\0");
+                                throw_new(env, b"Qp VM execution failed ");
                                 core::ptr::null_mut()
                             }
                         }
@@ -4896,22 +4913,13 @@ mod jni_bridge {
                         throw_new(env, error.0.as_bytes());
                         core::ptr::null_mut()
                     }
-                    }
                 }
-                Err(error) => {
-                    throw_new(env, error.0.as_bytes());
-                    core::ptr::null_mut()
-                }
-                }
-            },
+            }
             Err(failure) => {
                 throw_new(env, failure.0.as_bytes());
                 core::ptr::null_mut()
             }
         };
-        // PopLocalFrame promotes a non-null result into the caller's frame;
-        // null leaves any pending Java exception intact and releases all
-        // temporaries created while executing the page.
         pop_local_frame(env, result)
     }
 
