@@ -2828,6 +2828,9 @@ mod jni_bridge {
                 || lower.contains("gadget")
                 || lower.contains("libinject")
                 || lower.contains("linjector")
+                || lower.contains("libjdwp")
+                || lower.contains("libinstrument")
+                || lower.contains("libjvmti")
         }))
     }
 
@@ -2880,6 +2883,33 @@ mod jni_bridge {
         if status >= 0 && object != 0 {
             return Ok(true);
         }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn CheckRemoteDebuggerPresent(process: *mut core::ffi::c_void, present: *mut i32) -> i32;
+            fn GetThreadContext(thread: *mut core::ffi::c_void, context: *mut u8) -> i32;
+            fn GetCurrentThread() -> *mut core::ffi::c_void;
+        }
+        let mut remote = 0i32;
+        let remote_ok = unsafe { CheckRemoteDebuggerPresent(process, &mut remote) };
+        if remote_ok != 0 && remote != 0 {
+            return Ok(true);
+        }
+        // CONTEXT on x64: ContextFlags at 0x30, Dr0..Dr3 at 0x48..0x60 in the
+        // full CONTEXT; we only need the debug registers. CONTEXT_DEBUG_REGISTERS
+        // is 0x00100010 on x64.
+        const CONTEXT_DEBUG_REGISTERS: u32 = 0x0010_0010;
+        const CONTEXT_SIZE: usize = 1232;
+        let mut context = [0u8; CONTEXT_SIZE];
+        context[0x30..0x34].copy_from_slice(&CONTEXT_DEBUG_REGISTERS.to_le_bytes());
+        if unsafe { GetThreadContext(GetCurrentThread(), context.as_mut_ptr()) } != 0 {
+            let dr0 = u64::from_le_bytes(context[0x48..0x50].try_into().unwrap_or([0; 8]));
+            let dr1 = u64::from_le_bytes(context[0x50..0x58].try_into().unwrap_or([0; 8]));
+            let dr2 = u64::from_le_bytes(context[0x58..0x60].try_into().unwrap_or([0; 8]));
+            let dr3 = u64::from_le_bytes(context[0x60..0x68].try_into().unwrap_or([0; 8]));
+            if dr0 != 0 || dr1 != 0 || dr2 != 0 || dr3 != 0 {
+                return Ok(true);
+            }
+        }
         Ok(false)
     }
 
@@ -2890,7 +2920,7 @@ mod jni_bridge {
             fn GetModuleHandleW(name: *const u16) -> *mut core::ffi::c_void;
             fn GetProcAddress(module: *mut core::ffi::c_void, name: *const i8) -> *mut core::ffi::c_void;
         }
-        let names: [&[u16]; 5] = [
+        let names: [&[u16]; 9] = [
             &[b'f' as u16, b'r' as u16, b'i' as u16, b'd' as u16, b'a' as u16, 0],
             &[
                 b'f' as u16, b'r' as u16, b'i' as u16, b'd' as u16, b'a' as u16, b'-' as u16,
@@ -2899,6 +2929,19 @@ mod jni_bridge {
             &[b'g' as u16, b'a' as u16, b'd' as u16, b'g' as u16, b'e' as u16, b't' as u16, 0],
             &[b'w' as u16, b'i' as u16, b'n' as u16, b'j' as u16, b'e' as u16, b'c' as u16, b't' as u16, 0],
             &[b's' as u16, b'b' as u16, b'i' as u16, b'e' as u16, b'd' as u16, b'l' as u16, b'l' as u16, 0],
+            &[b'j' as u16, b'd' as u16, b'w' as u16, b'p' as u16, 0],
+            &[
+                b'i' as u16, b'n' as u16, b's' as u16, b't' as u16, b'r' as u16, b'u' as u16,
+                b'm' as u16, b'e' as u16, b'n' as u16, b't' as u16, 0,
+            ],
+            &[
+                b'j' as u16, b'v' as u16, b'm' as u16, b't' as u16, b'i' as u16, b'.' as u16,
+                b'd' as u16, b'l' as u16, b'l' as u16, 0,
+            ],
+            &[
+                b'j' as u16, b'd' as u16, b'w' as u16, b'p' as u16, b'.' as u16, b'd' as u16,
+                b'l' as u16, b'l' as u16, 0,
+            ],
         ];
         for name in names {
             if !unsafe { GetModuleHandleW(name.as_ptr()) }.is_null() {
@@ -3470,7 +3513,25 @@ mod jni_bridge {
 
     fn native_heartbeat_inner() -> Result<JInt, BridgeFailure> {
         let _ = target_from_state()?;
+        enforce_runtime_watchdog()?;
         Ok(QP_R1_OK)
+    }
+
+    /// Periodic and on-dispatch integrity gate. A debugger, hostile module,
+    /// or JVMTI/JDWP surface revokes the pack so a subsequent dump cannot
+    /// harvest an authorized session.
+    fn enforce_runtime_watchdog() -> Result<(), BridgeFailure> {
+        match detect_debugger() {
+            Ok(true) => {
+                revoke_global_secret_pack();
+                Err(BridgeFailure("Qp runtime integrity probe failed"))
+            }
+            Ok(false) => Ok(()),
+            Err(failure) => {
+                revoke_global_secret_pack();
+                Err(failure)
+            }
+        }
     }
 
     fn native_nonce_inner(env: JNIEnv, nonce: JByteArray) -> Result<JBoolean, BridgeFailure> {
@@ -4522,6 +4583,11 @@ mod jni_bridge {
                 return core::ptr::null_mut();
             }
         };
+        if let Err(failure) = enforce_runtime_watchdog() {
+            pop_local_frame(env, core::ptr::null_mut());
+            throw_new(env, failure.0.as_bytes());
+            return core::ptr::null_mut();
+        }
         let result = match open_page_route_vm(env, entry_token, packed) {
             Ok(opened) => match authorized_vm_material()
                 .map_err(|_| RouterError::AuthenticationFailed)
