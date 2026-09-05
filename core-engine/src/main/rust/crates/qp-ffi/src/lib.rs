@@ -5,6 +5,8 @@ mod relocation;
 mod secret_pack;
 mod specialization;
 mod sensitive_memory;
+#[cfg(windows)]
+mod windows_map;
 
 pub use specialization::{
     PACKING_LEVEL, PAYLOAD_PROFILE, PROTECTION_LEVEL, SPECIALIZATION_DIGEST, TARGET_TRIPLE,
