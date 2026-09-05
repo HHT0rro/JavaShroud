@@ -541,9 +541,7 @@ fun applyMethodVirtualization(
                             buildContext = buildContext,
                             structureEntropy = methodEntropy.domain("serializer-structure").entropyDigest,
                         )
-                        if (vmMethodName != name) {
-                            bodyCapture.rewriteStaticSelfCalls(className, name, descriptor, vmMethodName, vmDescriptor)
-                        }
+                        bodyCapture.rewriteStaticSelfCalls(className, name, descriptor, vmMethodName, vmDescriptor)
                         bodyCapture.optimizeWithQpCompiler(className, vmMethodName, vmDescriptor, vmMethodAccess)
                         val vmBytes = try {
                             bodyCapture.replayTo(serializer)
@@ -1434,17 +1432,22 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         var changed = false
         var index = 0
         while (index < capturedInstructions.size) {
-            val instruction = capturedInstructions[index] as? CapturedInstruction.MethodArg
+            val current = capturedInstructions[index]
+            val instruction = when (current) {
+                is CapturedInstruction.MethodArg -> current
+                is CapturedInstruction.IndyArg -> staticTargetMethodCall(current)
+                else -> null
+            }
             if (instruction == null) {
                 index++
                 continue
             }
             if (instruction.opcode == Opcodes.INVOKESTATIC &&
                 instruction.owner == className &&
-                instruction.name == originalName &&
-                instruction.desc == descriptor
+                (instruction.name == originalName || instruction.name == targetName) &&
+                (instruction.desc == descriptor || instruction.desc == targetDescriptor)
             ) {
-                if (targetDescriptor == "([Ljava/lang/String;Z)V" && descriptor == "([Ljava/lang/String;)V") {
+                if (targetDescriptor == "([Ljava/lang/String;Z)V" && descriptor == "([Ljava/lang/String;)V" && current is CapturedInstruction.MethodArg) {
                     capturedInstructions.add(index, CapturedInstruction.NoArg(Opcodes.ICONST_0))
                     index++
                 }
