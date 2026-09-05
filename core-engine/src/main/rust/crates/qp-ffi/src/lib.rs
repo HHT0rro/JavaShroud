@@ -367,7 +367,6 @@ mod jni_bridge {
         target: Option<SupportedTarget>,
         initialized: bool,
         session_nonce: Option<SensitiveMemoryLease>,
-        vm_entry_token_cache: std::collections::HashMap<Vec<u8>, i64>,
         session_epoch: u64,
         artifact_commitment: Option<[u8; DIGEST_SIZE]>,
         name_seed: Option<[u8; qp_crypto::QP_NAME_SEED_SIZE]>,
@@ -381,8 +380,9 @@ mod jni_bridge {
     }
 
     impl BridgeState {
-        /// Wipes the recombined secret pack, if any. Used by defense
-        /// violation paths and state resets.
+        /// Revokes the secret pack and advances its epoch. Used by defense
+        /// violation paths and state resets. Router pages stay until
+        /// `reset_runtime`; later page-key callbacks fail closed on the new epoch.
         fn revoke_secret_pack(&self) {
             if let Some(pack) = self.secret_pack.as_ref() {
                 pack.revoke();
@@ -2430,19 +2430,25 @@ mod jni_bridge {
         )
     }
 
-    fn authorized_vm_material() -> Result<([u8; DIGEST_SIZE], [u8; DIGEST_SIZE]), BridgeFailure> {
-        let state = lock_state()?;
-        let pack = state
-            .secret_pack
-            .as_ref()
-            .ok_or(BridgeFailure("Qp native secret pack is sealed"))?;
-        let crypto = pack
-            .crypto_domain()
-            .map_err(|_| BridgeFailure("Qp native secret pack is sealed"))?;
-        let layout = pack
-            .layout_digest()
-            .map_err(|_| BridgeFailure("Qp native secret pack is sealed"))?;
-        Ok((crypto, layout))
+    fn with_live_root_material<T, F>(f: F) -> Result<T, BridgeFailure>
+    where
+        F: FnOnce(&[u8; DIGEST_SIZE], &[u8; DIGEST_SIZE]) -> Result<T, BridgeFailure>,
+    {
+        let pack = {
+            let state = lock_state()?;
+            state
+                .secret_pack
+                .as_ref()
+                .ok_or(BridgeFailure("Qp native secret pack is sealed"))?
+                .clone()
+        };
+        let mut out: Option<Result<T, BridgeFailure>> = None;
+        pack.with_root_material(|crypto, layout| {
+            out = Some(f(crypto, layout));
+            Ok(())
+        })
+        .map_err(|_| BridgeFailure("Qp native secret pack is sealed"))?;
+        out.ok_or(BridgeFailure("Qp native secret pack is sealed"))?
     }
 
     unsafe fn throw_new(env: JNIEnv, message: &'static [u8]) {
@@ -3160,24 +3166,28 @@ mod jni_bridge {
         let surface_mask = [state.defense_surface_mask];
         let epoch = state.session_epoch.to_be_bytes();
         let measurement_crc = crate::image_measure::commitment_crc32().to_be_bytes();
-        let mut scoped_key = hmac_sha256_bytes(
-            nonce.as_slice(),
-            &[
-                DEFENSE_SHARE_DOMAIN,
-                target.triple().as_bytes(),
-                profile.label(),
-                &surface_mask,
-                &epoch,
-                &measurement_crc,
-                specialization::SPECIALIZATION_DIGEST.as_ref(),
-                &state
-                    .secret_pack
-                    .as_ref()
-                    .ok_or(BridgeFailure("Qp native secret pack is sealed"))?
-                    .layout_digest()
-                    .map_err(|_| BridgeFailure("Qp native secret pack is sealed"))?,
-            ],
-        );
+        let pack = state
+            .secret_pack
+            .as_ref()
+            .ok_or(BridgeFailure("Qp native secret pack is sealed"))?
+            .clone();
+        let mut scoped_key = pack
+            .with_root_material(|_crypto, layout| {
+                Ok(hmac_sha256_bytes(
+                    nonce.as_slice(),
+                    &[
+                        DEFENSE_SHARE_DOMAIN,
+                        target.triple().as_bytes(),
+                        profile.label(),
+                        &surface_mask,
+                        &epoch,
+                        &measurement_crc,
+                        specialization::SPECIALIZATION_DIGEST.as_ref(),
+                        layout,
+                    ],
+                ))
+            })
+            .map_err(|_| BridgeFailure("Qp native secret pack is sealed"))?;
         let output = hmac_sha256_bytes(
             &scoped_key,
             &[
@@ -3453,15 +3463,17 @@ mod jni_bridge {
             }));
             state.secret_pack = Some(pack);
         }
-        let crypto_domain = state
+        let pack = state
             .secret_pack
             .as_ref()
             .ok_or(BridgeFailure("Qp native secret pack is unavailable"))?
-            .crypto_domain()
-            .map_err(|_| BridgeFailure("Qp native secret pack is unavailable"))?;
-        let (shell_name_seed, shell_native_sha256, directory_plain) =
-            open_sealed_directory_parts(directory_bytes.as_bytes(), &crypto_domain)
-                .map_err(|_| BridgeFailure("Qp current catalog directory authentication failed"))?;
+            .clone();
+        let (shell_name_seed, shell_native_sha256, directory_plain) = pack
+            .with_root_material(|crypto_domain, _layout| {
+                open_sealed_directory_parts(directory_bytes.as_bytes(), crypto_domain)
+                    .map_err(|_| RouterError::AuthenticationFailed)
+            })
+            .map_err(|_| BridgeFailure("Qp current catalog directory authentication failed"))?;
         let directory = ArtifactDirectory::decode(&directory_plain)
             .map_err(|_| BridgeFailure("Qp current catalog directory authentication failed"))?;
         let mut directory_plain = directory_plain;
@@ -4554,6 +4566,11 @@ mod jni_bridge {
             throw_new(env, b"Qp JNI local frame unavailable\0");
             return core::ptr::null_mut();
         }
+        if let Err(failure) = enforce_runtime_watchdog() {
+            pop_local_frame(env, core::ptr::null_mut());
+            throw_new(env, failure.0.as_bytes());
+            return core::ptr::null_mut();
+        }
         let sealed_bytes = if sealed_entry_token.is_null() {
             Vec::new()
         } else {
@@ -4564,7 +4581,7 @@ mod jni_bridge {
                     Ok(text) => crate::relocation::base64_url_decode(text.as_str()).unwrap_or_default(),
                     Err(_) => {
                         pop_local_frame(env, core::ptr::null_mut());
-                        throw_new(env, b"Qp VM entry token is invalid ");
+                        throw_new(env, b"Qp VM entry token is invalid\0");
                         return core::ptr::null_mut();
                     }
                 },
@@ -4583,28 +4600,23 @@ mod jni_bridge {
                 return core::ptr::null_mut();
             }
         };
-        if let Err(failure) = enforce_runtime_watchdog() {
-            pop_local_frame(env, core::ptr::null_mut());
-            throw_new(env, failure.0.as_bytes());
-            return core::ptr::null_mut();
-        }
         let result = match open_page_route_vm(env, entry_token, packed) {
-            Ok(opened) => match authorized_vm_material()
-                .map_err(|_| RouterError::AuthenticationFailed)
-                .and_then(|(crypto, layout)| {
-                vm_dialect_corpus().and_then(|corpus| {
-                    opened.parse_vm_with_material(
-                        crypto,
-                        layout,
-                        vm_state_binding(
-                            opened.entry_token(),
-                            opened.logical_binding_path(),
-                            &layout,
+            Ok(opened) => match with_live_root_material(|crypto, layout| {
+                vm_dialect_corpus()
+                    .and_then(|corpus| {
+                        opened.parse_vm_with_material(
+                            *crypto,
+                            *layout,
+                            vm_state_binding(
+                                opened.entry_token(),
+                                opened.logical_binding_path(),
+                                layout,
+                            )
+                            .as_bytes(),
+                            &corpus,
                         )
-                        .as_bytes(),
-                        &corpus,
-                    )
-                })
+                    })
+                    .map_err(router_failure)
             }) {
                 Ok(program) => {
                     match copy_vm_arguments(env, args, &program) {
@@ -4651,7 +4663,7 @@ mod jni_bridge {
                     }
                 }
                 Err(error) => {
-                    throw_new(env, router_failure(error).0.as_bytes());
+                    throw_new(env, error.0.as_bytes());
                     core::ptr::null_mut()
                 }
             },
@@ -5015,32 +5027,23 @@ mod jni_bridge {
         copied.map(Some)
     }
 
-    /// Sealed VM entry tokens are unwrapped once per token and cached for the
-    /// bridge session; the plaintext entry token never crosses into Java.
+    /// Sealed VM entry tokens unwrap inside the pack's root-material window.
+    /// The plaintext i64 is not retained on the bridge; a revoke epoch change
+    /// fail-closes the result.
     fn unwrap_vm_entry_token_checked(sealed: &[u8]) -> Result<i64, BridgeFailure> {
         if sealed.is_empty() {
             return Err(BridgeFailure("Qp VM entry token is missing"));
         }
-        {
-            let state = lock_state()?;
-            if let Some(token) = state.vm_entry_token_cache.get(sealed) {
-                return Ok(*token);
-            }
-        }
-        let crypto_domain = {
+        let pack = {
             let state = lock_state()?;
             state
                 .secret_pack
                 .as_ref()
                 .ok_or(BridgeFailure("Qp native secret pack is unavailable"))?
-                .crypto_domain()
-                .map_err(|_| BridgeFailure("Qp native secret pack is unavailable"))?
+                .clone()
         };
-        let token = crate::secret_pack::unwrap_vm_entry_token(&crypto_domain, sealed)
-            .map_err(|_| BridgeFailure("Qp VM entry token is invalid"))?;
-        let mut state = lock_state()?;
-        state.vm_entry_token_cache.insert(sealed.to_vec(), token);
-        Ok(token)
+        pack.with_vm_entry_token(sealed, |token| Ok(token))
+            .map_err(|_| BridgeFailure("Qp VM entry token is invalid"))
     }
 
     unsafe fn resolve_registration_plan(
@@ -5102,22 +5105,21 @@ mod jni_bridge {
         if specialization::SECRET_PACK_SHARD_COUNT == 0 {
             return Ok(Default::default());
         }
-        let crypto_domain = {
+        {
             let state = lock_state()?;
-            match state.secret_pack.as_ref() {
-                Some(pack) => pack
-                    .crypto_domain()
-                    .map_err(|_| BridgeFailure("Qp native secret pack is unavailable"))?,
-                None => return Ok(Default::default()),
+            if state.secret_pack.is_none() {
+                return Ok(Default::default());
             }
-        };
+        }
         let bindings_text = read_system_property(env, b"j.n\0")?
             .ok_or(BridgeFailure("Qp sealed bindings property is missing"))?;
         let sealed = crate::relocation::base64_url_decode(&bindings_text)
             .ok_or(BridgeFailure("Qp sealed bindings property is invalid"))?;
-        let plain = crate::relocation::decrypt_sealed_bindings(&crypto_domain, &sealed)
-            .map_err(BridgeFailure)?;
-        crate::relocation::method_binding_map(&plain).map_err(BridgeFailure)
+        with_live_root_material(|crypto_domain, _layout| {
+            let plain = crate::relocation::decrypt_sealed_bindings(crypto_domain, &sealed)
+                .map_err(BridgeFailure)?;
+            crate::relocation::method_binding_map(&plain).map_err(BridgeFailure)
+        })
     }
 
     unsafe fn unregister_natives(env: JNIEnv, class: JClass) {

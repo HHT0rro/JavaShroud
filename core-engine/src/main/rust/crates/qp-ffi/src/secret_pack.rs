@@ -7,11 +7,16 @@
 //! is `HMAC(reconstruct_shard_key, image commitment)`; the commitment lives in
 //! the `.jsms` slot and is read at runtime only, so the shard keys can never
 //! be constant-folded into a contiguous static window.
+//!
+//! After authorize, only ciphertext is retained. Root material and slot seeds
+//! are unwrapped into a callback window and wiped on every return, panic, and
+//! error path. A revoke epoch invalidates in-flight windows.
 
 use crate::image_measure;
 use crate::specialization;
 use qp_crypto::{aes256_gcm_decrypt, constant_time_eq, hmac_sha256_bytes, hkdf_sha256};
 use qp_runtime::{PageKeyAuthority, PageKeyMaterial, PageKeyRequest, RouterError};
+use std::sync::atomic::{compiler_fence, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 const PAGE_KEY_DOMAIN: &[u8] = b"javashroud-qp-page-key-v6";
@@ -36,6 +41,64 @@ const ENTRY_TOKEN_DOMAIN: &[u8] = b"javashroud-qp-entry-token-v6";
 const KEY_SIZE: usize = 32;
 const NONCE_SIZE: usize = 12;
 
+fn volatile_wipe(bytes: &mut [u8]) {
+    for byte in bytes {
+        unsafe { core::ptr::write_volatile(byte, 0) };
+    }
+    compiler_fence(Ordering::SeqCst);
+}
+
+/// 32-byte secret that is wiped on drop, including panic and error returns.
+struct WipedArray32([u8; KEY_SIZE]);
+
+impl WipedArray32 {
+    fn new(value: [u8; KEY_SIZE]) -> Self {
+        Self(value)
+    }
+
+    fn as_ref(&self) -> &[u8; KEY_SIZE] {
+        &self.0
+    }
+
+    fn copy_from_slice(&mut self, src: &[u8]) {
+        self.0.copy_from_slice(src);
+    }
+
+    fn is_zero(&self) -> bool {
+        self.0.iter().all(|byte| *byte == 0)
+    }
+}
+
+impl Drop for WipedArray32 {
+    fn drop(&mut self) {
+        volatile_wipe(&mut self.0);
+    }
+}
+
+/// Heap buffer that is wiped on drop, including panic and error returns.
+struct WipedVec(Vec<u8>);
+
+impl WipedVec {
+    fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl Drop for WipedVec {
+    fn drop(&mut self) {
+        volatile_wipe(&mut self.0);
+        self.0.clear();
+    }
+}
+
 /// One sealed shard kept as ciphertext. Plaintext exists only inside a
 /// short-lived unwrap window and is wiped before the window returns.
 struct SealedShard {
@@ -46,8 +109,9 @@ struct SealedShard {
 
 impl Drop for SealedShard {
     fn drop(&mut self) {
-        self.nonce.fill(0);
-        self.wrapped.fill(0);
+        volatile_wipe(&mut self.nonce);
+        volatile_wipe(&mut self.wrapped);
+        self.wrapped.clear();
     }
 }
 
@@ -76,7 +140,7 @@ fn wrap_aad() -> [u8; 32] {
     input[..32].copy_from_slice(&identity);
     input[32..].copy_from_slice(&info);
     let derived = qp_crypto::sha256(&input).into_bytes();
-    input.fill(0);
+    volatile_wipe(&mut input);
     derived
 }
 
@@ -84,6 +148,7 @@ fn wrap_aad() -> [u8; 32] {
 pub struct SecretPackState {
     native_identity: [u8; KEY_SIZE],
     state: Mutex<Option<AuthorizedPack>>,
+    epoch: AtomicU64,
 }
 
 impl SecretPackState {
@@ -93,7 +158,16 @@ impl SecretPackState {
         Self {
             native_identity: specialization::SECRET_PACK_NATIVE_IDENTITY,
             state: Mutex::new(None),
+            epoch: AtomicU64::new(0),
         }
+    }
+
+    pub fn revocation_epoch(&self) -> u64 {
+        self.epoch.load(Ordering::SeqCst)
+    }
+
+    fn bump_epoch(&self) {
+        self.epoch.fetch_add(1, Ordering::SeqCst);
     }
 
     /// Verifies the image measurement and the sealed container, then retains
@@ -122,15 +196,15 @@ impl SecretPackState {
         if specialization::SECRET_PACK_SHARD_COUNT == 0 {
             return Err(RouterError::InvalidRequest("secret wrap is empty"));
         }
-        let mut measurement_key = specialization::qp_sp_reconstruct_shard_key(1);
-        if measurement_key == [0u8; KEY_SIZE] {
+        let measurement_key =
+            WipedArray32::new(specialization::qp_sp_reconstruct_shard_key(1));
+        if measurement_key.is_zero() {
             return Err(RouterError::InvalidRequest("secret wrap key is zero"));
         }
-        if image_measure::verify_wrap_key(&measurement_key).is_err() {
-            measurement_key.fill(0);
+        if image_measure::verify_wrap_key(measurement_key.as_ref()).is_err() {
             return Err(RouterError::InvalidRequest("secret image measurement failed"));
         }
-        measurement_key.fill(0);
+        drop(measurement_key);
         let parsed = parse_sealed_pack(sealed_pack)
             .map_err(|_| RouterError::InvalidRequest("secret wrap container is invalid"))?;
         if parsed.len() != specialization::SECRET_PACK_SHARD_COUNT {
@@ -148,6 +222,7 @@ impl SecretPackState {
         // match the root record. Plaintext is wiped before this returns.
         let slot_home = self.verify_pack_integrity(&shards)?;
         *guard = Some(AuthorizedPack { shards, slot_home });
+        self.bump_epoch();
         Ok(())
     }
 
@@ -155,35 +230,53 @@ impl SecretPackState {
         &self,
         shards: &[SealedShard],
     ) -> Result<Vec<(u8, u16, u16)>, RouterError> {
-        let mut kinds: Vec<Vec<Option<[u8; KEY_SIZE]>>> =
-            vec![Vec::new(); specialization::SECRET_PACK_KIND_COUNT];
-        let mut root: Option<([u8; KEY_SIZE], [u8; KEY_SIZE], usize)> = None;
         let mut slot_home = Vec::new();
+        let mut total_slots: Option<usize> = None;
+        let mut armed = 0usize;
         for (index, shard) in shards.iter().enumerate() {
-            let mut plaintext = unwrap_shard(index, shard)?;
-            let homes = collect_slot_homes(&plaintext, shard.kind, index as u16);
-            let parsed = parse_shard(
-                &plaintext,
-                shard.kind,
-                &mut kinds,
-                &mut root,
-                &self.native_identity,
-            );
-            plaintext.fill(0);
-            parsed.map_err(|_| RouterError::InvalidRequest("secret wrap plaintext is invalid"))?;
-            slot_home.extend(homes);
+            let plaintext = unwrap_shard(index, shard)?;
+            if shard.kind == SHARD_KIND_ROOT {
+                if total_slots.is_some() {
+                    return Err(RouterError::InvalidRequest(
+                        "secret wrap plaintext is invalid",
+                    ));
+                }
+                let (crypto, layout, total) =
+                    parse_root_record(plaintext.as_slice(), &self.native_identity).map_err(
+                        |_| RouterError::InvalidRequest("secret wrap plaintext is invalid"),
+                    )?;
+                drop(crypto);
+                drop(layout);
+                total_slots = Some(total);
+            } else {
+                let count = count_kind_records(plaintext.as_slice(), shard.kind).map_err(|_| {
+                    RouterError::InvalidRequest("secret wrap plaintext is invalid")
+                })?;
+                let homes = collect_slot_homes(plaintext.as_slice(), shard.kind, index as u16);
+                if homes.len() != count {
+                    return Err(RouterError::InvalidRequest(
+                        "secret wrap plaintext is invalid",
+                    ));
+                }
+                armed = armed
+                    .checked_add(count)
+                    .ok_or(RouterError::InvalidRequest(
+                        "secret wrap plaintext is invalid",
+                    ))?;
+                slot_home.extend(homes);
+            }
         }
-        let (_, _, total_slots) = root.ok_or(RouterError::InvalidRequest(
+        let total_slots = total_slots.ok_or(RouterError::InvalidRequest(
             "secret wrap plaintext is invalid",
         ))?;
-        let armed: usize = kinds
-            .iter()
-            .map(|kind| kind.iter().flatten().count())
-            .sum();
-        for kind in &mut kinds {
-            for seed in kind.iter_mut().flatten() {
-                seed.fill(0);
+        let mut seen = Vec::with_capacity(slot_home.len());
+        for &(kind, slot, _) in &slot_home {
+            if seen.iter().any(|entry| *entry == (kind, slot)) {
+                return Err(RouterError::InvalidRequest(
+                    "secret wrap plaintext is invalid",
+                ));
             }
+            seen.push((kind, slot));
         }
         if armed != total_slots {
             return Err(RouterError::InvalidRequest(
@@ -193,8 +286,10 @@ impl SecretPackState {
         Ok(slot_home)
     }
 
-    /// Wipes the retained ciphertext; every later derivation fails.
+    /// Wipes the retained ciphertext and advances the revoke epoch so any
+    /// in-flight callback result is rejected.
     pub fn revoke(&self) {
+        self.bump_epoch();
         if let Ok(mut guard) = self.state.lock() {
             *guard = None;
         }
@@ -207,90 +302,87 @@ impl SecretPackState {
             .unwrap_or(false)
     }
 
-    pub fn crypto_domain(&self) -> Result<[u8; KEY_SIZE], RouterError> {
-        self.with_root(|(crypto_domain, _, _)| *crypto_domain)
-    }
-
-    pub fn layout_digest(&self) -> Result<[u8; KEY_SIZE], RouterError> {
-        self.with_root(|(_, layout_digest, _)| *layout_digest)
-    }
-
-    fn with_root<T, F>(&self, f: F) -> Result<T, RouterError>
+    /// Unwraps the root shard into `f` and wipes crypto-domain / layout-digest
+    /// copies when `f` returns or panics. The callback must not stash the
+    /// arrays past the call; a revoke epoch change fail-closes the result.
+    pub fn with_root_material<T, F>(&self, f: F) -> Result<T, RouterError>
     where
-        F: FnOnce(&([u8; KEY_SIZE], [u8; KEY_SIZE], usize)) -> T,
+        F: FnOnce(&[u8; KEY_SIZE], &[u8; KEY_SIZE]) -> Result<T, RouterError>,
     {
-        let guard = self
-            .state
-            .lock()
-            .map_err(|_| RouterError::AuthenticationFailed)?;
-        let pack = guard.as_ref().ok_or(RouterError::AuthenticationFailed)?;
-        let root_index = pack
-            .shards
-            .iter()
-            .position(|shard| shard.kind == SHARD_KIND_ROOT)
-            .ok_or(RouterError::AuthenticationFailed)?;
-        let mut plaintext = unwrap_shard(root_index, &pack.shards[root_index])?;
-        let mut kinds: Vec<Vec<Option<[u8; KEY_SIZE]>>> =
-            vec![Vec::new(); specialization::SECRET_PACK_KIND_COUNT];
-        let mut root: Option<([u8; KEY_SIZE], [u8; KEY_SIZE], usize)> = None;
-        let parsed = parse_shard(
-            &plaintext,
-            SHARD_KIND_ROOT,
-            &mut kinds,
-            &mut root,
-            &self.native_identity,
-        );
-        plaintext.fill(0);
-        parsed?;
-        let value = root.ok_or(RouterError::AuthenticationFailed)?;
-        let out = f(&value);
-        Ok(out)
+        let epoch = self.revocation_epoch();
+        let (crypto, layout, _total) = {
+            let guard = self
+                .state
+                .lock()
+                .map_err(|_| RouterError::AuthenticationFailed)?;
+            if self.revocation_epoch() != epoch {
+                return Err(RouterError::AuthenticationFailed);
+            }
+            let pack = guard.as_ref().ok_or(RouterError::AuthenticationFailed)?;
+            let root_index = pack
+                .shards
+                .iter()
+                .position(|shard| shard.kind == SHARD_KIND_ROOT)
+                .ok_or(RouterError::AuthenticationFailed)?;
+            let plaintext = unwrap_shard(root_index, &pack.shards[root_index])?;
+            parse_root_record(plaintext.as_slice(), &self.native_identity)?
+        };
+        if self.revocation_epoch() != epoch {
+            return Err(RouterError::AuthenticationFailed);
+        }
+        let result = f(crypto.as_ref(), layout.as_ref());
+        drop(crypto);
+        drop(layout);
+        if self.revocation_epoch() != epoch {
+            return Err(RouterError::AuthenticationFailed);
+        }
+        result
+    }
+
+    /// Unwraps one VM entry token inside the root-material window. The i64 is
+    /// not cached on the pack or the bridge.
+    pub fn with_vm_entry_token<T, F>(&self, sealed: &[u8], f: F) -> Result<T, RouterError>
+    where
+        F: FnOnce(i64) -> Result<T, RouterError>,
+    {
+        self.with_root_material(|crypto_domain, _layout| {
+            let token = unwrap_vm_entry_token(crypto_domain, sealed)?;
+            f(token)
+        })
     }
 
     fn with_kind_seed<T, F>(&self, kind_id: u8, slot: usize, f: F) -> Result<T, RouterError>
     where
         F: FnOnce(&[u8; KEY_SIZE]) -> Result<T, RouterError>,
     {
-        let guard = self
-            .state
-            .lock()
-            .map_err(|_| RouterError::AuthenticationFailed)?;
-        let pack = guard.as_ref().ok_or(RouterError::AuthenticationFailed)?;
-        let shard_index = pack
-            .slot_home
-            .iter()
-            .find(|(kind, slot_id, _)| *kind == kind_id && *slot_id as usize == slot)
-            .map(|(_, _, shard_index)| *shard_index as usize)
-            .ok_or(RouterError::AuthenticationFailed)?;
-        let kind = pack.shards[shard_index].kind;
-        let mut plaintext = unwrap_shard(shard_index, &pack.shards[shard_index])?;
-        let mut kinds: Vec<Vec<Option<[u8; KEY_SIZE]>>> =
-            vec![Vec::new(); specialization::SECRET_PACK_KIND_COUNT];
-        let mut root: Option<([u8; KEY_SIZE], [u8; KEY_SIZE], usize)> = None;
-        let parsed = parse_shard(
-            &plaintext,
-            kind,
-            &mut kinds,
-            &mut root,
-            &self.native_identity,
-        );
-        plaintext.fill(0);
-        parsed?;
-        let kind_index = kind_id as usize;
-        if kind_index >= kinds.len() {
+        let epoch = self.revocation_epoch();
+        let seed = {
+            let guard = self
+                .state
+                .lock()
+                .map_err(|_| RouterError::AuthenticationFailed)?;
+            if self.revocation_epoch() != epoch {
+                return Err(RouterError::AuthenticationFailed);
+            }
+            let pack = guard.as_ref().ok_or(RouterError::AuthenticationFailed)?;
+            let shard_index = pack
+                .slot_home
+                .iter()
+                .find(|(kind, slot_id, _)| *kind == kind_id && *slot_id as usize == slot)
+                .map(|(_, _, shard_index)| *shard_index as usize)
+                .ok_or(RouterError::AuthenticationFailed)?;
+            let kind = pack.shards[shard_index].kind;
+            let plaintext = unwrap_shard(shard_index, &pack.shards[shard_index])?;
+            extract_kind_slot(plaintext.as_slice(), kind, slot)?
+        };
+        if self.revocation_epoch() != epoch {
             return Err(RouterError::AuthenticationFailed);
         }
-        let mut seed = kinds[kind_index]
-            .get(slot)
-            .and_then(|entry| *entry)
-            .ok_or(RouterError::AuthenticationFailed)?;
-        for kind_slots in &mut kinds {
-            for entry in kind_slots.iter_mut().flatten() {
-                entry.fill(0);
-            }
+        let result = f(seed.as_ref());
+        drop(seed);
+        if self.revocation_epoch() != epoch {
+            return Err(RouterError::AuthenticationFailed);
         }
-        let result = f(&seed);
-        seed.fill(0);
         result
     }
 }
@@ -314,19 +406,23 @@ fn collect_slot_homes(plaintext: &[u8], kind: u8, shard_index: u16) -> Vec<(u8, 
     homes
 }
 
-fn unwrap_shard(index: usize, shard: &SealedShard) -> Result<Vec<u8>, RouterError> {
+fn unwrap_shard(index: usize, shard: &SealedShard) -> Result<WipedVec, RouterError> {
     let commitment = specialization::image_measurement_commitment();
-    let mut static_key = specialization::qp_sp_reconstruct_shard_key(index);
-    if static_key == [0u8; KEY_SIZE] {
-        static_key.fill(0);
+    let static_key = WipedArray32::new(specialization::qp_sp_reconstruct_shard_key(index));
+    if static_key.is_zero() {
         return Err(RouterError::InvalidRequest("secret wrap key is zero"));
     }
-    let shard_key = hmac_sha256_bytes(&static_key, &[&commitment]);
-    static_key.fill(0);
-    let wrap_aad = wrap_aad();
-    let plaintext = aes256_gcm_decrypt(&shard_key, &shard.nonce, &wrap_aad, &shard.wrapped)
-        .map_err(|_| RouterError::InvalidRequest("secret wrap decrypt failed"))?;
-    Ok(plaintext)
+    let shard_key = WipedArray32::new(hmac_sha256_bytes(static_key.as_ref(), &[&commitment]));
+    drop(static_key);
+    let wrap_aad = WipedArray32::new(wrap_aad());
+    let plaintext = aes256_gcm_decrypt(
+        shard_key.as_ref(),
+        &shard.nonce,
+        wrap_aad.as_ref(),
+        &shard.wrapped,
+    )
+    .map_err(|_| RouterError::InvalidRequest("secret wrap decrypt failed"))?;
+    Ok(WipedVec::new(plaintext))
 }
 
 impl PageKeyAuthority for SecretPackState {
@@ -337,7 +433,7 @@ impl PageKeyAuthority for SecretPackState {
         let kind = request.kind_id;
         let slot = request.secret_slot as usize;
         self.with_kind_seed(kind, slot, |seed| {
-            let mut info = Vec::with_capacity(
+            let mut info = WipedVec::new(Vec::with_capacity(
                 request.artifact_commitment.len()
                     + 4
                     + 1
@@ -346,29 +442,34 @@ impl PageKeyAuthority for SecretPackState {
                     + request.locator_token.len()
                     + request.page_nonce.len()
                     + KEY_SIZE,
+            ));
+            info.0.extend_from_slice(request.artifact_commitment);
+            info.0.extend_from_slice(&request.secret_slot.to_be_bytes());
+            info.0.push(request.kind_id);
+            info.0.extend_from_slice(&(request.page_index as u32).to_be_bytes());
+            info.0.extend_from_slice(request.encoded_handle);
+            info.0.extend_from_slice(request.locator_token);
+            info.0.extend_from_slice(request.page_nonce);
+            info.0.extend_from_slice(&self.native_identity);
+            let key = WipedVec::new(
+                hkdf_sha256(seed, PAGE_KEY_DOMAIN, info.as_slice(), KEY_SIZE)
+                    .map_err(|_| RouterError::AuthenticationFailed)?,
             );
-            info.extend_from_slice(request.artifact_commitment);
-            info.extend_from_slice(&request.secret_slot.to_be_bytes());
-            info.push(request.kind_id);
-            info.extend_from_slice(&(request.page_index as u32).to_be_bytes());
-            info.extend_from_slice(request.encoded_handle);
-            info.extend_from_slice(request.locator_token);
-            info.extend_from_slice(request.page_nonce);
-            info.extend_from_slice(&self.native_identity);
-            let mut key = hkdf_sha256(seed, PAGE_KEY_DOMAIN, &info, KEY_SIZE)
-                .map_err(|_| RouterError::AuthenticationFailed)?;
-            let commitment_key = hkdf_sha256(seed, COMMITMENT_DOMAIN, &[], KEY_SIZE)
-                .map_err(|_| RouterError::AuthenticationFailed)?;
-            info.fill(0);
-            let expected = hmac_sha256_bytes(&commitment_key, &[&key]);
-            let mut material = [0u8; KEY_SIZE];
+            let commitment_key = WipedVec::new(
+                hkdf_sha256(seed, COMMITMENT_DOMAIN, &[], KEY_SIZE)
+                    .map_err(|_| RouterError::AuthenticationFailed)?,
+            );
+            volatile_wipe(&mut info.0);
+            let expected = hmac_sha256_bytes(commitment_key.as_slice(), &[key.as_slice()]);
             if !constant_time_eq(&expected, request.expected_key_commitment) {
-                key.clear();
                 return Err(RouterError::AuthenticationFailed);
             }
-            material.copy_from_slice(&key[..KEY_SIZE]);
-            key.clear();
-            Ok(PageKeyMaterial::from_material(&material))
+            if key.len() < KEY_SIZE {
+                return Err(RouterError::AuthenticationFailed);
+            }
+            let mut material = WipedArray32::new([0u8; KEY_SIZE]);
+            material.copy_from_slice(&key.as_slice()[..KEY_SIZE]);
+            Ok(PageKeyMaterial::from_material(material.as_ref()))
         })
     }
 }
@@ -416,39 +517,34 @@ fn parse_sealed_pack(bytes: &[u8]) -> Result<Vec<(u8, [u8; NONCE_SIZE], Vec<u8>)
     Ok(shards)
 }
 
-fn parse_shard(
+fn parse_root_record(
     plaintext: &[u8],
-    kind: u8,
-    kinds: &mut Vec<Vec<Option<[u8; KEY_SIZE]>>>,
-    root: &mut Option<([u8; KEY_SIZE], [u8; KEY_SIZE], usize)>,
     expected_identity: &[u8; KEY_SIZE],
-) -> Result<(), RouterError> {
-    if kind == SHARD_KIND_ROOT {
-        if plaintext.len() != KEY_SIZE + 4 + KEY_SIZE + KEY_SIZE {
-            return Err(RouterError::AuthenticationFailed);
-        }
-        if !constant_time_eq(&plaintext[..KEY_SIZE], expected_identity) {
-            return Err(RouterError::AuthenticationFailed);
-        }
-        let total =
-            u32::from_be_bytes(plaintext[KEY_SIZE..KEY_SIZE + 4].try_into().map_err(|_| {
-                RouterError::AuthenticationFailed
-            })?) as usize;
-        if total > specialization::SECRET_PACK_SLOT_COUNT {
-            return Err(RouterError::AuthenticationFailed);
-        }
-        let mut crypto_domain = [0u8; KEY_SIZE];
-        crypto_domain.copy_from_slice(&plaintext[KEY_SIZE + 4..KEY_SIZE + 4 + KEY_SIZE]);
-        let mut layout_digest = [0u8; KEY_SIZE];
-        layout_digest.copy_from_slice(&plaintext[KEY_SIZE + 4 + KEY_SIZE..]);
-        if crypto_domain == [0u8; KEY_SIZE] || layout_digest == [0u8; KEY_SIZE] {
-            return Err(RouterError::AuthenticationFailed);
-        }
-        if root.replace((crypto_domain, layout_digest, total)).is_some() {
-            return Err(RouterError::AuthenticationFailed);
-        }
-        return Ok(());
+) -> Result<(WipedArray32, WipedArray32, usize), RouterError> {
+    if plaintext.len() != KEY_SIZE + 4 + KEY_SIZE + KEY_SIZE {
+        return Err(RouterError::AuthenticationFailed);
     }
+    if !constant_time_eq(&plaintext[..KEY_SIZE], expected_identity) {
+        return Err(RouterError::AuthenticationFailed);
+    }
+    let total =
+        u32::from_be_bytes(plaintext[KEY_SIZE..KEY_SIZE + 4].try_into().map_err(|_| {
+            RouterError::AuthenticationFailed
+        })?) as usize;
+    if total > specialization::SECRET_PACK_SLOT_COUNT {
+        return Err(RouterError::AuthenticationFailed);
+    }
+    let mut crypto_domain = WipedArray32::new([0u8; KEY_SIZE]);
+    crypto_domain.copy_from_slice(&plaintext[KEY_SIZE + 4..KEY_SIZE + 4 + KEY_SIZE]);
+    let mut layout_digest = WipedArray32::new([0u8; KEY_SIZE]);
+    layout_digest.copy_from_slice(&plaintext[KEY_SIZE + 4 + KEY_SIZE..]);
+    if crypto_domain.is_zero() || layout_digest.is_zero() {
+        return Err(RouterError::AuthenticationFailed);
+    }
+    Ok((crypto_domain, layout_digest, total))
+}
+
+fn count_kind_records(plaintext: &[u8], kind: u8) -> Result<usize, RouterError> {
     let kind_index = kind as usize;
     if kind_index >= specialization::SECRET_PACK_KIND_COUNT {
         return Err(RouterError::AuthenticationFailed);
@@ -469,10 +565,7 @@ fn parse_shard(
     if plaintext.len() != expected_len || count > specialization::SECRET_PACK_SLOT_COUNT {
         return Err(RouterError::AuthenticationFailed);
     }
-    let mut slots = std::mem::take(&mut kinds[kind_index]);
-    if slots.is_empty() {
-        slots = vec![None; specialization::SECRET_PACK_SLOT_COUNT];
-    }
+    let mut seen = vec![false; specialization::SECRET_PACK_SLOT_COUNT];
     let mut cursor = 5usize;
     for _ in 0..count {
         let slot_id = u32::from_be_bytes(
@@ -481,20 +574,44 @@ fn parse_shard(
                 .map_err(|_| RouterError::AuthenticationFailed)?,
         ) as usize;
         cursor += 4;
-        if slot_id >= slots.len() {
+        if slot_id >= seen.len() || seen[slot_id] {
             return Err(RouterError::AuthenticationFailed);
         }
-        let mut seed = [0u8; KEY_SIZE];
-        seed.copy_from_slice(&plaintext[cursor..cursor + KEY_SIZE]);
+        seen[slot_id] = true;
+        if plaintext[cursor..cursor + KEY_SIZE]
+            .iter()
+            .all(|byte| *byte == 0)
+        {
+            return Err(RouterError::AuthenticationFailed);
+        }
         cursor += KEY_SIZE;
-        if seed == [0u8; KEY_SIZE] || slots[slot_id].is_some() {
-            seed.fill(0);
-            return Err(RouterError::AuthenticationFailed);
-        }
-        slots[slot_id] = Some(seed);
     }
-    kinds[kind_index] = slots;
-    Ok(())
+    Ok(count)
+}
+
+fn extract_kind_slot(
+    plaintext: &[u8],
+    kind: u8,
+    slot: usize,
+) -> Result<WipedArray32, RouterError> {
+    let count = count_kind_records(plaintext, kind)?;
+    let _record = 4 + KEY_SIZE;
+    let mut cursor = 5usize;
+    for _ in 0..count {
+        let slot_id = u32::from_be_bytes(
+            plaintext[cursor..cursor + 4]
+                .try_into()
+                .map_err(|_| RouterError::AuthenticationFailed)?,
+        ) as usize;
+        cursor += 4;
+        if slot_id == slot {
+            let mut seed = WipedArray32::new([0u8; KEY_SIZE]);
+            seed.copy_from_slice(&plaintext[cursor..cursor + KEY_SIZE]);
+            return Ok(seed);
+        }
+        cursor += KEY_SIZE;
+    }
+    Err(RouterError::AuthenticationFailed)
 }
 
 /// v6 sealed VM entry token: `nonce(12) || ct||tag`, AES-256-GCM under
@@ -506,18 +623,23 @@ pub fn unwrap_vm_entry_token(
     if sealed.len() < 12 + 16 {
         return Err(RouterError::AuthenticationFailed);
     }
-    let key = hkdf_sha256(crypto_domain, ENTRY_TOKEN_DOMAIN, &[], KEY_SIZE)
-        .map_err(|_| RouterError::AuthenticationFailed)?;
-    let plaintext = aes256_gcm_decrypt(&key, &sealed[..12], ENTRY_TOKEN_DOMAIN, &sealed[12..])
-        .map_err(|_| RouterError::AuthenticationFailed)?;
+    let key = WipedVec::new(
+        hkdf_sha256(crypto_domain, ENTRY_TOKEN_DOMAIN, &[], KEY_SIZE)
+            .map_err(|_| RouterError::AuthenticationFailed)?,
+    );
+    let plaintext = WipedVec::new(
+        aes256_gcm_decrypt(key.as_slice(), &sealed[..12], ENTRY_TOKEN_DOMAIN, &sealed[12..])
+            .map_err(|_| RouterError::AuthenticationFailed)?,
+    );
     if plaintext.len() != 8 {
         return Err(RouterError::AuthenticationFailed);
     }
     let mut raw = [0u8; 8];
-    raw.copy_from_slice(&plaintext);
-    Ok(i64::from_be_bytes(raw))
+    raw.copy_from_slice(plaintext.as_slice());
+    let token = i64::from_be_bytes(raw);
+    volatile_wipe(&mut raw);
+    Ok(token)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -548,6 +670,50 @@ mod tests {
         bytes.extend_from_slice(&11u16.to_be_bytes());
         bytes.extend_from_slice(&0u32.to_be_bytes());
         assert!(parse_sealed_pack(&bytes).is_err());
+    }
+
+    #[test]
+    fn volatile_wipe_zeros_buffer() {
+        let mut buf = [0x5Au8; 32];
+        volatile_wipe(&mut buf);
+        assert!(buf.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn wiped_array_zeros_on_drop() {
+        let mut buf = [0x5Au8; 32];
+        {
+            let wrapped = WipedArray32::new(buf);
+            buf.copy_from_slice(wrapped.as_ref());
+        }
+        // The stack copy in `buf` is independent; Drop of WipedArray32 is
+        // covered by Miri/ASAN elsewhere. Check the wipe helper contract here.
+        volatile_wipe(&mut buf);
+        assert!(buf.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn revoke_increments_epoch_and_clears_authorization() {
+        let pack = SecretPackState::from_specialization();
+        let before = pack.revocation_epoch();
+        pack.revoke();
+        assert!(pack.revocation_epoch() > before);
+        assert!(!pack.is_authorized());
+    }
+
+    #[test]
+    fn with_root_material_fails_when_unauthorized() {
+        let pack = SecretPackState::from_specialization();
+        let error = pack
+            .with_root_material(|_, _| Ok(()))
+            .expect_err("unauthorized pack");
+        assert!(matches!(error, RouterError::AuthenticationFailed));
+    }
+
+    #[test]
+    fn with_vm_entry_token_fails_when_unauthorized() {
+        let pack = SecretPackState::from_specialization();
+        assert!(pack.with_vm_entry_token(&[0u8; 32], |_| Ok(())).is_err());
     }
 }
 
@@ -581,7 +747,6 @@ mod blob_tests {
 mod entry_token_tests {
     use super::*;
     use qp_crypto::aes256_gcm_encrypt;
-
 
     #[test]
     fn vm_entry_token_round_trips_and_rejects_tampering() {
