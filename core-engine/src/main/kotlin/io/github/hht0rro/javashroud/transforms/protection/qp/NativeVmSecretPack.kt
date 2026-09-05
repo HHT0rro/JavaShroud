@@ -398,8 +398,11 @@ internal class NativeSecretPackLiterals private constructor(
     private var wiped = false
 
     /**
-     * Seals every shard under `HMAC(cmKey, imageCommitment)` and caches the
-     * packed blob for one compiled platform artifact. Idempotent per platform.
+     * Seals every shard under `HMAC(cmKey, imageCommitment)` and stores the
+     * packed blob for one compiled platform artifact. Always re-seals against
+     * the passed commitment and overwrites any earlier blob for the platform:
+     * a cached blob could have been wrapped under a stale image commitment
+     * after a recompile, and the runtime would then fail closed.
      */
     @Synchronized
     fun sealForPlatform(platform: String, imageCommitment: ByteArray): ByteArray {
@@ -407,7 +410,6 @@ internal class NativeSecretPackLiterals private constructor(
         require(imageCommitment.size == QP_SECRET_PACK_SEED_SIZE) {
             "Qp image commitment must be ${QP_SECRET_PACK_SEED_SIZE} bytes"
         }
-        sealedBlobs[platform]?.let { return it.copyOf() }
         val random = java.security.SecureRandom()
         val mac = Mac.getInstance("HmacSHA256")
         val out = java.io.ByteArrayOutputStream()
@@ -629,8 +631,15 @@ internal object NativeImageMeasurement {
     private fun zeroShardMaskRegion(bytes: ByteArray) {
         // The .jsmk rows are patched with the commitment after this digest is
         // taken; the runtime zeroes the same region, so both sides must hash
-        // it as zeros or the measurement will never verify.
-        val range = locateSectionRange(bytes, ".jsmk") ?: return
+        // it as zeros or the measurement will never verify. The .jsmd dialect
+        // mask region is patched with the commitment stream for the same
+        // reason and normalized identically.
+        zeroSectionRange(bytes, ".jsmk")
+        zeroSectionRange(bytes, ".jsmd")
+    }
+
+    private fun zeroSectionRange(bytes: ByteArray, name: String) {
+        val range = locateSectionRange(bytes, name) ?: return
         val offset = range.first
         val size = range.second
         if (offset < 0 || size <= 0 || offset + size > bytes.size) return
@@ -830,6 +839,52 @@ internal object NativeImageMeasurement {
                 bytes[found + j] = ((bytes[found + j].toInt() xor commitment[j % 32].toInt()) and 0xFF).toByte()
             }
         }
+        return true
+    }
+
+    /**
+     * Counter-mode SHA-256 expansion of the image commitment; must match the
+     * generated `qp_dialect_mask_stream` in the specialization byte for byte.
+     */
+    internal fun dialectMaskStream(commitment: ByteArray, length: Int): ByteArray {
+        val info = "javashroud-qp-dialect-mask-v6".toByteArray(Charsets.US_ASCII)
+        val input = ByteArray(32 + 4 + info.size)
+        commitment.copyInto(input)
+        val out = ByteArray(length)
+        var counter = 0
+        var filled = 0
+        while (filled < length) {
+            input[32] = (counter ushr 24).toByte()
+            input[33] = (counter ushr 16).toByte()
+            input[34] = (counter ushr 8).toByte()
+            input[35] = counter.toByte()
+            info.copyInto(input, 36)
+            val digest = java.security.MessageDigest.getInstance("SHA-256").digest(input)
+            val take = minOf(32, length - filled)
+            System.arraycopy(digest, 0, out, filled, take)
+            filled += take
+            counter++
+        }
+        java.util.Arrays.fill(input, 0)
+        return out
+    }
+
+    /**
+     * Commitment-chains the VM dialect corpus: the counter-mode stream of the
+     * patched image commitment is XORed over the whole `.jsmd` section, so
+     * `mask ^ masked` in the static bytes never reconstructs the corpus
+     * without the (itself commitment-chained) image measurement.
+     */
+    internal fun patchDialectMask(bytes: ByteArray, commitment: ByteArray): Boolean {
+        val range = locateSectionRange(bytes, ".jsmd") ?: return false
+        val offset = range.first
+        val size = range.second
+        if (offset < 0 || size <= 0 || offset + size > bytes.size) return false
+        val stream = dialectMaskStream(commitment, size)
+        for (index in 0 until size) {
+            bytes[offset + index] = ((bytes[offset + index].toInt() xor stream[index].toInt()) and 0xFF).toByte()
+        }
+        java.util.Arrays.fill(stream, 0)
         return true
     }
 
