@@ -143,11 +143,23 @@ public final class QpGuard {
     /**
      * Re-runs armed probes immediately before protected-data release.
      * Deleting injected method probe call sites does not skip this gate.
+     *
+     * <p>The full probe pair is time-throttled to match the native watchdog's
+     * scan cadence: every dispatch keeps the native hot-path check, while this
+     * Java-side re-verification runs at the same 50ms interval instead of once
+     * per page call. A failed or tampered probe still fails closed immediately
+     * and poisons the kernel state, so throttling only widens the detection
+     * window of this Java layer, never the revocation response.</p>
      */
     public static void authorizeProtectedData() {
         if (state != DEFENSE_READY || armedSurfaces == 0) {
             return;
         }
+        final long now = System.nanoTime();
+        if (now - lastFullAuthorizeNanos < FULL_PROBE_INTERVAL_NANOS) {
+            return;
+        }
+        lastFullAuthorizeNanos = now;
         if ((armedSurfaces & DEBUG_SURFACE) != 0) {
             probe(SURFACE_OS_ANTI_DEBUG, POINT_DATA_ACCESS);
         }
@@ -155,6 +167,9 @@ public final class QpGuard {
             probe(SURFACE_OS_ANTI_VM, POINT_DATA_ACCESS);
         }
     }
+
+    private static volatile long lastFullAuthorizeNanos;
+    private static final long FULL_PROBE_INTERVAL_NANOS = 50_000_000L;
 
     private static void verifyShortLivedShare(int surfaceCode, int pointCode) {
         byte[] material = new byte[8];
