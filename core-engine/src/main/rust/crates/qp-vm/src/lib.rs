@@ -180,7 +180,7 @@ pub mod opcode {
 
 use crypto::{
     aes128_ctr, ct_eq, frame_aes_material, frame_hmac, frame_hmac_fields, frame_session_material,
-    vm_build_key,
+    hmac_bytes, vm_build_key,
 };
 use opcode::*;
 use std::fmt;
@@ -848,6 +848,7 @@ impl<'a> VmParser<'a> {
             self.material.layout_digest(),
         )?;
         program.metadata = metadata;
+        mark_self_invokes(&mut program, build_key);
         Ok(program)
     }
 }
@@ -1134,6 +1135,7 @@ pub struct VmProgram {
     flags: u16,
     nonce: [u8; 16],
     seed: u32,
+    self_invoke: Vec<u8>,
 }
 
 impl VmProgram {
@@ -1177,6 +1179,10 @@ impl VmProgram {
         self.metadata_cp_index
     }
 
+    pub fn is_self_invoke(&self, index: usize) -> bool {
+        self.self_invoke.get(index).copied() == Some(1)
+    }
+
     fn wipe(&mut self) {
         for constant in &mut self.constants {
             constant.wipe();
@@ -1197,6 +1203,8 @@ impl VmProgram {
             handler.type_cp = None;
         }
         self.exceptions.clear();
+        self.self_invoke.fill(0);
+        self.self_invoke.clear();
         self.metadata_cp_index = 0;
         self.register_count = 0;
         self.max_stack = 0;
@@ -1267,6 +1275,51 @@ struct EncodedException {
     end: u16,
     handler: u16,
     type_cp: u16,
+}
+
+const METHOD_IDENTITY_LABEL: &[u8] = b"javashroud-qp-method-identity-v2";
+
+fn mark_self_invokes(program: &mut VmProgram, build_key: &[u8; 32]) {
+    program.self_invoke.clear();
+    program.self_invoke.resize(program.instructions.len(), 0);
+    if !program.metadata.is_static || program.metadata.method_identity.iter().all(|byte| *byte == 0) {
+        return;
+    }
+    for (index, instruction) in program.instructions.iter().enumerate() {
+        if instruction.opcode != INVOKESTATIC {
+            continue;
+        }
+        let operands = &program.operands[instruction.operand_range.clone()];
+        let Some(reference_index) = operands.first().and_then(|value| usize::try_from(*value).ok()) else {
+            continue;
+        };
+        let Some(reference) = program.constants.get(reference_index).and_then(VmConstant::as_string) else {
+            continue;
+        };
+        let Some(identity) = method_identity_from_reference(build_key, reference) else {
+            continue;
+        };
+        if ct_eq(&identity, &program.metadata.method_identity) {
+            program.self_invoke[index] = 1;
+        }
+    }
+}
+
+fn method_identity_from_reference(build_key: &[u8; 32], reference: &str) -> Option<[u8; 32]> {
+    let (owner_and_name, descriptor) = reference.rsplit_once(':')?;
+    let (owner, name) = owner_and_name.rsplit_once('.')?;
+    Some(hmac_bytes(
+        build_key,
+        &[
+            METHOD_IDENTITY_LABEL,
+            &[0],
+            owner.as_bytes(),
+            &[0],
+            name.as_bytes(),
+            &[0],
+            descriptor.as_bytes(),
+        ],
+    ))
 }
 
 /// Stream mask over the stored header flags word, derived from the frame
@@ -2532,6 +2585,7 @@ fn lower_rows(
             operand: 0,
         };
     }
+    let self_invoke = vec![0u8; instructions.len()];
     Ok((
         VmProgram {
             constants,
@@ -2557,6 +2611,7 @@ fn lower_rows(
             flags: 0,
             nonce: [0; 16],
             seed: 0,
+            self_invoke,
         },
         metadata_cp_index,
     ))
@@ -2911,6 +2966,8 @@ pub struct ProgramBuilder {
     exceptions: Vec<ExceptionHandler>,
     max_stack: usize,
     max_locals: usize,
+    method_identity: [u8; 32],
+    recursive_static: bool,
 }
 
 impl ProgramBuilder {
@@ -2921,6 +2978,8 @@ impl ProgramBuilder {
             exceptions: Vec::new(),
             max_stack: 64,
             max_locals: 16,
+            method_identity: [0; 32],
+            recursive_static: false,
         }
     }
 
@@ -2947,6 +3006,11 @@ impl ProgramBuilder {
 
     pub fn constant_double(mut self, value: f64) -> Self {
         self.constants.push(VmConstant::Double(value));
+        self
+    }
+
+    pub fn recursive_static(mut self) -> Self {
+        self.recursive_static = true;
         self
     }
 
@@ -2989,8 +3053,17 @@ impl ProgramBuilder {
     pub fn finish(self) -> VmProgram {
         let mut operands = Vec::new();
         let mut instructions = Vec::with_capacity(self.instructions.len());
+        let recursive_static = self.recursive_static;
         for (opcode, flags, values) in self.instructions {
             add_instruction(&mut instructions, &mut operands, opcode, flags, &values);
+        }
+        let mut self_invoke = vec![0u8; instructions.len()];
+        if recursive_static {
+            for (index, instruction) in instructions.iter().enumerate() {
+                if instruction.opcode == INVOKESTATIC {
+                    self_invoke[index] = 1;
+                }
+            }
         }
         VmProgram {
             constants: self.constants,
@@ -3001,7 +3074,7 @@ impl ProgramBuilder {
                 entry_token: 1,
                 return_tag: b'V',
                 method_local_profile: 0,
-                method_identity: [0; 32],
+                method_identity: self.method_identity,
                 owner_identity: [0; 32],
                 argument_tags: Vec::new(),
                 resource_path: VmString::from_string(String::new()),
@@ -3016,6 +3089,7 @@ impl ProgramBuilder {
             flags: 0,
             nonce: [0; 16],
             seed: 0,
+            self_invoke,
         }
     }
 }

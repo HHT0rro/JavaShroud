@@ -966,7 +966,7 @@ impl<H: ObjectOperations> VmExecutor<H> {
             | opcode::INVOKESPECIAL
             | opcode::INVOKESTATIC
             | opcode::INVOKEINTERFACE
-            | opcode::INVOKEDYNAMIC => self.invoke(program, frame, op, operands, depth, next),
+            | opcode::INVOKEDYNAMIC => self.invoke(program, frame, op, operands, pc, depth, next),
             opcode::NEW => {
                 let class = cp_string(program, operand(operands, 0)?)?;
                 let object = self
@@ -1206,6 +1206,7 @@ impl<H: ObjectOperations> VmExecutor<H> {
         frame: &mut ExecutionFrame<H::Object>,
         opcode: u16,
         operands: &[i32],
+        pc: usize,
         depth: usize,
         next: usize,
     ) -> Result<Control<H::Object>, Thrown<H::Object>> {
@@ -1242,18 +1243,32 @@ impl<H: ObjectOperations> VmExecutor<H> {
             let receiver = pop(frame)?;
             Some(as_object(receiver)?)
         };
-        let result = match self
-            .host
-            .invoke(kind, reference, receiver_object.as_ref(), &arguments)
-        {
-            Ok(value) => Ok(value),
-            Err(_) => match self.host.take_pending_exception() {
-                Some((class_name, object)) => Err(Thrown {
+        let result = if opcode == opcode::INVOKESTATIC && program.is_self_invoke(pc) {
+            match self.execute_at_depth(program, &arguments, depth + 1) {
+                Ok(value) => Ok(value),
+                Err(VmError::UncaughtException { class_name, message: _ }) => Err(Thrown {
                     class_name,
-                    value: VmValue::Object(object),
+                    value: VmValue::Null,
                 }),
-                None => Err(thrown("java/lang/LinkageError", VmValue::Null)),
-            },
+                Err(VmError::RecursionLimit) | Err(VmError::StepLimit) => {
+                    Err(thrown("java/lang/StackOverflowError", VmValue::Null))
+                }
+                Err(_) => Err(thrown("java/lang/VerifyError", VmValue::Null)),
+            }
+        } else {
+            match self
+                .host
+                .invoke(kind, reference, receiver_object.as_ref(), &arguments)
+            {
+                Ok(value) => Ok(value),
+                Err(_) => match self.host.take_pending_exception() {
+                    Some((class_name, object)) => Err(Thrown {
+                        class_name,
+                        value: VmValue::Object(object),
+                    }),
+                    None => Err(thrown("java/lang/LinkageError", VmValue::Null)),
+                },
+            }
         };
         let value = result?;
         arguments.clear();
@@ -1659,6 +1674,42 @@ mod tests {
             .finish();
         let mut executor = VmExecutor::new(NoObjectOperations);
         assert_eq!(executor.execute(&program, &[]), Ok(VmValue::Int(0)));
+    }
+
+    #[test]
+    fn static_self_invoke_stays_inside_the_current_program() {
+        struct Host;
+        impl ObjectOperations for Host {
+            type Object = ();
+            fn invoke(
+                &mut self,
+                _kind: InvokeKind,
+                _reference: &str,
+                _receiver: Option<&()>,
+                _arguments: &[VmValue<()>],
+            ) -> Result<VmValue<()>, VmHostError> {
+                Err(VmHostError::Failure)
+            }
+        }
+        let program = ProgramBuilder::new()
+            .recursive_static()
+            .constant_string("pack/tests/bench/Calc.call:(I)V")
+            .instruction(opcode::ILOAD, &[0])
+            .instruction(opcode::IFEQ, &[7])
+            .instruction(opcode::ILOAD, &[0])
+            .instruction(opcode::ICONST, &[1])
+            .instruction(opcode::ISUB, &[])
+            .instruction(opcode::INVOKESTATIC, &[0])
+            .instruction(opcode::IRETURN, &[])
+            .instruction(opcode::ICONST, &[1])
+            .instruction(opcode::IRETURN, &[])
+            .max_locals(2)
+            .finish();
+        let mut executor = VmExecutor::new(Host);
+        assert_eq!(
+            executor.execute(&program, &[VmValue::Int(3)]),
+            Ok(VmValue::Int(1))
+        );
     }
 
     #[test]
