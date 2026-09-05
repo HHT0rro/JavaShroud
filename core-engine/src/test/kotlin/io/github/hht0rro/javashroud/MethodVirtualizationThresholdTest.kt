@@ -814,6 +814,79 @@ class MethodVirtualizationThresholdTest {
     }
 
     @Test
+    fun official_pool_lambda_implementation_stays_on_jvm() {
+        val classBytes = officialResourceBytes("pack/tests/basics/runable/Task.class")
+        val artifact = artifactFor(
+            classBytes = classBytes,
+            internalName = "pack/tests/basics/runable/Task",
+            methodSummaries = listOf(
+                MemberSummary(MemberKind.METHOD, "run", "()V", Opcodes.ACC_PUBLIC),
+                MemberSummary(
+                    MemberKind.METHOD,
+                    "lambda\$run\$0",
+                    "(Lpack/tests/basics/runable/Exec;)V",
+                    Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC or Opcodes.ACC_SYNTHETIC,
+                ),
+            ),
+        )
+
+        val result = applyMethodVirtualization(
+            artifact = artifact,
+            ruleMatches = ruleMatchesFor("pack/tests/basics/runable/Task"),
+            params = mapOf(
+                "maxInstructions" to 0,
+                "seed" to 42,
+                "methodSelection" to "all-compatible",
+                "strictVirtualization" to true,
+                "maxBroadVirtualizedMethods" to 0,
+            ),
+        )
+
+        val transformed = result.artifact.classArtifactIndex.getValue("pack/tests/basics/runable/Task").bytes
+        assertFalse(
+            methodCallsVmDispatcher(transformed, "lambda\$run\$0", "(Lpack/tests/basics/runable/Exec;)V"),
+            "LambdaMetafactory implementation of Task.run must stay on the JVM",
+        )
+        assertFalse(methodCallsVmDispatcher(transformed, "run", "()V"), "Task.run is a thread-pool timing root and must stay on the JVM")
+    }
+
+    @Test
+    fun renamed_lambda_implementation_handle_stays_on_jvm() {
+        val classBytes = renameOfficialTaskLambda("renamedPoolWorker")
+        val artifact = artifactFor(
+            classBytes = classBytes,
+            internalName = "pack/tests/basics/runable/Task",
+            methodSummaries = listOf(
+                MemberSummary(MemberKind.METHOD, "run", "()V", Opcodes.ACC_PUBLIC),
+                MemberSummary(
+                    MemberKind.METHOD,
+                    "renamedPoolWorker",
+                    "(Lpack/tests/basics/runable/Exec;)V",
+                    Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC or Opcodes.ACC_SYNTHETIC,
+                ),
+            ),
+        )
+
+        val result = applyMethodVirtualization(
+            artifact = artifact,
+            ruleMatches = ruleMatchesFor("pack/tests/basics/runable/Task"),
+            params = mapOf(
+                "maxInstructions" to 0,
+                "seed" to 42,
+                "methodSelection" to "all-compatible",
+                "strictVirtualization" to true,
+                "maxBroadVirtualizedMethods" to 0,
+            ),
+        )
+
+        val transformed = result.artifact.classArtifactIndex.getValue("pack/tests/basics/runable/Task").bytes
+        assertFalse(
+            methodCallsVmDispatcher(transformed, "renamedPoolWorker", "(Lpack/tests/basics/runable/Exec;)V"),
+            "A renamed LambdaMetafactory implementation must still stay on the JVM",
+        )
+    }
+
+    @Test
     fun official_calc_keeps_runAll_on_jvm_and_virtualizes_private_helpers() {
         val classBytes = officialCalcClassBytes()
         val artifact = artifactFor(
@@ -1031,11 +1104,42 @@ class MethodVirtualizationThresholdTest {
         return writer.toByteArray()
     }
 
-    private fun officialCalcClassBytes(): ByteArray {
-        val stream = requireNotNull(javaClass.getResourceAsStream("/official-test-jar/pack/tests/bench/Calc.class")) {
-            "Official TEST.jar Calc.class fixture is missing"
+    private fun officialResourceBytes(path: String): ByteArray {
+        val stream = requireNotNull(javaClass.getResourceAsStream("/official-test-jar/$path")) {
+            "Official TEST.jar fixture is missing: $path"
         }
         return stream.use { it.readBytes() }
+    }
+
+    private fun officialCalcClassBytes(): ByteArray = officialResourceBytes("pack/tests/bench/Calc.class")
+
+    private fun renameOfficialTaskLambda(newName: String): ByteArray {
+        val node = org.objectweb.asm.tree.ClassNode()
+        ClassReader(officialResourceBytes("pack/tests/basics/runable/Task.class")).accept(node, 0)
+        val oldName = "lambda\$run\$0"
+        for (method in node.methods) {
+            if (method.name == oldName) method.name = newName
+            method.instructions?.forEach { instruction ->
+                when (instruction) {
+                    is org.objectweb.asm.tree.InvokeDynamicInsnNode -> {
+                        instruction.bsmArgs = instruction.bsmArgs.map { argument ->
+                            val handle = argument as? org.objectweb.asm.Handle ?: return@map argument
+                            if (handle.owner == node.name && handle.name == oldName) {
+                                org.objectweb.asm.Handle(handle.tag, handle.owner, newName, handle.desc, handle.isInterface)
+                            } else {
+                                argument
+                            }
+                        }.toTypedArray()
+                    }
+                    is org.objectweb.asm.tree.MethodInsnNode -> {
+                        if (instruction.owner == node.name && instruction.name == oldName) instruction.name = newName
+                    }
+                }
+            }
+        }
+        val writer = org.objectweb.asm.ClassWriter(0)
+        node.accept(writer)
+        return writer.toByteArray()
     }
 
     private fun officialCalcMethodSummaries(synthetic: Boolean = false): List<MemberSummary> {

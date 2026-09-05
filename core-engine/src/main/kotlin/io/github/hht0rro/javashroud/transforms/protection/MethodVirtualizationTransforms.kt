@@ -187,6 +187,45 @@ private fun jvmBoundaryBootstrapKeys(classNode: ClassNode): Set<String> = classN
     }
     .toSet()
 
+/**
+ * Methods that LambdaMetafactory (or an a_bsm wrapper of it) binds as the
+ * implementation handle. rename-methods strips the `lambda$` prefix, so name
+ * matching is not enough; these bodies stay on the JVM because they run on
+ * executor threads and changing their dispatch changes Pool-style timing.
+ */
+private fun lambdaMetafactoryImplementationKeys(classNode: ClassNode): Set<String> {
+    val keys = linkedSetOf<String>()
+    for (method in classNode.methods) {
+        val instructions = method.instructions ?: continue
+        for (instruction in instructions) {
+            val indy = instruction as? org.objectweb.asm.tree.InvokeDynamicInsnNode ?: continue
+            if (!isLambdaMetafactoryCall(indy)) continue
+            for (argument in indy.bsmArgs) {
+                val handle = argument as? Handle ?: continue
+                if (handle.owner != classNode.name) continue
+                if (handle.tag != Opcodes.H_INVOKESTATIC &&
+                    handle.tag != Opcodes.H_INVOKESPECIAL &&
+                    handle.tag != Opcodes.H_INVOKEVIRTUAL
+                ) {
+                    continue
+                }
+                keys += handle.name + handle.desc
+            }
+        }
+    }
+    return keys
+}
+
+private fun isLambdaMetafactoryCall(indy: org.objectweb.asm.tree.InvokeDynamicInsnNode): Boolean {
+    if (indy.bsm.owner == "java/lang/invoke/LambdaMetafactory") return true
+    val returnType = runCatching { Type.getReturnType(indy.desc) }.getOrNull() ?: return false
+    if (returnType.sort != Type.OBJECT) return false
+    val returned = returnType.internalName
+    return returned == "java/lang/Runnable" ||
+        returned == "java/util/concurrent/Callable" ||
+        returned.startsWith("java/util/function/")
+}
+
 private fun rejectUnsupportedQpParams(params: Map<String, Any>) {
     val unsupported = params.keys.filter { it !in QP_ALLOWED_PARAMS }
     if (unsupported.isNotEmpty()) {
@@ -335,6 +374,7 @@ fun applyMethodVirtualization(
         val className = classArtifact.summary.internalName
         val timingSensitiveSyntheticHandlers = unsafeSyntheticHandlerKeys(classArtifact.bytes)
         val jvmBoundaryBootstrapKeys = jvmBoundaryBootstrapKeys(classNode)
+        val lambdaImplementationKeys = lambdaMetafactoryImplementationKeys(classNode)
         val existingMethodKeys = classArtifact.summary.methodSummaries
             .map { it.name + it.descriptor }
             .toMutableSet()
@@ -411,6 +451,11 @@ fun applyMethodVirtualization(
                         }
                         if (name + descriptor in jvmBoundaryBootstrapKeys) {
                             recordSelectionSkip("jvm-boundary-bootstrap")
+                            bodyCapture.replayTo(superMv)
+                            return
+                        }
+                        if (name + descriptor in lambdaImplementationKeys) {
+                            recordSelectionSkip("lambda-impl-handle")
                             bodyCapture.replayTo(superMv)
                             return
                         }
