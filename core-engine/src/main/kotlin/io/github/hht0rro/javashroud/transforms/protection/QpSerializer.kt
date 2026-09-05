@@ -302,7 +302,10 @@ internal class QpSerializer(
         out.write(opcodeDialect.commitment)
         writeU4(out, frameKeyId(cryptoSeed, nonce))
         out.write(wrappedSeed)
-        writeU2(out, flags)
+        // The stored flags word is masked with a nonce-derived stream so the
+        // fixed per-page flag fingerprint disappears from the frame bytes;
+        // the Rust parser derives the same mask from the frame nonce.
+        writeU2(out, flags xor vmFlagsMask(nonce))
         writeU2(out, logicalProgram.blocks.size.coerceAtLeast(1))
         val storageBlocks = storageOrderedBlocks(logicalProgram.blocks)
         writeU4(out, constantPoolPlain.size)
@@ -2638,6 +2641,25 @@ private fun frameNonce(seed: Int, flags: Int, constantPoolPlain: ByteArray, exce
         constantPoolPlain,
         exceptionPlain,
     ) { material -> material.copyOfRange(0, 16) }
+
+/** Stream mask over the stored header flags word, derived from the frame
+ *  nonce; must match `flags_mask` in the qp-vm Rust parser byte for byte. */
+private fun vmFlagsMask(nonce: ByteArray): Int {
+    val digest = java.security.MessageDigest.getInstance("SHA-256").digest(
+        nonce + "javashroud-qp-vm-flags-v6".toByteArray(Charsets.US_ASCII),
+    )
+    return ((digest[0].toInt() and 0xFF) shl 8) or (digest[1].toInt() and 0xFF)
+}
+
+/** Reads the logical header flags back from a serialized frame by unmasking
+ *  the stored word; tooling/tests only, the qp-vm parser does its own unmask.
+ *  Offset 72 = magic(4) + nonce(16) + dialect commitment(32) + keyId(4) +
+ *  wrappedSeed(16). */
+internal fun storedVmHeaderFlags(frame: ByteArray): Int {
+    val nonce = frame.copyOfRange(4, 20)
+    val stored = ((frame[72].toInt() and 0xFF) shl 8) or (frame[73].toInt() and 0xFF)
+    return stored xor vmFlagsMask(nonce)
+}
 
 private fun frameWrappedSeed(seed: Int, nonce: ByteArray, stateBinding: String = ""): ByteArray {
     val bindingBytes = stateBinding.toByteArray(Charsets.UTF_8)

@@ -6,6 +6,7 @@ import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.NativeVmBuildProfile
 import io.github.hht0rro.javashroud.transforms.protection.QpEntryMetadata
 import io.github.hht0rro.javashroud.transforms.protection.QpSerializer
+import io.github.hht0rro.javashroud.transforms.protection.storedVmHeaderFlags
 import io.github.hht0rro.javashroud.transforms.protection.decodeCfgIndex
 import io.github.hht0rro.javashroud.transforms.protection.encodeCfgIndex
 import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
@@ -211,7 +212,7 @@ class VmStructureDivergenceTest {
             serializer.visitEnd()
 
             val bytes = serializer.serialize()
-            val flags = readU2(bytes, 72)
+            val flags = storedVmHeaderFlags(bytes)
             val blockCount = readU2(bytes, 74)
             val entries = readBlockIndex(bytes, blockCount)
             LayoutSnapshot(
@@ -267,7 +268,7 @@ class VmStructureDivergenceTest {
             serializer.visitMaxs(4, 1)
             serializer.visitEnd()
             val bytes = serializer.serialize()
-            val flags = readU2(bytes, 72)
+            val flags = storedVmHeaderFlags(bytes)
             val blockCount = readU2(bytes, 74)
             val entries = readBlockIndex(bytes, blockCount)
             LayoutSnapshot(bytes, seed, context, effectiveBuildSeed(serializer), flags, blockCount, entries, entries.map { it.blockId }, entries.map { it.token })

@@ -468,7 +468,7 @@ impl<'a> VmParser<'a> {
         }
         let key_id = header.read_u32_be()?;
         let wrapped_seed = header.read_fixed::<16>()?;
-        let flags = header.read_u16_be()?;
+        let flags = header.read_u16_be()? ^ flags_mask(&nonce);
         validate_flags(flags)?;
         let block_count = usize::from(header.read_u16_be()?);
         if block_count == 0 || block_count > self.limits.max_blocks {
@@ -1120,6 +1120,17 @@ struct EncodedException {
     end: u16,
     handler: u16,
     type_cp: u16,
+}
+
+/// Stream mask over the stored header flags word, derived from the frame
+/// nonce; must match the Kotlin serializer's `vmFlagsMask` byte for byte.
+fn flags_mask(nonce: &[u8; 16]) -> u16 {
+    const INFO: &[u8] = b"javashroud-qp-vm-flags-v6";
+    let mut input = [0u8; 16 + INFO.len()];
+    input[..16].copy_from_slice(nonce);
+    input[16..].copy_from_slice(INFO);
+    let derived = qp_crypto::sha256(&input).into_bytes();
+    u16::from_be_bytes([derived[0], derived[1]])
 }
 
 fn validate_flags(flags: u16) -> Result<(), VmError> {
@@ -2991,7 +3002,7 @@ pub fn encode_iconst7_frame(material: &VmKeyMaterial) -> Result<Vec<u8>, VmError
     body.extend_from_slice(&dialect.commitment);
     push_u32(&mut body, key_id);
     body.extend_from_slice(&wrapped);
-    push_u16(&mut body, flags);
+    push_u16(&mut body, flags ^ flags_mask(&nonce));
     push_u16(&mut body, 1);
     push_u32(&mut body, cp_container.len() as u32);
     push_u32(&mut body, cp_cipher.len() as u32);

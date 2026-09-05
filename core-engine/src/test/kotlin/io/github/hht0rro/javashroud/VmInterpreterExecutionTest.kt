@@ -12,6 +12,7 @@ import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.NativeVmBuildProfile
 import io.github.hht0rro.javashroud.transforms.protection.RuntimeKeyPartitions
 import io.github.hht0rro.javashroud.transforms.protection.QpSerializer
+import io.github.hht0rro.javashroud.transforms.protection.storedVmHeaderFlags
 import io.github.hht0rro.javashroud.transforms.protection.hardening.ProtectionFormat
 import io.github.hht0rro.javashroud.transforms.protection.qp.derivedVmMagic
 import org.objectweb.asm.ClassReader
@@ -68,7 +69,7 @@ class VmInterpreterExecutionTest {
         assertEquals(32, bytes.copyOfRange(20, 52).size, "Native VM header must carry a dialect commitment")
         assertTrue(bytes.copyOfRange(20, 52).any { it != 0.toByte() }, "Native VM dialect commitment must not be an all-zero placeholder")
         assertEquals(16, bytes.copyOfRange(56, 72).size, "Native VM header must carry a wrapped seed token")
-        val flags = readU2(bytes, 72)
+        val flags = storedVmHeaderFlags(bytes)
         assertTrue(flags and 0x0001 != 0, "Constant pool section must be encrypted")
         assertTrue(flags and 0x0002 != 0, "Instruction section must be block encrypted")
         assertTrue(flags and 0x0004 != 0, "Stream must contain MAC")
@@ -159,7 +160,7 @@ class VmInterpreterExecutionTest {
         serializer.visitEnd()
 
         val bytes = serializer.serialize()
-        val flags = readU2(bytes, 72)
+        val flags = storedVmHeaderFlags(bytes)
         val blockCount = readU2(bytes, 74)
         val entries = readBlockIndexEntries(bytes, blockCount)
 
