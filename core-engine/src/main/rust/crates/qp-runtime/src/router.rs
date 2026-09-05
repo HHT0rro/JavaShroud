@@ -136,14 +136,13 @@ impl OpenedPage {
         crypto_domain: [u8; 32],
         layout_digest: [u8; 32],
         state_binding: &[u8],
-        dialect_corpus: &qp_vm::VmDialectCorpus,
+        dialect: &std::sync::Arc<qp_vm::VmDialect>,
     ) -> Result<qp_vm::VmProgram, RouterError> {
         if self.kind != PageKind::Vm {
             return Err(RouterError::RouteUnavailable { kind: self.kind });
         }
-        let material = qp_vm::VmKeyMaterial::new(crypto_domain, layout_digest)
-            .with_dialect_corpus(dialect_corpus.clone());
-        let parser = qp_vm::VmParser::new(&material, state_binding)
+        let material = qp_vm::VmKeyMaterial::new(crypto_domain, layout_digest);
+        let parser = qp_vm::VmParser::with_shared_dialect(&material, state_binding, dialect.clone())
             .map_err(|error| RouterError::Wire(error.to_string()))?;
         parser
             .parse(self.payload.as_slice())

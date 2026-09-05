@@ -6,7 +6,7 @@ mod dialect;
 pub mod executor;
 mod zstd;
 
-pub use dialect::VmDialectCorpus;
+pub use dialect::{VmDialect, VmDialectCorpus};
 pub use executor::{
     ExecutionLimits, InvokeKind, ObjectOperations, VmExecutor, VmHostError, VmValue,
 };
@@ -406,11 +406,24 @@ pub struct VmParser<'a> {
     material: &'a VmKeyMaterial,
     state_binding: Vec<u8>,
     limits: ParserLimits,
-    dialect: dialect::VmDialect,
+    dialect: std::sync::Arc<dialect::VmDialect>,
 }
 
 impl<'a> VmParser<'a> {
     pub fn new(material: &'a VmKeyMaterial, state_binding: &[u8]) -> Result<Self, VmError> {
+        let dialect = dialect::VmDialect::from_material(
+            material.crypto_domain_material(),
+            material.layout_digest(),
+            material.dialect_corpus()?,
+        )?;
+        Self::with_shared_dialect(material, state_binding, std::sync::Arc::new(dialect))
+    }
+
+    pub fn with_shared_dialect(
+        material: &'a VmKeyMaterial,
+        state_binding: &[u8],
+        dialect: std::sync::Arc<dialect::VmDialect>,
+    ) -> Result<Self, VmError> {
         if state_binding.is_empty() {
             return Err(VmError::StateBindingMismatch);
         }
@@ -425,11 +438,7 @@ impl<'a> VmParser<'a> {
             material,
             state_binding: state_binding.to_vec(),
             limits: ParserLimits::default(),
-            dialect: dialect::VmDialect::from_material(
-                material.crypto_domain_material(),
-                material.layout_digest(),
-                material.dialect_corpus()?,
-            )?,
+            dialect,
         })
     }
 

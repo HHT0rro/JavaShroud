@@ -364,7 +364,6 @@ mod jni_bridge {
     const DEFENSE_SHARE_DOMAIN: &[u8] = b"JavaShroud/QP/UnifiedDefense/v2";
     const MAX_TARGET_HANDLE_CACHE_ENTRIES: usize = 4096;
 
-    #[derive(Default)]
     struct BridgeState {
         target: Option<SupportedTarget>,
         initialized: bool,
@@ -379,6 +378,28 @@ mod jni_bridge {
         target_handle_cache: BTreeMap<[u8; DIGEST_SIZE], usize>,
         router: TypedPageRouter,
         secret_pack: Option<Arc<SecretPackState>>,
+        vm_dialect: Option<Arc<qp_vm::VmDialect>>,
+    }
+
+    impl Default for BridgeState {
+        fn default() -> Self {
+            Self {
+                target: None,
+                initialized: false,
+                session_nonce: None,
+                session_epoch: 0,
+                artifact_commitment: None,
+                name_seed: None,
+                defense_surface_mask: 0,
+                defense_profile: None,
+                registered: false,
+                registered_class: None,
+                target_handle_cache: BTreeMap::new(),
+                router: TypedPageRouter::default(),
+                secret_pack: None,
+                vm_dialect: None,
+            }
+        }
     }
 
     impl BridgeState {
@@ -390,6 +411,7 @@ mod jni_bridge {
                 pack.revoke();
             }
             self.router.clear();
+            self.vm_dialect = None;
         }
 
         fn install_token_binding(
@@ -488,6 +510,7 @@ mod jni_bridge {
             self.defense_profile = None;
             self.target_handle_cache.clear();
             self.router.clear();
+            self.vm_dialect = None;
             if let Some(pack) = self.secret_pack.as_ref() {
                 pack.revoke();
             }
@@ -630,6 +653,27 @@ mod jni_bridge {
         let opcodes = specialization::vm_dialect_semantic_opcodes();
         qp_vm::VmDialectCorpus::from_opcodes(&opcodes)
             .map_err(|_| RouterError::AuthenticationFailed)
+    }
+
+    fn cached_vm_dialect() -> Result<Arc<qp_vm::VmDialect>, BridgeFailure> {
+        {
+            let state = lock_state()?;
+            if let Some(dialect) = state.vm_dialect.clone() {
+                return Ok(dialect);
+            }
+        }
+        let corpus = vm_dialect_corpus().map_err(router_failure)?;
+        let dialect = with_live_root_material(|crypto, layout| {
+            qp_vm::VmDialect::from_material(crypto, layout, &corpus)
+                .map(Arc::new)
+                .map_err(|_| BridgeFailure("Qp VM dialect is unavailable"))
+        })?;
+        let mut state = lock_state()?;
+        if let Some(existing) = state.vm_dialect.clone() {
+            return Ok(existing);
+        }
+        state.vm_dialect = Some(dialect.clone());
+        Ok(dialect)
     }
 
     fn wipe(bytes: &mut [u8]) {
@@ -4781,10 +4825,14 @@ mod jni_bridge {
             }
         };
         let result = match open_page_route_vm(env, entry_token, packed) {
-            Ok(opened) => match with_live_root_material(|crypto, layout| {
-                vm_dialect_corpus()
-                    .and_then(|corpus| {
-                        opened.parse_vm_with_material(
+            Ok(opened) => match cached_vm_dialect() {
+                Err(error) => {
+                    throw_new(env, error.0.as_bytes());
+                    core::ptr::null_mut()
+                }
+                Ok(dialect) => match with_live_root_material(|crypto, layout| {
+                    opened
+                        .parse_vm_with_material(
                             *crypto,
                             *layout,
                             vm_state_binding(
@@ -4793,11 +4841,10 @@ mod jni_bridge {
                                 layout,
                             )
                             .as_bytes(),
-                            &corpus,
+                            &dialect,
                         )
-                    })
-                    .map_err(router_failure)
-            }) {
+                        .map_err(router_failure)
+                }) {
                 Ok(program) => {
                     match copy_vm_arguments(env, args, &program) {
                     Ok(arguments) => {
@@ -4845,6 +4892,7 @@ mod jni_bridge {
                 Err(error) => {
                     throw_new(env, error.0.as_bytes());
                     core::ptr::null_mut()
+                }
                 }
             },
             Err(failure) => {
