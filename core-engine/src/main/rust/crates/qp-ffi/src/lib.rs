@@ -2896,7 +2896,10 @@ mod jni_bridge {
             if tracer_pid != 0 && tracer_pid != 1 {
                 return Ok(true);
             }
-            if scan_modules && linux_hostile_mapping_present()? {
+            if !scan_modules {
+                return Ok(false);
+            }
+            if linux_hostile_mapping_present()? {
                 return Ok(true);
             }
 
@@ -2928,10 +2931,11 @@ mod jni_bridge {
             if windows_debugger_present()? {
                 return Ok(true);
             }
-            if scan_modules {
-                if windows_debug_registers_or_remote_present()? || hostile_module_present()? {
-                    return Ok(true);
-                }
+            if !scan_modules {
+                return Ok(false);
+            }
+            if windows_debug_registers_or_remote_present()? || hostile_module_present()? {
+                return Ok(true);
             }
             Ok(jvmti_agent_attached()?)
         }
