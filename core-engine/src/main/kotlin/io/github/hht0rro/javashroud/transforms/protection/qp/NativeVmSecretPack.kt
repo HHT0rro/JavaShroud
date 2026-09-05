@@ -30,7 +30,15 @@ private val SECRET_PACK_COMMITMENT_DOMAIN = "javashroud-qp-secret-commitment-v6"
 private val SECRET_PACK_PAGE_KEY_DOMAIN = "javashroud-qp-page-key-v6".toByteArray(Charsets.US_ASCII)
 private val SECRET_PACK_NATIVE_IDENTITY_DOMAIN = "javashroud-qp-native-identity-v6".toByteArray(Charsets.US_ASCII)
 internal val SECRET_PACK_WRAP_AAD = "javashroud-qp-secret-wrap-v6".toByteArray(Charsets.US_ASCII)
-internal val IMAGE_MEASUREMENT_MAGIC: ByteArray = byteArrayOf(
+private const val IMAGE_MEASUREMENT_MAGIC_INFO = "javashroud-jsim-magic-v6"
+
+/**
+ * Per-build `.jsms` locator magic. The default is only the template value for
+ * loader-only/non-generated builds; the pack draft replaces it as soon as the
+ * native identity is derived, so compiled images never carry the plaintext
+ * `JSIM` tag that generic artifact scanners would flag.
+ */
+internal var IMAGE_MEASUREMENT_MAGIC: ByteArray = byteArrayOf(
     'J'.code.toByte(),
     'S'.code.toByte(),
     'I'.code.toByte(),
@@ -40,6 +48,14 @@ internal val IMAGE_MEASUREMENT_MAGIC: ByteArray = byteArrayOf(
     '6'.code.toByte(),
     0,
 )
+    private set
+
+internal fun deriveMeasurementMagic(nativeIdentity: ByteArray): ByteArray {
+    val digest = java.security.MessageDigest.getInstance("SHA-256").digest(
+        nativeIdentity + IMAGE_MEASUREMENT_MAGIC_INFO.toByteArray(Charsets.US_ASCII),
+    )
+    return digest.copyOf(8)
+}
 
 /** One allocated secret slot; the seed is owned by the surrounding draft. */
 internal class NativeVmPageSlot internal constructor(
@@ -172,6 +188,7 @@ internal class NativeVmSecretPackDraft private constructor(
             info = ByteArray(0),
             length = QP_SECRET_PACK_SEED_SIZE,
         )
+        IMAGE_MEASUREMENT_MAGIC = deriveMeasurementMagic(nativeIdentityValue)
     }
 
     /** Allocates the next secret slot for one registered page. */

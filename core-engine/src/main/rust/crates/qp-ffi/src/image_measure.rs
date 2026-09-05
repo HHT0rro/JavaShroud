@@ -158,22 +158,10 @@ fn zero_commitment_slot(bytes: &mut [u8]) -> Result<(), RouterError> {
 }
 
 fn slot_magic() -> [u8; 8] {
-    let mask = [0xA5u8, 0x3C, 0x5A, 0xC3, 0x0F, 0xF0, 0x69, 0x96];
-    let packed = [
-        b'J' ^ 0xA5,
-        b'S' ^ 0x3C,
-        b'I' ^ 0x5A,
-        b'M' ^ 0xC3,
-        0x01 ^ 0x0F,
-        b'v' ^ 0xF0,
-        b'6' ^ 0x69,
-        0 ^ 0x96,
-    ];
-    let mut magic = [0u8; 8];
-    for index in 0..8 {
-        magic[index] = packed[index] ^ mask[index];
-    }
-    magic
+    // The magic is per-build generated into the specialization static, so no
+    // recognizable plaintext tag exists in the shipped image. Reading the
+    // static keeps the locator in lockstep with the on-disk bytes it scans.
+    specialization::IMAGE_MEASUREMENT.magic
 }
 
 fn locate_commitment_slot(bytes: &[u8]) -> Result<usize, RouterError> {
