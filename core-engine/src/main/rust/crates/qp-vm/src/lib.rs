@@ -1309,8 +1309,24 @@ fn mark_self_invokes(program: &mut VmProgram, build_key: &[u8; 32]) {
 
 fn method_identity_from_reference(build_key: &[u8; 32], reference: &str) -> Option<[u8; 32]> {
     let (owner_and_name, descriptor) = reference.rsplit_once(':')?;
-    let (owner, name) = owner_and_name.rsplit_once('.')?;
+    let (owner, name) = split_owner_and_name(owner_and_name)?;
     method_identity_bytes(build_key, owner, name, descriptor)
+}
+
+fn split_owner_and_name(owner_and_name: &str) -> Option<(&str, &str)> {
+    if let Some(slash) = owner_and_name.rfind('/') {
+        let relative = &owner_and_name[slash + 1..];
+        let relative_dot = relative.find('.')?;
+        let dot = slash + 1 + relative_dot;
+        let owner = &owner_and_name[..dot];
+        let name = &owner_and_name[dot + 1..];
+        if owner.is_empty() || name.is_empty() {
+            return None;
+        }
+        Some((owner, name))
+    } else {
+        owner_and_name.rsplit_once('.')
+    }
 }
 
 fn method_identity_from_mhstatic(build_key: &[u8; 32], reference: &str) -> Option<[u8; 32]> {
