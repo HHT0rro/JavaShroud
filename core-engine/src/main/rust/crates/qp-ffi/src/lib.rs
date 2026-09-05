@@ -2924,8 +2924,10 @@ mod jni_bridge {
             if windows_debugger_present()? {
                 return Ok(true);
             }
-            if scan_modules && hostile_module_present()? {
-                return Ok(true);
+            if scan_modules {
+                if windows_debug_registers_or_remote_present()? || hostile_module_present()? {
+                    return Ok(true);
+                }
             }
             Ok(jvmti_agent_attached()?)
         }
@@ -3014,12 +3016,19 @@ mod jni_bridge {
         if status >= 0 && object != 0 {
             return Ok(true);
         }
+        Ok(false)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn windows_debug_registers_or_remote_present() -> Result<bool, BridgeFailure> {
         #[link(name = "kernel32")]
         extern "system" {
             fn CheckRemoteDebuggerPresent(process: *mut core::ffi::c_void, present: *mut i32) -> i32;
             fn GetThreadContext(thread: *mut core::ffi::c_void, context: *mut u8) -> i32;
             fn GetCurrentThread() -> *mut core::ffi::c_void;
+            fn GetCurrentProcess() -> *mut core::ffi::c_void;
         }
+        let process = unsafe { GetCurrentProcess() };
         let mut remote = 0i32;
         let remote_ok = unsafe { CheckRemoteDebuggerPresent(process, &mut remote) };
         if remote_ok != 0 && remote != 0 {
