@@ -2934,7 +2934,10 @@ mod jni_bridge {
             if !scan_modules {
                 return Ok(false);
             }
-            if windows_debug_registers_or_remote_present()? || hostile_module_present()? {
+            if windows_debug_port_or_object_present()?
+                || windows_debug_registers_or_remote_present()?
+                || hostile_module_present()?
+            {
                 return Ok(true);
             }
             Ok(jvmti_agent_attached()?)
@@ -2980,6 +2983,13 @@ mod jni_bridge {
         #[link(name = "kernel32")]
         extern "system" {
             fn IsDebuggerPresent() -> i32;
+        }
+        Ok(unsafe { IsDebuggerPresent() } != 0)
+    }
+
+    fn windows_debug_port_or_object_present() -> Result<bool, BridgeFailure> {
+        #[link(name = "kernel32")]
+        extern "system" {
             fn GetCurrentProcess() -> *mut core::ffi::c_void;
         }
         #[link(name = "ntdll")]
@@ -2991,9 +3001,6 @@ mod jni_bridge {
                 length: u32,
                 returned: *mut u32,
             ) -> i32;
-        }
-        if unsafe { IsDebuggerPresent() } != 0 {
-            return Ok(true);
         }
         let process = unsafe { GetCurrentProcess() };
         const PROCESS_DEBUG_PORT: u32 = 7;
