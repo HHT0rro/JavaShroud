@@ -29,7 +29,21 @@ private val SECRET_PACK_SLOT_DOMAIN = "javashroud-qp-secret-slot-v6".toByteArray
 private val SECRET_PACK_COMMITMENT_DOMAIN = "javashroud-qp-secret-commitment-v6".toByteArray(Charsets.US_ASCII)
 private val SECRET_PACK_PAGE_KEY_DOMAIN = "javashroud-qp-page-key-v6".toByteArray(Charsets.US_ASCII)
 private val SECRET_PACK_NATIVE_IDENTITY_DOMAIN = "javashroud-qp-native-identity-v6".toByteArray(Charsets.US_ASCII)
-internal val SECRET_PACK_WRAP_AAD = "javashroud-qp-secret-wrap-v6".toByteArray(Charsets.US_ASCII)
+private const val SECRET_PACK_WRAP_AAD_INFO = "javashroud-qp-secret-wrap-v6"
+
+/**
+ * Per-build wrap AAD. The ASCII domain string never ships in the native
+ * image; both sides expand SHA-256(nativeIdentity || domain) so GCM AAD
+ * stays in lockstep without a searchable label.
+ */
+internal var SECRET_PACK_WRAP_AAD: ByteArray = ByteArray(32)
+    private set
+
+internal fun deriveWrapAad(nativeIdentity: ByteArray): ByteArray {
+    return java.security.MessageDigest.getInstance("SHA-256").digest(
+        nativeIdentity + SECRET_PACK_WRAP_AAD_INFO.toByteArray(Charsets.US_ASCII),
+    )
+}
 private const val IMAGE_MEASUREMENT_MAGIC_INFO = "javashroud-jsim-magic-v6"
 
 /**
@@ -189,6 +203,7 @@ internal class NativeVmSecretPackDraft private constructor(
             length = QP_SECRET_PACK_SEED_SIZE,
         )
         IMAGE_MEASUREMENT_MAGIC = deriveMeasurementMagic(nativeIdentityValue)
+        SECRET_PACK_WRAP_AAD = deriveWrapAad(nativeIdentityValue)
     }
 
     /** Allocates the next secret slot for one registered page. */

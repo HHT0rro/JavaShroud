@@ -1266,6 +1266,21 @@ internal object ReleaseArtifactScan {
                 jsimHits == 0,
                 if (jsimHits == 0) "$tag:plaintext-magic-absent" else "$tag:plaintext-magic-hits=$jsimHits",
             )
+            val wrapLabel = "javashroud-qp-secret-wrap-v6".toByteArray(Charsets.US_ASCII)
+            var wrapHits = 0
+            var wrapPos = 0
+            while (wrapPos <= bytes.size - wrapLabel.size) {
+                var match = true
+                for (k in wrapLabel.indices) {
+                    if (bytes[wrapPos + k] != wrapLabel[k]) { match = false; break }
+                }
+                if (match) { wrapHits++; wrapPos += wrapLabel.size } else wrapPos++
+            }
+            findings += ReleaseArtifactScanReport.Finding(
+                "wrap-aad-plaintext",
+                wrapHits == 0,
+                if (wrapHits == 0) "$tag:wrap-aad-label-absent" else "$tag:wrap-aad-label-hits=$wrapHits",
+            )
             findings += scanHalfKeyWindows(tag, bytes)
         }
         // Plaintext relocation binding lines in any JAR resource

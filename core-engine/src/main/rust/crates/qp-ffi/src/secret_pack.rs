@@ -16,7 +16,21 @@ use std::sync::Mutex;
 
 const PAGE_KEY_DOMAIN: &[u8] = b"javashroud-qp-page-key-v6";
 const COMMITMENT_DOMAIN: &[u8] = b"javashroud-qp-secret-commitment-v6";
-const WRAP_AAD: &[u8] = b"javashroud-qp-secret-wrap-v6";
+/// Domain label for wrap AAD derivation. Packed under a non-foldable mask so
+/// the ASCII string is not a contiguous `.rdata` literal a scanner can grep.
+#[inline(never)]
+fn wrap_aad_info() -> [u8; 28] {
+    let packed: [u8; 28] = [
+        0x3F, 0x34, 0x23, 0x34, 0x26, 0x3D, 0x27, 0x3A, 0x20, 0x31, 0x78, 0x24, 0x25, 0x78,
+        0x26, 0x30, 0x36, 0x27, 0x30, 0x21, 0x78, 0x22, 0x27, 0x34, 0x25, 0x78, 0x23, 0x63,
+    ];
+    let mut info = [0u8; 28];
+    for index in 0..28 {
+        info[index] = packed[index] ^ 0x55;
+    }
+    // Volatile read keeps LLVM from reconstituting the ASCII into .rdata.
+    unsafe { core::ptr::read_volatile(&info) }
+}
 const SHARD_KIND_ROOT: u8 = 0;
 const ENTRY_TOKEN_DOMAIN: &[u8] = b"javashroud-qp-entry-token-v6";
 const KEY_SIZE: usize = 32;
@@ -40,6 +54,19 @@ impl Drop for Recombined {
         self.crypto_domain.fill(0);
         self.layout_digest.fill(0);
     }
+}
+
+/// Per-build wrap AAD: SHA-256(nativeIdentity || domain). The ASCII domain
+/// never appears as a searchable label in the compiled image.
+fn wrap_aad() -> [u8; 32] {
+    let identity = specialization::SECRET_PACK_NATIVE_IDENTITY;
+    let info = wrap_aad_info();
+    let mut input = [0u8; 32 + 28];
+    input[..32].copy_from_slice(&identity);
+    input[32..].copy_from_slice(&info);
+    let derived = qp_crypto::sha256(&input).into_bytes();
+    input.fill(0);
+    derived
 }
 
 /// Artifact-specific secret authority backed by the generated specialization.
@@ -115,7 +142,8 @@ impl SecretPackState {
             }
             let shard_key = hmac_sha256_bytes(&static_key, &[&commitment]);
             static_key.fill(0);
-            let plaintext = match aes256_gcm_decrypt(&shard_key, nonce, WRAP_AAD, wrapped) {
+            let wrap_aad = wrap_aad();
+            let plaintext = match aes256_gcm_decrypt(&shard_key, nonce, &wrap_aad, wrapped) {
                 Ok(bytes) => bytes,
                 Err(_) => {
                     return Err(RouterError::InvalidRequest("secret wrap decrypt failed"));

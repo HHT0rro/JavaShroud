@@ -334,7 +334,7 @@ class NativeVmSecretPackTest {
                 val mac = Mac.getInstance("HmacSHA256")
                 mac.init(SecretKeySpec(cm, "HmacSHA256"))
                 val shardKey = mac.doFinal(imageCommitment)
-                val aad = "javashroud-qp-secret-wrap-v6".encodeToByteArray()
+                val aad = io.github.hht0rro.javashroud.transforms.protection.qp.SECRET_PACK_WRAP_AAD
                 val openCipher = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding")
                 openCipher.init(
                     javax.crypto.Cipher.DECRYPT_MODE,
