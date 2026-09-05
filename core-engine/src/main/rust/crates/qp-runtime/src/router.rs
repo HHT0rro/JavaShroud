@@ -1,3 +1,4 @@
+use crate::lifecycle::SensitiveBytes;
 use crate::page::{PageKind, PageRequest};
 use qp_crypto::constant_time_eq;
 use qp_page::{BorrowedPageLease, PageCipherSchedule, PageEnvelope, PageError as WirePageError};
@@ -101,7 +102,7 @@ impl Default for TypedPageRouter {
 #[derive(Debug, Eq, PartialEq)]
 pub struct OpenedPage {
     kind: PageKind,
-    payload: Vec<u8>,
+    payload: SensitiveBytes,
     entry_token: i64,
     logical_binding_path: String,
 }
@@ -112,13 +113,14 @@ impl OpenedPage {
     }
 
     pub fn payload(&self) -> &[u8] {
-        &self.payload
+        self.payload.as_slice()
     }
 
-    pub fn into_payload(mut self) -> Vec<u8> {
-        let mut payload = Vec::new();
-        std::mem::swap(&mut payload, &mut self.payload);
-        payload
+    pub fn with_payload<T, F>(&self, f: F) -> T
+    where
+        F: FnOnce(&[u8]) -> T,
+    {
+        f(self.payload.as_slice())
     }
 
     pub fn entry_token(&self) -> i64 {
@@ -144,14 +146,8 @@ impl OpenedPage {
         let parser = qp_vm::VmParser::new(&material, state_binding)
             .map_err(|error| RouterError::Wire(error.to_string()))?;
         parser
-            .parse(&self.payload)
+            .parse(self.payload.as_slice())
             .map_err(|error| RouterError::Wire(error.to_string()))
-    }
-}
-
-impl Drop for OpenedPage {
-    fn drop(&mut self) {
-        self.payload.fill(0);
     }
 }
 
@@ -454,7 +450,7 @@ impl TypedPageRouter {
             });
         }
 
-        let mut payload = Vec::with_capacity(total_encoded);
+        let mut payload = SensitiveBytes::new(Vec::with_capacity(total_encoded));
         for &slot in slots {
             let page = self
                 .pages
@@ -474,7 +470,7 @@ impl TypedPageRouter {
     fn open_attached_page<'a>(
         &self,
         attached: &'a AttachedPage,
-    ) -> Result<(Vec<u8>, &'a str), RouterError> {
+    ) -> Result<(SensitiveBytes, &'a str), RouterError> {
         let key_material =
             self.derive_attached_key_material(&attached.descriptor, &attached.encoded)?;
         let schedule = key_material.materialize()?;
@@ -490,7 +486,10 @@ impl TypedPageRouter {
         let payload = lease
             .consume()
             .map_err(|_| RouterError::AuthenticationFailed)?;
-        Ok((payload, attached.descriptor.route().logical_binding_path()))
+        Ok((
+            SensitiveBytes::new(payload),
+            attached.descriptor.route().logical_binding_path(),
+        ))
     }
 
     pub fn install_catalog_descriptor_bound(
@@ -969,7 +968,7 @@ mod tests {
         let installed = installed_router();
         let request = string_request(&installed, &installed.proof_bytes);
         let opened = installed.router.open(0, &request).expect("open current page");
-        assert_eq!(opened.payload(), b"hello-native");
+        opened.with_payload(|bytes| assert_eq!(bytes, b"hello-native"));
     }
 
     #[test]

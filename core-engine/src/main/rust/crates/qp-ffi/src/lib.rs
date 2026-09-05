@@ -4685,7 +4685,7 @@ mod jni_bridge {
         packed: JByteArray,
     ) -> JString {
         match open_page_route(env, 0, packed, PageKind::String) {
-            Ok(opened) => match SensitiveMemoryLease::new(opened.into_payload()) {
+            Ok(opened) => match opened.with_payload(|bytes| SensitiveMemoryLease::new(bytes.to_vec())) {
                 Ok(lease) => match std::ffi::CString::new(lease.as_slice()) {
                 Ok(text) => {
                     new_string_utf(env, text.as_bytes_with_nul()).unwrap_or(core::ptr::null_mut())
@@ -4713,7 +4713,7 @@ mod jni_bridge {
         packed: JByteArray,
     ) -> JByteArray {
         match open_page_route(env, 0, packed, PageKind::Class) {
-            Ok(opened) => match SensitiveMemoryLease::new(opened.into_payload()) {
+            Ok(opened) => match opened.with_payload(|bytes| SensitiveMemoryLease::new(bytes.to_vec())) {
                 Ok(lease) => new_byte_array(env, lease.as_slice()).unwrap_or(core::ptr::null_mut()),
                 Err(_) => {
                     throw_new(env, b"Qp class page lease is invalid\0");

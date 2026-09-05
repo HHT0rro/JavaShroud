@@ -431,12 +431,15 @@ fn validate_artifact_name(name: &str) -> Result<(), LifecycleError> {
     Ok(())
 }
 
-#[derive(Clone)]
 pub struct SensitiveBytes(Vec<u8>);
 
 impl SensitiveBytes {
-    fn new(bytes: Vec<u8>) -> Self {
+    pub fn new(bytes: Vec<u8>) -> Self {
         Self(bytes)
+    }
+
+    pub fn append(&mut self, other: &mut Self) {
+        self.0.append(&mut other.0);
     }
 
     pub fn from_slice(bytes: &[u8]) -> Self {
@@ -462,6 +465,10 @@ impl SensitiveBytes {
     pub fn is_zeroed(&self) -> bool {
         self.0.iter().all(|byte| *byte == 0)
     }
+
+    fn duplicate(&self) -> Self {
+        Self(self.0.clone())
+    }
 }
 
 impl fmt::Debug for SensitiveBytes {
@@ -479,6 +486,14 @@ impl PartialEq<[u8]> for SensitiveBytes {
     }
 }
 
+impl PartialEq for SensitiveBytes {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for SensitiveBytes {}
+
 impl Drop for SensitiveBytes {
     fn drop(&mut self) {
         self.0.fill(0);
@@ -487,7 +502,6 @@ impl Drop for SensitiveBytes {
 
 pub type WipedBytes = SensitiveBytes;
 
-#[derive(Clone)]
 struct CacheEntry {
     key: [u8; 32],
     value: SensitiveBytes,
@@ -557,7 +571,7 @@ impl FixedCache {
         self.entries
             .iter()
             .find(|entry| &entry.key == key)
-            .map(|entry| entry.value.clone())
+            .map(|entry| entry.value.duplicate())
     }
 
     pub fn remove(&mut self, key: &[u8; 32]) -> Option<SensitiveBytes> {
