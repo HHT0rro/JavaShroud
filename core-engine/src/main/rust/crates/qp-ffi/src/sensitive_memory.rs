@@ -127,6 +127,9 @@ impl SensitiveMemoryLease {
     }
 
     pub fn as_slice(&self) -> &[u8] {
+        if self.closed {
+            return &[];
+        }
         &self.storage[self.offset..self.offset + self.length]
     }
 
@@ -320,7 +323,17 @@ fn protect_from_dump(pointer: *mut u8, length: usize) -> bool {
     unsafe { linux_madvise(pointer, length, 16) == 0 }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+fn protect_from_dump(pointer: *mut u8, length: usize) -> bool {
+    // VirtualProtect(PAGE_NOACCESS) on a Rust heap allocation can make the
+    // neighboring heap inaccessible and AV the process. Dedicated VirtualAlloc
+    // pages belong to a later max-hardening window; this path only reports
+    // that ordinary heap pages are not dump-excluded.
+    let _ = (pointer, length);
+    false
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 fn protect_from_dump(pointer: *mut u8, length: usize) -> bool {
     let _ = (pointer, length);
     false
@@ -478,7 +491,6 @@ mod tests {
         assert!(!lease.is_closed());
         lease.close();
         assert!(lease.is_closed());
-        assert!(lease.as_slice().iter().all(|byte| *byte == 0));
         lease.close();
         assert!(lease.is_closed());
     }
@@ -502,6 +514,7 @@ mod tests {
         lease.wipe().expect("wipe");
         assert!(lease.as_slice().iter().all(|byte| *byte == 0));
         lease.close();
+        assert!(lease.as_slice().is_empty() || lease.as_slice().iter().all(|byte| *byte == 0));
         assert_eq!(lease.as_mut_slice(), Err(SensitiveMemoryError::Closed));
         assert_eq!(lease.try_as_mut_slice(), Err(SensitiveMemoryError::Closed));
         assert_eq!(lease.wipe(), Err(SensitiveMemoryError::Closed));
