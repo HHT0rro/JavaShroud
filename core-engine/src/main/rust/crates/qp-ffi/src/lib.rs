@@ -379,7 +379,7 @@ mod jni_bridge {
         router: TypedPageRouter,
         secret_pack: Option<Arc<SecretPackState>>,
         vm_dialect: Option<Arc<qp_vm::VmDialect>>,
-        vm_programs: BTreeMap<i64, Arc<VmProgram>>,
+        vm_entry_tokens: BTreeMap<Vec<u8>, i64>,
     }
 
     impl Default for BridgeState {
@@ -399,7 +399,7 @@ mod jni_bridge {
                 router: TypedPageRouter::default(),
                 secret_pack: None,
                 vm_dialect: None,
-                vm_programs: BTreeMap::new(),
+                vm_entry_tokens: BTreeMap::new(),
             }
         }
     }
@@ -414,7 +414,7 @@ mod jni_bridge {
             }
             self.router.clear();
             self.vm_dialect = None;
-            self.vm_programs.clear();
+            self.vm_entry_tokens.clear();
         }
 
         fn install_token_binding(
@@ -514,7 +514,7 @@ mod jni_bridge {
             self.target_handle_cache.clear();
             self.router.clear();
             self.vm_dialect = None;
-            self.vm_programs.clear();
+            self.vm_entry_tokens.clear();
             if let Some(pack) = self.secret_pack.as_ref() {
                 pack.revoke();
             }
@@ -679,44 +679,6 @@ mod jni_bridge {
         state.vm_dialect = Some(dialect.clone());
         Ok(dialect)
     }
-
-    fn cached_vm_program(
-        env: JNIEnv,
-        entry_token: JLong,
-        packed: JByteArray,
-    ) -> Result<Arc<VmProgram>, BridgeFailure> {
-        {
-            let state = lock_state()?;
-            if let Some(program) = state.vm_programs.get(&entry_token) {
-                return Ok(program.clone());
-            }
-        }
-        let opened = unsafe { open_page_route_vm(env, entry_token, packed) }?;
-        let dialect = cached_vm_dialect()?;
-        let program = with_live_root_material(|crypto, layout| {
-            opened
-                .parse_vm_with_material(
-                    *crypto,
-                    *layout,
-                    vm_state_binding(
-                        opened.entry_token(),
-                        opened.logical_binding_path(),
-                        layout,
-                    )
-                    .as_bytes(),
-                    &dialect,
-                )
-                .map(Arc::new)
-                .map_err(router_failure)
-        })?;
-        let mut state = lock_state()?;
-        if let Some(existing) = state.vm_programs.get(&entry_token) {
-            return Ok(existing.clone());
-        }
-        state.vm_programs.insert(entry_token, program.clone());
-        Ok(program)
-    }
-
 
     fn wipe(bytes: &mut [u8]) {
         for byte in bytes {
@@ -4875,17 +4837,38 @@ mod jni_bridge {
                 return core::ptr::null_mut();
             }
         };
-        let result = match cached_vm_program(env, entry_token, packed) {
-            Ok(program) => {
-                let program_ref = program.as_ref();
-                match copy_vm_arguments(env, args, program_ref) {
+        let dialect = match cached_vm_dialect() {
+            Ok(dialect) => dialect,
+            Err(failure) => {
+                throw_new(env, failure.0.as_bytes());
+                pop_local_frame(env, core::ptr::null_mut());
+                return core::ptr::null_mut();
+            }
+        };
+        let result = match open_page_route_vm(env, entry_token, packed) {
+            Ok(opened) => match with_live_root_material(|crypto, layout| {
+                opened
+                    .parse_vm_with_material(
+                        *crypto,
+                        *layout,
+                        vm_state_binding(
+                            opened.entry_token(),
+                            opened.logical_binding_path(),
+                            layout,
+                        )
+                        .as_bytes(),
+                        &dialect,
+                    )
+                    .map_err(router_failure)
+            }) {
+                Ok(program) => match copy_vm_arguments(env, args, &program) {
                     Ok(arguments) => {
                         let helper_class = lock_state()
                             .ok()
                             .and_then(|state| state.registered_class.map(|class| class as JObject));
                         let mut executor =
                             VmExecutor::new(JniObjectOperations::new(env, helper_class));
-                        let execution = executor.execute(program_ref, &arguments);
+                        let execution = executor.execute(&program, &arguments);
                         let mut host = executor.into_host();
                         match execution {
                             Ok(value) => {
@@ -4895,7 +4878,7 @@ mod jni_bridge {
                                 box_vm_value_with_tag(
                                     env,
                                     value,
-                                    Some(program_ref.metadata().return_tag),
+                                    Some(program.metadata().return_tag),
                                 )
                                 .unwrap_or(core::ptr::null_mut())
                             }
@@ -4913,8 +4896,12 @@ mod jni_bridge {
                         throw_new(env, error.0.as_bytes());
                         core::ptr::null_mut()
                     }
+                },
+                Err(error) => {
+                    throw_new(env, error.0.as_bytes());
+                    core::ptr::null_mut()
                 }
-            }
+            },
             Err(failure) => {
                 throw_new(env, failure.0.as_bytes());
                 core::ptr::null_mut()
@@ -5279,6 +5266,12 @@ mod jni_bridge {
         if sealed.is_empty() {
             return Err(BridgeFailure("Qp VM entry token is missing"));
         }
+        {
+            let state = lock_state()?;
+            if let Some(token) = state.vm_entry_tokens.get(sealed) {
+                return Ok(*token);
+            }
+        }
         let pack = {
             let state = lock_state()?;
             state
@@ -5287,8 +5280,12 @@ mod jni_bridge {
                 .ok_or(BridgeFailure("Qp native secret pack is unavailable"))?
                 .clone()
         };
-        pack.with_vm_entry_token(sealed, |token| Ok(token))
-            .map_err(|_| BridgeFailure("Qp VM entry token is invalid"))
+        let token = pack
+            .with_vm_entry_token(sealed, |token| Ok(token))
+            .map_err(|_| BridgeFailure("Qp VM entry token is invalid"))?;
+        let mut state = lock_state()?;
+        state.vm_entry_tokens.insert(sealed.to_vec(), token);
+        Ok(token)
     }
 
     unsafe fn resolve_registration_plan(
