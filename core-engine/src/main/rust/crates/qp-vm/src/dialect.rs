@@ -10,7 +10,7 @@ const STREAM_LEN: usize = 4096;
 /// supplied by the artifact specialization build (stored there only as
 /// XOR-masked shard groups), so no fixed corpus table exists in the compiled
 /// artifact and no two builds embed the same plain table.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct VmDialectCorpus {
     semantic_opcodes: Vec<u16>,
 }
@@ -30,6 +30,22 @@ impl VmDialectCorpus {
         Ok(Self {
             semantic_opcodes: semantic_opcodes.to_vec(),
         })
+    }
+}
+
+impl std::fmt::Debug for VmDialectCorpus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VmDialectCorpus")
+            .field("opcodes", &self.semantic_opcodes.len())
+            .finish()
+    }
+}
+
+impl Drop for VmDialectCorpus {
+    fn drop(&mut self) {
+        self.semantic_opcodes.fill(0);
+        self.semantic_opcodes.clear();
     }
 }
 
@@ -111,6 +127,7 @@ impl VmDialect {
         commit_input.push(stream[33] & 3);
         let commitment = crate::crypto::sha256_bytes(&commit_input);
         commit_input.fill(0);
+        live.fill(0);
         Self {
             encode: encode.into_boxed_slice(),
             decode: decode.into_boxed_slice(),
@@ -127,5 +144,16 @@ impl VmDialect {
 
     pub fn decode(&self, encoded: u16) -> u16 {
         self.decode[encoded as usize]
+    }
+}
+
+impl Drop for VmDialect {
+    fn drop(&mut self) {
+        self.encode.fill(0);
+        self.decode.fill(0);
+        self.commitment.fill(0);
+        self.dispatch_family = 0;
+        self.fused_semantic = 0;
+        self.fused_opcode = 0;
     }
 }

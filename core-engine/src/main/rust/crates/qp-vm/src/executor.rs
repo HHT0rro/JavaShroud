@@ -222,6 +222,15 @@ struct Thrown<O> {
     value: VmValue<O>,
 }
 
+impl<O> Drop for Thrown<O> {
+    fn drop(&mut self) {
+        let mut class_name = core::mem::take(&mut self.class_name).into_bytes();
+        class_name.fill(0);
+        class_name.clear();
+        self.value = VmValue::Null;
+    }
+}
+
 struct ExecutionFrame<O> {
     locals: Vec<VmValue<O>>,
     stack: Vec<VmValue<O>>,
@@ -374,13 +383,13 @@ impl<H: ObjectOperations> VmExecutor<H> {
             match operation {
                 Ok(Control::Next(next)) => pc = next,
                 Ok(Control::Return(value)) => return Ok(value),
-                Err(thrown) => {
+                Err(mut thrown) => {
                     if let Some(handler) = self.find_handler(program, fault_pc, &thrown)? {
                         frame.stack.clear();
                         if frame.stack.len() >= self.limits.max_stack {
                             return Err(VmError::StackOverflow);
                         }
-                        frame.stack.push(thrown.value);
+                        frame.stack.push(core::mem::replace(&mut thrown.value, VmValue::Null));
                         pc = handler;
                         exception_transfers += 1;
                         if exception_transfers > self.limits.max_exception_transfers {
@@ -394,7 +403,7 @@ impl<H: ObjectOperations> VmExecutor<H> {
                             _ => None,
                         };
                         return Err(VmError::UncaughtException {
-                            class_name: thrown.class_name,
+                            class_name: core::mem::take(&mut thrown.class_name),
                             message,
                         });
                     }

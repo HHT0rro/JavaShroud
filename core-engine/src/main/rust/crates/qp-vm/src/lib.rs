@@ -352,6 +352,7 @@ impl Drop for VmKeyMaterial {
     fn drop(&mut self) {
         self.crypto_domain_material.fill(0);
         self.layout_digest.fill(0);
+        self.dialect_corpus = None;
     }
 }
 
@@ -943,7 +944,6 @@ impl<'a> Cursor<'a> {
     }
 }
 
-#[derive(Debug)]
 pub struct VmString(Vec<u8>);
 
 impl VmString {
@@ -962,17 +962,23 @@ impl VmString {
 
 impl fmt::Display for VmString {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(self.as_str())
+        formatter.debug_struct("VmString").field("len", &self.0.len()).finish()
+    }
+}
+
+impl fmt::Debug for VmString {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("VmString").field("len", &self.0.len()).finish()
     }
 }
 
 impl Drop for VmString {
     fn drop(&mut self) {
         self.0.fill(0);
+        self.0.clear();
     }
 }
 
-#[derive(Debug)]
 pub enum VmConstant {
     Int(i32),
     Long(i64),
@@ -988,16 +994,64 @@ impl VmConstant {
             _ => None,
         }
     }
+
+    fn wipe(&mut self) {
+        match self {
+            Self::Int(value) => *value = 0,
+            Self::Long(value) => *value = 0,
+            Self::Float(value) => *value = 0.0,
+            Self::Double(value) => *value = 0.0,
+            Self::String(value) => {
+                value.0.fill(0);
+                value.0.clear();
+            }
+        }
+    }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+impl fmt::Debug for VmConstant {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Int(_) => formatter.debug_tuple("Int").field(&"i32").finish(),
+            Self::Long(_) => formatter.debug_tuple("Long").field(&"i64").finish(),
+            Self::Float(_) => formatter.debug_tuple("Float").field(&"f32").finish(),
+            Self::Double(_) => formatter.debug_tuple("Double").field(&"f64").finish(),
+            Self::String(value) => formatter.debug_tuple("String").field(value).finish(),
+        }
+    }
+}
+
+impl Drop for VmConstant {
+    fn drop(&mut self) {
+        self.wipe();
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub struct Instruction {
     pub opcode: u16,
     pub flags: u16,
     operand_range: Range<usize>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+impl fmt::Debug for Instruction {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Instruction")
+            .field("operands", &(self.operand_range.end.saturating_sub(self.operand_range.start)))
+            .finish()
+    }
+}
+
+impl Drop for Instruction {
+    fn drop(&mut self) {
+        self.opcode = 0;
+        self.flags = 0;
+        self.operand_range = 0..0;
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
 pub struct ExceptionHandler {
     pub start: usize,
     pub end: usize,
@@ -1005,7 +1059,21 @@ pub struct ExceptionHandler {
     pub type_cp: Option<usize>,
 }
 
-#[derive(Debug)]
+impl fmt::Debug for ExceptionHandler {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("ExceptionHandler").finish_non_exhaustive()
+    }
+}
+
+impl Drop for ExceptionHandler {
+    fn drop(&mut self) {
+        self.start = 0;
+        self.end = 0;
+        self.handler = 0;
+        self.type_cp = None;
+    }
+}
+
 pub struct VmMetadata {
     pub entry_token: u64,
     pub return_tag: u8,
@@ -1019,15 +1087,31 @@ pub struct VmMetadata {
     pub dispatch_profile_tag: u32,
 }
 
-impl Drop for VmMetadata {
-    fn drop(&mut self) {
-        self.method_identity.fill(0);
-        self.owner_identity.fill(0);
-        self.argument_tags.fill(0);
+impl fmt::Debug for VmMetadata {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VmMetadata")
+            .field("argument_tags", &self.argument_tags.len())
+            .field("resource_path", &self.resource_path)
+            .finish_non_exhaustive()
     }
 }
 
-#[derive(Debug)]
+impl Drop for VmMetadata {
+    fn drop(&mut self) {
+        self.entry_token = 0;
+        self.return_tag = 0;
+        self.method_local_profile = 0;
+        self.method_identity.fill(0);
+        self.owner_identity.fill(0);
+        self.argument_tags.fill(0);
+        self.argument_tags.clear();
+        self.is_static = false;
+        self.native_vm_profile_id = 0;
+        self.dispatch_profile_tag = 0;
+    }
+}
+
 pub struct VmProgram {
     constants: Vec<VmConstant>,
     instructions: Vec<Instruction>,
@@ -1083,13 +1167,67 @@ impl VmProgram {
     pub fn metadata_cp_index(&self) -> usize {
         self.metadata_cp_index
     }
+
+    fn wipe(&mut self) {
+        for constant in &mut self.constants {
+            constant.wipe();
+        }
+        self.constants.clear();
+        for instruction in &mut self.instructions {
+            instruction.opcode = 0;
+            instruction.flags = 0;
+            instruction.operand_range = 0..0;
+        }
+        self.instructions.clear();
+        self.operands.fill(0);
+        self.operands.clear();
+        for handler in &mut self.exceptions {
+            handler.start = 0;
+            handler.end = 0;
+            handler.handler = 0;
+            handler.type_cp = None;
+        }
+        self.exceptions.clear();
+        self.metadata_cp_index = 0;
+        self.register_count = 0;
+        self.max_stack = 0;
+        self.max_locals = 0;
+        self.flags = 0;
+        self.nonce.fill(0);
+        self.seed = 0;
+    }
+
+    #[cfg(test)]
+    fn is_wiped(&self) -> bool {
+        self.constants.is_empty()
+            && self.instructions.is_empty()
+            && self.operands.iter().all(|operand| *operand == 0)
+            && self.exceptions.is_empty()
+            && self.metadata_cp_index == 0
+            && self.register_count == 0
+            && self.max_stack == 0
+            && self.max_locals == 0
+            && self.flags == 0
+            && self.nonce.iter().all(|byte| *byte == 0)
+            && self.seed == 0
+    }
+}
+
+impl fmt::Debug for VmProgram {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VmProgram")
+            .field("constants", &self.constants.len())
+            .field("instructions", &self.instructions.len())
+            .field("operands", &self.operands.len())
+            .field("exceptions", &self.exceptions.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl Drop for VmProgram {
     fn drop(&mut self) {
-        self.operands.fill(0);
-        self.nonce.fill(0);
-        self.seed = 0;
+        self.wipe();
     }
 }
 
@@ -3074,6 +3212,12 @@ mod parser_tests {
         assert_eq!(program.instructions().len(), 3);
         let mut executor = VmExecutor::new(NoObjectOperations);
         assert_eq!(executor.execute(&program, &[]), Ok(VmValue::Int(7)));
+        let debug = format!("{program:?}");
+        assert!(!debug.contains("resource"));
+        assert!(!debug.contains("ICONST"));
+        let mut owned = program;
+        owned.wipe();
+        assert!(owned.is_wiped());
     }
 
     #[test]
