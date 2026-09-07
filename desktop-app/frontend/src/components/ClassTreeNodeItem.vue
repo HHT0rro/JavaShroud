@@ -95,3 +95,40 @@ const forwardNodeRuleChanged = (node: ClassTreeNode, action: RuleAction): void =
     </ul>
   </li>
 </template>
+
+<style scoped>
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  padding-inline: 8px;
+  border-bottom: 1px solid rgba(237, 237, 237, 0.06);
+}
+
+.tree-row--unavailable {
+  opacity: 0.55;
+}
+
+.tree-expand.open :deep(svg) {
+  transform: rotate(90deg);
+}
+
+.tree-spacer {
+  width: 22px;
+  flex: 0 0 22px;
+}
+
+.tree-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #ededed;
+}
+
+.tree-kind-icon {
+  opacity: 0.7;
+}
+</style>

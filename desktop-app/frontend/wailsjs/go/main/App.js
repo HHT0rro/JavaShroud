@@ -34,6 +34,10 @@ export function SelectInputJar() {
   return window['go']['main']['App']['SelectInputJar']();
 }
 
+export function SelectNativeShroudCli() {
+  return window['go']['main']['App']['SelectNativeShroudCli']();
+}
+
 export function SelectOutputJar(arg1) {
   return window['go']['main']['App']['SelectOutputJar'](arg1);
 }

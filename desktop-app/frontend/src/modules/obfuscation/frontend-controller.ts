@@ -73,6 +73,19 @@ export const browseInputJar = async (state: RunState, bridge: WailsBridge): Prom
   }
 }
 
+export const browseNativeShroudCli = async (state: RunState, bridge: WailsBridge): Promise<ControllerResult<string | null>> => {
+  try {
+    const cliPath: string = await bridge.selectNativeShroudCli()
+    if (cliPath.trim().length === 0) {
+      return successResult(state, null)
+    }
+
+    return successResult(state, cliPath)
+  } catch (error) {
+    return failureResult(state, error, '选择 NativeShroud CLI 失败')
+  }
+}
+
 export const browseOutputJar = async (state: RunState, bridge: WailsBridge): Promise<ControllerResult<string | null>> => {
   try {
     const defaultInputJarPath: string = state.inputJar?.inputJarPath ?? ''

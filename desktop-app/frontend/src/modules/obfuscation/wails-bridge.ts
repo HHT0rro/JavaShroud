@@ -5,6 +5,7 @@ export interface WailsBridge {
   readonly cancelObfuscation: () => Promise<void>
   readonly getEngineCapabilities: () => Promise<string>
   readonly selectInputJar: () => Promise<string>
+  readonly selectNativeShroudCli: () => Promise<string>
   readonly selectOutputJar: (defaultInputJarPath: string) => Promise<string>
   readonly selectImportConfig: () => Promise<string>
   readonly selectExportConfig: () => Promise<string>
@@ -27,6 +28,7 @@ interface WailsGoApp {
   readonly CancelObfuscation?: () => Promise<void>
   readonly GetEngineCapabilities?: () => Promise<string>
   readonly SelectInputJar?: () => Promise<string>
+  readonly SelectNativeShroudCli?: () => Promise<string>
   readonly SelectOutputJar?: (defaultInputJarPath: string) => Promise<string>
   readonly SelectImportConfig?: () => Promise<string>
   readonly SelectExportConfig?: () => Promise<string>
@@ -86,6 +88,15 @@ export const createWailsBridge = (windowRef: Window): WailsBridge => ({
     }
 
     return app.SelectInputJar()
+  },
+  selectNativeShroudCli: async (): Promise<string> => {
+    const app: WailsGoApp = resolveWailsApp(windowRef)
+
+    if (typeof app.SelectNativeShroudCli !== 'function') {
+      throw new Error('Wails 绑定缺少 SelectNativeShroudCli。')
+    }
+
+    return app.SelectNativeShroudCli()
   },
   selectOutputJar: async (defaultInputJarPath: string): Promise<string> => {
     const app: WailsGoApp = resolveWailsApp(windowRef)

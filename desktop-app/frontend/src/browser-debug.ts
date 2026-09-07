@@ -2,7 +2,16 @@ import { createApp } from 'vue'
 import App from './App.vue'
 import './style.css'
 import './styles/liquid-glass.css'
-import type { EngineSchemaPayload, JarInspectionPayload, ObfuscationRequest } from './modules/obfuscation/types'
+import type { ObfuscationRequest } from './modules/obfuscation/types'
+import {
+  MOCK_SCENARIO_QUERY,
+  defaultConfigToml,
+  parseMockScenarioId,
+  resolveMockScenario,
+  type MockEngineEvent,
+  type MockScenario,
+} from './debug/mock-scenarios'
+import { runUiSmokeChecks, type UiCheckResult } from './debug/ui-smoke'
 
 type EngineEventHandler = (event: unknown) => void
 
@@ -18,6 +27,7 @@ interface WailsAppMock {
   CancelObfuscation: () => Promise<void>
   GetEngineCapabilities: () => Promise<string>
   SelectInputJar: () => Promise<string>
+  SelectNativeShroudCli: () => Promise<string>
   SelectOutputJar: (defaultInputJarPath: string) => Promise<string>
   SelectImportConfig: () => Promise<string>
   SelectExportConfig: () => Promise<string>
@@ -37,6 +47,23 @@ interface DebugWindow extends Window {
       App?: WailsAppMock
     }
   }
+  __JAVASHROUD_DEBUG_MOCK__?: DebugMockHooks
+}
+
+export interface DebugMockHooks {
+  readonly developmentOnly: true
+  readonly scenarioId: string
+  readonly scenario: MockScenario
+  readonly emittedEvents: readonly MockEngineEvent[]
+  readonly activeRunToken: number | null
+  readonly uiCheckResult: UiCheckResult
+  setScenario: (id: string) => MockScenario
+  reset: () => void
+  runUiChecks: () => void
+}
+
+if (!import.meta.env.DEV) {
+  throw new Error('browser-debug mock is development-only and must not load in production builds')
 }
 
 const debugWindow = window as DebugWindow
@@ -45,202 +72,18 @@ const eventListeners = new Map<string, Set<EngineEventHandler>>()
 let cancelRequested = false
 let isWindowMaximised = false
 let debugConfigToml = ''
-
-const defaultSchema: EngineSchemaPayload = {
-  schemaVersion: '2',
-  engineVersion: 'browser-mock-dev',
-  tags: [
-    { id: 'metadata', name: 'Metadata', description: 'Metadata cleanup and stripping.' },
-    { id: 'obfuscation', name: 'Obfuscation', description: 'Name and bytecode transforms.' },
-    { id: 'vm-protection', name: 'VM Protection', description: 'Method-level virtual machine protection.' },
-  ],
-  modules: [
-    {
-      id: 'strip-compile-debug-info',
-      name: 'Strip Compile Debug Info',
-      description: 'Removes source and debug metadata.',
-      tagIds: ['metadata'],
-      stability: 'stable',
-      targeting: { supported: true, targetKinds: ['class'] },
-      params: [],
-    },
-    {
-      id: 'rename-classes',
-      name: 'Rename Classes',
-      description: 'Renames class symbols for debug preview.',
-      tagIds: ['obfuscation'],
-      stability: 'beta',
-      targeting: { supported: true, targetKinds: ['class'] },
-      params: [
-        {
-          key: 'dictionary',
-          type: 'enum',
-          defaultValue: 'ascii',
-          options: ['ascii', 'greek', 'compact'],
-          description: 'Select the preview rename dictionary.',
-          hidden: false,
-        },
-      ],
-    },
-    {
-      id: 'method-virtualization',
-      name: 'Method Virtualization',
-      description: 'Lowers selected methods into the native bytecode VM path.',
-      tagIds: ['vm-protection'],
-      stability: 'experimental',
-      risk: 'high',
-      requiresOptIn: true,
-      targeting: { supported: true, targetKinds: ['class', 'method'] },
-      params: [
-        {
-          key: 'methodSelection',
-          type: 'enum',
-          defaultValue: 'critical-plus',
-          options: ['safe', 'critical-auto', 'critical-plus', 'all-compatible'],
-          description: 'Selects compatible methods for virtualization under broad class rules.',
-          hidden: false,
-        },
-        {
-          key: 'maxInstructions',
-          type: 'number',
-          defaultValue: 0,
-          options: null,
-          description: 'Maximum bytecode instructions per virtualized method; 0 means unlimited.',
-          hidden: false,
-        },
-        {
-          key: 'maxBroadVirtualizedMethods',
-          type: 'number',
-          defaultValue: 0,
-          options: null,
-          description: 'Maximum methods selected by broad class rules; 0 means unlimited.',
-          hidden: false,
-        },
-      ],
-    },
-  ],
-  compatibility: [],
-  orderingConstraints: [],
-  defaultPipeline: ['strip-compile-debug-info', 'rename-classes'],
-}
-
-const defaultInspection: JarInspectionPayload = {
-  jarPath: 'C:\\debug\\demo-app.jar',
-  classCount: 5,
-  packageCount: 3,
-  nodes: [
-    {
-      id: 'pkg-com-example',
-      label: 'com.example',
-      qualifiedName: 'com.example',
-      internalName: 'com/example',
-      selector: 'com/example/*',
-      kind: 'package',
-      children: [
-        {
-          id: 'class-main',
-          label: 'MainApplication',
-          qualifiedName: 'com.example.MainApplication',
-          internalName: 'com/example/MainApplication',
-          selector: 'com/example/MainApplication',
-          kind: 'class',
-          children: [
-            {
-              id: 'method-main-run',
-              label: 'run()V',
-              qualifiedName: 'com.example.MainApplication#run:()V',
-              internalName: 'com/example/MainApplication#run:()V',
-              selector: 'com/example/MainApplication#run:()V',
-              kind: 'method',
-              children: [],
-            },
-          ],
-        },
-        {
-          id: 'class-service',
-          label: 'UserService',
-          qualifiedName: 'com.example.UserService',
-          internalName: 'com/example/UserService',
-          selector: 'com/example/UserService',
-          kind: 'class',
-          children: [
-            {
-              id: 'method-user-find-string',
-              label: 'find(Ljava/lang/String;)Ljava/lang/String;',
-              qualifiedName: 'com.example.UserService#find:(Ljava/lang/String;)Ljava/lang/String;',
-              internalName: 'com/example/UserService#find:(Ljava/lang/String;)Ljava/lang/String;',
-              selector: 'com/example/UserService#find:(Ljava/lang/String;)Ljava/lang/String;',
-              kind: 'method',
-              children: [],
-            },
-            {
-              id: 'method-user-find-int',
-              label: 'find(I)Ljava/lang/String;',
-              qualifiedName: 'com.example.UserService#find:(I)Ljava/lang/String;',
-              internalName: 'com/example/UserService#find:(I)Ljava/lang/String;',
-              selector: 'com/example/UserService#find:(I)Ljava/lang/String;',
-              kind: 'method',
-              children: [],
-            },
-          ],
-        },
-      ],
-    },
-    {
-      id: 'pkg-com-example-api',
-      label: 'com.example.api',
-      qualifiedName: 'com.example.api',
-      internalName: 'com/example/api',
-      selector: 'com/example/api/*',
-      kind: 'package',
-      children: [
-        {
-          id: 'class-controller',
-          label: 'AuthController',
-          qualifiedName: 'com.example.api.AuthController',
-          internalName: 'com/example/api/AuthController',
-          selector: 'com/example/api/AuthController',
-          kind: 'class',
-          children: [],
-        },
-      ],
-    },
-    {
-      id: 'pkg-com-example-model',
-      label: 'com.example.model',
-      qualifiedName: 'com.example.model',
-      internalName: 'com/example/model',
-      selector: 'com/example/model/*',
-      kind: 'package',
-      children: [
-        {
-          id: 'class-user',
-          label: 'UserRecord',
-          qualifiedName: 'com.example.model.UserRecord',
-          internalName: 'com/example/model/UserRecord',
-          selector: 'com/example/model/UserRecord',
-          kind: 'class',
-          children: [],
-        },
-        {
-          id: 'class-role',
-          label: 'RoleRecord',
-          qualifiedName: 'com.example.model.RoleRecord',
-          internalName: 'com/example/model/RoleRecord',
-          selector: 'com/example/model/RoleRecord',
-          kind: 'class',
-          children: [],
-        },
-      ],
-    },
-  ],
-}
+let emittedEvents: MockEngineEvent[] = []
+let activeRunToken: number | null = null
+let nextRunToken = 1
+let uiCheckResult: UiCheckResult = { status: 'idle', passed: [] }
+let scenario = resolveMockScenario(parseMockScenarioId(new URLSearchParams(window.location.search).get(MOCK_SCENARIO_QUERY)))
 
 const sleep = async (ms: number): Promise<void> => new Promise((resolve) => {
   window.setTimeout(resolve, ms)
 })
 
-const emitEngineEvent = (event: unknown): void => {
+const emitEngineEvent = (event: MockEngineEvent): void => {
+  emittedEvents = [...emittedEvents, event]
   const listeners = eventListeners.get(engineEventName)
   if (listeners === undefined) {
     return
@@ -262,6 +105,13 @@ const ensureListenerSet = (eventName: string): Set<EngineEventHandler> => {
   return created
 }
 
+const applyOutputPath = (event: MockEngineEvent, outputJarPath: string): MockEngineEvent => {
+  if (event.type === 'done') {
+    return { ...event, outPath: outputJarPath }
+  }
+  return event
+}
+
 const runtimeMock: WailsRuntimeMock = {
   EventsOn: (eventName: string, callback: EngineEventHandler): (() => void) => {
     const listeners = ensureListenerSet(eventName)
@@ -278,48 +128,101 @@ const runtimeMock: WailsRuntimeMock = {
   OnFileDropOff: (): void => undefined,
 }
 
+const pumpRun = async (token: number, request: ObfuscationRequest): Promise<void> => {
+  const delay = scenario.outcome === 'stream' ? 40 : 180
+  const steps = scenario.runSteps.filter((step) => !(step.type === 'log' && step.progress === 0))
+  const iterable = steps.length > 0 ? steps : scenario.runSteps
+
+  if (scenario.outcome === 'done') {
+    await sleep(delay)
+    if (activeRunToken !== token) {
+      return
+    }
+    if (cancelRequested) {
+      emitEngineEvent({
+        type: 'canceled',
+        level: 'warn',
+        message: '浏览器调试模式已取消当前任务。',
+        progress: null,
+        outPath: null,
+      })
+      if (activeRunToken === token) {
+        activeRunToken = null
+      }
+      return
+    }
+    emitEngineEvent(applyOutputPath(scenario.runSteps[scenario.runSteps.length - 1] ?? {
+      type: 'done',
+      level: 'success',
+      message: '浏览器调试模式已完成模拟输出。',
+      progress: 100,
+      outPath: request.outputJarPath,
+    }, request.outputJarPath))
+    if (activeRunToken === token) {
+      activeRunToken = null
+    }
+    return
+  }
+
+  for (const step of iterable) {
+    await sleep(delay)
+    if (activeRunToken !== token) {
+      return
+    }
+    if (cancelRequested && scenario.outcome !== 'canceled') {
+      emitEngineEvent({
+        type: 'canceled',
+        level: 'warn',
+        message: '浏览器调试模式已取消当前任务。',
+        progress: null,
+        outPath: null,
+      })
+      if (activeRunToken === token) {
+        activeRunToken = null
+      }
+      return
+    }
+    emitEngineEvent(applyOutputPath(step, request.outputJarPath))
+    if (step.type === 'error' || step.type === 'canceled' || step.type === 'done') {
+      if (activeRunToken === token) {
+        activeRunToken = null
+      }
+      return
+    }
+  }
+  if (activeRunToken === token) {
+    activeRunToken = null
+  }
+}
+
 const appMock: WailsAppMock = {
   StartObfuscation: async (request: ObfuscationRequest): Promise<void> => {
     cancelRequested = false
+    emittedEvents = []
+    const token = nextRunToken
+    nextRunToken += 1
+    activeRunToken = token
     emitEngineEvent({
       type: 'log',
       level: 'info',
-      message: `浏览器调试模式已启动: input=${request.inputJarPath}`,
+      message: `浏览器调试模式已启动: input=${request.inputJarPath} token=${token}`,
       progress: 0,
       outPath: null,
     })
-
-    const steps = [20, 45, 70, 90, 100]
-    for (const progress of steps) {
-      await sleep(280)
-      if (cancelRequested) {
-        emitEngineEvent({
-          type: 'canceled',
-          level: 'warn',
-          message: '浏览器调试模式已取消当前任务。',
-          progress: null,
-          outPath: null,
-        })
-        return
-      }
-
-      emitEngineEvent({
-        type: progress === 100 ? 'done' : 'progress',
-        level: progress === 100 ? 'success' : 'info',
-        message: progress === 100 ? '浏览器调试模式已完成模拟输出。' : `浏览器调试进度 ${progress}%`,
-        progress,
-        outPath: progress === 100 ? request.outputJarPath : null,
-      })
-    }
+    void pumpRun(token, request)
   },
   CancelObfuscation: async (): Promise<void> => {
     cancelRequested = true
   },
-  GetEngineCapabilities: async (): Promise<string> => JSON.stringify(defaultSchema),
-  SelectInputJar: async (): Promise<string> => defaultInspection.jarPath,
+  GetEngineCapabilities: async (): Promise<string> => JSON.stringify(scenario.schema),
+  SelectInputJar: async (): Promise<string> => scenario.inputJarPath,
+  SelectNativeShroudCli: async (): Promise<string> => 'C:\\XiangMu\\NativeShroud\\target\\release\\nativeshroud.exe',
   SelectOutputJar: async (defaultInputJarPath: string): Promise<string> => {
+    if (scenario.id === 'empty') {
+      return ''
+    }
     if (defaultInputJarPath.trim().length === 0) {
-      return 'C:\\debug\\demo-app-shrouded.jar'
+      return scenario.outputJarPath || 'C:\\debug\\demo-app-shrouded.jar'
     }
 
     if (defaultInputJarPath.toLowerCase().endsWith('.jar')) {
@@ -328,35 +231,9 @@ const appMock: WailsAppMock = {
 
     return `${defaultInputJarPath}-shrouded.jar`
   },
-  SelectImportConfig: async (): Promise<string> => 'C:\\debug\\javashroud-config.toml',
-  SelectExportConfig: async (): Promise<string> => 'C:\\debug\\javashroud-config.toml',
-  ReadTextFile: async (): Promise<string> => debugConfigToml || [
-    '[meta]',
-    'format = "javashroud-workbench"',
-    'version = 1',
-    '',
-    '[input]',
-    'inputJarPath = "C:\\\\debug\\\\demo-app.jar"',
-    'outputJarPath = "C:\\\\debug\\\\demo-app-shrouded.jar"',
-    '',
-    '[[passes]]',
-    'id = "strip-compile-debug-info"',
-    'enabled = true',
-    '',
-    '[passes.params]',
-    '',
-    '[[passes]]',
-    'id = "rename-classes"',
-    'enabled = true',
-    '',
-    '[passes.params]',
-    'dictionary = "ascii"',
-    '',
-    '[[rules]]',
-    'target = "com/example/api/*"',
-    'action = "exclude"',
-    '',
-  ].join('\n'),
+  SelectImportConfig: async (): Promise<string> => scenario.configPath,
+  SelectExportConfig: async (): Promise<string> => scenario.configPath,
+  ReadTextFile: async (): Promise<string> => debugConfigToml || defaultConfigToml(scenario),
   WriteTextFile: async (_path: string, content: string): Promise<void> => {
     debugConfigToml = content
     emitEngineEvent({
@@ -368,8 +245,8 @@ const appMock: WailsAppMock = {
     })
   },
   InspectJarClasses: async (inputJarPath: string): Promise<string> => JSON.stringify({
-    ...defaultInspection,
-    jarPath: inputJarPath,
+    ...scenario.inspection,
+    jarPath: inputJarPath || scenario.inspection.jarPath,
   }),
   WindowMinimise: async (): Promise<void> => undefined,
   WindowToggleMaximise: async (): Promise<void> => {
@@ -387,12 +264,73 @@ const appMock: WailsAppMock = {
   },
 }
 
+const hooks: DebugMockHooks = {
+  developmentOnly: true,
+  get scenarioId(): string {
+    return scenario.id
+  },
+  get scenario(): MockScenario {
+    return scenario
+  },
+  get emittedEvents(): readonly MockEngineEvent[] {
+    return emittedEvents
+  },
+  get activeRunToken(): number | null {
+    return activeRunToken
+  },
+  get uiCheckResult(): UiCheckResult {
+    return uiCheckResult
+  },
+  setScenario: (id: string): MockScenario => {
+    scenario = resolveMockScenario(parseMockScenarioId(id))
+    debugConfigToml = ''
+    emittedEvents = []
+    cancelRequested = false
+    return scenario
+  },
+  reset: (): void => {
+    debugConfigToml = ''
+    emittedEvents = []
+    cancelRequested = false
+    isWindowMaximised = false
+    activeRunToken = null
+  },
+  runUiChecks: (): void => {
+    if (uiCheckResult.status === 'running') {
+      return
+    }
+    uiCheckResult = { status: 'running', passed: [] }
+    void runUiSmokeChecks({
+      setScenario: (id: string) => {
+        scenario = resolveMockScenario(parseMockScenarioId(id))
+        debugConfigToml = ''
+        emittedEvents = []
+        cancelRequested = false
+        return scenario
+      },
+      getEmittedEvents: () => emittedEvents,
+      onProgress: (passed) => {
+        uiCheckResult = { status: 'running', passed: [...passed] }
+      },
+    }).then((result) => {
+      uiCheckResult = result
+    }).catch((error: unknown) => {
+      uiCheckResult = {
+        status: 'failed',
+        passed: uiCheckResult.passed,
+        error: error instanceof Error ? error.message : String(error),
+      }
+    })
+  },
+}
+
 debugWindow.runtime = runtimeMock
 debugWindow.go = {
   main: {
     App: appMock,
   },
 }
+debugWindow.__JAVASHROUD_DEBUG_MOCK__ = hooks
 
 const app = createApp(App)
 app.directive('motion', {

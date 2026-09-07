@@ -172,3 +172,63 @@ onBeforeUnmount((): void => resizeObserver?.disconnect())
     <div :style="{ height: `${virtualSlice.bottomPadding}px` }" aria-hidden="true" />
   </div>
 </template>
+
+<style scoped>
+.class-tree-virtual {
+  min-width: 0;
+  width: 100%;
+  min-height: 180px;
+  flex: 1 1 auto;
+  overflow: auto;
+  height: 100%;
+  border: 1px solid rgba(237, 237, 237, 0.08);
+  border-radius: 16px;
+  background: rgba(237, 237, 237, 0.03);
+}
+
+.class-tree-virtual:focus-visible {
+  outline: 2px solid #ededed;
+  outline-offset: 2px;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  height: 48px;
+  padding-inline-end: 10px;
+  border-bottom: 1px solid rgba(237, 237, 237, 0.06);
+}
+
+.tree-row.leaf,
+.tree-row.member {
+  opacity: 0.96;
+}
+
+.tree-row--unavailable {
+  opacity: 0.55;
+}
+
+.tree-expand.open :deep(svg) {
+  transform: rotate(90deg);
+}
+
+.tree-spacer {
+  width: 22px;
+  flex: 0 0 22px;
+}
+
+.tree-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #ededed;
+}
+
+.tree-kind-icon {
+  opacity: 0.7;
+}
+</style>

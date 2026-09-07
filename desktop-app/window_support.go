@@ -50,6 +50,24 @@ func (a *App) Quit() error {
 	return nil
 }
 
+func (a *App) SelectNativeShroudCli() (string, error) {
+	if a.ctx == nil {
+		return "", errors.New("select nativeshroud cli failed: Wails context is nil")
+	}
+
+	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "选择 NativeShroud CLI",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "NativeShroud CLI (nativeshroud.exe)", Pattern: "nativeshroud.exe;*.exe"},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("select nativeshroud cli failed: mode=open-file path=nativeshroud.exe: %w", err)
+	}
+
+	return path, nil
+}
+
 func (a *App) SelectInputJar() (string, error) {
 	if a.ctx == nil {
 		return "", errors.New("select input jar failed: Wails context is nil")

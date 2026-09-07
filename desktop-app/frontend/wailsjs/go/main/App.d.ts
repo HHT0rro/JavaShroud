@@ -18,6 +18,8 @@ export function SelectImportConfig():Promise<string>;
 
 export function SelectInputJar():Promise<string>;
 
+export function SelectNativeShroudCli():Promise<string>;
+
 export function SelectOutputJar(arg1:string):Promise<string>;
 
 export function StartObfuscation(arg1:main.ObfuscationRequest):Promise<void>;
