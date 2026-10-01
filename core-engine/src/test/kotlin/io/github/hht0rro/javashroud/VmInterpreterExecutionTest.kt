@@ -804,7 +804,7 @@ class VmInterpreterExecutionTest {
                         "maxInstructions" to 99999,
                     ),
                     "jni-microkernel-loader" to mapOf(
-                        "nativePackingLevel" to "off",
+                        "targetPlatform" to "windows-x64",
                     ),
                 ),
             )
@@ -936,7 +936,6 @@ class VmInterpreterExecutionTest {
                             ),
                             "jni-microkernel-loader" to mapOf(
                                 "targetPlatform" to "windows-x64",
-                                "nativePackingLevel" to "off",
                                 "seed" to 0x2468_1357,
                             ),
                         ),
@@ -991,19 +990,15 @@ class VmInterpreterExecutionTest {
         val configPath = inputJar.resolveSibling("javashroud-vm-cfg-$tag.toml")
         writeRunConfig(configPath, inputJar, outputJar, passIds, passParams)
         try {
-            if (contextOverride == null && passParams["jni-microkernel-loader"]?.get("nativePackingLevel") == "max-hardening") {
-                dispatchRequest(buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())), EngineKernel())
-            } else {
-                withTestBootSecret {
-                    if (contextOverride == null) {
-                        dispatchRequest(buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())), EngineKernel())
-                    } else {
-                        io.github.hht0rro.javashroud.kernel.executeKernelRun(
-                            config = io.github.hht0rro.javashroud.config.loadValidatedConfig(configPath),
-                            configPath = configPath,
-                            qpBuildContextOverride = contextOverride,
-                        )
-                    }
+            withTestBootSecret {
+                if (contextOverride == null) {
+                    dispatchRequest(buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())), EngineKernel())
+                } else {
+                    io.github.hht0rro.javashroud.kernel.executeKernelRun(
+                        config = io.github.hht0rro.javashroud.config.loadValidatedConfig(configPath),
+                        configPath = configPath,
+                        qpBuildContextOverride = contextOverride,
+                    )
                 }
             }
         } finally {

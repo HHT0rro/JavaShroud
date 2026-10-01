@@ -48,7 +48,6 @@ class EngineCliRunSupportTest {
             enabled = true
 
             [passes.params]
-            nativePackingLevel = "max"
             bootKeyDelivery = "embedded"
 
             [[passes]]

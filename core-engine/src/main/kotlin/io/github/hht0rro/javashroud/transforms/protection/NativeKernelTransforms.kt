@@ -126,6 +126,12 @@ private fun isJavaShroudVmDispatchCall(call: MethodInsnNode): Boolean {
     return false
 }
 
+fun applyNativeshroud(
+    artifact: BytecodeArtifact,
+    @Suppress("UNUSED_PARAMETER") ruleMatches: List<RuleMatch>,
+    @Suppress("UNUSED_PARAMETER") params: Map<String, Any>,
+): TransformResult = unchangedTransformResult(artifact)
+
 fun applyJniMicrokernelLoader(
     artifact: BytecodeArtifact,
     ruleMatches: List<RuleMatch>,

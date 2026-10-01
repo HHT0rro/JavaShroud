@@ -55,4 +55,5 @@ fun buildOrderingConstraints(): List<OrderingConstraint> = listOf(
     OrderingConstraint(before = "method-virtualization", after = "os-anti-vm", reason = "native VM lowering completes before unified defense probes are injected."),
     OrderingConstraint(before = "jni-microkernel-loader", after = "os-anti-debug", reason = "The typed native runtime must be sealed before debugger-defense probes are injected."),
     OrderingConstraint(before = "jni-microkernel-loader", after = "os-anti-vm", reason = "The typed native runtime must be sealed before virtual-machine-defense probes are injected."),
+    OrderingConstraint(before = "jni-microkernel-loader", after = "nativeshroud", reason = "NativeShroud packs the compiled Windows qp_ffi.dll after JNI runtime compilation."),
 )

@@ -12,15 +12,21 @@ export function Quit():Promise<void>;
 
 export function ReadTextFile(arg1:string):Promise<string>;
 
+export function ResolveXenolithCli():Promise<string>;
+
+export function ResumeNativePack(arg1:string):Promise<void>;
+
+export function RevealNativeImage(arg1:string):Promise<void>;
+
 export function SelectExportConfig():Promise<string>;
 
 export function SelectImportConfig():Promise<string>;
 
 export function SelectInputJar():Promise<string>;
 
-export function SelectNativeShroudCli():Promise<string>;
-
 export function SelectOutputJar(arg1:string):Promise<string>;
+
+export function SelectPackedNative():Promise<string>;
 
 export function StartObfuscation(arg1:main.ObfuscationRequest):Promise<void>;
 

@@ -75,6 +75,7 @@ class PassOrderingPlannerRegressionTest {
                 "string-encryption",
                 "field-string-encryption",
                 "jni-microkernel-loader",
+                "nativeshroud",
                 "method-virtualization",
                 "os-anti-debug",
                 "os-anti-vm",
@@ -101,6 +102,7 @@ class PassOrderingPlannerRegressionTest {
         assertBefore(result.orderedPasses, "method-virtualization", "os-anti-vm")
         assertBefore(result.orderedPasses, "jni-microkernel-loader", "os-anti-debug")
         assertBefore(result.orderedPasses, "jni-microkernel-loader", "os-anti-vm")
+        assertBefore(result.orderedPasses, "jni-microkernel-loader", "nativeshroud")
     }
 
     @Test

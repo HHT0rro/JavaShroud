@@ -9,6 +9,7 @@ import {
   buildObfuscationRequest,
   markCanceling,
   markInspectingClasses,
+  markPackResumed,
   markRunStarting,
   setEngineSchema,
   setInspectingClassesFailed,
@@ -73,16 +74,35 @@ export const browseInputJar = async (state: RunState, bridge: WailsBridge): Prom
   }
 }
 
-export const browseNativeShroudCli = async (state: RunState, bridge: WailsBridge): Promise<ControllerResult<string | null>> => {
+export const browsePackedNative = async (state: RunState, bridge: WailsBridge): Promise<ControllerResult<string | null>> => {
   try {
-    const cliPath: string = await bridge.selectNativeShroudCli()
-    if (cliPath.trim().length === 0) {
+    const packedPath: string = await bridge.selectPackedNative()
+    if (packedPath.trim().length === 0) {
       return successResult(state, null)
     }
 
-    return successResult(state, cliPath)
+    return successResult(state, packedPath)
   } catch (error) {
-    return failureResult(state, error, '选择 NativeShroud CLI 失败')
+    return failureResult(state, error, '选择加壳文件失败')
+  }
+}
+
+export const revealNativeImage = async (state: RunState, bridge: WailsBridge, path: string): Promise<ControllerResult<boolean>> => {
+  try {
+    await bridge.revealNativeImage(path)
+    return successResult(state, true)
+  } catch (error) {
+    return failureResult(state, error, '打开 native 镜像位置失败')
+  }
+}
+
+export const resumeNativePack = async (state: RunState, bridge: WailsBridge, path: string): Promise<ControllerResult<boolean>> => {
+  const resumedState: RunState = markPackResumed(state)
+  try {
+    await bridge.resumeNativePack(path)
+    return successResult(resumedState, true)
+  } catch (error) {
+    return failureResult(resumedState, error, '回传加壳文件失败')
   }
 }
 

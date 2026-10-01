@@ -23,18 +23,21 @@ import {
 } from './state'
 import {
   browseInputJar,
-  browseNativeShroudCli,
+  browsePackedNative,
   browseOutputJar,
   cancelObfuscationRun,
   exportWorkbenchConfig,
   inspectJarClasses,
   importWorkbenchConfig,
   loadWindowMaximiseState,
+  revealNativeImage,
+  resumeNativePack,
   runWindowAction,
   startObfuscationRun,
 } from './frontend-controller'
 import type { ClassTreeNode, PassItem, PassParamValue, PassSelectionMode, RuleAction, RuleItem, RunState } from './types'
 import type { WailsBridge } from './wails-bridge'
+import type { WorkbenchPage } from './workbench-view'
 
 interface MessageApi {
   readonly error: (message: string) => void
@@ -45,7 +48,7 @@ interface WorkbenchFacadeOptions {
   readonly state: Ref<RunState>
   readonly bridge: WailsBridge
   readonly message: MessageApi
-  readonly activePage: Ref<'home' | 'passes' | 'classes' | 'logs' | 'about'>
+  readonly activePage: Ref<WorkbenchPage>
   readonly isWindowMaximised: Ref<boolean>
 }
 
@@ -53,7 +56,7 @@ const isTerminalRunStatus = (status: RunState['status']): boolean =>
   status === 'done' || status === 'failed' || status === 'ready'
 
 const isBusyRunStatus = (status: RunState['status']): boolean =>
-  status === 'running' || status === 'canceling'
+  status === 'running' || status === 'awaiting-pack' || status === 'canceling'
 
 const windowControlErrorMessage = (error: unknown): string => {
   const message: string = error instanceof Error ? error.message : String(error)
@@ -77,6 +80,8 @@ export const createWorkbenchHandlers = (options: WorkbenchFacadeOptions) => {
   }
 
   const isRunPending = (): boolean => startInFlight || cancelInFlight || isBusyRunStatus(options.state.value.status)
+
+  const isPackHandoffActive = (): boolean => options.state.value.status === 'awaiting-pack'
 
   const inspectLoadedJar = async (inputJarPath: string): Promise<void> => {
     const generation = ++inspectGeneration
@@ -349,31 +354,64 @@ export const createWorkbenchHandlers = (options: WorkbenchFacadeOptions) => {
       options.state.value = setPassParam(options.state.value, passId, paramKey, value)
     },
 
-    handleBrowseNativeShroudCli: async (passId: string, paramKey: string): Promise<void> => {
-      if (isEditingLocked()) {
+    handleBrowsePackedNative: async (): Promise<string | null> => {
+      if (cancelInFlight || currentStatus() === 'canceling' || !isPackHandoffActive()) {
+        return null
+      }
+      const result = await browsePackedNative(options.state.value, options.bridge)
+      if (result.failed) {
+        options.state.value = {
+          ...options.state.value,
+          errorMessage: result.nextState.errorMessage,
+          logs: result.nextState.logs.length >= options.state.value.logs.length
+            ? result.nextState.logs
+            : options.state.value.logs,
+        }
+        emitStateError(options.message, options.state.value, '选择加壳文件失败')
+        return null
+      }
+      return result.value
+    },
+
+    handleRevealPackHandoff: async (): Promise<void> => {
+      const handoffPath = options.state.value.packHandoffPath
+      if (handoffPath === null || handoffPath.trim().length === 0) {
         return
       }
-      await enqueueMutating(async (): Promise<void> => {
-        if (isEditingLocked()) {
-          return
+      const result = await revealNativeImage(options.state.value, options.bridge, handoffPath)
+      if (result.failed) {
+        options.state.value = {
+          ...options.state.value,
+          errorMessage: result.nextState.errorMessage,
+          logs: result.nextState.logs.length >= options.state.value.logs.length
+            ? result.nextState.logs
+            : options.state.value.logs,
         }
-        const result = await browseNativeShroudCli(options.state.value, options.bridge)
-        if (result.failed) {
-          options.state.value = {
-            ...options.state.value,
-            errorMessage: result.nextState.errorMessage,
-            logs: result.nextState.logs.length >= options.state.value.logs.length
-              ? result.nextState.logs
-              : options.state.value.logs,
-          }
-          emitStateError(options.message, options.state.value, '选择 NativeShroud CLI 失败')
-          return
-        }
-        if (result.value === null) {
-          return
-        }
-        options.state.value = setPassParam(options.state.value, passId, paramKey, result.value)
-      })
+        emitStateError(options.message, options.state.value, '打开 native 镜像位置失败')
+      }
+    },
+
+    handleResumeNativePack: async (packedPath: string): Promise<void> => {
+      if (!isPackHandoffActive() || cancelInFlight) {
+        return
+      }
+      const trimmed = packedPath.trim()
+      if (trimmed.length === 0) {
+        return
+      }
+      const result = await resumeNativePack(options.state.value, options.bridge, trimmed)
+      if (result.failed) {
+        options.state.value = applyBridgeError(
+          options.state.value,
+          new Error(result.nextState.errorMessage ?? '回传加壳文件失败'),
+          '回传加壳文件失败',
+        )
+        emitStateError(options.message, options.state.value, '回传加壳文件失败')
+        return
+      }
+      options.state.value = result.nextState
+      options.activePage.value = 'logs'
+      emitSuccess(options.message, '已回传加壳文件')
     },
 
     handleAutoScrollChanged: (autoScroll: boolean): void => {

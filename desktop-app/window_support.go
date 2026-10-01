@@ -50,22 +50,36 @@ func (a *App) Quit() error {
 	return nil
 }
 
-func (a *App) SelectNativeShroudCli() (string, error) {
+func (a *App) SelectPackedNative() (string, error) {
 	if a.ctx == nil {
-		return "", errors.New("select nativeshroud cli failed: Wails context is nil")
+		return "", errors.New("select packed native failed: Wails context is nil")
 	}
 
 	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
-		Title: "选择 NativeShroud CLI",
+		Title: "选择加壳后的 native 镜像",
 		Filters: []runtime.FileFilter{
-			{DisplayName: "NativeShroud CLI (nativeshroud.exe)", Pattern: "nativeshroud.exe;*.exe"},
+			{DisplayName: "Native library (*.dll;*.so)", Pattern: "*.dll;*.so"},
 		},
 	})
 	if err != nil {
-		return "", fmt.Errorf("select nativeshroud cli failed: mode=open-file path=nativeshroud.exe: %w", err)
+		return "", fmt.Errorf("select packed native failed: mode=open-file path=*.dll;*.so: %w", err)
 	}
 
 	return path, nil
+}
+
+func (a *App) RevealNativeImage(path string) error {
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == "" {
+		return errors.New("reveal native image failed: path is empty")
+	}
+	if _, err := os.Stat(trimmedPath); err != nil {
+		return fmt.Errorf("reveal native image failed: path=%s: %w", trimmedPath, err)
+	}
+	if err := revealPathInFileManager(trimmedPath); err != nil {
+		return fmt.Errorf("reveal native image failed: path=%s: %w", trimmedPath, err)
+	}
+	return nil
 }
 
 func (a *App) SelectInputJar() (string, error) {

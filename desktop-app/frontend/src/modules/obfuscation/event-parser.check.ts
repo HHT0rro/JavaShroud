@@ -27,6 +27,17 @@ const parsedProgressEvent = parseEngineEvent({
 })
 assert(parsedProgressEvent.progress === 50, 'expected valid progress to be preserved')
 
+const parsedNeedPackEvent = parseEngineEvent({
+  type: 'need-pack',
+  level: 'info',
+  message: 'awaiting packed native',
+  progress: 94,
+  outPath: 'C:\\tmp\\qp_ffi.dll',
+})
+assert(parsedNeedPackEvent.type === 'need-pack', 'expected need-pack type')
+assert(parsedNeedPackEvent.outPath === 'C:\\tmp\\qp_ffi.dll', 'expected need-pack outPath')
+assert(parsedNeedPackEvent.progress === 94, 'expected need-pack progress')
+
 expectParseError(
   {
     type: 'progress',

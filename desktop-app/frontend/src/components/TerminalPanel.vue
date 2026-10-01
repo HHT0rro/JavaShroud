@@ -37,7 +37,7 @@ const emit = defineEmits<{
   readonly clearLogs: []
 }>()
 
-const isRunning = computed((): boolean => props.status === 'running' || props.status === 'canceling')
+const isRunning = computed((): boolean => props.status === 'running' || props.status === 'awaiting-pack' || props.status === 'canceling')
 
 const displayStatus = computed((): RunStatus | 'canceled' => {
   if (props.status === 'failed' || props.status === 'done' || isRunning.value) {
@@ -54,6 +54,8 @@ const statusLabel = computed((): string => {
   switch (displayStatus.value) {
     case 'running':
       return zh ? '运行中' : 'Running'
+    case 'awaiting-pack':
+      return zh ? '等待加壳' : 'Awaiting pack'
     case 'canceling':
       return zh ? '正在取消' : 'Canceling'
     case 'canceled':
@@ -534,6 +536,7 @@ onBeforeUnmount((): void => {
 }
 
 .status-badge[data-status='running'],
+.status-badge[data-status='awaiting-pack'],
 .status-badge[data-status='canceling'] {
   border-color: color-mix(in srgb, var(--text, #ededed) 55%, transparent);
 }

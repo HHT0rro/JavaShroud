@@ -103,7 +103,7 @@ func resolveNativeEnginePath() (string, error) {
 		}
 	}
 
-	return "", fmt.Errorf("native engine is missing: checked=%s", strings.Join(candidatePaths, ", "))
+	return "", fmt.Errorf("native engine is missing: embeddedError=%v: checked=%s", embeddedErr, strings.Join(candidatePaths, ", "))
 }
 
 func resolveEngineJarPath() (string, error) {

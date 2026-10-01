@@ -215,7 +215,7 @@ const deriveDisplayCategory = (moduleDefinition: ModuleDefinition): string => {
     return 'helper-loader'
   }
 
-  if (primaryTag === 'runtime-defense' || (primaryTag === 'native-kernel' && moduleDefinition.id !== 'jni-microkernel-loader')) {
+  if (primaryTag === 'runtime-defense') {
     return 'runtime-defense'
   }
 
@@ -223,6 +223,7 @@ const deriveDisplayCategory = (moduleDefinition: ModuleDefinition): string => {
     return 'virtualization'
   }
 
+  // Keep nativeshroud with jni-microkernel-loader under Native kernel (do not remap to runtime-defense).
   if (primaryTag === 'native-kernel') {
     return 'native-kernel'
   }

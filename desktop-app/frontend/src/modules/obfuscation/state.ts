@@ -102,6 +102,7 @@ export const createInitialRunState = (): RunState => ({
   inspectingClasses: false,
   progress: 0,
   currentStep: null,
+  packHandoffPath: null,
   outputPath: null,
   logs: [
     {
@@ -470,6 +471,7 @@ export const markRunStarting = (state: RunState): RunState => ({
   status: 'running',
   progress: 0,
   currentStep: null,
+  packHandoffPath: null,
   outputPath: null,
   errorMessage: null,
   logs: appendLogLine(state.logs, {
@@ -487,12 +489,23 @@ export const markCanceling = (state: RunState): RunState => ({
   }),
 })
 
+export const markPackResumed = (state: RunState): RunState => ({
+  ...state,
+  status: 'running',
+  currentStep: state.currentStep,
+  logs: appendLogLine(state.logs, {
+    level: 'info',
+    message: '已回传加壳文件，继续引擎流程。',
+  }),
+})
+
 export const applyEngineEvent = (state: RunState, event: EngineEvent): RunState => {
   if (event.type === 'canceled') {
     return {
       ...state,
       status: 'ready',
       currentStep: null,
+      packHandoffPath: null,
       logs: appendLogLine(state.logs, { level: event.level, message: event.message }),
       errorMessage: null,
     }
@@ -504,6 +517,7 @@ export const applyEngineEvent = (state: RunState, event: EngineEvent): RunState 
       status: 'done',
       progress: 100,
       currentStep: null,
+      packHandoffPath: null,
       outputPath: event.outPath,
       logs: appendLogLine(state.logs, { level: event.level, message: event.message }),
       errorMessage: null,
@@ -515,8 +529,21 @@ export const applyEngineEvent = (state: RunState, event: EngineEvent): RunState 
       ...state,
       status: 'failed',
       currentStep: null,
+      packHandoffPath: null,
       logs: appendLogLine(state.logs, { level: event.level, message: event.message }),
       errorMessage: event.message,
+    }
+  }
+
+  if (event.type === 'need-pack') {
+    return {
+      ...state,
+      status: 'awaiting-pack',
+      progress: event.progress === null ? state.progress : clampProgress(event.progress),
+      currentStep: event.message || state.currentStep,
+      packHandoffPath: event.outPath,
+      logs: appendLogLine(state.logs, { level: event.level, message: event.message }),
+      errorMessage: null,
     }
   }
 

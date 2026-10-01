@@ -22,6 +22,18 @@ export function ReadTextFile(arg1) {
   return window['go']['main']['App']['ReadTextFile'](arg1);
 }
 
+export function ResolveXenolithCli() {
+  return window['go']['main']['App']['ResolveXenolithCli']();
+}
+
+export function ResumeNativePack(arg1) {
+  return window['go']['main']['App']['ResumeNativePack'](arg1);
+}
+
+export function RevealNativeImage(arg1) {
+  return window['go']['main']['App']['RevealNativeImage'](arg1);
+}
+
 export function SelectExportConfig() {
   return window['go']['main']['App']['SelectExportConfig']();
 }
@@ -34,12 +46,12 @@ export function SelectInputJar() {
   return window['go']['main']['App']['SelectInputJar']();
 }
 
-export function SelectNativeShroudCli() {
-  return window['go']['main']['App']['SelectNativeShroudCli']();
-}
-
 export function SelectOutputJar(arg1) {
   return window['go']['main']['App']['SelectOutputJar'](arg1);
+}
+
+export function SelectPackedNative() {
+  return window['go']['main']['App']['SelectPackedNative']();
 }
 
 export function StartObfuscation(arg1) {

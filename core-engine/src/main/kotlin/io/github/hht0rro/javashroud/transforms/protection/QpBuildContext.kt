@@ -48,8 +48,45 @@ internal data class QpBuildContext(
     val nativeVmProfile: NativeVmBuildProfile = NativeVmBuildProfile.fromBuildMaterial(nativeSeed, jarLayoutDigest),
     val productionBuildEvidence: CandidateProductionBuildEvidence = CandidateProductionBuildEvidence.disabled(nativeVmProfile),
     val maxHardening: Boolean = false,
-    val nameSeed: ByteArray = ByteArray(io.github.hht0rro.javashroud.transforms.protection.qp.QpNameSchedule.NAME_SEED_SIZE).also { java.security.SecureRandom().nextBytes(it) },
+    val nameSeed: ByteArray = ByteArray(io.github.hht0rro.javashroud.transforms.protection.qp.QpNameSchedule.NAME_SEED_SIZE).also {
+        java.security.SecureRandom().nextBytes(it)
+    },
 ) {
+    // Build-time registry mapping native condy tokens to their plaintext
+    // constants.  The class file stores only the token; the VM serializer
+    // resolves the plaintext so protected pages keep real constant semantics
+    // while the public constant pool stays clean.  Build-only, wiped on close.
+    private val condyTokenPlaintexts = HashMap<String, String>()
+    /**
+     * Build-only map from the original JVM method identity to the opaque
+     * `([Ljava/lang/Object;)Ljava/lang/Object;` dispatcher that replaced it.
+     * Used so later classes in the same virtualization pass can rewrite
+     * invokes before their pages are serialized. Never copied across scopes.
+     */
+    private val opaqueVmDispatchers = LinkedHashMap<String, OpaqueVmDispatcher>()
+
+    fun registerCondyTokenPlaintext(token: String, plaintext: String) {
+        synchronized(condyTokenPlaintexts) { condyTokenPlaintexts[token] = plaintext }
+    }
+
+    fun resolveCondyTokenPlaintext(token: String): String? =
+        synchronized(condyTokenPlaintexts) { condyTokenPlaintexts[token] }
+
+    @Synchronized
+    fun registerOpaqueVmDispatcher(target: OpaqueVmDispatcher) {
+        val key = opaqueVmDispatcherKey(target.owner, target.originalName, target.originalDescriptor)
+        require(opaqueVmDispatchers.put(key, target) == null) {
+            "opaque VM dispatcher already registered for $key"
+        }
+    }
+
+    @Synchronized
+    fun resolveOpaqueVmDispatcher(owner: String, name: String, descriptor: String): OpaqueVmDispatcher? =
+        opaqueVmDispatchers[opaqueVmDispatcherKey(owner, name, descriptor)]
+
+    @Synchronized
+    fun opaqueVmDispatchers(): Map<String, OpaqueVmDispatcher> = opaqueVmDispatchers.toMap()
+
     private var signedDebugMapDraft: io.github.hht0rro.javashroud.transforms.protection.hardening.SignedDebugMap.Draft? = null
     private val nativeSpecializationDigests = LinkedHashMap<String, ByteArray>()
     /** Build-only current-format Qp page/evaluator plan; never serialized into runtime output. */
@@ -146,6 +183,30 @@ internal data class QpBuildContext(
     }
 
     private val nativeSealedPackBlobs = LinkedHashMap<String, ByteArray>()
+
+    /**
+     * Prepared secret-pack literals awaiting post-pack JSIM bind when the
+     * nativeshroud pass defers measurement. Ownership transfers to the taker.
+     */
+    private var pendingNativeSecretPackLiterals:
+        io.github.hht0rro.javashroud.transforms.protection.qp.NativeSecretPackLiterals? = null
+
+    @Synchronized
+    fun publishPendingNativeSecretPackLiterals(
+        pack: io.github.hht0rro.javashroud.transforms.protection.qp.NativeSecretPackLiterals,
+    ) {
+        pendingNativeSecretPackLiterals?.wipe()
+        pendingNativeSecretPackLiterals = pack
+    }
+
+    /** Takes ownership of the deferred secret-pack literals, or null if none. */
+    @Synchronized
+    fun takePendingNativeSecretPackLiterals():
+        io.github.hht0rro.javashroud.transforms.protection.qp.NativeSecretPackLiterals? {
+        val pack = pendingNativeSecretPackLiterals
+        pendingNativeSecretPackLiterals = null
+        return pack
+    }
 
     /** Sealed per-platform secret-pack blobs produced by the native compiler pass. */
     @Synchronized
@@ -1088,6 +1149,8 @@ internal data class QpBuildContext(
         nativeSpecializationDigests.clear()
         nativeSealedPackBlobs.values.forEach { java.util.Arrays.fill(it, 0) }
         nativeSealedPackBlobs.clear()
+        pendingNativeSecretPackLiterals?.wipe()
+        pendingNativeSecretPackLiterals = null
         qpMethodCandidates.values.forEach { it.wipe() }
         qpMethodCandidates.clear()
         qpTextPageCandidates.values.forEach { it.wipe() }
@@ -1112,8 +1175,23 @@ internal data class QpBuildContext(
         qpClassRouteReservation = null
         qpNativeRouteReservation?.wipe()
         qpNativeRouteReservation = null
+        condyTokenPlaintexts.clear()
+        opaqueVmDispatchers.clear()
     }
 }
+
+internal data class OpaqueVmDispatcher(
+    val owner: String,
+    val originalName: String,
+    val originalDescriptor: String,
+    val syntheticName: String,
+    val syntheticDescriptor: String,
+    val originalAccess: Int,
+    val isMainEntry: Boolean,
+)
+
+internal fun opaqueVmDispatcherKey(owner: String, name: String, descriptor: String): String =
+    "$owner#$name#$descriptor"
 
 internal data class NativeVmBuildProfile(
     val parserRowProfile: Int,
@@ -1217,8 +1295,7 @@ internal fun buildQpBuildContext(config: ObfuscationConfig, artifact: BytecodeAr
         nativeVmProfile = profile,
         productionBuildEvidence = CandidateProductionBuildEvidence.forConfig(config, profile),
         maxHardening = config.passes.any { pass ->
-            pass.enabled && pass.id == "jni-microkernel-loader" &&
-                pass.params["nativePackingLevel"]?.asText() == "max-hardening"
+            pass.enabled && pass.id == "method-virtualization"
         },
     )
 }

@@ -29,8 +29,8 @@ object QpNativeCompilerPass {
     private val rustToolchainIdentityCache = ConcurrentHashMap<String, String>()
     private const val DEFAULT_NATIVE_COMPILE_PARALLELISM = 2
 
-    private const val NATIVE_CACHE_MAGIC = "QP-RUST-CACHE-V2"
-    private const val NATIVE_CACHE_VERSION = 2
+    private const val NATIVE_CACHE_MAGIC = "QP-RUST-CACHE-V3"
+    private const val NATIVE_CACHE_VERSION = 3
     private const val NATIVE_CACHE_HEADER_SIZE = 16 + 4 + 32 + 8 + 32
     private const val MAX_NATIVE_ARTIFACT_BYTES = 256L * 1024L * 1024L
     private const val MAX_RUST_DIAGNOSTIC_BYTES = 8_192
@@ -75,8 +75,7 @@ object QpNativeCompilerPass {
         classLoader: ClassLoader,
         targetPlatforms: Collection<String> = RUST_TARGETS.keys,
         nativeProtectionLevel: String = "standard",
-        nativePackingLevel: String = "max",
-    ): List<RecompiledNative> = recompileWithDiagnostics(seed, classLoader, targetPlatforms, nativeProtectionLevel, nativePackingLevel).results
+    ): List<RecompiledNative> = recompileWithDiagnostics(seed, classLoader, targetPlatforms, nativeProtectionLevel).results
 
     data class RecompilationDiagnostics(
         val results: List<RecompiledNative>,
@@ -94,7 +93,6 @@ object QpNativeCompilerPass {
         classLoader = classLoader,
         request = QpNativeCompilerRequest.forTargets(
             nativeProtectionLevel = nativeProtectionLevel,
-            nativePackingLevel = NativeKernelShellPacker.Level.OFF,
             targetPlatforms = listOf(targetPlatform),
         ),
         cfgEvidenceExports = true,
@@ -110,12 +108,10 @@ object QpNativeCompilerPass {
         classLoader: ClassLoader,
         targetPlatforms: Collection<String> = RUST_TARGETS.keys,
         nativeProtectionLevel: String = "standard",
-        nativePackingLevel: String = "max",
         onMessage: (NativeToolchainProvisioner.ResolutionMessage) -> Unit = {},
     ): RecompilationDiagnostics {
         val request = QpNativeCompilerRequest.forTargets(
             nativeProtectionLevel = nativeProtectionLevel,
-            nativePackingLevel = NativeKernelShellPacker.Level.parse(nativePackingLevel),
             targetPlatforms = targetPlatforms,
         )
         return recompileWithDiagnostics(
@@ -131,11 +127,13 @@ object QpNativeCompilerPass {
         classLoader: ClassLoader,
         request: QpNativeCompilerRequest,
         onMessage: (NativeToolchainProvisioner.ResolutionMessage) -> Unit = {},
+        deferImageMeasurement: Boolean = false,
     ): RecompilationDiagnostics = recompileWithDiagnosticsInternal(
         seed = seed,
         classLoader = classLoader,
         request = request,
         onMessage = onMessage,
+        deferImageMeasurement = deferImageMeasurement,
     )
 
     private fun recompileWithDiagnosticsInternal(
@@ -145,6 +143,7 @@ object QpNativeCompilerPass {
         onMessage: (NativeToolchainProvisioner.ResolutionMessage) -> Unit = {},
         cfgEvidenceExports: Boolean = false,
         evidenceRandom: Random? = null,
+        deferImageMeasurement: Boolean = false,
     ): RecompilationDiagnostics {
         val messages = mutableListOf<NativeToolchainProvisioner.ResolutionMessage>()
         fun report(message: NativeToolchainProvisioner.ResolutionMessage) {
@@ -192,9 +191,13 @@ object QpNativeCompilerPass {
                 request = request,
                 cfgEvidenceExports = cfgEvidenceExports,
                 evidenceRandom = evidenceRandom,
+                deferImageMeasurement = deferImageMeasurement,
                 report = ::report,
             )
-            RecompilationDiagnostics(results, messages)
+            RecompilationDiagnostics(
+                results = results.natives,
+                messages = messages,
+            )
         } catch (error: Exception) {
             report(rustMessage("error", "Qp Rust native recompilation failed: ${error.message.orEmpty()}"))
             RecompilationDiagnostics(emptyList(), messages)
@@ -206,6 +209,10 @@ object QpNativeCompilerPass {
         }
     }
 
+    private data class RecompileOutcome(
+        val natives: List<RecompiledNative>,
+    )
+
     private fun doRecompile(
         seed: Long,
         classLoader: ClassLoader,
@@ -215,8 +222,9 @@ object QpNativeCompilerPass {
         request: QpNativeCompilerRequest,
         cfgEvidenceExports: Boolean,
         evidenceRandom: Random?,
+        deferImageMeasurement: Boolean,
         report: (NativeToolchainProvisioner.ResolutionMessage) -> Unit,
-    ): List<RecompiledNative> {
+    ): RecompileOutcome {
         requireSupportedNativeRequest(request)
         val context = QpBuildContexts.requireCurrent()
         require(!cfgEvidenceExports || evidenceRandom != null) {
@@ -236,6 +244,7 @@ object QpNativeCompilerPass {
         var targetTokenCommitment = ByteArray(0)
         var targetTokenNameSeed = ByteArray(0)
         var secretPackLiterals: io.github.hht0rro.javashroud.transforms.protection.qp.NativeSecretPackLiterals? = null
+        var transferPendingSecretPack = false
         try {
             copyRustWorkspace(workspace, rustWorkspace)
             check(Files.readString(rustWorkspace.resolve("crates/qp-ffi/src/lib.rs")).contains("fn JNI_OnLoad")) {
@@ -263,9 +272,11 @@ object QpNativeCompilerPass {
                     )
             }
             val packCommitment = secretPackLiterals?.commitment() ?: ByteArray(0)
-            // Hardened builds carry per-artifact secret material and never
-            // touch the persistent native cache.
-            val cacheEnabled = request.nativePackingLevel != QpPackingLevel.MAX_HARDENING
+            val cacheEnabled = true
+            // When NativeShroud packing is enabled, JSIM bind/seal runs after
+            // packIfRequested on the returned disk image. Compile and cache
+            // store only unbound images (.jsmk still holds cm^R pre-mask rows).
+            val bindMeasurement = !deferImageMeasurement
             tasks = request.routes.map { route ->
                 val target = rustTargetForPlatform(route.platform)
                 val specializationDigest = rustSpecializationDigest(
@@ -291,7 +302,6 @@ object QpNativeCompilerPass {
                     qpBuildContext = context,
                     protectedSectionKey = specializationNonce,
                     nativeProtectionLevel = request.nativeProtectionLevel,
-                    nativePackingLevel = request.nativePackingLevel.configValue,
                     nativeShellPackerVersion = 1,
                     nativeShellPayloadProfile = "qp-rust-ffi-v1",
                    nativeShellLoaderProfile = "rust-ffi-${route.platform}-v1",
@@ -310,7 +320,6 @@ object QpNativeCompilerPass {
                     cacheKey = cacheKey,
                     specializationDigest = specializationDigest,
                     protectionLevel = request.nativeProtectionLevel,
-                    packingLevel = request.nativePackingLevel.configValue,
                     cryptoDomain = cryptoDomain.copyOf(),
                     layoutDigest = layoutDigest.copyOf(),
                     targetTokenCommitment = targetTokenCommitment.copyOf(),
@@ -324,6 +333,7 @@ object QpNativeCompilerPass {
                 rustWorkspace = rustWorkspace,
                 cfgEvidenceExports = cfgEvidenceExports,
                 cacheEnabled = cacheEnabled,
+                bindMeasurement = bindMeasurement,
             )
             val results = ArrayList<RecompiledNative>(compiled.size)
             var failed = false
@@ -336,9 +346,6 @@ object QpNativeCompilerPass {
                 }
                 try {
                     validateRustArtifact(task.platform, task.outputName, bytes)
-                    if (cacheEnabled && !cfgEvidenceExports && !result.fromCache) {
-                        writeRustArtifactCache(task.cachePath, bytes, task.cacheKey, task.platform, task.outputName)
-                    }
                     results += RecompiledNative(
                         task.platform,
                         task.outputName,
@@ -357,19 +364,25 @@ object QpNativeCompilerPass {
                     result.bytes.fill(0)
                     result.specializationDigest.fill(0)
                 }
-                return emptyList()
+                return RecompileOutcome(emptyList())
             }
             if (secretPackLiterals != null) {
-                val sealedPackBlobs = secretPackLiterals.blobByPlatform()
-                require(sealedPackBlobs.keys == tasks.associate { it.platform to Unit }.keys) {
-                    "Qp sealed secret pack blob was not sealed for every compiled platform"
+                if (deferImageMeasurement) {
+                    // Hand ownership to the pack/bind stage via the build context.
+                    transferPendingSecretPack = true
+                    context.publishPendingNativeSecretPackLiterals(secretPackLiterals)
+                } else {
+                    val sealedPackBlobs = secretPackLiterals.blobByPlatform()
+                    require(sealedPackBlobs.keys == tasks.associate { it.platform to Unit }.keys) {
+                        "Qp sealed secret pack blob was not sealed for every compiled platform"
+                    }
+                    context.publishNativeSealedPackBlobs(sealedPackBlobs)
                 }
-                context.publishNativeSealedPackBlobs(sealedPackBlobs)
             }
             context.publishNativeSpecializationDigests(
                 results.associate { it.platform to it.specializationDigest.copyOf() },
             )
-            return results
+            return RecompileOutcome(natives = results)
         } finally {
             tasks.forEach { task ->
                 task.specializationDigest.fill(0)
@@ -384,7 +397,9 @@ object QpNativeCompilerPass {
             layoutDigest.fill(0)
             targetTokenCommitment.fill(0)
             targetTokenNameSeed.fill(0)
-            secretPackLiterals?.wipe()
+            if (!transferPendingSecretPack) {
+                secretPackLiterals?.wipe()
+            }
         }
     }
 
@@ -399,7 +414,6 @@ object QpNativeCompilerPass {
         val cacheKey: String,
         val specializationDigest: ByteArray,
         val protectionLevel: String,
-        val packingLevel: String,
         val cryptoDomain: ByteArray,
         val layoutDigest: ByteArray,
         val targetTokenCommitment: ByteArray,
@@ -420,6 +434,7 @@ object QpNativeCompilerPass {
         rustWorkspace: Path,
         cfgEvidenceExports: Boolean,
         cacheEnabled: Boolean,
+        bindMeasurement: Boolean,
     ): List<Pair<NativeCompileTask, NativeArtifactBuildResult>> {
         if (compileTasks.isEmpty()) return emptyList()
         val parallelism = minOf(compileTasks.size, nativeCompileParallelism())
@@ -434,6 +449,7 @@ object QpNativeCompilerPass {
                     task = task,
                     cfgEvidenceExports = cfgEvidenceExports,
                     cacheEnabled = cacheEnabled,
+                    bindMeasurement = bindMeasurement,
                 )
             } catch (error: Exception) {
                 task to NativeArtifactBuildResult(false, error.message ?: error::class.java.simpleName, null, false)
@@ -477,64 +493,109 @@ object QpNativeCompilerPass {
         task: NativeCompileTask,
         cfgEvidenceExports: Boolean,
         cacheEnabled: Boolean,
+        bindMeasurement: Boolean,
     ): NativeArtifactBuildResult = withRustCompileLock(task.cachePath) {
-        // Hardened builds carry per-artifact secret-pack material and never
-        // read or write the persistent native cache.
+        // Cache stores unbound images only. Bind/seal happens after the cache
+        // write (or after NativeShroud packing when bindMeasurement is false).
+        var fromCache = false
+        var bytes: ByteArray? = null
         if (cacheEnabled && !cfgEvidenceExports) {
             readRustArtifactCache(task.cachePath, task.cacheKey, task.platform, task.outputName)?.let { cachedBytes ->
-                return@withRustCompileLock NativeArtifactBuildResult(true, "cache-hit", cachedBytes, true)
+                bytes = cachedBytes
+                fromCache = true
             }
         }
-        val specializationHex = HexEncodingSupport.toHexLower(task.specializationDigest)
-        val compileResult = runRustCompile(
-            toolchain = toolchain,
-            workspace = rustWorkspace,
-            targetDir = task.targetDir,
-            target = task.rustTarget,
-            specializationHex = specializationHex,
-            cfgEvidenceExports = cfgEvidenceExports,
-        )
-        if (!compileResult.success) {
-            return@withRustCompileLock NativeArtifactBuildResult(false, compileResult.output, null, false)
-        }
-        // cargo-zigbuild accepts the glibc floor in the command target
-        // (`x86_64-unknown-linux-gnu.2.17`) but writes Cargo outputs below the
-        // base target directory (`x86_64-unknown-linux-gnu`). Resolve the
-        // on-disk path using the emitted target while retaining the exact
-        // glibc-qualified target in the compile command and specialization.
-        val outputTarget = if (task.rustTarget == "x86_64-unknown-linux-gnu.2.17") {
-            "x86_64-unknown-linux-gnu"
-        } else {
-            task.rustTarget
-        }
-        val builtArtifact = task.targetDir.resolve(outputTarget).resolve("release").resolve(rustLibraryFileName(task.platform))
-        if (!Files.isRegularFile(builtArtifact)) {
-            return@withRustCompileLock NativeArtifactBuildResult(
-                false,
-                "Cargo completed without the expected Rust artifact: $builtArtifact",
-                null,
-                false,
+        if (bytes == null) {
+            val specializationHex = HexEncodingSupport.toHexLower(task.specializationDigest)
+            val compileResult = runRustCompile(
+                toolchain = toolchain,
+                workspace = rustWorkspace,
+                targetDir = task.targetDir,
+                target = task.rustTarget,
+                specializationHex = specializationHex,
+                cfgEvidenceExports = cfgEvidenceExports,
             )
+            if (!compileResult.success) {
+                return@withRustCompileLock NativeArtifactBuildResult(false, compileResult.output, null, false)
+            }
+            // cargo-zigbuild accepts the glibc floor in the command target
+            // (`x86_64-unknown-linux-gnu.2.17`) but writes Cargo outputs below the
+            // base target directory (`x86_64-unknown-linux-gnu`). Resolve the
+            // on-disk path using the emitted target while retaining the exact
+            // glibc-qualified target in the compile command and specialization.
+            val outputTarget = if (task.rustTarget == "x86_64-unknown-linux-gnu.2.17") {
+                "x86_64-unknown-linux-gnu"
+            } else {
+                task.rustTarget
+            }
+            val builtArtifact = task.targetDir.resolve(outputTarget).resolve("release").resolve(rustLibraryFileName(task.platform))
+            if (!Files.isRegularFile(builtArtifact)) {
+                return@withRustCompileLock NativeArtifactBuildResult(
+                    false,
+                    "Cargo completed without the expected Rust artifact: $builtArtifact",
+                    null,
+                    false,
+                )
+            }
+            val compiled = Files.readAllBytes(builtArtifact)
+            if (compiled.isEmpty() || compiled.size.toLong() > MAX_NATIVE_ARTIFACT_BYTES) {
+                compiled.fill(0)
+                return@withRustCompileLock NativeArtifactBuildResult(false, "Rust artifact is empty or exceeds the bounded size", null, false)
+            }
+            bytes = compiled
+            if (cacheEnabled && !cfgEvidenceExports) {
+                try {
+                    writeRustArtifactCache(task.cachePath, compiled, task.cacheKey, task.platform, task.outputName)
+                } catch (error: Exception) {
+                    // Cache write failure must not discard a valid compile product.
+                    // The next build will simply recompile.
+                }
+            }
         }
-        val bytes = Files.readAllBytes(builtArtifact)
-        if (bytes.isEmpty() || bytes.size.toLong() > MAX_NATIVE_ARTIFACT_BYTES) {
-            bytes.fill(0)
-            return@withRustCompileLock NativeArtifactBuildResult(false, "Rust artifact is empty or exceeds the bounded size", null, false)
+        val image = checkNotNull(bytes)
+        if (bindMeasurement && task.secretPack != null) {
+            try {
+                bindImageMeasurement(image, task.secretPack, task.platform)
+            } catch (error: Exception) {
+                image.fill(0)
+                return@withRustCompileLock NativeArtifactBuildResult(
+                    false,
+                    "Qp image measurement commitment could not be bound: ${error.message}",
+                    null,
+                    false,
+                )
+            }
         }
-        val measurementKey = task.secretPack?.measurementKey
+        NativeArtifactBuildResult(true, if (fromCache) "cache-hit" else "compiled", image, fromCache)
+    }
+
+    /**
+     * Digest the on-disk image (commitment slot / `.jsmk` / `.jsmd` zeroed),
+     * write HMAC into `.jsms`, seal the secret pack for [platform], then
+     * commitment-chain `.jsmk` / `.jsmd`. Mutates [bytes] in place.
+     *
+     * Fail-closed: on any error [bytes] is zeroed and the exception is rethrown.
+     * Used both immediately after compile and after NativeShroud packing.
+     */
+    internal fun bindImageMeasurement(
+        bytes: ByteArray,
+        secretPack: io.github.hht0rro.javashroud.transforms.protection.qp.NativeSecretPackLiterals,
+        platform: String,
+    ) {
+        val measurementKey = secretPack.measurementKey
         var commitment: ByteArray? = null
         try {
-            if (measurementKey != null) {
-                commitment = patchImageMeasurementCommitment(bytes, measurementKey)
-                task.secretPack.sealForPlatform(task.platform, commitment)
-                // Commitment-chain the shard key halves by content: locate each
-                // pre-mask row (cm ^ R) in the image and XOR the patched image
-                // commitment in place, then verify the runtime reconstruction.
-                val shardCount = task.secretPack.shardCount()
-                val maskRMaster = task.secretPack.maskRMaster()
-                val maskedRows = ArrayList<ByteArray>(shardCount)
+            commitment = patchImageMeasurementCommitment(bytes, measurementKey)
+            secretPack.sealForPlatform(platform, checkNotNull(commitment))
+            // Commitment-chain the shard key halves by content: locate each
+            // pre-mask row (cm ^ R) in the image and XOR the patched image
+            // commitment in place, then verify the runtime reconstruction.
+            val shardCount = secretPack.shardCount()
+            val maskRMaster = secretPack.maskRMaster()
+            val maskedRows = ArrayList<ByteArray>(shardCount)
+            try {
                 for (shard in 0 until shardCount) {
-                    val cm = task.secretPack.cmKeyAt(shard)
+                    val cm = secretPack.cmKeyAt(shard)
                     val mask = io.github.hht0rro.javashroud.transforms.protection.qp.NativeImageMeasurement
                         .shardMask(maskRMaster, shard)
                     val row = ByteArray(32)
@@ -548,9 +609,6 @@ object QpNativeCompilerPass {
                 ) {
                     error("Qp shard key mask rows are missing from the compiled image")
                 }
-                for (shard in 0 until shardCount) {
-                }
-                maskedRows.forEach { Arrays.fill(it, 0) }
                 // Commitment-chain the VM dialect corpus the same way: the
                 // .jsmd section only ever holds `corpus ^ R ^ stream(C)`, so
                 // the static bytes alone never recover the opcode table.
@@ -561,22 +619,17 @@ object QpNativeCompilerPass {
                 ) {
                     error("Qp dialect mask section could not be commitment-chained")
                 }
-                val cm1 = task.secretPack.cmKeyAt(1)
+            } finally {
+                maskedRows.forEach { Arrays.fill(it, 0) }
                 Arrays.fill(maskRMaster, 0)
             }
         } catch (error: Exception) {
             bytes.fill(0)
-            return@withRustCompileLock NativeArtifactBuildResult(
-                false,
-                "Qp image measurement commitment could not be bound: ${error.message}",
-                null,
-                false,
-            )
+            throw error
         } finally {
             commitment?.fill(0)
-            measurementKey?.fill(0)
+            Arrays.fill(measurementKey, 0)
         }
-        NativeArtifactBuildResult(true, compileResult.output, bytes, false)
     }
 
     private fun <T> withRustCompileLock(cachePath: Path, block: () -> T): T {
@@ -886,9 +939,7 @@ object QpNativeCompilerPass {
             append("pub const PROTECTION_LEVEL: &str = \"")
             append(task.protectionLevel)
             append("\";\n")
-            append("pub const PACKING_LEVEL: &str = \"")
-            append(task.packingLevel)
-            append("\";\n")
+            append("pub const PACKING_LEVEL: &str = \"off\";\n")
             append("pub const VM_CRYPTO_DOMAIN: [u8; 32] = [0; 32];\n")
             append("pub const VM_LAYOUT_DIGEST: [u8; 32] = [0; 32];\n")
             append("pub const TARGET_TOKEN_COMMITMENT: [u8; 32] = [")
@@ -1108,7 +1159,7 @@ object QpNativeCompilerPass {
         updateLong(context.nativeSeed)
         update(context.jarLayoutDigest)
         updateUtf8(request.nativeProtectionLevel)
-        updateUtf8(request.nativePackingLevel.configValue)
+        updateUtf8("off")
         updateUtf8("qp-rust-ffi-v1")
         updateInt(context.nativeVmProfile.authenticatedId)
         require(targetTokenCommitment.size == 32) { "Qp token commitment must be 32 bytes" }
@@ -1521,7 +1572,6 @@ object QpNativeCompilerPass {
         qpBuildContext: QpBuildContext,
         protectedSectionKey: ByteArray,
         nativeProtectionLevel: String = "standard",
-        nativePackingLevel: String = "max",
         nativeShellPackerVersion: Int = 1,
         nativeShellPayloadProfile: String = "qp-rust-ffi-v1",
         nativeShellLoaderProfile: String = "direct-rust-loader",
@@ -1540,7 +1590,7 @@ object QpNativeCompilerPass {
         digest.updateUtf8(outputName)
         digest.updateUtf8(RUST_FFI_PACKAGE)
         digest.updateUtf8(nativeProtectionLevel)
-        digest.updateUtf8(nativePackingLevel)
+        digest.updateUtf8("off")
         digest.updateInt(nativeShellPackerVersion)
         digest.updateUtf8(nativeShellPayloadProfile)
         digest.updateUtf8(nativeShellLoaderProfile)

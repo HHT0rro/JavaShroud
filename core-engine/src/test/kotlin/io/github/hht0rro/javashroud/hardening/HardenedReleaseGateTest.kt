@@ -337,6 +337,7 @@ class HardenedReleaseGateTest {
                 inputJarBytes = 1L,
             )
             assertFalse(blocked.findings.single { it.check == "perf-budget" }.passed)
+            assertTrue(blocked.passed, "perf-budget must not fail the RELEASE scan")
             val analysis = ReleaseArtifactScan.scan(
                 jar,
                 artifact,

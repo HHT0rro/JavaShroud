@@ -337,10 +337,7 @@ object RuntimeArtifactSealing {
 
     fun sealIfRequested(artifact: BytecodeArtifact, config: ObfuscationConfig): BytecodeArtifact {
         if (!isRequested(config)) return artifact
-        val maxHardening = config.passes.any { pass ->
-            pass.enabled && pass.id == "jni-microkernel-loader" &&
-                pass.params["nativePackingLevel"]?.asText() == "max-hardening"
-        }
+        val maxHardening = config.enablesPass("method-virtualization")
         return seal(
             artifact,
             seedFromConfig(config),

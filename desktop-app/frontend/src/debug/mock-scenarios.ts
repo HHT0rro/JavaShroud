@@ -259,13 +259,13 @@ const longInspection: JarInspectionPayload = {
   ],
 }
 
-const enumParam = (key: string, defaultValue: string, options: readonly string[], description: string): ParamSchema => ({
+const enumParam = (key: string, defaultValue: string, options: readonly string[], description: string, hidden = false): ParamSchema => ({
   key,
   type: 'enum',
   defaultValue,
   options,
   description,
-  hidden: false,
+  hidden,
 })
 
 const numberParam = (key: string, defaultValue: number, description: string): ParamSchema => ({
@@ -390,9 +390,21 @@ const fullCatalogSchema: EngineSchemaPayload = {
       requiresOptIn: true,
       requiresAnyPassIds: ['os-anti-debug', 'os-anti-vm', 'method-virtualization', 'string-encryption'],
     }),
-    moduleDef('nativeshroud', 'NativeShroud Packer', ['native-kernel'], [
-      enumParam('profile', 'max', ['fast', 'standard', 'max'], 'NativeShroud pack profile.'),
-      stringParam('cliPath', '', 'Absolute path to nativeshroud.exe.'),
+    moduleDef('nativeshroud', 'Custom packing', ['native-kernel'], [
+      stringParam('cliPath', '', 'Absolute path to the Xenolith CLI executable; when set, the engine runs `xenolith pack` on the unpacked Windows qp_ffi.dll before JSIM binding.', true),
+      enumParam('profile', 'standard', ['fast', 'standard', 'max'], 'Xenolith pack profile (fast/standard/max).', true),
+      stringParam('vmExports', '', 'Comma-separated export names to virtualize via `--vm-export`. JVM/CRT ABI names are refused; the fast profile rejects vmExports.', true),
+      stringParam('selectRva', '', 'Comma-separated explicit function ranges `RVA:LEN` passed as repeatable `--select-rva`. Fail-closed if unliftable.', true),
+      stringParam('selectFunction', '', 'Comma-separated symbol/export names selected after metadata discovery via `--select-function`.', true),
+      booleanParam('selectAll', false, 'Select every discoverable function (`--select-all`).', true),
+      booleanParam('strictCoverage', false, 'Fail the pack when no function is selected or a selected function cannot be fully transformed (`--strict-coverage`).', true),
+      booleanParam('allowNativeFallback', false, 'Let unliftable selected functions stay native, reported as mixed_native (`--allow-native-fallback`).', true),
+      booleanParam('lazyRegions', false, 'Seal non-keep code regions at bootstrap; pages decrypt on first execution fault (`--lazy-regions`).', true),
+      booleanParam('protectImports', false, 'Seal import name records in the envelope (`--protect-imports`).', true),
+      booleanParam('strictConstants', false, 'Refuse to pack when read-only constants keep native references (`--strict-constants`).', true),
+      booleanParam('traceDiverge', false, 'Two semantically equal paths per block with a TEB^heap^RSP selector (`--trace-diverge`).', true),
+      stringParam('packedPath', '', 'Absolute path to a pre-packed Windows qp_ffi.dll (hidden CLI/test param).', true),
+      stringParam('packedPathLinux', '', 'Absolute path to a pre-packed Linux libqp_ffi.so (hidden CLI/test param).', true),
     ], { stability: 'experimental', risk: 'high', requiresOptIn: true, requiredPassIds: ['jni-microkernel-loader'] }),
   ],
   compatibility: [

@@ -72,16 +72,15 @@ class QpNativeCompilerPassTest {
 
     @Test
     fun retired_targets_are_rejected_before_toolchain_resolution() {
-        val diagnostics = QpNativeCompilerPass.recompileWithDiagnostics(
-            seed = 1L,
-            classLoader = javaClass.classLoader,
-            targetPlatforms = listOf("macos-arm64"),
-            nativeProtectionLevel = "standard",
-            nativePackingLevel = "off",
-        )
-        assertTrue(diagnostics.results.isEmpty())
-        assertTrue(diagnostics.messages.any { it.level == "error" })
-        assertTrue(diagnostics.messages.any { it.message.contains("macOS") || it.message.contains("unsupported") })
+        val error = assertFailsWith<IllegalArgumentException> {
+            QpNativeCompilerPass.recompileWithDiagnostics(
+                seed = 1L,
+                classLoader = javaClass.classLoader,
+                targetPlatforms = listOf("macos-arm64"),
+                nativeProtectionLevel = "standard",
+            )
+        }
+        assertTrue(error.message.orEmpty().contains("unsupported") || error.message.orEmpty().contains("macOS"))
     }
 
     @Test

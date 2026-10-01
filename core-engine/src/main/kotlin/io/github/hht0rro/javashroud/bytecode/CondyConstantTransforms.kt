@@ -28,6 +28,12 @@ import org.objectweb.asm.tree.VarInsnNode
  * bootstrap argument per JVMS 5.4.3.6.
  */
 fun applyCondyConstantIndirection(classBytes: ByteArray): ByteArray {
+    // Native token path: constants move into authenticated string pages and
+    // the class file carries only opaque tokens.  Falls back to the legacy
+    // identity-bootstrap form when no Qp build context is active (tests).
+    if (io.github.hht0rro.javashroud.transforms.protection.currentQpBuildContextOrNull() != null) {
+        return io.github.hht0rro.javashroud.bytecode.applyCondyNativeTokenIndirection(classBytes)
+    }
     val classNode = ClassNode()
     val reader = ClassReader(classBytes)
     reader.accept(classNode, 0)

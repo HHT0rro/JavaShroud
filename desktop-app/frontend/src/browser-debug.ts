@@ -25,9 +25,11 @@ interface WailsRuntimeMock {
 interface WailsAppMock {
   StartObfuscation: (request: ObfuscationRequest) => Promise<void>
   CancelObfuscation: () => Promise<void>
+  ResumeNativePack: (path: string) => Promise<void>
   GetEngineCapabilities: () => Promise<string>
   SelectInputJar: () => Promise<string>
-  SelectNativeShroudCli: () => Promise<string>
+  SelectPackedNative: () => Promise<string>
+  RevealNativeImage: (path: string) => Promise<void>
   SelectOutputJar: (defaultInputJarPath: string) => Promise<string>
   SelectImportConfig: () => Promise<string>
   SelectExportConfig: () => Promise<string>
@@ -70,6 +72,7 @@ const debugWindow = window as DebugWindow
 const engineEventName = 'engine:event'
 const eventListeners = new Map<string, Set<EngineEventHandler>>()
 let cancelRequested = false
+let packResumeResolver: ((path: string) => void) | null = null
 let isWindowMaximised = false
 let debugConfigToml = ''
 let emittedEvents: MockEngineEvent[] = []
@@ -183,6 +186,36 @@ const pumpRun = async (token: number, request: ObfuscationRequest): Promise<void
       return
     }
     emitEngineEvent(applyOutputPath(step, request.outputJarPath))
+    if (step.type === 'need-pack') {
+      const packedPath = await new Promise<string>((resolve) => {
+        packResumeResolver = resolve
+      })
+      packResumeResolver = null
+      if (activeRunToken !== token) {
+        return
+      }
+      if (cancelRequested) {
+        emitEngineEvent({
+          type: 'canceled',
+          level: 'warn',
+          message: '浏览器调试模式已取消当前任务。',
+          progress: null,
+          outPath: null,
+        })
+        if (activeRunToken === token) {
+          activeRunToken = null
+        }
+        return
+      }
+      emitEngineEvent({
+        type: 'log',
+        level: 'info',
+        message: `浏览器调试模式已收到加壳回传：${packedPath}`,
+        progress: step.progress,
+        outPath: null,
+      })
+      continue
+    }
     if (step.type === 'error' || step.type === 'canceled' || step.type === 'done') {
       if (activeRunToken === token) {
         activeRunToken = null
@@ -198,6 +231,7 @@ const pumpRun = async (token: number, request: ObfuscationRequest): Promise<void
 const appMock: WailsAppMock = {
   StartObfuscation: async (request: ObfuscationRequest): Promise<void> => {
     cancelRequested = false
+    packResumeResolver = null
     emittedEvents = []
     const token = nextRunToken
     nextRunToken += 1
@@ -213,10 +247,32 @@ const appMock: WailsAppMock = {
   },
   CancelObfuscation: async (): Promise<void> => {
     cancelRequested = true
+    if (packResumeResolver !== null) {
+      const resolve = packResumeResolver
+      packResumeResolver = null
+      resolve('SKIP')
+    }
+  },
+  ResumeNativePack: async (path: string): Promise<void> => {
+    if (packResumeResolver === null) {
+      throw new Error('resume native pack failed: no active pack handoff')
+    }
+    const resolve = packResumeResolver
+    packResumeResolver = null
+    resolve(path)
   },
   GetEngineCapabilities: async (): Promise<string> => JSON.stringify(scenario.schema),
   SelectInputJar: async (): Promise<string> => scenario.inputJarPath,
-  SelectNativeShroudCli: async (): Promise<string> => 'C:\\XiangMu\\NativeShroud\\target\\release\\nativeshroud.exe',
+  SelectPackedNative: async (): Promise<string> => 'C:\\debug\\qp_ffi.packed.dll',
+  RevealNativeImage: async (path: string): Promise<void> => {
+    emitEngineEvent({
+      type: 'log',
+      level: 'info',
+      message: `浏览器调试模式打开镜像位置：${path}`,
+      progress: null,
+      outPath: null,
+    })
+  },
   SelectOutputJar: async (defaultInputJarPath: string): Promise<string> => {
     if (scenario.id === 'empty') {
       return ''

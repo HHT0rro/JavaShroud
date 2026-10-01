@@ -129,7 +129,7 @@ func inferLevel(eventType string) string {
 
 func isKnownEventType(eventType string) bool {
 	switch eventType {
-	case "progress", "log", "done", "error", "warn", "canceled":
+	case "progress", "log", "done", "error", "warn", "canceled", "need-pack":
 		return true
 	default:
 		return false

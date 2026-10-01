@@ -392,6 +392,13 @@ impl<H: ObjectOperations> VmExecutor<H> {
                             VmValue::Object(object) => {
                                 self.host.throwable_message(object).ok().flatten()
                             }
+                            _ if thrown.class_name == "java/lang/VerifyError" => Some(format!(
+                                "pc={} op={:#x} stack={} locals={}",
+                                fault_pc,
+                                instruction.opcode,
+                                frame.stack.len(),
+                                frame.locals.len(),
+                            )),
                             _ => None,
                         };
                         return Err(VmError::UncaughtException {
@@ -1187,7 +1194,22 @@ impl<H: ObjectOperations> VmExecutor<H> {
                     .type_constant(value.as_str())
                     .map_err(|_| VmError::HostFailure)?,
             )),
-            (opcode::LDC_HANDLE | opcode::LDC_CONDY, VmConstant::String(value)) => {
+            (opcode::LDC_CONDY, VmConstant::String(value)) => {
+                // Condy rows are serialized as `condy|<kind>|...|payload`
+                // whose payload is the resolved constant.  Decode here so
+                // guest code observes real JVM constant semantics instead of
+                // the wire form.
+                let decoded = decode_condy_constant(value.as_str()).ok_or(VmError::HostFailure)?;
+                Ok(match decoded {
+                    CondyConstant::Text(text) => VmValue::Object(
+                        self.host
+                            .string_constant(&text)
+                            .map_err(|_| VmError::HostFailure)?,
+                    ),
+                    CondyConstant::Int(number) => VmValue::Int(number),
+                })
+            }
+            (opcode::LDC_HANDLE, VmConstant::String(value)) => {
                 Ok(VmValue::Object(
                     self.host
                         .string_constant(value.as_str())
@@ -1386,10 +1408,12 @@ fn dynamic_descriptor(reference: &str) -> Option<&str> {
     let mut fields = reference.split('|');
     match fields.next()? {
         "mhstatic" => fields.next().and_then(|_| fields.next()),
-        // LambdaMetafactory carries a business implementation handle and is
-        // intentionally JVM-owned. A legacy recipe must never reach the
-        // Native host, so reject it before stack arity or member parsing.
-        "lambda" => None,
+        // Lambda factories replay through QpBridge.replayQpLambda. The
+        // recipe is `lambda|indyName|indyDesc|sam|owner|name|desc|inst`.
+        "lambda" => fields.next().and_then(|_| fields.next()),
+        // Native string-page token materialization is a zero-argument
+        // `()[B` site whose bootstrap argument is the opaque packed token.
+        "stringpage" => Some("()[B"),
         "concat" => fields.next(),
         "sam" | "sam-lambda" => fields
             .nth(1)
@@ -1870,4 +1894,44 @@ mod tests {
         let mut executor = VmExecutor::new(NoObjectOperations);
         assert!(executor.execute(&program, &[]).is_err());
     }
+}
+
+
+enum CondyConstant {
+    Text(String),
+    Int(i32),
+}
+
+fn decode_condy_constant(encoded: &str) -> Option<CondyConstant> {
+    let mut fields = encoded.split('|');
+    if fields.next()? != "condy" {
+        return None;
+    }
+    let kind = fields.next()?;
+    let mut payload = None;
+    for field in fields {
+        payload = Some(field);
+    }
+    let payload = payload?;
+    match kind {
+        "str" => {
+            let bytes = decode_hex_bytes(payload)?;
+            let text = String::from_utf8(bytes).ok()?;
+            Some(CondyConstant::Text(text))
+        }
+        "int" => {
+            let number = payload.parse::<i32>().ok()?;
+            Some(CondyConstant::Int(number))
+        }
+        _ => None,
+    }
+}
+
+fn decode_hex_bytes(payload: &str) -> Option<Vec<u8>> {
+    if payload.len() % 2 != 0 {
+        return None;
+    }
+    (0..payload.len() / 2)
+        .map(|index| u8::from_str_radix(&payload[index * 2..index * 2 + 2], 16).ok())
+        .collect()
 }

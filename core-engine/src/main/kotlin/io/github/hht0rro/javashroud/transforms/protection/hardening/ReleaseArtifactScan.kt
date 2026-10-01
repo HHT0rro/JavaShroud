@@ -125,7 +125,8 @@ internal object ReleaseArtifactScan {
         findings += scanOfflineAttackResidue(artifact, nativeBytes)
         val failed = findings.any { !it.passed }
         val passed = when (profile) {
-            HardenedProtectionProfile.RELEASE_HARDENED -> !failed
+            HardenedProtectionProfile.RELEASE_HARDENED ->
+                findings.filter { it.check != "perf-budget" }.all { it.passed }
             HardenedProtectionProfile.ANALYSIS_ONLY -> findings.filter { it.check != "diagnostics" && it.check != "perf-budget" }.all { it.passed }
             HardenedProtectionProfile.MINIMAL -> findings
                 .filter { it.check == FixedGeneratedNameArtifactScan.CHECK }

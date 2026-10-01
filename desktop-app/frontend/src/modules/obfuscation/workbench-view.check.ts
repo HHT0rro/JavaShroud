@@ -1,5 +1,5 @@
 import { createInitialRunState } from './state'
-import { getReadinessIssue, runIsBusy, runStatusLabel } from './workbench-view'
+import { getReadinessIssue, runBlocksFileDialogs, runIsBusy, runStatusLabel } from './workbench-view'
 
 const equal = (actual: unknown, expected: unknown): void => {
   if (actual !== expected) throw new Error(`Expected ${String(expected)}, received ${String(actual)}`)
@@ -13,7 +13,11 @@ equal(getReadinessIssue(input, 'en')?.message, 'Set the output JAR path')
 equal(getReadinessIssue({ ...input, outputJarPath: 'C:\\out.jar' }, 'en')?.page, 'passes')
 equal(runStatusLabel('ready', 'en', 'canceled'), 'Canceled')
 equal(runStatusLabel('running', 'en', 'canceled'), 'Running')
+equal(runStatusLabel('awaiting-pack', 'zh'), '等待加壳')
 equal(runStatusLabel('failed', 'zh'), '发生错误')
 equal(runIsBusy('canceling'), true)
+equal(runIsBusy('awaiting-pack'), true)
 equal(runIsBusy('done'), false)
+equal(runBlocksFileDialogs('awaiting-pack'), false)
+equal(runBlocksFileDialogs('running'), true)
 console.log('workbench view checks passed')

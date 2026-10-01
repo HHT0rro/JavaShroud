@@ -1710,10 +1710,36 @@ internal class QpSerializer(
                 staticTarget.desc,
             ).joinToString("|")
         }
+        if (normalized.bootstrapMethodHandle.owner.endsWith("QpTextBridge") &&
+            normalized.descriptor == "()[B" &&
+            normalized.bootstrapMethodArguments.size == 1 &&
+            normalized.bootstrapMethodArguments[0] is String
+        ) {
+            // Native string-page token materialization: the host builds the
+            // authenticated byte[] directly from the opaque token.
+            return "stringpage|" + normalized.bootstrapMethodArguments[0]
+        }
         if (normalized.bootstrapMethodHandle.owner == "java/lang/invoke/LambdaMetafactory") {
-            throw UnsupportedOperationException(
-                "LambdaMetafactory targets are JVM-owned and cannot enter the Qp VM",
-            )
+            // Lambda factories replay through the registered helper: the
+            // native host routes `lambda|` rows to QpBridge.replayQpLambda,
+            // which re-runs metafactory with the captured SAM contract and
+            // invokes the resulting target with the guest arguments.
+            val samMethodType = normalized.bootstrapMethodArguments.getOrNull(0) as? org.objectweb.asm.Type
+                ?: throw UnsupportedOperationException("unsupported lambda bootstrap sam type")
+            val implHandle = normalized.bootstrapMethodArguments.getOrNull(1) as? Handle
+                ?: throw UnsupportedOperationException("unsupported lambda bootstrap impl handle")
+            val instantiatedType = normalized.bootstrapMethodArguments.getOrNull(2) as? org.objectweb.asm.Type
+                ?: throw UnsupportedOperationException("unsupported lambda bootstrap instantiated type")
+            return listOf(
+                "lambda",
+                normalized.name,
+                normalized.descriptor,
+                samMethodType.descriptor,
+                implHandle.owner,
+                implHandle.name,
+                implHandle.desc,
+                instantiatedType.descriptor,
+            ).joinToString("|")
         }
         val bsmRef = "${normalized.bootstrapMethodHandle.owner}.${normalized.bootstrapMethodHandle.name}:${normalized.bootstrapMethodHandle.desc}"
         val callRef = "${normalized.name}:${normalized.descriptor}"
@@ -1819,22 +1845,33 @@ internal class QpSerializer(
         val bsm = value.bootstrapMethod
         return when (value.descriptor) {
             "Ljava/lang/String;" -> {
-                require(bsm.tag == Opcodes.H_INVOKESTATIC && bsm.name == "\$_c_str" &&
+                require(bsm.tag == Opcodes.H_INVOKESTATIC &&
                     bsm.desc == "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Object;") {
                     "unsupported ConstantDynamic string bootstrap"
                 }
-                val constant = value.getBootstrapMethodArgument(0) as? String
+                val raw = value.getBootstrapMethodArgument(0) as? String
                     ?: throw UnsupportedOperationException("unsupported ConstantDynamic string argument")
+                val constant = io.github.hht0rro.javashroud.transforms.protection.currentQpBuildContextOrNull()
+                    ?.resolveCondyTokenPlaintext(raw)
+                    ?: throw UnsupportedOperationException("unresolved ConstantDynamic string token")
                 listOf("condy", "str", bsm.owner, bsm.name, bsm.desc, modifiedUtf8Bytes(constant).joinToString("") { "%02x".format(it.toInt() and 0xFF) }).joinToString("|")
             }
             "I" -> {
-                require(bsm.tag == Opcodes.H_INVOKESTATIC && bsm.name == "\$_c_int" &&
-                    bsm.desc == "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;I)Ljava/lang/Object;") {
+                require(bsm.tag == Opcodes.H_INVOKESTATIC) {
                     "unsupported ConstantDynamic int bootstrap"
                 }
-                val constant = value.getBootstrapMethodArgument(0) as? Int
-                    ?: throw UnsupportedOperationException("unsupported ConstantDynamic int argument")
-                listOf("condy", "int", bsm.owner, bsm.name, bsm.desc, constant.toString()).joinToString("|")
+                val raw = value.getBootstrapMethodArgument(0)
+                val constant = when (raw) {
+                    is Int -> raw.toString()
+                    is String -> {
+                        val text = io.github.hht0rro.javashroud.transforms.protection.currentQpBuildContextOrNull()
+                            ?.resolveCondyTokenPlaintext(raw) ?: raw
+                        text.toIntOrNull()?.toString()
+                            ?: throw UnsupportedOperationException("unresolved ConstantDynamic int token")
+                    }
+                    else -> throw UnsupportedOperationException("unsupported ConstantDynamic int argument")
+                }
+                listOf("condy", "int", bsm.owner, bsm.name, bsm.desc, constant).joinToString("|")
             }
             else -> throw UnsupportedOperationException("unsupported ConstantDynamic descriptor ${value.descriptor}")
         }

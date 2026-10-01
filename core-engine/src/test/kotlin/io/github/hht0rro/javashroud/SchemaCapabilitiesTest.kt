@@ -381,13 +381,31 @@ class SchemaCapabilitiesTest {
         assertEquals("standard", protectionLevel!!.defaultValue?.asText(), "nativeProtectionLevel should default to standard")
         assertEquals(listOf("standard", "aggressive"), protectionLevel.options)
 
-        val packingLevel = jniModule.params.singleOrNull { it.key == "nativePackingLevel" }
-        assertTrue(packingLevel != null, "nativePackingLevel param should exist")
-        assertEquals("max", packingLevel!!.defaultValue?.asText(), "nativePackingLevel should default to max")
-        assertEquals(listOf("off", "standard", "max", "max-hardening"), packingLevel.options)
-        assertFalse(packingLevel.hidden, "nativePackingLevel should be visible")
-        assertEquals("Qp Rust cdylib hardening level.", packingLevel.description)
+        assertTrue(jniModule.params.none { it.key == "nativePackingLevel" }, "native packing is a separate nativeshroud pass")
         assertTrue(jniModule.params.none { it.key == "bootKeyDelivery" }, "Qp current format must remove the legacy bootKeyDelivery parameter")
+
+        val nativeshroud = moduleIndex["nativeshroud"]
+        assertTrue(nativeshroud != null, "nativeshroud should exist in schema")
+        assertEquals(false, nativeshroud!!.defaultEnabled)
+        assertEquals(listOf("native-kernel"), nativeshroud.tagIds)
+        assertEquals(listOf("jni-microkernel-loader"), nativeshroud.requiredPassIds)
+        assertEquals(
+            listOf(
+                "cliPath", "profile",
+                "vmExports", "selectRva", "selectFunction", "selectAll", "strictCoverage", "allowNativeFallback",
+                "lazyRegions", "protectImports", "strictConstants", "traceDiverge",
+                "packedPath", "packedPathLinux",
+            ),
+            nativeshroud.params.map { it.key },
+        )
+        assertTrue(nativeshroud.params.all { it.hidden }, "nativeshroud params are engine/desktop-driven and must stay hidden")
+        assertEquals("", nativeshroud.params.single { it.key == "cliPath" }.defaultValue?.asText())
+        assertEquals("", nativeshroud.params.single { it.key == "packedPath" }.defaultValue?.asText())
+        assertEquals("", nativeshroud.params.single { it.key == "packedPathLinux" }.defaultValue?.asText())
+        val profile = nativeshroud.params.single { it.key == "profile" }
+        assertEquals("standard", profile.defaultValue?.asText())
+        assertEquals(listOf("fast", "standard", "max"), profile.options)
+        assertEquals("Custom packing", nativeshroud.name)
 
         assertTrue(
             jniModule.params.none { it.key == "codeSectionEncryption" },

@@ -2,14 +2,18 @@ import { buildObfuscationRequest } from './state'
 import type { RunState, RunStatus } from './types'
 import type { DisplayLanguage } from './pass-localization'
 
-export type WorkbenchPage = 'home' | 'passes' | 'classes' | 'logs' | 'about'
+export type WorkbenchPage = 'home' | 'passes' | 'classes' | 'logs' | 'packing' | 'about'
 export type RunOutcome = 'done' | 'failed' | 'canceled'
 export interface ReadinessIssue {
   readonly message: string
   readonly page: WorkbenchPage
 }
 
-export const runIsBusy = (status: RunStatus): boolean => status === 'running' || status === 'canceling'
+export const runIsBusy = (status: RunStatus): boolean =>
+  status === 'running' || status === 'awaiting-pack' || status === 'canceling'
+
+export const runBlocksFileDialogs = (status: RunStatus): boolean =>
+  status === 'running' || status === 'canceling'
 
 export const runStatusLabel = (status: RunStatus, language: DisplayLanguage, outcome: RunOutcome | null = null): string => {
   const zh = language === 'zh'
@@ -18,6 +22,7 @@ export const runStatusLabel = (status: RunStatus, language: DisplayLanguage, out
     idle: ['等待输入', 'Awaiting input'],
     ready: ['待运行', 'Ready'],
     running: ['运行中', 'Running'],
+    'awaiting-pack': ['等待加壳', 'Awaiting pack'],
     canceling: ['正在取消', 'Canceling'],
     done: ['已完成', 'Completed'],
     failed: ['发生错误', 'Failed'],

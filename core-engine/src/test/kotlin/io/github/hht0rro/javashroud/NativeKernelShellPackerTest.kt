@@ -1,28 +1,31 @@
 package io.github.hht0rro.javashroud
 
-import io.github.hht0rro.javashroud.transforms.protection.QpPackingLevel
+import java.nio.file.Files
+import java.nio.file.Path
 import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 
 class NativeKernelShellPackerTest {
     @Test
-    fun native_packing_policy_has_only_locked_configuration_values() {
-        assertEquals(
-            listOf("off", "standard", "max", "max-hardening"),
-            QpPackingLevel.entries.map { it.configValue },
-        )
-        assertEquals(QpPackingLevel.MAX, QpPackingLevel.parse(" MAX "))
-        assertEquals(QpPackingLevel.MAX_HARDENING, QpPackingLevel.parse("max-hardening"))
+    fun retired_packing_identity_files_are_gone() {
+        assertFalse(Files.exists(workspacePath(
+            "core-engine/src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeKernelShellPacker.kt",
+        )))
+        assertFalse(Files.exists(workspacePath(
+            "core-engine/src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/QpPackingLevel.kt",
+        )))
     }
 
-    @Test
-    fun retired_shell_profiles_are_not_accepted_as_platform_or_artifact_values() {
-        assertFailsWith<IllegalArgumentException> {
-            QpPackingLevel.parse("macos-dylib")
-        }
-        assertFailsWith<IllegalArgumentException> {
-            QpPackingLevel.parse("native-shell")
+    private fun workspacePath(relative: String): Path {
+        var current = Path.of("").toAbsolutePath()
+        while (true) {
+            val candidate = current.resolve(relative)
+            if (Files.exists(current.resolve("settings.gradle.kts")) ||
+                Files.exists(current.resolve("core-engine/src/main/rust/Cargo.toml"))
+            ) {
+                return candidate
+            }
+            current = current.parent ?: return Path.of("").toAbsolutePath().resolve(relative)
         }
     }
 }

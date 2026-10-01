@@ -1033,161 +1033,85 @@ mod jni_bridge {
                 _ => return Err(VmHostError::Failure),
             };
             let entry = native_entry(self.env, index).ok_or(VmHostError::Failure)?;
+            type StaticFn<R> = unsafe extern "system" fn(JNIEnv, JClass, *const c_void, *const JValue) -> R;
+            type VirtualFn<R> = unsafe extern "system" fn(JNIEnv, JObject, *const c_void, *const JValue) -> R;
+            type NonvirtualFn<R> = unsafe extern "system" fn(JNIEnv, JObject, JClass, *const c_void, *const JValue) -> R;
+            unsafe fn dispatch<R>(
+                entry: *const c_void,
+                env: JNIEnv,
+                class: JClass,
+                target: JObject,
+                method: *const c_void,
+                args: *const JValue,
+                is_static: bool,
+                is_nonvirtual: bool,
+            ) -> R {
+                if is_static {
+                    let f: StaticFn<R> = core::mem::transmute(entry);
+                    f(env, class, method, args)
+                } else if is_nonvirtual {
+                    let f: NonvirtualFn<R> = core::mem::transmute(entry);
+                    f(env, target, class, method, args)
+                } else {
+                    let f: VirtualFn<R> = core::mem::transmute(entry);
+                    f(env, target, method, args)
+                }
+            }
             let value = match return_tag {
                 b'V' => {
-                    let f: unsafe extern "system" fn(
-                        JNIEnv,
-                        JObject,
-                        *const c_void,
-                        *const JValue,
-                    ) = core::mem::transmute(entry);
-                    if is_static {
-                        f(self.env, target, method, args)
-                    } else if is_nonvirtual {
-                        let f: unsafe extern "system" fn(
-                            JNIEnv,
-                            JObject,
-                            JClass,
-                            *const c_void,
-                            *const JValue,
-                        ) = core::mem::transmute(entry);
-                        f(self.env, target, class, method, args);
-                    } else {
-                        f(self.env, target, method, args);
+                    dispatch::<()>(entry, self.env, class, target, method, args, is_static, is_nonvirtual);
+                    if exception_pending(self.env) {
+                        self.capture_pending_exception()?;
+                        return Err(VmHostError::Failure);
                     }
                     VmValue::Null
                 }
                 b'Z' => {
-                    if is_nonvirtual {
-                        let f: unsafe extern "system" fn(
-                            JNIEnv,
-                            JObject,
-                            JClass,
-                            *const c_void,
-                            *const JValue,
-                        ) -> JBoolean = core::mem::transmute(entry);
-                        VmValue::Int(i32::from(f(self.env, target, class, method, args) != 0))
-                    } else {
-                        let f: unsafe extern "system" fn(
-                            JNIEnv,
-                            JObject,
-                            *const c_void,
-                            *const JValue,
-                        ) -> JBoolean = core::mem::transmute(entry);
-                        VmValue::Int(i32::from(f(self.env, target, method, args) != 0))
+                    let raw: JBoolean = dispatch(entry, self.env, class, target, method, args, is_static, is_nonvirtual);
+                    if exception_pending(self.env) {
+                        self.capture_pending_exception()?;
+                        return Err(VmHostError::Failure);
                     }
+                    VmValue::Int(i32::from(raw != 0))
                 }
                 b'B' | b'C' | b'S' | b'I' => {
-                    let value = if is_nonvirtual {
-                        let f: unsafe extern "system" fn(
-                            JNIEnv,
-                            JObject,
-                            JClass,
-                            *const c_void,
-                            *const JValue,
-                        ) -> JInt = core::mem::transmute(entry);
-                        f(self.env, target, class, method, args)
-                    } else {
-                        let f: unsafe extern "system" fn(
-                            JNIEnv,
-                            JObject,
-                            *const c_void,
-                            *const JValue,
-                        ) -> JInt = core::mem::transmute(entry);
-                        f(self.env, target, method, args)
-                    };
-                    VmValue::Int(value)
+                    let raw: JInt = dispatch(entry, self.env, class, target, method, args, is_static, is_nonvirtual);
+                    if exception_pending(self.env) {
+                        self.capture_pending_exception()?;
+                        return Err(VmHostError::Failure);
+                    }
+                    VmValue::Int(raw)
                 }
                 b'J' => {
-                    let value = if is_nonvirtual {
-                        let f: unsafe extern "system" fn(
-                            JNIEnv,
-                            JObject,
-                            JClass,
-                            *const c_void,
-                            *const JValue,
-                        ) -> JLong = core::mem::transmute(entry);
-                        f(self.env, target, class, method, args)
-                    } else {
-                        let f: unsafe extern "system" fn(
-                            JNIEnv,
-                            JObject,
-                            *const c_void,
-                            *const JValue,
-                        ) -> JLong = core::mem::transmute(entry);
-                        f(self.env, target, method, args)
-                    };
-                    VmValue::Long(value)
+                    let raw: JLong = dispatch(entry, self.env, class, target, method, args, is_static, is_nonvirtual);
+                    if exception_pending(self.env) {
+                        self.capture_pending_exception()?;
+                        return Err(VmHostError::Failure);
+                    }
+                    VmValue::Long(raw)
                 }
                 b'F' => {
-                    let value = if is_nonvirtual {
-                        let f: unsafe extern "system" fn(
-                            JNIEnv,
-                            JObject,
-                            JClass,
-                            *const c_void,
-                            *const JValue,
-                        ) -> JFloat = core::mem::transmute(entry);
-                        f(self.env, target, class, method, args)
-                    } else {
-                        let f: unsafe extern "system" fn(
-                            JNIEnv,
-                            JObject,
-                            *const c_void,
-                            *const JValue,
-                        ) -> JFloat = core::mem::transmute(entry);
-                        f(self.env, target, method, args)
-                    };
-                    VmValue::Float(value)
+                    let raw: JFloat = dispatch(entry, self.env, class, target, method, args, is_static, is_nonvirtual);
+                    if exception_pending(self.env) {
+                        self.capture_pending_exception()?;
+                        return Err(VmHostError::Failure);
+                    }
+                    VmValue::Float(raw)
                 }
                 b'D' => {
-                    let value = if is_nonvirtual {
-                        let f: unsafe extern "system" fn(
-                            JNIEnv,
-                            JObject,
-                            JClass,
-                            *const c_void,
-                            *const JValue,
-                        ) -> JDouble = core::mem::transmute(entry);
-                        f(self.env, target, class, method, args)
-                    } else {
-                        let f: unsafe extern "system" fn(
-                            JNIEnv,
-                            JObject,
-                            *const c_void,
-                            *const JValue,
-                        ) -> JDouble = core::mem::transmute(entry);
-                        f(self.env, target, method, args)
-                    };
-                    VmValue::Double(value)
+                    let raw: JDouble = dispatch(entry, self.env, class, target, method, args, is_static, is_nonvirtual);
+                    if exception_pending(self.env) {
+                        self.capture_pending_exception()?;
+                        return Err(VmHostError::Failure);
+                    }
+                    VmValue::Double(raw)
                 }
                 b'L' | b'[' => {
-                    let object = if is_static {
-                        let f: unsafe extern "system" fn(
-                            JNIEnv,
-                            JClass,
-                            *const c_void,
-                            *const JValue,
-                        ) -> JObject = core::mem::transmute(entry);
-                        f(self.env, target, method, args)
-                    } else if is_nonvirtual {
-                        let f: unsafe extern "system" fn(
-                            JNIEnv,
-                            JObject,
-                            JClass,
-                            *const c_void,
-                            *const JValue,
-                        ) -> JObject = core::mem::transmute(entry);
-                        f(self.env, target, class, method, args)
-                    } else {
-                        let f: unsafe extern "system" fn(
-                            JNIEnv,
-                            JObject,
-                            *const c_void,
-                            *const JValue,
-                        ) -> JObject = core::mem::transmute(entry);
-                        f(self.env, target, method, args)
-                    };
+                    let object: JObject = dispatch(entry, self.env, class, target, method, args, is_static, is_nonvirtual);
+                    if exception_pending(self.env) {
+                        self.capture_pending_exception()?;
+                        return Err(VmHostError::Failure);
+                    }
                     if object.is_null() {
                         VmValue::Null
                     } else {
@@ -1216,9 +1140,7 @@ mod jni_bridge {
                 Ok(Some(class_name)) => class_name,
                 _ => {
                     clear_exception(self.env);
-                    self.release(throwable);
-                    delete_local_ref(self.env, throwable);
-                    return Err(VmHostError::Failure);
+                    "java/lang/Throwable".to_owned()
                 }
             };
             self.pending_exception = Some((class_name, throwable));
@@ -1573,7 +1495,96 @@ mod jni_bridge {
             Ok(self.own(object))
         }
 
-        unsafe fn invoke_string_concat(
+        unsafe fn own_new_local_ref(&mut self, reference: JObject) -> Option<JObject> {
+            let owned = unsafe { new_local_ref(self.env, reference) }?;
+            self.owned.push(owned);
+            Some(owned)
+        }
+
+        unsafe fn new_byte_array(&mut self, bytes: &[u8]) -> Option<JByteArray> {
+            let entry = native_entry(self.env, NEW_BYTE_ARRAY_INDEX)?;
+            let function: unsafe extern "system" fn(JNIEnv, JSize) -> JByteArray =
+                core::mem::transmute(entry);
+            let array = function(self.env, bytes.len() as JSize);
+            if array.is_null() {
+                return None;
+            }
+            if !bytes.is_empty() {
+                let set_entry = native_entry(self.env, SET_BYTE_ARRAY_REGION_INDEX)?;
+                let set_region: unsafe extern "system" fn(JNIEnv, JByteArray, JSize, JSize, *const i8) =
+                    core::mem::transmute(set_entry);
+                set_region(
+                    self.env,
+                    array,
+                    0,
+                    bytes.len() as JSize,
+                    bytes.as_ptr().cast::<i8>(),
+                );
+            }
+            Some(array)
+        }
+
+    unsafe fn invoke_lambda_replay(
+            &mut self,
+            reference: &str,
+            arguments: &[VmValue<JObject>],
+        ) -> Result<VmValue<JObject>, VmHostError> {
+            let mut fields = reference.split('|');
+            if fields.next() != Some("lambda") {
+                return Err(VmHostError::Failure);
+            }
+            let _indy_name = fields.next().ok_or(VmHostError::Failure)?;
+            let descriptor = fields.next().ok_or(VmHostError::Failure)?;
+            let (argument_tags, _) = parse_method_descriptor(descriptor)?;
+            if argument_tags.len() != arguments.len() {
+                return Err(VmHostError::Failure);
+            }
+            let arguments_array =
+                self.new_reference_array("java/lang/Object", arguments.len() as i32)?;
+            let set_entry = native_entry(self.env, SET_OBJECT_ARRAY_ELEMENT_INDEX)
+                .ok_or(VmHostError::Failure)?;
+            let set_element: unsafe extern "system" fn(JNIEnv, JObject, JSize, JObject) =
+                core::mem::transmute(set_entry);
+            for (index, (tag, value)) in argument_tags.iter().zip(arguments.iter()).enumerate() {
+                let object = match value {
+                    VmValue::Object(object) => *object,
+                    VmValue::Null => core::ptr::null_mut(),
+                    _ => box_vm_value_with_tag(self.env, value.clone(), Some(*tag))
+                        .ok_or(VmHostError::Failure)?,
+                };
+                set_element(self.env, arguments_array, index as JSize, object);
+                if exception_pending(self.env) {
+                    self.capture_pending_exception()?;
+                    return Err(VmHostError::Failure);
+                }
+            }
+            let helper_class = self.helper_class.ok_or(VmHostError::Failure)?;
+            let method = self.method_id(
+                helper_class,
+                "replayQpLambda",
+                "(Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;",
+                true,
+            )?;
+            let spec_object = self.new_string(reference)?;
+            let values = [
+                JValue { l: spec_object },
+                JValue { l: arguments_array },
+            ];
+            let result = self.call_method(
+                InvokeKind::Static,
+                helper_class,
+                None,
+                method,
+                b'L',
+                jvalue_ptr(&values),
+            )?;
+            if exception_pending(self.env) {
+                self.capture_pending_exception()?;
+                return Err(VmHostError::Failure);
+            }
+            Ok(result)
+        }
+    unsafe fn invoke_string_concat(
             &mut self,
             reference: &str,
             arguments: &[VmValue<JObject>],
@@ -1593,7 +1604,8 @@ mod jni_bridge {
                 return Err(VmHostError::Failure);
             }
             let recipe_bytes = decode_hex_bytes(recipe_hex)?;
-            let recipe = std::str::from_utf8(&recipe_bytes).map_err(|_| VmHostError::Failure)?;
+            let recipe = String::from_utf8_lossy(&recipe_bytes).into_owned();
+            let recipe = recipe.as_str();
             let (argument_tags, _) = parse_method_descriptor(descriptor)?;
             if argument_tags.len() != arguments.len() || fields.clone().count() != constant_count {
                 return Err(VmHostError::Failure);
@@ -1710,8 +1722,8 @@ mod jni_bridge {
             let mut values = Vec::with_capacity(count as usize);
             for index in 0..count {
                 let value = get(self.env, array, index);
-                if value.is_null() {
-                    clear_exception(self.env);
+                if exception_pending(self.env) {
+                    return Err(VmHostError::Failure);
                 }
                 values.push(value);
             }
@@ -2027,6 +2039,16 @@ mod jni_bridge {
             if matches!(kind, InvokeKind::Dynamic) && reference.starts_with("concat|") {
                 return unsafe { self.invoke_string_concat(reference, arguments) };
             }
+            if matches!(kind, InvokeKind::Dynamic) && reference.starts_with("lambda|") {
+                return unsafe { self.invoke_lambda_replay(reference, arguments) };
+            }
+            if matches!(kind, InvokeKind::Dynamic) && reference.starts_with("stringpage|") {
+                let token = &reference["stringpage|".len()..];
+                let packed = crate::relocation::base64_url_decode(token).ok_or(VmHostError::Failure)?;
+                let array = unsafe { self.new_byte_array(&packed) }.ok_or(VmHostError::Failure)?;
+                let owned = unsafe { self.own_new_local_ref(array) }.ok_or(VmHostError::Failure)?;
+                return Ok(VmValue::Object(owned));
+            }
             if matches!(kind, InvokeKind::Dynamic) && reference.starts_with("mhstatic|") {
                 let mut fields = reference.split('|');
                 let _ = fields.next();
@@ -2274,7 +2296,7 @@ mod jni_bridge {
                     value => VmValue::Object(value),
                 });
             }
-            let (index, kind) = match opcode {
+            let (jni_index, kind) = match opcode {
                 qp_vm::opcode::IALOAD => (GET_INT_ARRAY_ELEMENTS_INDEX, b'I'),
                 qp_vm::opcode::LALOAD => (GET_LONG_ARRAY_ELEMENTS_INDEX, b'J'),
                 qp_vm::opcode::FALOAD => (GET_FLOAT_ARRAY_ELEMENTS_INDEX, b'F'),
@@ -2284,7 +2306,7 @@ mod jni_bridge {
                 qp_vm::opcode::SALOAD => (GET_SHORT_ARRAY_ELEMENTS_INDEX, b'S'),
                 _ => return Err(VmHostError::Unsupported),
             };
-            let entry = unsafe { native_entry(self.env, index) }.ok_or(VmHostError::Failure)?;
+            let entry = unsafe { native_entry(self.env, jni_index) }.ok_or(VmHostError::Failure)?;
             let get: unsafe extern "system" fn(JNIEnv, JObject, *mut JBoolean) -> *mut c_void =
                 unsafe { core::mem::transmute(entry) };
             let values = unsafe { get(self.env, *array, core::ptr::null_mut()) };

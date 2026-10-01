@@ -18,7 +18,7 @@ const emit = defineEmits<{
   readonly browseInput: []
   readonly browseOutput: []
 }>()
-const isLocked = computed(() => props.status === 'running' || props.status === 'canceling')
+const isLocked = computed(() => props.status === 'running' || props.status === 'awaiting-pack' || props.status === 'canceling')
 const inputPath = computed(() => props.inputJar?.inputJarPath ?? '')
 const feedback = ref('')
 const copyPath = async (value: string): Promise<void> => {

@@ -5,6 +5,7 @@ enum class EngineEventType {
     LOG,
     DONE,
     ERROR,
+    NEED_PACK,
 }
 
 enum class EngineEventLevel {

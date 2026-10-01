@@ -33,8 +33,23 @@ internal fun isNativeVmSupportedInvokeDynamicCall(
         bootstrapMethodHandle,
         bootstrapMethodArguments,
     )
-    if (normalized.bootstrapMethodHandle.owner == "java/lang/invoke/LambdaMetafactory") return false
+    if (normalized.bootstrapMethodHandle.owner == "java/lang/invoke/LambdaMetafactory") {
+        // Lambda factories replay through QpBridge.replayQpLambda with the
+        // captured SAM contract; the SAM implementation itself stays on the
+        // JVM via the lambda-implementation skip list.
+        return normalized.bootstrapMethodArguments.any { it is Handle }
+    }
     if (normalized.bootstrapMethodHandle.owner == "java/lang/invoke/StringConcatFactory") return true
+    // Native string-page token materialization: `()[B` rows whose bootstrap
+    // argument is the opaque packed token replay through the `stringpage|`
+    // host route, which builds the authenticated array directly.
+    if (normalized.bootstrapMethodHandle.owner.endsWith("QpTextBridge") &&
+        normalized.descriptor == "()[B" &&
+        normalized.bootstrapMethodArguments.size == 1 &&
+        normalized.bootstrapMethodArguments[0] is String
+    ) {
+        return true
+    }
     return methodHandleBackedStaticTarget(normalized) != null
 }
 

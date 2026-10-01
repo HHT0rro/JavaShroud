@@ -162,6 +162,45 @@ public final class QpBridge {
         }
     }
 
+    /**
+     * Replays a captured LambdaMetafactory call site on behalf of a protected
+     * VM page.  The guest cannot construct call sites itself, so the native
+     * host routes `lambda|` rows here with the full serialized spec and the
+     * boxed guest arguments.  The SAM implementation stays a JVM method of
+     * the protected artifact; this helper only rebuilds the call site.
+     */
+    public static Object replayQpLambda(String spec, Object[] arguments) throws Throwable {
+        if (spec == null || arguments == null) {
+            throw new SecurityException("Qp lambda replay request is invalid");
+        }
+        String[] fields = spec.split("\\|", -1);
+        if (fields.length != 8 || !"lambda".equals(fields[0])) {
+            throw new SecurityException("Qp lambda replay spec is invalid");
+        }
+        String indyName = fields[1];
+        String indyDesc = fields[2];
+        String samType = fields[3];
+        String implOwner = fields[4];
+        String implName = fields[5];
+        String implDesc = fields[6];
+        String instType = fields[7];
+        Class<?> owner = Class.forName(implOwner.replace('/', '.'), false, QpBridge.class.getClassLoader());
+        java.lang.invoke.MethodHandles.Lookup privateLookup =
+            java.lang.invoke.MethodHandles.privateLookupIn(owner, java.lang.invoke.MethodHandles.lookup());
+        ClassLoader loader = owner.getClassLoader();
+        java.lang.invoke.MethodType sam =
+            java.lang.invoke.MethodType.fromMethodDescriptorString(samType, loader);
+        java.lang.invoke.MethodHandle impl = privateLookup.findStatic(
+            owner, implName, java.lang.invoke.MethodType.fromMethodDescriptorString(implDesc, loader));
+        java.lang.invoke.MethodType instantiated =
+            java.lang.invoke.MethodType.fromMethodDescriptorString(instType, loader);
+        java.lang.invoke.MethodType invoked =
+            java.lang.invoke.MethodType.fromMethodDescriptorString(indyDesc, loader);
+        java.lang.invoke.CallSite site = java.lang.invoke.LambdaMetafactory.metafactory(
+            privateLookup, indyName, invoked, sam, impl, instantiated);
+        return site.getTarget().invokeWithArguments(java.util.Arrays.asList(arguments));
+    }
+
     private static void requireTargetSiteRequest(
         MethodHandles.Lookup lookup,
         String indyName,

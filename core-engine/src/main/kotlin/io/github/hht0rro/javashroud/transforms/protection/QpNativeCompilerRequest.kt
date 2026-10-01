@@ -10,12 +10,8 @@ package io.github.hht0rro.javashroud.transforms.protection
  */
 internal class QpNativeCompilerRequest private constructor(
     val nativeProtectionLevel: String,
-    val nativePackingProfile: NativeRecompilationPackingProfile,
     routes: List<NativeRecompilationRoute>,
 ) {
-    val nativePackingLevel: QpPackingLevel
-        get() = nativePackingProfile.level
-
     val routes: List<NativeRecompilationRoute> = routes.toList()
 
     init {
@@ -37,7 +33,6 @@ internal class QpNativeCompilerRequest private constructor(
         /** Resolve only the two locked Qp Rust routes in caller order. */
         internal fun forTargets(
             nativeProtectionLevel: String,
-            nativePackingLevel: QpPackingLevel,
             targetPlatforms: Collection<String> = NativeRecompilationRoute.canonicalPlatformOrder,
         ): QpNativeCompilerRequest {
             val requestedPlatforms = targetPlatforms.map(NativeRecompilationRoute::normalizePlatform)
@@ -45,73 +40,12 @@ internal class QpNativeCompilerRequest private constructor(
             require(requestedPlatforms.distinct().size == requestedPlatforms.size) {
                 "native recompilation target platforms must be unique"
             }
-
             return QpNativeCompilerRequest(
                 nativeProtectionLevel = nativeProtectionLevel,
-                nativePackingProfile = NativeRecompilationPackingProfile.forLevel(nativePackingLevel),
                 routes = requestedPlatforms.map(NativeRecompilationRoute::forPlatform),
             )
         }
-
-        /** Compatibility bridge for the current recompilation API. */
-        @Deprecated("Use QpPackingLevel")
-        internal fun forTargets(
-            nativeProtectionLevel: String,
-            nativePackingLevel: NativeKernelShellPacker.Level,
-            targetPlatforms: Collection<String> = NativeRecompilationRoute.canonicalPlatformOrder,
-        ): QpNativeCompilerRequest {
-            val requestedPlatforms = targetPlatforms.map { value ->
-                runCatching { NativeRecompilationRoute.normalizePlatform(value) }
-                    .getOrElse { value.trim().ifEmpty { "<blank>" } }
-            }
-            require(requestedPlatforms.isNotEmpty()) { "native recompilation requires at least one target platform" }
-            require(requestedPlatforms.distinct().size == requestedPlatforms.size) {
-                "native recompilation target platforms must have unique values"
-            }
-            return QpNativeCompilerRequest(
-                nativeProtectionLevel = nativeProtectionLevel,
-                nativePackingProfile = NativeRecompilationPackingProfile.forLevel(nativePackingLevel.toNative()),
-                routes = requestedPlatforms.map { platform ->
-                    if (NativeRecompilationRoute.isKnownPlatform(platform)) {
-                        NativeRecompilationRoute.forPlatform(platform)
-                    } else {
-                        NativeRecompilationRoute.rejected(platform)
-                    }
-                },
-            )
-        }
     }
-}
-
-/** Direct Rust artifact policy selected by the retained configuration value. */
-internal class NativeRecompilationPackingProfile private constructor(
-    val level: QpPackingLevel,
-    val outputForm: QpOutputForm,
-) {
-    init {
-        require(level.hardened == outputForm.hardened) {
-            "Qp packing level does not match its direct Rust output policy"
-        }
-    }
-
-    companion object {
-        internal fun forLevel(level: QpPackingLevel): NativeRecompilationPackingProfile =
-            NativeRecompilationPackingProfile(
-                level = level,
-                outputForm = if (level.hardened) {
-                    QpOutputForm.HARDENED_DIRECT_RUST_CDYLIB
-                } else {
-                    QpOutputForm.DIRECT_RUST_CDYLIB
-                },
-            )
-    }
-}
-
-internal enum class QpOutputForm(
-    val hardened: Boolean,
-) {
-    DIRECT_RUST_CDYLIB(false),
-    HARDENED_DIRECT_RUST_CDYLIB(true),
 }
 
 /**
@@ -165,21 +99,10 @@ internal class NativeRecompilationRoute private constructor(
             }
         }
 
-        internal fun isKnownPlatform(platform: String): Boolean = platform in routesByPlatform
-
         internal fun forPlatform(platform: String): NativeRecompilationRoute =
             requireNotNull(routesByPlatform[platform]) {
                 "Qp Rust target platform is unsupported: $platform"
             }
-
-        /** Preserve diagnostic failure categories for the raw compatibility adapter. */
-        internal fun rejected(platform: String): NativeRecompilationRoute = NativeRecompilationRoute(
-            platform = platform,
-            rustTarget = "unsupported",
-            outputName = "rejected.unsupported",
-            loadSuffix = ".unsupported",
-            shellLoaderProfile = "rejected-route",
-        )
 
         private fun route(
             platform: String,

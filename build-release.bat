@@ -180,6 +180,38 @@ if not exist "%DESKTOP_EMBEDDED_DIR%\obfuscator-engine.exe" (
 )
 call :verify_same_file_hash "%ENGINE_EXE%" "%DESKTOP_EMBEDDED_DIR%\obfuscator-engine.exe" "embedded native engine" || exit /b 1
 
+rem ---- Xenolith packer CLI (embed into javashroud.exe + ship in release tools\) ----
+rem Resolution order: XENOLITH_EXE -> XENOLITH_DIST%\xenolith.exe -> sibling ..\Xenolith\dist\xenolith.exe
+set "XENOLITH_EXE_SOURCE="
+if defined XENOLITH_EXE (
+  if exist "%XENOLITH_EXE%" set "XENOLITH_EXE_SOURCE=%XENOLITH_EXE%"
+)
+if not defined XENOLITH_EXE_SOURCE (
+  if defined XENOLITH_DIST if exist "%XENOLITH_DIST%\xenolith.exe" set "XENOLITH_EXE_SOURCE=%XENOLITH_DIST%\xenolith.exe"
+)
+if not defined XENOLITH_EXE_SOURCE (
+  if exist "%CORE_DIR%\..\Xenolith\dist\xenolith.exe" set "XENOLITH_EXE_SOURCE=%CORE_DIR%\..\Xenolith\dist\xenolith.exe"
+)
+if not defined XENOLITH_EXE_SOURCE (
+  echo No local xenolith.exe found; fetching from GitHub Releases via CN mirror chain ^(ghfast.top / gh-proxy.com / ghproxy.net, direct as last resort^)...
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%DESKTOP_DIR%\fetch-xenolith.ps1" -OutPath "%DESKTOP_EMBEDDED_DIR%\xenolith.exe" || (
+    echo WARNING: xenolith.exe download failed. Building without embedded Xenolith; desktop falls back to tools dir / PATH / manual packing.
+  )
+  if exist "%DESKTOP_EMBEDDED_DIR%\xenolith.exe" set "XENOLITH_EXE_SOURCE=%DESKTOP_EMBEDDED_DIR%\xenolith.exe"
+)
+set "WAILS_BUILD_TAGS=javashroud_embed_engine"
+set "XENOLITH_EMBEDDED="
+if defined XENOLITH_EXE_SOURCE (
+  copy /y "%XENOLITH_EXE_SOURCE%" "%DESKTOP_EMBEDDED_DIR%\xenolith.exe" >nul || exit /b 1
+  call :verify_same_file_hash "%XENOLITH_EXE_SOURCE%" "%DESKTOP_EMBEDDED_DIR%\xenolith.exe" "embedded xenolith cli" || exit /b 1
+  set "WAILS_BUILD_TAGS=%WAILS_BUILD_TAGS%,javashroud_embed_xenolith"
+  set "XENOLITH_EMBEDDED=1"
+  echo Embedded Xenolith CLI: %XENOLITH_EXE_SOURCE%
+) else (
+  if exist "%DESKTOP_EMBEDDED_DIR%\xenolith.exe" del /f /q "%DESKTOP_EMBEDDED_DIR%\xenolith.exe" >nul 2>nul
+  echo WARNING: xenolith.exe not found ^(XENOLITH_EXE / XENOLITH_DIST / sibling Xenolith\dist^). Building without embedded Xenolith; desktop falls back to tools dir / PATH / manual packing.
+)
+
 echo [4/10] Building frontend bundle...
 if exist "%FRONTEND_BUILD_LOG%" del /f /q "%FRONTEND_BUILD_LOG%" >nul 2>nul
 cmd /d /c "corepack yarn --cwd ""%FRONTEND_DIR%"" build > ""%FRONTEND_BUILD_LOG%"" 2>&1"
@@ -212,7 +244,7 @@ if "%RSRC_CACHE_OK%"=="1" (
 if exist "%APP_EXE%" del /f /q "%APP_EXE%" >nul 2>nul
 if exist "%WAILS_ACTUAL_EXE%" del /f /q "%WAILS_ACTUAL_EXE%" >nul 2>nul
 pushd "%DESKTOP_DIR%" || exit /b 1
-"%WAILS_EXE%" build -compiler "%GOEXE%" -tags javashroud_embed_engine -s -m -nopackage -platform windows/amd64 -o "%WAILS_OUTPUT_RELATIVE%" || (popd & exit /b 1)
+"%WAILS_EXE%" build -compiler "%GOEXE%" -tags "%WAILS_BUILD_TAGS%" -s -m -nopackage -platform windows/amd64 -o "%WAILS_OUTPUT_RELATIVE%" || (popd & exit /b 1)
 popd
 if not exist "%WAILS_ACTUAL_EXE%" (
   echo Desktop build did not produce the expected Wails output: %WAILS_ACTUAL_EXE%
@@ -233,7 +265,13 @@ call :verify_same_file_hash "%ENGINE_EXE%" "%DESKTOP_ENGINE_DIR%\obfuscator-engi
 echo [6/10] Preparing release directory...
 if exist "%RELEASE_DIR%" rmdir /s /q "%RELEASE_DIR%"
 mkdir "%RELEASE_DIR%" || exit /b 1
+mkdir "%RELEASE_DIR%\engine" || exit /b 1
 copy /y "%APP_EXE%" "%RELEASE_DIR%\javashroud.exe" >nul || exit /b 1
+copy /y "%ENGINE_EXE%" "%RELEASE_DIR%\engine\obfuscator-engine.exe" >nul || exit /b 1
+if defined XENOLITH_EXE_SOURCE (
+  mkdir "%RELEASE_DIR%\tools" || exit /b 1
+  copy /y "%XENOLITH_EXE_SOURCE%" "%RELEASE_DIR%\tools\xenolith.exe" >nul || exit /b 1
+)
 
 echo [7/10] Writing release metadata...
 (
@@ -241,12 +279,20 @@ echo [7/10] Writing release metadata...
   echo.
   echo Files:
   echo - javashroud.exe
+  echo - engine\obfuscator-engine.exe
+  if defined XENOLITH_EXE_SOURCE echo - tools\xenolith.exe ^(GPL-3.0, source: https://github.com/HHT0rro/Xenolith^)
   echo.
   echo Build root: %BUILD_ROOT%
 ) > "%RELEASE_DIR%\README.txt"
 
 echo [8/10] Verifying release package...
 if not exist "%RELEASE_DIR%\javashroud.exe" exit /b 1
+if not exist "%RELEASE_DIR%\engine\obfuscator-engine.exe" exit /b 1
+call :verify_same_file_hash "%ENGINE_EXE%" "%RELEASE_DIR%\engine\obfuscator-engine.exe" "release package native engine" || exit /b 1
+if defined XENOLITH_EXE_SOURCE (
+  if not exist "%RELEASE_DIR%\tools\xenolith.exe" exit /b 1
+  call :verify_same_file_hash "%XENOLITH_EXE_SOURCE%" "%RELEASE_DIR%\tools\xenolith.exe" "release package xenolith cli" || exit /b 1
+)
 
 echo [9/10] Release contents:
 dir /b "%RELEASE_DIR%"

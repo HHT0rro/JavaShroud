@@ -24,7 +24,7 @@ const emit = defineEmits<{
   language: []
   window: [action: 'minimise' | 'toggle-maximise' | 'quit']
 }>()
-const running = computed(() => props.status === 'running' || props.status === 'canceling')
+const running = computed(() => props.status === 'running' || props.status === 'awaiting-pack' || props.status === 'canceling')
 const windowActions = computed(() => [
   { id: 'minimise' as const, label: t('minimize', props.displayLanguage), icon: Minus },
   { id: 'toggle-maximise' as const, label: t(props.maximised ? 'restore' : 'maximize', props.displayLanguage), icon: props.maximised ? Minimize2 : Maximize2 },

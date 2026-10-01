@@ -9,7 +9,7 @@ interface EngineEventShape {
   readonly outPath?: unknown
 }
 
-const eventTypes: readonly EngineEventType[] = ['progress', 'log', 'warn', 'error', 'done', 'canceled']
+const eventTypes: readonly EngineEventType[] = ['progress', 'log', 'warn', 'error', 'done', 'canceled', 'need-pack']
 const eventLevels: readonly EngineEventLevel[] = ['info', 'warn', 'error', 'success']
 
 export const parseEngineEvent = (rawEvent: unknown): EngineEvent => {

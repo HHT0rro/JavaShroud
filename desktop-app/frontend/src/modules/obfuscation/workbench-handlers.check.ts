@@ -24,9 +24,12 @@ const createDeferred = <T>(): { promise: Promise<T>; resolve: (value: T) => void
 const createBridge = (overrides: Partial<WailsBridge> = {}): WailsBridge => ({
   startObfuscation: async (): Promise<void> => undefined,
   cancelObfuscation: async (): Promise<void> => undefined,
+  resumeNativePack: async (): Promise<void> => undefined,
   getEngineCapabilities: async (): Promise<string> => '{}',
+  resolveXenolithCli: async (): Promise<{ path: string; version: string; source: string }> => ({ path: '', version: '', source: '' }),
   selectInputJar: async (): Promise<string> => '',
-  selectNativeShroudCli: async (): Promise<string> => '',
+  selectPackedNative: async (): Promise<string> => '',
+  revealNativeImage: async (): Promise<void> => undefined,
   selectOutputJar: async (): Promise<string> => '',
   selectImportConfig: async (): Promise<string> => '',
   selectExportConfig: async (): Promise<string> => '',
@@ -48,7 +51,7 @@ const createBridge = (overrides: Partial<WailsBridge> = {}): WailsBridge => ({
 
 const createHarness = (bridge: WailsBridge, initial: RunState = createInitialRunState()) => {
   const state = shallowRef(initial)
-  const activePage = shallowRef<'home' | 'passes' | 'classes' | 'logs' | 'about'>('home')
+  const activePage = shallowRef<import('./workbench-view.ts').WorkbenchPage>('home')
   const isWindowMaximised = shallowRef(false)
   const errors: string[] = []
   const successes: string[] = []
@@ -374,117 +377,83 @@ const readyState = (): RunState => ({
 }
 
 {
-  const { state, handlers } = createHarness(createBridge({
-    selectNativeShroudCli: async (): Promise<string> => 'C:\\XiangMu\\NativeShroud\\target\\release\\nativeshroud.exe',
-  }), {
-    ...createInitialRunState(),
-    passes: [{
-      id: 'nativeshroud',
-      name: 'NativeShroud Packer',
-      description: 'pack',
-      tagIds: ['native-kernel'],
-      category: 'native',
-      enabled: true,
-      params: { profile: 'max', cliPath: '' },
-      paramSchemas: [
-        { key: 'profile', type: 'enum', defaultValue: 'max', options: ['fast', 'standard', 'max'], description: 'profile', hidden: false },
-        { key: 'cliPath', type: 'string', defaultValue: '', options: null, description: 'cli', hidden: false },
-      ],
-      stability: 'experimental',
-      risk: 'high',
-      requiresOptIn: true,
-      requiredPassIds: ['jni-microkernel-loader'],
-      requiresAnyPassIds: [],
-      variantRequirements: [],
-      targeting: { supported: true, targetKinds: ['class'] },
-    }],
-  })
-
-  await handlers.handleBrowseNativeShroudCli('nativeshroud', 'cliPath')
-  assert(
-    state.value.passes.find((pass) => pass.id === 'nativeshroud')?.params.cliPath === 'C:\\XiangMu\\NativeShroud\\target\\release\\nativeshroud.exe',
-    'expected browse to fill nativeshroud cliPath',
-  )
-}
-
-{
-  let browseCalls = 0
-  const nativeshroudPass = {
-    id: 'nativeshroud',
-    name: 'NativeShroud Packer',
-    description: 'pack',
-    tagIds: ['native-kernel'],
-    category: 'native',
-    enabled: true,
-    params: { profile: 'max', cliPath: 'keep-me.exe' },
-    paramSchemas: [
-      { key: 'profile', type: 'enum', defaultValue: 'max', options: ['fast', 'standard', 'max'], description: 'profile', hidden: false },
-      { key: 'cliPath', type: 'string', defaultValue: '', options: null, description: 'cli', hidden: false },
-    ],
-    stability: 'experimental',
-    risk: 'high',
-    requiresOptIn: true,
-    requiredPassIds: ['jni-microkernel-loader'],
-    requiresAnyPassIds: [],
-    variantRequirements: [],
-    targeting: { supported: true, targetKinds: ['class'] },
-  } as const
-  const { state, handlers } = createHarness(createBridge({
-    selectNativeShroudCli: async (): Promise<string> => {
-      browseCalls += 1
-      return ''
+  let inputBrowseCalls = 0
+  let packedBrowseCalls = 0
+  let resumePath: string | null = null
+  const { state, activePage, handlers } = createHarness(createBridge({
+    selectInputJar: async (): Promise<string> => {
+      inputBrowseCalls += 1
+      return 'C:\\debug\\example.jar'
+    },
+    selectPackedNative: async (): Promise<string> => {
+      packedBrowseCalls += 1
+      return 'C:\\tmp\\qp_ffi.packed.dll'
+    },
+    resumeNativePack: async (path: string): Promise<void> => {
+      resumePath = path
     },
   }), {
-    ...createInitialRunState(),
-    passes: [nativeshroudPass],
-  })
-
-  await handlers.handleBrowseNativeShroudCli('nativeshroud', 'cliPath')
-  assert(browseCalls === 1, 'expected dialog cancel still to call selectNativeShroudCli')
-  assert(
-    state.value.passes.find((pass) => pass.id === 'nativeshroud')?.params.cliPath === 'keep-me.exe',
-    'expected cancel to leave cliPath unchanged',
-  )
-}
-
-{
-  let browseCalls = 0
-  const { state, handlers } = createHarness(createBridge({
-    selectNativeShroudCli: async (): Promise<string> => {
-      browseCalls += 1
-      return 'C:\\should-not-apply\\nativeshroud.exe'
-    },
-  }), {
-    ...createInitialRunState(),
+    ...readyState(),
     status: 'running',
-    passes: [{
-      id: 'nativeshroud',
-      name: 'NativeShroud Packer',
-      description: 'pack',
-      tagIds: ['native-kernel'],
-      category: 'native',
-      enabled: true,
-      params: { profile: 'max', cliPath: '' },
-      paramSchemas: [
-        { key: 'profile', type: 'enum', defaultValue: 'max', options: ['fast', 'standard', 'max'], description: 'profile', hidden: false },
-        { key: 'cliPath', type: 'string', defaultValue: '', options: null, description: 'cli', hidden: false },
-      ],
-      stability: 'experimental',
-      risk: 'high',
-      requiresOptIn: true,
-      requiredPassIds: ['jni-microkernel-loader'],
-      requiresAnyPassIds: [],
-      variantRequirements: [],
-      targeting: { supported: true, targetKinds: ['class'] },
-    }],
+    packHandoffPath: null,
   })
 
-  await handlers.handleBrowseNativeShroudCli('nativeshroud', 'cliPath')
-  assert(browseCalls === 0, 'expected locked run to skip NativeShroud CLI dialog')
-  assert(
-    state.value.passes.find((pass) => pass.id === 'nativeshroud')?.params.cliPath === '',
-    'expected locked browse not to mutate cliPath',
-  )
+  state.value = applyEnginePayload(state.value, {
+    type: 'need-pack',
+    level: 'info',
+    message: 'awaiting packed native',
+    progress: 94,
+    outPath: 'C:\\tmp\\qp_ffi.dll',
+  })
+  assert(state.value.status === 'awaiting-pack', `expected need-pack to enter awaiting-pack, actual=${state.value.status}`)
+  assert(state.value.packHandoffPath === 'C:\\tmp\\qp_ffi.dll', `expected packHandoffPath from need-pack, actual=${String(state.value.packHandoffPath)}`)
+
+  await handlers.handleBrowseInput()
+  assert(inputBrowseCalls === 0, 'expected awaiting-pack to keep regular jar browse locked')
+
+  const selected = await handlers.handleBrowsePackedNative()
+  assert(packedBrowseCalls === 1, 'expected awaiting-pack to allow packed native browse')
+  assert(selected === 'C:\\tmp\\qp_ffi.packed.dll', `expected packed path, actual=${String(selected)}`)
+
+  await handlers.handleResumeNativePack('C:\\tmp\\qp_ffi.packed.dll')
+  assert(resumePath === 'C:\\tmp\\qp_ffi.packed.dll', `expected resume path, actual=${String(resumePath)}`)
+  assert(state.value.status === 'running', `expected resume to return to running, actual=${state.value.status}`)
+  assert(activePage.value === 'logs', 'expected resume to switch to logs')
+}
+
+{
+  let browseCalls = 0
+  const { handlers } = createHarness(createBridge({
+    selectPackedNative: async (): Promise<string> => {
+      browseCalls += 1
+      return 'C:\\tmp\\qp_ffi.packed.dll'
+    },
+  }), {
+    ...readyState(),
+    status: 'running',
+    packHandoffPath: null,
+  })
+
+  const selected = await handlers.handleBrowsePackedNative()
+  assert(browseCalls === 0, 'expected running status to block packed native browse')
+  assert(selected === null, 'expected locked pack browse to return null')
+}
+
+{
+  let resumeCalls = 0
+  const { state, handlers } = createHarness(createBridge({
+    resumeNativePack: async (): Promise<void> => {
+      resumeCalls += 1
+    },
+  }), {
+    ...readyState(),
+    status: 'awaiting-pack',
+    packHandoffPath: 'C:\\tmp\\libqp_ffi.so',
+  })
+
+  await handlers.handleResumeNativePack('SKIP')
+  assert(resumeCalls === 1, 'expected Linux SKIP resume to call bridge')
+  assert(state.value.status === 'running', 'expected SKIP resume to mark running')
 }
 
 console.log('workbench-handlers checks passed')

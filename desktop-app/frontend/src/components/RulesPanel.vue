@@ -22,7 +22,7 @@ interface RuleConfigItem {
 
 const configText = ref<string>('')
 const errorMessage = ref<string | null>(null)
-const isLocked = (): boolean => props.status === 'running' || props.status === 'canceling'
+const isLocked = (): boolean => props.status === 'running' || props.status === 'awaiting-pack' || props.status === 'canceling'
 const exportedRules = computed((): readonly RuleConfigItem[] => props.rules.map((rule: RuleItem): RuleConfigItem => ({
   target: rule.target,
   action: rule.action,

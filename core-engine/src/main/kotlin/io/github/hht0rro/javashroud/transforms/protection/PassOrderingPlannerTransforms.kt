@@ -258,7 +258,11 @@ private fun resolverProfileOrderingConstraints(
     if ("method-virtualization" in selectedPassIds) {
         add("string-encryption", "method-virtualization", "Resolver-backed StringPage callsites must be captured before Qp VM lowering.")
         add("invoke-dynamic-indirection", "method-virtualization", "Resolver-backed invokedynamic callsites must be captured before Qp VM lowering.")
-        add("callsite-rotation-protection", "method-virtualization", "Resolver-backed callsite rotation must be captured before Qp VM lowering.")
+        // VM lowering runs before callsite rotation: rotation indy shapes are
+        // opaque to the VM host, and bodies captured without them can enter
+        // pages wholesale.  Rotation then hardens the remaining JVM-side
+        // bodies, including the generated dispatcher stubs.
+        add("method-virtualization", "callsite-rotation-protection", "Qp VM pages must be lowered before rotating the remaining JVM callsites.")
     }
     return constraints
 }

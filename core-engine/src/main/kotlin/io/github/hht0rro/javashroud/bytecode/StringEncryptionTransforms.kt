@@ -1,6 +1,7 @@
 package io.github.hht0rro.javashroud.bytecode
 
 import org.objectweb.asm.ClassReader
+import org.objectweb.asm.ConstantDynamic
 import org.objectweb.asm.Handle
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.Type
@@ -700,3 +701,193 @@ private fun intBytes(value: Int): ByteArray = byteArrayOf(
     ((value ushr 8) and 0xFF).toByte(),
     (value and 0xFF).toByte(),
 )
+
+
+/**
+ * Native-backed condy constant indirection.
+ *
+ * Rewrites LDC string/int constants into CONSTANT_Dynamic entries whose
+ * bootstrap argument is an opaque native string-page token.  The class file
+ * no longer carries the plaintext constant: it lives in an authenticated
+ * native page, and the generated bootstrap materializes it through the
+ * relocated QpTextBridge terminal (same remap path as string encryption).
+ * The token -> plaintext mapping is registered in the Qp build context so
+ * the VM serializer can lower condy LDCs inside protected pages to real
+ * constants (pages are AEAD-encrypted at rest).
+ */
+internal fun applyCondyNativeTokenIndirection(classBytes: ByteArray): ByteArray {
+    val classNode = org.objectweb.asm.tree.ClassNode()
+    val reader = ClassReader(classBytes)
+    reader.accept(classNode, 0)
+
+    if (classNode.version < Opcodes.V11) return classBytes
+    if ((classNode.access and Opcodes.ACC_INTERFACE) != 0) return classBytes
+
+    val buildContext = requireQpBuildContext()
+    val random = deterministicRandom(null, classNode.name)
+    val candidateRandom = SecureRandom()
+    val candidates = ArrayList<QpTextPageCandidate>()
+    var changed = false
+    var classLiteralOrdinal = 0
+
+    val strBsmDesc = "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Object;"
+    val intBsmDesc = "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;I)Ljava/lang/Object;"
+
+    fun isOwnBootstrap(method: org.objectweb.asm.tree.MethodNode): Boolean =
+        method.name.startsWith("\$_c_") || method.name.startsWith("a_bsm")
+
+    for (method in classNode.methods) {
+        if ((method.access and (Opcodes.ACC_ABSTRACT or Opcodes.ACC_NATIVE)) != 0) continue
+        if (isOwnBootstrap(method)) continue
+        val insns = method.instructions ?: continue
+        var methodLiteralOrdinal = 0
+        for (insn in insns.toArray()) {
+            val plain: Any = when {
+                insn is LdcInsnNode && insn.cst is String && (insn.cst as String).isNotEmpty() -> insn.cst
+                insn is LdcInsnNode && insn.cst is Int -> insn.cst
+                else -> continue
+            }
+            val buildNonce = ByteArray(QP_STRING_PAGE_NONCE_SIZE).also(random::nextBytes)
+            var logicalIdentity: ByteArray? = null
+            var encodedHandle: ByteArray? = null
+            var callSiteProof: ByteArray? = null
+            var plaintextBytes: ByteArray? = null
+            var candidate: QpTextPageCandidate? = null
+            try {
+                logicalIdentity = deriveQpStringPageIdentity(
+                    classInternalName = classNode.name,
+                    methodName = method.name,
+                    methodDescriptor = method.desc,
+                    classLiteralOrdinal = classLiteralOrdinal,
+                    methodLiteralOrdinal = methodLiteralOrdinal,
+                    buildNonce = buildNonce,
+                )
+                encodedHandle = deriveQpStringPageHandle(logicalIdentity, buildNonce)
+                val pageIndex = deriveQpStringPageIndex(logicalIdentity, buildNonce)
+                val bindingPath = qpTextPageLogicalBindingPath(logicalIdentity, encodedHandle)
+                callSiteProof = deriveQpStringPageCallSiteProof(
+                    logicalIdentity = logicalIdentity,
+                    encodedHandle = encodedHandle,
+                    pageIndex = pageIndex,
+                    logicalBindingPath = bindingPath,
+                )
+                val packed = packQpStringToken(encodedHandle, pageIndex, callSiteProof)
+                val token = Base64.getUrlEncoder().withoutPadding().encodeToString(packed)
+                java.util.Arrays.fill(packed, 0)
+
+                plaintextBytes = when (plain) {
+                    is String -> plain.toByteArray(Charsets.UTF_8)
+                    is Int -> plain.toString().toByteArray(Charsets.US_ASCII)
+                    else -> throw IllegalStateException()
+                }
+                candidate = QpTextPageCandidate.create(
+                    logicalIdentity = logicalIdentity,
+                    plaintext = plaintextBytes,
+                    pageIndex = pageIndex,
+                    callSiteProof = callSiteProof,
+                    encodedHandle = encodedHandle,
+                    logicalBindingPath = bindingPath,
+                    random = candidateRandom,
+                )
+                candidates += candidate
+                candidate = null
+                buildContext.registerCondyTokenPlaintext(token, plain.toString())
+
+                val condy = when (plain) {
+                    is String -> ConstantDynamic("c", "Ljava/lang/String;", Handle(
+                        Opcodes.H_INVOKESTATIC, classNode.name, "\$_c_str", strBsmDesc, false), token)
+                    is Int -> ConstantDynamic("c", "I", Handle(
+                        Opcodes.H_INVOKESTATIC, classNode.name, "\$_c_int", strBsmDesc, false), token)
+                    else -> throw IllegalStateException()
+                }
+                insns.set(insn, LdcInsnNode(condy))
+                changed = true
+                classLiteralOrdinal++
+                methodLiteralOrdinal++
+            } finally {
+                candidate?.wipe()
+                java.util.Arrays.fill(buildNonce, 0)
+                logicalIdentity?.let { java.util.Arrays.fill(it, 0) }
+                encodedHandle?.let { java.util.Arrays.fill(it, 0) }
+                callSiteProof?.let { java.util.Arrays.fill(it, 0) }
+                plaintextBytes?.let { java.util.Arrays.fill(it, 0) }
+            }
+        }
+    }
+
+    if (!changed) return classBytes
+
+    fun emitTokenDecode(method: org.objectweb.asm.tree.MethodNode, bootstrapSlot: Int) {
+        method.instructions.clear()
+        method.instructions.add(VarInsnNode(Opcodes.ALOAD, 3))
+        method.instructions.add(
+            MethodInsnNode(
+                Opcodes.INVOKESTATIC,
+                STRING_HELPER_OWNER,
+                "materializeQpStringToken",
+                STRING_HELPER_TOKEN_DESC,
+                false,
+            ),
+        )
+        method.instructions.add(
+            InvokeDynamicInsnNode(
+                "t$bootstrapSlot",
+                STRING_HELPER_NATIVE_DECODE_DESC,
+                Handle(
+                    Opcodes.H_INVOKESTATIC,
+                    STRING_HELPER_OWNER,
+                    STRING_HELPER_NATIVE_BSM_NAMES[bootstrapSlot % STRING_HELPER_NATIVE_BSM_NAMES.size],
+                    STRING_HELPER_NATIVE_BSM_DESC,
+                    false,
+                ),
+                Handle(
+                    Opcodes.H_INVOKESTATIC,
+                    STRING_HELPER_OWNER,
+                    "invokeQpStringTerminal",
+                    STRING_HELPER_NATIVE_DECODE_DESC,
+                    false,
+                ),
+            ),
+        )
+    }
+
+    var strBsm = classNode.methods.firstOrNull { it.name == "\$_c_str" }
+    if (strBsm == null) {
+        strBsm = org.objectweb.asm.tree.MethodNode(
+            Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC or Opcodes.ACC_SYNTHETIC,
+            "\$_c_str",
+            strBsmDesc,
+            null,
+            null,
+        )
+        classNode.methods.add(strBsm)
+    }
+    emitTokenDecode(strBsm, 0)
+    strBsm.instructions.add(InsnNode(Opcodes.ARETURN))
+    strBsm.maxStack = 2
+    strBsm.maxLocals = 4
+
+    var intBsm = classNode.methods.firstOrNull { it.name == "\$_c_int" }
+    if (intBsm == null) {
+        intBsm = org.objectweb.asm.tree.MethodNode(
+            Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC or Opcodes.ACC_SYNTHETIC,
+            "\$_c_int",
+            strBsmDesc,
+            null,
+            null,
+        )
+        classNode.methods.add(intBsm)
+    }
+    emitTokenDecode(intBsm, 1)
+    intBsm.instructions.add(MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Integer", "parseInt", "(Ljava/lang/String;)I", false))
+    intBsm.instructions.add(MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false))
+    intBsm.instructions.add(InsnNode(Opcodes.ARETURN))
+    intBsm.maxStack = 2
+    intBsm.maxLocals = 4
+
+    val writer = computeFramesWriter(reader)
+    classNode.accept(writer)
+    val transformed = writer.toByteArray()
+    buildContext.registerQpTextPageCandidates(candidates)
+    return transformed
+}

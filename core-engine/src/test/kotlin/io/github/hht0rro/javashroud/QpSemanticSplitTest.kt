@@ -18,7 +18,7 @@ class QpSemanticSplitTest {
         val rows = hardened.blocks.flatMap { it.instructions }
         val splitIndexes = rows.indices.filter { (rows[it].flags and 0x0008) != 0 }
 
-        assertTrue(splitIndexes.isNotEmpty(), "max-hardening must emit semantic split heads")
+        assertTrue(splitIndexes.isNotEmpty(), "VM serialization must emit semantic split heads")
         for (index in splitIndexes) {
             val share = rows.getOrNull(index + 1)
             assertTrue(share != null, "semantic split head must have a following share row")

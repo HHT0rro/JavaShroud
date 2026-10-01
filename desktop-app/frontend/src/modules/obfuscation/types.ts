@@ -1,6 +1,13 @@
-export type RunStatus = 'idle' | 'ready' | 'running' | 'canceling' | 'done' | 'failed'
+export type RunStatus = 'idle' | 'ready' | 'running' | 'awaiting-pack' | 'canceling' | 'done' | 'failed'
 
-export type EngineEventType = 'progress' | 'log' | 'warn' | 'error' | 'done' | 'canceled'
+/** Xenolith packer CLI resolved by the desktop app for the nativeshroud pass; empty path means unavailable. */
+export interface XenolithCliStatus {
+  readonly path: string
+  readonly version: string
+  readonly source: string
+}
+
+export type EngineEventType = 'progress' | 'log' | 'warn' | 'error' | 'done' | 'canceled' | 'need-pack'
 
 export type EngineEventLevel = 'info' | 'warn' | 'error' | 'success'
 
@@ -236,6 +243,7 @@ export interface RunState {
   readonly inspectingClasses: boolean
   readonly progress: number
   readonly currentStep: string | null
+  readonly packHandoffPath: string | null
   readonly outputPath: string | null
   readonly logs: readonly LogLine[]
   readonly errorMessage: string | null

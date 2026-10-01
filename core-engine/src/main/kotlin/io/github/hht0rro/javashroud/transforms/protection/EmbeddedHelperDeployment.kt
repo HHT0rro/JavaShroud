@@ -821,11 +821,8 @@ object EmbeddedHelperDeployment {
             ?.textValue() ?: "auto"
         val nativeProtectionLevel = (loaderPass.params["nativeProtectionLevel"] as? com.fasterxml.jackson.databind.node.TextNode)
             ?.textValue() ?: "standard"
-        val nativePackingLevel = (loaderPass.params["nativePackingLevel"] as? com.fasterxml.jackson.databind.node.TextNode)
-            ?.textValue() ?: "max"
         val request = QpNativeCompilerRequest.forTargets(
             nativeProtectionLevel = nativeProtectionLevel,
-            nativePackingLevel = QpPackingLevel.parse(nativePackingLevel),
             targetPlatforms = resolveNativeCompileTargetPlatforms(targetPlatformParam),
         )
 
@@ -834,11 +831,14 @@ object EmbeddedHelperDeployment {
             ?: config.outputJarPath.hashCode().toLong()
 
         val classLoader = this::class.java.classLoader
+        val deferImageMeasurement = config.passes.any { it.enabled && it.id == NativeShroudPacker.PASS_ID }
+        var pendingSecretPack: io.github.hht0rro.javashroud.transforms.protection.qp.NativeSecretPackLiterals? = null
         try {
             val diagnostics = QpNativeCompilerPass.recompileWithDiagnostics(
                 seed = seed,
                 classLoader = classLoader,
                 request = request,
+                deferImageMeasurement = deferImageMeasurement,
                 onMessage = { message ->
                     emitNativeRecompilationMessage(
                         emit = emit,
@@ -848,16 +848,49 @@ object EmbeddedHelperDeployment {
                     )
                 },
             )
+            if (deferImageMeasurement) {
+                pendingSecretPack = QpBuildContexts.requireCurrent().takePendingNativeSecretPackLiterals()
+            }
             if (diagnostics.results.isEmpty()) {
                 throw IllegalStateException("Qp Rust toolchain is unavailable or produced no loadable libraries")
             }
+            val packed = NativeShroudPacker.packIfRequested(
+                config = config,
+                compiled = diagnostics.results,
+                emit = emit,
+            )
+            if (pendingSecretPack != null) {
+                // Bind JSIM / seal against the packed (or SKIP-unpacked) disk image.
+                for (native in packed) {
+                    try {
+                        QpNativeCompilerPass.bindImageMeasurement(
+                            bytes = native.bytes,
+                            secretPack = pendingSecretPack,
+                            platform = native.platform,
+                        )
+                    } catch (error: Exception) {
+                        native.bytes.fill(0)
+                        throw IllegalStateException(
+                            "Qp image measurement could not be bound after packing ${native.platform}: ${error.message}",
+                            error,
+                        )
+                    }
+                }
+                val sealedPackBlobs = pendingSecretPack.blobByPlatform()
+                require(sealedPackBlobs.keys == packed.map { it.platform }.toSet()) {
+                    "Qp sealed secret pack blob was not sealed for every packed platform"
+                }
+                QpBuildContexts.requireCurrent().publishNativeSealedPackBlobs(sealedPackBlobs)
+            }
             return requireCompleteNativeCompileTargets(
                 request.routes.map(NativeRecompilationRoute::platform),
-                diagnostics.results,
+                packed,
             )
         } catch (error: Exception) {
             emitNativeRecompilationFailure(emit, error.message ?: error::class.java.simpleName)
             throw error
+        } finally {
+            pendingSecretPack?.wipe()
         }
     }
 

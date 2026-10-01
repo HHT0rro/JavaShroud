@@ -3,6 +3,7 @@ import io.github.hht0rro.javashroud.analysis.eligibleClassNamesForAction
 import io.github.hht0rro.javashroud.analysis.eligibleMembersForAction
 import io.github.hht0rro.javashroud.analysis.matchedMembersForAction
 import io.github.hht0rro.javashroud.bytecode.computeFramesWriter
+import io.github.hht0rro.javashroud.bytecode.stripDeadConstantPoolEntries
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.config.RuleSetScope
@@ -19,10 +20,14 @@ import io.github.hht0rro.javashroud.transforms.protection.qp.QpMethodCandidate
 import org.objectweb.asm.*
 import org.objectweb.asm.Type
 import org.objectweb.asm.tree.ClassNode
+import org.objectweb.asm.tree.InsnList
 import org.objectweb.asm.tree.InsnNode
+import org.objectweb.asm.tree.IntInsnNode
 import org.objectweb.asm.tree.LdcInsnNode
 import org.objectweb.asm.tree.MethodInsnNode
 import org.objectweb.asm.tree.MethodNode
+import org.objectweb.asm.tree.TypeInsnNode
+import org.objectweb.asm.tree.VarInsnNode
 import java.security.MessageDigest
 import java.security.Provider
 import java.security.SecureRandom
@@ -38,6 +43,7 @@ private const val JNI_MICROKERNEL_VM_DISPATCH_METHOD = "executeVmResource"
 private const val JNI_MICROKERNEL_VM_PAGE_DISPATCH_METHOD = "executeQpVmPage"
 private const val QP_VM_PAGE_DISPATCH_DESCRIPTOR = "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
 private const val QP_VM_PAGE_DISPATCH_SEALED_DESCRIPTOR = "(Ljava/lang/String;[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
+private const val OPAQUE_VM_DISPATCH_DESCRIPTOR = "([Ljava/lang/Object;)Ljava/lang/Object;"
 private const val QP_DISPATCH_LAYOUT = "qp-native"
 private fun qpSelectionTraceEnabled(): Boolean = System.getenv("JAVASHROUD_QP_TRACE") != null
 private val QP_ALLOWED_PARAMS = setOf(
@@ -354,6 +360,43 @@ fun applyMethodVirtualization(
     val selectionSkipCounts = linkedMapOf<String, Int>()
     val selectionDetailLines = mutableListOf<String>()
     val isolatedTargets = isolatedDefineClassTargets(artifact)
+    val dispatcherNameSalt = buildContext.deriveSubKey(
+        "javashroud-qp-opaque-dispatcher-name-v1",
+        32,
+        longBytes(seed ?: 0L),
+        intBytes(artifact.classArtifacts.size),
+        intBytes(artifact.jarEntries.size),
+    )
+    val dispatcherNameRandom = try {
+        buildContextAwareSecureRandom(
+            label = "method-virtualization-opaque-dispatcher-name-v1",
+            seed = seed,
+            classCount = artifact.classArtifacts.size,
+            jarCount = artifact.jarEntries.size,
+            contextSalt = dispatcherNameSalt,
+        )
+    } finally {
+        java.util.Arrays.fill(dispatcherNameSalt, 0)
+    }
+    registerOpaqueDispatchers(
+        artifact = artifact,
+        matchedClassNames = matchedClassNames,
+        isolatedTargets = isolatedTargets,
+        nativeOnlyInterpreter = nativeOnlyInterpreter,
+        eligibleMethodKeys = eligibleMethodKeys,
+        explicitlyMatchedMethodKeys = explicitlyMatchedMethodKeys,
+        selectedOnlyScope = selectedOnlyScope,
+        globalDirectMemberScope = globalDirectMemberScope,
+        strictRuleScope = strictRuleScope,
+        maxInstructions = maxInstructions,
+        maxBroadVirtualizedMethods = maxBroadVirtualizedMethods,
+        methodSelection = methodSelection,
+        highValueMethods = highValueMethods,
+        highValueMethodDeny = highValueMethodDeny,
+        strictVirtualization = strictVirtualization,
+        random = dispatcherNameRandom,
+        buildContext = buildContext,
+    )
 
     val updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
         if (!matchedClassNames.contains(classArtifact.summary.internalName)) return@map classArtifact
@@ -437,7 +480,7 @@ fun applyMethodVirtualization(
                             selectionSkipCounts[reason] = (selectionSkipCounts[reason] ?: 0) + 1
                             val helper = bodyCapture.traceIsPureComputeCountIncrementHelper
                             val elapsedRoot = bodyCapture.traceIsElapsedTimeBenchmarkRoot
-                            if (helper || elapsedRoot || reason == "virtualized") {
+                            if (qpSelectionTraceEnabled()) {
                                 selectionDetailLines += "qp-trace select $className#$name$descriptor reason=$reason native=${bodyCapture.nativeVmCompatible} skip=${bodyCapture.skipForBroadVirtualization(access, name, descriptor)} skipWhy=${bodyCapture.skipReasonForBroadVirtualization(access, name, descriptor)} helper=$helper elapsedRoot=$elapsedRoot wideDup2=${bodyCapture.traceHasWideValueAndDup2} indyUnsupported=${bodyCapture.hasUnsupportedInvokeDynamic} insn=${bodyCapture.instructionCount}${bodyCapture.unsupportedReasonSuffix()} $extra"
                             }
                         }
@@ -502,7 +545,10 @@ fun applyMethodVirtualization(
                             bodyCapture.replayTo(superMv)
                             return
                         }
-                        if (name.startsWith("a_bsm")) {
+                        if (name.startsWith("a_bsm") || name.startsWith("\$_c_") ||
+                            descriptor == "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Object;" ||
+                            descriptor == "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;I)Ljava/lang/Object;"
+                        ) {
                             recordSelectionSkip("bootstrap-method")
                             bodyCapture.replayTo(superMv)
                             return
@@ -558,25 +604,49 @@ fun applyMethodVirtualization(
                         }
                         recordSelectionSkip("virtualized")
 
-                        val vmDescriptor = if (isMainEntry && descriptor == "([Ljava/lang/String;)V") {
-                            "([Ljava/lang/String;Z)V"
-                        } else {
-                            descriptor
+                        val hideOriginalSignature = !isMainEntry && methodSelection == MethodSelectionMode.AllCompatible
+                        val registeredDispatcher = buildContext.resolveOpaqueVmDispatcher(className, name, descriptor)
+                        val vmDescriptor = when {
+                            isMainEntry && descriptor == "([Ljava/lang/String;)V" -> "([Ljava/lang/String;Z)V"
+                            hideOriginalSignature -> registeredDispatcher?.syntheticDescriptor ?: OPAQUE_VM_DISPATCH_DESCRIPTOR
+                            else -> descriptor
                         }
-                        val vmMethodName = if (isMainEntry) {
-                            uniqueSyntheticOriginalName(name, vmDescriptor, random, existingMethodKeys)
-                        } else {
-                            name
+                        val vmMethodName = when {
+                            registeredDispatcher != null -> registeredDispatcher.syntheticName
+                            isMainEntry || hideOriginalSignature -> uniqueSyntheticOriginalName(name, vmDescriptor, random, existingMethodKeys)
+                            else -> name
                         }
-                        val vmMethodAccess = if (vmMethodName != name) {
-                            (access and (Opcodes.ACC_PUBLIC or Opcodes.ACC_PROTECTED or Opcodes.ACC_PRIVATE or Opcodes.ACC_BRIDGE).inv()) or Opcodes.ACC_PRIVATE or Opcodes.ACC_SYNTHETIC
+                        val vmMethodAccess = if (vmMethodName != name || hideOriginalSignature) {
+                            (access and (Opcodes.ACC_PUBLIC or Opcodes.ACC_PROTECTED or Opcodes.ACC_PRIVATE or Opcodes.ACC_BRIDGE).inv()) or
+                                Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC or Opcodes.ACC_SYNTHETIC
                         } else {
                             access
                         }
+                        if (hideOriginalSignature) {
+                            if (buildContext.resolveOpaqueVmDispatcher(className, name, descriptor) == null) {
+                                buildContext.registerOpaqueVmDispatcher(
+                                    OpaqueVmDispatcher(
+                                        owner = className,
+                                        originalName = name,
+                                        originalDescriptor = descriptor,
+                                        syntheticName = vmMethodName,
+                                        syntheticDescriptor = vmDescriptor,
+                                        originalAccess = access,
+                                        isMainEntry = false,
+                                    ),
+                                )
+                            }
+                            superMv.visitCode()
+                            emitDefaultTypedReturn(superMv, Type.getReturnType(descriptor))
+                            superMv.visitMaxs(2, Type.getArgumentsAndReturnSizes(descriptor) shr 2)
+                            superMv.visitEnd()
+                        }
                         val vmMethodVisitor = if (vmMethodName != name) {
-                            val entryGuardName = uniqueSyntheticFieldName("\$m\$entryGuard", random, emptySet())
-                            cw.visitField(Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC or Opcodes.ACC_SYNTHETIC, entryGuardName, "Z", null, null)?.visitEnd()
-                            emitStaticEntryForwarder(superMv, className, vmMethodName, descriptor, vmDescriptor, entryGuardName)
+                            if (isMainEntry) {
+                                val entryGuardName = uniqueSyntheticFieldName("\$m\$entryGuard", random, emptySet())
+                                cw.visitField(Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC or Opcodes.ACC_SYNTHETIC, entryGuardName, "Z", null, null)?.visitEnd()
+                                emitStaticEntryForwarder(superMv, className, vmMethodName, descriptor, vmDescriptor, entryGuardName)
+                            }
                             cw.visitMethod(vmMethodAccess, vmMethodName, vmDescriptor, null, null)
                         } else {
                             superMv
@@ -610,6 +680,7 @@ fun applyMethodVirtualization(
                             structureEntropy = methodEntropy.domain("serializer-structure").entropyDigest,
                         )
                         bodyCapture.rewriteStaticSelfCalls(className, name, descriptor, vmMethodName, vmDescriptor)
+                        bodyCapture.rewriteVirtualizedInvokes(setOf(className))
                         bodyCapture.optimizeWithQpCompiler(className, vmMethodName, vmDescriptor, vmMethodAccess)
                         val vmBytes = try {
                             bodyCapture.replayTo(serializer)
@@ -707,7 +778,12 @@ fun applyMethodVirtualization(
             nativeMethodCandidatesForClass.clear()
             return@map classArtifact
         }
-        val reanalyzedArtifact = reanalyzedClassArtifact(classArtifact, cw.toByteArray())
+        val reanalyzedArtifact = reanalyzedClassArtifact(
+            classArtifact,
+            stripDeadConstantPoolEntries(
+                stripHiddenOriginalMethods(cw.toByteArray(), className, buildContext),
+            ),
+        )
         try {
             if (nativeMethodCandidatesForClass.isNotEmpty()) {
                 buildContext.registerQpMethodCandidates(nativeMethodCandidatesForClass)
@@ -729,9 +805,15 @@ fun applyMethodVirtualization(
 
     if (classCount == 0) return unchangedTransformResult(artifact)
 
+    val rewrittenClassArtifacts = updatedClassArtifacts.map { classArtifact ->
+        val rewritten = rewriteClassOpaqueCallsites(classArtifact.bytes, buildContext)
+        if (rewritten.contentEquals(classArtifact.bytes)) classArtifact
+        else reanalyzedClassArtifact(classArtifact, stripDeadConstantPoolEntries(rewritten))
+    }
+
     return updatedArtifactTransformResult(
         artifact = artifact,
-        updatedClassArtifacts = updatedClassArtifacts,
+        updatedClassArtifacts = rewrittenClassArtifacts,
         transformedClassCount = classCount,
         transformedMemberCount = methodCount,
     )
@@ -1147,6 +1229,117 @@ private fun isNativeVmSupportedInvokeDynamic(
     bootstrapMethodArguments: Array<out Any>,
 ): Boolean = isNativeVmSupportedInvokeDynamicCall(name, descriptor, bootstrapMethodHandle, bootstrapMethodArguments)
 
+private fun registerOpaqueDispatchers(
+    artifact: BytecodeArtifact,
+    matchedClassNames: Set<String>,
+    isolatedTargets: Set<String>,
+    nativeOnlyInterpreter: Boolean,
+    eligibleMethodKeys: Set<MethodSelectionKey>,
+    explicitlyMatchedMethodKeys: Set<MethodSelectionKey>,
+    selectedOnlyScope: Boolean,
+    globalDirectMemberScope: Boolean,
+    strictRuleScope: Boolean,
+    maxInstructions: Int,
+    maxBroadVirtualizedMethods: Int,
+    methodSelection: MethodSelectionMode,
+    highValueMethods: List<MethodSelectorPattern>,
+    highValueMethodDeny: List<MethodSelectorPattern>,
+    strictVirtualization: Boolean,
+    random: SecureRandom,
+    buildContext: QpBuildContext,
+) {
+    var broadVirtualizedMethodCount = 0
+    for (classArtifact in artifact.classArtifacts) {
+        val className = classArtifact.summary.internalName
+        if (className !in matchedClassNames) continue
+        if (className in isolatedTargets) continue
+        if (nativeOnlyInterpreter && classArtifact.summary.accessFlags and Opcodes.ACC_INTERFACE != 0) continue
+        if (isStackTraceSensitiveForVirtualization(classArtifact.bytes)) continue
+        val classNode = ClassNode()
+        try {
+            ClassReader(classArtifact.bytes).accept(classNode, ClassReader.SKIP_FRAMES)
+        } catch (_: Exception) {
+            continue
+        }
+        if (isPriorJavaShroudGeneratedRuntimeClass(classNode)) continue
+        if (hasPriorSealedRuntimeDependency(classNode)) continue
+        if (usesJavaShroudVmDispatch(classNode)) continue
+        val timingSensitiveSyntheticHandlers = unsafeSyntheticHandlerKeys(classArtifact.bytes)
+        val jvmBoundaryBootstrapKeys = jvmBoundaryBootstrapKeys(classNode)
+        val lambdaImplementationKeys = lambdaMetafactoryImplementationKeys(classNode)
+        val existingMethodKeys = classArtifact.summary.methodSummaries
+            .map { it.name + it.descriptor }
+            .toMutableSet()
+        for (method in classNode.methods.orEmpty()) {
+            val access = method.access
+            val name = method.name
+            val descriptor = method.desc
+            val methodKey = MethodSelectionKey(className, name, descriptor)
+            val selectedByRule = methodKey in eligibleMethodKeys
+            val explicitlySelected = methodKey in explicitlyMatchedMethodKeys
+            if (name == "<init>" || name == "<clinit>") continue
+            if (isEnumValuesHelper(classArtifact.summary.accessFlags, access, name, descriptor)) continue
+            if (access and (Opcodes.ACC_ABSTRACT or Opcodes.ACC_NATIVE) != 0) continue
+            if (selectedOnlyScope && !selectedByRule || globalDirectMemberScope && !explicitlySelected) continue
+            val bodyCapture = MethodBodyCapture()
+            method.accept(bodyCapture)
+            if (bodyCapture.instructionCount == 0) continue
+            if (name + descriptor in jvmBoundaryBootstrapKeys) continue
+            if (name + descriptor in lambdaImplementationKeys) continue
+            if (bodyCapture.instructionCount > maxInstructions) continue
+            bodyCapture.refreshRawBenchmarkCaptureState(name, descriptor, access)
+            bodyCapture.refreshCaptureStateAfterOptimization()
+            if (bodyCapture.callsTimingSensitiveSyntheticHandler(className, timingSensitiveSyntheticHandlers)) {
+                bodyCapture.markTimingSensitiveSyntheticHandlerUnsupported()
+            }
+            if (
+                isSecurityManagerBoundaryMethod(name, descriptor) ||
+                isJvmUiBoundaryMethod(name, descriptor) ||
+                bodyCapture.requiresJvmBoundaryPreservation()
+            ) continue
+            if (isSyntheticBridgeMethod(access)) continue
+            if (isCompilerGeneratedLambdaBody(name)) continue
+            if (name.startsWith("a_bsm") || name.startsWith("\$_c_") ||
+                descriptor == "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Object;" ||
+                descriptor == "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;I)Ljava/lang/Object;"
+            ) continue
+            val isMainEntry = isJvmMainEntry(access, name, descriptor)
+            if (isMainEntry || methodSelection != MethodSelectionMode.AllCompatible) continue
+            val selectedByMethodSelection = bodyCapture.selectedBy(methodSelection, access, name, descriptor)
+            val deniedByHighValueList = !globalDirectMemberScope && matchesMethodSelector(highValueMethodDeny, className, name, descriptor)
+            val selectedByHighValue = methodSelection == MethodSelectionMode.CriticalPlus &&
+                !deniedByHighValueList &&
+                bodyCapture.highValueSelected(className, name, descriptor, highValueMethods)
+            val selectedForBroad = !deniedByHighValueList && (selectedByMethodSelection || selectedByHighValue)
+            val withinBroadBudget = !globalDirectMemberScope && (maxBroadVirtualizedMethods <= 0 || broadVirtualizedMethodCount < maxBroadVirtualizedMethods)
+            val selectedWithinBroadBudget = selectedForBroad && withinBroadBudget
+            if (!explicitlySelected && !selectedWithinBroadBudget) continue
+            if (!explicitlySelected && (!bodyCapture.nativeVmCompatible || bodyCapture.hasUnsupportedInvokeDynamic)) continue
+            if (!bodyCapture.nativeVmCompatible || bodyCapture.hasUnsupportedInvokeDynamic) {
+                if (explicitlySelected || (strictVirtualization && selectedWithinBroadBudget)) {
+                    throw IllegalArgumentException("method-virtualization cannot virtualize unsupported selected method $className#$name$descriptor${bodyCapture.unsupportedReasonSuffix()}")
+                }
+                continue
+            }
+            if (buildContext.resolveOpaqueVmDispatcher(className, name, descriptor) != null) continue
+            val vmDescriptor = OPAQUE_VM_DISPATCH_DESCRIPTOR
+            val vmMethodName = uniqueSyntheticOriginalName(name, vmDescriptor, random, existingMethodKeys)
+            buildContext.registerOpaqueVmDispatcher(
+                OpaqueVmDispatcher(
+                    owner = className,
+                    originalName = name,
+                    originalDescriptor = descriptor,
+                    syntheticName = vmMethodName,
+                    syntheticDescriptor = vmDescriptor,
+                    originalAccess = access,
+                    isMainEntry = false,
+                ),
+            )
+            if (!globalDirectMemberScope && !explicitlySelected) broadVirtualizedMethodCount++
+        }
+    }
+}
+
 private fun uniqueSyntheticOriginalName(
     name: String,
     descriptor: String,
@@ -1170,6 +1363,182 @@ private fun uniqueSyntheticFieldName(prefix: String, random: SecureRandom, exist
         candidate = "$prefix$" + Integer.toUnsignedString(random.nextInt(), 36).take(6)
     } while (candidate in existingFieldNames)
     return candidate
+}
+
+private fun emitDefaultTypedReturn(mv: MethodVisitor, returnType: Type) {
+    when (returnType.sort) {
+        Type.VOID -> mv.visitInsn(Opcodes.RETURN)
+        Type.BOOLEAN, Type.BYTE, Type.CHAR, Type.SHORT, Type.INT -> {
+            mv.visitInsn(Opcodes.ICONST_0)
+            mv.visitInsn(returnType.getOpcode(Opcodes.IRETURN))
+        }
+        Type.LONG -> {
+            mv.visitInsn(Opcodes.LCONST_0)
+            mv.visitInsn(Opcodes.LRETURN)
+        }
+        Type.FLOAT -> {
+            mv.visitInsn(Opcodes.FCONST_0)
+            mv.visitInsn(Opcodes.FRETURN)
+        }
+        Type.DOUBLE -> {
+            mv.visitInsn(Opcodes.DCONST_0)
+            mv.visitInsn(Opcodes.DRETURN)
+        }
+        else -> {
+            mv.visitInsn(Opcodes.ACONST_NULL)
+            mv.visitInsn(Opcodes.ARETURN)
+        }
+    }
+}
+
+private fun rewriteClassOpaqueCallsites(classBytes: ByteArray, buildContext: QpBuildContext): ByteArray {
+    if (buildContext.opaqueVmDispatchers().isEmpty()) return classBytes
+    val node = ClassNode()
+    ClassReader(classBytes).accept(node, 0)
+    var changed = false
+    for (method in node.methods.orEmpty()) {
+        val instructions = method.instructions ?: continue
+        val replacements = ArrayList<Pair<org.objectweb.asm.tree.AbstractInsnNode, InsnList>>()
+        for (instruction in instructions.toArray()) {
+            val call = instruction as? MethodInsnNode ?: continue
+            val dispatcher = buildContext.resolveOpaqueVmDispatcher(call.owner, call.name, call.desc) ?: continue
+            if (call.name == dispatcher.syntheticName && call.desc == dispatcher.syntheticDescriptor) continue
+            replacements += instruction to opaqueCallReplacement(method, call, dispatcher)
+            changed = true
+        }
+        for ((old, replacement) in replacements) {
+            instructions.insert(old, replacement)
+            instructions.remove(old)
+        }
+    }
+    if (!changed) return classBytes
+    val writer = computeFramesWriter()
+    node.accept(writer)
+    return writer.toByteArray()
+}
+
+private fun opaqueCallReplacement(method: MethodNode, call: MethodInsnNode, dispatcher: OpaqueVmDispatcher): InsnList {
+    val list = InsnList()
+    val argumentTypes = Type.getArgumentTypes(call.desc)
+    val slots = ArrayList<Type>(argumentTypes.size + 1)
+    if (call.opcode != Opcodes.INVOKESTATIC) {
+        slots += Type.getObjectType(call.owner)
+    }
+    slots += argumentTypes
+    val stored = ArrayList<Pair<Int, Type>>(slots.size)
+    var local = opaqueCallLocalBase(method)
+    for (type in slots.asReversed()) {
+        list.add(VarInsnNode(type.getOpcode(Opcodes.ISTORE), local))
+        stored.add(0, local to type)
+        local += type.size
+    }
+    method.maxLocals = maxOf(method.maxLocals, local)
+    list.add(intInsn(slots.size))
+    list.add(TypeInsnNode(Opcodes.ANEWARRAY, "java/lang/Object"))
+    for ((index, slot) in stored.withIndex()) {
+        list.add(InsnNode(Opcodes.DUP))
+        list.add(intInsn(index))
+        list.add(VarInsnNode(slot.second.getOpcode(Opcodes.ILOAD), slot.first))
+        boxPrimitiveInsn(list, slot.second)
+        list.add(InsnNode(Opcodes.AASTORE))
+    }
+    list.add(MethodInsnNode(Opcodes.INVOKESTATIC, dispatcher.owner, dispatcher.syntheticName, dispatcher.syntheticDescriptor, false))
+    unboxPrimitiveInsn(list, Type.getReturnType(call.desc))
+    return list
+}
+
+private fun opaqueCallLocalBase(method: MethodNode): Int {
+    val args = Type.getArgumentTypes(method.desc)
+    var slots = if (method.access and Opcodes.ACC_STATIC == 0) 1 else 0
+    for (type in args) slots += type.size
+    return maxOf(method.maxLocals, slots + 8)
+}
+
+private fun stripHiddenOriginalMethods(
+    classBytes: ByteArray,
+    className: String,
+    buildContext: QpBuildContext,
+): ByteArray {
+    val hidden = buildContext.opaqueVmDispatchers().values.filter { dispatcher ->
+        dispatcher.owner == className && !dispatcher.isMainEntry
+    }
+    if (hidden.isEmpty()) return classBytes
+    val node = ClassNode()
+    ClassReader(classBytes).accept(node, 0)
+    val removed = node.methods.removeIf { method ->
+        hidden.any { dispatcher ->
+            dispatcher.originalName == method.name && dispatcher.originalDescriptor == method.desc
+        }
+    }
+    if (!removed) return classBytes
+    val writer = computeFramesWriter()
+    node.accept(writer)
+    return writer.toByteArray()
+}
+
+private fun intInsn(value: Int): org.objectweb.asm.tree.AbstractInsnNode = when (value) {
+    -1 -> InsnNode(Opcodes.ICONST_M1)
+    0 -> InsnNode(Opcodes.ICONST_0)
+    1 -> InsnNode(Opcodes.ICONST_1)
+    2 -> InsnNode(Opcodes.ICONST_2)
+    3 -> InsnNode(Opcodes.ICONST_3)
+    4 -> InsnNode(Opcodes.ICONST_4)
+    5 -> InsnNode(Opcodes.ICONST_5)
+    in Byte.MIN_VALUE..Byte.MAX_VALUE -> org.objectweb.asm.tree.IntInsnNode(Opcodes.BIPUSH, value)
+    in Short.MIN_VALUE..Short.MAX_VALUE -> org.objectweb.asm.tree.IntInsnNode(Opcodes.SIPUSH, value)
+    else -> LdcInsnNode(value)
+}
+
+private fun boxPrimitiveInsn(list: InsnList, type: Type) {
+    when (type.sort) {
+        Type.INT -> list.add(MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false))
+        Type.LONG -> list.add(MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false))
+        Type.FLOAT -> list.add(MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Float", "valueOf", "(F)Ljava/lang/Float;", false))
+        Type.DOUBLE -> list.add(MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", false))
+        Type.BOOLEAN -> list.add(MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false))
+        Type.BYTE -> list.add(MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Byte", "valueOf", "(B)Ljava/lang/Byte;", false))
+        Type.SHORT -> list.add(MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Short", "valueOf", "(S)Ljava/lang/Short;", false))
+        Type.CHAR -> list.add(MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Character", "valueOf", "(C)Ljava/lang/Character;", false))
+    }
+}
+
+private fun unboxPrimitiveInsn(list: InsnList, type: Type) {
+    when (type.sort) {
+        Type.VOID -> list.add(InsnNode(Opcodes.POP))
+        Type.INT -> {
+            list.add(org.objectweb.asm.tree.TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Integer"))
+            list.add(MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/Integer", "intValue", "()I", false))
+        }
+        Type.LONG -> {
+            list.add(org.objectweb.asm.tree.TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Long"))
+            list.add(MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false))
+        }
+        Type.FLOAT -> {
+            list.add(org.objectweb.asm.tree.TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Float"))
+            list.add(MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/Float", "floatValue", "()F", false))
+        }
+        Type.DOUBLE -> {
+            list.add(org.objectweb.asm.tree.TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Double"))
+            list.add(MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/Double", "doubleValue", "()D", false))
+        }
+        Type.BOOLEAN -> {
+            list.add(org.objectweb.asm.tree.TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Boolean"))
+            list.add(MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false))
+        }
+        Type.BYTE -> {
+            list.add(org.objectweb.asm.tree.TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Byte"))
+            list.add(MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/Byte", "byteValue", "()B", false))
+        }
+        Type.SHORT -> {
+            list.add(org.objectweb.asm.tree.TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Short"))
+            list.add(MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/Short", "shortValue", "()S", false))
+        }
+        Type.CHAR -> {
+            list.add(org.objectweb.asm.tree.TypeInsnNode(Opcodes.CHECKCAST, "java/lang/Character"))
+            list.add(MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/Character", "charValue", "()C", false))
+        }
+        else -> list.add(org.objectweb.asm.tree.TypeInsnNode(Opcodes.CHECKCAST, type.internalName))
+    }
 }
 
 private fun emitStaticEntryForwarder(mv: MethodVisitor, owner: String, targetName: String, descriptor: String, targetDescriptor: String, guardName: String) {
@@ -1518,6 +1887,11 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
     }
 
     fun rewriteStaticSelfCalls(className: String, originalName: String, descriptor: String, targetName: String, targetDescriptor: String) {
+        if (targetDescriptor == OPAQUE_VM_DISPATCH_DESCRIPTOR) {
+            rewriteVirtualizedInvokes(setOf(className))
+            return
+        }
+        rewriteVirtualizedInvokes(setOf(className))
         var changed = false
         var index = 0
         while (index < capturedInstructions.size) {
@@ -1546,6 +1920,166 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
             index++
         }
         if (changed) refreshCaptureStateAfterOptimization()
+    }
+
+    fun rewriteVirtualizedInvokes(ownersInFlight: Set<String> = emptySet()): Boolean {
+        val buildContext = currentQpBuildContextOrNull() ?: return false
+        var index = 0
+        var changed = false
+        while (index < capturedInstructions.size) {
+            val current = capturedInstructions[index]
+            val instruction = when (current) {
+                is CapturedInstruction.MethodArg -> current
+                is CapturedInstruction.IndyArg -> staticTargetMethodCall(current)
+                else -> null
+            }
+            if (instruction == null) {
+                index++
+                continue
+            }
+            val dispatcher = buildContext.resolveOpaqueVmDispatcher(instruction.owner, instruction.name, instruction.desc)
+            if (dispatcher == null) {
+                index++
+                continue
+            }
+            if (instruction.name == dispatcher.syntheticName && instruction.desc == dispatcher.syntheticDescriptor) {
+                index++
+                continue
+            }
+            if (current is CapturedInstruction.IndyArg) {
+                markNativeVmUnsupported("opaque dispatcher cannot rewrite invoke-dynamic handle ${instruction.owner}#${instruction.name}${instruction.desc}")
+                index++
+                continue
+            }
+            if (instruction.opcode != Opcodes.INVOKESTATIC &&
+                instruction.opcode != Opcodes.INVOKEVIRTUAL &&
+                instruction.opcode != Opcodes.INVOKESPECIAL &&
+                instruction.opcode != Opcodes.INVOKEINTERFACE
+            ) {
+                index++
+                continue
+            }
+            val boxed = boxInvokeToOpaqueDispatcher(instruction, dispatcher)
+            capturedInstructions.removeAt(index)
+            capturedInstructions.addAll(index, boxed)
+            index += boxed.size
+            changed = true
+        }
+        if (changed) {
+            val requiredLocals = opaqueRewriteLocals
+            for (offset in capturedInstructions.indices) {
+                val maxs = capturedInstructions[offset] as? CapturedInstruction.Maxs ?: continue
+                capturedInstructions[offset] = maxs.copy(
+                    maxStack = maxOf(maxs.maxStack, 8),
+                    maxLocals = maxOf(maxs.maxLocals, requiredLocals),
+                )
+            }
+            refreshCaptureStateAfterOptimization()
+        }
+        return changed
+    }
+
+    private var opaqueRewriteLocals = 32
+
+    private fun boxInvokeToOpaqueDispatcher(
+        instruction: CapturedInstruction.MethodArg,
+        dispatcher: OpaqueVmDispatcher,
+    ): List<CapturedInstruction> {
+        val argumentTypes = Type.getArgumentTypes(instruction.desc)
+        val slots = ArrayList<Type>(argumentTypes.size + 1)
+        if (instruction.opcode != Opcodes.INVOKESTATIC) {
+            slots += Type.getObjectType(instruction.owner)
+        }
+        slots += argumentTypes
+        val out = ArrayList<CapturedInstruction>(slots.size * 6 + 8)
+        val stored = ArrayList<Pair<Int, Type>>(slots.size)
+        var local = opaqueRewriteLocals
+        for (type in slots.asReversed()) {
+            out += CapturedInstruction.VarArg(type.getOpcode(Opcodes.ISTORE), local)
+            stored.add(0, local to type)
+            local += type.size
+        }
+        opaqueRewriteLocals = local + 1
+        out += capturedPushInt(slots.size)
+        out += CapturedInstruction.TypeArg(Opcodes.ANEWARRAY, "java/lang/Object")
+        for ((index, slot) in stored.withIndex()) {
+            out += CapturedInstruction.NoArg(Opcodes.DUP)
+            out += capturedPushInt(index)
+            out += CapturedInstruction.VarArg(slot.second.getOpcode(Opcodes.ILOAD), slot.first)
+            out.addAll(capturedBoxPrimitive(slot.second))
+            out += CapturedInstruction.NoArg(Opcodes.AASTORE)
+        }
+        out += CapturedInstruction.MethodArg(
+            opcode = Opcodes.INVOKESTATIC,
+            owner = dispatcher.owner,
+            name = dispatcher.syntheticName,
+            desc = dispatcher.syntheticDescriptor,
+            isInterface = false,
+        )
+        out.addAll(capturedUnboxToStack(Type.getReturnType(instruction.desc)))
+        return out
+    }
+
+    private fun capturedPushInt(value: Int): CapturedInstruction = when (value) {
+        -1 -> CapturedInstruction.NoArg(Opcodes.ICONST_M1)
+        0 -> CapturedInstruction.NoArg(Opcodes.ICONST_0)
+        1 -> CapturedInstruction.NoArg(Opcodes.ICONST_1)
+        2 -> CapturedInstruction.NoArg(Opcodes.ICONST_2)
+        3 -> CapturedInstruction.NoArg(Opcodes.ICONST_3)
+        4 -> CapturedInstruction.NoArg(Opcodes.ICONST_4)
+        5 -> CapturedInstruction.NoArg(Opcodes.ICONST_5)
+        in Byte.MIN_VALUE..Byte.MAX_VALUE -> CapturedInstruction.IntArg(Opcodes.BIPUSH, value)
+        in Short.MIN_VALUE..Short.MAX_VALUE -> CapturedInstruction.IntArg(Opcodes.SIPUSH, value)
+        else -> CapturedInstruction.LdcArg(value)
+    }
+
+    private fun capturedBoxPrimitive(type: Type): List<CapturedInstruction> = when (type.sort) {
+        Type.INT -> listOf(CapturedInstruction.MethodArg(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false))
+        Type.LONG -> listOf(CapturedInstruction.MethodArg(Opcodes.INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false))
+        Type.FLOAT -> listOf(CapturedInstruction.MethodArg(Opcodes.INVOKESTATIC, "java/lang/Float", "valueOf", "(F)Ljava/lang/Float;", false))
+        Type.DOUBLE -> listOf(CapturedInstruction.MethodArg(Opcodes.INVOKESTATIC, "java/lang/Double", "valueOf", "(D)Ljava/lang/Double;", false))
+        Type.BOOLEAN -> listOf(CapturedInstruction.MethodArg(Opcodes.INVOKESTATIC, "java/lang/Boolean", "valueOf", "(Z)Ljava/lang/Boolean;", false))
+        Type.BYTE -> listOf(CapturedInstruction.MethodArg(Opcodes.INVOKESTATIC, "java/lang/Byte", "valueOf", "(B)Ljava/lang/Byte;", false))
+        Type.SHORT -> listOf(CapturedInstruction.MethodArg(Opcodes.INVOKESTATIC, "java/lang/Short", "valueOf", "(S)Ljava/lang/Short;", false))
+        Type.CHAR -> listOf(CapturedInstruction.MethodArg(Opcodes.INVOKESTATIC, "java/lang/Character", "valueOf", "(C)Ljava/lang/Character;", false))
+        else -> emptyList()
+    }
+
+    private fun capturedUnboxToStack(type: Type): List<CapturedInstruction> = when (type.sort) {
+        Type.VOID -> listOf(CapturedInstruction.NoArg(Opcodes.POP))
+        Type.INT -> listOf(
+            CapturedInstruction.TypeArg(Opcodes.CHECKCAST, "java/lang/Integer"),
+            CapturedInstruction.MethodArg(Opcodes.INVOKEVIRTUAL, "java/lang/Integer", "intValue", "()I", false),
+        )
+        Type.LONG -> listOf(
+            CapturedInstruction.TypeArg(Opcodes.CHECKCAST, "java/lang/Long"),
+            CapturedInstruction.MethodArg(Opcodes.INVOKEVIRTUAL, "java/lang/Long", "longValue", "()J", false),
+        )
+        Type.FLOAT -> listOf(
+            CapturedInstruction.TypeArg(Opcodes.CHECKCAST, "java/lang/Float"),
+            CapturedInstruction.MethodArg(Opcodes.INVOKEVIRTUAL, "java/lang/Float", "floatValue", "()F", false),
+        )
+        Type.DOUBLE -> listOf(
+            CapturedInstruction.TypeArg(Opcodes.CHECKCAST, "java/lang/Double"),
+            CapturedInstruction.MethodArg(Opcodes.INVOKEVIRTUAL, "java/lang/Double", "doubleValue", "()D", false),
+        )
+        Type.BOOLEAN -> listOf(
+            CapturedInstruction.TypeArg(Opcodes.CHECKCAST, "java/lang/Boolean"),
+            CapturedInstruction.MethodArg(Opcodes.INVOKEVIRTUAL, "java/lang/Boolean", "booleanValue", "()Z", false),
+        )
+        Type.BYTE -> listOf(
+            CapturedInstruction.TypeArg(Opcodes.CHECKCAST, "java/lang/Byte"),
+            CapturedInstruction.MethodArg(Opcodes.INVOKEVIRTUAL, "java/lang/Byte", "byteValue", "()B", false),
+        )
+        Type.SHORT -> listOf(
+            CapturedInstruction.TypeArg(Opcodes.CHECKCAST, "java/lang/Short"),
+            CapturedInstruction.MethodArg(Opcodes.INVOKEVIRTUAL, "java/lang/Short", "shortValue", "()S", false),
+        )
+        Type.CHAR -> listOf(
+            CapturedInstruction.TypeArg(Opcodes.CHECKCAST, "java/lang/Character"),
+            CapturedInstruction.MethodArg(Opcodes.INVOKEVIRTUAL, "java/lang/Character", "charValue", "()C", false),
+        )
+        else -> listOf(CapturedInstruction.TypeArg(Opcodes.CHECKCAST, type.internalName))
     }
 
     fun refreshRawBenchmarkCaptureState(name: String, descriptor: String, access: Int) {
@@ -1800,7 +2334,9 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         is CapturedInstruction.TypeArg -> instruction.opcode == Opcodes.NEW || instruction.opcode == Opcodes.ANEWARRAY || instruction.opcode == Opcodes.CHECKCAST || instruction.opcode == Opcodes.INSTANCEOF
         is CapturedInstruction.FieldArg -> instruction.opcode == Opcodes.GETSTATIC || instruction.opcode == Opcodes.PUTSTATIC || instruction.opcode == Opcodes.GETFIELD || instruction.opcode == Opcodes.PUTFIELD
         is CapturedInstruction.MethodArg -> instruction.opcode == Opcodes.INVOKEVIRTUAL || instruction.opcode == Opcodes.INVOKESPECIAL || instruction.opcode == Opcodes.INVOKESTATIC || instruction.opcode == Opcodes.INVOKEINTERFACE
-        is CapturedInstruction.IndyArg -> isNativeVmSupportedInvokeDynamic(instruction.name, instruction.desc, instruction.bsm, instruction.bsmArgs)
+        is CapturedInstruction.IndyArg -> instruction.bsm.owner.endsWith("QpTextBridge") && instruction.desc == "()[B" &&
+            instruction.bsmArgs.size == 1 && instruction.bsmArgs[0] is String ||
+            isNativeVmSupportedInvokeDynamic(instruction.name, instruction.desc, instruction.bsm, instruction.bsmArgs)
         is CapturedInstruction.JumpArg -> isNativeVmSupportedJumpInsn(instruction.opcode)
         is CapturedInstruction.LdcArg -> isNativeVmSupportedLdc(instruction.value)
         is CapturedInstruction.IincArg -> instruction.`var` <= 0xFF && instruction.increment in Byte.MIN_VALUE..Byte.MAX_VALUE
@@ -2625,29 +3161,9 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
      * explicitly selected under a strict rule.
      */
     fun requiresJvmBoundaryPreservation(): Boolean {
-        val reflectionOwners = setOf(
-            "java/lang/Class",
-            "java/lang/ClassLoader",
-            "java/lang/reflect/AccessibleObject",
-            "java/lang/reflect/Constructor",
-            "java/lang/reflect/Field",
-            "java/lang/reflect/Method",
-            "java/lang/reflect/Proxy",
-            "java/lang/invoke/MethodHandles",
-            "java/lang/invoke/MethodHandles\$Lookup",
-        )
-        val concurrencyOwners = setOf(
-            "java/lang/Thread",
-            "java/util/concurrent/ThreadPoolExecutor",
-            "java/util/concurrent/Executor",
-            "java/util/concurrent/ExecutorService",
-            "java/util/concurrent/Future",
-        )
         val effectiveCalls = effectiveMethodCalls(capturedInstructions)
         if (effectiveCalls.any { call ->
-                call.owner in reflectionOwners ||
-                    call.owner in concurrencyOwners ||
-                    call.owner.startsWith("java/awt/") ||
+                call.owner.startsWith("java/awt/") ||
                     call.owner.startsWith("javax/swing/") ||
                     call.owner.startsWith("java/beans/") ||
                     (call.owner == "java/lang/System" && call.name == "setSecurityManager")
@@ -2658,27 +3174,17 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
             when (instruction) {
                 is CapturedInstruction.MethodArg -> false
                 is CapturedInstruction.IndyArg -> {
-                    val returnType = runCatching { Type.getReturnType(instruction.desc) }.getOrNull()
-                    val returnsRunnable = returnType?.sort == Type.OBJECT &&
-                        returnType.internalName == "java/lang/Runnable"
-                    val isThreadSleep = instruction.name == "sleep" &&
-                        instruction.desc in setOf("(J)V", "(JI)V")
-                    val hasBoundaryHandle = instruction.bsmArgs.any { argument ->
+                    val handleOwnersUi = instruction.bsmArgs.any { argument ->
                         val handle = argument as? Handle ?: return@any false
-                        isThreadSleepCall(handle.owner, handle.name, handle.desc) ||
-                            isConcurrencyBoundaryMethod(handle.owner, handle.name, handle.desc) ||
-                            isClassLoaderOrResourceBoundaryMethod(handle.owner, handle.name, handle.desc)
+                        handle.owner.startsWith("java/awt/") ||
+                            handle.owner.startsWith("javax/swing/") ||
+                            handle.owner.startsWith("java/beans/")
                     }
-                    returnsRunnable || isThreadSleep || hasBoundaryHandle
+                    handleOwnersUi
                 }
                 is CapturedInstruction.FieldArg ->
-                    instruction.owner == "java/lang/System" ||
-                        instruction.owner == "java/util/concurrent/ThreadPoolExecutor" ||
-                        instruction.owner.startsWith("java/awt/") ||
+                    instruction.owner.startsWith("java/awt/") ||
                         instruction.owner.startsWith("javax/swing/")
-                is CapturedInstruction.TryCatch ->
-                    instruction.type == "java/lang/InterruptedException" ||
-                        instruction.type == "java/util/concurrent/RejectedExecutionException"
                 else -> false
             }
         }
@@ -2914,13 +3420,13 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
         val bsm = condy.bootstrapMethod
         return when (condy.descriptor) {
             "Ljava/lang/String;" -> bsm.tag == Opcodes.H_INVOKESTATIC &&
-                bsm.name == "\$_c_str" &&
                 bsm.desc == "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Object;" &&
                 condy.getBootstrapMethodArgument(0) is String
-            "I" -> bsm.tag == Opcodes.H_INVOKESTATIC &&
-                bsm.name == "\$_c_int" &&
-                bsm.desc == "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;I)Ljava/lang/Object;" &&
-                condy.getBootstrapMethodArgument(0) is Int
+            "I" -> bsm.tag == Opcodes.H_INVOKESTATIC && (
+                (bsm.desc == "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Object;" &&
+                    condy.getBootstrapMethodArgument(0) is String) ||
+                (bsm.desc == "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;I)Ljava/lang/Object;" &&
+                    condy.getBootstrapMethodArgument(0) is Int))
             else -> false
         }
     }
@@ -3129,6 +3635,7 @@ internal fun generateVmDispatcher(
     val usesTokenOnlyDispatch = dispatchDescriptor == VM_TOKEN_DISPATCH_DESCRIPTOR
     val usesVoidSpecializedDispatch = dispatchDescriptor == VM_VOID_DISPATCH_DESCRIPTOR || dispatchDescriptor == VM_INT_VOID_DISPATCH_DESCRIPTOR
     val usesPrimitiveIntDispatch = dispatchDescriptor == VM_INT_DISPATCH_DESCRIPTOR || dispatchDescriptor == VM_INT_INT_DISPATCH_DESCRIPTOR
+    val usesOpaquePassThrough = isStatic && descriptor == OPAQUE_VM_DISPATCH_DESCRIPTOR
     require((pageEncodedHandle == null) == (pageCallSiteProof == null)) {
         "Qp VM dispatcher requires both page-zero handle and call-site proof"
     }
@@ -3182,6 +3689,8 @@ internal fun generateVmDispatcher(
         }
     } else if (dispatchDescriptor == VM_INT_INT_DISPATCH_DESCRIPTOR) {
         mv.visitVarInsn(Opcodes.ILOAD, if (isStatic) 0 else 1)
+    } else if (usesOpaquePassThrough) {
+        mv.visitVarInsn(Opcodes.ALOAD, 0)
     } else if (!usesPrimitiveIntDispatch) {
         mv.visitIntInsn(Opcodes.BIPUSH, totalArgs)
         mv.visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object")

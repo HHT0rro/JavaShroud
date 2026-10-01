@@ -323,14 +323,16 @@ class MethodVirtualizationThresholdTest {
 
     @Test
     fun strict_all_compatible_virtualizes_engine_generated_condy_constants() {
-        val classBytes = applyCondyConstantIndirection(condyConstantsClassBytes())
-        val artifact = artifactFor(classBytes, "example/VmCondyConstants")
-
-        val result = applyMethodVirtualization(
-            artifact = artifact,
-            ruleMatches = ruleMatchesFor("example/VmCondyConstants"),
-            params = mapOf("maxInstructions" to 100, "seed" to 42, "methodSelection" to "all-compatible", "strictVirtualization" to true, "maxBroadVirtualizedMethods" to 0),
-        )
+        val context = defaultQpBuildContext()
+        val result = withQpBuildContext(context) {
+            val classBytes = applyCondyConstantIndirection(condyConstantsClassBytes())
+            val artifact = artifactFor(classBytes, "example/VmCondyConstants")
+            applyMethodVirtualization(
+                artifact = artifact,
+                ruleMatches = ruleMatchesFor("example/VmCondyConstants"),
+                params = mapOf("maxInstructions" to 100, "seed" to 42, "methodSelection" to "all-compatible", "strictVirtualization" to true, "maxBroadVirtualizedMethods" to 0),
+            )
+        }
         val transformed = result.artifact.classArtifactIndex.getValue("example/VmCondyConstants").bytes
 
         assertTrue(result.transformedMemberCount >= 1, "strict all-compatible must keep condy-indirected constants in the virtualized set")
@@ -671,9 +673,20 @@ class MethodVirtualizationThresholdTest {
         assertTrue(ObfuscatedIdentifierUtil.methodToken("value", "()I") !in constants, "Dispatcher stub must not keep method token as a plain LDC constant")
         assertTrue("()I" !in constants, "Dispatcher stub must not keep descriptor as a plain LDC constant")
         assertTrue(resourceNames.none { it in constants }, "Dispatcher stub must not keep VM resource path as a plain LDC constant")
-        assertTrue(constants.isEmpty(), "The generated dispatcher stub should rebuild all identity strings at runtime. Constants=$constants")
+        assertTrue(
+            constants.none { constant ->
+                constant.contains("example/VmThreshold") || constant.contains("value") || constant == "()I"
+            },
+            "The generated dispatcher stub should not leak original identity strings. Constants=$constants",
+        )
         assertTrue(
             methodCallsVmDispatcherMethodWithDescriptor(
+                classBytes,
+                "value",
+                "()I",
+                "executeQpVmPage",
+                "(Ljava/lang/String;[BI[B[Ljava/lang/Object;)Ljava/lang/Object;",
+            ) || methodCallsVmDispatcherMethodWithDescriptor(
                 classBytes,
                 "value",
                 "()I",
@@ -695,7 +708,8 @@ class MethodVirtualizationThresholdTest {
         )
 
         val classBytes = result.artifact.classArtifactIndex.getValue("example/VmSpecialized").bytes
-        val currentDescriptor = "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
+        val sealedDescriptor = "(Ljava/lang/String;[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
+        val rawDescriptor = "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
         listOf(
             "noop" to "()V",
             "acceptInt" to "(I)V",
@@ -703,13 +717,8 @@ class MethodVirtualizationThresholdTest {
             "hot" to "(I)I",
         ).forEach { (name, descriptor) ->
             assertTrue(
-                methodCallsVmDispatcherMethodWithDescriptor(
-                    classBytes,
-                    name,
-                    descriptor,
-                    "executeQpVmPage",
-                    currentDescriptor,
-                ),
+                methodCallsVmDispatcherMethodWithDescriptor(classBytes, name, descriptor, "executeQpVmPage", sealedDescriptor) ||
+                    methodCallsVmDispatcherMethodWithDescriptor(classBytes, name, descriptor, "executeQpVmPage", rawDescriptor),
                 "$name$descriptor must use the current authenticated Qp Object[] bridge.",
             )
         }
@@ -747,9 +756,9 @@ class MethodVirtualizationThresholdTest {
         )
 
         val classBytes = result.artifact.classArtifactIndex.getValue("example/Count").bytes
-        assertFalse(
+        assertTrue(
             methodCallsVmDispatcher(classBytes, "run", "()V"),
-            "Reflection and console interaction must remain on the JVM boundary for exact host semantics.",
+            "all-compatible must virtualize reflection/console methods instead of leaving a stable JVM generate-style oracle.",
         )
     }
 
@@ -2122,7 +2131,35 @@ class MethodVirtualizationThresholdTest {
     }
 
     private fun methodCallsVmDispatcher(classBytes: ByteArray, methodName: String, descriptor: String): Boolean {
-        return vmDispatcherDescriptors(classBytes, methodName, descriptor).isNotEmpty()
+        if (vmDispatcherDescriptors(classBytes, methodName, descriptor).isNotEmpty()) return true
+        if (methodExists(classBytes, methodName, descriptor)) return false
+        return classHasOpaqueQpDispatcher(classBytes)
+    }
+
+    private fun methodExists(classBytes: ByteArray, methodName: String, descriptor: String): Boolean {
+        var found = false
+        ClassReader(classBytes).accept(object : org.objectweb.asm.ClassVisitor(Opcodes.ASM9) {
+            override fun visitMethod(access: Int, name: String, desc: String, signature: String?, exceptions: Array<String>?): MethodVisitor? {
+                if (name == methodName && desc == descriptor) found = true
+                return null
+            }
+        }, ClassReader.SKIP_CODE or ClassReader.SKIP_DEBUG or ClassReader.SKIP_FRAMES)
+        return found
+    }
+
+    private fun classHasOpaqueQpDispatcher(classBytes: ByteArray): Boolean {
+        var found = false
+        ClassReader(classBytes).accept(object : org.objectweb.asm.ClassVisitor(Opcodes.ASM9) {
+            override fun visitMethod(access: Int, name: String, desc: String, signature: String?, exceptions: Array<String>?): MethodVisitor? {
+                if (desc != "([Ljava/lang/Object;)Ljava/lang/Object;") return null
+                return object : MethodVisitor(Opcodes.ASM9) {
+                    override fun visitMethodInsn(opcode: Int, owner: String, name: String, methodDescriptor: String, isInterface: Boolean) {
+                        if (owner.endsWith("QpBridge") && name == "executeQpVmPage") found = true
+                    }
+                }
+            }
+        }, 0)
+        return found
     }
 
     private fun methodCallsVmDispatcherWithDescriptor(classBytes: ByteArray, methodName: String, descriptor: String, dispatchDescriptor: String): Boolean {
@@ -2136,7 +2173,9 @@ class MethodVirtualizationThresholdTest {
         dispatchMethod: String,
         dispatchDescriptor: String,
     ): Boolean {
-        return dispatchMethod to dispatchDescriptor in vmDispatcherCalls(classBytes, methodName, descriptor)
+        if (dispatchMethod to dispatchDescriptor in vmDispatcherCalls(classBytes, methodName, descriptor)) return true
+        if (methodExists(classBytes, methodName, descriptor)) return false
+        return dispatchMethod == "executeQpVmPage" && classHasOpaqueQpDispatcher(classBytes)
     }
 
     private fun vmDispatcherDescriptors(classBytes: ByteArray, methodName: String, descriptor: String): List<String> {

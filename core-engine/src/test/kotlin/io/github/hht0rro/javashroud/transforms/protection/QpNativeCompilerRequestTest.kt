@@ -11,7 +11,6 @@ class QpNativeCompilerRequestTest {
     fun default_request_preserves_the_locked_rust_route_order() {
         val request = QpNativeCompilerRequest.forTargets(
             nativeProtectionLevel = "standard",
-            nativePackingLevel = QpPackingLevel.MAX,
         )
 
         assertEquals(
@@ -64,7 +63,6 @@ class QpNativeCompilerRequestTest {
     fun selected_routes_keep_the_requested_platform_order() {
         val request = QpNativeCompilerRequest.forTargets(
             nativeProtectionLevel = "aggressive",
-            nativePackingLevel = QpPackingLevel.STANDARD,
             targetPlatforms = listOf("linux-x64", "windows-x64"),
         )
 
@@ -79,21 +77,14 @@ class QpNativeCompilerRequestTest {
     }
 
     @Test
-    fun all_native_profiles_emit_direct_rust_cdylibs_without_shell_forms() {
-        QpPackingLevel.entries.forEach { level ->
-            val request = QpNativeCompilerRequest.forTargets(
-                nativeProtectionLevel = "standard",
-                nativePackingLevel = level,
-                targetPlatforms = listOf("windows-x64"),
-            )
+    fun compiled_routes_are_direct_rust_cdylibs() {
+        val request = QpNativeCompilerRequest.forTargets(
+            nativeProtectionLevel = "standard",
+            targetPlatforms = listOf("windows-x64"),
+        )
 
-            assertEquals(level, request.nativePackingLevel)
-            assertEquals(
-                if (level.hardened) QpOutputForm.HARDENED_DIRECT_RUST_CDYLIB else QpOutputForm.DIRECT_RUST_CDYLIB,
-                request.nativePackingProfile.outputForm,
-            )
-            assertEquals(level.hardened, request.nativePackingProfile.outputForm.hardened)
-        }
+        assertEquals(listOf("qp_ffi.dll"), request.routes.map(NativeRecompilationRoute::outputName))
+        assertEquals(listOf(".dll"), request.routes.map(NativeRecompilationRoute::loadSuffix))
     }
 
     @Test
@@ -101,43 +92,37 @@ class QpNativeCompilerRequestTest {
         assertFailsWith<IllegalArgumentException> {
             QpNativeCompilerRequest.forTargets(
                 nativeProtectionLevel = "standard",
-                nativePackingLevel = QpPackingLevel.OFF,
-                targetPlatforms = emptyList(),
+            targetPlatforms = emptyList(),
             )
         }
         assertFailsWith<IllegalArgumentException> {
             QpNativeCompilerRequest.forTargets(
                 nativeProtectionLevel = "standard",
-                nativePackingLevel = QpPackingLevel.OFF,
-                targetPlatforms = listOf("windows-x64", "windows-x64"),
+            targetPlatforms = listOf("windows-x64", "windows-x64"),
             )
         }
         assertFailsWith<IllegalArgumentException> {
             QpNativeCompilerRequest.forTargets(
                 nativeProtectionLevel = "standard",
-                nativePackingLevel = QpPackingLevel.OFF,
-                targetPlatforms = listOf("unknown-x64"),
+            targetPlatforms = listOf("unknown-x64"),
             )
         }
         assertFailsWith<IllegalArgumentException> {
             QpNativeCompilerRequest.forTargets(
-                nativeProtectionLevel = "unsupported",
-                nativePackingLevel = QpPackingLevel.OFF,
-                targetPlatforms = listOf("windows-x64"),
-            )
-        }
-        assertFailsWith<IllegalArgumentException> {
-            QpNativeCompilerRequest.forTargets(
-                nativeProtectionLevel = "standard",
-                nativePackingLevel = QpPackingLevel.OFF,
-                targetPlatforms = listOf("macos-x64"),
+            nativeProtectionLevel = "unsupported",
+            targetPlatforms = listOf("windows-x64"),
             )
         }
         assertFailsWith<IllegalArgumentException> {
             QpNativeCompilerRequest.forTargets(
                 nativeProtectionLevel = "standard",
-                nativePackingLevel = QpPackingLevel.OFF,
-                targetPlatforms = listOf("windows-x64", RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET),
+            targetPlatforms = listOf("macos-x64"),
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            QpNativeCompilerRequest.forTargets(
+                nativeProtectionLevel = "standard",
+            targetPlatforms = listOf("windows-x64", RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET),
             )
         }
     }
@@ -146,7 +131,6 @@ class QpNativeCompilerRequestTest {
     fun locked_rust_target_aliases_resolve_to_canonical_routes() {
         val request = QpNativeCompilerRequest.forTargets(
             nativeProtectionLevel = "standard",
-            nativePackingLevel = QpPackingLevel.OFF,
             targetPlatforms = listOf(
                 RustToolchainProvisioner.LINUX_RUNTIME_TARGET,
                 RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET,
@@ -164,7 +148,6 @@ class QpNativeCompilerRequestTest {
                 classLoader = javaClass.classLoader,
                 targetPlatforms = listOf("windows-x64", "windows-x64"),
                 nativeProtectionLevel = "standard",
-                nativePackingLevel = "off",
             )
         }
 

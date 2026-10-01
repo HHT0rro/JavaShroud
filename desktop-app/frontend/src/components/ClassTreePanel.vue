@@ -43,7 +43,7 @@ const emit = defineEmits<{
 
 const query = ref<string>('')
 const activeScopeId = ref<ClassTreeScopeId>(GLOBAL_CLASS_TREE_SCOPE_ID)
-const locked = computed((): boolean => props.status === 'running' || props.status === 'canceling')
+const locked = computed((): boolean => props.status === 'running' || props.status === 'awaiting-pack' || props.status === 'canceling')
 const enabledPasses = computed((): readonly PassItem[] => props.passes.filter((pass): boolean => pass.enabled))
 const isGlobalScope = computed((): boolean => activeScopeId.value === GLOBAL_CLASS_TREE_SCOPE_ID)
 const activePass = computed((): PassItem | null => (

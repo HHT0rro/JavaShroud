@@ -5,15 +5,20 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
 )
 
+const packHandoffEnvKey = "JAVASHROUD_PACK_HANDOFF"
+
 type EngineRunCallbacks struct {
 	EmitEvent      func(EngineEvent)
 	EmitLocalError func(string, error)
 	EmitCanceled   func(EngineLaunchSpec, context.Context)
+	AttachStdin    func(io.WriteCloser)
+	ClearStdin     func()
 }
 
 func (callbacks EngineRunCallbacks) emitEvent(event EngineEvent) {
@@ -34,9 +39,22 @@ func (callbacks EngineRunCallbacks) emitCanceled(launchSpec EngineLaunchSpec, ru
 	}
 }
 
+func (callbacks EngineRunCallbacks) attachStdin(stdin io.WriteCloser) {
+	if callbacks.AttachStdin != nil {
+		callbacks.AttachStdin(stdin)
+	}
+}
+
+func (callbacks EngineRunCallbacks) clearStdin() {
+	if callbacks.ClearStdin != nil {
+		callbacks.ClearStdin()
+	}
+}
+
 func runEngineProcess(runContext context.Context, launchSpec EngineLaunchSpec, callbacks EngineRunCallbacks) {
 	cmd := exec.CommandContext(runContext, launchSpec.CommandPath, launchSpec.CommandArgs...)
 	cmd.Dir = launchSpec.CommandDir
+	cmd.Env = append(os.Environ(), packHandoffEnvKey+"=1")
 	applyHiddenProcessWindow(cmd)
 
 	stdoutPipe, err := cmd.StdoutPipe()
@@ -49,6 +67,13 @@ func runEngineProcess(runContext context.Context, launchSpec EngineLaunchSpec, c
 		callbacks.emitLocalError("stderr pipe failed", fmt.Errorf("command=%s args=%v: %w", launchSpec.CommandPath, launchSpec.CommandArgs, err))
 		return
 	}
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		callbacks.emitLocalError("stdin pipe failed", fmt.Errorf("command=%s args=%v: %w", launchSpec.CommandPath, launchSpec.CommandArgs, err))
+		return
+	}
+	callbacks.attachStdin(stdinPipe)
+	defer callbacks.clearStdin()
 
 	if err = cmd.Start(); err != nil {
 		callbacks.emitLocalError("command start failed", fmt.Errorf("command=%s args=%v dir=%s mode=%s: %w", launchSpec.CommandPath, launchSpec.CommandArgs, launchSpec.CommandDir, launchSpec.Mode, err))

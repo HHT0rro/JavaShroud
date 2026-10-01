@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 )
@@ -309,8 +310,52 @@ func (a *App) CancelObfuscation() error {
 		return errors.New("cancel obfuscation failed: no running task")
 	}
 
+	if a.engineStdin != nil {
+		_ = a.engineStdin.Close()
+		a.engineStdin = nil
+	}
 	a.cancelCurrent()
 	return nil
+}
+
+func (a *App) ResumeNativePack(path string) error {
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == "" {
+		return errors.New("resume native pack failed: path is empty")
+	}
+	if strings.ContainsAny(trimmedPath, "\r\n") {
+		return errors.New("resume native pack failed: path must be a single line")
+	}
+
+	a.mu.Lock()
+	stdin := a.engineStdin
+	a.mu.Unlock()
+	if stdin == nil {
+		return errors.New("resume native pack failed: no active pack handoff")
+	}
+
+	if _, err := io.WriteString(stdin, trimmedPath+"\n"); err != nil {
+		return fmt.Errorf("resume native pack failed: path=%s: %w", trimmedPath, err)
+	}
+	return nil
+}
+
+func (a *App) attachEngineStdin(stdin io.WriteCloser) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.engineStdin != nil {
+		_ = a.engineStdin.Close()
+	}
+	a.engineStdin = stdin
+}
+
+func (a *App) clearEngineStdin() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.engineStdin != nil {
+		_ = a.engineStdin.Close()
+		a.engineStdin = nil
+	}
 }
 
 func (a *App) runEngine(runContext context.Context, request ObfuscationRequest) {

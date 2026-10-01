@@ -42,6 +42,7 @@ func TestParseEngineEventLine_AcceptsEngineAndHostEventTypes(t *testing.T) {
 		`event = { level = "error", type = "error", message = "failed" }`,
 		`event = { level = "warn", type = "warn", message = "stderr" }`,
 		`event = { level = "warn", type = "canceled", message = "canceled" }`,
+		`event = { level = "info", type = "need-pack", message = "awaiting packed native", progress = 94, outPath = "C:\\tmp\\qp_ffi.dll" }`,
 	}
 
 	for _, line := range cases {

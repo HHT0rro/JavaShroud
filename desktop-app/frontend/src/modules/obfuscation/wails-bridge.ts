@@ -1,11 +1,14 @@
-import type { ObfuscationRequest } from './types'
+import type { ObfuscationRequest, XenolithCliStatus } from './types'
 
 export interface WailsBridge {
   readonly startObfuscation: (request: ObfuscationRequest) => Promise<void>
   readonly cancelObfuscation: () => Promise<void>
+  readonly resumeNativePack: (path: string) => Promise<void>
   readonly getEngineCapabilities: () => Promise<string>
+  readonly resolveXenolithCli: () => Promise<XenolithCliStatus>
   readonly selectInputJar: () => Promise<string>
-  readonly selectNativeShroudCli: () => Promise<string>
+  readonly selectPackedNative: () => Promise<string>
+  readonly revealNativeImage: (path: string) => Promise<void>
   readonly selectOutputJar: (defaultInputJarPath: string) => Promise<string>
   readonly selectImportConfig: () => Promise<string>
   readonly selectExportConfig: () => Promise<string>
@@ -26,9 +29,12 @@ interface WailsRuntime {
 interface WailsGoApp {
   readonly StartObfuscation?: (request: ObfuscationRequest) => Promise<void>
   readonly CancelObfuscation?: () => Promise<void>
+  readonly ResumeNativePack?: (path: string) => Promise<void>
   readonly GetEngineCapabilities?: () => Promise<string>
+  readonly ResolveXenolithCli?: () => Promise<string>
   readonly SelectInputJar?: () => Promise<string>
-  readonly SelectNativeShroudCli?: () => Promise<string>
+  readonly SelectPackedNative?: () => Promise<string>
+  readonly RevealNativeImage?: (path: string) => Promise<void>
   readonly SelectOutputJar?: (defaultInputJarPath: string) => Promise<string>
   readonly SelectImportConfig?: () => Promise<string>
   readonly SelectExportConfig?: () => Promise<string>
@@ -71,6 +77,15 @@ export const createWailsBridge = (windowRef: Window): WailsBridge => ({
 
     await app.CancelObfuscation()
   },
+  resumeNativePack: async (path: string): Promise<void> => {
+    const app: WailsGoApp = resolveWailsApp(windowRef)
+
+    if (typeof app.ResumeNativePack !== 'function') {
+      throw new Error('Wails 绑定缺少 ResumeNativePack。')
+    }
+
+    await app.ResumeNativePack(path)
+  },
   getEngineCapabilities: async (): Promise<string> => {
     const app: WailsGoApp = resolveWailsApp(windowRef)
 
@@ -79,6 +94,26 @@ export const createWailsBridge = (windowRef: Window): WailsBridge => ({
     }
 
     return app.GetEngineCapabilities()
+  },
+  resolveXenolithCli: async (): Promise<XenolithCliStatus> => {
+    const app: WailsGoApp = resolveWailsApp(windowRef)
+
+    if (typeof app.ResolveXenolithCli !== 'function') {
+      throw new Error('Wails 绑定缺少 ResolveXenolithCli。')
+    }
+
+    const raw: string = await app.ResolveXenolithCli()
+    const parsed: unknown = JSON.parse(raw) as unknown
+    if (typeof parsed !== 'object' || parsed === null) {
+      throw new Error(`ResolveXenolithCli 返回了非法 JSON：${raw}`)
+    }
+
+    const shape = parsed as { path?: unknown; version?: unknown; source?: unknown }
+    return {
+      path: typeof shape.path === 'string' ? shape.path : '',
+      version: typeof shape.version === 'string' ? shape.version : '',
+      source: typeof shape.source === 'string' ? shape.source : '',
+    }
   },
   selectInputJar: async (): Promise<string> => {
     const app: WailsGoApp = resolveWailsApp(windowRef)
@@ -89,14 +124,23 @@ export const createWailsBridge = (windowRef: Window): WailsBridge => ({
 
     return app.SelectInputJar()
   },
-  selectNativeShroudCli: async (): Promise<string> => {
+  selectPackedNative: async (): Promise<string> => {
     const app: WailsGoApp = resolveWailsApp(windowRef)
 
-    if (typeof app.SelectNativeShroudCli !== 'function') {
-      throw new Error('Wails 绑定缺少 SelectNativeShroudCli。')
+    if (typeof app.SelectPackedNative !== 'function') {
+      throw new Error('Wails 绑定缺少 SelectPackedNative。')
     }
 
-    return app.SelectNativeShroudCli()
+    return app.SelectPackedNative()
+  },
+  revealNativeImage: async (path: string): Promise<void> => {
+    const app: WailsGoApp = resolveWailsApp(windowRef)
+
+    if (typeof app.RevealNativeImage !== 'function') {
+      throw new Error('Wails 绑定缺少 RevealNativeImage。')
+    }
+
+    await app.RevealNativeImage(path)
   },
   selectOutputJar: async (defaultInputJarPath: string): Promise<string> => {
     const app: WailsGoApp = resolveWailsApp(windowRef)

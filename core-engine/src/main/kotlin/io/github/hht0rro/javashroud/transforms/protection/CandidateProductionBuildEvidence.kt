@@ -55,9 +55,19 @@ internal class CandidateProductionBuildEvidence private constructor(
         val entry: JarEntryData,
     )
 
+    /** How the final native image was packed; recorded by the nativeshroud handoff. */
+    internal data class PackerObservation(
+        val platform: String,
+        val source: String,
+        val profile: String,
+        val cliVersion: String,
+        val packedSha256: String,
+    )
+
     private val lock = Any()
     private val methods = linkedMapOf<String, MethodObservation>()
     private val natives = linkedMapOf<String, NativeObservation>()
+    private val packers = linkedMapOf<String, PackerObservation>()
     private var closed = false
 
     internal val isEnabled: Boolean
@@ -98,6 +108,19 @@ internal class CandidateProductionBuildEvidence private constructor(
         }
     }
 
+    internal fun recordPacker(observation: PackerObservation) {
+        if (!enabled) return
+        require(observation.platform.isNotBlank()) { "candidate packer evidence platform must not be blank" }
+        require(observation.source.isNotBlank()) { "candidate packer evidence source must not be blank" }
+        requireHexSha256(observation.packedSha256, "packedSha256")
+        synchronized(lock) {
+            check(!closed) { "candidate build evidence is already finalized" }
+            check(packers.putIfAbsent(observation.platform, observation) == null) {
+                "duplicate candidate packer evidence platform ${observation.platform}"
+            }
+        }
+    }
+
     internal fun writeAfterFinalJar(
         artifact: BytecodeArtifact,
         outputJarPath: Path,
@@ -105,11 +128,13 @@ internal class CandidateProductionBuildEvidence private constructor(
         if (!enabled) return null
         val methodSnapshot: List<MethodObservation>
         var nativeSnapshot: List<NativeObservation>
+        val packerSnapshot: List<PackerObservation>
         synchronized(lock) {
             check(!closed) { "candidate build evidence is already finalized" }
             closed = true
             methodSnapshot = methods.values.sortedBy { it.semanticId }
             nativeSnapshot = natives.values.sortedBy { it.platform }
+            packerSnapshot = packers.values.sortedBy { it.platform }
         }
         check(methodSnapshot.isNotEmpty()) { "max candidate produced no protected-method build evidence" }
         if (nativeSnapshot.isEmpty()) {
@@ -210,6 +235,17 @@ internal class CandidateProductionBuildEvidence private constructor(
             document["natives"] = finalNatives.map(::multiPlatformNativeDocument)
         }
         document["methods"] = finalMethods
+        if (packerSnapshot.isNotEmpty()) {
+            document["packing"] = packerSnapshot.map { observation ->
+                linkedMapOf<String, Any>(
+                    "platform" to observation.platform,
+                    "source" to observation.source,
+                    "profile" to observation.profile,
+                    "cli_version" to observation.cliVersion,
+                    "packed_sha256" to observation.packedSha256,
+                )
+            }
+        }
         val evidencePath = evidencePath(outputJarPath)
         Files.createDirectories(requireNotNull(evidencePath.parent) { "build evidence path has no parent: $evidencePath" })
         val temporaryPath = Files.createTempFile(evidencePath.parent, ".${evidencePath.fileName}.", ".tmp")
@@ -263,8 +299,7 @@ internal class CandidateProductionBuildEvidence private constructor(
 
         fun forConfig(config: ObfuscationConfig, profile: NativeVmBuildProfile): CandidateProductionBuildEvidence {
             val maxLoader = config.passes.any { pass ->
-                pass.id == "jni-microkernel-loader" && pass.enabled &&
-                    pass.params["nativePackingLevel"]?.asText() in setOf("max", "max-hardening")
+                pass.id == "jni-microkernel-loader" && pass.enabled
             }
             val virtualized = config.passes.any { it.id == "method-virtualization" && it.enabled }
             return CandidateProductionBuildEvidence(maxLoader && virtualized, profile.parserRowProfile)

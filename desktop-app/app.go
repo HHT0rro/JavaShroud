@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"sync"
 )
 
@@ -77,6 +78,7 @@ type EngineLaunchSpec struct {
 type App struct {
 	ctx           context.Context
 	cancelCurrent context.CancelFunc
+	engineStdin   io.WriteCloser
 	mu            sync.Mutex
 }
 

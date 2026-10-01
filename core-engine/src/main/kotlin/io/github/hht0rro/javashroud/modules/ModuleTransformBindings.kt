@@ -26,6 +26,7 @@ import io.github.hht0rro.javashroud.transforms.protection.applyCallsiteRotationP
 
 // Phase 4: Native kernel transforms
 import io.github.hht0rro.javashroud.transforms.protection.applyJniMicrokernelLoader
+import io.github.hht0rro.javashroud.transforms.protection.applyNativeshroud
 import io.github.hht0rro.javashroud.transforms.protection.applyExceptionSemanticVirtualization
 import io.github.hht0rro.javashroud.transforms.protection.applyOsAntiDebug
 import io.github.hht0rro.javashroud.transforms.protection.applyOsAntiVm
@@ -90,4 +91,5 @@ internal fun runtimeDefenseModuleBindings(): List<ModuleBinding> = listOf(
 
 internal fun nativeKernelModuleBindings(): List<ModuleBinding> = listOf(
     ModuleBinding(id = "jni-microkernel-loader", transform = ModuleTransform(::applyJniMicrokernelLoader)),
+    ModuleBinding(id = "nativeshroud", transform = ModuleTransform(::applyNativeshroud)),
 )

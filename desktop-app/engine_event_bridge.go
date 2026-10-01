@@ -12,6 +12,8 @@ func (a *App) engineRunCallbacks() EngineRunCallbacks {
 		EmitEvent:      a.emitEvent,
 		EmitLocalError: a.emitLocalError,
 		EmitCanceled:   a.emitCanceledEvent,
+		AttachStdin:    a.attachEngineStdin,
+		ClearStdin:     a.clearEngineStdin,
 	}
 }
 
