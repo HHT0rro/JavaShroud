@@ -202,7 +202,9 @@ if not defined XENOLITH_EXE_SOURCE (
 set "WAILS_BUILD_TAGS=javashroud_embed_engine"
 set "XENOLITH_EMBEDDED="
 if defined XENOLITH_EXE_SOURCE (
-  copy /y "%XENOLITH_EXE_SOURCE%" "%DESKTOP_EMBEDDED_DIR%\xenolith.exe" >nul || exit /b 1
+  if /I not "%XENOLITH_EXE_SOURCE%"=="%DESKTOP_EMBEDDED_DIR%\xenolith.exe" (
+    copy /y "%XENOLITH_EXE_SOURCE%" "%DESKTOP_EMBEDDED_DIR%\xenolith.exe" >nul || exit /b 1
+  )
   call :verify_same_file_hash "%XENOLITH_EXE_SOURCE%" "%DESKTOP_EMBEDDED_DIR%\xenolith.exe" "embedded xenolith cli" || exit /b 1
   set "WAILS_BUILD_TAGS=%WAILS_BUILD_TAGS%,javashroud_embed_xenolith"
   set "XENOLITH_EMBEDDED=1"

@@ -141,6 +141,13 @@ jobs:
           WAILS_EXE: wails
         run: build-release.bat
 
+      - name: Write release notes from tag message
+        shell: pwsh
+        run: |
+          $tag = '${{ steps.release_tag.outputs.tag }}'
+          $notes = git tag -l --format='%(contents:subject)%n%n%(contents:body)' $tag
+          ($notes -join "`n") | Out-File -FilePath RELEASE_NOTES.md -Encoding utf8
+
       - name: Package release
         shell: pwsh
         run: Compress-Archive -Path "build\release\javashroud-windows-amd64\*" -DestinationPath "javashroud-windows-amd64.zip" -Force
