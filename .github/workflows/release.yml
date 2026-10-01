@@ -145,7 +145,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = '${{ steps.release_tag.outputs.tag }}'
-          $notes = git tag -l --format='%(contents:subject)%n%n%(contents:body)' $tag
+          $notes = git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' $tag
           ($notes -join "`n") | Out-File -FilePath RELEASE_NOTES.md -Encoding utf8
 
       - name: Package release
