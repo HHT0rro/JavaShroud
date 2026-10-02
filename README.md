@@ -24,6 +24,8 @@ JavaShroud 是一套 Java 混淆与加固工具链：Kotlin 引擎做字节码�
 
 构建期为每份产物生成专属材料：6–16 个资源分区密钥加一个锚密钥、256 位 opcode 方言承诺、页密钥槽位，以及 native locator 路由与绑定摘要。同一份输入在不同构建里得到不同的密钥布局、方言掩码和 native digest，运行行为保持一致。产物自带运行所需的全部材料，分析者面对的是一份自洽的加密容器和一个只认这份容器的 native 内核。
 
+在字节码变换与 Native runtime 之外，编译出的 native 镜像还可交由 [Xenolith](https://github.com/HHT0rro/Xenolith)——一个独立开源的 PE 加壳器——做镜像级加壳，形成字节码混淆、方法虚拟化、Native runtime、镜像加壳的完整保护链。
+
 ## 核心能力
 
 | 模块 | pass / 入口 |
@@ -35,7 +37,8 @@ JavaShroud 是一套 Java 混淆与加固工具链：Kotlin 引擎做字节码�
 | 方法虚拟化 | `method-virtualization`：JVM bytecode lowering 为 native VM 字节码，由 Native dispatcher 执行 |
 | 资源与类保护 | JSRP v8 认证资源封装、Native typed page 路由 |
 | 运行时防御 | `os-anti-debug`、`os-anti-vm`、`callsite-rotation-protection`、`exception-semantic-virtualization` |
-| Native runtime | `jni-microkernel-loader`：Qp Rust runtime、认证资源与平台绑定；`nativeshroud`：Xenolith 自动加壳 / 外部打包挂载 |
+| Native runtime | `jni-microkernel-loader`：Qp Rust runtime、认证资源与平台绑定 |
+| Native 加壳 | `nativeshroud`：Xenolith 自动加壳（`fast` / `standard` / `max` 档位）、预打包镜像挂载、桌面加壳交接 |
 | 桌面工作流 | Wails + Vue 界面、配置编辑、类树与方法选择、任务运行与事件日志 |
 
 引擎注册 24 个 pass。`-schema` 报告的默认 pipeline 只含 `strip-compile-debug-info`；配置里写 `protectionProfile = "release-hardened"` 且 `passes` 为空时，引擎展开 13 个 pass 的加固流水线：
@@ -118,12 +121,7 @@ Qp runtime 是 Rust-only 边界，源码随引擎分发在 `core-engine/src/main
 
 - 生产资源只为 Windows x64 与 Linux x64 生成，并绑定最终 artifact digest 与当前 runtime 格式；工具链锁定 Rust 1.78、Zig 0.13.0、cargo-zigbuild 0.23.2，Linux glibc floor 2.17。
 - 资源、平台、长度、镜像头和 binding 任一校验失败都会拒绝加载；Java 侧不会回退到旧 C shell 或系统路径库。
-- `nativeshroud` 提供外部打包，三种方式（均 fail-closed，打包失败/缺失/取消即拒绝）：
-  - **Xenolith 自动打包（推荐）**：设置隐藏参数 `cliPath`（Xenolith CLI 绝对路径）与 `profile`（`fast`/`standard`/`max`，默认 `standard`）后，引擎在交接点直接运行 `xenolith pack <qp_ffi.dll> -o <out> --profile <p> --json`，随后在打包镜像上完成 JSIM 绑定。函数级选择/虚拟化与 G5 开关均已透出：`vmExports`（`--vm-export`，逗号分隔；JVM/CRT ABI 名与 fast 档位被引擎侧 fail-fast 拒绝）、`selectRva`（可重复 `--select-rva`）、`selectFunction`（`--select-function`）、`selectAll`、`strictCoverage`、`allowNativeFallback`（两者互斥）、`protectImports`、`strictConstants`、`traceDiverge`；`lazyRegions` 已验证与 qp_ffi 的 JNI 宿主引导不兼容（VEH 唤醒无法在加载器锁下运行，DLL 初始化例程必然失败），引擎侧具名拒绝。桌面版把 Xenolith CLI 内嵌进 `javashroud.exe`（构建标签 `javashroud_embed_xenolith`）并随包附带 `tools\xenolith.exe`，在"自定义加壳"模块一键开启。Xenolith 是独立开源加壳器（GPL-3.0，https://github.com/HHT0rro/Xenolith），JavaShroud 只 spawn 其 CLI，不链接其代码。
-  - **预打包路径**：非交互场景设置 `packedPath` / `packedPathLinux` 指向已打包镜像。
-  - **桌面交接**：`JAVASHROUD_PACK_HANDOFF=1` 时引擎发出 `need-pack` 事件并等待路径回传；Linux 可回 `SKIP` 直接发运未加壳 `.so`。
-  - 任何来源的打包镜像都会先做预校验：必须是 PE64 DLL、保留 `.jsms`/`.jsmk` 测量段与 `JNI_OnLoad`/`JNI_OnUnload`/`qp_r1_*` 导出（VMP 等第三方加壳器同样需要满足该契约，否则在 JSIM 绑定前被具名拒绝）。
-  - **自动下载**：构建机找不到本地 xenolith.exe 时，`build-release.bat` 调用 `desktop-app\fetch-xenolith.ps1` 从 GitHub Releases 自动获取（跳过无 Windows 资产的 tag），优先国内镜像链 `ghfast.top` → `gh-proxy.com` → `ghproxy.net`、直连兜底，并按发布包内 `manifest.json` 的逐工件 SHA-256 校验通过后才原子写入。可用环境变量覆盖：`XENOLITH_MIRRORS`（分号分隔的镜像前缀，`-` 表示禁用镜像）、`XENOLITH_RELEASE_TAG`（固定 release tag）、`XENOLITH_SHA256`（硬钉摘要，不匹配即失败）。
+- 编译出的 native 镜像可再经 `nativeshroud` 做外部加壳（Xenolith 自动打包 / 预打包镜像 / 桌面交接，均 fail-closed），详见下节「Native 加壳：Xenolith」。
 - 旧 `NativeKernelShellPacker` C 外壳、Mach-O loader、Zig 入口和 `.dylib` 输出均已退役，只为 stale source fixture 保留 fail-closed 封存。
 
 ### 平台边界
@@ -133,6 +131,31 @@ Qp runtime 是 Rust-only 边界，源码随引擎分发在 `core-engine/src/main
 | Windows x64 | Rust runtime，cargo target `x86_64-pc-windows-gnu`，资源后缀 `.dll`；PE loader 与旧 C 路径不在生产路径 |
 | Linux x64 | Rust runtime，cargo target `x86_64-unknown-linux-gnu.2.17`，资源后缀 `.so`；ELF loader 与旧 C 路径不在生产路径 |
 | 其他平台 | 含 macOS、Mach-O 与 `.dylib`：平台识别、构建、资源选择和加载全部 fail-closed |
+
+## Native 加壳：Xenolith
+
+`nativeshroud` 负责给编译出的 native 镜像（Windows x64 上的 `qp_ffi.dll`）做外部加壳，默认路径是 [Xenolith](https://github.com/HHT0rro/Xenolith)——一个独立开源的 Windows x64 PE 加壳器（GPL-3.0）。JavaShroud 只 spawn 其 CLI（`xenolith pack <qp_ffi.dll> -o <out> --profile <p> --json`），不链接其代码；加壳发生在 JSIM 绑定之前，打包失败、镜像缺失或用户取消一律 fail-closed，直接拒绝发运。
+
+### 档位与函数级开关
+
+| 参数 | 取值 | 作用 |
+| --- | --- | --- |
+| `profile` | `fast`、`standard`（默认）、`max` | 打包档位：fast 最快，standard 均衡，max 附加反调试探测 |
+| `vmExports` | 导出名列表 | 透传 `--vm-export` 做函数级虚拟化；JVM/CRT ABI 名与 fast 档位被引擎侧 fail-fast 拒绝 |
+| `selectRva` / `selectFunction` | 可重复 | 透传 `--select-rva` / `--select-function` 做函数级选择 |
+| `selectAll` / `strictCoverage` / `allowNativeFallback` | 布尔 | 全量选择与覆盖度控制；`selectAll` 与 `allowNativeFallback` 互斥 |
+| `protectImports` / `strictConstants` / `traceDiverge` | 布尔 | 导入保护、常量保护与 diverge 追踪 |
+
+`lazyRegions` 已验证与 qp_ffi 的 JNI 宿主引导不兼容（VEH 唤醒无法在加载器锁下运行，DLL 初始化例程必然失败），引擎侧具名拒绝。
+
+### 桌面与构建集成
+
+- 桌面版把 Xenolith CLI 内嵌进 `javashroud.exe`（构建标签 `javashroud_embed_xenolith`）并随包附带 `tools\xenolith.exe`，在"自定义加壳"模块一键开启；默认即内置 CLI 自动打包，也可暂停等待手动加壳（VMP 等）再选回文件。
+- 发布包构建时找不到本地 xenolith.exe，`build-release.bat` 会调 `desktop-app\fetch-xenolith.ps1` 从 GitHub Releases 自动获取（跳过无 Windows 资产的 tag），优先国内镜像链 `ghfast.top` → `gh-proxy.com` → `ghproxy.net`、直连兜底，并按发布包内 `manifest.json` 的逐工件 SHA-256 校验通过后才原子写入。可用环境变量覆盖：`XENOLITH_MIRRORS`（分号分隔的镜像前缀，`-` 表示禁用镜像）、`XENOLITH_RELEASE_TAG`（固定 release tag）、`XENOLITH_SHA256`（硬钉摘要，不匹配即失败）。
+
+### 加壳镜像契约
+
+无论镜像来自 Xenolith、VMP 还是其他加壳器，进入 JSIM 绑定前都要过同一道预校验：必须是 PE64 DLL，保留 `.jsms` / `.jsmk` 测量段与 `JNI_OnLoad` / `JNI_OnUnload` / `qp_r1_*` 导出，否则被具名拒绝。不使用 CLI 的场景还有两条路：`packedPath` / `packedPathLinux` 直接指向预打包镜像；`JAVASHROUD_PACK_HANDOFF=1` 时引擎发出 `need-pack` 事件并等待路径回传，Linux 可回 `SKIP` 直接发运未加壳 `.so`。
 
 ## 与 JNIC / Native 混淆的区别
 
@@ -155,21 +178,21 @@ Qp runtime 是 Rust-only 边界，源码随引擎分发在 `core-engine/src/main
 ## 快速开始
 
 ```powershell
-# 构建核心引擎（产物：build\core-engine\libs\obfuscator-engine-0.30.0-dev.jar）
+# 构建核心引擎（产物：build\core-engine\libs\obfuscator-engine-0.31.0.jar）
 .\gradlew.bat :core-engine:jar
 
 # 查看 pass 清单、参数、默认 pipeline 与兼容性约束（TOML 输出）
-java -jar build\core-engine\libs\obfuscator-engine-0.30.0-dev.jar -schema
+java -jar build\core-engine\libs\obfuscator-engine-0.31.0.jar -schema
 
 # 查看输入 JAR 的包 / 类 / 成员树
-java -jar build\core-engine\libs\obfuscator-engine-0.30.0-dev.jar -inspect app.jar
+java -jar build\core-engine\libs\obfuscator-engine-0.31.0.jar -inspect app.jar
 
 # 按 TOML 配置处理 JAR
-java -jar build\core-engine\libs\obfuscator-engine-0.30.0-dev.jar -config path\to\config.toml
+java -jar build\core-engine\libs\obfuscator-engine-0.31.0.jar -config path\to\config.toml
 
 # 引擎运行时缓存维护
-java -jar build\core-engine\libs\obfuscator-engine-0.30.0-dev.jar -gc
-java -jar build\core-engine\libs\obfuscator-engine-0.30.0-dev.jar -gc --apply
+java -jar build\core-engine\libs\obfuscator-engine-0.31.0.jar -gc
+java -jar build\core-engine\libs\obfuscator-engine-0.31.0.jar -gc --apply
 ```
 
 配置示例（重命名 + 控制流平坦化；opt-in pass 需要 `allowOptInPasses = true`）：
