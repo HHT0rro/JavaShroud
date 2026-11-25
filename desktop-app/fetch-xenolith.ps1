@@ -445,26 +445,17 @@ if ($PublishRelease -or $ZipFrom -or $VerifyZip) {
 }
 
 if (-not $OutPath) { $OutPath = Join-Path $PSScriptRoot 'embedded/xenolith.exe' }
-$OutPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutPath)
+$OutPath = Get-PlainPath $OutPath -AllowMissing
 $outDir = Split-Path -Parent $OutPath
-$infoPath = Join-Path $outDir $InfoName
-$stagePath = "$OutPath.$([guid]::NewGuid().ToString('N')).tmp"
-if ((Test-Path -LiteralPath $OutPath -PathType Container) -or (Test-Path -LiteralPath $infoPath -PathType Container)) {
-    throw 'The Xenolith executable and manifest destinations must be file paths.'
-}
+$infoPath = Get-PlainPath (Join-Path $outDir $InfoName) -AllowMissing
+if ($OutPath -ieq $infoPath) { throw 'The Xenolith executable destination aliases its manifest.' }
+Assert-PinConfiguration -Required:($RequirePin -or [bool]$Tag)
 $localPath = $null
 $source = $null
 if ($env:XENOLITH_EXE) {
-    $localPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($env:XENOLITH_EXE)
+    $localPath = Get-PlainPath $env:XENOLITH_EXE
     $source = 'local:explicit'
 }
-# An explicit input can itself be the destination. Keep it until verified, but
-# remove the previous manifest so a failure cannot authorize the old output.
-if (Test-Path -LiteralPath $infoPath) { Remove-Item -LiteralPath $infoPath -Force }
-if ($localPath -ne $OutPath -and (Test-Path -LiteralPath $OutPath -PathType Leaf)) {
-    Remove-Item -LiteralPath $OutPath -Force
-}
-Assert-PinConfiguration -Required:($RequirePin -or [bool]$Tag)
 if ($localPath -and $Tag) { throw 'Choose either XENOLITH_EXE or XENOLITH_RELEASE_TAG.' }
 if (($RequirePin -or $Pin) -and -not ($localPath -or $Tag)) {
     throw 'A pinned Xenolith requires XENOLITH_EXE or XENOLITH_RELEASE_TAG.'
@@ -477,21 +468,35 @@ if (-not ($localPath -or $Tag)) {
     $fallbacks['local:sibling-dist'] = Join-Path $PSScriptRoot '../../Xenolith/dist/xenolith.exe'
     foreach ($candidate in $fallbacks.GetEnumerator()) {
         if (Test-Path -LiteralPath $candidate.Value -PathType Leaf) {
-            $localPath = $candidate.Value
+            $localPath = Get-PlainPath $candidate.Value
             $source = $candidate.Key
             break
         }
     }
 }
+if ($localPath -ieq $infoPath) { throw 'The Xenolith manifest destination aliases its executable input.' }
+$lockPath = Get-PlainPath (Join-Path $outDir '.xenolith-fetch.lock') -AllowMissing
+if ($OutPath -ieq $lockPath -or $localPath -ieq $lockPath) {
+    throw 'A Xenolith executable path aliases its publication lock.'
+}
 
 [IO.Directory]::CreateDirectory($outDir) | Out-Null
-$stageInfo = "$stagePath.json"
+$lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::Write, [IO.FileShare]::None)
+$work = $null
+$preserveWork = $false
 try {
+    $workspacePath = Join-Path $outDir ('.xenolith-fetch-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $workspacePath | Out-Null
+    $work = $workspacePath
+    $stagePath = Join-Path $work 'xenolith.exe'
+    $stageInfo = Join-Path $work $InfoName
+    $priorExe = Join-Path $work 'prior.exe'
+    $priorInfo = Join-Path $work 'prior-info.json'
     if ($Tag) {
         $info = Get-RemoteXenolith $stagePath
     } elseif ($localPath) {
         if (-not (Test-Path -LiteralPath $localPath -PathType Leaf)) { throw "Xenolith file not found: $localPath" }
-        Copy-Item -LiteralPath $localPath -Destination $stagePath
+        [IO.File]::Copy($localPath, $stagePath)
         if ((Get-Item -LiteralPath $stagePath).Length -eq 0) { throw 'The local Xenolith executable is empty.' }
         $digest = Get-PathSha256 $stagePath
         Assert-PinMatch $digest
@@ -504,9 +509,51 @@ try {
     }
     $json = ($info | ConvertTo-Json -Compress) + "`n"
     [IO.File]::WriteAllText($stageInfo, $json, [Text.UTF8Encoding]::new($false))
-    if ($info.included) { Move-Item -LiteralPath $stagePath -Destination $OutPath -Force }
-    Move-Item -LiteralPath $stageInfo -Destination $infoPath -Force
+    $executableChanged = $false
+    try {
+        if ($info.included) {
+            if ($localPath -ine $OutPath) {
+                Set-VerifiedFile $stagePath $OutPath $priorExe
+                $executableChanged = $true
+            }
+        } else {
+            $null = Get-PlainPath $OutPath -AllowMissing
+            if ([IO.File]::Exists($OutPath)) {
+                [IO.File]::Move($OutPath, $priorExe)
+                $executableChanged = $true
+            }
+        }
+        if ($info.included -and (Get-PathSha256 $OutPath) -ne $info.sha256) {
+            throw 'The Xenolith executable changed before its manifest was committed.'
+        }
+        Set-VerifiedFile $stageInfo $infoPath $priorInfo
+    } catch {
+        $promotionError = $_
+        $rollbackErrors = @()
+        if ([IO.File]::Exists($priorInfo)) {
+            try { Set-VerifiedFile $priorInfo $infoPath }
+            catch { $rollbackErrors += $_.Exception.Message }
+        }
+        if ($executableChanged) {
+            try {
+                if ([IO.File]::Exists($priorExe)) { Set-VerifiedFile $priorExe $OutPath }
+                else { [IO.File]::Delete((Get-PlainPath $OutPath)) }
+            } catch { $rollbackErrors += $_.Exception.Message }
+        }
+        if ($rollbackErrors.Count) {
+            $preserveWork = $true
+            throw "Xenolith publication failed: $promotionError. Rollback failed: $($rollbackErrors -join ' | '). Recovery files: $work"
+        }
+        throw $promotionError
+    }
     Write-Host "Xenolith information written to $infoPath"
 } finally {
-    Remove-Item -LiteralPath $stagePath, $stageInfo -Force -ErrorAction SilentlyContinue
+    try {
+        if ($work -and -not $preserveWork -and [IO.Directory]::Exists($work)) {
+            try { [IO.Directory]::Delete((Get-PlainPath $work -Directory), $true) }
+            catch { Write-Warning "Could not remove Xenolith workspace $work. $($_.Exception.Message)" }
+        }
+    } finally {
+        $lock.Dispose()
+    }
 }

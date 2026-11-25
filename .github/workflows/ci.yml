@@ -220,7 +220,17 @@ jobs:
         working-directory: desktop-app/frontend
       - name: Test and build desktop app Go module
         run: |
-          go test ./...
+          New-Item -ItemType Directory -Force -Path ../build/logs | Out-Null
+          go test -count=1 -json ./... | Tee-Object -FilePath ../build/logs/desktop-go-tests.jsonl
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go vet ./...
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build ./...
         working-directory: desktop-app
+      - name: Upload desktop Go test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-go-test-evidence-${{ matrix.os }}
+          path: build/logs/desktop-go-tests.jsonl
+          if-no-files-found: warn

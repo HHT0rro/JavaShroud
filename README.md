@@ -151,7 +151,7 @@ Qp runtime 是 Rust-only 边界，源码随引擎分发在 `core-engine/src/main
 ### 桌面与构建集成
 
 - 桌面版把 Xenolith CLI 内嵌进 `javashroud.exe`（构建标签 `javashroud_embed_xenolith`）并随包附带 `tools\xenolith.exe`，在"自定义加壳"模块一键开启；默认即内置 CLI 自动打包，也可暂停等待手动加壳（VMP 等）再选回文件。
-- 发布包构建时找不到本地 xenolith.exe，`build-release.bat` 会调 `desktop-app\fetch-xenolith.ps1` 从 GitHub Releases 自动获取（跳过无 Windows 资产的 tag），优先国内镜像链 `ghfast.top` → `gh-proxy.com` → `ghproxy.net`、直连兜底，并按发布包内 `manifest.json` 的逐工件 SHA-256 校验通过后才原子写入。可用环境变量覆盖：`XENOLITH_MIRRORS`（分号分隔的镜像前缀，`-` 表示禁用镜像）、`XENOLITH_RELEASE_TAG`（固定 release tag）、`XENOLITH_SHA256`（硬钉摘要，不匹配即失败）。
+- 正式发布使用 `--require-xenolith-pin`，设置来自独立可信来源的 `XENOLITH_SHA256`，并通过 `XENOLITH_EXE` 指定本地 CLI 或通过 `XENOLITH_RELEASE_TAG` 指定恰有一个 Windows ZIP 的 release tag。`desktop-app\fetch-xenolith.ps1` 验证暂存的 CLI 和清单后，在目标目录的独占锁下提交两者，失败时恢复旧文件。输入及目标须为普通文件，清单别名、硬链接和目录链接会被拒绝。`XENOLITH_MIRRORS` 接受分号分隔的镜像前缀，`-` 禁用镜像。默认镜像链为 `ghfast.top`、`gh-proxy.com`、`ghproxy.net`，之后尝试直连。
 - 开发环境优先使用同级 Xenolith 源码仓库中新构建的 `target\release\xenolith.exe`，其次回退到旧 `dist\xenolith.exe`；正式发布仍把解析出的 CLI 内嵌并附带 `tools\xenolith.exe`。
 
 ### 加壳镜像契约
