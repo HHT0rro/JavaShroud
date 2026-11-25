@@ -25,6 +25,56 @@ import org.objectweb.asm.tree.TypeInsnNode
 class ApkRealToolchainRoundTripTest {
 
     @Test
+    fun allocationIndexIncludesPreciseNewWhoseConstructorBelongsToItsParent() {
+        val parent = "fixture/Base"
+        val first = "fixture/First"
+        val second = "fixture/Second"
+        val host = "fixture/PartlyRecovered"
+        fun classBytes(owner: String, superName: String, methods: (ClassWriter) -> Unit = {}): ByteArray {
+            val writer = ClassWriter(ClassWriter.COMPUTE_MAXS)
+            writer.visit(Opcodes.V1_6, Opcodes.ACC_PUBLIC, owner, null, superName, null)
+            methods(writer)
+            writer.visitEnd()
+            return writer.toByteArray()
+        }
+        val bytes = classBytes(host, "java/lang/Object") { writer ->
+            writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "make", "()V", null, null).apply {
+                visitCode()
+                for (owner in listOf(first, parent)) {
+                    visitTypeInsn(Opcodes.NEW, owner)
+                    visitInsn(Opcodes.DUP)
+                    visitMethodInsn(Opcodes.INVOKESPECIAL, parent, "<init>", "()V", false)
+                    visitInsn(Opcodes.POP)
+                }
+                visitInsn(Opcodes.RETURN)
+                visitMaxs(0, 0)
+                visitEnd()
+            }
+        }
+        val classes = listOf(
+            "$host.class" to bytes,
+            "$parent.class" to classBytes(parent, "java/lang/Object"),
+            "$first.class" to classBytes(first, parent),
+            "$second.class" to classBytes(second, parent),
+        )
+        val sites = listOf(first, second).map { ApkDexNewInstanceIndex.Site(it, parent) }
+        for (declaredStack in listOf(2, 0)) {
+            val input = ClassNode()
+            ClassReader(bytes).accept(input, 0)
+            input.methods.single().maxStack = declaredStack
+            val writer = ClassWriter(0)
+            input.accept(writer)
+            val convertedClasses = classes.map { (name, body) -> name to if (name == "$host.class") writer.toByteArray() else body }
+            val result = ApkNewTypeRepair.repair(convertedClasses, mapOf(host to mapOf("make()V" to sites)))
+            val node = ClassNode()
+            ClassReader(result.classes.first().second).accept(node, 0)
+            assertEquals(listOf(first, second), node.methods.single().instructions.filterIsInstance<TypeInsnNode>()
+                .filter { it.opcode == Opcodes.NEW }.map { it.desc }, "declared maxStack=$declaredStack")
+            assertEquals(1, result.dexRecoveredSites)
+        }
+    }
+
+    @Test
     fun reorderedAllocationUsesItsFieldReceiverRatherThanTheDexOrdinal() {
         val parent = "java/lang/Object"
         val host = "fixture/AllocationOrder"

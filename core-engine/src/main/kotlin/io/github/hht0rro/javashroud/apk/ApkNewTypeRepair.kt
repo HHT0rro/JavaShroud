@@ -142,30 +142,14 @@ internal object ApkNewTypeRepair {
             var heuristicRecovered = 0
             for (method in node.methods) {
                 val insns = method.instructions ?: continue
+                if (insns.none { it.opcode == Opcodes.NEW }) continue
                 val dexMethodSites = dexMethodSitesByClass?.get(method.name + method.desc).orEmpty()
-                // Pair each `new S` with the next unpaired `invokespecial
-                // S.<init>()V` after it, in code order. javac/dex2jar emit them
-                // in that order, but argument computations may sit between
-                // them, so adjacency cannot be required.
-                val unpairedNewByOwner = LinkedHashMap<String, MutableList<TypeInsnNode>>()
-                val pairedCtor = HashMap<TypeInsnNode, MethodInsnNode>()
-                for (instruction in insns) {
-                    when {
-                        instruction is TypeInsnNode && instruction.opcode == Opcodes.NEW && instruction.desc.isNotEmpty() ->
-                            unpairedNewByOwner.getOrPut(instruction.desc) { mutableListOf() }.add(instruction)
-                        instruction is MethodInsnNode && instruction.opcode == Opcodes.INVOKESPECIAL &&
-                            instruction.name == "<init>" -> {
-                            val pending = unpairedNewByOwner[instruction.owner]
-                            if (!pending.isNullOrEmpty()) {
-                                pairedCtor[pending.removeAt(0)] = instruction
-                            }
-                        }
-                    }
-                }
-                val byConstructorOwner = insns.filterIsInstance<TypeInsnNode>()
-                    .filter { it in pairedCtor }.groupBy { it.desc }
+                val flow = allocationUses(node.name, method) ?: continue
+                val pairedCtor = flow.constructors
+                // A precise NEW Sub followed by Super.<init> still consumes one source-Dex
+                // allocation; omitting it shifts the remaining degraded sites onto the wrong types.
+                val byConstructorOwner = pairedCtor.entries.groupBy({ it.value.owner }, { it.key })
                 val dexByConstructorOwner = dexMethodSites.groupBy { it.constructorOwner }
-                val fieldOwners by lazy { allocationFieldOwners(node.name, method) }
                 val matchingDexTypes = mutableMapOf<TypeInsnNode, String>()
                 val uncertainAllocations = mutableSetOf<TypeInsnNode>()
                 for ((owner, allocations) in byConstructorOwner) {
@@ -175,8 +159,9 @@ internal object ApkNewTypeRepair {
                         allocations.take(sites.size).zip(sites).forEach { (site, type) -> matchingDexTypes[site] = type }
                         continue
                     }
-                    val constraints = allocations.associateWith { fieldOwners[it].orEmpty() }
-                    fun permits(site: TypeInsnNode, type: String) = constraints.getValue(site).all { extendsArtifact(type, it, classFacts) }
+                    val constraints = allocations.associateWith { flow.fieldOwners[it].orEmpty() }
+                    fun permits(site: TypeInsnNode, type: String) = (site.desc == owner || site.desc == type) &&
+                        constraints.getValue(site).all { extendsArtifact(type, it, classFacts) }
                     if (allocations.size == sites.size && allocations.zip(sites).all { (site, type) -> permits(site, type) }) {
                         allocations.zip(sites).forEach { (site, type) -> matchingDexTypes[site] = type }
                         continue
@@ -192,7 +177,7 @@ internal object ApkNewTypeRepair {
                         val iterator = pending.iterator()
                         while (iterator.hasNext()) {
                             val site = iterator.next()
-                            if (constraints.getValue(site).isEmpty()) continue
+                            if (constraints.getValue(site).isEmpty() && site.desc == owner) continue
                             val type = remaining.asSequence().filter { permits(site, it) }.distinct().singleOrNull() ?: continue
                             matchingDexTypes[site] = type
                             remaining.remove(type)
@@ -244,29 +229,43 @@ internal object ApkNewTypeRepair {
         }
     }
 
-    private fun allocationFieldOwners(owner: String, method: MethodNode): Map<TypeInsnNode, Set<String>> {
+    private data class AllocationUses(
+        val constructors: Map<TypeInsnNode, MethodInsnNode>,
+        val fieldOwners: Map<TypeInsnNode, Set<String>>,
+    )
+
+    private fun allocationUses(owner: String, method: MethodNode): AllocationUses? {
         val interpreter = object : SourceInterpreter(Opcodes.ASM9) {
             override fun copyOperation(insn: AbstractInsnNode, value: SourceValue): SourceValue = value
         }
         val frames = try {
-            Analyzer(interpreter).analyze(owner, method)
+            // Converted methods can underreport maxStack; let ASM derive capacity before tracking receivers.
+            Analyzer(interpreter).analyzeAndComputeMaxs(owner, method)
         } catch (_: AnalyzerException) {
-            return emptyMap()
+            return null
         }
         val owners = mutableMapOf<TypeInsnNode, MutableSet<String>>()
+        val constructors = linkedMapOf<TypeInsnNode, MethodInsnNode>()
         for ((index, insn) in method.instructions.toArray().withIndex()) {
+            val frame = frames[index] ?: continue
+            if (insn is MethodInsnNode && insn.opcode == Opcodes.INVOKESPECIAL && insn.name == "<init>") {
+                val receiverIndex = frame.stackSize - Type.getArgumentTypes(insn.desc).size - 1
+                if (receiverIndex < 0) continue
+                val source = frame.getStack(receiverIndex).insns.singleOrNull() as? TypeInsnNode ?: continue
+                if (source.opcode == Opcodes.NEW) constructors[source] = insn
+                continue
+            }
             if (insn !is FieldInsnNode) continue
             val fromTop = when (insn.opcode) {
                 Opcodes.PUTFIELD -> 2 // ASM frames contain one value per operand, including double and long.
                 Opcodes.GETFIELD -> 1
                 else -> continue
             }
-            val frame = frames[index] ?: continue
             if (frame.stackSize < fromTop) continue
             val source = frame.getStack(frame.stackSize - fromTop).insns.singleOrNull() as? TypeInsnNode ?: continue
             if (source.opcode == Opcodes.NEW) owners.getOrPut(source) { mutableSetOf() } += insn.owner
         }
-        return owners
+        return AllocationUses(constructors, owners)
     }
 
     /** Declared reference type when the use pins one; null otherwise. */
