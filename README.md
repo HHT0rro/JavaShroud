@@ -167,7 +167,7 @@ APK 内已有的 `j$` Java API 兼容类保留原名，与应用类分开生成 
 
 DEX 转换出现方法异常、异常堆栈或错误报告时，引擎会报告转换失败并拒绝发布，即使 dex2jar 返回 0。每次转换使用独立暂存路径，失败会保留已有 APK 和附属文件，详细原因可通过 `--log-file` 查看。
 
-仓库内的 `ApkAndroidDeviceSmokeTest` 从源码生成自有单 DEX、多 DEX、XML 回调与简单 JNI 夹具，并对原包和处理后包执行返回值、Parcelable 写读、WebView JavaScript 接口、签名及对齐检查。设备须已启动，明确设置 `ANDROID_SERIAL`、`ANDROID_HOME` 和 `ANDROID_NDK_HOME` 后再启用。未启用时这三项测试会跳过；启用后缺工具或设备会失败，Gradle 也会重新执行测试。证据保留在 `build/android-runtime-evidence/`。
+仓库内的 `ApkAndroidDeviceSmokeTest` 从源码生成自有单 DEX、多 DEX、XML 回调与简单 JNI 夹具，并对原包和处理后包执行返回值、Parcelable 写读、WebView JavaScript 接口、跨改名包的继承分派、签名及对齐检查。设备须已启动，明确设置 `ANDROID_SERIAL`、`ANDROID_HOME` 和 `ANDROID_NDK_HOME` 后再启用。未启用时这三项测试会跳过；启用后缺工具或设备会失败，Gradle 也会重新执行测试。证据保留在 `build/android-runtime-evidence/`，失败时在卸载前采集原生崩溃及进程退出诊断。
 
 ```bash
 export ANDROID_SERIAL=emulator-5554

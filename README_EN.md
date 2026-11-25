@@ -178,7 +178,7 @@ Bundled `j$` Java API compatibility classes retain their names. They compile int
 
 Method conversion exceptions, exception stacks, or error reports cause the engine to reject publication, including when dex2jar returns zero. Each conversion uses private staging paths. A conversion failure preserves the existing APK and sidecars, and `--log-file` records the diagnostics.
 
-`ApkAndroidDeviceSmokeTest` generates owned single-DEX, multidex, XML callback, and simple JNI fixtures from source, then checks return values, Parcelable round trips, WebView JavaScript interfaces, signatures, and alignment for both original and protected APKs. Start the intended device and set `ANDROID_SERIAL`, `ANDROID_HOME`, and `ANDROID_NDK_HOME` before enabling the tests. The three tests skip while disabled. Once enabled, missing prerequisites fail the run and Gradle executes the tests again. Evidence remains under `build/android-runtime-evidence/`.
+`ApkAndroidDeviceSmokeTest` generates owned single-DEX, multidex, XML callback, and simple JNI fixtures from source, then checks return values, Parcelable round trips, WebView JavaScript interfaces, inherited dispatch across renamed packages, signatures, and alignment for both original and protected APKs. Start the intended device and set `ANDROID_SERIAL`, `ANDROID_HOME`, and `ANDROID_NDK_HOME` before enabling the tests. The three tests skip while disabled. Once enabled, missing prerequisites fail the run and Gradle executes the tests again. Evidence remains under `build/android-runtime-evidence/`, including native crash and process exit diagnostics collected before uninstall on failure.
 
 ```bash
 export ANDROID_SERIAL=emulator-5554

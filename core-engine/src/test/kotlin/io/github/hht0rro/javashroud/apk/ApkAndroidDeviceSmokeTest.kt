@@ -259,10 +259,39 @@ class ApkAndroidDeviceSmokeTest {
             """.trimIndent())
             source("AnswerView.java", """
                 package $packageName;
-                public final class AnswerView extends android.widget.Button {
+                public final class AnswerView extends OwnedBaseButton {
                     public AnswerView(android.content.Context context, android.util.AttributeSet attributes) {
                         super(context, attributes);
                     }
+                    @Override public OwnedAnswerSpec createSpec(android.content.Context context, android.util.AttributeSet attributes) {
+                        return new OwnedAnswerSpec();
+                    }
+                }
+            """)
+            source("OwnedBaseButton.java", """
+                package $packageName;
+                public abstract class OwnedBaseButton extends android.widget.Button {
+                    private final int checkedAnswer;
+                    public OwnedBaseButton(android.content.Context context, android.util.AttributeSet attributes) {
+                        super(context, attributes);
+                        checkedAnswer = createSpec(context, attributes).answer;
+                        if (checkedAnswer != 42) throw new AssertionError("Inherited factory returned " + checkedAnswer);
+                    }
+                    abstract OwnedBaseSpec createSpec(android.content.Context context, android.util.AttributeSet attributes);
+                    public final int checkedAnswer() { return checkedAnswer; }
+                }
+            """)
+            source("OwnedBaseSpec.java", """
+                package $packageName;
+                public class OwnedBaseSpec {
+                    public final int answer;
+                    public OwnedBaseSpec(int answer) { this.answer = answer; }
+                }
+            """)
+            source("OwnedAnswerSpec.java", """
+                package $packageName;
+                public final class OwnedAnswerSpec extends OwnedBaseSpec {
+                    public OwnedAnswerSpec() { super(42); }
                 }
             """)
             source("OwnedParcel.java", """
@@ -294,6 +323,9 @@ class ApkAndroidDeviceSmokeTest {
                         super.onCreate(state);
                         invocation = getIntent().getStringExtra("invocation");
                         setContentView(R.layout.main);
+                        final int factory = ((AnswerView) findViewById(R.id.action)).checkedAnswer();
+                        if (factory != 42) throw new AssertionError("Inherited dispatch failed");
+                        android.util.Log.i("$tag", "token=" + invocation + " factory=42");
                         final int result = Calculation.value();
                         final int resource = getResources().getInteger(R.integer.answer);
                         if (result != 42 || resource != 42) throw new AssertionError("Unexpected fixture answer");
@@ -618,22 +650,32 @@ class ApkAndroidDeviceSmokeTest {
                     val log = adb("$label-logcat", "logcat", "-d", "-v", "brief", "-s", "$tag:I", "*:S")
                     val lines = log.lineSequence().filter { it.contains("token=$token ") }.toList()
                     if (lines.any { it.endsWith(" result=42 resource=42") } && lines.any { it.endsWith(" click=42") } &&
-                        lines.any { it.endsWith(" parcel=42") } && lines.any { it.endsWith(" web=42") }) {
+                        lines.any { it.endsWith(" parcel=42") } && lines.any { it.endsWith(" web=42") } &&
+                        lines.any { it.endsWith(" factory=42") }) {
                         observed = true
                         break
                     }
                     Thread.sleep(500)
                 }
-                assertTrue(observed, "Expected result=42 resource=42 click=42 parcel=42 web=42 for $label; evidence=$evidence")
+                assertTrue(observed, "Expected result=42 resource=42 click=42 parcel=42 web=42 factory=42 for $label; evidence=$evidence")
                 val firstPid = packagePid("$label-first-pid")
                 assertTrue(firstPid.matches(Regex("[0-9]+")), "Fixture process is missing: $firstPid")
                 Thread.sleep(2_000)
                 assertEquals(firstPid, packagePid("$label-later-pid"), "Fixture process did not survive")
                 val runtime = adb("$label-process-logcat", "logcat", "-d", "-v", "threadtime", "-s", "AndroidRuntime:E", "*:S")
                 assertTrue(!runtime.contains("Process: $packageName, PID: $firstPid"), "Fixture crashed: $runtime")
-                note("$label runtime PASS result=42 resource=42 click=42 parcel=42 web=42 pid=$firstPid token=$token")
+                note("$label runtime PASS result=42 resource=42 click=42 parcel=42 web=42 factory=42 pid=$firstPid token=$token")
             } catch (error: Throwable) {
                 failure = error
+                // Capture native tombstones before uninstall removes the package identity.
+                // A missing PID can precede the normal AndroidRuntime log inspection.
+                try {
+                    adb("$label-failure-crash-logcat", "logcat", "-b", "crash", "-d", "-v", "threadtime")
+                    adb("$label-failure-exit-info", "shell", "dumpsys", "activity", "exit-info", packageName)
+                } catch (diagnosticFailure: Throwable) {
+                    error.addSuppressed(diagnosticFailure)
+                    note("Failure diagnostics: ${diagnosticFailure.stackTraceToString()}")
+                }
                 throw error
             } finally {
                 // Timeout interruption must still allow bounded cleanup of this unique package.

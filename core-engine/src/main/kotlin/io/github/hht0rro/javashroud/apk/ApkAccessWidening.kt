@@ -96,8 +96,15 @@ internal object ApkAccessWidening {
         }
         // Resolve symbolic owners to declarations before checking the rename boundary.
         // R8 can reference an inherited member through the caller's own class name.
+        val virtualMethodsByClass = mutableMapOf<String, Map<MemberRef, Int>>()
         for ((caller, bytes) in bytesByClass) {
             val node = parseNode(bytes) ?: continue
+            virtualMethodsByClass[caller] = node.methods.orEmpty()
+                .filter { method ->
+                    method.access and (Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC) == 0 &&
+                        !method.name.startsWith("<") && !isSerializationHook(method.name, method.desc)
+                }
+                .associate { method -> MemberRef(true, method.name, method.desc) to method.access }
             for (method in node.methods.orEmpty()) {
                 for (instruction in method.instructions ?: continue) {
                     val target = when (instruction) {
@@ -118,6 +125,27 @@ internal object ApkAccessWidening {
                     addTarget(owner, ref)
                     if (samePackage) protectedTargets.getOrPut(owner) { mutableSetOf() } += ref
                 }
+            }
+        }
+        // A constructor can dispatch to its own package-private abstract method,
+        // whose implementation is a bridge on a kept subclass. Relocation must
+        // preserve the original same-package override relation across that boundary.
+        for ((owner, methods) in virtualMethodsByClass) {
+            val originalPackage = owner.substringBeforeLast('/', "")
+            var ancestor = classInfos[owner]?.superName
+            val visited = mutableSetOf(owner)
+            while (ancestor != null && visited.add(ancestor)) {
+                if ((owner in keptClassNames) != (ancestor in keptClassNames) &&
+                    ancestor.substringBeforeLast('/', "") == originalPackage
+                ) {
+                    for ((ref, access) in virtualMethodsByClass[ancestor].orEmpty()) {
+                        if (ref !in methods || !needsWidening(access)) continue
+                        addTarget(ancestor, ref)
+                        addTarget(owner, ref)
+                        protectedTargets.getOrPut(owner) { mutableSetOf() } += ref
+                    }
+                }
+                ancestor = classInfos[ancestor]?.superName
             }
         }
         // (c) class-level widening: package-private classes participate in the
