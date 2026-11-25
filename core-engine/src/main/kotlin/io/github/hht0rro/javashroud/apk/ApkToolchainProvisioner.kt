@@ -24,6 +24,8 @@ object ApkToolchainProvisioner {
     const val D8_MAIN_CLASS = "com.android.tools.r8.D8"
     const val REAL_TOOLS_SKIP_ENV = "JAVASHROUD_APK_REAL_TOOLS"
 
+    private const val DEX2JAR_FIX_JAR = "javashroud-dex2jar-fixes.jar"
+
     /** build-tools 34.0.0 d8.jar (dev fallback only; the fat jar embeds r8). */
     private const val SDK_D8_SHA256 = "d43c8a94c9b1f1da1a7cc49c32b81e8cee1708b37ee8b530a81a0688222b42c0"
     private const val SDK_D8_SIZE = 14_929_869L
@@ -34,6 +36,7 @@ object ApkToolchainProvisioner {
         val d8Jar: Path,
         val dex2jarSource: String,
         val d8Source: String,
+        val fixJar: Path? = null,
     )
 
     fun ensure(
@@ -44,7 +47,13 @@ object ApkToolchainProvisioner {
         environment: (String) -> String? = System::getenv,
     ): ApkToolchain {
         val javaExecutable = resolveJavaExecutable(environment)
-        val dex2jar = resolveDex2Jar(dex2jarDirOverride, userHome)
+        val bundledDex2jar = resolveDex2Jar("", userHome)
+        val fixJar = bundledDex2jar.first.resolve(DEX2JAR_FIX_JAR)
+        require(Files.isRegularFile(fixJar)) {
+            "vendored dex2jar fix jar is missing from the verified toolchain: $fixJar"
+        }
+        val dex2jar = if (dex2jarDirOverride.isBlank()) bundledDex2jar
+            else resolveDex2Jar(dex2jarDirOverride, userHome)
         val d8 = resolveD8(d8JarOverride, androidHome)
         return ApkToolchain(
             javaExecutable = javaExecutable,
@@ -52,6 +61,7 @@ object ApkToolchainProvisioner {
             dex2jarSource = dex2jar.second,
             d8Jar = d8.first,
             d8Source = d8.second,
+            fixJar = fixJar,
         )
     }
 
@@ -97,6 +107,9 @@ object ApkToolchainProvisioner {
         }
         val sums = decodeSums(sumsBytes)
         require(sums.isNotEmpty()) { "vendored dex2jar manifest is empty" }
+        require(sums.containsKey(DEX2JAR_FIX_JAR)) {
+            "vendored dex2jar manifest does not authenticate $DEX2JAR_FIX_JAR"
+        }
         val directoryName = "dex2jar-" + sha256Hex(sumsBytes).substring(0, 16)
         val installDir = cacheRoot.resolve(directoryName)
         Files.createDirectories(cacheRoot)

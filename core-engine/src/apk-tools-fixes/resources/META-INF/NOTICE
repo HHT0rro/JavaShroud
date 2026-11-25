@@ -1,0 +1,5 @@
+DexFix is derived from dex2jar 2.4.28 dex-translator.
+Copyright dex2jar contributors, including Bob Pan and maintained fork contributors.
+Licensed under the Apache License, Version 2.0.
+JavaShroud modified the long-string conversion on 2026-11-26.
+Source archive and modification scope are recorded in THIRD_PARTY_NOTICES.md.

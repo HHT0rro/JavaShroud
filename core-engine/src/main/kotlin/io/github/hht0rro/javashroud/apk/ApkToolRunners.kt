@@ -1,6 +1,7 @@
 package io.github.hht0rro.javashroud.apk
 
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.LinkOption
@@ -217,6 +218,10 @@ open class ApkDex2JarRunner(
         Files.write(dexFile, dex.bytes)
         val outputJar = conversionDirectory.resolve("classes.jar")
         val exceptionFile = conversionDirectory.resolve("conversion-errors.zip")
+        val classpath = listOfNotNull(
+            toolchain.fixJar?.toAbsolutePath()?.toString(),
+            wildcardClasspath(toolchain.dex2jarDirectory),
+        ).joinToString(File.pathSeparator)
         val command = listOf(
             toolchain.javaExecutable.toAbsolutePath().toString(),
         ) + ApkProcessSupport.childJvmMemoryFlags(
@@ -224,7 +229,7 @@ open class ApkDex2JarRunner(
             ApkProcessSupport.DEX2JAR_XMX_DEFAULT,
         ) + listOf(
             "-cp",
-            wildcardClasspath(toolchain.dex2jarDirectory),
+            classpath,
             ApkToolchainProvisioner.DEX2JAR_MAIN_CLASS,
             // DEX identities must match the source allocation index and Android references.
             "--dont-sanitize-names",

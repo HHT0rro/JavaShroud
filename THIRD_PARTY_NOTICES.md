@@ -50,6 +50,14 @@ extraction (mismatch deletes the extraction and fails closed).
   `de.femtopedia.dex2jar:dex-tools:2.4.28`
 - License: Apache License 2.0. Compatible with this repository's GPL-3.0.
 
+JavaShroud compiles a source-derived `DexFix` repair from the fixed 2.4.28
+source archive into `javashroud-dex2jar-fixes.jar`. The modified source is in
+`core-engine/src/apk-tools-fixes/java/com/googlecode/d2j/dex/DexFix.java`.
+It preserves the existing static-field fixes and repairs classfile UTF8
+splitting, temporary-register allocation, incoming parameters and interned
+string identity. The repair JAR is covered by the same SHA-256SUMS manifest
+and precedes the upstream jars on the converter process classpath.
+
 ## Apache Commons Compress
 
 APK archive fidelity (raw-entry re-packing, metadata preservation) uses Apache

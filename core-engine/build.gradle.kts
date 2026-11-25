@@ -405,12 +405,29 @@ val packageRustNativeRuntime = tasks.register<Sync>("packageRustNativeRuntime") 
     }
 }
 
+val compileApkDexToolsFixes = tasks.register<JavaCompile>("compileApkDexToolsFixes") {
+    source(fileTree("src/apk-tools-fixes/java") { include("**/*.java") })
+    classpath = apkDexToolsConfiguration
+    destinationDirectory.set(layout.buildDirectory.dir("classes/apk-tools-fixes"))
+    options.release.set(8)
+}
+
+val packageApkDexToolsFixes = tasks.register<Jar>("packageApkDexToolsFixes") {
+    archiveFileName.set("javashroud-dex2jar-fixes.jar")
+    destinationDirectory.set(layout.buildDirectory.dir("generated/apk-tools-fixes"))
+    from(compileApkDexToolsFixes.flatMap { it.destinationDirectory })
+    from("src/apk-tools-fixes/resources")
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
+
 val packageApkDexTools = tasks.register<Sync>("packageApkDexTools") {
     group = "build"
     description = "Vendors the dex-tools jar closure as engine resources with a generated SHA-256SUMS manifest."
     val resourceRoot = apkDexToolsResourceRoot
     into(resourceRoot.map { root -> root.dir("META-INF/apk-tools/dex2jar") })
     from(apkDexToolsConfiguration)
+    from(packageApkDexToolsFixes.flatMap { it.archiveFile })
     doLast {
         fun sha256Of(file: File): String {
             val digest = MessageDigest.getInstance("SHA-256")

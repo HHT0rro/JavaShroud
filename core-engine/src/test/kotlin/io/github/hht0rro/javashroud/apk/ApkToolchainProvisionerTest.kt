@@ -7,6 +7,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import org.junit.jupiter.api.io.TempDir
 
 class ApkToolchainProvisionerTest {
 
@@ -82,5 +83,42 @@ class ApkToolchainProvisionerTest {
         } finally {
             Files.write(victim, original)
         }
+    }
+
+    @Test
+    fun authenticatedFixIsRepairedWhenTamperedOrMissing(@TempDir work: Path) {
+        val original = ApkToolchainProvisioner.ensure("", "", userHome = work)
+        val fix = assertNotNull(original.fixJar)
+        val expected = Files.readAllBytes(fix)
+        Files.write(fix, byteArrayOf(0))
+        val repaired = ApkToolchainProvisioner.ensure("", "", userHome = work)
+        assertTrue(Files.readAllBytes(assertNotNull(repaired.fixJar)).contentEquals(expected))
+        Files.delete(assertNotNull(repaired.fixJar))
+        val restored = ApkToolchainProvisioner.ensure("", "", userHome = work)
+        assertTrue(Files.readAllBytes(assertNotNull(restored.fixJar)).contentEquals(expected))
+    }
+
+    @Test
+    fun customToolsUseTheAuthenticatedFixWithoutDirectoryWrites(@TempDir work: Path) {
+        val home = work.resolve("home")
+        val bundled = ApkToolchainProvisioner.ensure("", "", userHome = home)
+        val custom = Files.createDirectory(work.resolve("custom-tools"))
+        val expected = linkedMapOf<String, String>()
+        Files.list(bundled.dex2jarDirectory).use { jars ->
+            jars.filter { it != bundled.fixJar }.forEach { jar ->
+                Files.copy(jar, custom.resolve(jar.fileName))
+                expected[jar.fileName.toString()] = ApkToolchainProvisioner.sha256Hex(Files.readAllBytes(jar))
+            }
+        }
+        val overridden = ApkToolchainProvisioner.ensure(custom.toString(), "", userHome = home)
+        assertEquals("config", overridden.dex2jarSource)
+        assertEquals(custom, overridden.dex2jarDirectory)
+        assertEquals(bundled.fixJar, overridden.fixJar)
+        val actual = Files.list(custom).use { jars ->
+            jars.toList().associate { jar ->
+                jar.fileName.toString() to ApkToolchainProvisioner.sha256Hex(Files.readAllBytes(jar))
+            }
+        }
+        assertEquals(expected, actual)
     }
 }
