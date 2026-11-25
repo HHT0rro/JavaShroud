@@ -163,6 +163,7 @@ Qp runtime 是 Rust-only 边界，源码随引擎分发在 `core-engine/src/main
 `-config` 支持输入单个 APK。配置里令 `inputJarPath` 指向 `.apk`，可设置 `artifactFormat = "apk"` 或追加 `--apk`。引擎将 DEX 转换为 class，根据 Manifest、资源和 JNI 等引用生成保留规则，执行管线，再经 D8 生成 DEX、重打包、对齐并以 v1+v2 重签名。资源表和原有 Native 库保持原字节。D8 可以重新划分 DEX，输出数量可能改变。默认使用调试密钥，发布或覆盖升级时请使用应用对应的签名证书。
 
 APK 中的 `META-INF/services/` 登记文件保持原字节；它引用的服务接口和实现类如果在 APK 内，也保留原类名，以便 `ServiceLoader` 按原登记发现它们。
+APK 内已有的 `j$` Java API 兼容类保留原名，与应用类分开生成 DEX，两组仍发布到同一个 APK。
 
 ```powershell
 java -cp build\core-engine\install\core-engine\lib\* io.github.hht0rro.javashroud.MainKt ^

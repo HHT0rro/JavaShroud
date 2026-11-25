@@ -59,6 +59,46 @@ object ApkValidation {
         return classDefs
     }
 
+    internal fun validateDisjointDexClasses(dexes: List<Pair<String, ByteArray>>) {
+        val seen = HashMap<String, String>()
+        for ((name, bytes) in dexes) {
+            validateDexHeader(name, bytes)
+            fun table(countField: Int, width: Int): Pair<Int, Int> {
+                val count = readUInt(bytes, countField).toInt()
+                val offset = readUInt(bytes, countField + 4).toInt()
+                require(count >= 0 && offset >= 0 && offset.toLong() + count.toLong() * width <= bytes.size) {
+                    "dex entry '$name' has an out-of-bounds class identity table"
+                }
+                return count to offset
+            }
+            val (strings, stringsAt) = table(0x38, 4)
+            val (types, typesAt) = table(0x40, 4)
+            val (classes, classesAt) = table(0x60, 32)
+            for (index in 0 until classes) {
+                val type = readUInt(bytes, classesAt + index * 32).toInt()
+                require(type in 0 until types) { "dex entry '$name' has an invalid class type index" }
+                val string = readUInt(bytes, typesAt + type * 4).toInt()
+                require(string in 0 until strings) { "dex entry '$name' has an invalid descriptor string index" }
+                var cursor = readUInt(bytes, stringsAt + string * 4).toInt()
+                require(cursor in DEX_HEADER_SIZE until bytes.size) { "dex entry '$name' has an invalid descriptor location" }
+                var lengthBytes = 0
+                while (cursor < bytes.size && bytes[cursor].toInt() and 0x80 != 0 && lengthBytes < 4) {
+                    cursor++
+                    lengthBytes++
+                }
+                require(cursor < bytes.size && bytes[cursor].toInt() and 0x80 == 0) { "dex entry '$name' has an invalid descriptor length" }
+                val start = cursor + 1
+                cursor = start
+                while (cursor < bytes.size && bytes[cursor] != 0.toByte()) cursor++
+                require(cursor < bytes.size && cursor > start) { "dex entry '$name' has an unterminated class descriptor" }
+                // Preserve DEX modified UTF-8 bytes exactly, including supplementary identifier characters.
+                val descriptor = String(bytes, start, cursor - start, Charsets.ISO_8859_1)
+                val previous = seen.putIfAbsent(descriptor, name)
+                require(previous == null) { "dex class '$descriptor' is defined more than once ($previous and $name)" }
+            }
+        }
+    }
+
     data class WorkJarScan(
         val classNames: Set<String>,
         val membersByOwner: Map<String, Set<Pair<String, String>>>,

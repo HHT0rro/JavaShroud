@@ -6,6 +6,7 @@ import java.util.jar.JarOutputStream
 import java.util.zip.ZipEntry
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Assumptions
 import org.junit.jupiter.api.io.TempDir
@@ -13,6 +14,7 @@ import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.tree.ClassNode
+import org.objectweb.asm.tree.MethodInsnNode
 import org.objectweb.asm.tree.TypeInsnNode
 
 /**
@@ -21,6 +23,64 @@ import org.objectweb.asm.tree.TypeInsnNode
  * JAVASHROUD_APK_REAL_TOOLS=skip to bypass on restricted runners.
  */
 class ApkRealToolchainRoundTripTest {
+
+    @Test
+    fun packagedDesugaredLibraryAndApplicationProduceSeparateDexGroups(@TempDir work: Path) {
+        Assumptions.assumeTrue(System.getenv(ApkToolchainProvisioner.REAL_TOOLS_SKIP_ENV) != "skip")
+        val app = "fixture/App"
+        val provider = "j\$/nio/file/spi/FixtureProvider"
+        fun classWithMarker(owner: String): ByteArray {
+            val writer = ClassWriter(ClassWriter.COMPUTE_MAXS)
+            writer.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC, owner, null, "java/lang/Object", null)
+            val method = writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "marker", "()I", null, null)
+            method.visitCode()
+            if (owner == app) method.visitMethodInsn(Opcodes.INVOKESTATIC, provider, "marker", "()I", false)
+            else method.visitIntInsn(Opcodes.BIPUSH, 42)
+            method.visitInsn(Opcodes.IRETURN)
+            method.visitMaxs(0, 0)
+            method.visitEnd()
+            writer.visitEnd()
+            return writer.toByteArray()
+        }
+        val input = work.resolve("app-and-library.jar")
+        JarOutputStream(Files.newOutputStream(input)).use { jar ->
+            for (owner in listOf(app, provider)) {
+                jar.putNextEntry(ZipEntry("$owner.class"))
+                jar.write(classWithMarker(owner))
+                jar.closeEntry()
+            }
+        }
+        val toolchain = ApkToolchainProvisioner.ensure(dex2jarDirOverride = "", d8JarOverride = "")
+        val dex = ApkD8Runner().compile(toolchain, input, work.resolve("dex"), minApi = 23, androidJarPath = "") {}
+        assertEquals(listOf("classes.dex", "classes2.dex"), dex.map { it.first })
+        val duplicate = assertFailsWith<IllegalArgumentException> {
+            ApkValidation.validateDisjointDexClasses(dex + ("classes3.dex" to dex[1].second))
+        }
+        assertTrue(duplicate.message.orEmpty().contains("defined more than once"))
+        val converted = dex.mapIndexed { i, (name, bytes) ->
+            ApkValidation.validateDexHeader(name, bytes)
+            ApkDex2JarRunner().convert(toolchain, ApkInputUnpacker.ApkDexInput(name, i + 1, bytes), work) {}
+        }
+        assertEquals(listOf("$app.class"), converted[0].classNames)
+        assertEquals(listOf("$provider.class"), converted[1].classNames)
+        val node = ClassNode()
+        java.util.jar.JarFile(converted[0].jarPath.toFile()).use { jar ->
+            jar.getInputStream(jar.getJarEntry("$app.class")).use { ClassReader(it).accept(node, 0) }
+        }
+        val call = node.methods.single().instructions.filterIsInstance<MethodInsnNode>().single()
+        assertEquals(provider, call.owner)
+        assertEquals("marker", call.name)
+    }
+
+    @Test
+    fun toolOutputKeepsTheFailureAmongVerboseWarnings() {
+        val output = "Info: first hint\n" + "Info: noisy build hint\n".repeat(600) +
+            "Error: packaged library classes cannot be merged\n" + "Info: more build hints\n".repeat(600) + "Final tool status\n"
+        val preview = ApkProcessSupport.preview(output)
+        assertTrue(preview.length <= 8_000)
+        assertTrue("Info: first hint" in preview && "Final tool status" in preview)
+        assertTrue("Error: packaged library classes cannot be merged" in preview)
+    }
 
     @Test
     fun desugaredCompanionNameKeepsItsDexAllocationIdentity(@TempDir work: Path) {

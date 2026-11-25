@@ -6,7 +6,9 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+import java.util.jar.JarFile
 import java.util.jar.JarInputStream
+import java.util.jar.JarOutputStream
 import java.util.zip.ZipEntry
 
 /**
@@ -85,8 +87,14 @@ object ApkProcessSupport {
         }
     }
 
-    fun preview(output: String): String =
-        if (output.length <= OUTPUT_PREVIEW_LIMIT) output.trim() else output.take(OUTPUT_PREVIEW_LIMIT) + "…"
+    fun preview(output: String): String {
+        if (output.length <= OUTPUT_PREVIEW_LIMIT) return output.trim()
+        val errors = output.lineSequence().filter { it.startsWith("Error") || it.startsWith("Caused by:") }
+            .take(5).joinToString("\n") { it.take(400) }
+        val window = (OUTPUT_PREVIEW_LIMIT - errors.length - 24) / 2
+        return output.take(window).trimEnd() + "\n…\n" +
+            (if (errors.isEmpty()) "" else "$errors\n…\n") + output.takeLast(window).trimStart()
+    }
 }
 
 /** dex -> class jar conversion via the vendored Dex2jarCmd closure. */
@@ -168,6 +176,30 @@ open class ApkD8Runner(
         log: (String) -> Unit,
     ): List<Pair<String, ByteArray>> {
         Files.createDirectories(outputDirectory)
+        val split = splitDesugaredLibraryInputs(inputJar, outputDirectory)
+        if (split == null) return compileGroup(toolchain, inputJar, outputDirectory, minApi, androidJarPath, log)
+
+        val (app, library) = split
+        // D8 prohibits merging DEX containing j$. with application classes. The two program
+        // groups see each other for resolution, but the archive keeps their DEX files separate.
+        log("d8: compiling application and packaged desugared library as separate DEX groups")
+        val appDex = compileGroup(toolchain, app, outputDirectory.resolve("application"), minApi, androidJarPath, log, library)
+        val libraryDex = compileGroup(toolchain, library, outputDirectory.resolve("desugared-library"), minApi, androidJarPath, log, app)
+        return (appDex + libraryDex).mapIndexed { index, (_, bytes) ->
+            (if (index == 0) "classes.dex" else "classes${index + 1}.dex") to bytes
+        }.also(ApkValidation::validateDisjointDexClasses)
+    }
+
+    private fun compileGroup(
+        toolchain: ApkToolchainProvisioner.ApkToolchain,
+        inputJar: Path,
+        outputDirectory: Path,
+        minApi: Int,
+        androidJarPath: String,
+        log: (String) -> Unit,
+        counterpart: Path? = null,
+    ): List<Pair<String, ByteArray>> {
+        Files.createDirectories(outputDirectory)
         val command = mutableListOf(
             toolchain.javaExecutable.toAbsolutePath().toString(),
         )
@@ -188,6 +220,7 @@ open class ApkD8Runner(
         if (androidJarPath.isNotBlank()) {
             command += listOf("--lib", Path.of(androidJarPath).toAbsolutePath().toString())
         }
+        if (counterpart != null) command += listOf("--classpath", counterpart.toAbsolutePath().toString())
         command += inputJar.toAbsolutePath().toString()
         log("d8 argv: ${command.joinToString(" ")}")
         val result = runner(command, timeoutMillis)
@@ -200,4 +233,25 @@ open class ApkD8Runner(
         require(dexes.isNotEmpty()) { "D8 produced no classes.dex in ${outputDirectory}" }
         return dexes.map { file -> file.name to Files.readAllBytes(file.toPath()) }
     }
+
+    private fun splitDesugaredLibraryInputs(inputJar: Path, outputDirectory: Path): Pair<Path, Path>? =
+        JarFile(inputJar.toFile()).use { jar ->
+            val classes = jar.entries().asSequence().filter { !it.isDirectory && it.name.endsWith(".class") }.toList()
+            if (classes.none { it.name.startsWith("j\$/") }) return null
+            val (library, app) = classes.partition { it.name.startsWith("j\$/") || it.name.startsWith("java/") }
+            if (app.isEmpty()) return null
+            val work = Files.createTempDirectory(outputDirectory, "d8-inputs-")
+            fun writeGroup(name: String, group: List<java.util.jar.JarEntry>): Path {
+                val output = work.resolve(name)
+                JarOutputStream(Files.newOutputStream(output)).use { target ->
+                    for (entry in group) {
+                        target.putNextEntry(ZipEntry(entry.name))
+                        jar.getInputStream(entry).use { it.copyTo(target) }
+                        target.closeEntry()
+                    }
+                }
+                return output
+            }
+            writeGroup("application.jar", app) to writeGroup("desugared-library.jar", library)
+        }
 }

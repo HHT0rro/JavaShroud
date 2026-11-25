@@ -179,7 +179,8 @@ object ApkKeepRuleSynthesis {
         // On a supporting Android version the boot class loader resolves these names to the SDK classes.
         // Moving the packaged placeholder would also rewrite platform method descriptors and superclass names.
         for (info in loaded) {
-            if (info.isAndroidFrameworkPlaceholder) classKeeps += info.internalName
+            // Keep the desugared library's namespace intact for existing references and the D8 partition.
+            if (info.isAndroidFrameworkPlaceholder || info.internalName.startsWith("j\$/")) classKeeps += info.internalName
         }
 
         // 1. Manifest components (intersected with actually loaded classes).

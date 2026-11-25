@@ -174,6 +174,7 @@ The two approaches can coexist; in JavaShroud the Native layer is part of a virt
 `-config` accepts a single APK. Point `inputJarPath` at the APK and optionally set `artifactFormat = "apk"` or pass `--apk`. The engine converts DEX to classes, builds keep rules from the manifest, resources, and JNI references, runs the pipeline, then recompiles with D8, repacks, aligns, and signs with v1 and v2. Resources and existing native libraries retain their bytes. D8 can change the number of DEX files. The engine uses a debug key by default. Use the app's signing certificate for release or upgrade builds.
 
 The APK retains the exact bytes of `META-INF/services/` files and the original names of any service interfaces and providers they reference within the APK, so `ServiceLoader` can still find them.
+Bundled `j$` Java API compatibility classes retain their names. They compile into separate DEX files within the same APK.
 
 ```powershell
 java -cp build\core-engine\install\core-engine\lib\* io.github.hht0rro.javashroud.MainKt ^
