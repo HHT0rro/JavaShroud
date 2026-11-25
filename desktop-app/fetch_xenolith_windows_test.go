@@ -273,3 +273,31 @@ func TestFetchXenolithRejectsHardLinkedExecutableDestination(t *testing.T) {
 	assertFetchFile(t, fixture.output, input)
 	assertFetchFile(t, fixture.info, fixture.oldInfo)
 }
+
+func TestFetchXenolithRestoresBackupWhenReplacementReportsFailure(t *testing.T) {
+	for _, state := range []string{"old executable moved to backup", "replacement already at destination"} {
+		t.Run(state, func(t *testing.T) {
+			fixture := newFetchFixture(t)
+			contents, err := os.ReadFile(fixture.script)
+			if err != nil {
+				t.Fatal(err)
+			}
+			call := "Set-VerifiedFile $stagePath $OutPath $priorExe"
+			if strings.Count(string(contents), call) != 1 {
+				t.Fatal("executable replacement fault location is missing or ambiguous")
+			}
+			replacement := "[IO.File]::Move($OutPath, $priorExe)"
+			if state == "replacement already at destination" {
+				replacement = call
+			}
+			// Model the filesystem states possible when replacement fails after saving a backup.
+			replacement += "\n                throw 'owned replacement failure after backup creation'"
+			writeFetchFile(t, fixture.script, []byte(strings.Replace(string(contents), call, replacement, 1)))
+			log, err := runFetchScript(t, fixture, fixture.output, nil, true)
+			if err == nil {
+				t.Fatalf("injected replacement failure was ignored: %s", log)
+			}
+			assertFetchPair(t, fixture)
+		})
+	}
+}

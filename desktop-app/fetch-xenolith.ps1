@@ -534,7 +534,7 @@ try {
             try { Set-VerifiedFile $priorInfo $infoPath }
             catch { $rollbackErrors += $_.Exception.Message }
         }
-        if ($executableChanged) {
+        if ($executableChanged -or [IO.File]::Exists($priorExe)) {
             try {
                 if ([IO.File]::Exists($priorExe)) { Set-VerifiedFile $priorExe $OutPath }
                 else { [IO.File]::Delete((Get-PlainPath $OutPath)) }
