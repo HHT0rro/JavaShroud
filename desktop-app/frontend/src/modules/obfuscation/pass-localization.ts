@@ -1,0 +1,474 @@
+import type { ParamSchema, PassItem } from './types'
+
+export type DisplayLanguage = 'zh' | 'en'
+
+interface LocalizedText {
+  readonly zh: string
+  readonly en: string
+}
+
+interface LocalizedPassCopy {
+  readonly name: LocalizedText
+  readonly description: LocalizedText
+  readonly params?: Readonly<Record<string, LocalizedText>>
+}
+
+const text = (zh: string, en: string): LocalizedText => ({ zh, en })
+
+const categoryLabels: Readonly<Record<string, LocalizedText>> = {
+  all: text('全部', 'All'),
+  'metadata-cleanup': text('元数据清理', 'Metadata cleanup'),
+  'symbol-renaming': text('符号重命名', 'Symbol renaming'),
+  'member-hiding': text('成员隐藏', 'Member hiding'),
+  'string-protection': text('字符串与载荷保护', 'String and payload protection'),
+  'helper-loader': text('辅助运行时与加载器', 'Runtime helpers and loaders'),
+  'control-flow': text('控制流与调用伪装', 'Control flow and call camouflage'),
+  'decompiler-traps': text('反编译干扰', 'Decompiler disruption'),
+  'runtime-defense': text('运行时防御', 'Runtime defense'),
+  virtualization: text('虚拟化保护', 'Virtualization protection'),
+  'native-kernel': text('Native 内核', 'Native kernel'),
+  metadata: text('元数据', 'Metadata'),
+  renaming: text('重命名', 'Renaming'),
+  encryption: text('加密', 'Encryption'),
+  obfuscation: text('结构混淆', 'Structure'),
+  hiding: text('隐藏', 'Hiding'),
+  aggressive: text('激进', 'Aggressive'),
+  unknown: text('其他', 'Other'),
+}
+
+const riskLabels: Readonly<Record<PassItem['risk'], LocalizedText>> = {
+  low: text('低风险', 'Low risk'),
+  medium: text('中风险', 'Medium risk'),
+  high: text('高风险', 'High risk'),
+}
+
+export const uiText: Readonly<Record<string, LocalizedText>> = {
+  home: text('首页', 'Home'),
+  inputOutput: text('输入与输出', 'Input and output'),
+  passes: text('功能', 'Passes'),
+  passFeatures: text('混淆功能', 'Obfuscation features'),
+  rules: text('排除规则', 'Rules'),
+  classScope: text('类树范围', 'Class scope'),
+  logs: text('日志', 'Logs'),
+  eventStream: text('事件流', 'Event stream'),
+  about: text('关于', 'About'),
+  projectLicense: text('项目与协议', 'Project and license'),
+  enabledPasses: text('启用 Pass', 'Enabled passes'),
+  excludedRules: text('排除规则', 'Excluded rules'),
+  start: text('开始混淆', 'Start obfuscation'),
+  cancel: text('取消任务', 'Cancel task'),
+  importConfig: text('导入配置', 'Import config'),
+  exportConfig: text('导出配置', 'Export config'),
+  windowControls: text('窗口与语言控制', 'Window and language controls'),
+  switchTo: text('切换到', 'Switch to'),
+  appNav: text('JavaShroud 工作台导航', 'JavaShroud workbench navigation'),
+  workbenchSections: text('工作台分区', 'Workbench sections'),
+  configSummary: text('当前配置摘要', 'Current configuration summary'),
+  projectInfo: text('项目信息', 'Project information'),
+  minimize: text('最小化窗口', 'Minimize window'),
+  restore: text('还原窗口', 'Restore window'),
+  maximize: text('最大化窗口', 'Maximize window'),
+  close: text('关闭窗口', 'Close window'),
+  aboutApp: text('关于应用', 'About app'),
+  aboutDescription: text('一款基于 GPL-3.0 开源协议发布的 JVM 字节码混淆器。', 'A JVM bytecode obfuscator released under the GPL-3.0 open-source license.'),
+  aboutStack: text('核心混淆引擎基于 Kotlin，桌面宿主采用 Go/Wails，前端由 Vue 3 提供可视化配置与运行反馈。', 'The core engine is built with Kotlin, the desktop host uses Go/Wails, and the Vue 3 frontend provides visual configuration and run feedback.'),
+  openSourceLicense: text('开源协议', 'Open-source license'),
+  licenseDescription: text('JavaShroud 基于 GNU General Public License v3.0 发布，允许使用、研究、修改与分发。', 'JavaShroud is released under the GNU General Public License v3.0, allowing use, study, modification, and distribution.'),
+  licenseObligation: text('如果分发修改版或衍生版本，需要在同一协议下提供对应源代码，并保留必要的版权与协议声明。', 'If you distribute modified or derived versions, the corresponding source code must be provided under the same license with required copyright and license notices.'),
+  viewGpl: text('查看 GPL-3.0 协议', 'View GPL-3.0 license'),
+}
+
+export const t = (key: keyof typeof uiText, language: DisplayLanguage): string => pick(uiText[key], language)
+
+const commonParamDescriptions: Readonly<Record<string, LocalizedText>> = {
+  algebraicFamily: text('代数谓词族：决定生成不透明谓词时采用哪类恒等式，用来改变假分支的形态和分析成本。', 'Algebraic predicate family: chooses which identity family builds opaque predicates, changing fake branch shape and analysis cost.'),
+  algorithm: text('兼容算法：旧版字符串算法选项；新配置建议优先使用“加密策略”。', 'Legacy algorithm: older string algorithm selector. Prefer strategy for new configurations.'),
+  bindingSource: text('环境绑定来源：指定密钥依赖哪些环境特征，例如硬件指纹、JVM 参数或证书指纹。', 'Binding source: defines which environment signals keys depend on, such as hardware identity, JVM parameters, or certificate fingerprints.'),
+  collisionPolicy: text('命名冲突策略：新名称重复时选择追加序号、重新生成，或直接报错停止。', 'Collision policy: chooses whether duplicate names receive a suffix, are regenerated, or fail the run.'),
+  count: text('注入数量：控制每个插入点加入多少条垃圾指令；值越高体积和性能风险越高。', 'Injection count: controls how many junk instructions are added at each site. Higher values increase size and performance risk.'),
+  codeSectionEncryption: text('代码段扰动：通过重编译期源码和编译参数变化制造 native 二进制差异。', 'Code-section diversity: varies native binaries through recompilation-time source and compiler changes.'),
+  density: text('扰动密度：控制每个方法中插入多少分发节点、异常边或噪声块。值越高混淆越强，字节码也越膨胀。', 'Density: controls how many dispatcher nodes, exception edges, or noise blocks are inserted per method. Higher values strengthen obfuscation and grow bytecode.'),
+  depth: text('嵌套深度：控制 try-finally 或包装层数。越深越难读，也越容易产生体积膨胀。', 'Depth: controls try-finally or wrapper nesting. Deeper nesting is harder to read and can grow bytecode quickly.'),
+  detectionLevel: text('检测级别：控制反插桩检查的强度，仅保留 standard 与 aggressive 两档。', 'Detection level: controls OS anti-debug intensity with only standard and aggressive modes.'),
+  detectionMode: text('检测模式：选择被动检查还是主动持续观察 agent 或运行时状态变化。', 'Detection mode: chooses passive checks or active monitoring of agent and runtime state changes.'),
+  dictionaryFile: text('自定义字典文件：每行一个候选名称，仅在字典风格选择自定义文件时使用。', 'Custom dictionary file: one candidate name per line, used when dictionary style is set to custom file.'),
+  dictionaryStyle: text('命名字典风格：决定生成新名称的字符形态，例如顺序编号、相似字符或自定义词库。', 'Naming dictionary style: controls generated name appearance, such as sequential counters, confusable characters, or a custom dictionary.'),
+  dispatchMode: text('分发模式：选择控制流重组时的跳转结构，例如条件链、查找表或混合 switch。', 'Dispatch mode: selects the jump structure used for rewritten control flow, such as if chains, lookup tables, or hybrid switch dispatch.'),
+  encryptionStrategy: text('加密策略：决定类、方法体或载荷使用的加密算法与包装方式，影响强度、依赖和启动成本。', 'Encryption strategy: selects the algorithm and wrapping style for classes, method bodies, or payloads, affecting strength, dependencies, and startup cost.'),
+  frequency: text('插入频率：每隔多少条指令插入一个不透明谓词或噪声逻辑；值越小覆盖越密。', 'Insertion frequency: inserts an opaque predicate or noise block every N instructions. Smaller values mean denser coverage.'),
+  handlerComplexity: text('处理器复杂度：控制虚假异常处理器或分发块中放入多少噪声逻辑。', 'Handler complexity: controls how much noise logic is placed inside bogus exception handlers or dispatcher blocks.'),
+  kernelComponents: text('内核组件集：选择 JNI 微内核携带哪些能力，例如加载器、解密器或调度桥。', 'Kernel components: selects which JNI microkernel capabilities ship, such as loader, decryptor, or dispatch bridge.'),
+  keyMode: text('密钥作用域：选择密钥按类、按方法还是全局复用；粒度越细，泄露影响面越小。', 'Key scope: chooses per-class, per-method, or global key reuse. Finer scope reduces blast radius after disclosure.'),
+  layerMode: text('解密层级：选择单层或多层解密 stub；多层更难逆向，但会增加调用和初始化成本。', 'Layer mode: chooses single or multi-layer decrypt stubs. More layers are harder to reverse but add call and initialization cost.'),
+  lengthThreshold: text('长度阈值：按长度过滤时，只有达到该长度的字符串才会参与加密。', 'Length threshold: when length filtering is active, only strings at or above this length are encrypted.'),
+  migrationStrategy: text('迁移策略：选择常量或敏感值迁移到 condy、运行时构造器，或两者混合。', 'Migration strategy: chooses whether constants or sensitive values move to condy, runtime builders, or a hybrid of both.'),
+  methodSelection: text('方法选择策略：控制广义类规则虚拟化哪些方法，可保守选择、自动识别关键方法或强制覆盖所有 VM 兼容方法。', 'Method selection strategy: controls which methods broad class rules virtualize, from conservative selection to critical auto-detection or all VM-compatible methods.'),
+  mode: text('工作模式：控制该 pass 的主要行为分支，例如自动排序、仅校验、拒绝冲突或延迟解密。', 'Mode: controls the main behavior branch for this pass, such as auto-sort, validate-only, reject-conflicts, or delayed decryption.'),
+  nativeProtectionLevel: text('native 反逆向保护级别：standard 包含反调试与反反汇编扰动；aggressive 额外启用反虚拟机检测和完整性自校验。', 'Native anti-reverse protection level: standard includes anti-debug and anti-disassembly diversity; aggressive adds anti-VM detection and integrity self-check.'),
+  nativeRecompilation: text('混淆时编译：强制用锁定的 Rust 工具链重编当前 Qp JNI runtime；缺失工具链时 fail-closed。', 'Compile during obfuscation: rebuilds the current Qp JNI runtime with the locked Rust toolchain and fails closed if the toolchain is missing.'),
+  pattern: text('插入模式：选择噪声块或分发块使用的字节码形态，例如死分支、算术空操作或字段噪声。', 'Insertion pattern: selects the bytecode shape for noise or dispatcher blocks, such as dead branches, arithmetic no-ops, or field noise.'),
+  preservePackageDepth: text('保留包层级：重命名包路径时保留前几层，兼顾反射、资源路径和包级约定。', 'Preserve package depth: keeps the first N package segments during package renaming for reflection, resource paths, or package conventions.'),
+  protectionLevel: text('防护等级：控制内存转储、heap dump 或密钥材料保护深度。', 'Protection level: controls the depth of memory-dump, heap-dump, or key-material protection.'),
+  response: text('响应策略：检测到风险环境后选择记录、降级、切换路径或拒绝运行。', 'Response strategy: chooses whether a risky environment is logged, degraded, switched to another path, or refused.'),
+  rotationStrategy: text('轮换策略：决定调用点或目标绑定按 epoch、计数器、线程局部或随机方式切换。', 'Rotation strategy: controls whether call sites or target bindings rotate by epoch, counter, thread-local state, or randomness.'),
+  scope: text('作用范围：选择哪些字符串、类或载荷进入该 pass 的处理范围。', 'Scope: selects which strings, classes, or payloads are processed by this pass.'),
+  seed: text('种子：作为非秘密个性化输入；具体 pass 是否可复现以能力说明为准，Native runtime 输出始终包含每产物随机材料。', 'Seed: non-secret personalization input. Reproducibility depends on the pass; Native runtime output always includes per-artifact random material.'),
+  targetPlatform: text('目标平台：选择原生微内核产物面向的系统和架构。', 'Target platform: selects the operating system and architecture for the native microkernel artifact.'),
+  trapDensity: text('陷阱密度：控制符号执行陷阱的注入频率；越密越难约束求解，也越重。', 'Trap density: controls symbolic-execution trap frequency. Denser traps are harder to solve and heavier to run.'),
+  virtualizationLevel: text('虚拟化级别：选择只保护关键路径还是更激进地虚拟化语义。', 'Virtualization level: chooses whether only key paths or more aggressive semantics are virtualized.'),
+  decoderBackend: text('解密器后端：native-kernel 使用 JNI 微内核解密（自动启用 JNI 加载器）；jvm-resolver 使用纯 JVM 内置解析器，无 native 依赖。', 'Decoder backend: native-kernel uses the JNI microkernel decoder (auto-enables the JNI loader); jvm-resolver uses a self-contained JVM resolver with no native dependency.'),
+  strength: text('保护强度：字符串解析器的保护等级，共 standard、strong、flow-guarded、max 四档，最高为 max；仅 jvm-resolver 后端生效。', 'Protection strength: string resolver level from standard up to the highest level max; applies to the jvm-resolver backend only.'),
+  payloadCodec: text('载荷编码：解析器载荷的编码族；auto 按强度自动派生，或手动选择 xor、indexed、des。', 'Payload codec: resolver payload encoding family; auto derives it from strength, or pick xor, indexed, or des manually.'),
+  rewriteMode: text('重写方式：arithmetic 算术等价改写；resolver 常量解析器调用点。', 'Rewriting mode: arithmetic keeps arithmetic-equivalent rewriting; resolver replaces constants with class-local resolver call sites.'),
+  intCoverage: text('int 覆盖等级：resolver 模式下 int 常量的覆盖范围，none 关闭，最高为 aggressive。', 'int coverage: integer constant coverage in resolver mode; none disables, aggressive is the highest level.'),
+  longCoverage: text('long 覆盖等级：resolver 模式下 long 常量的覆盖范围，none 关闭，最高为 normal。', 'long coverage: long constant coverage in resolver mode; none disables, normal is the highest level.'),
+  resolverCodec: text('解析器编码：resolver 模式下常量载荷的编码族，可选 xor 或 des。', 'Resolver codec: constant payload encoding family in resolver mode, either xor or des.'),
+  callSiteForm: text('调用点形态：bootstrap-table 为每类引导查找表；constant-resolver 为常量解析器调用点，首次解析后转为常量目标。', 'Call-site form: bootstrap-table uses a per-class bootstrap lookup table; constant-resolver wraps resolver members in first-resolve constant call sites.'),
+  branchInjection: text('条件边注入等级：基于状态字段的条件边扰动，与谓词分发叠加；none 关闭，最高为 aggressive。', 'Branch injection level: state-field conditional-edge perturbation combined with predicate dispatch; none disables, aggressive is the highest level.'),
+  handlerSplit: text('异常处理器拆分等级：同类型 handler 拆分与中继，与谓词分发叠加；none 关闭，最高为 heavy。', 'Handler split level: same-type handler split and relay combined with predicate dispatch; none disables, heavy is the highest level.'),
+  descriptorPadding: text('描述符填充：为符合条件的直接调用方法追加上下文参数；off 关闭，fixed 固定追加 long，random 按种子随机 int 或 long。', 'Descriptor padding: appends a context parameter to eligible direct-call methods; off disables, fixed appends a long, random picks int or long per method.'),
+  parameterPacking: text('参数打包：object-array 将符合条件的直接调用参数打包为单个 Object[]；off 关闭。', 'Parameter packing: object-array lowers eligible direct-call parameters into a single Object[]; off disables.'),
+  returnSensitiveNaming: text('返回类型敏感命名：允许按含返回类型的最终 JVM 描述符复用短名称。', 'Return-sensitive naming: allows short-name reuse keyed by final JVM descriptors, including return types.'),
+}
+
+const optionLabels: Readonly<Record<string, LocalizedText>> = {
+  active: text('主动', 'Active'),
+  'aes-128': text('AES-128', 'AES-128'),
+  'aes-256': text('AES-256', 'AES-256'),
+  aggressive: text('激进', 'Aggressive'),
+  all: text('随机混用', 'All / random mix'),
+  'all-compatible': text('全部兼容方法', 'All compatible'),
+  'all-strings': text('全部字符串', 'All strings'),
+  annotated: text('仅注解标记', 'Annotated only'),
+  annotation: text('注解', 'Annotation'),
+  'append-index': text('追加序号', 'Append index'),
+  'arithmetic-chain': text('算术链', 'Arithmetic chain'),
+  'arithmetic-nop': text('算术空操作', 'Arithmetic no-op'),
+  attribute: text('类属性', 'Class attribute'),
+  auto: text('自动', 'Auto'),
+  'auto-sort': text('自动排序', 'Auto sort'),
+  basic: text('基础', 'Basic'),
+  'bitwise-identity': text('位运算恒等式', 'Bitwise identity'),
+  caesar: text('凯撒位移', 'Caesar'),
+  'call-stack-depth': text('调用栈深度', 'Call stack depth'),
+  'certificate-fingerprint': text('证书指纹', 'Certificate fingerprint'),
+  chain: text('链式', 'Chain'),
+  combined: text('组合', 'Combined'),
+  'complexity-threshold': text('复杂度阈值', 'Complexity threshold'),
+  'critical-auto': text('关键方法自动识别', 'Critical auto'),
+  condy: text('ConstantDynamic', 'ConstantDynamic'),
+  conservative: text('保守', 'Conservative'),
+  counter: text('计数器', 'Counter'),
+  'custom-file': text('自定义字典', 'Custom file'),
+  'dead-branch': text('不可达分支', 'Dead branch'),
+  decryptor: text('解密器', 'Decryptor'),
+  degrade: text('降级运行', 'Degrade'),
+  'dynamic-proxy': text('动态代理', 'Dynamic proxy'),
+  'encrypted-table': text('加密分发表', 'Encrypted table'),
+  'entry-exit': text('入口/出口块', 'Entry/exit blocks'),
+  embedded: text('内嵌到 JAR', 'Embedded in JAR'),
+  epoch: text('Epoch', 'Epoch'),
+  'external-file': text('外部伴随文件', 'External sidecar file'),
+  fail: text('报错停止', 'Fail'),
+  fast: text('快速', 'Fast'),
+  'field-noise': text('字段读写噪声', 'Field noise'),
+  'field-scramble': text('字段扰乱', 'Field scramble'),
+  'field-write': text('写入合成字段', 'Synthetic field write'),
+  full: text('完整', 'Full'),
+  global: text('全局', 'Global'),
+  'global-registry': text('共享全局注册表', 'Global registry'),
+  'hardware-id': text('硬件指纹', 'Hardware ID'),
+  'hidden-class': text('隐藏类', 'Hidden class'),
+  'hidden-class-redirect': text('隐藏类重定向', 'Hidden-class redirect'),
+  hybrid: text('混合', 'Hybrid'),
+  'if-chain': text('条件链分发', 'If-chain dispatch'),
+  iiliii: text('i/l 相似字符', 'i/l homoglyphs'),
+  'interface-dispatch': text('接口分发', 'Interface dispatch'),
+  invokedynamic: text('InvokeDynamic', 'InvokeDynamic'),
+  'jni-key-hold': text('JNI 持有密钥', 'JNI-held key'),
+  'jvm-params': text('JVM 参数', 'JVM parameters'),
+  'lambda-wrapper': text('Lambda 包装', 'Lambda wrapper'),
+  layout: text('布局差异', 'Layout'),
+  'lazy-decrypt': text('延迟解密', 'Lazy decrypt'),
+  'length-threshold': text('按长度阈值', 'Length threshold'),
+  'linux-x64': text('Linux x64', 'Linux x64'),
+  loader: text('加载器', 'Loader'),
+  log: text('仅记录', 'Log only'),
+  'lookup-table': text('查找表', 'Lookup table'),
+  lookupswitch: text('查找表分发', 'LOOKUPSWITCH'),
+  'macos-arm64': text('macOS ARM64', 'macOS ARM64'),
+  'macos-x64': text('macOS x64', 'macOS x64'),
+  'method-call': text('调用合成方法', 'Synthetic method call'),
+  'methodhandle-chain': text('MethodHandle 链', 'MethodHandle chain'),
+  mixed: text('混合', 'Mixed'),
+  moderate: text('中等', 'Moderate'),
+  'modular-arithmetic': text('模运算恒等式', 'Modular arithmetic'),
+  multi: text('多层', 'Multi layer'),
+  'naming-only': text('仅命名差异', 'Naming only'),
+  nnmnmnm: text('n/m 相似字符', 'n/m homoglyphs'),
+  nop: text('仅空操作', 'NOP only'),
+  ooO0oO: text('o/O/0 相似字符', 'o/O/0 homoglyphs'),
+  pair: text('成对', 'Pair'),
+  passive: text('被动', 'Passive'),
+  'per-class': text('按类', 'Per class'),
+  'per-method': text('按方法', 'Per method'),
+  'quadratic-residue': text('二次剩余', 'Quadratic residue'),
+  random: text('随机', 'Random'),
+  'random-register': text('随机寄存器', 'Random register'),
+  'random-sample': text('随机采样', 'Random sample'),
+  'random-stack': text('随机栈', 'Random stack'),
+  refuse: text('拒绝运行', 'Refuse'),
+  rehash: text('重新生成', 'Rehash'),
+  reject: text('拒绝', 'Reject'),
+  'reject-conflicts': text('拒绝冲突', 'Reject conflicts'),
+  resource: text('资源', 'Resource'),
+  ring: text('环状', 'Ring'),
+  'rsa-2048': text('RSA-2048', 'RSA-2048'),
+  'runtime-builder': text('运行时构造器', 'Runtime builder'),
+  safe: text('安全保守', 'Safe'),
+  selective: text('选择性', 'Selective'),
+  sequential: text('顺序命名', 'Sequential'),
+  silent: text('静默', 'Silent'),
+  single: text('单层', 'Single layer'),
+  standard: text('标准', 'Standard'),
+  strict: text('严格', 'Strict'),
+  'tigress-like': text('Tigress-like', 'Tigress-like'),
+  'switch-path': text('切换路径', 'Switch path'),
+  'tableswitch-hybrid': text('表分发混合', 'TABLESWITCH hybrid'),
+  'thread-hash': text('线程哈希', 'Thread hash'),
+  'thread-id': text('线程 ID', 'Thread ID'),
+  'thread-local': text('线程局部', 'Thread local'),
+  'time-epoch': text('时间 Epoch', 'Time epoch'),
+  'unicode-confusable': text('Unicode 相似字符', 'Unicode confusables'),
+  'unreachable-method': text('不可达方法', 'Unreachable method'),
+  'unsafe-define': text('Unsafe 定义类', 'Unsafe define'),
+  'validate-only': text('仅校验', 'Validate only'),
+  'vm-interpreter': text('VM 解释器', 'VM interpreter'),
+  warn: text('警告', 'Warn'),
+  'windows-x64': text('Windows x64', 'Windows x64'),
+  'arithmetic-split': text('算术分裂', 'Arithmetic split'),
+  none: text('关闭', 'Off'),
+  off: text('关闭', 'Off'),
+  normal: text('标准', 'Normal'),
+  light: text('轻度', 'Light'),
+  heavy: text('重度', 'Heavy'),
+  fixed: text('固定', 'Fixed'),
+  'object-array': text('Object[] 打包', 'Object[] packing'),
+  strong: text('强化', 'Strong'),
+  'flow-guarded': text('流防护', 'Flow guarded'),
+  max: text('最高', 'Max'),
+  arithmetic: text('算术改写', 'Arithmetic'),
+  resolver: text('常量解析器', 'Resolver'),
+  xor: text('XOR', 'XOR'),
+  des: text('DES', 'DES'),
+  indexed: text('索引置换', 'Indexed'),
+  'bootstrap-table': text('引导查找表', 'Bootstrap table'),
+  'constant-resolver': text('常量解析器调用点', 'Constant resolver'),
+  'native-kernel': text('Native 微内核', 'Native kernel'),
+  'jvm-resolver': text('JVM 内置解析器', 'JVM resolver'),
+}
+
+const passCopies: Readonly<Record<string, LocalizedPassCopy>> = {
+  'anti-decompiler-structure': {
+    name: text('反编译干扰结构', 'Anti-decompiler structure'),
+    description: text('加入虚假异常处理器和死代码块，让反编译器更难还原清晰结构，同时不改变运行结果。', 'Adds bogus exception handlers and dead blocks that confuse decompilers without changing runtime behavior.'),
+  },
+  'os-anti-debug': {
+    name: text('操作系统反调试', 'OS anti-debug'),
+    description: text('在 native 层统一检测调试器、JVMTI、Instrumentation、Java agent、ByteBuddy、Attach 与转换器状态；启动、心跳和分布式探针认证失败时直接拒绝执行。', 'Uses the unified native defense kernel to detect debuggers, JVMTI, Instrumentation, Java agents, ByteBuddy, Attach, and transformer state; startup, heartbeat, or distributed-probe authentication failures fail closed.'),
+  },
+  'os-anti-vm': {
+    name: text('操作系统反虚拟机', 'OS anti-VM'),
+    description: text('在 native 层组合 CPUID、虚拟化厂商、固件和 DMI/sysfs 证据，并把认证状态绑定到 evaluator、VM session、predicate share 与字段材料。', 'Combines authenticated native CPUID, hypervisor-vendor, firmware, and DMI/sysfs evidence and binds the result to evaluator, VM-session, predicate-share, and field material.'),
+  },
+  'callsite-rotation-protection': {
+    name: text('调用点轮换防护', 'Callsite rotation protection'),
+    description: text('用 MutableCallSite、epoch、线程或随机信号动态切换调用目标，提高静态恢复成本。', 'Uses MutableCallSite, epoch, thread, or random signals to rotate call targets and raise static recovery cost.'),
+  },
+  'condy-constant-indirection': {
+    name: text('动态常量间接化', 'ConstantDynamic indirection'),
+    description: text('用 ConstantDynamic 延迟解析字符串和整数常量，让静态分析更难直接读出值。', 'Uses ConstantDynamic to resolve string and integer constants lazily, making static extraction harder.'),
+  },
+  'control-flow-flattening': {
+    name: text('控制流平坦化', 'Control-flow flattening'),
+    description: text('把方法逻辑改写为分发器驱动结构，作为中等强度扰动提高 CFG 恢复成本。', 'Rewrites method logic into dispatcher-driven structure as medium-strength perturbation that raises CFG recovery cost.'),
+  },
+  'control-flow-obfuscation': {
+    name: text('控制流混淆', 'Control-flow obfuscation'),
+    description: text('通过不透明谓词、分发逻辑和代数恒等式重组方法控制流，可叠加条件边注入与异常处理器拆分。', 'Restructures method control flow using opaque predicates, dispatch logic, and algebraic identities, with optional conditional-edge injection and handler splitting.'),
+  },
+  'exception-semantic-virtualization': {
+    name: text('异常语义虚拟化', 'Exception semantic virtualization'),
+    description: text('把部分正常控制流转换为自定义异常路径，是实验性语义扰动而非完整 VM 保护。', 'Converts selected normal control flow into custom exception paths as experimental semantic perturbation, not full VM protection.'),
+  },
+  'field-string-encryption': {
+    name: text('字段字符串加密', 'Field string encryption'),
+    description: text('加密 static final String 字段常量，并在类初始化时解密，避免常量池出现明文。', 'Encrypts static final String field constants and decrypts them during class initialization to avoid plaintext in the constant pool.'),
+  },
+  'integer-constant-obfuscation': {
+    name: text('整数常量混淆', 'Integer constant obfuscation'),
+    description: text('把整数/长整数常量改写为等价表达式或常量解析器调用，避免简单常量模式被直接匹配。', 'Rewrites integer and long constants into equivalent expressions or constant-resolver calls to avoid direct constant pattern matching.'),
+  },
+  'invoke-dynamic-indirection': {
+    name: text('InvokeDynamic 间接调用', 'InvokeDynamic indirection'),
+    description: text('把静态调用改写为 invokedynamic：每类引导查找表，或首次解析后转为常量目标的常量解析器调用点。', 'Rewrites direct calls into invokedynamic calls: per-class bootstrap lookup tables, or first-resolve constant-resolver call sites.'),
+  },
+  'jni-microkernel-loader': {
+    name: text('JNI 微内核加载器', 'JNI microkernel loader'),
+    description: text('把部分加载、解密或调度逻辑转移到平台相关的 native 微内核中。', 'Moves selected loading, decryption, or dispatch logic into a platform-specific native microkernel.'),
+  },
+  nativeshroud: {
+    name: text('自定义加壳', 'Custom packing'),
+    description: text('对编译后的 native 镜像外部加壳：默认用内置 Xenolith CLI 自动打包（fast / standard / max），也可暂停等待手动加壳（VMP / NativeShroud 等）再选回文件。打包失败、报告缺失、非生产 debug_gate 或取消均 fail-closed；须保留 .jsms/.jsmk 及输入中存在的 .jsmd 区段与 JNI / qp_r1 导出，否则引擎拒绝。', 'Packs compiled native images externally with the bundled Xenolith CLI (fast / standard / max), or pauses for manual packing (VMP / NativeShroud, etc.) and selects the packed file back. Failed runs, missing reports, non-production debug_gate values, and cancellation fail closed; .jsms/.jsmk and any input .jsmd section, plus JNI / qp_r1 exports, must survive or the engine rejects the image.'),
+    params: {
+      cliPath: text('Xenolith CLI 可执行文件的绝对路径；留空则使用手动加壳交接流程。', 'Absolute path to the Xenolith CLI executable; empty keeps the manual packing handoff.'),
+      profile: text('Xenolith 打包档位：fast 最快、standard 均衡、max 附加反调试探测。', 'Xenolith pack profile: fast is quickest, standard is balanced, max adds anti-debug probes.'),
+      vmExports: text('逗号分隔的导出名，经 --vm-export 虚拟化。JVM/CRT ABI 名（JNI_OnLoad/Java_*/qp_r1_*/DllMain/*crt*/下划线开头）会被拒绝；fast 档位拒绝 vmExports。', 'Comma-separated export names virtualized via --vm-export. JVM/CRT ABI names are refused; the fast profile rejects vmExports.'),
+      selectRva: text('逗号分隔的显式函数区间 RVA:LEN（十六进制或十进制），逐个透传 --select-rva；不可提升即 fail-closed。', 'Comma-separated explicit function ranges RVA:LEN forwarded as repeatable --select-rva; unliftable ranges fail closed.'),
+      selectFunction: text('逗号分隔的符号/导出名，元数据发现后经 --select-function 选择。', 'Comma-separated symbol/export names selected after metadata discovery via --select-function.'),
+      selectAll: text('选择全部可发现函数（--select-all）；不开启时绝不隐式全量发现。', 'Select every discoverable function (--select-all); discovery is never implicit without it.'),
+      strictCoverage: text('无函数被选中或所选函数无法完整转换时打包失败（--strict-coverage）；与 allowNativeFallback 互斥。', 'Fail the pack when no function is selected or a selected function cannot be fully transformed (--strict-coverage); mutually exclusive with allowNativeFallback.'),
+      allowNativeFallback: text('无法完整转换的所选函数保持原生，报告为 mixed_native（--allow-native-fallback）；与 strictCoverage 互斥。', 'Let unliftable selected functions stay native, reported as mixed_native (--allow-native-fallback); mutually exclusive with strictCoverage.'),
+      lazyRegions: text('已禁用：VEH 惰性解密无法在加载器锁下运行，会导致打包后的 qp_ffi.dll 初始化失败；开启即具名报错。', 'Rejected: the VEH wake cannot run under the loader lock and the packed qp_ffi.dll would fail to initialize; enabling it fails with a named error.'),
+      protectImports: text('把导入名记录封入封套（--protect-imports；TLS/Fast 目标保留加载器目录）。', 'Seal import name records in the envelope (--protect-imports; TLS/Fast targets keep the loader directory).'),
+      strictConstants: text('只读常量仍保留原生引用时拒绝打包（--strict-constants）。', 'Refuse to pack when read-only constants keep native references (--strict-constants).'),
+      traceDiverge: text('每块两条语义等价路径，选择器为 TEB^heap^RSP（--trace-diverge）。', 'Two semantically equal paths per block with a TEB^heap^RSP selector (--trace-diverge).'),
+      packedPath: text('预先打包好的 Windows qp_ffi.dll 绝对路径（非交互 CLI/测试用）。', 'Absolute path to a pre-packed Windows qp_ffi.dll for non-interactive CLI/tests.'),
+      packedPathLinux: text('预先打包好的 Linux libqp_ffi.so 绝对路径（非交互 CLI/测试用）。', 'Absolute path to a pre-packed Linux libqp_ffi.so for non-interactive CLI/tests.'),
+    },
+  },
+  'member-hide': {
+    name: text('隐藏成员', 'Member hide'),
+    description: text('把字段和方法标记为合成成员，让 IDE 和反编译器更不容易直接展示。', 'Marks fields and methods as synthetic so IDEs and decompilers are less likely to show them directly.'),
+  },
+  'method-virtualization': {
+    name: text('方法虚拟化', 'Method virtualization'),
+    description: text('把方法语义转换为 native VM 指令并由 Native runtime 执行，默认自动识别 VM 兼容关键方法以减少回退裸露面。', 'Converts method semantics into native VM instructions executed by the Native runtime, defaulting to critical VM-compatible method selection to reduce fallback exposure.'),
+    params: {
+      methodSelection: text('方法选择策略：控制类规则如何自动选择 VM 兼容方法；显式方法规则仍优先。', 'Method selection strategy: controls how class rules auto-select VM-compatible methods. Explicit method rules still take precedence.'),
+      maxInstructions: text('最大指令数：超过该阈值的方法保持原样；默认值 00 表示不限制。', 'Maximum instruction count: methods above this threshold stay unchanged; the default 00 means unlimited.'),
+      maxBroadVirtualizedMethods: text('广义规则最大方法数：限制广义类规则自动虚拟化的方法数量；默认值 00 表示不限制。', 'Maximum broad-rule methods: limits methods virtualized by broad class rules; the default 00 means unlimited.'),
+      qpStateBoundEncoding: text('固定默认：state-bound encoding 始终开启，并作为隐藏的 fail-closed 不变量。', 'Fixed default: state-bound encoding is always on and remains a hidden fail-closed invariant.'),
+      qpHandlerMorphing: text('固定默认：handler morphing 始终开启，并作为隐藏的 fail-closed 不变量。', 'Fixed default: handler morphing is always on and remains a hidden fail-closed invariant.'),
+      qpStrengthMax: text('固定默认：强度固定为 max，不暴露低强度或兼容 profile。', 'Fixed default: strength is locked to max, with no low-strength or compatibility profile exposed.'),
+      qpInterpreterDiversity: text('固定默认：native-only 路径始终启用解释器多样化；关闭会被引擎拒绝。', 'Fixed default: interpreter diversity is always enabled for the native-only path; disabling it is rejected by the engine.'),
+      qpHashedJniSymbols: text('固定默认：JNI VM 目标使用构建和方法级 token 定位，避免在热路径传递明文符号。', 'Fixed default: JNI VM targets use build- and method-scoped tokens to avoid passing plaintext symbols on hot paths.'),
+      qpExecutableRegisterIr: text('固定默认：native dispatcher 以 register IR 执行，stack opcode 仅作为兼容输入。', 'Fixed default: the native dispatcher executes register IR, with stack opcodes retained only as compatible input.'),
+      qpSuperOperators: text('固定默认：serializer 按方法随机结构 seed 折叠 super-operator，并纳入认证状态。', 'Fixed default: the serializer folds super-operators by per-method randomized structure seed and binds them into authenticated state.'),
+      qpIntegrityKeyBinding: text('固定默认：session integrity digest 参与 seed unwrap、block key 和 CP key 派生。', 'Fixed default: the session integrity digest participates in seed unwrap, block-key, and CP-key derivation.'),
+      qpEphemeralRootMaterial: text('固定默认：native 主密钥只按需短生命周期派生，用后擦除。', 'Fixed default: the native master key is derived only for a short on-demand lifetime and wiped after use.'),
+    },
+  },
+  'reference-proxy': {
+    name: text('引用代理', 'Reference proxy'),
+    description: text('通过代理方法转发原始调用，打断直接调用图。', 'Forwards original calls through proxy methods, breaking direct call graphs.'),
+  },
+  'rename-classes': {
+    name: text('重命名类', 'Rename classes'),
+    description: text('重命名匹配的类，并同步改写字节码引用。', 'Renames matched classes and rewrites bytecode references consistently.'),
+  },
+  'rename-fields': {
+    name: text('重命名字段', 'Rename fields'),
+    description: text('重命名匹配的字段，支持多种名称风格和冲突处理策略。', 'Renames matched fields with configurable naming styles and collision policies.'),
+  },
+  'rename-methods': {
+    name: text('重命名方法', 'Rename methods'),
+    description: text('重命名匹配的方法，并尽量保持接口方法关系一致。', 'Renames matched methods while preserving interface method consistency where possible.'),
+  },
+  'rename-packages': {
+    name: text('重命名包路径', 'Rename packages'),
+    description: text('改写匹配类的包路径，可按需保留前几层包名。', 'Rewrites package paths for matched classes while optionally preserving leading package segments.'),
+  },
+  'static-init-perturbation': {
+    name: text('静态初始化扰动', 'Static init perturbation'),
+    description: text('把编译期静态常量移到运行时初始化，并加入噪声赋值。', 'Moves compile-time static constants into runtime initialization and adds noisy assignments.'),
+  },
+  'string-encryption': {
+    name: text('字符串加密', 'String encryption'),
+    description: text('加密字符串常量并注入解密逻辑；解密器后端可选 JNI 微内核或纯 JVM 内置解析器，支持强度、载荷编码与过滤范围。', 'Encrypts string constants and injects decrypt logic; decoder backend can be the JNI microkernel or a self-contained JVM resolver, with strength, payload codec, and scope controls.'),
+  },
+  'strip-compile-debug-info': {
+    name: text('清理编译调试信息', 'Strip compile debug info'),
+    description: text('移除源码名、行号、参数名和局部变量等调试元数据。', 'Removes source names, line numbers, parameter names, local variables, and other debug metadata.'),
+  },
+}
+
+const pick = (copy: LocalizedText, language: DisplayLanguage): string => copy[language]
+
+const looksMojibake = (value: string): boolean => value.includes('�') || value.includes('Ԫ') || value.includes('���')
+
+const humanizeIdentifier = (value: string): string => value
+  .split('-')
+  .filter((part: string): boolean => part.length > 0)
+  .map((part: string): string => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
+  .join(' ')
+
+export const languageToggleLabel = (language: DisplayLanguage): string => nextLanguageLabel(language)
+
+export const nextLanguageLabel = (language: DisplayLanguage): string => (language === 'zh' ? 'English' : '简体中文')
+
+export const toggleLanguage = (language: DisplayLanguage): DisplayLanguage => (language === 'zh' ? 'en' : 'zh')
+
+export const localizeCategoryLabel = (category: string, language: DisplayLanguage): string => {
+  const matched = categoryLabels[category]
+  if (matched !== undefined) {
+    return pick(matched, language)
+  }
+
+  return language === 'en' ? humanizeIdentifier(category) : category
+}
+
+export const localizeRiskLabel = (risk: PassItem['risk'], language: DisplayLanguage): string => pick(riskLabels[risk], language)
+
+export const localizePassName = (passItem: PassItem, language: DisplayLanguage): string => {
+  const copy = passCopies[passItem.id]?.name
+  if (copy !== undefined) {
+    return pick(copy, language)
+  }
+
+  if (language === 'en') {
+    return looksMojibake(passItem.name) ? humanizeIdentifier(passItem.id) : passItem.name
+  }
+
+  return looksMojibake(passItem.name) ? humanizeIdentifier(passItem.id) : passItem.name
+}
+
+
+export const localizePassNameById = (passId: string, language: DisplayLanguage): string => {
+  const copy = passCopies[passId]?.name
+  if (copy !== undefined) {
+    return pick(copy, language)
+  }
+  return language === 'en' ? humanizeIdentifier(passId) : passId
+}
+export const localizePassDescription = (passItem: PassItem, language: DisplayLanguage): string => {
+  const copy = passCopies[passItem.id]?.description
+  if (copy !== undefined) {
+    return pick(copy, language)
+  }
+
+  return looksMojibake(passItem.description) ? humanizeIdentifier(passItem.id) : passItem.description
+}
+
+export const localizeParamDescription = (passItem: PassItem, paramSchema: ParamSchema, language: DisplayLanguage): string => {
+  const passParamCopy = passCopies[passItem.id]?.params?.[paramSchema.key]
+  if (passParamCopy !== undefined) {
+    return pick(passParamCopy, language)
+  }
+
+  const commonCopy = commonParamDescriptions[paramSchema.key]
+  if (commonCopy !== undefined) {
+    return pick(commonCopy, language)
+  }
+
+  return looksMojibake(paramSchema.description) ? humanizeIdentifier(paramSchema.key) : paramSchema.description
+}
+
+export const localizeOptionLabel = (value: string, language: DisplayLanguage): string => {
+  const copy = optionLabels[value]
+  if (copy !== undefined) {
+    return pick(copy, language)
+  }
+
+  return language === 'en' ? humanizeIdentifier(value) : value
+}

@@ -1,0 +1,676 @@
+import { parseEngineSchema } from './capability-parser.ts'
+import { applyPassDependencies, buildPassItemsFromSchema } from './pass-catalog.ts'
+import { hasEnabledSoftCompatibilityConflict, resolvePassCompatibility } from './pass-compatibility.ts'
+
+const assert = (condition: boolean, message: string): void => {
+  if (!condition) {
+    throw new Error(message)
+  }
+}
+
+const baseSchema = {
+  schemaVersion: '2',
+  engineVersion: 'check-engine',
+  tags: [
+    {
+      id: 'obfuscation',
+      name: 'Obfuscation',
+      description: 'Obfuscation passes',
+    },
+  ],
+  modules: [
+    {
+      id: 'sample-pass',
+      name: 'Sample pass',
+      description: 'Sample pass',
+      tagIds: ['obfuscation'],
+      stability: 'stable',
+      compatibilityNotes: 'Use only the current native VM target.',
+      defaultEnabled: false,
+      targeting: { supported: true, targetKinds: ['class', 'method'] },
+      params: [
+        {
+          key: 'mode',
+          type: 'enum',
+          defaultValue: 'safe',
+          options: ['safe', 'fast'],
+          description: 'Mode',
+        },
+        {
+          key: 'enabled',
+          type: 'boolean',
+          defaultValue: true,
+          description: 'Enabled',
+        },
+        {
+          key: 'salt',
+          type: 'number',
+          defaultValue: 42,
+          description: 'Salt',
+          hidden: true,
+        },
+      ],
+    },
+  ],
+  compatibility: [],
+  orderingConstraints: [],
+  defaultPipeline: ['sample-pass'],
+}
+
+const expectParseError = (schema: unknown, expectedMessagePart: string): void => {
+  try {
+    parseEngineSchema(schema)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    assert(message.includes(expectedMessagePart), `expected parse error to include "${expectedMessagePart}", actual=${message}`)
+    return
+  }
+
+  throw new Error(`expected schema parse to fail with "${expectedMessagePart}"`)
+}
+
+const parsedSchema = parseEngineSchema(baseSchema)
+assert(parsedSchema.modules[0]?.params[0]?.defaultValue === 'safe', 'expected valid enum default to be preserved')
+assert(parsedSchema.modules[0]?.params[2]?.hidden === true, 'expected hidden param flag to be preserved')
+assert(parsedSchema.modules[0]?.compatibilityNotes === 'Use only the current native VM target.', 'expected compatibility notes to be preserved')
+assert(parsedSchema.modules[0]?.targeting.targetKinds.includes('method') === true, 'expected targeting capability to be preserved')
+assert(buildPassItemsFromSchema(parsedSchema)[0]?.params.salt === 42, 'expected hidden param default to be preserved in pass params')
+assert(buildPassItemsFromSchema(parsedSchema)[0]?.compatibilityNotes === 'Use only the current native VM target.', 'expected compatibility notes to be copied to pass items')
+assert(!buildPassItemsFromSchema(parsedSchema)[0]?.paramSchemas.some((paramSchema) => paramSchema.key === 'salt'), 'expected hidden params to be omitted from visible param schemas')
+assert(buildPassItemsFromSchema(parsedSchema)[0]?.paramSchemas.some((paramSchema) => paramSchema.key === 'enabled'), 'expected visible params to be included in visible param schemas')
+assert(parsedSchema.defaultPipeline[0] === 'sample-pass', 'expected defaultPipeline to be preserved')
+
+const conditionalRequirementSchema = parseEngineSchema({
+  ...baseSchema,
+  modules: [
+    {
+      ...baseSchema.modules[0],
+      id: 'jni-microkernel-loader',
+      name: 'JNI Loader',
+      defaultEnabled: false,
+      params: [],
+    },
+    {
+      ...baseSchema.modules[0],
+      id: 'string-encryption',
+      name: 'String Encryption',
+      defaultEnabled: false,
+      params: [
+        {
+          key: 'decoderBackend',
+          type: 'enum',
+          defaultValue: 'jvm-resolver',
+          options: ['native-kernel', 'jvm-resolver'],
+          description: 'String encryption decoder backend.',
+        },
+      ],
+      variantRequirements: [
+        {
+          whenParam: 'decoderBackend',
+          equals: 'native-kernel',
+          requiredPassIds: ['jni-microkernel-loader'],
+        },
+      ],
+    },
+  ],
+  defaultPipeline: ['string-encryption'],
+})
+const jvmResolverConditionalPasses = buildPassItemsFromSchema(conditionalRequirementSchema)
+assert(jvmResolverConditionalPasses.find((passItem) => passItem.id === 'jni-microkernel-loader')?.enabled === false, 'expected jvm-resolver string backend to avoid JNI dependency')
+const legacyConditionalPasses = applyPassDependencies(jvmResolverConditionalPasses.map((passItem) => (
+  passItem.id === 'string-encryption'
+    ? { ...passItem, params: { ...passItem.params, decoderBackend: 'native-kernel' } }
+    : passItem
+)))
+assert(legacyConditionalPasses.find((passItem) => passItem.id === 'jni-microkernel-loader')?.enabled === true, 'expected native-kernel string backend to include JNI dependency')
+
+const legacyConditionalRequirementSchema = parseEngineSchema({
+  ...conditionalRequirementSchema,
+  modules: conditionalRequirementSchema.modules.map((module) => (
+    module.id === 'string-encryption'
+      ? {
+          ...module,
+          params: [{
+            key: 'decoderBackend',
+            type: 'enum',
+            defaultValue: 'native-kernel',
+            options: ['native-kernel', 'jvm-resolver'],
+            description: 'String encryption decoder backend.',
+          }],
+        }
+      : module
+  )),
+})
+
+const legacyVariantPasses = buildPassItemsFromSchema(legacyConditionalRequirementSchema)
+assert(legacyVariantPasses.find((passItem) => passItem.id === 'jni-microkernel-loader')?.dependencyAutoEnabled === true, 'expected native-kernel dependency to be marked automatic')
+const jvmResolverVariantPasses = applyPassDependencies(legacyVariantPasses.map((passItem) => (
+  passItem.id === 'string-encryption'
+    ? { ...passItem, params: { ...passItem.params, decoderBackend: 'jvm-resolver' } }
+    : passItem
+)))
+assert(jvmResolverVariantPasses.find((passItem) => passItem.id === 'jni-microkernel-loader')?.enabled === false, 'expected jvm-resolver backend to release an automatic JNI dependency')
+
+const explicitlyEnabledLoaderPasses = applyPassDependencies(jvmResolverVariantPasses.map((passItem) => (
+  passItem.id === 'jni-microkernel-loader'
+    ? { ...passItem, enabled: true, dependencyAutoEnabled: false }
+    : passItem
+)))
+assert(explicitlyEnabledLoaderPasses.find((passItem) => passItem.id === 'jni-microkernel-loader')?.dependencyAutoEnabled === false, 'expected a user-enabled JNI loader to become explicit')
+const restoredLegacyPasses = applyPassDependencies(explicitlyEnabledLoaderPasses.map((passItem) => (
+  passItem.id === 'string-encryption'
+    ? { ...passItem, params: { ...passItem.params, decoderBackend: 'native-kernel' } }
+    : passItem
+)))
+const retainedExplicitLoaderPasses = applyPassDependencies(restoredLegacyPasses.map((passItem) => (
+  passItem.id === 'string-encryption'
+    ? { ...passItem, params: { ...passItem.params, decoderBackend: 'jvm-resolver' } }
+    : passItem
+)))
+assert(retainedExplicitLoaderPasses.find((passItem) => passItem.id === 'jni-microkernel-loader')?.enabled === true, 'expected an explicitly enabled JNI loader to survive the jvm-resolver backend switch')
+
+const sharedDependencySchema = parseEngineSchema({
+  ...legacyConditionalRequirementSchema,
+  modules: [
+    ...legacyConditionalRequirementSchema.modules,
+    {
+      ...baseSchema.modules[0],
+      id: 'other-native-consumer',
+      name: 'Other native consumer',
+      defaultEnabled: false,
+      requiredPassIds: ['jni-microkernel-loader'],
+      params: [],
+    },
+  ],
+  defaultPipeline: ['string-encryption', 'other-native-consumer'],
+})
+const sharedJvmResolverPasses = applyPassDependencies(buildPassItemsFromSchema(sharedDependencySchema).map((passItem) => (
+  passItem.id === 'string-encryption'
+    ? { ...passItem, params: { ...passItem.params, decoderBackend: 'jvm-resolver' } }
+    : passItem
+)))
+assert(sharedJvmResolverPasses.find((passItem) => passItem.id === 'jni-microkernel-loader')?.enabled === true, 'expected another enabled consumer to retain the JNI loader')
+const releasedSharedDependencyPasses = applyPassDependencies(sharedJvmResolverPasses.map((passItem) => (
+  passItem.id === 'other-native-consumer'
+    ? { ...passItem, enabled: false, dependencyAutoEnabled: false }
+    : passItem
+)))
+assert(releasedSharedDependencyPasses.find((passItem) => passItem.id === 'jni-microkernel-loader')?.enabled === false, 'expected JNI loader to release after its last automatic consumer is removed')
+
+expectParseError(
+  {
+    ...baseSchema,
+    schemaVersion: 'check-v1',
+  },
+  'schemaVersion 不受支持',
+)
+
+expectParseError(
+  {
+    ...baseSchema,
+    tags: [
+      baseSchema.tags[0],
+      {
+        ...baseSchema.tags[0],
+        name: 'Duplicate obfuscation tag',
+      },
+    ],
+  },
+  'tags[1].id 重复',
+)
+
+expectParseError(
+  {
+    ...baseSchema,
+    modules: [
+      baseSchema.modules[0],
+      {
+        ...baseSchema.modules[0],
+        name: 'Duplicate sample pass',
+      },
+    ],
+  },
+  'modules[1].id 重复',
+)
+
+expectParseError(
+  {
+    ...baseSchema,
+    modules: [
+      {
+        ...baseSchema.modules[0],
+        tagIds: ['obfuscation', 'obfuscation'],
+      },
+    ],
+  },
+  'tagIds[1] 重复',
+)
+
+expectParseError(
+  {
+    ...baseSchema,
+    modules: [
+      {
+        ...baseSchema.modules[0],
+        params: [
+          baseSchema.modules[0].params[0],
+          {
+            ...baseSchema.modules[0].params[0],
+            description: 'Duplicate mode param',
+          },
+        ],
+      },
+    ],
+  },
+  'params[1].key 重复',
+)
+
+const parsedPasses = buildPassItemsFromSchema(parsedSchema)
+assert(parsedPasses[0]?.enabled === true, 'expected defaultPipeline to enable listed pass even when module defaultEnabled is false')
+
+const dependencySchema = parseEngineSchema({
+  ...baseSchema,
+  modules: [
+    {
+      ...baseSchema.modules[0],
+      id: 'jni-microkernel-loader',
+      defaultEnabled: false,
+      requiresAnyPassIds: ['os-anti-debug'],
+      params: [],
+    },
+    {
+      ...baseSchema.modules[0],
+      id: 'os-anti-debug',
+      requiredPassIds: ['jni-microkernel-loader'],
+      defaultEnabled: false,
+      params: [],
+    },
+  ],
+  defaultPipeline: ['os-anti-debug'],
+})
+const dependencyPasses = buildPassItemsFromSchema(dependencySchema)
+assert(dependencyPasses.find((passItem) => passItem.id === 'jni-microkernel-loader')?.enabled === true, 'expected requiredPassIds dependency to auto-enable jni-microkernel-loader')
+
+const singleJniSchema = parseEngineSchema({
+  ...baseSchema,
+  modules: [
+    {
+      ...baseSchema.modules[0],
+      id: 'jni-microkernel-loader',
+      defaultEnabled: true,
+      requiresAnyPassIds: ['sample-pass'],
+      params: [],
+    },
+    {
+      ...baseSchema.modules[0],
+      defaultEnabled: false,
+      params: [],
+    },
+  ],
+  defaultPipeline: ['jni-microkernel-loader'],
+})
+const singleJniPasses = buildPassItemsFromSchema(singleJniSchema)
+assert(singleJniPasses.find((passItem) => passItem.id === 'jni-microkernel-loader')?.enabled === false, 'expected standalone requiresAnyPassIds pass to be disabled')
+
+const anchoredJniSchema = parseEngineSchema({
+  ...baseSchema,
+  modules: [
+    {
+      ...baseSchema.modules[0],
+      id: 'jni-microkernel-loader',
+      defaultEnabled: false,
+      requiresAnyPassIds: ['sample-pass'],
+      params: [],
+    },
+    {
+      ...baseSchema.modules[0],
+      defaultEnabled: true,
+      requiredPassIds: ['jni-microkernel-loader'],
+      params: [],
+    },
+  ],
+  defaultPipeline: ['sample-pass'],
+})
+const anchoredJniPasses = buildPassItemsFromSchema(anchoredJniSchema)
+assert(anchoredJniPasses.find((passItem) => passItem.id === 'jni-microkernel-loader')?.enabled === true, 'expected requiresAnyPassIds pass to stay enabled when its anchor is enabled')
+
+expectParseError(
+  {
+    ...baseSchema,
+    modules: [
+      {
+        ...baseSchema.modules[0],
+        params: [
+          {
+            key: 'mode',
+            type: 'enum',
+            defaultValue: 'unsupported',
+            options: ['safe', 'fast'],
+            description: 'Mode',
+          },
+        ],
+      },
+    ],
+  },
+  'defaultValue 必须包含在 enum options 中',
+)
+
+expectParseError(
+  {
+    ...baseSchema,
+    modules: [
+      {
+        ...baseSchema.modules[0],
+        params: [
+          {
+            key: 'enabled',
+            type: 'boolean',
+            defaultValue: 'true',
+            description: 'Enabled',
+          },
+        ],
+      },
+    ],
+  },
+  'defaultValue 必须是布尔值',
+)
+
+expectParseError(
+  {
+    ...baseSchema,
+    modules: [
+      {
+        ...baseSchema.modules[0],
+        params: [
+          {
+            key: 'salt',
+            type: 'number',
+            defaultValue: '42',
+            description: 'Salt',
+          },
+        ],
+      },
+    ],
+  },
+  'defaultValue 必须是数字',
+)
+
+expectParseError(
+  {
+    ...baseSchema,
+    modules: [
+      {
+        ...baseSchema.modules[0],
+        params: [
+          {
+            key: 'salt',
+            type: 'number',
+            defaultValue: 42,
+            hidden: 'yes',
+            description: 'Salt',
+          },
+        ],
+      },
+    ],
+  },
+  'params[0].hidden 必须是布尔值',
+)
+
+expectParseError(
+  {
+    ...baseSchema,
+    compatibility: [
+      {
+        passIds: ['sample-pass', 'missing-pass'],
+        severity: 'hard',
+        description: 'Missing pass conflict.',
+      },
+    ],
+  },
+  'compatibility[0].passIds[1] 未声明',
+)
+
+expectParseError(
+  {
+    ...baseSchema,
+    compatibility: [
+      {
+        passIds: ['sample-pass', 'sample-pass'],
+        severity: 'hard',
+        description: 'Duplicate pass conflict.',
+      },
+    ],
+  },
+  'compatibility[0].passIds[1] 重复',
+)
+
+expectParseError(
+  {
+    ...baseSchema,
+    orderingConstraints: [
+      {
+        before: 'sample-pass',
+        after: 'missing-pass',
+        reason: 'Missing pass ordering.',
+      },
+    ],
+  },
+  'orderingConstraints[0].after 未声明',
+)
+
+expectParseError(
+  {
+    ...baseSchema,
+    modules: [
+      {
+        ...baseSchema.modules[0],
+        requiredPassIds: ['missing-pass'],
+      },
+    ],
+  },
+  'requiredPassIds[0] 未声明',
+)
+
+expectParseError(
+  {
+    ...baseSchema,
+    modules: [
+      {
+        ...baseSchema.modules[0],
+        requiredPassIds: ['sample-pass'],
+      },
+    ],
+  },
+  'requiredPassIds[0] 不能引用自身',
+)
+
+expectParseError(
+  {
+    ...baseSchema,
+    modules: [
+      {
+        ...baseSchema.modules[0],
+        id: 'sample-dependency',
+        name: 'Sample dependency',
+        defaultEnabled: false,
+        params: [],
+      },
+      {
+        ...baseSchema.modules[0],
+        requiredPassIds: ['sample-dependency', 'sample-dependency'],
+      },
+    ],
+  },
+  'requiredPassIds[1] 重复',
+)
+
+expectParseError(
+  {
+    ...baseSchema,
+    modules: [
+      {
+        ...baseSchema.modules[0],
+        requiresAnyPassIds: ['missing-pass'],
+      },
+    ],
+  },
+  'requiresAnyPassIds[0] 未声明',
+)
+
+expectParseError(
+  {
+    ...baseSchema,
+    modules: [
+      {
+        ...baseSchema.modules[0],
+        requiresAnyPassIds: ['sample-pass'],
+      },
+    ],
+  },
+  'requiresAnyPassIds[0] 不能引用自身',
+)
+
+expectParseError(
+  {
+    ...baseSchema,
+    modules: [
+      {
+        ...baseSchema.modules[0],
+        id: 'sample-anchor',
+        name: 'Sample anchor',
+        defaultEnabled: false,
+        params: [],
+      },
+      {
+        ...baseSchema.modules[0],
+        requiresAnyPassIds: ['sample-anchor', 'sample-anchor'],
+      },
+    ],
+  },
+  'requiresAnyPassIds[1] 重复',
+)
+
+const softCompatibilitySchema = parseEngineSchema({
+  ...baseSchema,
+  modules: [
+    {
+      ...baseSchema.modules[0],
+      id: 'soft-a',
+      defaultEnabled: false,
+      params: [],
+    },
+    {
+      ...baseSchema.modules[0],
+      id: 'soft-b',
+      defaultEnabled: false,
+      params: [],
+    },
+  ],
+  compatibility: [
+    {
+      passIds: ['soft-a', 'soft-b'],
+      severity: 'soft',
+      description: 'Soft overlap.',
+    },
+  ],
+  defaultPipeline: ['soft-a', 'soft-b'],
+})
+const softCompatibilityPasses = resolvePassCompatibility(buildPassItemsFromSchema(softCompatibilitySchema), softCompatibilitySchema.compatibility)
+assert(softCompatibilityPasses.every((passItem) => passItem.enabled), 'expected soft compatibility rules to preserve enabled passes')
+assert(hasEnabledSoftCompatibilityConflict(softCompatibilityPasses, softCompatibilitySchema.compatibility), 'expected enabled soft compatibility conflict to require redundant allowance')
+
+const hardCompatibilitySchema = parseEngineSchema({
+  ...softCompatibilitySchema,
+  compatibility: [
+    {
+      passIds: ['soft-a', 'soft-b'],
+      severity: 'hard',
+      description: 'Hard conflict.',
+    },
+  ],
+})
+const hardCompatibilityPasses = resolvePassCompatibility(buildPassItemsFromSchema(hardCompatibilitySchema), hardCompatibilitySchema.compatibility)
+assert(hardCompatibilityPasses.filter((passItem) => passItem.enabled).length === 1, 'expected hard compatibility rules to keep only one enabled pass')
+
+// 引擎实际输出的 TOML：为 null 的 options/defaultValue 被省略；number 参数无 options。
+// 经 parseTomlDocument -> parseEngineSchema 文本往返，确认不再误判 options 必须是字符串数组。
+const { targeting: _baseTargeting, ...moduleWithoutTargeting } = baseSchema.modules[0]
+expectParseError(
+  {
+    ...baseSchema,
+    modules: [moduleWithoutTargeting],
+  },
+  'modules[0].targeting 必须是对象',
+)
+
+expectParseError(
+  {
+    ...baseSchema,
+    modules: [{
+      ...baseSchema.modules[0],
+      targeting: null,
+    }],
+  },
+  'modules[0].targeting 必须是对象',
+)
+
+const tomlSchema = [
+  "schemaVersion = '2'",
+  "engineVersion = 'check-engine'",
+  "tags = [{id = 'runtime-defense', name = 'Runtime Defense', description = 'runtime defense', order = 80}]",
+  "modules = [{id = 'os-anti-vm', name = 'OS Anti VM', description = 'native virtual-machine defense', tagIds = ['runtime-defense'], params = [{key = 'seed', type = 'number', description = 'deterministic seed', hidden = false}], stability = 'experimental', targeting = {supported = true, targetKinds = ['class']}}]",
+  'compatibility = []',
+  "defaultPipeline = ['os-anti-vm']",
+  'orderingConstraints = []',
+].join('\n')
+const tomlParsedSchema = parseEngineSchema(tomlSchema)
+assert(tomlParsedSchema.modules[0]?.params[0]?.key === 'seed', 'expected TOML number param to parse')
+assert(tomlParsedSchema.modules[0]?.params[0]?.options === null, 'expected omitted options to parse as null')
+assert(tomlParsedSchema.modules[0]?.params[0]?.defaultValue === null, 'expected omitted defaultValue to parse as null')
+
+// 防御加固：即使引擎回归把 null 写成空字符串 ''，前端也应按缺省处理而非抛错。
+const emptyStringSchema = {
+  ...baseSchema,
+  modules: [
+    {
+      ...baseSchema.modules[0],
+      params: [
+        {
+          key: 'seed',
+          type: 'number',
+          defaultValue: '',
+          options: '',
+          description: 'deterministic seed',
+        },
+      ],
+    },
+  ],
+}
+const emptyStringParsed = parseEngineSchema(emptyStringSchema)
+assert(emptyStringParsed.modules[0]?.params[0]?.options === null, 'expected empty-string options to parse as null')
+assert(emptyStringParsed.modules[0]?.params[0]?.defaultValue === null, 'expected empty-string defaultValue to parse as null')
+
+
+expectParseError(
+  {
+    ...baseSchema,
+    modules: [{
+      ...baseSchema.modules[0],
+      targeting: { supported: false, targetKinds: ['class'] },
+    }],
+  },
+  'targeting 不支持时 targetKinds 必须为空',
+)
+
+expectParseError(
+  {
+    ...baseSchema,
+    modules: [{
+      ...baseSchema.modules[0],
+      targeting: { supported: true, targetKinds: [] },
+    }],
+  },
+  'targeting 支持时 targetKinds 不能为空',
+)
+
+console.log('capability-parser checks passed')

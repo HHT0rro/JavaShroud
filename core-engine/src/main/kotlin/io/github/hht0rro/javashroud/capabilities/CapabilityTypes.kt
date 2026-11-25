@@ -1,0 +1,31 @@
+package io.github.hht0rro.javashroud.capabilities
+
+import io.github.hht0rro.javashroud.model.schema.ParamSchema
+import io.github.hht0rro.javashroud.model.schema.ModuleTargetingCapability
+import io.github.hht0rro.javashroud.model.schema.VariantRequirement
+
+private const val schemaVersion: String = "2"
+const val JS_VERSION: String = "0.31.0"
+
+internal data class CapabilityBinding(
+    val id: String,
+    val name: String,
+    val description: String,
+    val tagIds: List<String>,
+    val stability: String,
+    val params: List<ParamSchema> = emptyList(),
+    val risk: String = "low",
+    val requiresRuntimeFlags: List<String> = emptyList(),
+    val platformConstraints: List<String> = emptyList(),
+    val compatibilityNotes: String = "",
+    val requiredPassIds: List<String> = emptyList(),
+    val requiresAnyPassIds: List<String> = emptyList(),
+    val variantRequirements: List<VariantRequirement> = emptyList(),
+    val defaultEnabled: Boolean = true,
+    val requiresOptIn: Boolean = false,
+    val targeting: ModuleTargetingCapability,
+)
+
+fun engineSchemaVersion(): String = schemaVersion
+
+fun engineVersion(): String = JS_VERSION

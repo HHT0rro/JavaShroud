@@ -1,0 +1,1967 @@
+package io.github.hht0rro.javashroud
+
+import com.fasterxml.jackson.databind.JsonNode
+import com.fasterxml.jackson.databind.ObjectMapper
+import io.github.hht0rro.javashroud.adapters.protocol.EngineCommand
+import io.github.hht0rro.javashroud.adapters.protocol.buildCommandRequest
+import io.github.hht0rro.javashroud.adapters.protocol.dispatchRequest
+import io.github.hht0rro.javashroud.kernel.EngineKernel
+import io.github.hht0rro.javashroud.transforms.protection.CandidateProductionBuildEvidence
+import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
+import io.github.hht0rro.javashroud.transforms.protection.QP_LAYOUT_DIGEST_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.QP_MASTER_KEY_SIZE
+import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.NativeVmBuildProfile
+import io.github.hht0rro.javashroud.transforms.protection.RuntimeKeyPartitions
+import io.github.hht0rro.javashroud.transforms.protection.QpSerializer
+import io.github.hht0rro.javashroud.transforms.protection.storedVmHeaderFlags
+import io.github.hht0rro.javashroud.transforms.protection.hardening.ProtectionFormat
+import io.github.hht0rro.javashroud.transforms.protection.qp.derivedVmMagic
+import org.objectweb.asm.ClassReader
+import org.objectweb.asm.ClassWriter
+import org.objectweb.asm.ClassVisitor
+import org.objectweb.asm.Handle
+import org.objectweb.asm.MethodVisitor
+import org.objectweb.asm.Opcodes
+import org.objectweb.asm.Type
+import java.nio.file.Files
+import java.nio.file.Path
+import java.util.jar.JarInputStream
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
+import java.security.SecureRandom
+import kotlin.test.assertTrue
+import kotlin.test.assertNotNull
+
+private fun decodeHexSignature(value: String): ByteArray = ByteArray(value.length / 2) { index ->
+    value.substring(index * 2, index * 2 + 2).toInt(16).toByte()
+}
+
+/**
+ * Native VM lifecycle tests.
+ *
+ * The former Java interpreter roundtrip tests are intentionally removed in
+ * Native-only mode. These tests verify compile-time serializer output and
+ * runtime helper injection behavior for the native-only path.
+ */
+class VmInterpreterExecutionTest {
+    private val objectMapper = ObjectMapper()
+
+    @Test
+    fun native_serializer_returns_expected_header_and_section_markers() {
+        val serializer = QpSerializer(buildSeed = 0x2468_1357, buildContext = fixedQpContext())
+        serializer.visitCode()
+        serializer.visitInsn(Opcodes.ICONST_1)
+        serializer.visitInsn(Opcodes.IRETURN)
+        serializer.visitMaxs(8, 8)
+        serializer.visitEnd()
+
+        val bytes = serializer.serialize()
+
+        val currentMagic = derivedVmMagic()
+        val retiredVmMagic = decodeHexSignature(ProtectionFormat.RETIRED_VM_MAGIC_HEX)
+        try {
+            assertTrue(bytes.copyOfRange(0, 4).contentEquals(currentMagic), "VM frame must use the current seed-derived magic")
+            assertFalse(bytes.copyOfRange(0, 4).contentEquals(retiredVmMagic), "VM frame must not use the retired magic")
+        } finally {
+            java.util.Arrays.fill(currentMagic, 0)
+            java.util.Arrays.fill(retiredVmMagic, 0)
+        }
+        assertFalse(bytes.containsInt32BigEndian(0x2468_1357), "Build seed must not be stored in plaintext")
+        assertEquals(32, bytes.copyOfRange(20, 52).size, "Native VM header must carry a dialect commitment")
+        assertTrue(bytes.copyOfRange(20, 52).any { it != 0.toByte() }, "Native VM dialect commitment must not be an all-zero placeholder")
+        assertEquals(16, bytes.copyOfRange(56, 72).size, "Native VM header must carry a wrapped seed token")
+        val flags = storedVmHeaderFlags(bytes)
+        assertTrue(flags and 0x0001 != 0, "Constant pool section must be encrypted")
+        assertTrue(flags and 0x0002 != 0, "Instruction section must be block encrypted")
+        assertTrue(flags and 0x0004 != 0, "Stream must contain MAC")
+        assertTrue(flags and 0x0020 != 0, "Stream must carry authenticated encryption metadata")
+        assertEquals(32, bytes.copyOfRange(bytes.size - 32, bytes.size).size, "Native VM frame ends in the fixed-size HMAC without a trailing length marker")
+    }
+
+    @Test
+    fun native_multi_block_layout_splits_large_methods_into_several_blocks() {
+        val serializer = QpSerializer(buildSeed = 0x0BADF00D, buildContext = fixedQpContext())
+        serializer.visitCode()
+        repeat(60) { i ->
+            serializer.visitLdcInsn(i)
+            serializer.visitInsn(Opcodes.POP)
+        }
+        serializer.visitInsn(Opcodes.ICONST_1)
+        serializer.visitInsn(Opcodes.IRETURN)
+        serializer.visitMaxs(8, 8)
+        serializer.visitEnd()
+
+        val bytes = serializer.serialize()
+        val blockCount = readU2(bytes, 74)
+        assertTrue(blockCount > 1, "Large methods must lower into multiple VM blocks, got $blockCount")
+        assertTrue(blockCount <= 12, "Multi-block layout must respect the block ceiling, got $blockCount")
+    }
+
+    @Test
+    fun native_multi_block_layout_uses_entropy_even_for_same_seed() {
+        fun emit(seed: Int): ByteArray {
+            val serializer = QpSerializer(buildSeed = seed, buildContext = fixedQpContext())
+            serializer.visitCode()
+            repeat(60) { i ->
+                serializer.visitLdcInsn(i)
+                serializer.visitInsn(Opcodes.POP)
+            }
+            serializer.visitInsn(Opcodes.ICONST_1)
+            serializer.visitInsn(Opcodes.IRETURN)
+            serializer.visitMaxs(8, 8)
+            serializer.visitEnd()
+            val bytes = serializer.serialize()
+            return bytes
+        }
+        val repeated = (1..16).map { emit(0x13572468) }
+        assertTrue(repeated.map { it.toList() }.toSet().size > 1, "Encoded block layout must vary with structure entropy even for a repeated fixed seed")
+    }
+
+    @Test
+    fun native_multi_block_storage_order_is_seed_randomized() {
+        fun blockIds(seed: Int): List<Int> {
+            val serializer = QpSerializer(buildSeed = seed, buildContext = fixedQpContext())
+            serializer.visitCode()
+            repeat(96) { i ->
+                serializer.visitLdcInsn(i)
+                serializer.visitInsn(Opcodes.POP)
+            }
+            serializer.visitInsn(Opcodes.ICONST_1)
+            serializer.visitInsn(Opcodes.IRETURN)
+            serializer.visitMaxs(8, 8)
+            serializer.visitEnd()
+            val bytes = serializer.serialize()
+            val blockCount = readU2(bytes, 74)
+            return readBlockIndexEntries(bytes, blockCount).map { it.blockId }
+        }
+
+        val orders = (1..40).map { blockIds(0x2468_1357) }
+        for (ids in orders) {
+            assertTrue(ids.size > 1, "Fixture must produce multiple blocks")
+            assertEquals(ids.indices.toList(), ids.sorted(), "Physical block index must contain each logical block id exactly once")
+        }
+        assertTrue(orders.map { it.size to it }.groupBy({ it.first }, { it.second }).values.any { it.distinct().size > 1 },
+            "Physical block order must vary for builds with the same block count")
+    }
+
+    @Test
+    fun native_multi_block_index_carries_masked_dispatch_chain() {
+        val seed = 0x2468_1357
+        val serializer = QpSerializer(
+            buildSeed = seed,
+            buildContext = fixedQpContext(),
+            structureEntropy = fixedStructureEntropy(),
+        )
+        serializer.visitCode()
+        repeat(96) { i ->
+            serializer.visitLdcInsn(i)
+            serializer.visitInsn(Opcodes.POP)
+        }
+        serializer.visitInsn(Opcodes.ICONST_1)
+        serializer.visitInsn(Opcodes.IRETURN)
+        serializer.visitMaxs(8, 8)
+        serializer.visitEnd()
+
+        val bytes = serializer.serialize()
+        val flags = storedVmHeaderFlags(bytes)
+        val blockCount = readU2(bytes, 74)
+        val entries = readBlockIndexEntries(bytes, blockCount)
+
+        assertTrue(flags and 0x0800 != 0, "Native VM must mark block-dispatch metadata as required")
+        assertTrue(blockCount > 1, "Fixture must produce multiple blocks")
+        assertTrue(entries.any { it.maskedNext != it.blockId + 1 }, "Dispatch edges must be masked rather than plaintext next ids")
+        val dispatchSeed = effectiveBuildSeed(serializer)
+        val nextByBlock = entries.associate { it.blockId to decodeBlockDispatchNext(dispatchSeed, it.blockId, blockCount, it.maskedNext) }
+        val chain = generateSequence(0) { current ->
+            val next = nextByBlock.getValue(current)
+            if (next == blockCount) null else next
+        }.take(blockCount + 1).toList()
+        assertEquals((0 until blockCount).toList(), chain.sorted(), "Masked block-dispatch chain must visit every logical block exactly once")
+        assertEquals(blockCount, nextByBlock.getValue(chain.last()), "Last block in dispatch order must target the terminal sentinel")
+    }
+
+    @Test
+    fun native_same_program_has_high_structural_variance_across_build_seeds() {
+        fun emit(seed: Int): Pair<ByteArray, List<Int>> {
+            val serializer = QpSerializer(buildSeed = seed, buildContext = fixedQpContext())
+            serializer.visitCode()
+            repeat(128) { i ->
+                serializer.visitLdcInsn(i xor (i shl 3))
+                serializer.visitInsn(Opcodes.POP)
+                serializer.visitInsn(Opcodes.ICONST_1)
+                serializer.visitInsn(Opcodes.ICONST_2)
+                serializer.visitInsn(Opcodes.IADD)
+                serializer.visitInsn(Opcodes.POP)
+            }
+            serializer.visitInsn(Opcodes.ICONST_1)
+            serializer.visitInsn(Opcodes.IRETURN)
+            serializer.visitMaxs(8, 8)
+            serializer.visitEnd()
+            val bytes = serializer.serialize()
+            val blockCount = readU2(bytes, 74)
+            val blockIds = readBlockIndexEntries(bytes, blockCount).map { it.blockId }
+            return bytes to blockIds
+        }
+
+        val outputs = (1..16).map { emit(0x5A00_0000.toInt() + it) }
+        val uniquePayloads = outputs.map { it.first.toList() }.toSet().size
+        val uniqueBlockCounts = outputs.map { it.second.size }.toSet().size
+        val uniqueStorageOrders = outputs.map { it.second }.toSet().size
+
+        assertEquals(outputs.size, uniquePayloads, "Same source VM program should produce unique native payloads across sampled build seeds")
+        assertTrue(uniqueBlockCounts >= 2, "Same source VM program should vary logical block counts across seeds")
+        assertTrue(uniqueStorageOrders >= outputs.size / 2, "Same source VM program should vary physical block storage order across seeds")
+    }
+
+    @Test
+    fun native_extended_opcode_aliasing_covers_more_semantic_families() {
+        val serializerSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/QpSerializer.kt"))
+        val nativeSource = Files.readString(Path.of("src/main/rust/crates/qp-vm/src/lib.rs"))
+        // Arithmetic/bitwise, load-store, array, field, and branch families must all carry aliases.
+        for (canonical in listOf("VM_IMUL", "VM_IXOR", "VM_IAND", "VM_ISHL", "VM_ALOAD", "VM_ASTORE", "VM_IALOAD", "VM_GETFIELD", "VM_GOTO", "VM_IF_ICMPEQ")) {
+            assertTrue(serializerSource.contains("VmOpcodes.$canonical to intArrayOf("), "Serializer must alias $canonical")
+        }
+        assertTrue(nativeSource.contains("fn canonical_opcode"), "Rust parser must canonicalize polymorphic opcode aliases")
+        for (name in listOf("IMUL", "GOTO", "GETFIELD", "IALOAD")) {
+            assertTrue(nativeSource.contains(name), "Rust VM must keep $name")
+        }
+    }
+
+    @Test
+    fun native_domain_super_operator_operands_are_alias_diversified() {
+        fun foldedSources(seed: Int): Pair<Int, Int> {
+            val serializer = QpSerializer(buildSeed = seed, buildContext = fixedQpContext())
+            val domainOperand = QpSerializer::class.java.getDeclaredMethod(
+                "domainSuperOperandOpcode",
+                Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType,
+            ).apply { isAccessible = true }
+            val srcA = domainOperand.invoke(serializer, 0x02, 0, 0) as Int
+            val srcB = domainOperand.invoke(serializer, 0x40, 0, 1) as Int
+            return srcA to srcB
+        }
+
+        val variants = (1..12).map { foldedSources(0x7100_0000 + it) }.toSet()
+
+        assertTrue(variants.size >= 2, "Semantic/domain super-operator embedded opcodes must use multiple alias encodings across seeds")
+    }
+
+    @Test
+    fun native_stack_instruction_opcodes_are_masked_per_build_seed() {
+        val serializerA = QpSerializer(buildSeed = 0x11111111, buildContext = fixedQpContext())
+        serializerA.visitCode()
+        serializerA.visitInsn(Opcodes.ICONST_1)
+        serializerA.visitInsn(Opcodes.IRETURN)
+        serializerA.visitMaxs(8, 8)
+        serializerA.visitEnd()
+        val bytesA = serializerA.serialize()
+
+        val serializerB = QpSerializer(buildSeed = 0x22222222, buildContext = fixedQpContext())
+        serializerB.visitCode()
+        serializerB.visitInsn(Opcodes.ICONST_1)
+        serializerB.visitInsn(Opcodes.IRETURN)
+        serializerB.visitMaxs(8, 8)
+        serializerB.visitEnd()
+        val bytesB = serializerB.serialize()
+
+        // Different seeds should produce different binary output for the same program
+        assertFalse(bytesA.contentEquals(bytesB), "Different build seeds must produce different native VM encodings")
+        // The complete 32-byte MAC tag at EOF should differ too.
+        assertFalse(
+            bytesA.copyOfRange(bytesA.size - 32, bytesA.size).contentEquals(
+                bytesB.copyOfRange(bytesB.size - 32, bytesB.size)
+            ),
+            "Different build seeds must produce different 32-byte MAC tags"
+        )
+    }
+
+    @Test
+    fun native_state_bound_serializer_uses_runtime_binding_in_seed_derivation() {
+        val serializerSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/QpSerializer.kt"))
+        val virtualizationSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/MethodVirtualizationTransforms.kt"))
+        val nativeKernelSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/NativeKernelTransforms.kt"))
+
+        assertTrue(serializerSource.contains("private val stateBinding: String"), "Native VM serializer must accept runtime state binding material.")
+        assertTrue(serializerSource.contains("QP_FLAG_STATE_BOUND") && serializerSource.contains("frameWrappedSeed(cryptoSeed, nonce, stateBinding)"), "Native VM serializer seed wrapping must always include binding material.")
+        assertTrue(virtualizationSource.contains("QP_CLEAN_ENTRY_INTEGRITY_HEX") && virtualizationSource.contains("jarLayoutDigest"), "VM resource binding must include clean entry integrity and build layout digest material.")
+        assertTrue(virtualizationSource.contains("vmStateBinding(entryToken, resourcePath)"), "VM resource serialization must bind the hashed runtime entry token and resource path.")
+        assertTrue(nativeKernelSource.contains("stateBinding = vmStateBinding(entryToken, resourcePath)"), "Helper VM resource serialization must also bind the hashed runtime entry token and resource path.")
+    }
+
+    @Test
+    fun native_serializer_and_native_parser_support_opcode_level_polymorphism() {
+        val serializerSource = Files.readString(Path.of("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/QpSerializer.kt"))
+        val nativeSource = Files.readString(Path.of("src/main/rust/crates/qp-vm/src/lib.rs"))
+
+        assertTrue(serializerSource.contains("VM_OPCODE_ALIASES"), "Serializer must define equivalent opcode aliases.")
+        assertTrue(serializerSource.contains("lowerToLogicalProgram(metadataCpIndex)"), "Native-only serialization must lower bytecode into the register program consumed by native dispatch.")
+        assertTrue(serializerSource.contains("polymorphicOpcode(instruction.opcode"), "Register instruction serialization must choose polymorphic opcode aliases.")
+        assertTrue(serializerSource.contains("domainSuperOperandOpcode") && serializerSource.contains("polymorphicOpcode(opcode"), "Semantic/domain super-operators must diversify their embedded source opcodes instead of exposing stable canonical operands.")
+        assertTrue(nativeSource.contains("fn canonical_opcode"), "Rust parser must canonicalize polymorphic opcode aliases before dispatch.")
+        assertTrue(nativeSource.contains("IADD"), "Rust parser must keep arithmetic handlers.")
+        assertTrue(nativeSource.contains("IRETURN"), "Rust parser must keep return handlers.")
+    }
+
+    @Test
+    fun jni_native_only_profile_rejects_execution_when_no_kernel_is_available() {
+        val passes = listOf("method-virtualization", "jni-microkernel-loader")
+        val inputJar = buildDiverseFixtureJar(Files.createTempFile("javashroud-vm-jni-exec", ".jar"))
+        try {
+            if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) {
+                val error = assertFailsWith<IllegalArgumentException> { runEngine(inputJar, passes) }
+                assertTrue(error.message?.contains("requires a bundled sealed JNI VM kernel") == true, "Native-only mode should fail closed. Message=${error.message}")
+                return
+            }
+
+            val outputJar = runEngine(inputJar, passes)
+            val entries = loadJarEntryNames(outputJar)
+            assertFalse(entries.any { it.contains("Vm" + "Interpreter" + "Helper") }, "JNI native-only mode must not embed the full Java VM interpreter helper")
+            assertTrue(entries.any { it.startsWith("META-INF/") && !it.endsWith(".class") && !it.endsWith("/") }, "JNI VM mode should seal VM resources under META-INF for native consumption")
+            assertTrue(methodInvokesNativeVmDispatcher(outputJar, "e2e/Root", "call", "()I"), "Native-compatible method should be replaced with the JNI VM dispatcher")
+            assertFalse(classHasMethodNameContaining(outputJar, "e2e/Root", "js" + "$" + "orig"), "Native-compatible method bodies must not remain as synthetic original Java methods")
+            Files.deleteIfExists(outputJar)
+        } finally {
+            Files.deleteIfExists(inputJar)
+        }
+    }
+
+    @Test
+    fun jni_native_only_profile_preserves_hot_loops_and_nested_catch_semantics() {
+        if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) return
+        val passes = listOf("method-virtualization", "jni-microkernel-loader")
+        val inputJar = buildHotLoopExceptionFixtureJar(Files.createTempFile("javashroud-vm-hot-exception", ".jar"))
+        var outputJar: Path? = null
+        try {
+            val baseline = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", inputJar.toAbsolutePath().normalize().toString()),
+                timeoutSeconds = 20,
+            )
+            assertEquals(0, baseline.exitCode, "Baseline hot-loop/exception fixture must exit cleanly. stdout=${baseline.output}")
+
+            outputJar = runEngine(inputJar, passes)
+            val result = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()),
+                timeoutSeconds = 60,
+            )
+            assertEquals(0, result.exitCode, "Virtualized hot-loop/exception fixture must exit cleanly. stdout=${result.output}")
+            assertEquals(
+                baseline.output.trim(),
+                result.output.trim(),
+                "Native VM must preserve long-running loops and nested virtualized ArithmeticException catch semantics",
+            )
+        } finally {
+            outputJar?.let { Files.deleteIfExists(it) }
+            Files.deleteIfExists(inputJar)
+        }
+    }
+    @Test
+    fun jni_native_only_profile_preserves_bitwise_and_shift_super_operator_fusion() {
+        if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) return
+        val passes = listOf("method-virtualization", "jni-microkernel-loader")
+        val inputJar = buildBitwiseShiftFixtureJar(Files.createTempFile("javashroud-vm-bitwise", ".jar"))
+        var outputJar: Path? = null
+        try {
+            val baseline = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", inputJar.toAbsolutePath().normalize().toString()),
+            )
+            assertEquals(0, baseline.exitCode, "Baseline bitwise/shift fixture must exit cleanly. stdout=${baseline.output}")
+
+            outputJar = runEngine(inputJar, passes)
+            val result = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()),
+            )
+            assertEquals(0, result.exitCode, "Virtualized bitwise/shift fixture must exit cleanly. stdout=${result.output}")
+            assertEquals(
+                baseline.output.trim(),
+                result.output.trim(),
+                "Native VM must preserve const+bitwise/shift semantics through broadened super-operator fusion",
+            )
+        } finally {
+            outputJar?.let { Files.deleteIfExists(it) }
+            Files.deleteIfExists(inputJar)
+        }
+    }
+
+    @Test
+    fun jni_native_only_profile_preserves_semantic_predicate_super_operator_fusion() {
+        if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) return
+        val passes = listOf("method-virtualization", "jni-microkernel-loader")
+        val inputJar = buildPredicateDomainFixtureJar(Files.createTempFile("javashroud-vm-predicate", ".jar"))
+        var outputJar: Path? = null
+        try {
+            val baseline = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", inputJar.toAbsolutePath().normalize().toString()),
+            )
+            assertEquals(0, baseline.exitCode, "Baseline predicate fixture must exit cleanly. stdout=${'$'}{baseline.output}")
+
+            outputJar = runEngine(inputJar, passes)
+            val result = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()),
+            )
+            assertEquals(0, result.exitCode, "Virtualized predicate fixture must exit cleanly. stdout=${result.output}")
+            assertEquals(
+                baseline.output.trim(),
+                result.output.trim(),
+                "Native VM must preserve compare-and-branch semantics through semantic predicate super-operator fusion",
+            )
+        } finally {
+            outputJar?.let { Files.deleteIfExists(it) }
+            Files.deleteIfExists(inputJar)
+        }
+    }
+
+
+    private fun buildRenamedMainBridgeFixtureJar(target: Path): Path = buildJavaSourceFixtureJar(
+        target = target,
+        mainClass = "e2e.RenamedMainRoot",
+        sourceFile = "RenamedMainRoot.java",
+        source = """
+            package e2e;
+
+            public final class RenamedMainRoot {
+                public static void main(String[] args) {
+                    String mode = (args.length > 0 && "--diagnostics-only".equals(args[0])) ? "diagnostics" : "ui";
+                    System.out.println("renamed-main:" + mode);
+                }
+            }
+        """.trimIndent(),
+    )
+    private fun buildPredicateDomainFixtureJar(target: Path): Path = buildJavaSourceFixtureJar(
+        target = target,
+        mainClass = "e2e.PredicateRoot",
+        sourceFile = "PredicateRoot.java",
+        source = """
+            package e2e;
+
+            public final class PredicateRoot {
+                private static int compare(long a, long b, float f, double d) {
+                    int score = 0;
+                    if (a < b) score += 3;
+                    if (a == b) score += 5;
+                    if (f > 7.25f) score += 11;
+                    if (d <= 12.5d) score += 17;
+                    return score;
+                }
+
+                public static void main(String[] args) {
+                    int acc = 0;
+                    for (int i = 0; i < 80; i++) {
+                        acc += compare(i * 3L, 120L - i, i / 3.0f, i / 2.0d);
+                    }
+                    System.out.println(acc);
+                }
+            }
+        """.trimIndent(),
+    )
+
+    private fun buildMaxHardeningSemanticSplitFixtureJar(target: Path): Path = buildJavaSourceFixtureJar(
+        target = target,
+        mainClass = "e2e.SemanticSplitRoot",
+        sourceFile = "SemanticSplitRoot.java",
+        source = """
+            package e2e;
+
+            public final class SemanticSplitRoot {
+                private static int nestedVerify(int value) {
+                    switch (value) {
+                        case 0: return 7;
+                        case 1: return 11;
+                        case 2: return 13;
+                        default: return 17;
+                    }
+                }
+
+                private static int sparseLookup(int value) {
+                    switch (value) {
+                        case -1: return 3;
+                        case 9: return 5;
+                        case 127: return 7;
+                        default: return 11;
+                    }
+                }
+
+                private static int priorityCheck(int value) {
+                    try {
+                        try {
+                            if (value == 0) return 8 / (value - value);
+                            if (value == 1) throw new IllegalStateException();
+                            return value + 19;
+                        } catch (ArithmeticException first) {
+                            return 31;
+                        }
+                    } catch (RuntimeException second) {
+                        return 37;
+                    }
+                }
+
+                private static int crossMethod(int value) {
+                    int left = nestedVerify(value & 3);
+                    int middle = sparseLookup(value);
+                    int right = priorityCheck(value);
+                    return left + middle + right + (value > 3 ? 41 : 43);
+                }
+
+                public static void main(String[] args) {
+                    System.out.println(crossMethod(0));
+                    System.out.println(crossMethod(1));
+                    System.out.println(crossMethod(9));
+                    System.out.println(crossMethod(127));
+                    System.out.println(crossMethod(-1));
+                }
+            }
+        """.trimIndent(),
+    )
+
+    private fun buildHotLoopExceptionFixtureJar(target: Path): Path = buildJavaSourceFixtureJar(
+        target = target,
+        mainClass = "e2e.HotExceptionRoot",
+        sourceFile = "HotExceptionRoot.java",
+        source = """
+            package e2e;
+
+            public final class HotExceptionRoot {
+                private static int risky(int seed, int i) {
+                    if (i % 131 == 0) return seed / (i - i);
+                    return (seed ^ i) + Integer.reverseBytes(i);
+                }
+
+                private static int catchLoop(int seed) {
+                    int result = seed;
+                    int caught = 0;
+                    for (int i = 1; i <= 5000; i++) {
+                        try {
+                            result ^= risky(seed, i);
+                        } catch (ArithmeticException expected) {
+                            caught += 7;
+                            result += expected.getClass().getSimpleName().hashCode();
+                        }
+                        result = Integer.rotateLeft(result, i & 7);
+                    }
+                    return result ^ caught;
+                }
+
+                private static int hotLoop(int seed) {
+                    int value = seed;
+                    long wide = seed * -7046029254386353131L;
+                    for (int i = 0; i < 160000; i++) {
+                        value ^= i * 73244475;
+                        value = Integer.rotateLeft(value, (i & 15) + 1);
+                        wide ^= ((long)value) * (i + 1099511628211L);
+                        wide = Long.rotateLeft(wide, i & 31);
+                    }
+                    return value ^ (int)(wide ^ (wide >>> 32));
+                }
+
+                public static void main(String[] args) {
+                    System.out.println("hot-ex:" + hotLoop(17) + ":" + catchLoop(31));
+                }
+            }
+        """.trimIndent(),
+    )
+    private fun buildBitwiseShiftFixtureJar(target: Path): Path = buildJavaSourceFixtureJar(
+        target = target,
+        mainClass = "e2e.BitwiseRoot",
+        sourceFile = "BitwiseRoot.java",
+        source = """
+            package e2e;
+
+            public final class BitwiseRoot {
+                // Many `const, <binop>` idioms across arithmetic, bitwise, and shift
+                // families so the folded super-operator path is exercised for each.
+                private static int mix(int x) {
+                    int a = x ^ 0x5A5A5A5A;
+                    a = a & 0x7FFFFFFF;
+                    a = a | 0x01010101;
+                    a = a << 3;
+                    a = a >> 2;
+                    a = a >>> 1;
+                    a = a + 1234;
+                    a = a - 567;
+                    a = a * 31;
+                    return a;
+                }
+
+                public static void main(String[] args) {
+                    int acc = 0;
+                    for (int i = 0; i < 64; i++) {
+                        acc = (acc + mix(i)) ^ (i << 2);
+                        acc = acc & 0x3FFFFFFF;
+                    }
+                    System.out.println("bw:" + acc);
+                }
+            }
+        """.trimIndent(),
+    )
+
+    @Test
+    fun jni_native_only_profile_preserves_recursive_static_call_and_static_field_updates() {
+        if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) return
+        val passes = listOf("method-virtualization", "jni-microkernel-loader")
+        val inputJar = buildRecursiveCounterFixtureJar(Files.createTempFile("javashroud-vm-recursive", ".jar"))
+        var outputJar: Path? = null
+        try {
+            outputJar = runEngine(inputJar, passes)
+            val result = runJavaProcessWithTimeout(
+                ProcessBuilder(
+                    "java",
+                    "-jar",
+                    outputJar.toAbsolutePath().normalize().toString(),
+                ),
+            )
+            assertEquals(0, result.exitCode, "Recursive static VM fixture must exit cleanly. stdout=${result.output}")
+            assertTrue(result.output.contains("ok:4"), "Recursive static VM fixture must preserve decrement recursion and static field updates. stdout=${result.output}")
+        } finally {
+            outputJar?.let { Files.deleteIfExists(it) }
+            Files.deleteIfExists(inputJar)
+        }
+    }
+
+    @Test
+    fun jni_native_only_profile_preserves_instance_tail_recursion_without_reentry() {
+        if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) return
+        val passes = listOf("method-virtualization", "jni-microkernel-loader")
+        val inputJar = buildInstanceRecursiveCounterFixtureJar(Files.createTempFile("javashroud-vm-instance-recursive", ".jar"))
+        var outputJar: Path? = null
+        try {
+            val baseline = runJavaProcessWithTimeout(ProcessBuilder("java", "-jar", inputJar.toAbsolutePath().normalize().toString()))
+            assertEquals(0, baseline.exitCode, "Baseline instance recursive fixture must exit cleanly. stdout=${baseline.output}")
+            outputJar = runEngine(inputJar, passes)
+            val result = runJavaProcessWithTimeout(ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()), timeoutSeconds = 120)
+            assertEquals(0, result.exitCode, "Virtualized instance recursive fixture must exit cleanly without native reentry blowup. stdout=${result.output}")
+            assertEquals(baseline.output.trim(), result.output.trim(), "Native VM must preserve private instance tail recursion semantics")
+        } finally {
+            outputJar?.let { Files.deleteIfExists(it) }
+            Files.deleteIfExists(inputJar)
+        }
+    }
+
+    @Test
+    fun jni_native_only_profile_preserves_custom_class_loader_define_class_from_byte_slice() {
+        if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) return
+        val passes = listOf("method-virtualization", "jni-microkernel-loader")
+        val inputJar = buildDefineClassFixtureJar(Files.createTempFile("javashroud-vm-define-class", ".jar"))
+        var outputJar: Path? = null
+        try {
+            val baseline = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", inputJar.toAbsolutePath().normalize().toString()),
+            )
+            assertEquals(0, baseline.exitCode, "Baseline defineClass fixture must exit cleanly. stdout=${baseline.output}")
+            assertEquals("defined:42", baseline.output.trim(), "Baseline defineClass fixture contract changed")
+
+            outputJar = runEngine(inputJar, passes)
+            val result = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()),
+            )
+            assertEquals(0, result.exitCode, "Virtualized defineClass fixture must exit cleanly. stdout=${result.output}")
+            assertEquals(baseline.output.trim(), result.output.trim(), "Native VM must preserve defineClass(byte[], offset, length) semantics")
+        } finally {
+            outputJar?.let { Files.deleteIfExists(it) }
+            Files.deleteIfExists(inputJar)
+        }
+    }
+
+    @Test
+    fun jni_native_only_profile_preserves_uninitialized_constructor_stack_shapes() {
+        if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) return
+        val passes = listOf("method-virtualization", "jni-microkernel-loader")
+        val inputJar = buildConstructorStackFixtureJar(Files.createTempFile("javashroud-vm-ctor-stack", ".jar"))
+        var outputJar: Path? = null
+        try {
+            val baseline = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", inputJar.toAbsolutePath().normalize().toString()),
+            )
+            assertEquals(0, baseline.exitCode, "Baseline constructor-stack fixture must exit cleanly. stdout=${baseline.output}")
+            assertEquals("ctor:classic:2:true", baseline.output.trim(), "Baseline constructor-stack fixture contract changed")
+
+            outputJar = runEngine(inputJar, passes)
+            val result = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()),
+            )
+            assertEquals(0, result.exitCode, "Virtualized constructor-stack fixture must exit cleanly. stdout=${result.output}")
+            assertEquals(baseline.output.trim(), result.output.trim(), "Native VM must preserve uninitialized object duplication and multi-arg constructor semantics")
+        } finally {
+            outputJar?.let { Files.deleteIfExists(it) }
+            Files.deleteIfExists(inputJar)
+        }
+    }
+
+    @Test
+    fun jni_native_only_profile_preserves_option_parser_constructor_tail() {
+        if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) return
+        val passes = listOf("method-virtualization", "jni-microkernel-loader")
+        val inputJar = buildOptionParserFixtureJar(Files.createTempFile("javashroud-vm-option-parser", ".jar"))
+        var outputJar: Path? = null
+        try {
+            val baseline = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", inputJar.toAbsolutePath().normalize().toString()),
+            )
+            assertEquals(0, baseline.exitCode, "Baseline option parser fixture must exit cleanly. stdout=${baseline.output}")
+            assertEquals("default:2:classic:true;custom:5:night:false", baseline.output.trim(), "Baseline option parser fixture contract changed")
+
+            outputJar = runEngine(inputJar, passes)
+            val result = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()),
+            )
+            assertEquals(0, result.exitCode, "Virtualized option parser fixture must exit cleanly. stdout=${result.output}")
+            assertEquals(baseline.output.trim(), result.output.trim(), "Native VM must preserve looped option parsing and constructor tail semantics")
+        } finally {
+            outputJar?.let { Files.deleteIfExists(it) }
+            Files.deleteIfExists(inputJar)
+        }
+    }
+
+    @Test
+    fun jni_native_only_profile_preserves_virtualized_method_annotation_metadata() {
+        if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) return
+        val passes = listOf("method-virtualization", "jni-microkernel-loader")
+        val inputJar = buildAnnotationMetadataFixtureJar(Files.createTempFile("javashroud-vm-annotation", ".jar"))
+        var outputJar: Path? = null
+        try {
+            val baseline = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", inputJar.toAbsolutePath().normalize().toString()),
+            )
+            assertEquals(0, baseline.exitCode, "Baseline annotation fixture must exit cleanly. stdout=${baseline.output}")
+            assertEquals("ann:method:7:param:OK", baseline.output.trim(), "Baseline annotation fixture contract changed")
+
+            outputJar = runEngine(inputJar, passes)
+            val result = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()),
+            )
+            assertEquals(0, result.exitCode, "Virtualized annotation fixture must exit cleanly. stdout=${result.output}")
+            assertEquals(baseline.output.trim(), result.output.trim(), "Native VM must preserve method, default, and parameter annotation metadata")
+        } finally {
+            outputJar?.let { Files.deleteIfExists(it) }
+            Files.deleteIfExists(inputJar)
+        }
+    }
+
+    @Test
+    fun jni_native_only_profile_preserves_runnable_lambda_thread_pool_timing() {
+        if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) return
+        val passes = listOf("method-virtualization", "jni-microkernel-loader")
+        val inputJar = buildThreadPoolLambdaFixtureJar(Files.createTempFile("javashroud-vm-thread-pool", ".jar"))
+        var outputJar: Path? = null
+        try {
+            val baseline = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", inputJar.toAbsolutePath().normalize().toString()),
+            )
+            assertEquals(0, baseline.exitCode, "Baseline thread-pool fixture must exit cleanly. stdout=${baseline.output}")
+            assertEquals("pool:30", baseline.output.trim(), "Baseline thread-pool fixture contract changed")
+
+            outputJar = runEngine(inputJar, passes)
+            val result = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()),
+            )
+            assertEquals(0, result.exitCode, "Virtualized thread-pool fixture must exit cleanly. stdout=${result.output}")
+            assertEquals(baseline.output.trim(), result.output.trim(), "Native VM must preserve Runnable lambda execution inside time-bounded executor flows")
+        } finally {
+            outputJar?.let { Files.deleteIfExists(it) }
+            Files.deleteIfExists(inputJar)
+        }
+    }
+
+    @Test
+    fun jni_native_indy_string_bridge_survives_concurrent_sealed_helper_relocation() {
+        if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) return
+        val passes = listOf(
+            "string-encryption",
+            "invoke-dynamic-indirection",
+            "callsite-rotation-protection",
+            "method-virtualization",
+            "jni-microkernel-loader",
+        )
+        val inputJar = buildIndyStringBridgeConcurrencyFixtureJar(
+            Files.createTempFile("javashroud-vm-indy-string-bridge", ".jar"),
+        )
+        var outputJar: Path? = null
+        try {
+            val baseline = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-Xverify:all", "-jar", inputJar.toAbsolutePath().normalize().toString()),
+                timeoutSeconds = 30,
+            )
+            assertEquals(0, baseline.exitCode, "Baseline concurrent String bridge fixture must exit cleanly. stdout=${baseline.output}")
+            assertTrue(baseline.output.trim().startsWith("bridge:"), "Baseline concurrent String bridge fixture contract changed: ${baseline.output}")
+
+            outputJar = runEngine(
+                inputJar = inputJar,
+                passIds = passes,
+                passParams = mapOf(
+                    "string-encryption" to mapOf(
+                        "decoderBackend" to "native-kernel",
+                        "scope" to "all-strings",
+                        "strength" to "max",
+                        "lengthThreshold" to 1,
+                    ),
+                    "invoke-dynamic-indirection" to mapOf(
+                        "callSiteForm" to "bootstrap-table",
+                    ),
+                    "callsite-rotation-protection" to mapOf(
+                        "rotationStrategy" to "mixed",
+                    ),
+                    "method-virtualization" to mapOf(
+                        "methodSelection" to "all-compatible",
+                        "highValueMethods" to "e2e/IndyStringBridgeRoot#bridge:(II)I",
+                        "highValueMethodDeny" to "main,lambda${'$'}main${'$'}0",
+                        "strictVirtualization" to true,
+                        "maxInstructions" to 99999,
+                    ),
+                    "jni-microkernel-loader" to mapOf(
+                        "targetPlatform" to "auto",
+                    ),
+                ),
+            )
+            assertTrue(
+                methodInvokesNativeVmDispatcher(outputJar, "e2e/IndyStringBridgeRoot", "bridge", "(II)I"),
+                "The bridge method must execute through the native VM dispatcher rather than only exercising the Java-side transformed output",
+            )
+            val result = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-Xverify:all", "-jar", outputJar.toAbsolutePath().normalize().toString()),
+                // Each bridge call authenticates and reparses its current-format
+                // VM page.  Keep the correctness budget separate from a future
+                // parsed-program-cache performance benchmark.
+                timeoutSeconds = 180,
+            )
+            assertEquals(0, result.exitCode, "Virtualized concurrent String bridge fixture must exit cleanly. stdout=${result.output}")
+            assertEquals(
+                baseline.output.trim(),
+                result.output.trim(),
+                "Native VM invokedynamic string bridge must resolve the sealed helper on concurrent worker paths",
+            )
+            assertFalse(result.output.contains("NoSuchMethodError"), result.output)
+            assertFalse(result.output.contains("native VM execution failed"), result.output)
+            assertFalse(result.output.contains("indy kind="), result.output)
+        } finally {
+            outputJar?.let { Files.deleteIfExists(it) }
+            Files.deleteIfExists(inputJar)
+        }
+    }
+
+    @Test
+    fun jni_native_only_profile_preserves_renamed_manifest_main_bridge() {
+        if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) return
+        val passes = listOf("rename-methods", "method-virtualization", "jni-microkernel-loader")
+        val inputJar = buildRenamedMainBridgeFixtureJar(Files.createTempFile("javashroud-vm-renamed-main", ".jar"))
+        var outputJar: Path? = null
+        try {
+            val baseline = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", inputJar.toAbsolutePath().normalize().toString(), "--diagnostics-only"),
+            )
+            assertEquals(0, baseline.exitCode, "Baseline renamed-main fixture must exit cleanly. stdout=${baseline.output}")
+            assertEquals("renamed-main:diagnostics", baseline.output.trim(), "Baseline renamed-main fixture contract changed")
+
+            outputJar = runEngine(
+                inputJar,
+                passes,
+                mapOf(
+                    "method-virtualization" to mapOf(
+                        "methodSelection" to "all-compatible",
+                        "strictVirtualization" to true,
+                        "maxInstructions" to 99999,
+                    ),
+                ),
+            )
+            val result = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString(), "--diagnostics-only"),
+            )
+            assertEquals(0, result.exitCode, "Virtualized renamed-main fixture must exit cleanly. stdout=${result.output}")
+            assertEquals(baseline.output.trim(), result.output.trim(), "Synthetic main bridge created for method renaming must continue to invoke the renamed original entry logic")
+        } finally {
+            outputJar?.let { Files.deleteIfExists(it) }
+            Files.deleteIfExists(inputJar)
+        }
+    }
+    @Test
+    fun strict_all_compatible_virtualization_preserves_thread_sleep_boundary() {
+        if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) return
+        val passes = listOf("method-virtualization", "jni-microkernel-loader")
+        val inputJar = buildThreadSleepFixtureJar(Files.createTempFile("javashroud-vm-thread-sleep", ".jar"))
+        var outputJar: Path? = null
+        try {
+            val baseline = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", inputJar.toAbsolutePath().normalize().toString()),
+            )
+            assertEquals(0, baseline.exitCode, "Baseline Thread.sleep fixture must exit cleanly. stdout=${baseline.output}")
+            assertEquals("sleep:13", baseline.output.trim(), "Baseline Thread.sleep fixture contract changed")
+
+            outputJar = runEngine(
+                inputJar,
+                passes,
+                mapOf(
+                    "method-virtualization" to mapOf(
+                        "methodSelection" to "all-compatible",
+                        "strictVirtualization" to true,
+                        "maxInstructions" to 99999,
+                    ),
+                ),
+            )
+            assertTrue(hasRecordedCurrentVmMethod(outputJar, "e2e/ThreadSleepRoot", "compute", "(I)I"), "The compatible Thread.sleep caller must execute through the current VM route")
+            assertTrue(hasRecordedCurrentVmMethod(outputJar, "e2e/ThreadSleepRoot", "arithmetic", "(I)I"), "The called arithmetic method must execute through the current VM route")
+            val result = runJavaProcessWithTimeout(
+                ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()),
+            )
+            assertEquals(0, result.exitCode, "Virtualized Thread.sleep fixture must exit cleanly. stdout=${result.output}")
+            assertEquals(baseline.output.trim(), result.output.trim(), "Native VM must preserve Thread.sleep call semantics")
+        } finally {
+            outputJar?.let { Files.deleteIfExists(it) }
+            Files.deleteIfExists(inputJar)
+        }
+    }
+
+    @Test
+    fun all_build_local_native_vm_profiles_preserve_thread_sleep_behavior() {
+        if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) return
+        val passes = listOf("method-virtualization", "jni-microkernel-loader")
+        val inputJar = buildThreadSleepFixtureJar(Files.createTempFile("javashroud-vm-profile-matrix", ".jar"))
+        val outputs = mutableListOf<Path>()
+        val sharedPartitions = RuntimeKeyPartitions.generate()
+        val results = mutableListOf<NativeProfileBehaviorResult>()
+        val guestSemanticId = CandidateProductionBuildEvidence.semanticId("e2e/ThreadSleepRoot", "arithmetic", "(I)I")
+        try {
+            val baseline = runJavaProcessWithTimeout(ProcessBuilder("java", "-jar", inputJar.toAbsolutePath().normalize().toString()))
+            assertEquals(0, baseline.exitCode, "Baseline native profile matrix fixture must exit cleanly. stdout=${baseline.output}")
+            assertEquals("sleep:13", baseline.output.trim(), "Baseline native profile matrix fixture contract changed")
+            listOf(NativeVmBuildProfile(0, 0), NativeVmBuildProfile(1, 1), NativeVmBuildProfile(2, 2)).forEach { profile ->
+                val tag = "profile-${profile.parserRowProfile}-${profile.operandAccessProfile}"
+                val runIdentity = inputJar.fileName.toString().removeSuffix(".jar")
+                val outputJar = inputJar.resolveSibling("$runIdentity-vm-out-$tag.jar")
+                val configPath = inputJar.resolveSibling("$runIdentity-vm-cfg-$tag.toml")
+                writeRunConfig(configPath, inputJar, outputJar, passes, mapOf(
+                    "method-virtualization" to mapOf(
+                        "methodSelection" to "all-compatible",
+                        "strictVirtualization" to true,
+                        "maxInstructions" to 99999,
+                        "seed" to 0x1357_2468,
+                    ),
+                    "jni-microkernel-loader" to mapOf(
+                        "targetPlatform" to "auto",
+                        "seed" to 0x2468_1357,
+                    ),
+                ))
+                val config = io.github.hht0rro.javashroud.config.loadValidatedConfig(configPath)
+                val baseContext = fixedQpContext()
+                val context = baseContext.copy(
+                    runtimeKeyPartitions = sharedPartitions.deepCopy(),
+                    nativeVmProfile = profile,
+                    productionBuildEvidence = CandidateProductionBuildEvidence.forConfig(config, profile),
+                )
+                outputs.add(outputJar)
+                try {
+                    assertTrue(context.nameSeed.any { it != 0.toByte() }, "Profile $profile must retain its name seed through native initialization")
+                    withTestBootSecret {
+                        io.github.hht0rro.javashroud.kernel.executeKernelRun(
+                            config = config,
+                            configPath = configPath,
+                            qpBuildContextOverride = context,
+                        )
+                    }
+                    assertTrue(hasRecordedCurrentVmMethod(outputJar, "e2e/ThreadSleepRoot", "compute", "(I)I"), "Profile $profile must execute the compatible sleep caller through the current VM route")
+                    assertTrue(hasRecordedCurrentVmMethod(outputJar, "e2e/ThreadSleepRoot", "arithmetic", "(I)I"), "Profile $profile must execute the ordinary arithmetic method through the current VM route")
+                    val evidence = objectMapper.readTree(Files.readAllBytes(CandidateProductionBuildEvidence.evidencePath(outputJar)))
+                    val native = if (evidence.has("parser")) evidence else evidence.path("natives").single()
+                    assertEquals(profile.parserRowProfile, native.path("parser").path("profile_id").asInt(-1), "Recorded native parser must match the requested profile")
+                    assertEquals(profile.operandAccessProfile, native.path("dispatcher").path("profile_id").asInt(-1), "Recorded operand access must match the requested profile")
+                    val guestRecord = evidence.path("methods").single { it.path("semantic_id").asText() == guestSemanticId }
+                    // Finalization releases the transient VM plan. The collector retains
+                    // the exact observations used to write the final build evidence.
+                    val observations = CandidateProductionBuildEvidence::class.java.getDeclaredField("methods")
+                        .apply { isAccessible = true }.get(context.productionBuildEvidence) as Map<*, *>
+                    val guestObservation = observations.values.filterIsInstance<CandidateProductionBuildEvidence.MethodObservation>()
+                        .single { it.semanticId == guestSemanticId }
+                    assertEquals(guestRecord.path("source_resource_path").asText(), guestObservation.sourceResourcePath)
+                    val guestEntryToken = guestObservation.entryToken.toString()
+                    val result = runJavaProcessWithTimeout(ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString()))
+                    assertEquals(0, result.exitCode, "Profile $profile must execute cleanly. stdout=${result.output}")
+                    assertEquals(baseline.output.trim(), result.output.trim(), "Profile $profile must preserve native VM behavior")
+                    val tracedProcess = ProcessBuilder("java", "-jar", outputJar.toAbsolutePath().normalize().toString())
+                    tracedProcess.environment()["JAVASHROUD_QP_TRACE"] = "1"
+                    val traced = runJavaProcessWithTimeout(tracedProcess)
+                    assertEquals(0, traced.exitCode, "Profile $profile must execute cleanly with native tracing. stdout=${traced.output}")
+                    val parseTrace = assertNotNull(traced.output.lineSequence().singleOrNull { it.startsWith("qp-trace parse token=$guestEntryToken ") }, "Profile $profile must parse the registered arithmetic token. stdout=${traced.output}")
+                    val executeTrace = assertNotNull(traced.output.lineSequence().singleOrNull { it.startsWith("qp-trace execute ") && it.contains(" token=$guestEntryToken ") }, "Profile $profile must execute the registered arithmetic token. stdout=${traced.output}")
+                    results += NativeProfileBehaviorResult(profile, result, evidence, guestEntryToken, parseTrace, executeTrace, traced.output)
+                } finally {
+                    context.wipe()
+                    baseContext.wipe()
+                    Files.deleteIfExists(configPath)
+                }
+            }
+            writeNativeProfileBehaviorEvidence(baseline, results, guestSemanticId)
+        } finally {
+            sharedPartitions.wipe()
+            outputs.forEach(Files::deleteIfExists)
+            Files.deleteIfExists(inputJar)
+        }
+    }
+
+    private data class NativeProfileBehaviorResult(
+        val profile: NativeVmBuildProfile,
+        val result: JavaProcessResult,
+        val buildEvidence: JsonNode,
+        val guestEntryToken: String,
+        val parseTrace: String,
+        val executeTrace: String,
+        val traceOutput: String,
+    )
+
+    private fun writeNativeProfileBehaviorEvidence(
+        baseline: JavaProcessResult,
+        results: List<NativeProfileBehaviorResult>,
+        guestSemanticId: String,
+    ) {
+        val cwd = Path.of("").toAbsolutePath().normalize()
+        val root = if (cwd.fileName?.toString() == "core-engine") cwd.parent else cwd
+        val reportPath = root.resolve("build/core-engine/reports/native-max/native-vm-profile-behavior-evidence.json")
+        Files.createDirectories(reportPath.parent)
+        fun digest(value: String): String = CandidateProductionBuildEvidence.sha256Hex(value.toByteArray(Charsets.UTF_8))
+        val profiles = results.map { proof ->
+            val tracePath = reportPath.resolveSibling("native-vm-profile-${proof.profile.parserRowProfile}-${proof.profile.operandAccessProfile}.trace.log")
+            Files.writeString(tracePath, proof.traceOutput, Charsets.UTF_8)
+            linkedMapOf(
+                "parser_row_profile" to proof.profile.parserRowProfile,
+                "operand_access_profile" to proof.profile.operandAccessProfile,
+                "authenticated_id" to proof.profile.authenticatedId,
+                "exit_code" to proof.result.exitCode,
+                "stdout_sha256" to digest(proof.result.output.trim()),
+                "contract_equal" to (proof.result.exitCode == baseline.exitCode && proof.result.output.trim() == baseline.output.trim()),
+                "guest_entry_token" to proof.guestEntryToken,
+                "guest_parse_trace" to proof.parseTrace,
+                "guest_execute_trace" to proof.executeTrace,
+                "trace_file" to tracePath.fileName.toString(),
+                "production_build_evidence" to proof.buildEvidence,
+            )
+        }
+        val report = linkedMapOf(
+            "schema_version" to 1,
+            "fixture" to "thread-sleep-native-qp",
+            "guest_method" to "e2e/ThreadSleepRoot#arithmetic:(I)I",
+            "guest_semantic_id" to guestSemanticId,
+            "baseline" to mapOf("exit_code" to baseline.exitCode, "stdout_sha256" to digest(baseline.output.trim())),
+            "profiles" to profiles,
+            "status" to "passed",
+        )
+        Files.writeString(reportPath, objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(report), Charsets.UTF_8)
+        assertTrue(Files.size(reportPath) > 0, "Native profile behavior evidence report must be written: $reportPath")
+    }
+
+    private fun runEngine(
+        inputJar: Path,
+        passIds: List<String>,
+        passParams: Map<String, Map<String, Any>> = emptyMap(),
+        contextOverride: QpBuildContext? = null,
+        outputTag: String? = null,
+    ): Path {
+        val tag = safeTag(outputTag ?: passIds.joinToString("-"), "javashroud-vm-exec-")
+        val runIdentity = inputJar.fileName.toString().removeSuffix(".jar")
+        val outputJar = inputJar.resolveSibling("$runIdentity-vm-out-$tag.jar")
+        val configPath = inputJar.resolveSibling("$runIdentity-vm-cfg-$tag.toml")
+        writeRunConfig(configPath, inputJar, outputJar, passIds, passParams)
+        try {
+            withTestBootSecret {
+                if (contextOverride == null) {
+                    dispatchRequest(buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())), EngineKernel())
+                } else {
+                    io.github.hht0rro.javashroud.kernel.executeKernelRun(
+                        config = io.github.hht0rro.javashroud.config.loadValidatedConfig(configPath),
+                        configPath = configPath,
+                        qpBuildContextOverride = contextOverride,
+                    )
+                }
+            }
+        } finally {
+            Files.deleteIfExists(configPath)
+        }
+        return outputJar
+    }
+
+    private fun writeRunConfig(configPath: Path, inputJar: Path, outputJar: Path, passIds: List<String>, passParams: Map<String, Map<String, Any>>) {
+        writeTestRunConfigToml(
+            configPath = configPath,
+            inputJar = inputJar,
+            outputJar = outputJar,
+            passIds = passIds,
+            passParams = passParams.mapValues { (_, params) -> params.mapValues { (_, value) -> objectMapper.valueToTree(value) } },
+        )
+    }
+
+    private fun loadJarEntryNames(jarPath: Path): List<String> {
+        val entries = mutableListOf<String>()
+        JarInputStream(Files.newInputStream(jarPath)).use { jar ->
+            while (true) {
+                val entry = jar.nextJarEntry ?: break
+                if (!entry.isDirectory) entries.add(entry.name)
+                jar.closeEntry()
+            }
+        }
+        return entries
+    }
+
+    private fun classHasMethodNameContaining(jarPath: Path, className: String, needle: String): Boolean {
+        JarInputStream(Files.newInputStream(jarPath)).use { jar ->
+            while (true) {
+                val entry = jar.nextJarEntry ?: break
+                if (!entry.isDirectory && entry.name == "$className.class") {
+                    var found = false
+                    ClassReader(jar.readBytes()).accept(object : ClassVisitor(Opcodes.ASM9) {
+                        override fun visitMethod(access: Int, name: String, descriptor: String, signature: String?, exceptions: Array<String>?): MethodVisitor {
+                            if (name.contains(needle)) found = true
+                            return object : MethodVisitor(Opcodes.ASM9) {}
+                        }
+                    }, ClassReader.SKIP_CODE)
+                    return found
+                }
+                jar.closeEntry()
+            }
+        }
+        return false
+    }
+
+    private fun methodInvokesNativeVmDispatcher(jarPath: Path, className: String, targetName: String, targetDescriptor: String): Boolean {
+        if (hasRecordedCurrentVmMethod(jarPath, className, targetName, targetDescriptor)) return true
+        JarInputStream(Files.newInputStream(jarPath)).use { jar ->
+            while (true) {
+                val entry = jar.nextJarEntry ?: break
+                if (!entry.isDirectory && entry.name == "$className.class") {
+                    var found = false
+                    ClassReader(jar.readBytes()).accept(object : ClassVisitor(Opcodes.ASM9) {
+                        override fun visitMethod(access: Int, name: String, descriptor: String, signature: String?, exceptions: Array<String>?): MethodVisitor {
+                            if (name != targetName || descriptor != targetDescriptor) return object : MethodVisitor(Opcodes.ASM9) {}
+                            return object : MethodVisitor(Opcodes.ASM9) {
+                                override fun visitMethodInsn(opcode: Int, owner: String, name: String, descriptor: String, isInterface: Boolean) {
+                                    if (
+                                        opcode == Opcodes.INVOKESTATIC &&
+                                        descriptor == "(Ljava/lang/String;[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
+                                    ) found = true
+                                }
+
+                                override fun visitInvokeDynamicInsn(
+                                    name: String,
+                                    descriptor: String,
+                                    bootstrapMethodHandle: Handle,
+                                    vararg bootstrapMethodArguments: Any,
+                                ) {
+                                    // invoke-dynamic-indirection may wrap the
+                                    // generated QpBridge call after method
+                                    // virtualization. Preserve the native-only
+                                    // assertion across both dispatcher shapes.
+                                    if (descriptor == "(Ljava/lang/String;[BI[B[Ljava/lang/Object;)Ljava/lang/Object;" &&
+                                        bootstrapMethodHandle.owner != "java/lang/invoke/LambdaMetafactory"
+                                    ) {
+                                        found = true
+                                    }
+                                }
+                            }
+                        }
+                    }, ClassReader.SKIP_FRAMES)
+                    return found
+                }
+                jar.closeEntry()
+            }
+        }
+        return false
+    }
+
+    private fun safeTag(raw: String, prefix: String): String {
+        val clean = raw.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+        val maxLen = 180 - prefix.length
+        return if (clean.length > maxLen) clean.substring(0, maxLen) else clean
+    }
+
+    private fun normalizeLineEndings(output: String): String = output.trim().replace("\r\n", "\n")
+
+    private fun fixedQpContext(): QpBuildContext = QpBuildContext(
+        masterKey = ByteArray(QP_MASTER_KEY_SIZE) { index -> (index * 29 + 3).toByte() },
+        nativeSeed = 0x2468_1357L,
+        jarLayoutDigest = ByteArray(QP_LAYOUT_DIGEST_SIZE) { index -> (index * 31 + 9).toByte() },
+    )
+
+    private fun fixedStructureEntropy(): ByteArray = ByteArray(32) { index -> (index * 23 + 11).toByte() }
+
+    private fun readU2(bytes: ByteArray, offset: Int): Int =
+        ((bytes[offset].toInt() and 0xFF) shl 8) or (bytes[offset + 1].toInt() and 0xFF)
+
+    private fun readU4(bytes: ByteArray, offset: Int): Int =
+        ((bytes[offset].toInt() and 0xFF) shl 24) or
+            ((bytes[offset + 1].toInt() and 0xFF) shl 16) or
+            ((bytes[offset + 2].toInt() and 0xFF) shl 8) or
+            (bytes[offset + 3].toInt() and 0xFF)
+
+    private fun effectiveBuildSeed(serializer: QpSerializer): Int =
+        serializer.javaClass.getDeclaredField("effectiveBuildSeed").apply { isAccessible = true }.getInt(serializer)
+
+    private data class BlockIndexEntry(val blockId: Int, val entryToken: Int, val maskedNext: Int)
+
+    private fun readBlockIndexEntries(bytes: ByteArray, blockCount: Int): List<BlockIndexEntry> {
+        val cpSectionSize = readU4(bytes, 80)
+        var offset = 84 + cpSectionSize
+        return (0 until blockCount).map {
+            val entry = BlockIndexEntry(
+                blockId = readU2(bytes, offset),
+                entryToken = readU4(bytes, offset + 2),
+                maskedNext = readU4(bytes, offset + 6),
+            )
+            offset += 10
+            entry
+        }
+    }
+
+    private fun decodeBlockDispatchNext(seed: Int, blockId: Int, blockCount: Int, token: Int): Int {
+        val mask = seed.rotateLeft((blockId * 5 + 7) and 31) xor
+            (blockId * 0x45D9F3B) xor
+            (blockCount * 0x119DE1F3)
+        val payload = token xor mask
+        if (payload in 0..blockCount) return payload
+        val nextBlockId = payload and 0xFFFF
+        val state = (payload ushr 16) and 0xFFFF
+        val mixed = seed.rotateLeft((blockId * 3 + 11) and 31) xor
+            (blockId * 0x632BE59B) xor
+            (nextBlockId * 0x85157AF5.toInt()) xor
+            (blockCount * 0x9E3779B9.toInt())
+        val expectedState = ((mixed xor (mixed ushr 16)) and 0xFFFF).let { if (it == 0) 1 else it }
+        return if (nextBlockId <= blockCount && state == expectedState) nextBlockId else -1
+    }
+
+    private fun ByteArray.containsInt32BigEndian(value: Int): Boolean {
+        if (size < 4) return false
+        for (offset in 0..(size - 4)) {
+            if (readU4(this, offset) == value) return true
+        }
+        return false
+    }
+
+    private fun buildInstanceRecursiveCounterFixtureJar(target: Path): Path = buildJavaSourceFixtureJar(
+        target = target,
+        mainClass = "e2e.InstanceRecursiveCounter",
+        sourceFile = "InstanceRecursiveCounter.java",
+        source = """
+            package e2e;
+
+            public final class InstanceRecursiveCounter {
+                private int count;
+
+                private void call(int i) {
+                    if (i == 0) count++;
+                    else call(i - 1);
+                }
+
+                private int run() {
+                    for (int i = 0; i < 10000; i++) call(100);
+                    return count;
+                }
+
+                public static void main(String[] args) {
+                    System.out.println("ok:" + new InstanceRecursiveCounter().run());
+                }
+            }
+        """.trimIndent(),
+    )
+
+    private fun buildRecursiveCounterFixtureJar(target: Path): Path {
+        val cw = org.objectweb.asm.ClassWriter(0)
+        cw.visit(testClassfileVersion(), org.objectweb.asm.Opcodes.ACC_PUBLIC or org.objectweb.asm.Opcodes.ACC_FINAL, "e2e/RecursiveCounter", null, "java/lang/Object", null)
+        cw.visitField(org.objectweb.asm.Opcodes.ACC_PRIVATE or org.objectweb.asm.Opcodes.ACC_STATIC, "count", "I", null, null).visitEnd()
+        val init = cw.visitMethod(org.objectweb.asm.Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
+        init.visitCode()
+        init.visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 0)
+        init.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+        init.visitInsn(org.objectweb.asm.Opcodes.RETURN)
+        init.visitMaxs(1, 1)
+        init.visitEnd()
+        val call = cw.visitMethod(org.objectweb.asm.Opcodes.ACC_PRIVATE or org.objectweb.asm.Opcodes.ACC_STATIC, "call", "(I)V", null, null)
+        call.visitCode()
+        val recurse = org.objectweb.asm.Label()
+        val done = org.objectweb.asm.Label()
+        call.visitVarInsn(org.objectweb.asm.Opcodes.ILOAD, 0)
+        call.visitJumpInsn(org.objectweb.asm.Opcodes.IFNE, recurse)
+        call.visitFieldInsn(org.objectweb.asm.Opcodes.GETSTATIC, "e2e/RecursiveCounter", "count", "I")
+        call.visitInsn(org.objectweb.asm.Opcodes.ICONST_1)
+        call.visitInsn(org.objectweb.asm.Opcodes.IADD)
+        call.visitFieldInsn(org.objectweb.asm.Opcodes.PUTSTATIC, "e2e/RecursiveCounter", "count", "I")
+        call.visitJumpInsn(org.objectweb.asm.Opcodes.GOTO, done)
+        call.visitLabel(recurse)
+        call.visitVarInsn(org.objectweb.asm.Opcodes.ILOAD, 0)
+        call.visitInsn(org.objectweb.asm.Opcodes.ICONST_1)
+        call.visitInsn(org.objectweb.asm.Opcodes.ISUB)
+        call.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESTATIC, "e2e/RecursiveCounter", "call", "(I)V", false)
+        call.visitLabel(done)
+        call.visitInsn(org.objectweb.asm.Opcodes.RETURN)
+        call.visitMaxs(2, 1)
+        call.visitEnd()
+        val main = cw.visitMethod(org.objectweb.asm.Opcodes.ACC_PUBLIC or org.objectweb.asm.Opcodes.ACC_STATIC, "main", "([Ljava/lang/String;)V", null, null)
+        main.visitCode()
+        main.visitInsn(org.objectweb.asm.Opcodes.ICONST_3)
+        main.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESTATIC, "e2e/RecursiveCounter", "call", "(I)V", false)
+        main.visitFieldInsn(org.objectweb.asm.Opcodes.GETSTATIC, "e2e/RecursiveCounter", "count", "I")
+        main.visitInsn(org.objectweb.asm.Opcodes.ICONST_3)
+        main.visitInsn(org.objectweb.asm.Opcodes.IADD)
+        main.visitFieldInsn(org.objectweb.asm.Opcodes.PUTSTATIC, "e2e/RecursiveCounter", "count", "I")
+        main.visitFieldInsn(org.objectweb.asm.Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;")
+        main.visitFieldInsn(org.objectweb.asm.Opcodes.GETSTATIC, "e2e/RecursiveCounter", "count", "I")
+        main.visitInvokeDynamicInsn(
+            "makeConcatWithConstants",
+            "(I)Ljava/lang/String;",
+            org.objectweb.asm.Handle(
+                org.objectweb.asm.Opcodes.H_INVOKESTATIC,
+                "java/lang/invoke/StringConcatFactory",
+                "makeConcatWithConstants",
+                "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;",
+                false,
+            ),
+            "ok:",
+        )
+        main.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false)
+        main.visitInsn(org.objectweb.asm.Opcodes.RETURN)
+        main.visitMaxs(2, 1)
+        main.visitEnd()
+        val clinit = cw.visitMethod(org.objectweb.asm.Opcodes.ACC_STATIC, "<clinit>", "()V", null, null)
+        clinit.visitCode()
+        clinit.visitInsn(org.objectweb.asm.Opcodes.ICONST_0)
+        clinit.visitFieldInsn(org.objectweb.asm.Opcodes.PUTSTATIC, "e2e/RecursiveCounter", "count", "I")
+        clinit.visitInsn(org.objectweb.asm.Opcodes.RETURN)
+        clinit.visitMaxs(1, 0)
+        clinit.visitEnd()
+        cw.visitEnd()
+        java.nio.file.Files.newOutputStream(target).use { out ->
+            java.util.jar.JarOutputStream(out).use { jar ->
+                jar.putNextEntry(java.util.jar.JarEntry("e2e/RecursiveCounter.class"))
+                jar.write(cw.toByteArray())
+                jar.closeEntry()
+            }
+        }
+        return target
+    }
+
+    private fun buildConstructorStackFixtureJar(target: Path): Path {
+        val root = buildConstructorStackRootBytes()
+        java.nio.file.Files.newOutputStream(target).use { out ->
+            java.util.jar.JarOutputStream(out).use { jar ->
+                jar.putNextEntry(java.util.jar.JarEntry("META-INF/MANIFEST.MF"))
+                jar.write("Manifest-Version: 1.0\r\nMain-Class: e2e.CtorStackRoot\r\n\r\n".toByteArray())
+                jar.closeEntry()
+                jar.putNextEntry(java.util.jar.JarEntry("e2e/CtorStackRoot.class"))
+                jar.write(root)
+                jar.closeEntry()
+            }
+        }
+        return target
+    }
+
+    private fun buildConstructorStackRootBytes(): ByteArray {
+        val cw = org.objectweb.asm.ClassWriter(org.objectweb.asm.ClassWriter.COMPUTE_MAXS or org.objectweb.asm.ClassWriter.COMPUTE_FRAMES)
+        cw.visit(testClassfileVersion(), org.objectweb.asm.Opcodes.ACC_PUBLIC or org.objectweb.asm.Opcodes.ACC_FINAL, "e2e/CtorStackRoot", null, "java/lang/Object", null)
+        cw.visitField(org.objectweb.asm.Opcodes.ACC_PRIVATE or org.objectweb.asm.Opcodes.ACC_FINAL, "label", "Ljava/lang/String;", null, null).visitEnd()
+        cw.visitField(org.objectweb.asm.Opcodes.ACC_PRIVATE or org.objectweb.asm.Opcodes.ACC_FINAL, "count", "I", null, null).visitEnd()
+        cw.visitField(org.objectweb.asm.Opcodes.ACC_PRIVATE or org.objectweb.asm.Opcodes.ACC_FINAL, "enabled", "Z", null, null).visitEnd()
+
+        cw.visitMethod(org.objectweb.asm.Opcodes.ACC_PUBLIC, "<init>", "()V", null, null).apply {
+            visitCode()
+            visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 0)
+            visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+            visitInsn(org.objectweb.asm.Opcodes.RETURN)
+            visitMaxs(1, 1)
+            visitEnd()
+        }
+
+        cw.visitMethod(org.objectweb.asm.Opcodes.ACC_PRIVATE, "<init>", "(ZZILjava/lang/String;Z)V", null, null).apply {
+            visitCode()
+            visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 0)
+            visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+            visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 0)
+            visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 4)
+            visitFieldInsn(org.objectweb.asm.Opcodes.PUTFIELD, "e2e/CtorStackRoot", "label", "Ljava/lang/String;")
+            visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 0)
+            visitVarInsn(org.objectweb.asm.Opcodes.ILOAD, 3)
+            visitFieldInsn(org.objectweb.asm.Opcodes.PUTFIELD, "e2e/CtorStackRoot", "count", "I")
+            visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 0)
+            visitVarInsn(org.objectweb.asm.Opcodes.ILOAD, 1)
+            visitVarInsn(org.objectweb.asm.Opcodes.ILOAD, 2)
+            visitInsn(org.objectweb.asm.Opcodes.IOR)
+            visitVarInsn(org.objectweb.asm.Opcodes.ILOAD, 5)
+            visitInsn(org.objectweb.asm.Opcodes.IAND)
+            visitFieldInsn(org.objectweb.asm.Opcodes.PUTFIELD, "e2e/CtorStackRoot", "enabled", "Z")
+            visitInsn(org.objectweb.asm.Opcodes.RETURN)
+            visitMaxs(3, 6)
+            visitEnd()
+        }
+
+        cw.visitMethod(org.objectweb.asm.Opcodes.ACC_PRIVATE, "describe", "()Ljava/lang/String;", null, null).apply {
+            visitCode()
+            visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 0)
+            visitFieldInsn(org.objectweb.asm.Opcodes.GETFIELD, "e2e/CtorStackRoot", "label", "Ljava/lang/String;")
+            visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 0)
+            visitFieldInsn(org.objectweb.asm.Opcodes.GETFIELD, "e2e/CtorStackRoot", "count", "I")
+            visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 0)
+            visitFieldInsn(org.objectweb.asm.Opcodes.GETFIELD, "e2e/CtorStackRoot", "enabled", "Z")
+            visitInvokeDynamicInsn(
+                "makeConcatWithConstants",
+                "(Ljava/lang/String;IZ)Ljava/lang/String;",
+                org.objectweb.asm.Handle(
+                    org.objectweb.asm.Opcodes.H_INVOKESTATIC,
+                    "java/lang/invoke/StringConcatFactory",
+                    "makeConcatWithConstants",
+                    "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;",
+                    false,
+                ),
+                "ctor:\u0001:\u0001:\u0001",
+            )
+            visitInsn(org.objectweb.asm.Opcodes.ARETURN)
+            visitMaxs(3, 1)
+            visitEnd()
+        }
+
+        cw.visitMethod(org.objectweb.asm.Opcodes.ACC_PRIVATE or org.objectweb.asm.Opcodes.ACC_STATIC, "run", "()Ljava/lang/String;", null, null).apply {
+            visitCode()
+            visitIntInsn(org.objectweb.asm.Opcodes.BIPUSH, 7)
+            visitIntInsn(org.objectweb.asm.Opcodes.NEWARRAY, org.objectweb.asm.Opcodes.T_CHAR)
+            "classic".forEachIndexed { index, char ->
+                visitInsn(org.objectweb.asm.Opcodes.DUP)
+                visitIntInsn(org.objectweb.asm.Opcodes.BIPUSH, index)
+                visitIntInsn(org.objectweb.asm.Opcodes.BIPUSH, char.code)
+                visitInsn(org.objectweb.asm.Opcodes.CASTORE)
+            }
+            visitTypeInsn(org.objectweb.asm.Opcodes.NEW, "java/lang/String")
+            visitInsn(org.objectweb.asm.Opcodes.DUP_X1)
+            visitInsn(org.objectweb.asm.Opcodes.SWAP)
+            visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESPECIAL, "java/lang/String", "<init>", "([C)V", false)
+            visitVarInsn(org.objectweb.asm.Opcodes.ASTORE, 0)
+            visitTypeInsn(org.objectweb.asm.Opcodes.NEW, "e2e/CtorStackRoot")
+            visitInsn(org.objectweb.asm.Opcodes.DUP)
+            visitInsn(org.objectweb.asm.Opcodes.ICONST_1)
+            visitInsn(org.objectweb.asm.Opcodes.ICONST_0)
+            visitInsn(org.objectweb.asm.Opcodes.ICONST_2)
+            visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 0)
+            visitInsn(org.objectweb.asm.Opcodes.ICONST_1)
+            visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESPECIAL, "e2e/CtorStackRoot", "<init>", "(ZZILjava/lang/String;Z)V", false)
+            visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, "e2e/CtorStackRoot", "describe", "()Ljava/lang/String;", false)
+            visitInsn(org.objectweb.asm.Opcodes.ARETURN)
+            visitMaxs(7, 1)
+            visitEnd()
+        }
+
+        cw.visitMethod(org.objectweb.asm.Opcodes.ACC_PUBLIC or org.objectweb.asm.Opcodes.ACC_STATIC, "main", "([Ljava/lang/String;)V", null, null).apply {
+            visitCode()
+            visitFieldInsn(org.objectweb.asm.Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;")
+            visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESTATIC, "e2e/CtorStackRoot", "run", "()Ljava/lang/String;", false)
+            visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false)
+            visitInsn(org.objectweb.asm.Opcodes.RETURN)
+            visitMaxs(2, 1)
+            visitEnd()
+        }
+
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    private fun buildAnnotationMetadataFixtureJar(target: Path): Path = buildJavaSourceFixtureJar(
+        target = target,
+        mainClass = "e2e.AnnotationRoot",
+        sourceFile = "AnnotationRoot.java",
+        source = """
+            package e2e;
+
+            import java.lang.annotation.ElementType;
+            import java.lang.annotation.Retention;
+            import java.lang.annotation.RetentionPolicy;
+            import java.lang.annotation.Target;
+            import java.lang.reflect.Method;
+            import java.util.Locale;
+
+            @Retention(RetentionPolicy.RUNTIME)
+            @Target({ElementType.METHOD, ElementType.PARAMETER})
+            @interface Marker {
+                String value();
+                int count() default 1;
+            }
+
+            public final class AnnotationRoot {
+                @Marker(value = "method", count = 7)
+                private static String target(@Marker("param") String value) {
+                    return value.toUpperCase(Locale.ROOT);
+                }
+
+                public static void main(String[] args) throws Exception {
+                    Method method = AnnotationRoot.class.getDeclaredMethod("target", String.class);
+                    method.setAccessible(true);
+                    Marker methodMarker = method.getAnnotation(Marker.class);
+                    Marker paramMarker = (Marker) method.getParameterAnnotations()[0][0];
+                    System.out.println("ann:" + methodMarker.value() + ":" + methodMarker.count() + ":" + paramMarker.value() + ":" + method.invoke(null, "ok"));
+                }
+            }
+        """.trimIndent(),
+    )
+
+    private fun buildThreadPoolLambdaFixtureJar(target: Path): Path = buildJavaSourceFixtureJar(
+        target = target,
+        mainClass = "e2e.ThreadPoolRoot",
+        sourceFile = "ThreadPoolRoot.java",
+        source = """
+            package e2e;
+
+            import java.util.concurrent.CountDownLatch;
+            import java.util.concurrent.Future;
+            import java.util.concurrent.LinkedBlockingQueue;
+            import java.util.concurrent.RejectedExecutionException;
+            import java.util.concurrent.ThreadPoolExecutor;
+            import java.util.concurrent.TimeUnit;
+
+            public final class ThreadPoolRoot {
+                private static volatile int value = 1;
+                private static final ThreadPoolExecutor EXECUTOR = new ThreadPoolExecutor(0, 1, 1L, TimeUnit.SECONDS, new LinkedBlockingQueue<Runnable>(1));
+                private static final CountDownLatch FIRST_STARTED = new CountDownLatch(1);
+                private static final CountDownLatch RELEASE_FIRST = new CountDownLatch(1);
+
+                private static final class Exec {
+                    private final int delta;
+                    private final boolean blockFirst;
+
+                    Exec(int delta, boolean blockFirst) {
+                        this.delta = delta;
+                        this.blockFirst = blockFirst;
+                    }
+
+                    void doAdd() {
+                        if (blockFirst) {
+                            FIRST_STARTED.countDown();
+                            try {
+                                if (!RELEASE_FIRST.await(5L, TimeUnit.SECONDS)) {
+                                    throw new IllegalStateException("first executor task was not released");
+                                }
+                            } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt();
+                                throw new IllegalStateException("first executor task was interrupted", e);
+                            }
+                        }
+                        value += delta;
+                    }
+                }
+
+                private static Runnable direct(Exec exec) {
+                    return exec::doAdd;
+                }
+
+                private static Runnable snapshot(Exec exec) {
+                    return () -> {
+                        int before = value;
+                        exec.doAdd();
+                        value += before;
+                    };
+                }
+
+                private static String run() throws Exception {
+                    try {
+                        Future<?> first = EXECUTOR.submit(direct(new Exec(3, true)));
+                        if (!FIRST_STARTED.await(5L, TimeUnit.SECONDS)) {
+                            throw new IllegalStateException("first executor task did not start");
+                        }
+                        Thread.sleep(1L);
+                        Future<?> second = EXECUTOR.submit(snapshot(new Exec(2, false)));
+                        try {
+                            EXECUTOR.submit(direct(new Exec(100, false)));
+                        } catch (RejectedExecutionException expected) {
+                            value += 10;
+                        }
+                        RELEASE_FIRST.countDown();
+                        first.get(5L, TimeUnit.SECONDS);
+                        second.get(5L, TimeUnit.SECONDS);
+                        return "pool:" + value;
+                    } finally {
+                        RELEASE_FIRST.countDown();
+                        EXECUTOR.shutdownNow();
+                    }
+                }
+
+                public static void main(String[] args) throws Exception {
+                    System.out.println(run());
+                }
+            }
+        """.trimIndent(),
+    )
+
+    private fun buildIndyStringBridgeConcurrencyFixtureJar(target: Path): Path = buildJavaSourceFixtureJar(
+        target = target,
+        mainClass = "e2e.IndyStringBridgeRoot",
+        sourceFile = "IndyStringBridgeRoot.java",
+        source = """
+            package e2e;
+
+            import java.util.concurrent.CountDownLatch;
+            import java.util.concurrent.atomic.AtomicInteger;
+
+            public final class IndyStringBridgeRoot {
+                private static int bridge(int worker, int iteration) {
+                    String token = "bridge-token:" + worker + ":" + iteration;
+                    return (token.length() * 31 + worker * 17) ^ (iteration * 13);
+                }
+
+                public static void main(String[] args) throws Exception {
+                    final int workers = 6;
+                    final int iterations = 160;
+                    CountDownLatch ready = new CountDownLatch(workers);
+                    CountDownLatch start = new CountDownLatch(1);
+                    CountDownLatch done = new CountDownLatch(workers);
+                    AtomicInteger total = new AtomicInteger();
+
+                    for (int worker = 0; worker < workers; worker++) {
+                        final int workerIndex = worker;
+                        Thread thread = new Thread(() -> {
+                            ready.countDown();
+                            try {
+                                start.await();
+                                int local = 0;
+                                for (int iteration = 0; iteration < iterations; iteration++) {
+                                    local += bridge(workerIndex, iteration);
+                                }
+                                total.addAndGet(local);
+                            } catch (InterruptedException interrupted) {
+                                Thread.currentThread().interrupt();
+                                throw new IllegalStateException("bridge worker interrupted", interrupted);
+                            } finally {
+                                done.countDown();
+                            }
+                        }, "bridge-" + worker);
+                        thread.start();
+                    }
+
+                    if (!ready.await(10L, java.util.concurrent.TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("bridge workers were not ready");
+                    }
+                    start.countDown();
+                    if (!done.await(120L, java.util.concurrent.TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("bridge workers did not complete");
+                    }
+                    System.out.println("bridge:" + total.get());
+                }
+            }
+        """.trimIndent(),
+    )
+
+    private fun buildThreadSleepFixtureJar(target: Path): Path = buildJavaSourceFixtureJar(
+        target = target,
+        mainClass = "e2e.ThreadSleepRoot",
+        sourceFile = "ThreadSleepRoot.java",
+        source = """
+            package e2e;
+
+            public final class ThreadSleepRoot {
+                private static int arithmetic(int value) {
+                    return value + 11;
+                }
+
+                public static int compute(int value) throws Exception {
+                    Thread.sleep(1L);
+                    return arithmetic(value);
+                }
+
+                public static void main(String[] args) throws Exception {
+                    System.out.println("sleep:" + compute(2));
+                }
+            }
+        """.trimIndent(),
+    )
+
+    private fun buildJavaSourceFixtureJar(target: Path, mainClass: String, sourceFile: String, source: String): Path {
+        val workDir = Files.createTempDirectory("javashroud-java-fixture-src")
+        try {
+            val srcDir = workDir.resolve("e2e")
+            val classesDir = workDir.resolve("classes")
+            Files.createDirectories(srcDir)
+            Files.createDirectories(classesDir)
+            val sourcePath = srcDir.resolve(sourceFile)
+            Files.writeString(sourcePath, source)
+            val compiler = javax.tools.ToolProvider.getSystemJavaCompiler() ?: error("JDK compiler is required for Java fixture")
+            val compileExit = compiler.run(null, null, null, "-d", classesDir.toString(), sourcePath.toString())
+            assertEquals(0, compileExit, "Java fixture source must compile: $sourceFile")
+            Files.newOutputStream(target).use { out ->
+                java.util.jar.JarOutputStream(out).use { jar ->
+                    jar.putNextEntry(java.util.jar.JarEntry("META-INF/MANIFEST.MF"))
+                    jar.write("Manifest-Version: 1.0\r\nMain-Class: $mainClass\r\n\r\n".toByteArray())
+                    jar.closeEntry()
+                    Files.walk(classesDir).use { paths ->
+                        paths.filter { Files.isRegularFile(it) }.forEach { classFile ->
+                            val entryName = classesDir.relativize(classFile).toString().replace('\\', '/')
+                            jar.putNextEntry(java.util.jar.JarEntry(entryName))
+                            jar.write(Files.readAllBytes(classFile))
+                            jar.closeEntry()
+                        }
+                    }
+                }
+            }
+            return target
+        } finally {
+            Files.walk(workDir).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+    private fun buildOptionParserFixtureJar(target: Path): Path {
+        val workDir = Files.createTempDirectory("javashroud-option-parser-src")
+        try {
+            val srcDir = workDir.resolve("e2e")
+            val classesDir = workDir.resolve("classes")
+            Files.createDirectories(srcDir)
+            Files.createDirectories(classesDir)
+            val source = srcDir.resolve("OptionParserRoot.java")
+            Files.writeString(
+                source,
+                """
+                package e2e;
+
+                public final class OptionParserRoot {
+                    private final int depth;
+                    private final String theme;
+                    private final boolean animation;
+
+                    private OptionParserRoot(boolean diagnosticsOnly, boolean skipStartupDiagnostics, int depth, String theme, boolean animation) {
+                        this.depth = depth;
+                        this.theme = theme;
+                        this.animation = animation && !diagnosticsOnly && !skipStartupDiagnostics;
+                    }
+
+                    public static OptionParserRoot parse(String[] args) {
+                        boolean diagnosticsOnly = false;
+                        boolean skipStartupDiagnostics = false;
+                        boolean animationEnabled = true;
+                        int aiDepth = 2;
+                        String themeName = "classic";
+                        for (String arg : args) {
+                            if ("--diagnostics-only".equals(arg)) {
+                                diagnosticsOnly = true;
+                            } else if ("--skip-startup-diagnostics".equals(arg)) {
+                                skipStartupDiagnostics = true;
+                            } else if ("--no-animation".equals(arg)) {
+                                animationEnabled = false;
+                            } else if (arg != null && arg.startsWith("--ai-depth=")) {
+                                try {
+                                    aiDepth = Math.max(1, Math.min(5, Integer.parseInt(arg.substring("--ai-depth=".length()))));
+                                } catch (NumberFormatException ignored) {
+                                    aiDepth = 2;
+                                }
+                            } else if (arg != null && arg.startsWith("--theme=")) {
+                                String candidate = arg.substring("--theme=".length()).toLowerCase();
+                                if ("classic".equals(candidate) || "paper".equals(candidate) || "night".equals(candidate)) {
+                                    themeName = candidate;
+                                }
+                            }
+                        }
+                        return new OptionParserRoot(diagnosticsOnly, skipStartupDiagnostics, aiDepth, themeName, animationEnabled);
+                    }
+
+                    private String describe(String prefix) {
+                        return prefix + ":" + depth + ":" + theme + ":" + animation;
+                    }
+
+                    public static void main(String[] args) {
+                        OptionParserRoot def = parse(new String[0]);
+                        OptionParserRoot custom = parse(new String[] {"--ai-depth=9", "--theme=NIGHT", "--no-animation"});
+                        System.out.println(def.describe("default") + ";" + custom.describe("custom"));
+                    }
+                }
+                """.trimIndent(),
+            )
+            val compiler = javax.tools.ToolProvider.getSystemJavaCompiler() ?: error("JDK compiler is required for option parser fixture")
+            val compileExit = compiler.run(null, null, null, "-d", classesDir.toString(), source.toString())
+            assertEquals(0, compileExit, "Option parser fixture Java source must compile")
+            Files.newOutputStream(target).use { out ->
+                java.util.jar.JarOutputStream(out).use { jar ->
+                    jar.putNextEntry(java.util.jar.JarEntry("META-INF/MANIFEST.MF"))
+                    jar.write("Manifest-Version: 1.0\r\nMain-Class: e2e.OptionParserRoot\r\n\r\n".toByteArray())
+                    jar.closeEntry()
+                    Files.walk(classesDir).use { paths ->
+                        paths.filter { Files.isRegularFile(it) }.forEach { classFile ->
+                            val entryName = classesDir.relativize(classFile).toString().replace('\\', '/')
+                            jar.putNextEntry(java.util.jar.JarEntry(entryName))
+                            jar.write(Files.readAllBytes(classFile))
+                            jar.closeEntry()
+                        }
+                    }
+                }
+            }
+            return target
+        } finally {
+            Files.walk(workDir).use { paths ->
+                paths.sorted(java.util.Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+            }
+        }
+    }
+
+    private fun buildDefineClassFixtureJar(target: Path): Path {
+        val payload = buildDefineClassPayloadBytes()
+        val host = buildDefineClassHostBytes()
+        java.nio.file.Files.newOutputStream(target).use { out ->
+            java.util.jar.JarOutputStream(out).use { jar ->
+                jar.putNextEntry(java.util.jar.JarEntry("META-INF/MANIFEST.MF"))
+                jar.write("Manifest-Version: 1.0\r\nMain-Class: e2e.DefineClassHost\r\n\r\n".toByteArray())
+                jar.closeEntry()
+                jar.putNextEntry(java.util.jar.JarEntry("e2e/DefineClassHost.class"))
+                jar.write(host)
+                jar.closeEntry()
+                // The ClassLoader stays on the JVM while a separate ordinary method exercises the native pipeline.
+                val control = ClassWriter(ClassWriter.COMPUTE_MAXS)
+                control.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC or Opcodes.ACC_FINAL, "e2e/DefineClassControl", null, "java/lang/Object", null)
+                control.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "normalize", "(I)I", null, null).apply {
+                    visitCode()
+                    visitVarInsn(Opcodes.ILOAD, 0)
+                    visitInsn(Opcodes.ICONST_1)
+                    visitInsn(Opcodes.IADD)
+                    visitInsn(Opcodes.ICONST_1)
+                    visitInsn(Opcodes.ISUB)
+                    visitInsn(Opcodes.IRETURN)
+                    visitMaxs(0, 0)
+                    visitEnd()
+                }
+                control.visitEnd()
+                jar.putNextEntry(java.util.jar.JarEntry("e2e/DefineClassControl.class"))
+                jar.write(control.toByteArray())
+                jar.closeEntry()
+                jar.putNextEntry(java.util.jar.JarEntry("payload.bin"))
+                jar.write(payload)
+                jar.closeEntry()
+            }
+        }
+        return target
+    }
+
+    private fun buildDefineClassHostBytes(): ByteArray {
+        val cw = org.objectweb.asm.ClassWriter(org.objectweb.asm.ClassWriter.COMPUTE_MAXS or org.objectweb.asm.ClassWriter.COMPUTE_FRAMES)
+        cw.visit(testClassfileVersion(), org.objectweb.asm.Opcodes.ACC_PUBLIC or org.objectweb.asm.Opcodes.ACC_FINAL, "e2e/DefineClassHost", null, "java/lang/ClassLoader", null)
+
+        cw.visitMethod(org.objectweb.asm.Opcodes.ACC_PUBLIC, "<init>", "()V", null, null).apply {
+            visitCode()
+            visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 0)
+            visitLdcInsn(Type.getType("Le2e/DefineClassHost;"))
+            visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, "java/lang/Class", "getClassLoader", "()Ljava/lang/ClassLoader;", false)
+            visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESPECIAL, "java/lang/ClassLoader", "<init>", "(Ljava/lang/ClassLoader;)V", false)
+            visitInsn(org.objectweb.asm.Opcodes.RETURN)
+            visitMaxs(2, 1)
+            visitEnd()
+        }
+
+        cw.visitMethod(org.objectweb.asm.Opcodes.ACC_PRIVATE, "definePayload", "([B)Ljava/lang/Class;", "([B)Ljava/lang/Class<*>;", null).apply {
+            visitCode()
+            visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 0)
+            visitLdcInsn("e2e.DynamicPayload")
+            visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 1)
+            visitInsn(org.objectweb.asm.Opcodes.ICONST_3)
+            visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 1)
+            visitInsn(org.objectweb.asm.Opcodes.ARRAYLENGTH)
+            visitIntInsn(org.objectweb.asm.Opcodes.BIPUSH, 10)
+            visitInsn(org.objectweb.asm.Opcodes.ISUB)
+            visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, "e2e/DefineClassHost", "defineClass", "(Ljava/lang/String;[BII)Ljava/lang/Class;", false)
+            visitInsn(org.objectweb.asm.Opcodes.ARETURN)
+            visitMaxs(5, 2)
+            visitEnd()
+        }
+
+        cw.visitMethod(org.objectweb.asm.Opcodes.ACC_PRIVATE or org.objectweb.asm.Opcodes.ACC_STATIC, "loadPayload", "()[B", null, arrayOf("java/io/IOException")).apply {
+            visitCode()
+            visitLdcInsn(Type.getType("Le2e/DefineClassHost;"))
+            visitLdcInsn("/payload.bin")
+            visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, "java/lang/Class", "getResourceAsStream", "(Ljava/lang/String;)Ljava/io/InputStream;", false)
+            visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, "java/io/InputStream", "readAllBytes", "()[B", false)
+            visitVarInsn(org.objectweb.asm.Opcodes.ASTORE, 0)
+            visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 0)
+            visitInsn(org.objectweb.asm.Opcodes.ARRAYLENGTH)
+            visitIntInsn(org.objectweb.asm.Opcodes.BIPUSH, 10)
+            visitInsn(org.objectweb.asm.Opcodes.IADD)
+            visitIntInsn(org.objectweb.asm.Opcodes.NEWARRAY, org.objectweb.asm.Opcodes.T_BYTE)
+            visitVarInsn(org.objectweb.asm.Opcodes.ASTORE, 1)
+            visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 0)
+            visitInsn(org.objectweb.asm.Opcodes.ICONST_0)
+            visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 1)
+            visitInsn(org.objectweb.asm.Opcodes.ICONST_3)
+            visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 0)
+            visitInsn(org.objectweb.asm.Opcodes.ARRAYLENGTH)
+            visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESTATIC, "java/lang/System", "arraycopy", "(Ljava/lang/Object;ILjava/lang/Object;II)V", false)
+            visitVarInsn(org.objectweb.asm.Opcodes.ALOAD, 1)
+            visitInsn(org.objectweb.asm.Opcodes.ARETURN)
+            visitMaxs(5, 2)
+            visitEnd()
+        }
+
+        cw.visitMethod(org.objectweb.asm.Opcodes.ACC_PUBLIC or org.objectweb.asm.Opcodes.ACC_STATIC, "main", "([Ljava/lang/String;)V", null, arrayOf("java/lang/Exception")).apply {
+            visitCode()
+            visitTypeInsn(org.objectweb.asm.Opcodes.NEW, "e2e/DefineClassHost")
+            visitInsn(org.objectweb.asm.Opcodes.DUP)
+            visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESPECIAL, "e2e/DefineClassHost", "<init>", "()V", false)
+            visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESTATIC, "e2e/DefineClassHost", "loadPayload", "()[B", false)
+            visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, "e2e/DefineClassHost", "definePayload", "([B)Ljava/lang/Class;", false)
+            visitLdcInsn("value")
+            visitInsn(org.objectweb.asm.Opcodes.ICONST_0)
+            visitTypeInsn(org.objectweb.asm.Opcodes.ANEWARRAY, "java/lang/Class")
+            visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, "java/lang/Class", "getDeclaredMethod", "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;", false)
+            visitInsn(org.objectweb.asm.Opcodes.ACONST_NULL)
+            visitInsn(org.objectweb.asm.Opcodes.ICONST_0)
+            visitTypeInsn(org.objectweb.asm.Opcodes.ANEWARRAY, "java/lang/Object")
+            visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, "java/lang/reflect/Method", "invoke", "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;", false)
+            visitTypeInsn(org.objectweb.asm.Opcodes.CHECKCAST, "java/lang/Integer")
+            visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, "java/lang/Integer", "intValue", "()I", false)
+            visitMethodInsn(Opcodes.INVOKESTATIC, "e2e/DefineClassControl", "normalize", "(I)I", false)
+            visitVarInsn(org.objectweb.asm.Opcodes.ISTORE, 1)
+            visitFieldInsn(org.objectweb.asm.Opcodes.GETSTATIC, "java/lang/System", "out", "Ljava/io/PrintStream;")
+            visitVarInsn(org.objectweb.asm.Opcodes.ILOAD, 1)
+            visitInvokeDynamicInsn(
+                "makeConcatWithConstants",
+                "(I)Ljava/lang/String;",
+                org.objectweb.asm.Handle(
+                    org.objectweb.asm.Opcodes.H_INVOKESTATIC,
+                    "java/lang/invoke/StringConcatFactory",
+                    "makeConcatWithConstants",
+                    "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/invoke/CallSite;",
+                    false,
+                ),
+                "defined:\u0001",
+            )
+            visitMethodInsn(org.objectweb.asm.Opcodes.INVOKEVIRTUAL, "java/io/PrintStream", "println", "(Ljava/lang/String;)V", false)
+            visitInsn(org.objectweb.asm.Opcodes.RETURN)
+            visitMaxs(4, 2)
+            visitEnd()
+        }
+
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    private fun buildDefineClassPayloadBytes(): ByteArray {
+        val cw = org.objectweb.asm.ClassWriter(0)
+        cw.visit(testClassfileVersion(), org.objectweb.asm.Opcodes.ACC_PUBLIC or org.objectweb.asm.Opcodes.ACC_FINAL, "e2e/DynamicPayload", null, "java/lang/Object", null)
+        cw.visitMethod(org.objectweb.asm.Opcodes.ACC_PUBLIC or org.objectweb.asm.Opcodes.ACC_STATIC, "value", "()I", null, null).apply {
+            visitCode()
+            visitIntInsn(org.objectweb.asm.Opcodes.BIPUSH, 42)
+            visitInsn(org.objectweb.asm.Opcodes.IRETURN)
+            visitMaxs(1, 0)
+            visitEnd()
+        }
+        cw.visitEnd()
+        return cw.toByteArray()
+    }
+
+    private fun buildDiverseFixtureJar(target: Path): Path {
+        val cw = org.objectweb.asm.ClassWriter(0)
+        cw.visit(testClassfileVersion(), org.objectweb.asm.Opcodes.ACC_PUBLIC or org.objectweb.asm.Opcodes.ACC_FINAL, "e2e/Root", null, "java/lang/Object", null)
+        val mv = cw.visitMethod(org.objectweb.asm.Opcodes.ACC_PUBLIC or org.objectweb.asm.Opcodes.ACC_STATIC, "call", "()I", null, null)
+        mv.visitCode()
+        mv.visitInsn(org.objectweb.asm.Opcodes.ICONST_1)
+        mv.visitInsn(org.objectweb.asm.Opcodes.IRETURN)
+        mv.visitMaxs(1, 0)
+        mv.visitEnd()
+        val main = cw.visitMethod(org.objectweb.asm.Opcodes.ACC_PUBLIC or org.objectweb.asm.Opcodes.ACC_STATIC, "main", "([Ljava/lang/String;)V", null, null)
+        main.visitCode()
+        main.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESTATIC, "e2e/Root", "call", "()I", false)
+        main.visitMethodInsn(org.objectweb.asm.Opcodes.INVOKESTATIC, "java/lang/System", "exit", "(I)V", false)
+        main.visitInsn(org.objectweb.asm.Opcodes.RETURN)
+        main.visitMaxs(1, 1)
+        main.visitEnd()
+        cw.visitEnd()
+        java.nio.file.Files.newOutputStream(target).use { out ->
+            java.util.jar.JarOutputStream(out).use { jar ->
+                jar.putNextEntry(java.util.jar.JarEntry("e2e/Root.class"))
+                jar.write(cw.toByteArray())
+                jar.closeEntry()
+            }
+        }
+        return target
+    }
+}

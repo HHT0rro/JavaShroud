@@ -1,0 +1,16 @@
+JavaShroud Third-Party Notices
+==============================
+
+This repository vendors source code from the following third-party project:
+
+Zstandard
+---------
+
+Location:
+  core-engine/src/main/native/zstd/
+
+License:
+  BSD license, see core-engine/src/main/native/zstd/LICENSE.
+
+Copyright:
+  Copyright (c) Meta Platforms, Inc. and affiliates.

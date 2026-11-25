@@ -1,0 +1,87 @@
+package io.github.hht0rro.javashroud.capabilities
+
+import com.fasterxml.jackson.databind.node.JsonNodeFactory
+import io.github.hht0rro.javashroud.model.schema.ParamSchema
+
+private fun fixedQpInvariant(key: String, description: String): ParamSchema = ParamSchema(
+    key = key,
+    type = "boolean",
+    defaultValue = JsonNodeFactory.instance.booleanNode(true),
+    options = null,
+    description = description,
+    hidden = true,
+)
+
+internal fun vmProtectionCapabilityBindings(): List<CapabilityBinding> = listOf(
+    CapabilityBinding(
+        targeting = CLASS_AND_METHOD_TARGETING,
+        id = "method-virtualization",
+        name = "方法级虚拟化",
+        description = "将选定方法 lowering 为 native VM-only native bytecode VM 资源，并通过 JNI native dispatcher 执行；旧版 VM 资源 fail-closed。",
+        tagIds = listOf("vm-protection"),
+        stability = "experimental",
+        risk = "high",
+        requiresRuntimeFlags = emptyList(),
+        platformConstraints = emptyList(),
+        compatibilityNotes = "native VM-only 破坏性升级：要求 jni-microkernel-loader、平台 native 库和 Java 11+ 运行目标；旧资源、旧 profile 和低强度参数全部拒绝。Java 8/classfile 52 输入不是兼容目标。",
+        requiredPassIds = listOf("jni-microkernel-loader"),
+        defaultEnabled = false,
+        params = listOf(
+            ParamSchema(
+                key = "seed",
+                type = "number",
+                defaultValue = JsonNodeFactory.instance.nullNode(),
+                options = null,
+                description = "非秘密个性化输入；输出仍由每产物 CSPRNG 材料随机化，不保证复现 VM key、布局、资源路径或 native profile。",
+            ),
+            ParamSchema(
+                key = "methodSelection",
+                type = "enum",
+                defaultValue = JsonNodeFactory.instance.textNode("critical-plus"),
+                options = listOf("safe", "critical-auto", "critical-plus", "all-compatible"),
+                description = "广义类规则的方法选择策略：safe 保留小型非覆盖方法选择；critical-auto 自动选择 VM 兼容且带字段、调用、类型、分支、异常或 invokedynamic 信号的关键方法；critical-plus 在 critical-auto 基础上额外纳入含分支或非平凡规模的纯计算方法；all-compatible 强制选择所有 VM 兼容方法。显式方法规则仍优先。",
+            ),
+            ParamSchema(
+                key = "maxInstructions",
+                type = "number",
+                defaultValue = JsonNodeFactory.instance.numberNode(0),
+                options = null,
+                description = "单个方法允许虚拟化的最大字节码指令数；超过阈值的方法保持原样，0 表示不限制。",
+            ),
+            ParamSchema(
+                key = "maxBroadVirtualizedMethods",
+                type = "number",
+                defaultValue = JsonNodeFactory.instance.numberNode(0),
+                options = null,
+                description = "广义类规则自动虚拟化的方法数量上限；0 表示不限制，显式成员规则不受该上限约束。",
+            ),
+            ParamSchema(
+                key = "highValueMethods",
+                type = "string",
+                defaultValue = JsonNodeFactory.instance.nullNode(),
+                options = null,
+                description = "critical-plus 高价值方法显式纳入名单，逗号/分号/换行分隔；项可写 methodName 或 owner#methodName:descriptor。显式成员规则仍优先。",
+                hidden = true,
+            ),
+            ParamSchema(
+                key = "highValueMethodDeny",
+                type = "string",
+                defaultValue = JsonNodeFactory.instance.nullNode(),
+                options = null,
+                description = "critical-plus 高价值自动选择排除名单，逗号/分号/换行分隔；项可写 methodName 或 owner#methodName:descriptor。用于排除误选热点方法，显式成员规则不受影响。",
+                hidden = true,
+            ),
+            fixedQpInvariant("qpStateBoundEncoding", "native VM 固定行为：state-bound encoding 始终启用，不能关闭。"),
+            fixedQpInvariant("qpHandlerMorphing", "native VM 固定行为：handler morphing 始终启用，不能关闭。"),
+            fixedQpInvariant("qpStrengthMax", "native VM 固定行为：强度固定为 max，不提供低强度或兼容 profile。"),
+            fixedQpInvariant("qpInterpreterDiversity", "native VM 固定行为：native-only 路径始终启用构建期解释器多样化，不能关闭。"),
+            fixedQpInvariant("qpHashedJniSymbols", "native VM 固定行为：JNI VM 调用目标使用 per-build/per-method token 定位，热路径不传递明文符号。"),
+            fixedQpInvariant("qpExecutableRegisterIr", "native VM 固定行为：native dispatcher 以 register IR 为主执行，stack opcode 只作为兼容输入。"),
+            fixedQpInvariant("qpSuperOperators", "native VM 固定行为：serializer 按方法随机结构 seed 折叠 super-operator 并纳入认证状态。"),
+            fixedQpInvariant("qpIntegrityKeyBinding", "native VM 固定行为：session integrity digest 参与 seed unwrap、block key 和 CP key 派生。"),
+            fixedQpInvariant("qpEphemeralRootMaterial", "native VM 固定行为：native 根材料只按需短生命周期派生，用后擦除。"),
+        ),
+    ),
+)
+
+fun buildVmProtectionCapabilityDefinitions() = capabilityDefinitions(vmProtectionCapabilityBindings())

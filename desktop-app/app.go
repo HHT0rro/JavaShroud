@@ -1,0 +1,94 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"sync"
+)
+
+const engineEventName = "engine:event"
+
+type ObfuscationRequest struct {
+	InputJarPath          string          `json:"inputJarPath"`
+	OutputJarPath         string          `json:"outputJarPath"`
+	ArtifactFormat        string          `json:"artifactFormat"`
+	Passes                []PassSpec      `json:"passes"`
+	Rules                 []RuleItem      `json:"rules"`
+	PassSelections        []PassSelection `json:"passSelections"`
+	AllowOptInPasses      bool            `json:"allowOptInPasses"`
+	AllowRedundantPasses  bool            `json:"allowRedundantPasses"`
+	AllowAnnotationPasses bool            `json:"allowAnnotationPasses"`
+}
+
+type PassSpec struct {
+	ID      string                     `json:"id"`
+	Enabled bool                       `json:"enabled"`
+	Params  map[string]json.RawMessage `json:"params"`
+}
+
+type RuleItem struct {
+	ID     string `json:"id"`
+	Target string `json:"target"`
+	Action string `json:"action"`
+}
+
+type PassSelectionMode string
+
+const (
+	PassSelectionModeInheritGlobal PassSelectionMode = "inherit-global"
+	PassSelectionModeSelectedOnly  PassSelectionMode = "selected-only"
+)
+
+type PassSelection struct {
+	PassID string            `json:"passId"`
+	Mode   PassSelectionMode `json:"mode"`
+	Rules  []RuleItem        `json:"rules"`
+}
+
+type EngineConfig struct {
+	InputJarPath          string          `json:"inputJarPath"`
+	OutputJarPath         string          `json:"outputJarPath"`
+	ArtifactFormat        string          `json:"artifactFormat"`
+	LogFilePath           string          `json:"logFilePath"`
+	Passes                []PassSpec      `json:"passes"`
+	RuleSet               RuleSet         `json:"ruleSet"`
+	PassSelections        []PassSelection `json:"passSelections"`
+	AllowOptInPasses      bool            `json:"allowOptInPasses"`
+	AllowRedundantPasses  bool            `json:"allowRedundantPasses"`
+	AllowAnnotationPasses bool            `json:"allowAnnotationPasses"`
+}
+
+type RuleSet struct {
+	Rules []RuleItem `json:"rules"`
+}
+
+type EngineEvent struct {
+	Level    string  `json:"level"`
+	Type     string  `json:"type"`
+	Message  string  `json:"message"`
+	Progress *int    `json:"progress"`
+	OutPath  *string `json:"outPath"`
+}
+
+type EngineLaunchSpec struct {
+	CommandPath string
+	CommandArgs []string
+	CommandDir  string
+	Mode        string
+}
+
+type App struct {
+	ctx           context.Context
+	cancelCurrent context.CancelFunc
+	engineStdin   io.WriteCloser
+	mu            sync.Mutex
+}
+
+func NewApp() *App {
+	return &App{}
+}
+
+func (a *App) Startup(ctx context.Context) {
+	a.ctx = ctx
+}

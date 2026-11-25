@@ -1,0 +1,270 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+)
+
+func prepareConfigFile(request ObfuscationRequest) (string, string, func(), error) {
+	request = normalizeObfuscationRequest(request)
+	if err := validateObfuscationRequest(request); err != nil {
+		return "", "", func() {}, fmt.Errorf("validate desktop request failed: %w", err)
+	}
+
+	tempDir, err := os.MkdirTemp("", "javashroud-config-*")
+	if err != nil {
+		return "", "", func() {}, fmt.Errorf("create temp dir failed: %w", err)
+	}
+
+	inputJarPath, err := normalizeEngineConfigPath(request.InputJarPath)
+	if err != nil {
+		return tempDir, "", func() {}, fmt.Errorf("resolve input jar path failed: path=%s: %w", request.InputJarPath, err)
+	}
+	outputJarPath, err := normalizeEngineConfigPath(request.OutputJarPath)
+	if err != nil {
+		return tempDir, "", func() {}, fmt.Errorf("resolve output jar path failed: path=%s: %w", request.OutputJarPath, err)
+	}
+
+	config := EngineConfig{
+		InputJarPath:          inputJarPath,
+		OutputJarPath:         outputJarPath,
+		ArtifactFormat:        request.ArtifactFormat,
+		LogFilePath:           deriveEngineLogFilePath(outputJarPath),
+		Passes:                clonePasses(request.Passes),
+		RuleSet:               RuleSet{Rules: cloneRules(request.Rules)},
+		PassSelections:        cloneSelectedOnlyPassSelections(request.PassSelections),
+		AllowOptInPasses:      request.AllowOptInPasses,
+		AllowRedundantPasses:  request.AllowRedundantPasses,
+		AllowAnnotationPasses: request.AllowAnnotationPasses,
+	}
+
+	payload, err := formatEngineConfigToml(config)
+	if err != nil {
+		return tempDir, "", func() {}, fmt.Errorf("marshal config failed: %w", err)
+	}
+
+	configPath := filepath.Join(tempDir, "obfuscation-config.toml")
+	if err = os.WriteFile(configPath, []byte(payload), 0o600); err != nil {
+		return tempDir, "", func() {}, fmt.Errorf("write config failed: path=%s: %w", configPath, err)
+	}
+
+	return tempDir, configPath, func() {}, nil
+}
+
+func normalizeEngineConfigPath(inputPath string) (string, error) {
+	absolutePath, err := filepath.Abs(inputPath)
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.ToSlash(filepath.Clean(absolutePath)), nil
+}
+
+// defaultEngineArtifactFormat keeps format detection content-driven in the
+// engine: "auto" routes ZIP inputs containing AndroidManifest.xml + classes*.dex
+// into the APK pipeline and everything else into the JAR pipeline.
+const defaultEngineArtifactFormat = "auto"
+
+// Include the artifact extension so that JAR and APK jobs do not share a log.
+func deriveEngineLogFilePath(outputJarPath string) string {
+	return outputJarPath + ".log"
+}
+
+func clonePasses(passSpecs []PassSpec) []PassSpec {
+	result := make([]PassSpec, 0, len(passSpecs))
+	for _, passSpec := range passSpecs {
+		id := strings.TrimSpace(passSpec.ID)
+		if isRetiredCurrentFormatPassID(id) {
+			continue
+		}
+		result = append(result, PassSpec{ID: id, Enabled: passSpec.Enabled, Params: clonePassParams(passSpec.Params)})
+	}
+	return result
+}
+
+func isRetiredCurrentFormatPassID(passID string) bool {
+	switch passID {
+	case "environment-bound-keys",
+		"method-body-delayed-decryption",
+		"class-encryption-loader",
+		"anti-instrumentation",
+		"anti-jvmti-agent",
+		"anti-bytebuddy-transform",
+		"anti-dump-protection",
+		"anti-symbolic-execution":
+		return true
+	default:
+		return false
+	}
+}
+
+func clonePassParams(params map[string]json.RawMessage) map[string]json.RawMessage {
+	result := make(map[string]json.RawMessage, len(params))
+	for key, value := range params {
+		result[key] = append(json.RawMessage(nil), value...)
+	}
+	return result
+}
+
+func cloneRules(rules []RuleItem) []RuleItem {
+	result := make([]RuleItem, 0, len(rules))
+	for _, rule := range rules {
+		result = append(result, RuleItem{
+			ID:     rule.ID,
+			Target: strings.TrimSpace(rule.Target),
+			Action: strings.TrimSpace(rule.Action),
+		})
+	}
+	return result
+}
+
+func cloneSelectedOnlyPassSelections(passSelections []PassSelection) []PassSelection {
+	result := make([]PassSelection, 0, len(passSelections))
+	for _, passSelection := range passSelections {
+		if PassSelectionMode(strings.TrimSpace(string(passSelection.Mode))) != PassSelectionModeSelectedOnly {
+			continue
+		}
+		rules := cloneRules(passSelection.Rules)
+		sort.SliceStable(rules, func(left, right int) bool {
+			if rules[left].Target == rules[right].Target {
+				return rules[left].Action < rules[right].Action
+			}
+			return rules[left].Target < rules[right].Target
+		})
+		result = append(result, PassSelection{
+			PassID: strings.TrimSpace(passSelection.PassID),
+			Mode:   PassSelectionMode(strings.TrimSpace(string(passSelection.Mode))),
+			Rules:  rules,
+		})
+	}
+	sort.SliceStable(result, func(left, right int) bool {
+		return result[left].PassID < result[right].PassID
+	})
+	return result
+}
+
+func formatEngineConfigToml(config EngineConfig) (string, error) {
+	var builder strings.Builder
+	builder.WriteString("inputJarPath = ")
+	builder.WriteString(formatTomlString(config.InputJarPath))
+	builder.WriteString("\n")
+	builder.WriteString("outputJarPath = ")
+	builder.WriteString(formatTomlString(config.OutputJarPath))
+	builder.WriteString("\n")
+	builder.WriteString("artifactFormat = ")
+	builder.WriteString(formatTomlString(config.ArtifactFormat))
+	builder.WriteString("\n")
+	builder.WriteString("logFilePath = ")
+	builder.WriteString(formatTomlString(config.LogFilePath))
+	builder.WriteString("\n")
+	builder.WriteString("allowOptInPasses = ")
+	builder.WriteString(strconv.FormatBool(config.AllowOptInPasses))
+	builder.WriteString("\n")
+	builder.WriteString("allowRedundantPasses = ")
+	builder.WriteString(strconv.FormatBool(config.AllowRedundantPasses))
+	builder.WriteString("\n")
+	builder.WriteString("allowAnnotationPasses = ")
+	builder.WriteString(strconv.FormatBool(config.AllowAnnotationPasses))
+	builder.WriteString("\n\n")
+
+	for _, passSpec := range config.Passes {
+		builder.WriteString("[[passes]]\n")
+		builder.WriteString("id = ")
+		builder.WriteString(formatTomlString(passSpec.ID))
+		builder.WriteString("\n")
+		builder.WriteString("enabled = ")
+		builder.WriteString(strconv.FormatBool(passSpec.Enabled))
+		builder.WriteString("\n")
+		if len(passSpec.Params) > 0 {
+			formattedParams := make([]string, 0, len(passSpec.Params))
+			keys := make([]string, 0, len(passSpec.Params))
+			for key := range passSpec.Params {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				value, ok, err := formatTomlRawScalar(passSpec.Params[key])
+				if err != nil {
+					return "", fmt.Errorf("format pass param failed: pass=%s param=%s: %w", passSpec.ID, key, err)
+				}
+				if !ok {
+					continue
+				}
+				formattedParams = append(formattedParams, key+" = "+value)
+			}
+			if len(formattedParams) > 0 {
+				builder.WriteString("\n[passes.params]\n")
+				for _, formattedParam := range formattedParams {
+					builder.WriteString(formattedParam)
+					builder.WriteString("\n")
+				}
+			}
+		}
+		builder.WriteString("\n")
+	}
+
+	builder.WriteString("[ruleSet]\n")
+	if len(config.RuleSet.Rules) == 0 {
+		builder.WriteString("rules = []\n")
+	} else {
+		for _, rule := range config.RuleSet.Rules {
+			builder.WriteString("[[ruleSet.rules]]\n")
+			builder.WriteString("target = ")
+			builder.WriteString(formatTomlString(rule.Target))
+			builder.WriteString("\n")
+			builder.WriteString("action = ")
+			builder.WriteString(formatTomlString(rule.Action))
+			builder.WriteString("\n\n")
+		}
+	}
+
+	for _, passSelection := range config.PassSelections {
+		builder.WriteString("\n[[passSelections]]\n")
+		builder.WriteString("passId = ")
+		builder.WriteString(formatTomlString(passSelection.PassID))
+		builder.WriteString("\n")
+		builder.WriteString("mode = ")
+		builder.WriteString(formatTomlString(string(passSelection.Mode)))
+		builder.WriteString("\n")
+		for _, rule := range passSelection.Rules {
+			builder.WriteString("\n[[passSelections.rules]]\n")
+			builder.WriteString("target = ")
+			builder.WriteString(formatTomlString(rule.Target))
+			builder.WriteString("\n")
+			builder.WriteString("action = ")
+			builder.WriteString(formatTomlString(rule.Action))
+			builder.WriteString("\n")
+		}
+		builder.WriteString("\n")
+	}
+
+	return builder.String(), nil
+}
+
+func formatTomlRawScalar(raw json.RawMessage) (string, bool, error) {
+	var value interface{}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "", false, err
+	}
+	switch typedValue := value.(type) {
+	case bool:
+		return strconv.FormatBool(typedValue), true, nil
+	case string:
+		return formatTomlString(typedValue), true, nil
+	case float64:
+		return strconv.FormatFloat(typedValue, 'f', -1, 64), true, nil
+	case nil:
+		return "", false, nil
+	default:
+		return "", false, fmt.Errorf("unsupported TOML scalar type %T", value)
+	}
+}
+
+func formatTomlString(value string) string {
+	return strconv.Quote(value)
+}

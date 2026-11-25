@@ -1,0 +1,145 @@
+package io.github.hht0rro.javashroud.passes
+
+import io.github.hht0rro.javashroud.analysis.buildRenamePlan
+import io.github.hht0rro.javashroud.analysis.buildRuleMatches
+import io.github.hht0rro.javashroud.analysis.effectiveRuleSetForPass
+import io.github.hht0rro.javashroud.analysis.matchesClassPattern
+import io.github.hht0rro.javashroud.analysis.parseTargetSelector
+import io.github.hht0rro.javashroud.artifact.classSummaryIndex
+import io.github.hht0rro.javashroud.artifact.resourceCount
+import io.github.hht0rro.javashroud.model.analysis.JarAnalysisSummary
+import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
+import io.github.hht0rro.javashroud.model.config.PassSpec
+import io.github.hht0rro.javashroud.model.config.RuleSet
+import io.github.hht0rro.javashroud.model.config.RuleSpec
+import io.github.hht0rro.javashroud.model.passes.PassContext
+
+internal data class PassApplyResult(
+    val context: PassContext,
+    val transformedClassCount: Int,
+    val transformedMemberCount: Int,
+    val plannedRenameCount: Int,
+)
+
+internal fun applyRegisteredPass(spec: PassSpec, executable: ExecutablePass, context: PassContext): PassContext =
+    applyRegisteredPassWithMetrics(spec, executable, context).context
+
+internal fun applyRegisteredPassWithMetrics(spec: PassSpec, executable: ExecutablePass, context: PassContext): PassApplyResult {
+    if (!spec.enabled) {
+        return PassApplyResult(
+            context = context.copy(events = context.events + createPassEvent(message = buildDisabledPassMessage(spec.id))),
+            transformedClassCount = 0,
+            transformedMemberCount = 0,
+            plannedRenameCount = 0,
+        )
+    }
+
+    val artifact = context.artifact
+    val effectiveRuleSet = effectiveRuleSetForPass(context.config, spec.id)
+    val currentSummary = artifact.currentAnalysisSummary(context, effectiveRuleSet)
+    val ruleMatches = currentSummary.ruleMatches
+    val passParams: Map<String, Any> = spec.params.mapValues { (_, v) ->
+        when {
+            v.isTextual -> v.asText()
+            v.isIntegralNumber && v.canConvertToInt() -> v.asInt()
+            v.isIntegralNumber -> v.asLong()
+            v.isNumber -> v.asDouble()
+            v.isBoolean -> v.asBoolean()
+            else -> v.asText()
+        }
+    }
+    val effectivePassParams = if (spec.id == "method-virtualization") {
+        // Native runtime availability is validated when the final artifact is sealed.
+        // The compiler is not a bundled resource during this bytecode pass.
+        passParams + ("__nativeOnlyInterpreter" to true)
+    } else {
+        passParams
+    }
+    val transformResult = executable.module.transform.apply(artifact, ruleMatches, effectivePassParams)
+
+    return PassApplyResult(
+        context = context.copy(
+            config = remapConfigRulesAfterClassRename(context.config, artifact, transformResult.artifact, spec.id),
+            artifact = transformResult.artifact,
+        ),
+        transformedClassCount = transformResult.transformedClassCount,
+        transformedMemberCount = transformResult.transformedMemberCount,
+        plannedRenameCount = currentSummary.renamePlan.entries.size,
+    )
+}
+
+private fun remapConfigRulesAfterClassRename(
+    config: ObfuscationConfig,
+    before: io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact,
+    after: io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact,
+    passId: String,
+): ObfuscationConfig {
+    if (passId !in setOf("rename-classes", "rename-packages")) return config
+    val classRenameMap = before.classArtifacts.zip(after.classArtifacts)
+        .mapNotNull { (oldClass, newClass) ->
+            val oldName = oldClass.summary.internalName
+            val newName = newClass.summary.internalName
+            if (oldName == newName) null else oldName to newName
+        }
+        .toMap()
+    if (classRenameMap.isEmpty()) return config
+    val originalClassNames = before.analysisSummary.classSummaries.map { it.internalName }
+    return config.copy(
+        ruleSet = remapRuleSetClassTargets(config.ruleSet, originalClassNames, classRenameMap),
+        passSelections = config.passSelections.map { selection ->
+            if (selection.mode != io.github.hht0rro.javashroud.model.config.PassSelectionMode.SELECTED_ONLY) {
+                selection
+            } else {
+                selection.copy(rules = remapRuleSetClassTargets(RuleSet(selection.rules), originalClassNames, classRenameMap).rules)
+            }
+        },
+    )
+}
+
+private fun remapRuleSetClassTargets(ruleSet: RuleSet, originalClassNames: List<String>, classRenameMap: Map<String, String>): RuleSet {
+    val remappedRules = ruleSet.rules.flatMap { rule -> remapRuleClassTarget(rule, originalClassNames, classRenameMap) }
+    return RuleSet(remappedRules.distinct())
+}
+
+private fun remapRuleClassTarget(rule: RuleSpec, originalClassNames: List<String>, classRenameMap: Map<String, String>): List<RuleSpec> {
+    val selector = parseTargetSelector(rule.target)
+    val memberSuffix = rule.target.substringAfter('#', missingDelimiterValue = "").let { suffix ->
+        if ('#' in rule.target) "#$suffix" else ""
+    }
+    val matchedRenames = originalClassNames
+        .filter { originalName -> matchesClassPattern(originalName, selector.classPattern) }
+        .mapNotNull { originalName -> classRenameMap[originalName] }
+        .distinct()
+    if (matchedRenames.isEmpty()) return listOf(rule)
+    val exploded = matchedRenames.map { renamedClassName -> rule.copy(target = renamedClassName + memberSuffix) }
+    return when {
+        // A wildcard class pattern still covers every UNRENAMED class after
+        // the pass (default-package classes never move, and fixed-generated /
+        // runtime-bound / helper classes are excluded from renaming). Replacing
+        // the wildcard with per-renamed-class rules silently dropped that
+        // coverage — APK keep synthesis anchors member keeps on `*#name:desc`
+        // targets, so dropped coverage renamed externally required members.
+        selector.classPattern == "*" -> listOf(rule)
+        // A package prefix keeps matching the classes that stayed under it;
+        // the exploded rules additionally follow the classes that moved out.
+        selector.classPattern.endsWith("/*") -> listOf(rule) + exploded
+        // Exact class anchors go stale once the class moves: replace them.
+        else -> exploded
+    }
+}
+
+private fun io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact.currentAnalysisSummary(
+    context: PassContext,
+    ruleSet: RuleSet = context.config.ruleSet,
+): JarAnalysisSummary {
+    val currentClassSummaries = classArtifacts.map { it.summary }
+    val currentRuleMatches = buildRuleMatches(ruleSet, currentClassSummaries)
+    return analysisSummary.copy(
+        classCount = currentClassSummaries.size,
+        resourceCount = resourceCount(jarEntries, currentClassSummaries.size),
+        classSummaries = currentClassSummaries,
+        classNameIndex = classSummaryIndex(currentClassSummaries),
+        ruleMatches = currentRuleMatches,
+        renamePlan = buildRenamePlan(currentRuleMatches, currentClassSummaries),
+    )
+}

@@ -1,0 +1,217 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Existing tag to build and release, for example v0.7.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-release:
+    name: Build Windows release
+    runs-on: windows-latest
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.event.head_commit.message, 'Release v')
+    env:
+      # Configure the confirmed upstream tag and an independently obtained EXE digest.
+      XENOLITH_RELEASE_TAG: ${{ vars.XENOLITH_RELEASE_TAG }}
+      XENOLITH_SHA256: ${{ vars.XENOLITH_SHA256 }}
+      XENOLITH_MIRRORS: '-'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref }}
+
+      - name: Resolve release tag
+        id: release_tag
+        shell: pwsh
+        env:
+          RELEASE_EVENT: ${{ github.event_name }}
+          REQUESTED_TAG: ${{ inputs.tag_name }}
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_REF_NAME: ${{ github.ref_name }}
+        run: |
+          if ($env:RELEASE_EVENT -eq 'workflow_dispatch') {
+            $tag = $env:REQUESTED_TAG
+          } elseif ($env:RELEASE_REF.StartsWith('refs/tags/')) {
+            $tag = $env:RELEASE_REF_NAME
+          } else {
+            $versionSource = Get-Content -LiteralPath 'core-engine/src/main/kotlin/io/github/hht0rro/javashroud/capabilities/CapabilityTypes.kt' -Raw
+            if ($versionSource -notmatch 'const val JS_VERSION:\s*String\s*=\s*"([^"]+)"') {
+              throw 'Unable to resolve JS_VERSION from CapabilityTypes.kt.'
+            }
+            $tag = "v$($Matches[1])"
+          }
+
+          if ($tag -notmatch '^v\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$') {
+            throw "Invalid release tag: $tag"
+          }
+
+          git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
+          if ($LASTEXITCODE -ne 0) { throw "Could not fetch release tag $tag." }
+          $tagSha = (git rev-list -n 1 $tag).Trim()
+          $headSha = (git rev-parse HEAD).Trim()
+          if ($tagSha -ne $headSha) {
+            throw "Release tag $tag points to $tagSha, but checked out commit is $headSha. Push main/dev first, then recreate the tag on the release commit."
+          }
+
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Setup GraalVM Native Image
+        uses: graalvm/setup-graalvm@v1
+        with:
+          java-version: "21"
+          distribution: "graalvm"
+          components: "native-image"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@1.78.0
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: Setup Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+
+      - name: Setup MinGW linker
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-gcc
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.4"
+          cache-dependency-path: desktop-app/go.sum
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Enable Corepack
+        shell: pwsh
+        run: corepack enable
+
+      - name: Install Wails CLI
+        shell: pwsh
+        run: |
+          go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+          $goBin = Join-Path (go env GOPATH) "bin"
+          $goBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Locate Visual Studio build tools
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $installPath) {
+            throw "Visual Studio C++ build tools were not found."
+          }
+
+          $vcvarsall = Join-Path $installPath "VC\Auxiliary\Build\vcvarsall.bat"
+          if (-not (Test-Path -LiteralPath $vcvarsall)) {
+            throw "vcvarsall.bat was not found at $vcvarsall"
+          }
+
+          "VCVARSALL=$vcvarsall" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build annotations jar
+        shell: pwsh
+        run: ./gradlew.bat :annotations:jar
+
+      - name: Build release
+        shell: cmd
+        env:
+          GRAALVM_HOME: ${{ env.JAVA_HOME }}
+          GOEXE: go
+          WAILS_EXE: wails
+        run: build-release.bat --require-xenolith-pin
+
+      - name: Write release notes from tag message
+        shell: pwsh
+        run: |
+          $tag = '${{ steps.release_tag.outputs.tag }}'
+          $notes = git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' $tag
+          ($notes -join "`n") | Out-File -FilePath RELEASE_NOTES.md -Encoding utf8
+
+      - name: Verify release ZIP
+        shell: pwsh
+        run: ./desktop-app/fetch-xenolith.ps1 -RequirePin -VerifyZip 'build/release/javashroud-windows-amd64.zip'
+
+      - name: Smoke test the packaged native engine
+        shell: pwsh
+        timeout-minutes: 3
+        env:
+          EXPECTED_RELEASE_TAG: ${{ steps.release_tag.outputs.tag }}
+        run: |
+          $package = 'build/release/javashroud-windows-amd64.zip'
+          $unpacked = Join-Path $env:RUNNER_TEMP "javashroud-smoke-$([Guid]::NewGuid())"
+          $stderr = Join-Path $unpacked 'engine-schema.stderr.log'
+          try {
+            Expand-Archive -LiteralPath $package -DestinationPath $unpacked
+            $engine = Join-Path $unpacked 'engine/obfuscator-engine.exe'
+            Push-Location -LiteralPath $unpacked
+            try {
+              $schema = & $engine -schema 2> $stderr
+              $exitCode = $LASTEXITCODE
+            } finally {
+              Pop-Location
+            }
+            $diagnostics = Get-Content -LiteralPath $stderr -Raw
+            if ($exitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace($diagnostics)) {
+              throw "Packaged native engine schema failed (exit $exitCode). ${diagnostics}"
+            }
+            $version = $env:EXPECTED_RELEASE_TAG.Substring(1)
+            $versionLine = "^engineVersion\s*=\s*['`"]$([regex]::Escape($version))['`"]\s*$"
+            if (-not ($schema -match "^schemaVersion\s*=\s*['`"]?2['`"]?\s*$") -or
+                -not ($schema -match $versionLine)) {
+              throw "Packaged native engine did not report schema 2 and engine version $version."
+            }
+          } finally {
+            if (Test-Path -LiteralPath $unpacked) {
+              $resolved = (Resolve-Path -LiteralPath $unpacked).Path
+              $tempRoot = (Resolve-Path -LiteralPath $env:RUNNER_TEMP).Path
+              if ((Split-Path -LiteralPath $resolved) -eq $tempRoot) {
+                Remove-Item -LiteralPath $resolved -Recurse -Force
+              }
+            }
+          }
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release_tag.outputs.tag }}
+          name: JavaShroud ${{ steps.release_tag.outputs.tag }}
+          body_path: RELEASE_NOTES.md
+          draft: false
+          prerelease: false
+          make_latest: true
+          fail_on_unmatched_files: true
+          files: |
+            build/release/javashroud-windows-amd64.zip
+            build/annotations/libs/javashroud-annotations-*.jar

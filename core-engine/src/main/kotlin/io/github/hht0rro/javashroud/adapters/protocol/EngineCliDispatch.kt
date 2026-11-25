@@ -1,0 +1,93 @@
+package io.github.hht0rro.javashroud.adapters.protocol
+
+import io.github.hht0rro.javashroud.apk.ApkPipelineRunner
+import io.github.hht0rro.javashroud.capabilities.buildEngineSchemaPayload
+import io.github.hht0rro.javashroud.kernel.EngineKernel
+import io.github.hht0rro.javashroud.maintenance.RuntimeGarbageCollector
+import io.github.hht0rro.javashroud.model.config.ARTIFACT_FORMAT_APK
+import io.github.hht0rro.javashroud.model.protocol.EngineEvent
+
+// --- single dispatch entry point ---
+
+internal fun handleResolvedRequest(request: EngineCliRequest, kernel: EngineKernel): Unit {
+    try {
+        dispatchRequest(request = request, kernel = kernel)
+    } catch (error: Throwable) {
+        handleCommandFailure(request.command, error)
+    }
+}
+
+internal fun dispatchRequest(request: EngineCliRequest, kernel: EngineKernel): Unit {
+    when (request) {
+        SchemaCommandRequest -> handleSchemaCommand()
+        is GarbageCollectCommandRequest -> handleGarbageCollectCommand(request)
+        is InspectCommandRequest -> handleInspectCommand(request = request, kernel = kernel)
+        is RunCommandRequest -> handleRunCommand(request = request.runRequest, kernel = kernel)
+    }
+}
+
+// --- per-command handlers ---
+
+private fun handleSchemaCommand(): Unit {
+    writeEngineSchemaPayload(buildEngineSchemaPayload())
+}
+
+private fun handleInspectCommand(request: InspectCommandRequest, kernel: EngineKernel): Unit {
+    writeJarInspectionPayload(kernel.inspectJar(request.inputJarPath))
+}
+
+private fun handleRunCommand(request: EngineRunRequest, kernel: EngineKernel): Unit {
+    if (request.config.artifactFormat == ARTIFACT_FORMAT_APK) {
+        ApkPipelineRunner().run(request.config, request.configPath, ::writeEvent)
+        return
+    }
+    executeRunRequest(
+        request = request,
+        run = { config, configPath, emit -> kernel.run(config, configPath, emit) },
+    )
+}
+
+internal fun executeRunRequest(
+    request: EngineRunRequest,
+    run: (io.github.hht0rro.javashroud.model.config.ObfuscationConfig, java.nio.file.Path, (EngineEvent) -> Unit) -> Unit,
+    emit: (EngineEvent) -> Unit = ::writeEvent,
+): Unit {
+    run(request.config, request.configPath, emit)
+}
+
+private fun handleGarbageCollectCommand(request: GarbageCollectCommandRequest): Unit {
+    val result = RuntimeGarbageCollector.collect(apply = request.apply)
+    writeProtocolTextLine(buildGarbageCollectionReport(result))
+}
+
+// --- failure handling ---
+
+fun handleCommandFailure(command: EngineCommand, error: Throwable): Nothing {
+    return when (command) {
+        EngineCommand.Run -> failWithEvent(error)
+        EngineCommand.Schema, EngineCommand.Inspect, EngineCommand.GarbageCollect -> failWithStderr(error)
+    }
+}
+
+fun buildFailureMessage(error: Throwable): String {
+    val detail = error.message ?: error::class.qualifiedName ?: "unknown-error"
+    return "Engine execution failed: detail=" + detail
+}
+
+internal fun buildFailureEvent(error: Throwable): EngineEvent = EngineEvent(
+    level = "error",
+    type = "error",
+    message = buildFailureMessage(error),
+    progress = null,
+    outPath = null,
+)
+
+fun failWithEvent(error: Throwable): Nothing {
+    writeEvent(buildFailureEvent(error))
+    throw error
+}
+
+fun failWithStderr(error: Throwable): Nothing {
+    System.err.println(buildFailureMessage(error))
+    throw error
+}

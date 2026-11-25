@@ -1,0 +1,893 @@
+package io.github.hht0rro.javashroud.bytecode
+
+import org.objectweb.asm.ClassReader
+import org.objectweb.asm.ConstantDynamic
+import org.objectweb.asm.Handle
+import org.objectweb.asm.Opcodes
+import org.objectweb.asm.Type
+import org.objectweb.asm.tree.FieldInsnNode
+import org.objectweb.asm.tree.AbstractInsnNode
+import org.objectweb.asm.tree.InsnList
+import org.objectweb.asm.tree.InsnNode
+import org.objectweb.asm.tree.IntInsnNode
+import org.objectweb.asm.tree.InvokeDynamicInsnNode
+import org.objectweb.asm.tree.JumpInsnNode
+import org.objectweb.asm.tree.LabelNode
+import org.objectweb.asm.tree.LdcInsnNode
+import org.objectweb.asm.tree.LookupSwitchInsnNode
+import org.objectweb.asm.tree.MethodInsnNode
+import org.objectweb.asm.tree.MethodNode
+import org.objectweb.asm.tree.TableSwitchInsnNode
+import org.objectweb.asm.tree.TypeInsnNode
+import org.objectweb.asm.tree.VarInsnNode
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.Arrays
+import java.util.Base64
+import java.util.Random
+import java.util.Collections
+import java.util.IdentityHashMap
+import io.github.hht0rro.javashroud.transforms.protection.requireQpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.qp.QpHandle
+import io.github.hht0rro.javashroud.transforms.protection.qp.QpTextPageCandidate
+
+/**
+ * Configuration for native-backed string encryption.
+ */
+data class StringEncryptionConfig(
+    val scope: String = "all-strings",
+    val lengthThreshold: Int = 3,
+    val seed: Long? = null,
+)
+
+private const val STRING_HELPER_OWNER = "io/github/hht0rro/javashroud/transforms/protection/qp/QpTextBridge"
+private const val STRING_HELPER_NATIVE_DECODE_DESC = "([B)Ljava/lang/String;"
+private const val STRING_HELPER_NATIVE_BSM_DESC =
+    "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;" +
+        "Ljava/lang/invoke/MethodHandle;)Ljava/lang/invoke/CallSite;"
+private val STRING_HELPER_NATIVE_BSM_NAMES = arrayOf("q0", "m7", "x3", "v8")
+private const val STRING_HELPER_TOKEN_DESC = "(Ljava/lang/String;)[B"
+private const val STRING_HELPER_TOKEN_BSM_DESC =
+    "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;" +
+        "Ljava/lang/String;)Ljava/lang/invoke/CallSite;"
+private val STRING_HELPER_TOKEN_BSM_NAMES = arrayOf("u0", "u1", "u2", "u3")
+private const val SHROUD_ENCRYPT_DESC = "Lio/github/hht0rro/javashroud/bytecode/ShroudEncrypt;"
+private const val QP_STRING_PAGE_NONCE_SIZE = 16
+
+private enum class QpIntPushShape {
+    Canonical,
+    Bipush,
+    Sipush,
+    Ldc,
+}
+
+private enum class QpTokenEmission {
+    PackedArray,
+    LdcPayload,
+    IndyConstant,
+}
+
+private data class QpStringCallsiteShape(
+    val handleLengthPush: QpIntPushShape,
+    val proofLengthPush: QpIntPushShape,
+    val pageIndexPush: QpIntPushShape,
+    val reverseStores: Boolean,
+    val useInvokeDynamic: Boolean,
+    val bootstrapSlot: Int,
+    val tokenEmission: QpTokenEmission,
+)
+
+private val QP_STRING_PAGE_IDENTITY_DOMAIN =
+    "javashroud-qp-string-page-logical-identity-v1".toByteArray(Charsets.US_ASCII)
+private val QP_STRING_PAGE_HANDLE_DOMAIN =
+    "javashroud-qp-string-page-handle-v1".toByteArray(Charsets.US_ASCII)
+private val QP_STRING_PAGE_PROOF_DOMAIN =
+    "javashroud-qp-string-page-call-site-proof-v1".toByteArray(Charsets.US_ASCII)
+private val QP_STRING_PAGE_PATH_DOMAIN =
+    "javashroud-qp-string-page-logical-path-v1".toByteArray(Charsets.US_ASCII)
+private val QP_STRING_PAGE_INDEX_DOMAIN =
+    "javashroud-qp-string-page-index-v2".toByteArray(Charsets.US_ASCII)
+private val QP_STRING_PAGE_TEMPLATE_DOMAIN =
+    "javashroud-qp-string-page-callsite-template-v2".toByteArray(Charsets.US_ASCII)
+private val QP_STRING_PAGE_PATH_ROOTS = arrayOf(
+    "META-INF/.a4/s",
+    "META-INF/.r4/p",
+    "assets/.a4/s",
+    "META-INF/.j4/r",
+)
+private val QP_STRING_PAGE_PATH_SUFFIXES = arrayOf(".bin", ".dat", ".p", ".r")
+
+/**
+ * Replaces string LDC constants with native-backed authenticated decode callsites.
+ */
+fun encryptClassStrings(
+    classBytes: ByteArray,
+    config: StringEncryptionConfig = StringEncryptionConfig(),
+): ByteArray {
+    val reader = ClassReader(classBytes)
+    val classNode = org.objectweb.asm.tree.ClassNode()
+    reader.accept(classNode, 0)
+
+    if ((classNode.access and Opcodes.ACC_INTERFACE) != 0) return classBytes
+
+    val random = deterministicRandom(config.seed, classNode.name)
+    val candidateRandom = SecureRandom()
+    val candidates = ArrayList<QpTextPageCandidate>()
+    var encryptedCount = 0
+
+    try {
+        for (method in classNode.methods) {
+            if ((method.access and (Opcodes.ACC_ABSTRACT or Opcodes.ACC_NATIVE)) != 0) continue
+            expandStringConcatRecipes(method)
+            val annotated = hasShroudEncryptAnnotation(method)
+            val instructions = method.instructions ?: continue
+            val reflectionMemberNameNodes = reflectionMemberNameConstants(method)
+            val loopMembers = backwardLoopMembers(method)
+            val loopLocalInitializers = InsnList()
+            var methodLiteralOrdinal = 0
+            for (insn in instructions.toArray()) {
+                val ldc = insn as? LdcInsnNode ?: continue
+                if (reflectionMemberNameNodes.contains(ldc)) continue
+                val value = ldc.cst as? String ?: continue
+                if (value.isEmpty() || !shouldEncryptString(value, config, annotated)) continue
+
+                val buildNonce = ByteArray(QP_STRING_PAGE_NONCE_SIZE).also(random::nextBytes)
+                var logicalIdentity: ByteArray? = null
+                var plaintext: ByteArray? = null
+                var encodedHandle: ByteArray? = null
+                var callSiteProof: ByteArray? = null
+                var candidate: QpTextPageCandidate? = null
+                try {
+                    logicalIdentity = deriveQpStringPageIdentity(
+                        classInternalName = classNode.name,
+                        methodName = method.name,
+                        methodDescriptor = method.desc,
+                        classLiteralOrdinal = encryptedCount,
+                        methodLiteralOrdinal = methodLiteralOrdinal,
+                        buildNonce = buildNonce,
+                    )
+                    encodedHandle = deriveQpStringPageHandle(logicalIdentity, buildNonce)
+                    val pageIndex = deriveQpStringPageIndex(logicalIdentity, buildNonce)
+                    val logicalBindingPath = qpTextPageLogicalBindingPath(logicalIdentity, encodedHandle)
+                    callSiteProof = deriveQpStringPageCallSiteProof(
+                        logicalIdentity = logicalIdentity,
+                        encodedHandle = encodedHandle,
+                        pageIndex = pageIndex,
+                        logicalBindingPath = logicalBindingPath,
+                    )
+                    plaintext = value.toByteArray(Charsets.UTF_8)
+                    candidate = QpTextPageCandidate.create(
+                        logicalIdentity = logicalIdentity,
+                        plaintext = plaintext,
+                        pageIndex = pageIndex,
+                        callSiteProof = callSiteProof,
+                        encodedHandle = encodedHandle,
+                        logicalBindingPath = logicalBindingPath,
+                        random = candidateRandom,
+                    )
+                    val callsiteShape = selectQpStringCallsiteShape(
+                        logicalIdentity = logicalIdentity,
+                        classLiteralOrdinal = encryptedCount,
+                        methodLiteralOrdinal = methodLiteralOrdinal,
+                    )
+                    val decodeCallsite = buildQpStringPageDecodeCallsite(
+                        encodedHandle = encodedHandle,
+                        pageIndex = pageIndex,
+                        callSiteProof = callSiteProof,
+                        shape = callsiteShape,
+                    )
+                    val replacement = if (loopMembers.contains(insn)) {
+                        val local = method.maxLocals
+                        method.maxLocals += 1
+                        loopLocalInitializers.add(InsnNode(Opcodes.ACONST_NULL))
+                        loopLocalInitializers.add(VarInsnNode(Opcodes.ASTORE, local))
+                        lazyLoopStringLoad(local, decodeCallsite)
+                    } else {
+                        decodeCallsite
+                    }
+                    instructions.insert(insn, replacement)
+                    instructions.remove(insn)
+                    candidates += candidate
+                    candidate = null
+                    encryptedCount++
+                    methodLiteralOrdinal++
+                } finally {
+                    candidate?.wipe()
+                    Arrays.fill(buildNonce, 0)
+                    logicalIdentity?.let { Arrays.fill(it, 0) }
+                    plaintext?.let { Arrays.fill(it, 0) }
+                    encodedHandle?.let { Arrays.fill(it, 0) }
+                    callSiteProof?.let { Arrays.fill(it, 0) }
+                }
+            }
+            if (loopLocalInitializers.size() > 0) {
+                instructions.insertBefore(instructions.first, loopLocalInitializers)
+            }
+        }
+
+        if (encryptedCount == 0) return classBytes
+
+        // Do not seed the writer from the source reader: ASM's reader-backed
+        // constant-pool copy can retain now-unreferenced plaintext LDC entries.
+        // Building a fresh pool ensures protected literals are absent from the
+        // emitted class bytes, not merely absent from the instruction stream.
+        val writer = computeFramesWriter()
+        classNode.accept(writer)
+        val transformed = writer.toByteArray()
+        requireQpBuildContext().registerQpTextPageCandidates(candidates)
+        return transformed
+    } finally {
+        candidates.forEach { it.wipe() }
+    }
+}
+
+/**
+ * Finds instructions enclosed by a backward jump/switch edge. String pages in
+ * such a region are authenticated lazily once per method invocation and then
+ * kept only in a local variable until that invocation returns. This preserves
+ * all-strings protection without turning a loop-invariant literal into a JNI
+ * page open on every iteration or introducing a Java/static plaintext cache.
+ */
+private fun backwardLoopMembers(method: MethodNode): Set<AbstractInsnNode> {
+    val instructions = method.instructions?.toArray() ?: return emptySet()
+    if (instructions.isEmpty()) return emptySet()
+    val positions = IdentityHashMap<AbstractInsnNode, Int>(instructions.size)
+    instructions.forEachIndexed { index, instruction -> positions[instruction] = index }
+    val members = Collections.newSetFromMap(IdentityHashMap<AbstractInsnNode, Boolean>())
+
+    fun addBackwardRange(branchIndex: Int, target: LabelNode) {
+        val targetIndex = positions[target] ?: return
+        if (targetIndex >= branchIndex) return
+        for (index in targetIndex..branchIndex) members.add(instructions[index])
+    }
+
+    instructions.forEachIndexed { index, instruction ->
+        when (instruction) {
+            is JumpInsnNode -> addBackwardRange(index, instruction.label)
+            is TableSwitchInsnNode -> {
+                addBackwardRange(index, instruction.dflt)
+                instruction.labels.forEach { label -> addBackwardRange(index, label) }
+            }
+            is LookupSwitchInsnNode -> {
+                addBackwardRange(index, instruction.dflt)
+                instruction.labels.forEach { label -> addBackwardRange(index, label) }
+            }
+        }
+    }
+    return members
+}
+
+private fun lazyLoopStringLoad(local: Int, decodeCallsite: InsnList): InsnList = InsnList().apply {
+    val ready = LabelNode()
+    add(VarInsnNode(Opcodes.ALOAD, local))
+    add(InsnNode(Opcodes.DUP))
+    add(JumpInsnNode(Opcodes.IFNONNULL, ready))
+    add(InsnNode(Opcodes.POP))
+    add(decodeCallsite)
+    add(InsnNode(Opcodes.DUP))
+    add(VarInsnNode(Opcodes.ASTORE, local))
+    add(ready)
+}
+
+
+internal fun expandStringConcatRecipes(method: MethodNode) {
+    val instructions = method.instructions ?: return
+    for (insn in instructions.toArray()) {
+        val indy = insn as? InvokeDynamicInsnNode ?: continue
+        if (indy.bsm.owner != "java/lang/invoke/StringConcatFactory" || indy.bsm.name != "makeConcatWithConstants") continue
+        val recipe = indy.bsmArgs.firstOrNull() as? String ?: continue
+        val argTypes = Type.getArgumentTypes(indy.desc)
+        val localSlots = IntArray(argTypes.size)
+        var nextSlot = method.maxLocals.coerceAtLeast(0)
+        for (index in argTypes.indices) {
+            localSlots[index] = nextSlot
+            nextSlot += argTypes[index].size
+        }
+        method.maxLocals = method.maxLocals.coerceAtLeast(nextSlot)
+
+        val replacement = InsnList()
+        for (index in argTypes.indices.reversed()) {
+            replacement.addStore(argTypes[index], localSlots[index])
+        }
+        replacement.add(TypeInsnNode(Opcodes.NEW, "java/lang/StringBuilder"))
+        replacement.add(InsnNode(Opcodes.DUP))
+        replacement.add(MethodInsnNode(Opcodes.INVOKESPECIAL, "java/lang/StringBuilder", "<init>", "()V", false))
+
+        var argIndex = 0
+        var constantArgIndex = 1
+        val constantBuffer = StringBuilder()
+        fun flushConstantBuffer() {
+            if (constantBuffer.isEmpty()) return
+            replacement.add(LdcInsnNode(constantBuffer.toString()))
+            replacement.add(MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false))
+            constantBuffer.clear()
+        }
+
+        for (char in recipe) {
+            when (char) {
+                '\u0001' -> {
+                    flushConstantBuffer()
+                    if (argIndex < argTypes.size) {
+                        replacement.addLoad(argTypes[argIndex], localSlots[argIndex])
+                        replacement.addStringBuilderAppend(argTypes[argIndex])
+                        argIndex++
+                    }
+                }
+                '\u0002' -> {
+                    flushConstantBuffer()
+                    val constant = indy.bsmArgs.getOrNull(constantArgIndex++)?.toString() ?: ""
+                    replacement.add(LdcInsnNode(constant))
+                    replacement.add(MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/StringBuilder", "append", "(Ljava/lang/String;)Ljava/lang/StringBuilder;", false))
+                }
+                else -> constantBuffer.append(char)
+            }
+        }
+        flushConstantBuffer()
+        replacement.add(MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/StringBuilder", "toString", "()Ljava/lang/String;", false))
+        instructions.insert(indy, replacement)
+        instructions.remove(indy)
+    }
+}
+
+private fun InsnList.addStore(type: Type, slot: Int) {
+    add(VarInsnNode(type.getOpcode(Opcodes.ISTORE), slot))
+}
+
+private fun InsnList.addLoad(type: Type, slot: Int) {
+    add(VarInsnNode(type.getOpcode(Opcodes.ILOAD), slot))
+}
+
+private fun InsnList.addStringBuilderAppend(type: Type) {
+    val desc = when (type.sort) {
+        Type.BOOLEAN -> "(Z)Ljava/lang/StringBuilder;"
+        Type.CHAR -> "(C)Ljava/lang/StringBuilder;"
+        Type.BYTE, Type.SHORT, Type.INT -> "(I)Ljava/lang/StringBuilder;"
+        Type.FLOAT -> "(F)Ljava/lang/StringBuilder;"
+        Type.LONG -> "(J)Ljava/lang/StringBuilder;"
+        Type.DOUBLE -> "(D)Ljava/lang/StringBuilder;"
+        else -> "(Ljava/lang/Object;)Ljava/lang/StringBuilder;"
+    }
+    add(MethodInsnNode(Opcodes.INVOKEVIRTUAL, "java/lang/StringBuilder", "append", desc, false))
+}
+private fun deterministicRandom(seed: Long?, className: String): Random = if (seed != null) {
+    Random(seed + className.hashCode().toLong())
+} else {
+    val bytes = ByteArray(Long.SIZE_BYTES)
+    SecureRandom().nextBytes(bytes)
+    var value = 0L
+    for (byte in bytes) value = value * 257L + (byte.toLong() and 0xFFL)
+    Random(value + className.hashCode().toLong())
+}
+
+private fun hasShroudEncryptAnnotation(method: MethodNode): Boolean =
+    method.visibleAnnotations.orEmpty().any { it.desc == SHROUD_ENCRYPT_DESC } ||
+        method.invisibleAnnotations.orEmpty().any { it.desc == SHROUD_ENCRYPT_DESC }
+
+private fun shouldEncryptString(value: String, config: StringEncryptionConfig, annotated: Boolean): Boolean = when (config.scope) {
+    "length-threshold" -> value.length >= config.lengthThreshold
+    "annotated" -> annotated
+    else -> true
+}
+
+private val REFLECTION_MEMBER_LOOKUP_METHODS = setOf(
+    "getDeclaredMethod",
+    "getMethod",
+    "getDeclaredField",
+    "getField",
+)
+
+/**
+ * Returns string LDC nodes used as member names by java.lang.Class reflection
+ * lookups. These names must remain ordinary constants until the member rename
+ * stage can rewrite them together with the corresponding declaration.
+ */
+private fun reflectionMemberNameConstants(method: MethodNode): Set<LdcInsnNode> {
+    val marked = Collections.newSetFromMap(IdentityHashMap<LdcInsnNode, Boolean>())
+    val instructions = method.instructions ?: return marked
+    for (instruction in instructions.toArray()) {
+        val call = instruction as? MethodInsnNode ?: continue
+        if (call.owner != "java/lang/Class" || call.name !in REFLECTION_MEMBER_LOOKUP_METHODS) continue
+        reflectionMemberNameConstantBefore(call)?.let(marked::add)
+    }
+    return marked
+}
+
+private fun reflectionMemberNameConstantBefore(call: MethodInsnNode): LdcInsnNode? {
+    var current = call.previous
+    var scanned = 0
+    while (current != null && scanned < 48) {
+        if (current.opcode >= 0) {
+            scanned++
+            val ldc = current as? LdcInsnNode
+            if (ldc?.cst is String) return ldc
+            // Do not cross another invocation: any earlier string belongs to a
+            // different call's arguments rather than this reflection lookup.
+            if (current is MethodInsnNode || current is InvokeDynamicInsnNode) break
+        }
+        current = current.previous
+    }
+    return null
+}
+
+private fun buildQpStringPageDecodeCallsite(
+    encodedHandle: ByteArray,
+    pageIndex: Int,
+    callSiteProof: ByteArray,
+    shape: QpStringCallsiteShape,
+): InsnList = InsnList().apply {
+    addQpStringToken(encodedHandle, pageIndex, callSiteProof, shape)
+    if (shape.useInvokeDynamic) {
+        add(
+            InvokeDynamicInsnNode(
+                "a${shape.bootstrapSlot}",
+                STRING_HELPER_NATIVE_DECODE_DESC,
+                Handle(
+                    Opcodes.H_INVOKESTATIC,
+                    STRING_HELPER_OWNER,
+                    STRING_HELPER_NATIVE_BSM_NAMES[shape.bootstrapSlot],
+                    STRING_HELPER_NATIVE_BSM_DESC,
+                    false,
+                ),
+                Handle(
+                    Opcodes.H_INVOKESTATIC,
+                    STRING_HELPER_OWNER,
+                    "invokeQpStringTerminal",
+                    STRING_HELPER_NATIVE_DECODE_DESC,
+                    false,
+                ),
+            ),
+        )
+    } else {
+        add(
+            MethodInsnNode(
+                Opcodes.INVOKESTATIC,
+                STRING_HELPER_OWNER,
+                "invokeQpStringTerminal",
+                STRING_HELPER_NATIVE_DECODE_DESC,
+                false,
+            ),
+        )
+    }
+}
+
+private fun InsnList.addQpStringToken(
+    encodedHandle: ByteArray,
+    pageIndex: Int,
+    callSiteProof: ByteArray,
+    shape: QpStringCallsiteShape,
+) {
+    val packed = packQpStringToken(encodedHandle, pageIndex, callSiteProof)
+    try {
+        when (shape.tokenEmission) {
+            QpTokenEmission.PackedArray -> addByteArray(packed, shape.handleLengthPush, shape.reverseStores)
+            QpTokenEmission.LdcPayload -> {
+                add(LdcInsnNode(Base64.getUrlEncoder().withoutPadding().encodeToString(packed)))
+                add(
+                    MethodInsnNode(
+                        Opcodes.INVOKESTATIC,
+                        STRING_HELPER_OWNER,
+                        "materializeQpStringToken",
+                        STRING_HELPER_TOKEN_DESC,
+                        false,
+                    ),
+                )
+            }
+            QpTokenEmission.IndyConstant -> add(
+                InvokeDynamicInsnNode(
+                    "t${shape.bootstrapSlot}",
+                    "()[B",
+                    Handle(
+                        Opcodes.H_INVOKESTATIC,
+                        STRING_HELPER_OWNER,
+                        STRING_HELPER_TOKEN_BSM_NAMES[shape.bootstrapSlot],
+                        STRING_HELPER_TOKEN_BSM_DESC,
+                        false,
+                    ),
+                    Base64.getUrlEncoder().withoutPadding().encodeToString(packed),
+                ),
+            )
+        }
+    } finally {
+        Arrays.fill(packed, 0)
+    }
+}
+
+private fun InsnList.addByteArray(
+    bytes: ByteArray,
+    lengthPush: QpIntPushShape = QpIntPushShape.Canonical,
+    reverseStores: Boolean = false,
+) {
+    addInt(bytes.size, lengthPush)
+    add(IntInsnNode(Opcodes.NEWARRAY, Opcodes.T_BYTE))
+    val indices = if (reverseStores) bytes.indices.reversed() else bytes.indices
+    for (index in indices) {
+        add(InsnNode(Opcodes.DUP))
+        addInt(index)
+        addInt(bytes[index].toInt())
+        add(InsnNode(Opcodes.BASTORE))
+    }
+}
+
+private fun InsnList.addInt(value: Int, shape: QpIntPushShape = QpIntPushShape.Canonical) {
+    when (shape) {
+        QpIntPushShape.Canonical -> when (value) {
+            -1 -> add(InsnNode(Opcodes.ICONST_M1))
+            0 -> add(InsnNode(Opcodes.ICONST_0))
+            1 -> add(InsnNode(Opcodes.ICONST_1))
+            2 -> add(InsnNode(Opcodes.ICONST_2))
+            3 -> add(InsnNode(Opcodes.ICONST_3))
+            4 -> add(InsnNode(Opcodes.ICONST_4))
+            5 -> add(InsnNode(Opcodes.ICONST_5))
+            in Byte.MIN_VALUE..Byte.MAX_VALUE -> add(IntInsnNode(Opcodes.BIPUSH, value))
+            in Short.MIN_VALUE..Short.MAX_VALUE -> add(IntInsnNode(Opcodes.SIPUSH, value))
+            else -> add(LdcInsnNode(value))
+        }
+        QpIntPushShape.Bipush -> {
+            require(value in Byte.MIN_VALUE..Byte.MAX_VALUE) { "Qp callsite BIPUSH value is out of range" }
+            add(IntInsnNode(Opcodes.BIPUSH, value))
+        }
+        QpIntPushShape.Sipush -> {
+            require(value in Short.MIN_VALUE..Short.MAX_VALUE) { "Qp callsite SIPUSH value is out of range" }
+            add(IntInsnNode(Opcodes.SIPUSH, value))
+        }
+        QpIntPushShape.Ldc -> add(LdcInsnNode(value))
+    }
+}
+
+private fun packQpStringToken(encodedHandle: ByteArray, pageIndex: Int, callSiteProof: ByteArray): ByteArray {
+    require(encodedHandle.size == 24) { "Qp string handle must be 24 bytes" }
+    require(callSiteProof.isNotEmpty() && callSiteProof.size <= 4096) { "Qp string proof size is invalid" }
+    val packed = ByteArray(24 + 4 + callSiteProof.size)
+    encodedHandle.copyInto(packed)
+    packed[24] = (pageIndex ushr 24).toByte()
+    packed[25] = (pageIndex ushr 16).toByte()
+    packed[26] = (pageIndex ushr 8).toByte()
+    packed[27] = pageIndex.toByte()
+    callSiteProof.copyInto(packed, 28)
+    return packed
+}
+
+private fun deriveQpStringPageIndex(
+    logicalIdentity: ByteArray,
+    buildNonce: ByteArray,
+): Int {
+    val digest = digestQpBinding(QP_STRING_PAGE_INDEX_DOMAIN, logicalIdentity, buildNonce)
+    return try {
+        // Typed StringPages are not dispatcher page-zero bindings. Keep the
+        // index bounded and non-zero while still binding it into the proof,
+        // descriptor, evaluator graph, and native request.
+        val mixed = ((digest[0].toInt() and 0xFF) shl 8) or (digest[1].toInt() and 0xFF)
+        1 + (mixed and 0x1F)
+    } finally {
+        Arrays.fill(digest, 0)
+    }
+}
+
+private fun selectQpStringCallsiteShape(
+    logicalIdentity: ByteArray,
+    classLiteralOrdinal: Int,
+    methodLiteralOrdinal: Int,
+): QpStringCallsiteShape {
+    val digest = digestQpBinding(
+        QP_STRING_PAGE_TEMPLATE_DOMAIN,
+        logicalIdentity,
+        intBytes(classLiteralOrdinal),
+        intBytes(methodLiteralOrdinal),
+    )
+    return try {
+        val first = digest[0].toInt() and 0xFF
+        val second = digest[1].toInt() and 0xFF
+        fun pushShape(bits: Int): QpIntPushShape = when (bits and 0x03) {
+            0 -> QpIntPushShape.Canonical
+            1 -> QpIntPushShape.Bipush
+            2 -> QpIntPushShape.Sipush
+            else -> QpIntPushShape.Ldc
+        }
+        QpStringCallsiteShape(
+            handleLengthPush = pushShape(first),
+            proofLengthPush = pushShape(first ushr 2),
+            pageIndexPush = pushShape(first ushr 4),
+            reverseStores = (second and 0x01) != 0,
+            // Alternate direct and indy terminals while the shape digest
+            // randomizes the surrounding encodings and bootstrap alias.
+            useInvokeDynamic = (classLiteralOrdinal and 1) != 0,
+            bootstrapSlot = (second ushr 1) and (STRING_HELPER_NATIVE_BSM_NAMES.lastIndex),
+            tokenEmission = QpTokenEmission.entries[
+                (classLiteralOrdinal + (digest[2].toInt() and 0xFF)) % QpTokenEmission.entries.size
+            ],
+        )
+    } finally {
+        Arrays.fill(digest, 0)
+    }
+}
+
+private fun deriveQpStringPageIdentity(
+    classInternalName: String,
+    methodName: String,
+    methodDescriptor: String,
+    classLiteralOrdinal: Int,
+    methodLiteralOrdinal: Int,
+    buildNonce: ByteArray,
+): ByteArray = MessageDigest.getInstance("SHA-256").apply {
+    update(QP_STRING_PAGE_IDENTITY_DOMAIN)
+    updateQpString(classInternalName)
+    updateQpString(methodName)
+    updateQpString(methodDescriptor)
+    updateQpInt(classLiteralOrdinal)
+    updateQpInt(methodLiteralOrdinal)
+    updateQpBytes(buildNonce)
+}.digest()
+
+private fun deriveQpStringPageHandle(
+    logicalIdentity: ByteArray,
+    buildNonce: ByteArray,
+): ByteArray {
+    val digest = digestQpBinding(QP_STRING_PAGE_HANDLE_DOMAIN, logicalIdentity, buildNonce)
+    return try {
+        digest.copyOf(QpHandle.ENCODED_HANDLE_SIZE)
+    } finally {
+        Arrays.fill(digest, 0)
+    }
+}
+
+private fun deriveQpStringPageCallSiteProof(
+    logicalIdentity: ByteArray,
+    encodedHandle: ByteArray,
+    pageIndex: Int,
+    logicalBindingPath: String,
+): ByteArray {
+    val pageBytes = intBytes(pageIndex)
+    val pathBytes = logicalBindingPath.toByteArray(Charsets.UTF_8)
+    return try {
+        digestQpBinding(
+            QP_STRING_PAGE_PROOF_DOMAIN,
+            logicalIdentity,
+            encodedHandle,
+            pageBytes,
+            pathBytes,
+        )
+    } finally {
+        Arrays.fill(pageBytes, 0)
+        Arrays.fill(pathBytes, 0)
+    }
+}
+
+private fun qpTextPageLogicalBindingPath(
+    logicalIdentity: ByteArray,
+    encodedHandle: ByteArray,
+): String {
+    val digest = digestQpBinding(QP_STRING_PAGE_PATH_DOMAIN, logicalIdentity, encodedHandle)
+    return try {
+        val token = Base64.getUrlEncoder().withoutPadding().encodeToString(digest)
+        val root = QP_STRING_PAGE_PATH_ROOTS[(digest[0].toInt() and 0xFF) % QP_STRING_PAGE_PATH_ROOTS.size]
+        val prefixLength = 2 + ((digest[1].toInt() and 0xFF) % 3)
+        val suffix = QP_STRING_PAGE_PATH_SUFFIXES[(digest[2].toInt() and 0xFF) % QP_STRING_PAGE_PATH_SUFFIXES.size]
+        "$root/${token.substring(0, prefixLength)}/${token.substring(prefixLength)}$suffix"
+    } finally {
+        Arrays.fill(digest, 0)
+    }
+}
+
+private fun digestQpBinding(domain: ByteArray, vararg values: ByteArray): ByteArray =
+    MessageDigest.getInstance("SHA-256").apply {
+        update(domain)
+        values.forEach(::updateQpBytes)
+    }.digest()
+
+private fun MessageDigest.updateQpString(value: String) {
+    val encoded = value.toByteArray(Charsets.UTF_8)
+    try {
+        updateQpBytes(encoded)
+    } finally {
+        Arrays.fill(encoded, 0)
+    }
+}
+
+private fun MessageDigest.updateQpBytes(value: ByteArray) {
+    updateQpInt(value.size)
+    update(value)
+}
+
+private fun MessageDigest.updateQpInt(value: Int) {
+    update((value ushr 24).toByte())
+    update((value ushr 16).toByte())
+    update((value ushr 8).toByte())
+    update(value.toByte())
+}
+
+private fun intBytes(value: Int): ByteArray = byteArrayOf(
+    ((value ushr 24) and 0xFF).toByte(),
+    ((value ushr 16) and 0xFF).toByte(),
+    ((value ushr 8) and 0xFF).toByte(),
+    (value and 0xFF).toByte(),
+)
+
+
+/**
+ * Native-backed condy constant indirection.
+ *
+ * Rewrites LDC string/int constants into CONSTANT_Dynamic entries whose
+ * bootstrap argument is an opaque native string-page token.  The class file
+ * no longer carries the plaintext constant: it lives in an authenticated
+ * native page, and the generated bootstrap materializes it through the
+ * relocated QpTextBridge terminal (same remap path as string encryption).
+ * The token -> plaintext mapping is registered in the Qp build context so
+ * the VM serializer can lower condy LDCs inside protected pages to real
+ * constants (pages are AEAD-encrypted at rest).
+ */
+internal fun applyCondyNativeTokenIndirection(classBytes: ByteArray): ByteArray {
+    val classNode = org.objectweb.asm.tree.ClassNode()
+    val reader = ClassReader(classBytes)
+    reader.accept(classNode, 0)
+
+    if (classNode.version < Opcodes.V11) return classBytes
+    if ((classNode.access and Opcodes.ACC_INTERFACE) != 0) return classBytes
+
+    val buildContext = requireQpBuildContext()
+    val random = deterministicRandom(null, classNode.name)
+    val candidateRandom = SecureRandom()
+    val candidates = ArrayList<QpTextPageCandidate>()
+    var changed = false
+    var classLiteralOrdinal = 0
+
+    val strBsmDesc = "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Object;"
+    val intBsmDesc = "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/Class;I)Ljava/lang/Object;"
+
+    fun isOwnBootstrap(method: org.objectweb.asm.tree.MethodNode): Boolean =
+        method.name.startsWith("\$_c_") || method.name.startsWith("a_bsm")
+
+    for (method in classNode.methods) {
+        if ((method.access and (Opcodes.ACC_ABSTRACT or Opcodes.ACC_NATIVE)) != 0) continue
+        if (isOwnBootstrap(method)) continue
+        val insns = method.instructions ?: continue
+        var methodLiteralOrdinal = 0
+        for (insn in insns.toArray()) {
+            val plain: Any = when {
+                insn is LdcInsnNode && insn.cst is String && (insn.cst as String).isNotEmpty() -> insn.cst
+                insn is LdcInsnNode && insn.cst is Int -> insn.cst
+                else -> continue
+            }
+            val buildNonce = ByteArray(QP_STRING_PAGE_NONCE_SIZE).also(random::nextBytes)
+            var logicalIdentity: ByteArray? = null
+            var encodedHandle: ByteArray? = null
+            var callSiteProof: ByteArray? = null
+            var plaintextBytes: ByteArray? = null
+            var candidate: QpTextPageCandidate? = null
+            try {
+                logicalIdentity = deriveQpStringPageIdentity(
+                    classInternalName = classNode.name,
+                    methodName = method.name,
+                    methodDescriptor = method.desc,
+                    classLiteralOrdinal = classLiteralOrdinal,
+                    methodLiteralOrdinal = methodLiteralOrdinal,
+                    buildNonce = buildNonce,
+                )
+                encodedHandle = deriveQpStringPageHandle(logicalIdentity, buildNonce)
+                val pageIndex = deriveQpStringPageIndex(logicalIdentity, buildNonce)
+                val bindingPath = qpTextPageLogicalBindingPath(logicalIdentity, encodedHandle)
+                callSiteProof = deriveQpStringPageCallSiteProof(
+                    logicalIdentity = logicalIdentity,
+                    encodedHandle = encodedHandle,
+                    pageIndex = pageIndex,
+                    logicalBindingPath = bindingPath,
+                )
+                val packed = packQpStringToken(encodedHandle, pageIndex, callSiteProof)
+                val token = Base64.getUrlEncoder().withoutPadding().encodeToString(packed)
+                java.util.Arrays.fill(packed, 0)
+
+                plaintextBytes = when (plain) {
+                    is String -> plain.toByteArray(Charsets.UTF_8)
+                    is Int -> plain.toString().toByteArray(Charsets.US_ASCII)
+                    else -> throw IllegalStateException()
+                }
+                candidate = QpTextPageCandidate.create(
+                    logicalIdentity = logicalIdentity,
+                    plaintext = plaintextBytes,
+                    pageIndex = pageIndex,
+                    callSiteProof = callSiteProof,
+                    encodedHandle = encodedHandle,
+                    logicalBindingPath = bindingPath,
+                    random = candidateRandom,
+                )
+                candidates += candidate
+                candidate = null
+                buildContext.registerCondyTokenPlaintext(token, plain.toString())
+
+                val condy = when (plain) {
+                    is String -> ConstantDynamic("c", "Ljava/lang/String;", Handle(
+                        Opcodes.H_INVOKESTATIC, classNode.name, "\$_c_str", strBsmDesc, false), token)
+                    is Int -> ConstantDynamic("c", "I", Handle(
+                        Opcodes.H_INVOKESTATIC, classNode.name, "\$_c_int", strBsmDesc, false), token)
+                    else -> throw IllegalStateException()
+                }
+                insns.set(insn, LdcInsnNode(condy))
+                changed = true
+                classLiteralOrdinal++
+                methodLiteralOrdinal++
+            } finally {
+                candidate?.wipe()
+                java.util.Arrays.fill(buildNonce, 0)
+                logicalIdentity?.let { java.util.Arrays.fill(it, 0) }
+                encodedHandle?.let { java.util.Arrays.fill(it, 0) }
+                callSiteProof?.let { java.util.Arrays.fill(it, 0) }
+                plaintextBytes?.let { java.util.Arrays.fill(it, 0) }
+            }
+        }
+    }
+
+    if (!changed) return classBytes
+
+    fun emitTokenDecode(method: org.objectweb.asm.tree.MethodNode, bootstrapSlot: Int) {
+        method.instructions.clear()
+        method.instructions.add(VarInsnNode(Opcodes.ALOAD, 3))
+        method.instructions.add(
+            MethodInsnNode(
+                Opcodes.INVOKESTATIC,
+                STRING_HELPER_OWNER,
+                "materializeQpStringToken",
+                STRING_HELPER_TOKEN_DESC,
+                false,
+            ),
+        )
+        method.instructions.add(
+            InvokeDynamicInsnNode(
+                "t$bootstrapSlot",
+                STRING_HELPER_NATIVE_DECODE_DESC,
+                Handle(
+                    Opcodes.H_INVOKESTATIC,
+                    STRING_HELPER_OWNER,
+                    STRING_HELPER_NATIVE_BSM_NAMES[bootstrapSlot % STRING_HELPER_NATIVE_BSM_NAMES.size],
+                    STRING_HELPER_NATIVE_BSM_DESC,
+                    false,
+                ),
+                Handle(
+                    Opcodes.H_INVOKESTATIC,
+                    STRING_HELPER_OWNER,
+                    "invokeQpStringTerminal",
+                    STRING_HELPER_NATIVE_DECODE_DESC,
+                    false,
+                ),
+            ),
+        )
+    }
+
+    var strBsm = classNode.methods.firstOrNull { it.name == "\$_c_str" }
+    if (strBsm == null) {
+        strBsm = org.objectweb.asm.tree.MethodNode(
+            Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC or Opcodes.ACC_SYNTHETIC,
+            "\$_c_str",
+            strBsmDesc,
+            null,
+            null,
+        )
+        classNode.methods.add(strBsm)
+    }
+    emitTokenDecode(strBsm, 0)
+    strBsm.instructions.add(InsnNode(Opcodes.ARETURN))
+    strBsm.maxStack = 2
+    strBsm.maxLocals = 4
+
+    var intBsm = classNode.methods.firstOrNull { it.name == "\$_c_int" }
+    if (intBsm == null) {
+        intBsm = org.objectweb.asm.tree.MethodNode(
+            Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC or Opcodes.ACC_SYNTHETIC,
+            "\$_c_int",
+            strBsmDesc,
+            null,
+            null,
+        )
+        classNode.methods.add(intBsm)
+    }
+    emitTokenDecode(intBsm, 1)
+    intBsm.instructions.add(MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Integer", "parseInt", "(Ljava/lang/String;)I", false))
+    intBsm.instructions.add(MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Integer", "valueOf", "(I)Ljava/lang/Integer;", false))
+    intBsm.instructions.add(InsnNode(Opcodes.ARETURN))
+    intBsm.maxStack = 2
+    intBsm.maxLocals = 4
+
+    val writer = computeFramesWriter(reader)
+    classNode.accept(writer)
+    val transformed = writer.toByteArray()
+    buildContext.registerQpTextPageCandidates(candidates)
+    return transformed
+}
