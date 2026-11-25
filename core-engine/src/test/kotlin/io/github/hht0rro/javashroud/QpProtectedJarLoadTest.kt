@@ -4,6 +4,7 @@ import io.github.hht0rro.javashroud.transforms.protection.qp.QpBridge
 import java.io.File
 import java.io.IOException
 import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Modifier
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -16,10 +17,23 @@ import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.objectweb.asm.Type
 
 class QpProtectedJarLoadTest {
     @Test
-    fun windows_gnu_runtime_initializes_renamed_native_surface_and_rejects_unbound_page() {
+    fun renamed_native_fixture_matches_the_complete_current_bridge_surface() {
+        val sourceMethods = QpBridge::class.java.declaredMethods
+            .filter { Modifier.isNative(it.modifiers) }
+            .associate { it.name to Type.getMethodDescriptor(it) }
+        val renamedMethods = RenamedNativeSurface::class.java.declaredMethods
+            .filter { Modifier.isNative(it.modifiers) }
+            .associate { it.name to Type.getMethodDescriptor(it) }
+        assertEquals(sourceMethods, SOURCE_METHODS.associate { (source, signature, _) -> source to signature })
+        assertEquals(renamedMethods, SOURCE_METHODS.associate { (_, signature, renamed) -> renamed to signature })
+    }
+
+    @Test
+    fun windows_loader_only_runtime_rejects_unauthenticated_renamed_bindings() {
         assumeTrue(isWindows(), "Windows GNU runtime test requires a Windows host")
         val dll = resolveGnuDll()
         val bytes = Files.readAllBytes(dll)
@@ -32,31 +46,12 @@ class QpProtectedJarLoadTest {
         val previousMethods = System.getProperty(METHOD_PROPERTY)
         try {
             System.setProperty(LOADER_PROPERTY, RENAMED_OWNER)
+            // A complete plaintext map cannot authorize current sealed JNI relocation.
             System.setProperty(METHOD_PROPERTY, renamedMethodBindings())
             Files.write(extracted, bytes)
-            try {
+            assertFailsWith<UnsatisfiedLinkError> {
                 System.load(extracted.toAbsolutePath().toString())
-            } catch (_: UnsatisfiedLinkError) {
-                return
             }
-
-            assertEquals(0, RenamedNativeSurface.nInit("windows-x64"))
-            assertEquals(0, RenamedNativeSurface.nBeat())
-            val nonce = ByteArray(32)
-            try {
-                java.security.SecureRandom().nextBytes(nonce)
-                assertTrue(RenamedNativeSurface.nNonce(nonce))
-            } finally {
-                nonce.fill(0)
-            }
-            val error = assertFailsWith<SecurityException> {
-                RenamedNativeSurface.nStr(ByteArray(24), 0, byteArrayOf(1))
-            }
-            assertTrue(
-                error.message.orEmpty().contains("route") ||
-                    error.message.orEmpty().contains("catalog") ||
-                    error.message.orEmpty().contains("page"),
-            )
         } finally {
             restoreProperty(LOADER_PROPERTY, previousLoader)
             restoreProperty(METHOD_PROPERTY, previousMethods)
@@ -71,6 +66,9 @@ class QpProtectedJarLoadTest {
         val result = runProcess(listOf(java.toString()) + probeArguments(resolveGnuDll(), "windows-x64"), 90)
         assertEquals(0, result.exitCode, "Fresh JVM overhead probe failed or timed out:\n${result.output}")
         val lines = result.stdout.lineSequence().toSet()
+        for (expected in listOf("INIT=0", "BEAT=0", "SESSION=ok", "UNBOUND=ok")) {
+            assertTrue(expected in lines, "Windows load probe did not report $expected:\n${result.output}")
+        }
         assertTrue("OVERHEAD_OK" in lines, result.output)
         assertTrue("BUDGET=3.0" in lines, result.output)
     }
@@ -246,6 +244,9 @@ class QpProtectedJarLoadTest {
             Triple("nativeInitializeDefense", "(Ljava/lang/String;Ljava/lang/String;)I", "nDefenseInit"),
             Triple("nativeProbeDefense", "(Ljava/lang/String;Ljava/lang/String;)I", "nDefenseProbe"),
             Triple("nativeTransformDefense", "([BLjava/lang/String;)[B", "nDefenseTransform"),
+            Triple("nativeInitializeDefenseCode", "(II)I", "nDefenseInitCode"),
+            Triple("nativeProbeDefenseCode", "(II)I", "nDefenseProbeCode"),
+            Triple("nativeTransformDefenseCode", "([BI)[B", "nDefenseTransformCode"),
             Triple("nativeInvokeSite", "(Ljava/lang/invoke/MethodHandles\$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;[B[Ljava/lang/Object;Z)Ljava/lang/Object;", "nInvokeSite"),
         )
     }
@@ -268,10 +269,6 @@ private object QpBridgeProbe {
         } finally {
             nonce.fill(0)
         }
-        if (platform == "windows-x64") {
-            checkWindowsDefenseOverhead(started)
-            return
-        }
         println("INIT=$init")
         println("BEAT=$beat")
         println("SESSION=ok")
@@ -281,6 +278,7 @@ private object QpBridgeProbe {
         } catch (_: SecurityException) {
             println("UNBOUND=ok")
         }
+        if (platform == "windows-x64") checkWindowsDefenseOverhead(started)
     }
 
     private fun checkWindowsDefenseOverhead(started: Long) {
