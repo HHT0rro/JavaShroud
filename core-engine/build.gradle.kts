@@ -226,6 +226,11 @@ dependencies {
 tasks.test {
     maxHeapSize = "2g"
     useJUnitPlatform()
+    val androidDeviceTests = providers.environmentVariable("JAVASHROUD_ANDROID_DEVICE_TESTS")
+        .map { it == "true" }.orElse(false)
+    inputs.property("androidDeviceTestsEnabled", androidDeviceTests)
+    outputs.upToDateWhen { !androidDeviceTests.get() }
+    outputs.doNotCacheIf("Android device tests require live SDK and device state") { androidDeviceTests.get() }
     val engineJar = tasks.jar.flatMap { it.archiveFile }
     dependsOn(tasks.jar)
     inputs.file(engineJar)

@@ -176,6 +176,16 @@ The two approaches can coexist; in JavaShroud the Native layer is part of a virt
 The APK retains the exact bytes of `META-INF/services/` files and the original names of any service interfaces and providers they reference within the APK, so `ServiceLoader` can still find them.
 Bundled `j$` Java API compatibility classes retain their names. They compile into separate DEX files within the same APK.
 
+`ApkAndroidDeviceSmokeTest` generates owned single-DEX, multidex, XML callback, and simple JNI fixtures from source, then checks return values, signatures, and alignment for both original and protected APKs. Start the intended device and set `ANDROID_SERIAL`, `ANDROID_HOME`, and `ANDROID_NDK_HOME` before enabling the tests. The three tests skip while disabled. Once enabled, missing prerequisites fail the run and Gradle executes the tests again. Evidence remains under `build/android-runtime-evidence/`.
+
+```bash
+export ANDROID_SERIAL=emulator-5554
+export JAVASHROUD_ANDROID_DEVICE_TESTS=true
+./gradlew :core-engine:test --tests '*.ApkAndroidDeviceSmokeTest' --max-workers=1
+```
+
+`JAVASHROUD_ANDROID_EXPECT_API` and `JAVASHROUD_ANDROID_EXPECT_PAGE_SIZE` optionally require exact device values. CI configures x86_64 emulator jobs for API 21/26 with 4 KiB pages and API 35 with 16 KiB pages. Each job archives its observed device configuration and test results. Native ARM64 hardware requires separate verification.
+
 ```powershell
 java -cp build\core-engine\install\core-engine\lib\* io.github.hht0rro.javashroud.MainKt ^
   -config apk-config.toml --apk --log-file run.log

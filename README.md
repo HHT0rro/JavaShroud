@@ -165,6 +165,16 @@ Qp runtime 是 Rust-only 边界，源码随引擎分发在 `core-engine/src/main
 APK 中的 `META-INF/services/` 登记文件保持原字节；它引用的服务接口和实现类如果在 APK 内，也保留原类名，以便 `ServiceLoader` 按原登记发现它们。
 APK 内已有的 `j$` Java API 兼容类保留原名，与应用类分开生成 DEX，两组仍发布到同一个 APK。
 
+仓库内的 `ApkAndroidDeviceSmokeTest` 从源码生成自有单 DEX、多 DEX、XML 回调与简单 JNI 夹具，并对原包和处理后包执行返回值、签名及对齐检查。设备须已启动，明确设置 `ANDROID_SERIAL`、`ANDROID_HOME` 和 `ANDROID_NDK_HOME` 后再启用。未启用时这三项测试会跳过；启用后缺工具或设备会失败，Gradle 也会重新执行测试。证据保留在 `build/android-runtime-evidence/`。
+
+```bash
+export ANDROID_SERIAL=emulator-5554
+export JAVASHROUD_ANDROID_DEVICE_TESTS=true
+./gradlew :core-engine:test --tests '*.ApkAndroidDeviceSmokeTest' --max-workers=1
+```
+
+可用 `JAVASHROUD_ANDROID_EXPECT_API` 和 `JAVASHROUD_ANDROID_EXPECT_PAGE_SIZE` 要求设备参数精确匹配。CI 配置了 API 21/26 的 4 KiB 与 API 35 的 16 KiB x86_64 模拟器作业，作业归档实际设备信息及测试结果。ARM64 真机结果须另行验证。
+
 ```powershell
 java -cp build\core-engine\install\core-engine\lib\* io.github.hht0rro.javashroud.MainKt ^
   -config apk-config.toml --apk --log-file run.log

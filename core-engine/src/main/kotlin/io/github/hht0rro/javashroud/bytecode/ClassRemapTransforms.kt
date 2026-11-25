@@ -41,16 +41,13 @@ internal fun remapClassesStrict(classBytes: ByteArray, classRenameMap: Map<Strin
  * resource strings, and slash resource paths remain covered by [createRemapper].
  */
 private fun remapSupportedReflectionClassString(value: String, classRenameMap: Map<String, String>): String {
-    val ordered = classRenameMap.entries.sortedByDescending { it.key.length }
-    for ((oldInternalName, newInternalName) in ordered) {
-        val oldBinaryName = oldInternalName.replace('/', '.')
-        val newBinaryName = newInternalName.replace('/', '.')
-        val isMemberReference = value.startsWith("$oldBinaryName#") ||
-            value.startsWith("$oldBinaryName::") ||
-            value.startsWith("$oldBinaryName.m_")
-        if (isMemberReference) {
-            return newBinaryName + value.removePrefix(oldBinaryName)
-        }
+    // Check longest candidate owners first without sorting and scanning every class for each LDC.
+    for (index in value.indices.reversed()) {
+        val separator = value[index] == '#' || value.startsWith("::", index) || value.startsWith(".m_", index)
+        if (!separator) continue
+        val owner = value.substring(0, index).replace('.', '/')
+        val replacement = classRenameMap[owner] ?: continue
+        return replacement.replace('/', '.') + value.substring(index)
     }
     return value
 }
