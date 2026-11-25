@@ -109,18 +109,23 @@ class VmStructureDivergenceTest {
 
     @Test
     fun dispatch_chain_reassembles_logical_order_from_shuffled_storage_order() {
-        val snapshot = (0 until 32)
-            .asSequence()
-            .map { serializedLayout(0x7800_0000 + it) }
-            .first { it.blockIds != (0 until it.blockCount).toList() }
-
-        val chain = dispatchChain(snapshot)
-        assertEquals(snapshot.blockCount, chain.size, "state-bound dispatch chain must visit every logical block")
-        assertEquals((0 until snapshot.blockCount).toSet(), chain.toSet(), "state-bound dispatch chain must be a full block-id permutation")
-        assertEquals(0, chain.first(), "native dispatch must retain block zero as its authenticated entry")
+        val layouts = (0 until 32).map { serializedLayout(0x7800_0000 + it) }
+        val chains = layouts.map { snapshot ->
+            val chain = dispatchChain(snapshot)
+            assertEquals(snapshot.blockCount, chain.size, "state-bound dispatch chain must visit every logical block")
+            assertEquals((0 until snapshot.blockCount).toSet(), chain.toSet(), "state-bound dispatch chain must be a full block-id permutation")
+            assertEquals(0, chain.first(), "native dispatch must retain block zero as its authenticated entry")
+            chain
+        }
+        // Logical IDs and physical storage are independently permuted. Either permutation can
+        // legitimately be the identity in an individual build; observe each across the cohort.
+        assertTrue(layouts.zip(chains).any { (layout, chain) -> layout.blockIds != chain },
+            "at least one fixture must reconstruct a chain that differs from storage order")
         assertTrue(
-            chain.drop(1) != (1 until snapshot.blockCount).toList() || snapshot.blockCount == 2,
-            "logical block ids after entry must be build-secret shuffled when more than one permutation exists",
+            layouts.zip(chains).any { (layout, chain) ->
+                layout.blockCount > 2 && chain.drop(1) != (1 until layout.blockCount).toList()
+            },
+            "at least one multi-choice fixture must exercise shuffled logical block IDs",
         )
     }
 
