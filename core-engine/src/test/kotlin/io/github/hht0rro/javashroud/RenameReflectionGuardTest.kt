@@ -589,6 +589,36 @@ class RenameReflectionGuardTest {
         assertTrue(methods.any { it.name == "m0000" && it.desc == "(Z)Ljava/lang/Object;" }, "Original method body must be renamed even when method frames mention classes absent from the engine classpath")
         assertTrue(methods.any { it.name == "choose" && it.desc == "(Z)Ljava/lang/Object;" && it.access and Opcodes.ACC_BRIDGE != 0 }, "ABI bridge must still be injected without recomputing unrelated application frames")
     }
+
+    @Test
+    fun remapMethods_updates_annotated_caller_without_loading_types_from_unrelated_frames() {
+        val node = ClassNode()
+        ClassReader(buildMissingClasspathFrameMergeClass()).accept(node, 0)
+        val annotation = "sample/ExternalMarker"
+        node.visitAnnotation("L$annotation;", true).apply {
+            visit("value", "fixture")
+            visitEnd()
+        }
+        val target = "sample/StaticTarget"
+        node.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "dispatch", "()I", null, null).apply {
+            visitCode()
+            visitMethodInsn(Opcodes.INVOKESTATIC, target, "answer", "()I", false)
+            visitInsn(Opcodes.IRETURN)
+            visitMaxs(1, 0)
+            visitEnd()
+        }
+        val writer = ClassWriter(0)
+        node.accept(writer)
+        val annotationMember = MemberKey(annotation, "value", "()Ljava/lang/String;")
+        val staticMember = MemberKey(target, "answer", "()I")
+        val output = remapMethods(writer.toByteArray(), mapOf(
+            annotationMember to MemberRename(annotation, "value", annotationMember.descriptor, "label"),
+            staticMember to MemberRename(target, "answer", staticMember.descriptor, "answerRenamed"),
+        ))
+        assertEquals(setOf("label"), readRuntimeAnnotationElementNames(output, "L$annotation;"))
+        assertEquals("answerRenamed", readMethodCalls(output).single { it.owner == target }.name)
+    }
+
     @Test
     fun renameMethods_preserves_compiler_synthetic_accessor_for_vm_captured_calls() {
         val classBytes = buildSyntheticAccessorHostClass()

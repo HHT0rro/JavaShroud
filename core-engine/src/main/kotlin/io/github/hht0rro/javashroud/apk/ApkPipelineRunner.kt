@@ -496,6 +496,9 @@ class ApkPipelineRunner(
             for (candidate in strings) {
                 dottedToSlash[candidate]?.let { hits += it }
             }
+            if (entry.name.startsWith("res/")) {
+                hits += ApkResourceClassReferenceScanner.preferenceClassReferences(entry.data, loadedSlashClassNames)
+            }
         }
         if (hits.isNotEmpty()) log.info("resource string pool keeps ${hits.size} classes")
         return hits

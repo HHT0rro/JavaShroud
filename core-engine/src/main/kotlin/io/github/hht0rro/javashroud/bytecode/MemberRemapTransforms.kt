@@ -180,7 +180,9 @@ private fun rewriteAnnotationElementNames(
         changed = rewriteAnnotationValue(method.annotationDefault, annotationElementRenameMap).changed || changed
     }
     if (!changed) return classBytes
-    val writer = ClassWriter(ClassWriter.COMPUTE_MAXS or ClassWriter.COMPUTE_FRAMES)
+    // Annotation element names do not affect instructions, stack heights, or frames.
+    // Recomputing can fail on unrelated application types and discard already-remapped calls.
+    val writer = ClassWriter(0)
     node.accept(writer)
     return writer.toByteArray()
 }
@@ -457,7 +459,8 @@ private fun addMethodRenameBridges(
         node.methods.add(buildBridgeMethod(node, rename, rename.renamedName, rename.originalName))
     }
 
-    val writer = computeFramesWriter(ClassReader(classBytes))
+    // Generated bridges have no branches or handlers; existing methods keep their input frames.
+    val writer = ClassWriter(ClassWriter.COMPUTE_MAXS)
     node.accept(writer)
     return writer.toByteArray()
 }

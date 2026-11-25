@@ -12,6 +12,10 @@ import org.objectweb.asm.tree.MethodInsnNode
 import org.objectweb.asm.tree.MethodNode
 import org.objectweb.asm.tree.TypeInsnNode
 import org.objectweb.asm.tree.VarInsnNode
+import org.objectweb.asm.tree.analysis.Analyzer
+import org.objectweb.asm.tree.analysis.AnalyzerException
+import org.objectweb.asm.tree.analysis.SourceInterpreter
+import org.objectweb.asm.tree.analysis.SourceValue
 
 /**
  * Repairs the dex2jar `new`-type degradation before the kernel sees the
@@ -25,8 +29,11 @@ import org.objectweb.asm.tree.VarInsnNode
  * verifier hard-rejects the class ("register has type Super but expected Sub"
  * / "returning 'Super'" / "cannot access").
  *
- * The repair rewrites `new S; dup; invokespecial S.<init>()V` to `new T`,
- * where T is the declared type at the value's first statically typed use:
+ * The input DEX supplies allocated types. When dex2jar changes the order or count
+ * of allocations with the same constructor owner, tracked field receivers can
+ * disambiguate which source type belongs to a converted allocation. If the
+ * evidence still conflicts, the repair does not guess between siblings.
+ * Without a matching source site, a fallback uses the first statically typed use:
  *  - a field store (putstatic/putfield, T = the field's declared type),
  *  - a reference return (areturn, T = the method's declared return type),
  *  - a zero-argument invoke receiver (T = the call's owner),
@@ -136,11 +143,6 @@ internal object ApkNewTypeRepair {
             for (method in node.methods) {
                 val insns = method.instructions ?: continue
                 val dexMethodSites = dexMethodSitesByClass?.get(method.name + method.desc).orEmpty()
-                // Ordinal matching within the method: dex2jar emits degraded
-                // sites in IR order and the dex lists (H, S) pairs in the same
-                // order, so the k-th classfile degraded site with constructor
-                // owner S maps to the k-th dex pair with the same S.
-                val dexOrdinalByOwner = HashMap<String, Int>()
                 // Pair each `new S` with the next unpaired `invokespecial
                 // S.<init>()V` after it, in code order. javac/dex2jar emit them
                 // in that order, but argument computations may sit between
@@ -160,31 +162,70 @@ internal object ApkNewTypeRepair {
                         }
                     }
                 }
+                val byConstructorOwner = insns.filterIsInstance<TypeInsnNode>()
+                    .filter { it in pairedCtor }.groupBy { it.desc }
+                val dexByConstructorOwner = dexMethodSites.groupBy { it.constructorOwner }
+                val fieldOwners by lazy { allocationFieldOwners(node.name, method) }
+                val matchingDexTypes = mutableMapOf<TypeInsnNode, String>()
+                val uncertainAllocations = mutableSetOf<TypeInsnNode>()
+                for ((owner, allocations) in byConstructorOwner) {
+                    val sites = dexByConstructorOwner[owner].orEmpty().map { it.allocatedType }
+                    if (sites.isEmpty()) continue
+                    if (sites.distinct().size <= 1) {
+                        allocations.take(sites.size).zip(sites).forEach { (site, type) -> matchingDexTypes[site] = type }
+                        continue
+                    }
+                    val constraints = allocations.associateWith { fieldOwners[it].orEmpty() }
+                    fun permits(site: TypeInsnNode, type: String) = constraints.getValue(site).all { extendsArtifact(type, it, classFacts) }
+                    if (allocations.size == sites.size && allocations.zip(sites).all { (site, type) -> permits(site, type) }) {
+                        allocations.zip(sites).forEach { (site, type) -> matchingDexTypes[site] = type }
+                        continue
+                    }
+
+                    // dex2jar may reorder blocks or remove redundant NEWs, so an ordinal disagreement
+                    // cannot justify choosing between sibling types. Constrain by actual field receivers.
+                    val remaining = sites.toMutableList()
+                    val pending = allocations.toMutableList()
+                    var progress: Boolean
+                    do {
+                        progress = false
+                        val iterator = pending.iterator()
+                        while (iterator.hasNext()) {
+                            val site = iterator.next()
+                            if (constraints.getValue(site).isEmpty()) continue
+                            val type = remaining.asSequence().filter { permits(site, it) }.distinct().singleOrNull() ?: continue
+                            matchingDexTypes[site] = type
+                            remaining.remove(type)
+                            iterator.remove()
+                            progress = true
+                        }
+                    } while (progress)
+                    val uniform = remaining.distinct().singleOrNull()
+                    if (uniform != null && pending.size <= remaining.size && pending.all { permits(it, uniform) }) {
+                        pending.forEach { matchingDexTypes[it] = uniform }
+                    } else {
+                        uncertainAllocations += pending
+                    }
+                }
                 for (instruction in insns) {
                     val newInsn = instruction as? TypeInsnNode ?: continue
                     if (newInsn.opcode != Opcodes.NEW) continue
                     val constructedType = newInsn.desc
                     val ctor = pairedCtor[newInsn] ?: continue
-                    val use = nextMeaningful(ctor) ?: continue
-
-                    // Exact recovery from the source dex, when available: the
-                    // dex's new-instance operand IS the true allocated class.
-                    val ordinal = dexOrdinalByOwner.merge(constructedType, 1, Int::plus)!! - 1
-                    val dexMatch = dexMethodSites
-                        .filter { it.constructorOwner == constructedType }
-                        .getOrNull(ordinal)
-                    val recoveredFromDex = dexMatch != null &&
-                        dexMatch.allocatedType != constructedType &&
-                        isInstantiableClassType(dexMatch.allocatedType, classFacts) &&
-                        extendsArtifact(dexMatch.allocatedType, constructedType, classFacts)
-                    if (recoveredFromDex) {
-                        newInsn.desc = dexMatch!!.allocatedType
-                        repairedSites += 1
-                        dexRecovered += 1
+                    val dexType = matchingDexTypes[newInsn]
+                    if (dexType != null) {
+                        if (dexType != constructedType && isInstantiableClassType(dexType, classFacts) &&
+                            extendsArtifact(dexType, constructedType, classFacts)) {
+                            newInsn.desc = dexType
+                            repairedSites += 1
+                            dexRecovered += 1
+                        }
                         continue
                     }
+                    if (newInsn in uncertainAllocations) continue
 
                     // Heuristic fallback: declared use type in the classfile.
+                    val use = nextMeaningful(ctor) ?: continue
                     val targetType = declaredUseType(use, method.desc) ?: continue
                     if (targetType == constructedType) continue
                     if (!isInstantiableClassType(targetType, classFacts)) continue
@@ -201,6 +242,31 @@ internal object ApkNewTypeRepair {
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun allocationFieldOwners(owner: String, method: MethodNode): Map<TypeInsnNode, Set<String>> {
+        val interpreter = object : SourceInterpreter(Opcodes.ASM9) {
+            override fun copyOperation(insn: AbstractInsnNode, value: SourceValue): SourceValue = value
+        }
+        val frames = try {
+            Analyzer(interpreter).analyze(owner, method)
+        } catch (_: AnalyzerException) {
+            return emptyMap()
+        }
+        val owners = mutableMapOf<TypeInsnNode, MutableSet<String>>()
+        for ((index, insn) in method.instructions.toArray().withIndex()) {
+            if (insn !is FieldInsnNode) continue
+            val fromTop = when (insn.opcode) {
+                Opcodes.PUTFIELD -> 2 // ASM frames contain one value per operand, including double and long.
+                Opcodes.GETFIELD -> 1
+                else -> continue
+            }
+            val frame = frames[index] ?: continue
+            if (frame.stackSize < fromTop) continue
+            val source = frame.getStack(frame.stackSize - fromTop).insns.singleOrNull() as? TypeInsnNode ?: continue
+            if (source.opcode == Opcodes.NEW) owners.getOrPut(source) { mutableSetOf() } += insn.owner
+        }
+        return owners
     }
 
     /** Declared reference type when the use pins one; null otherwise. */

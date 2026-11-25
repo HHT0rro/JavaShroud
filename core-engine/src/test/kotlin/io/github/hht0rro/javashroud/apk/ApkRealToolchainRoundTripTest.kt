@@ -25,6 +25,54 @@ import org.objectweb.asm.tree.TypeInsnNode
 class ApkRealToolchainRoundTripTest {
 
     @Test
+    fun reorderedAllocationUsesItsFieldReceiverRatherThanTheDexOrdinal() {
+        val parent = "java/lang/Object"
+        val host = "fixture/AllocationOrder"
+        val counter = "fixture/Counter"
+        val reference = "fixture/Reference"
+        fun classBytes(name: String, block: (ClassWriter) -> Unit): ByteArray =
+            ClassWriter(ClassWriter.COMPUTE_MAXS).also { writer ->
+                writer.visit(Opcodes.V1_6, Opcodes.ACC_PUBLIC or Opcodes.ACC_FINAL, name, null, parent, null)
+                block(writer)
+                writer.visitEnd()
+            }.toByteArray()
+
+        val make = classBytes(host) { writer ->
+            writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "make", "()V", null, null).apply {
+                visitCode()
+                fun allocate() {
+                    visitTypeInsn(Opcodes.NEW, parent)
+                    visitInsn(Opcodes.DUP)
+                    visitMethodInsn(Opcodes.INVOKESPECIAL, parent, "<init>", "()V", false)
+                }
+                allocate()
+                visitInsn(Opcodes.POP)
+                allocate()
+                visitVarInsn(Opcodes.ASTORE, 0)
+                visitVarInsn(Opcodes.ALOAD, 0)
+                visitInsn(Opcodes.FCONST_1)
+                visitFieldInsn(Opcodes.PUTFIELD, counter, "value", "F")
+                allocate()
+                visitInsn(Opcodes.POP)
+                visitInsn(Opcodes.RETURN)
+                visitMaxs(0, 0)
+                visitEnd()
+            }
+        }
+        val classes = listOf(
+            "$host.class" to make,
+            "$counter.class" to classBytes(counter) { it.visitField(Opcodes.ACC_PUBLIC, "value", "F", null, null).visitEnd() },
+            "$reference.class" to classBytes(reference) {},
+        )
+        val source = listOf(reference, reference, counter, reference).map { ApkDexNewInstanceIndex.Site(it, parent) }
+        val repaired = ApkNewTypeRepair.repair(classes, mapOf(host to mapOf("make()V" to source)))
+        val output = ClassNode()
+        ClassReader(repaired.classes.first().second).accept(output, 0)
+        assertEquals(listOf(reference, counter, reference), output.methods.single().instructions
+            .filterIsInstance<TypeInsnNode>().filter { it.opcode == Opcodes.NEW }.map { it.desc })
+    }
+
+    @Test
     fun packagedDesugaredLibraryAndApplicationProduceSeparateDexGroups(@TempDir work: Path) {
         Assumptions.assumeTrue(System.getenv(ApkToolchainProvisioner.REAL_TOOLS_SKIP_ENV) != "skip")
         val app = "fixture/App"

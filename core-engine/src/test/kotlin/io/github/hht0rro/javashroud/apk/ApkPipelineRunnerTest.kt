@@ -55,6 +55,7 @@ class ApkPipelineRunnerTest {
         recordedEvents: MutableList<EngineEvent>,
         workJarSidecars: Boolean = true,
         signOutput: (Path, Path) -> Unit = { unsigned, staged -> Files.copy(unsigned, staged, REPLACE_EXISTING) },
+        fixtureClasses: List<String> = listOf("com/example/app/App"),
         kernelBehavior: (ObfuscationConfig, Path, (EngineEvent) -> Unit) -> Unit = { _, _, emit ->
             emit(EngineEvent("info", "log", "kernel summary output=C:\\work\\apk-work.jar", null, "ignored"))
         },
@@ -66,9 +67,11 @@ class ApkPipelineRunnerTest {
             val workJar = Path.of(engineConfig.outputJarPath)
             Files.createDirectories(workJar.parent)
             JarOutputStream(Files.newOutputStream(workJar)).use { jar ->
-                jar.putNextEntry(ZipEntry("com/example/app/App.class"))
-                jar.write(ApkPipelineRunnerTestSupport.appClassBytes())
-                jar.closeEntry()
+                for (owner in fixtureClasses) {
+                    jar.putNextEntry(ZipEntry("$owner.class"))
+                    jar.write(ApkPipelineRunnerTestSupport.appClassBytes(owner))
+                    jar.closeEntry()
+                }
             }
             if (workJarSidecars) {
                 Files.writeString(
@@ -92,11 +95,13 @@ class ApkPipelineRunnerTest {
                 recordedStages += "dex2jar-${dex.index}"
                 val jarPath = workDirectory.resolve("fake-classes-${dex.index}.jar")
                 JarOutputStream(Files.newOutputStream(jarPath)).use { jar ->
-                    jar.putNextEntry(ZipEntry("com/example/app/App.class"))
-                    jar.write(ApkPipelineRunnerTestSupport.appClassBytes())
-                    jar.closeEntry()
+                    for (owner in fixtureClasses) {
+                        jar.putNextEntry(ZipEntry("$owner.class"))
+                        jar.write(ApkPipelineRunnerTestSupport.appClassBytes(owner))
+                        jar.closeEntry()
+                    }
                 }
-                return ConvertedDex(dex.index, jarPath, listOf("com/example/app/App.class"))
+                return ConvertedDex(dex.index, jarPath, fixtureClasses.map { "$it.class" })
             }
         }
         val fakeD8 = object : ApkD8Runner(runner = { _, _ -> ApkProcessSupport.ProcessResult(0, "fake", false) }) {
@@ -109,7 +114,7 @@ class ApkPipelineRunnerTest {
                 log: (String) -> Unit,
             ): List<Pair<String, ByteArray>> {
                 recordedStages += "d8"
-                return listOf("classes.dex" to minimalValidDex())
+                return listOf("classes.dex" to ApkPipelineRunnerTestSupport.minimalDex(fixtureClasses.size))
             }
         }
         return ApkPipelineRunner(
@@ -177,6 +182,30 @@ class ApkPipelineRunnerTest {
             ZipFile.builder().setFile(output.toFile()).get().use { archive ->
                 assertContentEquals(descriptor, archive.getInputStream(archive.getEntry(name)).use { it.readBytes() })
             }
+        }
+    }
+
+    @Test
+    fun keepsShortPreferenceTagsAndTheRuntimePackageAnchors() {
+        val dir = Files.createTempDirectory("pipeline-preference-tags-")
+        val prefix = "androidx/preference/"
+        val screen = prefix + "PreferenceScreen"
+        val action = prefix + "EditTextPreference"
+        val anchors = listOf(prefix + "Preference", prefix + "SwitchPreference")
+        val negative = listOf(prefix + "CheckBoxPreference", "fixture/EditTextPreference", prefix + "PreferenceInflater")
+        val xml = ApkTestFixtures.binaryXmlElements("PreferenceScreen", "EditTextPreference", otherPoolStrings = listOf("CheckBoxPreference"))
+        val name = "res/41.xml" // Optimized resources may no longer carry a res/xml directory name.
+        val input = ApkTestFixtures.writeApk(dir.resolve("input.apk"), ApkTestFixtures.syntheticApk(
+            extraEntries = listOf(ApkTestFixtures.ApkTemplateEntry(name, xml)),
+        ))
+        val output = dir.resolve("result.apk")
+        val configs = mutableListOf<ObfuscationConfig>()
+        fakeRunner(mutableListOf(), configs, mutableListOf(), fixtureClasses = listOf(screen, action) + anchors + negative)
+            .run(config(input, output), dir.resolve("config.toml")) {}
+        val exclusions = configs.single().ruleSet.rules.filter { it.action == "exclude" }.map { it.target }.toSet()
+        assertEquals((listOf(screen, action) + anchors).toSet(), exclusions)
+        ZipFile.builder().setFile(output.toFile()).get().use { archive ->
+            assertContentEquals(xml, archive.getInputStream(archive.getEntry(name)).use { it.readBytes() })
         }
     }
 
@@ -621,7 +650,7 @@ class ApkPipelineRunnerTest {
 /** Shared builders used by the fake pipeline tests. */
 object ApkPipelineRunnerTestSupport {
 
-    fun minimalDex(): ByteArray {
+    fun minimalDex(classCount: Int = 1): ByteArray {
         val mapOffset = 0x70
         val mapSize = 2
         val total = mapOffset + 4 + mapSize * 12
@@ -648,7 +677,7 @@ object ApkPipelineRunnerTestSupport {
         u32(mapOffset + 12, 1L)
         u16(mapOffset + 16, 0x0006)
         u32(mapOffset + 20, 0x70L)
-        u32(mapOffset + 24, 1L)
+        u32(mapOffset + 24, classCount.toLong())
         val signature = java.security.MessageDigest.getInstance("SHA-1").apply {
             update(bytes, 32, total - 32)
         }.digest()
@@ -663,12 +692,12 @@ object ApkPipelineRunnerTestSupport {
         return bytes
     }
 
-    fun appClassBytes(): ByteArray {
+    fun appClassBytes(owner: String = "com/example/app/App"): ByteArray {
         val writer = org.objectweb.asm.ClassWriter(0)
         writer.visit(
             org.objectweb.asm.Opcodes.V1_8,
             org.objectweb.asm.Opcodes.ACC_PUBLIC,
-            "com/example/app/App",
+            owner,
             null,
             "java/lang/Object",
             null,

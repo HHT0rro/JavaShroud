@@ -130,6 +130,34 @@ object ApkTestFixtures {
         return table.toByteArray()
     }
 
+    internal fun binaryXmlElements(vararg tags: String, otherPoolStrings: List<String> = emptyList()): ByteArray {
+        val pool = encodeStringPool(otherPoolStrings + tags)
+        return ByteArrayOutputStream().also { bytes ->
+            DataOutputStream(bytes).use { data ->
+                data.writeShortLE(3)
+                data.writeShortLE(8)
+                data.writeIntLE(8 + pool.size + tags.size * (36 + 24))
+                data.write(pool)
+                fun element(type: Int, nameIndex: Int, size: Int) {
+                    data.writeShortLE(type)
+                    data.writeShortLE(16)
+                    data.writeIntLE(size)
+                    data.writeIntLE(1)
+                    data.writeIntLE(-1)
+                    data.writeIntLE(-1)
+                    data.writeIntLE(nameIndex + otherPoolStrings.size)
+                }
+                for (index in tags.indices) {
+                    element(0x0102, index, 36)
+                    data.writeShortLE(20)
+                    data.writeShortLE(20)
+                    repeat(4) { data.writeShortLE(0) }
+                }
+                for (index in tags.indices.reversed()) element(0x0103, index, 24)
+            }
+        }.toByteArray()
+    }
+
     private fun encodeStringPool(strings: List<String>): ByteArray {
         val out = ByteArrayOutputStream()
         val offsets = mutableListOf<Int>()

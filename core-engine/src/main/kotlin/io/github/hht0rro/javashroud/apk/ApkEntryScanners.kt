@@ -12,21 +12,52 @@ object ApkResourceClassReferenceScanner {
     private const val CHUNK_STRING_POOL = 0x0001
     private const val CHUNK_TABLE = 0x0002
     private const val CHUNK_XML = 0x0003
+    private const val CHUNK_XML_START_ELEMENT = 0x0102
     private const val STRING_POOL_UTF8_FLAG = 1 shl 8
+    private const val PREFERENCE_PACKAGE = "androidx/preference/"
+    private const val PREFERENCE_INFLATER = PREFERENCE_PACKAGE + "PreferenceInflater"
+    private val preferencePackageAnchors = listOf(PREFERENCE_PACKAGE + "Preference", PREFERENCE_PACKAGE + "SwitchPreference")
 
     /** Extracts top-level pool strings from one binary XML resource or resource table. */
-    fun extractStringPoolStrings(bytes: ByteArray): List<String> {
-        if (bytes.size < 8) return emptyList()
+    fun extractStringPoolStrings(bytes: ByteArray): List<String> = buildList {
+        visitResourceChunks(bytes) { type, cursor, headerSize, end ->
+            if (type == CHUNK_STRING_POOL) parsePool(bytes, cursor, headerSize, end).filterNotNullTo(this)
+        }
+    }
+
+    internal fun preferenceClassReferences(bytes: ByteArray, loadedClassNames: Set<String>): Set<String> {
+        if (PREFERENCE_INFLATER !in loadedClassNames || bytes.size < 8 || readUShort(bytes, 0) != CHUNK_XML) return emptySet()
+        val hits = mutableSetOf<String>()
+        var pool: List<String?> = emptyList()
+        visitResourceChunks(bytes) { type, start, headerSize, end ->
+            when (type) {
+                CHUNK_STRING_POOL -> pool = parsePool(bytes, start, headerSize, end)
+                CHUNK_XML_START_ELEMENT -> if (headerSize >= 16 && end - start - headerSize >= 20) {
+                    val index = readUInt(bytes, start + headerSize + 4)
+                    val tag = if (index < pool.size) pool[index.toInt()] else null
+                    if (tag != null && tag.isNotEmpty() && tag.none { it == '.' || it == '/' }) {
+                        val candidate = PREFERENCE_PACKAGE + tag
+                        if (candidate in loadedClassNames) hits += candidate
+                    }
+                }
+            }
+        }
+        // PreferenceInflater computes its search package from these class literals at runtime.
+        if (hits.isNotEmpty()) preferencePackageAnchors.filterTo(hits) { it in loadedClassNames }
+        return hits
+    }
+
+    private inline fun visitResourceChunks(bytes: ByteArray, visit: (Int, Int, Int, Int) -> Unit) {
+        if (bytes.size < 8) return
         val rootType = readUShort(bytes, 0)
         val rootHeaderSize = readUShort(bytes, 2)
         val rootSize = readUInt(bytes, 4)
         val minimumHeader = when (rootType) {
             CHUNK_XML -> 8
             CHUNK_TABLE -> 12
-            else -> return emptyList()
+            else -> return
         }
-        if (rootHeaderSize < minimumHeader || rootSize < rootHeaderSize || rootSize > bytes.size) return emptyList()
-        val results = mutableListOf<String>()
+        if (rootHeaderSize < minimumHeader || rootSize < rootHeaderSize || rootSize > bytes.size) return
         var cursor = rootHeaderSize
         while (rootSize - cursor >= 8) {
             val chunkType = readUShort(bytes, cursor)
@@ -34,16 +65,13 @@ object ApkResourceClassReferenceScanner {
             val chunkSize = readUInt(bytes, cursor + 4)
             if (headerSize < 8 || chunkSize < headerSize || chunkSize > rootSize - cursor) break
             val end = cursor + chunkSize.toInt()
-            if (chunkType == CHUNK_STRING_POOL) {
-                if (headerSize < 28) break
-                results += parsePool(bytes, cursor, headerSize, end)
-            }
+            if (chunkType == CHUNK_STRING_POOL && headerSize < 28) break
+            visit(chunkType, cursor, headerSize, end)
             cursor = end
         }
-        return results
     }
 
-    private fun parsePool(bytes: ByteArray, start: Int, headerSize: Int, end: Int): List<String> {
+    private fun parsePool(bytes: ByteArray, start: Int, headerSize: Int, end: Int): List<String?> {
         // body layout: stringCount(4) styleCount(4) flags(4) stringsStart(4) stylesStart(4)
         val stringCount = readUInt(bytes, start + 8)
         val styleCount = readUInt(bytes, start + 12)
@@ -56,13 +84,15 @@ object ApkResourceClassReferenceScanner {
         val stringsEnd = if (stylesStart == 0L) end else start + stylesStart.toInt()
         val isUtf8 = flags and STRING_POOL_UTF8_FLAG != 0
         val count = stringCount.coerceAtMost(65_536L).toInt()
-        val out = ArrayList<String>(count)
+        val out = ArrayList<String?>(count)
         for (index in 0 until count) {
             val offsetIndex = start + headerSize + index * 4
             val absolute = start + stringsStart + readUInt(bytes, offsetIndex)
-            if (absolute >= stringsEnd) continue
-            val value = if (isUtf8) decodeUtf8(bytes, absolute.toInt(), stringsEnd) else decodeUtf16(bytes, absolute.toInt(), stringsEnd)
-            if (value != null) out += value
+            out += when {
+                absolute >= stringsEnd -> null
+                isUtf8 -> decodeUtf8(bytes, absolute.toInt(), stringsEnd)
+                else -> decodeUtf16(bytes, absolute.toInt(), stringsEnd)
+            }
         }
         return out
     }
