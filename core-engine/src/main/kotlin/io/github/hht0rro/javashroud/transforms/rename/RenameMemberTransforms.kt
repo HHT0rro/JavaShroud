@@ -2,6 +2,7 @@ package io.github.hht0rro.javashroud.transforms.rename
 
 import io.github.hht0rro.javashroud.analysis.eligibleMembersForAction
 import io.github.hht0rro.javashroud.bytecode.MethodFamilyIndexEntry
+import io.github.hht0rro.javashroud.bytecode.MethodRenameIndex
 import io.github.hht0rro.javashroud.bytecode.isResolverMemberName
 import io.github.hht0rro.javashroud.bytecode.remapFields
 import io.github.hht0rro.javashroud.bytecode.remapMethods
@@ -98,6 +99,7 @@ fun renameMethods(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, para
         )
     }
     var effectiveMethodRenameMap = methodRenameMap
+    var renameIndex = MethodRenameIndex(effectiveMethodRenameMap, bridgeMethodKeys, nativeMethodKeys, methodFamilies)
     var updatedClassArtifacts = workingArtifact.classArtifacts.map { classArtifact ->
         reanalyzedClassArtifact(
             classArtifact,
@@ -108,6 +110,7 @@ fun renameMethods(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, para
                 methodStringRewriteMap,
                 nativeMethodKeys,
                 methodFamilies,
+                renameIndex,
             ),
         )
     }
@@ -122,8 +125,7 @@ fun renameMethods(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, para
         for (classArtifact in updatedClassArtifacts) {
             val declaredMethodSignatures = classArtifact.summary.methodSummaries
                 .mapTo(mutableSetOf()) { it.name + it.descriptor }
-            for (rename in effectiveMethodRenameMap.values) {
-                if (rename.owner != classArtifact.summary.internalName) continue
+            for (rename in renameIndex.renamesByOwner[classArtifact.summary.internalName].orEmpty().values) {
                 val originalPresent = rename.originalName + rename.descriptor in declaredMethodSignatures
                 val renamedPresent = rename.renamedName + rename.descriptor in declaredMethodSignatures
                 if (originalPresent && !renamedPresent) {
@@ -134,16 +136,19 @@ fun renameMethods(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, para
     }
     if (unmaterializedMethodKeys.isNotEmpty()) {
         effectiveMethodRenameMap = effectiveMethodRenameMap - unmaterializedMethodKeys
+        val remainingBridgeKeys = bridgeMethodKeys - unmaterializedMethodKeys
+        renameIndex = MethodRenameIndex(effectiveMethodRenameMap, remainingBridgeKeys, nativeMethodKeys, methodFamilies)
         updatedClassArtifacts = workingArtifact.classArtifacts.map { classArtifact ->
             reanalyzedClassArtifact(
                 classArtifact,
                 remapMethods(
                     classArtifact.bytes,
                     effectiveMethodRenameMap,
-                    bridgeMethodKeys.filterNot(unmaterializedMethodKeys::contains).toSet(),
+                    remainingBridgeKeys,
                     methodStringRewriteMap,
                     nativeMethodKeys,
                     methodFamilies,
+                    renameIndex,
                 ),
             )
         }

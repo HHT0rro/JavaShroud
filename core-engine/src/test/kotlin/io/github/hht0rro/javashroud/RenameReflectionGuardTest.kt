@@ -4,6 +4,8 @@ import io.github.hht0rro.javashroud.analysis.analyzeClassBytes
 import io.github.hht0rro.javashroud.analysis.buildRuleMatches
 import io.github.hht0rro.javashroud.bytecode.remapFields
 import io.github.hht0rro.javashroud.bytecode.remapMethods
+import io.github.hht0rro.javashroud.bytecode.MethodFamilyIndexEntry
+import io.github.hht0rro.javashroud.bytecode.MethodRenameIndex
 import io.github.hht0rro.javashroud.model.analysis.MemberKind
 import io.github.hht0rro.javashroud.model.analysis.MemberSummary
 import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
@@ -30,6 +32,60 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class RenameReflectionGuardTest {
+    @Test
+    fun sharedMethodIndexesPreserveKeptOwnersAndBridgeOnlyTheRenamedOwner() {
+        val renamedOwner = "sample/IndexedFirst"
+        val keptOwner = "sample/IndexedSecond"
+        val caller = "sample/IndexedCaller"
+        fun valueClass(owner: String, number: Int): ByteArray {
+            val writer = ClassWriter(ClassWriter.COMPUTE_MAXS)
+            writer.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC, owner, null, "java/lang/Object", null)
+            writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "value", "()I", null, null).apply {
+                visitCode()
+                visitIntInsn(Opcodes.BIPUSH, number)
+                visitInsn(Opcodes.IRETURN)
+                visitMaxs(0, 0)
+                visitEnd()
+            }
+            writer.visitEnd()
+            return writer.toByteArray()
+        }
+        val consumer = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        consumer.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC, caller, null, "java/lang/Object", null)
+        consumer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "run", "()I", null, null).apply {
+            visitCode()
+            visitMethodInsn(Opcodes.INVOKESTATIC, renamedOwner, "value", "()I", false)
+            visitMethodInsn(Opcodes.INVOKESTATIC, keptOwner, "value", "()I", false)
+            visitInsn(Opcodes.IADD)
+            visitInsn(Opcodes.IRETURN)
+            visitMaxs(0, 0)
+            visitEnd()
+        }
+        consumer.visitEnd()
+        val key = MemberKey(renamedOwner, "value", "()I")
+        val mapping = mapOf(key to MemberRename(renamedOwner, "value", "()I", "renamedValue"))
+        val families = mapOf(
+            renamedOwner to MethodFamilyIndexEntry("java/lang/Object", emptyList(), setOf("value" to "()I")),
+            keptOwner to MethodFamilyIndexEntry("java/lang/Object", emptyList(), setOf("value" to "()I")),
+            caller to MethodFamilyIndexEntry("java/lang/Object", emptyList(), setOf("run" to "()I")),
+        )
+        val bridges = setOf(key)
+        val index = MethodRenameIndex(mapping, bridges, methodFamilies = families)
+        val originals = mapOf(renamedOwner to valueClass(renamedOwner, 7), keptOwner to valueClass(keptOwner, 11), caller to consumer.toByteArray())
+        val transformed = originals.mapValues { (_, bytes) ->
+            remapMethods(bytes, mapping, bridgeMethodKeys = bridges, methodFamilies = families, renameIndex = index)
+        }
+        val loader = object : ClassLoader(null) {
+            override fun findClass(name: String): Class<*> {
+                val bytes = transformed[name.replace('.', '/')] ?: throw ClassNotFoundException(name)
+                return defineClass(name, bytes, 0, bytes.size)
+            }
+        }
+        assertEquals(18, loader.loadClass(caller.replace('/', '.')).getDeclaredMethod("run").invoke(null))
+        assertEquals(setOf("value"), loader.loadClass(keptOwner.replace('/', '.')).declaredMethods.map { it.name }.toSet())
+        assertEquals(setOf("value", "renamedValue"), loader.loadClass(renamedOwner.replace('/', '.')).declaredMethods.map { it.name }.toSet())
+    }
+
     @Test
     fun wellKnownExternalSignatures_include_jdk_callbacks_for_native_image() {
         assertTrue("run()V" in wellKnownExternalInstanceMethodSignatures("java/lang/Runnable"))

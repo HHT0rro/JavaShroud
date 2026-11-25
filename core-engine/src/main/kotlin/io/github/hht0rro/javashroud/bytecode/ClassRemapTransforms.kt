@@ -4,6 +4,7 @@ import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.commons.ClassRemapper
 
+@JvmOverloads
 fun remapClasses(
     classBytes: ByteArray,
     classRenameMap: Map<String, String>,

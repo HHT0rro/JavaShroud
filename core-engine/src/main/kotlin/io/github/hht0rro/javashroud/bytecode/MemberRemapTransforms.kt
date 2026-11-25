@@ -40,6 +40,31 @@ class MethodFamilyIndexEntry(
     val ownMethods: Set<Pair<String, String>>,
 )
 
+/** Immutable indexes shared by every class transformed under one effective rename map. */
+class MethodRenameIndex(
+    methodRenameMap: Map<MemberKey, MemberRename>,
+    bridgeMethodKeys: Set<MemberKey> = emptySet(),
+    nativeMethodKeys: Set<MemberKey> = emptySet(),
+    methodFamilies: Map<String, MethodFamilyIndexEntry> = emptyMap(),
+) {
+    internal val renamesByOwner = methodRenameMap.entries.groupBy { it.key.owner }
+        .mapValues { (_, entries) -> entries.associate { it.key to it.value } }
+    internal val bridgesByOwner = bridgeMethodKeys.groupBy { it.owner }.mapValues { it.value.toSet() }
+    internal val nativeByOwner = nativeMethodKeys.groupBy { it.owner }.mapValues { it.value.toSet() }
+    internal val uniqueRenameBySignature = methodRenameMap.entries
+        .groupBy { it.key.name to it.key.descriptor }
+        .mapValues { (_, entries) -> entries.map { it.value.renamedName }.distinct().singleOrNull() }
+    internal val fallbackBlockedSignatures = buildSet {
+        for ((owner, entry) in methodFamilies) {
+            for ((name, descriptor) in entry.ownMethods) {
+                if (MemberKey(owner, name, descriptor) !in methodRenameMap) add(name + descriptor)
+            }
+        }
+    }
+    internal val annotationElements = annotationElementRenameMap(methodRenameMap)
+}
+
+@JvmOverloads
 fun remapMethods(
     classBytes: ByteArray,
     methodRenameMap: Map<MemberKey, MemberRename>,
@@ -47,29 +72,15 @@ fun remapMethods(
     stringRewriteMap: Map<String, Map<String, String>> = emptyMap(),
     nativeMethodKeys: Set<MemberKey> = emptySet(),
     methodFamilies: Map<String, MethodFamilyIndexEntry> = emptyMap(),
+    renameIndex: MethodRenameIndex = MethodRenameIndex(methodRenameMap, bridgeMethodKeys, nativeMethodKeys, methodFamilies),
 ): ByteArray = try {
     val classReader = ClassReader(classBytes)
     val classNode = ClassNode()
     classReader.accept(classNode, 0)
     val owner = classNode.name
-    val ownerMethodRenames = methodRenameMap.filterKeys { it.owner == owner }
-    val bridgeKeysForOwner = bridgeMethodKeys.filter { it.owner == owner }.toSet()
-    val nativeKeysForOwner = nativeMethodKeys.filter { it.owner == owner }.toSet()
-    val uniqueRenameBySignature = methodRenameMap.entries
-        .groupBy { it.key.name to it.key.descriptor }
-        .mapValues { (_, entries) -> entries.map { it.value.renamedName }.distinct().singleOrNull() }
-
-    // A signature that any in-artifact declarer keeps under its original name
-    // (kept member, native binding, enum owner, protected override family)
-    // must never be rewritten at any reference site: resolution could land on
-    // the unrenamed declaration.
-    val fallbackBlockedSignatures = buildSet {
-        for ((familyOwner, entry) in methodFamilies) {
-            for ((name, descriptor) in entry.ownMethods) {
-                if (MemberKey(familyOwner, name, descriptor) !in methodRenameMap) add(name + descriptor)
-            }
-        }
-    }
+    val ownerMethodRenames = renameIndex.renamesByOwner[owner].orEmpty()
+    val bridgeKeysForOwner = renameIndex.bridgesByOwner[owner].orEmpty()
+    val nativeKeysForOwner = renameIndex.nativeByOwner[owner].orEmpty()
 
     /**
      * Renamed name for a reference whose owner does not itself declare the
@@ -82,7 +93,7 @@ fun remapMethods(
     fun inheritedFallbackName(currentOwner: String, name: String, descriptor: String): String? {
         if (methodFamilies.isEmpty() || currentOwner !in methodFamilies) return null
         val signature = name + descriptor
-        if (signature in fallbackBlockedSignatures) return null
+        if (signature in renameIndex.fallbackBlockedSignatures) return null
         val visited = mutableSetOf(currentOwner)
         val pending = ArrayDeque<String>()
         fun enqueue(supertype: String?) {
@@ -96,7 +107,7 @@ fun remapMethods(
             val ancestor = pending.removeFirst()
             val entry = methodFamilies[ancestor] ?: continue
             if ((name to descriptor) in entry.ownMethods) {
-                return uniqueRenameBySignature[name to descriptor]
+                return renameIndex.uniqueRenameBySignature[name to descriptor]
             }
             enqueue(entry.superName)
             entry.interfaceNames.forEach(::enqueue)
@@ -124,8 +135,8 @@ fun remapMethods(
     } else {
         addMethodRenameBridges(remappedBytes, ownerMethodRenames, bridgeKeysForOwner, nativeKeysForOwner)
     }
-    val annotationSyncedBytes = rewriteAnnotationElementNames(bridgedBytes, annotationElementRenameMap(methodRenameMap))
-    rewriteReflectionNameStrings(annotationSyncedBytes, methodStringRewriteMap = stringRewriteMap, methodRenames = methodRenameMap)
+    val annotationSyncedBytes = rewriteAnnotationElementNames(bridgedBytes, renameIndex.annotationElements)
+    rewriteReflectionNameStrings(annotationSyncedBytes, methodStringRewriteMap = stringRewriteMap, methodRenamesByOwner = renameIndex.renamesByOwner)
 } catch (_: Exception) {
     classBytes
 }
@@ -249,7 +260,7 @@ private fun rewriteReflectionNameStrings(
     classBytes: ByteArray,
     fieldStringRewriteMap: Map<String, Map<String, String>> = emptyMap(),
     methodStringRewriteMap: Map<String, Map<String, String>> = emptyMap(),
-    methodRenames: Map<MemberKey, MemberRename> = emptyMap(),
+    methodRenamesByOwner: Map<String, Map<MemberKey, MemberRename>> = emptyMap(),
 ): ByteArray {
     if (fieldStringRewriteMap.isEmpty() && methodStringRewriteMap.isEmpty()) return classBytes
     val node = ClassNode()
@@ -276,8 +287,8 @@ private fun rewriteReflectionNameStrings(
                 val renamed = if (classLiterals.isEmpty()) candidate else {
                     val owner = classLiterals.singleOrNull()?.takeIf { receiverSources.size == 1 && it.sort == Type.OBJECT }
                         ?.internalName ?: continue
-                    methodRenames.values.asSequence()
-                        .filter { it.owner == owner && it.originalName == originalName }
+                    methodRenamesByOwner[owner].orEmpty().values.asSequence()
+                        .filter { it.originalName == originalName }
                         .filter { parameters == null || it.descriptor.substringBefore(')') + ")" == parameters }
                         .map { it.renamedName }.distinct().singleOrNull() ?: continue
                 }

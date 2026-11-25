@@ -46,32 +46,131 @@ object ApkProcessSupport {
     class ProcessResult(val exitCode: Int, val output: String, val timedOut: Boolean)
 
     fun runProcess(command: List<String>, timeoutMillis: Long, environment: Map<String, String> = emptyMap()): ProcessResult {
+        val output = ByteArrayOutputStream()
+        val buffer = ByteArray(8_192)
+        val descendants = linkedMapOf<Long, ProcessHandle>()
         val process = ProcessBuilder(command)
             .apply {
                 redirectErrorStream(true)
                 environment().putAll(environment)
             }
             .start()
-        val output = StringBuilder()
-        val readerThread = Thread {
-            process.inputStream.bufferedReader(StandardCharsets.UTF_8).useLines { lines ->
-                synchronized(output) { lines.forEach { output.appendLine(it) } }
+        val started = System.nanoTime()
+        val timeoutNanos = TimeUnit.MILLISECONDS.toNanos(timeoutMillis.coerceAtLeast(0))
+        var lastSnapshot = started - TimeUnit.MILLISECONDS.toNanos(50)
+        var timedOut = false
+        try {
+            while (true) {
+                val now = System.nanoTime()
+                if (now - lastSnapshot >= TimeUnit.MILLISECONDS.toNanos(50)) {
+                    rememberProcessDescendants(process, descendants)
+                    lastSnapshot = now
+                }
+                // Read only bytes already available. A descendant can inherit stdout after the
+                // parent exits, so waiting for EOF would exceed the tool's timeout.
+                val available = process.inputStream.available()
+                if (available > 0) {
+                    val count = process.inputStream.read(buffer, 0, minOf(available, buffer.size))
+                    if (count > 0) output.write(buffer, 0, count)
+                }
+                if (Thread.currentThread().isInterrupted) throw InterruptedException("APK tool execution interrupted")
+                if (!process.isAlive) break
+                val remaining = timeoutNanos - (System.nanoTime() - started)
+                if (remaining <= 0) {
+                    timedOut = true
+                    break
+                }
+                if (available == 0) process.waitFor(minOf(remaining, TimeUnit.MILLISECONDS.toNanos(20)), TimeUnit.NANOSECONDS)
+            }
+        } catch (error: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw error
+        } finally {
+            try {
+                terminateProcessTree(process, descendants)
+                // With the recorded tree stopped, collect its remaining buffered diagnostics.
+                // The deadline also bounds output from a descendant that escaped observation.
+                val drainDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1)
+                while (System.nanoTime() < drainDeadline) {
+                    val available = process.inputStream.available()
+                    if (available == 0) break
+                    val count = process.inputStream.read(buffer, 0, minOf(available, buffer.size))
+                    if (count <= 0) break
+                    output.write(buffer, 0, count)
+                }
+            } finally {
+                closeProcessStreams(process)
             }
         }
-        readerThread.isDaemon = true
-        readerThread.start()
-        val finished = process.waitFor(timeoutMillis, TimeUnit.MILLISECONDS)
-        if (!finished) {
-            process.destroyForcibly()
-            process.waitFor(10, TimeUnit.SECONDS)
-        }
-        readerThread.join(5_000)
-        val outputText = synchronized(output) { output.toString() }
+        if (Thread.currentThread().isInterrupted) throw InterruptedException("APK tool execution interrupted during cleanup")
         return ProcessResult(
-            exitCode = runCatching { process.exitValue() }.getOrElse { -1 },
-            output = outputText,
-            timedOut = !finished,
+            exitCode = if (process.isAlive) -1 else process.exitValue(),
+            output = output.toString(StandardCharsets.UTF_8),
+            timedOut = timedOut,
         )
+    }
+
+    private fun rememberProcessDescendants(process: Process, descendants: MutableMap<Long, ProcessHandle>) {
+        try {
+            process.descendants().use { handles -> handles.forEach { descendants[it.pid()] = it } }
+        } catch (error: RuntimeException) {
+            // Windows process enumeration can lose a snapshot during process churn. Keep the
+            // previously observed handles and retry on the next bounded sampling interval.
+            if (error.message != "snapshot not available") throw error
+        }
+    }
+
+    private fun terminateProcessTree(process: Process, descendants: MutableMap<Long, ProcessHandle>) {
+        // Clear interruption only while performing bounded cleanup, then restore cancellation.
+        var interrupted = Thread.interrupted()
+        try {
+            rememberProcessDescendants(process, descendants)
+            if (process.isAlive && System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) {
+                val killer = try {
+                    ProcessBuilder("taskkill", "/PID", process.pid().toString(), "/T", "/F")
+                        .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                        .redirectError(ProcessBuilder.Redirect.DISCARD)
+                        .start()
+                } catch (_: java.io.IOException) {
+                    null // ProcessHandle cleanup below also works when taskkill is unavailable.
+                }
+                if (killer != null) {
+                    try {
+                        killer.waitFor(2, TimeUnit.SECONDS)
+                    } catch (_: InterruptedException) {
+                        interrupted = true
+                    } finally {
+                        if (killer.isAlive) killer.toHandle().destroyForcibly()
+                        closeProcessStreams(killer)
+                    }
+                }
+            }
+            val handles = descendants.values.toList().asReversed() + process.toHandle()
+            handles.forEach { if (it.isAlive) it.destroyForcibly() }
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
+            while (handles.any { it.isAlive } && System.nanoTime() < deadline) {
+                try {
+                    Thread.sleep(20)
+                } catch (_: InterruptedException) {
+                    interrupted = true
+                }
+            }
+            check(handles.none { it.isAlive }) {
+                "APK tool process tree survived cleanup: ${handles.filter { it.isAlive }.map { it.pid() }}"
+            }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt()
+        }
+    }
+
+    private fun closeProcessStreams(process: Process) {
+        for (stream in listOf(process.outputStream, process.inputStream, process.errorStream)) {
+            try {
+                stream.close()
+            } catch (_: java.io.IOException) {
+                // The process may already have closed its pipe during termination.
+            }
+        }
     }
 
     fun requireSuccess(label: String, command: List<String>, result: ProcessResult) {

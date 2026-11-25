@@ -158,11 +158,13 @@ class ApkAndroidDeviceSmokeTest {
             val apiText = adb("device-api", "shell", "getprop", "ro.build.version.sdk").trim()
             val abi = adb("device-abi", "shell", "getprop", "ro.product.cpu.abi").trim()
             val abiList = adb("device-abilist", "shell", "getprop", "ro.product.cpu.abilist").trim()
-            val pageText = adb("device-page-size", "shell", "getconf", "PAGE_SIZE").trim()
+            val pages = adb("device-page-size", "shell", "cat", "/proc/self/smaps")
+            val observedPages = Regex("(?m)^KernelPageSize:\\s+([0-9]+) kB\\s*$")
+                .findAll(pages).map { it.groupValues[1].toInt() * 1024 }.toSet()
+            val pageSize = observedPages.singleOrNull() ?: error("Device has no unambiguous kernel page size: $observedPages")
             val selinux = adb("device-selinux", "shell", "getenforce").trim()
-            note("serial=$serial api=$apiText abi=$abi abilist=$abiList pageSize=$pageText SELinux=$selinux")
+            note("serial=$serial api=$apiText abi=$abi abilist=$abiList pageSize=$pageSize SELinux=$selinux")
             val api = apiText.toIntOrNull() ?: error("Device returned an invalid Android API: $apiText")
-            val pageSize = pageText.toIntOrNull() ?: error("Device returned an invalid page size: $pageText")
             require(api >= MIN_API) { "Owned fixtures require Android API $MIN_API or newer, found $api" }
             require(abi.isNotBlank()) { "Device returned an empty primary ABI" }
             require(pageSize == 4096 || pageSize == 16384) { "Unsupported device page size: $pageSize" }
@@ -569,10 +571,10 @@ class ApkAndroidDeviceSmokeTest {
                     Thread.sleep(500)
                 }
                 assertTrue(observed, "Expected result=42 resource=42 and click=42 for $label; evidence=$evidence")
-                val firstPid = adb("$label-first-pid", "shell", "pidof", packageName).trim()
+                val firstPid = packagePid("$label-first-pid")
                 assertTrue(firstPid.matches(Regex("[0-9]+")), "Fixture process is missing: $firstPid")
                 Thread.sleep(2_000)
-                assertEquals(firstPid, adb("$label-later-pid", "shell", "pidof", packageName).trim(), "Fixture process did not survive")
+                assertEquals(firstPid, packagePid("$label-later-pid"), "Fixture process did not survive")
                 val runtime = adb("$label-process-logcat", "logcat", "-d", "-v", "threadtime", "-s", "AndroidRuntime:E", "*:S")
                 assertTrue(!runtime.contains("Process: $packageName, PID: $firstPid"), "Fixture crashed: $runtime")
                 note("$label runtime PASS result=42 resource=42 click=42 pid=$firstPid token=$token")
@@ -593,6 +595,15 @@ class ApkAndroidDeviceSmokeTest {
                     if (interrupted) Thread.currentThread().interrupt()
                 }
             }
+        }
+
+        private fun packagePid(label: String): String {
+            val lines = adb(label, "shell", "ps").lineSequence().filter { it.isNotBlank() }.toList()
+            val header = lines.firstOrNull()?.trim()?.split(Regex("\\s+")).orEmpty()
+            val pidIndex = header.indexOf("PID")
+            require(pidIndex >= 0) { "Device process list has no PID column" }
+            return lines.drop(1).map { it.trim().split(Regex("\\s+")) }
+                .filter { it.lastOrNull() == packageName }.singleOrNull()?.getOrNull(pidIndex).orEmpty()
         }
 
         private fun adb(label: String, vararg arguments: String): String = command(label, adbCommand(*arguments), DEVICE_TIMEOUT).output
