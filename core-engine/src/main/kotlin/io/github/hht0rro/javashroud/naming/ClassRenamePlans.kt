@@ -197,8 +197,9 @@ fun applyPackageRenameMap(
     val renamedFinals = disambiguated.filter { it.first != it.second }
     val renamedCaseFolded = renamedFinals.map { it.second.lowercase(Locale.ROOT) }
     val allCaseFolded = disambiguated.map { it.second.lowercase(Locale.ROOT) }
+    val remainingCaseFolded = (allCaseFolded - renamedCaseFolded.toSet()).toSet()
     val createdCollisions = renamedCaseFolded.groupingBy { it }.eachCount().filterValues { it > 1 }.keys +
-        renamedCaseFolded.filter { it in allCaseFolded - renamedCaseFolded.toSet() }
+        renamedCaseFolded.filter { it in remainingCaseFolded }
     require(createdCollisions.isEmpty()) {
         "package rename plan creates a case-insensitive class path collision: ${createdCollisions.sorted()}"
     }
