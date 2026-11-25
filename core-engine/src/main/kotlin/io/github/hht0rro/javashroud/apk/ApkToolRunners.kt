@@ -3,6 +3,7 @@ package io.github.hht0rro.javashroud.apk
 import java.io.ByteArrayOutputStream
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.util.Locale
 import java.util.concurrent.TimeUnit
@@ -209,10 +210,13 @@ open class ApkDex2JarRunner(
         workDirectory: Path,
         log: (String) -> Unit,
     ): ConvertedDex {
-        val dexFile = workDirectory.resolve("input-${dex.index}.dex")
+        // Each attempt owns its input, output and diagnostics. The CLI otherwise writes
+        // error ZIPs into the caller's current directory, even when it exits with zero.
+        val conversionDirectory = Files.createTempDirectory(workDirectory, "dex-${dex.index}-")
+        val dexFile = conversionDirectory.resolve("input-${dex.index}.dex")
         Files.write(dexFile, dex.bytes)
-        val outputJar = workDirectory.resolve("dex-${dex.index}-classes.jar")
-        Files.deleteIfExists(outputJar)
+        val outputJar = conversionDirectory.resolve("classes.jar")
+        val exceptionFile = conversionDirectory.resolve("conversion-errors.zip")
         val command = listOf(
             toolchain.javaExecutable.toAbsolutePath().toString(),
         ) + ApkProcessSupport.childJvmMemoryFlags(
@@ -224,6 +228,10 @@ open class ApkDex2JarRunner(
             ApkToolchainProvisioner.DEX2JAR_MAIN_CLASS,
             // DEX identities must match the source allocation index and Android references.
             "--dont-sanitize-names",
+            // The default handler replaces failed methods with throwing stubs.
+            "--not-handle-exception",
+            "--exception-file",
+            exceptionFile.toAbsolutePath().toString(),
             "--output",
             outputJar.toAbsolutePath().toString(),
             dexFile.toAbsolutePath().toString(),
@@ -232,6 +240,17 @@ open class ApkDex2JarRunner(
         val result = runner(command, timeoutMillis)
         log("dex2jar exit=${result.exitCode} timedOut=${result.timedOut} output:\n${ApkProcessSupport.preview(result.output)}")
         ApkProcessSupport.requireSuccess("dex2jar(classes-${dex.index}.dex)", command, result)
+        // The pinned BaseCmd catches top-level exceptions and prints their stacks
+        // without setting a failing exit status, including with exception handling off.
+        val conversionFailed = Files.exists(exceptionFile, LinkOption.NOFOLLOW_LINKS) ||
+            result.output.lineSequence().any { line ->
+                val diagnostic = line.trimStart()
+                diagnostic.startsWith("at ") || diagnostic.startsWith("Caused by:") ||
+                    diagnostic.startsWith("Detail Error Information in File")
+            }
+        check(!conversionFailed) {
+            "dex2jar(${dex.entryName}) conversion failed; refusing incomplete classes: ${ApkProcessSupport.preview(result.output)}"
+        }
         require(Files.isRegularFile(outputJar)) { "dex2jar produced no output jar for ${dex.entryName}" }
         return ConvertedDex(
             dexIndex = dex.index,

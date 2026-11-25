@@ -165,6 +165,8 @@ Qp runtime 是 Rust-only 边界，源码随引擎分发在 `core-engine/src/main
 APK 中的 `META-INF/services/` 登记文件保持原字节；它引用的服务接口和实现类如果在 APK 内，也保留原类名，以便 `ServiceLoader` 按原登记发现它们。
 APK 内已有的 `j$` Java API 兼容类保留原名，与应用类分开生成 DEX，两组仍发布到同一个 APK。
 
+DEX 转换出现方法异常、异常堆栈或错误报告时，引擎会报告转换失败并拒绝发布，即使 dex2jar 返回 0。每次转换使用独立暂存路径，失败会保留已有 APK 和附属文件，详细原因可通过 `--log-file` 查看。
+
 仓库内的 `ApkAndroidDeviceSmokeTest` 从源码生成自有单 DEX、多 DEX、XML 回调与简单 JNI 夹具，并对原包和处理后包执行返回值、Parcelable 写读、WebView JavaScript 接口、签名及对齐检查。设备须已启动，明确设置 `ANDROID_SERIAL`、`ANDROID_HOME` 和 `ANDROID_NDK_HOME` 后再启用。未启用时这三项测试会跳过；启用后缺工具或设备会失败，Gradle 也会重新执行测试。证据保留在 `build/android-runtime-evidence/`。
 
 ```bash
