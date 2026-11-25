@@ -53,7 +53,7 @@ jobs:
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-zigbuild
+          tool: cargo-zigbuild@0.23.2
       - name: Setup MinGW linker
         uses: msys2/setup-msys2@v2
         with:
@@ -67,6 +67,15 @@ jobs:
           test -s build/core-engine/resources/main/META-INF/jsrt/windows-x64/qp_ffi.dll
           ! find build/core-engine/resources/main -type f -name '*.dylib' -print -quit | grep -q .
         shell: msys2 {0}
+      - name: Upload Gradle test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-test-reports-${{ matrix.os }}-jdk${{ matrix.java }}
+          path: |
+            build/*/test-results/**/*.xml
+            build/*/reports/tests/**
+          if-no-files-found: warn
 
   core-engine-linux:
     name: Core engine and Rust runtime (Linux x64 glibc 2.17)
@@ -88,7 +97,7 @@ jobs:
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-zigbuild
+          tool: cargo-zigbuild@0.23.2
       - name: Check Rust formatting
         working-directory: core-engine/src/main/rust
         run: cargo fmt --all -- --check
@@ -105,6 +114,15 @@ jobs:
             cmp - core-engine/src/main/rust/target/x86_64-unknown-linux-gnu/release/libqp_ffi.so
           ! find build/core-engine/resources/main -type f -name '*.dylib' -print -quit | grep -q .
         shell: bash
+      - name: Upload Gradle test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-test-reports-linux-jdk21
+          path: |
+            build/*/test-results/**/*.xml
+            build/*/reports/tests/**
+          if-no-files-found: warn
 
   desktop-app:
     runs-on: ${{ matrix.os }}
