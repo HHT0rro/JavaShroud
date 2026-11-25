@@ -1,5 +1,6 @@
 package io.github.hht0rro.javashroud
 
+import io.github.hht0rro.javashroud.bytecode.buildResourcePathRemapper
 import io.github.hht0rro.javashroud.bytecode.remapClasses
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -10,6 +11,26 @@ import org.objectweb.asm.tree.ClassNode
 import org.objectweb.asm.tree.LdcInsnNode
 
 class ReflectionClassStringRemapTest {
+    @Test
+    fun resourcePrefixUsesLongestPackageAndTheFirstDestinationForSplitPackages() {
+        val mapping = linkedMapOf(
+            "fixture/pkg/First" to "one/a/First",
+            "fixture/pkg/Second" to "two/b/Second",
+            "fixture/pkg/deep/Third" to "three/c/Third",
+            "RootClass" to "other/RootClass",
+            "same/Unchanged" to "same/Unchanged",
+        )
+        val remap = buildResourcePathRemapper(mapping)
+        val inputs = listOf(
+            "fixture/pkg/config.json", "/fixture/pkg/config.json", "fixture/pkg/deep/config.json",
+            "fixture/pkg/deep/nested/config.json", "fixture/pkg2/config.json", "RootClass", "same/file", "fixture/pkg/",
+        )
+        assertEquals(listOf(
+            "one/a/config.json", "/one/a/config.json", "three/c/config.json",
+            "three/c/nested/config.json", "fixture/pkg2/config.json", "RootClass", "same/file", "one/a/",
+        ), inputs.map(remap))
+    }
+
     @Test
     fun structuredOwnerNamesKeepLongestMatchAndLeaveOrdinaryStringsAlone() {
         val mapping = linkedMapOf(

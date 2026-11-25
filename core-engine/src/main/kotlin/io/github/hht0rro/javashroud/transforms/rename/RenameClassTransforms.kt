@@ -1,6 +1,7 @@
 package io.github.hht0rro.javashroud.transforms.rename
 
 import io.github.hht0rro.javashroud.analysis.eligibleClassNamesForAction
+import io.github.hht0rro.javashroud.bytecode.buildResourcePathRemapper
 import io.github.hht0rro.javashroud.bytecode.remapClasses
 import io.github.hht0rro.javashroud.bytecode.remapClassesStrict
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
@@ -66,8 +67,9 @@ internal fun removeFixedGeneratedNames(artifact: BytecodeArtifact, config: Renam
     }
 
     val relocationMap = buildFixedGeneratedClassRelocationMap(artifact.classArtifacts, fixedNames, config)
+    val resourcePathRemapper = buildResourcePathRemapper(relocationMap)
     val updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
-        renamedClassArtifact(classArtifact, remapClassesStrict(classArtifact.bytes, relocationMap))
+        renamedClassArtifact(classArtifact, remapClassesStrict(classArtifact.bytes, relocationMap, resourcePathRemapper))
     }
     val result = renamedArtifactTransformResult(
         artifact = artifact,
@@ -118,8 +120,9 @@ private fun applyClassRenameMap(artifact: BytecodeArtifact, classRenameMap: Map<
     }
 
     var effectiveRenameMap = classRenameMap
+    var resourcePathRemapper = buildResourcePathRemapper(effectiveRenameMap)
     var updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
-        renamedClassArtifact(classArtifact, remapClasses(classArtifact.bytes, effectiveRenameMap))
+        renamedClassArtifact(classArtifact, remapClasses(classArtifact.bytes, effectiveRenameMap, resourcePathRemapper))
     }
     // A remap that cannot re-serialize (dex2jar output can carry methods past
     // the JVM 64KB per-method limit, which dex tolerates) degrades to the
@@ -132,8 +135,9 @@ private fun applyClassRenameMap(artifact: BytecodeArtifact, classRenameMap: Map<
         .map { classArtifact -> classArtifact.summary.internalName }
     if (unmaterializedRenames.isNotEmpty()) {
         effectiveRenameMap = effectiveRenameMap - unmaterializedRenames.toSet()
+        resourcePathRemapper = buildResourcePathRemapper(effectiveRenameMap)
         updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
-            renamedClassArtifact(classArtifact, remapClasses(classArtifact.bytes, effectiveRenameMap))
+            renamedClassArtifact(classArtifact, remapClasses(classArtifact.bytes, effectiveRenameMap, resourcePathRemapper))
         }
     }
 
