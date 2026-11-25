@@ -23,7 +23,8 @@ import org.objectweb.asm.tree.MethodNode
  *   - moved caller -> kept callee: same failure from the other side.
  *
  * The widening is deliberately access-only (names, descriptors and bodies are
- * untouched), and only package-private members are widened: making a private
+ * untouched). Protected members used by a same-package peer also need widening
+ * when one side moves; making a private
  * member public could accidentally turn it into a virtual override of an
  * unrelated same-signature superclass method, changing dispatch semantics.
  * Widening never breaks override or dispatch relations and keeps the
@@ -64,6 +65,7 @@ internal object ApkAccessWidening {
         // method of a KEPT class becomes public — moved-away callers keep
         // their originally same-package rights against it.
         val widenTargets = mutableMapOf<String, MutableSet<MemberRef>>()
+        val protectedTargets = mutableMapOf<String, MutableSet<MemberRef>>()
         fun addTarget(owner: String, ref: MemberRef) {
             widenTargets.getOrPut(owner) { mutableSetOf() } += ref
         }
@@ -74,6 +76,27 @@ internal object ApkAccessWidening {
                 if (method.name == "<clinit>") continue
                 if (isSerializationHook(method.name, method.desc)) continue
                 if (needsWidening(method.access)) addTarget(owner, MemberRef(isMethod = true, name = method.name, descriptor = method.desc))
+            }
+        }
+        // Protected access also grants package peers access, even if the caller is not a subclass.
+        // Track only explicit same-package references crossing the kept/moved boundary.
+        for ((caller, bytes) in bytesByClass) {
+            val node = parseNode(bytes) ?: continue
+            for (method in node.methods.orEmpty()) {
+                for (instruction in method.instructions ?: continue) {
+                    val target = when (instruction) {
+                        is MethodInsnNode -> instruction.owner to MemberRef(true, instruction.name, instruction.desc)
+                        is FieldInsnNode -> instruction.owner to MemberRef(false, instruction.name, instruction.desc)
+                        else -> continue
+                    }
+                    val (owner, ref) = target
+                    if (owner !in bytesByClass || (caller in keptClassNames) == (owner in keptClassNames)) continue
+                    if (caller.substringBeforeLast('/', "") != owner.substringBeforeLast('/', "")) continue
+                    if (ref.isMethod && isSerializationHook(ref.name, ref.descriptor)) continue
+                    if (!ref.isMethod && (ref.name == "serialVersionUID" || ref.name == "CREATOR")) continue
+                    addTarget(owner, ref)
+                    protectedTargets.getOrPut(owner) { mutableSetOf() } += ref
+                }
             }
         }
         // (b) ref scan: every member a KEPT class references on a non-kept
@@ -134,7 +157,7 @@ internal object ApkAccessWidening {
             var working = bytes
             var widenedInClass = 0
             if (targets != null) {
-                val result = widenClassMembers(working, internalName, targets)
+                val result = widenClassMembers(working, internalName, targets, protectedTargets[internalName].orEmpty())
                 if (result != null) {
                     working = result.first
                     widenedInClass = result.second
@@ -173,21 +196,32 @@ internal object ApkAccessWidening {
     }
 
     /** ACC_PUBLIC set on the matching members; null (and the count) when nothing changed. */
-    private fun widenClassMembers(classBytes: ByteArray, internalName: String, targets: Set<MemberRef>): Pair<ByteArray, Int>? {
+    private fun widenClassMembers(
+        classBytes: ByteArray,
+        internalName: String,
+        targets: Set<MemberRef>,
+        protectedTargets: Set<MemberRef>,
+    ): Pair<ByteArray, Int>? {
         return try {
             val node = ClassNode()
             ClassReader(classBytes).accept(node, 0)
             var changed = 0
             val className = node.name.ifBlank { internalName }
             for (method in node.methods.orEmpty()) {
-                if (needsWidening(method.access) && MemberRef(true, method.name, method.desc) in targets) {
-                    method.access = method.access or Opcodes.ACC_PUBLIC
+                val ref = MemberRef(true, method.name, method.desc)
+                val needsPublic = needsWidening(method.access) ||
+                    (method.access and Opcodes.ACC_PROTECTED != 0 && ref in protectedTargets)
+                if (needsPublic && ref in targets) {
+                    method.access = (method.access and Opcodes.ACC_PROTECTED.inv()) or Opcodes.ACC_PUBLIC
                     changed += 1
                 }
             }
             for (field in node.fields.orEmpty()) {
-                if (needsWidening(field.access) && MemberRef(false, field.name, field.desc) in targets) {
-                    field.access = field.access or Opcodes.ACC_PUBLIC
+                val ref = MemberRef(false, field.name, field.desc)
+                val needsPublic = needsWidening(field.access) ||
+                    (field.access and Opcodes.ACC_PROTECTED != 0 && ref in protectedTargets)
+                if (needsPublic && ref in targets) {
+                    field.access = (field.access and Opcodes.ACC_PROTECTED.inv()) or Opcodes.ACC_PUBLIC
                     changed += 1
                 }
             }
