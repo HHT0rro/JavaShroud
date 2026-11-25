@@ -69,8 +69,8 @@ class QpProtectedJarLoadTest {
         for (expected in listOf("INIT=0", "BEAT=0", "SESSION=ok", "UNBOUND=ok")) {
             assertTrue(expected in lines, "Windows load probe did not report $expected:\n${result.output}")
         }
-        assertTrue("OVERHEAD_OK" in lines, result.output)
-        assertTrue("BUDGET=3.0" in lines, result.output)
+        assertTrue("CALL_SANITY_OK" in lines, result.output)
+        assertTrue("CALL_MEAN_LIMIT_NS=50000000" in lines, result.output)
     }
 
     @Test
@@ -252,7 +252,7 @@ class QpProtectedJarLoadTest {
     }
 }
 
-private object QpBridgeProbe {
+internal object QpBridgeProbe {
     @JvmStatic
     fun main(args: Array<String>) {
         // The packaged loader-only runtime registers the current source-named QpBridge methods.
@@ -278,10 +278,10 @@ private object QpBridgeProbe {
         } catch (_: SecurityException) {
             println("UNBOUND=ok")
         }
-        if (platform == "windows-x64") checkWindowsDefenseOverhead(started)
+        if (platform == "windows-x64") checkWindowsDefenseCallSanity(started)
     }
 
-    private fun checkWindowsDefenseOverhead(started: Long) {
+    private fun checkWindowsDefenseCallSanity(started: Long) {
         val surface = "os-anti-debug"
         check(QpBridge.nativeInitializeDefense(surface, "balanced") == 0) { "Native defense init failed" }
         println("STARTUP_NS=${System.nanoTime() - started}")
@@ -294,15 +294,14 @@ private object QpBridgeProbe {
             check(QpBridge.nativeProbeDefense(surface, "steady-state") == 0) { "Native defense probe failed" }
         }
         val elapsed = System.nanoTime() - begin
-        val baselineStart = System.nanoTime()
-        repeat(iterations) { @Suppress("UNUSED_VARIABLE") val point = "steady-state" }
-        val baseline = System.nanoTime() - baselineStart
+        val meanCallNanos = elapsed / iterations
+        val meanCallLimitNanos = TimeUnit.MILLISECONDS.toNanos(50)
+        println("CALLS=$iterations")
         println("NATIVE_NS=$elapsed")
-        println("BASELINE_NS=$baseline")
-        println("RATIO=${elapsed.toDouble() / baseline.coerceAtLeast(1)}")
-        check(elapsed / iterations < TimeUnit.MILLISECONDS.toNanos(50)) { "Protected call exceeded 50 ms sanity ceiling" }
-        println("BUDGET=3.0")
-        println("OVERHEAD_OK")
+        println("MEAN_CALL_NS=$meanCallNanos")
+        println("CALL_MEAN_LIMIT_NS=$meanCallLimitNanos")
+        check(meanCallNanos < meanCallLimitNanos) { "Protected call exceeded 50 ms mean sanity ceiling" }
+        println("CALL_SANITY_OK")
     }
 
     private fun invokeNative(name: String, vararg args: Any): Any? {
