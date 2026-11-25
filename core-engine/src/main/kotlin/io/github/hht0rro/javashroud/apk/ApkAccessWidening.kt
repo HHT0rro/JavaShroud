@@ -61,6 +61,22 @@ internal object ApkAccessWidening {
         val bytesByClass = buildMap {
             for ((entryName, bytes) in mergedClasses) put(internalNameOf(entryName), bytes)
         }
+        val classInfos = bytesByClass.mapValues { (_, bytes) -> ApkKeepRuleSynthesis.readClassInfo(bytes) }
+        fun declaringOwner(owner: String, ref: MemberRef, visited: MutableSet<String>): String? {
+            if (!visited.add(owner)) return null
+            val info = classInfos[owner] ?: return null
+            val declarations = if (ref.isMethod) info.methods else info.fields
+            if ((ref.name to ref.descriptor) in declarations) return owner
+            if (ref.isMethod) {
+                if (ref.name == "<init>") return null
+                info.superName?.let { declaringOwner(it, ref, visited)?.let { found -> return found } }
+            }
+            for (interfaceName in info.interfaces) {
+                declaringOwner(interfaceName, ref, visited)?.let { return it }
+            }
+            return if (ref.isMethod) null else info.superName?.let { declaringOwner(it, ref, visited) }
+        }
+        val declarationCache = mutableMapOf<Pair<String, MemberRef>, String?>()
         // (a) blanket: every non-public, non-protected instance-reachable
         // method of a KEPT class becomes public — moved-away callers keep
         // their originally same-package rights against it.
@@ -78,8 +94,8 @@ internal object ApkAccessWidening {
                 if (needsWidening(method.access)) addTarget(owner, MemberRef(isMethod = true, name = method.name, descriptor = method.desc))
             }
         }
-        // Protected access also grants package peers access, even if the caller is not a subclass.
-        // Track only explicit same-package references crossing the kept/moved boundary.
+        // Resolve symbolic owners to declarations before checking the rename boundary.
+        // R8 can reference an inherited member through the caller's own class name.
         for ((caller, bytes) in bytesByClass) {
             val node = parseNode(bytes) ?: continue
             for (method in node.methods.orEmpty()) {
@@ -89,40 +105,18 @@ internal object ApkAccessWidening {
                         is FieldInsnNode -> instruction.owner to MemberRef(false, instruction.name, instruction.desc)
                         else -> continue
                     }
-                    val (owner, ref) = target
-                    if (owner !in bytesByClass || (caller in keptClassNames) == (owner in keptClassNames)) continue
-                    if (caller.substringBeforeLast('/', "") != owner.substringBeforeLast('/', "")) continue
+                    val (referenceOwner, ref) = target
+                    if (referenceOwner !in bytesByClass) continue
+                    val owner = declarationCache.getOrPut(target) {
+                        declaringOwner(referenceOwner, ref, mutableSetOf())
+                    } ?: continue
+                    if ((caller in keptClassNames) == (owner in keptClassNames)) continue
+                    val samePackage = caller.substringBeforeLast('/', "") == owner.substringBeforeLast('/', "")
+                    if (!samePackage && caller !in keptClassNames) continue
                     if (ref.isMethod && isSerializationHook(ref.name, ref.descriptor)) continue
                     if (!ref.isMethod && (ref.name == "serialVersionUID" || ref.name == "CREATOR")) continue
                     addTarget(owner, ref)
-                    protectedTargets.getOrPut(owner) { mutableSetOf() } += ref
-                }
-            }
-        }
-        // (b) ref scan: every member a KEPT class references on a non-kept
-        // owner was same-package-accessible in the input; after the owner
-        // moves, the reference must stay legal, so that member is widened on
-        // the (renamed) owner instead.
-        for (owner in keptClassNames) {
-            val bytes = bytesByClass[owner] ?: continue
-            val node = parseNode(bytes) ?: continue
-            for (method in node.methods.orEmpty()) {
-                val instructions = method.instructions ?: continue
-                for (instruction in instructions) {
-                    when (instruction) {
-                        is MethodInsnNode -> {
-                            if (instruction.owner == owner || instruction.owner !in bytesByClass) continue
-                            if (instruction.owner in keptClassNames) continue
-                            if (isSerializationHook(instruction.name, instruction.desc)) continue
-                            addTarget(instruction.owner, MemberRef(isMethod = true, name = instruction.name, descriptor = instruction.desc))
-                        }
-                        is FieldInsnNode -> {
-                            if (instruction.owner == owner || instruction.owner !in bytesByClass) continue
-                            if (instruction.owner in keptClassNames) continue
-                            if (instruction.name == "serialVersionUID" || instruction.name == "CREATOR") continue
-                            addTarget(instruction.owner, MemberRef(isMethod = false, name = instruction.name, descriptor = instruction.desc))
-                        }
-                    }
+                    if (samePackage) protectedTargets.getOrPut(owner) { mutableSetOf() } += ref
                 }
             }
         }

@@ -10,6 +10,75 @@ import org.objectweb.asm.tree.ClassNode
 
 class ApkAccessWideningTest {
     @Test
+    fun inheritedFieldReferencesOnKeptSubclassesRemainAccessible() = checkInheritedAccess(methodReference = false)
+
+    @Test
+    fun inheritedMethodReferencesOnKeptSubclassesRemainAccessible() = checkInheritedAccess(methodReference = true)
+
+    private fun checkInheritedAccess(methodReference: Boolean) {
+        val parent = "fixture/MovingParent"
+        val child = "fixture/KeptChild"
+        val base = ClassWriter(ClassWriter.COMPUTE_MAXS).apply {
+            visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC, parent, null, "java/lang/Object", null)
+            visitField(0, "value", "I", null, null).visitEnd()
+            visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null).apply {
+                visitCode()
+                visitVarInsn(Opcodes.ALOAD, 0)
+                visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+                visitVarInsn(Opcodes.ALOAD, 0)
+                visitIntInsn(Opcodes.BIPUSH, 42)
+                visitFieldInsn(Opcodes.PUTFIELD, parent, "value", "I")
+                visitInsn(Opcodes.RETURN)
+                visitMaxs(0, 0)
+                visitEnd()
+            }
+            visitMethod(0, "calculate", "()I", null, null).apply {
+                visitCode()
+                visitIntInsn(Opcodes.BIPUSH, 42)
+                visitInsn(Opcodes.IRETURN)
+                visitMaxs(0, 0)
+                visitEnd()
+            }
+            visitEnd()
+        }.toByteArray()
+        val subclass = ClassWriter(ClassWriter.COMPUTE_MAXS).apply {
+            visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC, child, null, parent, null)
+            visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null).apply {
+                visitCode()
+                visitVarInsn(Opcodes.ALOAD, 0)
+                visitMethodInsn(Opcodes.INVOKESPECIAL, parent, "<init>", "()V", false)
+                visitInsn(Opcodes.RETURN)
+                visitMaxs(0, 0)
+                visitEnd()
+            }
+            visitMethod(Opcodes.ACC_PUBLIC, "probe", "()I", null, null).apply {
+                visitCode()
+                visitVarInsn(Opcodes.ALOAD, 0)
+                if (methodReference) visitMethodInsn(Opcodes.INVOKEVIRTUAL, child, "calculate", "()I", false)
+                else visitFieldInsn(Opcodes.GETFIELD, child, "value", "I")
+                visitInsn(Opcodes.IRETURN)
+                visitMaxs(0, 0)
+                visitEnd()
+            }
+            visitEnd()
+        }.toByteArray()
+        val mapping = mapOf(parent to "moved/Parent")
+        val widened = ApkAccessWidening.widen(listOf("$parent.class" to base, "$child.class" to subclass), setOf(child))
+        val output = widened.classes.associate { (entry, bytes) ->
+            val owner = entry.removeSuffix(".class")
+            (mapping[owner] ?: owner) to remapClasses(bytes, mapping)
+        }
+        val loader = object : ClassLoader(null) {
+            override fun findClass(name: String): Class<*> {
+                val bytes = output[name.replace('.', '/')] ?: throw ClassNotFoundException(name)
+                return defineClass(name, bytes, 0, bytes.size)
+            }
+        }
+        val type = loader.loadClass(child.replace('/', '.'))
+        assertEquals(42, type.getMethod("probe").invoke(type.getConstructor().newInstance()))
+    }
+
+    @Test
     fun samePackageProtectedConstructorRemainsCallableAfterTheOtherClassMoves() {
         val caller = "fixture/KeptCaller"
         val callee = "fixture/MovingTarget"
