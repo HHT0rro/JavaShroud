@@ -7,9 +7,12 @@ import java.util.jar.JarInputStream
 import java.util.zip.ZipEntry
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
+import org.objectweb.asm.ConstantDynamic
 import org.objectweb.asm.FieldVisitor
+import org.objectweb.asm.Handle
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
+import org.objectweb.asm.Type
 import org.objectweb.asm.tree.ClassNode
 import org.objectweb.asm.tree.MethodInsnNode
 import org.objectweb.asm.tree.TypeInsnNode
@@ -183,6 +186,8 @@ object ApkKeepRuleSynthesis {
             if (info.isAndroidFrameworkPlaceholder || info.internalName.startsWith("j\$/")) classKeeps += info.internalName
         }
 
+        classKeeps += externalSignatureClasses(mergedClassJarPath, loaded)
+
         // 1. Manifest components (intersected with actually loaded classes).
         val manifestHits = manifestComponentClasses.intersect(loadedNames)
         classKeeps += manifestHits
@@ -303,6 +308,100 @@ object ApkKeepRuleSynthesis {
     private fun normalizePrefix(prefix: String): String {
         val slash = prefix.replace('.', '/')
         return if (slash.endsWith("/*")) slash else "$slash/*"
+    }
+
+    private fun externalSignatureClasses(
+        jarPath: java.nio.file.Path,
+        loaded: List<LoadedClassInfo>,
+    ): Set<String> {
+        val byName = loaded.associateBy { it.internalName }
+        val methods = loaded.associate { it.internalName to it.methods.toSet() }
+        val fields = loaded.associate { it.internalName to it.fields.toSet() }
+        val retained = mutableSetOf<String>()
+
+        fun declaredInLoadedHierarchy(
+            owner: String,
+            name: String,
+            descriptor: String,
+            field: Boolean,
+            visited: MutableSet<String>,
+        ): Boolean {
+            if (!visited.add(owner)) return false
+            val info = byName[owner] ?: return false
+            val declarations = if (field) fields else methods
+            if ((name to descriptor) in declarations.getValue(owner)) return true
+            return info.interfaces.any { declaredInLoadedHierarchy(it, name, descriptor, field, visited) } ||
+                (info.superName?.let { declaredInLoadedHierarchy(it, name, descriptor, field, visited) } ?: false)
+        }
+
+        fun retainType(name: String) {
+            val info = byName[name] ?: return
+            if (!retained.add(name)) return
+            info.superName?.let { retainType(it) }
+            info.interfaces.forEach { retainType(it) }
+        }
+
+        fun referencedTypes(type: Type, names: MutableSet<String>) {
+            when (type.sort) {
+                Type.OBJECT -> if (type.internalName in byName) names += type.internalName
+                Type.ARRAY -> referencedTypes(type.elementType, names)
+                Type.METHOD -> {
+                    type.argumentTypes.forEach { referencedTypes(it, names) }
+                    referencedTypes(type.returnType, names)
+                }
+            }
+        }
+
+        fun memberReference(owner: String, name: String, descriptor: String, field: Boolean) {
+            val names = mutableSetOf<String>()
+            referencedTypes(Type.getType(descriptor), names)
+            if (names.isEmpty() || declaredInLoadedHierarchy(owner, name, descriptor, field, mutableSetOf())) return
+            // The external declaration cannot follow our class renames. This also covers packaged SDK
+            // interfaces resolved by Android's boot loader and inherited external member references.
+            names.forEach { retainType(it) }
+        }
+
+        fun handleReference(handle: Handle) {
+            memberReference(handle.owner, handle.name, handle.desc, handle.tag in Opcodes.H_GETFIELD..Opcodes.H_PUTSTATIC)
+        }
+
+        fun constantReference(value: Any) {
+            when (value) {
+                is Handle -> handleReference(value)
+                is ConstantDynamic -> {
+                    handleReference(value.bootstrapMethod)
+                    repeat(value.bootstrapMethodArgumentCount) { constantReference(value.getBootstrapMethodArgument(it)) }
+                }
+            }
+        }
+
+        JarInputStream(java.nio.file.Files.newInputStream(jarPath).buffered()).use { jar ->
+            while (true) {
+                val entry = jar.nextEntry ?: break
+                if (entry.isDirectory || !entry.name.endsWith(".class")) continue
+                ClassReader(jar.readBytes()).accept(object : ClassVisitor(Opcodes.ASM9) {
+                    override fun visitMethod(
+                        access: Int, name: String?, descriptor: String?, signature: String?, exceptions: Array<out String>?,
+                    ): MethodVisitor = object : MethodVisitor(Opcodes.ASM9) {
+                        override fun visitMethodInsn(opcode: Int, owner: String, name: String, descriptor: String, isInterface: Boolean) {
+                            memberReference(owner, name, descriptor, false)
+                        }
+
+                        override fun visitFieldInsn(opcode: Int, owner: String, name: String, descriptor: String) {
+                            memberReference(owner, name, descriptor, true)
+                        }
+
+                        override fun visitLdcInsn(value: Any) = constantReference(value)
+
+                        override fun visitInvokeDynamicInsn(name: String, descriptor: String, bootstrap: Handle, vararg arguments: Any) {
+                            handleReference(bootstrap)
+                            arguments.forEach { constantReference(it) }
+                        }
+                    }
+                }, ClassReader.SKIP_DEBUG or ClassReader.SKIP_FRAMES)
+            }
+        }
+        return retained
     }
 
     /** Direct-or-transitive implementors of [interfaceInternal] within the loaded closure. */

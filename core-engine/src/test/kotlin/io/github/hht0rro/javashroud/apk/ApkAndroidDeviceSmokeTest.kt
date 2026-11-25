@@ -158,10 +158,16 @@ class ApkAndroidDeviceSmokeTest {
             val apiText = adb("device-api", "shell", "getprop", "ro.build.version.sdk").trim()
             val abi = adb("device-abi", "shell", "getprop", "ro.product.cpu.abi").trim()
             val abiList = adb("device-abilist", "shell", "getprop", "ro.product.cpu.abilist").trim()
-            val pages = adb("device-page-size", "shell", "cat", "/proc/self/smaps")
-            val observedPages = Regex("(?m)^KernelPageSize:\\s+([0-9]+) kB\\s*$")
-                .findAll(pages).map { it.groupValues[1].toInt() * 1024 }.toSet()
-            val pageSize = observedPages.singleOrNull() ?: error("Device has no unambiguous kernel page size: $observedPages")
+            val getconf = recordProcess(adbCommand("shell", "getconf", "PAGE_SIZE"), DEVICE_TIMEOUT)
+            val reportedPageSize = getconf.output.trim().toIntOrNull()?.takeIf { getconf.exitCode == 0 && !getconf.timedOut }
+            val pageSize = reportedPageSize ?: run {
+                // API21's toolbox does not supply getconf. Read the kernel mapping units there.
+                val pages = adb("device-kernel-page-size", "shell", "cat", "/proc/self/smaps")
+                val observedPages = Regex("(?m)^KernelPageSize:\\s+([0-9]+) kB\\s*$")
+                    .findAll(pages).map { it.groupValues[1].toInt() * 1024 }.toSet()
+                observedPages.singleOrNull() ?: error("Device has no unambiguous kernel page size: $observedPages")
+            }
+            note("pageSizeSource=${if (reportedPageSize != null) "getconf" else "smaps"}")
             val selinux = adb("device-selinux", "shell", "getenforce").trim()
             note("serial=$serial api=$apiText abi=$abi abilist=$abiList pageSize=$pageSize SELinux=$selinux")
             val api = apiText.toIntOrNull() ?: error("Device returned an invalid Android API: $apiText")
@@ -259,10 +265,31 @@ class ApkAndroidDeviceSmokeTest {
                     }
                 }
             """)
+            source("OwnedParcel.java", """
+                package $packageName;
+                public final class OwnedParcel implements android.os.Parcelable {
+                    public final int answer;
+                    public OwnedParcel(int answer) { this.answer = answer; }
+                    public int describeContents() { return 0; }
+                    public void writeToParcel(android.os.Parcel output, int flags) { output.writeInt(answer); }
+                    public static final android.os.Parcelable.Creator<OwnedParcel> CREATOR =
+                        new android.os.Parcelable.Creator<OwnedParcel>() {
+                            public OwnedParcel createFromParcel(android.os.Parcel input) { return new OwnedParcel(input.readInt()); }
+                            public OwnedParcel[] newArray(int size) { return new OwnedParcel[size]; }
+                        };
+                }
+            """)
+            source("OwnedWebBridge.java", """
+                package $packageName;
+                public final class OwnedWebBridge {
+                    @android.webkit.JavascriptInterface public int answer() { return 42; }
+                }
+            """)
             source("SmokeActivity.java", """
                 package $packageName;
                 public final class SmokeActivity extends android.app.Activity {
                     private String invocation;
+                    private android.webkit.WebView web;
                     @Override public void onCreate(android.os.Bundle state) {
                         super.onCreate(state);
                         invocation = getIntent().getStringExtra("invocation");
@@ -271,6 +298,28 @@ class ApkAndroidDeviceSmokeTest {
                         final int resource = getResources().getInteger(R.integer.answer);
                         if (result != 42 || resource != 42) throw new AssertionError("Unexpected fixture answer");
                         android.util.Log.i("$tag", "token=" + invocation + " result=" + result + " resource=" + resource);
+                        final android.os.Parcel parcel = android.os.Parcel.obtain();
+                        try {
+                            parcel.writeParcelable(new OwnedParcel(42), 0);
+                            parcel.setDataPosition(0);
+                            final OwnedParcel restored = parcel.readParcelable(OwnedParcel.class.getClassLoader());
+                            if (restored.answer != 42) throw new AssertionError("Parcelable round trip failed");
+                            android.util.Log.i("$tag", "token=" + invocation + " parcel=42");
+                        } finally { parcel.recycle(); }
+                        web = new android.webkit.WebView(this);
+                        web.getSettings().setJavaScriptEnabled(true);
+                        web.addJavascriptInterface(new OwnedWebBridge(), "owned");
+                        web.setWebViewClient(new android.webkit.WebViewClient() {
+                            @Override public void onPageFinished(android.webkit.WebView view, String url) {
+                                view.evaluateJavascript("owned.answer()", new android.webkit.ValueCallback<String>() {
+                                    @Override public void onReceiveValue(String value) {
+                                        if (!"42".equals(value)) throw new AssertionError("Javascript interface returned " + value);
+                                        android.util.Log.i("$tag", "token=" + invocation + " web=42");
+                                    }
+                                });
+                            }
+                        });
+                        web.loadDataWithBaseURL("https://owned.invalid/", "<html><body>Owned fixture</body></html>", "text/html", "UTF-8", null);
                         final android.view.View button = findViewById(R.id.action);
                         button.post(new Runnable() {
                             @Override public void run() {
@@ -282,6 +331,10 @@ class ApkAndroidDeviceSmokeTest {
                         final int result = Calculation.value();
                         if (result != 42) throw new AssertionError("Unexpected callback answer");
                         android.util.Log.i("$tag", "token=" + invocation + " click=" + result);
+                    }
+                    @Override public void onDestroy() {
+                        if (web != null) web.destroy();
+                        super.onDestroy();
                     }
                 }
             """)
@@ -564,20 +617,21 @@ class ApkAndroidDeviceSmokeTest {
                 while (System.nanoTime() < deadline) {
                     val log = adb("$label-logcat", "logcat", "-d", "-v", "brief", "-s", "$tag:I", "*:S")
                     val lines = log.lineSequence().filter { it.contains("token=$token ") }.toList()
-                    if (lines.any { it.endsWith(" result=42 resource=42") } && lines.any { it.endsWith(" click=42") }) {
+                    if (lines.any { it.endsWith(" result=42 resource=42") } && lines.any { it.endsWith(" click=42") } &&
+                        lines.any { it.endsWith(" parcel=42") } && lines.any { it.endsWith(" web=42") }) {
                         observed = true
                         break
                     }
                     Thread.sleep(500)
                 }
-                assertTrue(observed, "Expected result=42 resource=42 and click=42 for $label; evidence=$evidence")
+                assertTrue(observed, "Expected result=42 resource=42 click=42 parcel=42 web=42 for $label; evidence=$evidence")
                 val firstPid = packagePid("$label-first-pid")
                 assertTrue(firstPid.matches(Regex("[0-9]+")), "Fixture process is missing: $firstPid")
                 Thread.sleep(2_000)
                 assertEquals(firstPid, packagePid("$label-later-pid"), "Fixture process did not survive")
                 val runtime = adb("$label-process-logcat", "logcat", "-d", "-v", "threadtime", "-s", "AndroidRuntime:E", "*:S")
                 assertTrue(!runtime.contains("Process: $packageName, PID: $firstPid"), "Fixture crashed: $runtime")
-                note("$label runtime PASS result=42 resource=42 click=42 pid=$firstPid token=$token")
+                note("$label runtime PASS result=42 resource=42 click=42 parcel=42 web=42 pid=$firstPid token=$token")
             } catch (error: Throwable) {
                 failure = error
                 throw error

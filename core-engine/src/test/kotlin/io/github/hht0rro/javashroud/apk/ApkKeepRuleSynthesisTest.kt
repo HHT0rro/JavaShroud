@@ -1,5 +1,6 @@
 package io.github.hht0rro.javashroud.apk
 
+import io.github.hht0rro.javashroud.bytecode.remapClasses
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.jar.JarOutputStream
@@ -17,6 +18,86 @@ import org.objectweb.asm.Opcodes
  * JNI declarers, manifest/resource/native class keeps and prefix rules.
  */
 class ApkKeepRuleSynthesisTest {
+
+    @Test
+    fun externalMemberDescriptorsRetainLoadedTypesAndTheirParentInterfaces() {
+        fun interfaceBytes(name: String, vararg parents: String): ByteArray = ClassWriter(0).apply {
+            visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC or Opcodes.ACC_INTERFACE or Opcodes.ACC_ABSTRACT,
+                name, null, "java/lang/Object", parents)
+            visitEnd()
+        }.toByteArray()
+
+        val parser = "android/content/res/XmlResourceParser"
+        val pullParser = "org/xmlpull/v1/XmlPullParser"
+        val attributes = "android/util/AttributeSet"
+        val fieldType = "fixture/FieldType"
+        val resources = "android/content/res/Resources"
+        val caller = "fixture/Caller"
+        val unrelated = "android/sun/Unrelated"
+        val descriptor = "(I)L$parser;"
+        val external = ClassWriter(ClassWriter.COMPUTE_MAXS).apply {
+            visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC, resources, null, "java/lang/Object", null)
+            visitField(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "parsers", "[[L$fieldType;", null, null).visitEnd()
+            visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null).apply {
+                visitCode()
+                visitVarInsn(Opcodes.ALOAD, 0)
+                visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+                visitInsn(Opcodes.RETURN)
+                visitMaxs(0, 0)
+                visitEnd()
+            }
+            visitMethod(Opcodes.ACC_PUBLIC, "getXml", descriptor, null, null).apply {
+                visitCode()
+                visitInsn(Opcodes.ACONST_NULL)
+                visitInsn(Opcodes.ARETURN)
+                visitMaxs(0, 0)
+                visitEnd()
+            }
+            visitEnd()
+        }.toByteArray()
+        val client = ClassWriter(ClassWriter.COMPUTE_MAXS).apply {
+            visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC, caller, null, "java/lang/Object", null)
+            visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "probe", "(L$resources;)I", null, null).apply {
+                visitCode()
+                visitVarInsn(Opcodes.ALOAD, 0)
+                visitInsn(Opcodes.ICONST_0)
+                visitMethodInsn(Opcodes.INVOKEVIRTUAL, resources, "getXml", descriptor, false)
+                visitInsn(Opcodes.POP)
+                visitFieldInsn(Opcodes.GETSTATIC, resources, "parsers", "[[L$fieldType;")
+                visitInsn(Opcodes.POP)
+                visitIntInsn(Opcodes.BIPUSH, 42)
+                visitInsn(Opcodes.IRETURN)
+                visitMaxs(0, 0)
+                visitEnd()
+            }
+            visitEnd()
+        }.toByteArray()
+        val input = listOf(
+            parser to interfaceBytes(parser, pullParser, attributes),
+            pullParser to interfaceBytes(pullParser),
+            attributes to interfaceBytes(attributes),
+            fieldType to interfaceBytes(fieldType),
+            unrelated to interfaceBytes(unrelated),
+            caller to client,
+        )
+        val jar = jarOf(input.map { (name, bytes) -> "$name.class" to bytes })
+        val plan = ApkKeepRuleSynthesis.synthesize(jar, emptySet(), emptySet(), emptySet(), emptyList())
+        val mapping = input.map { it.first }.filter { it !in plan.excludedClassNames }
+            .associateWith { "moved/${it.substringAfterLast('/')}" }
+        val output = input.associate { (name, bytes) -> (mapping[name] ?: name) to remapClasses(bytes, mapping) } +
+            (resources to external)
+        val loader = object : ClassLoader(null) {
+            override fun findClass(name: String): Class<*> {
+                val bytes = output[name.replace('.', '/')] ?: throw ClassNotFoundException(name)
+                return defineClass(name, bytes, 0, bytes.size)
+            }
+        }
+        val api = loader.loadClass(resources.replace('/', '.'))
+        val entry = loader.loadClass(mapping.getValue(caller).replace('/', '.'))
+        assertEquals(42, entry.getMethod("probe", api).invoke(null, api.getConstructor().newInstance()))
+        assertEquals(setOf(parser, pullParser, attributes, fieldType), plan.excludedClassNames)
+        assertTrue(unrelated in mapping)
+    }
 
     private fun parcelableClass(internalName: String): ByteArray {
         val writer = ClassWriter(0)

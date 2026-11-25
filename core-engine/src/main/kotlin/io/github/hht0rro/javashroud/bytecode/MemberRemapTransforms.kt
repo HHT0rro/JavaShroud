@@ -2,9 +2,12 @@ package io.github.hht0rro.javashroud.bytecode
 
 import io.github.hht0rro.javashroud.naming.MemberKey
 import io.github.hht0rro.javashroud.naming.MemberRename
+import java.util.concurrent.ConcurrentHashMap
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.ClassWriter
+import org.objectweb.asm.ConstantDynamic
+import org.objectweb.asm.Handle
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.Type
@@ -141,16 +144,105 @@ fun remapMethods(
     classBytes
 }
 
+/** Declaration facts for every artifact class, including classes whose fields are kept. */
+class FieldFamilyIndexEntry(
+    val superName: String?,
+    val interfaceNames: List<String>,
+    val ownFields: Set<Pair<String, String>>,
+)
+
+/** Resolves field references against the original declarations for one field rename pass. */
+class FieldRenameIndex(
+    private val fieldRenameMap: Map<MemberKey, MemberRename>,
+    private val fieldFamilies: Map<String, FieldFamilyIndexEntry> = emptyMap(),
+) {
+    private val referenceNames = ConcurrentHashMap<MemberKey, String>()
+
+    internal fun unresolvedDeclarations(classBytes: ByteArray): Set<MemberKey> {
+        val retained = mutableSetOf<MemberKey>()
+
+        fun collectPossibleDeclarations(key: MemberKey, visited: MutableSet<String>) {
+            if (!visited.add(key.owner)) return
+            val family = fieldFamilies[key.owner] ?: return
+            if ((key.name to key.descriptor) in family.ownFields) {
+                retained += key
+                return
+            }
+            family.interfaceNames.forEach { collectPossibleDeclarations(key.copy(owner = it), visited) }
+            family.superName?.let { collectPossibleDeclarations(key.copy(owner = it), visited) }
+        }
+
+        fun fieldReference(owner: String, name: String, descriptor: String) {
+            val key = MemberKey(owner, name, descriptor)
+            val resolved = resolveDeclaration(key, mutableSetOf()) ?: return
+            if (resolved.owner !in fieldFamilies && resolved.owner != "java/lang/Object") {
+                collectPossibleDeclarations(key, mutableSetOf())
+            }
+        }
+
+        fun constantReference(value: Any) {
+            when (value) {
+                is Handle -> if (value.tag in Opcodes.H_GETFIELD..Opcodes.H_PUTSTATIC) {
+                    fieldReference(value.owner, value.name, value.desc)
+                }
+                is ConstantDynamic -> repeat(value.bootstrapMethodArgumentCount) {
+                    constantReference(value.getBootstrapMethodArgument(it))
+                }
+            }
+        }
+
+        ClassReader(classBytes).accept(object : ClassVisitor(Opcodes.ASM9) {
+            override fun visitMethod(
+                access: Int, name: String?, descriptor: String?, signature: String?, exceptions: Array<out String>?,
+            ): MethodVisitor = object : MethodVisitor(Opcodes.ASM9) {
+                override fun visitFieldInsn(opcode: Int, owner: String, name: String, descriptor: String) {
+                    fieldReference(owner, name, descriptor)
+                }
+
+                override fun visitLdcInsn(value: Any) = constantReference(value)
+
+                override fun visitInvokeDynamicInsn(name: String, descriptor: String, bootstrap: Handle, vararg arguments: Any) {
+                    arguments.forEach { constantReference(it) }
+                }
+            }
+        }, ClassReader.SKIP_DEBUG or ClassReader.SKIP_FRAMES)
+        return retained
+    }
+
+    internal fun mapFieldName(owner: String, name: String, descriptor: String): String =
+        referenceNames.computeIfAbsent(MemberKey(owner, name, descriptor)) { key ->
+            val declaration = resolveDeclaration(key, mutableSetOf()) ?: key
+            fieldRenameMap[declaration]?.renamedName ?: key.name
+        }
+
+    private fun resolveDeclaration(key: MemberKey, visited: MutableSet<String>): MemberKey? {
+        if (!visited.add(key.owner)) return null
+        // Object declares no fields. An unavailable external type is a binding
+        // boundary: it may declare the field, so do not search past it.
+        val family = fieldFamilies[key.owner] ?: return if (key.owner == "java/lang/Object") null else key
+        if ((key.name to key.descriptor) in family.ownFields) return key
+
+        // JVM field resolution searches direct superinterfaces recursively
+        // before the superclass. A kept declaration also terminates the search.
+        for (interfaceName in family.interfaceNames) {
+            resolveDeclaration(key.copy(owner = interfaceName), visited)?.let { return it }
+        }
+        return family.superName?.let { resolveDeclaration(key.copy(owner = it), visited) }
+    }
+}
+
+@JvmOverloads
 fun remapFields(
     classBytes: ByteArray,
     fieldRenameMap: Map<MemberKey, MemberRename>,
     stringRewriteMap: Map<String, Map<String, String>> = emptyMap(),
+    renameIndex: FieldRenameIndex = FieldRenameIndex(fieldRenameMap),
 ): ByteArray = try {
     val classReader = ClassReader(classBytes)
     val classWriter = ClassWriter(classReader, 0)
     val classVisitor = ClassRemapper(classWriter, createRemapper(
         mapFieldName = { owner: String, name: String, descriptor: String ->
-            fieldRenameMap[MemberKey(owner, name, descriptor)]?.renamedName ?: name
+            renameIndex.mapFieldName(owner, name, descriptor)
         },
     ))
     classReader.accept(classVisitor, 0)

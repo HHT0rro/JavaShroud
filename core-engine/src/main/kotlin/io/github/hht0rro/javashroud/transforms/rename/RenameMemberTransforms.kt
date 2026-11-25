@@ -1,6 +1,8 @@
 package io.github.hht0rro.javashroud.transforms.rename
 
 import io.github.hht0rro.javashroud.analysis.eligibleMembersForAction
+import io.github.hht0rro.javashroud.bytecode.FieldFamilyIndexEntry
+import io.github.hht0rro.javashroud.bytecode.FieldRenameIndex
 import io.github.hht0rro.javashroud.bytecode.MethodFamilyIndexEntry
 import io.github.hht0rro.javashroud.bytecode.MethodRenameIndex
 import io.github.hht0rro.javashroud.bytecode.isResolverMemberName
@@ -182,16 +184,32 @@ fun renameFields(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, param
         .filter { it.kind == MemberKind.FIELD }
         .filter { it.owner !in runtimeBoundClassNames }
         .filter { it.name !in reflectionPinnedFieldNames }
-    val fieldRenameMap = buildFieldRenameMap(matchedMembers, config)
-    if (fieldRenameMap.isEmpty()) {
+    val plannedFieldRenames = buildFieldRenameMap(matchedMembers, config)
+    if (plannedFieldRenames.isEmpty()) {
         return unchangedTransformResult(artifact)
     }
 
+    val fieldFamilies = artifact.classArtifacts.associate { classArtifact ->
+        classArtifact.summary.internalName to FieldFamilyIndexEntry(
+            superName = classArtifact.summary.superName,
+            interfaceNames = classArtifact.summary.interfaceNames,
+            ownFields = classArtifact.summary.fieldSummaries
+                .map { field -> field.name to field.descriptor }
+                .toSet(),
+        )
+    }
+    val plannedIndex = FieldRenameIndex(plannedFieldRenames, fieldFamilies)
+    val unresolvedDeclarations = artifact.classArtifacts.flatMapTo(mutableSetOf()) {
+        plannedIndex.unresolvedDeclarations(it.bytes)
+    }
+    val fieldRenameMap = plannedFieldRenames - unresolvedDeclarations
+    if (fieldRenameMap.isEmpty()) return unchangedTransformResult(artifact)
     val fieldStringRewriteMap = fieldRenameMap.values
         .groupBy { it.owner }
         .mapValues { (_, renames) -> renames.associate { it.originalName to it.renamedName } }
+    val renameIndex = FieldRenameIndex(fieldRenameMap, fieldFamilies)
     val updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
-        reanalyzedClassArtifact(classArtifact, remapFields(classArtifact.bytes, fieldRenameMap, fieldStringRewriteMap))
+        reanalyzedClassArtifact(classArtifact, remapFields(classArtifact.bytes, fieldRenameMap, fieldStringRewriteMap, renameIndex))
     }
 
     val transformed = updatedArtifactTransformResult(
