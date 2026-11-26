@@ -148,6 +148,46 @@ class ApkLongStringRoundTripTest {
         assertStringRoundTrip(work, "\uD83D\uDE00".repeat(16_384))
     }
 
+    @Test
+    fun shortConstantKeepsTheExceptionLiveDestinationType(@TempDir work: Path) {
+        assertExceptionLiveDestination(work, "short")
+    }
+
+    @Test
+    fun oversizedConstantKeepsTheExceptionLiveDestinationType(@TempDir work: Path) {
+        assertExceptionLiveDestination(work, "A".repeat(65_536))
+    }
+
+    private fun assertExceptionLiveDestination(work: Path, value: String) {
+        val body = """
+            .registers 3
+            const-string v0, "retained-before-assignment"
+            :try_start
+            if-eqz p0, :assign
+            new-instance v1, Ljava/lang/IllegalArgumentException;
+            invoke-direct {v1}, Ljava/lang/IllegalArgumentException;-><init>()V
+            throw v1
+            :assign
+            const-string v0, ${smaliString(value)}
+            :try_end
+            return-object v0
+            .catch Ljava/lang/IllegalArgumentException; {:try_start .. :try_end} :handler
+            :handler
+            move-exception v1
+            return-object v0
+        """.trimIndent()
+        for (throwBeforeAssignment in listOf(false, true)) {
+            assertRoundTrip(
+                Files.createDirectory(work.resolve("throw-$throwBeforeAssignment")),
+                if (throwBeforeAssignment) "retained-before-assignment" else value,
+                body,
+                parameterTypes = arrayOf(java.lang.Boolean.TYPE),
+                arguments = arrayOf(throwBeforeAssignment),
+                literalIdentity = true,
+            )
+        }
+    }
+
     private fun assertStringRoundTrip(work: Path, value: String) {
         assertRoundTrip(
             work, value, """

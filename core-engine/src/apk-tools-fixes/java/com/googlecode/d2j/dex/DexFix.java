@@ -152,7 +152,8 @@ public final class DexFix {
             return;
         }
 
-        // Reserve v0 and shift every original register, including incoming parameters.
+        // Keep construction separate from the exception-live original destination.
+        // Reserve v0/v1 and shift every original register, including incoming parameters.
         DexCodeNode shifted = new DexCodeNode();
         methodNode.codeNode.accept(new ShiftedRegisterVisitor(shifted));
         List<DexStmtNode> statements = new ArrayList<>();
@@ -172,6 +173,7 @@ public final class DexFix {
 
     private static final int CONSTANT_UTF8_LIMIT = 65535;
     private static final int MIN_OVERSIZED_UTF16_LENGTH = CONSTANT_UTF8_LIMIT / 3 + 1;
+    private static final int TEMPORARY_REGISTER_COUNT = 2;
 
     private static boolean isOversizedString(DexStmtNode statement) {
         if (!(statement instanceof ConstStmtNode)
@@ -207,9 +209,9 @@ public final class DexFix {
     }
 
     private static void emitLongString(DexCodeVisitor visitor, int destination, String text) {
-        visitor.visitTypeStmt(Op.NEW_INSTANCE, destination, 0, "Ljava/lang/StringBuilder;");
-        visitor.visitConstStmt(Op.CONST, 0, text.length());
-        visitor.visitMethodStmt(Op.INVOKE_DIRECT, new int[] {destination, 0},
+        visitor.visitTypeStmt(Op.NEW_INSTANCE, 0, 0, "Ljava/lang/StringBuilder;");
+        visitor.visitConstStmt(Op.CONST, 1, text.length());
+        visitor.visitMethodStmt(Op.INVOKE_DIRECT, new int[] {0, 1},
                 new Method("Ljava/lang/StringBuilder;", "<init>", new String[] {"I"}, "V"));
         int start = 0;
         while (start < text.length()) {
@@ -223,17 +225,17 @@ public final class DexFix {
                 bytes += width;
                 end++;
             }
-            visitor.visitConstStmt(Op.CONST_STRING, 0, text.substring(start, end));
-            visitor.visitMethodStmt(Op.INVOKE_VIRTUAL, new int[] {destination, 0},
+            visitor.visitConstStmt(Op.CONST_STRING, 1, text.substring(start, end));
+            visitor.visitMethodStmt(Op.INVOKE_VIRTUAL, new int[] {0, 1},
                     new Method("Ljava/lang/StringBuilder;", "append",
                             new String[] {"Ljava/lang/String;"}, "Ljava/lang/StringBuilder;"));
             start = end;
         }
-        visitor.visitMethodStmt(Op.INVOKE_VIRTUAL, new int[] {destination},
+        visitor.visitMethodStmt(Op.INVOKE_VIRTUAL, new int[] {0},
                 new Method("Ljava/lang/StringBuilder;", "toString", new String[0], "Ljava/lang/String;"));
-        visitor.visitStmt1R(Op.MOVE_RESULT_OBJECT, destination);
+        visitor.visitStmt1R(Op.MOVE_RESULT_OBJECT, 0);
         // DEX string constants are interned, including those exceeding a classfile UTF8 entry.
-        visitor.visitMethodStmt(Op.INVOKE_VIRTUAL, new int[] {destination},
+        visitor.visitMethodStmt(Op.INVOKE_VIRTUAL, new int[] {0},
                 new Method("Ljava/lang/String;", "intern", new String[0], "Ljava/lang/String;"));
         visitor.visitStmt1R(Op.MOVE_RESULT_OBJECT, destination);
     }
@@ -244,7 +246,7 @@ public final class DexFix {
         }
 
         private static int shift(int register) {
-            return register < 0 ? register : register + 1;
+            return register < 0 ? register : register + TEMPORARY_REGISTER_COUNT;
         }
 
         private static int[] shift(int[] registers) {
@@ -257,7 +259,7 @@ public final class DexFix {
 
         @Override
         public void visitRegister(int total) {
-            super.visitRegister(Math.addExact(total, 1));
+            super.visitRegister(Math.addExact(total, TEMPORARY_REGISTER_COUNT));
         }
 
         @Override
