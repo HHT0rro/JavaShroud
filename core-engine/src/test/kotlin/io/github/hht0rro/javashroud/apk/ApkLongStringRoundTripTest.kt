@@ -1,5 +1,6 @@
 package io.github.hht0rro.javashroud.apk
 
+import io.github.hht0rro.javashroud.bytecode.ClassfileAttributeWhitelist
 import java.net.URLClassLoader
 import java.nio.file.Files
 import java.nio.file.Path
@@ -257,7 +258,17 @@ class ApkLongStringRoundTripTest {
         arguments: Array<Any>,
         literalIdentity: Boolean,
     ) {
-        URLClassLoader(arrayOf(jar.toUri().toURL()), null).use { loader ->
+        // D8 round trips can omit JVM frames. Apply the production classfile
+        // finalizer before loading, as the normal engine pipeline does.
+        val classLoader = object : URLClassLoader(arrayOf(jar.toUri().toURL()), null) {
+            override fun findClass(name: String): Class<*> {
+                val resource = name.replace('.', '/') + ".class"
+                val bytes = getResourceAsStream(resource)?.use { ClassfileAttributeWhitelist.apply(it.readBytes()) }
+                    ?: throw ClassNotFoundException(name)
+                return defineClass(name, bytes, 0, bytes.size)
+            }
+        }
+        classLoader.use { loader ->
             val actual = loader.loadClass("fixture.LongString").getMethod("value", *parameterTypes).invoke(null, *arguments)
             assertEquals(expected, actual, "$stage must preserve every UTF-16 code unit")
             if (literalIdentity) assertSame(expected.intern(), actual, "$stage must preserve DEX literal identity")
