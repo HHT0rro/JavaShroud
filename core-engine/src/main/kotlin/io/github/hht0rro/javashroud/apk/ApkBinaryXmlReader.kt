@@ -11,8 +11,8 @@ import java.nio.charset.StandardCharsets
  * Walks the chunk stream linearly: the first string-pool chunk supplies every
  * string; start-element chunks supply element names plus attribute name/value
  * pairs. Only the manifest facts the APK pipeline needs are extracted:
- * package name, minSdkVersion, and every android:name target (manifest
- * components, instrumentation, etc.). Unknown chunks are skipped using their
+ * package name, minSdkVersion, every name target, and Android class-valued
+ * attributes on their declared manifest elements. Unknown chunks are skipped using their
  * declared size; malformed input fails closed.
  */
 object ApkBinaryXmlReader {
@@ -28,10 +28,14 @@ object ApkBinaryXmlReader {
     private const val VALUE_TYPE_INT_HEX = 0x11
     private const val VALUE_TYPE_BOOLEAN = 0x12
 
+    private val CLASS_REFERENCE_PATTERN = Regex(
+        """\.?\p{javaJavaIdentifierStart}\p{javaJavaIdentifierPart}*(?:\.\p{javaJavaIdentifierStart}\p{javaJavaIdentifierPart}*)*""",
+    )
+
     data class ApkManifestInfo(
         val packageName: String,
         val minSdkVersion: Int?,
-        /** Dotted class names referenced by android:name attributes (raw values). */
+        /** Raw name targets and Android class-valued manifest attribute values. */
         val namedClasses: List<String>,
     )
 
@@ -39,21 +43,35 @@ object ApkBinaryXmlReader {
         var packageName = ""
         var minSdkVersion: Int? = null
         val namedClasses = mutableListOf<String>()
-        visitAttributes(bytes) { element, attribute ->
+        visitAttributes(bytes) { element, elementNamespaceIndex, attribute ->
             when {
                 element == "manifest" && attribute.name == "package" -> packageName = attribute.valueString.orEmpty()
                 element == "uses-sdk" && attribute.name == "minSdkVersion" -> minSdkVersion = attribute.intValue
-                attribute.name == "name" -> attribute.valueString?.takeIf { it.isNotBlank() }?.let(namedClasses::add)
+                attribute.name == "name" || isAdditionalClassReference(element, elementNamespaceIndex, attribute) ->
+                    attribute.valueString?.takeIf { it.isNotBlank() }?.let(namedClasses::add)
             }
         }
         require(packageName.isNotBlank()) { "AndroidManifest.xml does not declare a package name" }
         return ApkManifestInfo(packageName, minSdkVersion, namedClasses.distinct())
     }
 
+    private fun isAdditionalClassReference(element: String, elementNamespaceIndex: Int, attribute: ApxAttribute): Boolean {
+        if (elementNamespaceIndex != -1 || attribute.namespace != ANDROID_NAMESPACE || attribute.valueType != VALUE_TYPE_STRING) {
+            return false
+        }
+        val isClassAttribute = when (attribute.name) {
+            "appComponentFactory", "backupAgent", "manageSpaceActivity", "zygotePreloadName", "classLoader" -> element == "application"
+            "targetActivity" -> element == "activity-alias"
+            "parentActivityName" -> element == "activity" || element == "activity-alias"
+            else -> false
+        }
+        return isClassAttribute && attribute.valueString?.matches(CLASS_REFERENCE_PATTERN) == true
+    }
+
     internal fun layoutClickMethods(bytes: ByteArray): Set<String> {
         if (bytes.size < 8 || readUShort(bytes, 0) != 0x0003) return emptySet()
         return buildSet {
-            visitAttributes(bytes) { _, attribute ->
+            visitAttributes(bytes) { _, _, attribute ->
                 if (attribute.name == "onClick" && attribute.namespace == ANDROID_NAMESPACE) {
                     attribute.valueString?.takeIf { it.isNotBlank() }?.let(::add)
                 }
@@ -61,7 +79,7 @@ object ApkBinaryXmlReader {
         }
     }
 
-    private fun visitAttributes(bytes: ByteArray, visit: (String, ApxAttribute) -> Unit) {
+    private fun visitAttributes(bytes: ByteArray, visit: (String, Int, ApxAttribute) -> Unit) {
         val input = DataInputStream(ByteArrayInputStream(bytes))
         val fileHeader = ByteArray(8)
         readFully(input, fileHeader)
@@ -92,11 +110,12 @@ object ApkBinaryXmlReader {
                     val nameIndex = readUInt(body, 12).toInt()
                     val attributeCount = readUShort(body, 20)
                     val element = strings.getOrNull(nameIndex).orEmpty()
+                    val elementNamespaceIndex = readUInt(body, 8).toInt()
                     var index = 28
                     var attributeIndex = 0
                     while (attributeIndex < attributeCount) {
                         val attribute = readAttribute(strings, body, index) ?: break
-                        visit(element, attribute)
+                        visit(element, elementNamespaceIndex, attribute)
                         index += 20
                         attributeIndex += 1
                     }
@@ -184,6 +203,7 @@ object ApkBinaryXmlReader {
         val name: String,
         val namespace: String?,
         val valueString: String?,
+        val valueType: Int,
         val intValue: Int?,
     )
 
@@ -207,6 +227,7 @@ object ApkBinaryXmlReader {
             name = name,
             namespace = strings.getOrNull(readUInt(body, offset).toInt()),
             valueString = valueString,
+            valueType = dataType,
             intValue = intValue,
         )
     }

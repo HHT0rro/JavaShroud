@@ -1,5 +1,9 @@
 package io.github.hht0rro.javashroud.apk
 
+import java.io.ByteArrayOutputStream
+import java.io.EOFException
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.zip.ZipEntry
@@ -70,6 +74,8 @@ class ApkFormatDetectorTest {
 
 class ApkBinaryXmlReaderTest {
 
+    private val androidNamespace = "http://schemas.android.com/apk/res/android"
+
     @Test
     fun parsesPackageMinSdkAndComponents() {
         val manifest = ApkTestFixtures.binaryManifest(
@@ -107,6 +113,152 @@ class ApkBinaryXmlReaderTest {
         val manifest = ApkTestFixtures.binaryManifest("com.example.app")
         val info = ApkBinaryXmlReader.parse(manifest)
         assertEquals("com.example.app", info.packageName)
+    }
+
+    @Test
+    fun readsApplicationClassReferencesForTheComponentKeepSet() {
+        val references = listOf(
+            Triple("appComponentFactory", "androidx.core.app.CoreComponentFactory", "androidx/core/app/CoreComponentFactory"),
+            Triple("backupAgent", ".BackupAgent", "com/example/app/BackupAgent"),
+            Triple("manageSpaceActivity", "ManageSpaceActivity", "com/example/app/ManageSpaceActivity"),
+            Triple("zygotePreloadName", ".Preload${'$'}Nested", "com/example/app/Preload${'$'}Nested"),
+            Triple("classLoader", "dalvik.system.PathClassLoader", "dalvik/system/PathClassLoader"),
+        )
+        for ((attribute, value, internalName) in references) {
+            val info = ApkBinaryXmlReader.parse(manifestWithAttribute("application", attribute, value))
+            assertEquals(listOf(value), info.namedClasses, attribute)
+            assertEquals(setOf(internalName), ApkPipelineRunner().manifestComponentInternalNames(info), attribute)
+        }
+    }
+
+    @Test
+    fun readsAliasTargetAndActivityParentClassReferences() {
+        val references = listOf(
+            "activity-alias" to "targetActivity",
+            "activity-alias" to "parentActivityName",
+            "activity" to "parentActivityName",
+        )
+        for ((element, attribute) in references) {
+            val names = mapOf(
+                "com.example.OtherActivity" to "com/example/OtherActivity",
+                ".ParentActivity" to "com/example/app/ParentActivity",
+                "ParentActivity" to "com/example/app/ParentActivity",
+            )
+            for ((value, internalName) in names) {
+                val info = ApkBinaryXmlReader.parse(manifestWithAttribute(element, attribute, value))
+                assertEquals(listOf(value), info.namedClasses, "$element.$attribute")
+                assertEquals(setOf(internalName), ApkPipelineRunner().manifestComponentInternalNames(info))
+            }
+        }
+    }
+
+    @Test
+    fun additionalClassReferencesRequireTheAndroidNamespace() {
+        for (namespace in listOf(null, "urn:custom", "$androidNamespace/custom")) {
+            for ((element, attribute) in listOf("application" to "appComponentFactory", "activity-alias" to "targetActivity")) {
+                val manifest = manifestWithAttribute(element, attribute, "com.example.Unrelated", namespace = namespace)
+                assertTrue(ApkBinaryXmlReader.parse(manifest).namedClasses.isEmpty(), "$element.$attribute namespace=$namespace")
+            }
+        }
+    }
+
+    @Test
+    fun additionalClassReferencesRequireTheirDeclaredElement() {
+        val applicationAttributes = listOf("appComponentFactory", "backupAgent", "manageSpaceActivity", "zygotePreloadName", "classLoader")
+        for (attribute in applicationAttributes) {
+            for (element in listOf("activity", "meta-data", "property")) {
+                val manifest = manifestWithAttribute(element, attribute, "com.example.Unrelated")
+                assertTrue(ApkBinaryXmlReader.parse(manifest).namedClasses.isEmpty(), "$element.$attribute")
+            }
+        }
+        for ((element, attribute) in listOf("application" to "targetActivity", "activity" to "targetActivity", "service" to "parentActivityName")) {
+            assertTrue(ApkBinaryXmlReader.parse(manifestWithAttribute(element, attribute, "com.example.Unrelated")).namedClasses.isEmpty())
+        }
+        val namespacedElement = manifestWithAttribute("application", "appComponentFactory", "com.example.Unrelated", elementNamespace = "urn:custom")
+        assertTrue(ApkBinaryXmlReader.parse(namespacedElement).namedClasses.isEmpty())
+    }
+
+    @Test
+    fun ignoresUnrelatedStringsAndResourceValues() {
+        for (attribute in listOf("label", "permission", "process", "taskAffinity", "value")) {
+            val manifest = manifestWithAttribute("application", attribute, "com.example.Unrelated")
+            assertTrue(ApkBinaryXmlReader.parse(manifest).namedClasses.isEmpty(), attribute)
+        }
+        for (value in listOf("", " ", "@string/factory", "?attr/factory", "not a class", "com..Factory")) {
+            val manifest = manifestWithAttribute("application", "appComponentFactory", value)
+            assertTrue(ApkBinaryXmlReader.parse(manifest).namedClasses.isEmpty(), value)
+        }
+        for (type in listOf(0x01, 0x02, 0x10)) {
+            val manifest = manifestWithAttribute("application", "appComponentFactory", "com.example.ResourceName", valueType = type)
+            assertTrue(ApkBinaryXmlReader.parse(manifest).namedClasses.isEmpty(), "type=$type")
+        }
+    }
+
+    @Test
+    fun readsClassReferencesFromTypedStringsWithoutRawValues() {
+        val manifest = manifestWithAttribute("application", "appComponentFactory", ".Factory", rawValue = false)
+        val info = ApkBinaryXmlReader.parse(manifest)
+        assertEquals(listOf(".Factory"), info.namedClasses)
+        assertEquals(setOf("com/example/app/Factory"), ApkPipelineRunner().manifestComponentInternalNames(info))
+    }
+
+    @Test
+    fun preservesExistingNameAttributeReadContract() {
+        for (namespace in listOf(null, androidNamespace, "urn:custom")) {
+            val manifest = manifestWithAttribute("meta-data", "name", "com.example.ExistingName", namespace = namespace)
+            assertEquals(listOf("com.example.ExistingName"), ApkBinaryXmlReader.parse(manifest).namedClasses)
+        }
+    }
+
+    @Test
+    fun classReferenceParsingKeepsMalformedManifestFailures() {
+        assertFailsWith<IllegalArgumentException> { ApkBinaryXmlReader.parse(ApkTestFixtures.binaryManifest("")) }
+        val manifest = manifestWithAttribute("application", "appComponentFactory", ".Factory")
+        assertFailsWith<IllegalArgumentException> { ApkBinaryXmlReader.parse(manifest.copyOf(manifest.size - 1)) }
+        assertFailsWith<EOFException> { ApkBinaryXmlReader.parse(manifest.copyOf(7)) }
+    }
+
+    private fun manifestWithAttribute(
+        element: String,
+        attribute: String,
+        value: String,
+        namespace: String? = androidNamespace,
+        elementNamespace: String? = null,
+        valueType: Int = 0x03,
+        rawValue: Boolean = true,
+    ): ByteArray {
+        val strings = listOfNotNull("package", "com.example.app", attribute, value, namespace, elementNamespace).distinct()
+        val xml = ApkTestFixtures.binaryXmlElements("manifest", element, otherPoolStrings = strings)
+        val input = ByteBuffer.wrap(xml).order(ByteOrder.LITTLE_ENDIAN)
+        val output = ByteArrayOutputStream()
+        output.write(xml, 0, 8)
+        var cursor = 8
+        while (cursor < xml.size) {
+            val size = input.getInt(cursor + 4)
+            val chunk = xml.copyOfRange(cursor, cursor + size)
+            if (input.getShort(cursor).toInt() == 0x0102) {
+                val isManifest = input.getInt(cursor + 20) == strings.size
+                val expanded = chunk.copyOf(size + 20)
+                val encoded = ByteBuffer.wrap(expanded).order(ByteOrder.LITTLE_ENDIAN)
+                encoded.putInt(4, expanded.size)
+                encoded.putInt(16, if (isManifest) -1 else strings.indexOf(elementNamespace))
+                encoded.putShort(28, 1)
+                encoded.position(size)
+                encoded.putInt(if (isManifest) -1 else strings.indexOf(namespace))
+                encoded.putInt(strings.indexOf(if (isManifest) "package" else attribute))
+                val valueIndex = strings.indexOf(if (isManifest) "com.example.app" else value)
+                encoded.putInt(if (isManifest || rawValue) valueIndex else -1)
+                encoded.putShort(8)
+                encoded.put(0)
+                encoded.put(if (isManifest) 0x03.toByte() else valueType.toByte())
+                encoded.putInt(valueIndex)
+                output.write(expanded)
+            } else {
+                output.write(chunk)
+            }
+            cursor += size
+        }
+        return output.toByteArray().also { ByteBuffer.wrap(it).order(ByteOrder.LITTLE_ENDIAN).putInt(4, it.size) }
     }
 }
 
