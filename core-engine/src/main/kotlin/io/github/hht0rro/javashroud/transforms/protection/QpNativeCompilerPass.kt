@@ -1221,8 +1221,10 @@ object QpNativeCompilerPass {
             } else {
                 // Rust embeds source names from the isolated workspace in native diagnostics.
                 // Encoded flags keep prefixes containing spaces intact on hosted Windows.
-                val sourcePath = workspace.toRealPath().toString()
-                val sourcePaths = listOf(sourcePath, sourcePath.replace('\\', '/')).distinct()
+                val sourcePaths = listOf(
+                    workspace.toAbsolutePath().normalize().toString(),
+                    workspace.toRealPath().toString(),
+                ).flatMap { path -> listOf(path, path.replace('\\', '/')) }.distinct()
                 val remapFlags = sourcePaths.map { "--remap-path-prefix=$it=core-engine/src/main/rust" }
                 put("CARGO_ENCODED_RUSTFLAGS", (compilerArgs + remapFlags).joinToString("\u001f"))
             }

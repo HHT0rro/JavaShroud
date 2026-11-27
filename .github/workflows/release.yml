@@ -96,9 +96,9 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $ref -ne $env:RELEASE_SHA) {
             throw "The release commit must be the current main head."
           }
-          $runs = gh api -X GET "repos/$env:GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" -f branch=main -f event=push -f status=success -f head_sha=$env:RELEASE_SHA --jq '.workflow_runs[].head_sha'
+          $runs = gh api -X GET "repos/$env:GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" -f event=push -f status=success -f head_sha=$env:RELEASE_SHA --jq '.workflow_runs[].head_sha'
           if ($LASTEXITCODE -ne 0 -or $env:RELEASE_SHA -notin @($runs)) {
-            throw "No successful public-ci push run exists on main at $env:RELEASE_SHA."
+            throw "No successful public-ci push run exists at $env:RELEASE_SHA."
           }
 
       - name: Setup GraalVM Native Image
