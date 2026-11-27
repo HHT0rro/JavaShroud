@@ -533,7 +533,7 @@ def run_cli_profile(profile, paths, pins):
                           f'outputJarPath = {json.dumps(output_jar.as_posix())}\n'
                           f'artifactFormat = "jar"\nprotectionProfile = "{profile}"\n'
                           '[[passes]]\nid = "strip-compile-debug-info"\nenabled = true\n', encoding="utf-8")
-        recorded("native-cli-strip", [paths["engine"], "--config", config])
+        recorded("native-cli-strip", [paths["engine"], "-config", config])
         scan = output_jar.with_name(output_jar.stem + ".release-scan.txt").read_text(encoding="utf-8")
         if f"profile={profile}\n" not in scan or "RESULT=PASS" not in scan:
             raise RuntimeError("The Native CLI output scan did not confirm its requested profile")
@@ -544,7 +544,7 @@ def run_cli_profile(profile, paths, pins):
                                  encoding="utf-8")
         commands = {
             "direct": [paths["engine"], "--input", input_jar, "--output", input_jar],
-            "config": [paths["engine"], "--config", unsafe_config],
+            "config": [paths["engine"], "-config", unsafe_config],
         }
         for entry, command in commands.items():
             name = f"reject-same-input-output-{entry}"
