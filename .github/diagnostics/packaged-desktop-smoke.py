@@ -42,6 +42,7 @@ RESULT = {
     "desktop_started": False,
     "window_responsive": False,
     "schema_via_desktop_binding": False,
+    "schema_loaded_in_gui": False,
     "gui_input_selected": False,
     "gui_config_imported": False,
     "gui_output_selected": False,
@@ -208,7 +209,7 @@ def native_file_dialog(desktop, value, name):
 
 def wait_cdp(port, desktop):
     endpoint = f"http://127.0.0.1:{port}"
-    deadline = time.monotonic() + 45
+    deadline = time.monotonic() + 12
     last_error = "No loopback CDP endpoint"
     while time.monotonic() < deadline:
         if desktop.poll() is not None:
@@ -230,6 +231,113 @@ def wait_cdp(port, desktop):
                 last_error = str(error)
         time.sleep(0.5)
     raise RuntimeError(last_error)
+
+
+def uia_window(desktop):
+    own_windows = windows(desktop)
+    window = next((item for item in own_windows if item["pid"] == desktop.pid and item["title"] == "JavaShroud"), None)
+    if window is None:
+        raise RuntimeError("The owned desktop window was not visible")
+    return Desktop(backend="uia").window(handle=window["handle"]).wrapper_object()
+
+
+def uia_snapshot(desktop, name):
+    window = uia_window(desktop)
+    controls = window.descendants()
+    records = []
+    for control in controls:
+        entry = {"name": control.window_text(), "type": control.element_info.control_type,
+                 "automation_id": control.element_info.automation_id,
+                 "enabled": control.is_enabled(), "visible": control.is_visible()}
+        try:
+            entry["value"] = control.iface_value.CurrentValue
+        except Exception:
+            pass
+        records.append(entry)
+    save_json(f"{name}.uia.json", records)
+    checkpoint(None, desktop, name)
+    return records
+
+
+def uia_find(desktop, pattern, control_type="Button", timeout=15):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        matches = [control for control in uia_window(desktop).descendants(control_type=control_type)
+                   if re.search(pattern, control.window_text()) and control.is_enabled()]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            visible = [control for control in matches if control.is_visible()]
+            if len(visible) == 1:
+                return visible[0]
+        time.sleep(0.3)
+    raise RuntimeError(f"UIAutomation could not uniquely resolve {control_type} matching {pattern}")
+
+
+def uia_invoke(desktop, pattern, name):
+    button = uia_find(desktop, pattern)
+    action(name, accessible_name=button.window_text(), interaction="UIAutomation InvokePattern")
+    button.invoke()
+
+
+def uia_flow(desktop, input_jar, output_jar, config):
+    RESULT["interaction_backend"] = "Windows UIAutomation"
+    records = uia_snapshot(desktop, "uia-01-initial")
+    if not records:
+        raise RuntimeError("The hosted session exposed no UIAutomation descendants")
+    uia_invoke(desktop, r"^(选择 JAR 文件|Choose JAR file)$", "uia-select-input")
+    native_file_dialog(desktop, input_jar, "uia-02-select-input")
+    time.sleep(1)
+    records = uia_snapshot(desktop, "uia-03-input")
+    if not any(str(input_jar).replace("\\", "/") in entry.get("value", "").replace("\\", "/") for entry in records):
+        raise RuntimeError("Selected input was not reflected in the real path editor")
+    RESULT["gui_input_selected"] = True
+    uia_invoke(desktop, r"^(导入配置|Import config|导入|Import)$", "uia-import-config")
+    native_file_dialog(desktop, config, "uia-04-import-config")
+    time.sleep(1)
+    records = uia_snapshot(desktop, "uia-05-imported")
+    if not any(output_jar.as_posix() in entry.get("value", "").replace("\\", "/") for entry in records):
+        raise RuntimeError("Imported output path did not appear in the real UI")
+    RESULT["gui_config_imported"] = True
+    RESULT["gui_output_selected"] = True
+    uia_invoke(desktop, r"^流水线$|^Pipeline$", "uia-open-pipeline")
+    time.sleep(0.5)
+    records = uia_snapshot(desktop, "uia-06-pipeline")
+    checkboxes = uia_window(desktop).descendants(control_type="CheckBox")
+    if not any("编译" in item.window_text() or "Debug" in item.window_text() for item in checkboxes):
+        raise RuntimeError("The actual module catalog did not expose the strip pass")
+    checked = [{"name": item.window_text(), "toggle": item.get_toggle_state()} for item in checkboxes]
+    save_json("uia-pipeline-toggles.json", checked)
+    if sum(item["toggle"] == 1 for item in checked) != 1:
+        raise RuntimeError("Imported strip-only configuration did not select exactly one pass")
+    RESULT["schema_loaded_in_gui"] = True
+    RESULT["gui_schema_module_count"] = len(checkboxes)
+    uia_invoke(desktop, r"^工作台$|^Workbench$", "uia-return-home")
+    uia_snapshot(desktop, "uia-07-ready")
+    uia_invoke(desktop, r"^(开始混淆|Start run)$", "uia-start-run")
+    RESULT["gui_start_clicked"] = True
+    deadline = time.monotonic() + 90
+    observed = []
+    while time.monotonic() < deadline:
+        track_processes(desktop)
+        observed = [item.window_text() for item in uia_window(desktop).descendants()]
+        if any(text in ("任务未完成", "Task not completed") for text in observed):
+            uia_snapshot(desktop, "uia-08-failed")
+            raise RuntimeError("The real GUI displayed a failed task")
+        if output_jar.exists() and any(text in ("产物已生成", "Output generated") for text in observed):
+            RESULT["gui_result_visible"] = True
+            break
+        time.sleep(0.3)
+    save_json("uia-final-text.json", observed)
+    uia_snapshot(desktop, "uia-08-result")
+    if not RESULT["gui_result_visible"]:
+        raise RuntimeError("The real GUI did not confirm a generated output within 90 seconds")
+    log_path = Path(str(output_jar) + ".log")
+    if log_path.exists():
+        shutil.copy2(log_path, EVIDENCE / "gui-engine.log")
+        text = log_path.read_text(encoding="utf-8", errors="replace")
+        RESULT["gui_done_event"] = bool(re.search(r'type\s*=\s*"done"', text))
+    action("uia-output-visible", output=str(output_jar), done_in_retained_log=RESULT["gui_done_event"])
 
 
 def fixture():
@@ -420,39 +528,47 @@ def main():
                                    stdout=stdout, stderr=stderr, creationflags=subprocess.CREATE_NO_WINDOW)
         RESULT["desktop_started"] = True
         action("desktop-started", pid=desktop.pid, debug_port=port)
-        endpoint = wait_cdp(port, desktop)
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.connect_over_cdp(endpoint, timeout=15000)
-            pages = [candidate for context in browser.contexts for candidate in context.pages]
-            save_json("cdp-pages.json", [{"url": candidate.url} for candidate in pages])
-            page = next((candidate for candidate in pages if "wails" in candidate.url.lower()), None)
-            if page is None:
-                raise RuntimeError("The owned WebView2 endpoint did not expose the desktop page")
-            page.on("pageerror", lambda error: action("webview-page-error", detail=str(error)))
-            gui_flow(page, desktop, input_jar, output_jar, config)
-            for generated in (PRIVATE / "temp").glob("javashroud-config-*/obfuscation-config.toml"):
-                shutil.copy2(generated, EVIDENCE / "desktop-generated-config.toml")
-            generated_path = EVIDENCE / "desktop-generated-config.toml"
-            if generated_path.exists():
-                generated = tomllib.loads(generated_path.read_text(encoding="utf-8"))
-                actual_passes = [item["id"] for item in generated.get("passes", []) if item.get("enabled", True)]
-                if actual_passes != ["strip-compile-debug-info"]:
-                    raise RuntimeError(f"Unexpected GUI-selected passes: {actual_passes}")
-                RESULT["actual_gui_passes"] = actual_passes
-                RESULT["explicit_minimal_profile_preserved"] = generated.get("protectionProfile") == "minimal"
-                RESULT["generated_profile"] = generated.get("protectionProfile", "absent; engine JAR default release-hardened")
-            if not RESULT["explicit_minimal_profile_preserved"]:
-                RESULT["boundaries"].append("The shipped desktop request does not preserve the imported minimal profile. The generated configuration and its strip-only pass list are archived.")
-            verify_execution(input_jar, output_jar, before)
-            RESULT["full_gui_file_flow"] = True
-            RESULT["status"] = "gui-file-flow-passed"
-            exit_code = 0
+        try:
+            endpoint = wait_cdp(port, desktop)
+        except RuntimeError as error:
+            if str(error) != "No loopback CDP endpoint":
+                raise
+            action("cdp-unavailable-using-native-uia", reason=str(error))
+            uia_flow(desktop, input_jar, output_jar, config)
+        else:
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.connect_over_cdp(endpoint, timeout=15000)
+                pages = [candidate for context in browser.contexts for candidate in context.pages]
+                save_json("cdp-pages.json", [{"url": candidate.url} for candidate in pages])
+                page = next((candidate for candidate in pages if "wails" in candidate.url.lower()), None)
+                if page is None:
+                    raise RuntimeError("The owned WebView2 endpoint did not expose the desktop page")
+                page.on("pageerror", lambda error: action("webview-page-error", detail=str(error)))
+                gui_flow(page, desktop, input_jar, output_jar, config)
+        for generated in (PRIVATE / "temp").glob("javashroud-config-*/obfuscation-config.toml"):
+            shutil.copy2(generated, EVIDENCE / "desktop-generated-config.toml")
+        generated_path = EVIDENCE / "desktop-generated-config.toml"
+        if generated_path.exists():
+            generated = tomllib.loads(generated_path.read_text(encoding="utf-8"))
+            actual_passes = [item["id"] for item in generated.get("passes", []) if item.get("enabled", True)]
+            if actual_passes != ["strip-compile-debug-info"]:
+                raise RuntimeError(f"Unexpected GUI-selected passes: {actual_passes}")
+            RESULT["actual_gui_passes"] = actual_passes
+            RESULT["explicit_minimal_profile_preserved"] = generated.get("protectionProfile") == "minimal"
+            RESULT["generated_profile"] = generated.get("protectionProfile", "absent; engine JAR default release-hardened")
+        if not RESULT["explicit_minimal_profile_preserved"]:
+            RESULT["boundaries"].append("The shipped desktop request does not preserve the imported minimal profile. The generated configuration and its strip-only pass list are archived.")
+        verify_execution(input_jar, output_jar, before)
+        RESULT["full_gui_file_flow"] = True
+        RESULT["status"] = "gui-file-flow-passed"
+        exit_code = 0
     except Exception as error:
         RESULT["error"] = str(error)
         (EVIDENCE / "failure.traceback.txt").write_text(traceback.format_exc(), encoding="utf-8")
         RESULT["status"] = "failed"
         if desktop is not None:
             try:
+                uia_snapshot(desktop, "failure-uia")
                 checkpoint(page, desktop, "failure")
             except Exception:
                 pass
