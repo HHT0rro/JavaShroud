@@ -11,6 +11,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 import traceback
@@ -326,20 +327,44 @@ def uia_flow(desktop, input_jar, output_jar, config):
         if any(text in ("任务未完成", "Task not completed") for text in observed):
             uia_snapshot(desktop, "uia-08-failed")
             raise RuntimeError("The real GUI displayed a failed task")
-        if output_jar.exists() and any(text in ("产物已生成", "Output generated") for text in observed):
-            RESULT["gui_result_visible"] = True
+        if output_jar.exists() and any("Engine completed analysis and wrote output jar=" in text for text in observed):
+            RESULT["gui_completion_log_visible"] = True
             break
         time.sleep(0.3)
     save_json("uia-final-text.json", observed)
     uia_snapshot(desktop, "uia-08-result")
-    if not RESULT["gui_result_visible"]:
+    if not RESULT.get("gui_completion_log_visible"):
         raise RuntimeError("The real GUI did not confirm a generated output within 90 seconds")
+    uia_invoke(desktop, r"^工作台$|^Workbench$", "uia-view-completed-result")
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        result_text = [item.window_text() for item in uia_window(desktop).descendants()]
+        if any(text in ("产物已生成", "Output generated") for text in result_text):
+            RESULT["gui_result_visible"] = True
+            break
+        time.sleep(0.3)
+    uia_snapshot(desktop, "uia-09-home-result")
+    if not RESULT["gui_result_visible"]:
+        raise RuntimeError("The completed file was not reflected in the workbench result panel")
     log_path = Path(str(output_jar) + ".log")
     if log_path.exists():
         shutil.copy2(log_path, EVIDENCE / "gui-engine.log")
         text = log_path.read_text(encoding="utf-8", errors="replace")
         RESULT["gui_done_event"] = bool(re.search(r'type\s*=\s*"done"', text))
     action("uia-output-visible", output=str(output_jar), done_in_retained_log=RESULT["gui_done_event"])
+
+
+def retain_generated_configs(stop):
+    while not stop.is_set():
+        for config_path in (PRIVATE / "temp").glob("javashroud-config-*/obfuscation-config.toml"):
+            try:
+                content = config_path.read_text(encoding="utf-8")
+                parsed = tomllib.loads(content)
+                if parsed.get("inputJarPath") and parsed.get("passes"):
+                    (EVIDENCE / "desktop-generated-config.toml").write_text(content, encoding="utf-8")
+            except (OSError, tomllib.TOMLDecodeError):
+                pass
+        stop.wait(0.005)
 
 
 def fixture():
@@ -522,6 +547,9 @@ def main():
         "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "WEBVIEW2_USER_DATA_FOLDER", "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS")})
     desktop = None
     page = None
+    config_stop = threading.Event()
+    config_watcher = threading.Thread(target=retain_generated_configs, args=(config_stop,), daemon=True)
+    config_watcher.start()
     exit_code = 1
     stdout = (EVIDENCE / "desktop.stdout.log").open("wb")
     stderr = (EVIDENCE / "desktop.stderr.log").open("wb")
@@ -582,6 +610,8 @@ def main():
             RESULT["boundaries"].append(str(error))
             exit_code = 0
     finally:
+        config_stop.set()
+        config_watcher.join(timeout=5)
         if desktop is not None:
             track_processes(desktop)
             cleanup = []
@@ -597,8 +627,12 @@ def main():
                     owned_processes.append(process)
                 except (psutil.NoSuchProcess, psutil.AccessDenied) as error:
                     cleanup.append({"pid": process_id, "detail": str(error)})
-            psutil.wait_procs(owned_processes, timeout=10)
+            _, alive = psutil.wait_procs(owned_processes, timeout=10)
             save_json("cleanup-processes.json", cleanup)
+            RESULT["owned_processes_alive_after_cleanup"] = [process.pid for process in alive]
+            if alive:
+                RESULT["status"] = "failed-cleanup"
+                exit_code = 1
             RESULT["desktop_exit_code_after_cleanup"] = desktop.poll()
         stdout.close()
         stderr.close()
