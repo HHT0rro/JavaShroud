@@ -75,7 +75,7 @@ jobs:
             throw "Release tag $tag does not match the checked-out engine version."
           }
           if ($env:VERIFY_ONLY -ne 'true') {
-            git fetch origin "refs/tags/$tag:refs/tags/$tag"
+            git fetch origin "refs/tags/${tag}:refs/tags/${tag}"
             if ($LASTEXITCODE -ne 0) { throw "Could not fetch release tag $tag." }
             $tagSha = (git rev-list -n 1 $tag).Trim()
             if ($tagSha -ne $headSha) {
