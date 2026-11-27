@@ -10,6 +10,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption.APPEND
 import java.nio.file.StandardOpenOption.CREATE
+import java.nio.file.StandardOpenOption.CREATE_NEW
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.UUID
@@ -63,7 +64,11 @@ class ApkAndroidDeviceSmokeTest {
             harness.exercise()
             harness.note("PASS ${scenario.name}")
         } catch (failure: Throwable) {
-            harness.note(failure.stackTraceToString())
+            try {
+                harness.note(failure.stackTraceToString())
+            } catch (diagnosticFailure: Throwable) {
+                failure.addSuppressed(diagnosticFailure)
+            }
             throw failure
         }
     }
@@ -74,6 +79,7 @@ class ApkAndroidDeviceSmokeTest {
     private data class Device(val api: Int, val abi: String, val pageSize: Int)
     private data class NativeTools(val clang: Path, val readelf: Path, val sysroot: Path, val target: String)
     private data class DexInventory(val classCounts: List<Int>, val definedMethods: Int)
+    private data class MarkerObservation(val pid: String, val markers: Map<String, Boolean>)
 
     private class DeviceHarness(private val scenario: Scenario, private val evidence: Path) {
         private val identity = UUID.randomUUID().toString().replace("-", "")
@@ -81,7 +87,8 @@ class ApkAndroidDeviceSmokeTest {
         private val tag = "JS${identity.take(20)}"
         private val windows = System.getProperty("os.name").startsWith("Windows", ignoreCase = true)
         private val jdkBin = Path.of(System.getProperty("java.home"), "bin")
-        private var commandIndex = 0
+        private val diagnostics = AndroidDeviceEvidence(evidence)
+        private var deviceIdentity: Map<String, Any?> = emptyMap()
         private lateinit var serial: String
         private lateinit var sdk: Sdk
         private lateinit var device: Device
@@ -158,7 +165,7 @@ class ApkAndroidDeviceSmokeTest {
             val apiText = adb("device-api", "shell", "getprop", "ro.build.version.sdk").trim()
             val abi = adb("device-abi", "shell", "getprop", "ro.product.cpu.abi").trim()
             val abiList = adb("device-abilist", "shell", "getprop", "ro.product.cpu.abilist").trim()
-            val getconf = recordProcess(adbCommand("shell", "getconf", "PAGE_SIZE"), DEVICE_TIMEOUT)
+            val getconf = diagnostics.record("device-getconf-page-size", adbCommand("shell", "getconf", "PAGE_SIZE"), DEVICE_TIMEOUT)
             val reportedPageSize = getconf.output.trim().toIntOrNull()?.takeIf { getconf.exitCode == 0 && !getconf.timedOut }
             val pageSize = reportedPageSize ?: run {
                 // API21's toolbox does not supply getconf. Read the kernel mapping units there.
@@ -188,6 +195,25 @@ class ApkAndroidDeviceSmokeTest {
                     "Selected device page size differs from JAVASHROUD_ANDROID_EXPECT_PAGE_SIZE",
                 )
             }
+            val boot = diagnostics.capture("device-boot-id", adbCommand("shell", "cat", "/proc/sys/kernel/random/boot_id"))
+            val fingerprint = diagnostics.capture("device-fingerprint", adbCommand("shell", "getprop", "ro.build.fingerprint"))
+            val buildId = diagnostics.capture("device-build-id", adbCommand("shell", "getprop", "ro.build.id"))
+            val maxPageSize = diagnostics.capture("device-max-page-size", adbCommand("shell", "getprop", "ro.product.cpu.pagesize.max"))
+            val provider = diagnostics.capture("device-webview-provider", adbCommand("shell", "dumpsys", "webviewupdate"))
+            val smaps = diagnostics.capture("device-shell-smaps", adbCommand("shell", "cat", "/proc/self/smaps"))
+            deviceIdentity = mapOf(
+                "serial" to serial, "api" to api, "abi" to abi, "abi_list" to abiList,
+                "page_size" to pageSize, "getconf_page_size" to reportedPageSize,
+                "boot_id" to boot?.output?.trim(), "fingerprint" to fingerprint?.output?.trim(),
+                "build_id" to buildId?.output?.trim(), "max_page_size" to maxPageSize?.output?.trim(),
+                "webview_provider" to provider?.output,
+                "smaps_subject" to "adb shell cat /proc/self/smaps",
+                "kernel_page_sizes_kb" to Regex("(?m)^KernelPageSize:\\s+([0-9]+) kB\\s*$")
+                    .findAll(smaps?.output.orEmpty()).map { it.groupValues[1] }.toSet(),
+                "mmu_page_sizes_kb" to Regex("(?m)^MMUPageSize:\\s+([0-9]+) kB\\s*$")
+                    .findAll(smaps?.output.orEmpty()).map { it.groupValues[1] }.toSet(),
+            )
+            diagnostics.append("device.jsonl", deviceIdentity)
             return Device(api, abi, pageSize)
         }
 
@@ -672,10 +698,19 @@ class ApkAndroidDeviceSmokeTest {
 
         private fun exerciseInstalled(apk: Path, label: String) {
             var failure: Throwable? = null
+            val token = UUID.randomUUID().toString()
+            diagnostics.invocationToken = token
+            val started = System.nanoTime()
             try {
+                diagnostics.append("invocations.jsonl", mapOf(
+                    "event" to "begin", "label" to label, "token" to token,
+                    "apk" to apk.toString(), "apk_sha256" to sha256(apk), "package" to packageName,
+                    "host_utc" to Instant.now().toString(), "device" to deviceIdentity,
+                ))
                 val install = adb("$label-install", "install", "--no-streaming", "-t", apk.toString())
                 assertTrue(install.lineSequence().any { it.trim() == "Success" }, "Fixture installation failed: $install")
-                val token = UUID.randomUUID().toString()
+                diagnostics.capture("$label-launch-device-epoch", adbCommand("shell", "date", "+%s"))
+                diagnostics.capture("$label-launch-boot-id", adbCommand("shell", "cat", "/proc/sys/kernel/random/boot_id"))
                 val launch = adb("$label-start", "shell", "am", "start", "-W", "-n", "$packageName/.SmokeActivity", "--es", "invocation", token)
                 assertTrue(launch.lineSequence().any { it.trim() == "Status: ok" }, "Fixture launch failed: $launch")
                 val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
@@ -685,33 +720,42 @@ class ApkAndroidDeviceSmokeTest {
                 if (device.api >= 28) expectedMarkers += "componentFactory=created"
                 var observed = false
                 while (System.nanoTime() < deadline) {
-                    val log = adb("$label-logcat", "logcat", "-d", "-v", "brief", "-s", "$tag:I", "*:S")
-                    val lines = log.lineSequence().filter { it.contains("token=$token ") }.toList()
-                    if (expectedMarkers.all { marker -> lines.any { it.endsWith(" $marker") } }) {
+                    val markers = diagnostics.sample("$label-markers") {
+                        val log = adb("$label-logcat", "logcat", "-d", "-v", "brief", "-s", "$tag:I", "*:S")
+                        val lines = log.lineSequence().filter { it.contains("token=$token ") }.toList()
+                        MarkerObservation(
+                            packagePid("$label-sample-pid"),
+                            expectedMarkers.associateWith { marker -> lines.any { it.endsWith(" $marker") } },
+                        )
+                    }
+                    if (markers.markers.values.all { it }) {
                         observed = true
                         break
                     }
                     Thread.sleep(500)
                 }
                 assertTrue(observed, "Expected ${expectedMarkers.joinToString(" ")} for $label; evidence=$evidence")
-                val firstPid = packagePid("$label-first-pid")
+                val firstPid = diagnostics.sample("$label-first-pid") { packagePid("$label-first-pid") }
                 assertTrue(firstPid.matches(Regex("[0-9]+")), "Fixture process is missing: $firstPid")
+                diagnostics.append("invocations.jsonl", mapOf(
+                    "event" to "first_pid", "token" to token, "pid" to firstPid,
+                    "host_utc" to Instant.now().toString(),
+                ))
+                diagnostics.capture("$label-process-stat", adbCommand("shell", "cat", "/proc/$firstPid/stat"))
                 Thread.sleep(2_000)
-                assertEquals(firstPid, packagePid("$label-later-pid"), "Fixture process did not survive")
+                assertEquals(firstPid, diagnostics.sample("$label-later-pid") { packagePid("$label-later-pid") }, "Fixture process did not survive")
                 val runtime = adb("$label-process-logcat", "logcat", "-d", "-v", "threadtime", "-s", "AndroidRuntime:E", "*:S")
                 assertTrue(!runtime.contains("Process: $packageName, PID: $firstPid"), "Fixture crashed: $runtime")
                 note("$label runtime PASS ${expectedMarkers.joinToString(" ")} pid=$firstPid token=$token")
             } catch (error: Throwable) {
                 failure = error
-                // Capture native tombstones before uninstall removes the package identity.
-                // A missing PID can precede the normal AndroidRuntime log inspection.
-                try {
-                    adb("$label-failure-crash-logcat", "logcat", "-b", "crash", "-d", "-v", "threadtime")
-                    adb("$label-failure-exit-info", "shell", "dumpsys", "activity", "exit-info", packageName)
-                } catch (diagnosticFailure: Throwable) {
-                    error.addSuppressed(diagnosticFailure)
-                    note("Failure diagnostics: ${diagnosticFailure.stackTraceToString()}")
-                }
+                diagnostics.captureFailure(error, listOf(
+                    "$label-failure-crash-logcat" to adbCommand("logcat", "-b", "crash", "-d", "-v", "epoch"),
+                    "$label-failure-exit-info" to adbCommand("shell", "dumpsys", "activity", "exit-info", packageName),
+                    "$label-failure-all-logcat" to adbCommand("logcat", "-b", "all", "-d", "-v", "epoch"),
+                    "$label-failure-native-dropbox" to adbCommand("shell", "dumpsys", "dropbox", "--print", "data_app_native_crash"),
+                    "$label-failure-tombstone-dropbox" to adbCommand("shell", "dumpsys", "dropbox", "--print", "SYSTEM_TOMBSTONE"),
+                ))
                 throw error
             } finally {
                 // Timeout interruption must still allow bounded cleanup of this unique package.
@@ -720,11 +764,30 @@ class ApkAndroidDeviceSmokeTest {
                     val uninstall = adb("$label-uninstall", "uninstall", packageName)
                     assertTrue(uninstall.lineSequence().any { it.trim() == "Success" }, "Fixture cleanup failed: $uninstall")
                 } catch (cleanup: Throwable) {
-                    if (failure == null) throw cleanup
+                    if (failure == null) {
+                        failure = cleanup
+                        throw cleanup
+                    }
                     failure.addSuppressed(cleanup)
-                    note("Cleanup failure: ${cleanup.stackTraceToString()}")
+                    try {
+                        note("Cleanup failure: ${cleanup.stackTraceToString()}")
+                    } catch (diagnosticFailure: Throwable) {
+                        failure.addSuppressed(diagnosticFailure)
+                    }
                 } finally {
-                    if (interrupted) Thread.currentThread().interrupt()
+                    try {
+                        diagnostics.append("invocations.jsonl", mapOf(
+                            "event" to "end", "token" to token, "host_utc" to Instant.now().toString(),
+                            "elapsed_ms" to TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started),
+                            "failure" to failure?.toString(),
+                        ))
+                    } catch (diagnosticFailure: Throwable) {
+                        if (failure == null) throw diagnosticFailure
+                        failure.addSuppressed(diagnosticFailure)
+                    } finally {
+                        diagnostics.invocationToken = null
+                        if (interrupted) Thread.currentThread().interrupt()
+                    }
                 }
             }
         }
@@ -744,38 +807,13 @@ class ApkAndroidDeviceSmokeTest {
 
         private fun command(label: String, arguments: List<String>, timeout: Long = DEVICE_TIMEOUT): ApkProcessSupport.ProcessResult {
             note("$label")
-            val result = recordProcess(arguments, timeout)
+            val result = diagnostics.record(label, arguments, timeout)
             ApkProcessSupport.requireSuccess(label, arguments, result)
             return result
         }
 
-        private fun recordProcess(arguments: List<String>, timeout: Long): ApkProcessSupport.ProcessResult {
-            val prefix = (++commandIndex).toString().padStart(4, '0')
-            val output = evidence.resolve("$prefix-output.log")
-            Files.writeString(evidence.resolve("$prefix-command.txt"), arguments.joinToString("\n") + "\ntimeoutMillis=$timeout\n")
-            val process = ProcessBuilder(arguments).directory(evidence.toFile()).redirectErrorStream(true).redirectOutput(output.toFile()).start()
-            val started = System.nanoTime()
-            try {
-                val finished = process.waitFor(timeout, TimeUnit.MILLISECONDS)
-                if (!finished) terminate(process)
-                val result = ApkProcessSupport.ProcessResult(
-                    if (finished) process.exitValue() else -1, Files.readString(output), !finished,
-                )
-                val elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started)
-                note("command=$prefix exit=${result.exitCode} timedOut=${result.timedOut} elapsedMillis=$elapsed")
-                return result
-            } catch (interrupted: InterruptedException) {
-                terminate(process)
-                Thread.currentThread().interrupt()
-                throw interrupted
-            }
-        }
-
-        private fun terminate(process: Process) {
-            process.descendants().use { children -> children.forEach { it.destroyForcibly() } }
-            process.destroyForcibly()
-            process.waitFor(5, TimeUnit.SECONDS)
-        }
+        private fun recordProcess(arguments: List<String>, timeout: Long): ApkProcessSupport.ProcessResult =
+            diagnostics.record("tool", arguments, timeout)
 
         private fun versionedDirectories(root: Path): List<Path> {
             require(Files.isDirectory(root)) { "Missing SDK directory: $root" }
@@ -814,5 +852,125 @@ class ApkAndroidDeviceSmokeTest {
             const val DEVICE_TIMEOUT = 60_000L
             const val TEST_PASSWORD = "owned-smoke-test"
         }
+    }
+}
+
+/** Retains numbered raw command output and its invocation/sample identity for the owned fixtures. */
+internal class AndroidDeviceEvidence(private val directory: Path) {
+    private val mapper = ObjectMapper()
+    private var commandIndex = 0
+    private var sampleIndex = 0
+    private var activeSample: Int? = null
+    var invocationToken: String? = null
+
+    fun append(file: String, value: Any) {
+        Files.writeString(directory.resolve(file), mapper.writeValueAsString(value) + "\n", CREATE, APPEND)
+    }
+
+    fun <T> sample(label: String, observe: () -> T): T {
+        val ordinal = ++sampleIndex
+        activeSample = ordinal
+        val firstCommand = commandIndex + 1
+        val startedUtc = Instant.now().toString()
+        val started = System.nanoTime()
+        var observation: T? = null
+        var failure: Throwable? = null
+        try {
+            return observe().also { observation = it }
+        } catch (error: Throwable) {
+            failure = error
+            throw error
+        } finally {
+            try {
+                append("samples.jsonl", mapOf(
+                    "sample" to ordinal, "label" to label, "token" to invocationToken,
+                    "started_utc" to startedUtc, "finished_utc" to Instant.now().toString(),
+                    "elapsed_ms" to TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started),
+                    "first_command" to firstCommand, "last_command" to commandIndex,
+                    "observation" to observation, "error" to failure?.toString(),
+                ))
+            } catch (error: Throwable) {
+                if (failure == null) throw error
+                failure.addSuppressed(error)
+            } finally {
+                activeSample = null
+            }
+        }
+    }
+
+    fun capture(label: String, arguments: List<String>, failure: Throwable? = null): ApkProcessSupport.ProcessResult? {
+        return try {
+            record(label, arguments, 15_000L).also { ApkProcessSupport.requireSuccess(label, arguments, it) }
+        } catch (error: Throwable) {
+            failure?.addSuppressed(error)
+            null
+        }
+    }
+
+    fun captureFailure(failure: Throwable, commands: List<Pair<String, List<String>>>) {
+        var interrupted = Thread.interrupted()
+        try {
+            for ((label, arguments) in commands) {
+                capture(label, arguments, failure)
+                interrupted = Thread.interrupted() || interrupted
+            }
+        } finally {
+            if (interrupted) Thread.currentThread().interrupt()
+        }
+    }
+
+    fun record(label: String, arguments: List<String>, timeout: Long): ApkProcessSupport.ProcessResult {
+        val sequence = ++commandIndex
+        val prefix = sequence.toString().padStart(4, '0')
+        val output = directory.resolve("$prefix-output.log")
+        val command = directory.resolve("$prefix-command.txt")
+        val startedUtc = Instant.now().toString()
+        val started = System.nanoTime()
+        var process: Process? = null
+        var result: ApkProcessSupport.ProcessResult? = null
+        var failure: Throwable? = null
+        try {
+            Files.writeString(command, arguments.joinToString("\n") + "\ntimeoutMillis=$timeout\n", CREATE_NEW)
+            Files.createFile(output)
+            process = ProcessBuilder(arguments).directory(directory.toFile()).redirectErrorStream(true).redirectOutput(output.toFile()).start()
+            val finished = process.waitFor(timeout, TimeUnit.MILLISECONDS)
+            if (!finished) terminate(process)
+            result = ApkProcessSupport.ProcessResult(
+                if (finished) process.exitValue() else -1, Files.readString(output), !finished,
+            )
+            return result
+        } catch (error: Throwable) {
+            failure = error
+            if (process?.isAlive == true) {
+                try { terminate(process) } catch (termination: Throwable) { error.addSuppressed(termination) }
+            }
+            if (error is InterruptedException) Thread.currentThread().interrupt()
+            throw error
+        } finally {
+            try {
+                append("commands.jsonl", mapOf(
+                    "sequence" to sequence, "label" to label, "token" to invocationToken, "sample" to activeSample,
+                    "argv" to arguments, "timeout_ms" to timeout, "started_utc" to startedUtc,
+                    "finished_utc" to Instant.now().toString(),
+                    "elapsed_ms" to TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started),
+                    "exit_code" to result?.exitCode, "timed_out" to result?.timedOut,
+                    "error" to failure?.toString(), "command_file" to command.fileName.toString(),
+                    "output" to output.fileName.toString(),
+                    "output_bytes" to output.takeIf { Files.isRegularFile(it) }?.let { Files.size(it) },
+                    "output_sha256" to output.takeIf { Files.isRegularFile(it) }?.let {
+                        MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(it)).joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+                    },
+                ))
+            } catch (error: Throwable) {
+                if (failure == null) throw error
+                failure.addSuppressed(error)
+            }
+        }
+    }
+
+    private fun terminate(process: Process) {
+        process.descendants().use { children -> children.forEach { it.destroyForcibly() } }
+        process.destroyForcibly()
+        process.waitFor(5, TimeUnit.SECONDS)
     }
 }
