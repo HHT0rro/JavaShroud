@@ -41,7 +41,7 @@ JavaShroud 是一套 Java 混淆与加固工具链：Kotlin 引擎做字节码�
 | Native 加壳 | `nativeshroud`：Xenolith 自动加壳（`fast` / `standard` / `max` 档位）、预打包镜像挂载、桌面加壳交接 |
 | 桌面工作流 | Wails + Vue 界面、配置编辑、类树与方法选择、任务运行与事件日志 |
 
-引擎注册 24 个 pass。`-schema` 报告的默认 pipeline 只含 `strip-compile-debug-info`；配置里写 `protectionProfile = "release-hardened"` 且 `passes` 为空时，引擎展开 13 个 pass 的加固流水线：
+引擎注册 24 个 pass。`-schema` 报告的默认 pipeline 只含 `strip-compile-debug-info`。JAR 命令行模式默认使用 `release-hardened` 配置档，空 `passes` 会展开下列 13 个 pass。需要指定流水线时，在配置中明确选择 `protectionProfile = "minimal"` 并列出所需 pass。
 
 ```text
 rename-packages, rename-classes, rename-methods, rename-fields, string-encryption,
@@ -242,6 +242,7 @@ java -jar build\core-engine\libs\obfuscator-engine-0.31.1.jar -gc --apply
 ```toml
 inputJarPath = "app.jar"
 outputJarPath = "app-obf.jar"
+protectionProfile = "minimal"
 allowOptInPasses = true
 
 [[passes]]

@@ -41,7 +41,7 @@ Beyond bytecode transformation and the Native runtime, the compiled native image
 | Native packing | `nativeshroud`: Xenolith auto packing (`fast` / `standard` / `max` profiles), pre-packed image mounting, desktop packing handoff |
 | Desktop workflow | Wails + Vue UI, configuration editing, class tree and method selection, task runs and event log |
 
-The engine registers 24 passes. The default pipeline reported by `-schema` contains only `strip-compile-debug-info`. When the config sets `protectionProfile = "release-hardened"` with an empty `passes` list, the engine expands a 13-pass hardened pipeline:
+The engine registers 24 passes. The default pipeline reported by `-schema` contains only `strip-compile-debug-info`. JAR CLI mode defaults to the `release-hardened` profile, which expands an empty `passes` list into the following 13 passes. To select a pipeline explicitly, set `protectionProfile = "minimal"` and list the required passes.
 
 ```text
 rename-packages, rename-classes, rename-methods, rename-fields, string-encryption,
@@ -242,6 +242,7 @@ Configuration example (renaming + control-flow flattening; opt-in passes require
 ```toml
 inputJarPath = "app.jar"
 outputJarPath = "app-obf.jar"
+protectionProfile = "minimal"
 allowOptInPasses = true
 
 [[passes]]
