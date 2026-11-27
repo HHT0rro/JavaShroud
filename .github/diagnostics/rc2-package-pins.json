@@ -1,0 +1,10 @@
+{
+  "release_run_id": 46074714725,
+  "artifact_id": 15235036027,
+  "source_sha": "628e08184179ab56d9b8dead90399fba2b925b22",
+  "artifact_sha256": "b6d447eac5e3dc69fdaeee308891d9363b82fcfcbb0c928b7752e5d6fecdb916",
+  "package_sha256": "a5bf9ee5b5e928711d2963befc52bf86b9d381364b7a1c69acbace008282f67b",
+  "desktop_sha256": "34330b41c3536772681702b377915cb01d376296900bde097229a33766a0ce26",
+  "engine_sha256": "8365f971f736aec29fc170ad6b3564135f9397b3172fbf5fbf57a28a9235ae20",
+  "xenolith_sha256": "3cf8d3a55a538d6aad2c42a1eedb6c646395d8d001caa64b6cf6d9ecc5f84eab"
+}
