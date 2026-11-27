@@ -165,6 +165,8 @@ Qp runtime 是 Rust-only 边界，源码随引擎分发在 `core-engine/src/main
 APK 中的 `META-INF/services/` 登记文件保持原字节；它引用的服务接口和实现类如果在 APK 内，也保留原类名，以便 `ServiceLoader` 按原登记发现它们。
 APK 内已有的 `j$` Java API 兼容类保留原名，与应用类分开生成 DEX，两组仍发布到同一个 APK。
 
+当 DEX 包含可识别的 Android 框架接口占位类时，其实现类的公开实例方法名会保留，以兼容 SDK 方法声明不在引擎 classpath 中的系统回调；实现类仍可重命名。
+
 DEX 转换出现方法异常、异常堆栈或错误报告时，引擎会报告转换失败并拒绝发布，即使 dex2jar 返回 0。每次转换使用独立暂存路径，失败会保留已有 APK 和附属文件，详细原因可通过 `--log-file` 查看。
 
 捆绑 dex2jar 2.4.28 的长字符串修复随引擎构建为 Java 8 JAR，并通过工具清单认证后加载。修复按类文件 modified UTF-8 的实际字节上限拆分超长常量，保留参数、相邻寄存器和字符串驻留语义。自定义 `apk.dex2jarDirPath` 也使用这份认证修复，用户提供的工具目录只读。修复来源和修改范围见 `THIRD_PARTY_NOTICES.md`。

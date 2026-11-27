@@ -69,9 +69,11 @@ object ApkKeepRuleSynthesis {
         val internalName: String,
         val superName: String?,
         val interfaces: List<String>,
+        val isInterface: Boolean,
         val hasNativeMethod: Boolean,
         val fields: List<Pair<String, String>>,
         val methods: List<Pair<String, String>>,
+        val publicVirtualMethods: List<Pair<String, String>>,
         val javascriptInterfaceMethods: List<Pair<String, String>>,
         val isAndroidFrameworkPlaceholder: Boolean,
     )
@@ -83,9 +85,11 @@ object ApkKeepRuleSynthesis {
         lateinit var internalName: String
         var superName: String? = null
         val interfaces = mutableListOf<String>()
+        var isInterface = false
         var hasNativeMethod = false
         val fields = mutableListOf<Pair<String, String>>()
         val methods = mutableListOf<Pair<String, String>>()
+        val publicVirtualMethods = mutableListOf<Pair<String, String>>()
         val javascriptInterfaceMethods = mutableListOf<Pair<String, String>>()
 
         val reader = ClassReader(bytes)
@@ -101,6 +105,7 @@ object ApkKeepRuleSynthesis {
                 internalName = name ?: ""
                 superName = superClass
                 interfaces += implemented.orEmpty()
+                isInterface = access and Opcodes.ACC_INTERFACE != 0
             }
 
             override fun visitField(
@@ -124,6 +129,13 @@ object ApkKeepRuleSynthesis {
                 if (name == null || descriptor == null) return null
                 methods += name to descriptor
                 if (access and Opcodes.ACC_NATIVE != 0) hasNativeMethod = true
+                if (
+                    name.first() != '<' &&
+                    access and Opcodes.ACC_PUBLIC != 0 &&
+                    access and (Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC) == 0
+                ) {
+                    publicVirtualMethods += name to descriptor
+                }
                 return object : MethodVisitor(Opcodes.ASM9) {
                     override fun visitAnnotation(annotationDescriptor: String?, visible: Boolean): org.objectweb.asm.AnnotationVisitor? {
                         if (annotationDescriptor == JAVASCRIPT_INTERFACE_DESC) {
@@ -139,9 +151,11 @@ object ApkKeepRuleSynthesis {
             internalName = internalName,
             superName = superName,
             interfaces = interfaces.toList(),
+            isInterface = isInterface,
             hasNativeMethod = hasNativeMethod,
             fields = fields.toList(),
             methods = methods.toList(),
+            publicVirtualMethods = publicVirtualMethods.toList(),
             javascriptInterfaceMethods = javascriptInterfaceMethods.toList(),
             isAndroidFrameworkPlaceholder = internalName.startsWith("android/") && fields.isEmpty() &&
                 methods.singleOrNull() == ("<clinit>" to "()V") && hasMissingFrameworkTypeInitializer(reader),
@@ -187,6 +201,7 @@ object ApkKeepRuleSynthesis {
         }
 
         classKeeps += externalSignatureClasses(mergedClassJarPath, loaded)
+        memberKeeps += frameworkInterfaceCallbackKeeps(loaded)
 
         // 1. Manifest components (intersected with actually loaded classes).
         val manifestHits = manifestComponentClasses.intersect(loadedNames)
@@ -286,7 +301,7 @@ object ApkKeepRuleSynthesis {
             .distinctBy { it.selector }
             .map { keep ->
                 val descriptorPattern = when (keep.reason) {
-                    "parcelable-creator", "javascript-interface" -> "*"
+                    "parcelable-creator", "javascript-interface", "android-framework-interface-callback" -> "*"
                     else -> keep.descriptor
                 }
                 RuleSpec(target = "$WILDCARD_OWNER#${keep.name}:$descriptorPattern", action = "exclude")
@@ -308,6 +323,42 @@ object ApkKeepRuleSynthesis {
     private fun normalizePrefix(prefix: String): String {
         val slash = prefix.replace('.', '/')
         return if (slash.endsWith("/*")) slash else "$slash/*"
+    }
+
+    private fun frameworkInterfaceCallbackKeeps(loaded: List<LoadedClassInfo>): List<ApkMemberKeep> {
+        val byName = loaded.associateBy { it.internalName }
+        val frameworkInterfaces = loaded.asSequence()
+            .filter { it.isInterface && it.isAndroidFrameworkPlaceholder }
+            .map { it.internalName }
+            .toSet()
+        if (frameworkInterfaces.isEmpty()) return emptyList()
+
+        fun implementsFrameworkInterface(name: String, visited: MutableSet<String>): Boolean {
+            if (!visited.add(name)) return false
+            val info = byName[name] ?: return false
+            val inheritedInterface = info.interfaces.any { interfaceName ->
+                interfaceName in frameworkInterfaces || implementsFrameworkInterface(interfaceName, visited)
+            }
+            return inheritedInterface ||
+                (info.superName?.let { implementsFrameworkInterface(it, visited) } ?: false)
+        }
+
+        return loaded.asSequence()
+            .filterNot { it.isInterface || it.isAndroidFrameworkPlaceholder }
+            .filter { implementsFrameworkInterface(it.internalName, mutableSetOf()) }
+            .flatMap { info ->
+                info.publicVirtualMethods.asSequence().map { (name, descriptor) ->
+                    ApkMemberKeep(
+                        owner = info.internalName,
+                        name = name,
+                        descriptor = descriptor,
+                        kind = "method",
+                        reason = "android-framework-interface-callback",
+                    )
+                }
+            }
+            .distinctBy { it.selector }
+            .toList()
     }
 
     private fun externalSignatureClasses(

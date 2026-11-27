@@ -1,12 +1,16 @@
 package io.github.hht0rro.javashroud.apk
 
 import io.github.hht0rro.javashroud.bytecode.remapClasses
+import io.github.hht0rro.javashroud.bytecode.remapMethods
+import io.github.hht0rro.javashroud.naming.MemberKey
+import io.github.hht0rro.javashroud.naming.MemberRename
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.jar.JarOutputStream
 import java.util.zip.ZipEntry
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.MethodVisitor
@@ -97,6 +101,125 @@ class ApkKeepRuleSynthesisTest {
         assertEquals(42, entry.getMethod("probe", api).invoke(null, api.getConstructor().newInstance()))
         assertEquals(setOf(parser, pullParser, attributes, fieldType), plan.excludedClassNames)
         assertTrue(unrelated in mapping)
+    }
+
+    @Test
+    fun androidFrameworkInterfaceCallbacksKeepTheirRuntimeNames() {
+        val interfaceName = "android/media/AudioManager\$OnModeChangedListener"
+        val listenerName = "fixture/AudioModeListener"
+        val relocatedListenerName = "moved/AudioModeListener"
+
+        val placeholderInterface = ClassWriter(0).apply {
+            visit(
+                Opcodes.V1_8,
+                Opcodes.ACC_PUBLIC or Opcodes.ACC_INTERFACE or Opcodes.ACC_ABSTRACT or Opcodes.ACC_SYNTHETIC,
+                interfaceName,
+                null,
+                "java/lang/Object",
+                null,
+            )
+            visitMethod(Opcodes.ACC_STATIC or Opcodes.ACC_SYNTHETIC, "<clinit>", "()V", null, null).apply {
+                visitCode()
+                visitTypeInsn(Opcodes.NEW, "java/lang/NoClassDefFoundError")
+                visitInsn(Opcodes.DUP)
+                visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/NoClassDefFoundError", "<init>", "()V", false)
+                visitInsn(Opcodes.ATHROW)
+                visitMaxs(2, 0)
+                visitEnd()
+            }
+            visitEnd()
+        }.toByteArray()
+        val listener = ClassWriter(ClassWriter.COMPUTE_MAXS).apply {
+            visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC, listenerName, null, "java/lang/Object", arrayOf(interfaceName))
+            visitField(Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC, "observedMode", "I", null, null).visitEnd()
+            visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null).apply {
+                visitCode()
+                visitVarInsn(Opcodes.ALOAD, 0)
+                visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+                visitInsn(Opcodes.RETURN)
+                visitMaxs(0, 0)
+                visitEnd()
+            }
+            visitMethod(Opcodes.ACC_PUBLIC, "onModeChanged", "(I)V", null, null).apply {
+                visitCode()
+                visitVarInsn(Opcodes.ILOAD, 1)
+                visitFieldInsn(Opcodes.PUTSTATIC, listenerName, "observedMode", "I")
+                visitInsn(Opcodes.RETURN)
+                visitMaxs(0, 0)
+                visitEnd()
+            }
+            visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "getObservedMode", "()I", null, null).apply {
+                visitCode()
+                visitFieldInsn(Opcodes.GETSTATIC, listenerName, "observedMode", "I")
+                visitInsn(Opcodes.IRETURN)
+                visitMaxs(0, 0)
+                visitEnd()
+            }
+            visitMethod(Opcodes.ACC_PRIVATE, "appHelper", "()V", null, null).apply {
+                visitCode()
+                visitInsn(Opcodes.RETURN)
+                visitMaxs(0, 0)
+                visitEnd()
+            }
+            visitEnd()
+        }.toByteArray()
+        val plan = ApkKeepRuleSynthesis.synthesize(
+            jarOf(
+                listOf(
+                    "$interfaceName.class" to placeholderInterface,
+                    "$listenerName.class" to listener,
+                ),
+            ),
+            emptySet(),
+            emptySet(),
+            emptySet(),
+            emptyList(),
+        )
+
+        val callbackKeep = plan.memberKeeps.singleOrNull {
+            it.owner == listenerName && it.name == "onModeChanged" && it.descriptor == "(I)V"
+        }
+        assertTrue(callbackKeep != null, "the Android callback signature must be kept")
+        assertFalse(listenerName in plan.excludedClassNames, "the app listener class can still be relocated")
+        assertTrue(plan.rules.any { it.action == "exclude" && it.target == "*#onModeChanged:*" })
+
+        val methodRenameMap = mapOf(
+            MemberKey(relocatedListenerName, "appHelper", "()V") to MemberRename(
+                owner = relocatedListenerName,
+                originalName = "appHelper",
+                descriptor = "()V",
+                renamedName = "mAppHelper",
+            ),
+        )
+        val relocatedBytes = remapClasses(listener, mapOf(listenerName to relocatedListenerName))
+        val remappedListener = remapMethods(relocatedBytes, methodRenameMap)
+        val validationJar = jarOf(
+            listOf(
+                "$interfaceName.class" to placeholderInterface,
+                "$relocatedListenerName.class" to remappedListener,
+            ),
+        )
+        ApkValidation.validateKeepRetention(validationJar, plan)
+        val runtimeInterface = ClassWriter(0).apply {
+            visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC or Opcodes.ACC_INTERFACE or Opcodes.ACC_ABSTRACT, interfaceName, null, "java/lang/Object", null)
+            visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_ABSTRACT, "onModeChanged", "(I)V", null, null).visitEnd()
+            visitEnd()
+        }.toByteArray()
+        val definitions = mapOf(interfaceName to runtimeInterface, relocatedListenerName to remappedListener)
+        val loader = object : ClassLoader(null) {
+            override fun findClass(name: String): Class<*> {
+                val bytes = definitions[name.replace('.', '/')] ?: throw ClassNotFoundException(name)
+                return defineClass(name, bytes, 0, bytes.size)
+            }
+        }
+        val api = loader.loadClass(interfaceName.replace('/', '.'))
+        val listenerClass = loader.loadClass(relocatedListenerName.replace('/', '.'))
+        val instance = listenerClass.getConstructor().newInstance()
+        api.getMethod("onModeChanged", Int::class.javaPrimitiveType).invoke(instance, 42)
+
+        assertEquals(42, listenerClass.getMethod("getObservedMode").invoke(null))
+        assertTrue(listenerClass.declaredMethods.any { it.name == "mAppHelper" })
+        assertFalse(listenerClass.declaredMethods.any { it.name == "appHelper" })
     }
 
     private fun parcelableClass(internalName: String): ByteArray {

@@ -176,6 +176,8 @@ The two approaches can coexist; in JavaShroud the Native layer is part of a virt
 The APK retains the exact bytes of `META-INF/services/` files and the original names of any service interfaces and providers they reference within the APK, so `ServiceLoader` can still find them.
 Bundled `j$` Java API compatibility classes retain their names. They compile into separate DEX files within the same APK.
 
+When DEX contains a recognized Android framework interface placeholder, APK keep synthesis preserves public instance method names on its implementors so Android can dispatch callbacks whose SDK method declarations are absent from the engine classpath. Implementing classes remain eligible for relocation.
+
 Method conversion exceptions, exception stacks, or error reports cause the engine to reject publication, including when dex2jar returns zero. Each conversion uses private staging paths. A conversion failure preserves the existing APK and sidecars, and `--log-file` records the diagnostics.
 
 The engine builds a Java 8 repair JAR for bundled dex2jar 2.4.28 and authenticates it through the tool manifest before loading. The repair splits oversized constants at the classfile modified UTF-8 byte limit while preserving arguments, adjacent registers, and string interning. A custom `apk.dex2jarDirPath` also uses this authenticated repair, with read-only access to the supplied tool directory. Source attribution and modifications appear in `THIRD_PARTY_NOTICES.md`.

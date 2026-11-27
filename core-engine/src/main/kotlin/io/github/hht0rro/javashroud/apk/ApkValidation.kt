@@ -133,7 +133,7 @@ object ApkValidation {
             }
             when (keep.reason) {
                 "serialization-hook", "layout-on-click" -> (scan.methods["${keep.name}:${keep.descriptor}"] ?: 0) <= 0
-                "parcelable-creator", "serial-version-uid", "javascript-interface" -> {
+                "parcelable-creator", "serial-version-uid", "javascript-interface", "android-framework-interface-callback" -> {
                     val count = if (keep.kind == "field") scan.fieldNames[keep.name] else scan.methodNames[keep.name]
                     (count ?: 0) <= 0
                 }
