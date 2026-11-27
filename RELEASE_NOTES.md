@@ -1,3 +1,21 @@
+# JavaShroud v0.31.2-rc.3
+
+## 中文
+
+- Windows Native 检查每次枚举当前进程模块后，通过进程内模块 API 读取路径。保留现有匹配条件及检查频率，并覆盖缓冲边界、Unicode、长路径、失效句柄和并发装卸的回归。
+- 每次成功 JVMTI GetEnv 创建的环境由所属调用同步释放，缺失函数或释放错误通过桥接异常报告。真实 JDK17/21 各60,000次所有权检查中，独立控制环境持续有效。
+- Android 自有设备夹具追加编号命令、invocation 与 sample JSONL，绑定 APK 摘要、token、boot_id、WebView provider、PID 和原始输出摘要。失败时逐项收集 crash、exit-info、完整日志及 DropBox，保留诊断失败和原始异常。
+- 完整 Calc 10,000 次循环在 Native 候选两轮观察中返回正确结果。JDK17为1,555/1,603ms，JDK21为2,369/2,227ms，相对3倍预算仍失败。独立随机产物及宿主负载绑定各自计时记录。
+- 完整集成 CI 和 Linux JVMTI 实际运行结果按候选提交登记。ARM实机、ARM16KiB、API35 WebView间歇崩溃归因及本机火绒厂商处置继续保留未决状态。
+
+## English
+
+- Windows Native checks enumerate current-process modules on each sweep and query paths through the in-process module API. Regressions cover the existing predicates, buffer boundaries, Unicode, long paths, invalid handles and concurrent loading and unloading.
+- Each environment created by a successful JVMTI GetEnv call is disposed synchronously by its owner. Missing functions and disposal errors propagate through bridge exceptions. Independent control environments stayed valid during60,000 ownership checks on each of JDK17 and JDK21.
+- Owned Android fixtures append numbered command, invocation and sample JSONL records. Evidence binds APK digests, tokens, boot IDs, WebView providers, PIDs and raw output hashes. Failure diagnostics independently retain crash buffers, exit information, full logs and DropBox results while preserving the original exception.
+- The complete10,000-loop Calc returned correct results in two Native candidate rounds. Observed protected times were1,555/1,603ms onJDK17 and2,369/2,227ms onJDK21. The relative3x budget remains failed. Each timing record retains its randomized artifact and host load identity.
+- Full integrated CI and actual Linux JVMTI results are recorded against the candidate commit. ARM hardware, ARM16KiB execution, API35 WebView crash attribution and local Huorong vendor disposition retain their pending status.
+
 # JavaShroud v0.31.2-rc.2
 
 ## 中文

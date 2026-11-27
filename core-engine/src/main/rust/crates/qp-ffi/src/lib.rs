@@ -3683,9 +3683,8 @@ mod jni_bridge {
             path.fill(0);
             // The enumerated modules belong to this process. Query the loader
             // directly on every sweep, including while other threads unload DLLs.
-            let written = unsafe {
-                GetModuleFileNameW(module, path.as_mut_ptr(), path.len() as u32)
-            };
+            let written =
+                unsafe { GetModuleFileNameW(module, path.as_mut_ptr(), path.len() as u32) };
             if written == 0 {
                 continue;
             }
