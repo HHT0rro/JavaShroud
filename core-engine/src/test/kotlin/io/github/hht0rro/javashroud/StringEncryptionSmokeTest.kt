@@ -283,7 +283,7 @@ class StringEncryptionSmokeTest {
 
     private fun buildReflectiveLookupClassWithExtraLiteral(): ByteArray {
         val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
-        cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "ReflectiveLookup", null, "java/lang/Object", null)
+        cw.visit(testClassfileVersion(), Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "ReflectiveLookup", null, "java/lang/Object", null)
 
         val init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
         init.visitCode()
@@ -324,7 +324,7 @@ class StringEncryptionSmokeTest {
 
     private fun buildLoopStringClass(): ByteArray {
         val cw = ClassWriter(ClassWriter.COMPUTE_FRAMES or ClassWriter.COMPUTE_MAXS)
-        cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "LoopStringClass", null, "java/lang/Object", null)
+        cw.visit(testClassfileVersion(), Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "LoopStringClass", null, "java/lang/Object", null)
 
         val method = cw.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "runLoop", "()V", null, null)
         val loop = org.objectweb.asm.Label()
@@ -351,7 +351,7 @@ class StringEncryptionSmokeTest {
 
     private fun buildTestClassWithStrings(vararg strings: String): ByteArray {
         val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
-        cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "TestStringClass", null, "java/lang/Object", null)
+        cw.visit(testClassfileVersion(), Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "TestStringClass", null, "java/lang/Object", null)
 
         val init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
         init.visitCode()

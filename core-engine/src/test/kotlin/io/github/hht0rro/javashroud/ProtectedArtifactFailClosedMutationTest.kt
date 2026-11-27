@@ -42,12 +42,16 @@ class ProtectedArtifactFailClosedMutationTest {
         val calls = wrapper.instructions.asSequence().filterIsInstance<MethodInsnNode>().toList()
         val requestCheck = calls.indexOfFirst { it.owner == PROTECTION_HELPER_INTERNAL_NAME && it.name == "requireQpPageRequest" }
         val readinessCheck = calls.indexOfFirst { it.owner == PROTECTION_HELPER_INTERNAL_NAME && it.name == "ensureQpNativeKernel" }
-        val nativeTerminal = calls.indexOfFirst { it.owner == PROTECTION_HELPER_INTERNAL_NAME && it.name == "nativeExecuteVmPage" }
+        val defenseCheck = calls.indexOfFirst { it.owner == PROTECTION_HELPER_INTERNAL_NAME && it.name == "requireDefenseForProtectedPath" }
+        val packRequest = calls.indexOfFirst { it.owner == PROTECTION_HELPER_INTERNAL_NAME && it.name == "packQpPageRequest" }
+        val nativeCalls = calls.filter { it.owner == PROTECTION_HELPER_INTERNAL_NAME && it.name == "nativeExecuteVmPage" }
+        val nativeTerminal = nativeCalls.single()
 
         assertTrue(requestCheck >= 0, "the production wrapper must validate the typed page request")
         assertTrue(readinessCheck > requestCheck, "native readiness must follow request validation")
-        assertTrue(nativeTerminal > readinessCheck, "the native VM terminal must follow both fail-closed gates")
-        assertEquals(1, calls.count { it.owner == PROTECTION_HELPER_INTERNAL_NAME && it.name == "nativeExecuteVmPage" })
+        assertTrue(defenseCheck > readinessCheck, "the protected-path gate must run after native readiness")
+        assertTrue(packRequest > defenseCheck && calls.indexOf(nativeTerminal) > packRequest)
+        assertEquals("(Ljava/lang/String;[B[Ljava/lang/Object;)Ljava/lang/Object;", nativeTerminal.desc)
         assertEquals(1, wrapper.tryCatchBlocks.size, "only the UnsatisfiedLinkError translation is permitted around native dispatch")
         assertEquals("java/lang/UnsatisfiedLinkError", wrapper.tryCatchBlocks.single().type)
 
@@ -320,7 +324,7 @@ class ProtectedArtifactFailClosedMutationTest {
         const val SUITE_MARKER_FIELD = "SUITE_MARKER"
         const val SUITE_COMPLETE_MARKER = "SUITE_COMPLETE"
         const val DISPATCH_METHOD_NAME = "executeQpVmPage"
-        const val DISPATCH_DESCRIPTOR = "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
+        const val DISPATCH_DESCRIPTOR = "(Ljava/lang/String;[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
         const val DISPATCH_COUNT_FIELD = "dispatchCount"
         const val EXPECTED_VALUE = 73
     }

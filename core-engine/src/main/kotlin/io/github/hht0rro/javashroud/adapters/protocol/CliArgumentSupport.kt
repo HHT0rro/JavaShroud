@@ -30,6 +30,42 @@ internal val runCommandSpec: EngineCommandSpec = EngineCommandSpec(
     usageSuffix = "-config <absolute-config-path>",
 )
 
+internal val runApkCommandSpec: EngineCommandSpec = EngineCommandSpec(
+    command = EngineCommand.Run,
+    flag = "-config",
+    expectedArgCount = 3,
+    usageSuffix = "-config <absolute-config-path> --apk",
+)
+
+internal val runLogCommandSpec: EngineCommandSpec = EngineCommandSpec(
+    command = EngineCommand.Run,
+    flag = "-config",
+    expectedArgCount = 4,
+    usageSuffix = "-config <absolute-config-path> --log-file <absolute-path>",
+)
+
+internal val runApkLogCommandSpec: EngineCommandSpec = EngineCommandSpec(
+    command = EngineCommand.Run,
+    flag = "-config",
+    expectedArgCount = 5,
+    usageSuffix = "-config <absolute-config-path> --apk --log-file <absolute-path>",
+)
+
+/** Config-less direct run: input/output paths as CLI flag values. */
+internal val directRunSpec: EngineCommandSpec = EngineCommandSpec(
+    command = EngineCommand.Run,
+    flag = "--input",
+    expectedArgCount = 4,
+    usageSuffix = "--input <absolute-input-path> --output <absolute-output-path>",
+)
+
+internal val directRunLogSpec: EngineCommandSpec = EngineCommandSpec(
+    command = EngineCommand.Run,
+    flag = "--input",
+    expectedArgCount = 6,
+    usageSuffix = "--input <absolute-input-path> --output <absolute-output-path> --log-file <absolute-path>",
+)
+
 internal val inspectCommandSpec: EngineCommandSpec = EngineCommandSpec(
     command = EngineCommand.Inspect,
     flag = "-inspect",
@@ -54,6 +90,11 @@ internal val garbageCollectApplyCommandSpec: EngineCommandSpec = EngineCommandSp
 internal val supportedCommandSpecs: List<EngineCommandSpec> = listOf(
     schemaCommandSpec,
     runCommandSpec,
+    runApkCommandSpec,
+    runLogCommandSpec,
+    runApkLogCommandSpec,
+    directRunSpec,
+    directRunLogSpec,
     inspectCommandSpec,
     garbageCollectPreviewCommandSpec,
     garbageCollectApplyCommandSpec,
@@ -67,6 +108,42 @@ fun parseCommand(args: Array<String>): EngineCommand {
 fun parseConfigPath(args: Array<String>): Path {
     ensureCommand(runCommandSpec, args)
     return normalizedArgumentPath(args[1])
+}
+
+/** Optional run-command flags: --apk forces APK mode, --log-file redirects verbose logs. */
+data class RunCommandFlags(
+    val configPath: Path,
+    val forceApk: Boolean,
+    val logFilePath: Path?,
+    /** Direct (config-less) input path from --input; implies --output. */
+    val directInput: Path? = null,
+    val directOutput: Path? = null,
+)
+
+fun parseRunFlags(args: Array<String>): RunCommandFlags {
+    val spec = supportedCommandSpecs.firstOrNull { candidate -> matchesCommand(candidate, args) }
+        ?: throw IllegalArgumentException(buildCommandUsageErrorMessage())
+    return when (spec) {
+        runCommandSpec -> RunCommandFlags(normalizedArgumentPath(args[1]), forceApk = false, logFilePath = null)
+        runApkCommandSpec -> RunCommandFlags(normalizedArgumentPath(args[1]), forceApk = true, logFilePath = null)
+        runLogCommandSpec -> RunCommandFlags(normalizedArgumentPath(args[1]), forceApk = false, logFilePath = normalizedArgumentPath(args[3]))
+        runApkLogCommandSpec -> RunCommandFlags(normalizedArgumentPath(args[1]), forceApk = true, logFilePath = normalizedArgumentPath(args[4]))
+        directRunSpec -> RunCommandFlags(
+            configPath = normalizedArgumentPath(args[1]),
+            forceApk = false,
+            logFilePath = null,
+            directInput = normalizedArgumentPath(args[1]),
+            directOutput = normalizedArgumentPath(args[3]),
+        )
+        directRunLogSpec -> RunCommandFlags(
+            configPath = normalizedArgumentPath(args[1]),
+            forceApk = false,
+            logFilePath = normalizedArgumentPath(args[5]),
+            directInput = normalizedArgumentPath(args[1]),
+            directOutput = normalizedArgumentPath(args[3]),
+        )
+        else -> throw IllegalArgumentException(buildCommandUsageErrorMessage(spec, args))
+    }
 }
 
 fun parseInspectJarPath(args: Array<String>): Path {

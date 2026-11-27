@@ -181,6 +181,102 @@ class RustToolchainProvisionerTest {
     }
 
     @Test
+    fun windows_path_lookup_finds_rust_and_native_build_tools_with_mixed_case_key() {
+        withTempDirectory { home ->
+            val host = RustToolchainProvisioner.HostPlatform.WINDOWS_X64
+            val rustc = createTool(home, "rustc", host)
+            val cargo = createTool(home, "cargo", host)
+            val zig = createTool(home, "zig", host)
+            val cargoZigbuild = createTool(home, "cargo-zigbuild", host)
+            val rustVersion = lockedVersionRunner(rustc, cargo)
+
+            for (pathKey in listOf("Path", "pAtH")) {
+                val result = RustToolchainProvisioner.resolve(
+                    environment = mapOf(pathKey to home.toString()),
+                    osName = "Windows 11",
+                    osArch = "amd64",
+                    commandRunner = { command ->
+                        when (command.first()) {
+                            zig.toString() -> RustToolchainProvisioner.CommandResult(0, stdout = "0.13.0")
+                            cargoZigbuild.toString() -> RustToolchainProvisioner.CommandResult(0, stdout = "cargo-zigbuild 0.23.2")
+                            else -> rustVersion(command)
+                        }
+                    },
+                    userHome = home,
+                    autoInstall = true,
+                    fetcher = RustToolchainProvisioner.ArchiveFetcher { error("unexpected Rust download for $pathKey") },
+                    buildToolFetcher = NativeBuildToolchainProvisioner.ArchiveFetcher { error("unexpected native tool download for $pathKey") },
+                )
+                assertEquals(rustc, result.toolchain?.rustcPath, result.messages.toString())
+                assertEquals(cargo, result.toolchain?.cargoPath)
+                assertTrue(result.messages.any { it.message == "Using zig 0.13.0 from PATH" })
+                assertTrue(result.messages.any { it.message == "Using cargo-zigbuild 0.23.2 from PATH" })
+            }
+        }
+    }
+
+    @Test
+    fun windows_path_lookup_prefers_exact_key_and_preserves_explicit_path_injection() {
+        withTempDirectory { home ->
+            val host = RustToolchainProvisioner.HostPlatform.WINDOWS_X64
+            val rustc = createTool(home, "rustc", host)
+            val cargo = createTool(home, "cargo", host)
+            val missing = home.resolve("missing").toString()
+            val environment = linkedMapOf("Path" to missing, "PATH" to home.toString())
+            val result = RustToolchainProvisioner.resolve(
+                environment = environment,
+                osName = "Windows 11",
+                osArch = "amd64",
+                commandRunner = lockedVersionRunner(rustc, cargo),
+            )
+            assertEquals(rustc, result.toolchain?.rustcPath)
+            assertEquals(cargo, result.toolchain?.cargoPath)
+
+            val explicitPath = RustToolchainProvisioner.resolve(
+                environment = mapOf("Path" to missing, "PATH" to missing),
+                osName = "Windows 11",
+                pathEnv = home.toString(),
+                osArch = "amd64",
+                commandRunner = lockedVersionRunner(rustc, cargo),
+            )
+            assertEquals(rustc, explicitPath.toolchain?.rustcPath)
+            assertEquals(cargo, explicitPath.toolchain?.cargoPath)
+
+            val explicitNull = RustToolchainProvisioner.resolve(
+                environment = environment,
+                osName = "Windows 11",
+                pathEnv = null,
+                osArch = "amd64",
+                commandRunner = { RustToolchainProvisioner.CommandResult(1) },
+            )
+            assertEquals(null, explicitNull.toolchain)
+        }
+    }
+
+    @Test
+    fun linux_path_lookup_requires_the_exact_path_key() {
+        withTempDirectory { home ->
+            val host = RustToolchainProvisioner.HostPlatform.LINUX_X64
+            val rustc = createTool(home, "rustc", host)
+            val cargo = createTool(home, "cargo", host)
+            val rustVersion = lockedVersionRunner(rustc, cargo)
+            val result = RustToolchainProvisioner.resolve(
+                environment = mapOf("Path" to home.toString()),
+                osName = "Linux",
+                osArch = "amd64",
+                commandRunner = { command ->
+                    if (command.first() == rustc.toString() || command.first() == cargo.toString()) {
+                        rustVersion(command)
+                    } else {
+                        RustToolchainProvisioner.CommandResult(1)
+                    }
+                },
+            )
+            assertEquals(null, result.toolchain)
+        }
+    }
+
+    @Test
     fun rustup_command_contains_only_the_locked_targets() {
         val command = RustToolchainProvisioner.rustupInstallCommand(Path.of("rustup"))
         assertEquals(

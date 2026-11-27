@@ -24,7 +24,7 @@ class QpSemanticSplitTest {
             assertTrue(share != null, "semantic split head must have a following share row")
             assertEquals(0xF7, share.opcode)
             assertEquals(0x4000, share.flags)
-            assertFalse(rows[index].opcode == share.dst, "stored head opcode must remain share-masked")
+            assertFalse(rows[index].opcode == (rows[index].opcode xor share.dst), "stored head opcode must differ from the recombined opcode")
         }
         assertTrue(rows.size > rows.count { (it.flags and 0x0001) != 0 }, "stored row count must diverge from executable instruction count")
     }

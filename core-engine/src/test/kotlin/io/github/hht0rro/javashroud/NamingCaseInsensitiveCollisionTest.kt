@@ -141,18 +141,28 @@ class NamingCaseInsensitiveCollisionTest {
     }
 
     @Test
-    fun package_map_rejects_selected_case_folded_simple_name_collisions() {
+    fun package_map_disambiguates_selected_case_folded_simple_name_collisions() {
+        // Pre-obfuscated inputs routinely carry a/A in one package. The package
+        // rename keeps them grouped and disambiguates the case-folded collision
+        // with a generated simple name instead of failing the whole run.
         val artifacts = listOf(
             testClassArtifact("foo/Alpha"),
             testClassArtifact("foo/alpha"),
         )
+        val matched = artifacts.mapTo(mutableSetOf()) { it.summary.internalName }
 
-        assertFailsWith<IllegalArgumentException> {
-            buildPackageRenameMap(
-                classArtifacts = artifacts,
-                matchedClassNames = artifacts.mapTo(mutableSetOf()) { it.summary.internalName },
-            )
-        }
+        val packageRenameMap = buildPackageRenameMap(
+            classArtifacts = artifacts,
+            matchedClassNames = matched,
+        )
+        val classRenameMap = applyPackageRenameMap(artifacts, packageRenameMap, matched)
+
+        assertEquals(matched, classRenameMap.keys)
+        val normalized = classRenameMap.values.map { it.lowercase(Locale.ROOT) }
+        assertEquals(normalized.size, normalized.toSet().size, "final names must stay case-fold unique: $classRenameMap")
+        // One of the two keeps its simple name; the other moves to a generated one.
+        val simpleNames = classRenameMap.values.map { it.substringAfterLast('/') }
+        assertEquals(2, simpleNames.toSet().size)
     }
 
     private fun withCaseOnlyDictionary(block: (String) -> Unit) {

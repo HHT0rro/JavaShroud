@@ -9,11 +9,17 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: "Existing tag to build and release, for example v0.7.0"
+        description: "Release tag, or the expected tag for a verification-only build"
         required: true
         type: string
+      verify_only:
+        description: "Build and verify this ref without creating a release"
+        required: false
+        default: true
+        type: boolean
 
 permissions:
+  actions: read
   contents: write
 
 concurrency:
@@ -25,21 +31,32 @@ jobs:
     name: Build Windows release
     runs-on: windows-latest
     if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/v') || startsWith(github.event.head_commit.message, 'Release v')
+    env:
+      # Configure the confirmed upstream tag and an independently obtained EXE digest.
+      XENOLITH_RELEASE_TAG: ${{ vars.XENOLITH_RELEASE_TAG }}
+      XENOLITH_SHA256: ${{ vars.XENOLITH_SHA256 }}
+      XENOLITH_MIRRORS: '-'
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag_name || github.ref }}
+          ref: ${{ github.event_name == 'workflow_dispatch' && !inputs.verify_only && inputs.tag_name || github.ref }}
 
       - name: Resolve release tag
         id: release_tag
         shell: pwsh
+        env:
+          RELEASE_EVENT: ${{ github.event_name }}
+          REQUESTED_TAG: ${{ inputs.tag_name }}
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_REF_NAME: ${{ github.ref_name }}
+          VERIFY_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.verify_only }}
         run: |
-          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
-            $tag = '${{ inputs.tag_name }}'
-          } elseif ('${{ github.ref }}'.StartsWith('refs/tags/')) {
-            $tag = '${{ github.ref_name }}'
+          if ($env:RELEASE_EVENT -eq 'workflow_dispatch') {
+            $tag = $env:REQUESTED_TAG
+          } elseif ($env:RELEASE_REF.StartsWith('refs/tags/')) {
+            $tag = $env:RELEASE_REF_NAME
           } else {
             $versionSource = Get-Content -LiteralPath 'core-engine/src/main/kotlin/io/github/hht0rro/javashroud/capabilities/CapabilityTypes.kt' -Raw
             if ($versionSource -notmatch 'const val JS_VERSION:\s*String\s*=\s*"([^"]+)"') {
@@ -52,14 +69,37 @@ jobs:
             throw "Invalid release tag: $tag"
           }
 
-          git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
-          $tagSha = (git rev-list -n 1 $tag).Trim()
           $headSha = (git rev-parse HEAD).Trim()
-          if ($tagSha -ne $headSha) {
-            throw "Release tag $tag points to $tagSha, but checked out commit is $headSha. Push main/dev first, then recreate the tag on the release commit."
+          $versionSource = Get-Content -LiteralPath 'core-engine/src/main/kotlin/io/github/hht0rro/javashroud/capabilities/CapabilityTypes.kt' -Raw
+          if ($versionSource -notmatch 'const val JS_VERSION:\s*String\s*=\s*"([^"]+)"' -or $tag -cne "v$($Matches[1])") {
+            throw "Release tag $tag does not match the checked-out engine version."
           }
-
+          if ($env:VERIFY_ONLY -ne 'true') {
+            git fetch origin "refs/tags/$tag:refs/tags/$tag"
+            if ($LASTEXITCODE -ne 0) { throw "Could not fetch release tag $tag." }
+            $tagSha = (git rev-list -n 1 $tag).Trim()
+            if ($tagSha -ne $headSha) {
+              throw "Release tag $tag points to $tagSha, but checked out commit is $headSha."
+            }
+          }
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "sha=$headSha" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Require successful public CI for the release commit
+        if: github.event_name != 'workflow_dispatch' || !inputs.verify_only
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ steps.release_tag.outputs.sha }}
+        run: |
+          $ref = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha
+          if ($LASTEXITCODE -ne 0 -or $ref -ne $env:RELEASE_SHA) {
+            throw "The release commit must be the current main head."
+          }
+          $runs = gh api -X GET "repos/$env:GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" -f branch=main -f event=push -f status=success -f head_sha=$env:RELEASE_SHA --jq '.workflow_runs[].head_sha'
+          if ($LASTEXITCODE -ne 0 -or $env:RELEASE_SHA -notin @($runs)) {
+            throw "No successful public-ci push run exists on main at $env:RELEASE_SHA."
+          }
 
       - name: Setup GraalVM Native Image
         uses: graalvm/setup-graalvm@v1
@@ -82,7 +122,7 @@ jobs:
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-zigbuild
+          tool: cargo-zigbuild@0.23.2
 
       - name: Setup MinGW linker
         uses: msys2/setup-msys2@v2
@@ -139,20 +179,70 @@ jobs:
           GRAALVM_HOME: ${{ env.JAVA_HOME }}
           GOEXE: go
           WAILS_EXE: wails
-        run: build-release.bat
+        run: build-release.bat --require-xenolith-pin
 
       - name: Write release notes from tag message
+        if: github.event_name != 'workflow_dispatch' || !inputs.verify_only
         shell: pwsh
         run: |
           $tag = '${{ steps.release_tag.outputs.tag }}'
           $notes = git tag -l --format='%(contents:subject)%0a%0a%(contents:body)' $tag
           ($notes -join "`n") | Out-File -FilePath RELEASE_NOTES.md -Encoding utf8
 
-      - name: Package release
+      - name: Verify release ZIP
         shell: pwsh
-        run: Compress-Archive -Path "build\release\javashroud-windows-amd64\*" -DestinationPath "javashroud-windows-amd64.zip" -Force
+        run: ./desktop-app/fetch-xenolith.ps1 -RequirePin -VerifyZip 'build/release/javashroud-windows-amd64.zip'
+
+      - name: Smoke test the packaged native engine
+        shell: pwsh
+        timeout-minutes: 3
+        env:
+          EXPECTED_RELEASE_TAG: ${{ steps.release_tag.outputs.tag }}
+        run: |
+          $package = 'build/release/javashroud-windows-amd64.zip'
+          $unpacked = Join-Path $env:RUNNER_TEMP "javashroud-smoke-$([Guid]::NewGuid())"
+          $stderr = Join-Path $unpacked 'engine-schema.stderr.log'
+          try {
+            Expand-Archive -LiteralPath $package -DestinationPath $unpacked
+            $engine = Join-Path $unpacked 'engine/obfuscator-engine.exe'
+            Push-Location -LiteralPath $unpacked
+            try {
+              $schema = & $engine -schema 2> $stderr
+              $exitCode = $LASTEXITCODE
+            } finally {
+              Pop-Location
+            }
+            $diagnostics = Get-Content -LiteralPath $stderr -Raw
+            if ($exitCode -ne 0 -or -not [string]::IsNullOrWhiteSpace($diagnostics)) {
+              throw "Packaged native engine schema failed (exit $exitCode). ${diagnostics}"
+            }
+            $version = $env:EXPECTED_RELEASE_TAG.Substring(1)
+            $versionLine = "^engineVersion\s*=\s*['`"]$([regex]::Escape($version))['`"]\s*$"
+            if (-not ($schema -match "^schemaVersion\s*=\s*['`"]?2['`"]?\s*$") -or
+                -not ($schema -match $versionLine)) {
+              throw "Packaged native engine did not report schema 2 and engine version $version."
+            }
+          } finally {
+            if (Test-Path -LiteralPath $unpacked) {
+              $resolved = (Resolve-Path -LiteralPath $unpacked).Path
+              $tempRoot = (Resolve-Path -LiteralPath $env:RUNNER_TEMP).Path
+              if ((Split-Path -LiteralPath $resolved) -eq $tempRoot) {
+                Remove-Item -LiteralPath $resolved -Recurse -Force
+              }
+            }
+          }
+
+      - name: Upload verified release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: javashroud-${{ steps.release_tag.outputs.tag }}-windows-amd64
+          if-no-files-found: error
+          path: |
+            build/release/javashroud-windows-amd64.zip
+            build/annotations/libs/javashroud-annotations-*.jar
 
       - name: Publish GitHub Release
+        if: github.event_name != 'workflow_dispatch' || !inputs.verify_only
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release_tag.outputs.tag }}
@@ -161,6 +251,7 @@ jobs:
           draft: false
           prerelease: false
           make_latest: true
+          fail_on_unmatched_files: true
           files: |
-            javashroud-windows-amd64.zip
+            build/release/javashroud-windows-amd64.zip
             build/annotations/libs/javashroud-annotations-*.jar

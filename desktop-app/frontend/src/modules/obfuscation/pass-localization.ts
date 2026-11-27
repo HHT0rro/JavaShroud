@@ -319,7 +319,7 @@ const passCopies: Readonly<Record<string, LocalizedPassCopy>> = {
   },
   nativeshroud: {
     name: text('自定义加壳', 'Custom packing'),
-    description: text('对编译后的 native 镜像外部加壳：默认用内置 Xenolith CLI 自动打包（fast / standard / max），也可暂停等待手动加壳（VMP / NativeShroud 等）再选回文件。打包失败、找不到文件或取消均 fail-closed；须保留 .jsms/.jsmk 测量段与 JNI / qp_r1 导出，否则引擎拒绝。', 'Packs the compiled native images externally: by default the bundled Xenolith CLI packs automatically (fast / standard / max), or pause for manual packing (VMP / NativeShroud / etc.) and select the packed file back. Failed pack runs, missing file, or cancel fail closed; the .jsms/.jsmk measurement sections and JNI / qp_r1 exports must survive packing or the engine rejects the image.'),
+    description: text('对编译后的 native 镜像外部加壳：默认用内置 Xenolith CLI 自动打包（fast / standard / max），也可暂停等待手动加壳（VMP / NativeShroud 等）再选回文件。打包失败、报告缺失、非生产 debug_gate 或取消均 fail-closed；须保留 .jsms/.jsmk 及输入中存在的 .jsmd 区段与 JNI / qp_r1 导出，否则引擎拒绝。', 'Packs compiled native images externally with the bundled Xenolith CLI (fast / standard / max), or pauses for manual packing (VMP / NativeShroud, etc.) and selects the packed file back. Failed runs, missing reports, non-production debug_gate values, and cancellation fail closed; .jsms/.jsmk and any input .jsmd section, plus JNI / qp_r1 exports, must survive or the engine rejects the image.'),
     params: {
       cliPath: text('Xenolith CLI 可执行文件的绝对路径；留空则使用手动加壳交接流程。', 'Absolute path to the Xenolith CLI executable; empty keeps the manual packing handoff.'),
       profile: text('Xenolith 打包档位：fast 最快、standard 均衡、max 附加反调试探测。', 'Xenolith pack profile: fast is quickest, standard is balanced, max adds anti-debug probes.'),

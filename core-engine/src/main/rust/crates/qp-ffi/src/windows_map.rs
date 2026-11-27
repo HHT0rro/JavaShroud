@@ -104,12 +104,14 @@ impl WindowsVirtualAllocBackend {
         if protection.write && protection.execute {
             return Err(WindowsMapError::WriteExecute);
         }
-        Ok(match (protection.read, protection.write, protection.execute) {
-            (_, true, false) => PAGE_READWRITE,
-            (_, false, true) => PAGE_EXECUTE_READ,
-            (true, false, false) => PAGE_READONLY,
-            _ => PAGE_NOACCESS,
-        })
+        Ok(
+            match (protection.read, protection.write, protection.execute) {
+                (_, true, false) => PAGE_READWRITE,
+                (_, false, true) => PAGE_EXECUTE_READ,
+                (true, false, false) => PAGE_READONLY,
+                _ => PAGE_NOACCESS,
+            },
+        )
     }
 
     fn offset_pointer(
@@ -117,7 +119,8 @@ impl WindowsVirtualAllocBackend {
         virtual_address: u64,
         length: usize,
     ) -> Result<*mut u8, WindowsMapError> {
-        let offset = usize::try_from(virtual_address).map_err(|_| WindowsMapError::CopyOutOfRange)?;
+        let offset =
+            usize::try_from(virtual_address).map_err(|_| WindowsMapError::CopyOutOfRange)?;
         let end = offset
             .checked_add(length)
             .ok_or(WindowsMapError::CopyOutOfRange)?;
@@ -212,7 +215,8 @@ impl MapBackend for WindowsVirtualAllocBackend {
 
     fn protect(&mut self, mapping: &Self::Mapping, region: &MapRegion) -> Result<(), Self::Error> {
         let flags = Self::protection_flags(region.protection())?;
-        let size = usize::try_from(region.memory_size()).map_err(|_| WindowsMapError::CopyOutOfRange)?;
+        let size =
+            usize::try_from(region.memory_size()).map_err(|_| WindowsMapError::CopyOutOfRange)?;
         let dest = Self::offset_pointer(mapping, region.virtual_address(), size)?;
         let mut old = 0u32;
         let ok = unsafe { VirtualProtect(dest.cast(), size, flags, &mut old) };

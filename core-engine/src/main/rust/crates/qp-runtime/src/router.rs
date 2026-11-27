@@ -79,7 +79,8 @@ pub struct PageKeyRequest<'a> {
 /// the per-artifact specialization secret pack after the defense probes pass;
 /// isolated tests may install a synthetic authority.
 pub trait PageKeyAuthority: Send + Sync {
-    fn derive_page_key(&self, request: &PageKeyRequest<'_>) -> Result<PageKeyMaterial, RouterError>;
+    fn derive_page_key(&self, request: &PageKeyRequest<'_>)
+        -> Result<PageKeyMaterial, RouterError>;
 }
 
 struct TransientMaterial([u8; 32]);
@@ -150,8 +151,9 @@ impl OpenedPage {
             return Err(RouterError::RouteUnavailable { kind: self.kind });
         }
         let material = qp_vm::VmKeyMaterial::new(crypto_domain, layout_digest);
-        let parser = qp_vm::VmParser::with_shared_dialect(&material, state_binding, dialect.clone())
-            .map_err(|error| RouterError::Wire(error.to_string()))?;
+        let parser =
+            qp_vm::VmParser::with_shared_dialect(&material, state_binding, dialect.clone())
+                .map_err(|error| RouterError::Wire(error.to_string()))?;
         parser
             .parse(self.payload.as_slice())
             .map_err(|error| RouterError::Wire(error.to_string()))
@@ -206,8 +208,14 @@ impl TypedPageRouter {
     /// Installs the native secret authority exactly once, before any page is
     /// attached. A router without an authority refuses every install.
     pub fn bind_page_key_authority(&mut self, authority: Box<dyn PageKeyAuthority>) {
-        assert!(self.pages.is_empty(), "page key authority must be bound before installs");
-        assert!(self.authority.is_none(), "page key authority is already bound");
+        assert!(
+            self.pages.is_empty(),
+            "page key authority must be bound before installs"
+        );
+        assert!(
+            self.authority.is_none(),
+            "page key authority is already bound"
+        );
         self.authority = Some(authority);
     }
 
@@ -238,7 +246,9 @@ impl TypedPageRouter {
         }
         let header = qp_page::PageHeader::decode(&encoded[header_offset..header_end])
             .map_err(|_| RouterError::AuthenticationFailed)?;
-        let handle = descriptor.handle().map_err(|_| RouterError::AuthenticationFailed)?;
+        let handle = descriptor
+            .handle()
+            .map_err(|_| RouterError::AuthenticationFailed)?;
         let handle_encoded = handle.encoded();
         let handle_locator = handle.locator_token();
         let page_nonce = header.nonce();
@@ -349,7 +359,11 @@ impl TypedPageRouter {
         Ok(())
     }
 
-    pub fn open(&mut self, entry_token: i64, request: &PageRequest) -> Result<OpenedPage, RouterError> {
+    pub fn open(
+        &mut self,
+        entry_token: i64,
+        request: &PageRequest,
+    ) -> Result<OpenedPage, RouterError> {
         let page_index = i32::try_from(request.page_index())
             .map_err(|_| RouterError::InvalidRequest("page index does not fit the wire type"))?;
         let encoded_handle = request.handle().as_bytes();
@@ -444,8 +458,7 @@ impl TypedPageRouter {
                 .checked_add(page.encoded.len())
                 .ok_or(RouterError::AuthenticationFailed)?;
         }
-        let logical_binding_path = logical_binding_path
-            .ok_or(RouterError::AuthenticationFailed)?;
+        let logical_binding_path = logical_binding_path.ok_or(RouterError::AuthenticationFailed)?;
 
         if slots.len() == 1 {
             let (payload, _) = self.open_attached_page(slots[0])?;
@@ -481,7 +494,8 @@ impl TypedPageRouter {
                 .pages
                 .get(page_position)
                 .ok_or(RouterError::AuthenticationFailed)?;
-            let derived = self.derive_attached_key_material(&attached.descriptor, &attached.encoded)?;
+            let derived =
+                self.derive_attached_key_material(&attached.descriptor, &attached.encoded)?;
             derived
         };
         if !self.derived_keys.contains_key(&page_position) {
@@ -503,7 +517,11 @@ impl TypedPageRouter {
             .map_err(|_| RouterError::AuthenticationFailed)?;
         Ok((
             SensitiveBytes::new(payload),
-            attached.descriptor.route().logical_binding_path().to_string(),
+            attached
+                .descriptor
+                .route()
+                .logical_binding_path()
+                .to_string(),
         ))
     }
 
@@ -524,9 +542,11 @@ impl TypedPageRouter {
             }
             let start = entry.offset as usize;
             let length = entry.stored_length as usize;
-            let end = start.checked_add(length).ok_or(RouterError::InvalidRequest(
-                "catalog stored page range overflow",
-            ))?;
+            let end = start
+                .checked_add(length)
+                .ok_or(RouterError::InvalidRequest(
+                    "catalog stored page range overflow",
+                ))?;
             if end > blob.len() {
                 return Err(RouterError::InvalidRequest(
                     "catalog stored page range is out of bounds",
@@ -664,8 +684,8 @@ mod tests {
         const PAGE_KEY_DOMAIN: &[u8] = b"javashroud-test-page-key-v4";
 
         fn new(seed: [u8; 32]) -> Self {
-            let commitment_key = hkdf_sha256(&seed, Self::COMMITMENT_DOMAIN, &[], 32)
-                .expect("test commitment key");
+            let commitment_key =
+                hkdf_sha256(&seed, Self::COMMITMENT_DOMAIN, &[], 32).expect("test commitment key");
             let mut key = [0u8; 32];
             key.copy_from_slice(&commitment_key[..32]);
             Self {
@@ -870,12 +890,8 @@ mod tests {
         }
     }
 
-    fn string_request(
-        installed: &InstalledRouter,
-        proof: &[u8],
-    ) -> PageRequest {
-        PageRequest::new(&installed.encoded_handle, 3, proof, PageKind::String)
-            .expect("request")
+    fn string_request(installed: &InstalledRouter, proof: &[u8]) -> PageRequest {
+        PageRequest::new(&installed.encoded_handle, 3, proof, PageKind::String).expect("request")
     }
 
     #[test]
@@ -952,20 +968,21 @@ mod tests {
     fn descriptor_bound_install_retains_only_authenticated_descriptor_bytes() {
         let installed = installed_router();
         assert_eq!(installed.router.len(), 1);
-        assert!(
-            installed.router.pages.iter().all(|page| {
-                // Attached pages keep ciphertext and the authenticated descriptor
-                // only; page keys are re-derived on open.
-                !page.encoded.is_empty()
-            })
-        );
+        assert!(installed.router.pages.iter().all(|page| {
+            // Attached pages keep ciphertext and the authenticated descriptor
+            // only; page keys are re-derived on open.
+            !page.encoded.is_empty()
+        }));
     }
 
     #[test]
     fn clear_unbinds_authority_so_later_opens_fail_closed() {
         let mut installed = installed_router();
         let request = string_request(&installed, &installed.proof_bytes);
-        installed.router.open(0, &request).expect("open before clear");
+        installed
+            .router
+            .open(0, &request)
+            .expect("open before clear");
         installed.router.clear();
         assert!(installed.router.is_empty());
         let fixture = attached_string_page();
@@ -983,7 +1000,10 @@ mod tests {
     fn current_schedule_round_trips_an_authenticated_page() {
         let mut installed = installed_router();
         let request = string_request(&installed, &installed.proof_bytes);
-        let opened = installed.router.open(0, &request).expect("open current page");
+        let opened = installed
+            .router
+            .open(0, &request)
+            .expect("open current page");
         opened.with_payload(|bytes| assert_eq!(bytes, b"hello-native"));
     }
 
@@ -1028,11 +1048,7 @@ mod tests {
         let mut router = TypedPageRouter::new();
         router.bind_page_key_authority(Box::new(clone_authority(&fixture.authority)));
         assert_eq!(
-            router.install_descriptor_bound(
-                fixture.envelope,
-                fixture.encoded,
-                reslotted_bytes
-            ),
+            router.install_descriptor_bound(fixture.envelope, fixture.encoded, reslotted_bytes),
             Err(RouterError::AuthenticationFailed)
         );
     }

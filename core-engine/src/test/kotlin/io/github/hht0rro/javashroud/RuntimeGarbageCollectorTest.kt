@@ -51,17 +51,21 @@ class RuntimeGarbageCollectorTest {
     }
 
     @Test
-    fun collect_apply_preserves_toolchains_and_rust_workspace() {
+    fun collect_apply_preserves_active_toolchains_and_apk_signing_identity() {
         withTempRoots { userHome, workspace ->
             val userCache = userHome.resolve(".javashroud")
             val toolchain = writeFile(userCache.resolve("toolchains/zig-0.13.0-windows-x64/zig.exe"), 3)
             val workspaceFiles = writeFile(userCache.resolve("rust-workspace/qp/Cargo.toml"), 4)
+            val dex2jar = writeFile(userCache.resolve("apk-tools/dex2jar-fixture/dex-tools.jar"), 4)
+            val signingKey = writeFile(userCache.resolve("apk/debug.keystore"), 6)
             writeFile(userCache.resolve("zig/0.13.0/zig.exe"), 5)
 
             RuntimeGarbageCollector.collect(userHome, workspace, apply = true)
 
             assertTrue(Files.exists(toolchain))
             assertTrue(Files.exists(workspaceFiles))
+            assertTrue(Files.exists(dex2jar))
+            assertTrue(Files.exists(signingKey))
             assertFalse(Files.exists(userCache.resolve("zig")))
         }
     }

@@ -33,6 +33,50 @@ class PackedImageValidationTest {
     }
 
     @Test
+    fun all_input_measurement_sections_must_survive_byte_identical() {
+        val original = SyntheticPackedImages.windowsPackedDll()
+        PackedImageValidation.validateWindowsPackedDll(original.copyOf(), original)
+        val table = 0x80 + 4 + 20 + 0xF0
+        fun readLe32(bytes: ByteArray, offset: Int): Int =
+            (bytes[offset].toInt() and 255) or ((bytes[offset + 1].toInt() and 255) shl 8) or
+                ((bytes[offset + 2].toInt() and 255) shl 16) or ((bytes[offset + 3].toInt() and 255) shl 24)
+        for ((index, section) in listOf(".jsms", ".jsmk", ".jsmd").withIndex()) {
+            val header = table + (index + 1) * 40
+            val rawOffset = readLe32(original, header + 20)
+            val changed = original.copyOf().also { it[rawOffset] = 1 }
+            val error = assertFailsWith<IllegalStateException> {
+                PackedImageValidation.validateWindowsPackedDll(changed, original)
+            }
+            assertTrue(error.message.orEmpty().contains(section) && error.message.orEmpty().contains("raw bytes"))
+        }
+        val dropped = assertFailsWith<IllegalStateException> {
+            PackedImageValidation.validateWindowsPackedDll(SyntheticPackedImages.windowsPackedDll(dropSection = ".jsmd"), original)
+        }
+        assertTrue(dropped.message.orEmpty().contains(".jsmd"))
+        val withoutDialect = SyntheticPackedImages.windowsPackedDll(dropSection = ".jsmd")
+        PackedImageValidation.validateWindowsPackedDll(withoutDialect.copyOf(), withoutDialect)
+    }
+
+    @Test
+    fun measurement_sections_can_move_on_disk_but_not_change_rva_or_size() {
+        val original = SyntheticPackedImages.windowsPackedDll()
+        val table = 0x80 + 4 + 20 + 0xF0
+        val moved = original.copyOf(original.size + 64)
+        fun writeLe32(offset: Int, value: Int) {
+            repeat(4) { moved[offset + it] = (value ushr (it * 8)).toByte() }
+        }
+        for (index in 1..3) {
+            writeLe32(table + index * 40 + 20, original.size + (index - 1) * 16)
+        }
+        PackedImageValidation.validateWindowsPackedDll(moved, original)
+        writeLe32(table + 40 + 12, 0x5000)
+        val error = assertFailsWith<IllegalStateException> {
+            PackedImageValidation.validateWindowsPackedDll(moved, original)
+        }
+        assertTrue(error.message.orEmpty().contains(".jsms") && error.message.orEmpty().contains("RVA or size"))
+    }
+
+    @Test
     fun missing_bridge_export_is_a_named_failure() {
         val error = assertFailsWith<IllegalStateException> {
             PackedImageValidation.validateWindowsPackedDll(

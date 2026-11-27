@@ -1,11 +1,24 @@
 package io.github.hht0rro.javashroud
 
+import io.github.hht0rro.javashroud.analysis.analyzeClassBytes
+import io.github.hht0rro.javashroud.model.analysis.RuleMatch
+import io.github.hht0rro.javashroud.model.analysis.TargetSelector
+import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
+import io.github.hht0rro.javashroud.model.config.RuleSpec
+import io.github.hht0rro.javashroud.transforms.protection.applyMethodVirtualization
+import io.github.hht0rro.javashroud.transforms.protection.defaultQpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.hardening.ProtectionFormat
+import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import org.objectweb.asm.ClassReader
+import org.objectweb.asm.ClassWriter
+import org.objectweb.asm.Opcodes
+import org.objectweb.asm.tree.ClassNode
 
 class QpProtocolLabelParityTest {
     @Test
@@ -83,7 +96,7 @@ class QpProtocolLabelParityTest {
         val interpreter = source("src/test/kotlin/io/github/hht0rro/javashroud/VmInterpreterExecutionTest.kt")
         assertTrue("-Xverify:all" in nested, "Nested VM e2e must run java -Xverify:all")
         assertTrue("-Xverify:all" in interpreter, "VM interpreter e2e must run java -Xverify:all")
-        assertTrue("(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;" in nested)
+        assertTrue("(Ljava/lang/String;[BI[B[Ljava/lang/Object;)Ljava/lang/Object;" in nested)
         assertFalse("(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;" in nested)
     }
 
@@ -92,7 +105,6 @@ class QpProtocolLabelParityTest {
         val rewriter = source("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/hardening/QpTargetRewriter.kt")
         val rotation = source("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/RuntimeDefenseTransforms.kt")
         val sealing = source("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/RuntimeArtifactSealing.kt")
-        val virtualization = source("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/MethodVirtualizationTransforms.kt")
         val bridge = source("src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.java")
         val bootstrap = source("src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpBootstrap.java")
         val ffi = source("src/main/rust/crates/qp-ffi/src/lib.rs")
@@ -105,8 +117,50 @@ class QpProtocolLabelParityTest {
         assertFalse("b\\j.m\\0" in ffi, "native must not read the retired method-binding mailbox")
         assertTrue("qpResourceDir() + \"/native.locator\"" in sealing)
         assertTrue("qpResourceDir() + \"/native.bindings.locator\"" in sealing)
-        assertTrue("if (name.startsWith(\"a_bsm\"))" in virtualization)
+        assertBootstrapMethodStaysOnJvm()
         assertTrue("public static String openQpString" in bridge)
+    }
+
+    private fun assertBootstrapMethodStaysOnJvm() {
+        val owner = "sample/BootstrapBoundary"
+        val bootstrap = "a_bsmFixture"
+        val body = listOf(Opcodes.ICONST_1, Opcodes.ICONST_2, Opcodes.IADD, Opcodes.IRETURN)
+        val writer = ClassWriter(0)
+        writer.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, owner, null, "java/lang/Object", null)
+        for (name in listOf(bootstrap, "ordinary")) {
+            val method = writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, name, "()I", null, null)
+            method.visitCode()
+            body.forEach(method::visitInsn)
+            method.visitMaxs(2, 0)
+            method.visitEnd()
+        }
+        writer.visitEnd()
+        val bytes = writer.toByteArray()
+        val entry = ClassArtifact("$owner.class", analyzeClassBytes(bytes), bytes)
+        val match = RuleMatch(
+            rule = RuleSpec(target = owner, action = "method-virtualization"),
+            selector = TargetSelector(owner, null, null),
+            matchedClassNames = listOf(owner),
+            matchedMembers = emptyList(),
+        )
+
+        val context = defaultQpBuildContext()
+        val result = try {
+            withQpBuildContext(context) {
+                applyMethodVirtualization(
+                    artifact = testAttachedArtifact(listOf(entry)),
+                    ruleMatches = listOf(match),
+                    params = mapOf("methodSelection" to "all-compatible", "seed" to 42),
+                )
+            }
+        } finally {
+            context.wipe()
+        }
+        assertEquals(1, result.transformedMemberCount, "The ordinary method must exercise VM selection")
+        val node = ClassNode()
+        ClassReader(result.artifact.classArtifactIndex.getValue(owner).bytes).accept(node, ClassReader.SKIP_FRAMES)
+        val bootstrapBody = node.methods.single { it.name == bootstrap && it.desc == "()I" }.instructions
+        assertEquals(body, bootstrapBody.toArray().map { it.opcode }.filter { it >= 0 }, "Bootstrap body must stay on the JVM")
     }
 
     private fun source(relativePath: String): String = Files.readString(resolve(relativePath))

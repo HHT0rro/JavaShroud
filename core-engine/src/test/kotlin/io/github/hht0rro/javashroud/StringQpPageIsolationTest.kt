@@ -53,7 +53,7 @@ class StringQpPageIsolationTest {
 
     private fun buildFixture(classInternalName: String, literal: String): ByteArray {
         val writer = ClassWriter(ClassWriter.COMPUTE_MAXS)
-        writer.visit(Opcodes.V21, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, classInternalName, null, "java/lang/Object", null)
+        writer.visit(testClassfileVersion(), Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, classInternalName, null, "java/lang/Object", null)
         val method = writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "value", "()V", null, null)
         method.visitCode()
         method.visitLdcInsn(literal)

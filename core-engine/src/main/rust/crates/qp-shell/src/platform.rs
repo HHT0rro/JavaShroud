@@ -95,10 +95,7 @@ pub fn reject_legacy_or_macos_name(name: &str) -> Result<(), PlatformError> {
             reason: "macOS, Mach-O, and .dylib are not supported",
         });
     }
-    if lower == "meta-inf/jsrt"
-        || lower.starts_with("meta-inf/jsrt/")
-        || lower.contains("/jsrt/")
-    {
+    if lower == "meta-inf/jsrt" || lower.starts_with("meta-inf/jsrt/") || lower.contains("/jsrt/") {
         return Err(PlatformError::UnsupportedArtifact {
             reason: "retired META-INF/jsrt paths are not runtime inputs",
         });

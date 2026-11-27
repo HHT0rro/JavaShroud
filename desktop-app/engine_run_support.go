@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 )
 
 const packHandoffEnvKey = "JAVASHROUD_PACK_HANDOFF"
@@ -55,18 +56,18 @@ func runEngineProcess(runContext context.Context, launchSpec EngineLaunchSpec, c
 	cmd := exec.CommandContext(runContext, launchSpec.CommandPath, launchSpec.CommandArgs...)
 	cmd.Dir = launchSpec.CommandDir
 	cmd.Env = append(os.Environ(), packHandoffEnvKey+"=1")
+	cmd.WaitDelay = 5 * time.Second
 	applyHiddenProcessWindow(cmd)
 
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		callbacks.emitLocalError("stdout pipe failed", fmt.Errorf("command=%s args=%v: %w", launchSpec.CommandPath, launchSpec.CommandArgs, err))
-		return
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		callbacks.emitLocalError("stderr pipe failed", fmt.Errorf("command=%s args=%v: %w", launchSpec.CommandPath, launchSpec.CommandArgs, err))
-		return
-	}
+	stdoutPipe, stdoutWriter := io.Pipe()
+	defer stdoutPipe.Close()
+	defer stdoutWriter.Close()
+	stderrPipe, stderrWriter := io.Pipe()
+	defer stderrPipe.Close()
+	defer stderrWriter.Close()
+	cmd.Stdout = stdoutWriter
+	cmd.Stderr = stderrWriter
+
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
 		callbacks.emitLocalError("stdin pipe failed", fmt.Errorf("command=%s args=%v: %w", launchSpec.CommandPath, launchSpec.CommandArgs, err))
@@ -76,6 +77,10 @@ func runEngineProcess(runContext context.Context, launchSpec EngineLaunchSpec, c
 	defer callbacks.clearStdin()
 
 	if err = cmd.Start(); err != nil {
+		if isCanceledRun(runContext, err) {
+			callbacks.emitCanceled(launchSpec, runContext)
+			return
+		}
 		callbacks.emitLocalError("command start failed", fmt.Errorf("command=%s args=%v dir=%s mode=%s: %w", launchSpec.CommandPath, launchSpec.CommandArgs, launchSpec.CommandDir, launchSpec.Mode, err))
 		return
 	}
@@ -95,6 +100,9 @@ func runEngineProcess(runContext context.Context, launchSpec EngineLaunchSpec, c
 	}()
 
 	waitErr := cmd.Wait()
+	// Wait drains both copy loops. Close our writers to deliver EOF to the scanners.
+	stdoutWriter.Close()
+	stderrWriter.Close()
 	waitGroup.Wait()
 
 	if waitErr != nil {

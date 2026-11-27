@@ -8,9 +8,9 @@ package io.github.hht0rro.javashroud.transforms.protection
  * diagnostic instead of a late seal error.
  *
  * Windows PE64 DLLs are checked structurally: AMD64 DLL magic, the JS
- * measurement sections the binder patches in place (.jsms HMAC slot and .jsmk
- * shard-mask rows; .jsmd is optional at bind time), and the JNI bridge export
- * names. Linux ELF64 images get a magic/machine check only; the default Linux
+ * measurement sections the binder patches in place (.jsms HMAC slot, .jsmk
+ * shard-mask rows and .jsmd when present in the original image), and the JNI
+ * bridge export names. Linux ELF64 images get a magic/machine check only; the
  * flow ships the unpacked .so and the JSIM binder rejects missing sections
  * itself.
  */
@@ -34,15 +34,15 @@ internal object PackedImageValidation {
     private const val ELF_CLASS_64 = 2
     private const val ELF_MACHINE_X86_64 = 0x3E
 
-    internal fun validateWindowsPackedDll(bytes: ByteArray) {
+    internal fun validateWindowsPackedDll(bytes: ByteArray, original: ByteArray? = null) {
         try {
-            validateWindowsPackedDllStrict(bytes)
+            validateWindowsPackedDllStrict(bytes, original)
         } catch (error: IndexOutOfBoundsException) {
             throw validationError("packed Windows image is truncated (${error.message.orEmpty()})")
         }
     }
 
-    private fun validateWindowsPackedDllStrict(bytes: ByteArray) {
+    private fun validateWindowsPackedDllStrict(bytes: ByteArray, original: ByteArray?) {
         val peOffset = requirePeHeaders(bytes)
         val coffOffset = peOffset + 4
         val machine = readLe16(bytes, coffOffset)
@@ -78,6 +78,48 @@ internal object PackedImageValidation {
                 "packed Windows image lost required bridge export(s) ${missingExports.joinToString(", ")}; " +
                     "JNI_OnLoad/JNI_OnUnload and qp_r1_* exports must survive packing",
             )
+        }
+        if (original != null) validatePreservedMeasurementSections(original, bytes, sections)
+    }
+
+    private fun validatePreservedMeasurementSections(
+        original: ByteArray,
+        packed: ByteArray,
+        packedSections: List<PeSection>,
+    ) {
+        val coff = requirePeHeaders(original) + 4
+        val originalSections = parseSections(
+            original,
+            coff + PE_COFF_SIZE + readLe16(original, coff + 16),
+            readLe16(original, coff + 2),
+        )
+        for (name in JS_MEASUREMENT_SECTIONS + ".jsmd") {
+            val sourceMatches = originalSections.filter { it.name == name }
+            if (name == ".jsmd" && sourceMatches.isEmpty()) continue
+            val source = sourceMatches.singleOrNull()
+                ?: throw validationError("original image has missing or duplicate $name section")
+            val destination = packedSections.singleOrNull { it.name == name }
+                ?: throw validationError("packed Windows image lost or duplicated $name section")
+            if (source.virtualAddress != destination.virtualAddress || source.virtualSize != destination.virtualSize ||
+                source.sizeOfRawData != destination.sizeOfRawData
+            ) {
+                throw validationError("packed Windows image changed $name section RVA or size")
+            }
+            fun requireRange(image: ByteArray, section: PeSection) {
+                if (section.pointerToRawData < 0 || section.sizeOfRawData <= 0 ||
+                    section.pointerToRawData.toLong() + section.sizeOfRawData > image.size.toLong()
+                ) {
+                    throw validationError("$name raw data is empty or out of bounds")
+                }
+            }
+            requireRange(original, source)
+            requireRange(packed, destination)
+            if ((0 until source.sizeOfRawData).any { offset ->
+                    original[source.pointerToRawData + offset] != packed[destination.pointerToRawData + offset]
+                }
+            ) {
+                throw validationError("packed Windows image changed $name raw bytes; host measurement sections must survive byte-for-byte")
+            }
         }
     }
 

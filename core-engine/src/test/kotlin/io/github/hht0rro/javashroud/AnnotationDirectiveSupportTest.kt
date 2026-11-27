@@ -152,7 +152,7 @@ class AnnotationDirectiveSupportTest {
         classOptions: Map<String, String> = emptyMap(),
     ): ByteArray {
         val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
-        cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "sample/Annotated", null, "java/lang/Object", null)
+        cw.visit(testClassfileVersion(), Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "sample/Annotated", null, "java/lang/Object", null)
         if (classPass != null) addPassAnnotation(cw.visitAnnotation(JAVA_SHROUD_PASS_DESCRIPTOR, false), classPass, classOptions)
 
         val field = cw.visitField(Opcodes.ACC_PUBLIC, "secret", "Ljava/lang/String;", null, null)

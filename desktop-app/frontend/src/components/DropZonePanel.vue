@@ -3,16 +3,18 @@ import { computed, ref } from 'vue'
 import { Check, Copy, FileArchive, FolderOpen, Upload } from 'lucide-vue-next'
 import { NButton, NInput } from 'naive-ui'
 import LiquidGlass from './LiquidGlass.vue'
-import type { LoadedJarInfo, RunStatus } from '../modules/obfuscation/types'
+import type { ArtifactFormat, LoadedJarInfo, RunStatus } from '../modules/obfuscation/types'
 import type { DisplayLanguage } from '../modules/obfuscation/pass-localization'
 
 const props = defineProps<{
+  readonly artifactFormat: ArtifactFormat
   readonly inputJar: LoadedJarInfo | null
   readonly outputJarPath: string
   readonly status: RunStatus
   readonly displayLanguage: DisplayLanguage
 }>()
 const emit = defineEmits<{
+  readonly artifactFormatChanged: [format: ArtifactFormat]
   readonly inputPathChanged: [inputJarPath: string]
   readonly outputChanged: [outputJarPath: string]
   readonly browseInput: []
@@ -33,21 +35,29 @@ const copyPath = async (value: string): Promise<void> => {
 
 <template>
   <LiquidGlass as="section" level="surface" class="panel file-panel" @dragover.prevent>
-    <div class="panel-head"><div><p class="eyebrow">{{ displayLanguage === 'zh' ? '01 / 文件' : '01 / FILES' }}</p><h2>{{ displayLanguage === 'zh' ? '输入与输出' : 'Input & output' }}</h2></div><span v-if="inputJar" class="inline-status"><Check :size="14" />{{ displayLanguage === 'zh' ? '已选择' : 'Selected' }}</span></div>
+    <div class="panel-head">
+      <div><p class="eyebrow">{{ displayLanguage === 'zh' ? '01 / 文件' : '01 / FILES' }}</p><h2>{{ displayLanguage === 'zh' ? '输入与输出' : 'Input & output' }}</h2></div>
+      <div class="panel-head-actions">
+        <div class="artifact-switch" role="group" :aria-label="displayLanguage === 'zh' ? '输入工件模式' : 'Input artifact mode'">
+          <button v-for="format in ['jar', 'apk'] as ArtifactFormat[]" :key="format" type="button" class="artifact-switch-option" :class="{ active: artifactFormat === format }" :disabled="isLocked" :aria-pressed="artifactFormat === format" @click="emit('artifactFormatChanged', format)">{{ format.toUpperCase() }}</button>
+        </div>
+        <span v-if="inputJar" class="inline-status"><Check :size="14" />{{ displayLanguage === 'zh' ? '已选择' : 'Selected' }}</span>
+      </div>
+    </div>
     <div class="file-panel-body">
-      <button type="button" class="file-drop" :class="{ 'file-drop--loaded': inputJar }" :disabled="isLocked" :aria-label="displayLanguage === 'zh' ? '选择 JAR 文件' : 'Choose JAR file'" @click="emit('browseInput')">
+      <button type="button" class="file-drop" :class="{ 'file-drop--loaded': inputJar }" :disabled="isLocked" :aria-label="displayLanguage === 'zh' ? `选择 ${artifactFormat.toUpperCase()} 文件` : `Choose ${artifactFormat.toUpperCase()} file`" @click="emit('browseInput')">
         <span class="file-drop-mark"><FileArchive v-if="inputJar" :size="25" /><Upload v-else :size="25" /></span>
-        <span class="file-drop-copy"><strong>{{ inputJar?.fileName ?? (displayLanguage === 'zh' ? '拖入 JAR，开始配置' : 'Drop a JAR to get started') }}</strong><small>{{ inputJar ? (displayLanguage === 'zh' ? '点击更换文件，或拖入新的 JAR' : 'Click to replace, or drop another JAR') : (displayLanguage === 'zh' ? '也可以点击这里，通过系统对话框选择文件' : 'Or click here to choose a file from your computer') }}</small></span>
+        <span class="file-drop-copy"><strong>{{ inputJar?.fileName ?? (displayLanguage === 'zh' ? `拖入 ${artifactFormat.toUpperCase()}，开始配置` : `Drop a ${artifactFormat.toUpperCase()} to get started`) }}</strong><small>{{ inputJar ? (displayLanguage === 'zh' ? `点击更换文件，或拖入新的 ${artifactFormat.toUpperCase()}` : `Click to replace, or drop another ${artifactFormat.toUpperCase()}`) : (displayLanguage === 'zh' ? '也可以点击这里，通过系统对话框选择文件' : 'Or click here to choose a file from your computer') }}</small></span>
         <FolderOpen :size="18" class="file-drop-arrow" aria-hidden="true" />
       </button>
       <div class="file-field">
-        <label for="input-jar-path">{{ displayLanguage === 'zh' ? '输入 JAR 路径' : 'Input JAR path' }}</label>
-        <div class="file-field-controls"><NInput :value="inputPath" :disabled="isLocked" :input-props="{ id: 'input-jar-path', 'aria-label': displayLanguage === 'zh' ? '输入 JAR 路径' : 'Input JAR path' }" placeholder="D:\build\app.jar" @update:value="emit('inputPathChanged', $event)" /><button class="utility-button" type="button" :disabled="!inputPath" :aria-label="displayLanguage === 'zh' ? '复制输入路径' : 'Copy input path'" @click="copyPath(inputPath)"><Copy :size="15" /></button><NButton secondary :disabled="isLocked" @click="emit('browseInput')">{{ displayLanguage === 'zh' ? '浏览' : 'Browse' }}</NButton></div>
+        <label for="input-jar-path">{{ displayLanguage === 'zh' ? `输入 ${artifactFormat.toUpperCase()} 路径` : `Input ${artifactFormat.toUpperCase()} path` }}</label>
+        <div class="file-field-controls"><NInput :value="inputPath" :disabled="isLocked" :input-props="{ id: 'input-jar-path', 'aria-label': displayLanguage === 'zh' ? '输入文件路径' : 'Input file path' }" :placeholder="artifactFormat === 'apk' ? 'D:\\build\\app.apk' : 'D:\\build\\app.jar'" @update:value="emit('inputPathChanged', $event)" /><button class="utility-button" type="button" :disabled="!inputPath" :aria-label="displayLanguage === 'zh' ? '复制输入路径' : 'Copy input path'" @click="copyPath(inputPath)"><Copy :size="15" /></button><NButton secondary :disabled="isLocked" @click="emit('browseInput')">{{ displayLanguage === 'zh' ? '浏览' : 'Browse' }}</NButton></div>
       </div>
       <div class="file-field">
-        <label for="output-jar-path">{{ displayLanguage === 'zh' ? '输出 JAR 路径' : 'Output JAR path' }}</label>
-        <div class="file-field-controls"><NInput :value="outputJarPath" :disabled="isLocked" :input-props="{ id: 'output-jar-path', 'aria-label': displayLanguage === 'zh' ? '输出 JAR 路径' : 'Output JAR path' }" placeholder="D:\build\app-shrouded.jar" @update:value="emit('outputChanged', $event)" /><button class="utility-button" type="button" :disabled="!outputJarPath" :aria-label="displayLanguage === 'zh' ? '复制输出路径' : 'Copy output path'" @click="copyPath(outputJarPath)"><Copy :size="15" /></button><NButton secondary :disabled="isLocked || !inputJar" @click="emit('browseOutput')">{{ displayLanguage === 'zh' ? '另存为' : 'Save as' }}</NButton></div>
-        <p class="field-hint">{{ displayLanguage === 'zh' ? '使用不同的输出文件，保留原始 JAR。路径可直接编辑。' : 'Use a separate output file to keep the original JAR. Paths are editable.' }}</p>
+        <label for="output-jar-path">{{ displayLanguage === 'zh' ? `输出 ${artifactFormat.toUpperCase()} 路径` : `Output ${artifactFormat.toUpperCase()} path` }}</label>
+        <div class="file-field-controls"><NInput :value="outputJarPath" :disabled="isLocked" :input-props="{ id: 'output-jar-path', 'aria-label': displayLanguage === 'zh' ? '输出文件路径' : 'Output file path' }" :placeholder="artifactFormat === 'apk' ? 'D:\\build\\app-shrouded.apk' : 'D:\\build\\app-shrouded.jar'" @update:value="emit('outputChanged', $event)" /><button class="utility-button" type="button" :disabled="!outputJarPath" :aria-label="displayLanguage === 'zh' ? '复制输出路径' : 'Copy output path'" @click="copyPath(outputJarPath)"><Copy :size="15" /></button><NButton secondary :disabled="isLocked || !inputJar" @click="emit('browseOutput')">{{ displayLanguage === 'zh' ? '另存为' : 'Save as' }}</NButton></div>
+        <p class="field-hint">{{ displayLanguage === 'zh' ? `使用不同的输出文件，保留原始 ${artifactFormat.toUpperCase()}。路径可直接编辑。` : `Use a separate output file to keep the original ${artifactFormat.toUpperCase()}. Paths are editable.` }}</p>
       </div>
       <p v-if="feedback" class="field-hint" role="status">{{ feedback }}</p>
     </div>
@@ -56,6 +66,12 @@ const copyPath = async (value: string): Promise<void> => {
 
 <style scoped>
 .file-panel { align-self: start; }
+.panel-head-actions { display: flex; align-items: center; gap: 10px; }
+.artifact-switch { display: inline-flex; padding: 3px; gap: 2px; border: 1px solid var(--line-strong); border-radius: 999px; background: #111; }
+.artifact-switch-option { min-width: 43px; min-height: 25px; border: 0; border-radius: 999px; padding: 3px 9px; color: var(--text-muted); background: transparent; font: 600 11px var(--font-mono); cursor: pointer; transition: color var(--motion-fast), background var(--motion-fast), transform var(--motion-fast); }
+.artifact-switch-option:hover:not(:disabled) { color: var(--text); transform: translateY(-1px); }
+.artifact-switch-option.active { color: var(--accent-ink); background: var(--accent); }
+.artifact-switch-option:disabled { cursor: not-allowed; opacity: .55; }
 .file-panel-body { display: grid; gap: 22px; padding: 20px; }
 .file-drop { display: flex; align-items: center; gap: 18px; width: 100%; min-width: 0; min-height: 154px; padding: 24px; border: 1px dashed var(--line-strong); border-radius: var(--radius-md); color: var(--text); background: var(--accent-soft); cursor: pointer; text-align: left; transition: background var(--motion-fast), border-color var(--motion-fast); }
 .file-drop:hover:not(:disabled) { background: var(--control-hover); border-color: var(--accent-line); }
@@ -70,5 +86,5 @@ const copyPath = async (value: string): Promise<void> => {
 .file-field label { color: var(--text-soft); font-size: 13px; font-weight: 550; }
 .file-field-controls { display: grid; align-items: center; gap: 8px; grid-template-columns: minmax(0, 1fr) 36px auto; }
 .file-field-controls :deep(input) { font-family: var(--font-mono); font-size: 12px; }
-@media (max-width: 700px) { .file-panel-body { padding: 16px; } .file-drop { padding: 18px; gap: 12px; } .file-drop-arrow { display: none; } }
+@media (max-width: 700px) { .panel-head-actions { gap: 6px; } .inline-status { display: none; } .file-panel-body { padding: 16px; } .file-drop { padding: 18px; gap: 12px; } .file-drop-arrow { display: none; } }
 </style>

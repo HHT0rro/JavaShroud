@@ -6,7 +6,6 @@ pub mod router;
 pub mod shell;
 pub mod vm;
 
-pub use qp_shell::SupportedTarget;
 pub use lifecycle::{
     ArenaError, ArtifactIndex, ArtifactIndexEntry, Capabilities, CapabilitySet, DecoderContext,
     FixedCache, GenerationState, LifecycleError, RuntimeGeneration, RuntimeGenerationConfig,
@@ -16,7 +15,10 @@ pub use lifecycle::{
     MAX_VM_FRAMES, MAX_VM_FRAME_SIZE,
 };
 pub use page::{CallSiteProof, PageError, PageHandle, PageKind, PageRequest};
-pub use router::{OpenedPage, PageKeyAuthority, PageKeyMaterial, PageKeyRequest, RouterError, TypedPageRouter};
+pub use qp_shell::SupportedTarget;
+pub use router::{
+    OpenedPage, PageKeyAuthority, PageKeyMaterial, PageKeyRequest, RouterError, TypedPageRouter,
+};
 pub use shell::{ShellArtifact, ShellBinding, ShellError};
 pub use vm::{VmBoundary, VmError, VmResult};
 

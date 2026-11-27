@@ -37,6 +37,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   readonly passesChanged: [passes: readonly PassItem[]]
   readonly passToggled: [passId: string]
+  readonly allPassesToggled: [enabled: boolean]
   readonly passParamChanged: [passId: string, paramKey: string, value: PassParamValue]
 }>()
 
@@ -80,6 +81,22 @@ const hasEnabledAggressive = computed((): boolean => props.passes.some((p: PassI
 const isLocked = (): boolean => props.status === 'running' || props.status === 'awaiting-pack' || props.status === 'canceling'
 const isPassInteractionDisabled = (): boolean => isLocked()
 const canMovePass = (): boolean => true
+
+const allPassesEnabled = computed((): boolean => props.passes.length > 0 && enabledCount.value === props.passes.length)
+const allPassesToggleDisabled = computed((): boolean => isLocked() || props.passes.length === 0)
+const allPassesToggleLabel = computed((): string => allPassesEnabled.value
+  ? (props.displayLanguage === 'zh' ? '取消全选' : 'Deselect all')
+  : (props.displayLanguage === 'zh' ? '全选' : 'Select all'))
+const allPassesToggleTitle = computed((): string => allPassesEnabled.value
+  ? (props.displayLanguage === 'zh' ? '停用全部模块' : 'Disable all modules')
+  : (props.displayLanguage === 'zh' ? '启用全部模块（自动应用依赖、兼容性与排序约束）' : 'Enable all modules (dependency, compatibility and ordering constraints apply)'))
+
+const onToggleAll = (): void => {
+  if (allPassesToggleDisabled.value) {
+    return
+  }
+  emit('allPassesToggled', !allPassesEnabled.value)
+}
 
 const onDragUpdate = (value: PassItem[]): void => {
   const merged = applyVisibleReorder(props.passes, value).map(clonePassItem)
@@ -312,6 +329,18 @@ const fullOrderLabel = (passId: string): number => props.passes.findIndex((passI
         />
       </div>
       <div class="category-chips" :aria-label="displayLanguage === 'zh' ? 'Pass 分类筛选' : 'Pass category filters'">
+        <button
+          type="button"
+          class="category-chip category-chip--bulk"
+          :class="{ active: allPassesEnabled }"
+          :disabled="allPassesToggleDisabled"
+          :aria-pressed="allPassesEnabled"
+          :aria-label="allPassesToggleLabel"
+          :title="allPassesToggleTitle"
+          @click="onToggleAll"
+        >
+          {{ allPassesToggleLabel }}
+        </button>
         <button
           v-for="chip in filterChips"
           :key="chip.id"
@@ -607,6 +636,13 @@ const fullOrderLabel = (passId: string): number => props.passes.findIndex((passI
   align-items: center;
   gap: 6px;
   transition: color 160ms ease, background 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+
+.category-chip--bulk {
+  flex: 0 0 auto;
+  padding-inline: 9px;
+  white-space: nowrap;
+  font-weight: 600;
 }
 
 .category-chip:hover {

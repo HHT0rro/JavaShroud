@@ -1,6 +1,10 @@
 package io.github.hht0rro.javashroud.transforms.rename
 
 import io.github.hht0rro.javashroud.analysis.eligibleMembersForAction
+import io.github.hht0rro.javashroud.bytecode.FieldFamilyIndexEntry
+import io.github.hht0rro.javashroud.bytecode.FieldRenameIndex
+import io.github.hht0rro.javashroud.bytecode.MethodFamilyIndexEntry
+import io.github.hht0rro.javashroud.bytecode.MethodRenameIndex
 import io.github.hht0rro.javashroud.bytecode.isResolverMemberName
 import io.github.hht0rro.javashroud.bytecode.remapFields
 import io.github.hht0rro.javashroud.bytecode.remapMethods
@@ -87,50 +91,125 @@ fun renameMethods(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, para
     }.toSet() + entryPointMethodKeys + reflectionBridgeMethodKeys
     val nativeMethodKeys = nativeMethodKeys(workingArtifact).intersect(methodRenameMap.keys)
     val methodStringRewriteMap = methodReflectionStringRewriteMap(methodRenameMap)
-    val updatedClassArtifacts = workingArtifact.classArtifacts.map { classArtifact ->
+    val methodFamilies = workingArtifact.classArtifacts.associate { classArtifact ->
+        classArtifact.summary.internalName to MethodFamilyIndexEntry(
+            superName = classArtifact.summary.superName,
+            interfaceNames = classArtifact.summary.interfaceNames,
+            ownMethods = classArtifact.summary.methodSummaries
+                .map { method -> method.name to method.descriptor }
+                .toSet(),
+        )
+    }
+    var effectiveMethodRenameMap = methodRenameMap
+    var renameIndex = MethodRenameIndex(effectiveMethodRenameMap, bridgeMethodKeys, nativeMethodKeys, methodFamilies)
+    var updatedClassArtifacts = workingArtifact.classArtifacts.map { classArtifact ->
         reanalyzedClassArtifact(
             classArtifact,
             remapMethods(
                 classArtifact.bytes,
-                methodRenameMap,
+                effectiveMethodRenameMap,
                 bridgeMethodKeys,
                 methodStringRewriteMap,
                 nativeMethodKeys,
+                methodFamilies,
+                renameIndex,
             ),
         )
+    }
+    // A per-class remap failure (any internal exception falls back to the
+    // original bytes) leaves the DECLARATION under its original name while
+    // every caller was already rewritten to the map's new name — an
+    // unverifiable/unresolvable artifact. Members whose rename did not
+    // materialize are dropped from the map and the whole remap re-runs from
+    // the untouched working artifact, so each rename either lands everywhere
+    // or nowhere.
+    val unmaterializedMethodKeys = buildSet {
+        for (classArtifact in updatedClassArtifacts) {
+            val declaredMethodSignatures = classArtifact.summary.methodSummaries
+                .mapTo(mutableSetOf()) { it.name + it.descriptor }
+            for (rename in renameIndex.renamesByOwner[classArtifact.summary.internalName].orEmpty().values) {
+                val originalPresent = rename.originalName + rename.descriptor in declaredMethodSignatures
+                val renamedPresent = rename.renamedName + rename.descriptor in declaredMethodSignatures
+                if (originalPresent && !renamedPresent) {
+                    add(MemberKey(rename.owner, rename.originalName, rename.descriptor))
+                }
+            }
+        }
+    }
+    if (unmaterializedMethodKeys.isNotEmpty()) {
+        effectiveMethodRenameMap = effectiveMethodRenameMap - unmaterializedMethodKeys
+        val remainingBridgeKeys = bridgeMethodKeys - unmaterializedMethodKeys
+        renameIndex = MethodRenameIndex(effectiveMethodRenameMap, remainingBridgeKeys, nativeMethodKeys, methodFamilies)
+        updatedClassArtifacts = workingArtifact.classArtifacts.map { classArtifact ->
+            reanalyzedClassArtifact(
+                classArtifact,
+                remapMethods(
+                    classArtifact.bytes,
+                    effectiveMethodRenameMap,
+                    remainingBridgeKeys,
+                    methodStringRewriteMap,
+                    nativeMethodKeys,
+                    methodFamilies,
+                    renameIndex,
+                ),
+            )
+        }
     }
 
     val updatedArtifact = updatedArtifactTransformResult(
         artifact = workingArtifact,
         updatedClassArtifacts = updatedClassArtifacts,
-        transformedClassCount = affectedOwnerCount(methodRenameMap),
-        transformedMemberCount = methodRenameMap.size + parameterResult.transformedMemberCount,
+        transformedClassCount = affectedOwnerCount(effectiveMethodRenameMap),
+        transformedMemberCount = effectiveMethodRenameMap.size + parameterResult.transformedMemberCount,
     ).artifact
 
     return updatedArtifactTransformResult(
-        artifact = updatedArtifact.copy(jarEntries = mergeMethodRenameMapEntry(updatedArtifact.jarEntries, methodRenameMap)),
+        artifact = updatedArtifact.copy(jarEntries = mergeMethodRenameMapEntry(updatedArtifact.jarEntries, effectiveMethodRenameMap)),
         updatedClassArtifacts = updatedArtifact.classArtifacts,
-        transformedClassCount = affectedOwnerCount(methodRenameMap),
-        transformedMemberCount = methodRenameMap.size + parameterResult.transformedMemberCount,
+        transformedClassCount = affectedOwnerCount(effectiveMethodRenameMap),
+        transformedMemberCount = effectiveMethodRenameMap.size + parameterResult.transformedMemberCount,
     )
 }
 
 fun renameFields(artifact: BytecodeArtifact, ruleMatches: List<RuleMatch>, params: Map<String, Any>): TransformResult {
     val config = buildRenameConfig(params)
     val runtimeBoundClassNames = priorRuntimeBoundClassNames(artifact)
+    // Fields whose names appear as string constants are looked up
+    // reflectively somewhere in the artifact (kotlinx.coroutines'
+    // AtomicReferenceFieldUpdater.newUpdater(C, C, "name") pattern is the
+    // canonical case; Class.getDeclaredField callers are rewritten by
+    // remapFields instead). Their names must survive renaming.
+    val reflectionPinnedFieldNames = reflectedFieldNames(artifact)
     val matchedMembers = eligibleMembersForAction(artifact.classArtifacts, ruleMatches, "rename-fields")
         .filter { it.kind == MemberKind.FIELD }
         .filter { it.owner !in runtimeBoundClassNames }
-    val fieldRenameMap = buildFieldRenameMap(matchedMembers, config)
-    if (fieldRenameMap.isEmpty()) {
+        .filter { it.name !in reflectionPinnedFieldNames }
+    val plannedFieldRenames = buildFieldRenameMap(matchedMembers, config)
+    if (plannedFieldRenames.isEmpty()) {
         return unchangedTransformResult(artifact)
     }
 
+    val fieldFamilies = artifact.classArtifacts.associate { classArtifact ->
+        classArtifact.summary.internalName to FieldFamilyIndexEntry(
+            superName = classArtifact.summary.superName,
+            interfaceNames = classArtifact.summary.interfaceNames,
+            ownFields = classArtifact.summary.fieldSummaries
+                .map { field -> field.name to field.descriptor }
+                .toSet(),
+        )
+    }
+    val plannedIndex = FieldRenameIndex(plannedFieldRenames, fieldFamilies)
+    val unresolvedDeclarations = artifact.classArtifacts.flatMapTo(mutableSetOf()) {
+        plannedIndex.unresolvedDeclarations(it.bytes)
+    }
+    val fieldRenameMap = plannedFieldRenames - unresolvedDeclarations
+    if (fieldRenameMap.isEmpty()) return unchangedTransformResult(artifact)
     val fieldStringRewriteMap = fieldRenameMap.values
         .groupBy { it.owner }
         .mapValues { (_, renames) -> renames.associate { it.originalName to it.renamedName } }
+    val renameIndex = FieldRenameIndex(fieldRenameMap, fieldFamilies)
     val updatedClassArtifacts = artifact.classArtifacts.map { classArtifact ->
-        reanalyzedClassArtifact(classArtifact, remapFields(classArtifact.bytes, fieldRenameMap, fieldStringRewriteMap))
+        reanalyzedClassArtifact(classArtifact, remapFields(classArtifact.bytes, fieldRenameMap, fieldStringRewriteMap, renameIndex))
     }
 
     val transformed = updatedArtifactTransformResult(

@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -42,11 +42,15 @@ func (a *App) ResolveXenolithCli() (string, error) {
 func resolveXenolithCliInfo() (XenolithCliInfo, error) {
 	path, source := resolveXenolithCliPath()
 	if path == "" {
-		return XenolithCliInfo{Path: "", Version: "", Source: ""}, nil
+		return XenolithCliInfo{}, fmt.Errorf("xenolith CLI is missing: set %s to an executable, place tools/xenolith.exe next to the app, or add xenolith to PATH", xenolithCliEnvKey)
+	}
+	version, err := probeXenolithCliVersion(path)
+	if err != nil {
+		return XenolithCliInfo{}, err
 	}
 	return XenolithCliInfo{
 		Path:    path,
-		Version: probeXenolithCliVersion(path),
+		Version: version,
 		Source:  source,
 	}, nil
 }
@@ -71,10 +75,9 @@ func resolveXenolithCliPathFromSources(
 ) (string, string) {
 	if trimmedOverride := strings.TrimSpace(override); trimmedOverride != "" {
 		if absoluteOverride, err := filepath.Abs(trimmedOverride); err == nil {
-			if _, statErr := os.Stat(absoluteOverride); statErr == nil {
-				return absoluteOverride, "env"
-			}
+			return absoluteOverride, "env"
 		}
+		return trimmedOverride, "env"
 	}
 
 	if embeddedPath, embeddedErr := embedded(); embeddedErr == nil && embeddedPath != "" {
@@ -121,29 +124,41 @@ func xenolithCliCandidatesForExecutableDir(executableDir string) []xenolithCliCa
 	return []xenolithCliCandidate{
 		toolsCandidate,
 		{
+			path:   filepath.Join(executableDir, "..", "..", "..", "..", "Xenolith", "target", "release", "xenolith.exe"),
+			source: "sibling",
+		},
+		{
 			path:   filepath.Join(executableDir, "..", "..", "..", "..", "Xenolith", "dist", "xenolith.exe"),
 			source: "sibling",
 		},
 	}
 }
 
-var xenolithVersionCache sync.Map
-
-func probeXenolithCliVersion(cliPath string) string {
-	if cached, ok := xenolithVersionCache.Load(cliPath); ok {
-		if version, ok := cached.(string); ok {
-			return version
-		}
+func probeXenolithCliVersion(cliPath string) (string, error) {
+	fileInfo, err := os.Stat(cliPath)
+	if err != nil {
+		return "", fmt.Errorf("probe xenolith CLI version failed: path=%s args=[--version]: %w", cliPath, err)
+	}
+	if !fileInfo.Mode().IsRegular() {
+		return "", fmt.Errorf("probe xenolith CLI version failed: path=%s args=[--version]: executable is not a regular file", cliPath)
 	}
 
 	probeContext, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	cmd := exec.CommandContext(probeContext, cliPath, "--version")
+	cmd.WaitDelay = time.Second
 	applyHiddenProcessWindow(cmd)
 	output, err := cmd.Output()
 	if err != nil {
-		return ""
+		diagnostic := ""
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			diagnostic = summarizeEngineStderr(string(exitErr.Stderr), 1200)
+		}
+		if probeContext.Err() != nil {
+			err = probeContext.Err()
+		}
+		return "", fmt.Errorf("probe xenolith CLI version failed: path=%s args=[--version] stderr=%s: %w", cliPath, diagnostic, err)
 	}
 
 	version := ""
@@ -154,6 +169,8 @@ func probeXenolithCliVersion(cliPath string) string {
 			break
 		}
 	}
-	xenolithVersionCache.Store(cliPath, version)
-	return version
+	if version == "" {
+		return "", fmt.Errorf("probe xenolith CLI version failed: path=%s args=[--version]: version output is empty", cliPath)
+	}
+	return version, nil
 }

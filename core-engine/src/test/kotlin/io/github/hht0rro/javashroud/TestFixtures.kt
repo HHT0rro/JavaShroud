@@ -22,6 +22,9 @@ internal inline fun <T> withTestBootSecret(block: () -> T): T = block()
 /** Retained call-site adapter: the current runtime starts child JVMs without shell secrets. */
 internal fun ProcessBuilder.withTestBootSecret(): ProcessBuilder = this
 
+/** Behavioral fixtures exercise the classfile version supported by the executing test JVM. */
+internal fun testClassfileVersion(): Int = Runtime.version().feature() + 44
+
 internal fun testConfig(
     inputJarPath: String = "C:/tmp/input.jar",
     outputJarPath: String = "C:/tmp/output.jar",

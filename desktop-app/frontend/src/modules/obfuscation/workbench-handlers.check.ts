@@ -1,9 +1,10 @@
 import { shallowRef } from 'vue'
 import { createInitialRunState } from './state.ts'
 import { applyEnginePayload } from './frontend-controller.ts'
+import { exportWorkbenchTomlConfig, importWorkbenchTomlConfig } from './config-toml.ts'
 import { createWorkbenchHandlers } from './workbench-handlers.ts'
-import type { RunState } from './types.ts'
-import type { WailsBridge } from './wails-bridge.ts'
+import type { ObfuscationRequest, RunState } from './types.ts'
+import { createWailsBridge, type WailsBridge } from './wails-bridge.ts'
 
 const assert = (condition: boolean, message: string): void => {
   if (!condition) {
@@ -454,6 +455,175 @@ const readyState = (): RunState => ({
   await handlers.handleResumeNativePack('SKIP')
   assert(resumeCalls === 1, 'expected Linux SKIP resume to call bridge')
   assert(state.value.status === 'running', 'expected SKIP resume to mark running')
+}
+
+{
+  const initial = readyState()
+  const template = initial.passes[0]!
+  const passes = [
+    { ...template, id: 'rename', enabled: false, dependencyAutoEnabled: true, params: { mode: 'custom' } },
+    { ...template, id: 'protect', category: 'protect', enabled: false },
+  ]
+  const { state, handlers } = createHarness(createBridge(), { ...initial, passes })
+
+  handlers.handleAllPassesToggled(true)
+  assert(state.value.passes.every((pass) => pass.enabled), 'expected bulk enable to include every category')
+  assert(state.value.passes.every((pass) => !pass.dependencyAutoEnabled), 'expected bulk enable to clear dependency-only flags')
+  assert(passes.every((pass) => !pass.enabled), 'expected bulk enable not to mutate original passes')
+  assert(state.value.passes.find((pass) => pass.id === 'rename')?.params.mode === 'custom', 'expected bulk enable to retain parameters')
+
+  handlers.handlePassToggled('rename')
+  assert(state.value.passes.find((pass) => pass.id === 'rename')?.enabled === false, 'expected individual toggle to remain independent')
+  assert(state.value.passes.find((pass) => pass.id === 'protect')?.enabled === true, 'expected individual toggle to leave other passes enabled')
+
+  handlers.handleAllPassesToggled(false)
+  assert(state.value.passes.every((pass) => !pass.enabled), 'expected bulk disable to clear every category')
+  assert(state.value.passes.map((pass) => pass.id).join(',') === 'rename,protect', 'expected bulk toggle to retain unconstrained order')
+  assert(state.value.outputJarPath === initial.outputJarPath, 'expected bulk toggle to retain workbench configuration')
+}
+
+{
+  const initial = readyState()
+  const template = initial.passes[0]!
+  const { state, handlers } = createHarness(createBridge(), {
+    ...initial,
+    passes: [
+      { ...template, id: 'consumer', enabled: false, requiredPassIds: ['dependency'] },
+      { ...template, id: 'dependency', enabled: false },
+      { ...template, id: 'alternative-a', enabled: false },
+      { ...template, id: 'alternative-b', enabled: false },
+      { ...template, id: 'dependent-b', enabled: false, requiresAnyPassIds: ['alternative-b'] },
+    ],
+    schema: {
+      schemaVersion: 'test',
+      engineVersion: 'test',
+      tags: [],
+      modules: [],
+      compatibility: [{ passIds: ['alternative-a', 'alternative-b'], severity: 'hard', description: 'exclusive alternatives' }],
+      orderingConstraints: [{ before: 'dependency', after: 'consumer', hard: true, reason: 'dependency first' }],
+      defaultPipeline: [],
+    },
+  })
+
+  handlers.handleAllPassesToggled(true)
+  const passes = state.value.passes
+  assert(passes.find((pass) => pass.id === 'alternative-a')?.enabled === true, 'expected bulk enable to retain the compatible winner')
+  assert(passes.find((pass) => pass.id === 'alternative-b')?.enabled === false, 'expected bulk enable to resolve hard conflicts')
+  assert(passes.find((pass) => pass.id === 'dependent-b')?.enabled === false, 'expected bulk enable to apply requires-any constraints after conflicts')
+  assert(passes.findIndex((pass) => pass.id === 'dependency') < passes.findIndex((pass) => pass.id === 'consumer'), 'expected bulk enable to apply engine ordering constraints')
+
+  handlers.handleAllPassesToggled(false)
+  assert(state.value.passes.every((pass) => !pass.enabled), 'expected bulk disable not to re-enable dependencies')
+}
+
+for (const status of ['running', 'awaiting-pack', 'canceling'] as const) {
+  const initial = { ...readyState(), status }
+  const { state, handlers } = createHarness(createBridge(), initial)
+  handlers.handleAllPassesToggled(false)
+  handlers.handleAllPassesToggled(true)
+  assert(state.value === initial, `expected bulk edits locked during ${status}`)
+}
+
+{
+  const initial = { ...readyState(), inspectingClasses: true }
+  const { state, handlers } = createHarness(createBridge(), initial)
+  handlers.handleAllPassesToggled(false)
+  assert(state.value === initial, 'expected bulk edits to share the inspection lock')
+}
+
+{
+  // Reduced -schema payload with the engine's hidden parameter types and defaults.
+  const nativeModule = {
+    tagIds: ['native-kernel'], stability: 'experimental', risk: 'high',
+    requiresOptIn: true, defaultEnabled: false, targeting: { supported: true, targetKinds: ['class'] },
+  }
+  const schema = JSON.stringify({
+    schemaVersion: '2', engineVersion: 'no-op', compatibility: [], orderingConstraints: [], defaultPipeline: [],
+    tags: [{ id: 'native-kernel', name: 'Native kernel', description: 'Native kernel passes' }],
+    modules: [
+      { ...nativeModule, id: 'jni-microkernel-loader', name: 'JNI microkernel loader', description: 'Native runtime', params: [] },
+      {
+        ...nativeModule, id: 'nativeshroud', name: 'Custom packing', description: 'Native packing handoff',
+        requiredPassIds: ['jni-microkernel-loader'],
+        params: [
+          { key: 'cliPath', type: 'string', defaultValue: '', options: null, description: 'Desktop CLI path', hidden: true },
+          { key: 'profile', type: 'enum', defaultValue: 'standard', options: ['fast', 'standard', 'max'], description: 'Packing profile', hidden: true },
+          { key: 'packedPath', type: 'string', defaultValue: '', options: null, description: 'Backend-only packed path', hidden: true },
+          { key: 'traceDiverge', type: 'boolean', defaultValue: false, options: null, description: 'Backend-only flag', hidden: true },
+        ],
+      },
+    ],
+  })
+  const requests: ObfuscationRequest[] = []
+  const noOpWindow = { go: { main: { App: {
+    StartObfuscation: async (request: ObfuscationRequest): Promise<void> => { requests.push(request) },
+  } } } } as unknown as Window
+  const { state, handlers } = createHarness(createBridge({
+    getEngineCapabilities: async () => schema,
+    startObfuscation: createWailsBridge(noOpWindow).startObfuscation,
+  }), readyState())
+  await handlers.loadCapabilities()
+  handlers.handlePassToggled('nativeshroud')
+  const cliPath = 'C:/fixture tools/no-op-xenolith.exe'
+  handlers.handlePassParamChanged('nativeshroud', 'cliPath', cliPath)
+  handlers.handlePassParamChanged('nativeshroud', 'traceDiverge', true)
+  const exported = exportWorkbenchTomlConfig(state.value)
+  assert(!exported.includes('cliPath'), 'expected the machine-local runtime path to stay out of workbench TOML')
+  const imported = importWorkbenchTomlConfig(state.value, [
+    '[[passes]]', 'id = "nativeshroud"', 'enabled = true', '[passes.params]', 'cliPath = "C:/fixture/ignored.exe"',
+  ].join('\n'))
+  assert(imported.nextState.passes.find(({ id }) => id === 'nativeshroud')?.params.cliPath === cliPath,
+    'expected import to ignore replacement of the desktop-selected path')
+  await handlers.handleStart()
+  assert(requests[0]?.artifactFormat === 'jar', 'expected explicit JAR mode across the Wails bridge')
+  const autoParams = requests[0]?.passes.find(({ id }) => id === 'nativeshroud')?.params
+  assert(autoParams?.cliPath === cliPath, 'expected the switch-selected CLI path to reach the no-op bridge')
+  assert(Object.keys(autoParams ?? {}).join(',') === 'cliPath', 'expected other hidden values to remain filtered')
+  state.value = applyEnginePayload(state.value, { type: 'done', level: 'info', message: 'fixture done', progress: 100, outPath: 'C:/fixture/out.jar' })
+  handlers.handlePassParamChanged('nativeshroud', 'cliPath', '')
+  await handlers.handleStart()
+  const manualParams = requests[1]?.passes.find(({ id }) => id === 'nativeshroud')?.params
+  assert(manualParams !== undefined && !('cliPath' in manualParams), 'expected switch off to use the manual handoff')
+}
+
+const needPack = { type: 'need-pack', level: 'info', message: 'first handoff', progress: 55, outPath: 'C:/fixture/qp_ffi.dll' }
+
+{
+  const gate = createDeferred<void>()
+  let submissions = 0
+  const { state, handlers } = createHarness(createBridge({
+    resumeNativePack: () => { submissions += 1; return gate.promise },
+  }), applyEnginePayload(readyState(), needPack))
+  const resumed = handlers.handleResumeNativePack('C:/fixture/packed.dll')
+  await handlers.handleResumeNativePack('C:/fixture/packed.dll')
+  assert(submissions === 1, 'expected one submission per pending handoff')
+  state.value = applyEnginePayload(state.value, { type: 'progress', level: 'info', message: 'late progress', progress: 80 })
+  state.value = applyEnginePayload(state.value, { type: 'warn', level: 'warn', message: 'late log' })
+  gate.resolve()
+  await resumed
+  assert(state.value.status === 'running' && state.value.progress === 80, 'expected resume to keep newer progress')
+  assert(state.value.logs.some(({ message }) => message === 'late log'), 'expected resume to keep newer logs')
+}
+
+for (const event of [
+  { type: 'done', level: 'info', message: 'done before acknowledgement', progress: 100, outPath: 'C:/fixture/out.jar' },
+  { type: 'canceled', level: 'warn', message: 'canceled before acknowledgement' },
+  { type: 'error', level: 'error', message: 'failed before acknowledgement' },
+  { ...needPack, message: 'new handoff at the same path' },
+]) {
+  const gate = createDeferred<void>()
+  const { state, activePage, handlers, errors } = createHarness(createBridge({
+    resumeNativePack: () => gate.promise,
+  }), applyEnginePayload(readyState(), needPack))
+  const resumed = handlers.handleResumeNativePack('C:/fixture/packed.dll')
+  state.value = applyEnginePayload(state.value, event)
+  activePage.value = 'packing'
+  const latest = state.value
+  if (event.type === 'error') gate.reject(new Error('stale acknowledgement'))
+  else gate.resolve()
+  await resumed
+  assert(state.value === latest, 'expected ' + event.type + ' to survive a late resume reply')
+  assert(activePage.value === 'packing' && errors.length === 0, 'expected stale replies to leave navigation and toasts alone')
 }
 
 console.log('workbench-handlers checks passed')

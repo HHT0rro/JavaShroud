@@ -1,7 +1,13 @@
 package io.github.hht0rro.javashroud.config
 
+import io.github.hht0rro.javashroud.apk.ApkBinaryXmlReader
+import io.github.hht0rro.javashroud.apk.ApkFormatDetector
+import io.github.hht0rro.javashroud.apk.ApkPassPolicy
 import io.github.hht0rro.javashroud.capabilities.buildEngineSchemaPayload
 import io.github.hht0rro.javashroud.compatibility.hardConflictPairs
+import io.github.hht0rro.javashroud.model.config.ARTIFACT_FORMAT_APK
+import io.github.hht0rro.javashroud.model.config.ARTIFACT_FORMAT_AUTO
+import io.github.hht0rro.javashroud.model.config.ARTIFACT_FORMAT_JAR
 import io.github.hht0rro.javashroud.model.config.HardenedProtectionProfile
 import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
 import io.github.hht0rro.javashroud.transforms.protection.hardening.HardenedDefaultPipeline
@@ -12,9 +18,18 @@ import io.github.hht0rro.javashroud.model.schema.requiresAnyPassIdsFor
 import java.nio.file.Path
 import kotlin.io.path.absolutePathString
 
-fun loadValidatedConfig(configPath: Path): ObfuscationConfig {
+fun loadValidatedConfig(
+    configPath: Path,
+    forceApk: Boolean = false,
+    cliLogFilePath: Path? = null,
+): ObfuscationConfig {
     ensureReadableFile(configPath)
-    return validateConfig(parseConfig(configPath), configPath)
+    val parsed = parseConfig(configPath)
+    val withOverrides = parsed.copy(
+        artifactFormat = if (forceApk) ARTIFACT_FORMAT_APK else parsed.artifactFormat,
+        logFilePath = cliLogFilePath?.absolutePathString() ?: parsed.logFilePath,
+    )
+    return validateConfig(withOverrides, configPath)
 }
 
 fun validateConfig(config: ObfuscationConfig, configPath: Path): ObfuscationConfig {
@@ -46,16 +61,79 @@ fun validateConfig(config: ObfuscationConfig, configPath: Path): ObfuscationConf
         throw IllegalArgumentException("Config validation failed: outputJarPath is blank, path=${configPath.absolutePathString()}")
     }
 
-    val profileFilled = if (normalizedConfig.passes.isEmpty() &&
-        normalizedConfig.protectionProfile == HardenedProtectionProfile.RELEASE_HARDENED
+    // Resolve the artifact format before pipeline selection: "auto" sniffs the
+    // input for Android markers; explicit formats cross-checked fail-closed.
+    val formatResolved = resolveArtifactFormat(normalizedConfig, configPath)
+
+    val apkConfigured = formatResolved.artifactFormat == ARTIFACT_FORMAT_APK
+
+    // APK profile default: an absent protectionProfile resolves to MINIMAL
+    // (the desktop-native passes the RELEASE_HARDENED scan requires are
+    // blacklisted on Android). An explicitly requested profile is never
+    // downgraded — explicit RELEASE_HARDENED keeps its fail-closed scan.
+    val profileResolved = if (
+        apkConfigured &&
+        !formatResolved.protectionProfileExplicit &&
+        formatResolved.protectionProfile == HardenedProtectionProfile.RELEASE_HARDENED
     ) {
-        normalizedConfig.copy(
+        formatResolved.copy(protectionProfile = HardenedProtectionProfile.MINIMAL)
+    } else {
+        formatResolved
+    }
+    require(!apkConfigured || profileResolved.protectionProfile != HardenedProtectionProfile.RELEASE_HARDENED) {
+        "APK mode does not support protectionProfile=release-hardened because it requires the desktop Qp runtime. " +
+            "Use protectionProfile=minimal with Android-compatible passes: $configPath"
+    }
+    val profileDefaultedToMinimal =
+        apkConfigured &&
+            !profileResolved.protectionProfileExplicit &&
+            profileResolved.protectionProfile == HardenedProtectionProfile.MINIMAL
+
+    // APK minApi: read the manifest up front so an unspecified apk.minApi can
+    // be derived from minSdkVersion (floored at 21) before any gate or default
+    // pipeline fill runs. Explicit values are untouched and keep the strict
+    // cross-checks below.
+    val apkManifestMinSdk = if (apkConfigured) {
+        readManifestMinSdk(Path.of(profileResolved.inputJarPath))
+    } else {
+        null
+    }
+    val minApiResolved = if (apkConfigured) {
+        profileResolved.copy(
+            apk = profileResolved.apk.copy(
+                minApi = ApkPassPolicy.deriveEffectiveMinApi(profileResolved.apk, apkManifestMinSdk),
+            ),
+        )
+    } else {
+        profileResolved
+    }
+
+    if (apkConfigured) {
+        ApkPassPolicy.validateMinApi(minApiResolved.apk, configPath)
+    }
+
+    val pipelineFilled = when {
+        minApiResolved.passes.isNotEmpty() -> minApiResolved
+        profileDefaultedToMinimal -> minApiResolved.copy(
+            passes = ApkPassPolicy.defaultApkPassSpecs(minApi = minApiResolved.apk.minApi),
+            allowOptInPasses = true,
+        )
+        minApiResolved.protectionProfile == HardenedProtectionProfile.RELEASE_HARDENED -> minApiResolved.copy(
             passes = HardenedDefaultPipeline.defaultPassSpecs(),
             allowOptInPasses = true,
         )
-    } else {
-        normalizedConfig
+        else -> minApiResolved
     }
+
+    if (apkConfigured) {
+        // Dependency-injected forbidden passes are caught here too (the
+        // injector runs further below, so also re-check after normalize).
+        ApkPassPolicy.validatePassBlacklist(pipelineFilled, configPath)
+        ApkPassPolicy.validateInvokeCustomGate(pipelineFilled, configPath)
+        ApkPassPolicy.validateManifestMinSdk(apkManifestMinSdk, pipelineFilled, configPath)
+    }
+
+    val profileFilled = pipelineFilled
     if (profileFilled.passes.isEmpty()) {
         throw IllegalArgumentException("Config validation failed: passes is empty, path=${configPath.absolutePathString()}")
     }
@@ -71,6 +149,7 @@ fun validateConfig(config: ObfuscationConfig, configPath: Path): ObfuscationConf
 
     val inputJarPath = Path.of(normalizedConfig.inputJarPath).toAbsolutePath().normalize()
     val outputJarPath = Path.of(normalizedConfig.outputJarPath).toAbsolutePath().normalize()
+    requireSafeRunFilePaths(profileFilled, configPath)
     ensureReadableFile(inputJarPath)
 
     if (executablePasses.isEmpty()) {
@@ -79,6 +158,14 @@ fun validateConfig(config: ObfuscationConfig, configPath: Path): ObfuscationConf
 
     validateKnownPassIds(executablePasses, configPath)
     val normalizedPasses = normalizePassDependencies(executablePasses)
+    if (apkConfigured) {
+        // The dependency injector above may add forbidden passes after the
+        // earlier blacklist check; re-check the injected list fail-closed.
+        ApkPassPolicy.validatePassBlacklist(
+            profileFilled.copy(passes = normalizedPasses),
+            configPath,
+        )
+    }
     validatePassSelections(profileFilled.passSelections, normalizedPasses, configPath)
     validateRequiredPassDependencies(normalizedPasses, configPath)
     validatePassCompatibility(normalizedPasses, configPath, profileFilled.allowIncomplete)
@@ -100,6 +187,58 @@ internal fun rejectRemovedCurrentFormatParameters(passes: List<PassSpec>) {
         }) {
         throw IllegalArgumentException(REMOVED_BOOT_KEY_DELIVERY_MESSAGE)
     }
+}
+
+/**
+ * Resolves artifactFormat="auto" by sniffing the input zip for Android
+ * markers. Explicit formats are cross-checked fail-closed: explicit "apk"
+ * without dex entries and explicit "jar" on APK-shaped input both reject
+ * with both facts in the message.
+ */
+internal fun resolveArtifactFormat(config: ObfuscationConfig, configPath: Path): ObfuscationConfig {
+    val inputPath = Path.of(config.inputJarPath).toAbsolutePath().normalize()
+    return when (config.artifactFormat.trim().lowercase()) {
+        ARTIFACT_FORMAT_JAR -> {
+            if (ApkFormatDetector.looksLikeApk(inputPath)) {
+                throw IllegalArgumentException(
+                    "Config validation failed: artifactFormat=jar but the input has Android markers " +
+                        "(root AndroidManifest.xml + classes*.dex); use artifactFormat=\"apk\", path=${configPath.absolutePathString()}",
+                )
+            }
+            config
+        }
+        ARTIFACT_FORMAT_APK -> {
+            if (!ApkFormatDetector.looksLikeApk(inputPath)) {
+                throw IllegalArgumentException(
+                    "Config validation failed: artifactFormat=apk but the input is not an APK " +
+                        "(no root AndroidManifest.xml + classes*.dex pair), path=${configPath.absolutePathString()}",
+                )
+            }
+            config
+        }
+        ARTIFACT_FORMAT_AUTO -> {
+            val isApk = ApkFormatDetector.looksLikeApk(inputPath)
+            config.copy(artifactFormat = if (isApk) ARTIFACT_FORMAT_APK else ARTIFACT_FORMAT_JAR)
+        }
+        else -> throw IllegalArgumentException(
+            "Config validation failed: artifactFormat '${config.artifactFormat}' is not supported; " +
+                "supported values: $ARTIFACT_FORMAT_AUTO, $ARTIFACT_FORMAT_JAR, $ARTIFACT_FORMAT_APK, " +
+                "path=${configPath.absolutePathString()}",
+        )
+    }
+}
+
+internal fun readManifestMinSdk(inputApk: Path): Int? {
+    val manifestBytes = ApkFormatDetector.readRootEntry(inputApk, "AndroidManifest.xml")
+        ?: throw IllegalArgumentException(
+            "APK input is missing the root AndroidManifest.xml entry: $inputApk",
+        )
+    val manifest = runCatching { ApkBinaryXmlReader.parse(manifestBytes) }.getOrElse { error ->
+        throw IllegalArgumentException(
+            "APK AndroidManifest.xml is not parseable: ${error.message}, path=$inputApk",
+        )
+    }
+    return manifest.minSdkVersion
 }
 
 internal val RETIRED_CURRENT_FORMAT_PASS_IDS = setOf(

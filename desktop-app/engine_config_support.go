@@ -33,6 +33,8 @@ func prepareConfigFile(request ObfuscationRequest) (string, string, func(), erro
 	config := EngineConfig{
 		InputJarPath:          inputJarPath,
 		OutputJarPath:         outputJarPath,
+		ArtifactFormat:        request.ArtifactFormat,
+		LogFilePath:           deriveEngineLogFilePath(outputJarPath),
 		Passes:                clonePasses(request.Passes),
 		RuleSet:               RuleSet{Rules: cloneRules(request.Rules)},
 		PassSelections:        cloneSelectedOnlyPassSelections(request.PassSelections),
@@ -61,6 +63,16 @@ func normalizeEngineConfigPath(inputPath string) (string, error) {
 	}
 
 	return filepath.ToSlash(filepath.Clean(absolutePath)), nil
+}
+
+// defaultEngineArtifactFormat keeps format detection content-driven in the
+// engine: "auto" routes ZIP inputs containing AndroidManifest.xml + classes*.dex
+// into the APK pipeline and everything else into the JAR pipeline.
+const defaultEngineArtifactFormat = "auto"
+
+// Include the artifact extension so that JAR and APK jobs do not share a log.
+func deriveEngineLogFilePath(outputJarPath string) string {
+	return outputJarPath + ".log"
 }
 
 func clonePasses(passSpecs []PassSpec) []PassSpec {
@@ -143,6 +155,12 @@ func formatEngineConfigToml(config EngineConfig) (string, error) {
 	builder.WriteString("\n")
 	builder.WriteString("outputJarPath = ")
 	builder.WriteString(formatTomlString(config.OutputJarPath))
+	builder.WriteString("\n")
+	builder.WriteString("artifactFormat = ")
+	builder.WriteString(formatTomlString(config.ArtifactFormat))
+	builder.WriteString("\n")
+	builder.WriteString("logFilePath = ")
+	builder.WriteString(formatTomlString(config.LogFilePath))
 	builder.WriteString("\n")
 	builder.WriteString("allowOptInPasses = ")
 	builder.WriteString(strconv.FormatBool(config.AllowOptInPasses))

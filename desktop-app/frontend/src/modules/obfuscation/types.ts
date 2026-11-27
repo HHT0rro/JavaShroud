@@ -1,3 +1,5 @@
+export type ArtifactFormat = 'jar' | 'apk'
+
 export type RunStatus = 'idle' | 'ready' | 'running' | 'awaiting-pack' | 'canceling' | 'done' | 'failed'
 
 /** Xenolith packer CLI resolved by the desktop app for the nativeshroud pass; empty path means unavailable. */
@@ -8,13 +10,9 @@ export interface XenolithCliStatus {
 }
 
 export type EngineEventType = 'progress' | 'log' | 'warn' | 'error' | 'done' | 'canceled' | 'need-pack'
-
 export type EngineEventLevel = 'info' | 'warn' | 'error' | 'success'
-
 export type RuleAction = 'obfuscate' | 'exclude'
-
 export type PassSelectionMode = 'inherit-global' | 'selected-only'
-
 export type TargetKind = 'class' | 'method'
 
 export interface TargetingCapability {
@@ -94,7 +92,6 @@ export interface EngineSchemaPayload {
 }
 
 export type PassParamValue = boolean | string | number | null
-
 export type PassRisk = 'low' | 'medium' | 'high'
 
 export interface PassItem {
@@ -115,6 +112,7 @@ export interface PassItem {
   readonly variantRequirements: readonly VariantRequirement[]
   readonly targeting: TargetingCapability
   readonly dependencyAutoEnabled?: boolean
+  readonly platformConstraints?: readonly string[]
 }
 
 export interface PassSpec {
@@ -143,6 +141,7 @@ export interface PassSelection {
 export interface ObfuscationRequest {
   readonly inputJarPath: string
   readonly outputJarPath: string
+  readonly artifactFormat: ArtifactFormat
   readonly passes: readonly PassSpec[]
   readonly rules: readonly RuleItem[]
   readonly passSelections: readonly PassSelection[]
@@ -173,6 +172,7 @@ export interface WorkbenchTomlConfig {
   readonly version: number
   readonly inputJarPath: string
   readonly outputJarPath: string
+  readonly artifactFormat: ArtifactFormat | 'auto' | null
   readonly passes: readonly WorkbenchTomlPassConfig[]
   readonly rules: readonly WorkbenchTomlRuleConfig[]
   readonly passSelections: readonly WorkbenchTomlPassSelectionConfig[]
@@ -229,6 +229,10 @@ export interface JarInspectionPayload {
 }
 
 export interface RunState {
+  readonly artifactFormat: ArtifactFormat
+  /** Passes hidden for APK mode, retained so switching back to JAR restores selections. */
+  readonly apkUnavailablePasses: readonly PassItem[]
+  readonly jarPassOrder: readonly string[]
   readonly status: RunStatus
   readonly schema: EngineSchemaPayload | null
   readonly inputJar: LoadedJarInfo | null
@@ -244,6 +248,7 @@ export interface RunState {
   readonly progress: number
   readonly currentStep: string | null
   readonly packHandoffPath: string | null
+  readonly packHandoffRevision: number
   readonly outputPath: string | null
   readonly logs: readonly LogLine[]
   readonly errorMessage: string | null

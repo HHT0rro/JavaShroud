@@ -111,7 +111,21 @@ private fun remapRuleClassTarget(rule: RuleSpec, originalClassNames: List<String
         .mapNotNull { originalName -> classRenameMap[originalName] }
         .distinct()
     if (matchedRenames.isEmpty()) return listOf(rule)
-    return matchedRenames.map { renamedClassName -> rule.copy(target = renamedClassName + memberSuffix) }
+    val exploded = matchedRenames.map { renamedClassName -> rule.copy(target = renamedClassName + memberSuffix) }
+    return when {
+        // A wildcard class pattern still covers every UNRENAMED class after
+        // the pass (default-package classes never move, and fixed-generated /
+        // runtime-bound / helper classes are excluded from renaming). Replacing
+        // the wildcard with per-renamed-class rules silently dropped that
+        // coverage — APK keep synthesis anchors member keeps on `*#name:desc`
+        // targets, so dropped coverage renamed externally required members.
+        selector.classPattern == "*" -> listOf(rule)
+        // A package prefix keeps matching the classes that stayed under it;
+        // the exploded rules additionally follow the classes that moved out.
+        selector.classPattern.endsWith("/*") -> listOf(rule) + exploded
+        // Exact class anchors go stale once the class moves: replace them.
+        else -> exploded
+    }
 }
 
 private fun io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact.currentAnalysisSummary(

@@ -1,5 +1,6 @@
 package io.github.hht0rro.javashroud.transforms.protection
 
+import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.github.hht0rro.javashroud.model.config.ObfuscationConfig
@@ -52,13 +53,14 @@ internal object NativeShroudPacker {
     private const val CLI_TIMEOUT_MILLIS = 10L * 60L * 1000L
     private const val WINDOWS_IMAGE_NAME = "qp_ffi.dll"
     private const val LINUX_IMAGE_NAME = "libqp_ffi.so"
-    private val jsonMapper = ObjectMapper()
+    private val jsonMapper = ObjectMapper().enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
 
     /** One external Xenolith CLI invocation; injectable for tests. */
     internal data class XenolithCliResult(
         val exitCode: Int,
         val output: String,
         val timedOut: Boolean,
+        val errorOutput: String = "",
     )
 
     internal fun interface XenolithCliRunner {
@@ -66,30 +68,29 @@ internal object NativeShroudPacker {
     }
 
     internal val processXenolithCliRunner = XenolithCliRunner { cliPath, args, timeoutMillis ->
-        val process = ProcessBuilder(listOf(cliPath) + args)
-            .redirectErrorStream(true)
-            .start()
+        val process = ProcessBuilder(listOf(cliPath) + args).start()
         val output = StringBuilder()
-        val readerThread = Thread {
-            process.inputStream.bufferedReader(StandardCharsets.UTF_8).useLines { lines ->
-                synchronized(output) {
-                    lines.forEach { output.appendLine(it) }
-                }
+        val errorOutput = StringBuilder()
+        fun readStream(stream: java.io.InputStream, destination: StringBuilder): Thread = Thread {
+            stream.bufferedReader(StandardCharsets.UTF_8).useLines { lines ->
+                lines.forEach { line -> synchronized(destination) { destination.appendLine(line) } }
             }
-        }
-        readerThread.isDaemon = true
-        readerThread.start()
+        }.also { it.isDaemon = true; it.start() }
+        val readerThread = readStream(process.inputStream, output)
+        val errorThread = readStream(process.errorStream, errorOutput)
         val finished = process.waitFor(timeoutMillis, TimeUnit.MILLISECONDS)
         if (!finished) {
             process.destroyForcibly()
             process.waitFor(10, TimeUnit.SECONDS)
         }
         readerThread.join(5_000)
+        errorThread.join(5_000)
         val outputText = synchronized(output) { output.toString() }
         XenolithCliResult(
             exitCode = runCatching { process.exitValue() }.getOrElse { -1 },
             output = outputText,
             timedOut = !finished,
+            errorOutput = synchronized(errorOutput) { errorOutput.toString() },
         )
     }
 
@@ -197,6 +198,13 @@ internal object NativeShroudPacker {
         }
         return outcome.fold(
             onSuccess = { packed ->
+                try {
+                    PackedImageValidation.validateWindowsPackedDll(packed, native.bytes)
+                } catch (error: Exception) {
+                    packed.fill(0)
+                    native.bytes.fill(0)
+                    throw error
+                }
                 emit(
                     EngineEvent(
                         level = "info",
@@ -310,23 +318,37 @@ internal object NativeShroudPacker {
         val unpackedPath = scratch.resolve(imageName).toAbsolutePath().normalize()
         Files.write(unpackedPath, native.bytes)
 
+        fun validatePacked(bytes: ByteArray): ByteArray {
+            if (native.platform != WINDOWS_PLATFORM) return bytes
+            try {
+                PackedImageValidation.validateWindowsPackedDll(bytes, native.bytes)
+            } catch (error: Exception) {
+                bytes.fill(0)
+                native.bytes.fill(0)
+                throw error
+            }
+            return bytes
+        }
+
         if (cliPath.isNotEmpty()) {
-            val packed = spawnXenolithPack(
-                cliPath = cliPath,
-                profile = profile,
-                cliVersion = cliVersion,
-                selectionFlags = selectionFlags,
-                unpackedPath = unpackedPath,
-                scratch = scratch,
-                emit = emit,
-                cliRunner = cliRunner,
+            val packed = validatePacked(
+                spawnXenolithPack(
+                    cliPath = cliPath,
+                    profile = profile,
+                    cliVersion = cliVersion,
+                    selectionFlags = selectionFlags,
+                    unpackedPath = unpackedPath,
+                    scratch = scratch,
+                    emit = emit,
+                    cliRunner = cliRunner,
+                ),
             )
             recordPackerObservation(native.platform, PACKER_SOURCE_XENOLITH_CLI, profile, cliVersion, packed)
             return packed
         }
 
         if (packedPathParam.isNotEmpty()) {
-            val packed = readPackedFile(Path.of(packedPathParam), platformLabel = native.platform)
+            val packed = validatePacked(readPackedFile(Path.of(packedPathParam), platformLabel = native.platform))
             recordPackerObservation(native.platform, PACKER_SOURCE_PACKED_PATH, "", null, packed)
             return packed
         }
@@ -350,7 +372,7 @@ internal object NativeShroudPacker {
             if (allowSkip && line.equals(LINUX_SKIP, ignoreCase = true)) {
                 return native.bytes
             }
-            val packed = readPackedFile(Path.of(line), platformLabel = native.platform)
+            val packed = validatePacked(readPackedFile(Path.of(line), platformLabel = native.platform))
             recordPackerObservation(native.platform, PACKER_SOURCE_HANDOFF, "", null, packed)
             return packed
         }
@@ -394,43 +416,50 @@ internal object NativeShroudPacker {
             args = xenolithPackArgs(unpackedPath, outputPath, profile, selectionFlags),
             timeoutMillis = CLI_TIMEOUT_MILLIS,
         )
+        val diagnostics = result.output + "\n" + result.errorOutput
         if (result.timedOut) {
             throw IllegalStateException(
-                "xenolith pack timed out after ${CLI_TIMEOUT_MILLIS / 60000} minutes: ${sanitize(tail(result.output))}",
+                "xenolith pack timed out after ${CLI_TIMEOUT_MILLIS / 60000} minutes: ${sanitize(tail(diagnostics))}",
             )
         }
         if (result.exitCode != 0) {
             throw IllegalStateException(
-                "xenolith pack exited with code ${result.exitCode}: ${sanitize(tail(result.output))}",
+                "xenolith pack exited with code ${result.exitCode}: ${sanitize(tail(diagnostics))}",
             )
         }
         val packed = readPackedFile(outputPath, platformLabel = WINDOWS_PLATFORM)
-        val report = parsePackReport(result.output)
-        report?.let {
-            val reportedProfile = it["profile"]?.asText().orEmpty()
-            if (reportedProfile.isNotEmpty() && !reportedProfile.equals(profile, ignoreCase = true)) {
-                throw IllegalStateException(
-                    "xenolith pack report profile $reportedProfile does not match requested profile $profile",
-                )
-            }
+        try {
+            val report = parsePackReport(result.output)
+            validatePackReport(report, profile, selectionFlags, Files.size(unpackedPath), packed.size.toLong())
+            emit(
+                EngineEvent(
+                    level = "info",
+                    type = "log",
+                    message = buildString {
+                        append("Xenolith packed $WINDOWS_IMAGE_NAME (").append(packed.size).append(" bytes")
+                        append(", iat=").append(report["iat_mode"].asText())
+                        append(", format=").append(report["format"].asText())
+                        append(", gate=").append(report["debug_gate"].asInt())
+                        report["imports_kept_reason"]?.asText()?.takeIf(String::isNotEmpty)?.let {
+                            append(", imports-kept=").append(it)
+                        }
+                        report["vm_functions"]?.let { append(", vm-functions=").append(it.asInt()) }
+                        report["coverage"]?.takeIf { it.isArray }?.let { coverage ->
+                            append(", mixed-native=").append(coverage.count { it["bucket"]?.asText() == "mixed_native" })
+                        }
+                        report["constants_encrypted"]?.let { append(", constants-encrypted=").append(it.asInt()) }
+                        report["runtime_decryption_window"]?.let { append(", decrypt-window=").append(it.asBoolean()) }
+                        append(')')
+                    },
+                    progress = HANDOFF_PROGRESS,
+                    outPath = null,
+                ),
+            )
+            return packed
+        } catch (error: Exception) {
+            packed.fill(0)
+            throw error
         }
-        emit(
-            EngineEvent(
-                level = "info",
-                type = "log",
-                message = buildString {
-                    append("Xenolith packed $WINDOWS_IMAGE_NAME (").append(packed.size).append(" bytes")
-                    report?.let { node ->
-                        node["iat_mode"]?.asText()?.let { append(", iat=").append(it) }
-                        node["format"]?.asText()?.let { append(", format=").append(it) }
-                    }
-                    append(')')
-                },
-                progress = HANDOFF_PROGRESS,
-                outPath = null,
-            ),
-        )
-        return packed
     }
 
     private fun probeXenolithVersion(
@@ -470,11 +499,79 @@ internal object NativeShroudPacker {
         return version
     }
 
-    private fun parsePackReport(output: String): JsonNode? {
-        val start = output.indexOf('{')
-        val end = output.lastIndexOf('}')
-        if (start < 0 || end <= start) return null
-        return runCatching { jsonMapper.readTree(output.substring(start, end + 1)) }.getOrNull()
+    private fun parsePackReport(output: String): JsonNode {
+        val report = runCatching { jsonMapper.readTree(output) }.getOrNull()
+        if (report == null || !report.isObject) {
+            throw IllegalStateException("xenolith pack returned no valid JSON object report")
+        }
+        return report
+    }
+
+    private fun validatePackReport(
+        report: JsonNode,
+        profile: String,
+        flags: XenolithSelectionFlags,
+        inputBytes: Long,
+        outputBytes: Long,
+    ) {
+        fun requireText(field: String, expected: String) {
+            val value = report[field]
+            check(value?.isTextual == true && value.textValue() == expected) {
+                "xenolith pack report $field ${value ?: "missing"} does not match $expected"
+            }
+        }
+        fun optionalText(field: String): String {
+            val value = report[field]
+            check(value?.isTextual == true) {
+                "xenolith pack report $field ${value ?: "missing"} is not text"
+            }
+            return value.textValue()
+        }
+        fun requireNumber(field: String, expected: Long) {
+            val value = report[field]
+            check(value?.isIntegralNumber == true && value.canConvertToLong() && value.longValue() == expected) {
+                "xenolith pack report $field ${value ?: "missing"} does not match $expected"
+            }
+        }
+        fun requireFlag(field: String, expected: Boolean) {
+            val value = report[field]
+            check(value?.isBoolean == true && value.booleanValue() == expected) {
+                "xenolith pack report $field ${value ?: "missing"} does not match $expected"
+            }
+        }
+
+        val reportedProfile = report["profile"]
+        check(reportedProfile?.isTextual == true && reportedProfile.textValue() == profile) {
+            "xenolith pack report profile ${reportedProfile ?: "missing"} does not match requested profile $profile"
+        }
+        requireNumber("report_version", 1)
+        requireNumber("debug_gate", 3)
+        requireText("format", "pe64-dll")
+        requireText("machine", "x86_64")
+        requireText("backend", "pic-stub+xl-core")
+        check(optionalText("iat_mode") in setOf("disk-import-directory", "hashed-resolve-writeback-iat")) {
+            "xenolith pack report iat_mode is unsupported"
+        }
+        val importsKept = report["imports_kept"]
+        check(importsKept?.isIntegralNumber == true && importsKept.canConvertToLong() && importsKept.longValue() >= 0) {
+            "xenolith pack report imports_kept ${importsKept ?: "missing"} is invalid"
+        }
+        val importsKeptReason = optionalText("imports_kept_reason")
+        check(importsKeptReason.isEmpty() || importsKeptReason in setOf(
+            "tls-bootstrap-needs-loader-iat",
+            "jni-abi-needs-loader-iat",
+        )) {
+            "xenolith pack report imports_kept_reason is unsupported"
+        }
+        if (importsKeptReason.isNotEmpty()) {
+            check(importsKept.longValue() > 0 && optionalText("iat_mode") == "disk-import-directory") {
+                "xenolith pack report IAT keep reason conflicts with the import disposition"
+            }
+        }
+        requireNumber("input_bytes", inputBytes)
+        requireNumber("output_bytes", outputBytes)
+        requireFlag("strict_coverage", flags.strictCoverage)
+        requireFlag("allow_native_fallback", flags.allowNativeFallback)
     }
 
     /** Mirrors the xenolith pack CLI surface: `pack IN -o OUT --profile P --json` plus

@@ -14,6 +14,8 @@ val guavaVersion = "33.4.8-jre"
 val gsonVersion = "2.13.1"
 val jphantomVersion = "1.4.4"
 val dex2jarVersion = "2.4.28"
+val r8Version = "8.7.18"
+val apksigVersion = "8.5.2"
 val cafed00dVersion = "2.1.4"
 val jlinkerVersion = "1.0.7"
 val aircompressorVersion = "0.27"
@@ -29,6 +31,9 @@ allprojects {
 
     repositories {
         mavenCentral()
+        // r8 and apksig are published only on Google Maven; APK mode resolves
+        // them from here (dex-tools and everything else stay on Maven Central).
+        google()
         maven("https://jitpack.io")
     }
 
@@ -44,6 +49,8 @@ allprojects {
         set("gsonVersion", gsonVersion)
         set("jphantomVersion", jphantomVersion)
         set("dex2jarVersion", dex2jarVersion)
+        set("r8Version", r8Version)
+        set("apksigVersion", apksigVersion)
         set("cafed00dVersion", cafed00dVersion)
         set("jlinkerVersion", jlinkerVersion)
         set("aircompressorVersion", aircompressorVersion)

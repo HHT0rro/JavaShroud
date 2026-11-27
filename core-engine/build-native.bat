@@ -14,35 +14,91 @@ set "HELPER_CLASS_RESOURCES_1=META-INF/javashroud-helpers/.*\.class"
 set "HELPER_CLASS_RESOURCES_2=META-INF/javashroud-helpers/.*\.bin"
 set "HELPER_CLASS_RESOURCES_3=io/github/hht0rro/javashroud/transforms/protection/.*\.class"
 set "META_INF_RESOURCES=META-INF/.*"
+set "NATIVE_IMAGE_TUNING_ARGS=--no-fallback --enable-url-protocols=https -H:+ReportExceptionStackTraces"
+set "PREPARED_OUTPUT_DIR="
+
+if not "%~1"=="" (
+  if /I not "%~1"=="--prepared" goto :usage
+  if "%~2"=="" goto :usage
+  if "%~3"=="" goto :usage
+  if "%~4"=="" goto :usage
+  if not "%~5"=="" goto :usage
+  set "ENGINE_JAR=%~f2"
+  set "ENGINE_RESOURCE_CONFIG=%~f3"
+  set "PREPARED_OUTPUT_DIR=%~f4"
+)
 
 if defined GRAALVM_HOME if exist "%GRAALVM_HOME%\bin\native-image.cmd" (
   set "JAVA_HOME=%GRAALVM_HOME%"
   set "PATH=%GRAALVM_HOME%\bin;%PATH%"
 )
 
-call :require_file "%CORE_DIR%\gradlew.bat" "Missing Gradle wrapper" || exit /b 1
 call :resolve_native_image || exit /b 1
 call :resolve_vcvarsall || exit /b 1
+if defined PREPARED_OUTPUT_DIR goto :prepared_build
 
 echo [1/3] Building engine jar and native resources...
+call :require_file "%CORE_DIR%\gradlew.bat" "Missing Gradle wrapper" || exit /b 1
 pushd "%CORE_DIR%" || exit /b 1
 call gradlew.bat --build-cache --no-configuration-cache --rerun-tasks :core-engine:jar :core-engine:generateResourcesConfigFile || (popd & exit /b 1)
 popd
 call :resolve_engine_jar || exit /b 1
-call :require_file "%ENGINE_RESOURCE_CONFIG%" "Engine resource config was not generated" || exit /b 1
-
-echo [2/3] Building native engine executable...
-if not exist "%ENGINE_NATIVE_DIR%" mkdir "%ENGINE_NATIVE_DIR%" || exit /b 1
-set "NATIVE_IMAGE_TUNING_ARGS= --no-fallback --enable-url-protocols=https -H:+ReportExceptionStackTraces"
 call "%VCVARSALL%" x64 >nul || exit /b 1
-call "%NATIVE_IMAGE_CMD%" -cp "%ENGINE_JAR%" -H:Name=obfuscator-engine "-H:Path=%ENGINE_NATIVE_DIR%" %NATIVE_IMAGE_TUNING_ARGS% "-H:IncludeResources=%HELPER_CLASS_RESOURCES_1%" "-H:IncludeResources=%HELPER_CLASS_RESOURCES_2%" "-H:IncludeResources=%HELPER_CLASS_RESOURCES_3%" "-H:IncludeResources=%META_INF_RESOURCES%" "-H:ResourceConfigurationFiles=%ENGINE_RESOURCE_CONFIG%" %ENGINE_MAIN_CLASS% || exit /b 1
-call :require_file "%ENGINE_EXE%" "Native engine build did not produce obfuscator-engine.exe" || exit /b 1
+if not exist "%ENGINE_NATIVE_DIR%" mkdir "%ENGINE_NATIVE_DIR%" || exit /b 1
+set "NATIVE_OUTPUT_DIR=%ENGINE_NATIVE_DIR%\standalone-%RANDOM%-%RANDOM%-%RANDOM%"
+mkdir "%NATIVE_OUTPUT_DIR%" || exit /b 1
+call :compile_native
+set "NATIVE_EXIT=%ERRORLEVEL%"
+if "%NATIVE_EXIT%"=="0" (
+  call :publish_standalone_output || set "NATIVE_EXIT=1"
+)
+rmdir /s /q "%NATIVE_OUTPUT_DIR%" || echo Could not remove native workspace: %NATIVE_OUTPUT_DIR%
+if not "%NATIVE_EXIT%"=="0" exit /b %NATIVE_EXIT%
 
 echo [3/3] Native engine ready: %ENGINE_EXE%
 exit /b 0
 
+:prepared_build
+set "NATIVE_OUTPUT_DIR=%PREPARED_OUTPUT_DIR%"
+if not exist "%NATIVE_OUTPUT_DIR%\." exit /b 1
+if exist "%NATIVE_OUTPUT_DIR%\obfuscator-engine.exe" exit /b 1
+set "NATIVE_CACHE_HELPER=%CORE_DIR%\desktop-app\fetch-xenolith.ps1"
+set "NATIVE_CACHE_FILE=%ENGINE_NATIVE_DIR%\.release-stamp-v2.json"
+set "NATIVE_BUILD_SCRIPT=%~f0"
+call "%VCVARSALL%" x64 >nul || exit /b 1
+powershell -NoProfile -File "%NATIVE_CACHE_HELPER%" -NativeCache Restore -OutPath "%NATIVE_CACHE_FILE%"
+set "CACHE_EXIT=%ERRORLEVEL%"
+if "%CACHE_EXIT%"=="0" (
+  echo Reusing verified native engine cache.
+  exit /b 0
+)
+if not "%CACHE_EXIT%"=="20" exit /b 1
+call :compile_native || exit /b 1
+powershell -NoProfile -File "%NATIVE_CACHE_HELPER%" -NativeCache Save -OutPath "%NATIVE_CACHE_FILE%" || exit /b 1
+exit /b 0
+
+:compile_native
+call :require_file "%ENGINE_JAR%" "Missing engine JAR" || exit /b 1
+call :require_file "%ENGINE_RESOURCE_CONFIG%" "Missing engine resource config" || exit /b 1
+echo [2/3] Building native engine executable...
+call "%NATIVE_IMAGE_CMD%" -cp "%ENGINE_JAR%" -H:Name=obfuscator-engine "-H:Path=%NATIVE_OUTPUT_DIR%" %NATIVE_IMAGE_TUNING_ARGS% "-H:IncludeResources=%HELPER_CLASS_RESOURCES_1%" "-H:IncludeResources=%HELPER_CLASS_RESOURCES_2%" "-H:IncludeResources=%HELPER_CLASS_RESOURCES_3%" "-H:IncludeResources=%META_INF_RESOURCES%" "-H:ResourceConfigurationFiles=%ENGINE_RESOURCE_CONFIG%" %ENGINE_MAIN_CLASS% || exit /b 1
+call :require_file "%NATIVE_OUTPUT_DIR%\obfuscator-engine.exe" "Native engine build did not produce obfuscator-engine.exe" || exit /b 1
+for %%I in ("%NATIVE_OUTPUT_DIR%\obfuscator-engine.exe") do if %%~zI EQU 0 exit /b 1
+exit /b 0
+
+:usage
+echo Usage: build-native.bat [--prepared jar resource-config output-directory]
+exit /b 1
+
+:publish_standalone_output
+if exist "%ENGINE_EXE%" call :require_file "%ENGINE_EXE%" "Native output destination is not a file" || exit /b 1
+move /y "%NATIVE_OUTPUT_DIR%\obfuscator-engine.exe" "%ENGINE_EXE%" >nul
+exit /b %ERRORLEVEL%
+
 :require_file
-if exist %~1 exit /b 0
+set "REQUIRED_FILE_ATTR="
+for %%I in ("%~1") do set "REQUIRED_FILE_ATTR=%%~aI"
+if defined REQUIRED_FILE_ATTR if /I not "%REQUIRED_FILE_ATTR:~0,1%"=="d" exit /b 0
 echo %~2: %~1
 exit /b 1
 

@@ -3160,9 +3160,7 @@ impl PageDescriptor {
         let mut cursor = Cursor::new(encoded);
         let version = cursor.read_u8()?;
         if version != CURRENT_DESCRIPTOR_VERSION {
-            return Err(PageError::InvalidInput(
-                "descriptor version is not current",
-            ));
+            return Err(PageError::InvalidInput("descriptor version is not current"));
         }
         let route_bytes = cursor.read_frame(MAX_ROUTE_ENCODING_SIZE, false, "route")?;
         let route = PageRoute::decode(&route_bytes)?;
@@ -3331,12 +3329,11 @@ impl RuntimeBindingDigest {
 }
 
 pub fn authentication_tag(binding_digest: &[u8], payload: &[u8]) -> Result<Digest, PageError> {
-    let digest =
-        qp_crypto::Digest::from_slice(binding_digest).ok_or(PageError::InvalidLength {
-            field: "runtime binding digest",
-            expected: DIGEST_SIZE,
-            actual: binding_digest.len(),
-        })?;
+    let digest = qp_crypto::Digest::from_slice(binding_digest).ok_or(PageError::InvalidLength {
+        field: "runtime binding digest",
+        expected: DIGEST_SIZE,
+        actual: binding_digest.len(),
+    })?;
     Ok(*qp_crypto::authentication_tag(&digest, payload)
         .map_err(crypto_error)?
         .as_bytes())
@@ -3431,7 +3428,10 @@ pub fn locate_current_frame(frame: &[u8]) -> Result<FrameView, PageError> {
     let mut cursor = Cursor::new(frame);
     let magic = cursor.read_fixed(4)?;
     if magic.as_slice() == RETIRED_FRAME_MAGIC.as_slice()
-        || magic.as_slice() != qp_crypto::derived_frame_magic().expect("name schedule").as_slice()
+        || magic.as_slice()
+            != qp_crypto::derived_frame_magic()
+                .expect("name schedule")
+                .as_slice()
     {
         return Err(PageError::InvalidMagic);
     }
@@ -4762,7 +4762,9 @@ mod tests {
             b"payload"
         );
         assert_eq!(
-            locate_current_frame(&frame).expect("frame location").payload_length,
+            locate_current_frame(&frame)
+                .expect("frame location")
+                .payload_length,
             7
         );
         let mut tampered = frame.clone();
@@ -4999,9 +5001,8 @@ mod tests {
         let reordered = encoded.clone();
         // Current compact layout: version byte, framed route, framed proof.
         assert_eq!(reordered[0], CURRENT_DESCRIPTOR_VERSION);
-        let route_len = u32::from_be_bytes(
-            reordered[1..5].try_into().expect("route length"),
-        ) as usize;
+        let route_len =
+            u32::from_be_bytes(reordered[1..5].try_into().expect("route length")) as usize;
         let proof_start = 5 + route_len;
         let proof_len = u32::from_be_bytes(
             reordered[proof_start..proof_start + 4]
@@ -5217,12 +5218,21 @@ mod tests {
                 &[0x30; 16],
             ))
             .expect("authenticate borrowed page");
-        assert_eq!(lease.payload().expect("payload"), b"authenticated page payload");
-        assert_eq!(encoded, original, "borrowed lease must not wipe catalog bytes");
+        assert_eq!(
+            lease.payload().expect("payload"),
+            b"authenticated page payload"
+        );
+        assert_eq!(
+            encoded, original,
+            "borrowed lease must not wipe catalog bytes"
+        );
         let consumed = lease.consume().expect("consume");
         assert_eq!(consumed, b"authenticated page payload");
         lease.wipe();
-        assert_eq!(encoded, original, "lease cleanup must leave catalog bytes intact");
+        assert_eq!(
+            encoded, original,
+            "lease cleanup must leave catalog bytes intact"
+        );
     }
 
     #[test]
@@ -5246,6 +5256,9 @@ mod tests {
             .is_err());
         assert_eq!(lease.state(), LeaseState::Failed);
         lease.release().expect("release failed borrowed lease");
-        assert_eq!(encoded, tampered, "borrowed lease must not mutate catalog bytes");
+        assert_eq!(
+            encoded, tampered,
+            "borrowed lease must not mutate catalog bytes"
+        );
     }
 }

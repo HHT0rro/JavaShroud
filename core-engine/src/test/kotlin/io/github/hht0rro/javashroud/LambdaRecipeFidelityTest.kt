@@ -8,6 +8,7 @@ import org.objectweb.asm.Opcodes
 import org.objectweb.asm.Type
 import kotlin.test.Test
 import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class LambdaRecipeFidelityTest {
     @Test
@@ -19,7 +20,7 @@ class LambdaRecipeFidelityTest {
     }
 
     @Test
-    fun lambda_metafactory_recipe_is_not_selected_for_native_vm() {
+    fun lambda_metafactory_recipe_is_selected_only_with_a_replayable_handle() {
         val factoryDescriptor = "()Ljava/util/function/Supplier;"
         val bootstrap = Handle(
             Opcodes.H_INVOKESTATIC,
@@ -35,9 +36,14 @@ class LambdaRecipeFidelityTest {
             Handle(Opcodes.H_INVOKESTATIC, "example/Target", "value", "()Ljava/lang/String;", false),
             Type.getMethodType("()Ljava/lang/String;"),
         )
-        assertFalse(
+        assertTrue(
             isNativeVmSupportedInvokeDynamicCall("get", factoryDescriptor, bootstrap, arguments),
-            "LambdaMetafactory recipes stay on the JVM boundary until an opaque native route exists",
+            "Current lambda replay requires the explicit implementation handle",
         )
+        val virtualTarget = arguments.copyOf().also {
+            it[1] = Handle(Opcodes.H_INVOKEVIRTUAL, "example/Target", "value", "()Ljava/lang/String;", false)
+        }
+        assertFalse(isNativeVmSupportedInvokeDynamicCall("get", factoryDescriptor, bootstrap, virtualTarget))
+        assertFalse(isNativeVmSupportedInvokeDynamicCall("get", factoryDescriptor, bootstrap, emptyArray()))
     }
 }

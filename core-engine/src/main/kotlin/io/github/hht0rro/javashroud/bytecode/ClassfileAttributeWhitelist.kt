@@ -5,6 +5,7 @@ import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.FieldVisitor
+import org.objectweb.asm.MethodTooLargeException
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
 
@@ -66,6 +67,17 @@ internal object ClassfileAttributeWhitelist {
         // SKIP_FRAMES here silently emitted verifier-invalid classes whenever
         // an earlier pass inserted a branch.
         }, ClassReader.SKIP_DEBUG)
-        return stripDeadConstantPoolEntries(writer.toByteArray())
+        // dex2jar output can legitimately contain methods whose code exceeds
+        // the JVM 64KB per-method limit (dex has no such limit; giant
+        // <clinit> array initializations are the common case). Such classes
+        // cannot be re-serialized by ASM at all, so the attribute whitelist
+        // degrades to a byte-identical pass-through: d8 consumes the class
+        // back into dex, where the method size is legal again.
+        val rewritten = try {
+            writer.toByteArray()
+        } catch (_: MethodTooLargeException) {
+            return classBytes
+        }
+        return stripDeadConstantPoolEntries(rewritten)
     }
 }

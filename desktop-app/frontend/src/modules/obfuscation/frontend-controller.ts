@@ -9,7 +9,6 @@ import {
   buildObfuscationRequest,
   markCanceling,
   markInspectingClasses,
-  markPackResumed,
   markRunStarting,
   setEngineSchema,
   setInspectingClassesFailed,
@@ -93,16 +92,6 @@ export const revealNativeImage = async (state: RunState, bridge: WailsBridge, pa
     return successResult(state, true)
   } catch (error) {
     return failureResult(state, error, '打开 native 镜像位置失败')
-  }
-}
-
-export const resumeNativePack = async (state: RunState, bridge: WailsBridge, path: string): Promise<ControllerResult<boolean>> => {
-  const resumedState: RunState = markPackResumed(state)
-  try {
-    await bridge.resumeNativePack(path)
-    return successResult(resumedState, true)
-  } catch (error) {
-    return failureResult(resumedState, error, '回传加壳文件失败')
   }
 }
 

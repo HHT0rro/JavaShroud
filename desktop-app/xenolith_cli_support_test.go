@@ -2,11 +2,85 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestMain(m *testing.M) {
+	if len(os.Args) == 2 && os.Args[1] == "--version" {
+		switch os.Getenv("JAVASHROUD_TEST_XENOLITH") {
+		case "valid":
+			fmt.Fprintln(os.Stdout, "xenolith fixture")
+			os.Exit(0)
+		case "empty":
+			os.Exit(0)
+		case "fail":
+			fmt.Fprintln(os.Stderr, "fixture version failure")
+			os.Exit(7)
+		}
+	}
+	os.Exit(m.Run())
+}
+
+func TestResolveXenolithCliRejectsInvalidOverride(t *testing.T) {
+	dir := t.TempDir()
+	invalidPath := filepath.Join(dir, "invalid.exe")
+	if err := os.WriteFile(invalidPath, []byte("invalid executable"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name string
+		path string
+	}{
+		{name: "missing", path: filepath.Join(dir, "missing.exe")},
+		{name: "directory", path: dir},
+		{name: "invalid executable", path: invalidPath},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(xenolithCliEnvKey, test.path)
+			result, err := (&App{}).ResolveXenolithCli()
+			if result != "" || err == nil || !strings.Contains(err.Error(), test.path) {
+				t.Fatalf("expected unavailable CLI with path in error: result=%q error=%v", result, err)
+			}
+		})
+	}
+}
+
+func TestResolveXenolithCliVersionProbe(t *testing.T) {
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(xenolithCliEnvKey, binary)
+	for _, mode := range []string{"valid", "fail", "empty"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("JAVASHROUD_TEST_XENOLITH", mode)
+			result, err := (&App{}).ResolveXenolithCli()
+			if mode == "valid" {
+				var info XenolithCliInfo
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal([]byte(result), &info); err != nil {
+					t.Fatal(err)
+				}
+				if info.Path != binary || info.Source != "env" || info.Version != "xenolith fixture" {
+					t.Fatalf("unexpected CLI info: %+v", info)
+				}
+				return
+			}
+			if result != "" || err == nil || !strings.Contains(err.Error(), binary) || !strings.Contains(err.Error(), "--version") {
+				t.Fatalf("expected unavailable CLI with probe error: result=%q error=%v", result, err)
+			}
+			if mode == "fail" && (!strings.Contains(err.Error(), "exit status 7") || !strings.Contains(err.Error(), "fixture version failure")) {
+				t.Fatalf("expected exit status and diagnostic, got %v", err)
+			}
+		})
+	}
+}
 
 func TestResolveXenolithCliPathPrefersEnvOverride(t *testing.T) {
 	overrideDir := t.TempDir()
@@ -109,13 +183,41 @@ func TestXenolithCliInfoJsonShape(t *testing.T) {
 
 func TestXenolithCliCandidatesForExecutableDir(t *testing.T) {
 	candidates := xenolithCliCandidatesForExecutableDir(filepath.Join("E", "app", "bin"))
-	if len(candidates) != 2 {
-		t.Fatalf("expected 2 candidates, got %d", len(candidates))
+	if len(candidates) != 3 {
+		t.Fatalf("expected 3 candidates, got %d", len(candidates))
 	}
 	if candidates[0].source != "tools" || !strings.HasSuffix(filepath.ToSlash(candidates[0].path), "app/bin/tools/xenolith.exe") {
 		t.Fatalf("unexpected tools candidate: %+v", candidates[0])
 	}
-	if candidates[1].source != "sibling" || !strings.Contains(filepath.ToSlash(candidates[1].path), "Xenolith/dist/xenolith.exe") {
-		t.Fatalf("unexpected sibling candidate: %+v", candidates[1])
+	if candidates[1].source != "sibling" || !strings.Contains(filepath.ToSlash(candidates[1].path), "Xenolith/target/release/xenolith.exe") {
+		t.Fatalf("unexpected sibling release candidate: %+v", candidates[1])
+	}
+	if candidates[2].source != "sibling" || !strings.Contains(filepath.ToSlash(candidates[2].path), "Xenolith/dist/xenolith.exe") {
+		t.Fatalf("unexpected sibling dist candidate: %+v", candidates[2])
+	}
+}
+
+func TestXenolithSiblingReleasePreferredOverStaleDist(t *testing.T) {
+	root := t.TempDir()
+	executableDir := filepath.Join(root, "JavaShroud-public", "build", "desktop-app", "bin")
+	candidates := xenolithCliCandidatesForExecutableDir(executableDir)
+	for _, candidate := range candidates[1:] {
+		if err := os.MkdirAll(filepath.Dir(candidate.path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(candidate.path, []byte("MZ"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	path, source := resolveXenolithCliPathFromSources("", func() (string, error) { return "", os.ErrNotExist }, candidates, nil)
+	if filepath.Clean(path) != filepath.Clean(candidates[1].path) || source != "sibling" {
+		t.Fatalf("expected fresh release candidate, got %q/%q", path, source)
+	}
+	if err := os.Remove(candidates[1].path); err != nil {
+		t.Fatal(err)
+	}
+	path, source = resolveXenolithCliPathFromSources("", func() (string, error) { return "", os.ErrNotExist }, candidates, nil)
+	if filepath.Clean(path) != filepath.Clean(candidates[2].path) || source != "sibling" {
+		t.Fatalf("expected dist when release is absent, got %q/%q", path, source)
 	}
 }

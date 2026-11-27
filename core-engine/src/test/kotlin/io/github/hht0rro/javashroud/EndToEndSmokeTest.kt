@@ -92,7 +92,7 @@ class EndToEndSmokeTest {
 
     private fun buildTestArtifactWithStrings(vararg strings: String): BytecodeArtifact {
         val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
-        cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "TestClass", null, "java/lang/Object", null)
+        cw.visit(testClassfileVersion(), Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "TestClass", null, "java/lang/Object", null)
         val init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
         init.visitCode()
         init.visitVarInsn(Opcodes.ALOAD, 0)
@@ -129,7 +129,7 @@ class EndToEndSmokeTest {
 
     private fun buildTestArtifactWithIntConstants(): BytecodeArtifact {
         val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
-        cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "TestIntClass", null, "java/lang/Object", null)
+        cw.visit(testClassfileVersion(), Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "TestIntClass", null, "java/lang/Object", null)
         val init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
         init.visitCode()
         init.visitVarInsn(Opcodes.ALOAD, 0)

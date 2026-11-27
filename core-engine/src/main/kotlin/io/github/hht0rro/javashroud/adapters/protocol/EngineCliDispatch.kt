@@ -1,8 +1,10 @@
 package io.github.hht0rro.javashroud.adapters.protocol
 
+import io.github.hht0rro.javashroud.apk.ApkPipelineRunner
 import io.github.hht0rro.javashroud.capabilities.buildEngineSchemaPayload
 import io.github.hht0rro.javashroud.kernel.EngineKernel
 import io.github.hht0rro.javashroud.maintenance.RuntimeGarbageCollector
+import io.github.hht0rro.javashroud.model.config.ARTIFACT_FORMAT_APK
 import io.github.hht0rro.javashroud.model.protocol.EngineEvent
 
 // --- single dispatch entry point ---
@@ -35,6 +37,10 @@ private fun handleInspectCommand(request: InspectCommandRequest, kernel: EngineK
 }
 
 private fun handleRunCommand(request: EngineRunRequest, kernel: EngineKernel): Unit {
+    if (request.config.artifactFormat == ARTIFACT_FORMAT_APK) {
+        ApkPipelineRunner().run(request.config, request.configPath, ::writeEvent)
+        return
+    }
     executeRunRequest(
         request = request,
         run = { config, configPath, emit -> kernel.run(config, configPath, emit) },

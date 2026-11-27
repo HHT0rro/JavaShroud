@@ -12,6 +12,7 @@ const engineEventName = "engine:event"
 type ObfuscationRequest struct {
 	InputJarPath          string          `json:"inputJarPath"`
 	OutputJarPath         string          `json:"outputJarPath"`
+	ArtifactFormat        string          `json:"artifactFormat"`
 	Passes                []PassSpec      `json:"passes"`
 	Rules                 []RuleItem      `json:"rules"`
 	PassSelections        []PassSelection `json:"passSelections"`
@@ -48,6 +49,8 @@ type PassSelection struct {
 type EngineConfig struct {
 	InputJarPath          string          `json:"inputJarPath"`
 	OutputJarPath         string          `json:"outputJarPath"`
+	ArtifactFormat        string          `json:"artifactFormat"`
+	LogFilePath           string          `json:"logFilePath"`
 	Passes                []PassSpec      `json:"passes"`
 	RuleSet               RuleSet         `json:"ruleSet"`
 	PassSelections        []PassSelection `json:"passSelections"`

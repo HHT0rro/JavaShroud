@@ -19,7 +19,7 @@ import kotlin.test.assertTrue
 class NativeShroudPackerTest {
     @Test
     fun disabled_pass_leaves_compiled_natives_unchanged() {
-        val windows = native("windows-x64", "qp_ffi.dll", byteArrayOf(1, 2, 3))
+        val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
         val linux = native("linux-x64", "libqp_ffi.so", byteArrayOf(9, 8, 7))
         val result = NativeShroudPacker.packIfRequested(
             config = config(enabled = false),
@@ -30,7 +30,7 @@ class NativeShroudPackerTest {
 
     @Test
     fun enabled_pass_without_packed_path_or_handoff_fails_closed() {
-        val windows = native("windows-x64", "qp_ffi.dll", byteArrayOf(1, 2, 3))
+        val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
         val error = assertFailsWith<IllegalStateException> {
             NativeShroudPacker.packIfRequested(
                 config = config(enabled = true),
@@ -48,7 +48,7 @@ class NativeShroudPackerTest {
         try {
             val packedBytes = SyntheticPackedImages.windowsPackedDll()
             val packedFile = workDir.resolve("packed.dll").also { Files.write(it, packedBytes) }
-            val windows = native("windows-x64", "qp_ffi.dll", byteArrayOf(10, 20, 30, 40))
+            val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
             val result = NativeShroudPacker.packIfRequested(
                 config = config(enabled = true, packedPath = packedFile.toString()),
                 compiled = listOf(windows),
@@ -68,7 +68,7 @@ class NativeShroudPackerTest {
             val packedBytes = SyntheticPackedImages.windowsPackedDll()
             val packedFile = workDir.resolve("user-packed.dll").also { Files.write(it, packedBytes) }
             val events = mutableListOf<EngineEvent>()
-            val windows = native("windows-x64", "qp_ffi.dll", byteArrayOf(1, 1, 1, 1))
+            val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
             val result = NativeShroudPacker.packIfRequested(
                 config = config(enabled = true),
                 compiled = listOf(windows),
@@ -92,7 +92,7 @@ class NativeShroudPackerTest {
     fun windows_handoff_cancel_zeros_bytes_and_fails_closed() {
         val workDir = Files.createTempDirectory("javashroud-pack-cancel")
         try {
-            val windows = native("windows-x64", "qp_ffi.dll", byteArrayOf(11, 12, 13))
+            val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
             val error = assertFailsWith<IllegalStateException> {
                 NativeShroudPacker.packIfRequested(
                     config = config(enabled = true),
@@ -114,7 +114,7 @@ class NativeShroudPackerTest {
         val workDir = Files.createTempDirectory("javashroud-pack-empty")
         try {
             val emptyPacked = workDir.resolve("empty.dll").also { Files.write(it, ByteArray(0)) }
-            val windows = native("windows-x64", "qp_ffi.dll", byteArrayOf(8, 8, 8))
+            val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
             val error = assertFailsWith<IllegalStateException> {
                 NativeShroudPacker.packIfRequested(
                     config = config(enabled = true, packedPath = emptyPacked.toString()),
@@ -136,7 +136,7 @@ class NativeShroudPackerTest {
         try {
             val brokenBytes = SyntheticPackedImages.windowsPackedDll(dropSection = ".jsmk")
             val brokenFile = workDir.resolve("broken.dll").also { Files.write(it, brokenBytes) }
-            val windows = native("windows-x64", "qp_ffi.dll", byteArrayOf(8, 8, 8))
+            val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
             val error = assertFailsWith<IllegalStateException> {
                 NativeShroudPacker.packIfRequested(
                     config = config(enabled = true, packedPath = brokenFile.toString()),
@@ -227,7 +227,7 @@ class NativeShroudPackerTest {
             val result = NativeShroudPacker.packIfRequested(
                 config = config(enabled = true),
                 compiled = listOf(
-                    native("windows-x64", "qp_ffi.dll", byteArrayOf(1)),
+                    native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll()),
                     native("linux-x64", "libqp_ffi.so", byteArrayOf(1)),
                 ),
                 emit = { events.add(it) },
@@ -251,7 +251,7 @@ class NativeShroudPackerTest {
             val packedBytes = SyntheticPackedImages.windowsPackedDll()
             val runner = FakeXenolithCli(packedBytes)
             val events = mutableListOf<EngineEvent>()
-            val windows = native("windows-x64", "qp_ffi.dll", byteArrayOf(3, 3, 3))
+            val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
             val result = NativeShroudPacker.packIfRequested(
                 config = config(enabled = true, cliPath = cliFile.toString(), profile = "fast"),
                 compiled = listOf(windows),
@@ -272,6 +272,8 @@ class NativeShroudPackerTest {
             assertEquals("--json", packArgs[6])
             assertTrue(events.any { it.message.contains("xenolith 0.1.0-test") })
             assertTrue(events.any { it.message.contains("Xenolith packed qp_ffi.dll") })
+            assertTrue(events.any { it.message.contains("imports-kept=jni-abi-needs-loader-iat") })
+            assertTrue(events.any { it.message.contains("constants-encrypted=0") && it.message.contains("decrypt-window=false") })
         } finally {
             workDir.toFile().deleteRecursively()
         }
@@ -285,7 +287,7 @@ class NativeShroudPackerTest {
             val manualBytes = SyntheticPackedImages.windowsPackedDll(dropExport = "JNI_OnUnload")
             val manualPacked = workDir.resolve("manual.dll").also { Files.write(it, manualBytes) }
             val spawnedBytes = SyntheticPackedImages.windowsPackedDll()
-            val windows = native("windows-x64", "qp_ffi.dll", byteArrayOf(4, 4))
+            val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
             val result = NativeShroudPacker.packIfRequested(
                 config = config(
                     enabled = true,
@@ -309,7 +311,7 @@ class NativeShroudPackerTest {
         val workDir = Files.createTempDirectory("javashroud-pack-xenolith-fail")
         try {
             val cliFile = workDir.resolve("xenolith.exe").also { Files.write(it, byteArrayOf(0x4D, 0x5A)) }
-            val windows = native("windows-x64", "qp_ffi.dll", byteArrayOf(5, 5))
+            val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
             val error = assertFailsWith<IllegalStateException> {
                 NativeShroudPacker.packIfRequested(
                     config = config(enabled = true, cliPath = cliFile.toString()),
@@ -321,6 +323,7 @@ class NativeShroudPackerTest {
             }
             assertTrue(error.message.orEmpty().contains("exited with code 2"))
             assertTrue(windows.bytes.all { it == 0.toByte() })
+            assertTrue(error.message.orEmpty().contains("boom"))
         } finally {
             workDir.toFile().deleteRecursively()
         }
@@ -331,7 +334,7 @@ class NativeShroudPackerTest {
         val workDir = Files.createTempDirectory("javashroud-pack-xenolith-nooutput")
         try {
             val cliFile = workDir.resolve("xenolith.exe").also { Files.write(it, byteArrayOf(0x4D, 0x5A)) }
-            val windows = native("windows-x64", "qp_ffi.dll", byteArrayOf(6, 6))
+            val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
             val error = assertFailsWith<IllegalStateException> {
                 NativeShroudPacker.packIfRequested(
                     config = config(enabled = true, cliPath = cliFile.toString()),
@@ -352,7 +355,7 @@ class NativeShroudPackerTest {
         val workDir = Files.createTempDirectory("javashroud-pack-xenolith-mismatch")
         try {
             val cliFile = workDir.resolve("xenolith.exe").also { Files.write(it, byteArrayOf(0x4D, 0x5A)) }
-            val windows = native("windows-x64", "qp_ffi.dll", byteArrayOf(7, 7))
+            val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
             val error = assertFailsWith<IllegalStateException> {
                 NativeShroudPacker.packIfRequested(
                     config = config(enabled = true, cliPath = cliFile.toString(), profile = "fast"),
@@ -376,7 +379,7 @@ class NativeShroudPackerTest {
         val workDir = Files.createTempDirectory("javashroud-pack-xenolith-badoutput")
         try {
             val cliFile = workDir.resolve("xenolith.exe").also { Files.write(it, byteArrayOf(0x4D, 0x5A)) }
-            val windows = native("windows-x64", "qp_ffi.dll", byteArrayOf(9, 9))
+            val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
             val error = assertFailsWith<IllegalStateException> {
                 NativeShroudPacker.packIfRequested(
                     config = config(enabled = true, cliPath = cliFile.toString()),
@@ -398,7 +401,7 @@ class NativeShroudPackerTest {
         val workDir = Files.createTempDirectory("javashroud-pack-xenolith-badprofile")
         try {
             val cliFile = workDir.resolve("xenolith.exe").also { Files.write(it, byteArrayOf(0x4D, 0x5A)) }
-            val windows = native("windows-x64", "qp_ffi.dll", byteArrayOf(1, 2))
+            val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
             val error = assertFailsWith<IllegalArgumentException> {
                 NativeShroudPacker.packIfRequested(
                     config = config(enabled = true, cliPath = cliFile.toString(), profile = "ultra"),
@@ -418,7 +421,7 @@ class NativeShroudPackerTest {
     fun xenolith_missing_cli_file_fails_with_named_error() {
         val workDir = Files.createTempDirectory("javashroud-pack-xenolith-nocli")
         try {
-            val windows = native("windows-x64", "qp_ffi.dll", byteArrayOf(1, 2))
+            val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
             val error = assertFailsWith<IllegalStateException> {
                 NativeShroudPacker.packIfRequested(
                     config = config(enabled = true, cliPath = workDir.resolve("missing.exe").toString()),
@@ -488,7 +491,7 @@ class NativeShroudPackerTest {
         try {
             val cliFile = workDir.resolve("xenolith.exe").also { Files.write(it, byteArrayOf(0x4D, 0x5A)) }
             val runner = FakeXenolithCli(SyntheticPackedImages.windowsPackedDll())
-            val windows = native("windows-x64", "qp_ffi.dll", byteArrayOf(3, 3))
+            val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
             NativeShroudPacker.packIfRequested(
                 config(
                     enabled = true,
@@ -536,7 +539,7 @@ class NativeShroudPackerTest {
         val workDir = Files.createTempDirectory("javashroud-pack-xenolith-fastvm")
         try {
             val cliFile = workDir.resolve("xenolith.exe").also { Files.write(it, byteArrayOf(0x4D, 0x5A)) }
-            val windows = native("windows-x64", "qp_ffi.dll", byteArrayOf(1))
+            val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
             val error = assertFailsWith<IllegalArgumentException> {
                 NativeShroudPacker.packIfRequested(
                     config(
@@ -562,7 +565,7 @@ class NativeShroudPackerTest {
         val workDir = Files.createTempDirectory("javashroud-pack-xenolith-mutual")
         try {
             val cliFile = workDir.resolve("xenolith.exe").also { Files.write(it, byteArrayOf(0x4D, 0x5A)) }
-            val windows = native("windows-x64", "qp_ffi.dll", byteArrayOf(1))
+            val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
             val error = assertFailsWith<IllegalArgumentException> {
                 NativeShroudPacker.packIfRequested(
                     config(
@@ -591,7 +594,7 @@ class NativeShroudPackerTest {
         try {
             val cliFile = workDir.resolve("xenolith.exe").also { Files.write(it, byteArrayOf(0x4D, 0x5A)) }
             for (name in listOf("JNI_OnLoad", "Java_com_x_y", "qp_r1_open_frame", "DllMain", "_start", "ucrtbase_fn")) {
-                val windows = native("windows-x64", "qp_ffi.dll", byteArrayOf(1))
+                val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
                 val error = assertFailsWith<IllegalArgumentException> {
                     NativeShroudPacker.packIfRequested(
                         config(
@@ -620,7 +623,7 @@ class NativeShroudPackerTest {
         val workDir = Files.createTempDirectory("javashroud-pack-xenolith-lazy")
         try {
             val cliFile = workDir.resolve("xenolith.exe").also { Files.write(it, byteArrayOf(0x4D, 0x5A)) }
-            val windows = native("windows-x64", "qp_ffi.dll", byteArrayOf(1))
+            val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
             val error = assertFailsWith<IllegalArgumentException> {
                 NativeShroudPacker.packIfRequested(
                     config(
@@ -640,10 +643,105 @@ class NativeShroudPackerTest {
         }
     }
 
+    @Test
+    fun xenolith_rejects_inconsistent_or_non_production_reports_and_zeros_input() {
+        val values = JsonNodeFactory.instance
+        val invalidFields = listOf(
+            "report_version" to values.numberNode(2),
+            "debug_gate" to values.numberNode(0),
+            "debug_gate" to values.numberNode(1),
+            "debug_gate" to values.numberNode(2),
+            "debug_gate" to values.textNode("3"),
+            "machine" to values.textNode("aarch64"),
+            "format" to values.textNode("pe64-exe"),
+            "backend" to values.textNode("host-emulator"),
+            "iat_mode" to values.textNode("unsupported-iat"),
+            "input_bytes" to values.numberNode(1),
+            "output_bytes" to values.numberNode(1),
+            "output_bytes" to values.numberNode(Long.MAX_VALUE),
+            "strict_coverage" to values.booleanNode(true),
+            "allow_native_fallback" to values.booleanNode(true),
+        )
+        val workDir = Files.createTempDirectory("javashroud-pack-report-gates")
+        try {
+            val cliFile = workDir.resolve("xenolith.exe").also { Files.write(it, byteArrayOf(0x4D, 0x5A)) }
+            for ((field, value) in invalidFields) {
+                val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
+                val error = assertFailsWith<IllegalStateException> {
+                    NativeShroudPacker.packIfRequested(
+                        config(enabled = true, cliPath = cliFile.toString()), listOf(windows),
+                        workDir = workDir, handoffEnabled = false,
+                        cliRunner = FakeXenolithCli(SyntheticPackedImages.windowsPackedDll(), reportTransform = {
+                            it.set<com.fasterxml.jackson.databind.JsonNode>(field, value)
+                        }),
+                    )
+                }
+                assertTrue(error.message.orEmpty().contains(field), "expected $field in: ${error.message}")
+                assertTrue(windows.bytes.all { it == 0.toByte() })
+            }
+        } finally {
+            workDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun xenolith_missing_or_malformed_json_report_fails_closed() {
+        val workDir = Files.createTempDirectory("javashroud-pack-report-json")
+        try {
+            val cliFile = workDir.resolve("xenolith.exe").also { Files.write(it, byteArrayOf(0x4D, 0x5A)) }
+            for (report in listOf("", "packing done", "{", "[]", "{} {}")) {
+                val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
+                val error = assertFailsWith<IllegalStateException> {
+                    NativeShroudPacker.packIfRequested(
+                        config(enabled = true, cliPath = cliFile.toString()), listOf(windows),
+                        workDir = workDir, handoffEnabled = false,
+                        cliRunner = FakeXenolithCli(SyntheticPackedImages.windowsPackedDll(), report = report),
+                    )
+                }
+                assertTrue(error.message.orEmpty().contains("valid JSON"))
+                assertTrue(windows.bytes.all { it == 0.toByte() })
+            }
+            val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
+            val error = assertFailsWith<IllegalStateException> {
+                NativeShroudPacker.packIfRequested(
+                    config(enabled = true, cliPath = cliFile.toString()), listOf(windows),
+                    workDir = workDir, handoffEnabled = false,
+                    cliRunner = FakeXenolithCli(SyntheticPackedImages.windowsPackedDll(), reportTransform = { it.remove("debug_gate") }),
+                )
+            }
+            assertTrue(error.message.orEmpty().contains("debug_gate"))
+            assertTrue(windows.bytes.all { it == 0.toByte() })
+        } finally {
+            workDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun packed_path_cannot_drop_the_input_dialect_section() {
+        val workDir = Files.createTempDirectory("javashroud-pack-dialect")
+        try {
+            val packedFile = workDir.resolve("packed.dll").also {
+                Files.write(it, SyntheticPackedImages.windowsPackedDll(dropSection = ".jsmd"))
+            }
+            val windows = native("windows-x64", "qp_ffi.dll", SyntheticPackedImages.windowsPackedDll())
+            val error = assertFailsWith<IllegalStateException> {
+                NativeShroudPacker.packIfRequested(
+                    config(enabled = true, packedPath = packedFile.toString()), listOf(windows),
+                    workDir = workDir, handoffEnabled = false,
+                )
+            }
+            assertTrue(error.message.orEmpty().contains(".jsmd"))
+            assertTrue(windows.bytes.all { it == 0.toByte() })
+        } finally {
+            workDir.toFile().deleteRecursively()
+        }
+    }
+
     private class FakeXenolithCli(
         private val packedBytes: ByteArray?,
         private val exitCode: Int = 0,
         private val report: String? = null,
+        private val reportTransform: (com.fasterxml.jackson.databind.node.ObjectNode) -> Unit = {},
     ) : NativeShroudPacker.XenolithCliRunner {
         val invocations = mutableListOf<List<String>>()
 
@@ -657,7 +755,7 @@ class NativeShroudPackerTest {
                 return NativeShroudPacker.XenolithCliResult(0, "xenolith 0.1.0-test\n", false)
             }
             if (exitCode != 0) {
-                return NativeShroudPacker.XenolithCliResult(exitCode, "boom\n", false)
+                return NativeShroudPacker.XenolithCliResult(exitCode, "", false, errorOutput = "boom\n")
             }
             val outputIndex = args.indexOf("-o")
             if (outputIndex >= 0 && packedBytes != null) {
@@ -665,9 +763,18 @@ class NativeShroudPackerTest {
             }
             val profileIndex = args.indexOf("--profile")
             val requestedProfile = if (profileIndex >= 0) args[profileIndex + 1] else "standard"
+            val reportNode = JsonNodeFactory.instance.objectNode()
+                .put("report_version", 1).put("profile", requestedProfile).put("format", "pe64-dll")
+                .put("machine", "x86_64").put("debug_gate", 3).put("backend", "pic-stub+xl-core")
+                .put("input_bytes", Files.size(Path.of(args[1]))).put("output_bytes", packedBytes?.size ?: 0)
+                .put("iat_mode", "disk-import-directory").put("imports_kept", 186).put("imports_kept_reason", "jni-abi-needs-loader-iat")
+                .put("strict_coverage", "--strict-coverage" in args).put("allow_native_fallback", "--allow-native-fallback" in args)
+                .put("vm_functions", 0).put("constants_encrypted", 0).put("runtime_decryption_window", false)
+            reportNode.putArray("coverage")
+            reportTransform(reportNode)
             return NativeShroudPacker.XenolithCliResult(
                 0,
-                report ?: """{"report_version":1,"profile":"$requestedProfile","format":"pe-dll","output_bytes":128}""",
+                report ?: reportNode.toString(),
                 false,
             )
         }

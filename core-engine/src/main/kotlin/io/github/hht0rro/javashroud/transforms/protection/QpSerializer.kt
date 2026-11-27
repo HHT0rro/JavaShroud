@@ -899,6 +899,10 @@ internal class QpSerializer(
         val encodedMeta = opcodeDialect.encodeOpcode(QP_REG_META)
         val remappedBlocks = program.blocks.map { block ->
             val remappedInsns = block.instructions.mapIndexed { rowIndex, insn ->
+                // A continuation opcode is a row marker. Decoding it as an instruction
+                // can mistake a numeric operand such as VM_MAXS maxLocals for a CP index.
+                if ((insn.flags and QP_REG_FLAG_CONTINUATION) != 0) return@mapIndexed insn
+
                 val semanticShare = if ((insn.flags and QP_REG_FLAG_SEMANTIC_SPLIT) != 0) {
                     block.instructions.getOrNull(rowIndex + 1)?.also { share ->
                         check(share.opcode == QP_REG_SEMANTIC_SHARE && share.flags == QP_REG_FLAG_SEMANTIC_SHARE) {
@@ -908,7 +912,7 @@ internal class QpSerializer(
                 } else {
                     null
                 }
-                val consumesMaskSlot = (insn.flags and (QP_REG_FLAG_CONTINUATION or QP_REG_FLAG_SEMANTIC_SHARE)) == 0
+                val consumesMaskSlot = (insn.flags and QP_REG_FLAG_SEMANTIC_SHARE) == 0
                 val currentMaskIndex = maskIndex
                 val maskedOpcode = if (consumesMaskSlot) {
                     (insn.opcode xor (semanticShare?.dst ?: 0)) xor opcodeMask(effectiveBuildSeed, currentMaskIndex)

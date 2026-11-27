@@ -50,8 +50,8 @@ private fun ClassWriter.addMethodWithCode(access: Int, name: String, descriptor:
 }
 
 private fun buildRootClassBytes(): ByteArray {
-    val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
-    cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC, "e2e/Root", null, "java/lang/Object", arrayOf("e2e/Shape"))
+    val cw = ClassWriter(ClassWriter.COMPUTE_FRAMES)
+    cw.visit(testClassfileVersion(), Opcodes.ACC_PUBLIC, "e2e/Root", null, "java/lang/Object", arrayOf("e2e/Shape"))
     cw.visitSource("Root.java", "JSR45#/e2e/Root.java")
     cw.visitOuterClass("e2e/Outer", "outerCall", "()V")
     cw.visitInnerClass(innerClassName(), "e2e/Root", "Inner", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC or Opcodes.ACC_ABSTRACT)
@@ -113,7 +113,7 @@ private fun buildRootClassBytes(): ByteArray {
 
 private fun buildInnerClassBytes(): ByteArray {
     val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
-    cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC or Opcodes.ACC_ABSTRACT, innerClassName(), null, "java/lang/Object", null)
+    cw.visit(testClassfileVersion(), Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC or Opcodes.ACC_ABSTRACT, innerClassName(), null, "java/lang/Object", null)
     cw.visitSource("Root.java", null)
     cw.visitOuterClass("e2e/Root", "call", "()I")
     cw.visitEnd()
@@ -122,7 +122,7 @@ private fun buildInnerClassBytes(): ByteArray {
 
 private fun buildBaseClassBytes(): ByteArray {
     val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
-    cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC or Opcodes.ACC_ABSTRACT, "e2e/Base", null, "java/lang/Object", null)
+    cw.visit(testClassfileVersion(), Opcodes.ACC_PUBLIC or Opcodes.ACC_ABSTRACT, "e2e/Base", null, "java/lang/Object", null)
     cw.visitSource("Base.java", null)
 
     cw.addMethodWithCode(
@@ -142,7 +142,7 @@ private fun buildBaseClassBytes(): ByteArray {
 
 private fun buildImplClassBytes(): ByteArray {
     val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
-    cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC, "e2e/Impl", null, "e2e/Base", arrayOf("java/io/Serializable"))
+    cw.visit(testClassfileVersion(), Opcodes.ACC_PUBLIC, "e2e/Impl", null, "e2e/Base", arrayOf("java/io/Serializable"))
     cw.visitSource("Impl.java", null)
 
     cw.addMethodWithCode(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null) { mv ->
@@ -157,7 +157,7 @@ private fun buildImplClassBytes(): ByteArray {
 
 private fun buildInterfaceBytes(): ByteArray {
     val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
-    cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC or Opcodes.ACC_INTERFACE or Opcodes.ACC_ABSTRACT, "e2e/Shape", null, "java/lang/Object", null)
+    cw.visit(testClassfileVersion(), Opcodes.ACC_PUBLIC or Opcodes.ACC_INTERFACE or Opcodes.ACC_ABSTRACT, "e2e/Shape", null, "java/lang/Object", null)
     cw.visitSource("Shape.java", null)
 
     cw.addMethodWithCode(Opcodes.ACC_PUBLIC, "area", "()D", null, null) { mv ->
@@ -171,7 +171,7 @@ private fun buildInterfaceBytes(): ByteArray {
 
 private fun buildLambdaStyleClassBytes(): ByteArray {
     val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
-    cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC, "e2e/LambdaStyle", null, "java/lang/Object", null)
+    cw.visit(testClassfileVersion(), Opcodes.ACC_PUBLIC, "e2e/LambdaStyle", null, "java/lang/Object", null)
     cw.visitSource("LambdaStyle.java", null)
 
     val handler = cw.visitField(Opcodes.ACC_PRIVATE or Opcodes.ACC_SYNTHETIC, "handler", "Ljava/lang/Runnable;", null, null)

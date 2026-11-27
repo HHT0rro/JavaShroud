@@ -33,8 +33,9 @@ export const runStatusLabel = (status: RunStatus, language: DisplayLanguage, out
 export const getReadinessIssue = (state: RunState, language: DisplayLanguage): ReadinessIssue | null => {
   const zh = language === 'zh'
   if (state.schema === null) return { message: zh ? '等待引擎能力加载完成' : 'Waiting for engine capabilities', page: 'home' }
-  if (!state.inputJar?.inputJarPath.trim()) return { message: zh ? '选择一个输入 JAR 文件' : 'Choose an input JAR', page: 'home' }
-  if (!state.outputJarPath.trim()) return { message: zh ? '设置输出 JAR 路径' : 'Set the output JAR path', page: 'home' }
+  const format = state.artifactFormat.toUpperCase()
+  if (!state.inputJar?.inputJarPath.trim()) return { message: zh ? `选择一个输入 ${format} 文件` : `Choose an input ${format}`, page: 'home' }
+  if (!state.outputJarPath.trim()) return { message: zh ? `设置输出 ${format} 路径` : `Set the output ${format} path`, page: 'home' }
   if (!state.passes.some((pass) => pass.enabled)) return { message: zh ? '至少启用一个混淆模块' : 'Enable at least one module', page: 'passes' }
   try {
     buildObfuscationRequest(state)

@@ -15,7 +15,6 @@ import java.util.jar.JarOutputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
-import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.Opcodes
 
@@ -42,11 +41,15 @@ class EngineCliDispatchSupportTest {
     }
 
     @Test
-    fun engine_jar_schema_command_emits_single_json_payload() {
-        val engineJar = engineJarPath()
-        assumeTrue(Files.isRegularFile(engineJar), "Skipping: obfuscator-engine.jar not built at $engineJar")
+    fun engine_jar_schema_command_emits_single_toml_document() {
+        val engineJar = Path.of(checkNotNull(System.getProperty("javashroud.test.engineJar")) {
+            "The Gradle test task must supply the engine JAR"
+        })
+        assertTrue(Files.isRegularFile(engineJar), "Engine JAR not built at $engineJar")
+        val executable = if (System.getProperty("os.name").startsWith("Windows", ignoreCase = true)) "java.exe" else "java"
+        val java = Path.of(System.getProperty("java.home"), "bin", executable)
 
-        val result = runCommand(listOf("java", "-jar", engineJar.toString(), "-schema"), engineJar.parent)
+        val result = runCommand(listOf(java.toString(), "-jar", engineJar.toString(), "-schema"), engineJar.parent)
         val stdoutLines = result.stdout.lineSequence().filter { it.isNotBlank() }.toList()
 
         assertEquals(0, result.exitCode, "Schema process should exit successfully. stderr=${result.stderr.take(500)}")
@@ -113,14 +116,6 @@ class EngineCliDispatchSupportTest {
             System.setOut(originalOut)
             System.setErr(originalErr)
         }
-    }
-
-    private fun engineJarPath(): Path {
-        val candidates = listOf(
-            Path.of("..", "build", "core-engine", "libs", "obfuscator-engine.jar"),
-            Path.of("build", "core-engine", "libs", "obfuscator-engine.jar"),
-        ).map { it.toAbsolutePath().normalize() }
-        return candidates.firstOrNull { Files.isRegularFile(it) } ?: candidates.first()
     }
 
     private fun runCommand(command: List<String>, workDir: Path): CommandResult {

@@ -9,20 +9,24 @@ import io.github.hht0rro.javashroud.transforms.protection.RuntimeResourceKind
 import io.github.hht0rro.javashroud.transforms.protection.QP_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.QP_MASTER_KEY_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.QpLocator
 import io.github.hht0rro.javashroud.transforms.protection.defaultQpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.requireQpBuildContext
+import io.github.hht0rro.javashroud.transforms.protection.sealNativeBindingBytes
 import io.github.hht0rro.javashroud.transforms.protection.sealedRuntimeHelperInternalName
 import io.github.hht0rro.javashroud.transforms.protection.sealedRuntimeHelperMethodName
 import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.tree.ClassNode
-import java.nio.file.Files
-import java.nio.file.Path
+import org.objectweb.asm.tree.MethodInsnNode
 
 class RuntimeArtifactSealingCollisionTest {
     @Test
@@ -141,42 +145,69 @@ class RuntimeArtifactSealingCollisionTest {
     }
 
     @Test
-    fun `sealed native binding publication merges with existing runtime bindings`() {
-        val helperClass = Class.forName("io.github.hht0rro.javashroud.transforms.protection.qp.QpBridge")
-        val merge = helperClass.getDeclaredMethod("mergeBindingProperties", String::class.java, String::class.java).also { it.isAccessible = true }
+    fun final_native_locator_binds_one_sealed_bindings_resource_by_length_and_digest() {
+        val native = JarEntryData("META-INF/a/qp_ffi.dll", byteArrayOf(0x4D, 0x5A, 1, 2, 3))
+        val bindings = JarEntryData(
+            "META-INF/b/bindings.conf",
+            sealNativeBindingBytes(ByteArray(32), "fixture binding".encodeToByteArray()),
+        )
+        val libraries = listOf(QpLocator.entry("windows-x64", native.name, ".dll", native.bytes))
+        val bindingRow = QpLocator.bindingsEntry(bindings.name, bindings.bytes)
+        val expected = QpLocator.finalNativeBindingDigest(libraries, bindingRow)
 
-        val merged = merge.invoke(null, "old.Owner=old.Alias\nshared.Owner=old.Shared", "new.Owner=new.Alias\nshared.Owner=new.Shared") as String
-
-        assertEquals("old.Alias", bindingValue(merged, "old.Owner"))
-        assertEquals("new.Alias", bindingValue(merged, "new.Owner"))
-        assertEquals("new.Shared", bindingValue(merged, "shared.Owner"))
+        assertContentEquals(
+            expected.asBytes(),
+            QpLocator.finalNativeBindingDigestFromArtifact(listOf(native, bindings), libraries, bindingRow).asBytes(),
+        )
+        assertFailsWith<IllegalStateException>("missing binding") {
+            QpLocator.finalNativeBindingDigestFromArtifact(listOf(native), libraries, bindingRow)
+        }
+        val wrongDigest = bindings.bytes.copyOf().also { it[0] = (it[0].toInt() xor 1).toByte() }
+        val invalidEntries = mapOf(
+            "duplicate binding" to listOf(native, bindings, bindings),
+            "wrong length" to listOf(native, bindings.copy(bytes = bindings.bytes.copyOf(bindings.bytes.size - 1))),
+            "wrong digest" to listOf(native, bindings.copy(bytes = wrongDigest)),
+        )
+        for ((reason, entries) in invalidEntries) {
+            assertFailsWith<IllegalArgumentException>(reason) {
+                QpLocator.finalNativeBindingDigestFromArtifact(entries, libraries, bindingRow)
+            }
+        }
     }
 
     @Test
-    fun `sealed native loader owner is scoped while bindings remain merged`() {
-        val helperSource = Files.readString(Path.of("src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge.java"))
+    fun native_loader_publishes_one_sealed_bootstrap_and_retains_property_rollback() {
+        val owner = "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge"
+        val node = ClassNode().also { ClassReader(loadClassBytes("$owner.class")).accept(it, ClassReader.SKIP_FRAMES) }
+        val loader = node.methods.single { it.name == "tryLoadQpBundledNativeResource" }
+        val calls = loader.instructions.asSequence().filterIsInstance<MethodInsnNode>().toList()
+        val publish = calls.single { it.owner == owner && it.name == "publishSealedNativeBootstrap" }
+        val systemLoad = calls.single { it.owner == "java/lang/System" && it.name == "load" }
+        assertEquals("([B[B)V", publish.desc)
+        assertTrue(calls.indexOf(publish) < calls.indexOf(systemLoad), "JNI must see one sealed bootstrap before load")
 
-        assertTrue(
-            helperSource.contains("String previousLoaderOwner = System.getProperty(sealedLoaderPropertyName())"),
-            "Native loading must snapshot j.l so a later re-obfuscation does not permanently redirect an older runtime helper.",
+        val properties = listOf("sealedLoaderPropertyName", "sealedPackPropertyName", "sealedBindingsPropertyName")
+        val beforePublish = calls.take(calls.indexOf(publish))
+        val snapshotted = beforePublish.zipWithNext().filter { (key, read) ->
+            key.owner == owner && key.name in properties && read.owner == "java/lang/System" && read.name == "getProperty"
+        }.map { (key, _) -> key.name }
+        assertEquals(properties, snapshotted, "Snapshot the owner, sealed pack and sealed bindings before publication")
+
+        val afterLoad = calls.drop(calls.indexOf(systemLoad) + 1).filter { it.owner == owner }.map { it.name }
+        val restores = listOf(
+            "restoreLoaderProperty", "sealedPackPropertyName", "restoreProperty", "sealedBindingsPropertyName", "restoreProperty",
         )
-        assertTrue(
-            helperSource.contains("restoreLoaderProperty(previousLoaderOwner)"),
-            "Native loading must restore the previous j.l owner after RegisterNatives finishes.",
-        )
-        assertTrue(
-            helperSource.contains("publishSealedNativeLoaderOwner()") &&
-                helperSource.contains("System.setProperty(sealedLoaderPropertyName(), QpBridge.class.getName().replace('.', '/'))"),
-            "The active helper still has to publish itself before registering or invoking native VM entries.",
-        )
-        assertTrue(
-            helperSource.contains("mergeBindingProperties(System.getProperty(sealedBindingPropertyName()), bindings.toString())"),
-            "Class bindings must remain merged across multiple sealed runtime generations.",
-        )
-        assertFalse(
-            helperSource.contains("mergeLoaderProperties"),
-            "j.l must not become a permanent merged owner list; it is a current-helper dispatch scope.",
-        )
+        assertTrue(restores in afterLoad.windowed(restores.size), "Rollback must restore all three bootstrap properties")
+
+        val publisher = node.methods.single { it.name == publish.name && it.desc == publish.desc }
+        val publication = publisher.instructions.asSequence().filterIsInstance<MethodInsnNode>().toList()
+        assertTrue(publication.any { it.owner == owner && it.name == "publishSealedNativeLoaderOwner" })
+        val published = publication.windowed(3).filter { (key, encode, write) ->
+            key.owner == owner && encode.owner == owner && encode.name == "base64UrlEncode" &&
+                write.owner == "java/lang/System" && write.name == "setProperty"
+        }.map { it.first().name }
+        assertEquals(properties.drop(1), published, "Publish one opaque pack and one opaque bindings resource")
+        assertFalse(publication.any { it.owner == "java/lang/System" && it.name == "getProperty" })
     }
 
     private fun loadClassBytes(resourceName: String): ByteArray =
@@ -197,9 +228,6 @@ class RuntimeArtifactSealingCollisionTest {
         writer.visitEnd()
         return writer.toByteArray()
     }
-
-    private fun bindingValue(text: String, key: String): String? =
-        text.lines().firstOrNull { it.startsWith("$key=") }?.substringAfter('=')
 
     private fun fixedContext() = QpBuildContext(
         masterKey = ByteArray(QP_MASTER_KEY_SIZE) { index -> (0x23 + index * 7).toByte() },

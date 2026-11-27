@@ -2,6 +2,8 @@ package io.github.hht0rro.javashroud
 
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpBridge
 import org.objectweb.asm.ClassReader
+import org.objectweb.asm.ClassVisitor
+import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -20,7 +22,15 @@ class QpBridgeJava8CompatibilityTest {
                 method.name == "resolveVmMethodHandle"
         })
         val helperText = helperBytes.toString(Charsets.ISO_8859_1)
-        assertFalse(helperText.contains("privateLookupIn"))
+        reader.accept(object : ClassVisitor(Opcodes.ASM9) {
+            override fun visitMethod(
+                access: Int, name: String?, descriptor: String?, signature: String?, exceptions: Array<out String>?,
+            ): MethodVisitor = object : MethodVisitor(Opcodes.ASM9) {
+                override fun visitMethodInsn(opcode: Int, owner: String, name: String, descriptor: String, isInterface: Boolean) {
+                    assertFalse(owner == "java/lang/invoke/MethodHandles" && name == "privateLookupIn")
+                }
+            }
+        }, 0)
         assertFalse(helperText.contains("resolveMethodHandle"))
         assertFalse(helperText.contains("createSamLambda"))
     }

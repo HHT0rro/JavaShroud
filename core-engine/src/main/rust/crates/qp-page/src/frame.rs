@@ -1,6 +1,7 @@
 use qp_crypto::{authentication_tag, constant_time_eq, CryptoError, RuntimeBindingDigest};
 use qp_crypto::{
-    Binding, BindingError, Digest, DIGEST_SIZE, MAX_PAYLOAD_SIZE, PROTOCOL_MAGIC_SIZE, PROTOCOL_VERSION,
+    Binding, BindingError, Digest, DIGEST_SIZE, MAX_PAYLOAD_SIZE, PROTOCOL_MAGIC_SIZE,
+    PROTOCOL_VERSION,
 };
 use std::fmt;
 

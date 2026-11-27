@@ -105,7 +105,13 @@ internal fun inArtifactOverrideMethodSignatures(artifact: BytecodeArtifact): Set
 }
 
 internal fun reflectedFieldNames(artifact: BytecodeArtifact): Set<String> {
-    val stringConstants = stringConstants(artifact)
+    // Only constants that do NOT feed a java/lang/Class.getField or
+    // getDeclaredField call: those are rewritten in lockstep with the field
+    // rename by [remapFields], so the field stays renameable. Everything else
+    // that names a field (kotlinx.coroutines'
+    // AtomicReferenceFieldUpdater.newUpdater(C, C, "name") is the canonical
+    // case) pins the field name.
+    val stringConstants = nonClassLookupStringConstants(artifact)
     val blocked = HashSet<String>()
     for (classArtifact in artifact.classArtifacts) {
         for (field in classArtifact.summary.fieldSummaries) {
@@ -115,6 +121,34 @@ internal fun reflectedFieldNames(artifact: BytecodeArtifact): Set<String> {
         }
     }
     return blocked
+}
+
+private fun nonClassLookupStringConstants(artifact: BytecodeArtifact): Set<String> {
+    val constants = HashSet<String>()
+    for (classArtifact in artifact.classArtifacts) {
+        val node = ClassNode()
+        ClassReader(classArtifact.bytes).accept(node, ClassReader.SKIP_FRAMES)
+        for (method in node.methods) {
+            var previous: LdcInsnNode? = null
+            for (instruction in method.instructions) {
+                if (instruction is LdcInsnNode && instruction.cst is String) {
+                    previous = instruction
+                    continue
+                }
+                if (instruction.opcode < 0) continue
+                val call = instruction as? MethodInsnNode
+                val feedsClassFieldLookup = previous != null && call != null &&
+                    call.owner == "java/lang/Class" &&
+                    (call.name == "getField" || call.name == "getDeclaredField") &&
+                    call.desc == "(Ljava/lang/String;)Ljava/lang/reflect/Field;"
+                if (!feedsClassFieldLookup && previous != null) {
+                    constants.add(previous.cst as String)
+                }
+                previous = null
+            }
+        }
+    }
+    return constants
 }
 
 private fun parseClassNode(classBytes: ByteArray): ClassNode {

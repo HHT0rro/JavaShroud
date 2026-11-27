@@ -19,31 +19,37 @@ set "WAILS_ICON_SOURCE=%FRONTEND_DIR%\public\brand\appicon.ico"
 set "WAILS_ICON_RESOURCE=%DESKTOP_DIR%\rsrc_windows_amd64.syso"
 set "RELEASE_ROOT=%BUILD_ROOT%\release"
 set "RELEASE_DIR=%RELEASE_ROOT%\javashroud-windows-amd64"
+set "RELEASE_ZIP=%RELEASE_ROOT%\javashroud-windows-amd64.zip"
 set "ENGINE_BUILD_DIR=%BUILD_ROOT%\core-engine"
 set "ENGINE_LIBS_DIR=%ENGINE_BUILD_DIR%\libs"
-set "ENGINE_JAR=%ENGINE_LIBS_DIR%\obfuscator-engine.jar"
+set "ENGINE_VERSION_SOURCE=%CORE_DIR%\core-engine\src\main\kotlin\io\github\hht0rro\javashroud\capabilities\CapabilityTypes.kt"
 set "ENGINE_RESOURCE_CONFIG=%ENGINE_BUILD_DIR%\native\generated\generateResourcesConfigFile\resource-config.json"
 set "ENGINE_NATIVE_DIR=%ENGINE_BUILD_DIR%\native\manual-native-image"
-set "ENGINE_EXE=%ENGINE_NATIVE_DIR%\obfuscator-engine.exe"
-set "ENGINE_NATIVE_STAMP=%ENGINE_NATIVE_DIR%\obfuscator-engine.sha256"
-set "ENGINE_MAIN_CLASS=io.github.hht0rro.javashroud.MainKt"
-set "NATIVE_IMAGE_BUILD_ARGS=--no-fallback --enable-url-protocols=https -H:+ReportExceptionStackTraces"
 set "APP_EXE=%DESKTOP_BIN_DIR%\javashroud.exe"
 set "WAILS_OUTPUT_RELATIVE=..\build\desktop-app\bin\javashroud.exe"
 set "WAILS_ACTUAL_EXE=%DESKTOP_DIR%\build\build\desktop-app\bin\javashroud.exe"
 set "FRONTEND_BUILD_LOG=%BUILD_ROOT%\logs\frontend-build.log"
 rem ---- Build optimization toggles ----
-rem Supported switches: --strict-heap | --pgo <profile>
+rem Supported switches: --strict-heap | --pgo <profile> | --require-xenolith-pin
 set "ENABLE_PGO="
 set "PGO_PROFILE="
+set "XENOLITH_PIN_OPTION="
 
 :parse_switches
 if "%~1"=="" goto :switches_done
+if /I "%~1"=="--require-xenolith-pin" ( set "XENOLITH_PIN_OPTION=-RequirePin" & shift & goto :parse_switches )
 if /I "%~1"=="--strict-heap" ( set "ENABLE_STRICT_HEAP=1" & shift & goto :parse_switches )
 if /I "%~1"=="--pgo" ( set "ENABLE_PGO=1" & set "PGO_PROFILE=%~2" & shift & shift & goto :parse_switches )
 shift
 goto :parse_switches
 :switches_done
+set "ENGINE_RUN_DIR="
+call :build_release
+set "RELEASE_EXIT=%ERRORLEVEL%"
+if defined ENGINE_RUN_DIR rmdir /s /q "%ENGINE_RUN_DIR%" || echo Could not remove native release workspace: %ENGINE_RUN_DIR%
+exit /b %RELEASE_EXIT%
+
+:build_release
 if not defined GOEXE set "GOEXE=go"
 if not defined WAILS_EXE set "WAILS_EXE=wails"
 if defined GRAALVM_HOME if exist "%GRAALVM_HOME%\bin\native-image.cmd" (
@@ -127,11 +133,20 @@ if /I not "%GOARCH%"=="amd64" (
   exit /b 1
 )
 
+rem Prepare Xenolith before the build. Only the current successful preparation enables embedding.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%DESKTOP_DIR%\fetch-xenolith.ps1" -OutPath "%DESKTOP_EMBEDDED_DIR%\xenolith.exe" %XENOLITH_PIN_OPTION% || exit /b 1
+set "WAILS_BUILD_TAGS=javashroud_embed_engine"
+set "XENOLITH_EMBEDDED="
+if exist "%DESKTOP_EMBEDDED_DIR%\xenolith.exe" (
+  set "WAILS_BUILD_TAGS=javashroud_embed_engine,javashroud_embed_xenolith"
+  set "XENOLITH_EMBEDDED=1"
+)
+
 if not exist "%FRONTEND_DIR%\node_modules\.yarn-state.yml" (
-  echo [1/10] Installing frontend dependencies...
+  echo [1/6] Installing frontend dependencies...
   call corepack yarn --cwd "%FRONTEND_DIR%" install --immutable || exit /b 1
 ) else (
-  echo [1/10] Frontend dependencies already installed.
+  echo [1/6] Frontend dependencies already installed.
 )
 
 set "GRADLE_OPTS=-Dorg.gradle.parallel=true -Dorg.gradle.caching=true -Dorg.gradle.configuration-cache=true"
@@ -140,39 +155,18 @@ if defined ENABLE_SKIP_ENGINE_TESTS (
   echo Skipping engine tests for faster build: ENABLE_SKIP_ENGINE_TESTS is enabled.
   set "GRADLE_ENGINE_TASK=%GRADLE_ENGINE_TASK% -x :core-engine:test"
 )
-echo [2/10] Building engine jar and native resources...
+echo [2/6] Building engine jar and native resources...
 pushd "%CORE_DIR%" || exit /b 1
 call gradlew.bat --no-build-cache --no-configuration-cache --rerun-tasks :core-engine:jar :core-engine:generateResourcesConfigFile || (popd & exit /b 1)
 popd
-call :resolve_engine_jar || exit /b 1
-if not exist "%ENGINE_RESOURCE_CONFIG%" (
-  echo Engine resource config was not generated: %ENGINE_RESOURCE_CONFIG%
-  exit /b 1
-)
+call :prepare_engine_inputs || exit /b 1
 
-echo [3/10] Building native engine executable...
-set "ENGINE_NATIVE_CACHE_ENABLED=1"
-set "ENGINE_NATIVE_STAMP_FILE=%ENGINE_NATIVE_DIR%\.release-stamp.txt"
-set "ENGINE_NATIVE_CACHE_OK="
-call :sha256_file "%ENGINE_JAR%" ENGINE_JAR_SHA256 || exit /b 1
-set "ENGINE_NATIVE_CACHE_KEY=args=%NATIVE_IMAGE_BUILD_ARGS%;jar=%ENGINE_JAR_SHA256%"
-if defined ENABLE_QUICK_BUILD set "ENGINE_NATIVE_CACHE_ENABLED=0"
-if defined ENABLE_PGO set "ENGINE_NATIVE_CACHE_ENABLED=0"
-if "%ENGINE_NATIVE_CACHE_ENABLED%"=="1" if exist "%ENGINE_EXE%" if exist "%ENGINE_NATIVE_STAMP_FILE%" (
-  set /p ENGINE_NATIVE_PREV_KEY= < "%ENGINE_NATIVE_STAMP_FILE%"
-  if "!ENGINE_NATIVE_PREV_KEY!"=="!ENGINE_NATIVE_CACHE_KEY!" set "ENGINE_NATIVE_CACHE_OK=1"
-)
-if "%ENGINE_NATIVE_CACHE_OK%"=="1" (
-  echo Reusing cached native engine build: %ENGINE_EXE%
-) else (
-  call "%CORE_DIR%\core-engine\build-native.bat" || exit /b 1
-)
-if exist "%ENGINE_NATIVE_DIR%" mkdir "%ENGINE_NATIVE_DIR%" >nul 2>nul
-> "%ENGINE_NATIVE_STAMP_FILE%" echo !ENGINE_NATIVE_CACHE_KEY!
-if not exist "%ENGINE_EXE%" (
-  echo Native engine build did not produce obfuscator-engine.exe: %ENGINE_EXE%
-  exit /b 1
-)
+echo [3/6] Building native engine executable...
+set "ENGINE_NATIVE_CACHE_DISABLED="
+if defined ENABLE_QUICK_BUILD set "ENGINE_NATIVE_CACHE_DISABLED=1"
+if defined ENABLE_PGO set "ENGINE_NATIVE_CACHE_DISABLED=1"
+call "%CORE_DIR%\core-engine\build-native.bat" --prepared "%ENGINE_RUN_DIR%\obfuscator-engine.jar" "%ENGINE_RUN_DIR%\resource-config.json" "%ENGINE_RUN_DIR%" || exit /b 1
+set "ENGINE_EXE=%ENGINE_RUN_DIR%\obfuscator-engine.exe"
 copy /y "%ENGINE_EXE%" "%DESKTOP_EMBEDDED_DIR%\obfuscator-engine.exe" >nul || exit /b 1
 if not exist "%DESKTOP_EMBEDDED_DIR%\obfuscator-engine.exe" (
   echo Embedded engine input is missing for Wails build: %DESKTOP_EMBEDDED_DIR%\obfuscator-engine.exe
@@ -180,41 +174,7 @@ if not exist "%DESKTOP_EMBEDDED_DIR%\obfuscator-engine.exe" (
 )
 call :verify_same_file_hash "%ENGINE_EXE%" "%DESKTOP_EMBEDDED_DIR%\obfuscator-engine.exe" "embedded native engine" || exit /b 1
 
-rem ---- Xenolith packer CLI (embed into javashroud.exe + ship in release tools\) ----
-rem Resolution order: XENOLITH_EXE -> XENOLITH_DIST%\xenolith.exe -> sibling ..\Xenolith\dist\xenolith.exe
-set "XENOLITH_EXE_SOURCE="
-if defined XENOLITH_EXE (
-  if exist "%XENOLITH_EXE%" set "XENOLITH_EXE_SOURCE=%XENOLITH_EXE%"
-)
-if not defined XENOLITH_EXE_SOURCE (
-  if defined XENOLITH_DIST if exist "%XENOLITH_DIST%\xenolith.exe" set "XENOLITH_EXE_SOURCE=%XENOLITH_DIST%\xenolith.exe"
-)
-if not defined XENOLITH_EXE_SOURCE (
-  if exist "%CORE_DIR%\..\Xenolith\dist\xenolith.exe" set "XENOLITH_EXE_SOURCE=%CORE_DIR%\..\Xenolith\dist\xenolith.exe"
-)
-if not defined XENOLITH_EXE_SOURCE (
-  echo No local xenolith.exe found; fetching from GitHub Releases via CN mirror chain ^(ghfast.top / gh-proxy.com / ghproxy.net, direct as last resort^)...
-  powershell -NoProfile -ExecutionPolicy Bypass -File "%DESKTOP_DIR%\fetch-xenolith.ps1" -OutPath "%DESKTOP_EMBEDDED_DIR%\xenolith.exe" || (
-    echo WARNING: xenolith.exe download failed. Building without embedded Xenolith; desktop falls back to tools dir / PATH / manual packing.
-  )
-  if exist "%DESKTOP_EMBEDDED_DIR%\xenolith.exe" set "XENOLITH_EXE_SOURCE=%DESKTOP_EMBEDDED_DIR%\xenolith.exe"
-)
-set "WAILS_BUILD_TAGS=javashroud_embed_engine"
-set "XENOLITH_EMBEDDED="
-if defined XENOLITH_EXE_SOURCE (
-  if /I not "%XENOLITH_EXE_SOURCE%"=="%DESKTOP_EMBEDDED_DIR%\xenolith.exe" (
-    copy /y "%XENOLITH_EXE_SOURCE%" "%DESKTOP_EMBEDDED_DIR%\xenolith.exe" >nul || exit /b 1
-  )
-  call :verify_same_file_hash "%XENOLITH_EXE_SOURCE%" "%DESKTOP_EMBEDDED_DIR%\xenolith.exe" "embedded xenolith cli" || exit /b 1
-  set "WAILS_BUILD_TAGS=%WAILS_BUILD_TAGS%,javashroud_embed_xenolith"
-  set "XENOLITH_EMBEDDED=1"
-  echo Embedded Xenolith CLI: %XENOLITH_EXE_SOURCE%
-) else (
-  if exist "%DESKTOP_EMBEDDED_DIR%\xenolith.exe" del /f /q "%DESKTOP_EMBEDDED_DIR%\xenolith.exe" >nul 2>nul
-  echo WARNING: xenolith.exe not found ^(XENOLITH_EXE / XENOLITH_DIST / sibling Xenolith\dist^). Building without embedded Xenolith; desktop falls back to tools dir / PATH / manual packing.
-)
-
-echo [4/10] Building frontend bundle...
+echo [4/6] Building frontend bundle...
 if exist "%FRONTEND_BUILD_LOG%" del /f /q "%FRONTEND_BUILD_LOG%" >nul 2>nul
 cmd /d /c "corepack yarn --cwd ""%FRONTEND_DIR%"" build > ""%FRONTEND_BUILD_LOG%"" 2>&1"
 set "FRONTEND_EXIT=%ERRORLEVEL%"
@@ -227,7 +187,7 @@ call :verify_frontend_bundle "%FRONTEND_BUILD_DIR%" || exit /b 1
 call :verify_frontend_bundle "%WAILS_FRONTEND_DIST%" || exit /b 1
 call :verify_synced_frontend "%FRONTEND_BUILD_DIR%" "%WAILS_FRONTEND_DIST%" || exit /b 1
 
-echo [5/10] Building desktop executable for relocation into repository build output...
+echo [5/6] Building desktop executable for relocation into repository build output...
 if not exist "%DESKTOP_DIR%\build" mkdir "%DESKTOP_DIR%\build" || exit /b 1
 copy /y "%WAILS_APPICON_SOURCE%" "%WAILS_APPICON_TARGET%" >nul || exit /b 1
 set "RSRC_CACHE_OK="
@@ -264,68 +224,41 @@ if not exist "%DESKTOP_ENGINE_DIR%\obfuscator-engine.exe" (
 )
 call :verify_same_file_hash "%ENGINE_EXE%" "%DESKTOP_ENGINE_DIR%\obfuscator-engine.exe" "desktop runtime native engine" || exit /b 1
 
-echo [6/10] Preparing release directory...
-if exist "%RELEASE_DIR%" rmdir /s /q "%RELEASE_DIR%"
-mkdir "%RELEASE_DIR%" || exit /b 1
-mkdir "%RELEASE_DIR%\engine" || exit /b 1
-copy /y "%APP_EXE%" "%RELEASE_DIR%\javashroud.exe" >nul || exit /b 1
-copy /y "%ENGINE_EXE%" "%RELEASE_DIR%\engine\obfuscator-engine.exe" >nul || exit /b 1
-if defined XENOLITH_EXE_SOURCE (
-  mkdir "%RELEASE_DIR%\tools" || exit /b 1
-  copy /y "%XENOLITH_EXE_SOURCE%" "%RELEASE_DIR%\tools\xenolith.exe" >nul || exit /b 1
-)
+echo [6/6] Assembling, verifying and publishing the release directory and ZIP...
+set "XENOLITH_INCLUDED_OPTION="
+if defined XENOLITH_EMBEDDED set "XENOLITH_INCLUDED_OPTION=-ExpectXenolith"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%DESKTOP_DIR%\fetch-xenolith.ps1" -PublishRelease "%RELEASE_DIR%" -OutPath "%RELEASE_ZIP%" -ReleaseInputRoot "%CORE_DIR%" -DesktopExe "%APP_EXE%" -EngineExe "%ENGINE_EXE%" -XenolithDirectory "%DESKTOP_EMBEDDED_DIR%" %XENOLITH_INCLUDED_OPTION% %XENOLITH_PIN_OPTION% || exit /b 1
 
-echo [7/10] Writing release metadata...
-(
-  echo JavaShroud Windows AMD64 Release
-  echo.
-  echo Files:
-  echo - javashroud.exe
-  echo - engine\obfuscator-engine.exe
-  if defined XENOLITH_EXE_SOURCE echo - tools\xenolith.exe ^(GPL-3.0, source: https://github.com/HHT0rro/Xenolith^)
-  echo.
-  echo Build root: %BUILD_ROOT%
-) > "%RELEASE_DIR%\README.txt"
-
-echo [8/10] Verifying release package...
-if not exist "%RELEASE_DIR%\javashroud.exe" exit /b 1
-if not exist "%RELEASE_DIR%\engine\obfuscator-engine.exe" exit /b 1
-call :verify_same_file_hash "%ENGINE_EXE%" "%RELEASE_DIR%\engine\obfuscator-engine.exe" "release package native engine" || exit /b 1
-if defined XENOLITH_EXE_SOURCE (
-  if not exist "%RELEASE_DIR%\tools\xenolith.exe" exit /b 1
-  call :verify_same_file_hash "%XENOLITH_EXE_SOURCE%" "%RELEASE_DIR%\tools\xenolith.exe" "release package xenolith cli" || exit /b 1
-)
-
-echo [9/10] Release contents:
+echo Release contents:
 dir /b "%RELEASE_DIR%"
 
-echo [10/10] Release package ready: %RELEASE_DIR%
+echo Release package ready: %RELEASE_ZIP%
 exit /b 0
 
 :sha256_file
 set "SHA_FILE=%~1"
 set "SHA_VAR=%~2"
+set "%SHA_VAR%="
 set "POWERSHELL_EXE=powershell"
 where pwsh >nul 2>nul && set "POWERSHELL_EXE=pwsh"
 for /f "delims=" %%H in ('%POWERSHELL_EXE% -NoProfile -Command "(Get-FileHash -Algorithm SHA256 -LiteralPath $env:SHA_FILE).Hash"') do set "%SHA_VAR%=%%H"
 if not defined %SHA_VAR% exit /b 1
 exit /b 0
 
-:resolve_engine_jar
-set "ENGINE_VERSIONED_JAR="
-for /f "delims=" %%J in ('dir /b /a-d /o-d "%ENGINE_LIBS_DIR%\obfuscator-engine-*.jar" 2^>nul') do (
-  if not defined ENGINE_VERSIONED_JAR set "ENGINE_VERSIONED_JAR=%ENGINE_LIBS_DIR%\%%J"
-)
-if not defined ENGINE_VERSIONED_JAR (
-  if exist "%ENGINE_JAR%" (
-    echo Using existing engine jar alias: %ENGINE_JAR%
-    exit /b 0
-  )
-  echo Engine jar build did not produce obfuscator-engine.jar or obfuscator-engine-*.jar under %ENGINE_LIBS_DIR%
+:prepare_engine_inputs
+set "ENGINE_VERSION="
+for /f "delims=" %%V in ('powershell -NoProfile -Command "$pattern = 'JS_VERSION: String = ' + [char]34 + '([0-9A-Za-z._+-]+)' + [char]34; [regex]::Match([IO.File]::ReadAllText($env:ENGINE_VERSION_SOURCE), $pattern).Groups[1].Value"') do set "ENGINE_VERSION=%%V"
+if not defined ENGINE_VERSION (
+  echo Could not read the Gradle engine version from %ENGINE_VERSION_SOURCE%
   exit /b 1
 )
-copy /y "%ENGINE_VERSIONED_JAR%" "%ENGINE_JAR%" >nul || exit /b 1
-echo Engine jar alias ready: %ENGINE_JAR% from %ENGINE_VERSIONED_JAR%
+if not exist "%ENGINE_NATIVE_DIR%" mkdir "%ENGINE_NATIVE_DIR%" || exit /b 1
+set "ENGINE_RUN_CANDIDATE=%ENGINE_NATIVE_DIR%\release-%RANDOM%-%RANDOM%-%RANDOM%"
+mkdir "%ENGINE_RUN_CANDIDATE%" || exit /b 1
+set "ENGINE_RUN_DIR=%ENGINE_RUN_CANDIDATE%"
+copy /y "%ENGINE_LIBS_DIR%\obfuscator-engine-%ENGINE_VERSION%.jar" "%ENGINE_RUN_DIR%\obfuscator-engine.jar" >nul || exit /b 1
+copy /y "%ENGINE_RESOURCE_CONFIG%" "%ENGINE_RUN_DIR%\resource-config.json" >nul || exit /b 1
+copy /y "%ENGINE_RUN_DIR%\obfuscator-engine.jar" "%ENGINE_LIBS_DIR%\obfuscator-engine.jar" >nul || exit /b 1
 exit /b 0
 
 :verify_same_file_hash

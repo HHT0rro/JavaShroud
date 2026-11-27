@@ -1,23 +1,23 @@
 package io.github.hht0rro.javashroud
 
 import com.fasterxml.jackson.databind.ObjectMapper
-import io.github.hht0rro.javashroud.adapters.protocol.EngineCommand
-import io.github.hht0rro.javashroud.adapters.protocol.buildCommandRequest
-import io.github.hht0rro.javashroud.adapters.protocol.dispatchRequest
+import io.github.hht0rro.javashroud.config.loadValidatedConfig
 import io.github.hht0rro.javashroud.kernel.EngineKernel
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
+import io.github.hht0rro.javashroud.transforms.protection.OpaqueVmDispatcher
+import io.github.hht0rro.javashroud.transforms.protection.currentQpBuildContextOrNull
 import org.objectweb.asm.ClassReader
-import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.Label
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
+import org.objectweb.asm.tree.ClassNode
+import org.objectweb.asm.tree.MethodInsnNode
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Comparator
 import java.util.jar.JarEntry
-import java.util.jar.JarInputStream
 import java.util.jar.JarOutputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -43,7 +43,7 @@ class MonitorSemanticsTest {
             assertEquals(0, baseline.exitCode, "Baseline monitor fixture failed: ${baseline.output}")
             assertEquals("MONITOR_OK", baseline.output.trim(), "Baseline monitor fixture contract changed")
 
-            runEngine(inputJar, outputJar)
+            val dispatchers = runEngine(inputJar, outputJar)
             val virtualizedMethods = listOf(
                 "increment" to "()V",
                 "reentrant" to "(Ljava/lang/Object;)I",
@@ -51,8 +51,11 @@ class MonitorSemanticsTest {
                 "illegalExit" to "(Ljava/lang/Object;)V",
             )
             for ((name, descriptor) in virtualizedMethods) {
+                val dispatcher = dispatchers.single {
+                    it.owner == ROOT_CLASS && it.originalName == name && it.originalDescriptor == descriptor
+                }
                 assertTrue(
-                    methodInvokesNativeVmDispatcher(outputJar, name, descriptor),
+                    methodInvokesNativeVmDispatcher(outputJar, dispatcher),
                     "$name$descriptor must execute through the native VM",
                 )
             }
@@ -69,7 +72,7 @@ class MonitorSemanticsTest {
         }
     }
 
-    private fun runEngine(inputJar: Path, outputJar: Path) {
+    private fun runEngine(inputJar: Path, outputJar: Path): List<OpaqueVmDispatcher> {
         val configPath = outputJar.resolveSibling("monitor-config.toml")
         writeTestRunConfigToml(
             configPath = configPath,
@@ -94,12 +97,13 @@ class MonitorSemanticsTest {
             ),
         )
         try {
-            withTestBootSecret {
-                dispatchRequest(
-                    buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())),
-                    EngineKernel(),
-                )
+            var dispatchers = emptyList<OpaqueVmDispatcher>()
+            EngineKernel().run(loadValidatedConfig(configPath), configPath) { event ->
+                if (event.type == "done") {
+                    dispatchers = checkNotNull(currentQpBuildContextOrNull()).opaqueVmDispatchers().values.toList()
+                }
             }
+            return dispatchers
         } finally {
             Files.deleteIfExists(configPath)
         }
@@ -343,34 +347,26 @@ class MonitorSemanticsTest {
         return writer.toByteArray()
     }
 
-    private fun methodInvokesNativeVmDispatcher(jarPath: Path, targetName: String, targetDescriptor: String): Boolean {
-        JarInputStream(Files.newInputStream(jarPath)).use { jar ->
-            while (true) {
-                val entry = jar.nextJarEntry ?: break
-                if (!entry.isDirectory && entry.name == "$ROOT_CLASS.class") {
-                    var found = false
-                    ClassReader(jar.readBytes()).accept(object : ClassVisitor(Opcodes.ASM9) {
-                        override fun visitMethod(
-                            access: Int,
-                            name: String,
-                            descriptor: String,
-                            signature: String?,
-                            exceptions: Array<String>?,
-                        ): MethodVisitor? {
-                            if (name != targetName || descriptor != targetDescriptor) return null
-                            return object : MethodVisitor(Opcodes.ASM9) {
-                                override fun visitMethodInsn(opcode: Int, owner: String, name: String, descriptor: String, isInterface: Boolean) {
-                                    if (opcode == Opcodes.INVOKESTATIC && descriptor.startsWith("(J")) found = true
-                                }
-                            }
-                        }
-                    }, ClassReader.SKIP_FRAMES)
-                    return found
-                }
-                jar.closeEntry()
-            }
+    private fun methodInvokesNativeVmDispatcher(jarPath: Path, dispatcher: OpaqueVmDispatcher): Boolean {
+        val classes = loadJarClassBytes(jarPath)
+        val classBytes = classes[dispatcher.owner] ?: return false
+        val node = ClassNode()
+        ClassReader(classBytes).accept(node, 0)
+        val method = node.methods.singleOrNull {
+            it.name == dispatcher.syntheticName && it.desc == dispatcher.syntheticDescriptor
+        } ?: return false
+        val requiredAccess = Opcodes.ACC_STATIC or Opcodes.ACC_SYNTHETIC
+        if (method.access and requiredAccess != requiredAccess) return false
+        val terminal = method.instructions.filterIsInstance<MethodInsnNode>().singleOrNull {
+            it.opcode == Opcodes.INVOKESTATIC &&
+                it.desc == "(Ljava/lang/String;[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
+        } ?: return false
+        val helperBytes = classes[terminal.owner] ?: return false
+        val helper = ClassNode()
+        ClassReader(helperBytes).accept(helper, ClassReader.SKIP_CODE)
+        return helper.methods.any {
+            it.name == terminal.name && it.desc == terminal.desc && it.access and Opcodes.ACC_STATIC != 0
         }
-        return false
     }
 
     private fun MethodVisitor.throwAssertionError() {

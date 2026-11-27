@@ -4,6 +4,7 @@ import io.github.hht0rro.javashroud.adapters.protocol.EngineCommand
 import io.github.hht0rro.javashroud.adapters.protocol.buildCommandRequest
 import io.github.hht0rro.javashroud.adapters.protocol.dispatchRequest
 import io.github.hht0rro.javashroud.kernel.EngineKernel
+import io.github.hht0rro.javashroud.transforms.protection.hardening.QpTargetRewriter
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import java.nio.file.Files
@@ -76,7 +77,7 @@ class EndToEndConfigRunVerificationTest {
     private fun assertChangedBytecode(inputJar: Path, outputJar: Path, passes: List<String>) {
         val inputBytes = loadJarClassBytes(inputJar)
         val outputBytes = loadJarClassBytes(outputJar)
-        assertEquals(inputBytes.keys, outputBytes.keys, "Class set should remain stable for passes=$passes")
+        assertEquals(inputBytes.keys + QpTargetRewriter.BOOTSTRAP_OWNER, outputBytes.keys, "Fixture classes and the release bootstrap should be present for passes=$passes")
 
         val inputAttributes = inputBytes.mapValues { (_, bytes) -> collectClassBytecodeAttributes(bytes) }
         val outputAttributes = outputBytes.mapValues { (_, bytes) -> collectClassBytecodeAttributes(bytes) }

@@ -14,7 +14,8 @@ object RuntimeGarbageCollector {
      * forces a multi-hundred-megabyte re-download on the next run and races
      * concurrent engine processes, so the garbage collector preserves them.
      */
-    private val PRESERVED_USER_CACHE_CHILDREN = setOf("toolchains", "rust-workspace")
+    // Keep tool installations used by concurrent jobs and the debug APK signing identity.
+    private val PRESERVED_USER_CACHE_CHILDREN = setOf("toolchains", "rust-workspace", "apk-tools", "apk")
 
     data class GarbageCandidate(
         val path: Path,

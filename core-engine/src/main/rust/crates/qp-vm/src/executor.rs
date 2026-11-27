@@ -381,7 +381,9 @@ impl<H: ObjectOperations> VmExecutor<H> {
                         if frame.stack.len() >= self.limits.max_stack {
                             return Err(VmError::StackOverflow);
                         }
-                        frame.stack.push(core::mem::replace(&mut thrown.value, VmValue::Null));
+                        frame
+                            .stack
+                            .push(core::mem::replace(&mut thrown.value, VmValue::Null));
                         pc = handler;
                         exception_transfers += 1;
                         if exception_transfers > self.limits.max_exception_transfers {
@@ -1057,10 +1059,15 @@ impl<H: ObjectOperations> VmExecutor<H> {
                 let value = pop(frame)?;
                 let result = match value {
                     VmValue::Null => false,
-                    VmValue::Object(object) => self
-                        .host
-                        .instance_of(&object, class)
-                        .map_err(|_| thrown("java/lang/LinkageError", VmValue::Null))?,
+                    VmValue::Object(object) => match self.host.instance_of(&object, class) {
+                        Ok(value) => value,
+                        Err(_) => {
+                            if crate::qp_trace_enabled() {
+                                eprintln!("qp-trace host-fail site=instanceof class={}", class);
+                            }
+                            return Err(thrown("java/lang/LinkageError", VmValue::Null));
+                        }
+                    },
                     _ => false,
                 };
                 push(
@@ -1209,13 +1216,11 @@ impl<H: ObjectOperations> VmExecutor<H> {
                     CondyConstant::Int(number) => VmValue::Int(number),
                 })
             }
-            (opcode::LDC_HANDLE, VmConstant::String(value)) => {
-                Ok(VmValue::Object(
-                    self.host
-                        .string_constant(value.as_str())
-                        .map_err(|_| VmError::HostFailure)?,
-                ))
-            }
+            (opcode::LDC_HANDLE, VmConstant::String(value)) => Ok(VmValue::Object(
+                self.host
+                    .string_constant(value.as_str())
+                    .map_err(|_| VmError::HostFailure)?,
+            )),
             _ => Err(VmError::InvalidConstantPool(
                 "constant opcode/type mismatch",
             )),
@@ -1271,7 +1276,10 @@ impl<H: ObjectOperations> VmExecutor<H> {
             crate::record_self_invoke();
             match self.execute_at_depth(program, &arguments, depth + 1) {
                 Ok(value) => Ok(value),
-                Err(VmError::UncaughtException { class_name, message: _ }) => Err(Thrown {
+                Err(VmError::UncaughtException {
+                    class_name,
+                    message: _,
+                }) => Err(Thrown {
                     class_name,
                     value: VmValue::Null,
                 }),
@@ -1288,11 +1296,34 @@ impl<H: ObjectOperations> VmExecutor<H> {
             {
                 Ok(value) => Ok(value),
                 Err(_) => match self.host.take_pending_exception() {
-                    Some((class_name, object)) => Err(Thrown {
-                        class_name,
-                        value: VmValue::Object(object),
-                    }),
-                    None => Err(thrown("java/lang/LinkageError", VmValue::Null)),
+                    Some((class_name, object)) => {
+                        if crate::qp_trace_enabled() {
+                            eprintln!(
+                                "qp-trace host-exception opcode={:#06x} ref={} argc={} receiver={} class={}",
+                                opcode,
+                                reference,
+                                arguments.len(),
+                                receiver_object.is_some(),
+                                class_name
+                            );
+                        }
+                        Err(Thrown {
+                            class_name,
+                            value: VmValue::Object(object),
+                        })
+                    }
+                    None => {
+                        if crate::qp_trace_enabled() {
+                            eprintln!(
+                                "qp-trace host-fail site=invoke opcode={:#06x} ref={} argc={} receiver={}",
+                                opcode,
+                                reference,
+                                arguments.len(),
+                                receiver_object.is_some()
+                            );
+                        }
+                        Err(thrown("java/lang/LinkageError", VmValue::Null))
+                    }
                 },
             }
         };
@@ -1315,17 +1346,34 @@ impl<H: ObjectOperations> VmExecutor<H> {
         let reference = cp_string(program, operand(operands, 0)?)?;
         match opcode {
             opcode::GETSTATIC => {
-                let value = self
-                    .host
-                    .field_get(opcode, reference, None)
-                    .map_err(|_| thrown("java/lang/LinkageError", VmValue::Null))?;
+                let value = match self.host.field_get(opcode, reference, None) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        if crate::qp_trace_enabled() {
+                            eprintln!(
+                                "qp-trace host-fail site=field opcode={:#06x} ref={}",
+                                opcode, reference
+                            );
+                        }
+                        return Err(thrown("java/lang/LinkageError", VmValue::Null));
+                    }
+                };
                 push(frame, value, self.limits.max_stack)?;
             }
             opcode::PUTSTATIC => {
                 let value = pop(frame)?;
-                self.host
-                    .field_put(opcode, reference, None, value)
-                    .map_err(|_| thrown("java/lang/LinkageError", VmValue::Null))?;
+                match self.host.field_put(opcode, reference, None, value) {
+                    Ok(()) => {}
+                    Err(_) => {
+                        if crate::qp_trace_enabled() {
+                            eprintln!(
+                                "qp-trace host-fail site=field opcode={:#06x} ref={}",
+                                opcode, reference
+                            );
+                        }
+                        return Err(thrown("java/lang/LinkageError", VmValue::Null));
+                    }
+                }
             }
             opcode::GETFIELD => {
                 let receiver = as_object(pop(frame)?)?;
@@ -1354,10 +1402,17 @@ impl<H: ObjectOperations> VmExecutor<H> {
     ) -> Result<bool, Thrown<H::Object>> {
         match (left, right) {
             (VmValue::Null, VmValue::Null) => Ok(true),
-            (VmValue::Object(left), VmValue::Object(right)) => self
-                .host
-                .same_object(left, right)
-                .map_err(|_| thrown("java/lang/LinkageError", VmValue::Null)),
+            (VmValue::Object(left), VmValue::Object(right)) => {
+                match self.host.same_object(left, right) {
+                    Ok(value) => Ok(value),
+                    Err(_) => {
+                        if crate::qp_trace_enabled() {
+                            eprintln!("qp-trace host-fail site=same_object");
+                        }
+                        Err(thrown("java/lang/LinkageError", VmValue::Null))
+                    }
+                }
+            }
             _ => Ok(false),
         }
     }
@@ -1410,7 +1465,22 @@ fn dynamic_descriptor(reference: &str) -> Option<&str> {
         "mhstatic" => fields.next().and_then(|_| fields.next()),
         // Lambda factories replay through QpBridge.replayQpLambda. The
         // recipe is `lambda|indyName|indyDesc|sam|owner|name|desc|inst`.
-        "lambda" => fields.next().and_then(|_| fields.next()),
+        "lambda" => {
+            let name = fields.next()?;
+            let descriptor = fields.next()?;
+            if name.is_empty() || descriptor.is_empty() {
+                return None;
+            }
+            for _ in 0..5 {
+                if fields.next()?.is_empty() {
+                    return None;
+                }
+            }
+            if fields.next().is_some() {
+                return None;
+            }
+            Some(descriptor)
+        }
         // Native string-page token materialization is a zero-argument
         // `()[B` site whose bootstrap argument is the opaque packed token.
         "stringpage" => Some("()[B"),
@@ -1684,10 +1754,15 @@ mod tests {
     use crate::ProgramBuilder;
 
     #[test]
-    fn lambda_recipe_is_rejected_before_host_dispatch() {
-        let reference =
-            "lambda|run|(Lexample/Exec;)Ljava/lang/Runnable;|5|example/Exec|doAdd|()V|()V|()V|0;;";
-        assert_eq!(dynamic_descriptor(reference), None);
+    fn lambda_recipe_requires_the_current_shape_before_host_dispatch() {
+        let descriptor = "(Lexample/Exec;)Ljava/lang/Runnable;";
+        let current = format!("lambda|run|{descriptor}|()V|example/Exec|doAdd|()V|()V");
+        assert_eq!(dynamic_descriptor(&current), Some(descriptor));
+        assert_eq!(dynamic_descriptor(&format!("{current}|extra")), None);
+        assert_eq!(
+            dynamic_descriptor(current.rsplit_once('|').unwrap().0),
+            None
+        );
     }
 
     #[test]
@@ -1895,7 +1970,6 @@ mod tests {
         assert!(executor.execute(&program, &[]).is_err());
     }
 }
-
 
 enum CondyConstant {
     Text(String),

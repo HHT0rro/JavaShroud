@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.31.0-5b6ee1" />
+  <img alt="Version" src="https://img.shields.io/badge/version-0.31.1-5b6ee1" />
   <img alt="License" src="https://img.shields.io/badge/license-GPL--3.0-blue" />
   <img alt="JDK" src="https://img.shields.io/badge/JDK-17%2B-orange" />
   <img alt="Desktop" src="https://img.shields.io/badge/desktop-Wails%20%2B%20Vue-42b883" />
@@ -134,7 +134,7 @@ The Qp runtime is a Rust-only boundary, shipped with the engine under `core-engi
 
 ## Native packing: Xenolith
 
-`nativeshroud` packs the compiled native image (the `qp_ffi.dll` on Windows x64) externally; the default path is [Xenolith](https://github.com/HHT0rro/Xenolith), an independent open-source Windows x64 PE packer (GPL-3.0). JavaShroud only spawns its CLI (`xenolith pack <qp_ffi.dll> -o <out> --profile <p> --json`) and never links its code. Packing happens before JSIM binding; a failed pack run, a missing image, or a cancel is fail-closed and refuses to ship.
+`nativeshroud` packs the compiled native image (the `qp_ffi.dll` on Windows x64) externally; the default path is [Xenolith](https://github.com/HHT0rro/Xenolith), an independent open-source Windows x64 PE packer (GPL-3.0). JavaShroud only spawns its CLI (`xenolith pack <qp_ffi.dll> -o <out> --profile <p> --json`) and never links its code. Packing happens before JSIM binding; a failed pack run, a missing image/report, a non-production `debug_gate`, or a cancel is fail-closed and refuses to ship.
 
 ### Profiles and function-level switches
 
@@ -151,11 +151,12 @@ The Qp runtime is a Rust-only boundary, shipped with the engine under `core-engi
 ### Desktop and build integration
 
 - The desktop app embeds the Xenolith CLI into `javashroud.exe` (build tag `javashroud_embed_xenolith`) and ships `tools\xenolith.exe`; it is enabled with one switch on the "Custom packing" module. By default the bundled CLI packs automatically, or the run can pause for manual packing (VMP, etc.) and pick the packed file back up.
-- When the build machine has no local xenolith.exe, `build-release.bat` calls `desktop-app\fetch-xenolith.ps1` to fetch it from GitHub Releases (skipping tags without a Windows asset), preferring the CN mirror chain `ghfast.top` → `gh-proxy.com` → `ghproxy.net` with direct GitHub as the fallback, and writes the binary atomically only after matching the per-artifact SHA-256 in the release `manifest.json`. Env overrides: `XENOLITH_MIRRORS` (semicolon-separated mirror prefixes, `-` disables mirrors), `XENOLITH_RELEASE_TAG` (pin a release tag), `XENOLITH_SHA256` (hard digest pin; mismatch fails).
+- Formal releases use `--require-xenolith-pin` with `XENOLITH_SHA256` obtained from an independent trusted source, plus either a local CLI in `XENOLITH_EXE` or an explicit `XENOLITH_RELEASE_TAG` containing exactly one Windows ZIP. `desktop-app\fetch-xenolith.ps1` verifies the staged CLI and manifest, commits both under an exclusive destination-directory lock, and restores previous files if publication fails. Inputs and destinations must be plain files. Manifest aliases, hard links and directory links are rejected. `XENOLITH_MIRRORS` accepts semicolon-separated mirror prefixes, and `-` disables mirrors. The default chain tries `ghfast.top`, `gh-proxy.com`, `ghproxy.net` and then direct GitHub access.
+- Development builds prefer the sibling Xenolith checkout's fresh `target\release\xenolith.exe`, then fall back to `dist\xenolith.exe`; the published release still embeds the resolved CLI and ships `tools\xenolith.exe`.
 
 ### Packed-image contract
 
-No matter where the image comes from — Xenolith, VMP, or any other packer — it must pass the same pre-validation before JSIM binding: it must be a PE64 DLL preserving the `.jsms` / `.jsmk` measurement sections and the `JNI_OnLoad` / `JNI_OnUnload` / `qp_r1_*` exports, or it is rejected with a named error. Non-CLI scenarios have two more paths: `packedPath` / `packedPathLinux` point directly at a pre-packed image, and with `JAVASHROUD_PACK_HANDOFF=1` the engine emits a `need-pack` event and waits for a path reply; Linux may reply `SKIP` to ship the unpacked `.so`.
+No matter where the image comes from — Xenolith, VMP, or any other packer — it must pass the same pre-validation before JSIM binding: it must be a PE64 DLL preserving `.jsms` and `.jsmk`, plus `.jsmd` when the input has it. Section RVA, size and raw bytes must match the unbound input; moving the sections on disk is allowed. The JNI bridge exports must also survive. CLI packing additionally requires a valid Xenolith JSON report that matches the requested profile, input/output sizes, PE format, x86-64 machine, injected backend, JNI-safe IAT mode and production `debug_gate=3`. Non-CLI scenarios have two more paths: `packedPath` / `packedPathLinux` point directly at a pre-packed image, and with `JAVASHROUD_PACK_HANDOFF=1` the engine emits a `need-pack` event and waits for a path reply; Linux may reply `SKIP` to ship the unpacked `.so`.
 
 ## Compared With JNIC / Native Obfuscation
 
@@ -168,6 +169,47 @@ No matter where the image comes from — Xenolith, VMP, or any other packer — 
 
 The two approaches can coexist; in JavaShroud the Native layer is part of a virtual execution protocol.
 
+## Android APK obfuscation & repacking
+
+`-config` accepts a single APK. Point `inputJarPath` at the APK and optionally set `artifactFormat = "apk"` or pass `--apk`. The engine converts DEX to classes, builds keep rules from the manifest, resources, and JNI references, runs the pipeline, then recompiles with D8, repacks, aligns, and signs with v1 and v2. Resources and existing native libraries retain their bytes. D8 can change the number of DEX files. The engine uses a debug key by default. Use the app's signing certificate for release or upgrade builds.
+
+The APK retains the exact bytes of `META-INF/services/` files and the original names of any service interfaces and providers they reference within the APK, so `ServiceLoader` can still find them.
+Bundled `j$` Java API compatibility classes retain their names. They compile into separate DEX files within the same APK.
+
+When DEX contains a recognized Android framework interface placeholder, APK keep synthesis preserves public instance method names on its implementors so Android can dispatch callbacks whose SDK method declarations are absent from the engine classpath. Implementing classes remain eligible for relocation.
+
+Method conversion exceptions, exception stacks, or error reports cause the engine to reject publication, including when dex2jar returns zero. Each conversion uses private staging paths. A conversion failure preserves the existing APK and sidecars, and `--log-file` records the diagnostics.
+
+The engine builds a Java 8 repair JAR for bundled dex2jar 2.4.28 and authenticates it through the tool manifest before loading. The repair splits oversized constants at the classfile modified UTF-8 byte limit while preserving arguments, adjacent registers, and string interning. A custom `apk.dex2jarDirPath` also uses this authenticated repair, with read-only access to the supplied tool directory. Source attribution and modifications appear in `THIRD_PARTY_NOTICES.md`.
+
+`ApkAndroidDeviceSmokeTest` generates owned single-DEX, multidex, XML callback, and simple JNI fixtures from source, then checks return values, Parcelable round trips, WebView JavaScript interfaces, inherited dispatch across renamed packages, signatures, and alignment for both original and protected APKs. Start the intended device and set `ANDROID_SERIAL`, `ANDROID_HOME`, and `ANDROID_NDK_HOME` before enabling the tests. The three tests skip while disabled. Once enabled, missing prerequisites fail the run and Gradle executes the tests again. Evidence remains under `build/android-runtime-evidence/`, including native crash and process exit diagnostics collected before uninstall on failure.
+
+```bash
+export ANDROID_SERIAL=emulator-5554
+export JAVASHROUD_ANDROID_DEVICE_TESTS=true
+./gradlew :core-engine:test --tests '*.ApkAndroidDeviceSmokeTest' --max-workers=1
+```
+
+`JAVASHROUD_ANDROID_EXPECT_API` and `JAVASHROUD_ANDROID_EXPECT_PAGE_SIZE` optionally require exact device values. CI configures x86_64 emulator jobs for API 21/26 with 4 KiB pages and API 35 with 16 KiB pages. Each job archives its observed device configuration and test results. Native ARM64 hardware requires separate verification.
+
+```powershell
+java -cp build\core-engine\install\core-engine\lib\* io.github.hht0rro.javashroud.MainKt ^
+  -config apk-config.toml --apk --log-file run.log
+```
+
+Config-less direct run (default pipeline + default minimal profile):
+
+```powershell
+java -cp build\core-engine\install\core-engine\lib\* io.github.hht0rro.javashroud.MainKt ^
+  --input app.apk --output app-shrouded.apk --log-file run.log
+```
+
+APK mode defaults to `minimal` and selects Android-compatible passes. When explicitly setting `minimal`, list the passes in the configuration. APK mode rejects `method-virtualization` and `nativeshroud` because they require the desktop Qp runtime. The `release-hardened` profile also requires desktop release checks.
+
+The input manifest must declare a numeric `minSdkVersion`. If `apk.minApi` is omitted, the engine uses the manifest value with a floor of 21 and reports any change to the output manifest. An explicit `apk.minApi` above the manifest value is rejected. Pipelines with indy require API 26 or later. The engine publishes the APK after signing, archive validation, and sidecar checks all pass.
+
+Uncompressed `.so` entries are aligned to at least 4 KiB. If any uncompressed library in the input APK already starts on a 16 KiB boundary, repacking aligns all uncompressed libraries to 16 KiB. To require this alignment for other inputs, set `soPageSize = 16384` in the `[apk]` table. The ELF load segments also need alignment for the target page size. Repacking preserves the library bytes.
+
 ## Compatibility
 
 - The engine builds and runs on JDK 17+; CI builds and tests on JDK 17 and 21.
@@ -178,21 +220,21 @@ The two approaches can coexist; in JavaShroud the Native layer is part of a virt
 ## Quick Start
 
 ```powershell
-# Build the core engine (artifact: build\core-engine\libs\obfuscator-engine-0.31.0.jar)
+# Build the core engine (artifact: build\core-engine\libs\obfuscator-engine-0.31.1.jar)
 .\gradlew.bat :core-engine:jar
 
 # List passes, parameters, the default pipeline, and compatibility constraints (TOML output)
-java -jar build\core-engine\libs\obfuscator-engine-0.31.0.jar -schema
+java -jar build\core-engine\libs\obfuscator-engine-0.31.1.jar -schema
 
 # Show the package / class / member tree of an input JAR
-java -jar build\core-engine\libs\obfuscator-engine-0.31.0.jar -inspect app.jar
+java -jar build\core-engine\libs\obfuscator-engine-0.31.1.jar -inspect app.jar
 
 # Process a JAR with a TOML configuration
-java -jar build\core-engine\libs\obfuscator-engine-0.31.0.jar -config path\to\config.toml
+java -jar build\core-engine\libs\obfuscator-engine-0.31.1.jar -config path\to\config.toml
 
 # Engine runtime-cache maintenance
-java -jar build\core-engine\libs\obfuscator-engine-0.31.0.jar -gc
-java -jar build\core-engine\libs\obfuscator-engine-0.31.0.jar -gc --apply
+java -jar build\core-engine\libs\obfuscator-engine-0.31.1.jar -gc
+java -jar build\core-engine\libs\obfuscator-engine-0.31.1.jar -gc --apply
 ```
 
 Configuration example (renaming + control-flow flattening; opt-in passes require `allowOptInPasses = true`):

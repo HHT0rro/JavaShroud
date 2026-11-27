@@ -1,5 +1,6 @@
 import java.io.File
 import java.io.RandomAccessFile
+import java.security.MessageDigest
 import org.gradle.api.GradleException
 import org.gradle.api.tasks.Sync
 import org.gradle.language.jvm.tasks.ProcessResources
@@ -23,6 +24,8 @@ val guavaVersion = rootProject.extra["guavaVersion"] as String
 val gsonVersion = rootProject.extra["gsonVersion"] as String
 val jphantomVersion = rootProject.extra["jphantomVersion"] as String
 val dex2jarVersion = rootProject.extra["dex2jarVersion"] as String
+val r8Version = rootProject.extra["r8Version"] as String
+val apksigVersion = rootProject.extra["apksigVersion"] as String
 val cafed00dVersion = rootProject.extra["cafed00dVersion"] as String
 val jlinkerVersion = rootProject.extra["jlinkerVersion"] as String
 val aircompressorVersion = rootProject.extra["aircompressorVersion"] as String
@@ -126,6 +129,20 @@ val rustReleaseDir = rustWorkspaceDir.dir("target/$rustOutputTarget/release")
 val rustLibraryArtifact = rustReleaseDir.file(rustLibraryFileName)
 val rustNativeResourceOutput = layout.buildDirectory.dir("generated/rust-native-resources")
 
+// --- APK toolchain wiring -------------------------------------------------
+// dex-tools (with its transitive dex2jar closure) is vendored as engine
+// resources and spawned as a separate Java process, so the published engine
+// never depends on a local Android SDK for dex -> class conversion. r8 (D8)
+// and apksig are linked into the fat jar as regular dependencies; both pins
+// were verified against the Google Maven artifacts (see THIRD_PARTY_NOTICES.md).
+val apkDexToolsVersion = dex2jarVersion
+val pinnedR8Sha256 = "58366f77067207c39a17d469de7b05701d2877212a9c55201bcb0af43e59e903"
+val pinnedR8SizeBytes = 17_650_417L
+val pinnedApksigSha256 = "c4f6fdf2148490296f422a7eb37647ea11d1c3b02f1f2349c33ce257f3c29b1f"
+val pinnedApksigSizeBytes = 496_313L
+val apkDexToolsConfiguration = configurations.create("apkDexTools")
+val apkDexToolsResourceRoot = layout.buildDirectory.dir("generated/apk-dex-tools")
+
 kotlin {
     compilerOptions {
         languageVersion.set(KotlinVersion.KOTLIN_2_1)
@@ -192,10 +209,16 @@ dependencies {
     implementation("com.google.code.gson:gson:$gsonVersion")
 
     implementation("com.github.Col-E:jphantom:$jphantomVersion")
-    implementation("de.femtopedia.dex2jar:dex2jar:$dex2jarVersion")
+    implementation("com.android.tools:r8:$r8Version")
+    implementation("com.android.tools.build:apksig:$apksigVersion")
     implementation("com.github.Col-E:CAFED00D:$cafed00dVersion")
     implementation("com.github.xxDark:jlinker:$jlinkerVersion")
     implementation("io.airlift:aircompressor:$aircompressorVersion")
+
+    // The de.femtopedia.dex2jar:dex2jar coordinate is a 283-byte empty shell
+    // jar; the real CLI lives in dex-tools. It is vendored below instead of
+    // linked, because it is spawned as an isolated Java 8 process.
+    apkDexToolsConfiguration("de.femtopedia.dex2jar:dex-tools:$apkDexToolsVersion")
 
     testImplementation(kotlin("test"))
 }
@@ -203,6 +226,19 @@ dependencies {
 tasks.test {
     maxHeapSize = "2g"
     useJUnitPlatform()
+    val androidDeviceTests = providers.environmentVariable("JAVASHROUD_ANDROID_DEVICE_TESTS")
+        .map { it == "true" }.orElse(false)
+    inputs.property("androidDeviceTestsEnabled", androidDeviceTests)
+    outputs.upToDateWhen { !androidDeviceTests.get() }
+    outputs.doNotCacheIf("Android device tests require live SDK and device state") { androidDeviceTests.get() }
+    val engineJar = tasks.jar.flatMap { it.archiveFile }
+    dependsOn(tasks.jar)
+    inputs.file(engineJar)
+    systemProperty("javashroud.test.engineJar", engineJar.get().asFile.absolutePath)
+    // Real-toolchain APK tests resolve the vendored dex2jar closure from the
+    // test classpath; r8/apksig arrive via the runtime classpath.
+    dependsOn("packageApkDexTools")
+    classpath += files(apkDexToolsResourceRoot)
 }
 
 tasks.named<JavaExec>("run") {
@@ -236,12 +272,21 @@ val buildRustNativeRuntime = tasks.register<Exec>("buildRustNativeRuntime") {
             environment("ZIG", zig.absolutePath)
         }
     }
-    environment(
-        "RUSTFLAGS",
-        listOf(inheritedRustFlags, requiredRustFlags)
-            .filter { it.isNotEmpty() }
-            .joinToString(" "),
-    )
+    if (rustRuntimeTarget.platform == "linux-x64") {
+        val inheritedArgs = System.getenv("CARGO_ENCODED_RUSTFLAGS")?.split('\u001f')
+            ?: inheritedRustFlags.split(Regex("\\s+"))
+        val sourcePathFlag = "--remap-path-prefix=${workspace.canonicalPath}/=core-engine/src/main/rust/"
+        val compilerArgs = inheritedArgs.filter(String::isNotEmpty) + sourcePathFlag
+        inputs.property("rustCompilerArgs", compilerArgs)
+        environment("CARGO_ENCODED_RUSTFLAGS", compilerArgs.joinToString("\u001f"))
+    } else {
+        environment(
+            "RUSTFLAGS",
+            listOf(inheritedRustFlags, requiredRustFlags)
+                .filter { it.isNotEmpty() }
+                .joinToString(" "),
+        )
+    }
     environment("CARGO_TERM_COLOR", "never")
     commandLine(resolveCargoExecutable(), "zigbuild", "--locked", "--workspace", "--release", "--target", cargoTarget)
 }
@@ -276,6 +321,9 @@ val packageRustNativeRuntime = tasks.register<Sync>("packageRustNativeRuntime") 
     val artifact = rustLibraryArtifact.asFile
     val targetPlatform = rustRuntimeTarget.platform
     val releaseDirectory = rustReleaseDir.asFile
+    // Capture script state by value: the configuration cache forbids task
+    // actions from holding references to the build script instance.
+    val requiredExports = requiredWindowsNativeExports.toList()
     dependsOn(buildRustNativeRuntime)
     into(rustNativeResourceOutput)
     from(artifact) {
@@ -337,7 +385,7 @@ val packageRustNativeRuntime = tasks.register<Sync>("packageRustNativeRuntime") 
                             needle.indices.all { offset -> imageBytes[start + offset] == needle[offset] }
                     }
                 }
-                val missing = requiredWindowsNativeExports.filterNot { export ->
+                val missing = requiredExports.filterNot { export ->
                     containsAscii(export)
                 }
                 if (missing.isNotEmpty()) {
@@ -357,10 +405,99 @@ val packageRustNativeRuntime = tasks.register<Sync>("packageRustNativeRuntime") 
     }
 }
 
+val compileApkDexToolsFixes = tasks.register<JavaCompile>("compileApkDexToolsFixes") {
+    source(fileTree("src/apk-tools-fixes/java") { include("**/*.java") })
+    classpath = apkDexToolsConfiguration
+    destinationDirectory.set(layout.buildDirectory.dir("classes/apk-tools-fixes"))
+    options.release.set(8)
+}
+
+val packageApkDexToolsFixes = tasks.register<Jar>("packageApkDexToolsFixes") {
+    archiveFileName.set("javashroud-dex2jar-fixes.jar")
+    destinationDirectory.set(layout.buildDirectory.dir("generated/apk-tools-fixes"))
+    from(compileApkDexToolsFixes.flatMap { it.destinationDirectory })
+    from("src/apk-tools-fixes/resources")
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+}
+
+val packageApkDexTools = tasks.register<Sync>("packageApkDexTools") {
+    group = "build"
+    description = "Vendors the dex-tools jar closure as engine resources with a generated SHA-256SUMS manifest."
+    val resourceRoot = apkDexToolsResourceRoot
+    into(resourceRoot.map { root -> root.dir("META-INF/apk-tools/dex2jar") })
+    from(apkDexToolsConfiguration)
+    from(packageApkDexToolsFixes.flatMap { it.archiveFile })
+    doLast {
+        fun sha256Of(file: File): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            file.inputStream().use { input ->
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    digest.update(buffer, 0, read)
+                }
+            }
+            return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+        }
+        val root = resourceRoot.get().asFile.resolve("META-INF/apk-tools/dex2jar")
+        val jars = root.listFiles().orEmpty().filter { it.isFile && it.extension == "jar" }.sortedBy { it.name }
+        if (jars.none { it.name.startsWith("dex-tools-") }) {
+            throw GradleException("apk dex-tools vendoring is missing the dex-tools jar: ${jars.map { it.name }}")
+        }
+        val sums = jars.joinToString("\n") { jar -> "${sha256Of(jar)}  ${jar.name}" } + "\n"
+        root.resolve("SHA-256SUMS").writeText(sums)
+        // Build-time assertion: every vendored jar is covered by the manifest.
+        val manifestNames = sums.lineSequence().map { it.substringAfter("  ").trim() }.filter { it.isNotEmpty() }.toSet()
+        val uncovered = jars.map { it.name }.filterNot { it in manifestNames }
+        if (uncovered.isNotEmpty()) {
+            throw GradleException("apk dex-tools SHA-256SUMS does not cover: $uncovered")
+        }
+    }
+}
+
+val verifyApkPinnedArtifacts = tasks.register("verifyApkPinnedArtifacts") {
+    group = "verification"
+    description = "Asserts the resolved r8 and apksig artifacts match their pinned SHA-256 digests."
+    val r8JarName = "r8-$r8Version.jar"
+    val apksigJarName = "apksig-$apksigVersion.jar"
+    val expectedR8 = pinnedR8Sha256 to pinnedR8SizeBytes
+    val expectedApksig = pinnedApksigSha256 to pinnedApksigSizeBytes
+    val pinnedFiles = configurations.runtimeClasspath.get()
+        .files
+        .filter { it.name == r8JarName || it.name == apksigJarName }
+    doLast {
+        fun sha256Of(file: File): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            file.inputStream().use { input ->
+                val buffer = ByteArray(64 * 1024)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    digest.update(buffer, 0, read)
+                }
+            }
+            return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
+        }
+        val r8Jar = pinnedFiles.firstOrNull { it.name == r8JarName }
+            ?: throw GradleException("runtime classpath does not contain $r8JarName")
+        val apksigJar = pinnedFiles.firstOrNull { it.name == apksigJarName }
+            ?: throw GradleException("runtime classpath does not contain $apksigJarName")
+        if (r8Jar.length() != expectedR8.second || sha256Of(r8Jar) != expectedR8.first) {
+            throw GradleException("r8 artifact failed its pinned size/SHA-256 check: $r8Jar")
+        }
+        if (apksigJar.length() != expectedApksig.second || sha256Of(apksigJar) != expectedApksig.first) {
+            throw GradleException("apksig artifact failed its pinned size/SHA-256 check: $apksigJar")
+        }
+    }
+}
+
 tasks.named<ProcessResources>("processResources") {
-    dependsOn(packageRustNativeRuntime, packageRustWorkspaceSources)
+    dependsOn(packageRustNativeRuntime, packageRustWorkspaceSources, packageApkDexTools, verifyApkPinnedArtifacts)
     from(packageRustNativeRuntime)
     from(layout.buildDirectory.dir("generated/rust-workspace-sources"))
+    from(apkDexToolsResourceRoot)
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 }
 

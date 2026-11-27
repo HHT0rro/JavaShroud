@@ -11,6 +11,9 @@ import io.github.hht0rro.javashroud.model.transforms.TransformResult
 import io.github.hht0rro.javashroud.transforms.reanalyzedClassArtifact
 import io.github.hht0rro.javashroud.transforms.unchangedTransformResult
 import io.github.hht0rro.javashroud.transforms.updatedArtifactTransformResult
+import io.github.hht0rro.javashroud.transforms.rename.externallyBoundMethodSignatures
+import io.github.hht0rro.javashroud.transforms.rename.inArtifactOverrideMethodSignatures
+import io.github.hht0rro.javashroud.transforms.rename.methodSignature
 import io.github.hht0rro.javashroud.transforms.protection.qp.QpHandle
 import io.github.hht0rro.javashroud.transforms.protection.currentQpBuildContextOrNull
 import io.github.hht0rro.javashroud.transforms.protection.hkdfSha256
@@ -199,23 +202,26 @@ private fun jvmBoundaryBootstrapKeys(classNode: ClassNode): Set<String> = classN
  * matching is not enough; these bodies stay on the JVM because they run on
  * executor threads and changing their dispatch changes Pool-style timing.
  */
-private fun lambdaMetafactoryImplementationKeys(classNode: ClassNode): Set<String> {
-    val keys = linkedSetOf<String>()
-    for (method in classNode.methods) {
-        val instructions = method.instructions ?: continue
-        for (instruction in instructions) {
-            val indy = instruction as? org.objectweb.asm.tree.InvokeDynamicInsnNode ?: continue
-            if (!isLambdaMetafactoryCall(indy)) continue
-            for (argument in indy.bsmArgs) {
-                val handle = argument as? Handle ?: continue
-                if (handle.owner != classNode.name) continue
-                if (handle.tag != Opcodes.H_INVOKESTATIC &&
-                    handle.tag != Opcodes.H_INVOKESPECIAL &&
-                    handle.tag != Opcodes.H_INVOKEVIRTUAL
-                ) {
-                    continue
+private fun lambdaMetafactoryImplementationKeys(artifact: BytecodeArtifact): Map<String, Set<String>> {
+    val keys = linkedMapOf<String, MutableSet<String>>()
+    for (classArtifact in artifact.classArtifacts) {
+        val classNode = ClassNode()
+        ClassReader(classArtifact.bytes).accept(classNode, ClassReader.SKIP_FRAMES)
+        for (method in classNode.methods) {
+            val instructions = method.instructions ?: continue
+            for (instruction in instructions) {
+                val indy = instruction as? org.objectweb.asm.tree.InvokeDynamicInsnNode ?: continue
+                if (!isLambdaMetafactoryCall(indy)) continue
+                for (argument in indy.bsmArgs) {
+                    val handle = argument as? Handle ?: continue
+                    if (handle.tag != Opcodes.H_INVOKESTATIC &&
+                        handle.tag != Opcodes.H_INVOKESPECIAL &&
+                        handle.tag != Opcodes.H_INVOKEVIRTUAL
+                    ) {
+                        continue
+                    }
+                    keys.getOrPut(handle.owner) { linkedSetOf() } += handle.name + handle.desc
                 }
-                keys += handle.name + handle.desc
             }
         }
     }
@@ -378,6 +384,17 @@ fun applyMethodVirtualization(
     } finally {
         java.util.Arrays.fill(dispatcherNameSalt, 0)
     }
+
+    // Signatures that take part in virtual or interface dispatch across the
+    // artifact boundary.  The synthetic-dispatcher path moves a body behind a
+    // $m$<hash>(Object[]) stub and deletes the original member, which leaves a
+    // surviving interface or supertype call on that signature dangling as an
+    // AbstractMethodError.  Those methods are still virtualized, but in place:
+    // they keep the declared name, descriptor and access so dispatch keeps
+    // working.
+    val dispatchBoundSignatures = externallyBoundMethodSignatures(artifact) +
+        inArtifactOverrideMethodSignatures(artifact)
+    val lambdaImplementationKeysByOwner = lambdaMetafactoryImplementationKeys(artifact)
     registerOpaqueDispatchers(
         artifact = artifact,
         matchedClassNames = matchedClassNames,
@@ -395,6 +412,8 @@ fun applyMethodVirtualization(
         highValueMethodDeny = highValueMethodDeny,
         strictVirtualization = strictVirtualization,
         random = dispatcherNameRandom,
+        dispatchBoundSignatures = dispatchBoundSignatures,
+        lambdaImplementationKeysByOwner = lambdaImplementationKeysByOwner,
         buildContext = buildContext,
     )
 
@@ -417,7 +436,7 @@ fun applyMethodVirtualization(
         val className = classArtifact.summary.internalName
         val timingSensitiveSyntheticHandlers = unsafeSyntheticHandlerKeys(classArtifact.bytes)
         val jvmBoundaryBootstrapKeys = jvmBoundaryBootstrapKeys(classNode)
-        val lambdaImplementationKeys = lambdaMetafactoryImplementationKeys(classNode)
+        val lambdaImplementationKeys = lambdaImplementationKeysByOwner[className].orEmpty()
         val existingMethodKeys = classArtifact.summary.methodSummaries
             .map { it.name + it.descriptor }
             .toMutableSet()
@@ -604,7 +623,10 @@ fun applyMethodVirtualization(
                         }
                         recordSelectionSkip("virtualized")
 
-                        val hideOriginalSignature = !isMainEntry && methodSelection == MethodSelectionMode.AllCompatible
+                        val bindsToInstanceDispatch = access and Opcodes.ACC_STATIC == 0 &&
+                            methodSignature(name, descriptor) in dispatchBoundSignatures
+                        val hideOriginalSignature = !isMainEntry && !bindsToInstanceDispatch &&
+                            methodSelection == MethodSelectionMode.AllCompatible
                         val registeredDispatcher = buildContext.resolveOpaqueVmDispatcher(className, name, descriptor)
                         val vmDescriptor = when {
                             isMainEntry && descriptor == "([Ljava/lang/String;)V" -> "([Ljava/lang/String;Z)V"
@@ -617,8 +639,7 @@ fun applyMethodVirtualization(
                             else -> name
                         }
                         val vmMethodAccess = if (vmMethodName != name || hideOriginalSignature) {
-                            (access and (Opcodes.ACC_PUBLIC or Opcodes.ACC_PROTECTED or Opcodes.ACC_PRIVATE or Opcodes.ACC_BRIDGE).inv()) or
-                                Opcodes.ACC_PRIVATE or Opcodes.ACC_STATIC or Opcodes.ACC_SYNTHETIC
+                            (access and Opcodes.ACC_BRIDGE.inv()) or Opcodes.ACC_STATIC or Opcodes.ACC_SYNTHETIC
                         } else {
                             access
                         }
@@ -745,6 +766,7 @@ fun applyMethodVirtualization(
                                     sealedEntryToken = sealedVmEntryToken(entryToken, random),
                                     pageEncodedHandle = pageZeroEncodedHandle,
                                     pageCallSiteProof = pageZeroCallSiteProof,
+                                    argumentDescriptor = if (isMainEntry) guestOriginalDescriptor else vmDescriptor,
                                 )
                             } finally {
                                 java.util.Arrays.fill(pageZeroEncodedHandle, 0)
@@ -1246,6 +1268,8 @@ private fun registerOpaqueDispatchers(
     highValueMethodDeny: List<MethodSelectorPattern>,
     strictVirtualization: Boolean,
     random: SecureRandom,
+    dispatchBoundSignatures: Set<String>,
+    lambdaImplementationKeysByOwner: Map<String, Set<String>>,
     buildContext: QpBuildContext,
 ) {
     var broadVirtualizedMethodCount = 0
@@ -1266,7 +1290,7 @@ private fun registerOpaqueDispatchers(
         if (usesJavaShroudVmDispatch(classNode)) continue
         val timingSensitiveSyntheticHandlers = unsafeSyntheticHandlerKeys(classArtifact.bytes)
         val jvmBoundaryBootstrapKeys = jvmBoundaryBootstrapKeys(classNode)
-        val lambdaImplementationKeys = lambdaMetafactoryImplementationKeys(classNode)
+        val lambdaImplementationKeys = lambdaImplementationKeysByOwner[className].orEmpty()
         val existingMethodKeys = classArtifact.summary.methodSummaries
             .map { it.name + it.descriptor }
             .toMutableSet()
@@ -1280,7 +1304,16 @@ private fun registerOpaqueDispatchers(
             if (name == "<init>" || name == "<clinit>") continue
             if (isEnumValuesHelper(classArtifact.summary.accessFlags, access, name, descriptor)) continue
             if (access and (Opcodes.ACC_ABSTRACT or Opcodes.ACC_NATIVE) != 0) continue
+            // Instance dispatch still requires the original method declaration.
+            if (access and Opcodes.ACC_STATIC == 0 && methodSignature(name, descriptor) in dispatchBoundSignatures) continue
             if (selectedOnlyScope && !selectedByRule || globalDirectMemberScope && !explicitlySelected) continue
+            // Broad (default-scope) virtualization must also stay inside the
+            // rule-eligible member set: excluded members (APK keep synthesis
+            // anchors @JavascriptInterface bridges, serialization hooks and
+            // the like by name) would otherwise be virtualized into a
+            // $m$<hash> synthetic and their externally required name would
+            // silently disappear from the artifact.
+            if (!selectedOnlyScope && !globalDirectMemberScope && !selectedByRule && !explicitlySelected) continue
             val bodyCapture = MethodBodyCapture()
             method.accept(bodyCapture)
             if (bodyCapture.instructionCount == 0) continue
@@ -1947,8 +1980,28 @@ class MethodBodyCapture : MethodVisitor(Opcodes.ASM9) {
                 continue
             }
             if (current is CapturedInstruction.IndyArg) {
-                markNativeVmUnsupported("opaque dispatcher cannot rewrite invoke-dynamic handle ${instruction.owner}#${instruction.name}${instruction.desc}")
-                index++
+                // invoke-dynamic-indirection lowers a cross-class INVOKESTATIC
+                // into an indy whose bootstrap argument is the target handle.
+                // Once that target is virtualized the handle names a method the
+                // owner no longer declares, so replay the site as a boxed call
+                // into the synthetic dispatcher stub, exactly like a direct
+                // call.  methodHandleBackedStaticTarget only matches when the
+                // indy descriptor equals the target descriptor, so the operand
+                // stack layout is identical to the direct-call case.
+                val boxed = boxInvokeToOpaqueDispatcher(
+                    CapturedInstruction.MethodArg(
+                        opcode = Opcodes.INVOKESTATIC,
+                        owner = instruction.owner,
+                        name = instruction.name,
+                        desc = instruction.desc,
+                        isInterface = instruction.isInterface,
+                    ),
+                    dispatcher,
+                )
+                capturedInstructions.removeAt(index)
+                capturedInstructions.addAll(index, boxed)
+                index += boxed.size
+                changed = true
                 continue
             }
             if (instruction.opcode != Opcodes.INVOKESTATIC &&
@@ -3611,11 +3664,13 @@ internal fun generateVmDispatcher(
     pageEncodedHandle: ByteArray? = null,
     pageCallSiteProof: ByteArray? = null,
     sealedEntryToken: String? = null,
+    argumentDescriptor: String = descriptor,
 ) {
     mv.visitCode()
 
     // Polymorphic stub: shuffle constant loading through local variable slots
-    val argTypes = Type.getArgumentTypes(descriptor)
+    // A JVM entry forwarder can accept a private guard argument in addition to the guest arguments.
+    val argTypes = Type.getArgumentTypes(argumentDescriptor)
     val isStatic = access and Opcodes.ACC_STATIC != 0
     val totalArgs = argTypes.size + if (isStatic) 0 else 1
     // Scratch locals must start past the real parameter slots. long/double params each
@@ -3623,7 +3678,7 @@ internal fun generateVmDispatcher(
     // (argType.size sum) plus the implicit `this` slot, plus one gap slot. Using the raw
     // argument count here collides with the second half of a long/double parameter and
     // corrupts it (JVM VerifyError: Bad local variable type).
-    val parameterSlotCount = argTypes.sumOf { it.size } + if (isStatic) 0 else 1
+    val parameterSlotCount = Type.getArgumentTypes(descriptor).sumOf { it.size } + if (isStatic) 0 else 1
     val localBase = parameterSlotCount + 1 // after params + this + 1 gap slot
     val usesQpPageDispatch = dispatchDescriptor == QP_VM_PAGE_DISPATCH_DESCRIPTOR
     val usesSealedTokenDispatch = usesQpPageDispatch && sealedEntryToken != null

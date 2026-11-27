@@ -13,11 +13,11 @@ interface PathSelectionResult {
 
 export const applyDroppedJarPath = (state: RunState, inputJarPath: string): PathSelectionResult => {
   if (!isAbsoluteJarPath(inputJarPath)) {
-    const nextState: RunState = applyBridgeError(state, new Error('仅支持 .jar 文件的绝对路径。'), '输入校验失败')
+    const nextState: RunState = applyBridgeError(state, new Error('仅支持 .jar / .apk 文件的绝对路径。'), '输入校验失败')
     return {
       nextState,
       inputJarPath: null,
-      errorMessage: '请拖入 .jar 文件',
+      errorMessage: '请拖入 .jar / .apk 文件',
     }
   }
 
@@ -31,11 +31,11 @@ export const applyDroppedJarPath = (state: RunState, inputJarPath: string): Path
 export const applyDroppedJarPaths = (state: RunState, paths: readonly string[]): PathSelectionResult => {
   const inputJarPath: string | undefined = paths.find((pathValue: string): boolean => isAbsoluteJarPath(pathValue))
   if (inputJarPath === undefined) {
-    const nextState: RunState = applyBridgeError(state, new Error('拖拽内容未包含可用的 .jar 绝对路径。'), '输入校验失败')
+    const nextState: RunState = applyBridgeError(state, new Error('拖拽内容未包含可用的 .jar / .apk 绝对路径。'), '输入校验失败')
     return {
       nextState,
       inputJarPath: null,
-      errorMessage: '请拖入 .jar 文件',
+      errorMessage: '请拖入 .jar / .apk 文件',
     }
   }
 
@@ -48,7 +48,7 @@ export const resolveInspectableJarPath = (state: RunState): string => {
     throw new Error('输入 Jar 路径为空。')
   }
   if (!isAbsoluteJarPath(inputJarPath)) {
-    throw new Error('输入 Jar 必须是 .jar 文件的绝对路径。')
+    throw new Error('输入 Jar 必须是 .jar / .apk 文件的绝对路径。')
   }
 
   return inputJarPath
@@ -56,7 +56,8 @@ export const resolveInspectableJarPath = (state: RunState): string => {
 
 export const isAbsoluteJarPath = (inputJarPath: string): boolean => {
   const trimmedPath: string = inputJarPath.trim()
-  if (!trimmedPath.toLowerCase().endsWith('.jar')) {
+  const lowerPath: string = trimmedPath.toLowerCase()
+  if (!lowerPath.endsWith('.jar') && !lowerPath.endsWith('.apk')) {
     return false
   }
 

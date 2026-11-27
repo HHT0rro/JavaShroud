@@ -8,8 +8,11 @@ import {
   clearRules,
   markCanceling,
   markInspectingClasses,
+  markPackResumed,
   markRunStarting,
   replaceRules,
+  setAllPassesEnabled,
+  setArtifactFormat,
   setAutoScroll,
   setClassTreeRule,
   setPassSelectionMode,
@@ -31,11 +34,10 @@ import {
   importWorkbenchConfig,
   loadWindowMaximiseState,
   revealNativeImage,
-  resumeNativePack,
   runWindowAction,
   startObfuscationRun,
 } from './frontend-controller'
-import type { ClassTreeNode, PassItem, PassParamValue, PassSelectionMode, RuleAction, RuleItem, RunState } from './types'
+import type { ArtifactFormat, ClassTreeNode, PassItem, PassParamValue, PassSelectionMode, RuleAction, RuleItem, RunState } from './types'
 import type { WailsBridge } from './wails-bridge'
 import type { WorkbenchPage } from './workbench-view'
 
@@ -69,6 +71,7 @@ export const createWorkbenchHandlers = (options: WorkbenchFacadeOptions) => {
   let startInFlight = false
   let cancelInFlight = false
   let runGeneration = 0
+  let resumingHandoff: number | null = null
 
   const enqueueMutating = (work: () => Promise<void>): Promise<void> => {
     const run = mutatingQueue.then(work)
@@ -82,6 +85,8 @@ export const createWorkbenchHandlers = (options: WorkbenchFacadeOptions) => {
   const isRunPending = (): boolean => startInFlight || cancelInFlight || isBusyRunStatus(options.state.value.status)
 
   const isPackHandoffActive = (): boolean => options.state.value.status === 'awaiting-pack'
+  const isCurrentPackHandoff = (revision: number): boolean =>
+    isPackHandoffActive() && options.state.value.packHandoffRevision === revision
 
   const inspectLoadedJar = async (inputJarPath: string): Promise<void> => {
     const generation = ++inspectGeneration
@@ -157,7 +162,7 @@ export const createWorkbenchHandlers = (options: WorkbenchFacadeOptions) => {
         const result = applyDroppedJarPaths(options.state.value, paths)
         options.state.value = result.nextState
         if (result.errorMessage !== null) {
-          emitStateError(options.message, result.nextState, '请拖入 .jar 文件')
+          emitStateError(options.message, result.nextState, '请拖入 .jar / .apk 文件')
           return
         }
 
@@ -167,6 +172,11 @@ export const createWorkbenchHandlers = (options: WorkbenchFacadeOptions) => {
         }
         await inspectLoadedJar(result.inputJarPath)
       })
+    },
+
+    handleArtifactFormatChanged: (format: ArtifactFormat): void => {
+      if (isEditingLocked()) return
+      options.state.value = setArtifactFormat(options.state.value, format)
     },
 
     handleInputPathChanged: (inputJarPath: string): void => {
@@ -216,6 +226,10 @@ export const createWorkbenchHandlers = (options: WorkbenchFacadeOptions) => {
           status: isBusyRunStatus(current.status)
             ? current.status
             : loaded.status,
+          artifactFormat: loaded.artifactFormat,
+          apkUnavailablePasses: loaded.apkUnavailablePasses,
+          jarPassOrder: loaded.jarPassOrder,
+          passes: loaded.passes,
           inputJar: loaded.inputJar,
           outputJarPath: outputChangedDuringBrowse ? current.outputJarPath : loaded.outputJarPath,
           classTree: loaded.classTree,
@@ -340,6 +354,13 @@ export const createWorkbenchHandlers = (options: WorkbenchFacadeOptions) => {
       options.state.value = setPasses(options.state.value, passes)
     },
 
+    handleAllPassesToggled: (enabled: boolean): void => {
+      if (isEditingLocked()) {
+        return
+      }
+      options.state.value = setAllPassesEnabled(options.state.value, enabled)
+    },
+
     handlePassToggled: (passId: string): void => {
       if (isEditingLocked()) {
         return
@@ -358,7 +379,11 @@ export const createWorkbenchHandlers = (options: WorkbenchFacadeOptions) => {
       if (cancelInFlight || currentStatus() === 'canceling' || !isPackHandoffActive()) {
         return null
       }
+      const revision = options.state.value.packHandoffRevision
       const result = await browsePackedNative(options.state.value, options.bridge)
+      if (!isCurrentPackHandoff(revision)) {
+        return null
+      }
       if (result.failed) {
         options.state.value = {
           ...options.state.value,
@@ -396,22 +421,28 @@ export const createWorkbenchHandlers = (options: WorkbenchFacadeOptions) => {
         return
       }
       const trimmed = packedPath.trim()
-      if (trimmed.length === 0) {
+      const revision = options.state.value.packHandoffRevision
+      if (trimmed.length === 0 || resumingHandoff === revision) {
         return
       }
-      const result = await resumeNativePack(options.state.value, options.bridge, trimmed)
-      if (result.failed) {
-        options.state.value = applyBridgeError(
-          options.state.value,
-          new Error(result.nextState.errorMessage ?? '回传加壳文件失败'),
-          '回传加壳文件失败',
-        )
-        emitStateError(options.message, options.state.value, '回传加壳文件失败')
-        return
+      resumingHandoff = revision
+      try {
+        await options.bridge.resumeNativePack(trimmed)
+        if (isCurrentPackHandoff(revision)) {
+          options.state.value = markPackResumed(options.state.value)
+          options.activePage.value = 'logs'
+          emitSuccess(options.message, '已回传加壳文件')
+        }
+      } catch (error) {
+        if (isCurrentPackHandoff(revision)) {
+          options.state.value = applyBridgeError(options.state.value, error, '回传加壳文件失败')
+          emitStateError(options.message, options.state.value, '回传加壳文件失败')
+        }
+      } finally {
+        if (resumingHandoff === revision) {
+          resumingHandoff = null
+        }
       }
-      options.state.value = result.nextState
-      options.activePage.value = 'logs'
-      emitSuccess(options.message, '已回传加壳文件')
     },
 
     handleAutoScrollChanged: (autoScroll: boolean): void => {

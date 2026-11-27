@@ -1,8 +1,8 @@
 use qp_crypto::sha256;
 use qp_shell::SupportedTarget;
 use qp_shell::{
-    Compression, Elf64Image, ParseError, PayloadDecompressor, PayloadEnvelope, PayloadManifest,
-    Pe64Image, NativePayloadDecompressor, NATIVE_PAYLOAD_PROFILE,
+    Compression, Elf64Image, NativePayloadDecompressor, ParseError, PayloadDecompressor,
+    PayloadEnvelope, PayloadManifest, Pe64Image, NATIVE_PAYLOAD_PROFILE,
 };
 
 fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {

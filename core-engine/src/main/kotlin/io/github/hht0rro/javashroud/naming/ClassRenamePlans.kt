@@ -110,12 +110,10 @@ fun buildPackageRenameMap(
         require(packageClasses.none { isFixedGeneratedInternalName(it.summary.internalName) }) {
             "fixed generated package '$packageName' requires class relocation before package rename"
         }
-        val caseFoldedSimpleNames = packageClasses.map { classArtifact ->
-            classArtifact.summary.internalName.substringAfterLast('/').lowercase(Locale.ROOT)
-        }
-        require(caseFoldedSimpleNames.size == caseFoldedSimpleNames.toSet().size) {
-            "selected package '$packageName' contains a case-insensitive class path collision"
-        }
+        // A selected package may legitimately contain simple names that differ
+        // only by case (pre-obfuscated inputs such as `a`/`A` are common). The
+        // package rename keeps such names grouped; per-class disambiguation in
+        // [applyPackageRenameMap] restores the case-folded uniqueness invariant.
         val segments = packageName.split('/')
         val preserveCount = config.preservePackageDepth.coerceIn(0, segments.size)
         val preserved = segments.take(preserveCount)
@@ -144,6 +142,7 @@ fun applyPackageRenameMap(
     classArtifacts: List<ClassArtifact>,
     packageRenameMap: Map<String, String>,
     selectedClassNames: Set<String>? = null,
+    config: RenameConfig = RenameConfig(),
 ): Map<String, String> {
     if (packageRenameMap.isEmpty()) {
         return emptyMap()
@@ -165,11 +164,46 @@ fun applyPackageRenameMap(
     require(projected.none { (_, renamedName) -> isFixedGeneratedInternalName(renamedName) }) {
         "package rename plan would emit a reserved r/<number>/ class name"
     }
-    val caseFoldedNames = projected.map { (_, renamedName) -> renamedName.lowercase(Locale.ROOT) }
-    require(caseFoldedNames.size == caseFoldedNames.toSet().size) {
-        "package rename plan produces a case-insensitive class path collision"
+    // Simple names that differ only by case survive a package rename grouped
+    // together (a/A in one input package stay together in the renamed package).
+    // Dex and ART are case-sensitive, but the artifact-level case-folded
+    // uniqueness invariant is load-bearing for downstream tooling, so a renamed
+    // entry whose case-folded final name was already taken receives a fresh
+    // generated simple name. Entries that keep their original name (unselected
+    // classes) are never moved here; package-level planning already guarantees
+    // they cannot collide with renamed finals.
+    val generator = NameGenerator(config)
+    val allocatedCaseFolded = mutableSetOf<String>()
+    val disambiguated = projected.map { (originalName, renamedName) ->
+        var finalName = renamedName
+        if (renamedName != originalName && renamedName.lowercase(Locale.ROOT) in allocatedCaseFolded) {
+            val renamedPackage = renamedName.substringBeforeLast('/', "")
+            do {
+                val generatedSimpleName = generator.generateSimpleName("C")
+                finalName = if (renamedPackage.isBlank()) generatedSimpleName else "$renamedPackage/$generatedSimpleName"
+            } while (
+                isFixedGeneratedInternalName(finalName) ||
+                    finalName.lowercase(Locale.ROOT) in allocatedCaseFolded
+            )
+        }
+        allocatedCaseFolded += finalName.lowercase(Locale.ROOT)
+        originalName to finalName
     }
-    return projected
+    // Real-world pre-obfuscated inputs routinely carry case-variant pairs
+    // (k2/d + K2/d, E/v + E/V) that Android tolerates everywhere. Collisions
+    // among entries that KEPT their original names are therefore accepted as
+    // long as no rename CREATED one: a renamed final must not case-collide
+    // with any other final name.
+    val renamedFinals = disambiguated.filter { it.first != it.second }
+    val renamedCaseFolded = renamedFinals.map { it.second.lowercase(Locale.ROOT) }
+    val allCaseFolded = disambiguated.map { it.second.lowercase(Locale.ROOT) }
+    val remainingCaseFolded = (allCaseFolded - renamedCaseFolded.toSet()).toSet()
+    val createdCollisions = renamedCaseFolded.groupingBy { it }.eachCount().filterValues { it > 1 }.keys +
+        renamedCaseFolded.filter { it in remainingCaseFolded }
+    require(createdCollisions.isEmpty()) {
+        "package rename plan creates a case-insensitive class path collision: ${createdCollisions.sorted()}"
+    }
+    return disambiguated
         .filter { it.first != it.second }
         .toMap()
 }

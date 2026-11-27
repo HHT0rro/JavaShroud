@@ -111,12 +111,15 @@ class CallsiteRotationProtectionSafetyTest {
     @Test
     fun callsite_rotation_assigns_mixed_strategies_per_site() {
         val internalName = "sample/MixedRotationHost"
+        // The production pass samples eligible sites. Give it enough independent
+        // sites to test strategy assignment without relying on a small sample.
+        val eligibleSiteCount = 256
         val artifact = testAttachedArtifact(
             classArtifacts = listOf(
                 testClassArtifact(
                     internalName = internalName,
-                    bytes = buildManyVirtualCallsHost(internalName, 20),
-                    methodSummaries = (0 until 20).map { index ->
+                    bytes = buildManyVirtualCallsHost(internalName, eligibleSiteCount),
+                    methodSummaries = (0 until eligibleSiteCount).map { index ->
                         MemberSummary(MemberKind.METHOD, "m$index", "(Ljava/lang/String;)I", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC)
                     },
                 ),

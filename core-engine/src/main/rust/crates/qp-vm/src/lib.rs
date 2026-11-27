@@ -187,7 +187,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
-fn qp_trace_enabled() -> bool {
+pub(crate) fn qp_trace_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var_os("JAVASHROUD_QP_TRACE").is_some())
 }
@@ -997,13 +997,19 @@ impl VmString {
 
 impl fmt::Display for VmString {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("VmString").field("len", &self.0.len()).finish()
+        formatter
+            .debug_struct("VmString")
+            .field("len", &self.0.len())
+            .finish()
     }
 }
 
 impl fmt::Debug for VmString {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("VmString").field("len", &self.0.len()).finish()
+        formatter
+            .debug_struct("VmString")
+            .field("len", &self.0.len())
+            .finish()
     }
 }
 
@@ -1073,7 +1079,13 @@ impl fmt::Debug for Instruction {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Instruction")
-            .field("operands", &(self.operand_range.end.saturating_sub(self.operand_range.start)))
+            .field(
+                "operands",
+                &(self
+                    .operand_range
+                    .end
+                    .saturating_sub(self.operand_range.start)),
+            )
             .finish()
     }
 }
@@ -1096,7 +1108,9 @@ pub struct ExceptionHandler {
 
 impl fmt::Debug for ExceptionHandler {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("ExceptionHandler").finish_non_exhaustive()
+        formatter
+            .debug_struct("ExceptionHandler")
+            .finish_non_exhaustive()
     }
 }
 
@@ -1311,12 +1325,22 @@ const METHOD_IDENTITY_LABEL: &[u8] = b"javashroud-qp-method-identity-v2";
 fn mark_self_invokes(program: &mut VmProgram, build_key: &[u8; 32]) {
     program.self_invoke.clear();
     program.self_invoke.resize(program.instructions.len(), 0);
-    if !program.metadata.is_static || program.metadata.method_identity.iter().all(|byte| *byte == 0) {
+    if !program.metadata.is_static
+        || program
+            .metadata
+            .method_identity
+            .iter()
+            .all(|byte| *byte == 0)
+    {
         if qp_trace_enabled() {
             eprintln!(
                 "qp-trace mark skip static={} identity_zero={} instructions={}",
                 program.metadata.is_static,
-                program.metadata.method_identity.iter().all(|byte| *byte == 0),
+                program
+                    .metadata
+                    .method_identity
+                    .iter()
+                    .all(|byte| *byte == 0),
                 program.instructions.len()
             );
         }
@@ -1329,10 +1353,17 @@ fn mark_self_invokes(program: &mut VmProgram, build_key: &[u8; 32]) {
     let mut samples = Vec::new();
     for (index, instruction) in program.instructions.iter().enumerate() {
         let operands = &program.operands[instruction.operand_range.clone()];
-        let Some(reference_index) = operands.first().and_then(|value| usize::try_from(*value).ok()) else {
+        let Some(reference_index) = operands
+            .first()
+            .and_then(|value| usize::try_from(*value).ok())
+        else {
             continue;
         };
-        let Some(reference) = program.constants.get(reference_index).and_then(VmConstant::as_string) else {
+        let Some(reference) = program
+            .constants
+            .get(reference_index)
+            .and_then(VmConstant::as_string)
+        else {
             continue;
         };
         let canonical = canonical_opcode(instruction.opcode);
@@ -1348,7 +1379,10 @@ fn mark_self_invokes(program: &mut VmProgram, build_key: &[u8; 32]) {
             _ => None,
         };
         let Some(identity) = identity else {
-            if qp_trace_enabled() && samples.len() < 8 && matches!(canonical, INVOKESTATIC | INVOKEDYNAMIC) {
+            if qp_trace_enabled()
+                && samples.len() < 8
+                && matches!(canonical, INVOKESTATIC | INVOKEDYNAMIC)
+            {
                 samples.push(format!(
                     "unparsed op={:#06x} canon={:#06x} ref={}",
                     instruction.opcode, canonical, reference
@@ -1361,7 +1395,10 @@ fn mark_self_invokes(program: &mut VmProgram, build_key: &[u8; 32]) {
             program.self_invoke[index] = 1;
             matched += 1;
             if qp_trace_enabled() && samples.len() < 8 {
-                samples.push(format!("match op={:#06x} ref={}", instruction.opcode, reference));
+                samples.push(format!(
+                    "match op={:#06x} ref={}",
+                    instruction.opcode, reference
+                ));
             }
         } else if qp_trace_enabled() && samples.len() < 8 {
             samples.push(format!(
@@ -1370,7 +1407,12 @@ fn mark_self_invokes(program: &mut VmProgram, build_key: &[u8; 32]) {
             ));
         }
     }
-    if qp_trace_enabled() && (matched > 0 || samples.iter().any(|sample| sample.starts_with("mismatch") || sample.starts_with("unparsed"))) {
+    if qp_trace_enabled()
+        && (matched > 0
+            || samples
+                .iter()
+                .any(|sample| sample.starts_with("mismatch") || sample.starts_with("unparsed")))
+    {
         eprintln!(
             "qp-trace mark instructions={} static={} dynamic={} parsed={} matched={} samples={:?}",
             program.instructions.len(),
@@ -1418,7 +1460,12 @@ fn method_identity_from_mhstatic(build_key: &[u8; 32], reference: &str) -> Optio
     method_identity_bytes(build_key, owner, name, descriptor)
 }
 
-fn method_identity_bytes(build_key: &[u8; 32], owner: &str, name: &str, descriptor: &str) -> Option<[u8; 32]> {
+fn method_identity_bytes(
+    build_key: &[u8; 32],
+    owner: &str,
+    name: &str,
+    descriptor: &str,
+) -> Option<[u8; 32]> {
     Some(hmac_bytes(
         build_key,
         &[
@@ -3417,8 +3464,10 @@ mod parser_tests {
     #[test]
     fn vm_dialect_differs_across_materials_and_round_trips() {
         let corpus = test_corpus();
-        let first = dialect::VmDialect::from_material(&[0x11; 32], &[0x22; 32], &corpus).expect("first");
-        let second = dialect::VmDialect::from_material(&[0x33; 32], &[0x22; 32], &corpus).expect("second");
+        let first =
+            dialect::VmDialect::from_material(&[0x11; 32], &[0x22; 32], &corpus).expect("first");
+        let second =
+            dialect::VmDialect::from_material(&[0x33; 32], &[0x22; 32], &corpus).expect("second");
         assert_ne!(first.encode(ICONST), second.encode(ICONST));
         assert_ne!(first.commitment, second.commitment);
         assert_eq!(first.decode(first.encode(ICONST)), ICONST);
@@ -3432,8 +3481,7 @@ mod parser_tests {
     #[test]
     fn foreign_dialect_material_fails_closed_on_current_frame() {
         let (material, frame, binding) = valid_frame();
-        let foreign =
-            VmKeyMaterial::new([0x44; 32], [0x22; 32]).with_dialect_corpus(test_corpus());
+        let foreign = VmKeyMaterial::new([0x44; 32], [0x22; 32]).with_dialect_corpus(test_corpus());
         let parser = VmParser::new(&foreign, &binding).expect("parser");
         assert!(parser.parse(&frame).is_err());
         let _ = material;

@@ -4,6 +4,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class NativeBindingLoadOrderTest {
@@ -14,23 +15,55 @@ class NativeBindingLoadOrderTest {
         )
         val methodStart = source.indexOf("private static boolean tryLoadQpBundledNativeResource")
         val methodEnd = source.indexOf("private static boolean verifyQpNativeAbiAfterLoad", methodStart)
+        assertTrue(methodStart >= 0 && methodEnd > methodStart, "Current native resource loader must exist")
         val method = source.substring(methodStart, methodEnd)
 
-        assertTrue(method.indexOf("validateNativeImage(platformTarget, nativeBytes)") < method.indexOf("nativeExtractDirectories()"))
-        assertTrue(method.indexOf("String bindingText = sealedNativeBindingText(locator)") < method.indexOf("nativeExtractDirectories()"))
-        assertTrue(method.indexOf("publishSealedNativeBindings(bindingText);") < method.indexOf("extractedNativeMatchesLocator(tempLib, locator)"))
-        assertTrue(method.indexOf("qp:native-extract-digest-mismatch") < method.indexOf("System.load(tempLib.getAbsolutePath());"))
-        assertTrue(method.indexOf("System.load(tempLib.getAbsolutePath());") < method.indexOf("qp:native-loaded-digest-mismatch"))
-        assertTrue(method.indexOf("qp:native-loaded-digest-mismatch") < method.indexOf("initializeNativeKernel(platformTarget)"))
-        assertTrue(method.indexOf("System.load(tempLib.getAbsolutePath());") < method.indexOf("initializeNativeKernel(platformTarget)"))
-        assertTrue(method.indexOf("initializeNativeKernel(platformTarget)") < method.indexOf("installQpSessionNonce()"))
-        assertTrue(method.indexOf("installQpSessionNonce()") < method.indexOf("verifyQpNativeAbiAfterLoad()"))
-        assertTrue(method.contains("previousClassBindings"))
-        assertTrue(method.contains("previousMethodBindings"))
-        assertTrue(method.contains("previousFieldBindings"))
-        assertTrue(method.contains("restoreProperty(sealedBindingPropertyName(), previousClassBindings)"))
-        assertTrue(method.contains("restoreProperty(sealedMethodBindingPropertyName(), previousMethodBindings)"))
-        assertTrue(method.contains("restoreProperty(sealedFieldBindingPropertyName(), previousFieldBindings)"))
+        val extractedDigestGate = failClosedGate("!extractedNativeMatchesLocator(tempLib, locator)")
+        assertOrdered(
+            method,
+            Regex.escape("System.getProperty(sealedLoaderPropertyName())"),
+            Regex.escape("System.getProperty(sealedPackPropertyName())"),
+            Regex.escape("System.getProperty(sealedBindingsPropertyName())"),
+            Regex.escape("readAllBounded(in, locator.storedLength)"),
+            failClosedGate("nativeBytes.length != locator.storedLength || hasQpRejectedLegacyHeader(nativeBytes)"),
+            Regex.escape("validateNativeImage(platformTarget, nativeBytes)"),
+            Regex.escape("sha256(nativeBytes)"),
+            failClosedGate("!MessageDigest.isEqual(locator.sha256, actualDigest)"),
+            Regex.escape("sealedNativeBindingBytes(locator)"),
+            failClosedGate("sealedBindings == null || sealedBindings.length == 0"),
+            Regex.escape("nativeExtractDirectories()"),
+            Regex.escape("sealedQpPackBytes()"),
+            Regex.escape("publishSealedNativeBootstrap(sealedPack, sealedBindings)"),
+            extractedDigestGate,
+            Regex.escape("System.load(tempLib.getAbsolutePath());"),
+            extractedDigestGate,
+            Regex.escape("initializeNativeKernel(platformTarget)"),
+            failClosedGate("initResult < 0"),
+            Regex.escape("installQpSessionNonce()"),
+            Regex.escape("installQpCatalog()"),
+            failClosedGate("!verifyQpNativeAbiAfterLoad()"),
+            Regex.escape("loaded = true;"),
+        )
+        val rollback = method.substringAfter("if (!loaded) {", "").substringBefore('}')
+        for (restore in listOf(
+            "sealedNativeBindingsPublished = previousBindingsPublished;",
+            "restoreLoaderProperty(previousLoaderOwner)",
+            "restoreProperty(sealedPackPropertyName(), previousPackProperty)",
+            "restoreProperty(sealedBindingsPropertyName(), previousBindingsProperty)",
+        )) {
+            assertTrue(restore in rollback, "Failed native loads must roll back: $restore")
+        }
+    }
+
+    private fun failClosedGate(condition: String): String =
+        """if\s*\(\s*""" + Regex.escape(condition) + """\s*\)\s*\{[^}]*\breturn false;\s*}"""
+
+    private fun assertOrdered(source: String, vararg steps: String) {
+        var next = 0
+        for (step in steps) {
+            val match = assertNotNull(Regex(step).find(source, next), "Missing or out-of-order native load step: $step")
+            next = match.range.last + 1
+        }
     }
 
     @Test

@@ -4,8 +4,13 @@ import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.commons.ClassRemapper
 
-fun remapClasses(classBytes: ByteArray, classRenameMap: Map<String, String>): ByteArray = try {
-    remapClassesStrict(classBytes, classRenameMap)
+@JvmOverloads
+fun remapClasses(
+    classBytes: ByteArray,
+    classRenameMap: Map<String, String>,
+    resourcePathRemapper: (String) -> String = buildResourcePathRemapper(classRenameMap),
+): ByteArray = try {
+    remapClassesStrict(classBytes, classRenameMap, resourcePathRemapper)
 } catch (_: Exception) {
     // Ordinary optional rename passes preserve their existing resilience model.
     // Current-format fixed-name cleanup uses [remapClassesStrict] directly.
@@ -17,10 +22,15 @@ fun remapClasses(classBytes: ByteArray, classRenameMap: Map<String, String>): By
  * removes fixed generated names must never retain source bytes after a remap
  * error, because retaining them would emit a forbidden class name.
  */
-internal fun remapClassesStrict(classBytes: ByteArray, classRenameMap: Map<String, String>): ByteArray {
-    val resourcePathRemapper = buildResourcePathRemapper(classRenameMap)
+internal fun remapClassesStrict(
+    classBytes: ByteArray,
+    classRenameMap: Map<String, String>,
+    resourcePathRemapper: (String) -> String = buildResourcePathRemapper(classRenameMap),
+): ByteArray {
     val classReader = ClassReader(classBytes)
-    val classWriter = frameComputingWriter()
+    // ClassRemapper maps the type names in existing stack frames along with
+    // the instructions. A fresh writer also drops unused constant-pool entries.
+    val classWriter = ClassWriter(0)
     val classVisitor = ClassRemapper(
         classWriter,
         createRemapper(
@@ -30,21 +40,7 @@ internal fun remapClassesStrict(classBytes: ByteArray, classRenameMap: Map<Strin
         ),
     )
     classReader.accept(classVisitor, 0)
-    val remappedBytes = classWriter.toByteArray()
-
-    // Strip dead constant-pool entries so stale class-name constants do not
-    // survive a successful remap.
-    val cleanReader = ClassReader(remappedBytes)
-    // Build a fresh constant pool. ClassWriter(ClassReader, 0) intentionally
-    // copies the source pool, which can retain stale UTF8 constants for the
-    // retired fixed-r names even when no live instruction references them.
-    val cleanWriter = frameComputingWriter()
-    cleanReader.accept(cleanWriter, 0)
-    return cleanWriter.toByteArray()
-}
-
-private fun frameComputingWriter(): ClassWriter = object : ClassWriter(ClassWriter.COMPUTE_FRAMES) {
-    override fun getCommonSuperClass(type1: String, type2: String): String = "java/lang/Object"
+    return classWriter.toByteArray()
 }
 
 /**
@@ -53,29 +49,27 @@ private fun frameComputingWriter(): ClassWriter = object : ClassWriter(ClassWrit
  * resource strings, and slash resource paths remain covered by [createRemapper].
  */
 private fun remapSupportedReflectionClassString(value: String, classRenameMap: Map<String, String>): String {
-    val ordered = classRenameMap.entries.sortedByDescending { it.key.length }
-    for ((oldInternalName, newInternalName) in ordered) {
-        val oldBinaryName = oldInternalName.replace('/', '.')
-        val newBinaryName = newInternalName.replace('/', '.')
-        val isMemberReference = value.startsWith("$oldBinaryName#") ||
-            value.startsWith("$oldBinaryName::") ||
-            value.startsWith("$oldBinaryName.m_")
-        if (isMemberReference) {
-            return newBinaryName + value.removePrefix(oldBinaryName)
-        }
+    // Check longest candidate owners first without sorting and scanning every class for each LDC.
+    for (index in value.indices.reversed()) {
+        val separator = value[index] == '#' || value.startsWith("::", index) || value.startsWith(".m_", index)
+        if (!separator) continue
+        val owner = value.substring(0, index).replace('.', '/')
+        val replacement = classRenameMap[owner] ?: continue
+        return replacement.replace('/', '.') + value.substring(index)
     }
     return value
 }
 
 internal fun buildResourcePathRemapper(classRenameMap: Map<String, String>): (String) -> String {
-    val packageRenamePrefixes = classRenameMap.entries
-        .mapNotNull { (originalClassName, renamedClassName) ->
-            val originalPackage = originalClassName.substringBeforeLast('/', "")
-            val renamedPackage = renamedClassName.substringBeforeLast('/', "")
-            if (originalPackage.isNotEmpty() && originalPackage != renamedPackage) originalPackage to renamedPackage else null
+    val packageRenamePrefixes = linkedMapOf<String, String>()
+    for ((originalClassName, renamedClassName) in classRenameMap) {
+        val originalPackage = originalClassName.substringBeforeLast('/', "")
+        val renamedPackage = renamedClassName.substringBeforeLast('/', "")
+        if (originalPackage.isNotEmpty() && originalPackage != renamedPackage) {
+            // The former stable sort selected the first destination when a source package split.
+            packageRenamePrefixes.putIfAbsent(originalPackage, renamedPackage)
         }
-        .distinct()
-        .sortedByDescending { it.first.length }
+    }
 
     if (packageRenamePrefixes.isEmpty()) {
         return { resourcePath -> resourcePath }
@@ -84,14 +78,16 @@ internal fun buildResourcePathRemapper(classRenameMap: Map<String, String>): (St
     return { resourcePath ->
         val leadingSlash = resourcePath.startsWith('/')
         val normalizedPath = if (leadingSlash) resourcePath.drop(1) else resourcePath
+        var index = normalizedPath.lastIndexOf('/')
         var mappedPath = resourcePath
-        for ((originalPackage, renamedPackage) in packageRenamePrefixes) {
-            val prefix = "$originalPackage/"
-            if (normalizedPath.startsWith(prefix)) {
-                val renamedPath = "$renamedPackage/${normalizedPath.removePrefix(prefix)}"
+        while (index > 0) {
+            val renamedPackage = packageRenamePrefixes[normalizedPath.substring(0, index)]
+            if (renamedPackage != null) {
+                val renamedPath = "$renamedPackage/${normalizedPath.substring(index + 1)}"
                 mappedPath = if (leadingSlash) "/$renamedPath" else renamedPath
                 break
             }
+            index = normalizedPath.lastIndexOf('/', index - 1)
         }
         mappedPath
     }

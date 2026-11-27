@@ -1041,7 +1041,10 @@ object QpNativeCompilerPass {
             append("    let base = shard * 32;\n")
             append("    let mut key = [0u8; 32];\n")
             append("    for index in 0..32 {\n")
-            append("        key[index] = SHARD_KEYS_MASKED[base + index] ^ mask[index] ^ commitment[index % 32];\n")
+            // The build patches these bytes after linking. A normal read can
+            // use the original initializer after release optimization.
+            append("        let patched = unsafe { core::ptr::read_volatile(SHARD_KEYS_MASKED.as_ptr().add(base + index)) };\n")
+            append("        key[index] = patched ^ mask[index] ^ commitment[index];\n")
             append("    }\n")
             append("    key\n")
             append("}")
@@ -1131,8 +1134,9 @@ object QpNativeCompilerPass {
                 "    let mut stream = qp_dialect_mask_stream(&commitment, masked.len());\n" +
                 "    let mut corpus = Vec::with_capacity(masked.len() / 2);\n" +
                 "    for index in 0..corpus.capacity() {\n" +
-                "        let high = masked[index * 2] ^ mask[index * 2] ^ stream[index * 2];\n" +
-                "        let low = masked[index * 2 + 1] ^ mask[index * 2 + 1] ^ stream[index * 2 + 1];\n" +
+                "        let offset = index * 2;\n" +
+                "        let high = unsafe { core::ptr::read_volatile(masked.as_ptr().add(offset)) } ^ mask[offset] ^ stream[offset];\n" +
+                "        let low = unsafe { core::ptr::read_volatile(masked.as_ptr().add(offset + 1)) } ^ mask[offset + 1] ^ stream[offset + 1];\n" +
                 "        corpus.push((u16::from(high) << 8) | u16::from(low));\n" +
                 "    }\n" +
                 "    stream.fill(0);\n" +
@@ -1208,24 +1212,39 @@ object QpNativeCompilerPass {
             put("CARGO_TERM_COLOR", "never")
             put("RUSTC", toolchain.rustcPath.toAbsolutePath().normalize().toString())
             put("CARGO_TARGET_DIR", targetDir.toString())
-            put("RUSTFLAGS", rustFlagsForCompile(target, specializationHex))
+            val compilerArgs = rustFlagsForCompile(target, specializationHex)
+            if (target == RustToolchainProvisioner.LINUX_RUNTIME_TARGET) {
+                val inheritedArgs = get("CARGO_ENCODED_RUSTFLAGS")?.split('\u001f').orEmpty()
+                val sourcePathFlag = "--remap-path-prefix=${workspace.toRealPath()}/=core-engine/src/main/rust/"
+                val args = inheritedArgs.filter(String::isNotEmpty) + compilerArgs + sourcePathFlag
+                put("CARGO_ENCODED_RUSTFLAGS", args.joinToString("\u001f"))
+            } else {
+                // Rust embeds source names from the isolated workspace in native diagnostics.
+                // Encoded flags keep prefixes containing spaces intact on hosted Windows.
+                val sourcePath = workspace.toRealPath().toString()
+                val sourcePaths = listOf(sourcePath, sourcePath.replace('\\', '/')).distinct()
+                val remapFlags = sourcePaths.map { "--remap-path-prefix=$it=core-engine/src/main/rust" }
+                put("CARGO_ENCODED_RUSTFLAGS", (compilerArgs + remapFlags).joinToString("\u001f"))
+            }
             prependPath(toolchain.extraPathEntries)
             if (cfgEvidenceExports) put("QP_CFG_EVIDENCE", "1") else remove("QP_CFG_EVIDENCE")
         }
         return runRustProcess(processBuilder, target)
     }
 
-    private fun rustFlagsForCompile(target: String, specializationHex: String): String = buildString {
-        append("-C metadata=qp_").append(specializationHex.take(16))
+    private fun rustFlagsForCompile(target: String, specializationHex: String): List<String> = buildList {
+        add("-C")
+        add("metadata=qp_${specializationHex.take(16)}")
         if (target == RustToolchainProvisioner.WINDOWS_RUSTUP_TARGET) {
             RUST_RELEASE_EXPORTS.sorted().forEach { export ->
-                append(" -C link-arg=/EXPORT:").append(export)
+                add("-C")
+                add("link-arg=/EXPORT:$export")
             }
         }
     }
 
     internal fun rustFlagsForTest(target: String, specializationHex: String): String =
-        rustFlagsForCompile(target, specializationHex)
+        rustFlagsForCompile(target, specializationHex).joinToString(" ")
 
     private fun MutableMap<String, String>.prependPath(entries: List<Path>) {
         if (entries.isEmpty()) return
@@ -1597,6 +1616,11 @@ object QpNativeCompilerPass {
         digest.update(sourceDigest)
         digest.update(specializationDigest)
         digest.updateUtf8(toolchainIdentity)
+        if (rustTarget == RustToolchainProvisioner.LINUX_RUNTIME_TARGET) {
+            digest.updateUtf8("project-relative-rust-source-paths-v1")
+        } else {
+            digest.updateUtf8("project-relative-windows-rust-source-paths-v1")
+        }
         digest.updateLong(seed)
         digest.updateLong(qpBuildContext.nativeSeed)
         digest.update(qpBuildContext.jarLayoutDigest)

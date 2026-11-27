@@ -2,9 +2,12 @@ package io.github.hht0rro.javashroud.bytecode
 
 import io.github.hht0rro.javashroud.naming.MemberKey
 import io.github.hht0rro.javashroud.naming.MemberRename
+import java.util.concurrent.ConcurrentHashMap
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.ClassWriter
+import org.objectweb.asm.ConstantDynamic
+import org.objectweb.asm.Handle
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.Type
@@ -14,6 +17,7 @@ import org.objectweb.asm.commons.Remapper
 import org.objectweb.asm.tree.AbstractInsnNode
 import org.objectweb.asm.tree.AnnotationNode
 import org.objectweb.asm.tree.ClassNode
+import org.objectweb.asm.tree.InsnList
 import org.objectweb.asm.tree.InsnNode
 import org.objectweb.asm.tree.IntInsnNode
 import org.objectweb.asm.tree.LdcInsnNode
@@ -21,26 +25,98 @@ import org.objectweb.asm.tree.MethodInsnNode
 import org.objectweb.asm.tree.MethodNode
 import org.objectweb.asm.tree.TypeInsnNode
 import org.objectweb.asm.tree.VarInsnNode
+import org.objectweb.asm.tree.analysis.Analyzer
+import org.objectweb.asm.tree.analysis.AnalyzerException
+import org.objectweb.asm.tree.analysis.SourceInterpreter
+import org.objectweb.asm.tree.analysis.SourceValue
 
+/**
+ * In-artifact per-class declaration facts the method-reference signature
+ * fallback needs: the direct supertypes and the (name, descriptor) pairs this
+ * class declares. Owners absent from this index (framework classes, external
+ * libraries, kept classes excluded from the rename scope) never receive a
+ * fallback rename.
+ */
+class MethodFamilyIndexEntry(
+    val superName: String?,
+    val interfaceNames: List<String>,
+    val ownMethods: Set<Pair<String, String>>,
+)
+
+/** Immutable indexes shared by every class transformed under one effective rename map. */
+class MethodRenameIndex(
+    methodRenameMap: Map<MemberKey, MemberRename>,
+    bridgeMethodKeys: Set<MemberKey> = emptySet(),
+    nativeMethodKeys: Set<MemberKey> = emptySet(),
+    methodFamilies: Map<String, MethodFamilyIndexEntry> = emptyMap(),
+) {
+    internal val renamesByOwner = methodRenameMap.entries.groupBy { it.key.owner }
+        .mapValues { (_, entries) -> entries.associate { it.key to it.value } }
+    internal val bridgesByOwner = bridgeMethodKeys.groupBy { it.owner }.mapValues { it.value.toSet() }
+    internal val nativeByOwner = nativeMethodKeys.groupBy { it.owner }.mapValues { it.value.toSet() }
+    internal val uniqueRenameBySignature = methodRenameMap.entries
+        .groupBy { it.key.name to it.key.descriptor }
+        .mapValues { (_, entries) -> entries.map { it.value.renamedName }.distinct().singleOrNull() }
+    internal val fallbackBlockedSignatures = buildSet {
+        for ((owner, entry) in methodFamilies) {
+            for ((name, descriptor) in entry.ownMethods) {
+                if (MemberKey(owner, name, descriptor) !in methodRenameMap) add(name + descriptor)
+            }
+        }
+    }
+    internal val annotationElements = annotationElementRenameMap(methodRenameMap)
+}
+
+@JvmOverloads
 fun remapMethods(
     classBytes: ByteArray,
     methodRenameMap: Map<MemberKey, MemberRename>,
     bridgeMethodKeys: Set<MemberKey> = emptySet(),
     stringRewriteMap: Map<String, Map<String, String>> = emptyMap(),
     nativeMethodKeys: Set<MemberKey> = emptySet(),
+    methodFamilies: Map<String, MethodFamilyIndexEntry> = emptyMap(),
+    renameIndex: MethodRenameIndex = MethodRenameIndex(methodRenameMap, bridgeMethodKeys, nativeMethodKeys, methodFamilies),
 ): ByteArray = try {
     val classReader = ClassReader(classBytes)
     val classNode = ClassNode()
     classReader.accept(classNode, 0)
     val owner = classNode.name
-    val ownerMethodRenames = methodRenameMap.filterKeys { it.owner == owner }
-    val bridgeKeysForOwner = bridgeMethodKeys.filter { it.owner == owner }.toSet()
-    val nativeKeysForOwner = nativeMethodKeys.filter { it.owner == owner }.toSet()
- val platformMethodOwners = setOf("java/", "javax/", "jdk/", "sun/", "com/sun/", "kotlin/") 
- fun isPlatformMethodOwner(owner: String): Boolean = platformMethodOwners.any { owner.startsWith(it) } 
-    val uniqueRenameBySignature = methodRenameMap.entries
-        .groupBy { it.key.name to it.key.descriptor }
-        .mapValues { (_, entries) -> entries.map { it.value.renamedName }.distinct().singleOrNull() }
+    val ownerMethodRenames = renameIndex.renamesByOwner[owner].orEmpty()
+    val bridgeKeysForOwner = renameIndex.bridgesByOwner[owner].orEmpty()
+    val nativeKeysForOwner = renameIndex.nativeByOwner[owner].orEmpty()
+
+    /**
+     * Renamed name for a reference whose owner does not itself declare the
+     * member, resolved through the in-artifact supertype chain. Mirrors JVM
+     * virtual/interface dispatch: the reference may only follow the rename when
+     * an in-artifact ancestor declares the signature and the signature was
+     * renamed for every in-artifact declarer. References that resolve through
+     * external ancestors (framework classes) keep their original name.
+     */
+    fun inheritedFallbackName(currentOwner: String, name: String, descriptor: String): String? {
+        if (methodFamilies.isEmpty() || currentOwner !in methodFamilies) return null
+        val signature = name + descriptor
+        if (signature in renameIndex.fallbackBlockedSignatures) return null
+        val visited = mutableSetOf(currentOwner)
+        val pending = ArrayDeque<String>()
+        fun enqueue(supertype: String?) {
+            if (supertype != null && supertype != "java/lang/Object" && visited.add(supertype)) pending.add(supertype)
+        }
+        methodFamilies[currentOwner]?.let { entry ->
+            enqueue(entry.superName)
+            entry.interfaceNames.forEach(::enqueue)
+        }
+        while (pending.isNotEmpty()) {
+            val ancestor = pending.removeFirst()
+            val entry = methodFamilies[ancestor] ?: continue
+            if ((name to descriptor) in entry.ownMethods) {
+                return renameIndex.uniqueRenameBySignature[name to descriptor]
+            }
+            enqueue(entry.superName)
+            entry.interfaceNames.forEach(::enqueue)
+        }
+        return null
+    }
 
     val remappedBytes = run {
         val remapReader = ClassReader(classBytes)
@@ -48,11 +124,11 @@ fun remapMethods(
         val remapper = createRemapper(
             mapMethodName = { currentOwner: String, name: String, descriptor: String ->
                 methodRenameMap[MemberKey(currentOwner, name, descriptor)]?.renamedName
- ?: if (isPlatformMethodOwner(currentOwner)) name else uniqueRenameBySignature[name to descriptor] 
+                    ?: inheritedFallbackName(currentOwner, name, descriptor)
                     ?: name
             },
         )
-        val classVisitor = MethodDeclarationAwareRemapper(classWriter, remapper, owner, nativeKeysForOwner)
+        val classVisitor = MethodDeclarationAwareRemapper(classWriter, remapper, owner, nativeKeysForOwner, methodRenameMap)
         remapReader.accept(classVisitor, 0)
         classWriter.toByteArray()
     }
@@ -62,22 +138,111 @@ fun remapMethods(
     } else {
         addMethodRenameBridges(remappedBytes, ownerMethodRenames, bridgeKeysForOwner, nativeKeysForOwner)
     }
-    val annotationSyncedBytes = rewriteAnnotationElementNames(bridgedBytes, annotationElementRenameMap(methodRenameMap))
-    rewriteReflectionNameStrings(annotationSyncedBytes, methodStringRewriteMap = stringRewriteMap)
+    val annotationSyncedBytes = rewriteAnnotationElementNames(bridgedBytes, renameIndex.annotationElements)
+    rewriteReflectionNameStrings(annotationSyncedBytes, methodStringRewriteMap = stringRewriteMap, methodRenamesByOwner = renameIndex.renamesByOwner)
 } catch (_: Exception) {
     classBytes
 }
 
+/** Declaration facts for every artifact class, including classes whose fields are kept. */
+class FieldFamilyIndexEntry(
+    val superName: String?,
+    val interfaceNames: List<String>,
+    val ownFields: Set<Pair<String, String>>,
+)
+
+/** Resolves field references against the original declarations for one field rename pass. */
+class FieldRenameIndex(
+    private val fieldRenameMap: Map<MemberKey, MemberRename>,
+    private val fieldFamilies: Map<String, FieldFamilyIndexEntry> = emptyMap(),
+) {
+    private val referenceNames = ConcurrentHashMap<MemberKey, String>()
+
+    internal fun unresolvedDeclarations(classBytes: ByteArray): Set<MemberKey> {
+        val retained = mutableSetOf<MemberKey>()
+
+        fun collectPossibleDeclarations(key: MemberKey, visited: MutableSet<String>) {
+            if (!visited.add(key.owner)) return
+            val family = fieldFamilies[key.owner] ?: return
+            if ((key.name to key.descriptor) in family.ownFields) {
+                retained += key
+                return
+            }
+            family.interfaceNames.forEach { collectPossibleDeclarations(key.copy(owner = it), visited) }
+            family.superName?.let { collectPossibleDeclarations(key.copy(owner = it), visited) }
+        }
+
+        fun fieldReference(owner: String, name: String, descriptor: String) {
+            val key = MemberKey(owner, name, descriptor)
+            val resolved = resolveDeclaration(key, mutableSetOf()) ?: return
+            if (resolved.owner !in fieldFamilies && resolved.owner != "java/lang/Object") {
+                collectPossibleDeclarations(key, mutableSetOf())
+            }
+        }
+
+        fun constantReference(value: Any) {
+            when (value) {
+                is Handle -> if (value.tag in Opcodes.H_GETFIELD..Opcodes.H_PUTSTATIC) {
+                    fieldReference(value.owner, value.name, value.desc)
+                }
+                is ConstantDynamic -> repeat(value.bootstrapMethodArgumentCount) {
+                    constantReference(value.getBootstrapMethodArgument(it))
+                }
+            }
+        }
+
+        ClassReader(classBytes).accept(object : ClassVisitor(Opcodes.ASM9) {
+            override fun visitMethod(
+                access: Int, name: String?, descriptor: String?, signature: String?, exceptions: Array<out String>?,
+            ): MethodVisitor = object : MethodVisitor(Opcodes.ASM9) {
+                override fun visitFieldInsn(opcode: Int, owner: String, name: String, descriptor: String) {
+                    fieldReference(owner, name, descriptor)
+                }
+
+                override fun visitLdcInsn(value: Any) = constantReference(value)
+
+                override fun visitInvokeDynamicInsn(name: String, descriptor: String, bootstrap: Handle, vararg arguments: Any) {
+                    arguments.forEach { constantReference(it) }
+                }
+            }
+        }, ClassReader.SKIP_DEBUG or ClassReader.SKIP_FRAMES)
+        return retained
+    }
+
+    internal fun mapFieldName(owner: String, name: String, descriptor: String): String =
+        referenceNames.computeIfAbsent(MemberKey(owner, name, descriptor)) { key ->
+            val declaration = resolveDeclaration(key, mutableSetOf()) ?: key
+            fieldRenameMap[declaration]?.renamedName ?: key.name
+        }
+
+    private fun resolveDeclaration(key: MemberKey, visited: MutableSet<String>): MemberKey? {
+        if (!visited.add(key.owner)) return null
+        // Object declares no fields. An unavailable external type is a binding
+        // boundary: it may declare the field, so do not search past it.
+        val family = fieldFamilies[key.owner] ?: return if (key.owner == "java/lang/Object") null else key
+        if ((key.name to key.descriptor) in family.ownFields) return key
+
+        // JVM field resolution searches direct superinterfaces recursively
+        // before the superclass. A kept declaration also terminates the search.
+        for (interfaceName in family.interfaceNames) {
+            resolveDeclaration(key.copy(owner = interfaceName), visited)?.let { return it }
+        }
+        return family.superName?.let { resolveDeclaration(key.copy(owner = it), visited) }
+    }
+}
+
+@JvmOverloads
 fun remapFields(
     classBytes: ByteArray,
     fieldRenameMap: Map<MemberKey, MemberRename>,
     stringRewriteMap: Map<String, Map<String, String>> = emptyMap(),
+    renameIndex: FieldRenameIndex = FieldRenameIndex(fieldRenameMap),
 ): ByteArray = try {
     val classReader = ClassReader(classBytes)
     val classWriter = ClassWriter(classReader, 0)
     val classVisitor = ClassRemapper(classWriter, createRemapper(
         mapFieldName = { owner: String, name: String, descriptor: String ->
-            fieldRenameMap[MemberKey(owner, name, descriptor)]?.renamedName ?: name
+            renameIndex.mapFieldName(owner, name, descriptor)
         },
     ))
     classReader.accept(classVisitor, 0)
@@ -118,7 +283,9 @@ private fun rewriteAnnotationElementNames(
         changed = rewriteAnnotationValue(method.annotationDefault, annotationElementRenameMap).changed || changed
     }
     if (!changed) return classBytes
-    val writer = ClassWriter(ClassWriter.COMPUTE_MAXS or ClassWriter.COMPUTE_FRAMES)
+    // Annotation element names do not affect instructions, stack heights, or frames.
+    // Recomputing can fail on unrelated application types and discard already-remapped calls.
+    val writer = ClassWriter(0)
     node.accept(writer)
     return writer.toByteArray()
 }
@@ -185,34 +352,111 @@ private fun rewriteReflectionNameStrings(
     classBytes: ByteArray,
     fieldStringRewriteMap: Map<String, Map<String, String>> = emptyMap(),
     methodStringRewriteMap: Map<String, Map<String, String>> = emptyMap(),
+    methodRenamesByOwner: Map<String, Map<MemberKey, MemberRename>> = emptyMap(),
 ): ByteArray {
     if (fieldStringRewriteMap.isEmpty() && methodStringRewriteMap.isEmpty()) return classBytes
     val node = ClassNode()
     ClassReader(classBytes).accept(node, 0)
     var changed = false
     for (method in node.methods) {
-        for (instruction in method.instructions) {
+        val sources by lazy { ReflectionSources(node.name, method) }
+        for ((index, instruction) in method.instructions.toArray().withIndex()) {
             val call = instruction as? MethodInsnNode ?: continue
             if (call.owner != "java/lang/Class") continue
-            val fieldRewriteMap = fieldReflectionRewriteMap(call, fieldStringRewriteMap)
             val methodRewriteMap = methodReflectionRewriteMap(call, methodStringRewriteMap)
-            val rewriteNames = fieldRewriteMap.keys + methodRewriteMap.keys
-            if (rewriteNames.isEmpty()) continue
-            val nameConstant = reflectionNameConstantInstruction(call, rewriteNames) ?: continue
+            if (methodRewriteMap.isNotEmpty()) {
+                val frame = sources.frames?.get(index) ?: continue
+                val receiverIndex = frame.stackSize - 3 // receiver, String, Class[]
+                if (receiverIndex < 0) continue
+                val nameConstant = frame.getStack(receiverIndex + 1).insns.singleOrNull() as? LdcInsnNode ?: continue
+                val originalName = nameConstant.cst as? String ?: continue
+                val parameters = sources.parameterDescriptor(frame.getStack(receiverIndex + 2))
+                val candidate = methodReflectionRename(originalName, parameters, methodRewriteMap) ?: continue
+                val receiverSources = frame.getStack(receiverIndex).insns
+                val classLiterals = receiverSources.mapNotNull { (it as? LdcInsnNode)?.cst as? Type }
+                // A known owner must participate in the actual rename. In particular, an unrelated
+                // application method with the same name cannot rename a JDK or Android lookup.
+                val renamed = if (classLiterals.isEmpty()) candidate else {
+                    val owner = classLiterals.singleOrNull()?.takeIf { receiverSources.size == 1 && it.sort == Type.OBJECT }
+                        ?.internalName ?: continue
+                    methodRenamesByOwner[owner].orEmpty().values.asSequence()
+                        .filter { it.originalName == originalName }
+                        .filter { parameters == null || it.descriptor.substringBefore(')') + ")" == parameters }
+                        .map { it.renamedName }.distinct().singleOrNull() ?: continue
+                }
+                if (sources.isDirectName(nameConstant, call)) {
+                    nameConstant.cst = renamed
+                } else {
+                    // A copied or shared literal may still be needed by other calls. Replace only
+                    // this operand, preserving the Class[] and the stack shape at every frame.
+                    val replacement = InsnList().apply {
+                        add(InsnNode(Opcodes.SWAP))
+                        add(InsnNode(Opcodes.POP))
+                        add(LdcInsnNode(renamed))
+                        add(InsnNode(Opcodes.SWAP))
+                    }
+                    method.instructions.insertBefore(call, replacement)
+                }
+                changed = true
+                continue
+            }
+            val fieldRewriteMap = fieldReflectionRewriteMap(call, fieldStringRewriteMap)
+            if (fieldRewriteMap.isEmpty()) continue
+            val nameConstant = reflectionNameConstantInstruction(call, fieldRewriteMap.keys) ?: continue
             val originalName = nameConstant.cst as? String ?: continue
-            val renamedName = when {
-                methodRewriteMap.isNotEmpty() -> methodReflectionRename(call, originalName, methodRewriteMap)
-                fieldRewriteMap.isNotEmpty() -> fieldRewriteMap[originalName]
-                else -> null
-            } ?: continue
+            val renamedName = fieldRewriteMap[originalName] ?: continue
             nameConstant.cst = renamedName
             changed = true
         }
     }
     if (!changed) return classBytes
-    val writer = ClassWriter(ClassWriter.COMPUTE_MAXS or ClassWriter.COMPUTE_FRAMES)
+    // Both the LDC edit and the per-call operand replacement preserve control flow and frame types.
+    // Keep the input frames so writing this class does not need its dependencies.
+    val writer = ClassWriter(0)
     node.accept(writer)
     return writer.toByteArray()
+}
+
+private class ReflectionSources(owner: String, method: MethodNode) {
+    private val copiedLiterals = HashSet<AbstractInsnNode>()
+    private val originalIndices = method.instructions.toArray().withIndex().associate { it.value to it.index }
+    private val interpreter = object : SourceInterpreter(Opcodes.ASM9) {
+        override fun copyOperation(insn: AbstractInsnNode, value: SourceValue): SourceValue {
+            value.insns.filterTo(copiedLiterals) { it is LdcInsnNode && it.cst is String }
+            return value
+        }
+
+        override fun unaryOperation(insn: AbstractInsnNode, value: SourceValue): SourceValue =
+            if (insn.opcode == Opcodes.CHECKCAST) value else super.unaryOperation(insn, value)
+    }
+    val frames = try {
+        Analyzer(interpreter).analyze(owner, method)
+    } catch (_: AnalyzerException) {
+        null
+    }
+
+    fun parameterDescriptor(array: SourceValue): String? {
+        val source = array.insns.singleOrNull() ?: return null
+        if (source.opcode == Opcodes.ACONST_NULL) return "()"
+        if (source !is TypeInsnNode || source.opcode != Opcodes.ANEWARRAY || source.desc != "java/lang/Class") return null
+        val frame = originalIndices[source]?.let { frames?.get(it) } ?: return null
+        val size = frame.getStack(frame.stackSize - 1).insns.singleOrNull() ?: return null
+        return "()".takeIf { constantArraySize(size) == 0 }
+    }
+
+    fun isDirectName(literal: LdcInsnNode, call: MethodInsnNode): Boolean {
+        if (literal in copiedLiterals) return false
+        var next = literal.next
+        while (next != null && next !== call) {
+            if (next.type in controlFlowTypes || next.opcode in Opcodes.IRETURN..Opcodes.RETURN || next.opcode == Opcodes.ATHROW) return false
+            next = next.next
+        }
+        return next === call
+    }
+
+    private companion object {
+        val controlFlowTypes = setOf(AbstractInsnNode.LABEL, AbstractInsnNode.JUMP_INSN, AbstractInsnNode.LOOKUPSWITCH_INSN, AbstractInsnNode.TABLESWITCH_INSN)
+    }
 }
 
 private fun fieldReflectionRewriteMap(
@@ -244,7 +488,7 @@ private fun methodReflectionRewriteMap(
 ): Map<String, Map<String, String>> = when {
     methodStringRewriteMap.isNotEmpty() &&
         (call.name == "getMethod" || call.name == "getDeclaredMethod") &&
-        call.desc.startsWith("(Ljava/lang/String;") -> methodStringRewriteMap
+        call.desc == "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;" -> methodStringRewriteMap
     else -> emptyMap()
 }
 
@@ -264,38 +508,13 @@ private fun reflectionNameConstantInstruction(call: MethodInsnNode, rewriteNames
 }
 
 private fun methodReflectionRename(
-    call: MethodInsnNode,
     originalName: String,
+    parameterDescriptor: String?,
     rewriteMap: Map<String, Map<String, String>>,
 ): String? {
     val byParameters = rewriteMap[originalName] ?: return null
-    val parameterDescriptor = methodReflectionParameterDescriptor(call)
     if (parameterDescriptor != null) return byParameters[parameterDescriptor]
     return byParameters.values.distinct().singleOrNull()
-}
-
-private fun methodReflectionParameterDescriptor(call: MethodInsnNode): String? {
-    if (call.desc == "(Ljava/lang/String;)Ljava/lang/reflect/Method;") return "()"
-    if (!call.desc.startsWith("(Ljava/lang/String;[Ljava/lang/Class;)")) return null
-    if (previousMeaningfulInstruction(call)?.opcode == Opcodes.ACONST_NULL) return "()"
-    val arrayAllocation = findClassArrayAllocationBefore(call) ?: return null
-    return when (constantArraySize(arrayAllocation)) {
-        0 -> "()"
-        else -> null
-    }
-}
-
-private fun findClassArrayAllocationBefore(call: MethodInsnNode): AbstractInsnNode? {
-    var current = call.previous
-    var scanned = 0
-    while (current != null && scanned < 16) {
-        if (current.opcode >= 0) scanned++
-        if (current is TypeInsnNode && current.opcode == Opcodes.ANEWARRAY && current.desc == "java/lang/Class") {
-            return previousMeaningfulInstruction(current)
-        }
-        current = current.previous
-    }
-    return null
 }
 
 private fun constantArraySize(instruction: AbstractInsnNode): Int? = when (instruction.opcode) {
@@ -343,7 +562,8 @@ private fun addMethodRenameBridges(
         node.methods.add(buildBridgeMethod(node, rename, rename.renamedName, rename.originalName))
     }
 
-    val writer = computeFramesWriter(ClassReader(classBytes))
+    // Generated bridges have no branches or handlers; existing methods keep their input frames.
+    val writer = ClassWriter(ClassWriter.COMPUTE_MAXS)
     node.accept(writer)
     return writer.toByteArray()
 }
@@ -363,12 +583,14 @@ private fun buildBridgeMethod(node: ClassNode, rename: MemberRename, bridgeName:
         method.instructions.add(VarInsnNode(argumentType.getOpcode(Opcodes.ILOAD), localIndex))
         localIndex += argumentType.size
     }
+    val isInterface = node.access and Opcodes.ACC_INTERFACE != 0
     val invokeOpcode = when {
         isStatic -> Opcodes.INVOKESTATIC
         originalAccess and Opcodes.ACC_PRIVATE != 0 -> Opcodes.INVOKESPECIAL
+        isInterface -> Opcodes.INVOKEINTERFACE
         else -> Opcodes.INVOKEVIRTUAL
     }
-    method.instructions.add(MethodInsnNode(invokeOpcode, rename.owner, targetName, rename.descriptor, false))
+    method.instructions.add(MethodInsnNode(invokeOpcode, rename.owner, targetName, rename.descriptor, isInterface))
     method.instructions.add(InsnNode(Type.getReturnType(rename.descriptor).getOpcode(Opcodes.IRETURN)))
     method.maxLocals = localIndex
     method.maxStack = 0
@@ -381,6 +603,7 @@ private class MethodDeclarationAwareRemapper(
     private val remapper: Remapper,
     private val owner: String,
     private val nativeMethodKeys: Set<MemberKey>,
+    private val methodRenameMap: Map<MemberKey, MemberRename>,
 ) : ClassVisitor(Opcodes.ASM9, classVisitor) {
     override fun visitMethod(
         access: Int,
@@ -393,7 +616,11 @@ private class MethodDeclarationAwareRemapper(
             return super.visitMethod(access, name, descriptor, signature, exceptions)
         }
         val key = MemberKey(owner, name, descriptor)
-        val mappedName = if (key in nativeMethodKeys) name else remapper.mapMethodName(owner, name, descriptor)
+        // Declarations are renamed through the exact owner-keyed map only. A
+        // signature fallback must never touch a declaration: kept members,
+        // native bindings and override-protected methods keep their names even
+        // when an unrelated artifact class with the same signature was renamed.
+        val mappedName = if (key in nativeMethodKeys) name else methodRenameMap[key]?.renamedName ?: name
         val mappedDescriptor = remapper.mapMethodDesc(descriptor)
         val mappedSignature = remapper.mapSignature(signature, false)
         val mappedExceptions = exceptions?.map { remapper.mapType(it) }?.toTypedArray()

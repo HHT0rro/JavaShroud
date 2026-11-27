@@ -455,8 +455,12 @@ object RustToolchainProvisioner {
 
     fun resolve(
         environment: Map<String, String> = System.getenv(),
-        pathEnv: String? = environment["PATH"],
         osName: String = System.getProperty("os.name"),
+        pathEnv: String? = environment["PATH"] ?: if (osName.trimStart().startsWith("Windows", ignoreCase = true)) {
+            environment.entries.firstOrNull { it.key.equals("PATH", ignoreCase = true) }?.value
+        } else {
+            null
+        },
         osArch: String = System.getProperty("os.arch"),
         commandRunner: (List<String>) -> CommandResult = ::runCommand,
         userHome: Path = Paths.get(System.getProperty("user.home")),

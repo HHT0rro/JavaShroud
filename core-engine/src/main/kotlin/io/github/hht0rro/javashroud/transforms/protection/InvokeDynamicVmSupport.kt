@@ -37,7 +37,10 @@ internal fun isNativeVmSupportedInvokeDynamicCall(
         // Lambda factories replay through QpBridge.replayQpLambda with the
         // captured SAM contract; the SAM implementation itself stays on the
         // JVM via the lambda-implementation skip list.
-        return normalized.bootstrapMethodArguments.any { it is Handle }
+        val target = normalized.bootstrapMethodArguments.getOrNull(1) as? Handle ?: return false
+        return normalized.bootstrapMethodHandle.name == "metafactory" &&
+            normalized.bootstrapMethodArguments.size == 3 &&
+            target.tag == org.objectweb.asm.Opcodes.H_INVOKESTATIC
     }
     if (normalized.bootstrapMethodHandle.owner == "java/lang/invoke/StringConcatFactory") return true
     // Native string-page token materialization: `()[B` rows whose bootstrap

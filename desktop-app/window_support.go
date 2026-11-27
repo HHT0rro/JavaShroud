@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -88,13 +89,13 @@ func (a *App) SelectInputJar() (string, error) {
 	}
 
 	path, err := runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
-		Title: "閫夋嫨杈撳叆 Jar",
+		Title: "选择输入 Jar / APK",
 		Filters: []runtime.FileFilter{
-			{DisplayName: "Java Archive (*.jar)", Pattern: "*.jar"},
+			{DisplayName: "Java Archive / Android Package (*.jar;*.apk)", Pattern: "*.jar;*.apk"},
 		},
 	})
 	if err != nil {
-		return "", fmt.Errorf("select input jar failed: mode=open-file path=*.jar: %w", err)
+		return "", fmt.Errorf("select input jar failed: mode=open-file path=*.jar;*.apk: %w", err)
 	}
 
 	return path, nil
@@ -107,10 +108,10 @@ func (a *App) SelectOutputJar(defaultInputJarPath string) (string, error) {
 
 	defaultFileName := buildDefaultOutputJarName(defaultInputJarPath)
 	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
-		Title:           "閫夋嫨杈撳嚭 Jar",
+		Title:           "选择输出 Jar / APK",
 		DefaultFilename: defaultFileName,
 		Filters: []runtime.FileFilter{
-			{DisplayName: "Java Archive (*.jar)", Pattern: "*.jar"},
+			{DisplayName: "Java Archive / Android Package (*.jar;*.apk)", Pattern: "*.jar;*.apk"},
 		},
 	})
 	if err != nil {
@@ -177,9 +178,38 @@ func (a *App) WriteTextFile(path string, content string) error {
 		return errors.New("write text file failed: path is empty")
 	}
 
-	if err := os.WriteFile(trimmedPath, []byte(content), 0o644); err != nil {
+	if err := replaceExportedText(trimmedPath, content); err != nil {
 		return fmt.Errorf("write text file failed: path=%s: %w", trimmedPath, err)
 	}
 
 	return nil
+}
+
+func replaceExportedText(path, content string) error {
+	mode := os.FileMode(0o600)
+	if target, err := os.Lstat(path); err == nil {
+		if !target.Mode().IsRegular() {
+			return errors.New("destination is not a regular file")
+		}
+		mode = target.Mode().Perm()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	stage, err := os.CreateTemp(filepath.Dir(path), ".javashroud-config-*.tmp")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(stage.Name())
+	defer stage.Close()
+	if _, err = stage.WriteString(content); err != nil {
+		return err
+	}
+	if err = stage.Chmod(mode); err != nil {
+		return err
+	}
+	if err = stage.Close(); err != nil {
+		return err
+	}
+	return os.Rename(stage.Name(), path)
 }

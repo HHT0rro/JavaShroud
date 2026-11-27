@@ -1,9 +1,7 @@
 package io.github.hht0rro.javashroud
 
 import com.fasterxml.jackson.databind.ObjectMapper
-import io.github.hht0rro.javashroud.adapters.protocol.EngineCommand
-import io.github.hht0rro.javashroud.adapters.protocol.buildCommandRequest
-import io.github.hht0rro.javashroud.adapters.protocol.dispatchRequest
+import io.github.hht0rro.javashroud.config.loadValidatedConfig
 import io.github.hht0rro.javashroud.kernel.EngineKernel
 import io.github.hht0rro.javashroud.model.analysis.MatchedMember
 import io.github.hht0rro.javashroud.model.analysis.MemberKind
@@ -12,15 +10,17 @@ import io.github.hht0rro.javashroud.model.analysis.RuleMatch
 import io.github.hht0rro.javashroud.model.analysis.TargetSelector
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
+import io.github.hht0rro.javashroud.transforms.protection.OpaqueVmDispatcher
+import io.github.hht0rro.javashroud.transforms.protection.currentQpBuildContextOrNull
+import org.junit.jupiter.api.io.TempDir
 import org.objectweb.asm.ClassReader
-import org.objectweb.asm.ClassVisitor
-import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
+import org.objectweb.asm.tree.ClassNode
+import org.objectweb.asm.tree.MethodInsnNode
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.TimeUnit
 import java.util.jar.JarEntry
-import java.util.jar.JarInputStream
 import java.util.jar.JarOutputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -30,23 +30,26 @@ class CrossMethodOutliningExecutionTest {
     private val objectMapper = ObjectMapper()
 
     @Test
-    fun cross_method_outlined_vm_methods_preserve_runtime_result_in_transformed_jar() {
+    fun cross_method_outlined_vm_methods_preserve_runtime_result_in_transformed_jar(@TempDir directory: Path) {
         if (!EmbeddedHelperDeployment.hasLoadableNativeKernel()) return
-        val inputJar = buildCrossMethodFixtureJar(Files.createTempFile("javashroud-cross-method-input", ".jar"))
-        var outputJar: Path? = null
+        val inputJar = buildCrossMethodFixtureJar(directory.resolve("cross-method-input.jar"))
+        val outputJar = directory.resolve("cross-method-output.jar")
         try {
             val baseline = runJava(inputJar)
             assertEquals(0, baseline.exitCode, "Baseline cross-method fixture must run. output=${baseline.output}")
             assertEquals("34", baseline.output.trim(), "Baseline fixture contract changed")
 
-            outputJar = runEngine(inputJar)
+            val dispatchers = runEngine(inputJar, outputJar)
             assertTrue(
                 listOf(
                     "seed" to "(I)I",
                     "fold" to "(I)I",
                     "verify" to "()I",
                 ).all { (name, descriptor) ->
-                    methodInvokesNativeVmDispatcher(outputJar, "e2e/CrossMethodOutliningRoot", name, descriptor)
+                    val dispatcher = dispatchers.single {
+                        it.owner == "e2e/CrossMethodOutliningRoot" && it.originalName == name && it.originalDescriptor == descriptor
+                    }
+                    methodInvokesNativeVmDispatcher(outputJar, dispatcher)
                 },
                 "Every selected cross-method fixture method must be replaced by native VM dispatcher stub",
             )
@@ -55,13 +58,12 @@ class CrossMethodOutliningExecutionTest {
             assertEquals(0, transformed.exitCode, "Cross-method outlined transformed JAR must run. output=${transformed.output}")
             assertEquals(baseline.output.trim(), transformed.output.trim(), "Cross-method outlining must preserve method semantics")
         } finally {
-            outputJar?.let { Files.deleteIfExists(it) }
+            Files.deleteIfExists(outputJar)
             Files.deleteIfExists(inputJar)
         }
     }
 
-    private fun runEngine(inputJar: Path): Path {
-        val outputJar = inputJar.resolveSibling("javashroud-cross-method-output.jar")
+    private fun runEngine(inputJar: Path, outputJar: Path): List<OpaqueVmDispatcher> {
         val configPath = inputJar.resolveSibling("javashroud-cross-method-config.toml")
         writeTestRunConfigToml(
             configPath = configPath,
@@ -85,13 +87,16 @@ class CrossMethodOutliningExecutionTest {
             ),
         )
         try {
-            withTestBootSecret {
-                dispatchRequest(buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())), EngineKernel())
+            var dispatchers = emptyList<OpaqueVmDispatcher>()
+            EngineKernel().run(loadValidatedConfig(configPath), configPath) { event ->
+                if (event.type == "done") {
+                    dispatchers = checkNotNull(currentQpBuildContextOrNull()).opaqueVmDispatchers().values.toList()
+                }
             }
+            return dispatchers
         } finally {
             Files.deleteIfExists(configPath)
         }
-        return outputJar
     }
 
     private fun buildCrossMethodFixtureJar(target: Path): Path {
@@ -196,38 +201,26 @@ class CrossMethodOutliningExecutionTest {
         )
     }
 
-    private fun methodInvokesNativeVmDispatcher(jarPath: Path, className: String, targetName: String, targetDescriptor: String): Boolean {
-        JarInputStream(Files.newInputStream(jarPath)).use { jar ->
-            while (true) {
-                val entry = jar.nextJarEntry ?: break
-                if (!entry.isDirectory && entry.name == "$className.class") {
-                    var found = false
-                    ClassReader(jar.readBytes()).accept(object : ClassVisitor(Opcodes.ASM9) {
-                        override fun visitMethod(access: Int, name: String, descriptor: String, signature: String?, exceptions: Array<String>?): MethodVisitor {
-                            if (name != targetName || descriptor != targetDescriptor) return object : MethodVisitor(Opcodes.ASM9) {}
-                            return object : MethodVisitor(Opcodes.ASM9) {
-                                override fun visitMethodInsn(opcode: Int, owner: String, name: String, descriptor: String, isInterface: Boolean) {
-                                    if (
-                                        opcode == Opcodes.INVOKESTATIC &&
-                                        (descriptor == "(JLjava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;" ||
-                                            descriptor == "(J[Ljava/lang/Object;)Ljava/lang/Object;" ||
-                                            descriptor == "(J)V" ||
-                                            descriptor == "(JI)V" ||
-                                            descriptor == "(J)I" ||
-                                            descriptor == "(JI)I")
-                                    ) {
-                                        found = true
-                                    }
-                                }
-                            }
-                        }
-                    }, ClassReader.SKIP_FRAMES)
-                    return found
-                }
-                jar.closeEntry()
-            }
+    private fun methodInvokesNativeVmDispatcher(jarPath: Path, dispatcher: OpaqueVmDispatcher): Boolean {
+        val classes = loadJarClassBytes(jarPath)
+        val classBytes = classes[dispatcher.owner] ?: return false
+        val node = ClassNode()
+        ClassReader(classBytes).accept(node, 0)
+        val method = node.methods.singleOrNull {
+            it.name == dispatcher.syntheticName && it.desc == dispatcher.syntheticDescriptor
+        } ?: return false
+        val requiredAccess = Opcodes.ACC_STATIC or Opcodes.ACC_SYNTHETIC
+        if (method.access and requiredAccess != requiredAccess) return false
+        val terminal = method.instructions.filterIsInstance<MethodInsnNode>().singleOrNull {
+            it.opcode == Opcodes.INVOKESTATIC &&
+                it.desc == "(Ljava/lang/String;[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
+        } ?: return false
+        val helperBytes = classes[terminal.owner] ?: return false
+        val helper = ClassNode()
+        ClassReader(helperBytes).accept(helper, ClassReader.SKIP_CODE)
+        return helper.methods.any {
+            it.name == terminal.name && it.desc == terminal.desc && it.access and Opcodes.ACC_STATIC != 0
         }
-        return false
     }
 
     private fun runJava(jarPath: Path): ProcessResult {

@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.31.0-5b6ee1" />
+  <img alt="Version" src="https://img.shields.io/badge/version-0.31.1-5b6ee1" />
   <img alt="License" src="https://img.shields.io/badge/license-GPL--3.0-blue" />
   <img alt="JDK" src="https://img.shields.io/badge/JDK-17%2B-orange" />
   <img alt="Desktop" src="https://img.shields.io/badge/desktop-Wails%20%2B%20Vue-42b883" />
@@ -151,11 +151,53 @@ Qp runtime 是 Rust-only 边界，源码随引擎分发在 `core-engine/src/main
 ### 桌面与构建集成
 
 - 桌面版把 Xenolith CLI 内嵌进 `javashroud.exe`（构建标签 `javashroud_embed_xenolith`）并随包附带 `tools\xenolith.exe`，在"自定义加壳"模块一键开启；默认即内置 CLI 自动打包，也可暂停等待手动加壳（VMP 等）再选回文件。
-- 发布包构建时找不到本地 xenolith.exe，`build-release.bat` 会调 `desktop-app\fetch-xenolith.ps1` 从 GitHub Releases 自动获取（跳过无 Windows 资产的 tag），优先国内镜像链 `ghfast.top` → `gh-proxy.com` → `ghproxy.net`、直连兜底，并按发布包内 `manifest.json` 的逐工件 SHA-256 校验通过后才原子写入。可用环境变量覆盖：`XENOLITH_MIRRORS`（分号分隔的镜像前缀，`-` 表示禁用镜像）、`XENOLITH_RELEASE_TAG`（固定 release tag）、`XENOLITH_SHA256`（硬钉摘要，不匹配即失败）。
+- 正式发布使用 `--require-xenolith-pin`，设置来自独立可信来源的 `XENOLITH_SHA256`，并通过 `XENOLITH_EXE` 指定本地 CLI 或通过 `XENOLITH_RELEASE_TAG` 指定恰有一个 Windows ZIP 的 release tag。`desktop-app\fetch-xenolith.ps1` 验证暂存的 CLI 和清单后，在目标目录的独占锁下提交两者，失败时恢复旧文件。输入及目标须为普通文件，清单别名、硬链接和目录链接会被拒绝。`XENOLITH_MIRRORS` 接受分号分隔的镜像前缀，`-` 禁用镜像。默认镜像链为 `ghfast.top`、`gh-proxy.com`、`ghproxy.net`，之后尝试直连。
+- 开发环境优先使用同级 Xenolith 源码仓库中新构建的 `target\release\xenolith.exe`，其次回退到旧 `dist\xenolith.exe`；正式发布仍把解析出的 CLI 内嵌并附带 `tools\xenolith.exe`。
 
 ### 加壳镜像契约
 
-无论镜像来自 Xenolith、VMP 还是其他加壳器，进入 JSIM 绑定前都要过同一道预校验：必须是 PE64 DLL，保留 `.jsms` / `.jsmk` 测量段与 `JNI_OnLoad` / `JNI_OnUnload` / `qp_r1_*` 导出，否则被具名拒绝。不使用 CLI 的场景还有两条路：`packedPath` / `packedPathLinux` 直接指向预打包镜像；`JAVASHROUD_PACK_HANDOFF=1` 时引擎发出 `need-pack` 事件并等待路径回传，Linux 可回 `SKIP` 直接发运未加壳 `.so`。
+无论镜像来自 Xenolith、VMP 还是其他加壳器，进入 JSIM 绑定前都要过同一道预校验：必须是 PE64 DLL，保留输入中的 `.jsms` / `.jsmk`，以及输入存在时的 `.jsmd`；区段 RVA、大小和原始字节必须一致（允许加壳器改变区段在文件中的偏移），并保留 JNI / qp_r1 桥接导出。CLI 加壳还必须返回有效 Xenolith JSON 报告，且报告中的档位、输入/输出大小、PE 格式、x86-64 架构、注入后端、JNI 安全的 IAT 模式和生产 `debug_gate=3` 全部匹配，否则 fail-closed。非 CLI 场景还有两条路：`packedPath` / `packedPathLinux` 直接指向预打包镜像；`JAVASHROUD_PACK_HANDOFF=1` 时引擎发出 `need-pack` 事件并等待路径回传，Linux 可回 `SKIP` 直接发运未加壳 `.so`。
+
+## Android APK 混淆加壳
+
+`-config` 支持输入单个 APK。配置里令 `inputJarPath` 指向 `.apk`，可设置 `artifactFormat = "apk"` 或追加 `--apk`。引擎将 DEX 转换为 class，根据 Manifest、资源和 JNI 等引用生成保留规则，执行管线，再经 D8 生成 DEX、重打包、对齐并以 v1+v2 重签名。资源表和原有 Native 库保持原字节。D8 可以重新划分 DEX，输出数量可能改变。默认使用调试密钥，发布或覆盖升级时请使用应用对应的签名证书。
+
+APK 中的 `META-INF/services/` 登记文件保持原字节；它引用的服务接口和实现类如果在 APK 内，也保留原类名，以便 `ServiceLoader` 按原登记发现它们。
+APK 内已有的 `j$` Java API 兼容类保留原名，与应用类分开生成 DEX，两组仍发布到同一个 APK。
+
+当 DEX 包含可识别的 Android 框架接口占位类时，其实现类的公开实例方法名会保留，以兼容 SDK 方法声明不在引擎 classpath 中的系统回调；实现类仍可重命名。
+
+DEX 转换出现方法异常、异常堆栈或错误报告时，引擎会报告转换失败并拒绝发布，即使 dex2jar 返回 0。每次转换使用独立暂存路径，失败会保留已有 APK 和附属文件，详细原因可通过 `--log-file` 查看。
+
+捆绑 dex2jar 2.4.28 的长字符串修复随引擎构建为 Java 8 JAR，并通过工具清单认证后加载。修复按类文件 modified UTF-8 的实际字节上限拆分超长常量，保留参数、相邻寄存器和字符串驻留语义。自定义 `apk.dex2jarDirPath` 也使用这份认证修复，用户提供的工具目录只读。修复来源和修改范围见 `THIRD_PARTY_NOTICES.md`。
+
+仓库内的 `ApkAndroidDeviceSmokeTest` 从源码生成自有单 DEX、多 DEX、XML 回调与简单 JNI 夹具，并对原包和处理后包执行返回值、Parcelable 写读、WebView JavaScript 接口、跨改名包的继承分派、签名及对齐检查。设备须已启动，明确设置 `ANDROID_SERIAL`、`ANDROID_HOME` 和 `ANDROID_NDK_HOME` 后再启用。未启用时这三项测试会跳过；启用后缺工具或设备会失败，Gradle 也会重新执行测试。证据保留在 `build/android-runtime-evidence/`，失败时在卸载前采集原生崩溃及进程退出诊断。
+
+```bash
+export ANDROID_SERIAL=emulator-5554
+export JAVASHROUD_ANDROID_DEVICE_TESTS=true
+./gradlew :core-engine:test --tests '*.ApkAndroidDeviceSmokeTest' --max-workers=1
+```
+
+可用 `JAVASHROUD_ANDROID_EXPECT_API` 和 `JAVASHROUD_ANDROID_EXPECT_PAGE_SIZE` 要求设备参数精确匹配。CI 配置了 API 21/26 的 4 KiB 与 API 35 的 16 KiB x86_64 模拟器作业，作业归档实际设备信息及测试结果。ARM64 真机结果须另行验证。
+
+```powershell
+java -cp build\core-engine\install\core-engine\lib\* io.github.hht0rro.javashroud.MainKt ^
+  -config apk-config.toml --apk --log-file run.log
+```
+
+免配置直跑（默认管线 + 默认 minimal profile）：
+
+```powershell
+java -cp build\core-engine\install\core-engine\lib\* io.github.hht0rro.javashroud.MainKt ^
+  --input app.apk --output app-shrouded.apk --log-file run.log
+```
+
+APK 默认采用 `minimal` 并选择 Android 可用的 pass。显式选择 `minimal` 时，请在配置中列出所需 pass。Android 管线会拒绝依赖桌面 Qp 运行时的 `method-virtualization` 和 `nativeshroud`，`release-hardened` 也因依赖桌面发布检查而失败。
+
+输入清单须声明数字 `minSdkVersion`。省略 `apk.minApi` 时，引擎从清单推导，最低取 21，必要时会更新输出清单并发出提示。若显式配置的 `apk.minApi` 高于清单声明，引擎会拒绝处理。含 indy 的管线要求 API 26 或以上。签名、归档校验和附属文件检查均成功后才发布 APK。
+
+APK 中的未压缩 `.so` 默认至少按 4 KiB 对齐。如果输入 APK 已有按 16 KiB 对齐的未压缩原生库，重打包会将这些库统一按 16 KiB 对齐。也可以在 `[apk]` 中设置 `soPageSize = 16384`，为其他输入指定这一对齐要求。输入 ELF 的可加载段也需要按目标页大小对齐。重打包会保留库文件本身的字节。
 
 ## 与 JNIC / Native 混淆的区别
 
@@ -178,21 +220,21 @@ Qp runtime 是 Rust-only 边界，源码随引擎分发在 `core-engine/src/main
 ## 快速开始
 
 ```powershell
-# 构建核心引擎（产物：build\core-engine\libs\obfuscator-engine-0.31.0.jar）
+# 构建核心引擎（产物：build\core-engine\libs\obfuscator-engine-0.31.1.jar）
 .\gradlew.bat :core-engine:jar
 
 # 查看 pass 清单、参数、默认 pipeline 与兼容性约束（TOML 输出）
-java -jar build\core-engine\libs\obfuscator-engine-0.31.0.jar -schema
+java -jar build\core-engine\libs\obfuscator-engine-0.31.1.jar -schema
 
 # 查看输入 JAR 的包 / 类 / 成员树
-java -jar build\core-engine\libs\obfuscator-engine-0.31.0.jar -inspect app.jar
+java -jar build\core-engine\libs\obfuscator-engine-0.31.1.jar -inspect app.jar
 
 # 按 TOML 配置处理 JAR
-java -jar build\core-engine\libs\obfuscator-engine-0.31.0.jar -config path\to\config.toml
+java -jar build\core-engine\libs\obfuscator-engine-0.31.1.jar -config path\to\config.toml
 
 # 引擎运行时缓存维护
-java -jar build\core-engine\libs\obfuscator-engine-0.31.0.jar -gc
-java -jar build\core-engine\libs\obfuscator-engine-0.31.0.jar -gc --apply
+java -jar build\core-engine\libs\obfuscator-engine-0.31.1.jar -gc
+java -jar build\core-engine\libs\obfuscator-engine-0.31.1.jar -gc --apply
 ```
 
 配置示例（重命名 + 控制流平坦化；opt-in pass 需要 `allowOptInPasses = true`）：

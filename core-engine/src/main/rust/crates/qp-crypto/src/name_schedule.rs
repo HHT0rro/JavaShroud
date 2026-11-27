@@ -75,7 +75,9 @@ pub fn install_name_schedule(
 pub fn active_name_schedule() -> Result<QpNameSchedule, NameScheduleError> {
     let guard = INSTALLED.lock().expect("name schedule lock");
     match &*guard {
-        Some(installed) => QpNameSchedule::new(&installed.seed, &installed.commitment, installed.version),
+        Some(installed) => {
+            QpNameSchedule::new(&installed.seed, &installed.commitment, installed.version)
+        }
         None => QpNameSchedule::new(&TEST_NAME_SEED, &TEST_COMMITMENT, QP_SCHEDULE_VERSION),
     }
 }
@@ -111,8 +113,7 @@ pub fn derived_frame_auth_domain() -> Result<[u8; 16], NameScheduleError> {
     active_name_schedule()?.derive_domain(ROLE_CRYPTO, LANE_FRAME_AUTH, 0)
 }
 
-const URL_SAFE: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+const URL_SAFE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 const RESOURCE_ROOT_BYTES: usize = 9;
 const JNI_NAME_MIN: usize = 8;
 const JNI_NAME_MAX: usize = 12;
@@ -352,10 +353,7 @@ mod tests {
             schedule.derive_resource_root(0, 0).expect("root"),
             "2BVHBcHeWtGD"
         );
-        assert_eq!(
-            schedule.derive_jni_name(0, 0).expect("jni"),
-            "qchmbfhvjdx"
-        );
+        assert_eq!(schedule.derive_jni_name(0, 0).expect("jni"), "qchmbfhvjdx");
         assert_eq!(
             schedule
                 .derive_page_path_token(ROLE_RESOURCE, 7, 0)

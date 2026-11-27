@@ -30,7 +30,7 @@ const emit = defineEmits<{ open: [url: string] }>()
           <div><dt>{{ displayLanguage === 'zh' ? '引擎版本' : 'Engine version' }}</dt><dd class="version-value">{{ version }}</dd></div>
           <div><dt>{{ displayLanguage === 'zh' ? '界面框架' : 'Interface' }}</dt><dd>Vue 3 / Naive UI</dd></div>
           <div><dt>{{ displayLanguage === 'zh' ? '桌面运行时' : 'Desktop runtime' }}</dt><dd>Wails</dd></div>
-          <div><dt>{{ displayLanguage === 'zh' ? '处理对象' : 'Input format' }}</dt><dd>Java Archive (.jar)</dd></div>
+          <div><dt>{{ displayLanguage === 'zh' ? '处理对象' : 'Input format' }}</dt><dd>Java Archive / Android Package (.jar / .apk)</dd></div>
         </dl>
       </LiquidGlass>
 

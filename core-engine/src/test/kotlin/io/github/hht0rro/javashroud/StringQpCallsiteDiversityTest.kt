@@ -192,18 +192,27 @@ class StringQpCallsiteDiversityTest {
             val helperNode = classNode(
                 sealed.classArtifacts.single { it.summary.internalName == sealedHelperOwner }.bytes,
             )
+            val entryPoints = buildSet {
+                add(STRING_TERMINAL_NAME to STRING_TERMINAL_DESCRIPTOR)
+                add("materializeQpStringToken" to "(Ljava/lang/String;)[B")
+                STRING_BOOTSTRAP_ALIASES.forEach { add(it to STRING_BOOTSTRAP_DESCRIPTOR) }
+                STRING_TOKEN_BOOTSTRAP_ALIASES.forEach { add(it to STRING_TOKEN_BOOTSTRAP_DESCRIPTOR) }
+            }
             assertFalse(
-                helperNode.methods.any { methodNode ->
-                    methodNode.name == STRING_TERMINAL_NAME ||
-                        methodNode.name == "materializeQpStringToken" ||
-                        methodNode.name in STRING_BOOTSTRAP_ALIASES ||
-                        methodNode.name in STRING_TOKEN_BOOTSTRAP_ALIASES
-                },
-                "unsealed StringPage helper method names must not survive in the relocated helper",
+                helperNode.methods.any { (it.name to it.desc) in entryPoints },
+                "unsealed StringPage callsite entry points must not survive in the relocated helper",
             )
-            assertTrue(
-                helperNode.methods.any { it.name == sealedTerminalName && it.desc == STRING_TERMINAL_DESCRIPTOR },
-                "the relocated helper must retain the sealed String terminal",
+            val sealedTerminal = helperNode.methods.single {
+                it.name == sealedTerminalName && it.desc == STRING_TERMINAL_DESCRIPTOR
+            }
+            val unpackedTerminal = helperNode.methods.single { it.desc == "([BI[B)Ljava/lang/String;" }
+            assertEquals(0, unpackedTerminal.access and (Opcodes.ACC_PUBLIC or Opcodes.ACC_PROTECTED))
+            assertEquals(
+                1,
+                sealedTerminal.instructions.asSequence().filterIsInstance<MethodInsnNode>().count {
+                    it.owner == sealedHelperOwner && it.name == unpackedTerminal.name && it.desc == unpackedTerminal.desc
+                },
+                "the packed terminal must hand off to the internal typed terminal exactly once",
             )
             assertTrue(
                 sealedBootstrapNames.values.all { sealedName ->
@@ -263,7 +272,7 @@ class StringQpCallsiteDiversityTest {
 
     private fun fixtureClass(literals: List<String>): ByteArray {
         val writer = ClassWriter(ClassWriter.COMPUTE_FRAMES or ClassWriter.COMPUTE_MAXS)
-        writer.visit(Opcodes.V21, Opcodes.ACC_PUBLIC or Opcodes.ACC_FINAL, FIXTURE_INTERNAL_NAME, null, "java/lang/Object", null)
+        writer.visit(testClassfileVersion(), Opcodes.ACC_PUBLIC or Opcodes.ACC_FINAL, FIXTURE_INTERNAL_NAME, null, "java/lang/Object", null)
         writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, FIXTURE_METHOD, "()V", null, null).apply {
             visitCode()
             literals.forEach { literal ->

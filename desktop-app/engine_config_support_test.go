@@ -471,6 +471,81 @@ func TestPrepareConfigFile_NormalizesPassSelectionValues(t *testing.T) {
 	}
 }
 
+func TestPrepareConfigFile_WritesApkModeConfigKeys(t *testing.T) {
+	request := ObfuscationRequest{
+		InputJarPath:   filepath.Join(t.TempDir(), "input.apk"),
+		OutputJarPath:  filepath.Join(t.TempDir(), "out-shrouded.apk"),
+		ArtifactFormat: "apk",
+		Passes: []PassSpec{
+			{ID: "string-encryption", Enabled: true, Params: map[string]json.RawMessage{}},
+		},
+		Rules: []RuleItem{},
+	}
+
+	tempDir, configPath, cleanup, err := prepareConfigFile(request)
+	if err != nil {
+		t.Fatalf("prepareConfigFile returned error: %v", err)
+	}
+	defer cleanup()
+	defer os.RemoveAll(tempDir)
+
+	payload, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config failed: %v", err)
+	}
+	content := string(payload)
+
+	if !strings.Contains(strings.SplitN(content, "[[passes]]", 2)[0], `artifactFormat = "apk"`) {
+		t.Fatalf("expected top-level artifactFormat apk in config, got %s", content)
+	}
+
+	expectedLogPath := filepath.ToSlash(request.OutputJarPath + ".log")
+	if !strings.Contains(content, `logFilePath = "`+expectedLogPath+`"`) {
+		t.Fatalf("expected derived logFilePath %q in config, got %s", expectedLogPath, content)
+	}
+}
+
+func TestPrepareConfigFile_PreservesDesktopLaunchRequest(t *testing.T) {
+	const launchJSON = `{
+	  "inputJarPath": "fixture.jar", "outputJarPath": "out.jar", "artifactFormat": "jar",
+	  "passes": [{"id": "nativeshroud", "enabled": true, "params": {"cliPath": "C:/fixture tools/no-op-xenolith.exe"}}],
+	  "rules": [], "passSelections": [], "allowOptInPasses": true, "allowRedundantPasses": false
+	}`
+	var request ObfuscationRequest
+	if err := json.Unmarshal([]byte(launchJSON), &request); err != nil {
+		t.Fatal(err)
+	}
+	if request.ArtifactFormat != "jar" {
+		t.Fatalf("expected artifactFormat from the desktop JSON, got %q", request.ArtifactFormat)
+	}
+	for _, mode := range []struct{ provided, serialized string }{{"jar", "jar"}, {"", "auto"}} {
+		t.Run(mode.serialized, func(t *testing.T) {
+			request.ArtifactFormat = mode.provided
+			tempDir, configPath, cleanup, err := prepareConfigFile(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cleanup()
+			defer os.RemoveAll(tempDir)
+			payload, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			root, pass, found := strings.Cut(string(payload), "[[passes]]")
+			if !found || !strings.Contains(root, "artifactFormat = "+formatTomlString(mode.serialized)+"\n") {
+				t.Fatalf("expected root artifactFormat %q, got %s", mode.serialized, payload)
+			}
+			if !strings.Contains(pass, "[passes.params]\n"+`cliPath = "C:/fixture tools/no-op-xenolith.exe"`+"\n") {
+				t.Fatalf("expected the no-op path under the pass params, got %s", payload)
+			}
+		})
+	}
+	request.ArtifactFormat = "unsupported"
+	if _, _, _, err := prepareConfigFile(request); err == nil || !strings.Contains(err.Error(), "artifactFormat") {
+		t.Fatalf("expected invalid artifactFormat to be rejected, got %v", err)
+	}
+}
+
 func validPassSelectionRequest(t *testing.T) ObfuscationRequest {
 	t.Helper()
 	return ObfuscationRequest{

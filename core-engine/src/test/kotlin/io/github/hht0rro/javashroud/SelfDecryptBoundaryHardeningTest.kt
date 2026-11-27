@@ -5,6 +5,10 @@ import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import org.objectweb.asm.ClassReader
+import org.objectweb.asm.Opcodes
+import org.objectweb.asm.tree.ClassNode
+import org.objectweb.asm.tree.MethodInsnNode
 
 class SelfDecryptBoundaryHardeningTest {
     @Test
@@ -28,9 +32,19 @@ class SelfDecryptBoundaryHardeningTest {
         assertTrue("authorizeProtectedData" in kernelHelper, "Protected-data access must re-run armed defense probes")
         assertTrue("native-extract-digest-mismatch" in kernelHelper, "Extracted native bytes must match the locator digest")
         assertTrue("native-loaded-digest-mismatch" in kernelHelper, "Loaded native temp file must be re-hashed after System.load")
-        val defenseHelper = source("src/main/java/io/github/hht0rro/javashroud/transforms/protection/qp/QpGuard.java")
-        assertTrue("authorizeProtectedData" in defenseHelper, "Defense helper must expose a protected-data probe gate")
-        assertTrue("data-access" in defenseHelper, "Protected-data authorization must use a live probe point")
+        val guard = ClassNode()
+        val guardResource = "io/github/hht0rro/javashroud/transforms/protection/qp/QpGuard.class"
+        checkNotNull(javaClass.classLoader.getResourceAsStream(guardResource)).use { stream ->
+            ClassReader(stream).accept(guard, ClassReader.SKIP_FRAMES)
+        }
+        val authorization = guard.methods.single { it.name == "authorizeProtectedData" && it.desc == "()V" }
+        assertTrue(
+            authorization.instructions.asSequence().filterIsInstance<MethodInsnNode>().any { call ->
+                call.opcode == Opcodes.INVOKESTATIC && call.owner == guard.name &&
+                    call.name == "probe" && call.desc == "(II)V"
+            },
+            "Protected-data authorization must call the current typed probe",
+        )
         val defenseInject = source("src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/UnifiedDefenseTransforms.kt")
         assertTrue("expectDefenseForProtectedPath" in defenseInject, "os-anti injection must arm protected-data gates")
         assertTrue("RegisterNatives" in ffi, "Current runtime must use typed RegisterNatives registration")

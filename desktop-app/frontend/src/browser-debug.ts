@@ -281,8 +281,12 @@ const appMock: WailsAppMock = {
       return scenario.outputJarPath || 'C:\\debug\\demo-app-shrouded.jar'
     }
 
-    if (defaultInputJarPath.toLowerCase().endsWith('.jar')) {
-      return `${defaultInputJarPath.slice(0, -4)}-shrouded.jar`
+    const lowerDefaultPath: string = defaultInputJarPath.toLowerCase()
+    if (lowerDefaultPath.endsWith('.jar')) {
+      return `${defaultInputJarPath.slice(0, -'.jar'.length)}-shrouded.jar`
+    }
+    if (lowerDefaultPath.endsWith('.apk')) {
+      return `${defaultInputJarPath.slice(0, -'.apk'.length)}-shrouded.apk`
     }
 
     return `${defaultInputJarPath}-shrouded.jar`

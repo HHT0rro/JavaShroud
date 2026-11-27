@@ -61,7 +61,10 @@ fn zero_shard_mask_region(bytes: &mut [u8]) -> Result<(), RouterError> {
 }
 
 /// Locates a named section's raw file range; `None` when the section is absent.
-fn locate_named_section_range(bytes: &[u8], name: &[u8]) -> Result<Option<(usize, usize)>, RouterError> {
+fn locate_named_section_range(
+    bytes: &[u8],
+    name: &[u8],
+) -> Result<Option<(usize, usize)>, RouterError> {
     if is_pe64(bytes) {
         return locate_pe_section_range(bytes, name);
     }
@@ -71,7 +74,10 @@ fn locate_named_section_range(bytes: &[u8], name: &[u8]) -> Result<Option<(usize
     Err(RouterError::AuthenticationFailed)
 }
 
-fn locate_pe_section_range(bytes: &[u8], name: &[u8]) -> Result<Option<(usize, usize)>, RouterError> {
+fn locate_pe_section_range(
+    bytes: &[u8],
+    name: &[u8],
+) -> Result<Option<(usize, usize)>, RouterError> {
     let pe_offset = read_u32(bytes, 0x3C) as usize;
     let optional_size = read_u16(bytes, pe_offset + 20) as usize;
     let section_count = read_u16(bytes, pe_offset + 6) as usize;
@@ -83,7 +89,9 @@ fn locate_pe_section_range(bytes: &[u8], name: &[u8]) -> Result<Option<(usize, u
     let copied = core::cmp::min(name.len(), 8);
     expected[..copied].copy_from_slice(&name[..copied]);
     for index in 0..section_count {
-        let section = section_table.checked_add(index.saturating_mul(40)).ok_or(RouterError::AuthenticationFailed)?;
+        let section = section_table
+            .checked_add(index.saturating_mul(40))
+            .ok_or(RouterError::AuthenticationFailed)?;
         if section + 40 > bytes.len() {
             return Ok(None);
         }
@@ -100,7 +108,10 @@ fn locate_pe_section_range(bytes: &[u8], name: &[u8]) -> Result<Option<(usize, u
     Ok(None)
 }
 
-fn locate_elf_section_range(bytes: &[u8], name: &[u8]) -> Result<Option<(usize, usize)>, RouterError> {
+fn locate_elf_section_range(
+    bytes: &[u8],
+    name: &[u8],
+) -> Result<Option<(usize, usize)>, RouterError> {
     let section_offset = read_u64(bytes, 0x28) as usize;
     let section_entry_size = read_u16(bytes, 0x3A) as usize;
     let section_count = read_u16(bytes, 0x3C) as usize;
@@ -111,7 +122,9 @@ fn locate_elf_section_range(bytes: &[u8], name: &[u8]) -> Result<Option<(usize, 
     if name_index >= section_count {
         return Ok(None);
     }
-    let name_section = section_offset.checked_add(name_index.saturating_mul(section_entry_size)).ok_or(RouterError::AuthenticationFailed)?;
+    let name_section = section_offset
+        .checked_add(name_index.saturating_mul(section_entry_size))
+        .ok_or(RouterError::AuthenticationFailed)?;
     if name_section + 64 > bytes.len() {
         return Ok(None);
     }
@@ -121,7 +134,9 @@ fn locate_elf_section_range(bytes: &[u8], name: &[u8]) -> Result<Option<(usize, 
         return Ok(None);
     }
     for index in 0..section_count {
-        let section = section_offset.checked_add(index.saturating_mul(section_entry_size)).ok_or(RouterError::AuthenticationFailed)?;
+        let section = section_offset
+            .checked_add(index.saturating_mul(section_entry_size))
+            .ok_or(RouterError::AuthenticationFailed)?;
         if section + 64 > bytes.len() {
             return Ok(None);
         }
@@ -139,7 +154,13 @@ fn locate_elf_section_range(bytes: &[u8], name: &[u8]) -> Result<Option<(usize, 
     Ok(None)
 }
 
-fn elf_name_matches(bytes: &[u8], table_offset: usize, table_size: usize, name_off: usize, needle: &[u8]) -> bool {
+fn elf_name_matches(
+    bytes: &[u8],
+    table_offset: usize,
+    table_size: usize,
+    name_off: usize,
+    needle: &[u8],
+) -> bool {
     if name_off >= table_size {
         return false;
     }
@@ -152,8 +173,6 @@ fn elf_name_matches(bytes: &[u8], table_offset: usize, table_size: usize, name_o
     }
     bytes[start..start + needle.len()] == *needle && bytes[start + needle.len()] == 0
 }
-
-
 
 fn zero_commitment_slot(bytes: &mut [u8]) -> Result<(), RouterError> {
     let slot = locate_commitment_slot(bytes)?;
@@ -206,7 +225,9 @@ fn locate_pe_section_magic(bytes: &[u8], name: &[u8]) -> Option<usize> {
         }
         let raw_size = read_u32(bytes, section + 16) as usize;
         let raw_offset = read_u32(bytes, section + 20) as usize;
-        if raw_size < slot_magic().len() + DIGEST_SIZE || raw_offset.saturating_add(raw_size) > bytes.len() {
+        if raw_size < slot_magic().len() + DIGEST_SIZE
+            || raw_offset.saturating_add(raw_size) > bytes.len()
+        {
             continue;
         }
         return scan_magic_in_range(bytes, raw_offset, raw_size);
@@ -256,7 +277,13 @@ fn locate_elf_section_magic(bytes: &[u8], name: &[u8]) -> Option<usize> {
     None
 }
 
-fn elf_name_equals(bytes: &[u8], table_offset: usize, table_size: usize, name_off: usize, needle: &[u8]) -> bool {
+fn elf_name_equals(
+    bytes: &[u8],
+    table_offset: usize,
+    table_size: usize,
+    name_off: usize,
+    needle: &[u8],
+) -> bool {
     if name_off >= table_size {
         return false;
     }
@@ -319,10 +346,17 @@ fn is_pe64(bytes: &[u8]) -> bool {
         return false;
     }
     let pe_offset = read_u32(bytes, 0x3C) as usize;
-    if pe_offset.checked_add(26).map(|end| end > bytes.len()).unwrap_or(true) {
+    if pe_offset
+        .checked_add(26)
+        .map(|end| end > bytes.len())
+        .unwrap_or(true)
+    {
         return false;
     }
-    if bytes[pe_offset] != b'P' || bytes[pe_offset + 1] != b'E' || bytes[pe_offset + 2] != 0 || bytes[pe_offset + 3] != 0
+    if bytes[pe_offset] != b'P'
+        || bytes[pe_offset + 1] != b'E'
+        || bytes[pe_offset + 2] != 0
+        || bytes[pe_offset + 3] != 0
     {
         return false;
     }
@@ -393,7 +427,12 @@ fn zero_pe_directory(
     }
 }
 
-fn rva_to_file_offset(bytes: &[u8], section_table: usize, section_count: usize, rva: u32) -> Option<usize> {
+fn rva_to_file_offset(
+    bytes: &[u8],
+    section_table: usize,
+    section_count: usize,
+    rva: u32,
+) -> Option<usize> {
     for index in 0..section_count {
         let section = section_table.checked_add(index.saturating_mul(40))?;
         if section + 40 > bytes.len() {
@@ -405,7 +444,8 @@ fn rva_to_file_offset(bytes: &[u8], section_table: usize, section_count: usize, 
         let raw_offset = read_u32(bytes, section + 20);
         let span = virtual_size.max(raw_size);
         if rva >= virtual_address && rva.wrapping_sub(virtual_address) < span {
-            let offset = (raw_offset as u64).wrapping_add(u64::from(rva.wrapping_sub(virtual_address)));
+            let offset =
+                (raw_offset as u64).wrapping_add(u64::from(rva.wrapping_sub(virtual_address)));
             if offset > usize::MAX as u64 {
                 return None;
             }
@@ -441,7 +481,11 @@ fn zero_elf_relocations(bytes: &mut [u8]) {
         }
         let file_offset = read_u64(bytes, section + 24);
         let size = read_u64(bytes, section + 32);
-        if file_offset == 0 || size == 0 || file_offset > usize::MAX as u64 || size > usize::MAX as u64 {
+        if file_offset == 0
+            || size == 0
+            || file_offset > usize::MAX as u64
+            || size > usize::MAX as u64
+        {
             continue;
         }
         zero_range(bytes, file_offset as usize, size as usize);
@@ -529,11 +573,13 @@ fn windows_module_path() -> Option<PathBuf> {
             name: *const u16,
             module: *mut *mut core::ffi::c_void,
         ) -> i32;
-        fn GetModuleFileNameW(module: *mut core::ffi::c_void, filename: *mut u16, size: u32) -> u32;
+        fn GetModuleFileNameW(module: *mut core::ffi::c_void, filename: *mut u16, size: u32)
+            -> u32;
     }
     unsafe {
         let mut module = core::ptr::null_mut();
-        let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+        let flags =
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
         let ok = GetModuleHandleExW(flags, verify_wrap_key as *const u16, &mut module);
         if ok == 0 || module.is_null() {
             return None;

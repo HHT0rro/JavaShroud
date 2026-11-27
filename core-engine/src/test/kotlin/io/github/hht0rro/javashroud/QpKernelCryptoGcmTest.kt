@@ -24,12 +24,12 @@ class QpKernelCryptoGcmTest {
             "payload_len > MAX_PAYLOAD_SIZE",
             "AuthenticationFailed",
             "InvalidCiphertextLength",
-            "impl Drop for GcmWorkspace",
             "hardware_aes: false",
             "hardware_ghash: false",
         )) {
             assertTrue(source.contains(contract), "Native GCM contract is missing: $contract")
         }
+        assertGcmWorkspaceWipesState(source)
 
         assertRustTests(
             source,

@@ -121,7 +121,7 @@ class InvokeDynamicBootstrapRemapTest {
     private fun buildCallerClassWithStaticCalls(callCount: Int): ByteArray {
         val classWriter = ClassWriter(ClassWriter.COMPUTE_MAXS)
         classWriter.visit(
-            Opcodes.V21,
+            testClassfileVersion(),
             Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER,
             "com/example/Caller",
             null,
@@ -155,7 +155,7 @@ class InvokeDynamicBootstrapRemapTest {
     private fun buildClassLoaderBoundaryCaller(): ByteArray {
         val classWriter = ClassWriter(ClassWriter.COMPUTE_MAXS)
         classWriter.visit(
-            Opcodes.V21,
+            testClassfileVersion(),
             Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER,
             "com/example/BoundaryLoader",
             null,

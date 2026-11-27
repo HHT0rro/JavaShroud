@@ -1,7 +1,9 @@
 import { applyPassDependencies, applyPassRequiresAnyConstraints, buildPassItemsFromSchema, clonePassItem, disablePassAndDependents, requiresAnyPassIdsFor } from './pass-catalog'
 import { hasEnabledSoftCompatibilityConflict, resolvePassCompatibility } from './pass-compatibility'
+import { artifactFormatForPath, passesForArtifactFormat, unavailableApkPassIds } from './artifact-pass-policy'
 import { parsePassSelectionTarget } from './pass-selection-targeting.ts'
 import type {
+  ArtifactFormat,
   ClassTreeNode,
   EngineEvent,
   EngineSchemaPayload,
@@ -22,6 +24,7 @@ import type {
   RunState,
   TargetingCapability,
 } from './types'
+
 
 
 /**
@@ -87,8 +90,10 @@ export const reorderByConstraints = (
   return sorted.map((id: string): PassItem => passMap.get(id)!)
 }
 
-
 export const createInitialRunState = (): RunState => ({
+  artifactFormat: 'jar',
+  apkUnavailablePasses: [],
+  jarPassOrder: [],
   status: 'idle',
   schema: null,
   inputJar: null,
@@ -103,6 +108,7 @@ export const createInitialRunState = (): RunState => ({
   progress: 0,
   currentStep: null,
   packHandoffPath: null,
+  packHandoffRevision: 0,
   outputPath: null,
   logs: [
     {
@@ -115,6 +121,7 @@ export const createInitialRunState = (): RunState => ({
   errorMessage: null,
   autoScroll: true,
 })
+
 
 export const buildLoadedJarInfo = (file: File): LoadedJarInfo => ({
   fileName: file.name,
@@ -130,68 +137,118 @@ export const buildLoadedJarInfoFromPath = (inputJarPath: string): LoadedJarInfo 
   detectedMainClass: null,
 })
 
-export const setLoadedJar = (state: RunState, jarInfo: LoadedJarInfo): RunState => ({
-  ...state,
-  status: 'ready',
-  inputJar: jarInfo,
-  outputJarPath: jarInfo.inputJarPath.trim().length === 0 ? '' : deriveOutputJarPath(jarInfo.inputJarPath),
-  classTree: [],
-  classCount: 0,
-  packageCount: 0,
-  errorMessage: null,
-})
+export const hasExpectedArtifactExtension = (path: string, format: ArtifactFormat): boolean =>
+  path.trim().toLowerCase().endsWith(`.${format}`)
 
-export const setInputJarPath = (state: RunState, inputJarPath: string): RunState => {
-  const trimmedPath: string = inputJarPath.trim()
-  if (trimmedPath.length === 0) {
-    return {
-      ...state,
-      inputJar: null,
-      outputJarPath: '',
-      classTree: [],
-      classCount: 0,
-      packageCount: 0,
-    }
-  }
 
-  const currentInfo: LoadedJarInfo = state.inputJar ?? buildLoadedJarInfoFromPath(trimmedPath)
+const isArtifactExtension = (path: string): boolean => /\.(?:jar|apk)$/i.test(path.trim())
+
+export const setArtifactFormat = (state: RunState, artifactFormat: ArtifactFormat): RunState => {
+  if (state.artifactFormat === artifactFormat) return state
+  const allPasses = artifactFormat === 'jar'
+    ? [...state.passes, ...state.apkUnavailablePasses.filter((hidden) => !state.passes.some((pass) => pass.id === hidden.id))]
+    : state.passes
+  const unavailableIds = unavailableApkPassIds(allPasses)
+  const visiblePasses = artifactFormat === 'apk' ? allPasses.filter((pass) => !unavailableIds.has(pass.id)) : allPasses
+  const hiddenPasses = artifactFormat === 'apk' ? allPasses.filter((pass) => unavailableIds.has(pass.id)) : []
+  const savedOrder = new Map(state.jarPassOrder.map((id, index) => [id, index]))
+  const restoredPasses = artifactFormat === 'jar' ? [...visiblePasses].sort((a, b) => (savedOrder.get(a.id) ?? allPasses.length) - (savedOrder.get(b.id) ?? allPasses.length)) : visiblePasses
+  const inputJar = state.inputJar !== null && !hasExpectedArtifactExtension(state.inputJar.inputJarPath, artifactFormat) ? null : state.inputJar
+  const inputChanged = inputJar !== state.inputJar
   return {
     ...state,
+    artifactFormat,
+    jarPassOrder: artifactFormat === 'apk' ? allPasses.map((pass) => pass.id) : [],
+    apkUnavailablePasses: hiddenPasses,
+    inputJar,
+    outputJarPath: inputChanged ? '' : state.outputJarPath,
+    passes: normalizePasses(restoredPasses, state.schema?.compatibility ?? [], state.schema?.orderingConstraints ?? []),
+    passSelections: inputChanged ? [] : state.passSelections,
+    classTree: inputChanged ? [] : state.classTree,
+    classCount: inputChanged ? 0 : state.classCount,
+    packageCount: inputChanged ? 0 : state.packageCount,
+    errorMessage: inputChanged ? `已切换到 ${artifactFormat.toUpperCase()} 模式，请选择 .${artifactFormat} 输入文件。` : null,
+  }
+}
+
+
+export const setLoadedJar = (state: RunState, jarInfo: LoadedJarInfo): RunState => {
+  const detectedFormat = artifactFormatForPath(jarInfo.inputJarPath)
+  const nextState = detectedFormat !== null && detectedFormat !== state.artifactFormat
+    ? setArtifactFormat(state, detectedFormat)
+    : state
+  if (jarInfo.inputJarPath.trim().length > 0 && !hasExpectedArtifactExtension(jarInfo.inputJarPath, nextState.artifactFormat)) {
+    throw new Error(`当前 ${nextState.artifactFormat.toUpperCase()} 模式只接受 .${nextState.artifactFormat} 输入文件。`)
+  }
+  return {
+    ...nextState,
     status: 'ready',
-    inputJar: {
-      ...currentInfo,
-      fileName: extractFileName(trimmedPath),
-      inputJarPath: trimmedPath,
-    },
-    outputJarPath: state.outputJarPath.trim().length === 0 ? deriveOutputJarPath(trimmedPath) : state.outputJarPath,
+    inputJar: jarInfo,
+    outputJarPath: jarInfo.inputJarPath.trim().length === 0 ? '' : deriveOutputJarPath(jarInfo.inputJarPath),
     classTree: [],
     classCount: 0,
     packageCount: 0,
+    errorMessage: null,
   }
 }
+
+export const setInputJarPath = (state: RunState, inputJarPath: string): RunState => {
+  const trimmedPath = inputJarPath.trim()
+  if (trimmedPath.length === 0) {
+    return { ...state, inputJar: null, outputJarPath: '', classTree: [], classCount: 0, packageCount: 0, errorMessage: null }
+  }
+  const detectedFormat = artifactFormatForPath(trimmedPath)
+  const nextState = detectedFormat !== null && detectedFormat !== state.artifactFormat
+    ? setArtifactFormat(state, detectedFormat)
+    : state
+  if (isArtifactExtension(trimmedPath) && !hasExpectedArtifactExtension(trimmedPath, nextState.artifactFormat)) {
+    return { ...nextState, errorMessage: `当前 ${nextState.artifactFormat.toUpperCase()} 模式不接受此输入扩展名。`, outputJarPath: '' }
+  }
+  const currentInfo = nextState.inputJar ?? buildLoadedJarInfoFromPath(trimmedPath)
+  return {
+    ...nextState,
+    status: 'ready',
+    inputJar: { ...currentInfo, fileName: extractFileName(trimmedPath), inputJarPath: trimmedPath },
+    outputJarPath: nextState.outputJarPath.trim().length === 0 ? deriveOutputJarPath(trimmedPath) : nextState.outputJarPath,
+    classTree: [],
+    classCount: 0,
+    packageCount: 0,
+    errorMessage: null,
+  }
+}
+
 
 export const setOutputJarPath = (state: RunState, outputJarPath: string): RunState => ({
   ...state,
   outputJarPath,
 })
 
-export const setPasses = (state: RunState, passes: readonly PassItem[]): RunState => ({
-  ...state,
-  passes: normalizePasses(
-    passes.map((passItem: PassItem): PassItem => clonePassItem(passItem)),
-    state.schema?.compatibility ?? [],
-    state.schema?.orderingConstraints ?? [],
-  ),
-})
+export const setPasses = (state: RunState, passes: readonly PassItem[]): RunState => {
+  const cloned = passes.map(clonePassItem)
+  const visible = passesForArtifactFormat(cloned, state.artifactFormat)
+  const visibleIds = new Set(visible.map((pass) => pass.id))
+  const hidden = state.artifactFormat === 'apk'
+    ? [...state.apkUnavailablePasses.filter((pass) => !cloned.some((candidate) => candidate.id === pass.id)), ...cloned.filter((pass) => !visibleIds.has(pass.id))]
+    : []
+  return {
+    ...state,
+    apkUnavailablePasses: hidden,
+    passes: normalizePasses(visible, state.schema?.compatibility ?? [], state.schema?.orderingConstraints ?? []),
+  }
+}
 
 export const setEngineSchema = (state: RunState, schema: EngineSchemaPayload): RunState => {
-  const passes = normalizePasses(buildPassItemsFromSchema(schema), schema.compatibility, schema.orderingConstraints)
+  const allPasses = normalizePasses(buildPassItemsFromSchema(schema), schema.compatibility, schema.orderingConstraints)
+  const unavailableIds = unavailableApkPassIds(allPasses)
+  const passes = state.artifactFormat === 'apk' ? allPasses.filter((pass) => !unavailableIds.has(pass.id)) : allPasses
+  const hiddenPasses = state.artifactFormat === 'apk' ? allPasses.filter((pass) => unavailableIds.has(pass.id)) : []
   const disabledByCompatibility = schema.modules.length - countEnabledPasses(passes)
-
   return {
     ...state,
     schema: cloneEngineSchema(schema),
-    passes,
+    passes: normalizePasses(passes, schema.compatibility, schema.orderingConstraints),
+    apkUnavailablePasses: hiddenPasses,
+    jarPassOrder: state.artifactFormat === 'apk' ? allPasses.map((pass) => pass.id) : [],
     logs: appendLogLine(state.logs, {
       level: 'info',
       message: disabledByCompatibility === 0
@@ -220,31 +277,15 @@ export const togglePass = (state: RunState, passId: string): RunState => {
   }
 }
 
-export const setAllPassesEnabled = (state: RunState, enabled: boolean): RunState => ({
-  ...state,
-  passes: normalizePasses(
-    state.passes.map((passItem: PassItem): PassItem => ({
-      ...passItem,
-      enabled,
-      dependencyAutoEnabled: false,
-    })),
-    state.schema?.compatibility ?? [],
-    state.schema?.orderingConstraints ?? [],
-  ),
-})
+export const setAllPassesEnabled = (state: RunState, enabled: boolean): RunState => setPasses(
+  state,
+  state.passes.map((pass) => ({ ...pass, enabled, dependencyAutoEnabled: false })),
+)
 
-export const setPassParam = (state: RunState, passId: string, paramKey: string, value: PassParamValue): RunState => ({
-  ...state,
-  passes: normalizePasses(
-    state.passes.map((passItem: PassItem): PassItem => (
-      passItem.id === passId
-        ? { ...passItem, params: { ...passItem.params, [paramKey]: value } }
-        : passItem
-    )),
-    state.schema?.compatibility ?? [],
-    state.schema?.orderingConstraints ?? [],
-  ),
-})
+export const setPassParam = (state: RunState, passId: string, paramKey: string, value: PassParamValue): RunState => setPasses(
+  state,
+  state.passes.map((pass) => pass.id === passId ? { ...pass, params: { ...pass.params, [paramKey]: value } } : pass),
+)
 
 export const setAutoScroll = (state: RunState, autoScroll: boolean): RunState => ({
   ...state,
@@ -542,6 +583,7 @@ export const applyEngineEvent = (state: RunState, event: EngineEvent): RunState 
       progress: event.progress === null ? state.progress : clampProgress(event.progress),
       currentStep: event.message || state.currentStep,
       packHandoffPath: event.outPath,
+      packHandoffRevision: state.packHandoffRevision + 1,
       logs: appendLogLine(state.logs, { level: event.level, message: event.message }),
       errorMessage: null,
     }
@@ -579,31 +621,30 @@ export const applyBridgeError = (state: RunState, error: unknown, context: strin
 
 export const buildObfuscationRequest = (state: RunState): ObfuscationRequest => {
   if (state.inputJar === null) {
-    throw new Error('无法启动混淆：尚未载入 Jar 文件。')
+    throw new Error('无法启动混淆：尚未载入输入文件。')
   }
-
   if (state.inputJar.inputJarPath.trim().length === 0) {
-    throw new Error('无法启动混淆：输入 Jar 路径为空。')
+    throw new Error('无法启动混淆：输入文件路径为空。')
   }
-
+  if (!hasExpectedArtifactExtension(state.inputJar.inputJarPath, state.artifactFormat)) {
+    throw new Error(`无法启动混淆：${state.artifactFormat.toUpperCase()} 模式只接受 .${state.artifactFormat} 输入文件。`)
+  }
   if (state.outputJarPath.trim().length === 0) {
-    throw new Error('无法启动混淆：输出 Jar 路径为空。')
+    throw new Error('无法启动混淆：输出文件路径为空。')
   }
-
-  const enabledPasses: readonly PassSpec[] = state.passes
+  const enabledPasses: readonly PassSpec[] = passesForArtifactFormat(state.passes, state.artifactFormat)
     .filter((passItem: PassItem): boolean => passItem.enabled)
     .map((passItem: PassItem): PassSpec => ({
       id: passItem.id,
       enabled: passItem.enabled,
-      params: visiblePassParams(passItem),
+      params: executionPassParams(passItem, state.schema),
     }))
-
   if (enabledPasses.length === 0) {
     throw new Error('无法启动混淆：未启用任何可运行模块。')
   }
 
   const enabledPassIds = new Set<string>(enabledPasses.map((passSpec: PassSpec): string => passSpec.id))
-  const unsatisfiedPass = state.passes.find((passItem: PassItem): boolean => (
+  const unsatisfiedPass = passesForArtifactFormat(state.passes, state.artifactFormat).find((passItem: PassItem): boolean => (
     passItem.enabled && requiresAnyPassIdsFor(passItem).length > 0 && requiresAnyPassIdsFor(passItem).every((passId: string): boolean => !enabledPassIds.has(passId))
   ))
   if (unsatisfiedPass !== undefined) {
@@ -640,6 +681,7 @@ export const buildObfuscationRequest = (state: RunState): ObfuscationRequest => 
   return {
     inputJarPath: state.inputJar.inputJarPath,
     outputJarPath: state.outputJarPath,
+    artifactFormat: state.artifactFormat,
     passes: enabledPasses,
     rules: normalizeRuleItems(state.rules, 'rule'),
     passSelections,
@@ -658,6 +700,17 @@ export const visiblePassParams = (passItem: Pick<PassItem, 'params' | 'paramSche
   )
 }
 
+const executionPassParams = (pass: PassItem, schema: EngineSchemaPayload | null): Readonly<Record<string, PassParamValue>> => {
+  const params = visiblePassParams(pass)
+  const cliPath = pass.params.cliPath
+  if (pass.id !== 'nativeshroud' || typeof cliPath !== 'string' || cliPath.trim() === '') {
+    return params
+  }
+  // The desktop switch supplies this runtime path. Hidden parameters stay out of exported configs.
+  const module = schema?.modules.find((candidate) => candidate.id === pass.id)
+  const supportsCliPath = module?.params.some((param) => param.key === 'cliPath' && param.type === 'string')
+  return supportsCliPath ? { ...params, cliPath: cliPath.trim() } : params
+}
 
 const normalizePasses = (
   passes: readonly PassItem[],
@@ -753,9 +806,12 @@ const deriveOutputJarPath = (inputJarPath: string): string => {
     return ''
   }
 
-  const jarSuffix = '.jar'
-  if (trimmedPath.toLowerCase().endsWith(jarSuffix)) {
-    return `${trimmedPath.slice(0, -jarSuffix.length)}-shrouded.jar`
+  const lowerPath: string = trimmedPath.toLowerCase()
+  if (lowerPath.endsWith('.jar')) {
+    return `${trimmedPath.slice(0, -'.jar'.length)}-shrouded.jar`
+  }
+  if (lowerPath.endsWith('.apk')) {
+    return `${trimmedPath.slice(0, -'.apk'.length)}-shrouded.apk`
   }
 
   return `${trimmedPath}-shrouded.jar`

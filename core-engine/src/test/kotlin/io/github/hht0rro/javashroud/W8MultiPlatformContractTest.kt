@@ -14,12 +14,14 @@ import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.Opcodes
 import org.objectweb.asm.tree.ClassNode
+import org.objectweb.asm.tree.IntInsnNode
 import org.objectweb.asm.tree.LdcInsnNode
 import org.objectweb.asm.tree.MethodInsnNode
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -33,7 +35,7 @@ class W8MultiPlatformContractTest {
         assertEquals("auto", targetPlatform.defaultValue?.asText())
         assertNull(targetPlatform.options)
         assertTrue(targetPlatform.description.contains("all"))
-        assertTrue(targetPlatform.description.contains("windows-x64,linux-x64"))
+        assertTrue(targetPlatform.description.contains("comma-separated"))
     }
 
     @Test
@@ -74,9 +76,11 @@ class W8MultiPlatformContractTest {
 
     @Test
     fun multi_target_and_all_builds_preserve_the_requested_runtime_set() {
-        assertEquals("all", injectedRuntimeTarget("all"))
-        assertEquals("windows-x64,linux-x64", injectedRuntimeTarget("windows-x64,linux-x64"))
-        assertEquals("linux-x64", injectedRuntimeTarget("linux-x64"))
+        assertEquals(0, injectedRuntimeTargetMask("auto"))
+        assertEquals(0b11, injectedRuntimeTargetMask("all"))
+        assertEquals(0b11, injectedRuntimeTargetMask("windows-x64,linux-x64"))
+        assertEquals(0b01, injectedRuntimeTargetMask("windows-x64"))
+        assertEquals(0b10, injectedRuntimeTargetMask("linux-x64"))
     }
 
     @Test
@@ -124,7 +128,7 @@ class W8MultiPlatformContractTest {
         }
     }
 
-    private fun injectedRuntimeTarget(configuredTarget: String): String {
+    private fun injectedRuntimeTargetMask(configuredTarget: String): Int {
         val internalName = "sample/W8Host"
         val original = hostClass(internalName)
         val artifact = testAttachedArtifact(
@@ -149,12 +153,21 @@ class W8MultiPlatformContractTest {
         val node = ClassNode()
         ClassReader(result.artifact.classArtifactIndex.getValue(internalName).bytes).accept(node, ClassReader.SKIP_FRAMES)
         val clinit = node.methods.single { it.name == "<clinit>" }
-        val instructions = clinit.instructions.toArray()
+        val instructions = clinit.instructions.toArray().filter { it.opcode >= 0 }
         val callIndex = instructions.indexOfFirst { instruction ->
             instruction is MethodInsnNode && instruction.owner.endsWith("/QpBridge") && instruction.name == "loadKernel"
         }
-        assertTrue(callIndex >= 3, "JNI loader call must have three string arguments")
-        return (instructions[callIndex - 2] as LdcInsnNode).cst as String
+        assertTrue(callIndex >= 3, "JNI loader call must have three integer arguments")
+        val call = assertIs<MethodInsnNode>(instructions[callIndex])
+        assertEquals(Opcodes.INVOKESTATIC, call.opcode)
+        assertEquals("(III)V", call.desc)
+        val target = instructions[callIndex - 2]
+        return when (target.opcode) {
+            Opcodes.LDC -> assertIs<Int>(assertIs<LdcInsnNode>(target).cst)
+            Opcodes.BIPUSH, Opcodes.SIPUSH -> assertIs<IntInsnNode>(target).operand
+            in Opcodes.ICONST_M1..Opcodes.ICONST_5 -> target.opcode - Opcodes.ICONST_0
+            else -> error("JNI loader target mask must be an integer constant")
+        }
     }
 
     private fun hostClass(internalName: String): ByteArray {

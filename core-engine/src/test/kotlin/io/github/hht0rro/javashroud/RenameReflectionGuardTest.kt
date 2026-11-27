@@ -1,25 +1,91 @@
 package io.github.hht0rro.javashroud
 
+import io.github.hht0rro.javashroud.analysis.analyzeClassBytes
 import io.github.hht0rro.javashroud.analysis.buildRuleMatches
+import io.github.hht0rro.javashroud.bytecode.remapFields
 import io.github.hht0rro.javashroud.bytecode.remapMethods
+import io.github.hht0rro.javashroud.bytecode.MethodFamilyIndexEntry
+import io.github.hht0rro.javashroud.bytecode.MethodRenameIndex
 import io.github.hht0rro.javashroud.model.analysis.MemberKind
 import io.github.hht0rro.javashroud.model.analysis.MemberSummary
+import io.github.hht0rro.javashroud.model.artifact.ClassArtifact
 import io.github.hht0rro.javashroud.naming.MemberKey
 import io.github.hht0rro.javashroud.naming.MemberRename
 import io.github.hht0rro.javashroud.transforms.rename.renameClasses
 import io.github.hht0rro.javashroud.transforms.rename.renameFields
 import io.github.hht0rro.javashroud.transforms.rename.renameMethods
 import io.github.hht0rro.javashroud.transforms.rename.wellKnownExternalInstanceMethodSignatures
+import java.nio.file.Files
+import java.nio.file.Path
+import javax.tools.ToolProvider
+import org.junit.jupiter.api.io.TempDir
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.Opcodes
+import org.objectweb.asm.Type
+import org.objectweb.asm.tree.ClassNode
+import org.objectweb.asm.tree.FieldInsnNode
 import org.objectweb.asm.tree.LdcInsnNode
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class RenameReflectionGuardTest {
+    @Test
+    fun sharedMethodIndexesPreserveKeptOwnersAndBridgeOnlyTheRenamedOwner() {
+        val renamedOwner = "sample/IndexedFirst"
+        val keptOwner = "sample/IndexedSecond"
+        val caller = "sample/IndexedCaller"
+        fun valueClass(owner: String, number: Int): ByteArray {
+            val writer = ClassWriter(ClassWriter.COMPUTE_MAXS)
+            writer.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC, owner, null, "java/lang/Object", null)
+            writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "value", "()I", null, null).apply {
+                visitCode()
+                visitIntInsn(Opcodes.BIPUSH, number)
+                visitInsn(Opcodes.IRETURN)
+                visitMaxs(0, 0)
+                visitEnd()
+            }
+            writer.visitEnd()
+            return writer.toByteArray()
+        }
+        val consumer = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        consumer.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC, caller, null, "java/lang/Object", null)
+        consumer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "run", "()I", null, null).apply {
+            visitCode()
+            visitMethodInsn(Opcodes.INVOKESTATIC, renamedOwner, "value", "()I", false)
+            visitMethodInsn(Opcodes.INVOKESTATIC, keptOwner, "value", "()I", false)
+            visitInsn(Opcodes.IADD)
+            visitInsn(Opcodes.IRETURN)
+            visitMaxs(0, 0)
+            visitEnd()
+        }
+        consumer.visitEnd()
+        val key = MemberKey(renamedOwner, "value", "()I")
+        val mapping = mapOf(key to MemberRename(renamedOwner, "value", "()I", "renamedValue"))
+        val families = mapOf(
+            renamedOwner to MethodFamilyIndexEntry("java/lang/Object", emptyList(), setOf("value" to "()I")),
+            keptOwner to MethodFamilyIndexEntry("java/lang/Object", emptyList(), setOf("value" to "()I")),
+            caller to MethodFamilyIndexEntry("java/lang/Object", emptyList(), setOf("run" to "()I")),
+        )
+        val bridges = setOf(key)
+        val index = MethodRenameIndex(mapping, bridges, methodFamilies = families)
+        val originals = mapOf(renamedOwner to valueClass(renamedOwner, 7), keptOwner to valueClass(keptOwner, 11), caller to consumer.toByteArray())
+        val transformed = originals.mapValues { (_, bytes) ->
+            remapMethods(bytes, mapping, bridgeMethodKeys = bridges, methodFamilies = families, renameIndex = index)
+        }
+        val loader = object : ClassLoader(null) {
+            override fun findClass(name: String): Class<*> {
+                val bytes = transformed[name.replace('.', '/')] ?: throw ClassNotFoundException(name)
+                return defineClass(name, bytes, 0, bytes.size)
+            }
+        }
+        assertEquals(18, loader.loadClass(caller.replace('/', '.')).getDeclaredMethod("run").invoke(null))
+        assertEquals(setOf("value"), loader.loadClass(keptOwner.replace('/', '.')).declaredMethods.map { it.name }.toSet())
+        assertEquals(setOf("value", "renamedValue"), loader.loadClass(renamedOwner.replace('/', '.')).declaredMethods.map { it.name }.toSet())
+    }
+
     @Test
     fun wellKnownExternalSignatures_include_jdk_callbacks_for_native_image() {
         assertTrue("run()V" in wellKnownExternalInstanceMethodSignatures("java/lang/Runnable"))
@@ -59,6 +125,40 @@ class RenameReflectionGuardTest {
 
 
     @Test
+    fun remapFields_keeps_references_in_classes_that_merge_application_types() {
+        val key = MemberKey("sample/FieldOwner", "value", "I")
+        val node = ClassNode()
+        ClassReader(buildMissingClasspathFrameMergeClass()).accept(node, 0)
+        val read = node.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "read", "()I", null, null)
+        read.visitCode()
+        read.visitFieldInsn(Opcodes.GETSTATIC, key.owner, key.name, key.descriptor)
+        read.visitInsn(Opcodes.IRETURN)
+        read.visitMaxs(1, 0)
+        read.visitEnd()
+        val lookup = node.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "lookup", "()Ljava/lang/reflect/Field;", null, null)
+        lookup.visitCode()
+        lookup.visitLdcInsn(Type.getObjectType(key.owner))
+        lookup.visitLdcInsn(key.name)
+        lookup.visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Class", "getDeclaredField", "(Ljava/lang/String;)Ljava/lang/reflect/Field;", false)
+        lookup.visitInsn(Opcodes.ARETURN)
+        lookup.visitMaxs(2, 0)
+        lookup.visitEnd()
+        val writer = ClassWriter(0)
+        node.accept(writer)
+
+        val renamed = remapFields(
+            writer.toByteArray(),
+            mapOf(key to MemberRename(key.owner, key.name, key.descriptor, "f0000")),
+            mapOf(key.owner to mapOf(key.name to "f0000")),
+        )
+        val result = ClassNode()
+        ClassReader(renamed).accept(result, 0)
+        val field = result.methods.single { it.name == "read" }.instructions.filterIsInstance<FieldInsnNode>().single()
+        assertEquals("f0000", field.name)
+        assertTrue("f0000" in readStringConstants(renamed))
+    }
+
+    @Test
     fun renameFields_does_not_rewrite_non_reflection_status_strings() {
         val classBytes = buildStatusLoggingClass()
         val classArtifact = testClassArtifact(
@@ -80,37 +180,37 @@ class RenameReflectionGuardTest {
     }
 
 
-    @Test
-    fun renameMethods_moves_main_body_but_keeps_entrypoint_bridge() {
-        val classBytes = buildMainEntrypointClass()
-        val classArtifact = testClassArtifact(
-            internalName = "sample/MainApp",
-            bytes = classBytes,
-            methodSummaries = listOf(
-                MemberSummary(MemberKind.METHOD, "<init>", "()V", 0),
-                MemberSummary(MemberKind.METHOD, "main", "([Ljava/lang/String;)V", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
-            ),
-        )
-        val artifact = testAttachedArtifact(classArtifacts = listOf(classArtifact))
-
-        val result = renameMethods(
-            artifact = artifact,
-            ruleMatches = buildRuleMatches(testConfig().ruleSet, artifact.analysisSummary.classSummaries),
-            params = emptyMap(),
-        )
-
-        val methods = readMethodAccesses(result.artifact.classArtifacts.single().bytes)
-        val renamedMain = methods.single { it.name != "<init>" && it.name != "main" }
-        assertTrue(renamedMain.name.startsWith("m"), "main method body should still be renamed instead of skipped")
-        assertTrue(
-            methods.any { it.name == "main" && it.desc == "([Ljava/lang/String;)V" && it.access and Opcodes.ACC_BRIDGE != 0 },
-            "Original public static main(String[]) entrypoint must remain as a thin ABI bridge",
-        )
-        assertTrue(
-            readMethodCalls(result.artifact.classArtifacts.single().bytes).any { it.owner == "sample/MainApp" && it.name == renamedMain.name && it.desc == renamedMain.desc },
-            "Entrypoint bridge must forward to the renamed main body",
-        )
-    }
+    @Test
+    fun renameMethods_moves_main_body_but_keeps_entrypoint_bridge() {
+        val classBytes = buildMainEntrypointClass()
+        val classArtifact = testClassArtifact(
+            internalName = "sample/MainApp",
+            bytes = classBytes,
+            methodSummaries = listOf(
+                MemberSummary(MemberKind.METHOD, "<init>", "()V", 0),
+                MemberSummary(MemberKind.METHOD, "main", "([Ljava/lang/String;)V", Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC),
+            ),
+        )
+        val artifact = testAttachedArtifact(classArtifacts = listOf(classArtifact))
+
+        val result = renameMethods(
+            artifact = artifact,
+            ruleMatches = buildRuleMatches(testConfig().ruleSet, artifact.analysisSummary.classSummaries),
+            params = emptyMap(),
+        )
+
+        val methods = readMethodAccesses(result.artifact.classArtifacts.single().bytes)
+        val renamedMain = methods.single { it.name != "<init>" && it.name != "main" }
+        assertTrue(renamedMain.name.startsWith("m"), "main method body should still be renamed instead of skipped")
+        assertTrue(
+            methods.any { it.name == "main" && it.desc == "([Ljava/lang/String;)V" && it.access and Opcodes.ACC_BRIDGE != 0 },
+            "Original public static main(String[]) entrypoint must remain as a thin ABI bridge",
+        )
+        assertTrue(
+            readMethodCalls(result.artifact.classArtifacts.single().bytes).any { it.owner == "sample/MainApp" && it.name == renamedMain.name && it.desc == renamedMain.desc },
+            "Entrypoint bridge must forward to the renamed main body",
+        )
+    }
     @Test
     fun renameMethods_renames_runnable_run_and_adds_abi_bridge() {
         val classBytes = buildRunnableImplementationClass()
@@ -220,14 +320,15 @@ class RenameReflectionGuardTest {
     }
 
     @Test
-    fun renameMethods_keeps_native_abi_and_adds_renamed_wrapper() {
-        val classBytes = buildNativeMethodClass()
+    fun renameMethods_keeps_native_abi_while_renaming_ordinary_methods() {
+        val classBytes = buildNativeMethodClass(includeJavaMethod = true)
         val classArtifact = testClassArtifact(
             internalName = "sample/NativeHost",
             bytes = classBytes,
             methodSummaries = listOf(
                 MemberSummary(MemberKind.METHOD, "<init>", "()V", 0),
                 MemberSummary(MemberKind.METHOD, "nativeProbe", "()I", Opcodes.ACC_PUBLIC or Opcodes.ACC_NATIVE),
+                MemberSummary(MemberKind.METHOD, "javaProbe", "()I", Opcodes.ACC_PUBLIC),
             ),
         )
         val artifact = testAttachedArtifact(classArtifacts = listOf(classArtifact))
@@ -238,10 +339,68 @@ class RenameReflectionGuardTest {
             params = emptyMap(),
         )
 
-        val methods = readMethodAccesses(result.artifact.classArtifacts.single().bytes)
-        assertTrue(methods.any { it.name == "nativeProbe" && it.access and Opcodes.ACC_NATIVE != 0 }, "Original JNI ABI method must remain native for symbol lookup")
-        assertTrue(methods.any { it.name.startsWith("m") && it.desc == "()I" && it.access and Opcodes.ACC_NATIVE == 0 }, "Renamed callable wrapper must exist so rename coverage is real")
+        val transformed = result.artifact.classArtifacts.single().bytes
+        val methods = readMethodAccesses(transformed).filter { it.desc == "()I" }
+        val originalNative = readMethodAccesses(classBytes).single { it.name == "nativeProbe" }
+        assertEquals(listOf(originalNative), methods.filter { it.access and Opcodes.ACC_NATIVE != 0 })
+        val renamedJava = methods.single { it.access and Opcodes.ACC_NATIVE == 0 }
+        assertTrue(renamedJava.name != "javaProbe", "Ordinary Java method should still be renamed")
+        val type = object : ClassLoader(null) {
+            fun loadFixture() = defineClass("sample.NativeHost", transformed, 0, transformed.size)
+        }.loadFixture()
+        assertEquals(42, type.getMethod(renamedJava.name).invoke(type.getConstructor().newInstance()))
         assertEquals(1, result.transformedMemberCount)
+    }
+
+    @Test
+    fun renameMethods_preserves_static_default_and_overridden_interface_calls(@TempDir directory: Path) {
+        val fixture = directory.resolve("InterfaceCaller.java")
+        Files.writeString(fixture, """
+            interface Contract {
+                static int staticValue() { return 17; }
+                default int value() { return 42; }
+                static void lookups() throws Exception {
+                    Contract.class.getDeclaredMethod("staticValue");
+                    Contract.class.getDeclaredMethod("value");
+                }
+            }
+
+            public class InterfaceCaller {
+                static class Inherited implements Contract {}
+                static class Overridden implements Contract {
+                    public int value() { return 73; }
+                }
+
+                public static String values() {
+                    Contract inherited = new Inherited();
+                    Contract overridden = new Overridden();
+                    return Contract.staticValue() + "," + inherited.value() + "," + overridden.value();
+                }
+
+                public static void main(String[] args) { System.out.println(values()); }
+            }
+        """.trimIndent())
+        val compiler = checkNotNull(ToolProvider.getSystemJavaCompiler())
+        assertEquals(0, compiler.run(null, null, null, "--release", "8", "-d", directory.toString(), fixture.toString()))
+        val classFile = directory.resolve("Contract.class")
+        val original = Files.readAllBytes(classFile)
+        val artifact = testAttachedArtifact(listOf(ClassArtifact("Contract.class", analyzeClassBytes(original), original)))
+        val result = renameMethods(
+            artifact,
+            buildRuleMatches(testConfig().ruleSet, artifact.analysisSummary.classSummaries),
+            emptyMap(),
+        )
+        val transformed = result.artifact.classArtifacts.single().bytes
+        assertEquals(3, result.transformedMemberCount, "Both call targets and the lookup helper should be renamed")
+        val bridges = readMethodAccesses(transformed).filter { it.access and Opcodes.ACC_BRIDGE != 0 }
+        assertEquals(setOf("staticValue", "value"), bridges.map { it.name }.toSet())
+        Files.write(classFile, transformed)
+
+        val javaHome = System.getenv("JAVA8_HOME") ?: System.getProperty("java.home")
+        val java = Path.of(javaHome, "bin", "java")
+        val run = runJavaProcessWithTimeout(ProcessBuilder(java.toString(), "-Xverify:all", "-cp", directory.toString(), "InterfaceCaller"))
+        assertEquals(0, run.exitCode, run.output)
+        assertEquals("17,42,73", run.output.trim())
     }
 
     @Test
@@ -355,6 +514,82 @@ class RenameReflectionGuardTest {
         assertTrue("add" !in constants, "getDeclaredMethod(\"add\", null) LDC must not keep stale original name")
         assertTrue(renamedAddName in constants, "Null Class[] reflection lookup must follow renamed zero-arg method")
     }
+
+    @Test
+    fun remapMethods_preserves_external_reflection_when_an_app_method_has_the_same_name() {
+        val owner = "sample/ReflectionCollision"
+        val originalName = "contains"
+        val renamedName = "mFixture"
+        val signature = "(Ljava/lang/CharSequence;)Z"
+        val writer = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        writer.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC, owner, null, "java/lang/Object", null)
+        val access = Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC
+        writer.visitMethod(access, originalName, signature, null, null).apply {
+            visitCode()
+            visitInsn(Opcodes.ICONST_1)
+            visitInsn(Opcodes.IRETURN)
+            visitMaxs(0, 0)
+            visitEnd()
+        }
+        fun org.objectweb.asm.MethodVisitor.lookup(target: String, sharedName: Boolean = false) {
+            visitLdcInsn(Type.getObjectType(target))
+            visitVarInsn(Opcodes.ASTORE, 0)
+            visitVarInsn(Opcodes.ALOAD, 0)
+            if (sharedName) visitVarInsn(Opcodes.ALOAD, 1) else visitLdcInsn(originalName)
+            visitInsn(Opcodes.ICONST_1)
+            visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Class")
+            visitInsn(Opcodes.DUP)
+            visitInsn(Opcodes.ICONST_0)
+            visitLdcInsn(Type.getObjectType("java/lang/CharSequence"))
+            visitInsn(Opcodes.AASTORE)
+            visitMethodInsn(
+                Opcodes.INVOKEVIRTUAL, "java/lang/Class", "getDeclaredMethod",
+                "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;", false,
+            )
+        }
+        for ((method, target) in listOf("external" to "java/lang/String", "local" to owner)) {
+            writer.visitMethod(access, method, "()Ljava/lang/reflect/Method;", null, null).apply {
+                visitCode()
+                lookup(target)
+                visitInsn(Opcodes.ARETURN)
+                visitMaxs(0, 0)
+                visitEnd()
+            }
+        }
+        writer.visitMethod(access, "shared", "()Ljava/lang/reflect/Method;", null, null).apply {
+            visitCode()
+            visitLdcInsn(originalName)
+            visitVarInsn(Opcodes.ASTORE, 1)
+            lookup(owner, sharedName = true)
+            visitVarInsn(Opcodes.ASTORE, 2)
+            lookup("java/lang/String", sharedName = true)
+            visitInsn(Opcodes.POP)
+            visitVarInsn(Opcodes.ALOAD, 2)
+            visitInsn(Opcodes.ARETURN)
+            visitMaxs(0, 0)
+            visitEnd()
+        }
+        writer.visitEnd()
+        val key = MemberKey(owner, originalName, signature)
+        val output = remapMethods(
+            writer.toByteArray(),
+            mapOf(key to MemberRename(owner, originalName, signature, renamedName)),
+            stringRewriteMap = mapOf(originalName to mapOf("(Ljava/lang/CharSequence;)" to renamedName)),
+        )
+        val fixture = object : ClassLoader(null) {
+            fun loadFixture() = defineClass(owner.replace('/', '.'), output, 0, output.size)
+        }.loadFixture()
+        val external = fixture.getDeclaredMethod("external").invoke(null) as java.lang.reflect.Method
+        assertEquals(String::class.java, external.declaringClass)
+        assertEquals(originalName, external.name)
+        assertEquals(true, external.invoke("fixture", "xt"))
+        val local = fixture.getDeclaredMethod("local").invoke(null) as java.lang.reflect.Method
+        assertEquals(fixture, local.declaringClass)
+        assertEquals(renamedName, local.name)
+        assertEquals(true, local.invoke(null, "fixture"))
+        assertEquals(local, fixture.getDeclaredMethod("shared").invoke(null))
+    }
+
     @Test
     fun renameMethods_keeps_regular_method_abi_bridge_for_vm_captured_calls() {
         val classBytes = buildLockedBoardClass()
@@ -410,6 +645,36 @@ class RenameReflectionGuardTest {
         assertTrue(methods.any { it.name == "m0000" && it.desc == "(Z)Ljava/lang/Object;" }, "Original method body must be renamed even when method frames mention classes absent from the engine classpath")
         assertTrue(methods.any { it.name == "choose" && it.desc == "(Z)Ljava/lang/Object;" && it.access and Opcodes.ACC_BRIDGE != 0 }, "ABI bridge must still be injected without recomputing unrelated application frames")
     }
+
+    @Test
+    fun remapMethods_updates_annotated_caller_without_loading_types_from_unrelated_frames() {
+        val node = ClassNode()
+        ClassReader(buildMissingClasspathFrameMergeClass()).accept(node, 0)
+        val annotation = "sample/ExternalMarker"
+        node.visitAnnotation("L$annotation;", true).apply {
+            visit("value", "fixture")
+            visitEnd()
+        }
+        val target = "sample/StaticTarget"
+        node.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "dispatch", "()I", null, null).apply {
+            visitCode()
+            visitMethodInsn(Opcodes.INVOKESTATIC, target, "answer", "()I", false)
+            visitInsn(Opcodes.IRETURN)
+            visitMaxs(1, 0)
+            visitEnd()
+        }
+        val writer = ClassWriter(0)
+        node.accept(writer)
+        val annotationMember = MemberKey(annotation, "value", "()Ljava/lang/String;")
+        val staticMember = MemberKey(target, "answer", "()I")
+        val output = remapMethods(writer.toByteArray(), mapOf(
+            annotationMember to MemberRename(annotation, "value", annotationMember.descriptor, "label"),
+            staticMember to MemberRename(target, "answer", staticMember.descriptor, "answerRenamed"),
+        ))
+        assertEquals(setOf("label"), readRuntimeAnnotationElementNames(output, "L$annotation;"))
+        assertEquals("answerRenamed", readMethodCalls(output).single { it.owner == target }.name)
+    }
+
     @Test
     fun renameMethods_preserves_compiler_synthetic_accessor_for_vm_captured_calls() {
         val classBytes = buildSyntheticAccessorHostClass()
@@ -594,24 +859,24 @@ class RenameReflectionGuardTest {
         return writer.toByteArray()
     }
 
-    private fun buildMainEntrypointClass(): ByteArray {
-        val writer = ClassWriter(ClassWriter.COMPUTE_MAXS)
-        writer.visit(Opcodes.V17, Opcodes.ACC_PUBLIC, "sample/MainApp", null, "java/lang/Object", null)
-        val constructor = writer.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
-        constructor.visitCode()
-        constructor.visitVarInsn(Opcodes.ALOAD, 0)
-        constructor.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
-        constructor.visitInsn(Opcodes.RETURN)
-        constructor.visitMaxs(1, 1)
-        constructor.visitEnd()
-        val main = writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "main", "([Ljava/lang/String;)V", null, null)
-        main.visitCode()
-        main.visitInsn(Opcodes.RETURN)
-        main.visitMaxs(0, 1)
-        main.visitEnd()
-        writer.visitEnd()
-        return writer.toByteArray()
-    }
+    private fun buildMainEntrypointClass(): ByteArray {
+        val writer = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        writer.visit(Opcodes.V17, Opcodes.ACC_PUBLIC, "sample/MainApp", null, "java/lang/Object", null)
+        val constructor = writer.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
+        constructor.visitCode()
+        constructor.visitVarInsn(Opcodes.ALOAD, 0)
+        constructor.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/Object", "<init>", "()V", false)
+        constructor.visitInsn(Opcodes.RETURN)
+        constructor.visitMaxs(1, 1)
+        constructor.visitEnd()
+        val main = writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "main", "([Ljava/lang/String;)V", null, null)
+        main.visitCode()
+        main.visitInsn(Opcodes.RETURN)
+        main.visitMaxs(0, 1)
+        main.visitEnd()
+        writer.visitEnd()
+        return writer.toByteArray()
+    }
     private fun buildRunnableImplementationClass(): ByteArray {
         val writer = ClassWriter(ClassWriter.COMPUTE_MAXS)
         writer.visit(Opcodes.V17, Opcodes.ACC_PUBLIC, "sample/UiTask", null, "java/lang/Object", arrayOf("java/lang/Runnable"))
@@ -663,7 +928,7 @@ class RenameReflectionGuardTest {
     }
 
 
-    private fun buildNativeMethodClass(): ByteArray {
+    private fun buildNativeMethodClass(includeJavaMethod: Boolean = false): ByteArray {
         val writer = ClassWriter(ClassWriter.COMPUTE_MAXS)
         writer.visit(Opcodes.V17, Opcodes.ACC_PUBLIC, "sample/NativeHost", null, "java/lang/Object", null)
         val constructor = writer.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
@@ -674,6 +939,15 @@ class RenameReflectionGuardTest {
         constructor.visitMaxs(1, 1)
         constructor.visitEnd()
         writer.visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_NATIVE, "nativeProbe", "()I", null, null).visitEnd()
+        if (includeJavaMethod) {
+            writer.visitMethod(Opcodes.ACC_PUBLIC, "javaProbe", "()I", null, null).apply {
+                visitCode()
+                visitIntInsn(Opcodes.BIPUSH, 42)
+                visitInsn(Opcodes.IRETURN)
+                visitMaxs(0, 0)
+                visitEnd()
+            }
+        }
         writer.visitEnd()
         return writer.toByteArray()
     }

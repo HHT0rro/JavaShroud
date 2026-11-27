@@ -185,8 +185,7 @@ public final class QpBridge {
         String implDesc = fields[6];
         String instType = fields[7];
         Class<?> owner = Class.forName(implOwner.replace('/', '.'), false, QpBridge.class.getClassLoader());
-        java.lang.invoke.MethodHandles.Lookup privateLookup =
-            java.lang.invoke.MethodHandles.privateLookupIn(owner, java.lang.invoke.MethodHandles.lookup());
+        MethodHandles.Lookup privateLookup = lambdaLookup(owner);
         ClassLoader loader = owner.getClassLoader();
         java.lang.invoke.MethodType sam =
             java.lang.invoke.MethodType.fromMethodDescriptorString(samType, loader);
@@ -199,6 +198,18 @@ public final class QpBridge {
         java.lang.invoke.CallSite site = java.lang.invoke.LambdaMetafactory.metafactory(
             privateLookup, indyName, invoked, sam, impl, instantiated);
         return site.getTarget().invokeWithArguments(java.util.Arrays.asList(arguments));
+    }
+
+    private static MethodHandles.Lookup lambdaLookup(Class<?> owner) throws Throwable {
+        try {
+            return (MethodHandles.Lookup) MethodHandles.class
+                .getMethod("privateLookupIn", Class.class, MethodHandles.Lookup.class)
+                .invoke(null, owner, MethodHandles.lookup());
+        } catch (NoSuchMethodException unavailable) {
+            throw new UnsupportedOperationException("Qp lambda replay requires Java 9 or later", unavailable);
+        } catch (java.lang.reflect.InvocationTargetException failed) {
+            throw failed.getCause();
+        }
     }
 
     private static void requireTargetSiteRequest(

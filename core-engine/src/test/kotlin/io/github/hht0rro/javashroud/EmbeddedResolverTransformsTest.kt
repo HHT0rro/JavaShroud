@@ -149,7 +149,11 @@ class EmbeddedResolverTransformsTest {
             val node = ClassNode()
             ClassReader(transformed).accept(node, ClassReader.SKIP_CODE)
             assertEquals(classVersion, node.version)
-            assertEquals(value, load(transformed).getMethod("stringValue").invoke(null))
+            if (classVersion <= testClassfileVersion()) {
+                assertEquals(value, load(transformed).getMethod("stringValue").invoke(null))
+            } else {
+                assertFailsWith<UnsupportedClassVersionError> { load(transformed) }
+            }
         }
     }
 

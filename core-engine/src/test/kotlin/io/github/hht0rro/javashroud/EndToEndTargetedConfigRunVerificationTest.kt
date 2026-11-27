@@ -5,6 +5,7 @@ import io.github.hht0rro.javashroud.adapters.protocol.buildCommandRequest
 import io.github.hht0rro.javashroud.adapters.protocol.dispatchRequest
 import io.github.hht0rro.javashroud.kernel.EngineKernel
 import io.github.hht0rro.javashroud.model.config.RuleSpec
+import io.github.hht0rro.javashroud.transforms.protection.hardening.QpTargetRewriter
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
 import java.nio.file.Files
@@ -70,7 +71,9 @@ class EndToEndTargetedConfigRunVerificationTest {
     private fun writeTargetedRunConfig(configPath: Path, inputJar: Path, outputJar: Path, scenario: TargetedScenario) {
         val rules = mutableListOf<RuleSpec>()
         for (target in scenario.targetedClasses) {
-            rules += RuleSpec(target = target, action = scenario.passIds.first())
+            for (passId in scenario.passIds) {
+                rules += RuleSpec(target = target, action = passId)
+            }
         }
         for (target in scenario.targetedMembers) {
             rules += RuleSpec(target = target, action = "member-hide")
@@ -81,7 +84,7 @@ class EndToEndTargetedConfigRunVerificationTest {
     private fun assertTargetedTransformationHolds(inputJar: Path, outputJar: Path, scenario: TargetedScenario) {
         val inputBytes = loadJarClassBytes(inputJar)
         val outputBytes = loadJarClassBytes(outputJar)
-        assertEquals(inputBytes.keys, outputBytes.keys, "Class set must remain stable for $scenario")
+        assertEquals(inputBytes.keys + QpTargetRewriter.BOOTSTRAP_OWNER, outputBytes.keys, "Fixture classes and the release bootstrap should be present for $scenario")
 
         val inputAttributes = inputBytes.mapValues { (_, bytes) -> collectClassBytecodeAttributes(bytes) }
         val outputAttributes = outputBytes.mapValues { (_, bytes) -> collectClassBytecodeAttributes(bytes) }

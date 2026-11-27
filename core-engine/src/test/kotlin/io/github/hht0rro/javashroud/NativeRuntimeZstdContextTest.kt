@@ -44,7 +44,6 @@ class NativeRuntimeZstdContextTest {
             "fn bit_length(",
             "checked_mul(8)",
             "impl Drop for GhashWorkspace",
-            "impl Drop for GcmWorkspace",
             "impl Drop for WipedVec",
             "self.nonce.fill(0);",
             "self.aad.fill(0);",
@@ -53,6 +52,7 @@ class NativeRuntimeZstdContextTest {
         )) {
             assertContains(source, marker, "qp-crypto contract")
         }
+        assertGcmWorkspaceWipesState(source)
 
         val decrypt = source.substringAfter("pub fn aes256_gcm_decrypt(").substringBefore("fn ensure_software_backend(")
         val tagCheck = decrypt.indexOf("constant_time_tag_eq")

@@ -10,6 +10,7 @@ import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.model.passes.PassContext
 import io.github.hht0rro.javashroud.passes.applyRegisteredPassWithMetrics
 import io.github.hht0rro.javashroud.passes.requireExecutablePass
+import io.github.hht0rro.javashroud.transforms.protection.currentQpBuildContextOrNull
 import io.github.hht0rro.javashroud.transforms.protection.defaultQpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
 import org.objectweb.asm.ClassReader
@@ -487,12 +488,19 @@ class PassExecutionRuleRemapTest {
 
     private fun methodCallsVmDispatcher(classBytes: ByteArray, methodName: String, descriptor: String): Boolean {
         var callsDispatcher = false
-        ClassReader(classBytes).accept(object : org.objectweb.asm.ClassVisitor(Opcodes.ASM9) {
+        val reader = ClassReader(classBytes)
+        val dispatcher = currentQpBuildContextOrNull()?.resolveOpaqueVmDispatcher(reader.className, methodName, descriptor)
+        val actualName = dispatcher?.syntheticName ?: methodName
+        val actualDescriptor = dispatcher?.syntheticDescriptor ?: descriptor
+        reader.accept(object : org.objectweb.asm.ClassVisitor(Opcodes.ASM9) {
             override fun visitMethod(access: Int, name: String, desc: String, signature: String?, exceptions: Array<String>?): MethodVisitor? {
-                if (name != methodName || desc != descriptor) return null
+                if (name != actualName || desc != actualDescriptor) return null
                 return object : MethodVisitor(Opcodes.ASM9) {
                     override fun visitMethodInsn(opcode: Int, owner: String, name: String, methodDescriptor: String, isInterface: Boolean) {
-                        if (owner.endsWith("QpBridge") && name.startsWith("executeVmResource")) callsDispatcher = true
+                        if (opcode == Opcodes.INVOKESTATIC && owner.endsWith("/QpBridge") &&
+                            name == "executeQpVmPage" &&
+                            methodDescriptor == "(Ljava/lang/String;[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
+                        ) callsDispatcher = true
                     }
                 }
             }

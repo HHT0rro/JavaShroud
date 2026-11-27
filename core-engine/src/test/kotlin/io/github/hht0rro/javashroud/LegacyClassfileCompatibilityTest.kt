@@ -4,22 +4,21 @@ import io.github.hht0rro.javashroud.adapters.protocol.EngineCommand
 import io.github.hht0rro.javashroud.adapters.protocol.buildCommandRequest
 import io.github.hht0rro.javashroud.adapters.protocol.dispatchRequest
 import io.github.hht0rro.javashroud.kernel.EngineKernel
+import io.github.hht0rro.javashroud.passes.executablePassRegistry
+import org.junit.jupiter.api.io.TempDir
 import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassVisitor
 import org.objectweb.asm.ClassWriter
-import org.objectweb.asm.ConstantDynamic
 import org.objectweb.asm.Label
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
-import org.objectweb.asm.tree.ClassNode
-import org.objectweb.asm.tree.LdcInsnNode
 import java.io.ByteArrayOutputStream
 import java.io.PrintStream
-import java.net.URLClassLoader
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.jar.Attributes
 import java.util.jar.JarEntry
+import java.util.jar.JarFile
 import java.util.jar.JarOutputStream
 import java.util.jar.Manifest
 import kotlin.test.Test
@@ -31,65 +30,31 @@ import kotlin.test.assertTrue
 class LegacyClassfileCompatibilityTest {
 
     @Test
-    fun java8_classfile_safe_passes_do_not_raise_target_version_or_write_condy() {
+    fun java8_classfile_safe_passes_do_not_raise_target_version_or_write_condy(@TempDir directory: Path) {
+        val inputJar = buildLegacyJava8FixtureJar(directory.resolve("input.jar"))
+        assertRuns(inputJar, "untransformed Java 8 fixture")
         for (passId in JAVA8_CLASSFILE_PRESERVING_PASSES) {
-            val result = runLegacyFixture(passId)
-            val classBytesByName = loadJarClassBytes(result.outputJar)
-
-            assertTrue(result.events.any { it == "done" }, "Engine should finish for pass=$passId, events=${result.events}")
-            assertTrue(classBytesByName.isNotEmpty(), "Output jar should contain classes for pass=$passId")
-
-            for ((internalName, classBytes) in classBytesByName) {
-                assertAsmReadable(classBytes, "$passId:$internalName")
-                assertEquals(
-                    Opcodes.V1_8,
-                    classfileMajor(classBytes),
-                    "Pass $passId must not raise Java 8 classfile major for $internalName",
-                )
-                assertFalse(
-                    containsConstantDynamic(classBytes),
-                    "Pass $passId must not write CONSTANT_Dynamic into Java 8 classfile $internalName",
-                )
-            }
-
-            assertLoadable(result.outputJar, passId)
+            assertJava8Output(runJava8Fixture(inputJar, passId), passId)
         }
     }
 
     @Test
-    fun condy_indirection_keeps_java8_classfiles_without_constantdynamic() {
-        val result = runLegacyFixture("condy-constant-indirection")
-        val classBytesByName = loadJarClassBytes(result.outputJar)
-
-        assertTrue(result.events.any { it == "done" }, "Engine should finish for condy Java 8 compatibility")
-        assertTrue(classBytesByName.isNotEmpty(), "Output jar should contain classes for condy Java 8 compatibility")
-
-        for ((internalName, classBytes) in classBytesByName) {
-            assertAsmReadable(classBytes, "condy-constant-indirection:$internalName")
-            assertEquals(
-                Opcodes.V1_8,
-                classfileMajor(classBytes),
-                "condy-constant-indirection must not raise Java 8 classfile major for $internalName",
-            )
-            assertFalse(
-                containsConstantDynamic(classBytes),
-                "condy-constant-indirection must skip or fall back on Java 8 classfile $internalName",
-            )
-        }
+    fun condy_indirection_keeps_java8_classfiles_without_constantdynamic(@TempDir directory: Path) {
+        val inputJar = buildLegacyJava8FixtureJar(directory.resolve("input.jar"))
+        val passId = "condy-constant-indirection"
+        assertJava8Output(runJava8Fixture(inputJar, passId), passId)
     }
 
     @Test
     fun compatibility_matrix_covers_every_registered_pass() {
-        val documentedPassIds = (JAVA8_CLASSFILE_PRESERVING_PASSES + JAVA8_FEATURE_GATED_PASSES + JAVA11_OR_NATIVE_BOUND_PASSES).toSet()
-        assertEquals(23, documentedPassIds.size, "Compatibility matrix should document every executable pass exactly once")
-        assertEquals(EXPECTED_EXECUTABLE_PASS_IDS, documentedPassIds, "Compatibility matrix must match executable pass registry")
+        val classified = JAVA8_CLASSFILE_PRESERVING_PASSES + JAVA8_FEATURE_GATED_PASSES + JAVA11_OR_NATIVE_BOUND_PASSES
+        assertEquals(classified.size, classified.toSet().size, "Each executable pass must be classified exactly once")
+        assertEquals(executablePassRegistry.keys, classified.toSet(), "Compatibility matrix must match executable pass registry")
     }
 
-    private fun runLegacyFixture(passId: String): LegacyRunResult {
-        val inputJar = Files.createTempFile("javashroud-legacy-$passId-input", ".jar")
-        val outputJar = inputJar.resolveSibling("javashroud-legacy-$passId-output.jar")
-        val configPath = inputJar.resolveSibling("javashroud-legacy-$passId-config.toml")
-        buildLegacyJava8FixtureJar(inputJar)
+    private fun runJava8Fixture(inputJar: Path, passId: String): Path {
+        val outputJar = inputJar.resolveSibling("$passId.jar")
+        val configPath = inputJar.resolveSibling("$passId.toml")
         writeTestRunConfigToml(
             configPath = configPath,
             inputJar = inputJar,
@@ -98,17 +63,18 @@ class LegacyClassfileCompatibilityTest {
             allowIncomplete = false,
             allowOptInPasses = true,
         )
-
-        val output = withTestBootSecret {
-            captureStdout {
-                dispatchRequest(
-                    buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())),
-                    EngineKernel(),
-                )
-            }
+        // Exercise each pass's classfile output independently of release validation.
+        Files.writeString(configPath, "protectionProfile = \"minimal\"\n" + Files.readString(configPath))
+        val output = captureStdout {
+            dispatchRequest(
+                buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())),
+                EngineKernel(),
+            )
         }
+        val events = output.trim().lines().filter { it.isNotBlank() }.map(::parseEventType)
+        assertTrue("done" in events, "Engine should finish for pass=$passId, events=$events")
         assertTrue(Files.exists(outputJar), "Output jar should exist for pass=$passId")
-        return LegacyRunResult(outputJar = outputJar, events = output.trim().lines().filter { it.isNotBlank() }.map(::parseEventType))
+        return outputJar
     }
 
     private fun buildLegacyJava8FixtureJar(outputPath: Path): Path {
@@ -125,7 +91,7 @@ class LegacyClassfileCompatibilityTest {
     }
 
     private fun legacyMainClassBytes(): ByteArray {
-        val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
+        val cw = ClassWriter(ClassWriter.COMPUTE_FRAMES)
         cw.visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "legacy/Main", null, "java/lang/Object", null)
         cw.visitSource("Main.java", null)
 
@@ -140,7 +106,14 @@ class LegacyClassfileCompatibilityTest {
 
         cw.method(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, "main", "([Ljava/lang/String;)V") { mv ->
             mv.visitMethodInsn(Opcodes.INVOKESTATIC, "legacy/Main", "value", "()I", false)
-            mv.visitInsn(Opcodes.POP)
+            mv.visitIntInsn(Opcodes.BIPUSH, 20)
+            val expected = Label()
+            mv.visitJumpInsn(Opcodes.IF_ICMPEQ, expected)
+            mv.visitTypeInsn(Opcodes.NEW, "java/lang/AssertionError")
+            mv.visitInsn(Opcodes.DUP)
+            mv.visitMethodInsn(Opcodes.INVOKESPECIAL, "java/lang/AssertionError", "<init>", "()V", false)
+            mv.visitInsn(Opcodes.ATHROW)
+            mv.visitLabel(expected)
             mv.visitInsn(Opcodes.RETURN)
         }
 
@@ -191,24 +164,35 @@ class LegacyClassfileCompatibilityTest {
         assertTrue(classBytes.isNotEmpty(), "Class bytes should be non-empty: $context")
     }
 
-    private fun assertLoadable(outputJar: Path, passId: String) {
-        URLClassLoader(arrayOf(outputJar.toUri().toURL()), null).use { loader ->
-            val className = loadJarClassBytes(outputJar).keys.firstOrNull()?.replace('/', '.')
-            assertNotNull(className, "Pass $passId should keep at least one loadable class entry")
-            loader.loadClass(className)
+    private fun assertJava8Output(outputJar: Path, passId: String) {
+        val mainClass = JarFile(outputJar.toFile()).use { jar ->
+            assertNotNull(jar.manifest.mainAttributes.getValue(Attributes.Name.MAIN_CLASS))
+        }.replace('.', '/')
+        val classes = loadJarClassBytes(outputJar)
+        assertTrue(mainClass in classes, "Pass $passId must retain the application entry point")
+        for ((name, classBytes) in classes) {
+            assertAsmReadable(classBytes, "$passId:$name")
+            assertEquals(Opcodes.V1_8, classfileMajor(classBytes), "Pass $passId must preserve Java 8 classfile version for $name")
+            assertFalse(containsConstantDynamic(classBytes), "Pass $passId must not write CONSTANT_Dynamic into $name")
         }
+        assertRuns(outputJar, passId)
+    }
+
+    private fun assertRuns(jar: Path, context: String) {
+        val javaHome = System.getenv("JAVA8_HOME") ?: System.getProperty("java.home")
+        val java = Path.of(javaHome, "bin", "java")
+        val run = runJavaProcessWithTimeout(ProcessBuilder(java.toString(), "-Xverify:all", "-jar", jar.toString()))
+        assertEquals(0, run.exitCode, "$context failed on $java: " + run.output)
     }
 
     private fun classfileMajor(classBytes: ByteArray): Int =
         ((classBytes[6].toInt() and 0xff) shl 8) or (classBytes[7].toInt() and 0xff)
 
     private fun containsConstantDynamic(classBytes: ByteArray): Boolean {
-        val node = ClassNode()
-        ClassReader(classBytes).accept(node, 0)
-        return node.methods.any { method ->
-            method.instructions?.toArray()?.any { insn ->
-                insn is LdcInsnNode && insn.cst is ConstantDynamic
-            } == true
+        val reader = ClassReader(classBytes)
+        return (1 until reader.itemCount).any { index ->
+            val item = reader.getItem(index)
+            item != 0 && reader.readByte(item - 1) == 17 // CONSTANT_Dynamic tag
         }
     }
 
@@ -229,11 +213,10 @@ class LegacyClassfileCompatibilityTest {
         return match?.groupValues?.get(1) ?: error("Engine event line missing type: $line")
     }
 
-    private data class LegacyRunResult(val outputJar: Path, val events: List<String>)
-
     private companion object {
         val JAVA8_CLASSFILE_PRESERVING_PASSES = listOf(
             "strip-compile-debug-info",
+            "member-shuffle",
             "rename-classes",
             "rename-packages",
             "rename-methods",
@@ -261,32 +244,7 @@ class LegacyClassfileCompatibilityTest {
             "os-anti-debug",
             "os-anti-vm",
             "jni-microkernel-loader",
-        )
-
-        val EXPECTED_EXECUTABLE_PASS_IDS = setOf(
-            "strip-compile-debug-info",
-            "member-shuffle",
-            "rename-classes",
-            "rename-packages",
-            "rename-methods",
-            "rename-fields",
-            "string-encryption",
-            "field-string-encryption",
-            "integer-constant-obfuscation",
-            "static-init-perturbation",
-            "anti-decompiler-structure",
-            "invoke-dynamic-indirection",
-            "control-flow-obfuscation",
-            "reference-proxy",
-            "control-flow-flattening",
-            "condy-constant-indirection",
-            "member-hide",
-            "method-virtualization",
-            "callsite-rotation-protection",
-            "exception-semantic-virtualization",
-            "os-anti-debug",
-            "os-anti-vm",
-            "jni-microkernel-loader",
+            "nativeshroud",
         )
     }
 }

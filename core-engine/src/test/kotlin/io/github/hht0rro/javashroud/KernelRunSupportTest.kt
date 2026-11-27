@@ -13,6 +13,7 @@ import io.github.hht0rro.javashroud.kernel.buildRunSummaryEvent
 import io.github.hht0rro.javashroud.kernel.calculatePassTickProgress
 import io.github.hht0rro.javashroud.kernel.calculateProgress
 import io.github.hht0rro.javashroud.model.config.PassSpec
+import io.github.hht0rro.javashroud.model.config.HardenedProtectionProfile
 import io.github.hht0rro.javashroud.model.config.PassSelectionMode
 import io.github.hht0rro.javashroud.model.config.PassSelectionSpec
 import io.github.hht0rro.javashroud.model.config.RuleSpec
@@ -27,7 +28,15 @@ import io.github.hht0rro.javashroud.modules.ModuleTransform
 import io.github.hht0rro.javashroud.modules.ObfuscationModule
 import io.github.hht0rro.javashroud.passes.ExecutablePass
 import io.github.hht0rro.javashroud.passes.PassDescriptor
+import io.github.hht0rro.javashroud.transforms.protection.CandidateProductionBuildEvidence
+import io.github.hht0rro.javashroud.transforms.protection.hardening.SignedDebugMap
+import java.nio.file.FileSystemException
 import java.nio.file.Files
+import java.nio.file.Path
+import java.util.HexFormat
+import java.util.jar.JarEntry
+import java.util.jar.JarFile
+import java.util.jar.JarOutputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -351,6 +360,143 @@ class KernelRunSupportTest {
             assertTrue(emittedEvents.isEmpty(), "The rejected configuration must fail before bootstrap events")
         } finally {
             tempDir.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun engineKernelRun_preserves_original_jar_and_sidecars_when_final_scan_rejects() {
+        assertRejectedJarPublication(hasPreviousOutput = true)
+    }
+
+    @Test
+    fun engineKernelRun_creates_no_output_when_final_scan_rejects() {
+        assertRejectedJarPublication(hasPreviousOutput = false)
+    }
+
+    @Test
+    fun engineKernelRun_restores_replaced_outputs_after_late_publication_failure() {
+        assertJarPublicationRollsBack(hasPreviousOutput = true)
+    }
+
+    @Test
+    fun engineKernelRun_removes_new_outputs_after_late_publication_failure() {
+        assertJarPublicationRollsBack(hasPreviousOutput = false)
+    }
+
+    @Test
+    fun engineKernelRun_publishes_validated_jar_and_report_under_requested_names() {
+        val tempDir = Files.createTempDirectory("javashroud-jar-publication")
+        try {
+            val inputJar = tempDir.resolve("input.jar")
+            val outputJar = tempDir.resolve("release candidate.jar")
+            val report = tempDir.resolve("release candidate.release-scan.txt")
+            val debugMap = SignedDebugMap.sidecarPath(outputJar)
+            val evidence = CandidateProductionBuildEvidence.evidencePath(outputJar)
+            writePublicationJar(inputJar, "resource.txt", "new contents")
+            writePublicationJar(outputJar, "resource.txt", "old contents")
+            listOf(report, debugMap, evidence).forEach { Files.writeString(it, "old sidecar") }
+
+            val events = mutableListOf<EngineEvent>()
+            runPublicationJar(inputJar, outputJar, events)
+
+            JarFile(outputJar.toFile()).use { jar ->
+                val contents = jar.getInputStream(jar.getJarEntry("resource.txt")).reader().use { it.readText() }
+                assertEquals("new contents", contents)
+            }
+            val digest = HexFormat.of().formatHex(SignedDebugMap.sha256(outputJar))
+            val reportLines = Files.readAllLines(report)
+            assertTrue("artifactSha256=$digest" in reportLines)
+            assertTrue("RESULT=PASS" in reportLines)
+            assertEquals(outputJar.toString(), events.single { it.type == "done" }.outPath)
+            assertEquals(setOf(inputJar, outputJar, report), Files.list(tempDir).use { it.toList().toSet() })
+        } finally {
+            tempDir.toFile().deleteRecursively()
+        }
+    }
+
+    private fun assertRejectedJarPublication(hasPreviousOutput: Boolean) {
+        val tempDir = Files.createTempDirectory("javashroud-jar-publication")
+        try {
+            val inputJar = tempDir.resolve("input.jar")
+            val outputJar = tempDir.resolve("release candidate.jar")
+            val sidecars = listOf(
+                SignedDebugMap.sidecarPath(outputJar),
+                tempDir.resolve("release candidate.release-scan.txt"),
+                CandidateProductionBuildEvidence.evidencePath(outputJar),
+            )
+            writePublicationJar(inputJar, "metadata.debugmap", "an embedded debug map is rejected by the final scan")
+            if (hasPreviousOutput) {
+                writePublicationJar(outputJar, "resource.txt", "old contents")
+                sidecars.forEach { Files.writeString(it, "old " + it.fileName) }
+            }
+            val originalFiles = Files.list(tempDir).use { it.toList() }.associateWith(Files::readAllBytes)
+            val events = mutableListOf<EngineEvent>()
+
+            val error = assertFailsWith<SecurityException> { runPublicationJar(inputJar, outputJar, events) }
+
+            assertTrue(error.message.orEmpty().contains("debug-map-provenance: embedded=metadata.debugmap"))
+            val remainingFiles = Files.list(tempDir).use { it.toList().toSet() }
+            val changedFiles = originalFiles.filter { (path, bytes) ->
+                path !in remainingFiles || !Files.readAllBytes(path).contentEquals(bytes)
+            }.keys
+            assertEquals(emptySet(), changedFiles, "Original files changed or disappeared")
+            assertEquals(originalFiles.keys, remainingFiles, "Unexpected files left after failed publication")
+            assertTrue(events.none { it.type == "done" })
+        } finally {
+            tempDir.toFile().deleteRecursively()
+        }
+    }
+
+    private fun assertJarPublicationRollsBack(hasPreviousOutput: Boolean) {
+        val tempDir = Files.createTempDirectory("javashroud-jar-rollback")
+        try {
+            val inputJar = tempDir.resolve("input.jar")
+            val outputJar = tempDir.resolve("release candidate.jar")
+            val report = tempDir.resolve("release candidate.release-scan.txt")
+            val debugMap = SignedDebugMap.sidecarPath(outputJar)
+            writePublicationJar(inputJar, "resource.txt", "new contents")
+            if (hasPreviousOutput) {
+                writePublicationJar(outputJar, "resource.txt", "old contents")
+                Files.writeString(report, "old report")
+            }
+            Files.writeString(debugMap, "old debug map")
+            // Build evidence is the last target, after the JAR, report and old debug map removal.
+            val blockedTarget = Files.createDirectory(CandidateProductionBuildEvidence.evidencePath(outputJar))
+            val marker = Files.writeString(blockedTarget.resolve("keep.txt"), "keep")
+            val originalFiles = Files.list(tempDir).use { it.toList() }
+                .filter { it != blockedTarget }.associateWith(Files::readAllBytes)
+            val events = mutableListOf<EngineEvent>()
+
+            val failure = assertFailsWith<FileSystemException> { runPublicationJar(inputJar, outputJar, events) }
+
+            assertEquals(blockedTarget.toString(), failure.file)
+            val remaining = Files.list(tempDir).use { it.toList().toSet() }
+            val changed = originalFiles.filter { (path, bytes) ->
+                path !in remaining || !Files.readAllBytes(path).contentEquals(bytes)
+            }.keys
+            assertEquals(emptySet(), changed, "Original outputs were not restored")
+            assertEquals(originalFiles.keys + setOf(blockedTarget), remaining, "New outputs or staging files remain")
+            assertEquals("keep", Files.readString(marker))
+            assertTrue(events.none { it.type == "done" })
+        } finally {
+            tempDir.toFile().deleteRecursively()
+        }
+    }
+
+    private fun runPublicationJar(inputJar: Path, outputJar: Path, events: MutableList<EngineEvent>) {
+        EngineKernel().run(
+            config = testConfig(inputJarPath = inputJar.toString(), outputJarPath = outputJar.toString())
+                .copy(protectionProfile = HardenedProtectionProfile.ANALYSIS_ONLY),
+            configPath = inputJar.resolveSibling("config.toml"),
+            emit = { events += it },
+        )
+    }
+
+    private fun writePublicationJar(path: Path, entryName: String, content: String) {
+        JarOutputStream(Files.newOutputStream(path)).use { jar ->
+            jar.putNextEntry(JarEntry(entryName))
+            jar.write(content.toByteArray())
+            jar.closeEntry()
         }
     }
 

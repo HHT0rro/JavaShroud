@@ -16,7 +16,10 @@ func TestEmbeddedXenolithExtractsAndProbesVersion(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("extracted xenolith cli missing: %v", err)
 	}
-	version := probeXenolithCliVersion(path)
+	version, err := probeXenolithCliVersion(path)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.HasPrefix(version, "xenolith ") {
 		t.Fatalf("version probe returned %q", version)
 	}

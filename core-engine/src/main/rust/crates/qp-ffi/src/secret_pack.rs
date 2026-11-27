@@ -14,7 +14,7 @@
 
 use crate::image_measure;
 use crate::specialization;
-use qp_crypto::{aes256_gcm_decrypt, constant_time_eq, hmac_sha256_bytes, hkdf_sha256};
+use qp_crypto::{aes256_gcm_decrypt, constant_time_eq, hkdf_sha256, hmac_sha256_bytes};
 use qp_runtime::{PageKeyAuthority, PageKeyMaterial, PageKeyRequest, RouterError};
 use std::sync::atomic::{compiler_fence, AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -26,8 +26,8 @@ const COMMITMENT_DOMAIN: &[u8] = b"javashroud-qp-secret-commitment-v6";
 #[inline(never)]
 fn wrap_aad_info() -> [u8; 28] {
     let packed: [u8; 28] = [
-        0x3F, 0x34, 0x23, 0x34, 0x26, 0x3D, 0x27, 0x3A, 0x20, 0x31, 0x78, 0x24, 0x25, 0x78,
-        0x26, 0x30, 0x36, 0x27, 0x30, 0x21, 0x78, 0x22, 0x27, 0x34, 0x25, 0x78, 0x23, 0x63,
+        0x3F, 0x34, 0x23, 0x34, 0x26, 0x3D, 0x27, 0x3A, 0x20, 0x31, 0x78, 0x24, 0x25, 0x78, 0x26,
+        0x30, 0x36, 0x27, 0x30, 0x21, 0x78, 0x22, 0x27, 0x34, 0x25, 0x78, 0x23, 0x63,
     ];
     let mut info = [0u8; 28];
     for index in 0..28 {
@@ -40,8 +40,8 @@ fn wrap_aad_info() -> [u8; 28] {
 #[inline(never)]
 fn pack_shell_info() -> [u8; 27] {
     let packed: [u8; 27] = [
-        0x3F, 0x34, 0x23, 0x34, 0x26, 0x3D, 0x27, 0x3A, 0x20, 0x31, 0x78, 0x24, 0x25, 0x78,
-        0x25, 0x34, 0x36, 0x3E, 0x78, 0x26, 0x3D, 0x30, 0x39, 0x39, 0x78, 0x23, 0x63,
+        0x3F, 0x34, 0x23, 0x34, 0x26, 0x3D, 0x27, 0x3A, 0x20, 0x31, 0x78, 0x24, 0x25, 0x78, 0x25,
+        0x34, 0x36, 0x3E, 0x78, 0x26, 0x3D, 0x30, 0x39, 0x39, 0x78, 0x23, 0x63,
     ];
     let mut info = [0u8; 27];
     for index in 0..27 {
@@ -220,7 +220,9 @@ impl SecretPackState {
             return Ok(());
         }
         if !authorized || !session_armed {
-            return Err(RouterError::InvalidRequest("secret pack session is missing"));
+            return Err(RouterError::InvalidRequest(
+                "secret pack session is missing",
+            ));
         }
         if sealed_pack.is_empty() {
             return Err(RouterError::InvalidRequest("secret wrap is empty"));
@@ -228,19 +230,22 @@ impl SecretPackState {
         if specialization::SECRET_PACK_SHARD_COUNT == 0 {
             return Err(RouterError::InvalidRequest("secret wrap is empty"));
         }
-        let measurement_key =
-            WipedArray32::new(specialization::qp_sp_reconstruct_shard_key(1));
+        let measurement_key = WipedArray32::new(specialization::qp_sp_reconstruct_shard_key(1));
         if measurement_key.is_zero() {
             return Err(RouterError::InvalidRequest("secret wrap key is zero"));
         }
         if image_measure::verify_wrap_key(measurement_key.as_ref()).is_err() {
-            return Err(RouterError::InvalidRequest("secret image measurement failed"));
+            return Err(RouterError::InvalidRequest(
+                "secret image measurement failed",
+            ));
         }
         drop(measurement_key);
         let parsed = parse_sealed_pack(sealed_pack)
             .map_err(|_| RouterError::InvalidRequest("secret wrap container is invalid"))?;
         if parsed.len() != specialization::SECRET_PACK_SHARD_COUNT {
-            return Err(RouterError::InvalidRequest("secret wrap shard count mismatch"));
+            return Err(RouterError::InvalidRequest(
+                "secret wrap shard count mismatch",
+            ));
         }
         let mut shards = Vec::with_capacity(parsed.len());
         for (kind, nonce, wrapped) in parsed {
@@ -301,20 +306,17 @@ impl SecretPackState {
                 drop(layout);
                 total_slots = Some(total);
             } else {
-                let count = count_kind_records(plaintext.as_slice(), shard.kind).map_err(|_| {
-                    RouterError::InvalidRequest("secret wrap plaintext is invalid")
-                })?;
+                let count = count_kind_records(plaintext.as_slice(), shard.kind)
+                    .map_err(|_| RouterError::InvalidRequest("secret wrap plaintext is invalid"))?;
                 let homes = collect_slot_homes(plaintext.as_slice(), shard.kind, index as u16);
                 if homes.len() != count {
                     return Err(RouterError::InvalidRequest(
                         "secret wrap plaintext is invalid",
                     ));
                 }
-                armed = armed
-                    .checked_add(count)
-                    .ok_or(RouterError::InvalidRequest(
-                        "secret wrap plaintext is invalid",
-                    ))?;
+                armed = armed.checked_add(count).ok_or(RouterError::InvalidRequest(
+                    "secret wrap plaintext is invalid",
+                ))?;
                 for &(kind, slot, _) in &homes {
                     let seed = extract_kind_slot(plaintext.as_slice(), kind, slot as usize)?;
                     kind_seeds.push(((kind, slot), seed));
@@ -461,7 +463,8 @@ fn collect_slot_homes(plaintext: &[u8], kind: u8, shard_index: u16) -> Vec<(u8, 
         if cursor + record > plaintext.len() {
             break;
         }
-        let slot_id = u32::from_be_bytes(plaintext[cursor..cursor + 4].try_into().unwrap_or([0; 4]));
+        let slot_id =
+            u32::from_be_bytes(plaintext[cursor..cursor + 4].try_into().unwrap_or([0; 4]));
         homes.push((kind, slot_id as u16, shard_index));
         cursor += record;
     }
@@ -508,7 +511,8 @@ impl PageKeyAuthority for SecretPackState {
             info.0.extend_from_slice(request.artifact_commitment);
             info.0.extend_from_slice(&request.secret_slot.to_be_bytes());
             info.0.push(request.kind_id);
-            info.0.extend_from_slice(&(request.page_index as u32).to_be_bytes());
+            info.0
+                .extend_from_slice(&(request.page_index as u32).to_be_bytes());
             info.0.extend_from_slice(request.encoded_handle);
             info.0.extend_from_slice(request.locator_token);
             info.0.extend_from_slice(request.page_nonce);
@@ -560,7 +564,9 @@ fn unwrap_pack_shell(bytes: &[u8]) -> Result<WipedVec, RouterError> {
     Ok(WipedVec::new(plaintext))
 }
 
-fn parse_inner_sealed_pack(bytes: &[u8]) -> Result<Vec<(u8, [u8; NONCE_SIZE], Vec<u8>)>, RouterError> {
+fn parse_inner_sealed_pack(
+    bytes: &[u8],
+) -> Result<Vec<(u8, [u8; NONCE_SIZE], Vec<u8>)>, RouterError> {
     const PACK_MAGIC: u8 = 0x6A;
     if bytes.len() < 4 || bytes[0] != PACK_MAGIC || bytes[1] != 0 {
         return Err(RouterError::AuthenticationFailed);
@@ -577,15 +583,22 @@ fn parse_inner_sealed_pack(bytes: &[u8]) -> Result<Vec<(u8, [u8; NONCE_SIZE], Ve
             return Err(RouterError::AuthenticationFailed);
         }
         let nonce_len = u16::from_be_bytes([bytes[cursor + 2], bytes[cursor + 3]]) as usize;
-        let wrapped_len =
-            u32::from_be_bytes([bytes[cursor + 4], bytes[cursor + 5], bytes[cursor + 6], bytes[cursor + 7]])
-                as usize;
+        let wrapped_len = u32::from_be_bytes([
+            bytes[cursor + 4],
+            bytes[cursor + 5],
+            bytes[cursor + 6],
+            bytes[cursor + 7],
+        ]) as usize;
         cursor += 8;
         if nonce_len != NONCE_SIZE {
             return Err(RouterError::AuthenticationFailed);
         }
-        let nonce_end = cursor.checked_add(nonce_len).ok_or(RouterError::AuthenticationFailed)?;
-        let wrapped_end = nonce_end.checked_add(wrapped_len).ok_or(RouterError::AuthenticationFailed)?;
+        let nonce_end = cursor
+            .checked_add(nonce_len)
+            .ok_or(RouterError::AuthenticationFailed)?;
+        let wrapped_end = nonce_end
+            .checked_add(wrapped_len)
+            .ok_or(RouterError::AuthenticationFailed)?;
         if bytes.len() < wrapped_end {
             return Err(RouterError::AuthenticationFailed);
         }
@@ -610,10 +623,11 @@ fn parse_root_record(
     if !constant_time_eq(&plaintext[..KEY_SIZE], expected_identity) {
         return Err(RouterError::AuthenticationFailed);
     }
-    let total =
-        u32::from_be_bytes(plaintext[KEY_SIZE..KEY_SIZE + 4].try_into().map_err(|_| {
-            RouterError::AuthenticationFailed
-        })?) as usize;
+    let total = u32::from_be_bytes(
+        plaintext[KEY_SIZE..KEY_SIZE + 4]
+            .try_into()
+            .map_err(|_| RouterError::AuthenticationFailed)?,
+    ) as usize;
     if total > specialization::SECRET_PACK_SLOT_COUNT {
         return Err(RouterError::AuthenticationFailed);
     }
@@ -638,12 +652,18 @@ fn count_kind_records(plaintext: &[u8], kind: u8) -> Result<usize, RouterError> 
     if plaintext[0] != kind {
         return Err(RouterError::AuthenticationFailed);
     }
-    let count =
-        u32::from_be_bytes(plaintext[1..5].try_into().map_err(|_| RouterError::AuthenticationFailed)?)
-            as usize;
+    let count = u32::from_be_bytes(
+        plaintext[1..5]
+            .try_into()
+            .map_err(|_| RouterError::AuthenticationFailed)?,
+    ) as usize;
     let record = 4 + KEY_SIZE;
     let expected_len = 5usize
-        .checked_add(record.checked_mul(count).ok_or(RouterError::AuthenticationFailed)?)
+        .checked_add(
+            record
+                .checked_mul(count)
+                .ok_or(RouterError::AuthenticationFailed)?,
+        )
         .ok_or(RouterError::AuthenticationFailed)?;
     if plaintext.len() != expected_len || count > specialization::SECRET_PACK_SLOT_COUNT {
         return Err(RouterError::AuthenticationFailed);
@@ -672,11 +692,7 @@ fn count_kind_records(plaintext: &[u8], kind: u8) -> Result<usize, RouterError> 
     Ok(count)
 }
 
-fn extract_kind_slot(
-    plaintext: &[u8],
-    kind: u8,
-    slot: usize,
-) -> Result<WipedArray32, RouterError> {
+fn extract_kind_slot(plaintext: &[u8], kind: u8, slot: usize) -> Result<WipedArray32, RouterError> {
     let count = count_kind_records(plaintext, kind)?;
     let _record = 4 + KEY_SIZE;
     let mut cursor = 5usize;
@@ -711,8 +727,13 @@ pub fn unwrap_vm_entry_token(
             .map_err(|_| RouterError::AuthenticationFailed)?,
     );
     let plaintext = WipedVec::new(
-        aes256_gcm_decrypt(key.as_slice(), &sealed[..12], ENTRY_TOKEN_DOMAIN, &sealed[12..])
-            .map_err(|_| RouterError::AuthenticationFailed)?,
+        aes256_gcm_decrypt(
+            key.as_slice(),
+            &sealed[..12],
+            ENTRY_TOKEN_DOMAIN,
+            &sealed[12..],
+        )
+        .map_err(|_| RouterError::AuthenticationFailed)?,
     );
     if plaintext.len() != 8 {
         return Err(RouterError::AuthenticationFailed);

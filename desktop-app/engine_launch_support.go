@@ -130,8 +130,9 @@ func ensureReadableJarPath(inputJarPath string) error {
 	if fileInfo.IsDir() {
 		return fmt.Errorf("path is a directory")
 	}
-	if strings.ToLower(filepath.Ext(inputJarPath)) != ".jar" {
-		return fmt.Errorf("path extension is not .jar")
+	extension := strings.ToLower(filepath.Ext(inputJarPath))
+	if extension != ".jar" && extension != ".apk" {
+		return fmt.Errorf("path extension is not .jar or .apk")
 	}
 	return nil
 }
@@ -180,8 +181,9 @@ func buildDefaultOutputJarName(defaultInputJarPath string) string {
 	if strings.TrimSpace(baseName) == "" || baseName == "." || baseName == string(filepath.Separator) {
 		return "output-shrouded.jar"
 	}
-	if strings.HasSuffix(strings.ToLower(baseName), ".jar") {
-		return strings.TrimSuffix(baseName, filepath.Ext(baseName)) + "-shrouded.jar"
+	extension := strings.ToLower(filepath.Ext(baseName))
+	if extension == ".jar" || extension == ".apk" {
+		return strings.TrimSuffix(baseName, filepath.Ext(baseName)) + "-shrouded" + extension
 	}
 	return baseName + "-shrouded.jar"
 }

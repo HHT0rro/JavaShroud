@@ -38,7 +38,13 @@ jobs:
         java: ['17', '21']
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Install JDK 21 compile toolchain
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Select JDK ${{ matrix.java }} runtime
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: ${{ matrix.java }}
@@ -53,7 +59,7 @@ jobs:
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-zigbuild
+          tool: cargo-zigbuild@0.23.2
       - name: Setup MinGW linker
         uses: msys2/setup-msys2@v2
         with:
@@ -61,12 +67,21 @@ jobs:
           update: true
           install: mingw-w64-x86_64-gcc
       - name: Build Gradle modules and package Windows runtime
-        run: ./gradlew.bat :annotations:build :core-engine:build
+        run: ./gradlew.bat :annotations:build :core-engine:build '-Porg.gradle.java.installations.fromEnv=JAVA_HOME_21_X64'
       - name: Verify packaged Windows runtime
         run: |
-          test -s core-engine/build/core-engine/resources/main/META-INF/jsrt/windows-x64/qp_ffi.dll
-          ! find core-engine/build/core-engine/resources/main -type f -name '*.dylib' -print -quit | grep -q .
+          test -s build/core-engine/resources/main/META-INF/jsrt/windows-x64/qp_ffi.dll
+          ! find build/core-engine/resources/main -type f -name '*.dylib' -print -quit | grep -q .
         shell: msys2 {0}
+      - name: Upload Gradle test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-test-reports-${{ matrix.os }}-jdk${{ matrix.java }}
+          path: |
+            build/*/test-results/**/*.xml
+            build/*/reports/tests/**
+          if-no-files-found: warn
 
   core-engine-linux:
     name: Core engine and Rust runtime (Linux x64 glibc 2.17)
@@ -88,7 +103,7 @@ jobs:
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-zigbuild
+          tool: cargo-zigbuild@0.23.2
       - name: Check Rust formatting
         working-directory: core-engine/src/main/rust
         run: cargo fmt --all -- --check
@@ -96,11 +111,128 @@ jobs:
         working-directory: core-engine/src/main/rust
         run: cargo test --workspace --locked
       - name: Build Gradle modules and package Linux runtime
+        env:
+          JAVASHROUD_REQUIRE_LINUX_NATIVE_FIXTURES: 'true'
         run: |
           ./gradlew :annotations:build :core-engine:build -Pjavashroud.rust.platform=x86_64-unknown-linux-gnu.2.17
-          test -s core-engine/build/core-engine/resources/main/META-INF/jsrt/linux-x64/libqp_ffi.so
-          ! find core-engine/build/core-engine/resources/main -type f -name '*.dylib' -print -quit | grep -q .
+          test -s build/core-engine/resources/main/META-INF/jsrt/linux-x64/libqp_ffi.so
+          unzip -p build/core-engine/libs/obfuscator-engine-*.jar META-INF/jsrt/linux-x64/libqp_ffi.so |
+            cmp - core-engine/src/main/rust/target/x86_64-unknown-linux-gnu/release/libqp_ffi.so
+          ! find build/core-engine/resources/main -type f -name '*.dylib' -print -quit | grep -q .
         shell: bash
+      - name: Upload Gradle test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gradle-test-reports-linux-jdk21
+          path: |
+            build/*/test-results/**/*.xml
+            build/*/reports/tests/**
+          if-no-files-found: warn
+
+  android-runtime:
+    name: Android API ${{ matrix.api }} x86_64 (${{ matrix.page_size }} byte pages)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - api: 21
+            image: google_apis
+            page_size: 4096
+          - api: 26
+            image: google_apis
+            page_size: 4096
+          - api: 35
+            image: google_apis_ps16k
+            page_size: 16384
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: dtolnay/rust-toolchain@1.78.0
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.13.0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild@0.23.2
+      - name: Install the owned fixture compile SDK
+        id: android-sdk
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;35.0.0" > /dev/null
+          printf 'ndk-home=%s/ndk/27.2.12479018\n' "$ANDROID_HOME" >> "$GITHUB_OUTPUT"
+      - name: Allow the hosted runner to use KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Run owned APK runtime fixtures
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          ANDROID_SERIAL: emulator-5554
+          ANDROID_NDK_HOME: ${{ steps.android-sdk.outputs.ndk-home }}
+          JAVASHROUD_ANDROID_DEVICE_TESTS: 'true'
+          JAVASHROUD_ANDROID_EXPECT_API: ${{ matrix.api }}
+          JAVASHROUD_ANDROID_EXPECT_PAGE_SIZE: ${{ matrix.page_size }}
+          JAVASHROUD_APK_DEX2JAR_XMX: 768m
+          JAVASHROUD_APK_D8_XMX: 1024m
+        with:
+          api-level: ${{ matrix.api }}
+          target: ${{ matrix.image }}
+          arch: x86_64
+          ndk: 27.2.12479018
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          disable-animations: true
+          script: ./gradlew :core-engine:test --tests '*.ApkAndroidDeviceSmokeTest' --max-workers=1 '-Dorg.gradle.jvmargs=-Xmx1500m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8' -Pkotlin.compiler.execution.strategy=in-process -Pjavashroud.rust.platform=x86_64-unknown-linux-gnu.2.17
+      - name: Verify Android device JUnit results
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          expected_suite = "io.github.hht0rro.javashroud.apk.ApkAndroidDeviceSmokeTest"
+          expected_cases = {
+              "singleDexResourcesAndShortLayoutCallbackReturn42()",
+              "atLeast66000MethodsRemainMultiDexAndExecuteAcrossClassSplits()",
+              "jniAdditionReturns42WithTheSelectedDeviceAbiAndPageSize()",
+          }
+          report = Path("build/core-engine/test-results/test") / f"TEST-{expected_suite}.xml"
+          if not report.is_file():
+              raise SystemExit(f"Missing Android device JUnit report: {report}")
+          suite = ET.parse(report).getroot()
+          if suite.tag != "testsuite" or suite.get("name") != expected_suite:
+              raise SystemExit(f"Unexpected Android device JUnit suite in {report}")
+          for attribute, expected in {"tests": "3", "skipped": "0", "failures": "0", "errors": "0"}.items():
+              if suite.get(attribute) != expected:
+                  raise SystemExit(f"Android device JUnit {attribute}={suite.get(attribute)!r}, expected {expected}")
+          cases = suite.findall("testcase")
+          if len(cases) != 3 or {case.get("name") for case in cases} != expected_cases:
+              raise SystemExit("Android device JUnit must contain exactly the three owned smoke test cases")
+          if any(case.get("classname") != expected_suite for case in cases):
+              raise SystemExit("Android device JUnit contains an unexpected test class")
+          if any(suite.findall(f".//{tag}") for tag in ("skipped", "failure", "error")):
+              raise SystemExit("Android device JUnit contains skipped, failed, or errored test cases")
+          print(f"Verified {report}: 3 passed, 0 skipped, 0 failures, 0 errors")
+          PY
+      - name: Upload Android device evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-api${{ matrix.api }}-x86_64-pages${{ matrix.page_size }}
+          path: |
+            build/android-runtime-evidence/**
+            build/*/android-runtime-evidence/**
+            build/*/test-results/**/*.xml
+            build/*/reports/tests/**
+          if-no-files-found: warn
 
   desktop-app:
     runs-on: ${{ matrix.os }}
@@ -121,9 +253,25 @@ jobs:
       - name: Install frontend dependencies
         run: corepack yarn install --immutable
         working-directory: desktop-app/frontend
+      - name: Test frontend
+        run: corepack yarn check
+        working-directory: desktop-app/frontend
       - name: Build frontend
         run: corepack yarn build
         working-directory: desktop-app/frontend
-      - name: Verify desktop app Go module
-        run: go build ./...
+      - name: Test and build desktop app Go module
+        run: |
+          New-Item -ItemType Directory -Force -Path ../build/logs | Out-Null
+          go test -count=1 -json ./... | Tee-Object -FilePath ../build/logs/desktop-go-tests.jsonl
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go vet ./...
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build ./...
         working-directory: desktop-app
+      - name: Upload desktop Go test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-go-test-evidence-${{ matrix.os }}
+          path: build/logs/desktop-go-tests.jsonl
+          if-no-files-found: warn

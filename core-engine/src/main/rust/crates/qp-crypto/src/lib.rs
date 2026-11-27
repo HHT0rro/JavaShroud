@@ -1,13 +1,13 @@
 #![forbid(unsafe_code)]
 
-mod types;
 mod name_schedule;
+mod types;
 pub use name_schedule::*;
 use std::fmt;
 use std::sync::OnceLock;
 pub use types::{
-    Binding, BindingError, Digest, DIGEST_SIZE, MAX_BINDING_SIZE, MAX_PAYLOAD_SIZE, PROTOCOL_MAGIC_SIZE,
-    PROTOCOL_VERSION,
+    Binding, BindingError, Digest, DIGEST_SIZE, MAX_BINDING_SIZE, MAX_PAYLOAD_SIZE,
+    PROTOCOL_MAGIC_SIZE, PROTOCOL_VERSION,
 };
 
 const BLOCK_SIZE: usize = 64;
@@ -175,9 +175,7 @@ pub struct RuntimeBindingDigest(Digest);
 impl RuntimeBindingDigest {
     pub fn compute(binding: &Binding) -> Self {
         let domain = derived_runtime_binding_domain().expect("name schedule");
-        Self(
-            compute_framed(&domain, &[binding.as_bytes()]).expect("bounded binding"),
-        )
+        Self(compute_framed(&domain, &[binding.as_bytes()]).expect("bounded binding"))
     }
 
     pub fn compute_bytes(binding: &[u8]) -> Result<Self, CryptoError> {

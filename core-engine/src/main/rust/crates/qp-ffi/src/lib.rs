@@ -3,21 +3,22 @@
 mod image_measure;
 mod relocation;
 mod secret_pack;
-mod specialization;
 mod sensitive_memory;
+mod specialization;
 #[cfg(windows)]
 mod windows_map;
 
-pub use specialization::{
-    PACKING_LEVEL, PAYLOAD_PROFILE, PROTECTION_LEVEL, SPECIALIZATION_DIGEST, TARGET_TRIPLE,
-    TARGET_TOKEN_COMMITMENT, TARGET_TOKEN_NAME_SEED, VM_CRYPTO_DOMAIN, VM_LAYOUT_DIGEST,
-};
 pub use sensitive_memory::{SensitiveMemoryError, SensitiveMemoryLease, MAX_SENSITIVE_LEASE_BYTES};
+pub use specialization::{
+    PACKING_LEVEL, PAYLOAD_PROFILE, PROTECTION_LEVEL, SPECIALIZATION_DIGEST,
+    TARGET_TOKEN_COMMITMENT, TARGET_TOKEN_NAME_SEED, TARGET_TRIPLE, VM_CRYPTO_DOMAIN,
+    VM_LAYOUT_DIGEST,
+};
 
 use qp_crypto::{
-    aes128_gcm_decrypt, constant_time_eq, hmac_sha256_bytes, hkdf_sha256, Binding, QpNameSchedule,
-    RuntimeBindingDigest, Sha256, DIGEST_SIZE, LANE_TOKEN_AAD, LANE_TOKEN_KEY,
-    MAX_BINDING_SIZE, MAX_PAYLOAD_SIZE, QP_NAME_SEED_SIZE, QP_SCHEDULE_VERSION, ROLE_TOKEN,
+    aes128_gcm_decrypt, constant_time_eq, hkdf_sha256, hmac_sha256_bytes, Binding, QpNameSchedule,
+    RuntimeBindingDigest, Sha256, DIGEST_SIZE, LANE_TOKEN_AAD, LANE_TOKEN_KEY, MAX_BINDING_SIZE,
+    MAX_PAYLOAD_SIZE, QP_NAME_SEED_SIZE, QP_SCHEDULE_VERSION, ROLE_TOKEN,
 };
 use qp_page::{open_sealed_directory_parts, ArtifactDirectory, MAX_FRAME_SIZE};
 use qp_runtime::{
@@ -389,8 +390,7 @@ mod jni_bridge {
     const EXCEPTION_CHECK_INDEX: usize = 228;
     const GET_ENV_INDEX: usize = 6;
 
-    const TARGET_CLASS: &[u8] =
-        b"io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge\0";
+    const TARGET_CLASS: &[u8] = b"io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge\0";
     const SECURITY_EXCEPTION_CLASS: &[u8] = b"java/lang/SecurityException\0";
     const DEFENSE_DEBUG_SURFACE: u8 = 1;
     const DEFENSE_VM_SURFACE: u8 = 1 << 1;
@@ -472,7 +472,9 @@ mod jni_bridge {
                 return Ok(());
             }
             if commitment_absent || seed_absent {
-                return Err(BridgeFailure("Qp target token specialization binding is invalid"));
+                return Err(BridgeFailure(
+                    "Qp target token specialization binding is invalid",
+                ));
             }
             if self
                 .artifact_commitment
@@ -766,12 +768,8 @@ mod jni_bridge {
                 .parse_vm_with_material(
                     *crypto,
                     *layout,
-                    vm_state_binding(
-                        opened.entry_token(),
-                        opened.logical_binding_path(),
-                        layout,
-                    )
-                    .as_bytes(),
+                    vm_state_binding(opened.entry_token(), opened.logical_binding_path(), layout)
+                        .as_bytes(),
                     &dialect,
                 )
                 .map(std::sync::Arc::new)
@@ -903,7 +901,12 @@ mod jni_bridge {
             Ok(global)
         }
 
-        fn member_cache_key(name: &str, descriptor: &str, static_member: bool, field: bool) -> String {
+        fn member_cache_key(
+            name: &str,
+            descriptor: &str,
+            static_member: bool,
+            field: bool,
+        ) -> String {
             let mut key = String::with_capacity(name.len() + descriptor.len() + 4);
             key.push_str(name);
             key.push(' ');
@@ -914,7 +917,11 @@ mod jni_bridge {
             key
         }
 
-        fn cached_member_id(&mut self, class: JClass, key: &str) -> Result<Option<*const c_void>, VmHostError> {
+        fn cached_member_id(
+            &mut self,
+            class: JClass,
+            key: &str,
+        ) -> Result<Option<*const c_void>, VmHostError> {
             let local_key = (class as usize, key.to_owned());
             if let Some(id) = self.member_cache.get(&local_key) {
                 return Ok(Some(*id));
@@ -933,7 +940,12 @@ mod jni_bridge {
             Ok(None)
         }
 
-        fn remember_member_id(&mut self, class: JClass, key: String, id: *const c_void) -> Result<*const c_void, VmHostError> {
+        fn remember_member_id(
+            &mut self,
+            class: JClass,
+            key: String,
+            id: *const c_void,
+        ) -> Result<*const c_void, VmHostError> {
             let mut state = lock_state().map_err(|_| VmHostError::Failure)?;
             state
                 .jni_member_cache
@@ -1033,9 +1045,17 @@ mod jni_bridge {
                 _ => return Err(VmHostError::Failure),
             };
             let entry = native_entry(self.env, index).ok_or(VmHostError::Failure)?;
-            type StaticFn<R> = unsafe extern "system" fn(JNIEnv, JClass, *const c_void, *const JValue) -> R;
-            type VirtualFn<R> = unsafe extern "system" fn(JNIEnv, JObject, *const c_void, *const JValue) -> R;
-            type NonvirtualFn<R> = unsafe extern "system" fn(JNIEnv, JObject, JClass, *const c_void, *const JValue) -> R;
+            type StaticFn<R> =
+                unsafe extern "system" fn(JNIEnv, JClass, *const c_void, *const JValue) -> R;
+            type VirtualFn<R> =
+                unsafe extern "system" fn(JNIEnv, JObject, *const c_void, *const JValue) -> R;
+            type NonvirtualFn<R> = unsafe extern "system" fn(
+                JNIEnv,
+                JObject,
+                JClass,
+                *const c_void,
+                *const JValue,
+            ) -> R;
             unsafe fn dispatch<R>(
                 entry: *const c_void,
                 env: JNIEnv,
@@ -1059,7 +1079,16 @@ mod jni_bridge {
             }
             let value = match return_tag {
                 b'V' => {
-                    dispatch::<()>(entry, self.env, class, target, method, args, is_static, is_nonvirtual);
+                    dispatch::<()>(
+                        entry,
+                        self.env,
+                        class,
+                        target,
+                        method,
+                        args,
+                        is_static,
+                        is_nonvirtual,
+                    );
                     if exception_pending(self.env) {
                         self.capture_pending_exception()?;
                         return Err(VmHostError::Failure);
@@ -1067,7 +1096,16 @@ mod jni_bridge {
                     VmValue::Null
                 }
                 b'Z' => {
-                    let raw: JBoolean = dispatch(entry, self.env, class, target, method, args, is_static, is_nonvirtual);
+                    let raw: JBoolean = dispatch(
+                        entry,
+                        self.env,
+                        class,
+                        target,
+                        method,
+                        args,
+                        is_static,
+                        is_nonvirtual,
+                    );
                     if exception_pending(self.env) {
                         self.capture_pending_exception()?;
                         return Err(VmHostError::Failure);
@@ -1075,7 +1113,16 @@ mod jni_bridge {
                     VmValue::Int(i32::from(raw != 0))
                 }
                 b'B' | b'C' | b'S' | b'I' => {
-                    let raw: JInt = dispatch(entry, self.env, class, target, method, args, is_static, is_nonvirtual);
+                    let raw: JInt = dispatch(
+                        entry,
+                        self.env,
+                        class,
+                        target,
+                        method,
+                        args,
+                        is_static,
+                        is_nonvirtual,
+                    );
                     if exception_pending(self.env) {
                         self.capture_pending_exception()?;
                         return Err(VmHostError::Failure);
@@ -1083,7 +1130,16 @@ mod jni_bridge {
                     VmValue::Int(raw)
                 }
                 b'J' => {
-                    let raw: JLong = dispatch(entry, self.env, class, target, method, args, is_static, is_nonvirtual);
+                    let raw: JLong = dispatch(
+                        entry,
+                        self.env,
+                        class,
+                        target,
+                        method,
+                        args,
+                        is_static,
+                        is_nonvirtual,
+                    );
                     if exception_pending(self.env) {
                         self.capture_pending_exception()?;
                         return Err(VmHostError::Failure);
@@ -1091,7 +1147,16 @@ mod jni_bridge {
                     VmValue::Long(raw)
                 }
                 b'F' => {
-                    let raw: JFloat = dispatch(entry, self.env, class, target, method, args, is_static, is_nonvirtual);
+                    let raw: JFloat = dispatch(
+                        entry,
+                        self.env,
+                        class,
+                        target,
+                        method,
+                        args,
+                        is_static,
+                        is_nonvirtual,
+                    );
                     if exception_pending(self.env) {
                         self.capture_pending_exception()?;
                         return Err(VmHostError::Failure);
@@ -1099,7 +1164,16 @@ mod jni_bridge {
                     VmValue::Float(raw)
                 }
                 b'D' => {
-                    let raw: JDouble = dispatch(entry, self.env, class, target, method, args, is_static, is_nonvirtual);
+                    let raw: JDouble = dispatch(
+                        entry,
+                        self.env,
+                        class,
+                        target,
+                        method,
+                        args,
+                        is_static,
+                        is_nonvirtual,
+                    );
                     if exception_pending(self.env) {
                         self.capture_pending_exception()?;
                         return Err(VmHostError::Failure);
@@ -1107,7 +1181,16 @@ mod jni_bridge {
                     VmValue::Double(raw)
                 }
                 b'L' | b'[' => {
-                    let object: JObject = dispatch(entry, self.env, class, target, method, args, is_static, is_nonvirtual);
+                    let object: JObject = dispatch(
+                        entry,
+                        self.env,
+                        class,
+                        target,
+                        method,
+                        args,
+                        is_static,
+                        is_nonvirtual,
+                    );
                     if exception_pending(self.env) {
                         self.capture_pending_exception()?;
                         return Err(VmHostError::Failure);
@@ -1143,6 +1226,27 @@ mod jni_bridge {
                     "java/lang/Throwable".to_owned()
                 }
             };
+            if qp_trace_enabled() {
+                if let Ok(trace_class) = unsafe { self.find_class_checked("java/lang/Throwable") } {
+                    if let Ok(trace_method) =
+                        unsafe { self.method_id(trace_class, "printStackTrace", "()V", false) }
+                    {
+                        unsafe {
+                            let _ = self.call_method(
+                                InvokeKind::Virtual,
+                                trace_class,
+                                Some(throwable),
+                                trace_method,
+                                b'V',
+                                core::ptr::null(),
+                            );
+                        }
+                        unsafe {
+                            clear_exception(self.env);
+                        }
+                    }
+                }
+            }
             self.pending_exception = Some((class_name, throwable));
             Ok(())
         }
@@ -1511,8 +1615,13 @@ mod jni_bridge {
             }
             if !bytes.is_empty() {
                 let set_entry = native_entry(self.env, SET_BYTE_ARRAY_REGION_INDEX)?;
-                let set_region: unsafe extern "system" fn(JNIEnv, JByteArray, JSize, JSize, *const i8) =
-                    core::mem::transmute(set_entry);
+                let set_region: unsafe extern "system" fn(
+                    JNIEnv,
+                    JByteArray,
+                    JSize,
+                    JSize,
+                    *const i8,
+                ) = core::mem::transmute(set_entry);
                 set_region(
                     self.env,
                     array,
@@ -1524,7 +1633,7 @@ mod jni_bridge {
             Some(array)
         }
 
-    unsafe fn invoke_lambda_replay(
+        unsafe fn invoke_lambda_replay(
             &mut self,
             reference: &str,
             arguments: &[VmValue<JObject>],
@@ -1566,10 +1675,7 @@ mod jni_bridge {
                 true,
             )?;
             let spec_object = self.new_string(reference)?;
-            let values = [
-                JValue { l: spec_object },
-                JValue { l: arguments_array },
-            ];
+            let values = [JValue { l: spec_object }, JValue { l: arguments_array }];
             let result = self.call_method(
                 InvokeKind::Static,
                 helper_class,
@@ -1584,7 +1690,7 @@ mod jni_bridge {
             }
             Ok(result)
         }
-    unsafe fn invoke_string_concat(
+        unsafe fn invoke_string_concat(
             &mut self,
             reference: &str,
             arguments: &[VmValue<JObject>],
@@ -1611,8 +1717,10 @@ mod jni_bridge {
                 return Err(VmHostError::Failure);
             }
 
-            let constants_array = self.new_reference_array("java/lang/Object", constant_count as i32)?;
-            let arguments_array = self.new_reference_array("java/lang/Object", arguments.len() as i32)?;
+            let constants_array =
+                self.new_reference_array("java/lang/Object", constant_count as i32)?;
+            let arguments_array =
+                self.new_reference_array("java/lang/Object", arguments.len() as i32)?;
             let set_entry = native_entry(self.env, SET_OBJECT_ARRAY_ELEMENT_INDEX)
                 .ok_or(VmHostError::Failure)?;
             let set_element: unsafe extern "system" fn(JNIEnv, JObject, JSize, JObject) =
@@ -1621,7 +1729,8 @@ mod jni_bridge {
             for (index, encoded) in fields.enumerate() {
                 let (tag, value_hex) = encoded.split_once(':').ok_or(VmHostError::Failure)?;
                 let value_bytes = decode_hex_bytes(value_hex)?;
-                let value_text = std::str::from_utf8(&value_bytes).map_err(|_| VmHostError::Failure)?;
+                let value_text =
+                    std::str::from_utf8(&value_bytes).map_err(|_| VmHostError::Failure)?;
                 let value = match tag.as_bytes() {
                     b"S" => self.new_string(value_text)?,
                     b"I" => box_vm_value_with_tag(
@@ -2044,7 +2153,8 @@ mod jni_bridge {
             }
             if matches!(kind, InvokeKind::Dynamic) && reference.starts_with("stringpage|") {
                 let token = &reference["stringpage|".len()..];
-                let packed = crate::relocation::base64_url_decode(token).ok_or(VmHostError::Failure)?;
+                let packed =
+                    crate::relocation::base64_url_decode(token).ok_or(VmHostError::Failure)?;
                 let array = unsafe { self.new_byte_array(&packed) }.ok_or(VmHostError::Failure)?;
                 let owned = unsafe { self.own_new_local_ref(array) }.ok_or(VmHostError::Failure)?;
                 return Ok(VmValue::Object(owned));
@@ -2060,18 +2170,79 @@ mod jni_bridge {
                 if fields.next().is_some() {
                     return Err(VmHostError::Failure);
                 }
-                let (argument_tags, return_tag) = parse_method_descriptor(descriptor)?;
+                let (argument_tags, return_tag) = match parse_method_descriptor(descriptor) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if qp_trace_enabled() {
+                            eprintln!("qp-trace mhstatic-fail stage=descriptor ref={}", reference);
+                        }
+                        return Err(error);
+                    }
+                };
                 if argument_tags.len() != arguments.len() {
+                    if qp_trace_enabled() {
+                        eprintln!(
+                            "qp-trace mhstatic-fail stage=argc expected={} observed={} ref={}",
+                            argument_tags.len(),
+                            arguments.len(),
+                            reference
+                        );
+                    }
                     return Err(VmHostError::Failure);
                 }
                 let values = argument_tags
                     .iter()
                     .zip(arguments.iter())
-                    .map(|(tag, value)| primitive_value(value, *tag))
+                    .enumerate()
+                    .map(|(index, (tag, value))| {
+                        primitive_value(value, *tag).map_err(|error| {
+                            if qp_trace_enabled() {
+                                let observed = match value {
+                                    VmValue::Null => "null",
+                                    VmValue::Int(_) => "int",
+                                    VmValue::Long(_) => "long",
+                                    VmValue::Float(_) => "float",
+                                    VmValue::Double(_) => "double",
+                                    VmValue::Object(_) => "object",
+                                    VmValue::Uninitialized => "uninitialized",
+                                };
+                                eprintln!(
+                                    "qp-trace mhstatic-fail stage=primitive index={} expected-tag={} observed={} ref={}",
+                                    index,
+                                    *tag as char,
+                                    observed,
+                                    reference
+                                );
+                            }
+                            error
+                        })
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
-                let class = unsafe { self.find_class_checked(owner)? };
-                let method = unsafe { self.method_id(class, name, descriptor, true)? };
-                let result = unsafe {
+                let class = match unsafe { self.find_class_checked(owner) } {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if qp_trace_enabled() {
+                            eprintln!(
+                                "qp-trace mhstatic-fail stage=find-class owner={} ref={}",
+                                owner, reference
+                            );
+                        }
+                        return Err(error);
+                    }
+                };
+                let method = match unsafe { self.method_id(class, name, descriptor, true) } {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if qp_trace_enabled() {
+                            eprintln!(
+                                "qp-trace mhstatic-fail stage=method-id owner={} name={} desc={} ref={}",
+                                owner, name, descriptor, reference
+                            );
+                        }
+                        return Err(error);
+                    }
+                };
+                let result = match unsafe {
                     self.call_method(
                         InvokeKind::Static,
                         class,
@@ -2079,11 +2250,25 @@ mod jni_bridge {
                         method,
                         return_tag,
                         jvalue_ptr(&values),
-                    )?
+                    )
+                } {
+                    Ok(value) => value,
+                    Err(error) => {
+                        if qp_trace_enabled() {
+                            eprintln!("qp-trace mhstatic-fail stage=call ref={}", reference);
+                        }
+                        return Err(error);
+                    }
                 };
                 if unsafe { exception_pending(self.env) } {
                     unsafe {
                         let _ = self.capture_pending_exception();
+                    }
+                    if qp_trace_enabled() {
+                        eprintln!(
+                            "qp-trace mhstatic-fail stage=pending-exception ref={}",
+                            reference
+                        );
                     }
                     return Err(VmHostError::Failure);
                 }
@@ -2374,9 +2559,7 @@ mod jni_bridge {
                 unsafe { set(self.env, *array, index, value) };
             } else {
                 let (tag, set_index, ptr): (u8, usize, *const c_void) = match opcode {
-                    qp_vm::opcode::IASTORE => {
-                        (b'I', SET_INT_ARRAY_REGION_INDEX, core::ptr::null())
-                    }
+                    qp_vm::opcode::IASTORE => (b'I', SET_INT_ARRAY_REGION_INDEX, core::ptr::null()),
                     qp_vm::opcode::LASTORE => {
                         (b'J', SET_LONG_ARRAY_REGION_INDEX, core::ptr::null())
                     }
@@ -2574,12 +2757,7 @@ mod jni_bridge {
                 return Ok(None);
             }
             let method = unsafe {
-                self.method_id(
-                    object_class,
-                    "getMessage",
-                    "()Ljava/lang/String;",
-                    false,
-                )?
+                self.method_id(object_class, "getMessage", "()Ljava/lang/String;", false)?
             };
             let entry = unsafe { native_entry(self.env, CALL_OBJECT_METHOD_A_INDEX) }
                 .ok_or(VmHostError::Failure)?;
@@ -2597,8 +2775,8 @@ mod jni_bridge {
                 }
                 return Ok(None);
             }
-            let value = unsafe { copy_jstring(self.env, message) }
-                .map_err(|_| VmHostError::Failure)?;
+            let value =
+                unsafe { copy_jstring(self.env, message) }.map_err(|_| VmHostError::Failure)?;
             unsafe { delete_local_ref(self.env, message) };
             Ok(value)
         }
@@ -2675,9 +2853,7 @@ mod jni_bridge {
     }
 
     fn target_from_platform(bytes: &[u8]) -> Result<SupportedTarget, BridgeFailure> {
-        match core::str::from_utf8(bytes)
-            .map_err(|_| BridgeFailure("Qp platform is not UTF-8"))?
-        {
+        match core::str::from_utf8(bytes).map_err(|_| BridgeFailure("Qp platform is not UTF-8"))? {
             "windows-x64" | "x86_64-pc-windows-gnu" => Ok(SupportedTarget::WindowsX64Gnu),
             "linux-x64" | "x86_64-unknown-linux-gnu.2.17" => Ok(SupportedTarget::LinuxX64Gnu217),
             _ => Err(BridgeFailure("Qp platform is unsupported")),
@@ -2713,7 +2889,8 @@ mod jni_bridge {
             return Ok(false);
         };
         let mut env_out = core::ptr::null_mut();
-        let Some(code) = (unsafe { invoke_get_env_version(vm, &mut env_out, JVMTI_VERSION_1_2) }) else {
+        let Some(code) = (unsafe { invoke_get_env_version(vm, &mut env_out, JVMTI_VERSION_1_2) })
+        else {
             return Ok(false);
         };
         let jvmti_env_present = code == JNI_OK && !env_out.is_null();
@@ -2765,7 +2942,11 @@ mod jni_bridge {
         (!class.is_null()).then_some(class)
     }
 
-    fn vm_state_binding(entry_token: i64, resource_path: &str, layout_digest: &[u8; DIGEST_SIZE]) -> String {
+    fn vm_state_binding(
+        entry_token: i64,
+        resource_path: &str,
+        layout_digest: &[u8; DIGEST_SIZE],
+    ) -> String {
         let mut layout_hex = String::with_capacity(64);
         for byte in layout_digest {
             layout_hex.push_str(&format!("{:02x}", byte));
@@ -3084,13 +3265,11 @@ mod jni_bridge {
                 }
                 b'Z' | b'B' | b'C' | b'S' | b'I' | b'J' | b'F' | b'D' => {
                     if object.is_null() {
-                        return Err(BridgeFailure(
-                            "Qp primitive VM argument must not be null",
-                        ));
+                        return Err(BridgeFailure("Qp primitive VM argument must not be null"));
                     }
-                    let value = host.unbox(object, tag).map_err(|_| {
-                        BridgeFailure("Qp boxed primitive argument type mismatch")
-                    })?;
+                    let value = host
+                        .unbox(object, tag)
+                        .map_err(|_| BridgeFailure("Qp boxed primitive argument type mismatch"))?;
                     values.push(value);
                 }
                 _ => {
@@ -3121,9 +3300,7 @@ mod jni_bridge {
             let tracer_pid = status
                 .lines()
                 .find_map(|line| line.strip_prefix("TracerPid:"))
-                .ok_or(BridgeFailure(
-                    "Qp unified defense TracerPid is unavailable",
-                ))?
+                .ok_or(BridgeFailure("Qp unified defense TracerPid is unavailable"))?
                 .trim()
                 .parse::<u32>()
                 .map_err(|_| BridgeFailure("Qp unified defense TracerPid is malformed"))?;
@@ -3185,13 +3362,16 @@ mod jni_bridge {
 
     fn bind_probe_measurement() -> Result<(), BridgeFailure> {
         let commitment = specialization::image_measurement_commitment();
-        if specialization::SECRET_PACK_SHARD_COUNT != 0 && commitment.iter().all(|byte| *byte == 0) {
+        if specialization::SECRET_PACK_SHARD_COUNT != 0 && commitment.iter().all(|byte| *byte == 0)
+        {
             return Err(BridgeFailure("Qp image measurement is unbound"));
         }
         let crc = crate::image_measure::commitment_crc32();
         let mixed = crc ^ crc.rotate_left(13);
         if mixed == crc.wrapping_add(1) {
-            return Err(BridgeFailure("Qp unified defense measurement mix is invalid"));
+            return Err(BridgeFailure(
+                "Qp unified defense measurement mix is invalid",
+            ));
         }
         Ok(())
     }
@@ -3221,6 +3401,7 @@ mod jni_bridge {
         Ok(unsafe { IsDebuggerPresent() } != 0)
     }
 
+    #[cfg(target_os = "windows")]
     fn windows_debug_port_or_object_present() -> Result<bool, BridgeFailure> {
         #[link(name = "kernel32")]
         extern "system" {
@@ -3272,7 +3453,10 @@ mod jni_bridge {
     fn windows_debug_registers_or_remote_present() -> Result<bool, BridgeFailure> {
         #[link(name = "kernel32")]
         extern "system" {
-            fn CheckRemoteDebuggerPresent(process: *mut core::ffi::c_void, present: *mut i32) -> i32;
+            fn CheckRemoteDebuggerPresent(
+                process: *mut core::ffi::c_void,
+                present: *mut i32,
+            ) -> i32;
             fn GetThreadContext(thread: *mut core::ffi::c_void, context: *mut u8) -> i32;
             fn GetCurrentThread() -> *mut core::ffi::c_void;
             fn GetCurrentProcess() -> *mut core::ffi::c_void;
@@ -3307,29 +3491,100 @@ mod jni_bridge {
         #[link(name = "kernel32")]
         extern "system" {
             fn GetModuleHandleW(name: *const u16) -> *mut core::ffi::c_void;
-            fn GetProcAddress(module: *mut core::ffi::c_void, name: *const i8) -> *mut core::ffi::c_void;
+            fn GetProcAddress(
+                module: *mut core::ffi::c_void,
+                name: *const i8,
+            ) -> *mut core::ffi::c_void;
         }
         let names: [&[u16]; 9] = [
-            &[b'f' as u16, b'r' as u16, b'i' as u16, b'd' as u16, b'a' as u16, 0],
             &[
-                b'f' as u16, b'r' as u16, b'i' as u16, b'd' as u16, b'a' as u16, b'-' as u16,
-                b'g' as u16, b'a' as u16, b'd' as u16, b'g' as u16, b'e' as u16, b't' as u16, 0,
+                b'f' as u16,
+                b'r' as u16,
+                b'i' as u16,
+                b'd' as u16,
+                b'a' as u16,
+                0,
             ],
-            &[b'g' as u16, b'a' as u16, b'd' as u16, b'g' as u16, b'e' as u16, b't' as u16, 0],
-            &[b'w' as u16, b'i' as u16, b'n' as u16, b'j' as u16, b'e' as u16, b'c' as u16, b't' as u16, 0],
-            &[b's' as u16, b'b' as u16, b'i' as u16, b'e' as u16, b'd' as u16, b'l' as u16, b'l' as u16, 0],
+            &[
+                b'f' as u16,
+                b'r' as u16,
+                b'i' as u16,
+                b'd' as u16,
+                b'a' as u16,
+                b'-' as u16,
+                b'g' as u16,
+                b'a' as u16,
+                b'd' as u16,
+                b'g' as u16,
+                b'e' as u16,
+                b't' as u16,
+                0,
+            ],
+            &[
+                b'g' as u16,
+                b'a' as u16,
+                b'd' as u16,
+                b'g' as u16,
+                b'e' as u16,
+                b't' as u16,
+                0,
+            ],
+            &[
+                b'w' as u16,
+                b'i' as u16,
+                b'n' as u16,
+                b'j' as u16,
+                b'e' as u16,
+                b'c' as u16,
+                b't' as u16,
+                0,
+            ],
+            &[
+                b's' as u16,
+                b'b' as u16,
+                b'i' as u16,
+                b'e' as u16,
+                b'd' as u16,
+                b'l' as u16,
+                b'l' as u16,
+                0,
+            ],
             &[b'j' as u16, b'd' as u16, b'w' as u16, b'p' as u16, 0],
             &[
-                b'i' as u16, b'n' as u16, b's' as u16, b't' as u16, b'r' as u16, b'u' as u16,
-                b'm' as u16, b'e' as u16, b'n' as u16, b't' as u16, 0,
+                b'i' as u16,
+                b'n' as u16,
+                b's' as u16,
+                b't' as u16,
+                b'r' as u16,
+                b'u' as u16,
+                b'm' as u16,
+                b'e' as u16,
+                b'n' as u16,
+                b't' as u16,
+                0,
             ],
             &[
-                b'j' as u16, b'v' as u16, b'm' as u16, b't' as u16, b'i' as u16, b'.' as u16,
-                b'd' as u16, b'l' as u16, b'l' as u16, 0,
+                b'j' as u16,
+                b'v' as u16,
+                b'm' as u16,
+                b't' as u16,
+                b'i' as u16,
+                b'.' as u16,
+                b'd' as u16,
+                b'l' as u16,
+                b'l' as u16,
+                0,
             ],
             &[
-                b'j' as u16, b'd' as u16, b'w' as u16, b'p' as u16, b'.' as u16, b'd' as u16,
-                b'l' as u16, b'l' as u16, 0,
+                b'j' as u16,
+                b'd' as u16,
+                b'w' as u16,
+                b'p' as u16,
+                b'.' as u16,
+                b'd' as u16,
+                b'l' as u16,
+                b'l' as u16,
+                0,
             ],
         ];
         for name in names {
@@ -3338,8 +3593,16 @@ mod jni_bridge {
             }
         }
         let ntdll: [u16; 10] = [
-            b'n' as u16, b't' as u16, b'd' as u16, b'l' as u16, b'l' as u16, b'.' as u16,
-            b'd' as u16, b'l' as u16, b'l' as u16, 0,
+            b'n' as u16,
+            b't' as u16,
+            b'd' as u16,
+            b'l' as u16,
+            b'l' as u16,
+            b'.' as u16,
+            b'd' as u16,
+            b'l' as u16,
+            b'l' as u16,
+            0,
         ];
         let module = unsafe { GetModuleHandleW(ntdll.as_ptr()) };
         if !module.is_null() {
@@ -3585,7 +3848,9 @@ mod jni_bridge {
         profile: Option<DefenseProfile>,
     ) -> Result<(), BridgeFailure> {
         if point_code == 0 {
-            return Err(BridgeFailure("Qp unified defense probe point code is invalid"));
+            return Err(BridgeFailure(
+                "Qp unified defense probe point code is invalid",
+            ));
         }
         bind_probe_measurement()?;
         if surface == DefenseSurface::AbiProbe {
@@ -3708,9 +3973,8 @@ mod jni_bridge {
             }
         }
         let (handle, page_index, proof) = unpack_packed_page_request(env, packed)?;
-        let request =
-            PageRequest::new(&handle, page_index, &proof, kind)
-                .map_err(|_| BridgeFailure("Qp page request is malformed"))?;
+        let request = PageRequest::new(&handle, page_index, &proof, kind)
+            .map_err(|_| BridgeFailure("Qp page request is malformed"))?;
         let mut state = lock_state()?;
         state
             .router
@@ -3731,13 +3995,8 @@ mod jni_bridge {
             }
         }
         let (handle, page_index, proof) = unpack_packed_page_request(env, packed)?;
-        let request = PageRequest::new(
-            &handle,
-            page_index,
-            &proof,
-            PageKind::Vm,
-        )
-        .map_err(|_| BridgeFailure("Qp page request is malformed"))?;
+        let request = PageRequest::new(&handle, page_index, &proof, PageKind::Vm)
+            .map_err(|_| BridgeFailure("Qp page request is malformed"))?;
         let mut state = lock_state()?;
         state
             .router
@@ -3753,12 +4012,8 @@ mod jni_bridge {
             RouterError::RouteUnavailable { .. } => {
                 BridgeFailure("Qp typed page route is unavailable")
             }
-            RouterError::AuthenticationFailed => {
-                BridgeFailure("Qp page authentication failed")
-            }
-            RouterError::Wire(reason) => BridgeFailure(Box::leak(
-                format!("Qp page decode failed: {reason}").into_boxed_str(),
-            )),
+            RouterError::AuthenticationFailed => BridgeFailure("Qp page authentication failed"),
+            RouterError::Wire(_) => BridgeFailure("Qp page decode failed"),
             _ => BridgeFailure("Qp page request is malformed"),
         }
     }
@@ -3776,15 +4031,13 @@ mod jni_bridge {
                 ));
             };
             if entry.offset < 0 || entry.stored_length <= 0 {
-                return Err(BridgeFailure(
-                    "Qp current catalog page range is invalid",
-                ));
+                return Err(BridgeFailure("Qp current catalog page range is invalid"));
             }
             let start = entry.offset as usize;
             let length = entry.stored_length as usize;
-            let end = start.checked_add(length).ok_or(BridgeFailure(
-                "Qp current catalog page range overflow",
-            ))?;
+            let end = start
+                .checked_add(length)
+                .ok_or(BridgeFailure("Qp current catalog page range overflow"))?;
             if end > blob.len() {
                 return Err(BridgeFailure(
                     "Qp current catalog page range is out of bounds",
@@ -3803,9 +4056,7 @@ mod jni_bridge {
                     .checked_add(pair[0].1)
                     .ok_or(BridgeFailure("Qp current catalog page range overflow"))?;
                 if left_end > pair[1].0 {
-                    return Err(BridgeFailure(
-                        "Qp current catalog page ranges overlap",
-                    ));
+                    return Err(BridgeFailure("Qp current catalog page ranges overlap"));
                 }
             }
         }
@@ -3817,9 +4068,7 @@ mod jni_bridge {
         directory: &ArtifactDirectory,
     ) -> Result<std::collections::BTreeMap<String, Vec<u8>>, BridgeFailure> {
         if bundle.len() > MAX_CATALOG_BUNDLE_SIZE {
-            return Err(BridgeFailure(
-                "Qp current catalog bundle exceeds its bound",
-            ));
+            return Err(BridgeFailure("Qp current catalog bundle exceeds its bound"));
         }
         let mut cursor = 0usize;
         let count = read_catalog_u32(bundle, &mut cursor)? as usize;
@@ -3850,9 +4099,7 @@ mod jni_bridge {
             }
             let page = read_catalog_bytes(bundle, &mut cursor, page_len)?.to_vec();
             if stored.insert(path.to_owned(), page).is_some() {
-                return Err(BridgeFailure(
-                    "Qp current catalog contains duplicate pages",
-                ));
+                return Err(BridgeFailure("Qp current catalog contains duplicate pages"));
             }
         }
         if cursor != bundle.len() {
@@ -3917,9 +4164,11 @@ mod jni_bridge {
                     RouterError::InvalidRequest(reason) => BridgeFailure(reason),
                     _ => BridgeFailure("Qp native secret pack is unavailable"),
                 })?;
-            state.router.bind_page_key_authority(Box::new(SecretPackRouterAuthority {
-                pack: Arc::clone(&pack),
-            }));
+            state
+                .router
+                .bind_page_key_authority(Box::new(SecretPackRouterAuthority {
+                    pack: Arc::clone(&pack),
+                }));
             state.secret_pack = Some(pack);
         }
         let pack = state
@@ -3945,9 +4194,7 @@ mod jni_bridge {
             ));
         }
         if directory.runtime.target_triple != target.triple() {
-            return Err(BridgeFailure(
-                "Qp current catalog target binding mismatch",
-            ));
+            return Err(BridgeFailure("Qp current catalog target binding mismatch"));
         }
         qp_crypto::install_name_schedule(
             &directory.name_seed,
@@ -4091,7 +4338,10 @@ mod jni_bridge {
     ) -> Result<JInt, BridgeFailure> {
         let surface = unsafe { copy_string(env, surface) }?;
         let profile = unsafe { copy_string(env, profile) }?;
-        initialize_defense_values(DefenseSurface::parse(&surface)?, DefenseProfile::parse(&profile)?)
+        initialize_defense_values(
+            DefenseSurface::parse(&surface)?,
+            DefenseProfile::parse(&profile)?,
+        )
     }
 
     fn native_initialize_defense_code_inner(
@@ -4171,9 +4421,8 @@ mod jni_bridge {
             let state = lock_state()?;
             defense_share(&state, material.as_bytes(), &binding)?
         };
-        let result = unsafe { new_byte_array(env, &share) }.ok_or(BridgeFailure(
-            "Qp unified defense output allocation failed",
-        ));
+        let result = unsafe { new_byte_array(env, &share) }
+            .ok_or(BridgeFailure("Qp unified defense output allocation failed"));
         wipe(&mut share);
         result
     }
@@ -4185,16 +4434,17 @@ mod jni_bridge {
     ) -> Result<JByteArray, BridgeFailure> {
         let material = unsafe { copy_byte_array(env, material, 4096) }?;
         if material.as_bytes().is_empty() || binding_code == 0 {
-            return Err(BridgeFailure("Qp unified defense coded material is invalid"));
+            return Err(BridgeFailure(
+                "Qp unified defense coded material is invalid",
+            ));
         }
         let binding = binding_code.to_be_bytes();
         let mut share = {
             let state = lock_state()?;
             defense_share(&state, material.as_bytes(), &binding)?
         };
-        let result = unsafe { new_byte_array(env, &share) }.ok_or(BridgeFailure(
-            "Qp unified defense output allocation failed",
-        ));
+        let result = unsafe { new_byte_array(env, &share) }
+            .ok_or(BridgeFailure("Qp unified defense output allocation failed"));
         wipe(&mut share);
         result
     }
@@ -4342,7 +4592,9 @@ mod jni_bridge {
     fn validate_target_token_text(value: &[u8]) -> Result<(), BridgeFailure> {
         if value.is_empty()
             || value.len() > MAX_TARGET_TOKEN_TEXT_BYTES
-            || value.iter().any(|byte| *byte == 0 || *byte < 0x20 || *byte == 0x7f)
+            || value
+                .iter()
+                .any(|byte| *byte == 0 || *byte < 0x20 || *byte == 0x7f)
         {
             return Err(BridgeFailure("Qp target token context is invalid"));
         }
@@ -4359,11 +4611,21 @@ mod jni_bridge {
 
     fn parse_target_description(plaintext: &[u8]) -> Result<TargetDescription<'_>, BridgeFailure> {
         let mut fields = plaintext.split(|byte| *byte == 0);
-        let owner = fields.next().ok_or(BridgeFailure("Qp target token payload is invalid"))?;
-        let name = fields.next().ok_or(BridgeFailure("Qp target token payload is invalid"))?;
-        let descriptor = fields.next().ok_or(BridgeFailure("Qp target token payload is invalid"))?;
-        let tag = fields.next().ok_or(BridgeFailure("Qp target token payload is invalid"))?;
-        let interface = fields.next().ok_or(BridgeFailure("Qp target token payload is invalid"))?;
+        let owner = fields
+            .next()
+            .ok_or(BridgeFailure("Qp target token payload is invalid"))?;
+        let name = fields
+            .next()
+            .ok_or(BridgeFailure("Qp target token payload is invalid"))?;
+        let descriptor = fields
+            .next()
+            .ok_or(BridgeFailure("Qp target token payload is invalid"))?;
+        let tag = fields
+            .next()
+            .ok_or(BridgeFailure("Qp target token payload is invalid"))?;
+        let interface = fields
+            .next()
+            .ok_or(BridgeFailure("Qp target token payload is invalid"))?;
         if fields.next().is_some()
             || owner.is_empty()
             || name.is_empty()
@@ -4467,8 +4729,8 @@ mod jni_bridge {
         key.fill(0);
         let mut aad = aad;
         aad.fill(0);
-        let plaintext = plaintext_result
-            .map_err(|_| BridgeFailure("Qp target token authentication failed"))?;
+        let plaintext =
+            plaintext_result.map_err(|_| BridgeFailure("Qp target token authentication failed"))?;
         let lease = SensitiveMemoryLease::new(plaintext)
             .map_err(|_| BridgeFailure("Qp target token plaintext lease is invalid"))?;
         parse_target_description(lease.as_slice())?;
@@ -4545,20 +4807,18 @@ mod jni_bridge {
             b"()Ljava/lang/Class;\0",
         )
         .ok_or(BridgeFailure("Lookup.lookupClass is unavailable"))?;
-        let caller_class = call_object_method_a(env, lookup, lookup_class_method, core::ptr::null());
+        let caller_class =
+            call_object_method_a(env, lookup, lookup_class_method, core::ptr::null());
         if caller_class.is_null() || exception_pending(env) {
             return Err(BridgeFailure("Qp target site caller lookup failed"));
         }
         let class_class = find_class(env, b"java/lang/Class\0")
             .ok_or(BridgeFailure("java.lang.Class is unavailable"))?;
-        let class_name_method = get_method_id(
-            env,
-            class_class,
-            b"getName\0",
-            b"()Ljava/lang/String;\0",
-        )
-        .ok_or(BridgeFailure("Class.getName is unavailable"))?;
-        let caller_name = call_object_method_a(env, caller_class, class_name_method, core::ptr::null());
+        let class_name_method =
+            get_method_id(env, class_class, b"getName\0", b"()Ljava/lang/String;\0")
+                .ok_or(BridgeFailure("Class.getName is unavailable"))?;
+        let caller_name =
+            call_object_method_a(env, caller_class, class_name_method, core::ptr::null());
         if caller_name.is_null() || exception_pending(env) {
             return Err(BridgeFailure("Qp target site caller name is unavailable"));
         }
@@ -4581,7 +4841,8 @@ mod jni_bridge {
             b"()Ljava/lang/String;\0",
         )
         .ok_or(BridgeFailure("MethodType descriptor access is unavailable"))?;
-        let descriptor = call_object_method_a(env, method_type, descriptor_method, core::ptr::null());
+        let descriptor =
+            call_object_method_a(env, method_type, descriptor_method, core::ptr::null());
         if descriptor.is_null() || exception_pending(env) {
             return Err(BridgeFailure("Qp target site method type is unavailable"));
         }
@@ -4758,8 +5019,8 @@ mod jni_bridge {
             .ok_or(BridgeFailure("JNI GetObjectArrayElement is unavailable"))?;
         let get: unsafe extern "system" fn(JNIEnv, JObjectArray, JSize) -> JObject =
             core::mem::transmute(get_entry);
-        let byte_array_class = find_class(env, b"[B\0")
-            .ok_or(BridgeFailure("byte array class is unavailable"))?;
+        let byte_array_class =
+            find_class(env, b"[B\0").ok_or(BridgeFailure("byte array class is unavailable"))?;
         let instance_entry = native_entry(env, IS_INSTANCE_OF_INDEX)
             .ok_or(BridgeFailure("JNI IsInstanceOf is unavailable"))?;
         let is_instance: unsafe extern "system" fn(JNIEnv, JObject, JClass) -> JBoolean =
@@ -4771,12 +5032,8 @@ mod jni_bridge {
             }
             let resolved = if !value.is_null() && is_instance(env, value, byte_array_class) != 0 {
                 let token = copy_byte_array(env, value, MAX_TARGET_TOKEN_BYTES)?;
-                let lease = open_target_token(
-                    &token,
-                    caller_owner,
-                    indy_name_bytes,
-                    method_type_bytes,
-                )?;
+                let lease =
+                    open_target_token(&token, caller_owner, indy_name_bytes, method_type_bytes)?;
                 resolve_target_handle(env, lookup, caller_class, &lease)?
             } else {
                 value
@@ -4821,12 +5078,8 @@ mod jni_bridge {
         let handle = match cached_target_handle(&cache_key)? {
             Some(handle) => handle,
             None => {
-                let lease = open_target_token(
-                    &token,
-                    &caller_owner,
-                    &indy_name_bytes,
-                    &method_type_bytes,
-                )?;
+                let lease =
+                    open_target_token(&token, &caller_owner, &indy_name_bytes, &method_type_bytes)?;
                 let handle = resolve_target_handle(env, lookup, caller_class, &lease)?;
                 cache_target_handle(env, cache_key, handle)?
             }
@@ -5063,7 +5316,9 @@ mod jni_bridge {
                 // The dispatcher embeds the token as base64url text; decode it
                 // before handing binary material to the AEAD unwrap.
                 Ok(text) => match String::from_utf8(text) {
-                    Ok(text) => crate::relocation::base64_url_decode(text.as_str()).unwrap_or_default(),
+                    Ok(text) => {
+                        crate::relocation::base64_url_decode(text.as_str()).unwrap_or_default()
+                    }
                     Err(_) => {
                         pop_local_frame(env, core::ptr::null_mut());
                         throw_new(env, b"Qp VM entry token is invalid\0");
@@ -5111,8 +5366,7 @@ mod jni_bridge {
                 let helper_class = lock_state()
                     .ok()
                     .and_then(|state| state.registered_class.map(|class| class as JObject));
-                let mut executor =
-                    VmExecutor::new(JniObjectOperations::new(env, helper_class));
+                let mut executor = VmExecutor::new(JniObjectOperations::new(env, helper_class));
                 let execution = executor.execute(program.as_ref(), &arguments);
                 let mut host = executor.into_host();
                 match execution {
@@ -5120,14 +5374,13 @@ mod jni_bridge {
                         if let VmValue::Object(object) = &value {
                             host.release(*object);
                         }
-                        box_vm_value_with_tag(
-                            env,
-                            value,
-                            Some(program.metadata().return_tag),
-                        )
-                        .unwrap_or(core::ptr::null_mut())
+                        box_vm_value_with_tag(env, value, Some(program.metadata().return_tag))
+                            .unwrap_or(core::ptr::null_mut())
                     }
-                    Err(VmError::UncaughtException { class_name, message }) => {
+                    Err(VmError::UncaughtException {
+                        class_name,
+                        message,
+                    }) => {
                         unsafe { throw_named_exception(env, &class_name, message.as_deref()) };
                         core::ptr::null_mut()
                     }
@@ -5231,7 +5484,9 @@ mod jni_bridge {
         packed: JByteArray,
     ) -> JByteArray {
         match open_page_route(env, 0, packed, PageKind::Class) {
-            Ok(opened) => match opened.with_payload(|bytes| SensitiveMemoryLease::new(bytes.to_vec())) {
+            Ok(opened) => match opened
+                .with_payload(|bytes| SensitiveMemoryLease::new(bytes.to_vec()))
+            {
                 Ok(lease) => new_byte_array(env, lease.as_slice()).unwrap_or(core::ptr::null_mut()),
                 Err(_) => {
                     throw_new(env, b"Qp class page lease is invalid\0");
@@ -5605,9 +5860,7 @@ mod jni_bridge {
             state.arm_native_session()?;
         }
         let pack_text = read_system_property(env, b"j.p\0")?
-            .ok_or_else(|| {
-                BridgeFailure("Qp sealed pack property is missing")
-            })?;
+            .ok_or_else(|| BridgeFailure("Qp sealed pack property is missing"))?;
         let pack_bytes = crate::relocation::base64_url_decode(&pack_text)
             .ok_or(BridgeFailure("Qp sealed pack property is invalid"))?;
         let pack = Arc::new(SecretPackState::from_specialization());
@@ -5688,10 +5941,10 @@ mod jni_bridge {
         let base = registered_methods();
         let methods: [JniNativeMethod; crate::relocation::TYPED_NATIVE_METHOD_COUNT] =
             core::array::from_fn(|index| JniNativeMethod {
-            name: remapped_names[index].as_ptr(),
-            signature: base[index].signature,
-            fn_ptr: base[index].fn_ptr,
-        });
+                name: remapped_names[index].as_ptr(),
+                signature: base[index].signature,
+                fn_ptr: base[index].fn_ptr,
+            });
         let owner_bytes = if plan.owner == crate::relocation::ORIGINAL_HELPER_OWNER {
             TARGET_CLASS
         } else {
@@ -5922,9 +6175,13 @@ mod jni_bridge {
             )
             .expect("token aad");
             let nonce = [0x42u8; TARGET_TOKEN_NONCE_SIZE];
-            let plaintext = [b"java/lang/String\0length\0()I\0".as_slice(), b"5\00".as_slice()].concat();
-            let sealed = qp_crypto::aes128_gcm_encrypt(&key, &nonce, &aad, &plaintext)
-                .expect("token seal");
+            let plaintext = [
+                b"java/lang/String\0length\0()I\0".as_slice(),
+                b"5\00".as_slice(),
+            ]
+            .concat();
+            let sealed =
+                qp_crypto::aes128_gcm_encrypt(&key, &nonce, &aad, &plaintext).expect("token seal");
             let opened = aes128_gcm_decrypt(&key, &nonce, &aad, &sealed).expect("token open");
             assert_eq!(opened, plaintext);
             parse_target_description(&opened).expect("target payload");

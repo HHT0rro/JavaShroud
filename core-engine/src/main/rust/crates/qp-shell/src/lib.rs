@@ -13,8 +13,8 @@ use std::fmt;
 pub use elf::{Elf64Image, Elf64Segment, ElfDynamicEntry};
 pub use loader::{detect_format, validate_artifact, ArtifactFormat, LoadedArtifact, LoaderError};
 pub use payload::{
-    Compression, DecompressError, PayloadDecompressor, PayloadEnvelope, PayloadError,
-    PayloadManifest, NativePayloadDecompressor, SensitiveBytes, NATIVE_PAYLOAD_PROFILE,
+    Compression, DecompressError, NativePayloadDecompressor, PayloadDecompressor, PayloadEnvelope,
+    PayloadError, PayloadManifest, SensitiveBytes, NATIVE_PAYLOAD_PROFILE,
 };
 pub use pe::{Pe64Image, PeDataDirectory, PeSection};
 pub use plan::{

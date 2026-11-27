@@ -2,13 +2,16 @@ import {
   passSupportsTargeting,
   replacePassSelections,
   replaceRules,
+  setArtifactFormat,
   setInputJarPath,
   setOutputJarPath,
   setPasses,
   visiblePassParams,
 } from './state.ts'
 import { parsePassSelectionTarget } from './pass-selection-targeting.ts'
+import { artifactFormatForPath } from './artifact-pass-policy'
 import type {
+  ArtifactFormat,
   ConfigImportResult,
   ConfigImportWarning,
   ParamSchema,
@@ -28,6 +31,7 @@ import type {
 interface MutableWorkbenchConfig {
   inputJarPath: string
   outputJarPath: string
+  artifactFormat: ArtifactFormat | 'auto' | null
   passes: WorkbenchTomlPassConfig[]
   rules: RawRuleItem[]
   passSelections: MutablePassSelection[]
@@ -54,6 +58,7 @@ export const exportWorkbenchTomlConfig = (state: RunState): string => {
     '[meta]',
     `format = ${formatString(formatName)}`,
     `version = ${formatVersion}`,
+    `artifactFormat = ${formatString(state.artifactFormat)}`,
     '',
     '[input]',
     `inputJarPath = ${formatString(state.inputJar?.inputJarPath ?? '')}`,
@@ -105,7 +110,13 @@ export const exportWorkbenchTomlConfig = (state: RunState): string => {
 export const importWorkbenchTomlConfig = (state: RunState, rawToml: string): ConfigImportResult => {
   const parsedConfig = parseWorkbenchTomlConfig(rawToml)
   const warnings: ConfigImportWarning[] = []
-  let nextState: RunState = state
+  const detectedFormat = artifactFormatForPath(parsedConfig.inputJarPath)
+  const explicitFormat = parsedConfig.artifactFormat === 'auto' ? null : parsedConfig.artifactFormat
+  const format = explicitFormat ?? detectedFormat ?? state.artifactFormat
+  if (explicitFormat && parsedConfig.inputJarPath.trim() && detectedFormat !== explicitFormat) {
+    throw new Error(`配置导入失败：${format.toUpperCase()} 模式与输入文件扩展名不匹配。`)
+  }
+  let nextState: RunState = setArtifactFormat(state, format)
 
   if (parsedConfig.inputJarPath.trim().length > 0) {
     nextState = setInputJarPath(nextState, parsedConfig.inputJarPath)
@@ -132,6 +143,7 @@ export const parseWorkbenchTomlConfig = (rawToml: string): WorkbenchTomlConfig =
   const parsed: MutableWorkbenchConfig = {
     inputJarPath: '',
     outputJarPath: '',
+    artifactFormat: null,
     passes: [],
     rules: [],
     passSelections: [],
@@ -198,6 +210,17 @@ export const parseWorkbenchTomlConfig = (rawToml: string): WorkbenchTomlConfig =
     }
 
     const assignment = parseAssignment(line, lineNumber)
+    if ((section === 'meta' || section === 'input') && assignment.key === 'artifactFormat') {
+      const format = requireString(assignment.value, assignment.key, lineNumber).trim().toLowerCase()
+      if (format !== 'jar' && format !== 'apk' && format !== 'auto') {
+        throw new Error('配置导入失败：artifactFormat 必须为 jar、apk 或 auto。')
+      }
+      if (parsed.artifactFormat !== null && parsed.artifactFormat !== format) {
+        throw new Error('配置导入失败：artifactFormat 的值冲突。')
+      }
+      parsed.artifactFormat = format
+      return
+    }
     if (section === 'meta') {
       if (assignment.key === 'version') {
         parsed.version = requireVersion(assignment.value, lineNumber)
@@ -284,6 +307,7 @@ export const parseWorkbenchTomlConfig = (rawToml: string): WorkbenchTomlConfig =
     version: parsed.version,
     inputJarPath: parsed.inputJarPath,
     outputJarPath: parsed.outputJarPath,
+    artifactFormat: parsed.artifactFormat,
     passes: parsed.passes.filter((passConfig): boolean => passConfig.id.trim().length > 0),
     rules: parsed.rules,
     passSelections: parsed.passSelections.map((selection): WorkbenchTomlPassSelectionConfig => ({

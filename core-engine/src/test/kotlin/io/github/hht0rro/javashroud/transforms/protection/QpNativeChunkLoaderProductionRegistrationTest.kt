@@ -55,18 +55,22 @@ class QpNativeChunkLoaderProductionRegistrationTest {
                 ClassReader(transformedBytes).accept(node, ClassReader.SKIP_FRAMES)
                 val clinit = node.methods.single { method -> method.name == "<clinit>" && method.desc == "()V" }
                 val instructions = clinit.instructions.toArray()
-                val loadIndex = instructions.indexOfFirst { instruction ->
+                val loadIndex = instructions.indices.single { index ->
+                    val instruction = instructions[index]
                     instruction is MethodInsnNode &&
-                        instruction.owner.endsWith("/QpBridge") &&
+                        instruction.owner == QP_BRIDGE &&
+                        instruction.opcode == Opcodes.INVOKESTATIC &&
                         instruction.name == "loadKernel"
                 }
-                val consumeIndex = instructions.indexOfFirst { instruction ->
+                val consumeIndex = instructions.indices.single { index ->
+                    val instruction = instructions[index]
                     instruction is MethodInsnNode &&
-                        instruction.owner.endsWith("/QpBridge") &&
-                        instruction.name == "consumeQpNativeChunk" &&
-                        instruction.desc == "([B)V"
+                        instruction.owner == QP_BRIDGE &&
+                        instruction.opcode == Opcodes.INVOKESTATIC &&
+                        instruction.name == "consumeQpNativeChunk"
                 }
-                assertTrue(loadIndex >= 0, "bootstrap class must load the JNI kernel")
+                assertEquals("(III)V", (instructions[loadIndex] as MethodInsnNode).desc)
+                assertEquals("([BI[B)V", (instructions[consumeIndex] as MethodInsnNode).desc)
                 assertTrue(consumeIndex > loadIndex, "native chunk consume must run after loadKernel")
 
                 val emitted = decodeNativeChunkCallInputs(instructions, loadIndex + 1, consumeIndex)
@@ -234,4 +238,8 @@ class QpNativeChunkLoaderProductionRegistrationTest {
         val pageIndex: Int,
         val proof: ByteArray,
     )
+
+    private companion object {
+        const val QP_BRIDGE = "io/github/hht0rro/javashroud/transforms/protection/qp/QpBridge"
+    }
 }

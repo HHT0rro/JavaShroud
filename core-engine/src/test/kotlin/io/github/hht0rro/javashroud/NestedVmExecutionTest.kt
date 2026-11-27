@@ -92,7 +92,7 @@ class NestedVmExecutionTest {
 
     private fun buildHighValueFixtureJar(target: Path): Path {
         val cw = org.objectweb.asm.ClassWriter(org.objectweb.asm.ClassWriter.COMPUTE_FRAMES or org.objectweb.asm.ClassWriter.COMPUTE_MAXS)
-        cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC or Opcodes.ACC_FINAL, "e2e/NestedVmRoot", null, "java/lang/Object", null)
+        cw.visit(testClassfileVersion(), Opcodes.ACC_PUBLIC or Opcodes.ACC_FINAL, "e2e/NestedVmRoot", null, "java/lang/Object", null)
         cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null).apply {
             visitCode()
             visitVarInsn(Opcodes.ALOAD, 0)
@@ -146,7 +146,7 @@ class NestedVmExecutionTest {
                                 override fun visitMethodInsn(opcode: Int, owner: String, name: String, descriptor: String, isInterface: Boolean) {
                                     if (
                                         opcode == Opcodes.INVOKESTATIC &&
-                                        descriptor == "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
+                                        descriptor == "(Ljava/lang/String;[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
                                     ) {
                                         found = true
                                     }

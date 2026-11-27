@@ -55,7 +55,7 @@ class StringEncryptionAnnotatedScopeTest {
 
     private fun buildAnnotatedScopeFixture(): ByteArray {
         val cw = ClassWriter(ClassWriter.COMPUTE_MAXS)
-        cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "AnnotatedScopeFixture", null, "java/lang/Object", null)
+        cw.visit(testClassfileVersion(), Opcodes.ACC_PUBLIC or Opcodes.ACC_SUPER, "AnnotatedScopeFixture", null, "java/lang/Object", null)
 
         val init = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
         init.visitCode()

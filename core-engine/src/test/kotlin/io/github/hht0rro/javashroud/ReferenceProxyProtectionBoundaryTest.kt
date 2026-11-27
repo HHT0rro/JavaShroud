@@ -21,13 +21,18 @@ class ReferenceProxyProtectionBoundaryTest {
 
         val caller = classNode.methods.single { method -> method.name == "callBoth" }
         val callerInvocations = caller.instructions.toArray().filterIsInstance<MethodInsnNode>()
-        val proxies = classNode.methods.filter { method -> method.name.startsWith("a_px") }
+        val proxies = classNode.methods.filter { method ->
+            method.access and Opcodes.ACC_SYNTHETIC != 0
+        }
+        assertEquals(1, proxies.size, "only the ordinary application target should receive a proxy")
+        val proxy = proxies.single()
 
         assertTrue(
             callerInvocations.any { invocation ->
                 invocation.opcode == Opcodes.INVOKESTATIC &&
                     invocation.owner == owner &&
-                    invocation.name.startsWith("a_px") &&
+                    invocation.name == proxy.name &&
+                    invocation.desc == proxy.desc &&
                     invocation.desc == "()V"
             },
             "ordinary application static calls must still be routed through a generated proxy",
@@ -48,17 +53,17 @@ class ReferenceProxyProtectionBoundaryTest {
             "JavaShroud protection calls must remain direct",
         )
 
-        assertEquals(1, proxies.size, "only the ordinary application target should receive a proxy")
-        val proxyInvocations = proxies.single().instructions.toArray().filterIsInstance<MethodInsnNode>()
+        val proxyInvocations = proxy.instructions.toArray().filterIsInstance<MethodInsnNode>()
         assertTrue(
             proxyInvocations.any { invocation ->
-                invocation.owner == APPLICATION_HELPER_OWNER && invocation.name == "work"
+                invocation.opcode == Opcodes.INVOKESTATIC &&
+                    invocation.owner == APPLICATION_HELPER_OWNER && invocation.name == "work" && invocation.desc == "()V"
             },
             "the generated proxy must forward to the ordinary application target",
         )
         assertFalse(
             proxyInvocations.any { invocation -> invocation.owner.startsWith(PROTECTION_OWNER_PREFIX) },
-            "no a_px proxy may forward to a JavaShroud protection owner",
+            "the generated proxy must not forward to a JavaShroud protection owner",
         )
     }
 

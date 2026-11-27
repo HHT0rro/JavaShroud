@@ -1,27 +1,26 @@
 package io.github.hht0rro.javashroud
 
 import com.fasterxml.jackson.databind.ObjectMapper
-import io.github.hht0rro.javashroud.adapters.protocol.EngineCommand
-import io.github.hht0rro.javashroud.adapters.protocol.buildCommandRequest
-import io.github.hht0rro.javashroud.adapters.protocol.dispatchRequest
+import io.github.hht0rro.javashroud.config.loadValidatedConfig
 import io.github.hht0rro.javashroud.kernel.EngineKernel
 import io.github.hht0rro.javashroud.model.config.RuleSpec
 import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
+import io.github.hht0rro.javashroud.transforms.protection.OpaqueVmDispatcher
 import io.github.hht0rro.javashroud.transforms.protection.QP_LAYOUT_DIGEST_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.QP_MASTER_KEY_SIZE
 import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.QpSerializer
+import io.github.hht0rro.javashroud.transforms.protection.currentQpBuildContextOrNull
 import io.github.hht0rro.javashroud.transforms.protection.decodeCfgIndex
 import io.github.hht0rro.javashroud.transforms.protection.encodeCfgIndex
 import org.objectweb.asm.ClassReader
-import org.objectweb.asm.ClassVisitor
-import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
+import org.objectweb.asm.tree.ClassNode
+import org.objectweb.asm.tree.MethodInsnNode
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Comparator
 import java.util.jar.JarEntry
-import java.util.jar.JarInputStream
 import java.util.jar.JarOutputStream
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -95,9 +94,12 @@ class BasicBlockShuffleSemanticTest {
             assertFalse(baseline.timedOut, "Baseline CFG fixture must terminate")
             assertEquals(0, baseline.exitCode, "Baseline CFG fixture failed: ${baseline.output}")
 
-            runEngine(inputJar, outputJar)
+            val dispatchers = runEngine(inputJar, outputJar)
+            val dispatcher = dispatchers.single {
+                it.owner == "e2e/BlockShuffleRoot" && it.originalName == "compute" && it.originalDescriptor == "(I)I"
+            }
             assertTrue(
-                methodInvokesNativeVmDispatcher(outputJar, "compute", "(I)I"),
+                methodInvokesNativeVmDispatcher(outputJar, dispatcher),
                 "compute(I)I must execute through the native VM dispatcher",
             )
             val transformed = runJavaProcessWithTimeout(
@@ -116,7 +118,7 @@ class BasicBlockShuffleSemanticTest {
         }
     }
 
-    private fun runEngine(inputJar: Path, outputJar: Path) {
+    private fun runEngine(inputJar: Path, outputJar: Path): List<OpaqueVmDispatcher> {
         val configPath = outputJar.resolveSibling("block-shuffle-config.toml")
         writeTestRunConfigToml(
             configPath = configPath,
@@ -136,12 +138,13 @@ class BasicBlockShuffleSemanticTest {
             ),
         )
         try {
-            withTestBootSecret {
-                dispatchRequest(
-                    buildCommandRequest(EngineCommand.Run, arrayOf("-config", configPath.toString())),
-                    EngineKernel(),
-                )
+            var dispatchers = emptyList<OpaqueVmDispatcher>()
+            EngineKernel().run(loadValidatedConfig(configPath), configPath) { event ->
+                if (event.type == "done") {
+                    dispatchers = checkNotNull(currentQpBuildContextOrNull()).opaqueVmDispatchers().values.toList()
+                }
             }
+            return dispatchers
         } finally {
             Files.deleteIfExists(configPath)
         }
@@ -182,47 +185,26 @@ class BasicBlockShuffleSemanticTest {
         }
     }
 
-    private fun methodInvokesNativeVmDispatcher(jarPath: Path, targetName: String, targetDescriptor: String): Boolean {
-        JarInputStream(Files.newInputStream(jarPath)).use { jar ->
-            while (true) {
-                val entry = jar.nextJarEntry ?: break
-                if (!entry.isDirectory && entry.name == "e2e/BlockShuffleRoot.class") {
-                    var found = false
-                    ClassReader(jar.readBytes()).accept(object : ClassVisitor(Opcodes.ASM9) {
-                        override fun visitMethod(
-                            access: Int,
-                            name: String,
-                            descriptor: String,
-                            signature: String?,
-                            exceptions: Array<String>?,
-                        ): MethodVisitor {
-                            if (name != targetName || descriptor != targetDescriptor) {
-                                return object : MethodVisitor(Opcodes.ASM9) {}
-                            }
-                            return object : MethodVisitor(Opcodes.ASM9) {
-                                override fun visitMethodInsn(
-                                    opcode: Int,
-                                    owner: String,
-                                    name: String,
-                                    descriptor: String,
-                                    isInterface: Boolean,
-                                ) {
-                                    if (
-                                        opcode == Opcodes.INVOKESTATIC &&
-                                        (descriptor == "(J[Ljava/lang/Object;)Ljava/lang/Object;" || descriptor == "(JI)I")
-                                    ) {
-                                        found = true
-                                    }
-                                }
-                            }
-                        }
-                    }, ClassReader.SKIP_FRAMES)
-                    return found
-                }
-                jar.closeEntry()
-            }
+    private fun methodInvokesNativeVmDispatcher(jarPath: Path, dispatcher: OpaqueVmDispatcher): Boolean {
+        val classes = loadJarClassBytes(jarPath)
+        val classBytes = classes[dispatcher.owner] ?: return false
+        val node = ClassNode()
+        ClassReader(classBytes).accept(node, 0)
+        val method = node.methods.singleOrNull {
+            it.name == dispatcher.syntheticName && it.desc == dispatcher.syntheticDescriptor
+        } ?: return false
+        val requiredAccess = Opcodes.ACC_STATIC or Opcodes.ACC_SYNTHETIC
+        if (method.access and requiredAccess != requiredAccess) return false
+        val terminal = method.instructions.filterIsInstance<MethodInsnNode>().singleOrNull {
+            it.opcode == Opcodes.INVOKESTATIC &&
+                it.desc == "(Ljava/lang/String;[BI[B[Ljava/lang/Object;)Ljava/lang/Object;"
+        } ?: return false
+        val helperBytes = classes[terminal.owner] ?: return false
+        val helper = ClassNode()
+        ClassReader(helperBytes).accept(helper, ClassReader.SKIP_CODE)
+        return helper.methods.any {
+            it.name == terminal.name && it.desc == terminal.desc && it.access and Opcodes.ACC_STATIC != 0
         }
-        return false
     }
 
     private fun deleteTree(root: Path) {

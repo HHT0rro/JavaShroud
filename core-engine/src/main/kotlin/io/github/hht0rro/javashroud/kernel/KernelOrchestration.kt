@@ -7,6 +7,7 @@ import io.github.hht0rro.javashroud.analysis.eligibleMembersForAction
 import io.github.hht0rro.javashroud.capabilities.buildEngineSchemaPayload
 import io.github.hht0rro.javashroud.config.rejectRemovedCurrentFormatParameters
 import io.github.hht0rro.javashroud.analysis.loadBytecodeArtifact
+import io.github.hht0rro.javashroud.artifact.publishValidatedJar
 import io.github.hht0rro.javashroud.artifact.writeBytecodeArtifact
 import io.github.hht0rro.javashroud.model.analysis.MemberKind
 import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
@@ -26,9 +27,7 @@ import io.github.hht0rro.javashroud.transforms.protection.QpBuildContext
 import io.github.hht0rro.javashroud.transforms.protection.CandidateProductionBuildEvidence
 import io.github.hht0rro.javashroud.transforms.protection.EmbeddedHelperDeployment
 import io.github.hht0rro.javashroud.transforms.protection.withQpBuildContext
-import io.github.hht0rro.javashroud.transforms.protection.currentQpBuildContextOrNull
 import io.github.hht0rro.javashroud.transforms.protection.hardening.HardenedArtifactFinalizer
-import io.github.hht0rro.javashroud.transforms.protection.hardening.ProtectionFormat
 import io.github.hht0rro.javashroud.transforms.protection.hardening.ReleaseArtifactScan
 import io.github.hht0rro.javashroud.transforms.protection.hardening.SignedDebugMap
 import java.nio.file.Files
@@ -132,6 +131,7 @@ internal fun executeKernelRun(
     qpBuildContextOverride: QpBuildContext? = null,
 ): EngineRunResult {
     rejectRemovedCurrentFormatParameters(config.passes)
+    io.github.hht0rro.javashroud.config.requireSafeRunFilePaths(config, configPath)
     val bootstrapEvents = buildBootstrapEvents(configPath)
     bootstrapEvents.forEach(emit)
     val preparation = prepareKernelRun(config = config, artifact = loadBytecodeArtifact(config))
@@ -235,7 +235,6 @@ internal fun executeWithOrderedPasses(
     qpBuildContextOverride: QpBuildContext? = null,
 ): EngineRunResult {
     val outputJarPath = resolveOutputJarPath(config)
-    Files.deleteIfExists(CandidateProductionBuildEvidence.evidencePath(outputJarPath))
     val ownsQpBuildContext = qpBuildContextOverride == null
     val qpBuildContext = qpBuildContextOverride ?: buildQpBuildContext(config, preparation.artifact)
     return try {
@@ -291,14 +290,6 @@ internal fun executeWithOrderedPasses(
                 config = config,
             )
             val artifactForWrite = HardenedArtifactFinalizer.finalizeForWrite(sealedArtifact, config)
-            writeBytecodeArtifact(outputJarPath, artifactForWrite)
-            val artifactDigest = SignedDebugMap.sha256(outputJarPath)
-            currentQpBuildContextOrNull()?.signedDebugMapDraftOrNull()?.let { draft ->
-                if (draft.methodMappings.isNotEmpty() || draft.fieldMappings.isNotEmpty()) {
-                    SignedDebugMap.write(outputJarPath, draft, artifactDigest)
-                }
-            }
-            val enabledPasses = reorderedPasses.filter { it.spec.enabled }.map { it.spec.id }
             val nativeBytes = artifactForWrite.jarEntries.map { it.bytes }.filter { bytes ->
                 bytes.size >= 4 && ((bytes[0] == 0x4D.toByte() && bytes[1] == 0x5A.toByte()) ||
                     (bytes[0] == 0x7F.toByte() && bytes[1] == 0x45.toByte()))
@@ -308,23 +299,37 @@ internal fun executeWithOrderedPasses(
             } catch (_: Exception) {
                 -1L
             }
-            val scanReport = ReleaseArtifactScan.scan(
-                outputJarPath = outputJarPath,
-                artifact = artifactForWrite,
-                profile = config.protectionProfile,
-                enabledPasses = enabledPasses,
-                nativeBytes = nativeBytes,
-                inputJarBytes = inputJarBytes,
-                requiredNativePlatforms = requiredNativePlatforms(config),
-            )
-            ReleaseArtifactScan.writeReport(outputJarPath, scanReport)
-            if (config.protectionProfile.requiresReleaseScan) {
-                scanReport.requirePass()
+            publishValidatedJar(outputJarPath) { stagedJar ->
+                writeBytecodeArtifact(stagedJar, artifactForWrite)
+                val artifactDigest = SignedDebugMap.sha256(stagedJar)
+                qpBuildContext.signedDebugMapDraftOrNull()?.let { draft ->
+                    if (draft.methodMappings.isNotEmpty() || draft.fieldMappings.isNotEmpty()) {
+                        SignedDebugMap.write(stagedJar, draft, artifactDigest)
+                    }
+                }
+                val scanReport = ReleaseArtifactScan.scan(
+                    outputJarPath = stagedJar,
+                    artifact = artifactForWrite,
+                    profile = config.protectionProfile,
+                    enabledPasses = executedPassIds,
+                    nativeBytes = nativeBytes,
+                    inputJarBytes = inputJarBytes,
+                    requiredNativePlatforms = requiredNativePlatforms(config),
+                )
+                if (config.protectionProfile.requiresReleaseScan) {
+                    scanReport.requirePass()
+                }
+                val stagedReport = ReleaseArtifactScan.writeReport(stagedJar, scanReport)
+                qpBuildContext.productionBuildEvidence.writeAfterFinalJar(
+                    artifact = artifactForWrite,
+                    outputJarPath = stagedJar,
+                )
+                listOf(
+                    stagedReport,
+                    SignedDebugMap.sidecarPath(stagedJar),
+                    CandidateProductionBuildEvidence.evidencePath(stagedJar),
+                )
             }
-            currentQpBuildContextOrNull()?.productionBuildEvidence?.writeAfterFinalJar(
-                artifact = artifactForWrite,
-                outputJarPath = outputJarPath,
-            )
             val outputJarPathString = outputJarPath.toString()
             emit(buildRunSummaryEvent(
                 executedPassCount = passExecution.executedPassCount,

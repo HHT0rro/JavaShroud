@@ -925,7 +925,7 @@ private fun sealedJavaOnlyHelperMemberRenamePlan(
     addMethod(jniHelper, "loadKernel", "(Ljava/lang/String;Ljava/lang/String;)V")
     addMethod(jniHelper, "loadKernel", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V")
     addMethod(jniHelper, "loadKernel", "(III)V")
-    addMethod(jniHelper, "executeQpVmPage", "(J[BI[B[Ljava/lang/Object;)Ljava/lang/Object;")
+    addMethod(jniHelper, "executeQpVmPage", "(Ljava/lang/String;[BI[B[Ljava/lang/Object;)Ljava/lang/Object;")
     addMethod(jniHelper, "openQpString", "([BI[B)Ljava/lang/String;")
     addMethod(jniHelper, "readQpClassPage", "([BI[B)[B")
     addMethod(jniHelper, "consumeQpNativeChunk", "([BI[B)V")

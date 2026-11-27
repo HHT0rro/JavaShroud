@@ -17,6 +17,11 @@ func validateObfuscationRequest(request ObfuscationRequest) error {
 	if request.OutputJarPath == "" {
 		return fmt.Errorf("start obfuscation failed: outputJarPath is empty: request=%+v", request)
 	}
+	switch request.ArtifactFormat {
+	case defaultEngineArtifactFormat, "jar", "apk":
+	default:
+		return fmt.Errorf("start obfuscation failed: artifactFormat must be auto, jar, or apk: %q", request.ArtifactFormat)
+	}
 	if len(request.Passes) == 0 {
 		return fmt.Errorf("start obfuscation failed: passes is empty: request=%+v", request)
 	}
@@ -49,6 +54,10 @@ func normalizeObfuscationRequest(request ObfuscationRequest) ObfuscationRequest 
 	normalized := request
 	normalized.InputJarPath = strings.TrimSpace(request.InputJarPath)
 	normalized.OutputJarPath = strings.TrimSpace(request.OutputJarPath)
+	normalized.ArtifactFormat = strings.ToLower(strings.TrimSpace(request.ArtifactFormat))
+	if normalized.ArtifactFormat == "" {
+		normalized.ArtifactFormat = defaultEngineArtifactFormat
+	}
 	normalized.Passes = clonePasses(request.Passes)
 	normalized.Rules = cloneRules(request.Rules)
 	normalized.PassSelections = clonePassSelections(request.PassSelections)

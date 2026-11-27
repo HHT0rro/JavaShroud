@@ -41,7 +41,8 @@ pub const SHARD_MASK_R: [u8; 32] = [0; 32];
 /// through a volatile load, so no contiguous shard key exists in the file.
 #[used]
 #[link_section = ".jsmk"]
-pub static SHARD_KEYS_MASKED: [u8; 32 * SECRET_PACK_SHARD_COUNT] = [0; 32 * SECRET_PACK_SHARD_COUNT];
+pub static SHARD_KEYS_MASKED: [u8; 32 * SECRET_PACK_SHARD_COUNT] =
+    [0; 32 * SECRET_PACK_SHARD_COUNT];
 
 fn shard_mask_r(shard: usize) -> [u8; 32] {
     let mut mask = [0u8; 32];

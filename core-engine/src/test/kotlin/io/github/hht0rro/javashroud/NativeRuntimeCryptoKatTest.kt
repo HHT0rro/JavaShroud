@@ -3,6 +3,7 @@ package io.github.hht0rro.javashroud
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class NativeRuntimeCryptoKatTest {
@@ -38,7 +39,6 @@ class NativeRuntimeCryptoKatTest {
             "struct WipedVec(Vec<u8>);",
             "impl Drop for WipedVec",
             "impl Drop for GhashWorkspace",
-            "impl Drop for GcmWorkspace",
             "self.0.fill(0);",
             "expected_tag.fill(0);",
             "tag.fill(0);",
@@ -49,6 +49,7 @@ class NativeRuntimeCryptoKatTest {
         )) {
             assertTrue(source.contains(contract), "Native crypto contract is missing: $contract")
         }
+        assertGcmWorkspaceWipesState(source)
 
         assertRustTests(
             source,
@@ -81,5 +82,20 @@ class NativeRuntimeCryptoKatTest {
             current = current.parent ?: break
         }
         error("Unable to locate core-engine/src/main/rust")
+    }
+}
+
+internal fun assertGcmWorkspaceWipesState(source: String) {
+    // Drop's effects are not observable through the public GCM API. Check the cleanup body,
+    // allowing the workspace to be shared by more than one cipher.
+    val drop = Regex(
+        """\bimpl\b\s*(?:<[^>]+>\s*)?Drop\s+for\s+GcmWorkspace\b\s*(?:<[^>]+>\s*)?\{\s*fn\s+drop\s*\(&mut self\)\s*\{([^}]*)}""",
+    ).find(source)
+    val body = assertNotNull(drop, "GCM workspace must wipe state on drop").groupValues[1]
+    for (field in listOf("nonce", "aad", "j0", "counter", "tag_mask", "calculated_tag", "keystream")) {
+        assertTrue(
+            Regex("""\bself\.$field\s*\.fill\(0\)\s*;""").containsMatchIn(body),
+            "GCM workspace drop must clear $field",
+        )
     }
 }
