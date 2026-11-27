@@ -24,6 +24,81 @@ import org.objectweb.asm.Opcodes
 class ApkKeepRuleSynthesisTest {
 
     @Test
+    fun generatedImplementationNamesRemainResolvableAfterClassRenaming() {
+        fun classBytes(name: String, parent: String = "java/lang/Object"): ByteArray =
+            ClassWriter(ClassWriter.COMPUTE_MAXS).apply {
+                visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC, name, null, parent, null)
+                visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null).apply {
+                    visitCode()
+                    visitVarInsn(Opcodes.ALOAD, 0)
+                    visitMethodInsn(Opcodes.INVOKESPECIAL, parent, "<init>", "()V", false)
+                    visitInsn(Opcodes.RETURN)
+                    visitMaxs(0, 0)
+                    visitEnd()
+                }
+                visitEnd()
+            }.toByteArray()
+
+        val preference = "fixture/Preferences"
+        val database = "fixture/Database"
+        val caller = "fixture/GeneratedFactory"
+        val factory = ClassWriter(ClassWriter.COMPUTE_MAXS).apply {
+            visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC, caller, null, "java/lang/Object", null)
+            for ((methodName, base, suffix) in listOf(
+                Triple("preferences", preference, "Impl"),
+                Triple("database", database, "_Impl"),
+            )) {
+                visitMethod(Opcodes.ACC_PUBLIC or Opcodes.ACC_STATIC, methodName, "()Ljava/lang/String;", null, null).apply {
+                    visitCode()
+                    visitLdcInsn(org.objectweb.asm.Type.getObjectType(base))
+                    visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Class", "getName", "()Ljava/lang/String;", false)
+                    visitLdcInsn(suffix)
+                    visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/String", "concat", "(Ljava/lang/String;)Ljava/lang/String;", false)
+                    visitMethodInsn(Opcodes.INVOKESTATIC, "java/lang/Class", "forName", "(Ljava/lang/String;)Ljava/lang/Class;", false)
+                    visitInsn(Opcodes.ICONST_0)
+                    visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Class")
+                    visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Class", "getDeclaredConstructor", "([Ljava/lang/Class;)Ljava/lang/reflect/Constructor;", false)
+                    visitInsn(Opcodes.ICONST_0)
+                    visitTypeInsn(Opcodes.ANEWARRAY, "java/lang/Object")
+                    visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/reflect/Constructor", "newInstance", "([Ljava/lang/Object;)Ljava/lang/Object;", false)
+                    visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Object", "getClass", "()Ljava/lang/Class;", false)
+                    visitMethodInsn(Opcodes.INVOKEVIRTUAL, "java/lang/Class", "getName", "()Ljava/lang/String;", false)
+                    visitInsn(Opcodes.ARETURN)
+                    visitMaxs(0, 0)
+                    visitEnd()
+                }
+            }
+            visitEnd()
+        }.toByteArray()
+        val input = listOf(
+            preference to classBytes(preference),
+            "${preference}Impl" to classBytes("${preference}Impl", preference),
+            database to classBytes(database),
+            "${database}_Impl" to classBytes("${database}_Impl", database),
+            caller to factory,
+            "fixture/OrphanImpl" to classBytes("fixture/OrphanImpl"),
+        )
+        val plan = ApkKeepRuleSynthesis.synthesize(
+            jarOf(input.map { (name, bytes) -> "$name.class" to bytes }),
+            emptySet(), emptySet(), emptySet(), emptyList(),
+        )
+        val mapping = input.map { it.first }.filter { it !in plan.excludedClassNames }
+            .mapIndexed { index, name -> name to "moved/Type$index" }.toMap()
+        val output = input.associate { (name, bytes) -> (mapping[name] ?: name) to remapClasses(bytes, mapping) }
+        val loader = object : ClassLoader(null) {
+            override fun findClass(name: String): Class<*> {
+                val bytes = output[name.replace('.', '/')] ?: throw ClassNotFoundException(name)
+                return defineClass(name, bytes, 0, bytes.size)
+            }
+        }
+        val entry = loader.loadClass(mapping.getValue(caller).replace('/', '.'))
+        assertEquals("${preference.replace('/', '.')}Impl", entry.getMethod("preferences").invoke(null))
+        assertEquals("${database.replace('/', '.')}_Impl", entry.getMethod("database").invoke(null))
+        assertEquals(setOf(preference, "${preference}Impl", database, "${database}_Impl"), plan.excludedClassNames)
+        assertTrue("fixture/OrphanImpl" in mapping)
+    }
+
+    @Test
     fun externalMemberDescriptorsRetainLoadedTypesAndTheirParentInterfaces() {
         fun interfaceBytes(name: String, vararg parents: String): ByteArray = ClassWriter(0).apply {
             visit(Opcodes.V1_8, Opcodes.ACC_PUBLIC or Opcodes.ACC_INTERFACE or Opcodes.ACC_ABSTRACT,

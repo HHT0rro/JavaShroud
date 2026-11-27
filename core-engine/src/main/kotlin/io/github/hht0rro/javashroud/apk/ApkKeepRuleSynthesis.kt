@@ -215,19 +215,15 @@ object ApkKeepRuleSynthesis {
         // 6. Resource string-pool references.
         classKeeps += resourceReferencedClasses.intersect(loadedNames)
 
-        // 6b. Name-convention implementations resolved by reflection at
-        // runtime: Room looks up "<databaseClass>_Impl" via Class.forName on
-        // the canonical-name + suffix. Renaming either side breaks the
-        // pairing, so every *_Impl class whose base class is also loaded
-        // keeps its name.
-        val implConventionClasses = loadedNames.filterTo(sortedSetOf()) { name ->
-            name.endsWith("_Impl") && loadedNames.contains(name.removeSuffix("_Impl"))
+        // Room and preference-model factories construct implementation names
+        // from a base class's runtime name and a generated suffix.
+        for (suffix in listOf("_Impl", "Impl")) {
+            val implementationClasses = loadedNames.filter { name ->
+                name.endsWith(suffix) && loadedNames.contains(name.removeSuffix(suffix))
+            }
+            classKeeps += implementationClasses
+            classKeeps += implementationClasses.map { it.removeSuffix(suffix) }
         }
-        classKeeps += implConventionClasses
-        // The lookup string is built from the DATABASE class's own name, so
-        // the base class must keep its name too — pinning only the generated
-        // side still breaks the pairing.
-        classKeeps += implConventionClasses.map { it.removeSuffix("_Impl") }
 
         // 4. Parcelable CREATOR / Serializable serialVersionUID member keeps.
         val parcelableClasses = implementorsOf(loaded, PARCELABLE_INTERNAL)
