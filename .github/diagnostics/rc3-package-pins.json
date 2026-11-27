@@ -1,0 +1,13 @@
+{
+  "release_run_id": null,
+  "release_id": null,
+  "asset_id": null,
+  "tag": "v0.31.2-rc.3",
+  "tag_object_sha": null,
+  "source_sha": "0c5e58e077908e2d396493fdcd6a2139a1dae11f",
+  "package_sha256": null,
+  "package_size": null,
+  "desktop_sha256": null,
+  "engine_sha256": null,
+  "xenolith_sha256": null
+}
