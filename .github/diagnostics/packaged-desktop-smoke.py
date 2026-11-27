@@ -174,12 +174,9 @@ def native_file_dialog(desktop, value, name):
     deadline = time.monotonic() + 15
     dialog = None
     while time.monotonic() < deadline:
-        track_processes(desktop)
-        candidates = Desktop(backend="uia").windows(class_name="#32770")
-        for candidate in candidates:
-            if candidate.process_id() in OWNED:
-                dialog = candidate
-                break
+        candidates = [item for item in windows(desktop) if re.search(r"选择输入|选择导入配置|选择输出|Open|Save", item["title"])]
+        if len(candidates) == 1:
+            dialog = Desktop(backend="uia").window(handle=candidates[0]["handle"]).wrapper_object()
         if dialog is not None:
             break
         time.sleep(0.3)
