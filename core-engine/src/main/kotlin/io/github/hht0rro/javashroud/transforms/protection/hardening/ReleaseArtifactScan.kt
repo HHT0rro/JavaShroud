@@ -410,11 +410,54 @@ internal object ReleaseArtifactScan {
         )
         val haystacks = artifact.classArtifacts.map { it.bytes } + artifact.jarEntries.map { it.bytes }
         val hit = needles.firstOrNull { needle -> haystacks.any { bytes -> containsAscii(bytes, needle) } }
+        val diagnostics = if (hit == null) emptySet() else haystacks.flatMap { bytes ->
+            freshCwdHitDiagnostics(bytes, needles)
+        }.toSortedSet()
         return ReleaseArtifactScanReport.Finding(
             "fresh-cwd-reproducibility",
             hit == null,
-            hit ?: "absent",
+            if (hit == null) "absent" else "$hit ${diagnostics.joinToString(" | ")}",
         )
+    }
+
+    private fun freshCwdHitDiagnostics(bytes: ByteArray, needles: List<String>): Set<String> {
+        if (needles.none { containsAscii(bytes, it) }) return emptySet()
+        val container = when {
+            startsWithBytes(bytes, byteArrayOf(0xCA.toByte(), 0xFE.toByte(), 0xBA.toByte(), 0xBE.toByte())) -> "class"
+            startsWithBytes(bytes, byteArrayOf(0x4D, 0x5A)) -> "PE"
+            startsWithBytes(bytes, byteArrayOf(0x7F, 0x45, 0x4C, 0x46)) -> "ELF"
+            else -> "resource"
+        }
+        // Only inspect a bounded printable suffix after an existing marker hit.
+        // Every emitted field is selected from a fixed vocabulary.
+        val text = bytes.toString(StandardCharsets.ISO_8859_1)
+        val diagnostics = sortedSetOf<String>()
+        needles.forEach { needle ->
+            var start = text.indexOf(needle)
+            while (start >= 0) {
+                var end = start
+                while (end < text.length && end - start < 1024 && text[end] in ' '..'~') end++
+                val path = text.substring(start, end)
+                val normalized = path.replace('\\', '/').replace(Regex("/+"), "/").lowercase()
+                val workspace = System.getProperty("user.dir").orEmpty().replace('\\', '/').lowercase()
+                val category = when {
+                    "/registry/src/" in normalized || "/.cargo/registry/" in normalized -> "Cargo-registry"
+                    "/.rustup/" in normalized || "/rustup/" in normalized || "/rustup-home/" in normalized -> "rustup"
+                    "/zig/" in normalized || "/zig-" in normalized || "/ziglang/" in normalized || "/zig-cache/" in normalized -> "Zig"
+                    workspace.isNotEmpty() && normalized.startsWith(workspace) || "/rust-workspace/" in normalized -> "workspace"
+                    "/appdata/local/temp" in normalized -> "AppData-temp"
+                    else -> "other"
+                }
+                val alias = when {
+                    "\\\\" in path -> "escaped-backslash"
+                    '\\' in path -> "backslash"
+                    else -> "forward-slash"
+                }
+                diagnostics += "container=$container category=$category alias=$alias"
+                start = text.indexOf(needle, start + needle.length)
+            }
+        }
+        return diagnostics
     }
 
     private fun scanBlockingJdk(profile: HardenedProtectionProfile): ReleaseArtifactScanReport.Finding {

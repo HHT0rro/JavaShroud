@@ -385,7 +385,11 @@ class HardenedReleaseGateTest {
                 HardenedProtectionProfile.RELEASE_HARDENED,
                 emptyList(),
             )
-            assertFalse(leakReport.findings.single { it.check == "fresh-cwd-reproducibility" }.passed)
+            val leakFinding = leakReport.findings.single { it.check == "fresh-cwd-reproducibility" }
+            assertFalse(leakFinding.passed)
+            assertTrue("container=class category=other alias=backslash" in leakFinding.detail)
+            assertFalse("builder" in leakFinding.detail)
+            assertFalse("project" in leakFinding.detail)
 
             val cleanBytes = emptyClass("sample/CwdClean")
             val cleanArtifact = testAttachedArtifact(
