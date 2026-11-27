@@ -231,11 +231,16 @@ def wait_cdp(port, desktop):
 
 
 def uia_window(desktop):
-    own_windows = windows(desktop)
-    window = next((item for item in own_windows if item["pid"] == desktop.pid and item["title"] == "JavaShroud"), None)
-    if window is None:
-        raise RuntimeError("The owned desktop window was not visible")
-    return Desktop(backend="uia").window(handle=window["handle"]).wrapper_object()
+    deadline = time.monotonic() + 45
+    while time.monotonic() < deadline:
+        own_windows = windows(desktop)
+        window = next((item for item in own_windows if item["pid"] == desktop.pid and item["title"] == "JavaShroud"), None)
+        if window is not None:
+            return Desktop(backend="uia").window(handle=window["handle"]).wrapper_object()
+        if desktop.poll() is not None:
+            break
+        time.sleep(0.3)
+    raise RuntimeError("The owned desktop window was not visible after the startup readiness deadline")
 
 
 def uia_snapshot(desktop, name):
@@ -566,6 +571,9 @@ def main():
         if desktop is not None:
             try:
                 uia_snapshot(desktop, "failure-uia")
+            except Exception:
+                pass
+            try:
                 checkpoint(page, desktop, "failure")
             except Exception:
                 pass
