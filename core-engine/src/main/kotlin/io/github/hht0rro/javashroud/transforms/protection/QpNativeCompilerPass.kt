@@ -1,7 +1,9 @@
 package io.github.hht0rro.javashroud.transforms.protection
 
 import java.io.InputStream
+import java.io.IOException
 import java.nio.charset.StandardCharsets
+import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
@@ -817,16 +819,14 @@ object QpNativeCompilerPass {
     private fun extractBundledRustWorkspace(classLoader: ClassLoader): Path? {
         val listBytes = classLoader.getResourceAsStream("META-INF/rust-runtime/file-list.txt")?.use { it.readBytes() }
             ?: return null
-        val digest = HexEncodingSupport.toHexLower(MessageDigest.getInstance("SHA-256").digest(listBytes))
-        val destination = Path.of(System.getProperty("user.home"), ".javashroud", "rust-workspace", "qp-$digest")
+        val cacheRoot = Path.of(System.getProperty("user.home"), ".javashroud", "rust-workspace")
             .toAbsolutePath().normalize()
-        if (isRustWorkspaceTemplate(destination)) return destination
         val files = String(listBytes, StandardCharsets.UTF_8).lineSequence()
             .map(String::trim)
             .filter { it.isNotEmpty() && it != "file-list.txt" && ".." !in it }
             .toList()
-        Files.createDirectories(destination.parent)
-        val staging = Files.createTempDirectory(destination.parent, ".stage-rust-workspace-")
+        Files.createDirectories(cacheRoot)
+        val staging = Files.createTempDirectory(cacheRoot, ".stage-rust-workspace-")
         return try {
             files.forEach { relative ->
                 val output = staging.resolve(relative).normalize()
@@ -839,11 +839,29 @@ object QpNativeCompilerPass {
                 }
             }
             if (!isRustWorkspaceTemplate(staging)) return null
-            if (Files.exists(destination)) destination.toFile().deleteRecursively()
-            try {
-                Files.move(staging, destination, StandardCopyOption.ATOMIC_MOVE)
-            } catch (_: Exception) {
-                Files.move(staging, destination, StandardCopyOption.REPLACE_EXISTING)
+            // File names stay stable across runtime changes. Bind the cache to
+            // the same complete source digest used by native compilation.
+            val sourceDigest = digestRustWorkspace(staging)
+            val destination = cacheRoot.resolve("qp-${HexEncodingSupport.toHexLower(sourceDigest)}")
+            if (!Files.exists(destination)) {
+                try {
+                    Files.move(staging, destination, StandardCopyOption.ATOMIC_MOVE)
+                } catch (error: IOException) {
+                    // Another process can publish these exact contents first.
+                    // Reuse its complete tree only after verifying it below.
+                    if (!Files.isDirectory(destination)) {
+                        if (error !is AtomicMoveNotSupportedException) throw error
+                        try {
+                            Files.move(staging, destination)
+                        } catch (race: IOException) {
+                            if (!Files.isDirectory(destination)) throw race
+                        }
+                    }
+                }
+            }
+            check(isRustWorkspaceTemplate(destination) &&
+                MessageDigest.isEqual(sourceDigest, digestRustWorkspace(destination))) {
+                "Qp bundled Rust workspace cache content mismatch: $destination"
             }
             destination
         } finally {
