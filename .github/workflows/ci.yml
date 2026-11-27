@@ -48,7 +48,7 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          $pattern = 'container=(?:class|PE|ELF|resource) category=(?:workspace|Cargo-registry|rustup|Zig|AppData-temp|other) alias=(?:escaped-backslash|backslash|forward-slash)'
+          $pattern = 'container=(?:class|PE|ELF|resource) category=(?:workspace|Cargo-registry|rustup|Zig|AppData-temp|other) alias=(?:escaped-backslash|backslash|forward-slash)|path-alias-identity lexicalEqualsReal=(?:true|false) lexicalEqualsRealIgnoreCase=(?:true|false) lexicalHasTilde=(?:true|false) realHasTilde=(?:true|false)'
           $diagnostics = Get-ChildItem -LiteralPath build/core-engine/test-results/test -Filter 'TEST-*.xml' -ErrorAction SilentlyContinue |
             ForEach-Object {
               $report = [System.IO.File]::ReadAllText($_.FullName)
