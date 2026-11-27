@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.31.2--rc.1-5b6ee1" />
+  <img alt="Version" src="https://img.shields.io/badge/version-0.31.2--rc.2-5b6ee1" />
   <img alt="License" src="https://img.shields.io/badge/license-GPL--3.0-blue" />
   <img alt="JDK" src="https://img.shields.io/badge/JDK-17%2B-orange" />
   <img alt="Desktop" src="https://img.shields.io/badge/desktop-Wails%20%2B%20Vue-42b883" />
@@ -49,6 +49,8 @@ invoke-dynamic-indirection, callsite-rotation-protection, jni-microkernel-loader
 os-anti-debug, os-anti-vm, method-virtualization, strip-compile-debug-info,
 control-flow-flattening
 ```
+
+桌面配置导入、导出及任务请求会保留显式 `protectionProfile`，支持 `minimal`、`release-hardened` 和 `analysis-only`。省略该字段时使用所选产物格式的引擎默认值。显式非法值会被拒绝。
 
 配置校验在运行前完成：`requiredPassIds` 自动补齐，`requiresAnyPassIds` 必须由配置满足，schema 里 `requiresOptIn = true` 或 `risk = high` 的 pass 需要 `allowOptInPasses = true`。不合规的组合直接报错退出，不降级执行。
 
@@ -220,21 +222,21 @@ APK 中的未压缩 `.so` 默认至少按 4 KiB 对齐。如果输入 APK 已有
 ## 快速开始
 
 ```powershell
-# 构建核心引擎（产物：build\core-engine\libs\obfuscator-engine-0.31.2-rc.1.jar）
+# 构建核心引擎（产物：build\core-engine\libs\obfuscator-engine-0.31.2-rc.2.jar）
 .\gradlew.bat :core-engine:jar
 
 # 查看 pass 清单、参数、默认 pipeline 与兼容性约束（TOML 输出）
-java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.1.jar -schema
+java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.2.jar -schema
 
 # 查看输入 JAR 的包 / 类 / 成员树
-java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.1.jar -inspect app.jar
+java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.2.jar -inspect app.jar
 
 # 按 TOML 配置处理 JAR
-java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.1.jar -config path\to\config.toml
+java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.2.jar -config path\to\config.toml
 
 # 引擎运行时缓存维护
-java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.1.jar -gc
-java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.1.jar -gc --apply
+java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.2.jar -gc
+java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.2.jar -gc --apply
 ```
 
 配置示例（重命名 + 控制流平坦化；opt-in pass 需要 `allowOptInPasses = true`）：

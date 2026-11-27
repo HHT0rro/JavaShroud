@@ -1,3 +1,21 @@
+# JavaShroud v0.31.2-rc.2
+
+## 中文
+
+- 桌面配置导入、导出、JSON 任务请求及后端 TOML 保留显式 `protectionProfile`。覆盖三个合法值、非法值及省略字段的原有默认行为。
+- 内嵌 Rust workspace 缓存按完整源码内容求摘要，复用时核对内容。相同文件清单中的源码更新会选择新缓存，缺失资源与缓存变更会被拒绝，并发解包只接收完整且摘要一致的目录。
+- 缓存缺陷的六项回归和相关 JVM、Rust 定向验证已通过。完整 Gradle、GUI 和发行验证继续按当前候选提交记录。
+- 同一完整 Calc 夹具在缓存修复后的处理件上输出正确结果，JDK17 观察14339ms、JDK21观察25250ms，相对3倍性能预算仍未通过。该结果与旧产物535638ms的观察各自绑定独立产物及宿主负载。
+- ARM 设备、ARM16KiB及 API35 WebView 间歇崩溃继续保留未验证项与原始失败证据。
+
+## English
+
+- Desktop configuration import, export, JSON task requests, and generated backend TOML preserve an explicit `protectionProfile`. Regressions cover all three supported values, invalid values, and the existing behavior for omitted fields.
+- The bundled Rust workspace cache uses the complete source content digest and verifies cached contents before reuse. Updated sources select a new cache even when file names stay the same. Missing resources and modified caches fail closed. Concurrent extraction accepts a complete directory only after checking its digest.
+- Six cache regressions and related JVM and Rust focused checks passed. Full Gradle, GUI, and release validation continue to be recorded against the candidate commit.
+- The complete Calc fixture returned the correct result with the repaired source cache. Observed protected times were 14,339 ms on JDK 17 and 25,250 ms on JDK 21. The relative 3x performance budget remains failed. These results and the earlier 535,638 ms observation retain their individual artifact and host load bindings.
+- ARM devices, ARM16KiB execution, and the intermittent API35 WebView crash retain their pending checks and original failure evidence.
+
 # JavaShroud v0.31.2-rc.1
 
 ## 中文
