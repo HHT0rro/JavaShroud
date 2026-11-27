@@ -2880,9 +2880,8 @@ mod jni_bridge {
         Some(function(vm, env_out, JNI_VERSION_1_8))
     }
 
-    /// Distinguishes "the JVM can speak JVMTI" from "an agent already holds a
-    /// JVMTI environment". Stock JDKs support JVMTI; only a live GetEnv success
-    /// for JVMTI_VERSION_1_2 without JNI_EDETACHED/JNI_EVERSION is a hit.
+    /// Checks the live JVMTI interface and agent options. Each successful
+    /// JVMTI GetEnv creates an environment owned exclusively by this call.
     fn jvmti_agent_attached() -> Result<bool, BridgeFailure> {
         const JVMTI_VERSION_1_2: JInt = 0x30010200;
         let Some(vm) = current_java_vm() else {
@@ -2900,7 +2899,29 @@ mod jni_bridge {
         // Stock JDKs can return a JVMTI env from GetEnv. Treat it as an attack
         // only when a debug/agent capability is also live: JDWP listen status
         // or a hostile debug/instrument module already enumerated elsewhere.
+        unsafe { dispose_jvmti_environment(env_out) }?;
         Ok(jdwp_listen_status_enabled())
+    }
+
+    unsafe fn dispose_jvmti_environment(env: *mut c_void) -> Result<(), BridgeFailure> {
+        // jvmti.h function position 127, available since JVMTI 1.0.
+        const DISPOSE_ENVIRONMENT_INDEX: usize = 126;
+        if env.is_null() {
+            return Err(BridgeFailure("Qp JVMTI environment is unavailable"));
+        }
+        let table = *env.cast::<*const *const c_void>();
+        if table.is_null() {
+            return Err(BridgeFailure("Qp JVMTI function table is unavailable"));
+        }
+        let entry = *table.add(DISPOSE_ENVIRONMENT_INDEX);
+        if entry.is_null() {
+            return Err(BridgeFailure("Qp JVMTI disposal function is unavailable"));
+        }
+        let dispose: unsafe extern "system" fn(*mut c_void) -> JInt = core::mem::transmute(entry);
+        if dispose(env) != 0 {
+            return Err(BridgeFailure("Qp JVMTI environment disposal failed"));
+        }
+        Ok(())
     }
 
     fn jdwp_listen_status_enabled() -> bool {
@@ -3628,8 +3649,7 @@ mod jni_bridge {
                 cb: u32,
                 needed: *mut u32,
             ) -> i32;
-            fn K32GetModuleFileNameExW(
-                process: *mut core::ffi::c_void,
+            fn GetModuleFileNameW(
                 module: *mut core::ffi::c_void,
                 filename: *mut u16,
                 size: u32,
@@ -3661,8 +3681,10 @@ mod jni_bridge {
                 continue;
             }
             path.fill(0);
+            // The enumerated modules belong to this process. Query the loader
+            // directly on every sweep, including while other threads unload DLLs.
             let written = unsafe {
-                K32GetModuleFileNameExW(process, module, path.as_mut_ptr(), path.len() as u32)
+                GetModuleFileNameW(module, path.as_mut_ptr(), path.len() as u32)
             };
             if written == 0 {
                 continue;
@@ -6010,11 +6032,151 @@ mod jni_bridge {
         }
     }
 
+    #[cfg(all(test, target_os = "windows"))]
+    #[path = "windows_module_tests.rs"]
+    mod windows_module_tests;
+
     #[cfg(test)]
     mod tests {
         use super::*;
         use std::collections::BTreeSet;
         use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+
+        unsafe extern "system" fn dispose_owned_environment(env: *mut c_void) -> JInt {
+            let fixture = &mut *env.cast::<DisposalFixture>();
+            fixture.calls += 1;
+            fixture.result
+        }
+
+        #[repr(C)]
+        struct DisposalFixture {
+            table: *const *const c_void,
+            calls: usize,
+            result: JInt,
+        }
+
+        #[test]
+        fn jvmti_disposal_calls_the_owned_environment_once_and_propagates_errors() {
+            let mut table = [core::ptr::null(); 127];
+            table[126] = dispose_owned_environment as *const c_void;
+            let mut fixture = DisposalFixture {
+                table: table.as_ptr(),
+                calls: 0,
+                result: 0,
+            };
+            let env = (&mut fixture as *mut DisposalFixture).cast();
+            assert!(unsafe { dispose_jvmti_environment(env) }.is_ok());
+            assert_eq!(fixture.calls, 1);
+            fixture.result = 112;
+            assert!(unsafe { dispose_jvmti_environment(env) }.is_err());
+            assert_eq!(fixture.calls, 2);
+        }
+
+        #[test]
+        fn jvmti_disposal_rejects_missing_environment_table_and_function() {
+            assert!(unsafe { dispose_jvmti_environment(core::ptr::null_mut()) }.is_err());
+            let mut table = core::ptr::null::<*const c_void>();
+            let env = (&mut table as *mut *const *const c_void).cast();
+            assert!(unsafe { dispose_jvmti_environment(env) }.is_err());
+            let entries = [core::ptr::null(); 127];
+            table = entries.as_ptr();
+            assert!(unsafe { dispose_jvmti_environment(env) }.is_err());
+            core::hint::black_box(table);
+        }
+
+        #[test]
+        fn jvmti_disposal_keeps_concurrent_environment_ownership_separate() {
+            let threads: Vec<_> = (0..2)
+                .map(|_| {
+                    std::thread::spawn(|| {
+                        let mut table = [core::ptr::null(); 127];
+                        table[126] = dispose_owned_environment as *const c_void;
+                        for _ in 0..2000 {
+                            let mut fixture = DisposalFixture {
+                                table: table.as_ptr(),
+                                calls: 0,
+                                result: 0,
+                            };
+                            let env = (&mut fixture as *mut DisposalFixture).cast();
+                            assert!(unsafe { dispose_jvmti_environment(env) }.is_ok());
+                            assert_eq!(fixture.calls, 1);
+                        }
+                    })
+                })
+                .collect();
+            for thread in threads {
+                thread.join().unwrap();
+            }
+        }
+
+        #[test]
+        fn jvmti_probe_pairs_every_successful_get_env_with_disposal() {
+            #[repr(C)]
+            struct ProbeVm {
+                interface: *const JniInvokeInterface,
+                table: *const *const c_void,
+                calls: AtomicUsize,
+                releases: AtomicUsize,
+            }
+
+            #[repr(C)]
+            struct ProbeEnvironment {
+                table: *const *const c_void,
+                owner: *const ProbeVm,
+            }
+
+            unsafe extern "system" fn get_env(
+                vm: JavaVM,
+                out: *mut *mut c_void,
+                version: JInt,
+            ) -> JInt {
+                assert_eq!(version, 0x30010200);
+                let owner = &*vm.cast::<ProbeVm>();
+                owner.calls.fetch_add(1, Ordering::SeqCst);
+                *out = Box::into_raw(Box::new(ProbeEnvironment {
+                    table: owner.table,
+                    owner,
+                }))
+                .cast();
+                JNI_OK
+            }
+
+            unsafe extern "system" fn dispose(env: *mut c_void) -> JInt {
+                let env = Box::from_raw(env.cast::<ProbeEnvironment>());
+                (*env.owner).releases.fetch_add(1, Ordering::SeqCst);
+                0
+            }
+
+            struct RestoreVm(JavaVM);
+            impl Drop for RestoreVm {
+                fn drop(&mut self) {
+                    remember_java_vm(self.0);
+                }
+            }
+
+            let mut table = [core::ptr::null(); 127];
+            table[126] = dispose as *const c_void;
+            let mut interface = JniInvokeInterface {
+                entries: [core::ptr::null(); JNI_INVOKE_INTERFACE_SIZE],
+            };
+            interface.entries[GET_ENV_INDEX] = get_env as *const c_void;
+            let mut owner = ProbeVm {
+                interface: &interface,
+                table: table.as_ptr(),
+                calls: AtomicUsize::new(0),
+                releases: AtomicUsize::new(0),
+            };
+            let _restore = RestoreVm(current_java_vm().unwrap_or(core::ptr::null_mut()));
+            remember_java_vm((&mut owner as *mut ProbeVm).cast());
+            for _ in 0..32 {
+                assert_eq!(
+                    jvmti_agent_attached().unwrap(),
+                    jdwp_listen_status_enabled(),
+                );
+            }
+            assert_eq!(owner.calls.load(Ordering::SeqCst), 32);
+            assert_eq!(owner.releases.load(Ordering::SeqCst), 32);
+        }
 
         const EXPECTED_ROUTES: [(&str, &str); 15] = [
             ("nativeInit", "(Ljava/lang/String;)I"),
