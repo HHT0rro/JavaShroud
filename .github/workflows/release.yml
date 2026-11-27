@@ -249,8 +249,8 @@ jobs:
           name: JavaShroud ${{ steps.release_tag.outputs.tag }}
           body_path: RELEASE_NOTES.md
           draft: false
-          prerelease: false
-          make_latest: true
+          prerelease: ${{ contains(steps.release_tag.outputs.tag, '-') }}
+          make_latest: ${{ !contains(steps.release_tag.outputs.tag, '-') }}
           fail_on_unmatched_files: true
           files: |
             build/release/javashroud-windows-amd64.zip

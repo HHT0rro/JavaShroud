@@ -1,13 +1,15 @@
-# JavaShroud v0.31.1
+# JavaShroud v0.31.2-rc.1
 
 ## 中文
 
-- APK 管线在转换不完整、签名或对齐验证失败时拒绝发布，并保护输入、已有输出和附属文件。处理过程保留 Android 框架回调及必要的类和成员访问关系。
-- CI 在 API 21、26 和 35 的 x86_64 模拟器中实际运行单 DEX、多 DEX 和 JNI 夹具，并拒绝任何跳过。API 35 使用报告 16 KiB 页大小的模拟器；这不构成 ARM 实机证据。
-- Windows 原生构建使用相对源码路径。交付包固定 Xenolith v1.2.0-rc2 的 Windows CLI 摘要，工具链和最终包均独立验证。
+- APK 名称保留涵盖按模型类名加 `Impl` 反射构造的生成实现，延续已有 `_Impl` 约定。回归夹具执行实际重命名和反射构造。
+- Android 清单中的 `appComponentFactory`、备份代理、应用管理界面、类加载器、父 Activity 和别名目标等类引用进入保留集合，新增引用按声明元素和 Android 命名空间解析。
+- 预发行标签自动标记为 GitHub prerelease，发行工作流正确读取带前缀的 PowerShell tag 变量。
+- 已知的本机火绒 Native Image 隔离、默认加固 Calc 耗时、ARM 设备及部分历史 APK 验证仍在维护记录中逐项跟进。
 
 ## English
 
-- The APK pipeline preserves inputs, existing outputs, and companion files if conversion is incomplete or signature or alignment verification fails. It retains Android framework callbacks and required class and member access relationships.
-- CI runs the owned single-DEX, multidex, and JNI fixtures on Android API 21, 26, and 35 x86_64 emulators and rejects skipped cases. The API 35 results are emulator evidence for its reported 16 KiB page size. ARM device verification is separate.
-- Windows native builds use relative source paths. The Windows distribution pins the Xenolith v1.2.0-rc2 CLI and verifies the exact executable digest.
+- APK keep rules retain generated implementation names constructed from a model class name plus `Impl`, alongside the existing `_Impl` convention. The regression exercises class renaming and reflective construction.
+- Android manifest references for component factories, backup agents, management activities, class loaders, parent activities, and alias targets enter the keep set. Additional references are scoped to their declared elements and Android namespace.
+- Prerelease tags produce GitHub prereleases. The release workflow delimits PowerShell tag variables correctly.
+- Local Huorong Native Image quarantine, default hardened Calc latency, ARM device coverage, and remaining historical APK checks continue to be tracked individually.
