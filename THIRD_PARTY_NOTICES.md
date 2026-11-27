@@ -58,6 +58,11 @@ splitting, temporary-register allocation, incoming parameters and interned
 string identity. The repair JAR is covered by the same SHA-256SUMS manifest
 and precedes the upstream jars on the converter process classpath.
 
+The same source-derived JAR also supplies the one-line common-superclass
+correction required by the converter's frame-computation path. JavaShroud
+passes `--compute-frames` so large generated control-flow graphs fail closed
+with valid verifier frames instead of producing partial class output.
+
 ## Apache Commons Compress
 
 APK archive fidelity (raw-entry re-packing, metadata preservation) uses Apache

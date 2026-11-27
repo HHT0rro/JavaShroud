@@ -44,6 +44,7 @@ class ApkDex2JarFailureTest {
         val reportPaths = mutableListOf<Path>()
         val runner = ApkDex2JarRunner(runner = { command, _ ->
             assertTrue("--not-handle-exception" in command)
+            assertTrue("--compute-frames" in command)
             val reportIndex = command.indexOf("--exception-file")
             assertTrue(reportIndex >= 0)
             val report = Path.of(command[reportIndex + 1])

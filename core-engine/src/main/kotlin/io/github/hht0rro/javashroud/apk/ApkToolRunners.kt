@@ -233,6 +233,9 @@ open class ApkDex2JarRunner(
             ApkToolchainProvisioner.DEX2JAR_MAIN_CLASS,
             // DEX identities must match the source allocation index and Android references.
             "--dont-sanitize-names",
+            // Recompute verifier frames for large control-flow graphs. The authenticated
+            // fix JAR supplies the matching common-superclass correction for dex2jar 2.4.28.
+            "--compute-frames",
             // The default handler replaces failed methods with throwing stubs.
             "--not-handle-exception",
             "--exception-file",
