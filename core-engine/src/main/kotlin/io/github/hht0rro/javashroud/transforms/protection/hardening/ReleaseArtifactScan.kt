@@ -4,8 +4,10 @@ import io.github.hht0rro.javashroud.model.artifact.BytecodeArtifact
 import io.github.hht0rro.javashroud.model.config.HardenedProtectionProfile
 import io.github.hht0rro.javashroud.transforms.protection.qp.IMAGE_MEASUREMENT_MAGIC
 import io.github.hht0rro.javashroud.transforms.protection.qp.NativeImageMeasurement
+import io.github.hht0rro.javashroud.transforms.protection.qp.QpPageCodec
 import io.github.hht0rro.javashroud.transforms.protection.qp.catalog.QpArtifactDirectory
 import java.io.InputStream
+import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
@@ -1305,19 +1307,41 @@ internal object ReleaseArtifactScan {
             !asciiIndex,
             if (asciiIndex) "catalog.index still contains a readable path map" else "opaque-index-records",
         )
-        val rawPackMagic = artifact.jarEntries.any { entry ->
+        val rawPack = artifact.jarEntries.any { entry ->
             val name = normalizePath(entry.name)
-            "/catalog/" in name &&
-                entry.bytes.size >= 4 &&
-                entry.bytes[0] == 0x6A.toByte() &&
-                entry.bytes[1] == 0.toByte()
+            "/catalog/" in name && isUnwrappedSecretPack(entry.bytes)
         }
         findings += ReleaseArtifactScanReport.Finding(
             "pack-shell-envelope",
-            !rawPackMagic,
-            if (rawPackMagic) "catalog pack still starts with inner 0x6A magic" else "pack-shell-present-or-absent",
+            !rawPack,
+            if (rawPack) "catalog pack contains unwrapped inner shard records" else "pack-shell-present-or-absent",
         )
         return findings
+    }
+
+    /** The outer shell starts with a random nonce, so identify complete inner records. */
+    private fun isUnwrappedSecretPack(bytes: ByteArray): Boolean {
+        if (bytes.size < 4 || bytes[0] != 0x6A.toByte() || bytes[1] != 0.toByte()) return false
+        val buffer = ByteBuffer.wrap(bytes)
+        buffer.position(2)
+        val shardCount = buffer.short.toInt() and 0xFFFF
+        val minimumShardSize = 8 + QpPageCodec.NONCE_SIZE + QpPageCodec.GCM_TAG_SIZE
+        if (shardCount > buffer.remaining() / minimumShardSize) return false
+        repeat(shardCount) {
+            if (buffer.remaining() < 8) return false
+            val kind = buffer.get().toInt() and 0xFF
+            val reserved = buffer.get().toInt()
+            val nonceLength = buffer.short.toInt() and 0xFFFF
+            val sealedLength = buffer.int.toLong() and 0xFFFF_FFFFL
+            if (kind !in 0..4 || reserved != 0 ||
+                nonceLength != QpPageCodec.NONCE_SIZE || sealedLength < QpPageCodec.GCM_TAG_SIZE ||
+                nonceLength.toLong() + sealedLength > buffer.remaining().toLong()
+            ) {
+                return false
+            }
+            buffer.position(buffer.position() + nonceLength + sealedLength.toInt())
+        }
+        return !buffer.hasRemaining()
     }
 
     /**

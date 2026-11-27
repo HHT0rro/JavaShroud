@@ -12,10 +12,17 @@ import io.github.hht0rro.javashroud.transforms.protection.hardening.ProtectionFo
 import io.github.hht0rro.javashroud.transforms.protection.hardening.ReleaseArtifactScan
 import io.github.hht0rro.javashroud.transforms.protection.hardening.SignedDebugMap
 import io.github.hht0rro.javashroud.transforms.protection.hardening.QpDialectDescriptor
+import io.github.hht0rro.javashroud.transforms.protection.qp.NativeSecretPackLiterals
+import io.github.hht0rro.javashroud.transforms.protection.qp.NativeVmSecretPack
 import io.github.hht0rro.javashroud.transforms.rename.METHOD_RENAME_BINDINGS_RESOURCE
 import java.nio.file.Files
+import java.security.MessageDigest
 import java.security.SecureRandom
+import javax.crypto.Cipher
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.SecretKeySpec
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
@@ -272,6 +279,85 @@ class HardenedReleaseGateTest {
             assertFalse(report.findings.single { it.check == "current-format" }.passed)
             assertFalse(standalone.findings.single { it.check == "current-format" }.passed)
         } finally {
+            Files.walk(dir).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
+        }
+    }
+
+    @Test
+    fun scan_distinguishes_wrapped_pack_nonce_from_unwrapped_inner_records() {
+        val nativeIdentity = ByteArray(32) { (it + 1).toByte() }
+        val pack = NativeVmSecretPack.create(
+            slots = listOf(0 to ByteArray(32) { 0x31 }),
+            slotKinds = mapOf(0 to 1),
+            nativeIdentity = nativeIdentity,
+        )
+        val literals = NativeSecretPackLiterals.prepare(
+            pack,
+            java.util.Random(7),
+            cryptoDomain = ByteArray(32) { 0x11 },
+            layoutDigest = ByteArray(32) { 0x22 },
+        )
+        val dir = Files.createTempDirectory("js-hard-pack-shell")
+        try {
+            val blob = literals.sealForPlatform("windows-x64", ByteArray(32) { 0x41 })
+            val key = MessageDigest.getInstance("SHA-256").digest(
+                nativeIdentity + "javashroud-qp-pack-shell-v6".toByteArray(Charsets.US_ASCII),
+            )
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(128, blob.copyOfRange(0, 12)))
+            cipher.updateAAD(key)
+            val inner = cipher.doFinal(blob.copyOfRange(12, blob.size))
+            key.fill(0)
+
+            fun scanPack(name: String, bytes: ByteArray) = testAttachedArtifact(
+                classArtifacts = listOf(
+                    testClassArtifact(internalName = "sample/PackHost", bytes = emptyClass("sample/PackHost")),
+                ),
+                jarEntries = listOf(JarEntryData("META-INF/qpunit/catalog/pack.bin", bytes)),
+            ).let { artifact ->
+                val jar = dir.resolve("$name.jar")
+                io.github.hht0rro.javashroud.artifact.writeBytecodeArtifact(jar, artifact)
+                ReleaseArtifactScan.scan(jar, artifact, HardenedProtectionProfile.RELEASE_HARDENED, emptyList())
+            }
+
+            // This nonce also resembles a complete inner record header. Its
+            // apparent record ends before the authenticated outer blob ends.
+            val recordHeaderNonce = byteArrayOf(0x6A, 0, 0, 1, 0, 0, 0, 12, 0, 0, 0, 16)
+            val nonces = listOf(
+                recordHeaderNonce,
+                recordHeaderNonce.copyOf().also {
+                    it[2] = 0xFF.toByte()
+                    it[3] = 0xFF.toByte()
+                },
+                recordHeaderNonce.copyOf().also { it[4] = 5 },
+                recordHeaderNonce.copyOf().also { it[5] = 1 },
+                recordHeaderNonce.copyOf().also { it[7] = 11 },
+                recordHeaderNonce.copyOf().also { it[11] = 15 },
+                recordHeaderNonce.copyOf().also { it.fill(0xFF.toByte(), 8, 12) },
+            )
+            nonces.forEachIndexed { index, nonce ->
+                val wrapped = NativeSecretPackLiterals.wrapPackShell(
+                    inner,
+                    nativeIdentity,
+                    object : SecureRandom() {
+                        override fun nextBytes(bytes: ByteArray) {
+                            assertEquals(nonce.size, bytes.size)
+                            nonce.copyInto(bytes)
+                        }
+                    },
+                )
+                assertContentEquals(nonce, wrapped.copyOfRange(0, 12))
+                val finding = scanPack("wrapped-$index", wrapped).findings.single { it.check == "pack-shell-envelope" }
+                assertTrue(finding.passed, "nonce case $index: ${finding.detail}")
+            }
+
+            val rawReport = scanPack("inner", inner)
+            val rawFinding = rawReport.findings.single { it.check == "pack-shell-envelope" }
+            assertFalse(rawFinding.passed, rawFinding.detail)
+            assertFailsWith<SecurityException> { rawReport.requirePass() }
+        } finally {
+            literals.wipe()
+            pack.wipe()
             Files.walk(dir).sorted(Comparator.reverseOrder()).forEach { Files.deleteIfExists(it) }
         }
     }

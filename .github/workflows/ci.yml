@@ -38,7 +38,13 @@ jobs:
         java: ['17', '21']
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: Install JDK 21 compile toolchain
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Select JDK ${{ matrix.java }} runtime
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: ${{ matrix.java }}
@@ -61,7 +67,7 @@ jobs:
           update: true
           install: mingw-w64-x86_64-gcc
       - name: Build Gradle modules and package Windows runtime
-        run: ./gradlew.bat :annotations:build :core-engine:build
+        run: ./gradlew.bat :annotations:build :core-engine:build '-Porg.gradle.java.installations.fromEnv=JAVA_HOME_21_X64'
       - name: Verify packaged Windows runtime
         run: |
           test -s build/core-engine/resources/main/META-INF/jsrt/windows-x64/qp_ffi.dll
@@ -157,7 +163,10 @@ jobs:
         with:
           tool: cargo-zigbuild@0.23.2
       - name: Install the owned fixture compile SDK
-        run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;35.0.0" > /dev/null'
+        id: android-sdk
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;35.0.0" > /dev/null
+          printf 'ndk-home=%s/ndk/27.2.12479018\n' "$ANDROID_HOME" >> "$GITHUB_OUTPUT"
       - name: Allow the hosted runner to use KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -165,6 +174,14 @@ jobs:
           sudo udevadm trigger --name-match=kvm
       - name: Run owned APK runtime fixtures
         uses: reactivecircus/android-emulator-runner@v2
+        env:
+          ANDROID_SERIAL: emulator-5554
+          ANDROID_NDK_HOME: ${{ steps.android-sdk.outputs.ndk-home }}
+          JAVASHROUD_ANDROID_DEVICE_TESTS: 'true'
+          JAVASHROUD_ANDROID_EXPECT_API: ${{ matrix.api }}
+          JAVASHROUD_ANDROID_EXPECT_PAGE_SIZE: ${{ matrix.page_size }}
+          JAVASHROUD_APK_DEX2JAR_XMX: 768m
+          JAVASHROUD_APK_D8_XMX: 1024m
         with:
           api-level: ${{ matrix.api }}
           target: ${{ matrix.image }}
@@ -172,15 +189,39 @@ jobs:
           ndk: 27.2.12479018
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
           disable-animations: true
-          script: |
-            export ANDROID_SERIAL=emulator-5554
-            export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/27.2.12479018"
-            export JAVASHROUD_ANDROID_DEVICE_TESTS=true
-            export JAVASHROUD_ANDROID_EXPECT_API=${{ matrix.api }}
-            export JAVASHROUD_ANDROID_EXPECT_PAGE_SIZE=${{ matrix.page_size }}
-            export JAVASHROUD_APK_DEX2JAR_XMX=768m
-            export JAVASHROUD_APK_D8_XMX=1024m
-            ./gradlew :core-engine:test --tests '*.ApkAndroidDeviceSmokeTest' --max-workers=1 '-Dorg.gradle.jvmargs=-Xmx1500m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8' -Pkotlin.compiler.execution.strategy=in-process -Pjavashroud.rust.platform=x86_64-unknown-linux-gnu.2.17
+          script: ./gradlew :core-engine:test --tests '*.ApkAndroidDeviceSmokeTest' --max-workers=1 '-Dorg.gradle.jvmargs=-Xmx1500m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8' -Pkotlin.compiler.execution.strategy=in-process -Pjavashroud.rust.platform=x86_64-unknown-linux-gnu.2.17
+      - name: Verify Android device JUnit results
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          expected_suite = "io.github.hht0rro.javashroud.apk.ApkAndroidDeviceSmokeTest"
+          expected_cases = {
+              "singleDexResourcesAndShortLayoutCallbackReturn42()",
+              "atLeast66000MethodsRemainMultiDexAndExecuteAcrossClassSplits()",
+              "jniAdditionReturns42WithTheSelectedDeviceAbiAndPageSize()",
+          }
+          report = Path("build/core-engine/test-results/test") / f"TEST-{expected_suite}.xml"
+          if not report.is_file():
+              raise SystemExit(f"Missing Android device JUnit report: {report}")
+          suite = ET.parse(report).getroot()
+          if suite.tag != "testsuite" or suite.get("name") != expected_suite:
+              raise SystemExit(f"Unexpected Android device JUnit suite in {report}")
+          for attribute, expected in {"tests": "3", "skipped": "0", "failures": "0", "errors": "0"}.items():
+              if suite.get(attribute) != expected:
+                  raise SystemExit(f"Android device JUnit {attribute}={suite.get(attribute)!r}, expected {expected}")
+          cases = suite.findall("testcase")
+          if len(cases) != 3 or {case.get("name") for case in cases} != expected_cases:
+              raise SystemExit("Android device JUnit must contain exactly the three owned smoke test cases")
+          if any(case.get("classname") != expected_suite for case in cases):
+              raise SystemExit("Android device JUnit contains an unexpected test class")
+          if any(suite.findall(f".//{tag}") for tag in ("skipped", "failure", "error")):
+              raise SystemExit("Android device JUnit contains skipped, failed, or errored test cases")
+          print(f"Verified {report}: 3 passed, 0 skipped, 0 failures, 0 errors")
+          PY
       - name: Upload Android device evidence
         if: always()
         uses: actions/upload-artifact@v4

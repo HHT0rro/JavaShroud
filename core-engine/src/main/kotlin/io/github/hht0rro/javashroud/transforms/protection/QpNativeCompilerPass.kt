@@ -1219,7 +1219,12 @@ object QpNativeCompilerPass {
                 val args = inheritedArgs.filter(String::isNotEmpty) + compilerArgs + sourcePathFlag
                 put("CARGO_ENCODED_RUSTFLAGS", args.joinToString("\u001f"))
             } else {
-                put("RUSTFLAGS", compilerArgs.joinToString(" "))
+                // Rust embeds source names from the isolated workspace in native diagnostics.
+                // Encoded flags keep prefixes containing spaces intact on hosted Windows.
+                val sourcePath = workspace.toRealPath().toString()
+                val sourcePaths = listOf(sourcePath, sourcePath.replace('\\', '/')).distinct()
+                val remapFlags = sourcePaths.map { "--remap-path-prefix=$it=core-engine/src/main/rust" }
+                put("CARGO_ENCODED_RUSTFLAGS", (compilerArgs + remapFlags).joinToString("\u001f"))
             }
             prependPath(toolchain.extraPathEntries)
             if (cfgEvidenceExports) put("QP_CFG_EVIDENCE", "1") else remove("QP_CFG_EVIDENCE")
@@ -1613,6 +1618,8 @@ object QpNativeCompilerPass {
         digest.updateUtf8(toolchainIdentity)
         if (rustTarget == RustToolchainProvisioner.LINUX_RUNTIME_TARGET) {
             digest.updateUtf8("project-relative-rust-source-paths-v1")
+        } else {
+            digest.updateUtf8("project-relative-windows-rust-source-paths-v1")
         }
         digest.updateLong(seed)
         digest.updateLong(qpBuildContext.nativeSeed)
