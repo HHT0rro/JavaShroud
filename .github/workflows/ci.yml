@@ -1,277 +1,298 @@
-name: public-ci
+name: packaged-native-cli-verification
 
 on:
   push:
     branches:
-      - '**'
-    paths:
-      - '.github/workflows/ci.yml'
-      - 'build.gradle.kts'
-      - 'gradle/**'
-      - 'gradle.properties'
-      - 'settings.gradle.kts'
-      - 'gradlew'
-      - 'gradlew.bat'
-      - 'annotations/**'
-      - 'core-engine/**'
-      - 'desktop-app/**'
-  pull_request:
-    paths:
-      - '.github/workflows/ci.yml'
-      - 'build.gradle.kts'
-      - 'gradle/**'
-      - 'gradle.properties'
-      - 'settings.gradle.kts'
-      - 'gradlew'
-      - 'gradlew.bat'
-      - 'annotations/**'
-      - 'core-engine/**'
-      - 'desktop-app/**'
+      - codex/packaged-native-cli-verification-2026-11-28
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  core-engine:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest]
-        java: ['17', '21']
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install JDK 21 compile toolchain
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-      - name: Select JDK ${{ matrix.java }} runtime
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: ${{ matrix.java }}
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@1.78.0
-        with:
-          targets: x86_64-pc-windows-gnu
-      - name: Setup Zig
-        uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: 0.13.0
-      - name: Install cargo-zigbuild
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild@0.23.2
-      - name: Setup MinGW linker
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: mingw-w64-x86_64-gcc
-      - name: Build Gradle modules and package Windows runtime
-        run: ./gradlew.bat :annotations:build :core-engine:build '-Porg.gradle.java.installations.fromEnv=JAVA_HOME_21_X64'
-      - name: Verify packaged Windows runtime
-        run: |
-          test -s build/core-engine/resources/main/META-INF/jsrt/windows-x64/qp_ffi.dll
-          ! find build/core-engine/resources/main -type f -name '*.dylib' -print -quit | grep -q .
-        shell: msys2 {0}
-      - name: Upload Gradle test reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gradle-test-reports-${{ matrix.os }}-jdk${{ matrix.java }}
-          path: |
-            build/*/test-results/**/*.xml
-            build/*/reports/tests/**
-          if-no-files-found: warn
-
-  core-engine-linux:
-    name: Core engine and Rust runtime (Linux x64 glibc 2.17)
-    runs-on: ubuntu-22.04
+  windows-packaged-native-cli:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@1.78.0
-        with:
-          targets: x86_64-unknown-linux-gnu
-      - name: Setup Zig
-        uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: 0.13.0
-      - name: Install cargo-zigbuild
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild@0.23.2
-      - name: Check Rust formatting
-        working-directory: core-engine/src/main/rust
-        run: cargo fmt --all -- --check
-      - name: Test Rust workspace
-        working-directory: core-engine/src/main/rust
-        run: cargo test --workspace --locked
-      - name: Build Gradle modules and package Linux runtime
-        env:
-          JAVASHROUD_REQUIRE_LINUX_NATIVE_FIXTURES: 'true'
-        run: |
-          ./gradlew :annotations:build :core-engine:build -Pjavashroud.rust.platform=x86_64-unknown-linux-gnu.2.17
-          test -s build/core-engine/resources/main/META-INF/jsrt/linux-x64/libqp_ffi.so
-          unzip -p build/core-engine/libs/obfuscator-engine-*.jar META-INF/jsrt/linux-x64/libqp_ffi.so |
-            cmp - core-engine/src/main/rust/target/x86_64-unknown-linux-gnu/release/libqp_ffi.so
-          ! find build/core-engine/resources/main -type f -name '*.dylib' -print -quit | grep -q .
-        shell: bash
-      - name: Upload Gradle test reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gradle-test-reports-linux-jdk21
-          path: |
-            build/*/test-results/**/*.xml
-            build/*/reports/tests/**
-          if-no-files-found: warn
-
-  android-runtime:
-    name: Android API ${{ matrix.api }} x86_64 (${{ matrix.page_size }} byte pages)
-    runs-on: ubuntu-22.04
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - api: 21
-            image: google_apis
-            page_size: 4096
-          - api: 26
-            image: google_apis
-            page_size: 4096
-          - api: 35
-            image: google_apis_ps16k
-            page_size: 16384
-    steps:
-      - uses: actions/checkout@v4
+      - name: Record JDK 21 location
+        run: '"VERIFY_JDK_21=$env:JAVA_HOME" >> $env:GITHUB_ENV'
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '21'
-      - uses: dtolnay/rust-toolchain@1.78.0
-        with:
-          targets: x86_64-unknown-linux-gnu
-      - uses: goto-bus-stop/setup-zig@v2
-        with:
-          version: 0.13.0
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-zigbuild@0.23.2
-      - name: Install the owned fixture compile SDK
-        id: android-sdk
-        run: |
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34" "build-tools;35.0.0" > /dev/null
-          printf 'ndk-home=%s/ndk/27.2.12479018\n' "$ANDROID_HOME" >> "$GITHUB_OUTPUT"
-      - name: Allow the hosted runner to use KVM
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-      - name: Run owned APK runtime fixtures
-        uses: reactivecircus/android-emulator-runner@v2
+          java-version: '17'
+      - name: Record JDK 17 location
+        run: '"VERIFY_JDK_17=$env:JAVA_HOME" >> $env:GITHUB_ENV'
+      - name: Download and verify published package
         env:
-          ANDROID_SERIAL: emulator-5554
-          ANDROID_NDK_HOME: ${{ steps.android-sdk.outputs.ndk-home }}
-          JAVASHROUD_ANDROID_DEVICE_TESTS: 'true'
-          JAVASHROUD_ANDROID_EXPECT_API: ${{ matrix.api }}
-          JAVASHROUD_ANDROID_EXPECT_PAGE_SIZE: ${{ matrix.page_size }}
-          JAVASHROUD_APK_DEX2JAR_XMX: 768m
-          JAVASHROUD_APK_D8_XMX: 1024m
-        with:
-          api-level: ${{ matrix.api }}
-          target: ${{ matrix.image }}
-          arch: x86_64
-          ndk: 27.2.12479018
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
-          disable-animations: true
-          script: ./gradlew :core-engine:test --tests '*.ApkAndroidDeviceSmokeTest' --max-workers=1 '-Dorg.gradle.jvmargs=-Xmx1500m -XX:MaxMetaspaceSize=512m -Dfile.encoding=UTF-8' -Pkotlin.compiler.execution.strategy=in-process -Pjavashroud.rust.platform=x86_64-unknown-linux-gnu.2.17
-      - name: Verify Android device JUnit results
-        if: always()
-        shell: bash
+          GH_TOKEN: ${{ github.token }}
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          import xml.etree.ElementTree as ET
-
-          expected_suite = "io.github.hht0rro.javashroud.apk.ApkAndroidDeviceSmokeTest"
-          expected_cases = {
-              "singleDexResourcesAndShortLayoutCallbackReturn42()",
-              "atLeast66000MethodsRemainMultiDexAndExecuteAcrossClassSplits()",
-              "jniAdditionReturns42WithTheSelectedDeviceAbiAndPageSize()",
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'packaged-native-cli'
+          $evidence = Join-Path $root 'evidence'
+          $download = Join-Path $root 'download'
+          New-Item -ItemType Directory -Force -Path $evidence, $download | Out-Null
+          "VERIFY_ROOT=$root" >> $env:GITHUB_ENV
+          gh release download v0.31.1 --repo HHT0rro/JavaShroud --pattern javashroud-windows-amd64.zip --pattern release-provenance.json --dir $download 1> "$evidence/download.stdout.log" 2> "$evidence/download.stderr.log"
+          $downloadExit = $LASTEXITCODE
+          @{ command = 'gh release download v0.31.1'; exit_code = $downloadExit } |
+            ConvertTo-Json | Set-Content "$evidence/download.json"
+          if ($downloadExit -ne 0) { throw "Release download failed with exit $downloadExit" }
+          $zip = Join-Path $download 'javashroud-windows-amd64.zip'
+          $zipSha = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($zipSha -ne '80614ba64c89c9ec5fab49952313c4f8c19fc4a9f250073564a116c95e28fca8') { throw 'ZIP SHA-256 mismatch' }
+          $package = Join-Path $root 'package'
+          Expand-Archive -LiteralPath $zip -DestinationPath $package
+          $engine = Join-Path $package 'engine/obfuscator-engine.exe'
+          $xenolith = Join-Path $package 'tools/xenolith.exe'
+          $engineSha = (Get-FileHash -LiteralPath $engine -Algorithm SHA256).Hash.ToLowerInvariant()
+          $xenolithSha = (Get-FileHash -LiteralPath $xenolith -Algorithm SHA256).Hash.ToLowerInvariant()
+          [ordered]@{
+            release = 'v0.31.1'
+            source_sha = 'd2c4becbb242786a3266bd492e025a7828b7ac76'
+            workflow_sha = $env:GITHUB_SHA
+            run_id = $env:GITHUB_RUN_ID
+            run_attempt = $env:GITHUB_RUN_ATTEMPT
+            zip_sha256 = $zipSha
+            engine_sha256 = $engineSha
+            xenolith_sha256 = $xenolithSha
+            runner_os = $env:RUNNER_OS
+            runner_arch = $env:RUNNER_ARCH
+            image_os = $env:ImageOS
+            image_version = $env:ImageVersion
+          } | ConvertTo-Json | Set-Content "$evidence/pins.json"
+          if ($engineSha -ne '16f308d34c00e5793b39f3e6528f09331f98a2b5742290094839021a8ea40cda') { throw 'Engine SHA-256 mismatch' }
+          if ($xenolithSha -ne '3cf8d3a55a538d6aad2c42a1eedb6c646395d8d001caa64b6cf6d9ecc5f84eab') { throw 'Xenolith SHA-256 mismatch' }
+          Copy-Item -LiteralPath "$download/release-provenance.json", "$package/xenolith-info.json" -Destination $evidence
+          Write-Output "Package pins verified for run $env:GITHUB_RUN_ID"
+      - name: Exercise published Native CLI with owned Java 8 fixture
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = $env:VERIFY_ROOT
+          $evidence = Join-Path $root 'evidence'
+          $package = Join-Path $root 'package'
+          $engine = Join-Path $package 'engine/obfuscator-engine.exe'
+          $source = Join-Path $evidence 'source'
+          $classes = Join-Path $evidence 'classes'
+          New-Item -ItemType Directory -Force -Path $source, $classes | Out-Null
+          $utf8 = [Text.UTF8Encoding]::new($false)
+          $script:runRecords = [Collections.Generic.List[object]]::new()
+          function Invoke-RecordedProcess {
+            param([string]$Name, [string]$File, [string[]]$Arguments, [int]$TimeoutSeconds = 60)
+            $stdoutPath = Join-Path $evidence "$Name.stdout.log"
+            $stderrPath = Join-Path $evidence "$Name.stderr.log"
+            $info = [Diagnostics.ProcessStartInfo]::new()
+            $info.FileName = $File
+            $info.WorkingDirectory = $package
+            $info.UseShellExecute = $false
+            $info.CreateNoWindow = $true
+            $info.RedirectStandardOutput = $true
+            $info.RedirectStandardError = $true
+            foreach ($argument in $Arguments) { $info.ArgumentList.Add($argument) }
+            $process = [Diagnostics.Process]::new()
+            $process.StartInfo = $info
+            $record = [ordered]@{
+              name = $Name
+              executable = $File
+              arguments = $Arguments
+              started_utc = [DateTime]::UtcNow.ToString('o')
+              timeout_seconds = $TimeoutSeconds
+              timed_out = $false
+              exit_code = $null
+              elapsed_ms = $null
+              stdout_file = "$Name.stdout.log"
+              stderr_file = "$Name.stderr.log"
+            }
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            try {
+              $process.Start() | Out-Null
+              $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+              $stderrTask = $process.StandardError.ReadToEndAsync()
+              if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+                $record.timed_out = $true
+                $process.Kill($true)
+              }
+              $process.WaitForExit()
+              $record.exit_code = $process.ExitCode
+              [IO.File]::WriteAllText($stdoutPath, $stdoutTask.GetAwaiter().GetResult(), $utf8)
+              [IO.File]::WriteAllText($stderrPath, $stderrTask.GetAwaiter().GetResult(), $utf8)
+            } catch {
+              $record['start_or_capture_error'] = $_.Exception.Message
+              throw
+            } finally {
+              $watch.Stop()
+              $record.elapsed_ms = $watch.ElapsedMilliseconds
+              $script:runRecords.Add($record)
+              $script:runRecords | ConvertTo-Json -Depth 6 | Set-Content "$evidence/runs.json"
+              $process.Dispose()
+            }
+            Write-Host "$Name exit=$($record.exit_code) timeout=$($record.timed_out) elapsedMs=$($record.elapsed_ms)"
+            [pscustomobject]$record
           }
-          report = Path("build/core-engine/test-results/test") / f"TEST-{expected_suite}.xml"
-          if not report.is_file():
-              raise SystemExit(f"Missing Android device JUnit report: {report}")
-          suite = ET.parse(report).getroot()
-          if suite.tag != "testsuite" or suite.get("name") != expected_suite:
-              raise SystemExit(f"Unexpected Android device JUnit suite in {report}")
-          for attribute, expected in {"tests": "3", "skipped": "0", "failures": "0", "errors": "0"}.items():
-              if suite.get(attribute) != expected:
-                  raise SystemExit(f"Android device JUnit {attribute}={suite.get(attribute)!r}, expected {expected}")
-          cases = suite.findall("testcase")
-          if len(cases) != 3 or {case.get("name") for case in cases} != expected_cases:
-              raise SystemExit("Android device JUnit must contain exactly the three owned smoke test cases")
-          if any(case.get("classname") != expected_suite for case in cases):
-              raise SystemExit("Android device JUnit contains an unexpected test class")
-          if any(suite.findall(f".//{tag}") for tag in ("skipped", "failure", "error")):
-              raise SystemExit("Android device JUnit contains skipped, failed, or errored test cases")
-          print(f"Verified {report}: 3 passed, 0 skipped, 0 failures, 0 errors")
-          PY
-      - name: Upload Android device evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: android-api${{ matrix.api }}-x86_64-pages${{ matrix.page_size }}
-          path: |
-            build/android-runtime-evidence/**
-            build/*/android-runtime-evidence/**
-            build/*/test-results/**/*.xml
-            build/*/reports/tests/**
-          if-no-files-found: warn
+          function Assert-ProcessSuccess($Result) {
+            if ($Result.timed_out -or $Result.exit_code -ne 0) { throw "$($Result.name) failed" }
+          }
+          function Read-Stdout($Result) { [IO.File]::ReadAllText((Join-Path $evidence $Result.stdout_file)) }
+          function Read-Stderr($Result) { [IO.File]::ReadAllText((Join-Path $evidence $Result.stderr_file)) }
+          function Assert-ClassMajors([string]$JarPath) {
+            $archive = [IO.Compression.ZipFile]::OpenRead($JarPath)
+            try {
+              $classRecords = @($archive.Entries | Where-Object FullName -Like '*.class' | ForEach-Object {
+                $stream = $_.Open()
+                try {
+                  $header = [byte[]]::new(8)
+                  $stream.ReadExactly($header, 0, 8)
+                  if ([Convert]::ToHexString($header[0..3]) -ne 'CAFEBABE') { throw 'Invalid class magic' }
+                  $major = ([int]$header[6] * 256) + [int]$header[7]
+                  if ($major -ne 52) { throw "Class major is $major for $($_.FullName)" }
+                  @{ entry = $_.FullName; major = $major }
+                } finally { $stream.Dispose() }
+              })
+              if ($classRecords.Count -ne 2) { throw "Expected two owned classes in $JarPath" }
+              $classRecords
+            } finally { $archive.Dispose() }
+          }
+          $schemaResult = Invoke-RecordedProcess 'engine-schema' $engine @('-schema')
+          Assert-ProcessSuccess $schemaResult
+          $schema = Read-Stdout $schemaResult
+          if (-not [string]::IsNullOrWhiteSpace((Read-Stderr $schemaResult))) { throw 'Schema stderr was nonempty' }
+          if ($schema -notmatch '(?m)^schemaVersion\s*=\s*[''" ]?2[''" ]?\s*$' -or
+              $schema -notmatch '(?m)^engineVersion\s*=\s*[''"]0\.31\.1[''"]\s*$') {
+            throw 'Expected schema 2 and engine 0.31.1'
+          }
+          if ($schema -notmatch 'strip-compile-debug-info') { throw 'Required strip pass absent from schema' }
+          $calcRepoPath = 'core-engine/src/test/resources/official-test-jar/pack/tests/bench/Calc.java'
+          Copy-Item -LiteralPath $calcRepoPath -Destination "$source/Calc.java"
+          $mainSource = @'
+          import pack.tests.bench.Calc;
 
-  desktop-app:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.25.4'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - name: Enable Corepack
-        run: corepack enable
-      - name: Install frontend dependencies
-        run: corepack yarn install --immutable
-        working-directory: desktop-app/frontend
-      - name: Test frontend
-        run: corepack yarn check
-        working-directory: desktop-app/frontend
-      - name: Build frontend
-        run: corepack yarn build
-        working-directory: desktop-app/frontend
-      - name: Test and build desktop app Go module
+          public final class OwnedCalcMain {
+              public static void main(String[] args) {
+                  Calc.runAll();
+                  System.out.println("COUNT=" + Calc.count);
+              }
+          }
+          '@
+          [IO.File]::WriteAllText("$source/OwnedCalcMain.java", $mainSource + "`n", $utf8)
+          $sourceFiles = @(
+            'core-engine/src/main/kotlin/io/github/hht0rro/javashroud/adapters/protocol/CliArgumentSupport.kt',
+            'core-engine/src/main/kotlin/io/github/hht0rro/javashroud/adapters/protocol/EngineCliRunSupport.kt',
+            'core-engine/src/main/kotlin/io/github/hht0rro/javashroud/model/config/ConfigModels.kt',
+            'core-engine/src/main/kotlin/io/github/hht0rro/javashroud/config/ConfigLoadSupport.kt',
+            'core-engine/src/main/kotlin/io/github/hht0rro/javashroud/transforms/protection/hardening/HardenedDefaultPipeline.kt',
+            'core-engine/src/main/kotlin/io/github/hht0rro/javashroud/capabilities/SchemaCapabilities.kt'
+          )
+          foreach ($file in $sourceFiles) { Copy-Item -LiteralPath $file -Destination $source }
+          [ordered]@{
+            source_sha = 'd2c4becbb242786a3266bd492e025a7828b7ac76'
+            schema_default_pipeline = @('strip-compile-debug-info')
+            actual_configless_jar_profile = 'release-hardened'
+            actual_configless_jar_passes = @(
+              'rename-packages', 'rename-classes', 'rename-methods', 'rename-fields',
+              'string-encryption', 'invoke-dynamic-indirection', 'callsite-rotation-protection',
+              'jni-microkernel-loader', 'os-anti-debug', 'os-anti-vm', 'method-virtualization',
+              'strip-compile-debug-info', 'control-flow-flattening'
+            )
+            default_profile_evidence = 'Pinned source files archived alongside actual package schema'
+            acceptance_profile = 'minimal'
+            acceptance_passes = @('strip-compile-debug-info')
+          } | ConvertTo-Json -Depth 4 | Set-Content "$evidence/default-profile.json"
+          $javac = Join-Path $env:VERIFY_JDK_21 'bin/javac.exe'
+          $jar = Join-Path $env:VERIFY_JDK_21 'bin/jar.exe'
+          Assert-ProcessSuccess (Invoke-RecordedProcess 'compile-java8' $javac @('--release', '8', '-g', '-d', $classes, "$source/Calc.java", "$source/OwnedCalcMain.java"))
+          $inputJar = Join-Path $evidence 'owned-calc-input.jar'
+          $outputJar = Join-Path $evidence 'owned-calc-minimal.jar'
+          Assert-ProcessSuccess (Invoke-RecordedProcess 'build-owned-jar' $jar @('--create', '--file', $inputJar, '--main-class', 'OwnedCalcMain', '-C', $classes, '.'))
+          $before = (Get-FileHash -LiteralPath $inputJar -Algorithm SHA256).Hash.ToLowerInvariant()
+          $configPath = Join-Path $evidence 'minimal.toml'
+          $config = @"
+          inputJarPath = '$($inputJar.Replace('\', '/'))'
+          outputJarPath = '$($outputJar.Replace('\', '/'))'
+          artifactFormat = 'jar'
+          protectionProfile = 'minimal'
+
+          [[passes]]
+          id = 'strip-compile-debug-info'
+          enabled = true
+
+          [ruleSet]
+          rules = []
+          "@
+          [IO.File]::WriteAllText($configPath, $config + "`n", $utf8)
+          $conversion = Invoke-RecordedProcess 'engine-minimal-conversion' $engine @('-config', $configPath) 120
+          Assert-ProcessSuccess $conversion
+          $events = Read-Stdout $conversion
+          if ($events -notmatch 'type\s*=\s*"done"' -or $events -match 'type\s*=\s*"error"') { throw 'Conversion did not emit successful done event' }
+          if (-not (Test-Path -LiteralPath $outputJar -PathType Leaf)) { throw 'Converted JAR missing' }
+          if ((Get-FileHash -LiteralPath $inputJar -Algorithm SHA256).Hash.ToLowerInvariant() -ne $before) { throw 'Conversion changed input JAR' }
+          $majors = [ordered]@{ original = @(Assert-ClassMajors $inputJar); processed = @(Assert-ClassMajors $outputJar) }
+          $majors | ConvertTo-Json -Depth 5 | Set-Content "$evidence/class-majors.json"
+          foreach ($jdk in @('17', '21')) {
+            $javaHome = [Environment]::GetEnvironmentVariable("VERIFY_JDK_$jdk")
+            $java = Join-Path $javaHome 'bin/java.exe'
+            Assert-ProcessSuccess (Invoke-RecordedProcess "jdk$jdk-version" $java @('-version'))
+            foreach ($variant in @('original', 'processed')) {
+              $fixture = if ($variant -eq 'original') { $inputJar } else { $outputJar }
+              $result = Invoke-RecordedProcess "jdk$jdk-$variant" $java @('-jar', $fixture) 60
+              Assert-ProcessSuccess $result
+              $stdout = Read-Stdout $result
+              $stderr = Read-Stderr $result
+              $normalized = ($stdout -replace '(?m)^Calc:\d+ms\r?\n?', '').Trim()
+              if ($normalized -ne 'COUNT=30000' -or -not [string]::IsNullOrWhiteSpace($stderr)) {
+                throw "JDK $jdk $variant failed owned Calc semantics"
+              }
+            }
+          }
+          $rejection = Invoke-RecordedProcess 'engine-same-input-output' $engine @('--input', $inputJar, '--output', $inputJar)
+          $after = (Get-FileHash -LiteralPath $inputJar -Algorithm SHA256).Hash.ToLowerInvariant()
+          [ordered]@{
+            input_sha256_before = $before
+            input_sha256_after = $after
+            hash_unchanged = $before -eq $after
+            exit_code = $rejection.exit_code
+            timed_out = $rejection.timed_out
+          } | ConvertTo-Json | Set-Content "$evidence/same-input-output.json"
+          if ($rejection.timed_out -or $rejection.exit_code -eq 0 -or $before -ne $after) { throw 'Same-input-output rejection failed' }
+          $rejectionText = (Read-Stdout $rejection) + (Read-Stderr $rejection)
+          if ($rejectionText -notmatch 'protected run file' -or $rejectionText -notmatch 'type\s*=\s*"error"') { throw 'Expected explicit input-output collision error' }
+          if ($rejectionText -match 'type\s*=\s*"done"') { throw 'Rejected operation emitted done' }
+          [ordered]@{
+            schema_version = 2
+            engine_version = '0.31.1'
+            profile = 'minimal'
+            passes = @('strip-compile-debug-info')
+            original_and_processed_jdk_runs = 4
+            successful_count_runs = 4
+            class_major = 52
+            same_input_output_rejected = $true
+            input_sha256_unchanged = $true
+            status = 'passed'
+          } | ConvertTo-Json | Set-Content "$evidence/acceptance.json"
+          Write-Output 'Published Native CLI acceptance passed'
+      - name: Hash all retained evidence
+        if: always()
         run: |
-          New-Item -ItemType Directory -Force -Path ../build/logs | Out-Null
-          go test -count=1 -json ./... | Tee-Object -FilePath ../build/logs/desktop-go-tests.jsonl
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          go vet ./...
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          go build ./...
-        working-directory: desktop-app
-      - name: Upload desktop Go test evidence
+          $evidence = Join-Path $env:RUNNER_TEMP 'packaged-native-cli/evidence'
+          if (-not (Test-Path -LiteralPath $evidence)) { New-Item -ItemType Directory -Path $evidence -Force | Out-Null }
+          Copy-Item -LiteralPath .github/workflows/ci.yml -Destination "$evidence/workflow.yml"
+          $manifest = Get-ChildItem -LiteralPath $evidence -Recurse -File |
+            Where-Object Name -ne 'SHA256SUMS.txt' | Sort-Object FullName | ForEach-Object {
+              $relative = [IO.Path]::GetRelativePath($evidence, $_.FullName).Replace('\', '/')
+              '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $relative
+            }
+          $manifest | Set-Content "$evidence/SHA256SUMS.txt"
+      - name: Upload Native CLI evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: desktop-go-test-evidence-${{ matrix.os }}
-          path: build/logs/desktop-go-tests.jsonl
-          if-no-files-found: warn
+          name: packaged-native-cli-v0.31.1-${{ github.run_id }}
+          path: ${{ runner.temp }}/packaged-native-cli/evidence
+          if-no-files-found: error
+          retention-days: 14
