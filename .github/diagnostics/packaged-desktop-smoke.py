@@ -406,7 +406,8 @@ def verify_jar(path):
             raise RuntimeError("JAR CRC validation failed")
         classes = {name: int.from_bytes(archive.read(name)[6:8], "big")
                    for name in archive.namelist() if name.endswith(".class")}
-        if len(classes) != 2 or any(major != 52 for major in classes.values()):
+        required = {"OwnedCalcMain.class", "pack/tests/bench/Calc.class"}
+        if not required.issubset(classes) or any(major != 52 for major in classes.values()):
             raise RuntimeError(f"Unexpected classfile identities or major values: {classes}")
         signatures = [name for name in archive.namelist() if re.match(r"META-INF/.*\.(SF|RSA|DSA|EC)$", name, re.I)]
     return {"sha256": digest(path), "classes": classes, "signature_entries": signatures,
