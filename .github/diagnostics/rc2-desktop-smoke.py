@@ -20,7 +20,7 @@ import zipfile
 import psutil
 from pywinauto import Desktop
 
-ROOT = Path(os.environ["RUNNER_TEMP"]) / "rc2-desktop-smoke"
+ROOT = Path(os.environ["RUNNER_TEMP"]) / "published-rc2-smoke"
 EVIDENCE = ROOT / "evidence"
 PACKAGE = ROOT / "package"
 PRIVATE = ROOT / "private"
@@ -62,7 +62,7 @@ def action(name, **details):
     print(name, json.dumps(details, ensure_ascii=True), flush=True)
 
 
-def recorded(name, command, timeout=60, env=None):
+def recorded(name, command, timeout=60, env=None, expect_failure=False):
     start = time.monotonic()
     timed_out = False
     with (EVIDENCE / f"{name}.stdout.log").open("wb") as stdout, (EVIDENCE / f"{name}.stderr.log").open("wb") as stderr:
@@ -79,8 +79,12 @@ def recorded(name, command, timeout=60, env=None):
              "timed_out": timed_out, "elapsed_ms": round((time.monotonic() - start) * 1000)}
     RUNS.append(entry)
     save_json("runs.json", RUNS)
-    if timed_out or code != 0:
+    if timed_out:
         raise RuntimeError(f"{name} exit={code} timed_out={timed_out}")
+    if expect_failure and code == 0:
+        raise RuntimeError(f"{name} unexpectedly succeeded")
+    if not expect_failure and code != 0:
+        raise RuntimeError(f"{name} exit={code}")
     return (EVIDENCE / f"{name}.stdout.log").read_text(encoding="utf-8", errors="replace")
 
 
@@ -353,15 +357,15 @@ def verify_jar(path):
             "fixture_signature_status": "unsigned owned fixture", "zip_crc_verified": True}
 
 
-def verify_execution(input_jar, output_jar, before):
-    hashes = {"original": verify_jar(input_jar), "gui_output": verify_jar(output_jar)}
+def verify_execution(input_jar, output_jar, before, output_label="gui-output"):
+    hashes = {"original": verify_jar(input_jar), output_label.replace("-", "_"): verify_jar(output_jar)}
     if hashes["original"]["sha256"] != before:
-        raise RuntimeError("GUI processing changed the original fixture")
+        raise RuntimeError("Processing changed the original fixture")
     save_json("fixture-identities.json", hashes)
     for jdk in ("17", "21"):
         java_bin = Path(os.environ[f"VERIFY_JDK_{jdk}"]) / "bin"
         recorded(f"jdk{jdk}-version", [java_bin / "java.exe", "-version"])
-        for label, jar_path in (("original", input_jar), ("gui-output", output_jar)):
+        for label, jar_path in (("original", input_jar), (output_label, output_jar)):
             name = f"jdk{jdk}-{label}"
             stdout = recorded(name, [java_bin / "java.exe", "-jar", jar_path])
             stderr = (EVIDENCE / f"{name}.stderr.log").read_text(encoding="utf-8")
@@ -369,38 +373,39 @@ def verify_execution(input_jar, output_jar, before):
             if normalized != "COUNT=30000" or stderr.strip():
                 raise RuntimeError(f"{name} failed owned Calc semantics")
     java_bin = Path(os.environ["VERIFY_JDK_21"]) / "bin"
-    for label, jar_path in (("original", input_jar), ("gui-output", output_jar)):
+    for label, jar_path in (("original", input_jar), (output_label, output_jar)):
         recorded(f"jarsigner-{label}", [java_bin / "jarsigner.exe", "-verify", jar_path])
     RESULT["fixture_execution_passed"] = True
 
 
 def prepare_package(pins):
-    run = json.loads(recorded("verify-only-run", ["gh", "api", f"repos/HHT0rro/JavaShroud/actions/runs/{pins['release_run_id']}"]))
+    run = json.loads(recorded("publication-run", ["gh", "api", f"repos/HHT0rro/JavaShroud/actions/runs/{pins['release_run_id']}"]))
     if run["head_sha"] != pins["source_sha"] or run["status"] != "completed" or run["conclusion"] != "success":
-        raise RuntimeError("The pinned verify-only run did not succeed at the expected source")
-    metadata = json.loads(recorded("verify-only-artifact", ["gh", "api", f"repos/HHT0rro/JavaShroud/actions/artifacts/{pins['artifact_id']}"]))
-    if metadata["workflow_run"]["id"] != pins["release_run_id"] or metadata["workflow_run"]["head_sha"] != pins["source_sha"]:
-        raise RuntimeError("The pinned artifact belongs to a different run or source")
-    if metadata["digest"] != "sha256:" + pins["artifact_sha256"]:
-        raise RuntimeError("The artifact API digest differs from the independently retained pin")
-    archive_path = ROOT / "verify-only-artifact.zip"
-    start = time.monotonic()
-    with archive_path.open("wb") as stdout, (EVIDENCE / "artifact-download.stderr.log").open("wb") as stderr:
-        result = subprocess.run(["gh", "api", f"repos/HHT0rro/JavaShroud/actions/artifacts/{pins['artifact_id']}/zip"],
-                                stdout=stdout, stderr=stderr, timeout=120)
-    RUNS.append({"name": "artifact-download", "exit_code": result.returncode,
-                 "elapsed_ms": round((time.monotonic() - start) * 1000)})
-    save_json("runs.json", RUNS)
-    if result.returncode != 0 or digest(archive_path) != pins["artifact_sha256"]:
-        raise RuntimeError("The verify-only artifact download or digest check failed")
-    with zipfile.ZipFile(archive_path) as archive:
-        matches = [name for name in archive.namelist() if Path(name).name == "javashroud-windows-amd64.zip"]
-        if len(matches) != 1 or archive.testzip() is not None:
-            raise RuntimeError("The verify-only artifact did not contain one valid Windows package")
-        package_zip = ROOT / "javashroud-windows-amd64.zip"
-        package_zip.write_bytes(archive.read(matches[0]))
-    if digest(package_zip) != pins["package_sha256"]:
-        raise RuntimeError("The Windows package digest differed from its pin")
+        raise RuntimeError("The publication run did not succeed at the pinned source")
+    if run["event"] != "push" or run["head_branch"] != pins["tag"]:
+        raise RuntimeError("The publication run did not execute the pinned release tag")
+    tag_ref = json.loads(recorded("publication-tag-ref", ["gh", "api", f"repos/HHT0rro/JavaShroud/git/ref/tags/{pins['tag']}"]))
+    if tag_ref["object"]["type"] != "tag" or tag_ref["object"]["sha"] != pins["tag_object_sha"]:
+        raise RuntimeError("The annotated tag identity changed")
+    tag = json.loads(recorded("publication-tag-object", ["gh", "api", f"repos/HHT0rro/JavaShroud/git/tags/{pins['tag_object_sha']}"]))
+    if tag["object"]["type"] != "commit" or tag["object"]["sha"] != pins["source_sha"]:
+        raise RuntimeError("The public tag did not resolve to the pinned product source")
+    release = json.loads(recorded("publication-release", ["gh", "api", f"repos/HHT0rro/JavaShroud/releases/tags/{pins['tag']}"]))
+    if release["id"] != pins["release_id"] or release["draft"] or not release["published_at"]:
+        raise RuntimeError("The public release identity or publication state changed")
+    matches = [asset for asset in release["assets"] if asset["id"] == pins["asset_id"]]
+    if len(matches) != 1:
+        raise RuntimeError("The exact final Windows asset was absent")
+    asset = matches[0]
+    if asset["name"] != "javashroud-windows-amd64.zip" or asset["size"] != pins["package_size"] or asset["digest"] != "sha256:" + pins["package_sha256"]:
+        raise RuntimeError("The final Windows asset size or digest changed")
+    download = ROOT / "download"
+    download.mkdir()
+    recorded("publication-download", ["gh", "release", "download", pins["tag"], "--repo", "HHT0rro/JavaShroud",
+             "--pattern", asset["name"], "--dir", download], timeout=120)
+    package_zip = download / asset["name"]
+    if package_zip.stat().st_size != pins["package_size"] or digest(package_zip) != pins["package_sha256"]:
+        raise RuntimeError("The downloaded final package size or digest differed from its pin")
     with zipfile.ZipFile(package_zip) as archive:
         if archive.testzip() is not None:
             raise RuntimeError("The Windows package failed CRC validation")
@@ -411,6 +416,11 @@ def prepare_package(pins):
         if digest(path) != pins[f"{name}_sha256"]:
             raise RuntimeError(f"The extracted {name} digest differed from its pin")
     save_json("pins.json", pins)
+    save_json("publication-proof.json", {"tag": pins["tag"], "tag_object_sha": tag["sha"],
+              "source_sha": tag["object"]["sha"], "release_run_id": run["id"], "release_run_conclusion": run["conclusion"],
+              "release_id": release["id"], "published_at": release["published_at"], "draft": release["draft"],
+              "prerelease": release["prerelease"], "asset": asset, "downloaded_sha256": digest(package_zip),
+              "downloaded_bytes": package_zip.stat().st_size, "extracted_sha256": {name: digest(path) for name, path in paths.items()}})
     return paths
 
 
@@ -421,7 +431,7 @@ def run_gui_profile(profile, paths, pins):
     EVIDENCE.mkdir(parents=True)
     for name in ("temp", "appdata", "localappdata", "webview"):
         (PRIVATE / name).mkdir(parents=True, exist_ok=True)
-    RESULT = {"profile_requested": profile, "source_sha": pins["source_sha"],
+    RESULT = {"interface": "GUI", "profile_requested": profile, "source_sha": pins["source_sha"],
               "workflow_sha": os.environ["GITHUB_SHA"], "run_id": os.environ["GITHUB_RUN_ID"],
               "desktop_sha256": pins["desktop_sha256"], "engine_sha256": pins["engine_sha256"],
               "engine_mode": "packaged NativeImage", "status": "running",
@@ -507,6 +517,58 @@ def run_gui_profile(profile, paths, pins):
     return dict(RESULT)
 
 
+def run_cli_profile(profile, paths, pins):
+    global EVIDENCE, RESULT
+    EVIDENCE = ROOT / "evidence" / f"cli-{profile}"
+    EVIDENCE.mkdir(parents=True)
+    RESULT = {"interface": "Native CLI", "profile_requested": profile, "status": "running",
+              "source_sha": pins["source_sha"], "engine_sha256": pins["engine_sha256"]}
+    RUNS.clear()
+    try:
+        input_jar, _, _ = fixture()
+        output_jar = EVIDENCE / "output/owned-calc-cli-strip.jar"
+        before = digest(input_jar)
+        config = EVIDENCE / "native-cli-config.toml"
+        config.write_text(f'inputJarPath = {json.dumps(input_jar.as_posix())}\n'
+                          f'outputJarPath = {json.dumps(output_jar.as_posix())}\n'
+                          f'artifactFormat = "jar"\nprotectionProfile = "{profile}"\n'
+                          '[[passes]]\nid = "strip-compile-debug-info"\nenabled = true\n', encoding="utf-8")
+        recorded("native-cli-strip", [paths["engine"], "--config", config])
+        scan = output_jar.with_name(output_jar.stem + ".release-scan.txt").read_text(encoding="utf-8")
+        if f"profile={profile}\n" not in scan or "RESULT=PASS" not in scan:
+            raise RuntimeError("The Native CLI output scan did not confirm its requested profile")
+        verify_execution(input_jar, output_jar, before, output_label="cli-output")
+        protection = []
+        unsafe_config = EVIDENCE / "same-input-output.toml"
+        unsafe_config.write_text(config.read_text(encoding="utf-8").replace(output_jar.as_posix(), input_jar.as_posix()),
+                                 encoding="utf-8")
+        commands = {
+            "direct": [paths["engine"], "--input", input_jar, "--output", input_jar],
+            "config": [paths["engine"], "--config", unsafe_config],
+        }
+        for entry, command in commands.items():
+            name = f"reject-same-input-output-{entry}"
+            stdout = recorded(name, command, expect_failure=True)
+            stderr = (EVIDENCE / f"{name}.stderr.log").read_text(encoding="utf-8", errors="replace")
+            if "protected run file" not in stdout + stderr:
+                raise RuntimeError(f"{entry} input protection failed for an unexpected reason")
+            after = digest(input_jar)
+            if after != before:
+                raise RuntimeError(f"{entry} input protection changed the original fixture")
+            protection.append({"entry": entry, "exit_code": RUNS[-1]["exit_code"],
+                               "before_sha256": before, "after_sha256": after, "unchanged": True})
+        save_json("input-protection.json", protection)
+        RESULT["release_scan_profile"] = profile
+        RESULT["input_protection_passed"] = True
+        RESULT["status"] = "passed"
+    except Exception as error:
+        RESULT["status"] = "failed"
+        RESULT["error"] = str(error)
+        (EVIDENCE / "failure.traceback.txt").write_text(traceback.format_exc(), encoding="utf-8")
+    save_json("acceptance.json", RESULT)
+    return dict(RESULT)
+
+
 def main():
     EVIDENCE.mkdir(parents=True, exist_ok=True)
     PACKAGE.mkdir(parents=True, exist_ok=True)
@@ -516,14 +578,14 @@ def main():
     if str(schema["schemaVersion"]) != "2" or schema["engineVersion"] != "0.31.2-rc.2":
         raise RuntimeError("The real packaged NativeImage schema identity differed from the candidate")
     results = []
+    evidence_root = ROOT / "evidence"
     for profile in ("minimal", "release-hardened"):
         result = run_gui_profile(profile, paths, pins)
         results.append(result)
-        if result["status"] != "passed":
-            break
-    (ROOT / "evidence/summary.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
+        results.append(run_cli_profile(profile, paths, pins))
+        (evidence_root / "summary.json").write_text(json.dumps(results, indent=2), encoding="utf-8")
     print(json.dumps(results, indent=2), flush=True)
-    return 0 if len(results) == 2 and all(item["status"] == "passed" for item in results) else 1
+    return 0 if len(results) == 4 and all(item["status"] == "passed" for item in results) else 1
 
 
 if __name__ == "__main__":

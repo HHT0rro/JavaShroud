@@ -1,9 +1,9 @@
-name: rc2-packaged-desktop-smoke
+name: published-rc2-desktop-cli
 
 on:
   push:
     branches:
-      - codex/packaged-desktop-rc2-smoke-2026-11-28
+      - codex/published-rc2-desktop-cli-2026-11-28
   workflow_dispatch:
 
 permissions:
@@ -11,7 +11,7 @@ permissions:
   actions: read
 
 jobs:
-  packaged-desktop-windows:
+  published-desktop-cli-windows:
     runs-on: windows-latest
     timeout-minutes: 15
     defaults:
@@ -39,7 +39,7 @@ jobs:
       - name: Install the existing UIAutomation driver dependencies
         run: |
           $ErrorActionPreference = 'Stop'
-          $evidence = Join-Path $env:RUNNER_TEMP 'rc2-desktop-smoke/evidence'
+          $evidence = Join-Path $env:RUNNER_TEMP 'published-rc2-smoke/evidence'
           New-Item -ItemType Directory -Force -Path $evidence | Out-Null
           python -m pip install --disable-pip-version-check pywinauto==0.6.9 psutil==7.0.0 pillow==11.3.0 1> "$evidence/dependencies.stdout.log" 2> "$evidence/dependencies.stderr.log"
           $result = $LASTEXITCODE
@@ -47,10 +47,10 @@ jobs:
           if ($result -ne 0) { throw "UIAutomation dependency installation failed with exit $result" }
           @{ workflow_sha = $env:GITHUB_SHA; run_id = $env:GITHUB_RUN_ID; run_attempt = $env:GITHUB_RUN_ATTEMPT; image_os = $env:ImageOS; image_version = $env:ImageVersion } |
             ConvertTo-Json | Set-Content "$evidence/host.json"
-      - name: Verify the pinned RC2 NativeImage and normal GUI file flow
+      - name: Verify the published final NativeImage CLI and GUI file flow
         run: |
           $ErrorActionPreference = 'Stop'
-          $evidence = Join-Path $env:RUNNER_TEMP 'rc2-desktop-smoke/evidence'
+          $evidence = Join-Path $env:RUNNER_TEMP 'published-rc2-smoke/evidence'
           python -u -X utf8 .github/diagnostics/rc2-desktop-smoke.py 1> "$evidence/harness.stdout.log" 2> "$evidence/harness.stderr.log"
           $result = $LASTEXITCODE
           @{ exit_code = $result } | ConvertTo-Json | Set-Content "$evidence/harness-exit.json"
@@ -60,7 +60,7 @@ jobs:
         if: always()
         run: |
           $ErrorActionPreference = 'Stop'
-          $evidence = Join-Path $env:RUNNER_TEMP 'rc2-desktop-smoke/evidence'
+          $evidence = Join-Path $env:RUNNER_TEMP 'published-rc2-smoke/evidence'
           New-Item -ItemType Directory -Force -Path $evidence | Out-Null
           Copy-Item -LiteralPath .github/workflows/ci.yml -Destination "$evidence/workflow.yml"
           Copy-Item -LiteralPath .github/diagnostics/rc2-desktop-smoke.py -Destination "$evidence/rc2-desktop-smoke.py"
@@ -71,11 +71,11 @@ jobs:
               '{0}  {1}' -f (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $relative
             }
           $manifest | Set-Content "$evidence/SHA256SUMS.txt"
-      - name: Upload actual RC2 GUI evidence
+      - name: Upload publication proof and actual GUI and CLI evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: rc2-packaged-desktop-${{ github.run_id }}
-          path: ${{ runner.temp }}/rc2-desktop-smoke/evidence
+          name: published-rc2-desktop-cli-${{ github.run_id }}
+          path: ${{ runner.temp }}/published-rc2-smoke/evidence
           if-no-files-found: error
           retention-days: 14
