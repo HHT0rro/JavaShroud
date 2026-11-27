@@ -92,6 +92,7 @@ export const reorderByConstraints = (
 
 export const createInitialRunState = (): RunState => ({
   artifactFormat: 'jar',
+  protectionProfile: null,
   apkUnavailablePasses: [],
   jarPassOrder: [],
   status: 'idle',
@@ -682,6 +683,7 @@ export const buildObfuscationRequest = (state: RunState): ObfuscationRequest => 
     inputJarPath: state.inputJar.inputJarPath,
     outputJarPath: state.outputJarPath,
     artifactFormat: state.artifactFormat,
+    ...(state.protectionProfile === null ? {} : { protectionProfile: state.protectionProfile }),
     passes: enabledPasses,
     rules: normalizeRuleItems(state.rules, 'rule'),
     passSelections,

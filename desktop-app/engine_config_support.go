@@ -34,6 +34,7 @@ func prepareConfigFile(request ObfuscationRequest) (string, string, func(), erro
 		InputJarPath:          inputJarPath,
 		OutputJarPath:         outputJarPath,
 		ArtifactFormat:        request.ArtifactFormat,
+		ProtectionProfile:     request.ProtectionProfile,
 		LogFilePath:           deriveEngineLogFilePath(outputJarPath),
 		Passes:                clonePasses(request.Passes),
 		RuleSet:               RuleSet{Rules: cloneRules(request.Rules)},
@@ -159,6 +160,11 @@ func formatEngineConfigToml(config EngineConfig) (string, error) {
 	builder.WriteString("artifactFormat = ")
 	builder.WriteString(formatTomlString(config.ArtifactFormat))
 	builder.WriteString("\n")
+	if config.ProtectionProfile != nil {
+		builder.WriteString("protectionProfile = ")
+		builder.WriteString(formatTomlString(*config.ProtectionProfile))
+		builder.WriteString("\n")
+	}
 	builder.WriteString("logFilePath = ")
 	builder.WriteString(formatTomlString(config.LogFilePath))
 	builder.WriteString("\n")

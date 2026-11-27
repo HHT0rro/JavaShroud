@@ -8,6 +8,91 @@ import (
 	"testing"
 )
 
+func TestPrepareConfigFile_PreservesProtectionProfileFromGUIJSON(t *testing.T) {
+	for _, profile := range []string{"minimal", "release-hardened", "analysis-only", " MINIMAL "} {
+		t.Run(profile, func(t *testing.T) {
+			payload, err := json.Marshal(map[string]any{
+				"inputJarPath":      writeTempJar(t),
+				"outputJarPath":     filepath.Join(t.TempDir(), "out.jar"),
+				"protectionProfile": profile,
+				"passes":            []PassSpec{{ID: "strip-compile-debug-info", Enabled: true}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var request ObfuscationRequest
+			if err := json.Unmarshal(payload, &request); err != nil {
+				t.Fatal(err)
+			}
+			tempDir, configPath, cleanup, err := prepareConfigFile(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cleanup()
+			defer os.RemoveAll(tempDir)
+			content, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := `protectionProfile = "` + strings.ToLower(strings.TrimSpace(profile)) + `"`
+			if !strings.Contains(string(content), expected) {
+				t.Fatalf("GUI profile lost before CLI config: want %s, got %s", expected, content)
+			}
+		})
+	}
+}
+
+func TestPrepareConfigFile_OmittedProtectionProfileKeepsEngineDefaults(t *testing.T) {
+	for _, format := range []string{"jar", "apk", "auto"} {
+		t.Run(format, func(t *testing.T) {
+			request := ObfuscationRequest{
+				InputJarPath: writeTempJar(t), OutputJarPath: filepath.Join(t.TempDir(), "out.jar"),
+				ArtifactFormat: format, Passes: []PassSpec{{ID: "strip-compile-debug-info", Enabled: true}},
+			}
+			tempDir, configPath, cleanup, err := prepareConfigFile(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cleanup()
+			defer os.RemoveAll(tempDir)
+			content, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(content), "protectionProfile") {
+				t.Fatalf("missing profile must preserve engine defaults: %s", content)
+			}
+		})
+	}
+}
+
+func TestPrepareConfigFile_RejectsInvalidExplicitProtectionProfile(t *testing.T) {
+	for _, profile := range []string{"unknown", "", "   "} {
+		t.Run(profile, func(t *testing.T) {
+			payload, err := json.Marshal(map[string]any{
+				"inputJarPath": writeTempJar(t), "outputJarPath": filepath.Join(t.TempDir(), "out.jar"),
+				"protectionProfile": profile,
+				"passes":            []PassSpec{{ID: "strip-compile-debug-info", Enabled: true}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var request ObfuscationRequest
+			if err := json.Unmarshal(payload, &request); err != nil {
+				t.Fatal(err)
+			}
+			tempDir, _, cleanup, err := prepareConfigFile(request)
+			defer cleanup()
+			if tempDir != "" {
+				defer os.RemoveAll(tempDir)
+			}
+			if err == nil || !strings.Contains(err.Error(), "protectionProfile") {
+				t.Fatalf("expected explicit invalid profile rejection, got %v", err)
+			}
+		})
+	}
+}
+
 func TestPrepareConfigFile_RejectsInvalidRuleAction(t *testing.T) {
 	request := ObfuscationRequest{
 		InputJarPath:  writeTempJar(t),

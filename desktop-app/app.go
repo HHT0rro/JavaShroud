@@ -13,6 +13,7 @@ type ObfuscationRequest struct {
 	InputJarPath          string          `json:"inputJarPath"`
 	OutputJarPath         string          `json:"outputJarPath"`
 	ArtifactFormat        string          `json:"artifactFormat"`
+	ProtectionProfile     *string         `json:"protectionProfile,omitempty"`
 	Passes                []PassSpec      `json:"passes"`
 	Rules                 []RuleItem      `json:"rules"`
 	PassSelections        []PassSelection `json:"passSelections"`
@@ -50,6 +51,7 @@ type EngineConfig struct {
 	InputJarPath          string          `json:"inputJarPath"`
 	OutputJarPath         string          `json:"outputJarPath"`
 	ArtifactFormat        string          `json:"artifactFormat"`
+	ProtectionProfile     *string         `json:"protectionProfile,omitempty"`
 	LogFilePath           string          `json:"logFilePath"`
 	Passes                []PassSpec      `json:"passes"`
 	RuleSet               RuleSet         `json:"ruleSet"`

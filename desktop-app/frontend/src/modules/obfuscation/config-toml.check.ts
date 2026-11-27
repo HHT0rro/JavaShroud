@@ -211,4 +211,31 @@ assert(result.warnings.filter((warning) => warning.message.includes('非 canonic
 const v3Import = importWorkbenchTomlConfig(state, importToml.replace('version = 2', 'version = 3'))
 assert(!v3Import.warnings.some((warning) => warning.message.includes('v2 selected-only')), 'expected v3 import to avoid v2 migration warning')
 
+for (const profile of ['minimal', 'release-hardened', 'analysis-only']) {
+  const explicitToml = exportedToml.replace('version = 3', `version = 3\nprotectionProfile = "${profile}"`)
+  const imported = importWorkbenchTomlConfig(state, explicitToml)
+  const request = buildObfuscationRequest(imported.nextState)
+  assert(JSON.parse(JSON.stringify(request)).protectionProfile === profile, `expected ${profile} to reach the GUI request`)
+  const exported = exportWorkbenchTomlConfig(imported.nextState)
+  assert(exported.includes(`protectionProfile = "${profile}"`), `expected ${profile} in exported TOML`)
+  const roundTripped = importWorkbenchTomlConfig(state, exported)
+  assert(JSON.parse(JSON.stringify(buildObfuscationRequest(roundTripped.nextState))).protectionProfile === profile, `expected ${profile} after config round trip`)
+  const legacy = importWorkbenchTomlConfig(imported.nextState, exportedToml)
+  assert(!('protectionProfile' in buildObfuscationRequest(legacy.nextState)), 'legacy config must clear the previous explicit profile and use engine defaults')
+  assert(!exportWorkbenchTomlConfig(legacy.nextState).includes('protectionProfile'), 'legacy config must retain an omitted profile when exported')
+}
+assert(!('protectionProfile' in buildObfuscationRequest(state)), 'new workbench must retain implicit engine profile defaults')
+const normalizedProfile = importWorkbenchTomlConfig(state, exportedToml.replace('version = 3', 'version = 3\nprotectionProfile = " MINIMAL "'))
+assert(buildObfuscationRequest(normalizedProfile.nextState).protectionProfile === 'minimal', 'profile normalization must match the engine')
+const rootProfile = importWorkbenchTomlConfig(state, `protectionProfile = "minimal"\n${exportedToml}`)
+assert(buildObfuscationRequest(rootProfile.nextState).protectionProfile === 'minimal', 'root profile must reach the GUI request')
+const legacyApk = importWorkbenchTomlConfig(normalizedProfile.nextState, '[meta]\nartifactFormat = "apk"\n[input]\ninputJarPath = "C:/fixture.apk"\noutputJarPath = "C:/out.apk"')
+assert(!('protectionProfile' in buildObfuscationRequest(legacyApk.nextState)), 'legacy APK imports must keep the implicit APK profile')
+for (const invalid of ['"unknown"', '""', '"   "', '123', 'true']) {
+  let rejected = false
+  try { importWorkbenchTomlConfig(state, exportedToml.replace('version = 3', `version = 3\nprotectionProfile = ${invalid}`)) }
+  catch { rejected = true }
+  assert(rejected, `expected explicit invalid protectionProfile ${invalid} to be rejected`)
+}
+
 console.log('config-toml checks passed')

@@ -69,6 +69,8 @@ export namespace main {
 	export class ObfuscationRequest {
 	    inputJarPath: string;
 	    outputJarPath: string;
+	    artifactFormat: string;
+	    protectionProfile?: string;
 	    passes: PassSpec[];
 	    rules: RuleItem[];
 	    passSelections: PassSelection[];
@@ -84,6 +86,8 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.inputJarPath = source["inputJarPath"];
 	        this.outputJarPath = source["outputJarPath"];
+	        this.artifactFormat = source["artifactFormat"];
+	        this.protectionProfile = source["protectionProfile"];
 	        this.passes = this.convertValues(source["passes"], PassSpec);
 	        this.rules = this.convertValues(source["rules"], RuleItem);
 	        this.passSelections = this.convertValues(source["passSelections"], PassSelection);

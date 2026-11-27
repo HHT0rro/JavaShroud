@@ -626,4 +626,23 @@ for (const event of [
   assert(activePage.value === 'packing' && errors.length === 0, 'expected stale replies to leave navigation and toasts alone')
 }
 
+for (const profile of ['minimal', 'release-hardened', 'analysis-only'] as const) {
+  const requests: ObfuscationRequest[] = []
+  const exports: string[] = []
+  const config = exportWorkbenchTomlConfig({ ...readyState(), protectionProfile: profile })
+  const { handlers, errors } = createHarness(createBridge({
+    selectImportConfig: async (): Promise<string> => 'C:/fixture/import.toml',
+    readTextFile: async (): Promise<string> => config,
+    selectExportConfig: async (): Promise<string> => 'C:/fixture/export.toml',
+    writeTextFile: async (_path: string, content: string): Promise<void> => { exports.push(content) },
+    startObfuscation: async (request: ObfuscationRequest): Promise<void> => { requests.push(request) },
+  }), readyState())
+  await handlers.handleImportConfig()
+  await handlers.handleExportConfig()
+  await handlers.handleStart()
+  assert(errors.length === 0, `expected normal GUI handlers to accept ${profile}`)
+  assert(exports[0]?.includes(`protectionProfile = "${profile}"`), `expected GUI export to retain ${profile}`)
+  assert(requests[0]?.protectionProfile === profile, `expected GUI start bridge to receive ${profile}`)
+}
+
 console.log('workbench-handlers checks passed')

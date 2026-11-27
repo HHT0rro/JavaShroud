@@ -19,6 +19,7 @@ import type {
   PassParamValue,
   PassSelection,
   PassSelectionMode,
+  ProtectionProfile,
   RuleAction,
   RuleItem,
   RunState,
@@ -32,6 +33,7 @@ interface MutableWorkbenchConfig {
   inputJarPath: string
   outputJarPath: string
   artifactFormat: ArtifactFormat | 'auto' | null
+  protectionProfile: ProtectionProfile | null
   passes: WorkbenchTomlPassConfig[]
   rules: RawRuleItem[]
   passSelections: MutablePassSelection[]
@@ -59,6 +61,7 @@ export const exportWorkbenchTomlConfig = (state: RunState): string => {
     `format = ${formatString(formatName)}`,
     `version = ${formatVersion}`,
     `artifactFormat = ${formatString(state.artifactFormat)}`,
+    ...(state.protectionProfile === null ? [] : [`protectionProfile = ${formatString(state.protectionProfile)}`]),
     '',
     '[input]',
     `inputJarPath = ${formatString(state.inputJar?.inputJarPath ?? '')}`,
@@ -116,7 +119,7 @@ export const importWorkbenchTomlConfig = (state: RunState, rawToml: string): Con
   if (explicitFormat && parsedConfig.inputJarPath.trim() && detectedFormat !== explicitFormat) {
     throw new Error(`配置导入失败：${format.toUpperCase()} 模式与输入文件扩展名不匹配。`)
   }
-  let nextState: RunState = setArtifactFormat(state, format)
+  let nextState: RunState = { ...setArtifactFormat(state, format), protectionProfile: parsedConfig.protectionProfile }
 
   if (parsedConfig.inputJarPath.trim().length > 0) {
     nextState = setInputJarPath(nextState, parsedConfig.inputJarPath)
@@ -144,6 +147,7 @@ export const parseWorkbenchTomlConfig = (rawToml: string): WorkbenchTomlConfig =
     inputJarPath: '',
     outputJarPath: '',
     artifactFormat: null,
+    protectionProfile: null,
     passes: [],
     rules: [],
     passSelections: [],
@@ -210,6 +214,17 @@ export const parseWorkbenchTomlConfig = (rawToml: string): WorkbenchTomlConfig =
     }
 
     const assignment = parseAssignment(line, lineNumber)
+    if ((section === 'none' || section === 'meta') && assignment.key === 'protectionProfile') {
+      const profile = requireString(assignment.value, assignment.key, lineNumber).trim().toLowerCase()
+      if (profile !== 'release-hardened' && profile !== 'analysis-only' && profile !== 'minimal') {
+        throw new Error(`配置导入失败：protectionProfile 不受支持：${profile}。`)
+      }
+      if (parsed.protectionProfile !== null && parsed.protectionProfile !== profile) {
+        throw new Error('配置导入失败：protectionProfile 的值冲突。')
+      }
+      parsed.protectionProfile = profile
+      return
+    }
     if ((section === 'meta' || section === 'input') && assignment.key === 'artifactFormat') {
       const format = requireString(assignment.value, assignment.key, lineNumber).trim().toLowerCase()
       if (format !== 'jar' && format !== 'apk' && format !== 'auto') {
@@ -308,6 +323,7 @@ export const parseWorkbenchTomlConfig = (rawToml: string): WorkbenchTomlConfig =
     inputJarPath: parsed.inputJarPath,
     outputJarPath: parsed.outputJarPath,
     artifactFormat: parsed.artifactFormat,
+    protectionProfile: parsed.protectionProfile,
     passes: parsed.passes.filter((passConfig): boolean => passConfig.id.trim().length > 0),
     rules: parsed.rules,
     passSelections: parsed.passSelections.map((selection): WorkbenchTomlPassSelectionConfig => ({

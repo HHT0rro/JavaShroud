@@ -1,4 +1,5 @@
 export type ArtifactFormat = 'jar' | 'apk'
+export type ProtectionProfile = 'release-hardened' | 'analysis-only' | 'minimal'
 
 export type RunStatus = 'idle' | 'ready' | 'running' | 'awaiting-pack' | 'canceling' | 'done' | 'failed'
 
@@ -142,6 +143,7 @@ export interface ObfuscationRequest {
   readonly inputJarPath: string
   readonly outputJarPath: string
   readonly artifactFormat: ArtifactFormat
+  readonly protectionProfile?: ProtectionProfile
   readonly passes: readonly PassSpec[]
   readonly rules: readonly RuleItem[]
   readonly passSelections: readonly PassSelection[]
@@ -173,6 +175,7 @@ export interface WorkbenchTomlConfig {
   readonly inputJarPath: string
   readonly outputJarPath: string
   readonly artifactFormat: ArtifactFormat | 'auto' | null
+  readonly protectionProfile: ProtectionProfile | null
   readonly passes: readonly WorkbenchTomlPassConfig[]
   readonly rules: readonly WorkbenchTomlRuleConfig[]
   readonly passSelections: readonly WorkbenchTomlPassSelectionConfig[]
@@ -230,6 +233,8 @@ export interface JarInspectionPayload {
 
 export interface RunState {
   readonly artifactFormat: ArtifactFormat
+  /** Null preserves the engine's format-dependent default for legacy configurations. */
+  readonly protectionProfile: ProtectionProfile | null
   /** Passes hidden for APK mode, retained so switching back to JAR restores selections. */
   readonly apkUnavailablePasses: readonly PassItem[]
   readonly jarPassOrder: readonly string[]

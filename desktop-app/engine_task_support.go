@@ -22,6 +22,13 @@ func validateObfuscationRequest(request ObfuscationRequest) error {
 	default:
 		return fmt.Errorf("start obfuscation failed: artifactFormat must be auto, jar, or apk: %q", request.ArtifactFormat)
 	}
+	if request.ProtectionProfile != nil {
+		switch *request.ProtectionProfile {
+		case "minimal", "release-hardened", "analysis-only":
+		default:
+			return fmt.Errorf("start obfuscation failed: protectionProfile is unsupported: %q", *request.ProtectionProfile)
+		}
+	}
 	if len(request.Passes) == 0 {
 		return fmt.Errorf("start obfuscation failed: passes is empty: request=%+v", request)
 	}
@@ -55,6 +62,10 @@ func normalizeObfuscationRequest(request ObfuscationRequest) ObfuscationRequest 
 	normalized.InputJarPath = strings.TrimSpace(request.InputJarPath)
 	normalized.OutputJarPath = strings.TrimSpace(request.OutputJarPath)
 	normalized.ArtifactFormat = strings.ToLower(strings.TrimSpace(request.ArtifactFormat))
+	if request.ProtectionProfile != nil {
+		profile := strings.ToLower(strings.TrimSpace(*request.ProtectionProfile))
+		normalized.ProtectionProfile = &profile
+	}
 	if normalized.ArtifactFormat == "" {
 		normalized.ArtifactFormat = defaultEngineArtifactFormat
 	}
@@ -112,7 +123,9 @@ func validatePassSelections(passSelections []PassSelection, enabledPassIDs map[s
 			seenTargets[rule.Target] = struct{}{}
 			if _, err := parseDesktopPassSelectionTarget(rule.Target); err != nil {
 				return fmt.Errorf("start obfuscation failed: pass selection rule target is not a concrete class or JVM method selector: passId=%s target=%s: %w", passID, rule.Target, err)
-			}		}	}
+			}
+		}
+	}
 	return nil
 }
 
