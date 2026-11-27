@@ -239,6 +239,7 @@ class ApkAndroidDeviceSmokeTest {
                 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="$packageName">
                     <uses-sdk android:minSdkVersion="$MIN_API" android:targetSdkVersion="${device.api}" />
                     <application android:label="Owned smoke" android:allowBackup="false"
+                        android:appComponentFactory="$packageName.OwnedComponentFactory"
                         android:extractNativeLibs="false" android:theme="@android:style/Theme.Material.Light.NoActionBar">
                         <activity android:name="$packageName.SmokeActivity" android:exported="true">
                             <intent-filter>
@@ -314,6 +315,25 @@ class ApkAndroidDeviceSmokeTest {
                     @android.webkit.JavascriptInterface public int answer() { return 42; }
                 }
             """)
+            source("OwnedComponentFactory.java", """
+                package $packageName;
+                public final class OwnedComponentFactory extends android.app.AppComponentFactory {
+                    public static boolean constructed;
+                    public OwnedComponentFactory() { constructed = true; }
+                }
+            """)
+            source("OwnedPreferences.java", """
+                package $packageName;
+                public abstract class OwnedPreferences {
+                    public abstract int answer();
+                }
+            """)
+            source("OwnedPreferencesImpl.java", """
+                package $packageName;
+                public final class OwnedPreferencesImpl extends OwnedPreferences {
+                    public int answer() { return 42; }
+                }
+            """)
             source("SmokeActivity.java", """
                 package $packageName;
                 public final class SmokeActivity extends android.app.Activity {
@@ -322,6 +342,20 @@ class ApkAndroidDeviceSmokeTest {
                     @Override public void onCreate(android.os.Bundle state) {
                         super.onCreate(state);
                         invocation = getIntent().getStringExtra("invocation");
+                        try {
+                            final Class<?> implementation = Class.forName(OwnedPreferences.class.getName().concat("Impl"));
+                            final OwnedPreferences preferences = (OwnedPreferences) implementation.getDeclaredConstructor().newInstance();
+                            if (preferences.answer() != 42) throw new AssertionError("Generated preferences failed");
+                            android.util.Log.i("$tag", "token=" + invocation + " preferences=42");
+                            if (android.os.Build.VERSION.SDK_INT >= 28) {
+                                final Object constructed = Class.forName("$packageName.OwnedComponentFactory")
+                                    .getField("constructed").get(null);
+                                if (!Boolean.TRUE.equals(constructed)) throw new AssertionError("Component factory was not instantiated");
+                                android.util.Log.i("$tag", "token=" + invocation + " componentFactory=created");
+                            }
+                        } catch (ReflectiveOperationException failure) {
+                            throw new AssertionError("Generated class lookup failed", failure);
+                        }
                         setContentView(R.layout.main);
                         final int factory = ((AnswerView) findViewById(R.id.action)).checkedAnswer();
                         if (factory != 42) throw new AssertionError("Inherited dispatch failed");
@@ -645,26 +679,28 @@ class ApkAndroidDeviceSmokeTest {
                 val launch = adb("$label-start", "shell", "am", "start", "-W", "-n", "$packageName/.SmokeActivity", "--es", "invocation", token)
                 assertTrue(launch.lineSequence().any { it.trim() == "Status: ok" }, "Fixture launch failed: $launch")
                 val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30)
+                val expectedMarkers = mutableListOf(
+                    "result=42 resource=42", "click=42", "parcel=42", "web=42", "factory=42", "preferences=42",
+                )
+                if (device.api >= 28) expectedMarkers += "componentFactory=created"
                 var observed = false
                 while (System.nanoTime() < deadline) {
                     val log = adb("$label-logcat", "logcat", "-d", "-v", "brief", "-s", "$tag:I", "*:S")
                     val lines = log.lineSequence().filter { it.contains("token=$token ") }.toList()
-                    if (lines.any { it.endsWith(" result=42 resource=42") } && lines.any { it.endsWith(" click=42") } &&
-                        lines.any { it.endsWith(" parcel=42") } && lines.any { it.endsWith(" web=42") } &&
-                        lines.any { it.endsWith(" factory=42") }) {
+                    if (expectedMarkers.all { marker -> lines.any { it.endsWith(" $marker") } }) {
                         observed = true
                         break
                     }
                     Thread.sleep(500)
                 }
-                assertTrue(observed, "Expected result=42 resource=42 click=42 parcel=42 web=42 factory=42 for $label; evidence=$evidence")
+                assertTrue(observed, "Expected ${expectedMarkers.joinToString(" ")} for $label; evidence=$evidence")
                 val firstPid = packagePid("$label-first-pid")
                 assertTrue(firstPid.matches(Regex("[0-9]+")), "Fixture process is missing: $firstPid")
                 Thread.sleep(2_000)
                 assertEquals(firstPid, packagePid("$label-later-pid"), "Fixture process did not survive")
                 val runtime = adb("$label-process-logcat", "logcat", "-d", "-v", "threadtime", "-s", "AndroidRuntime:E", "*:S")
                 assertTrue(!runtime.contains("Process: $packageName, PID: $firstPid"), "Fixture crashed: $runtime")
-                note("$label runtime PASS result=42 resource=42 click=42 parcel=42 web=42 factory=42 pid=$firstPid token=$token")
+                note("$label runtime PASS ${expectedMarkers.joinToString(" ")} pid=$firstPid token=$token")
             } catch (error: Throwable) {
                 failure = error
                 // Capture native tombstones before uninstall removes the package identity.
