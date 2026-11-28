@@ -1285,15 +1285,26 @@ impl<H: ObjectOperations> VmExecutor<H> {
                 Err(_) => Err(thrown("java/lang/VerifyError", VmValue::Null)),
             }
         } else {
-            let mut arguments = Vec::with_capacity(argument_count);
-            for _ in 0..argument_count {
-                arguments.push(pop(frame)?);
-            }
-            arguments.reverse();
-            let receiver_object = if matches!(kind, InvokeKind::Static | InvokeKind::Dynamic) {
+            let argument_start = frame.stack.len() - argument_count;
+            let is_static = matches!(kind, InvokeKind::Static | InvokeKind::Dynamic);
+            let call_start = if is_static {
+                argument_start
+            } else {
+                argument_start.saturating_sub(1)
+            };
+            // Drain owns the call suffix until dispatch completes. Its slice
+            // already has argument order, and dropping it consumes arguments
+            // on both success and failure without allocating a temporary Vec.
+            let mut arguments = frame.stack.drain(call_start..);
+            let receiver_object = if is_static {
                 None
             } else {
-                let receiver = pop(frame)?;
+                if argument_start == 0 {
+                    return Err(thrown("java/lang/VerifyError", VmValue::Null));
+                }
+                let receiver = arguments
+                    .next()
+                    .ok_or_else(|| thrown("java/lang/VerifyError", VmValue::Null))?;
                 Some(as_object(receiver)?)
             };
             crate::record_host_invoke();
@@ -1301,7 +1312,7 @@ impl<H: ObjectOperations> VmExecutor<H> {
                 kind,
                 reference,
                 receiver_object.as_ref(),
-                &arguments,
+                arguments.as_slice(),
             ) {
                 Ok(value) => Ok(value),
                 Err(_) => match self.host.take_pending_exception() {
@@ -1335,7 +1346,7 @@ impl<H: ObjectOperations> VmExecutor<H> {
                     }
                 },
             };
-            arguments.clear();
+            drop(arguments);
             result
         };
         let value = result?;
@@ -1954,6 +1965,326 @@ mod tests {
             .finish();
         let mut executor = VmExecutor::new(Host);
         assert_eq!(executor.execute(&program, &[]), Ok(VmValue::Int(5)));
+    }
+
+    #[test]
+    fn host_invoke_preserves_argument_order_ownership_and_exception_transfer() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        #[derive(Clone)]
+        struct Object {
+            id: usize,
+            drops: Rc<RefCell<Vec<usize>>>,
+        }
+
+        impl Drop for Object {
+            fn drop(&mut self) {
+                self.drops.borrow_mut().push(self.id);
+            }
+        }
+
+        struct Host {
+            kind: InvokeKind,
+            outcome: usize,
+            calls: usize,
+            drops: Rc<RefCell<Vec<usize>>>,
+        }
+
+        impl ObjectOperations for Host {
+            type Object = Object;
+
+            fn invoke(
+                &mut self,
+                kind: InvokeKind,
+                _reference: &str,
+                receiver: Option<&Object>,
+                arguments: &[VmValue<Object>],
+            ) -> Result<VmValue<Object>, VmHostError> {
+                self.calls += 1;
+                assert_eq!(kind, self.kind);
+                assert!(self.drops.borrow().is_empty());
+                assert_eq!(
+                    receiver.map(|object| object.id),
+                    if matches!(kind, InvokeKind::Static | InvokeKind::Dynamic) {
+                        None
+                    } else {
+                        Some(0)
+                    }
+                );
+                assert_eq!(arguments.len(), 6);
+                assert!(matches!(arguments[0], VmValue::Int(7)));
+                assert!(matches!(arguments[1], VmValue::Long(9)));
+                assert!(matches!(arguments[2], VmValue::Double(value) if value == 3.0));
+                assert!(matches!(arguments[3], VmValue::Null));
+                assert!(matches!(&arguments[4], VmValue::Object(object) if object.id == 1));
+                assert!(matches!(&arguments[5], VmValue::Object(object) if object.id == 2));
+                if self.outcome == 0 {
+                    Ok(arguments[5].clone())
+                } else {
+                    Err(VmHostError::Failure)
+                }
+            }
+
+            fn take_pending_exception(&mut self) -> Option<(String, Object)> {
+                assert!(self.drops.borrow().is_empty());
+                (self.outcome == 2).then(|| {
+                    (
+                        "example/SpecificProblem".to_owned(),
+                        Object {
+                            id: 3,
+                            drops: self.drops.clone(),
+                        },
+                    )
+                })
+            }
+        }
+
+        for (opcode, kind) in [
+            (opcode::INVOKESTATIC, InvokeKind::Static),
+            (opcode::INVOKEDYNAMIC, InvokeKind::Dynamic),
+            (opcode::INVOKEVIRTUAL, InvokeKind::Virtual),
+            (opcode::INVOKESPECIAL, InvokeKind::Special),
+            (opcode::INVOKEINTERFACE, InvokeKind::Interface),
+        ] {
+            for outcome in 0..3 {
+                let descriptor = "(IJDLjava/lang/Object;[I[Ljava/lang/Object;)Ljava/lang/Object;";
+                let reference = if kind == InvokeKind::Dynamic {
+                    format!("mhstatic|Host.call|{descriptor}")
+                } else {
+                    format!("Host.call:{descriptor}")
+                };
+                let program = ProgramBuilder::new().constant_string(reference).finish();
+                let drops = Rc::new(RefCell::new(Vec::new()));
+                let mut executor = VmExecutor::new(Host {
+                    kind,
+                    outcome,
+                    calls: 0,
+                    drops: drops.clone(),
+                });
+                let mut frame = ExecutionFrame::new(1, 16);
+                frame.stack.push(VmValue::Int(42));
+                if !matches!(kind, InvokeKind::Static | InvokeKind::Dynamic) {
+                    frame.stack.push(VmValue::Object(Object {
+                        id: 0,
+                        drops: drops.clone(),
+                    }));
+                }
+                frame.stack.extend([
+                    VmValue::Int(7),
+                    VmValue::Long(9),
+                    VmValue::Double(3.0),
+                    VmValue::Null,
+                    VmValue::Object(Object {
+                        id: 1,
+                        drops: drops.clone(),
+                    }),
+                    VmValue::Object(Object {
+                        id: 2,
+                        drops: drops.clone(),
+                    }),
+                ]);
+                let result = executor.invoke(&program, &mut frame, opcode, &[0], 0, 0, 1);
+                assert_eq!(executor.host.calls, 1);
+                let expected_drops = if matches!(kind, InvokeKind::Static | InvokeKind::Dynamic) {
+                    vec![1, 2]
+                } else {
+                    vec![1, 2, 0]
+                };
+                assert_eq!(*drops.borrow(), expected_drops);
+                assert!(matches!(frame.stack[0], VmValue::Int(42)));
+                if outcome == 0 {
+                    assert!(matches!(result, Ok(Control::Next(1))));
+                    assert_eq!(frame.stack.len(), 2);
+                    assert!(matches!(&frame.stack[1], VmValue::Object(object) if object.id == 2));
+                } else {
+                    let error = match result {
+                        Err(error) => error,
+                        Ok(_) => panic!("host failure unexpectedly succeeded"),
+                    };
+                    assert_eq!(frame.stack.len(), 1);
+                    assert_eq!(
+                        error.class_name,
+                        if outcome == 2 {
+                            "example/SpecificProblem"
+                        } else {
+                            "java/lang/LinkageError"
+                        }
+                    );
+                    assert!(
+                        matches!(&error.value, VmValue::Object(object) if object.id == 3)
+                            || outcome == 1 && error.value.is_null()
+                    );
+                }
+                drop(frame);
+                assert_eq!(
+                    drops.borrow().len(),
+                    expected_drops.len() + usize::from(outcome != 1)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn host_invoke_consumes_arguments_on_receiver_errors() {
+        use std::rc::Rc;
+
+        struct Host;
+        impl ObjectOperations for Host {
+            type Object = Rc<()>;
+            fn invoke(
+                &mut self,
+                _kind: InvokeKind,
+                _reference: &str,
+                _receiver: Option<&Self::Object>,
+                _arguments: &[VmValue<Self::Object>],
+            ) -> Result<VmValue<Self::Object>, VmHostError> {
+                panic!("invalid receiver reached host dispatch");
+            }
+        }
+
+        let program = ProgramBuilder::new()
+            .constant_string("Host.call:(Ljava/lang/Object;)V")
+            .finish();
+        for opcode in [
+            opcode::INVOKEVIRTUAL,
+            opcode::INVOKESPECIAL,
+            opcode::INVOKEINTERFACE,
+        ] {
+            for receiver in [None, Some(VmValue::Null), Some(VmValue::Int(9))] {
+                let missing = receiver.is_none();
+                let null = matches!(receiver, Some(VmValue::Null));
+                let mut frame = ExecutionFrame::new(1, 8);
+                if let Some(receiver) = receiver {
+                    frame.stack.push(VmValue::Int(42));
+                    frame.stack.push(receiver);
+                }
+                let argument = Rc::new(());
+                frame.stack.push(VmValue::Object(argument.clone()));
+                let mut executor = VmExecutor::new(Host);
+                let error = match executor.invoke(&program, &mut frame, opcode, &[0], 0, 0, 1) {
+                    Err(error) => error,
+                    Ok(_) => panic!("invalid receiver unexpectedly succeeded"),
+                };
+                assert_eq!(
+                    error.class_name,
+                    if null {
+                        "java/lang/NullPointerException"
+                    } else {
+                        "java/lang/VerifyError"
+                    }
+                );
+                assert_eq!(Rc::strong_count(&argument), 1);
+                assert_eq!(frame.stack.len(), usize::from(!missing));
+                if !missing {
+                    assert!(matches!(frame.stack[0], VmValue::Int(42)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn host_invoke_keeps_empty_arguments_and_execution_limits() {
+        struct Host {
+            calls: usize,
+            fail: bool,
+        }
+        impl ObjectOperations for Host {
+            type Object = u32;
+            fn invoke(
+                &mut self,
+                _kind: InvokeKind,
+                _reference: &str,
+                _receiver: Option<&u32>,
+                arguments: &[VmValue<u32>],
+            ) -> Result<VmValue<u32>, VmHostError> {
+                self.calls += 1;
+                assert!(arguments.is_empty());
+                if self.fail {
+                    Err(VmHostError::Failure)
+                } else {
+                    Ok(VmValue::Int(7))
+                }
+            }
+        }
+
+        for (opcode, reference, instance) in [
+            (opcode::INVOKESTATIC, "Host.call:()I", false),
+            (opcode::INVOKEDYNAMIC, "mhstatic|Host.call|()I", false),
+            (opcode::INVOKEVIRTUAL, "Host.call:()I", true),
+            (opcode::INVOKESPECIAL, "Host.call:()I", true),
+            (opcode::INVOKEINTERFACE, "Host.call:()I", true),
+        ] {
+            let mut builder = ProgramBuilder::new().constant_string(reference);
+            if instance {
+                builder = builder.instruction(opcode::ALOAD, &[0]);
+            }
+            let program = builder
+                .instruction(opcode, &[0])
+                .instruction(opcode::IRETURN, &[])
+                .finish();
+            let mut executor = VmExecutor::new(Host {
+                calls: 0,
+                fail: false,
+            });
+            assert_eq!(
+                executor.execute(&program, &[VmValue::Object(5)]),
+                Ok(VmValue::Int(7))
+            );
+            assert_eq!(executor.host.calls, 1);
+
+            executor.limits.max_steps = 0;
+            assert!(matches!(
+                executor.execute(&program, &[]),
+                Err(VmError::StepLimit)
+            ));
+            executor.limits = ExecutionLimits {
+                max_recursion: 1,
+                ..ExecutionLimits::default()
+            };
+            assert!(matches!(executor.execute(&program, &[VmValue::Object(5)]),
+                Err(VmError::UncaughtException { class_name, .. })
+                    if class_name == "java/lang/StackOverflowError"));
+            executor.limits = ExecutionLimits {
+                max_stack: 0,
+                ..ExecutionLimits::default()
+            };
+            assert!(matches!(
+                executor.execute(&program, &[]),
+                Err(VmError::LengthTooLarge { .. })
+            ));
+            executor.limits = ExecutionLimits {
+                max_locals: 0,
+                ..ExecutionLimits::default()
+            };
+            assert!(matches!(
+                executor.execute(&program, &[]),
+                Err(VmError::LengthTooLarge { .. })
+            ));
+            assert_eq!(executor.host.calls, 1);
+        }
+
+        let program = ProgramBuilder::new()
+            .constant_string("Host.fail:()I")
+            .instruction(opcode::INVOKESTATIC, &[0])
+            .instruction(opcode::IRETURN, &[])
+            .instruction(opcode::POP, &[])
+            .instruction(opcode::RETURN, &[])
+            .exception(0, 1, 2, None)
+            .finish();
+        let mut executor = VmExecutor::new(Host {
+            calls: 0,
+            fail: true,
+        })
+        .with_limits(ExecutionLimits {
+            max_exception_transfers: 0,
+            ..ExecutionLimits::default()
+        });
+        assert!(matches!(
+            executor.execute(&program, &[]),
+            Err(VmError::StepLimit)
+        ));
+        assert_eq!(executor.host.calls, 1);
     }
 
     #[test]
