@@ -1,13 +1,13 @@
 {
-  "release_run_id": null,
-  "release_id": null,
-  "asset_id": null,
+  "release_run_id": 46084940022,
+  "release_id": 461173874,
+  "asset_id": 802533375,
   "tag": "v0.31.2-rc.3",
-  "tag_object_sha": null,
+  "tag_object_sha": "e0661babf948ff4cae25675f2fc15c40af6cb714",
   "source_sha": "0c5e58e077908e2d396493fdcd6a2139a1dae11f",
-  "package_sha256": null,
-  "package_size": null,
-  "desktop_sha256": null,
-  "engine_sha256": null,
-  "xenolith_sha256": null
+  "package_sha256": "1604d6308cb6cca7c6ffd2f31c5b88eb894b6a750709474fad44430b8b756fca",
+  "package_size": 68537162,
+  "desktop_sha256": "70dca61491926dae18fa01ffa5787c92675643a8ec1a9b79b9f3548137418b7d",
+  "engine_sha256": "e11fe4e453e9308327c6fad1165783387b12d06407147b9fce486d21277d5387",
+  "xenolith_sha256": "3cf8d3a55a538d6aad2c42a1eedb6c646395d8d001caa64b6cf6d9ecc5f84eab"
 }
