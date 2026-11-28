@@ -222,21 +222,21 @@ Uncompressed `.so` entries are aligned to at least 4 KiB. If any uncompressed li
 ## Quick Start
 
 ```powershell
-# Build the core engine (artifact: build\core-engine\libs\obfuscator-engine-0.31.2-rc.3.jar)
+# Build the core engine (artifact: build\core-engine\libs\obfuscator-engine-0.31.2-rc.4.jar)
 .\gradlew.bat :core-engine:jar
 
 # List passes, parameters, the default pipeline, and compatibility constraints (TOML output)
-java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.3.jar -schema
+java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.4.jar -schema
 
 # Show the package / class / member tree of an input JAR
-java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.3.jar -inspect app.jar
+java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.4.jar -inspect app.jar
 
 # Process a JAR with a TOML configuration
-java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.3.jar -config path\to\config.toml
+java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.4.jar -config path\to\config.toml
 
 # Engine runtime-cache maintenance
-java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.3.jar -gc
-java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.3.jar -gc --apply
+java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.4.jar -gc
+java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.4.jar -gc --apply
 ```
 
 Configuration example (renaming + control-flow flattening; opt-in passes require `allowOptInPasses = true`):

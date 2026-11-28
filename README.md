@@ -222,21 +222,21 @@ APK 中的未压缩 `.so` 默认至少按 4 KiB 对齐。如果输入 APK 已有
 ## 快速开始
 
 ```powershell
-# 构建核心引擎（产物：build\core-engine\libs\obfuscator-engine-0.31.2-rc.3.jar）
+# 构建核心引擎（产物：build\core-engine\libs\obfuscator-engine-0.31.2-rc.4.jar）
 .\gradlew.bat :core-engine:jar
 
 # 查看 pass 清单、参数、默认 pipeline 与兼容性约束（TOML 输出）
-java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.3.jar -schema
+java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.4.jar -schema
 
 # 查看输入 JAR 的包 / 类 / 成员树
-java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.3.jar -inspect app.jar
+java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.4.jar -inspect app.jar
 
 # 按 TOML 配置处理 JAR
-java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.3.jar -config path\to\config.toml
+java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.4.jar -config path\to\config.toml
 
 # 引擎运行时缓存维护
-java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.3.jar -gc
-java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.3.jar -gc --apply
+java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.4.jar -gc
+java -jar build\core-engine\libs\obfuscator-engine-0.31.2-rc.4.jar -gc --apply
 ```
 
 配置示例（重命名 + 控制流平坦化；opt-in pass 需要 `allowOptInPasses = true`）：

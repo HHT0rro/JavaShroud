@@ -1,3 +1,19 @@
+# JavaShroud v0.31.2-rc.4
+
+## 中文
+
+- Android 设备诊断将任意原始输出保存到文件，文本解码容忍无效 UTF-8，命令退出状态独立记录。正常退出、非零退出、超时及中断均验证原始字节、SHA256、状态和后续命令。保留最初失败与系统崩溃证据。
+- VM 静态自调用借用调用栈末尾的有序参数，子帧继续复制到自身局部变量。返回或异常后消费参数后缀，宽参数、对象生命周期、异常、递归限制和参数不足均有回归。
+- 同构递归夹具每10,000次调用减少1,000,000次临时分配，三对交错基准的中位耗时由335.9ms降到267.6ms。该收益限于隔离执行器夹具，完整Calc相对3倍预算仍失败。
+- 集成Gradle、Rust、Go、前端与设备矩阵按最终提交记录。ARM实机、ARM16KiB、API35 WebView与system_server崩溃根因及本机火绒厂商处置继续保留未决状态。
+
+## English
+
+- Android device diagnostics retain arbitrary raw output bytes in files, decode invalid UTF-8 with replacement, and record command status independently. Normal and nonzero exits, timeout and interruption verify raw bytes, SHA256, outcomes and subsequent commands. Original failures and system crash evidence are retained.
+- VM static self calls borrow the ordered argument suffix of the caller stack while child frames continue copying into their own locals. Success and failure consume that suffix. Regressions cover wide parameters, object lifetimes, exceptions, recursion limits and argument underflow.
+- The isolated recursive fixture removes1,000,000 temporary allocations per10,000 calls. The median of three alternating benchmark pairs changed from335.9ms to267.6ms. This benefit is scoped to the executor fixture. The complete Calc workload still fails the relative3x budget.
+- Integrated Gradle, Rust, Go, frontend and device matrices are recorded against the final commit. ARM hardware, ARM16KiB execution, API35 WebView and system_server crash causes, and local Huorong vendor disposition remain pending.
+
 # JavaShroud v0.31.2-rc.3
 
 ## 中文
