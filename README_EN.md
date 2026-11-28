@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-0.31.2--rc.3-5b6ee1" />
+  <img alt="Version" src="https://img.shields.io/badge/version-0.31.2--rc.4-5b6ee1" />
   <img alt="License" src="https://img.shields.io/badge/license-GPL--3.0-blue" />
   <img alt="JDK" src="https://img.shields.io/badge/JDK-17%2B-orange" />
   <img alt="Desktop" src="https://img.shields.io/badge/desktop-Wails%20%2B%20Vue-42b883" />
