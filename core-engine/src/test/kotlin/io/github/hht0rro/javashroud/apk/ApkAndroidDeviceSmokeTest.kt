@@ -927,24 +927,27 @@ internal class AndroidDeviceEvidence(private val directory: Path) {
         val startedUtc = Instant.now().toString()
         val started = System.nanoTime()
         var process: Process? = null
-        var result: ApkProcessSupport.ProcessResult? = null
+        var exitCode: Int? = null
+        var timedOut: Boolean? = null
         var failure: Throwable? = null
         try {
             Files.writeString(command, arguments.joinToString("\n") + "\ntimeoutMillis=$timeout\n", CREATE_NEW)
             Files.createFile(output)
             process = ProcessBuilder(arguments).directory(directory.toFile()).redirectErrorStream(true).redirectOutput(output.toFile()).start()
+            timedOut = false
             val finished = process.waitFor(timeout, TimeUnit.MILLISECONDS)
+            timedOut = !finished
+            exitCode = if (finished) process.exitValue() else -1
             if (!finished) terminate(process)
-            result = ApkProcessSupport.ProcessResult(
-                if (finished) process.exitValue() else -1, Files.readString(output), !finished,
+            return ApkProcessSupport.ProcessResult(
+                exitCode, Files.readAllBytes(output).toString(Charsets.UTF_8), timedOut,
             )
-            return result
         } catch (error: Throwable) {
             failure = error
             if (process?.isAlive == true) {
                 try { terminate(process) } catch (termination: Throwable) { error.addSuppressed(termination) }
             }
-            if (error is InterruptedException) Thread.currentThread().interrupt()
+            exitCode = exitCode ?: process?.takeIf { !it.isAlive }?.exitValue()
             throw error
         } finally {
             try {
@@ -953,7 +956,7 @@ internal class AndroidDeviceEvidence(private val directory: Path) {
                     "argv" to arguments, "timeout_ms" to timeout, "started_utc" to startedUtc,
                     "finished_utc" to Instant.now().toString(),
                     "elapsed_ms" to TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started),
-                    "exit_code" to result?.exitCode, "timed_out" to result?.timedOut,
+                    "exit_code" to exitCode, "timed_out" to timedOut,
                     "error" to failure?.toString(), "command_file" to command.fileName.toString(),
                     "output" to output.fileName.toString(),
                     "output_bytes" to output.takeIf { Files.isRegularFile(it) }?.let { Files.size(it) },
@@ -964,6 +967,8 @@ internal class AndroidDeviceEvidence(private val directory: Path) {
             } catch (error: Throwable) {
                 if (failure == null) throw error
                 failure.addSuppressed(error)
+            } finally {
+                if (failure is InterruptedException) Thread.currentThread().interrupt()
             }
         }
     }
