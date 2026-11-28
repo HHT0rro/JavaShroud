@@ -1,0 +1,80 @@
+{
+  "source_commit": "eca01095f7a945e2651e24eb0bd9f849d5f2c408",
+  "source_tree": "69bf3edff1fa87f034b97728d572eaae96d29a64",
+  "package_build_location": "Original isolated local Ubuntu WSL, before disk incident",
+  "workflow_scope": "Verify existing package bytes and return artifact",
+  "bytes": 67038386,
+  "sha256": "01439a79b571d69dd9a7ad2ae9b0a0eb3a68663503b9fc113a98543b9fa31193",
+  "files": [
+    {
+      "path": "javashroud-core-engine-v0.31.2-rc.4-Linux-x86_64-JVM.tar.gz",
+      "bytes": 66950463,
+      "sha256": "8160961e01d55d97fde45eb310332ae3e32b08e216357f688fc816edb3c577f9"
+    },
+    {
+      "path": "local-build-process-status.json",
+      "bytes": 380,
+      "sha256": "006399117eee9c65fbcdfba64f8abc9fdff17b599c81d2863b7fb271bcdc8882"
+    },
+    {
+      "path": "local-gradle-distTar.log",
+      "bytes": 129748,
+      "sha256": "b7495c654dafc85a1d56e11584c322ffc6c9790e8c3d475625c6a073690a6c4d"
+    },
+    {
+      "path": "local-source-postbuild-verification.json",
+      "bytes": 41,
+      "sha256": "77c9785adc53796a142d6b45fc03fe4920b3aeb2b53ff9cadd13ccdfe6a28f34"
+    },
+    {
+      "path": "local-source-prebuild-verification.json",
+      "bytes": 41,
+      "sha256": "77c9785adc53796a142d6b45fc03fe4920b3aeb2b53ff9cadd13ccdfe6a28f34"
+    },
+    {
+      "path": "local-toolchains.log",
+      "bytes": 2026,
+      "sha256": "93068a9f8f3c97c1dc79be0b02162b7fe93a440b5cda49d46813772f70a1c0d0"
+    },
+    {
+      "path": "probe-source-binding.json",
+      "bytes": 574,
+      "sha256": "23b92fbf2a73243354c8a9de52819baa77f1a35b4b4707dd4ba81cb49ecc92b0"
+    },
+    {
+      "path": "probe/META-INF/main.kotlin_module",
+      "bytes": 24,
+      "sha256": "656b3d35db5641e3cf9477532a1c7e3e49f1ad706fac99640966922bc55061b6"
+    },
+    {
+      "path": "probe/io/github/hht0rro/javashroud/QpBridgeProbe.class",
+      "bytes": 8194,
+      "sha256": "010332d0d1bb9e409c2970ac90c09c45910054377e8e169eacbf0402c378798b"
+    },
+    {
+      "path": "raw-ubuntu-validation.json",
+      "bytes": 961,
+      "sha256": "94e5940a7eeb8830a9d93682ef011753242fa415c37094cdd15c50e61e0304e3"
+    },
+    {
+      "path": "raw-unpacked-files.json",
+      "bytes": 7761,
+      "sha256": "1658ad2420fffa7967a46ef3ee05074a659adb2e7ccb4cd6e7c229edffddc0e7"
+    },
+    {
+      "path": "source-files.json",
+      "bytes": 184289,
+      "sha256": "1b30223a25948a8c406f37d7c37b2a0679ac4d795a3445b89ebb3513870f9515"
+    },
+    {
+      "path": "verify-centos7-cli.sh",
+      "bytes": 2049,
+      "sha256": "513237651b5ca307c125febbf352458755e6a85a3bbe94ea253f431152a70a9c"
+    },
+    {
+      "path": "verify-centos7.sh",
+      "bytes": 2394,
+      "sha256": "f1fd29a7d5c7ae2c058259eb969f756aee33d9503e4ceb513bb744e5548165a8"
+    }
+  ]
+}
