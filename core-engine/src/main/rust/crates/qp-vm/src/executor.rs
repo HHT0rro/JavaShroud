@@ -1252,11 +1252,6 @@ impl<H: ObjectOperations> VmExecutor<H> {
         if argument_count > frame.stack.len() {
             return Err(thrown("java/lang/VerifyError", VmValue::Null));
         }
-        let mut arguments = Vec::with_capacity(argument_count);
-        for _ in 0..argument_count {
-            arguments.push(pop(frame)?);
-        }
-        arguments.reverse();
         let kind = match opcode {
             opcode::INVOKEVIRTUAL => InvokeKind::Virtual,
             opcode::INVOKESPECIAL => InvokeKind::Special,
@@ -1264,17 +1259,18 @@ impl<H: ObjectOperations> VmExecutor<H> {
             opcode::INVOKEINTERFACE => InvokeKind::Interface,
             _ => InvokeKind::Dynamic,
         };
-        let receiver_object = if matches!(kind, InvokeKind::Static | InvokeKind::Dynamic) {
-            None
-        } else {
-            let receiver = pop(frame)?;
-            Some(as_object(receiver)?)
-        };
         let result = if matches!(opcode, opcode::INVOKESTATIC | opcode::INVOKEDYNAMIC)
             && program.is_self_invoke(pc)
         {
             crate::record_self_invoke();
-            match self.execute_at_depth(program, &arguments, depth + 1) {
+            // Self calls copy arguments into their own locals before executing.
+            // Borrow the ordered stack suffix until the call returns, then
+            // consume it on both success and failure without a temporary Vec.
+            let argument_start = frame.stack.len() - argument_count;
+            let execution =
+                self.execute_at_depth(program, &frame.stack[argument_start..], depth + 1);
+            frame.stack.truncate(argument_start);
+            match execution {
                 Ok(value) => Ok(value),
                 Err(VmError::UncaughtException {
                     class_name,
@@ -1289,11 +1285,24 @@ impl<H: ObjectOperations> VmExecutor<H> {
                 Err(_) => Err(thrown("java/lang/VerifyError", VmValue::Null)),
             }
         } else {
+            let mut arguments = Vec::with_capacity(argument_count);
+            for _ in 0..argument_count {
+                arguments.push(pop(frame)?);
+            }
+            arguments.reverse();
+            let receiver_object = if matches!(kind, InvokeKind::Static | InvokeKind::Dynamic) {
+                None
+            } else {
+                let receiver = pop(frame)?;
+                Some(as_object(receiver)?)
+            };
             crate::record_host_invoke();
-            match self
-                .host
-                .invoke(kind, reference, receiver_object.as_ref(), &arguments)
-            {
+            let result = match self.host.invoke(
+                kind,
+                reference,
+                receiver_object.as_ref(),
+                &arguments,
+            ) {
                 Ok(value) => Ok(value),
                 Err(_) => match self.host.take_pending_exception() {
                     Some((class_name, object)) => {
@@ -1325,10 +1334,11 @@ impl<H: ObjectOperations> VmExecutor<H> {
                         Err(thrown("java/lang/LinkageError", VmValue::Null))
                     }
                 },
-            }
+            };
+            arguments.clear();
+            result
         };
         let value = result?;
-        arguments.clear();
         if !matches!(value, VmValue::Null) || method_return_tag(descriptor) != Some(b'V') {
             push(frame, value, self.limits.max_stack)?;
         }
@@ -1813,6 +1823,102 @@ mod tests {
             executor.execute(&program, &[VmValue::Int(3)]),
             Ok(VmValue::Int(1))
         );
+    }
+
+    #[test]
+    fn self_invoke_preserves_wide_arguments_and_the_caller_stack() {
+        let program = ProgramBuilder::new()
+            .recursive_static()
+            .constant_string("example/Owned.recurse:(IJI)J")
+            .constant_long(7)
+            .instruction(opcode::ILOAD, &[0])
+            .instruction(opcode::IFEQ, &[11])
+            .instruction(opcode::LCONST, &[1])
+            .instruction(opcode::ILOAD, &[0])
+            .instruction(opcode::ICONST, &[1])
+            .instruction(opcode::ISUB, &[])
+            .instruction(opcode::LLOAD, &[1])
+            .instruction(opcode::ILOAD, &[3])
+            .instruction(opcode::INVOKESTATIC, &[0])
+            .instruction(opcode::LADD, &[])
+            .instruction(opcode::LRETURN, &[])
+            .instruction(opcode::LLOAD, &[1])
+            .instruction(opcode::ILOAD, &[3])
+            .instruction(opcode::I2L, &[])
+            .instruction(opcode::LADD, &[])
+            .instruction(opcode::LRETURN, &[])
+            .max_locals(4)
+            .finish();
+        let mut executor = VmExecutor::new(NoObjectOperations);
+        assert_eq!(
+            executor.execute(
+                &program,
+                &[
+                    VmValue::Int(3),
+                    VmValue::Long(9_000_000_000),
+                    VmValue::Int(23)
+                ],
+            ),
+            Ok(VmValue::Long(9_000_000_044)),
+        );
+    }
+
+    #[test]
+    fn self_invoke_releases_arguments_on_failure_and_preserves_stack_prefix() {
+        use std::rc::Rc;
+        struct Host;
+        impl ObjectOperations for Host {
+            type Object = Rc<()>;
+        }
+        let program = ProgramBuilder::new()
+            .recursive_static()
+            .constant_string("example/Owned.fail:(Ljava/lang/Object;)V")
+            .instruction(opcode::ICONST, &[1])
+            .instruction(opcode::ICONST, &[0])
+            .instruction(opcode::IDIV, &[])
+            .instruction(opcode::INVOKESTATIC, &[0])
+            .finish();
+        let object = Rc::new(());
+        let mut frame = ExecutionFrame::new(1, 8);
+        frame.stack.push(VmValue::Int(42));
+        frame.stack.push(VmValue::Object(object.clone()));
+        let mut executor = VmExecutor::new(Host);
+        let result = executor.invoke(&program, &mut frame, opcode::INVOKESTATIC, &[0], 3, 0, 4);
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("self invocation unexpectedly succeeded"),
+        };
+        assert_eq!(error.class_name, "java/lang/ArithmeticException");
+        assert_eq!(frame.stack, vec![VmValue::Int(42)]);
+        assert_eq!(Rc::strong_count(&object), 1);
+    }
+
+    #[test]
+    fn self_invoke_keeps_the_recursion_limit_and_argument_underflow() {
+        let program = ProgramBuilder::new()
+            .recursive_static()
+            .constant_string("example/Owned.recurse:(I)I")
+            .instruction(opcode::ILOAD, &[0])
+            .instruction(opcode::INVOKESTATIC, &[0])
+            .instruction(opcode::IRETURN, &[])
+            .finish();
+        let mut executor = VmExecutor::new(NoObjectOperations).with_limits(ExecutionLimits {
+            max_recursion: 4,
+            ..ExecutionLimits::default()
+        });
+        assert!(matches!(
+            executor.execute(&program, &[VmValue::Int(1)]),
+            Err(VmError::UncaughtException { class_name, .. })
+                if class_name == "java/lang/StackOverflowError"
+        ));
+        let mut frame = ExecutionFrame::new(1, 8);
+        let error = match executor.invoke(&program, &mut frame, opcode::INVOKESTATIC, &[0], 1, 0, 2)
+        {
+            Err(error) => error,
+            Ok(_) => panic!("missing argument unexpectedly succeeded"),
+        };
+        assert_eq!(error.class_name, "java/lang/VerifyError");
+        assert!(frame.stack.is_empty());
     }
 
     #[test]
